@@ -4,9 +4,10 @@ import Header from './components/Header'
 import ChatPanel from './components/ChatPanel'
 import VisualizationPanel from './components/VisualizationPanel'
 import useGraphStore from './store/graphStore'
+import { loadDemoData } from './utils/demoData'
 
 function App() {
-  const { selectedCommunities } = useGraphStore();
+  const { selectedCommunities, updateVisualization } = useGraphStore();
 
   // Load communities from URL query on initial load
   useEffect(() => {
@@ -17,6 +18,13 @@ function App() {
       useGraphStore.getState().setSelectedCommunities(communitiesParam);
     }
   }, []);
+
+  // Load demo data when communities are selected
+  useEffect(() => {
+    if (selectedCommunities.length > 0) {
+      loadDemoData(updateVisualization, selectedCommunities);
+    }
+  }, [selectedCommunities, updateVisualization]);
 
   return (
     <div className="app">

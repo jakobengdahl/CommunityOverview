@@ -1,4 +1,4 @@
-import { useCallback, useMemo } from 'react';
+import { useCallback, useMemo, useEffect } from 'react';
 import ReactFlow, {
   Background,
   Controls,
@@ -10,6 +10,7 @@ import ReactFlow, {
 import 'reactflow/dist/style.css';
 import useGraphStore from '../store/graphStore';
 import CustomNode from './CustomNode';
+import { getLayoutedElements } from '../utils/graphLayout';
 import './VisualizationPanel.css';
 
 // Node color mapping from metamodel
@@ -27,22 +28,7 @@ const NODE_COLORS = {
 function VisualizationPanel() {
   const { nodes: storeNodes, edges: storeEdges, highlightedNodeIds } = useGraphStore();
 
-  // Convert store data to React Flow format
-  const reactFlowNodes = useMemo(() => {
-    return storeNodes.map(node => ({
-      id: node.id,
-      type: 'custom',
-      data: {
-        label: node.name,
-        summary: node.summary || node.description?.slice(0, 100),
-        nodeType: node.type,
-        color: NODE_COLORS[node.type] || '#9CA3AF',
-        isHighlighted: highlightedNodeIds.includes(node.id),
-      },
-      position: { x: Math.random() * 500, y: Math.random() * 500 }, // TODO: Better layout
-    }));
-  }, [storeNodes, highlightedNodeIds]);
-
+  // Convert edges first (needed for layout calculation)
   const reactFlowEdges = useMemo(() => {
     return storeEdges.map(edge => ({
       id: edge.id,
@@ -55,8 +41,41 @@ function VisualizationPanel() {
     }));
   }, [storeEdges]);
 
+  // Convert store data to React Flow format with automatic layout
+  const reactFlowNodes = useMemo(() => {
+    const nodesWithoutPosition = storeNodes.map(node => ({
+      id: node.id,
+      type: 'custom',
+      data: {
+        label: node.name,
+        summary: node.summary || node.description?.slice(0, 100),
+        nodeType: node.type,
+        color: NODE_COLORS[node.type] || '#9CA3AF',
+        isHighlighted: highlightedNodeIds.includes(node.id),
+      },
+      position: { x: 0, y: 0 }, // Will be set by layout algorithm
+    }));
+
+    // Calculate positions using dagre layout
+    if (nodesWithoutPosition.length > 0 && reactFlowEdges.length > 0) {
+      return getLayoutedElements(nodesWithoutPosition, reactFlowEdges, 'TB');
+    }
+
+    return nodesWithoutPosition;
+  }, [storeNodes, highlightedNodeIds, reactFlowEdges]);
+
   const [nodes, setNodes, onNodesChange] = useNodesState(reactFlowNodes);
   const [edges, setEdges, onEdgesChange] = useEdgesState(reactFlowEdges);
+
+  // Update nodes when reactFlowNodes changes (for layout recalculation)
+  useEffect(() => {
+    setNodes(reactFlowNodes);
+  }, [reactFlowNodes, setNodes]);
+
+  // Update edges when reactFlowEdges changes
+  useEffect(() => {
+    setEdges(reactFlowEdges);
+  }, [reactFlowEdges, setEdges]);
 
   const onConnect = useCallback(
     (params) => setEdges((eds) => addEdge(params, eds)),
@@ -84,7 +103,15 @@ function VisualizationPanel() {
           onConnect={onConnect}
           nodeTypes={nodeTypes}
           fitView
+          fitViewOptions={{
+            padding: 0.2,
+            duration: 800,
+          }}
           attributionPosition="bottom-right"
+          defaultEdgeOptions={{
+            animated: true,
+            style: { strokeWidth: 2 }
+          }}
         >
           <Background color="#333" gap={16} />
           <Controls />

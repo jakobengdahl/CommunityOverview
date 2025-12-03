@@ -1,13 +1,50 @@
 import { useState } from 'react';
 import { Handle, Position } from 'reactflow';
+import useGraphStore from '../store/graphStore';
+import { DEMO_GRAPH_DATA } from '../utils/demoData';
 import './CustomNode.css';
 
-function CustomNode({ data }) {
+function CustomNode({ data, id }) {
   const [showRelatedButton, setShowRelatedButton] = useState(false);
+  const { addNodesToVisualization, highlightNodes, nodes: currentNodes } = useGraphStore();
 
   const handleShowRelated = () => {
-    // TODO: Implement "show related nodes" via MCP
-    console.log('Show related nodes for:', data.label);
+    // Find all edges connected to this node
+    const relatedEdges = DEMO_GRAPH_DATA.edges.filter(
+      edge => edge.source === id || edge.target === id
+    );
+
+    // Find related node IDs
+    const relatedNodeIds = new Set();
+    relatedEdges.forEach(edge => {
+      if (edge.source === id) relatedNodeIds.add(edge.target);
+      if (edge.target === id) relatedNodeIds.add(edge.source);
+    });
+
+    // Get related nodes that aren't already in the visualization
+    const currentNodeIds = new Set(currentNodes.map(n => n.id));
+    const newNodes = DEMO_GRAPH_DATA.nodes.filter(
+      node => relatedNodeIds.has(node.id) && !currentNodeIds.has(node.id)
+    );
+
+    // Get edges between the clicked node and new nodes
+    const newEdges = relatedEdges.filter(edge =>
+      (edge.source === id && !currentNodeIds.has(edge.target)) ||
+      (edge.target === id && !currentNodeIds.has(edge.source))
+    );
+
+    if (newNodes.length > 0) {
+      // Add new nodes and edges to visualization
+      addNodesToVisualization(newNodes, newEdges);
+
+      // Highlight the newly added nodes
+      highlightNodes(newNodes.map(n => n.id));
+
+      // Remove highlight after 2 seconds
+      setTimeout(() => highlightNodes([]), 2000);
+    } else {
+      console.log('All related nodes are already visible');
+    }
   };
 
   return (
