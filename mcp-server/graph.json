@@ -1,0 +1,294 @@
+{
+  "nodes": [
+    {
+      "id": "comm-001",
+      "type": "Community",
+      "name": "eSam",
+      "description": "En svensk samverkansorganisation för offentlig sektor",
+      "summary": "Samverkan för digital förvaltning",
+      "communities": ["eSam"],
+      "metadata": {},
+      "embedding": null,
+      "created_at": "2025-12-03T10:00:00Z",
+      "updated_at": "2025-12-03T10:00:00Z"
+    },
+    {
+      "id": "comm-002",
+      "type": "Community",
+      "name": "Myndigheter",
+      "description": "Svenska myndigheter",
+      "summary": "Myndighetsgemenskapen",
+      "communities": ["Myndigheter"],
+      "metadata": {},
+      "embedding": null,
+      "created_at": "2025-12-03T10:00:00Z",
+      "updated_at": "2025-12-03T10:00:00Z"
+    },
+    {
+      "id": "actor-001",
+      "type": "Actor",
+      "name": "DIGG",
+      "description": "Myndigheten för digital förvaltning",
+      "summary": "Digital förvaltning",
+      "communities": ["eSam", "Myndigheter"],
+      "metadata": {
+        "website": "https://www.digg.se"
+      },
+      "embedding": null,
+      "created_at": "2025-12-03T10:00:00Z",
+      "updated_at": "2025-12-03T10:00:00Z"
+    },
+    {
+      "id": "actor-002",
+      "type": "Actor",
+      "name": "MSB",
+      "description": "Myndigheten för samhällsskydd och beredskap",
+      "summary": "Samhällsskydd",
+      "communities": ["eSam", "Myndigheter"],
+      "metadata": {
+        "website": "https://www.msb.se"
+      },
+      "embedding": null,
+      "created_at": "2025-12-03T10:00:00Z",
+      "updated_at": "2025-12-03T10:00:00Z"
+    },
+    {
+      "id": "actor-003",
+      "type": "Actor",
+      "name": "SCB",
+      "description": "Statistiska centralbyrån",
+      "summary": "Officiell statistik",
+      "communities": ["Myndigheter"],
+      "metadata": {
+        "website": "https://www.scb.se"
+      },
+      "embedding": null,
+      "created_at": "2025-12-03T10:00:00Z",
+      "updated_at": "2025-12-03T10:00:00Z"
+    },
+    {
+      "id": "leg-001",
+      "type": "Legislation",
+      "name": "NIS2-direktivet",
+      "description": "EU-direktiv om åtgärder för en hög gemensam nivå av cybersäkerhet",
+      "summary": "Cybersäkerhetsdirektiv",
+      "communities": ["eSam", "Myndigheter"],
+      "metadata": {
+        "effective_date": "2024-10-17"
+      },
+      "embedding": null,
+      "created_at": "2025-12-03T10:00:00Z",
+      "updated_at": "2025-12-03T10:00:00Z"
+    },
+    {
+      "id": "leg-002",
+      "type": "Legislation",
+      "name": "GDPR",
+      "description": "Dataskyddsförordningen",
+      "summary": "Dataskydd och integritet",
+      "communities": ["eSam", "Myndigheter"],
+      "metadata": {
+        "effective_date": "2018-05-25"
+      },
+      "embedding": null,
+      "created_at": "2025-12-03T10:00:00Z",
+      "updated_at": "2025-12-03T10:00:00Z"
+    },
+    {
+      "id": "init-001",
+      "type": "Initiative",
+      "name": "NIS2 Implementeringsprojekt",
+      "description": "MSBs projekt för att implementera NIS2-direktivet i Sverige",
+      "summary": "NIS2-implementering Sverige",
+      "communities": ["eSam", "Myndigheter"],
+      "metadata": {
+        "start_date": "2024-01-01",
+        "status": "pågående"
+      },
+      "embedding": null,
+      "created_at": "2025-12-03T10:00:00Z",
+      "updated_at": "2025-12-03T10:00:00Z"
+    },
+    {
+      "id": "init-002",
+      "type": "Initiative",
+      "name": "Cybersäkerhetssamverkan Myndigheter",
+      "description": "Samverkansprojekt för att dela kunskap om cybersäkerhet mellan myndigheter",
+      "summary": "Myndighetssamverkan cyber",
+      "communities": ["eSam", "Myndigheter"],
+      "metadata": {
+        "start_date": "2024-06-01",
+        "status": "pågående"
+      },
+      "embedding": null,
+      "created_at": "2025-12-03T10:00:00Z",
+      "updated_at": "2025-12-03T10:00:00Z"
+    },
+    {
+      "id": "init-003",
+      "type": "Initiative",
+      "name": "Dataskyddsstrategi 2025",
+      "description": "DIGGs strategi för att stödja myndigheter med GDPR-efterlevnad",
+      "summary": "GDPR-strategi",
+      "communities": ["eSam", "Myndigheter"],
+      "metadata": {
+        "start_date": "2025-01-01",
+        "status": "planering"
+      },
+      "embedding": null,
+      "created_at": "2025-12-03T10:00:00Z",
+      "updated_at": "2025-12-03T10:00:00Z"
+    },
+    {
+      "id": "theme-001",
+      "type": "Theme",
+      "name": "Cybersäkerhet",
+      "description": "Tema för cybersäkerhet och informationssäkerhet",
+      "summary": "Cybersäkerhet",
+      "communities": ["eSam", "Myndigheter"],
+      "metadata": {},
+      "embedding": null,
+      "created_at": "2025-12-03T10:00:00Z",
+      "updated_at": "2025-12-03T10:00:00Z"
+    },
+    {
+      "id": "theme-002",
+      "type": "Theme",
+      "name": "Dataskydd och integritet",
+      "description": "Tema för dataskydd, GDPR och personuppgiftshantering",
+      "summary": "Dataskydd",
+      "communities": ["eSam", "Myndigheter"],
+      "metadata": {},
+      "embedding": null,
+      "created_at": "2025-12-03T10:00:00Z",
+      "updated_at": "2025-12-03T10:00:00Z"
+    },
+    {
+      "id": "cap-001",
+      "type": "Capability",
+      "name": "Säkerhetsanalys",
+      "description": "Förmåga att genomföra säkerhetsanalyser och riskbedömningar",
+      "summary": "Säkerhetsanalys",
+      "communities": ["eSam", "Myndigheter"],
+      "metadata": {},
+      "embedding": null,
+      "created_at": "2025-12-03T10:00:00Z",
+      "updated_at": "2025-12-03T10:00:00Z"
+    },
+    {
+      "id": "res-001",
+      "type": "Resource",
+      "name": "NIS2 Vägledning för Myndigheter",
+      "description": "Vägledningsdokument från MSB om hur myndigheter ska implementera NIS2",
+      "summary": "NIS2-vägledning",
+      "communities": ["eSam", "Myndigheter"],
+      "metadata": {
+        "document_type": "vägledning",
+        "url": "https://www.msb.se/nis2-vagledning"
+      },
+      "embedding": null,
+      "created_at": "2025-12-03T10:00:00Z",
+      "updated_at": "2025-12-03T10:00:00Z"
+    }
+  ],
+  "edges": [
+    {
+      "id": "edge-001",
+      "source": "actor-001",
+      "target": "comm-001",
+      "type": "BELONGS_TO",
+      "metadata": {},
+      "created_at": "2025-12-03T10:00:00Z"
+    },
+    {
+      "id": "edge-002",
+      "source": "actor-002",
+      "target": "comm-001",
+      "type": "BELONGS_TO",
+      "metadata": {},
+      "created_at": "2025-12-03T10:00:00Z"
+    },
+    {
+      "id": "edge-003",
+      "source": "init-001",
+      "target": "actor-002",
+      "type": "BELONGS_TO",
+      "metadata": {
+        "role": "ansvarig"
+      },
+      "created_at": "2025-12-03T10:00:00Z"
+    },
+    {
+      "id": "edge-004",
+      "source": "init-001",
+      "target": "leg-001",
+      "type": "IMPLEMENTS",
+      "metadata": {},
+      "created_at": "2025-12-03T10:00:00Z"
+    },
+    {
+      "id": "edge-005",
+      "source": "init-001",
+      "target": "theme-001",
+      "type": "RELATES_TO",
+      "metadata": {},
+      "created_at": "2025-12-03T10:00:00Z"
+    },
+    {
+      "id": "edge-006",
+      "source": "init-001",
+      "target": "res-001",
+      "type": "PRODUCES",
+      "metadata": {},
+      "created_at": "2025-12-03T10:00:00Z"
+    },
+    {
+      "id": "edge-007",
+      "source": "init-002",
+      "target": "theme-001",
+      "type": "RELATES_TO",
+      "metadata": {},
+      "created_at": "2025-12-03T10:00:00Z"
+    },
+    {
+      "id": "edge-008",
+      "source": "init-003",
+      "target": "actor-001",
+      "type": "BELONGS_TO",
+      "metadata": {
+        "role": "ansvarig"
+      },
+      "created_at": "2025-12-03T10:00:00Z"
+    },
+    {
+      "id": "edge-009",
+      "source": "init-003",
+      "target": "leg-002",
+      "type": "IMPLEMENTS",
+      "metadata": {},
+      "created_at": "2025-12-03T10:00:00Z"
+    },
+    {
+      "id": "edge-010",
+      "source": "init-003",
+      "target": "theme-002",
+      "type": "RELATES_TO",
+      "metadata": {},
+      "created_at": "2025-12-03T10:00:00Z"
+    },
+    {
+      "id": "edge-011",
+      "source": "init-001",
+      "target": "cap-001",
+      "type": "PRODUCES",
+      "metadata": {
+        "description": "Projektet bygger upp säkerhetsanalyskompetens"
+      },
+      "created_at": "2025-12-03T10:00:00Z"
+    }
+  ],
+  "metadata": {
+    "version": "1.0",
+    "last_updated": "2025-12-03T10:00:00Z"
+  }
+}
