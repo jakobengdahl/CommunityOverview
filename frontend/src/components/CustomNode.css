@@ -1,0 +1,124 @@
+.custom-node {
+  background: #1a1a1a;
+  border: 2px solid;
+  border-radius: 8px;
+  min-width: 150px;
+  max-width: 250px;
+  box-shadow: 0 2px 8px rgba(0, 0, 0, 0.3);
+  position: relative;
+  transition: all 0.2s ease;
+}
+
+.custom-node:hover {
+  box-shadow: 0 4px 12px rgba(0, 0, 0, 0.5);
+  transform: scale(1.02);
+}
+
+.custom-node.highlighted {
+  box-shadow: 0 0 20px rgba(100, 108, 255, 0.6);
+  animation: pulse 2s infinite;
+}
+
+@keyframes pulse {
+  0%, 100% {
+    box-shadow: 0 0 20px rgba(100, 108, 255, 0.6);
+  }
+  50% {
+    box-shadow: 0 0 30px rgba(100, 108, 255, 0.9);
+  }
+}
+
+.node-header {
+  padding: 0.4rem 0.6rem;
+  border-radius: 6px 6px 0 0;
+  color: white;
+  font-size: 0.75rem;
+  font-weight: 600;
+  text-align: center;
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+}
+
+.node-content {
+  padding: 0.75rem;
+  color: #ddd;
+}
+
+.node-label {
+  font-weight: 600;
+  font-size: 0.9rem;
+  margin-bottom: 0.4rem;
+  line-height: 1.2;
+}
+
+.node-summary {
+  font-size: 0.75rem;
+  color: #999;
+  line-height: 1.3;
+  display: -webkit-box;
+  -webkit-line-clamp: 2;
+  -webkit-box-orient: vertical;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.show-related-button {
+  position: absolute;
+  right: -12px;
+  top: 50%;
+  transform: translateY(-50%);
+  width: 24px;
+  height: 24px;
+  border-radius: 50%;
+  background-color: #646cff;
+  color: white;
+  border: 2px solid #1a1a1a;
+  font-size: 1rem;
+  font-weight: bold;
+  cursor: pointer;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  transition: all 0.2s ease;
+  z-index: 10;
+}
+
+.show-related-button:hover {
+  background-color: #535bf2;
+  transform: translateY(-50%) scale(1.1);
+}
+
+/* React Flow handles */
+.react-flow__handle {
+  width: 8px;
+  height: 8px;
+  background-color: #646cff;
+  border: 2px solid #1a1a1a;
+}
+
+@media (prefers-color-scheme: light) {
+  .custom-node {
+    background: white;
+    box-shadow: 0 2px 8px rgba(0, 0, 0, 0.1);
+  }
+
+  .custom-node:hover {
+    box-shadow: 0 4px 12px rgba(0, 0, 0, 0.15);
+  }
+
+  .node-content {
+    color: #213547;
+  }
+
+  .node-summary {
+    color: #666;
+  }
+
+  .show-related-button {
+    border-color: white;
+  }
+
+  .react-flow__handle {
+    border-color: white;
+  }
+}
