@@ -12,7 +12,7 @@ import useGraphStore from '../store/graphStore';
 import CustomNode from './CustomNode';
 import './VisualizationPanel.css';
 
-// Node color mapping från metamodell
+// Node color mapping from metamodel
 const NODE_COLORS = {
   Actor: '#3B82F6',
   Community: '#A855F7',
@@ -27,7 +27,7 @@ const NODE_COLORS = {
 function VisualizationPanel() {
   const { nodes: storeNodes, edges: storeEdges, highlightedNodeIds } = useGraphStore();
 
-  // Konvertera store-data till React Flow format
+  // Convert store data to React Flow format
   const reactFlowNodes = useMemo(() => {
     return storeNodes.map(node => ({
       id: node.id,
@@ -39,7 +39,7 @@ function VisualizationPanel() {
         color: NODE_COLORS[node.type] || '#9CA3AF',
         isHighlighted: highlightedNodeIds.includes(node.id),
       },
-      position: { x: Math.random() * 500, y: Math.random() * 500 }, // TODO: Bättre layout
+      position: { x: Math.random() * 500, y: Math.random() * 500 }, // TODO: Better layout
     }));
   }, [storeNodes, highlightedNodeIds]);
 
@@ -72,8 +72,8 @@ function VisualizationPanel() {
     <div className="visualization-panel">
       {storeNodes.length === 0 ? (
         <div className="empty-graph-message">
-          <h3>Ingen graf att visa ännu</h3>
-          <p>Ställ en fråga i chatten för att börja utforska kunskapsgrafen.</p>
+          <h3>No graph to display yet</h3>
+          <p>Ask a question in the chat to start exploring the knowledge graph.</p>
         </div>
       ) : (
         <ReactFlow

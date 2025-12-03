@@ -1,46 +1,46 @@
 # Community Knowledge Sharing PoC
 
-AI-powered kunskapsdelning för communities med graf-visualisering och konversationell chat.
+AI-powered knowledge sharing for communities with graph visualization and conversational chat.
 
-## Översikt
+## Overview
 
-Detta system hjälper organisationer att undvika överlappande investeringar genom att synliggöra:
-- Pågående initiativ och projekt
-- Resurser och förmågor
-- Kopplingar mellan aktörer, lagstiftning och teman
+This system helps organizations avoid overlapping investments by making visible:
+- Ongoing initiatives and projects
+- Resources and capabilities
+- Connections between actors, legislation, and themes
 
-**Teknisk stack:**
+**Tech stack:**
 - **Frontend:** React + React Flow + Zustand
-- **Backend:** MCP Server (Python) med NetworkX + JSON
-- **AI:** Claude API för RAG och extraktion
-- **Graf-lagring:** NetworkX in-memory + JSON persistens
+- **Backend:** MCP Server (Python) with NetworkX + JSON
+- **AI:** Claude API for RAG and extraction
+- **Graph storage:** NetworkX in-memory + JSON persistence
 
-## Projektstruktur
+## Project Structure
 
 ```
-/frontend          # React app med graf-visualisering
-/mcp-server        # Python MCP server med graf-logik
-/docs              # Dokumentation och specifikationer
+/frontend          # React app with graph visualization
+/mcp-server        # Python MCP server with graph logic
+/docs              # Documentation and specifications
 ```
 
-## Metamodell
+## Metamodel
 
-### Node-typer
-- **Actor** (blue) - Myndigheter, organisationer
+### Node Types
+- **Actor** (blue) - Government agencies, organizations
 - **Community** (purple) - eSam, Myndigheter, Officiell Statistik
-- **Initiative** (green) - Projekt, gruppverksamheter
-- **Capability** (orange) - Upphandling, IT-utveckling, portföljhantering
-- **Resource** (yellow) - Rapporter, mjukvarukomponenter
+- **Initiative** (green) - Projects, collaborative activities
+- **Capability** (orange) - Procurement, IT development, portfolio management
+- **Resource** (yellow) - Reports, software components
 - **Legislation** (red) - NIS2, GDPR, etc.
-- **Theme** (teal) - AI, datastrategier, förändringsledning
-- **VisualizationView** (gray) - Färdiga vyer för navigation
+- **Theme** (teal) - AI, data strategies, change management
+- **VisualizationView** (gray) - Predefined views for navigation
 
 ### Relationships
 - BELONGS_TO, IMPLEMENTS, PRODUCES, GOVERNED_BY, RELATES_TO, PART_OF
 
-## Snabbstart
+## Quick Start
 
-### Lokal utveckling
+### Local Development
 
 **MCP Server:**
 ```bash
@@ -58,36 +58,36 @@ npm install
 npm run dev
 ```
 
-### Med Docker Compose
+### With Docker Compose
 ```bash
 docker-compose up
 ```
 
 ### GitHub Codespaces
-Öppna projektet i Codespaces - allt är förkonfigurerat.
+Open the project in Codespaces - everything is pre-configured.
 
-## Användarscenario
+## User Scenario
 
-1. **Söka:** Användare söker efter initiativ kopplade till NIS2
-2. **Visualisera:** Graf visar kopplingar mellan initiativ, aktörer och lagstiftning
-3. **Upptäcka gap:** Användare ser att deras projekt saknas
-4. **Ladda upp:** Användare laddar upp projektrapport
-5. **Granska:** System föreslår noder och kopplingar
-6. **Godkänna:** Användare granskar och godkänner tillägg
+1. **Search:** User searches for initiatives related to NIS2
+2. **Visualize:** Graph shows connections between initiatives, actors, and legislation
+3. **Discover gaps:** User sees that their project is missing
+4. **Upload:** User uploads project report
+5. **Review:** System proposes nodes and connections
+6. **Approve:** User reviews and approves additions
 
-## Säkerhet
+## Security
 
-- Max 10 noder per delete-operation
-- Community-baserad isolation
-- Varning mot hantering av personuppgifter
-- Audit log för deletions
+- Max 10 nodes per delete operation
+- Community-based isolation
+- Warning against handling personal data
+- Audit log for deletions
 
 ## Development Status
 
-Se [Implementation Roadmap](docs/roadmap.md) för detaljerad progress.
+See [Implementation Roadmap](docs/roadmap.md) for detailed progress.
 
-**Current Phase:** Fas 1 - Grundläggande infrastruktur
+**Current Phase:** Phase 1 - Basic Infrastructure
 
 ## License
 
-MIT License - se LICENSE för detaljer
+MIT License - see LICENSE for details

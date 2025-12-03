@@ -2,25 +2,12 @@ import { useState, useEffect, useRef } from 'react';
 import useGraphStore from '../store/graphStore';
 import './ChatPanel.css';
 
-const WELCOME_MESSAGE = {
-  role: 'assistant',
-  content: `Välkommen till Community Knowledge Graph!
-
-Du kan ställa frågor som:
-• "Vilka initiativ rör NIS2?"
-• "Visa alla aktörer i eSam-communityn"
-• "Finns det projekt om AI-strategi?"
-
-**OBS:** Hanterar inte personuppgifter i denna tjänst.`,
-  timestamp: new Date()
-};
-
 function ChatPanel() {
   const { chatMessages, addChatMessage, selectedCommunities } = useGraphStore();
   const [inputValue, setInputValue] = useState('');
   const messagesEndRef = useRef(null);
 
-  // Auto-scroll till senaste meddelandet
+  // Auto-scroll to latest message
   const scrollToBottom = () => {
     messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' });
   };
@@ -29,17 +16,10 @@ function ChatPanel() {
     scrollToBottom();
   }, [chatMessages]);
 
-  // Lägg till välkomstmeddelande vid start
-  useEffect(() => {
-    if (chatMessages.length === 0) {
-      addChatMessage(WELCOME_MESSAGE);
-    }
-  }, []);
-
   const handleSend = async () => {
     if (!inputValue.trim()) return;
 
-    // Lägg till user message
+    // Add user message
     const userMessage = {
       role: 'user',
       content: inputValue,
@@ -48,16 +28,16 @@ function ChatPanel() {
     addChatMessage(userMessage);
     setInputValue('');
 
-    // TODO: Skicka till Claude API via MCP
-    // För nu: Placeholder response
+    // TODO: Send to Claude API via MCP
+    // For now: Placeholder response
     setTimeout(() => {
       const assistantMessage = {
         role: 'assistant',
-        content: `[Demo mode] Du frågade: "${inputValue}"
+        content: `[Demo mode] You asked: "${inputValue}"
 
-MCP-integration kommer implementeras i nästa steg.
+MCP integration will be implemented in the next step.
 
-Aktiva communities: ${selectedCommunities.join(', ')}`,
+Active communities: ${selectedCommunities.join(', ')}`,
         timestamp: new Date()
       };
       addChatMessage(assistantMessage);
@@ -96,7 +76,7 @@ Aktiva communities: ${selectedCommunities.join(', ')}`,
           value={inputValue}
           onChange={(e) => setInputValue(e.target.value)}
           onKeyPress={handleKeyPress}
-          placeholder="Ställ en fråga om grafen..."
+          placeholder="Ask a question about the graph..."
           rows={3}
         />
         <button
@@ -104,7 +84,7 @@ Aktiva communities: ${selectedCommunities.join(', ')}`,
           onClick={handleSend}
           disabled={!inputValue.trim()}
         >
-          Skicka
+          Send
         </button>
       </div>
     </div>

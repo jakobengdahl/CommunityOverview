@@ -6,7 +6,7 @@ function CustomNode({ data }) {
   const [showRelatedButton, setShowRelatedButton] = useState(false);
 
   const handleShowRelated = () => {
-    // TODO: Implementera "visa relaterade noder" via MCP
+    // TODO: Implement "show related nodes" via MCP
     console.log('Show related nodes for:', data.label);
   };
 
@@ -34,7 +34,7 @@ function CustomNode({ data }) {
         <button
           className="show-related-button"
           onClick={handleShowRelated}
-          title="Visa relaterade noder"
+          title="Show related nodes"
         >
           +
         </button>

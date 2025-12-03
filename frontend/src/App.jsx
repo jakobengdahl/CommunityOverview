@@ -8,7 +8,7 @@ import useGraphStore from './store/graphStore'
 function App() {
   const { selectedCommunities } = useGraphStore();
 
-  // Hämta communities från URL-query vid initial load
+  // Load communities from URL query on initial load
   useEffect(() => {
     const params = new URLSearchParams(window.location.search);
     const communitiesParam = params.getAll('community');
@@ -24,8 +24,8 @@ function App() {
 
       {selectedCommunities.length === 0 ? (
         <div className="no-community-selected">
-          <h2>Välj minst en community för att komma igång</h2>
-          <p>Använd dropdown-menyn ovan för att välja vilka communities du tillhör.</p>
+          <h2>Select at least one community to get started</h2>
+          <p>Use the dropdown menu above to select which communities you belong to.</p>
         </div>
       ) : (
         <div className="main-content">

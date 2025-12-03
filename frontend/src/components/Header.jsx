@@ -2,7 +2,7 @@ import { useState } from 'react';
 import useGraphStore from '../store/graphStore';
 import './Header.css';
 
-// Tillgängliga communities (hårdkodade för nu)
+// Available communities (hardcoded for now)
 const AVAILABLE_COMMUNITIES = [
   'eSam',
   'Myndigheter',
@@ -15,12 +15,12 @@ function Header() {
 
   const toggleCommunity = (community) => {
     if (selectedCommunities.includes(community)) {
-      // Ta bort
+      // Remove
       const updated = selectedCommunities.filter(c => c !== community);
       setSelectedCommunities(updated);
       updateURL(updated);
     } else {
-      // Lägg till
+      // Add
       const updated = [...selectedCommunities, community];
       setSelectedCommunities(updated);
       updateURL(updated);
@@ -46,7 +46,7 @@ function Header() {
             onClick={() => setIsDropdownOpen(!isDropdownOpen)}
           >
             {selectedCommunities.length === 0
-              ? 'Välj Communities'
+              ? 'Select Communities'
               : selectedCommunities.join(', ')}
             <span className="dropdown-arrow">▼</span>
           </button>
@@ -69,7 +69,7 @@ function Header() {
       </div>
 
       <div className="header-right">
-        {/* Logo eller annan info kan läggas här */}
+        {/* Logo or other info can be added here */}
       </div>
     </header>
   );
