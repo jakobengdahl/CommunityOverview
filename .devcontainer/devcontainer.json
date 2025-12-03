@@ -1,16 +1,18 @@
 {
   "name": "Community Knowledge Graph",
-  "dockerComposeFile": "../docker-compose.yml",
-  "service": "frontend",
-  "workspaceFolder": "/workspace",
+  "image": "mcr.microsoft.com/devcontainers/python:3.11",
+  "features": {
+    "ghcr.io/devcontainers/features/node:1": {
+      "version": "20"
+    }
+  },
   "customizations": {
     "vscode": {
       "extensions": [
         "dbaeumer.vscode-eslint",
         "esbenp.prettier-vscode",
         "ms-python.python",
-        "ms-python.vscode-pylance",
-        "bradlc.vscode-tailwindcss"
+        "ms-python.vscode-pylance"
       ],
       "settings": {
         "editor.formatOnSave": true,
@@ -32,6 +34,6 @@
       "onAutoForward": "silent"
     }
   },
-  "postCreateCommand": "cd /workspace && npm install --prefix frontend && pip install -r mcp-server/requirements.txt",
-  "remoteUser": "node"
+  "postCreateCommand": "pip install -r mcp-server/requirements.txt && cd frontend && npm install",
+  "remoteUser": "vscode"
 }
