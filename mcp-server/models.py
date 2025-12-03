@@ -1,6 +1,6 @@
 """
-Metamodell för Community Knowledge Graph
-Definierar alla node-typer, edge-typer och valideringsregler
+Metamodel for Community Knowledge Graph
+Defines all node types, edge types, and validation rules
 """
 
 from enum import Enum
@@ -11,7 +11,7 @@ import uuid
 
 
 class NodeType(str, Enum):
-    """Tillåtna node-typer enligt metamodellen"""
+    """Allowed node types according to the metamodel"""
     ACTOR = "Actor"
     COMMUNITY = "Community"
     INITIATIVE = "Initiative"
@@ -23,7 +23,7 @@ class NodeType(str, Enum):
 
 
 class RelationshipType(str, Enum):
-    """Tillåtna relationship-typer"""
+    """Allowed relationship types"""
     BELONGS_TO = "BELONGS_TO"
     IMPLEMENTS = "IMPLEMENTS"
     PRODUCES = "PRODUCES"
@@ -32,7 +32,7 @@ class RelationshipType(str, Enum):
     PART_OF = "PART_OF"
 
 
-# Färgkodning för visualisering
+# Color coding for visualization
 NODE_COLORS = {
     NodeType.ACTOR: "#3B82F6",  # blue
     NodeType.COMMUNITY: "#A855F7",  # purple
@@ -46,15 +46,15 @@ NODE_COLORS = {
 
 
 class Node(BaseModel):
-    """Bas-modell för en nod i grafen"""
+    """Base model for a node in the graph"""
     id: str = Field(default_factory=lambda: str(uuid.uuid4()))
     type: NodeType
     name: str = Field(..., min_length=1, max_length=200)
     description: str = Field(default="", max_length=2000)
-    summary: str = Field(default="", max_length=100)  # För visualisering
+    summary: str = Field(default="", max_length=100)  # For visualization
     communities: List[str] = Field(default_factory=list)
     metadata: Dict[str, Any] = Field(default_factory=dict)
-    embedding: Optional[List[float]] = None  # För future vector search
+    embedding: Optional[List[float]] = None  # For future vector search
     created_at: datetime = Field(default_factory=datetime.utcnow)
     updated_at: datetime = Field(default_factory=datetime.utcnow)
 
@@ -64,7 +64,7 @@ class Node(BaseModel):
         }
 
     def to_dict(self) -> dict:
-        """Konvertera till dict för JSON-lagring"""
+        """Convert to dict for JSON storage"""
         data = self.model_dump()
         data['created_at'] = self.created_at.isoformat()
         data['updated_at'] = self.updated_at.isoformat()
@@ -72,7 +72,7 @@ class Node(BaseModel):
 
     @classmethod
     def from_dict(cls, data: dict) -> 'Node':
-        """Skapa från dict (JSON)"""
+        """Create from dict (JSON)"""
         if isinstance(data.get('created_at'), str):
             data['created_at'] = datetime.fromisoformat(data['created_at'])
         if isinstance(data.get('updated_at'), str):
@@ -80,12 +80,12 @@ class Node(BaseModel):
         return cls(**data)
 
     def get_color(self) -> str:
-        """Returnera färg för visualisering"""
+        """Return color for visualization"""
         return NODE_COLORS.get(self.type, "#9CA3AF")
 
 
 class Edge(BaseModel):
-    """Modell för en edge (relationship) mellan noder"""
+    """Model for an edge (relationship) between nodes"""
     id: str = Field(default_factory=lambda: str(uuid.uuid4()))
     source: str  # Node ID
     target: str  # Node ID
@@ -111,14 +111,14 @@ class Edge(BaseModel):
 
 
 class SimilarNode(BaseModel):
-    """Modell för resultat från similarity search"""
+    """Model for similarity search results"""
     node: Node
     similarity_score: float = Field(..., ge=0.0, le=1.0)
     match_reason: str = ""
 
 
 class GraphStats(BaseModel):
-    """Statistik för grafen"""
+    """Statistics for the graph"""
     total_nodes: int
     total_edges: int
     nodes_by_type: Dict[str, int]
@@ -132,15 +132,15 @@ class GraphStats(BaseModel):
 
 
 class ProposedNodesResult(BaseModel):
-    """Resultat från propose_nodes_from_text"""
+    """Result from propose_nodes_from_text"""
     proposed_nodes: List[Node]
     proposed_edges: List[Edge]
     similar_existing: List[SimilarNode]
-    communities: List[str]  # Communities som föreslås kopplas
+    communities: List[str]  # Communities to be linked
 
 
 class AddNodesResult(BaseModel):
-    """Resultat från add_nodes operation"""
+    """Result from add_nodes operation"""
     added_node_ids: List[str]
     added_edge_ids: List[str]
     success: bool
@@ -148,8 +148,8 @@ class AddNodesResult(BaseModel):
 
 
 class DeleteNodesResult(BaseModel):
-    """Resultat från delete_nodes operation"""
+    """Result from delete_nodes operation"""
     deleted_node_ids: List[str]
-    affected_edge_ids: List[str]  # Edges som också togs bort
+    affected_edge_ids: List[str]  # Edges that were also removed
     success: bool
     message: str = ""

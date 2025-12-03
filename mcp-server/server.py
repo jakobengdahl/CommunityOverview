@@ -1,6 +1,6 @@
 """
-MCP Server för Community Knowledge Graph
-Exponerar tools för graf-operationer via MCP
+MCP Server for Community Knowledge Graph
+Exposes tools for graph operations via MCP
 """
 
 from typing import List, Optional, Dict, Any
@@ -11,10 +11,10 @@ from models import (
     SimilarNode, AddNodesResult, DeleteNodesResult
 )
 
-# Initiera MCP server
+# Initialize MCP server
 mcp = FastMCP("community-knowledge-graph")
 
-# Initiera graf-lagring
+# Initialize graph storage
 graph = GraphStorage("graph.json")
 
 
@@ -26,18 +26,18 @@ def search_graph(
     limit: int = 50
 ) -> Dict[str, Any]:
     """
-    Söker efter noder i grafen baserat på text-query
+    Search for nodes in the graph based on text query
 
     Args:
-        query: Söktext (matchar mot name, description, summary)
-        node_types: Lista av node-typer att filtrera på (Actor, Initiative, etc.)
-        communities: Lista av communities att filtrera på
-        limit: Max antal resultat (default 50)
+        query: Search text (matches against name, description, summary)
+        node_types: List of node types to filter on (Actor, Initiative, etc.)
+        communities: List of communities to filter on
+        limit: Max number of results (default 50)
 
     Returns:
-        Dict med matching nodes
+        Dict with matching nodes
     """
-    # Konvertera node_types till NodeType enum
+    # Convert node_types to NodeType enum
     type_filters = None
     if node_types:
         type_filters = [NodeType(t) for t in node_types]
@@ -63,20 +63,20 @@ def search_graph(
 @mcp.tool()
 def get_node_details(node_id: str) -> Dict[str, Any]:
     """
-    Hämtar fullständig information om en specifik nod
+    Get complete information about a specific node
 
     Args:
-        node_id: ID för noden
+        node_id: ID of the node
 
     Returns:
-        Dict med node-data eller error
+        Dict with node data or error
     """
     node = graph.get_node(node_id)
 
     if not node:
         return {
             "success": False,
-            "error": f"Nod med ID {node_id} hittades inte"
+            "error": f"Node with ID {node_id} not found"
         }
 
     return {
@@ -92,17 +92,17 @@ def get_related_nodes(
     depth: int = 1
 ) -> Dict[str, Any]:
     """
-    Hämtar noder kopplade till given nod
+    Get nodes connected to the given node
 
     Args:
-        node_id: ID för start-noden
-        relationship_types: Lista av relationship-typer att filtrera på
-        depth: Hur många hopp från start-noden (default 1)
+        node_id: ID of the starting node
+        relationship_types: List of relationship types to filter on
+        depth: How many hops from the starting node (default 1)
 
     Returns:
-        Dict med nodes och edges
+        Dict with nodes and edges
     """
-    # Konvertera relationship_types till enum
+    # Convert relationship_types to enum
     rel_filters = None
     if relationship_types:
         rel_filters = [RelationshipType(r) for r in relationship_types]
@@ -130,16 +130,16 @@ def find_similar_nodes(
     limit: int = 5
 ) -> Dict[str, Any]:
     """
-    Hittar liknande noder baserat på namn (för dublettkontroll)
+    Find similar nodes based on name (for duplicate detection)
 
     Args:
-        name: Namnet att söka efter liknande noder för
-        node_type: Optional node-typ att filtrera på
+        name: The name to search for similar nodes
+        node_type: Optional node type to filter on
         threshold: Similarity threshold 0.0-1.0 (default 0.7)
-        limit: Max antal resultat (default 5)
+        limit: Max number of results (default 5)
 
     Returns:
-        Dict med liknande noder och similarity scores
+        Dict with similar nodes and similarity scores
     """
     type_filter = NodeType(node_type) if node_type else None
 
@@ -170,23 +170,23 @@ def add_nodes(
     edges: List[Dict[str, Any]]
 ) -> Dict[str, Any]:
     """
-    Lägger till nya noder och edges till grafen
+    Add new nodes and edges to the graph
 
     Args:
-        nodes: Lista av nod-objekt att lägga till
-        edges: Lista av edge-objekt att lägga till
+        nodes: List of node objects to add
+        edges: List of edge objects to add
 
     Returns:
-        Dict med resultat (added_node_ids, added_edge_ids, success, message)
+        Dict with result (added_node_ids, added_edge_ids, success, message)
     """
-    # Konvertera dicts till Node och Edge objekt
+    # Convert dicts to Node and Edge objects
     try:
         node_objects = [Node(**n) for n in nodes]
         edge_objects = [Edge(**e) for e in edges]
     except Exception as e:
         return {
             "success": False,
-            "message": f"Fel vid validering av input: {str(e)}",
+            "message": f"Error validating input: {str(e)}",
             "added_node_ids": [],
             "added_edge_ids": []
         }
@@ -198,21 +198,21 @@ def add_nodes(
 @mcp.tool()
 def update_node(node_id: str, updates: Dict[str, Any]) -> Dict[str, Any]:
     """
-    Uppdaterar en befintlig nod
+    Update an existing node
 
     Args:
-        node_id: ID för noden att uppdatera
-        updates: Dict med fält att uppdatera (name, description, summary, communities, metadata)
+        node_id: ID of the node to update
+        updates: Dict with fields to update (name, description, summary, communities, metadata)
 
     Returns:
-        Dict med uppdaterad node eller error
+        Dict with updated node or error
     """
     updated_node = graph.update_node(node_id, updates)
 
     if not updated_node:
         return {
             "success": False,
-            "error": f"Nod med ID {node_id} hittades inte"
+            "error": f"Node with ID {node_id} not found"
         }
 
     return {
@@ -227,16 +227,16 @@ def delete_nodes(
     confirmed: bool = False
 ) -> Dict[str, Any]:
     """
-    Tar bort noder från grafen (max 10 åt gången)
+    Delete nodes from the graph (max 10 at a time)
 
-    SÄKERHET: Kräver confirmed=True och max 10 noder per anrop
+    SECURITY: Requires confirmed=True and max 10 nodes per call
 
     Args:
-        node_ids: Lista av node IDs att ta bort
-        confirmed: Måste vara True för att genomföra deletion
+        node_ids: List of node IDs to delete
+        confirmed: Must be True to execute deletion
 
     Returns:
-        Dict med resultat (deleted_node_ids, affected_edge_ids, success, message)
+        Dict with result (deleted_node_ids, affected_edge_ids, success, message)
     """
     result = graph.delete_nodes(node_ids, confirmed)
     return result.model_dump()
@@ -245,13 +245,13 @@ def delete_nodes(
 @mcp.tool()
 def get_graph_stats(communities: Optional[List[str]] = None) -> Dict[str, Any]:
     """
-    Hämtar statistik för grafen
+    Get statistics for the graph
 
     Args:
-        communities: Optional lista av communities att filtrera på
+        communities: Optional list of communities to filter on
 
     Returns:
-        Dict med statistik (total_nodes, total_edges, nodes_by_type, nodes_by_community)
+        Dict with statistics (total_nodes, total_edges, nodes_by_type, nodes_by_community)
     """
     stats = graph.get_stats(communities)
     return stats.model_dump()
@@ -260,10 +260,10 @@ def get_graph_stats(communities: Optional[List[str]] = None) -> Dict[str, Any]:
 @mcp.tool()
 def list_node_types() -> Dict[str, Any]:
     """
-    Listar alla tillåtna node-typer enligt metamodellen
+    List all allowed node types according to the metamodel
 
     Returns:
-        Dict med node-typer och deras färgkodning
+        Dict with node types and their color coding
     """
     from models import NODE_COLORS
 
@@ -282,10 +282,10 @@ def list_node_types() -> Dict[str, Any]:
 @mcp.tool()
 def list_relationship_types() -> Dict[str, Any]:
     """
-    Listar alla tillåtna relationship-typer
+    List all allowed relationship types
 
     Returns:
-        Dict med relationship-typer
+        Dict with relationship types
     """
     return {
         "relationship_types": [
@@ -299,73 +299,73 @@ def list_relationship_types() -> Dict[str, Any]:
 
 
 def _get_node_type_description(node_type: NodeType) -> str:
-    """Helper för beskrivningar av node-typer"""
+    """Helper for node type descriptions"""
     descriptions = {
-        NodeType.ACTOR: "Myndigheter, organisationer",
+        NodeType.ACTOR: "Government agencies, organizations",
         NodeType.COMMUNITY: "Communities (eSam, Myndigheter, etc.)",
-        NodeType.INITIATIVE: "Projekt, gruppverksamheter",
-        NodeType.CAPABILITY: "Förmågor (upphandling, IT-utveckling, etc.)",
-        NodeType.RESOURCE: "Resultat (rapporter, mjukvara, etc.)",
-        NodeType.LEGISLATION: "Lagar och direktiv (NIS2, GDPR, etc.)",
-        NodeType.THEME: "Teman (AI, datastrategier, etc.)",
-        NodeType.VISUALIZATION_VIEW: "Färdiga vyer för navigation"
+        NodeType.INITIATIVE: "Projects, collaborative activities",
+        NodeType.CAPABILITY: "Capabilities (procurement, IT development, etc.)",
+        NodeType.RESOURCE: "Outputs (reports, software, etc.)",
+        NodeType.LEGISLATION: "Laws and directives (NIS2, GDPR, etc.)",
+        NodeType.THEME: "Themes (AI, data strategies, etc.)",
+        NodeType.VISUALIZATION_VIEW: "Predefined views for navigation"
     }
     return descriptions.get(node_type, "")
 
 
 def _get_relationship_description(rel_type: RelationshipType) -> str:
-    """Helper för beskrivningar av relationship-typer"""
+    """Helper for relationship type descriptions"""
     descriptions = {
-        RelationshipType.BELONGS_TO: "Tillhör (actor tillhör community, initiative tillhör actor)",
-        RelationshipType.IMPLEMENTS: "Implementerar (initiative implementerar legislation)",
-        RelationshipType.PRODUCES: "Producerar (initiative producerar resource/capability)",
-        RelationshipType.GOVERNED_BY: "Styrs av (initiativ styrs av legislation)",
-        RelationshipType.RELATES_TO: "Relaterar till (generell koppling)",
-        RelationshipType.PART_OF: "Del av (komponent är del av större helhet)"
+        RelationshipType.BELONGS_TO: "Belongs to (actor belongs to community, initiative belongs to actor)",
+        RelationshipType.IMPLEMENTS: "Implements (initiative implements legislation)",
+        RelationshipType.PRODUCES: "Produces (initiative produces resource/capability)",
+        RelationshipType.GOVERNED_BY: "Governed by (initiative governed by legislation)",
+        RelationshipType.RELATES_TO: "Relates to (general connection)",
+        RelationshipType.PART_OF: "Part of (component is part of larger whole)"
     }
     return descriptions.get(rel_type, "")
 
 
-# Instruktioner för LLM när den använder MCP
+# Instructions for LLM when using MCP
 SYSTEM_PROMPT = """
-Du är en hjälpsam assistent för Community Knowledge Graph-systemet.
+You are a helpful assistant for the Community Knowledge Graph system.
 
-METAMODELL:
-- Actor (blue): Myndigheter, organisationer
+METAMODEL:
+- Actor (blue): Government agencies, organizations
 - Community (purple): eSam, Myndigheter, Officiell Statistik
-- Initiative (green): Projekt, gruppverksamheter
-- Capability (orange): Förmågor
-- Resource (yellow): Rapporter, mjukvara
+- Initiative (green): Projects, collaborative activities
+- Capability (orange): Capabilities
+- Resource (yellow): Reports, software
 - Legislation (red): NIS2, GDPR
-- Theme (teal): AI, datastrategier
-- VisualizationView (gray): Färdiga vyer
+- Theme (teal): AI, data strategies
+- VisualizationView (gray): Predefined views
 
-SÄKERHETSREGLER:
-1. Varna ALLTID om användaren försöker lagra personuppgifter
-2. Vid deletion: Max 10 noder, kräv dubbelkonfirmation
-3. Filtrera alltid baserat på användarens aktiva communities
+SECURITY RULES:
+1. ALWAYS warn if the user tries to store personal data
+2. For deletion: Max 10 nodes, require double confirmation
+3. Always filter based on the user's active communities
 
-ARBETSFLÖDE VID TILLÄGG AV NOD:
-1. Kör find_similar_nodes() för att hitta dubletter
-2. Presentera förslag + liknande befintliga noder
-3. Vänta på användargodkännande
-4. Kör add_nodes() endast efter godkännande
+WORKFLOW FOR ADDING NODES:
+1. Run find_similar_nodes() to find duplicates
+2. Present proposal + similar existing nodes
+3. Wait for user approval
+4. Run add_nodes() only after approval
 
-ARBETSFLÖDE VID DOKUMENTUPPLADDNING:
-1. Extrahera text från dokument
-2. Identifiera potentiella noder enligt metamodell
-3. Kör find_similar_nodes() för varje
-4. Presentera förslag + dubletter
-5. Låt användare välja vad som ska läggas till
-6. Länka automatiskt till användarens aktiva communities
+WORKFLOW FOR DOCUMENT UPLOAD:
+1. Extract text from document
+2. Identify potential nodes according to metamodel
+3. Run find_similar_nodes() for each
+4. Present proposal + duplicates
+5. Let user choose what to add
+6. Automatically link to user's active communities
 
-Var alltid tydlig med vad du gör och be om bekräftelse vid viktiga operationer.
+Always be clear about what you're doing and ask for confirmation for important operations.
 """
 
 
 if __name__ == "__main__":
-    # Starta MCP server
-    print("Startar Community Knowledge Graph MCP Server...")
-    print(f"Laddade graf med {len(graph.nodes)} noder och {len(graph.edges)} edges")
+    # Start MCP server
+    print("Starting Community Knowledge Graph MCP Server...")
+    print(f"Loaded graph with {len(graph.nodes)} nodes and {len(graph.edges)} edges")
     print(SYSTEM_PROMPT)
     mcp.run()

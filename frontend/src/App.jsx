@@ -4,11 +4,12 @@ import Header from './components/Header'
 import ChatPanel from './components/ChatPanel'
 import VisualizationPanel from './components/VisualizationPanel'
 import useGraphStore from './store/graphStore'
+import { loadDemoData } from './utils/demoData'
 
 function App() {
-  const { selectedCommunities } = useGraphStore();
+  const { selectedCommunities, updateVisualization } = useGraphStore();
 
-  // Hämta communities från URL-query vid initial load
+  // Load communities from URL query on initial load
   useEffect(() => {
     const params = new URLSearchParams(window.location.search);
     const communitiesParam = params.getAll('community');
@@ -18,14 +19,21 @@ function App() {
     }
   }, []);
 
+  // Load demo data when communities are selected
+  useEffect(() => {
+    if (selectedCommunities.length > 0) {
+      loadDemoData(updateVisualization, selectedCommunities);
+    }
+  }, [selectedCommunities, updateVisualization]);
+
   return (
     <div className="app">
       <Header />
 
       {selectedCommunities.length === 0 ? (
         <div className="no-community-selected">
-          <h2>Välj minst en community för att komma igång</h2>
-          <p>Använd dropdown-menyn ovan för att välja vilka communities du tillhör.</p>
+          <h2>Select at least one community to get started</h2>
+          <p>Use the dropdown menu above to select which communities you belong to.</p>
         </div>
       ) : (
         <div className="main-content">
