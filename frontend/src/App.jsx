@@ -4,7 +4,7 @@ import Header from './components/Header'
 import ChatPanel from './components/ChatPanel'
 import VisualizationPanel from './components/VisualizationPanel'
 import useGraphStore from './store/graphStore'
-import { loadDemoData } from './services/demoData'
+// import { loadDemoData } from './services/demoData' // REMOVED
 
 function App() {
   const { selectedCommunities, updateVisualization } = useGraphStore();
@@ -19,10 +19,11 @@ function App() {
     }
   }, []);
 
-  // Load demo data when communities are selected
+  // Load data when communities are selected
   useEffect(() => {
     if (selectedCommunities.length > 0) {
-      loadDemoData(updateVisualization, selectedCommunities);
+      // TODO: Fetch initial graph data from backend
+      // fetchGraphData(selectedCommunities).then(data => updateVisualization(data.nodes, data.edges));
     }
   }, [selectedCommunities, updateVisualization]);
 

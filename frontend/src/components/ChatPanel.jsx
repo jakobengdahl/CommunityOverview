@@ -1,7 +1,7 @@
 import { useState, useEffect, useRef } from 'react';
 import useGraphStore from '../store/graphStore';
-import { sendMessageToClaude } from '../services/claudeService';
-import { addNodeToDemoData, loadDemoData } from '../services/demoData';
+import { sendMessageToBackend } from '../services/api';
+// import { addNodeToDemoData, loadDemoData } from '../services/demoData'; // REMOVED: Using backend now
 import './ChatPanel.css';
 
 function ChatPanel() {
@@ -20,9 +20,6 @@ function ChatPanel() {
   const [extractText, setExtractText] = useState('');
   const messagesEndRef = useRef(null);
 
-  // Get API key from environment
-  const apiKey = import.meta.env.VITE_ANTHROPIC_API_KEY;
-
   // Auto-scroll to latest message
   const scrollToBottom = () => {
     messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' });
@@ -34,17 +31,6 @@ function ChatPanel() {
 
   const handleSend = async () => {
     if (!inputValue.trim() || isProcessing) return;
-
-    // Check if API key is available
-    if (!apiKey) {
-      const errorMessage = {
-        role: 'assistant',
-        content: '⚠️ API key not configured. Please add VITE_ANTHROPIC_API_KEY to your .env file.\n\nSee frontend/.env.example for details.',
-        timestamp: new Date()
-      };
-      addChatMessage(errorMessage);
-      return;
-    }
 
     // Add user message
     const userMessage = {
@@ -72,22 +58,25 @@ function ChatPanel() {
         content: inputValue
       });
 
-      // Call Claude API with tool support
-      const response = await sendMessageToClaude(
-        conversationMessages,
-        apiKey,
-        (toolResult) => {
-          // Handle tool results (e.g., search results, updates, deletes)
-          if (toolResult.tool_type === 'update' || toolResult.tool_type === 'delete') {
-            // For updates and deletes, reload the entire graph to show changes
-            loadDemoData(updateVisualization, selectedCommunities);
-          } else if (toolResult.nodes && toolResult.nodes.length > 0) {
-            // For search/related, update visualization with search results
-            const edges = toolResult.edges || [];
-            updateVisualization(toolResult.nodes, edges);
-          }
+      // Call Backend API
+      const response = await sendMessageToBackend(conversationMessages);
+
+      // Handle tool results from response
+      const toolResult = response.toolResult;
+
+      if (toolResult) {
+        // Handle visualization updates
+        if (toolResult.tool_type === 'update' || toolResult.tool_type === 'delete') {
+          // For updates/deletes, we might want to refresh the graph data completely
+          // TODO: Implement a way to reload graph data from backend
+          // For now, if we have nodes/edges in the response, we update visualization
         }
-      );
+
+        if (toolResult.nodes && toolResult.nodes.length > 0) {
+           const edges = toolResult.edges || [];
+           updateVisualization(toolResult.nodes, edges);
+        }
+      }
 
       // Add Claude's response
       const assistantMessage = {
@@ -108,10 +97,10 @@ function ChatPanel() {
       addChatMessage(assistantMessage);
 
     } catch (error) {
-      console.error('Error communicating with Claude:', error);
+      console.error('Error communicating with Backend:', error);
       const errorMessage = {
         role: 'assistant',
-        content: `❌ Error: ${error.message}\n\nPlease check your API key and try again.`,
+        content: `❌ Error: ${error.message}`,
         timestamp: new Date()
       };
       addChatMessage(errorMessage);
@@ -128,57 +117,115 @@ function ChatPanel() {
     }
   };
 
-  const handleApproveProposal = (proposal) => {
-    // Add the node to demo data
-    const result = addNodeToDemoData(proposal.node);
+  const handleApproveProposal = async (proposal) => {
+    // Send approval message to backend
+    const msg = `Ja, lägg till noden "${proposal.node.name}"`;
+    setInputValue(msg);
+    // Trigger send automatically would require refactoring, so just setting it for now
+    // or we can call handleSend logic directly
 
-    if (result.success) {
-      // Reload the graph to show the new node
-      loadDemoData(updateVisualization, selectedCommunities);
-
-      // Add confirmation message
-      const confirmationMessage = {
-        role: 'assistant',
-        content: `✅ Noden "${proposal.node.name}" har lagts till i grafen!`,
+    // Simulating user typing "Yes"
+    addChatMessage({
+        role: 'user',
+        content: msg,
         timestamp: new Date()
-      };
-      addChatMessage(confirmationMessage);
+    });
+
+    setIsProcessing(true);
+
+    try {
+        const conversationMessages = chatMessages.map(m => ({ role: m.role, content: m.content }));
+        conversationMessages.push({ role: 'user', content: msg });
+
+        const response = await sendMessageToBackend(conversationMessages);
+
+        // Handle tool results
+        const toolResult = response.toolResult;
+        if (toolResult && toolResult.added_node_ids) {
+            // Success!
+            // We might want to query the new node to show it
+            // For now, let's rely on Claude's confirmation text
+        }
+
+         // Add Claude's response
+        const assistantMessage = {
+            role: 'assistant',
+            content: response.content,
+            timestamp: new Date(),
+            toolUsed: response.toolUsed
+        };
+        addChatMessage(assistantMessage);
+
+    } catch (error) {
+        console.error("Error approving:", error);
+        addChatMessage({
+            role: 'assistant',
+            content: `❌ Error: ${error.message}`
+        });
+    } finally {
+        setIsProcessing(false);
     }
   };
 
   const handleRejectProposal = (proposal) => {
-    // Add rejection message
-    const rejectionMessage = {
-      role: 'assistant',
-      content: `❌ Noden "${proposal.node.name}" lades inte till.`,
-      timestamp: new Date()
-    };
-    addChatMessage(rejectionMessage);
+    // Send rejection message
+    const msg = "Nej, lägg inte till noden.";
+    setInputValue(msg); // Optional: just puts it in input
+
+    // But better to just send it
+    addChatMessage({
+        role: 'user',
+        content: msg,
+        timestamp: new Date()
+    });
+
+     // We should also send this to backend so context is maintained?
+     // Yes, otherwise Claude thinks we are still waiting
+     // ... implementing similar to handleApproveProposal ...
+     // For brevity, just calling the backend:
+
+     (async () => {
+         setIsProcessing(true);
+         try {
+             const conversationMessages = chatMessages.map(m => ({ role: m.role, content: m.content }));
+             conversationMessages.push({ role: 'user', content: msg });
+             const response = await sendMessageToBackend(conversationMessages);
+             addChatMessage({
+                 role: 'assistant',
+                 content: response.content,
+                 timestamp: new Date()
+             });
+         } catch(e) {
+             console.error(e);
+         } finally {
+             setIsProcessing(false);
+         }
+     })();
   };
 
   const handleConfirmDelete = async (deleteConfirmation) => {
     setIsProcessing(true);
-    try {
-      // Import the executeTool function from claudeService
-      const { DEMO_GRAPH_DATA } = await import('../services/demoData');
 
-      // Delete the nodes
-      const nodeIds = deleteConfirmation.node_ids;
-      DEMO_GRAPH_DATA.nodes = DEMO_GRAPH_DATA.nodes.filter(n => !nodeIds.includes(n.id));
-      DEMO_GRAPH_DATA.edges = DEMO_GRAPH_DATA.edges.filter(
-        edge => !nodeIds.includes(edge.source) && !nodeIds.includes(edge.target)
-      );
-
-      // Reload the graph
-      loadDemoData(updateVisualization, selectedCommunities);
-
-      // Add confirmation message
-      const confirmationMessage = {
-        role: 'assistant',
-        content: `✅ ${nodeIds.length} nod(er) och ${deleteConfirmation.affected_edges.length} koppling(ar) har raderats.`,
+    const msg = "Ja, radera noderna.";
+    addChatMessage({
+        role: 'user',
+        content: msg,
         timestamp: new Date()
-      };
-      addChatMessage(confirmationMessage);
+    });
+
+    try {
+      const conversationMessages = chatMessages.map(m => ({ role: m.role, content: m.content }));
+      conversationMessages.push({ role: 'user', content: msg });
+
+      const response = await sendMessageToBackend(conversationMessages);
+
+      addChatMessage({
+          role: 'assistant',
+          content: response.content,
+          timestamp: new Date(),
+          toolUsed: response.toolUsed
+      });
+
     } catch (error) {
       console.error('Error deleting nodes:', error);
       const errorMessage = {
@@ -231,19 +278,8 @@ Communities att koppla till: ${selectedCommunities.join(', ') || 'Ingen communit
         { role: 'user', content: extractionPrompt }
       ];
 
-      // Call Claude API
-      const response = await sendMessageToClaude(
-        conversationMessages,
-        apiKey,
-        (toolResult) => {
-          if (toolResult.tool_type === 'update' || toolResult.tool_type === 'delete') {
-            loadDemoData(updateVisualization, selectedCommunities);
-          } else if (toolResult.nodes && toolResult.nodes.length > 0) {
-            const edges = toolResult.edges || [];
-            updateVisualization(toolResult.nodes, edges);
-          }
-        }
-      );
+      // Call Backend API
+      const response = await sendMessageToBackend(conversationMessages);
 
       // Add Claude's response
       const assistantMessage = {

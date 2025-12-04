@@ -5,6 +5,8 @@ Exposes tools for graph operations via MCP
 
 from typing import List, Optional, Dict, Any
 from mcp.server.fastmcp import FastMCP
+from starlette.requests import Request
+from starlette.responses import JSONResponse
 from graph_storage import GraphStorage
 from models import (
     Node, Edge, NodeType, RelationshipType,
@@ -18,7 +20,57 @@ mcp = FastMCP("community-knowledge-graph")
 graph = GraphStorage("graph.json")
 
 
-@mcp.tool()
+# --- Chat Endpoint (Backend Integration) ---
+
+from chat_logic import ChatProcessor
+
+# Map tools to functions for the chat processor
+TOOLS_MAP = {}
+
+def register_tool(name, func):
+    TOOLS_MAP[name] = func
+    return func
+
+# Wrapper to register tools both in MCP and locally for ChatProcessor
+def tool_wrapper(func):
+    mcp.tool()(func)
+    register_tool(func.__name__, func)
+    return func
+
+# Initialize ChatProcessor (lazy load to avoid circular deps if any)
+chat_processor = None
+
+def get_chat_processor():
+    global chat_processor
+    if not chat_processor:
+        chat_processor = ChatProcessor(TOOLS_MAP)
+    return chat_processor
+
+@mcp.custom_route("/chat", methods=["POST"])
+async def chat_endpoint(request: Request):
+    """
+    Endpoint for the frontend to chat with Claude via the backend.
+    """
+    try:
+        body = await request.json()
+        messages = body.get("messages", [])
+
+        if not messages:
+            return JSONResponse({"error": "No messages provided"}, status_code=400)
+
+        processor = get_chat_processor()
+        result = processor.process_message(messages)
+
+        return JSONResponse(result)
+    except Exception as e:
+        import traceback
+        traceback.print_exc()
+        return JSONResponse({"error": str(e)}, status_code=500)
+
+
+# --- MCP Tools ---
+
+@tool_wrapper
 def search_graph(
     query: str,
     node_types: Optional[List[str]] = None,
@@ -60,7 +112,7 @@ def search_graph(
     }
 
 
-@mcp.tool()
+@tool_wrapper
 def get_node_details(node_id: str) -> Dict[str, Any]:
     """
     Get complete information about a specific node
@@ -85,7 +137,7 @@ def get_node_details(node_id: str) -> Dict[str, Any]:
     }
 
 
-@mcp.tool()
+@tool_wrapper
 def get_related_nodes(
     node_id: str,
     relationship_types: Optional[List[str]] = None,
@@ -122,7 +174,7 @@ def get_related_nodes(
     }
 
 
-@mcp.tool()
+@tool_wrapper
 def find_similar_nodes(
     name: str,
     node_type: Optional[str] = None,
@@ -164,7 +216,7 @@ def find_similar_nodes(
     }
 
 
-@mcp.tool()
+@tool_wrapper
 def add_nodes(
     nodes: List[Dict[str, Any]],
     edges: List[Dict[str, Any]]
@@ -195,7 +247,7 @@ def add_nodes(
     return result.model_dump()
 
 
-@mcp.tool()
+@tool_wrapper
 def update_node(node_id: str, updates: Dict[str, Any]) -> Dict[str, Any]:
     """
     Update an existing node
@@ -221,7 +273,7 @@ def update_node(node_id: str, updates: Dict[str, Any]) -> Dict[str, Any]:
     }
 
 
-@mcp.tool()
+@tool_wrapper
 def delete_nodes(
     node_ids: List[str],
     confirmed: bool = False
@@ -242,7 +294,7 @@ def delete_nodes(
     return result.model_dump()
 
 
-@mcp.tool()
+@tool_wrapper
 def get_graph_stats(communities: Optional[List[str]] = None) -> Dict[str, Any]:
     """
     Get statistics for the graph
@@ -257,7 +309,7 @@ def get_graph_stats(communities: Optional[List[str]] = None) -> Dict[str, Any]:
     return stats.model_dump()
 
 
-@mcp.tool()
+@tool_wrapper
 def list_node_types() -> Dict[str, Any]:
     """
     List all allowed node types according to the metamodel
@@ -279,7 +331,7 @@ def list_node_types() -> Dict[str, Any]:
     }
 
 
-@mcp.tool()
+@tool_wrapper
 def list_relationship_types() -> Dict[str, Any]:
     """
     List all allowed relationship types
