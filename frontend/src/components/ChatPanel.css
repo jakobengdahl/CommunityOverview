@@ -106,6 +106,96 @@
   cursor: not-allowed;
 }
 
+/* Proposal card styling */
+.proposal-card {
+  margin-top: 1rem;
+  padding: 1rem;
+  background-color: #1e1e1e;
+  border: 2px solid #10B981;
+  border-radius: 8px;
+}
+
+.proposal-card h4 {
+  margin: 0 0 0.75rem 0;
+  color: #10B981;
+  font-size: 1rem;
+}
+
+.proposal-details {
+  margin-bottom: 0.75rem;
+}
+
+.proposal-details p {
+  margin: 0.4rem 0;
+  font-size: 0.9rem;
+  line-height: 1.4;
+}
+
+.proposal-details strong {
+  color: #10B981;
+}
+
+.similar-nodes-warning {
+  margin: 0.75rem 0;
+  padding: 0.75rem;
+  background-color: #3a2a1a;
+  border-left: 3px solid #F97316;
+  border-radius: 4px;
+}
+
+.similar-nodes-warning p {
+  margin: 0 0 0.5rem 0;
+  color: #F97316;
+}
+
+.similar-nodes-warning ul {
+  margin: 0;
+  padding-left: 1.5rem;
+  font-size: 0.85rem;
+}
+
+.similar-nodes-warning li {
+  margin: 0.25rem 0;
+}
+
+.proposal-actions {
+  display: flex;
+  gap: 0.75rem;
+  margin-top: 1rem;
+}
+
+.approve-button,
+.reject-button {
+  flex: 1;
+  padding: 0.6rem 1rem;
+  border: none;
+  border-radius: 6px;
+  font-weight: 500;
+  cursor: pointer;
+  transition: all 0.2s;
+  font-size: 0.9rem;
+}
+
+.approve-button {
+  background-color: #10B981;
+  color: white;
+}
+
+.approve-button:hover {
+  background-color: #059669;
+  transform: translateY(-1px);
+}
+
+.reject-button {
+  background-color: #EF4444;
+  color: white;
+}
+
+.reject-button:hover {
+  background-color: #DC2626;
+  transform: translateY(-1px);
+}
+
 /* Scrollbar styling */
 .chat-messages::-webkit-scrollbar {
   width: 8px;

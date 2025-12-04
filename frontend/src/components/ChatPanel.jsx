@@ -1,6 +1,7 @@
 import { useState, useEffect, useRef } from 'react';
 import useGraphStore from '../store/graphStore';
 import { sendMessageToClaude } from '../services/claudeService';
+import { addNodeToDemoData, loadDemoData } from '../services/demoData';
 import './ChatPanel.css';
 
 function ChatPanel() {
@@ -88,7 +89,11 @@ function ChatPanel() {
         role: 'assistant',
         content: response.content,
         timestamp: new Date(),
-        toolUsed: response.toolUsed
+        toolUsed: response.toolUsed,
+        proposal: response.toolResult?.proposed_node ? {
+          node: response.toolResult.proposed_node,
+          similar_nodes: response.toolResult.similar_nodes
+        } : null
       };
       addChatMessage(assistantMessage);
 
@@ -113,6 +118,34 @@ function ChatPanel() {
     }
   };
 
+  const handleApproveProposal = (proposal) => {
+    // Add the node to demo data
+    const result = addNodeToDemoData(proposal.node);
+
+    if (result.success) {
+      // Reload the graph to show the new node
+      loadDemoData(updateVisualization, selectedCommunities);
+
+      // Add confirmation message
+      const confirmationMessage = {
+        role: 'assistant',
+        content: `✅ Noden "${proposal.node.name}" har lagts till i grafen!`,
+        timestamp: new Date()
+      };
+      addChatMessage(confirmationMessage);
+    }
+  };
+
+  const handleRejectProposal = (proposal) => {
+    // Add rejection message
+    const rejectionMessage = {
+      role: 'assistant',
+      content: `❌ Noden "${proposal.node.name}" lades inte till.`,
+      timestamp: new Date()
+    };
+    addChatMessage(rejectionMessage);
+  };
+
   return (
     <div className="chat-panel">
       <div className="chat-messages">
@@ -120,6 +153,47 @@ function ChatPanel() {
           <div key={idx} className={`chat-message ${msg.role}`}>
             <div className="message-content">
               {msg.content}
+
+              {/* Render proposal with approve/reject buttons */}
+              {msg.proposal && (
+                <div className="proposal-card">
+                  <h4>📋 Föreslaget tillägg:</h4>
+                  <div className="proposal-details">
+                    <p><strong>Typ:</strong> {msg.proposal.node.type}</p>
+                    <p><strong>Namn:</strong> {msg.proposal.node.name}</p>
+                    <p><strong>Beskrivning:</strong> {msg.proposal.node.description}</p>
+                    <p><strong>Communities:</strong> {msg.proposal.node.communities.join(', ')}</p>
+                  </div>
+
+                  {msg.proposal.similar_nodes && msg.proposal.similar_nodes.length > 0 && (
+                    <div className="similar-nodes-warning">
+                      <p><strong>⚠️ Liknande noder hittades:</strong></p>
+                      <ul>
+                        {msg.proposal.similar_nodes.map((sim, i) => (
+                          <li key={i}>
+                            {sim.node.name} ({sim.similarity_score * 100}% match)
+                          </li>
+                        ))}
+                      </ul>
+                    </div>
+                  )}
+
+                  <div className="proposal-actions">
+                    <button
+                      className="approve-button"
+                      onClick={() => handleApproveProposal(msg.proposal)}
+                    >
+                      ✅ Godkänn
+                    </button>
+                    <button
+                      className="reject-button"
+                      onClick={() => handleRejectProposal(msg.proposal)}
+                    >
+                      ❌ Avslå
+                    </button>
+                  </div>
+                </div>
+              )}
             </div>
             <div className="message-timestamp">
               {msg.timestamp?.toLocaleTimeString('sv-SE', {

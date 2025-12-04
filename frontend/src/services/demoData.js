@@ -173,3 +173,38 @@ export function loadDemoData(updateVisualization, selectedCommunities = []) {
 
   updateVisualization(filteredNodes, filteredEdges);
 }
+
+/**
+ * Add a new node to the demo data
+ * @param {Object} node - The node to add
+ * @param {Array} edges - Optional edges to add
+ * @returns {Object} Result with success status
+ */
+export function addNodeToDemoData(node, edges = []) {
+  // Generate a proper ID if it's a temporary one
+  if (node.id.startsWith('temp-')) {
+    const typePrefix = node.type.toLowerCase().substring(0, 4);
+    const count = DEMO_GRAPH_DATA.nodes.filter(n => n.type === node.type).length + 1;
+    node.id = `${typePrefix}-${String(count).padStart(3, '0')}`;
+  }
+
+  // Add node to demo data
+  DEMO_GRAPH_DATA.nodes.push(node);
+
+  // Add edges if provided
+  if (edges.length > 0) {
+    edges.forEach((edge, index) => {
+      const edgeId = `edge-${String(DEMO_GRAPH_DATA.edges.length + index + 1).padStart(3, '0')}`;
+      DEMO_GRAPH_DATA.edges.push({
+        ...edge,
+        id: edgeId
+      });
+    });
+  }
+
+  return {
+    success: true,
+    node_id: node.id,
+    message: `Added node ${node.name} with ID ${node.id}`
+  };
+}

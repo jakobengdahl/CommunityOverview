@@ -52,6 +52,56 @@ const TOOLS = [
     }
   },
   {
+    name: 'find_similar_nodes',
+    description: 'Find similar nodes based on name for duplicate detection. Use this BEFORE proposing to add a new node.',
+    input_schema: {
+      type: 'object',
+      properties: {
+        name: {
+          type: 'string',
+          description: 'The name to search for similar nodes'
+        },
+        node_type: {
+          type: 'string',
+          description: 'Optional: Node type to filter on (Actor, Initiative, etc.)'
+        },
+        threshold: {
+          type: 'number',
+          description: 'Similarity threshold 0.0-1.0 (default 0.7)',
+          default: 0.7
+        }
+      },
+      required: ['name']
+    }
+  },
+  {
+    name: 'propose_new_node',
+    description: 'Propose a new node to be added. Use find_similar_nodes FIRST to check for duplicates. Returns a proposal that requires user approval.',
+    input_schema: {
+      type: 'object',
+      properties: {
+        node: {
+          type: 'object',
+          description: 'The node to propose',
+          properties: {
+            type: { type: 'string', description: 'Node type (Actor, Initiative, etc.)' },
+            name: { type: 'string', description: 'Node name' },
+            description: { type: 'string', description: 'Detailed description' },
+            summary: { type: 'string', description: 'Short summary for visualization' },
+            communities: { type: 'array', items: { type: 'string' }, description: 'Communities this node belongs to' }
+          },
+          required: ['type', 'name', 'description', 'communities']
+        },
+        similar_nodes: {
+          type: 'array',
+          description: 'List of similar nodes found (from find_similar_nodes)',
+          items: { type: 'object' }
+        }
+      },
+      required: ['node', 'similar_nodes']
+    }
+  },
+  {
     name: 'list_node_types',
     description: 'List all allowed node types in the metamodel with their colors.',
     input_schema: {
@@ -74,16 +124,34 @@ METAMODEL:
 - Theme (teal): AI, data strategies
 - VisualizationView (gray): Predefined views
 
-WORKFLOW:
-1. When user asks about initiatives, actors, or legislation, use search_graph tool
-2. When showing results, always visualize them in the graph
-3. When user clicks on nodes, use get_related_nodes to show connections
-4. Keep responses concise and focused on the graph
+WORKFLOWS:
+
+1. SEARCH WORKFLOW:
+   - When user asks about initiatives, actors, or legislation, use search_graph tool
+   - Display results and visualize them in the graph
+   - Suggest related nodes user might want to explore
+
+2. ADD NODE WORKFLOW (TWO-STEP):
+   - When user wants to add a new node (e.g., "Vi har ett projekt om AI-säkerhet"):
+     a) First, use find_similar_nodes to check for duplicates
+     b) Then, use propose_new_node with the proposal and similar nodes found
+     c) Present the proposal clearly in Swedish:
+        - Show the proposed node details
+        - Show any similar existing nodes that might be duplicates
+        - Ask user: "Vill du lägga till denna nod?" with options [Ja] or [Nej]
+     d) Wait for user confirmation before actually adding
+
+3. EXPLORATION WORKFLOW:
+   - When user clicks on nodes, use get_related_nodes to show connections
+   - Help users discover hidden relationships
 
 IMPORTANT:
 - Always respond in Swedish since the user data is in Swedish
+- ALWAYS check for duplicates with find_similar_nodes before proposing new nodes
+- NEVER add nodes without explicit user approval
 - Warn if user tries to store personal data
-- Be helpful and guide users to explore the graph`;
+- Keep responses concise and focused on the graph
+- Format proposals clearly with bullet points`;
 
 /**
  * Execute a tool call with demo data
@@ -142,6 +210,87 @@ function executeTool(toolName, toolInput) {
         edges: relatedEdges,
         total_nodes: nodes.length,
         total_edges: relatedEdges.length
+      };
+    }
+
+    case 'find_similar_nodes': {
+      const { name, node_type, threshold = 0.7 } = toolInput;
+      const nameLower = name.toLowerCase();
+
+      // Simple Levenshtein distance implementation
+      const levenshtein = (a, b) => {
+        const matrix = [];
+        for (let i = 0; i <= b.length; i++) {
+          matrix[i] = [i];
+        }
+        for (let j = 0; j <= a.length; j++) {
+          matrix[0][j] = j;
+        }
+        for (let i = 1; i <= b.length; i++) {
+          for (let j = 1; j <= a.length; j++) {
+            if (b.charAt(i - 1) === a.charAt(j - 1)) {
+              matrix[i][j] = matrix[i - 1][j - 1];
+            } else {
+              matrix[i][j] = Math.min(
+                matrix[i - 1][j - 1] + 1,
+                matrix[i][j - 1] + 1,
+                matrix[i - 1][j] + 1
+              );
+            }
+          }
+        }
+        return matrix[b.length][a.length];
+      };
+
+      const results = [];
+      DEMO_GRAPH_DATA.nodes.forEach(node => {
+        // Filter by type if specified
+        if (node_type && node.type !== node_type) {
+          return;
+        }
+
+        // Calculate similarity
+        const nodeNameLower = node.name.toLowerCase();
+        const distance = levenshtein(nameLower, nodeNameLower);
+        const maxLen = Math.max(nameLower.length, nodeNameLower.length);
+        const similarity = maxLen === 0 ? 1.0 : 1.0 - (distance / maxLen);
+
+        if (similarity >= threshold) {
+          results.push({
+            node: node,
+            similarity_score: Math.round(similarity * 100) / 100,
+            match_reason: `Name similarity: ${Math.round(similarity * 100)}%`
+          });
+        }
+      });
+
+      // Sort by similarity score
+      results.sort((a, b) => b.similarity_score - a.similarity_score);
+
+      return {
+        similar_nodes: results.slice(0, 5),
+        total: results.length,
+        search_name: name
+      };
+    }
+
+    case 'propose_new_node': {
+      const { node, similar_nodes } = toolInput;
+
+      // Generate ID for the proposed node
+      const proposedNode = {
+        ...node,
+        id: `temp-${Date.now()}`,
+        created_at: new Date().toISOString(),
+        updated_at: new Date().toISOString()
+      };
+
+      return {
+        success: true,
+        proposed_node: proposedNode,
+        similar_nodes: similar_nodes,
+        message: 'Node proposal created. Waiting for user approval.',
+        requires_approval: true
       };
     }
 
