@@ -108,6 +108,54 @@ const TOOLS = [
       type: 'object',
       properties: {}
     }
+  },
+  {
+    name: 'update_node',
+    description: 'Update an existing node. Can update name, description, summary, communities, or metadata fields.',
+    input_schema: {
+      type: 'object',
+      properties: {
+        node_id: {
+          type: 'string',
+          description: 'ID of the node to update'
+        },
+        updates: {
+          type: 'object',
+          description: 'Fields to update (name, description, summary, communities, metadata)',
+          properties: {
+            name: { type: 'string', description: 'New name for the node' },
+            description: { type: 'string', description: 'New description' },
+            summary: { type: 'string', description: 'New summary for visualization' },
+            communities: {
+              type: 'array',
+              items: { type: 'string' },
+              description: 'New list of communities'
+            }
+          }
+        }
+      },
+      required: ['node_id', 'updates']
+    }
+  },
+  {
+    name: 'delete_nodes',
+    description: 'Delete nodes from the graph. IMPORTANT: Always call with confirmed=false first to show user what will be deleted. Max 10 nodes at a time.',
+    input_schema: {
+      type: 'object',
+      properties: {
+        node_ids: {
+          type: 'array',
+          items: { type: 'string' },
+          description: 'List of node IDs to delete (max 10)'
+        },
+        confirmed: {
+          type: 'boolean',
+          description: 'Must be false for first call (to get confirmation), true to actually delete',
+          default: false
+        }
+      },
+      required: ['node_ids']
+    }
   }
 ];
 
@@ -145,13 +193,30 @@ WORKFLOWS:
    - When user clicks on nodes, use get_related_nodes to show connections
    - Help users discover hidden relationships
 
+4. UPDATE NODE WORKFLOW:
+   - When user wants to update/edit/modify a node (e.g., "Uppdatera beskrivningen av X", "Ändra namnet på noden Y")
+   - Use search_graph to find the node if you only have a name
+   - Use update_node with the node_id and fields to update
+   - Confirm the update with the user
+   - The graph will automatically refresh to show the changes
+
+5. DELETE NODE WORKFLOW (TWO-STEP):
+   - When user wants to delete/remove nodes (e.g., "Ta bort noden X", "Radera denna initiative")
+   - STEP 1: Call delete_nodes with confirmed=false to preview deletion
+   - STEP 2: Show user what will be deleted (nodes + affected connections)
+   - STEP 3: Wait for user confirmation
+   - STEP 4: After approval, actually delete with confirmed=true
+   - Max 10 nodes per deletion for safety
+   - Show clear warning about irreversible action
+
 IMPORTANT:
 - Always respond in Swedish since the user data is in Swedish
 - ALWAYS check for duplicates with find_similar_nodes before proposing new nodes
 - NEVER add nodes without explicit user approval
 - Warn if user tries to store personal data
 - Keep responses concise and focused on the graph
-- Format proposals clearly with bullet points`;
+- Format proposals clearly with bullet points
+- When updating nodes, be specific about what changed`;
 
 /**
  * Execute a tool call with demo data
@@ -306,6 +371,91 @@ function executeTool(toolName, toolInput) {
           { type: 'Theme', color: '#14B8A6', description: 'Themes' },
           { type: 'VisualizationView', color: '#6B7280', description: 'Predefined views' }
         ]
+      };
+    }
+
+    case 'update_node': {
+      const { node_id, updates } = toolInput;
+
+      // Find the node in demo data
+      const nodeIndex = DEMO_GRAPH_DATA.nodes.findIndex(n => n.id === node_id);
+
+      if (nodeIndex === -1) {
+        return {
+          success: false,
+          error: `Node with ID ${node_id} not found`
+        };
+      }
+
+      // Update the node
+      const existingNode = DEMO_GRAPH_DATA.nodes[nodeIndex];
+      const updatedNode = {
+        ...existingNode,
+        ...updates,
+        updated_at: new Date().toISOString()
+      };
+
+      // Replace the node in the array
+      DEMO_GRAPH_DATA.nodes[nodeIndex] = updatedNode;
+
+      return {
+        success: true,
+        node: updatedNode,
+        nodes: [updatedNode], // For visualization update
+        message: `Updated node ${updatedNode.name}`,
+        tool_type: 'update' // Signal that this is an update operation
+      };
+    }
+
+    case 'delete_nodes': {
+      const { node_ids, confirmed = false } = toolInput;
+
+      // Security: Max 10 nodes
+      if (node_ids.length > 10) {
+        return {
+          success: false,
+          error: 'Maximum 10 nodes can be deleted at a time for security reasons'
+        };
+      }
+
+      // Find nodes to delete
+      const nodesToDelete = DEMO_GRAPH_DATA.nodes.filter(n => node_ids.includes(n.id));
+
+      if (nodesToDelete.length === 0) {
+        return {
+          success: false,
+          error: 'No nodes found with the provided IDs'
+        };
+      }
+
+      // Find affected edges
+      const affectedEdges = DEMO_GRAPH_DATA.edges.filter(
+        edge => node_ids.includes(edge.source) || node_ids.includes(edge.target)
+      );
+
+      if (!confirmed) {
+        // Preview mode: Return what will be deleted
+        return {
+          success: false,
+          requires_confirmation: true,
+          nodes_to_delete: nodesToDelete,
+          affected_edges: affectedEdges,
+          message: `This will delete ${nodesToDelete.length} node(s) and ${affectedEdges.length} connection(s). This action is irreversible.`
+        };
+      }
+
+      // Confirmed deletion: Actually delete
+      DEMO_GRAPH_DATA.nodes = DEMO_GRAPH_DATA.nodes.filter(n => !node_ids.includes(n.id));
+      DEMO_GRAPH_DATA.edges = DEMO_GRAPH_DATA.edges.filter(
+        edge => !node_ids.includes(edge.source) && !node_ids.includes(edge.target)
+      );
+
+      return {
+        success: true,
+        deleted_node_ids: node_ids,
+        affected_edge_ids: affectedEdges.map(e => e.id),
+        message: `Successfully deleted ${nodesToDelete.length} node(s) and ${affectedEdges.length} connection(s)`,
+        tool_type: 'delete' // Signal that this is a delete operation
       };
     }
 

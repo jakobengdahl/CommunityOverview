@@ -1,0 +1,136 @@
+.stats-panel {
+  position: absolute;
+  top: 1rem;
+  right: 1rem;
+  background-color: #1e1e1e;
+  border: 1px solid #444;
+  border-radius: 8px;
+  box-shadow: 0 4px 6px rgba(0, 0, 0, 0.3);
+  z-index: 10;
+  max-width: 300px;
+}
+
+.stats-toggle {
+  width: 100%;
+  padding: 0.75rem 1rem;
+  background-color: transparent;
+  color: #fff;
+  border: none;
+  border-radius: 8px;
+  cursor: pointer;
+  font-weight: 500;
+  font-size: 0.9rem;
+  text-align: left;
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  transition: background-color 0.2s;
+}
+
+.stats-toggle:hover {
+  background-color: #2a2a2a;
+}
+
+.stats-content {
+  padding: 0 1rem 1rem 1rem;
+  max-height: 400px;
+  overflow-y: auto;
+}
+
+.stats-section {
+  margin-bottom: 1rem;
+}
+
+.stats-section:last-child {
+  margin-bottom: 0;
+}
+
+.stats-section h4 {
+  margin: 0 0 0.5rem 0;
+  color: #10B981;
+  font-size: 0.85rem;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+}
+
+.stat-item {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  padding: 0.4rem 0;
+  font-size: 0.85rem;
+  border-bottom: 1px solid #2a2a2a;
+}
+
+.stat-item:last-child {
+  border-bottom: none;
+}
+
+.stat-label {
+  color: #aaa;
+}
+
+.stat-value {
+  color: #fff;
+  font-weight: 600;
+  background-color: #2a2a2a;
+  padding: 0.2rem 0.6rem;
+  border-radius: 4px;
+  min-width: 2rem;
+  text-align: center;
+}
+
+/* Scrollbar */
+.stats-content::-webkit-scrollbar {
+  width: 6px;
+}
+
+.stats-content::-webkit-scrollbar-track {
+  background: #1e1e1e;
+}
+
+.stats-content::-webkit-scrollbar-thumb {
+  background: #444;
+  border-radius: 3px;
+}
+
+.stats-content::-webkit-scrollbar-thumb:hover {
+  background: #555;
+}
+
+@media (prefers-color-scheme: light) {
+  .stats-panel {
+    background-color: white;
+    border-color: #ddd;
+  }
+
+  .stats-toggle {
+    color: #213547;
+  }
+
+  .stats-toggle:hover {
+    background-color: #f5f5f5;
+  }
+
+  .stat-item {
+    border-bottom-color: #f0f0f0;
+  }
+
+  .stat-label {
+    color: #666;
+  }
+
+  .stat-value {
+    color: #213547;
+    background-color: #f5f5f5;
+  }
+
+  .stats-content::-webkit-scrollbar-track {
+    background: white;
+  }
+
+  .stats-content::-webkit-scrollbar-thumb {
+    background: #ccc;
+  }
+}

@@ -75,9 +75,12 @@ function ChatPanel() {
         conversationMessages,
         apiKey,
         (toolResult) => {
-          // Handle tool results (e.g., search results)
-          if (toolResult.nodes && toolResult.nodes.length > 0) {
-            // Update visualization with search results
+          // Handle tool results (e.g., search results, updates, deletes)
+          if (toolResult.tool_type === 'update' || toolResult.tool_type === 'delete') {
+            // For updates and deletes, reload the entire graph to show changes
+            loadDemoData(updateVisualization, selectedCommunities);
+          } else if (toolResult.nodes && toolResult.nodes.length > 0) {
+            // For search/related, update visualization with search results
             const edges = toolResult.edges || [];
             updateVisualization(toolResult.nodes, edges);
           }
@@ -93,6 +96,11 @@ function ChatPanel() {
         proposal: response.toolResult?.proposed_node ? {
           node: response.toolResult.proposed_node,
           similar_nodes: response.toolResult.similar_nodes
+        } : null,
+        deleteConfirmation: response.toolResult?.requires_confirmation ? {
+          nodes_to_delete: response.toolResult.nodes_to_delete,
+          affected_edges: response.toolResult.affected_edges,
+          node_ids: response.toolResult.nodes_to_delete.map(n => n.id)
         } : null
       };
       addChatMessage(assistantMessage);
@@ -146,6 +154,52 @@ function ChatPanel() {
     addChatMessage(rejectionMessage);
   };
 
+  const handleConfirmDelete = async (deleteConfirmation) => {
+    setIsProcessing(true);
+    try {
+      // Import the executeTool function from claudeService
+      const { DEMO_GRAPH_DATA } = await import('../services/demoData');
+
+      // Delete the nodes
+      const nodeIds = deleteConfirmation.node_ids;
+      DEMO_GRAPH_DATA.nodes = DEMO_GRAPH_DATA.nodes.filter(n => !nodeIds.includes(n.id));
+      DEMO_GRAPH_DATA.edges = DEMO_GRAPH_DATA.edges.filter(
+        edge => !nodeIds.includes(edge.source) && !nodeIds.includes(edge.target)
+      );
+
+      // Reload the graph
+      loadDemoData(updateVisualization, selectedCommunities);
+
+      // Add confirmation message
+      const confirmationMessage = {
+        role: 'assistant',
+        content: `✅ ${nodeIds.length} nod(er) och ${deleteConfirmation.affected_edges.length} koppling(ar) har raderats.`,
+        timestamp: new Date()
+      };
+      addChatMessage(confirmationMessage);
+    } catch (error) {
+      console.error('Error deleting nodes:', error);
+      const errorMessage = {
+        role: 'assistant',
+        content: `❌ Fel vid radering: ${error.message}`,
+        timestamp: new Date()
+      };
+      addChatMessage(errorMessage);
+    } finally {
+      setIsProcessing(false);
+    }
+  };
+
+  const handleCancelDelete = () => {
+    // Add cancellation message
+    const cancellationMessage = {
+      role: 'assistant',
+      content: `❌ Radering avbruten.`,
+      timestamp: new Date()
+    };
+    addChatMessage(cancellationMessage);
+  };
+
   return (
     <div className="chat-panel">
       <div className="chat-messages">
@@ -190,6 +244,45 @@ function ChatPanel() {
                       onClick={() => handleRejectProposal(msg.proposal)}
                     >
                       ❌ Avslå
+                    </button>
+                  </div>
+                </div>
+              )}
+
+              {/* Render delete confirmation with confirm/cancel buttons */}
+              {msg.deleteConfirmation && (
+                <div className="delete-card">
+                  <h4>⚠️ Bekräfta radering:</h4>
+                  <div className="proposal-details">
+                    <p><strong>Noder som kommer raderas:</strong></p>
+                    <ul>
+                      {msg.deleteConfirmation.nodes_to_delete.map((node, i) => (
+                        <li key={i}>
+                          {node.name} ({node.type})
+                        </li>
+                      ))}
+                    </ul>
+                    <p><strong>Antal kopplingar som raderas:</strong> {msg.deleteConfirmation.affected_edges.length}</p>
+                  </div>
+
+                  <div className="similar-nodes-warning">
+                    <p><strong>⚠️ VARNING:</strong> Denna åtgärd kan inte ångras!</p>
+                  </div>
+
+                  <div className="proposal-actions">
+                    <button
+                      className="reject-button"
+                      onClick={() => handleConfirmDelete(msg.deleteConfirmation)}
+                      disabled={isProcessing}
+                    >
+                      ⚠️ Bekräfta radering
+                    </button>
+                    <button
+                      className="approve-button"
+                      onClick={() => handleCancelDelete()}
+                      disabled={isProcessing}
+                    >
+                      ❌ Avbryt
                     </button>
                   </div>
                 </div>

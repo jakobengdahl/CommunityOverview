@@ -10,6 +10,7 @@ import ReactFlow, {
 import 'reactflow/dist/style.css';
 import useGraphStore from '../store/graphStore';
 import CustomNode from './CustomNode';
+import StatsPanel from './StatsPanel';
 import { getLayoutedElements } from '../utils/graphLayout';
 import './VisualizationPanel.css';
 
@@ -95,31 +96,34 @@ function VisualizationPanel() {
           <p>Ask a question in the chat to start exploring the knowledge graph.</p>
         </div>
       ) : (
-        <ReactFlow
-          nodes={nodes}
-          edges={edges}
-          onNodesChange={onNodesChange}
-          onEdgesChange={onEdgesChange}
-          onConnect={onConnect}
-          nodeTypes={nodeTypes}
-          fitView
-          fitViewOptions={{
-            padding: 0.2,
-            duration: 800,
-          }}
-          attributionPosition="bottom-right"
-          defaultEdgeOptions={{
-            animated: true,
-            style: { strokeWidth: 2 }
-          }}
-        >
-          <Background color="#333" gap={16} />
-          <Controls />
-          <MiniMap
-            nodeColor={(node) => node.data.color}
-            maskColor="rgba(0, 0, 0, 0.5)"
-          />
-        </ReactFlow>
+        <>
+          <StatsPanel />
+          <ReactFlow
+            nodes={nodes}
+            edges={edges}
+            onNodesChange={onNodesChange}
+            onEdgesChange={onEdgesChange}
+            onConnect={onConnect}
+            nodeTypes={nodeTypes}
+            fitView
+            fitViewOptions={{
+              padding: 0.2,
+              duration: 800,
+            }}
+            attributionPosition="bottom-right"
+            defaultEdgeOptions={{
+              animated: true,
+              style: { strokeWidth: 2 }
+            }}
+          >
+            <Background color="#333" gap={16} />
+            <Controls />
+            <MiniMap
+              nodeColor={(node) => node.data.color}
+              maskColor="rgba(0, 0, 0, 0.5)"
+            />
+          </ReactFlow>
+        </>
       )}
     </div>
   );

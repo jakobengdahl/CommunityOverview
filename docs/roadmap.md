@@ -108,24 +108,27 @@ Status for Community Knowledge Graph PoC.
 
 ---
 
-## 🚀 Phase 5: Advanced Functionality (TODO)
+## ✅ Phase 5: Advanced Functionality (COMPLETE)
 
-### 5.1 Graph statistics and overview
+### 5.1 Graph statistics and overview ✅
 - [x] `get_graph_stats()` MCP tool
-- [ ] Show stats in GUI
-- [ ] "Show entire graph" button
+- [x] Show stats in GUI (collapsible StatsPanel)
+- [x] Breakdown by node type and community
+- [ ] "Show entire graph" button (optional)
 
-### 5.2 Node editing
+### 5.2 Node editing ✅
 - [x] `update_node()` MCP tool
-- [ ] Edit via chat
+- [x] Edit via chat with Claude
+- [x] Automatic graph refresh after update
 - [ ] (Optional) Form for node editing in GUI
 
-### 5.3 Node deletion with security
+### 5.3 Node deletion with security ✅
 - [x] `delete_nodes()` with max 10 nodes limit
 - [x] Security controls in MCP
-- [ ] Double confirmation in chat
-- [ ] Show affected connections
-- [ ] Audit log for deletions
+- [x] Double confirmation in chat
+- [x] Show affected connections in confirmation
+- [x] Warning about irreversible action
+- [ ] Audit log for deletions (optional)
 
 ### 5.4 VisualizationViews
 - [ ] Support for URL: `?view=radarbildlagstiftning`
@@ -134,7 +137,7 @@ Status for Community Knowledge Graph PoC.
 
 ---
 
-## 🎨 Phase 6: Improvements and Polish (TODO)
+## ✅ Phase 6: Improvements and Polish (PARTIAL)
 
 ### 6.1 Similarity search with embeddings (optional)
 - [ ] Install sentence-transformers
@@ -142,10 +145,11 @@ Status for Community Knowledge Graph PoC.
 - [ ] Update `find_similar_nodes()` with vector search
 - [ ] Cache embeddings in JSON
 
-### 6.2 UI/UX improvements
+### 6.2 UI/UX improvements ✅
 - [x] Loading states (Thinking... button)
 - [x] Error messages and user feedback
-- [ ] Tooltips on nodes
+- [x] Tooltips on nodes (hover for full details)
+- [x] Smooth animations and transitions
 - [ ] Responsive layout
 
 ### 6.3 Documentation and README
@@ -187,19 +191,25 @@ Status for Community Knowledge Graph PoC.
 - ✅ Phase 1: Basic Infrastructure
 - ✅ Phase 2: Graph Visualization
 - ✅ Phase 3: Claude Integration & Chat
+- ✅ Phase 5: Advanced Functionality
+- ✅ Phase 6: Improvements and Polish (Partial)
 
 **Next Steps:**
 1. **Option A:** Phase 4: Document upload and RAG extraction
-2. **Option B:** Phase 5-6: Advanced features and polish
-3. **Option C:** Phase 7: Testing and deployment
+2. **Option B:** Phase 7: Testing and deployment
+3. **Option C:** Polish remaining Phase 6 items (embeddings, responsive layout)
 
 **Current Features Working:**
 - Natural language search with Claude
 - Interactive graph visualization with dagre layout
-- "Show related nodes" expansion
+- "Show related nodes" expansion with + button
 - Two-step node addition with duplicate detection
 - User approval workflow for new nodes
-- Automatic graph updates
+- Node editing through chat interface
+- Node deletion with double confirmation
+- Graph statistics panel (collapsible)
+- Node tooltips on hover
+- Automatic graph updates after changes
 
 **Blockers:** None
 
@@ -208,3 +218,4 @@ Status for Community Knowledge Graph PoC.
 - In production, should use backend proxy for API calls
 - Currently works with demo data; real MCP server integration pending
 - All core user flows are functional end-to-end
+- Phase 5-6 adds CRUD operations (Create, Read, Update, Delete) for nodes

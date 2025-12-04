@@ -115,6 +115,21 @@
   border-radius: 8px;
 }
 
+/* Delete confirmation card styling */
+.delete-card {
+  margin-top: 1rem;
+  padding: 1rem;
+  background-color: #2a1a1a;
+  border: 2px solid #EF4444;
+  border-radius: 8px;
+}
+
+.delete-card h4 {
+  margin: 0 0 0.75rem 0;
+  color: #EF4444;
+  font-size: 1rem;
+}
+
 .proposal-card h4 {
   margin: 0 0 0.75rem 0;
   color: #10B981;

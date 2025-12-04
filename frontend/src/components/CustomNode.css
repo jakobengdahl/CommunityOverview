@@ -88,6 +88,70 @@
   transform: translateY(-50%) scale(1.1);
 }
 
+/* Tooltip */
+.node-tooltip {
+  position: absolute;
+  bottom: 100%;
+  left: 50%;
+  transform: translateX(-50%) translateY(-8px);
+  background-color: #2a2a2a;
+  border: 1px solid #444;
+  border-radius: 8px;
+  padding: 0.75rem;
+  min-width: 200px;
+  max-width: 350px;
+  box-shadow: 0 4px 12px rgba(0, 0, 0, 0.5);
+  z-index: 1000;
+  pointer-events: none;
+  animation: tooltipFadeIn 0.2s ease-in;
+}
+
+@keyframes tooltipFadeIn {
+  from {
+    opacity: 0;
+    transform: translateX(-50%) translateY(-4px);
+  }
+  to {
+    opacity: 1;
+    transform: translateX(-50%) translateY(-8px);
+  }
+}
+
+.node-tooltip::after {
+  content: '';
+  position: absolute;
+  top: 100%;
+  left: 50%;
+  transform: translateX(-50%);
+  border: 6px solid transparent;
+  border-top-color: #2a2a2a;
+}
+
+.tooltip-header {
+  font-size: 0.85rem;
+  margin-bottom: 0.5rem;
+  color: #fff;
+  line-height: 1.3;
+}
+
+.tooltip-description {
+  font-size: 0.8rem;
+  color: #bbb;
+  line-height: 1.4;
+  margin-bottom: 0.5rem;
+}
+
+.tooltip-communities {
+  font-size: 0.75rem;
+  color: #999;
+  padding-top: 0.5rem;
+  border-top: 1px solid #444;
+}
+
+.tooltip-communities strong {
+  color: #10B981;
+}
+
 /* React Flow handles */
 .react-flow__handle {
   width: 8px;
@@ -120,5 +184,28 @@
 
   .react-flow__handle {
     border-color: white;
+  }
+
+  .node-tooltip {
+    background-color: #fff;
+    border-color: #ddd;
+    box-shadow: 0 4px 12px rgba(0, 0, 0, 0.15);
+  }
+
+  .node-tooltip::after {
+    border-top-color: #fff;
+  }
+
+  .tooltip-header {
+    color: #213547;
+  }
+
+  .tooltip-description {
+    color: #666;
+  }
+
+  .tooltip-communities {
+    color: #888;
+    border-top-color: #ddd;
   }
 }
