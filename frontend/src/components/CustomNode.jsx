@@ -1,12 +1,16 @@
 import { useState } from 'react';
 import { Handle, Position } from 'reactflow';
 import useGraphStore from '../store/graphStore';
-import { DEMO_GRAPH_DATA } from '../utils/demoData';
+import { DEMO_GRAPH_DATA } from '../services/demoData';
 import './CustomNode.css';
 
 function CustomNode({ data, id }) {
   const [showRelatedButton, setShowRelatedButton] = useState(false);
+  const [showTooltip, setShowTooltip] = useState(false);
   const { addNodesToVisualization, highlightNodes, nodes: currentNodes } = useGraphStore();
+
+  // Get full node data for tooltip
+  const fullNode = DEMO_GRAPH_DATA.nodes.find(n => n.id === id);
 
   const handleShowRelated = () => {
     // Find all edges connected to this node
@@ -51,8 +55,14 @@ function CustomNode({ data, id }) {
     <div
       className={`custom-node ${data.isHighlighted ? 'highlighted' : ''}`}
       style={{ borderColor: data.color }}
-      onMouseEnter={() => setShowRelatedButton(true)}
-      onMouseLeave={() => setShowRelatedButton(false)}
+      onMouseEnter={() => {
+        setShowRelatedButton(true);
+        setShowTooltip(true);
+      }}
+      onMouseLeave={() => {
+        setShowRelatedButton(false);
+        setShowTooltip(false);
+      }}
     >
       <Handle type="target" position={Position.Top} />
 
@@ -75,6 +85,24 @@ function CustomNode({ data, id }) {
         >
           +
         </button>
+      )}
+
+      {showTooltip && fullNode && (
+        <div className="node-tooltip">
+          <div className="tooltip-header">
+            <strong>{fullNode.type}:</strong> {fullNode.name}
+          </div>
+          {fullNode.description && (
+            <div className="tooltip-description">
+              {fullNode.description}
+            </div>
+          )}
+          {fullNode.communities && fullNode.communities.length > 0 && (
+            <div className="tooltip-communities">
+              <strong>Communities:</strong> {fullNode.communities.join(', ')}
+            </div>
+          )}
+        </div>
       )}
 
       <Handle type="source" position={Position.Bottom} />
