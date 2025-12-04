@@ -16,6 +16,8 @@ function ChatPanel() {
   } = useGraphStore();
   const [inputValue, setInputValue] = useState('');
   const [isProcessing, setIsProcessing] = useState(false);
+  const [showTextExtract, setShowTextExtract] = useState(false);
+  const [extractText, setExtractText] = useState('');
   const messagesEndRef = useRef(null);
 
   // Get API key from environment
@@ -200,6 +202,82 @@ function ChatPanel() {
     addChatMessage(cancellationMessage);
   };
 
+  const handleExtractFromText = async () => {
+    if (!extractText.trim()) return;
+
+    setIsProcessing(true);
+    setShowTextExtract(false);
+
+    try {
+      // Add user message showing they want to extract
+      addChatMessage({
+        role: 'user',
+        content: `Extrahera noder från följande text:\n\n${extractText.substring(0, 200)}${extractText.length > 200 ? '...' : ''}`,
+        timestamp: new Date()
+      });
+
+      // Build conversation with extraction prompt
+      const extractionPrompt = `Analysera följande text och extrahera alla relevanta noder enligt metamodellen (Actor, Initiative, Capability, Resource, Legislation, Theme, Community).
+
+VIKTIGT: Använd find_similar_nodes för VARJE extraherad nod för att kontrollera dubbletter innan du föreslår dem. Föreslå sedan ALLA noder på en gång med propose_new_node för varje nod.
+
+Text att analysera:
+${extractText}
+
+Communities att koppla till: ${selectedCommunities.join(', ') || 'Ingen community vald'}`;
+
+      const conversationMessages = [
+        ...chatMessages.map(m => ({ role: m.role, content: m.content })),
+        { role: 'user', content: extractionPrompt }
+      ];
+
+      // Call Claude API
+      const response = await sendMessageToClaude(
+        conversationMessages,
+        apiKey,
+        (toolResult) => {
+          if (toolResult.tool_type === 'update' || toolResult.tool_type === 'delete') {
+            loadDemoData(updateVisualization, selectedCommunities);
+          } else if (toolResult.nodes && toolResult.nodes.length > 0) {
+            const edges = toolResult.edges || [];
+            updateVisualization(toolResult.nodes, edges);
+          }
+        }
+      );
+
+      // Add Claude's response
+      const assistantMessage = {
+        role: 'assistant',
+        content: response.content,
+        timestamp: new Date(),
+        toolUsed: response.toolUsed,
+        proposal: response.toolResult?.proposed_node ? {
+          node: response.toolResult.proposed_node,
+          similar_nodes: response.toolResult.similar_nodes
+        } : null,
+        deleteConfirmation: response.toolResult?.requires_confirmation ? {
+          nodes_to_delete: response.toolResult.nodes_to_delete,
+          affected_edges: response.toolResult.affected_edges,
+          node_ids: response.toolResult.nodes_to_delete.map(n => n.id)
+        } : null
+      };
+      addChatMessage(assistantMessage);
+
+      // Clear the extract text
+      setExtractText('');
+    } catch (error) {
+      console.error('Error extracting from text:', error);
+      const errorMessage = {
+        role: 'assistant',
+        content: `❌ Fel vid extrahering: ${error.message}`,
+        timestamp: new Date()
+      };
+      addChatMessage(errorMessage);
+    } finally {
+      setIsProcessing(false);
+    }
+  };
+
   return (
     <div className="chat-panel">
       <div className="chat-messages">
@@ -308,14 +386,73 @@ function ChatPanel() {
           placeholder="Ask a question about the graph..."
           rows={3}
         />
-        <button
-          className="chat-send-button"
-          onClick={handleSend}
-          disabled={!inputValue.trim() || isProcessing}
-        >
-          {isProcessing ? 'Thinking...' : 'Send'}
-        </button>
+        <div className="button-row">
+          <button
+            className="chat-extract-button"
+            onClick={() => setShowTextExtract(!showTextExtract)}
+            disabled={isProcessing}
+            title="Extract nodes from document text"
+          >
+            📄 Extract from Text
+          </button>
+          <button
+            className="chat-send-button"
+            onClick={handleSend}
+            disabled={!inputValue.trim() || isProcessing}
+          >
+            {isProcessing ? 'Thinking...' : 'Send'}
+          </button>
+        </div>
       </div>
+
+      {/* Text Extraction Panel */}
+      {showTextExtract && (
+        <div className="text-extract-panel">
+          <div className="extract-header">
+            <h3>📄 Extract Nodes from Text</h3>
+            <button
+              className="close-button"
+              onClick={() => setShowTextExtract(false)}
+            >
+              ✕
+            </button>
+          </div>
+          <p className="extract-instructions">
+            Paste text from a document (strategy document, project description, legislation, etc.).
+            Claude will analyze it and extract relevant nodes according to the metamodel.
+          </p>
+          {selectedCommunities.length > 0 && (
+            <p className="extract-communities">
+              <strong>Active communities:</strong> {selectedCommunities.join(', ')}
+            </p>
+          )}
+          <textarea
+            className="extract-textarea"
+            value={extractText}
+            onChange={(e) => setExtractText(e.target.value)}
+            placeholder="Paste document text here..."
+            rows={10}
+          />
+          <div className="extract-actions">
+            <button
+              className="approve-button"
+              onClick={handleExtractFromText}
+              disabled={!extractText.trim() || isProcessing}
+            >
+              🔍 Extract Nodes
+            </button>
+            <button
+              className="reject-button"
+              onClick={() => {
+                setShowTextExtract(false);
+                setExtractText('');
+              }}
+            >
+              Cancel
+            </button>
+          </div>
+        </div>
+      )}
     </div>
   );
 }

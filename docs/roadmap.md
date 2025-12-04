@@ -86,25 +86,29 @@ Status for Community Knowledge Graph PoC.
 
 ---
 
-## 📋 Phase 4: Document Upload and RAG (TODO)
+## 📋 Phase 4: Document Text Extraction (PARTIAL)
 
-### 4.1 File upload in GUI
+### 4.1 Text extraction ✅
+- [x] Text paste UI with expandable panel
+- [x] "📄 Extract from Text" button
+- [x] Claude analyzes text per metamodel
+- [x] Automatic duplicate checking
+- [x] Batch proposal workflow
+- [x] Auto-linking to active communities
+- [x] Structured extraction prompt in system
+
+### 4.2 File upload (TODO)
 - [ ] Upload button and file picker
 - [ ] Support for PDF and Word
 - [ ] Upload status indicator
 - [ ] Send file to Claude API
-
-### 4.2 Document extraction MCP tool
-- [ ] `propose_nodes_from_text()` implementation
 - [ ] PDF/Word parsing (PyMuPDF, python-docx)
-- [ ] Structured prompt to Claude for extraction
-- [ ] Auto-linking to active communities
 
-### 4.3 Flow: Document → Proposal → Approval
-- [ ] Extract nodes + find duplicates
-- [ ] Present in chat
-- [ ] Show proposed nodes in visualization (different style)
-- [ ] User approval → batch `add_nodes()`
+### 4.3 Flow: Document → Proposal → Approval ✅
+- [x] Extract nodes + find duplicates
+- [x] Present proposals in chat
+- [x] Individual approve/reject per node
+- [ ] Show proposed nodes differently in viz (optional)
 
 ---
 
@@ -191,11 +195,12 @@ Status for Community Knowledge Graph PoC.
 - ✅ Phase 1: Basic Infrastructure
 - ✅ Phase 2: Graph Visualization
 - ✅ Phase 3: Claude Integration & Chat
+- ✅ Phase 4: Document Text Extraction (Partial)
 - ✅ Phase 5: Advanced Functionality
 - ✅ Phase 6: Improvements and Polish (Partial)
 
 **Next Steps:**
-1. **Option A:** Phase 4: Document upload and RAG extraction
+1. **Option A:** Complete Phase 4.2: File upload (PDF/Word)
 2. **Option B:** Phase 7: Testing and deployment
 3. **Option C:** Polish remaining Phase 6 items (embeddings, responsive layout)
 
@@ -204,6 +209,7 @@ Status for Community Knowledge Graph PoC.
 - Interactive graph visualization with dagre layout
 - "Show related nodes" expansion with + button
 - Two-step node addition with duplicate detection
+- **📄 Text extraction from documents** ← NEW!
 - User approval workflow for new nodes
 - Node editing through chat interface
 - Node deletion with double confirmation
