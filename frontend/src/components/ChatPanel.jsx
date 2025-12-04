@@ -1,11 +1,24 @@
 import { useState, useEffect, useRef } from 'react';
 import useGraphStore from '../store/graphStore';
+import { sendMessageToClaude } from '../services/claudeService';
 import './ChatPanel.css';
 
 function ChatPanel() {
-  const { chatMessages, addChatMessage, selectedCommunities } = useGraphStore();
+  const {
+    chatMessages,
+    addChatMessage,
+    selectedCommunities,
+    updateVisualization,
+    setLoading,
+    setError,
+    clearError
+  } = useGraphStore();
   const [inputValue, setInputValue] = useState('');
+  const [isProcessing, setIsProcessing] = useState(false);
   const messagesEndRef = useRef(null);
+
+  // Get API key from environment
+  const apiKey = import.meta.env.VITE_ANTHROPIC_API_KEY;
 
   // Auto-scroll to latest message
   const scrollToBottom = () => {
@@ -17,7 +30,18 @@ function ChatPanel() {
   }, [chatMessages]);
 
   const handleSend = async () => {
-    if (!inputValue.trim()) return;
+    if (!inputValue.trim() || isProcessing) return;
+
+    // Check if API key is available
+    if (!apiKey) {
+      const errorMessage = {
+        role: 'assistant',
+        content: '⚠️ API key not configured. Please add VITE_ANTHROPIC_API_KEY to your .env file.\n\nSee frontend/.env.example for details.',
+        timestamp: new Date()
+      };
+      addChatMessage(errorMessage);
+      return;
+    }
 
     // Add user message
     const userMessage = {
@@ -27,21 +51,59 @@ function ChatPanel() {
     };
     addChatMessage(userMessage);
     setInputValue('');
+    setIsProcessing(true);
+    clearError();
 
-    // TODO: Send to Claude API via MCP
-    // For now: Placeholder response
-    setTimeout(() => {
+    try {
+      // Get conversation history for Claude
+      const conversationMessages = chatMessages
+        .filter(m => m.role !== 'system') // Filter out system messages
+        .map(m => ({
+          role: m.role,
+          content: m.content
+        }));
+
+      // Add the new user message
+      conversationMessages.push({
+        role: 'user',
+        content: inputValue
+      });
+
+      // Call Claude API with tool support
+      const response = await sendMessageToClaude(
+        conversationMessages,
+        apiKey,
+        (toolResult) => {
+          // Handle tool results (e.g., search results)
+          if (toolResult.nodes && toolResult.nodes.length > 0) {
+            // Update visualization with search results
+            const edges = toolResult.edges || [];
+            updateVisualization(toolResult.nodes, edges);
+          }
+        }
+      );
+
+      // Add Claude's response
       const assistantMessage = {
         role: 'assistant',
-        content: `[Demo mode] You asked: "${inputValue}"
-
-MCP integration will be implemented in the next step.
-
-Active communities: ${selectedCommunities.join(', ')}`,
-        timestamp: new Date()
+        content: response.content,
+        timestamp: new Date(),
+        toolUsed: response.toolUsed
       };
       addChatMessage(assistantMessage);
-    }, 500);
+
+    } catch (error) {
+      console.error('Error communicating with Claude:', error);
+      const errorMessage = {
+        role: 'assistant',
+        content: `❌ Error: ${error.message}\n\nPlease check your API key and try again.`,
+        timestamp: new Date()
+      };
+      addChatMessage(errorMessage);
+      setError(error.message);
+    } finally {
+      setIsProcessing(false);
+    }
   };
 
   const handleKeyPress = (e) => {
@@ -82,9 +144,9 @@ Active communities: ${selectedCommunities.join(', ')}`,
         <button
           className="chat-send-button"
           onClick={handleSend}
-          disabled={!inputValue.trim()}
+          disabled={!inputValue.trim() || isProcessing}
         >
-          Send
+          {isProcessing ? 'Thinking...' : 'Send'}
         </button>
       </div>
     </div>

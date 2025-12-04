@@ -4,7 +4,7 @@ import Header from './components/Header'
 import ChatPanel from './components/ChatPanel'
 import VisualizationPanel from './components/VisualizationPanel'
 import useGraphStore from './store/graphStore'
-import { loadDemoData } from './utils/demoData'
+import { loadDemoData } from './services/demoData'
 
 function App() {
   const { selectedCommunities, updateVisualization } = useGraphStore();

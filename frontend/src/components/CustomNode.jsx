@@ -1,7 +1,7 @@
 import { useState } from 'react';
 import { Handle, Position } from 'reactflow';
 import useGraphStore from '../store/graphStore';
-import { DEMO_GRAPH_DATA } from '../utils/demoData';
+import { DEMO_GRAPH_DATA } from '../services/demoData';
 import './CustomNode.css';
 
 function CustomNode({ data, id }) {
