@@ -1,6 +1,6 @@
 import { useState } from 'react';
 import useGraphStore from '../store/graphStore';
-import { DEMO_GRAPH_DATA } from '../services/demoData';
+// import { DEMO_GRAPH_DATA } from '../services/demoData'; // REMOVED
 import './StatsPanel.css';
 
 function StatsPanel() {
@@ -36,7 +36,7 @@ function StatsPanel() {
       totalEdges: edges.length,
       nodesByType,
       nodesByCommunity,
-      totalInDatabase: DEMO_GRAPH_DATA.nodes.length
+      totalInDatabase: 0 // Placeholder until backend stats integration
     };
   };
 

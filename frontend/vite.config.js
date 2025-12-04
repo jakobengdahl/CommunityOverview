@@ -8,8 +8,8 @@ export default defineConfig({
     port: 3000,
     host: true,
     proxy: {
-      // Proxy för MCP server (om vi kör HTTP-wrapper senare)
-      '/api': {
+      // Proxy to backend chat endpoint
+      '/chat': {
         target: 'http://localhost:8000',
         changeOrigin: true,
       }
