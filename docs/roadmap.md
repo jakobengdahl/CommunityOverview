@@ -86,7 +86,7 @@ Status for Community Knowledge Graph PoC.
 
 ---
 
-## ✅ Phase 4: Document Text Extraction (COMPLETE)
+## 📋 Phase 4: Document Text Extraction (COMPLETE)
 
 ### 4.1 Text extraction ✅
 - [x] Text paste UI with expandable panel
@@ -201,9 +201,9 @@ Status for Community Knowledge Graph PoC.
 - ✅ Phase 7: Testing and Deployment Prep
 
 **Next Steps:**
-1. **Option A:** Phase 7.3: Performance and optimization
-2. **Option B:** Phase 5.4: VisualizationViews
-3. **Option C:** User Acceptance Testing (UAT) / Demo
+1. **Option A:** Phase 6.1: Similarity search with embeddings
+2. **Option B:** Phase 7: Testing and deployment
+3. **Option C:** Polish remaining Phase 6 items (responsive layout)
 
 **Current Features Working:**
 - Natural language search with Claude
@@ -211,7 +211,6 @@ Status for Community Knowledge Graph PoC.
 - "Show related nodes" expansion with + button
 - Two-step node addition with duplicate detection
 - **📄 Text extraction from documents** (including File Upload)
-- **🔍 Similarity Search** with Vector Embeddings (hybrid search)
 - User approval workflow for new nodes
 - Node editing through chat interface
 - Node deletion with double confirmation
