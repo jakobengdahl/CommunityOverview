@@ -15,6 +15,7 @@ from models import (
     Node, Edge, NodeType, RelationshipType,
     SimilarNode, GraphStats, AddNodesResult, DeleteNodesResult
 )
+from vector_store import VectorStore
 
 
 class GraphStorage:
@@ -22,6 +23,7 @@ class GraphStorage:
 
     def __init__(self, json_path: str = "graph.json"):
         self.json_path = Path(json_path)
+        self.vector_store = VectorStore(storage_path="embeddings.pkl")
         self.graph = nx.MultiDiGraph()  # MultiDiGraph allows multiple edges between same nodes
         self.nodes: Dict[str, Node] = {}  # node_id -> Node
         self.edges: Dict[str, Edge] = {}  # edge_id -> Edge
@@ -174,10 +176,13 @@ class GraphStorage:
         limit: int = 5
     ) -> List[SimilarNode]:
         """
-        Find similar nodes based on Levenshtein distance
+        Find similar nodes based on Levenshtein distance AND vector embeddings
         Used for duplicate detection
         """
         results = []
+        seen_node_ids = set()
+
+        # 1. Levenshtein Search (Exact string matching)
         name_lower = name.lower()
 
         for node in self.nodes.values():
@@ -201,6 +206,34 @@ class GraphStorage:
                     similarity_score=round(similarity, 2),
                     match_reason=f"Name similarity: {int(similarity * 100)}%"
                 ))
+                seen_node_ids.add(node.id)
+
+        # 2. Vector Search (Semantic similarity)
+        # Lower threshold for vector search to catch semantic matches that might have different names
+        vector_threshold = max(0.4, threshold - 0.2)
+        vector_results = self.vector_store.search(
+            query_text=name,
+            limit=limit,
+            threshold=vector_threshold
+        )
+
+        for node_id, score in vector_results:
+            if node_id in seen_node_ids:
+                continue
+
+            node = self.nodes.get(node_id)
+            if not node:
+                continue
+
+            if node_type and node.type != node_type:
+                continue
+
+            results.append(SimilarNode(
+                node=node,
+                similarity_score=round(score, 2),
+                match_reason=f"Semantic similarity: {int(score * 100)}%"
+            ))
+            seen_node_ids.add(node_id)
 
         # Sort by similarity score
         results.sort(key=lambda x: x.similarity_score, reverse=True)
@@ -220,6 +253,7 @@ class GraphStorage:
 
         try:
             # Add nodes
+            nodes_to_embed = []
             for node in nodes:
                 if node.id in self.nodes:
                     return AddNodesResult(
@@ -232,6 +266,11 @@ class GraphStorage:
                 self.nodes[node.id] = node
                 self.graph.add_node(node.id, data=node)
                 added_node_ids.append(node.id)
+                nodes_to_embed.append(node)
+
+            # Generate embeddings for new nodes
+            if nodes_to_embed:
+                self.vector_store.update_nodes_embeddings(nodes_to_embed)
 
             # Add edges
             for edge in edges:
@@ -294,6 +333,10 @@ class GraphStorage:
         # Update in graph
         self.graph.nodes[node_id]['data'] = node
 
+        # Update embedding if text fields changed
+        if any(k in updates for k in ['name', 'description', 'summary']):
+            self.vector_store.update_node_embedding(node)
+
         # Save
         self.save()
         return node
@@ -348,6 +391,9 @@ class GraphStorage:
                 self.graph.remove_node(node_id)
                 del self.nodes[node_id]
                 deleted_node_ids.append(node_id)
+
+            # Remove embeddings
+            self.vector_store.remove_nodes_embeddings(deleted_node_ids)
 
             # Save
             self.save()

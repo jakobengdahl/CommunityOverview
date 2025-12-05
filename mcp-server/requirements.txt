@@ -12,9 +12,8 @@ python-multipart>=0.0.9
 
 # Similarity search
 python-Levenshtein>=0.21.0
-
-# Future: Vector embeddings
-# sentence-transformers>=2.2.0
+sentence-transformers>=2.2.0
+scikit-learn>=1.0.0
 
 # Development
 pytest>=7.0.0
