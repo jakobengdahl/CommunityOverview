@@ -86,7 +86,7 @@ Status for Community Knowledge Graph PoC.
 
 ---
 
-## 📋 Phase 4: Document Text Extraction (PARTIAL)
+## 📋 Phase 4: Document Text Extraction (COMPLETE)
 
 ### 4.1 Text extraction ✅
 - [x] Text paste UI with expandable panel
@@ -97,12 +97,12 @@ Status for Community Knowledge Graph PoC.
 - [x] Auto-linking to active communities
 - [x] Structured extraction prompt in system
 
-### 4.2 File upload (TODO)
-- [ ] Upload button and file picker
-- [ ] Support for PDF and Word
-- [ ] Upload status indicator
-- [ ] Send file to Claude API
-- [ ] PDF/Word parsing (PyMuPDF, python-docx)
+### 4.2 File upload ✅
+- [x] Upload button and file picker
+- [x] Support for PDF and Word
+- [x] Upload status indicator
+- [x] Send file to Claude API
+- [x] PDF/Word parsing (PyMuPDF, python-docx)
 
 ### 4.3 Flow: Document → Proposal → Approval ✅
 - [x] Extract nodes + find duplicates
@@ -195,21 +195,21 @@ Status for Community Knowledge Graph PoC.
 - ✅ Phase 1: Basic Infrastructure
 - ✅ Phase 2: Graph Visualization
 - ✅ Phase 3: Claude Integration & Chat
-- ✅ Phase 4: Document Text Extraction (Partial)
+- ✅ Phase 4: Document Text Extraction
 - ✅ Phase 5: Advanced Functionality
 - ✅ Phase 6: Improvements and Polish (Partial)
 
 **Next Steps:**
-1. **Option A:** Complete Phase 4.2: File upload (PDF/Word)
+1. **Option A:** Phase 6.1: Similarity search with embeddings
 2. **Option B:** Phase 7: Testing and deployment
-3. **Option C:** Polish remaining Phase 6 items (embeddings, responsive layout)
+3. **Option C:** Polish remaining Phase 6 items (responsive layout)
 
 **Current Features Working:**
 - Natural language search with Claude
 - Interactive graph visualization with dagre layout
 - "Show related nodes" expansion with + button
 - Two-step node addition with duplicate detection
-- **📄 Text extraction from documents** ← NEW!
+- **📄 Text extraction from documents** (including File Upload)
 - User approval workflow for new nodes
 - Node editing through chat interface
 - Node deletion with double confirmation
