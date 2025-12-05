@@ -27,3 +27,30 @@ export async function sendMessageToBackend(messages) {
     throw error;
   }
 }
+
+/**
+ * Upload a file to the backend to extract text
+ * @param {File} file - The file to upload
+ * @returns {Promise<Object>} Response with extracted text
+ */
+export async function uploadFileToBackend(file) {
+  try {
+    const formData = new FormData();
+    formData.append('file', file);
+
+    const response = await fetch('/upload', {
+      method: 'POST',
+      body: formData, // Content-Type is set automatically for FormData
+    });
+
+    if (!response.ok) {
+      const errorData = await response.json().catch(() => ({}));
+      throw new Error(errorData.error || `HTTP error! status: ${response.status}`);
+    }
+
+    return await response.json();
+  } catch (error) {
+    console.error('Error uploading file:', error);
+    throw error;
+  }
+}

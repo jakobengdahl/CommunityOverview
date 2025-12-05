@@ -4,6 +4,9 @@ Exposes tools for graph operations via MCP
 """
 
 from typing import List, Optional, Dict, Any
+import os
+import tempfile
+import shutil
 from mcp.server.fastmcp import FastMCP
 from starlette.requests import Request
 from starlette.responses import JSONResponse
@@ -12,6 +15,7 @@ from models import (
     Node, Edge, NodeType, RelationshipType,
     SimilarNode, AddNodesResult, DeleteNodesResult
 )
+from document_processor import DocumentProcessor
 
 # Initialize MCP server
 mcp = FastMCP("community-knowledge-graph")
@@ -62,6 +66,47 @@ async def chat_endpoint(request: Request):
         result = processor.process_message(messages)
 
         return JSONResponse(result)
+    except Exception as e:
+        import traceback
+        traceback.print_exc()
+        return JSONResponse({"error": str(e)}, status_code=500)
+
+
+@mcp.custom_route("/upload", methods=["POST"])
+async def upload_endpoint(request: Request):
+    """
+    Endpoint to upload files and extract text
+    """
+    try:
+        form = await request.form()
+        file = form.get("file")
+
+        if not file:
+            return JSONResponse({"error": "No file provided"}, status_code=400)
+
+        filename = file.filename
+
+        # Save temp file
+        with tempfile.NamedTemporaryFile(delete=False, suffix=os.path.splitext(filename)[1]) as tmp:
+            shutil.copyfileobj(file.file, tmp)
+            tmp_path = tmp.name
+
+        try:
+            # Extract text
+            text = DocumentProcessor.extract_text(tmp_path)
+
+            return JSONResponse({
+                "success": True,
+                "filename": filename,
+                "text": text,
+                "message": f"Successfully extracted {len(text)} characters"
+            })
+
+        finally:
+            # Cleanup
+            if os.path.exists(tmp_path):
+                os.remove(tmp_path)
+
     except Exception as e:
         import traceback
         traceback.print_exc()
