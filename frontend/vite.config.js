@@ -12,6 +12,11 @@ export default defineConfig({
       '/chat': {
         target: 'http://localhost:8000',
         changeOrigin: true,
+      },
+      // Proxy to backend upload endpoint
+      '/upload': {
+        target: 'http://localhost:8000',
+        changeOrigin: true,
       }
     }
   }

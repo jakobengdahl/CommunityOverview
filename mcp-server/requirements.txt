@@ -8,6 +8,7 @@ python-dateutil>=2.8.0
 # Document processing (for future RAG implementation)
 PyMuPDF>=1.23.0
 python-docx>=1.0.0
+python-multipart>=0.0.9
 
 # Similarity search
 python-Levenshtein>=0.21.0

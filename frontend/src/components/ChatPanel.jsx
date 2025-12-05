@@ -1,6 +1,6 @@
 import { useState, useEffect, useRef } from 'react';
 import useGraphStore from '../store/graphStore';
-import { sendMessageToBackend } from '../services/api';
+import { sendMessageToBackend, uploadFileToBackend } from '../services/api';
 // import { addNodeToDemoData, loadDemoData } from '../services/demoData'; // REMOVED: Using backend now
 import './ChatPanel.css';
 
@@ -18,7 +18,9 @@ function ChatPanel() {
   const [isProcessing, setIsProcessing] = useState(false);
   const [showTextExtract, setShowTextExtract] = useState(false);
   const [extractText, setExtractText] = useState('');
+  const [isUploading, setIsUploading] = useState(false);
   const messagesEndRef = useRef(null);
+  const fileInputRef = useRef(null);
 
   // Auto-scroll to latest message
   const scrollToBottom = () => {
@@ -249,6 +251,36 @@ function ChatPanel() {
     addChatMessage(cancellationMessage);
   };
 
+  const handleFileUpload = async (e) => {
+    const file = e.target.files[0];
+    if (!file) return;
+
+    setIsUploading(true);
+    setError(null);
+
+    try {
+      const result = await uploadFileToBackend(file);
+      if (result.success && result.text) {
+        setExtractText(result.text);
+        // Ensure extract panel is open
+        if (!showTextExtract) {
+          setShowTextExtract(true);
+        }
+      } else {
+        setError("Kunde inte extrahera text från filen.");
+      }
+    } catch (err) {
+      console.error("Upload error:", err);
+      setError(`Fel vid uppladdning: ${err.message}`);
+    } finally {
+      setIsUploading(false);
+      // Reset input
+      if (fileInputRef.current) {
+        fileInputRef.current.value = '';
+      }
+    }
+  };
+
   const handleExtractFromText = async () => {
     if (!extractText.trim()) return;
 
@@ -477,6 +509,22 @@ Communities att koppla till: ${selectedCommunities.join(', ') || 'Ingen communit
             >
               🔍 Extract Nodes
             </button>
+
+            <input
+              type="file"
+              ref={fileInputRef}
+              onChange={handleFileUpload}
+              style={{ display: 'none' }}
+              accept=".pdf,.docx,.doc,.txt"
+            />
+            <button
+              className="upload-button"
+              onClick={() => fileInputRef.current?.click()}
+              disabled={isUploading}
+            >
+              {isUploading ? '📤 Uploading...' : '📤 Upload File'}
+            </button>
+
             <button
               className="reject-button"
               onClick={() => {
