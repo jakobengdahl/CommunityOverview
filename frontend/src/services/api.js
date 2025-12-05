@@ -29,6 +29,37 @@ export async function sendMessageToBackend(messages) {
 }
 
 /**
+ * Execute a backend tool directly
+ * @param {string} toolName - Name of the tool to execute
+ * @param {Object} arguments - Arguments for the tool
+ * @returns {Promise<Object>} Tool result
+ */
+export async function executeTool(toolName, args) {
+  try {
+    const response = await fetch('/execute_tool', {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify({
+        tool_name: toolName,
+        arguments: args
+      }),
+    });
+
+    if (!response.ok) {
+      const errorData = await response.json().catch(() => ({}));
+      throw new Error(errorData.error || `HTTP error! status: ${response.status}`);
+    }
+
+    return await response.json();
+  } catch (error) {
+    console.error(`Error executing tool ${toolName}:`, error);
+    throw error;
+  }
+}
+
+/**
  * Upload a file to the backend to extract text
  * @param {File} file - The file to upload
  * @returns {Promise<Object>} Response with extracted text

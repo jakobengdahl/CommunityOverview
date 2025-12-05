@@ -1,6 +1,6 @@
 import { useState, useEffect, useRef } from 'react';
 import useGraphStore from '../store/graphStore';
-import { sendMessageToBackend, uploadFileToBackend } from '../services/api';
+import { sendMessageToBackend, uploadFileToBackend, executeTool } from '../services/api';
 // import { addNodeToDemoData, loadDemoData } from '../services/demoData'; // REMOVED: Using backend now
 import './ChatPanel.css';
 
@@ -12,7 +12,10 @@ function ChatPanel() {
     updateVisualization,
     setLoading,
     setError,
-    clearError
+    clearError,
+    nodes, // Need existing nodes to capture state
+    hiddenNodeIds,
+    setHiddenNodeIds
   } = useGraphStore();
   const [inputValue, setInputValue] = useState('');
   const [isProcessing, setIsProcessing] = useState(false);
@@ -67,14 +70,72 @@ function ChatPanel() {
       const toolResult = response.toolResult;
 
       if (toolResult) {
-        // Handle visualization updates
-        if (toolResult.tool_type === 'update' || toolResult.tool_type === 'delete') {
-          // For updates/deletes, we might want to refresh the graph data completely
-          // TODO: Implement a way to reload graph data from backend
-          // For now, if we have nodes/edges in the response, we update visualization
+        // 1. Handle "Save Visualization" signal from backend
+        if (toolResult.action === 'save_visualization') {
+             const viewName = toolResult.name;
+             // Capture state from store
+             // Note: store positions might be outdated if we haven't synced.
+             // But we added sync logic in VisualizationPanel.
+             const currentNodes = useGraphStore.getState().nodes;
+             const currentHidden = useGraphStore.getState().hiddenNodeIds;
+
+             const viewData = {
+                nodes: currentNodes.map(n => ({ id: n.id, position: n.position })),
+                hidden_nodes: currentHidden
+             };
+
+             const viewNode = {
+                name: viewName,
+                type: 'VisualizationView',
+                description: `Saved view: ${viewName}`,
+                metadata: { view_data: viewData },
+                communities: []
+             };
+
+             // Execute actual save
+             try {
+                await executeTool('add_nodes', { nodes: [viewNode], edges: [] });
+                // We could add a system message here, but Claude usually replies "Ready to save..."
+             } catch (err) {
+                console.error("Failed to save view via chat:", err);
+                setError(`Failed to save view: ${err.message}`);
+             }
         }
 
-        if (toolResult.nodes && toolResult.nodes.length > 0) {
+        // 2. Handle "Load Visualization" signal
+        else if (toolResult.action === 'load_visualization') {
+            const viewData = toolResult.view.metadata.view_data;
+            if (viewData) {
+                if (viewData.hidden_nodes) {
+                    setHiddenNodeIds(viewData.hidden_nodes);
+                }
+
+                // We need to apply positions.
+                // updateVisualization expects full nodes.
+                // We should probably just update positions of existing nodes?
+                // Or if the view contains specific nodes (filtering?), we might want to filter?
+                // The prompt said "which nodes ... are present".
+                // If the view implies filtering, we should handle that.
+                // But for now, let's assume it just restores positions and hidden state.
+
+                // Note: If the graph currently loaded doesn't have these nodes, we can't show them.
+                // We assume the user has searched/loaded the graph or the view contains enough info to load them?
+                // The view only stores IDs.
+                // So this only works if the nodes are already loaded.
+                // Ideally, `load_visualization` should probably return the full node objects too?
+                // But `get_visualization` returns the view node itself.
+
+                // TODO: In a real implementation, we might need to fetch the nodes listed in the view
+                // if they are not currently in the store.
+                // For now, let's update positions for nodes we DO have.
+                if (viewData.nodes) {
+                   useGraphStore.getState().updateNodePositions(viewData.nodes);
+                }
+            }
+        }
+
+        // 3. Handle standard updates
+        else if (toolResult.nodes && toolResult.nodes.length > 0) {
            const edges = toolResult.edges || [];
            updateVisualization(toolResult.nodes, edges);
         }

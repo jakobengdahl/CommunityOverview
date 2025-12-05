@@ -1,4 +1,4 @@
-import { useCallback, useMemo, useEffect } from 'react';
+import { useCallback, useMemo, useEffect, useState } from 'react';
 import ReactFlow, {
   Background,
   Controls,
@@ -11,6 +11,8 @@ import 'reactflow/dist/style.css';
 import useGraphStore from '../store/graphStore';
 import CustomNode from './CustomNode';
 import StatsPanel from './StatsPanel';
+import SaveViewDialog from './SaveViewDialog';
+import { executeTool } from '../services/api';
 import { getLayoutedElements } from '../utils/graphLayout';
 import './VisualizationPanel.css';
 
@@ -27,11 +29,33 @@ const NODE_COLORS = {
 };
 
 function VisualizationPanel() {
-  const { nodes: storeNodes, edges: storeEdges, highlightedNodeIds } = useGraphStore();
+  const {
+    nodes: storeNodes,
+    edges: storeEdges,
+    highlightedNodeIds,
+    hiddenNodeIds,
+    toggleNodeVisibility,
+    addNodesToVisualization
+  } = useGraphStore();
+
+  const [isSaveDialogOpen, setIsSaveDialogOpen] = useState(false);
+
+  // Filter out hidden nodes and their edges
+  const visibleNodes = useMemo(() =>
+    storeNodes.filter(n => !hiddenNodeIds.includes(n.id)),
+    [storeNodes, hiddenNodeIds]
+  );
+
+  const visibleEdges = useMemo(() =>
+    storeEdges.filter(e =>
+      !hiddenNodeIds.includes(e.source) && !hiddenNodeIds.includes(e.target)
+    ),
+    [storeEdges, hiddenNodeIds]
+  );
 
   // Convert edges first (needed for layout calculation)
   const reactFlowEdges = useMemo(() => {
-    return storeEdges.map(edge => ({
+    return visibleEdges.map(edge => ({
       id: edge.id,
       source: edge.source,
       target: edge.target,
@@ -40,11 +64,11 @@ function VisualizationPanel() {
       animated: false,
       style: { stroke: '#666' },
     }));
-  }, [storeEdges]);
+  }, [visibleEdges]);
 
   // Convert store data to React Flow format with automatic layout
   const reactFlowNodes = useMemo(() => {
-    const nodesWithoutPosition = storeNodes.map(node => ({
+    const nodesWithoutPosition = visibleNodes.map(node => ({
       id: node.id,
       type: 'custom',
       data: {
@@ -63,14 +87,34 @@ function VisualizationPanel() {
     }
 
     return nodesWithoutPosition;
-  }, [storeNodes, highlightedNodeIds, reactFlowEdges]);
+  }, [visibleNodes, highlightedNodeIds, reactFlowEdges]);
 
   const [nodes, setNodes, onNodesChange] = useNodesState(reactFlowNodes);
   const [edges, setEdges, onEdgesChange] = useEdgesState(reactFlowEdges);
 
+  const { updateNodePositions } = useGraphStore();
+
+  const onNodeDragStop = useCallback((event, node) => {
+      // Sync only the dragged node position to store
+      updateNodePositions([{ id: node.id, position: node.position }]);
+  }, [updateNodePositions]);
+
   // Update nodes when reactFlowNodes changes (for layout recalculation)
   useEffect(() => {
-    setNodes(reactFlowNodes);
+    // Only update if IDs changed or we have a massive shift, to avoid resetting dragged positions
+    // This is tricky with React Flow controlled mode.
+    // Ideally we merge positions.
+    setNodes((nds) => {
+        const newNodes = reactFlowNodes.map(n => {
+            const existing = nds.find(curr => curr.id === n.id);
+            if (existing && existing.position.x !== 0) {
+                // Keep existing position if valid
+                return { ...n, position: existing.position };
+            }
+            return n;
+        });
+        return newNodes;
+    });
   }, [reactFlowNodes, setNodes]);
 
   // Update edges when reactFlowEdges changes
@@ -83,6 +127,42 @@ function VisualizationPanel() {
     [setEdges]
   );
 
+  const onNodeContextMenu = useCallback(
+    (event, node) => {
+      event.preventDefault();
+      // Hide the node on right click
+      toggleNodeVisibility(node.id);
+    },
+    [toggleNodeVisibility]
+  );
+
+  const handleSaveView = async (name) => {
+    // Gather current state
+    const viewData = {
+      nodes: nodes.map(n => ({ id: n.id, position: n.position })),
+      hidden_nodes: hiddenNodeIds
+    };
+
+    // Create a node representing the view
+    const viewNode = {
+      name: name,
+      type: 'VisualizationView',
+      description: `Saved view: ${name}`,
+      metadata: {
+        view_data: viewData
+      },
+      communities: [] // Optional: inherit from current selection?
+    };
+
+    // Use add_nodes tool to save it
+    await executeTool('add_nodes', {
+      nodes: [viewNode],
+      edges: []
+    });
+
+    alert(`View '${name}' saved successfully!`);
+  };
+
   // Custom node types
   const nodeTypes = useMemo(() => ({
     custom: CustomNode,
@@ -90,6 +170,34 @@ function VisualizationPanel() {
 
   return (
     <div className="visualization-panel">
+      <SaveViewDialog
+        isOpen={isSaveDialogOpen}
+        onClose={() => setIsSaveDialogOpen(false)}
+        onSave={handleSaveView}
+      />
+
+      {storeNodes.length > 0 && (
+         <div className="view-controls">
+            <button
+              className="save-view-button"
+              onClick={() => setIsSaveDialogOpen(true)}
+            >
+              💾 Save View
+            </button>
+            {hiddenNodeIds.length > 0 && (
+              <div className="hidden-nodes-indicator">
+                {hiddenNodeIds.length} hidden nodes
+                <button
+                   className="unhide-button"
+                   onClick={() => useGraphStore.getState().setHiddenNodeIds([])}
+                >
+                  Show All
+                </button>
+              </div>
+            )}
+         </div>
+      )}
+
       {storeNodes.length === 0 ? (
         <div className="empty-graph-message">
           <h3>No graph to display yet</h3>
@@ -104,6 +212,8 @@ function VisualizationPanel() {
             onNodesChange={onNodesChange}
             onEdgesChange={onEdgesChange}
             onConnect={onConnect}
+            onNodeContextMenu={onNodeContextMenu}
+            onNodeDragStop={onNodeDragStop}
             nodeTypes={nodeTypes}
             fitView
             fitViewOptions={{
