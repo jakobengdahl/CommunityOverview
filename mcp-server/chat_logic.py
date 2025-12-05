@@ -237,6 +237,34 @@ Respond in Swedish by default as the data is Swedish.
                     "type": "object",
                     "properties": {}
                 }
+            },
+            {
+                "name": "save_visualization_metadata",
+                "description": "Signal intent to save the current visualization view. Use this when the user wants to save the view.",
+                "input_schema": {
+                    "type": "object",
+                    "properties": {
+                        "name": {
+                            "type": "string",
+                            "description": "Name of the view"
+                        }
+                    },
+                    "required": ["name"]
+                }
+            },
+            {
+                "name": "get_visualization",
+                "description": "Get/Open a saved visualization view by name.",
+                "input_schema": {
+                    "type": "object",
+                    "properties": {
+                        "name": {
+                            "type": "string",
+                            "description": "Name of the view"
+                        }
+                    },
+                    "required": ["name"]
+                }
             }
         ]
 

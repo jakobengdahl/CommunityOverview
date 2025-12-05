@@ -113,6 +113,32 @@ async def upload_endpoint(request: Request):
         return JSONResponse({"error": str(e)}, status_code=500)
 
 
+@mcp.custom_route("/execute_tool", methods=["POST"])
+async def execute_tool_endpoint(request: Request):
+    """
+    Endpoint for the frontend to execute tools directly
+    """
+    try:
+        body = await request.json()
+        tool_name = body.get("tool_name")
+        arguments = body.get("arguments", {})
+
+        if not tool_name:
+            return JSONResponse({"error": "No tool_name provided"}, status_code=400)
+
+        if tool_name not in TOOLS_MAP:
+            return JSONResponse({"error": f"Tool {tool_name} not found"}, status_code=404)
+
+        func = TOOLS_MAP[tool_name]
+        result = func(**arguments)
+
+        return JSONResponse(result)
+    except Exception as e:
+        import traceback
+        traceback.print_exc()
+        return JSONResponse({"error": str(e)}, status_code=500)
+
+
 # --- MCP Tools ---
 
 @tool_wrapper
@@ -392,6 +418,56 @@ def list_relationship_types() -> Dict[str, Any]:
             }
             for rt in RelationshipType
         ]
+    }
+
+
+@tool_wrapper
+def save_visualization_metadata(name: str) -> Dict[str, Any]:
+    """
+    Signal intent to save the current visualization view.
+
+    This tool does NOT save the view data itself (positions, etc.) because
+    the backend does not know the client state. Instead, it acts as a signal
+    for the frontend to capture the state and save it.
+
+    Args:
+        name: Name of the view to save
+
+    Returns:
+        A signal object that the frontend will intercept.
+    """
+    return {
+        "action": "save_visualization",
+        "name": name,
+        "message": f"Ready to save view '{name}'. Client will capture state."
+    }
+
+
+@tool_wrapper
+def get_visualization(name: str) -> Dict[str, Any]:
+    """
+    Get a saved visualization view by name.
+
+    Args:
+        name: Name of the view
+
+    Returns:
+        The view data (nodes, positions, etc.)
+    """
+    # Search for a node of type VISUALIZATION_VIEW with the given name
+    results = graph.search_nodes(query=name, node_types=[NodeType.VISUALIZATION_VIEW], limit=1)
+
+    if not results:
+        return {
+            "success": False,
+            "error": f"View '{name}' not found."
+        }
+
+    view_node = results[0]
+    return {
+        "success": True,
+        "view": view_node.model_dump(),
+        "action": "load_visualization"  # Signal for frontend
     }
 
 

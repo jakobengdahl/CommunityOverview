@@ -25,6 +25,7 @@ const useGraphStore = create((set, get) => ({
   nodes: [],
   edges: [],
   highlightedNodeIds: [],
+  hiddenNodeIds: [], // Set of IDs for hidden nodes
 
   // Update graph visualization
   updateVisualization: (nodes, edges, highlightNodeIds = []) => {
@@ -33,6 +34,28 @@ const useGraphStore = create((set, get) => ({
       edges,
       highlightedNodeIds: highlightNodeIds
     });
+  },
+
+  // Update node positions (from React Flow)
+  updateNodePositions: (positionUpdates) => {
+    const nodes = get().nodes.map(node => {
+        const update = positionUpdates.find(u => u.id === node.id);
+        if (update && update.position) {
+            return { ...node, position: update.position };
+        }
+        return node;
+    });
+    set({ nodes });
+  },
+
+  setHiddenNodeIds: (hiddenIds) => set({ hiddenNodeIds: hiddenIds }),
+  toggleNodeVisibility: (nodeId) => {
+    const hidden = get().hiddenNodeIds;
+    if (hidden.includes(nodeId)) {
+      set({ hiddenNodeIds: hidden.filter(id => id !== nodeId) });
+    } else {
+      set({ hiddenNodeIds: [...hidden, nodeId] });
+    }
   },
 
   // Add nodes to existing graph

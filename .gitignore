@@ -50,3 +50,6 @@ htmlcov/
 # Temporary files
 *.tmp
 *.bak
+embeddings.pkl
+test_embeddings.pkl
+test_embeddings_integration.pkl
