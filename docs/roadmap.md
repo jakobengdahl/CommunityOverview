@@ -134,9 +134,11 @@ Status for Community Knowledge Graph PoC.
 - [x] Warning about irreversible action
 - [ ] Audit log for deletions (optional)
 
-### 5.4 VisualizationViews
+### 5.4 VisualizationViews (PARTIAL)
+- [x] Backend: `save_visualization_metadata` and `get_visualization` tools
+- [x] Frontend: Save View dialog and logic
 - [ ] Support for URL: `?view=radarbildlagstiftning`
-- [ ] Load predefined node set
+- [ ] Load predefined node set from saved view
 - [ ] Create 2-3 example views
 
 ---
@@ -146,8 +148,8 @@ Status for Community Knowledge Graph PoC.
 ### 6.1 Similarity search with embeddings ✅
 - [x] Install sentence-transformers
 - [x] Generate embeddings on node creation
-- [x] Update `find_similar_nodes()` with vector search
-- [x] Cache embeddings in JSON (or Pickle)
+- [x] Update `find_similar_nodes()` with vector search (Hybrid Levenshtein + Vector)
+- [x] Cache embeddings in Pickle
 
 ### 6.2 UI/UX improvements ✅
 - [x] Loading states (Thinking... button)
@@ -196,20 +198,20 @@ Status for Community Knowledge Graph PoC.
 - ✅ Phase 2: Graph Visualization
 - ✅ Phase 3: Claude Integration & Chat
 - ✅ Phase 4: Document Text Extraction
-- ✅ Phase 5: Advanced Functionality
-- ✅ Phase 6: Improvements and Polish
+- ✅ Phase 5: Advanced Functionality (except loading views)
+- ✅ Phase 6: Improvements and Polish (Similarity Search complete)
 - ✅ Phase 7: Testing and Deployment Prep
 
 **Next Steps:**
-1. **Option A:** Phase 6.1: Similarity search with embeddings
-2. **Option B:** Phase 7: Testing and deployment
-3. **Option C:** Polish remaining Phase 6 items (responsive layout)
+1. **Option A:** Phase 5.4: Complete VisualizationViews (URL support, Loading logic)
+2. **Option B:** Phase 7.3: Performance and optimization
+3. **Option C:** Polish remaining items (responsive layout, video demo)
 
 **Current Features Working:**
 - Natural language search with Claude
 - Interactive graph visualization with dagre layout
 - "Show related nodes" expansion with + button
-- Two-step node addition with duplicate detection
+- Two-step node addition with duplicate detection (Hybrid Vector + Levenshtein)
 - **📄 Text extraction from documents** (including File Upload)
 - User approval workflow for new nodes
 - Node editing through chat interface
@@ -218,6 +220,7 @@ Status for Community Knowledge Graph PoC.
 - Node tooltips on hover
 - Automatic graph updates after changes
 - **🧪 Comprehensive Test Suite** (Frontend, Backend, E2E)
+- Saving Visualization Views
 
 **Blockers:** None
 
