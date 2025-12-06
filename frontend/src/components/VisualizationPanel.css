@@ -77,3 +77,23 @@
   background-color: #f0f0f0;
   transform: scale(1.05);
 }
+
+.shapes-layer {
+  position: absolute;
+  top: 0;
+  left: 0;
+  width: 100%;
+  height: 100%;
+  pointer-events: none;
+  z-index: 1;
+}
+
+/* Override ReactFlow z-index to be above shapes */
+.react-flow {
+  z-index: 2;
+}
+
+/* But allow shapes to receive pointer events for their own elements */
+.shapes-layer > * {
+  pointer-events: auto;
+}

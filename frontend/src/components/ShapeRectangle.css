@@ -1,0 +1,219 @@
+.shape-rectangle {
+  position: absolute;
+  border-radius: 8px;
+  opacity: 0.6;
+  transition: opacity 0.2s;
+  pointer-events: all;
+  box-sizing: border-box;
+}
+
+.shape-rectangle.hovered {
+  opacity: 0.8;
+}
+
+.shape-header {
+  position: absolute;
+  top: 0;
+  left: 0;
+  right: 0;
+  padding: 8px 12px;
+  font-weight: 600;
+  font-size: 14px;
+  color: white;
+  text-shadow: 0 1px 2px rgba(0, 0, 0, 0.3);
+  user-select: none;
+  border-radius: 6px 6px 0 0;
+}
+
+.shape-title {
+  display: block;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.shape-title-input {
+  width: 100%;
+  background: rgba(255, 255, 255, 0.2);
+  border: 1px solid rgba(255, 255, 255, 0.5);
+  border-radius: 4px;
+  padding: 4px 8px;
+  color: white;
+  font-weight: 600;
+  font-size: 14px;
+  outline: none;
+}
+
+.shape-title-input:focus {
+  background: rgba(255, 255, 255, 0.3);
+  border-color: white;
+}
+
+.shape-edit-button {
+  position: absolute;
+  top: 8px;
+  right: 8px;
+  background: rgba(255, 255, 255, 0.9);
+  border: none;
+  border-radius: 4px;
+  padding: 4px 8px;
+  cursor: pointer;
+  font-size: 14px;
+  transition: all 0.2s;
+  z-index: 10;
+}
+
+.shape-edit-button:hover {
+  background: white;
+  transform: scale(1.1);
+}
+
+.shape-edit-controls {
+  position: absolute;
+  top: 8px;
+  right: 8px;
+  display: flex;
+  gap: 8px;
+  align-items: center;
+  z-index: 10;
+}
+
+.color-picker-container {
+  position: relative;
+}
+
+.color-swatch {
+  width: 28px;
+  height: 28px;
+  border-radius: 4px;
+  cursor: pointer;
+  transition: transform 0.2s;
+}
+
+.color-swatch:hover {
+  transform: scale(1.1);
+}
+
+.color-picker-palette {
+  position: absolute;
+  top: 36px;
+  right: 0;
+  background: white;
+  border: 2px solid #ccc;
+  border-radius: 8px;
+  padding: 8px;
+  display: grid;
+  grid-template-columns: repeat(5, 1fr);
+  gap: 6px;
+  box-shadow: 0 4px 6px rgba(0, 0, 0, 0.2);
+  z-index: 100;
+}
+
+.color-option {
+  width: 32px;
+  height: 32px;
+  border: 2px solid white;
+  border-radius: 4px;
+  cursor: pointer;
+  transition: transform 0.2s, box-shadow 0.2s;
+}
+
+.color-option:hover {
+  transform: scale(1.15);
+  box-shadow: 0 2px 4px rgba(0, 0, 0, 0.3);
+  border-color: #666;
+}
+
+.shape-close-button {
+  width: 28px;
+  height: 28px;
+  background: rgba(255, 255, 255, 0.9);
+  border: none;
+  border-radius: 4px;
+  cursor: pointer;
+  font-size: 16px;
+  font-weight: bold;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  transition: all 0.2s;
+}
+
+.shape-close-button:hover {
+  background: white;
+  transform: scale(1.1);
+  color: #EF4444;
+}
+
+/* Resize handles */
+.resize-handle {
+  position: absolute;
+  background: rgba(255, 255, 255, 0.8);
+  transition: background 0.2s;
+}
+
+.resize-handle:hover {
+  background: white;
+}
+
+.resize-top,
+.resize-bottom {
+  left: 10%;
+  right: 10%;
+  height: 6px;
+  cursor: ns-resize;
+}
+
+.resize-top {
+  top: -3px;
+}
+
+.resize-bottom {
+  bottom: -3px;
+}
+
+.resize-left,
+.resize-right {
+  top: 10%;
+  bottom: 10%;
+  width: 6px;
+  cursor: ew-resize;
+}
+
+.resize-left {
+  left: -3px;
+}
+
+.resize-right {
+  right: -3px;
+}
+
+.resize-corner {
+  width: 10px;
+  height: 10px;
+  border-radius: 50%;
+}
+
+.resize-top-left {
+  top: -5px;
+  left: -5px;
+  cursor: nwse-resize;
+}
+
+.resize-top-right {
+  top: -5px;
+  right: -5px;
+  cursor: nesw-resize;
+}
+
+.resize-bottom-left {
+  bottom: -5px;
+  left: -5px;
+  cursor: nesw-resize;
+}
+
+.resize-bottom-right {
+  bottom: -5px;
+  right: -5px;
+  cursor: nwse-resize;
+}
