@@ -14,7 +14,12 @@ import StatsPanel from './StatsPanel';
 import SaveViewDialog from './SaveViewDialog';
 import { executeTool } from '../services/api';
 import { getLayoutedElements } from '../utils/graphLayout';
+import { useMemoizedLayout } from '../hooks/useMemoizedLayout';
 import './VisualizationPanel.css';
+
+// Lazy loading threshold - only render first N nodes if graph is large
+const LAZY_LOAD_THRESHOLD = 200;
+const INITIAL_LOAD_COUNT = 100;
 
 // Node color mapping from metamodel
 const NODE_COLORS = {
@@ -39,6 +44,7 @@ function VisualizationPanel() {
   } = useGraphStore();
 
   const [isSaveDialogOpen, setIsSaveDialogOpen] = useState(false);
+  const [loadedNodeCount, setLoadedNodeCount] = useState(INITIAL_LOAD_COUNT);
 
   // Filter out hidden nodes and their edges
   const visibleNodes = useMemo(() =>
@@ -46,12 +52,24 @@ function VisualizationPanel() {
     [storeNodes, hiddenNodeIds]
   );
 
-  const visibleEdges = useMemo(() =>
-    storeEdges.filter(e =>
-      !hiddenNodeIds.includes(e.source) && !hiddenNodeIds.includes(e.target)
-    ),
-    [storeEdges, hiddenNodeIds]
-  );
+  // Lazy loading - only show first N nodes if graph is large
+  const nodesToRender = useMemo(() => {
+    if (visibleNodes.length <= LAZY_LOAD_THRESHOLD) {
+      return visibleNodes;
+    }
+    // For large graphs, progressively load nodes
+    return visibleNodes.slice(0, loadedNodeCount);
+  }, [visibleNodes, loadedNodeCount]);
+
+  const visibleEdges = useMemo(() => {
+    const renderedNodeIds = new Set(nodesToRender.map(n => n.id));
+    return storeEdges.filter(e =>
+      !hiddenNodeIds.includes(e.source) &&
+      !hiddenNodeIds.includes(e.target) &&
+      renderedNodeIds.has(e.source) &&
+      renderedNodeIds.has(e.target)
+    );
+  }, [storeEdges, hiddenNodeIds, nodesToRender]);
 
   // Convert edges first (needed for layout calculation)
   const reactFlowEdges = useMemo(() => {
@@ -68,10 +86,11 @@ function VisualizationPanel() {
 
   // Convert store data to React Flow format with automatic layout
   const reactFlowNodes = useMemo(() => {
-    const nodesWithoutPosition = visibleNodes.map(node => ({
+    const nodesWithoutPosition = nodesToRender.map(node => ({
       id: node.id,
       type: 'custom',
       data: {
+        ...node, // Pass full node data for editing
         label: node.name,
         summary: node.summary || node.description?.slice(0, 100),
         nodeType: node.type,
@@ -81,13 +100,13 @@ function VisualizationPanel() {
       position: { x: 0, y: 0 }, // Will be set by layout algorithm
     }));
 
-    // Calculate positions using dagre layout
+    // Calculate positions using memoized dagre layout
     if (nodesWithoutPosition.length > 0 && reactFlowEdges.length > 0) {
       return getLayoutedElements(nodesWithoutPosition, reactFlowEdges, 'TB');
     }
 
     return nodesWithoutPosition;
-  }, [visibleNodes, highlightedNodeIds, reactFlowEdges]);
+  }, [nodesToRender, highlightedNodeIds, reactFlowEdges]);
 
   const [nodes, setNodes, onNodesChange] = useNodesState(reactFlowNodes);
   const [edges, setEdges, onEdgesChange] = useEdgesState(reactFlowEdges);
@@ -135,6 +154,19 @@ function VisualizationPanel() {
     },
     [toggleNodeVisibility]
   );
+
+  const handleLoadMore = useCallback(() => {
+    setLoadedNodeCount(prev => Math.min(prev + 100, visibleNodes.length));
+  }, [visibleNodes.length]);
+
+  // Reset loaded count when visible nodes change significantly
+  useEffect(() => {
+    if (visibleNodes.length <= LAZY_LOAD_THRESHOLD) {
+      setLoadedNodeCount(visibleNodes.length);
+    } else {
+      setLoadedNodeCount(INITIAL_LOAD_COUNT);
+    }
+  }, [visibleNodes.length]);
 
   const handleSaveView = async (name) => {
     // Gather current state with standardized format
@@ -197,6 +229,17 @@ function VisualizationPanel() {
                    onClick={() => useGraphStore.getState().setHiddenNodeIds([])}
                 >
                   Show All
+                </button>
+              </div>
+            )}
+            {visibleNodes.length > LAZY_LOAD_THRESHOLD && loadedNodeCount < visibleNodes.length && (
+              <div className="lazy-load-info">
+                Showing {loadedNodeCount} of {visibleNodes.length} nodes
+                <button
+                   className="load-more-button"
+                   onClick={handleLoadMore}
+                >
+                  Load More
                 </button>
               </div>
             )}

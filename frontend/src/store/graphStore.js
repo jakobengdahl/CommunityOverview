@@ -125,7 +125,11 @@ const useGraphStore = create((set, get) => ({
   // Error state
   error: null,
   setError: (error) => set({ error }),
-  clearError: () => set({ error: null })
+  clearError: () => set({ error: null }),
+
+  // API Key (temporary, session-only storage)
+  apiKey: null,
+  setApiKey: (key) => set({ apiKey: key })
 }));
 
 export default useGraphStore;

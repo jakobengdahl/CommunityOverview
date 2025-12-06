@@ -10,8 +10,10 @@ const AVAILABLE_COMMUNITIES = [
 ];
 
 function Header() {
-  const { selectedCommunities, setSelectedCommunities } = useGraphStore();
+  const { selectedCommunities, setSelectedCommunities, apiKey, setApiKey } = useGraphStore();
   const [isDropdownOpen, setIsDropdownOpen] = useState(false);
+  const [isSettingsOpen, setIsSettingsOpen] = useState(false);
+  const [tempApiKey, setTempApiKey] = useState(apiKey || '');
 
   const toggleCommunity = (community) => {
     if (selectedCommunities.includes(community)) {
@@ -31,6 +33,16 @@ function Header() {
     const params = new URLSearchParams();
     communities.forEach(c => params.append('community', c));
     window.history.replaceState({}, '', `?${params.toString()}`);
+  };
+
+  const handleSaveApiKey = () => {
+    setApiKey(tempApiKey);
+    setIsSettingsOpen(false);
+  };
+
+  const handleClearApiKey = () => {
+    setApiKey(null);
+    setTempApiKey('');
   };
 
   return (
@@ -69,8 +81,67 @@ function Header() {
       </div>
 
       <div className="header-right">
-        {/* Logo or other info can be added here */}
+        <button
+          className="settings-button"
+          onClick={() => setIsSettingsOpen(!isSettingsOpen)}
+          title="Settings"
+        >
+          ⚙️
+        </button>
+        {apiKey && <span className="api-key-indicator" title="API Key configured">🔑</span>}
       </div>
+
+      {/* Settings Dialog */}
+      {isSettingsOpen && (
+        <div className="settings-overlay" onClick={() => setIsSettingsOpen(false)}>
+          <div className="settings-dialog" onClick={(e) => e.stopPropagation()}>
+            <div className="settings-header">
+              <h2>Settings</h2>
+              <button
+                className="close-button"
+                onClick={() => setIsSettingsOpen(false)}
+              >
+                ✕
+              </button>
+            </div>
+            <div className="settings-body">
+              <div className="settings-section">
+                <label htmlFor="api-key-input">
+                  Anthropic API Key (Optional)
+                </label>
+                <p className="settings-description">
+                  Enter your own API key for temporary use during this session.
+                  The key is stored only in memory and will be cleared when you close the app.
+                </p>
+                <input
+                  id="api-key-input"
+                  type="password"
+                  className="api-key-input"
+                  value={tempApiKey}
+                  onChange={(e) => setTempApiKey(e.target.value)}
+                  placeholder="sk-ant-..."
+                />
+                <div className="settings-actions">
+                  <button
+                    className="save-button"
+                    onClick={handleSaveApiKey}
+                  >
+                    Save
+                  </button>
+                  {apiKey && (
+                    <button
+                      className="clear-button"
+                      onClick={handleClearApiKey}
+                    >
+                      Clear Key
+                    </button>
+                  )}
+                </div>
+              </div>
+            </div>
+          </div>
+        </div>
+      )}
     </header>
   );
 }

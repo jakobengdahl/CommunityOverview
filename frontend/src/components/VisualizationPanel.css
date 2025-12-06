@@ -48,3 +48,32 @@
 .unhide-button:hover {
   color: #93c5fd;
 }
+
+.lazy-load-info {
+  background-color: rgba(100, 108, 255, 0.9);
+  color: white;
+  padding: 6px 12px;
+  border-radius: 20px;
+  font-size: 12px;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-weight: 500;
+}
+
+.load-more-button {
+  background-color: white;
+  color: #646cff;
+  border: none;
+  padding: 4px 10px;
+  border-radius: 12px;
+  cursor: pointer;
+  font-size: 11px;
+  font-weight: 600;
+  transition: all 0.2s;
+}
+
+.load-more-button:hover {
+  background-color: #f0f0f0;
+  transform: scale(1.05);
+}

@@ -2,17 +2,34 @@
 const API_URL = '/chat'; // Using proxy in Vite or direct URL
 
 /**
+ * Get API key from store
+ */
+async function getApiKey() {
+  // Dynamic import to avoid circular dependency
+  const { default: useGraphStore } = await import('../store/graphStore.js');
+  return useGraphStore.getState().apiKey;
+}
+
+/**
  * Send a message to the backend chat endpoint
  * @param {Array} messages - Conversation history
  * @returns {Promise<Object>} Backend response
  */
 export async function sendMessageToBackend(messages) {
   try {
+    const apiKey = await getApiKey();
+    const headers = {
+      'Content-Type': 'application/json',
+    };
+
+    // Add API key header if provided
+    if (apiKey) {
+      headers['X-Anthropic-API-Key'] = apiKey;
+    }
+
     const response = await fetch(API_URL, {
       method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-      },
+      headers,
       body: JSON.stringify({ messages }),
     });
 
