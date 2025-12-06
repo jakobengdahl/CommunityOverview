@@ -62,8 +62,11 @@ async def chat_endpoint(request: Request):
         if not messages:
             return JSONResponse({"error": "No messages provided"}, status_code=400)
 
+        # Check for API key in header (user-provided key takes precedence)
+        api_key = request.headers.get("X-Anthropic-API-Key")
+
         processor = get_chat_processor()
-        result = processor.process_message(messages)
+        result = processor.process_message(messages, api_key=api_key)
 
         return JSONResponse(result)
     except Exception as e:

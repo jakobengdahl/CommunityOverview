@@ -88,6 +88,30 @@
   transform: translateY(-50%) scale(1.1);
 }
 
+.edit-node-button {
+  position: absolute;
+  right: -12px;
+  top: calc(50% + 32px);
+  width: 24px;
+  height: 24px;
+  border-radius: 50%;
+  background-color: #10B981;
+  color: white;
+  border: 2px solid #1a1a1a;
+  font-size: 0.8rem;
+  cursor: pointer;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  transition: all 0.2s ease;
+  z-index: 10;
+}
+
+.edit-node-button:hover {
+  background-color: #059669;
+  transform: scale(1.1);
+}
+
 /* Tooltip */
 .node-tooltip {
   position: absolute;
@@ -179,6 +203,10 @@
   }
 
   .show-related-button {
+    border-color: white;
+  }
+
+  .edit-node-button {
     border-color: white;
   }
 

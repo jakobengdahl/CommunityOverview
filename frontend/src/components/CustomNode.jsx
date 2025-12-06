@@ -1,12 +1,14 @@
 import { useState } from 'react';
 import { Handle, Position } from 'reactflow';
 import useGraphStore from '../store/graphStore';
+import NodeEditDialog from './NodeEditDialog';
 // import { DEMO_GRAPH_DATA } from '../services/demoData'; // REMOVED
 import './CustomNode.css';
 
 function CustomNode({ data, id }) {
   const [showRelatedButton, setShowRelatedButton] = useState(false);
   const [showTooltip, setShowTooltip] = useState(false);
+  const [showEditDialog, setShowEditDialog] = useState(false);
   const { addNodesToVisualization, highlightNodes, nodes: currentNodes } = useGraphStore();
 
   // Get full node data for tooltip - In real app, this should be in 'data' prop
@@ -45,13 +47,25 @@ function CustomNode({ data, id }) {
       </div>
 
       {showRelatedButton && (
-        <button
-          className="show-related-button"
-          onClick={handleShowRelated}
-          title="Show related nodes"
-        >
-          +
-        </button>
+        <>
+          <button
+            className="show-related-button"
+            onClick={handleShowRelated}
+            title="Show related nodes"
+          >
+            +
+          </button>
+          <button
+            className="edit-node-button"
+            onClick={(e) => {
+              e.stopPropagation();
+              setShowEditDialog(true);
+            }}
+            title="Edit node"
+          >
+            ✏️
+          </button>
+        </>
       )}
 
       {showTooltip && fullNode && (
@@ -73,6 +87,18 @@ function CustomNode({ data, id }) {
       )}
 
       <Handle type="source" position={Position.Bottom} />
+
+      {/* Edit Dialog */}
+      {showEditDialog && (
+        <NodeEditDialog
+          node={fullNode}
+          onClose={() => setShowEditDialog(false)}
+          onSave={(updatedNode) => {
+            console.log('Node updated:', updatedNode);
+            setShowEditDialog(false);
+          }}
+        />
+      )}
     </div>
   );
 }
