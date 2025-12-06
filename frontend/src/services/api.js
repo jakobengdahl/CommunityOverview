@@ -85,3 +85,23 @@ export async function uploadFileToBackend(file) {
     throw error;
   }
 }
+
+/**
+ * Load a saved visualization view by name
+ * @param {string} viewName - Name of the view to load
+ * @returns {Promise<Object>} View data with nodes and metadata
+ */
+export async function loadVisualizationView(viewName) {
+  try {
+    const result = await executeTool('get_visualization', { name: viewName });
+
+    if (!result.success) {
+      throw new Error(result.error || `View "${viewName}" not found`);
+    }
+
+    return result.view;
+  } catch (error) {
+    console.error(`Error loading view ${viewName}:`, error);
+    throw error;
+  }
+}

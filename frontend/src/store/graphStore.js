@@ -82,6 +82,34 @@ const useGraphStore = create((set, get) => ({
   // Clear graph
   clearVisualization: () => set({ nodes: [], edges: [], highlightedNodeIds: [] }),
 
+  // Load visualization view
+  loadVisualizationView: (viewData) => {
+    // viewData comes from the backend (VisualizationView node's metadata)
+    // It should contain: node_ids, positions, hidden_node_ids
+    const metadata = viewData.metadata || {};
+    const nodeIds = metadata.node_ids || [];
+    const positions = metadata.positions || {};
+    const hiddenNodeIds = metadata.hidden_node_ids || [];
+
+    // Note: We need to fetch the actual nodes based on node_ids
+    // For now, we'll just set the hidden nodes and positions
+    // The actual node loading should happen via a search/query
+    set({
+      hiddenNodeIds: hiddenNodeIds,
+    });
+
+    // Update positions if nodes already exist in store
+    if (Object.keys(positions).length > 0) {
+      const nodes = get().nodes.map(node => {
+        if (positions[node.id]) {
+          return { ...node, position: positions[node.id] };
+        }
+        return node;
+      });
+      set({ nodes });
+    }
+  },
+
   // Chat messages - initialize with welcome message
   chatMessages: [WELCOME_MESSAGE],
   addChatMessage: (message) => {

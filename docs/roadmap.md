@@ -112,12 +112,13 @@ Status for Community Knowledge Graph PoC.
 
 ---
 
-## ✅ Phase 5: Advanced Functionality (COMPLETE)
+## ⚠️ Phase 5: Advanced Functionality (NEARLY COMPLETE)
 
-### 5.1 Graph statistics and overview ✅
+### 5.1 Graph statistics and overview ⚠️
 - [x] `get_graph_stats()` MCP tool
 - [x] Show stats in GUI (collapsible StatsPanel)
 - [x] Breakdown by node type and community
+- [ ] Backend integration (StatsPanel calls get_graph_stats endpoint)
 - [ ] "Show entire graph" button (optional)
 
 ### 5.2 Node editing ✅
@@ -134,12 +135,12 @@ Status for Community Knowledge Graph PoC.
 - [x] Warning about irreversible action
 - [ ] Audit log for deletions (optional)
 
-### 5.4 VisualizationViews (PARTIAL)
+### 5.4 VisualizationViews ✅
 - [x] Backend: `save_visualization_metadata` and `get_visualization` tools
 - [x] Frontend: Save View dialog and logic
-- [ ] Support for URL: `?view=radarbildlagstiftning`
-- [ ] Load predefined node set from saved view
-- [ ] Create 2-3 example views
+- [x] Support for URL: `?view=NIS2%20Regulatory%20Overview`
+- [x] Load predefined node set from saved view (App.jsx loadView function)
+- [x] Create 3 example views (NIS2 Regulatory Overview, AI Initiatives, Key Actors)
 
 ---
 
@@ -198,14 +199,16 @@ Status for Community Knowledge Graph PoC.
 - ✅ Phase 2: Graph Visualization
 - ✅ Phase 3: Claude Integration & Chat
 - ✅ Phase 4: Document Text Extraction
-- ✅ Phase 5: Advanced Functionality (except loading views)
+- ⚠️ Phase 5: Advanced Functionality (95% - missing view loading URL, stats backend integration)
 - ✅ Phase 6: Improvements and Polish (Similarity Search complete)
-- ✅ Phase 7: Testing and Deployment Prep
+- ⚠️ Phase 7: Testing and Deployment Prep (Backend complete, Frontend minimal)
 
-**Next Steps:**
-1. **Option A:** Phase 5.4: Complete VisualizationViews (URL support, Loading logic)
-2. **Option B:** Phase 7.3: Performance and optimization
-3. **Option C:** Polish remaining items (responsive layout, video demo)
+**Priority Tasks (In Progress):**
+1. **Priority 1 (Current):** Complete VisualizationViews URL support and view loading
+2. **Priority 2:** Integrate backend statistics in StatsPanel
+3. **Priority 3:** Expand frontend test coverage
+4. **Priority 4:** Performance optimization (Phase 7.3)
+5. **Priority 5:** Production readiness (API proxy, audit logging, responsive design)
 
 **Current Features Working:**
 - Natural language search with Claude

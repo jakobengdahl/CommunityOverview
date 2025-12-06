@@ -4,7 +4,7 @@ import useGraphStore from '../store/graphStore';
 import { executeTool } from '../services/api';
 import './SaveViewDialog.css';
 
-function SaveViewDialog({ isOpen, onClose }) {
+function SaveViewDialog({ isOpen, onClose, onSave }) {
   const [viewName, setViewName] = useState('');
   const [isSaving, setIsSaving] = useState(false);
   const [error, setError] = useState(null);
@@ -37,11 +37,11 @@ function SaveViewDialog({ isOpen, onClose }) {
     setError(null);
 
     try {
-        // We will delegate the actual saving to the parent component via onSave prop
-        // because it has access to the React Flow instance/nodes.
-        if (onClose.onSave) {
-            await onClose.onSave(viewName);
+        // Call the onSave callback provided by VisualizationPanel
+        if (typeof onSave === 'function') {
+            await onSave(viewName);
         }
+
         onClose();
         setViewName('');
     } catch (err) {
