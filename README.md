@@ -66,6 +66,65 @@ docker-compose up
 ### GitHub Codespaces
 Open the project in Codespaces - everything is pre-configured.
 
+## URL Parameters
+
+The application supports loading external graph data and custom API keys via URL parameters:
+
+### Load External Graph Data
+
+Load graph data from an external JSON file:
+```
+http://localhost:5173/?loaddata=https%3A%2F%2Fraw.githubusercontent.com%2Fuser%2Frepo%2Fmain%2Fdata.json
+```
+
+**Parameters:**
+- `loaddata` - URL-encoded URL to a JSON file containing graph data
+
+**JSON Format:**
+```json
+{
+  "nodes": [
+    {
+      "id": "1",
+      "label": "Node Name",
+      "data": {
+        "label": "Node Name",
+        "description": "Description",
+        "type": "Initiative"
+      },
+      "position": { "x": 100, "y": 100 }
+    }
+  ],
+  "edges": [
+    {
+      "id": "e1-2",
+      "source": "1",
+      "target": "2",
+      "data": { "label": "relates to" }
+    }
+  ]
+}
+```
+
+See `example-graph-data.json` for a complete example.
+
+### Custom API Key
+
+Provide a custom Anthropic API key:
+```
+http://localhost:5173/?apikey=sk-ant-api03-...
+```
+
+**Parameters:**
+- `apikey` - URL-encoded Anthropic API key
+
+### Combining Parameters
+
+You can combine multiple parameters:
+```
+http://localhost:5173/?loaddata=https%3A%2F%2F...&apikey=sk-ant-api03-...
+```
+
 ## User Scenario
 
 1. **Search:** User searches for initiatives related to NIS2

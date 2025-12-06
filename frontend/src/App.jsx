@@ -8,7 +8,7 @@ import { loadVisualizationView, executeTool } from './services/api'
 // import { loadDemoData } from './services/demoData' // REMOVED
 
 function App() {
-  const { selectedCommunities, updateVisualization, loadVisualizationView: loadViewToStore, addChatMessage } = useGraphStore();
+  const { selectedCommunities, updateVisualization, loadVisualizationView: loadViewToStore, addChatMessage, setApiKey } = useGraphStore();
   const [viewLoadError, setViewLoadError] = useState(null);
 
   // Load communities and view from URL query on initial load
@@ -16,9 +16,26 @@ function App() {
     const params = new URLSearchParams(window.location.search);
     const communitiesParam = params.getAll('community');
     const viewParam = params.get('view');
+    const loadDataParam = params.get('loaddata');
+    const apiKeyParam = params.get('apikey');
+
+    // Set API key if provided
+    if (apiKeyParam) {
+      setApiKey(decodeURIComponent(apiKeyParam));
+      addChatMessage({
+        role: 'assistant',
+        content: '🔑 Custom API key loaded from URL',
+        timestamp: new Date()
+      });
+    }
 
     if (communitiesParam.length > 0) {
       useGraphStore.getState().setSelectedCommunities(communitiesParam);
+    }
+
+    // Load external data if specified
+    if (loadDataParam) {
+      loadExternalData(decodeURIComponent(loadDataParam));
     }
 
     // Load visualization view if specified
@@ -26,6 +43,71 @@ function App() {
       loadView(viewParam);
     }
   }, []);
+
+  // Function to load external graph data from URL
+  const loadExternalData = async (dataUrl) => {
+    try {
+      addChatMessage({
+        role: 'assistant',
+        content: `📥 Loading external graph data from: ${dataUrl}`,
+        timestamp: new Date()
+      });
+
+      const response = await fetch(dataUrl);
+
+      if (!response.ok) {
+        throw new Error(`Failed to fetch data: ${response.status} ${response.statusText}`);
+      }
+
+      const data = await response.json();
+
+      // Validate data format
+      if (!data.nodes || !Array.isArray(data.nodes)) {
+        throw new Error('Invalid data format: missing or invalid "nodes" array');
+      }
+
+      if (!data.edges || !Array.isArray(data.edges)) {
+        throw new Error('Invalid data format: missing or invalid "edges" array');
+      }
+
+      // Transform nodes to ensure they have the required format
+      const nodes = data.nodes.map(node => ({
+        id: node.id,
+        data: {
+          label: node.label || node.data?.label || node.id,
+          ...node.data
+        },
+        position: node.position || { x: 0, y: 0 },
+        type: node.type || 'custom'
+      }));
+
+      // Transform edges to ensure they have the required format
+      const edges = data.edges.map(edge => ({
+        id: edge.id || `${edge.source}-${edge.target}`,
+        source: edge.source,
+        target: edge.target,
+        data: edge.data || {},
+        ...edge
+      }));
+
+      // Update visualization with loaded data
+      updateVisualization(nodes, edges);
+
+      addChatMessage({
+        role: 'assistant',
+        content: `✅ Successfully loaded ${nodes.length} nodes and ${edges.length} edges from external source`,
+        timestamp: new Date()
+      });
+
+    } catch (error) {
+      console.error('Error loading external data:', error);
+      addChatMessage({
+        role: 'assistant',
+        content: `❌ Failed to load external data: ${error.message}`,
+        timestamp: new Date()
+      });
+    }
+  };
 
   // Function to load a saved view
   const loadView = async (viewName) => {
