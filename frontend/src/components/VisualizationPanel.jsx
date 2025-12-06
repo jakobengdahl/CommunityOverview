@@ -1,4 +1,4 @@
-import { useCallback, useMemo, useEffect, useState } from 'react';
+import { useCallback, useMemo, useEffect, useState, useRef } from 'react';
 import ReactFlow, {
   Background,
   Controls,
@@ -6,12 +6,15 @@ import ReactFlow, {
   useNodesState,
   useEdgesState,
   addEdge,
+  useReactFlow,
 } from 'reactflow';
 import 'reactflow/dist/style.css';
 import useGraphStore from '../store/graphStore';
 import CustomNode from './CustomNode';
 import StatsPanel from './StatsPanel';
 import SaveViewDialog from './SaveViewDialog';
+import ShapeRectangle from './ShapeRectangle';
+import ContextMenu from './ContextMenu';
 import { executeTool } from '../services/api';
 import { getLayoutedElements } from '../utils/graphLayout';
 import { useMemoizedLayout } from '../hooks/useMemoizedLayout';
@@ -40,11 +43,17 @@ function VisualizationPanel() {
     highlightedNodeIds,
     hiddenNodeIds,
     toggleNodeVisibility,
-    addNodesToVisualization
+    addNodesToVisualization,
+    shapes,
+    addShape,
+    addNodeToShape
   } = useGraphStore();
 
   const [isSaveDialogOpen, setIsSaveDialogOpen] = useState(false);
   const [loadedNodeCount, setLoadedNodeCount] = useState(INITIAL_LOAD_COUNT);
+  const [contextMenu, setContextMenu] = useState(null);
+  const [reactFlowInstance, setReactFlowInstance] = useState(null);
+  const reactFlowWrapper = useRef(null);
 
   // Filter out hidden nodes and their edges
   const visibleNodes = useMemo(() =>
@@ -113,11 +122,6 @@ function VisualizationPanel() {
 
   const { updateNodePositions } = useGraphStore();
 
-  const onNodeDragStop = useCallback((event, node) => {
-      // Sync only the dragged node position to store
-      updateNodePositions([{ id: node.id, position: node.position }]);
-  }, [updateNodePositions]);
-
   // Update nodes when reactFlowNodes changes (for layout recalculation)
   useEffect(() => {
     // Only update if IDs changed or we have a massive shift, to avoid resetting dragged positions
@@ -155,6 +159,78 @@ function VisualizationPanel() {
     [toggleNodeVisibility]
   );
 
+  const onPaneContextMenu = useCallback(
+    (event) => {
+      event.preventDefault();
+      setContextMenu({
+        x: event.clientX,
+        y: event.clientY,
+      });
+    },
+    []
+  );
+
+  const handleAddRectangle = useCallback(() => {
+    if (!reactFlowInstance || !contextMenu || !reactFlowWrapper.current) return;
+
+    // Convert screen coordinates to ReactFlow coordinates
+    const viewport = reactFlowInstance.getViewport();
+    const bounds = reactFlowWrapper.current.getBoundingClientRect();
+
+    const x = (contextMenu.x - bounds.left - viewport.x) / viewport.zoom;
+    const y = (contextMenu.y - bounds.top - viewport.y) / viewport.zoom;
+
+    addShape({
+      type: 'rectangle',
+      x,
+      y,
+      width: 300,
+      height: 200,
+      color: '#3B82F6',
+      title: 'New Group',
+      nodeIds: []
+    });
+  }, [contextMenu, reactFlowInstance, addShape, reactFlowWrapper]);
+
+  const handleNodeDrag = useCallback((event, node) => {
+    // Check if node is being dragged over any shape
+    if (!reactFlowInstance) return;
+
+    const nodePos = node.position;
+    shapes.forEach(shape => {
+      const isInside =
+        nodePos.x >= shape.x &&
+        nodePos.x <= shape.x + shape.width &&
+        nodePos.y >= shape.y &&
+        nodePos.y <= shape.y + shape.height;
+
+      if (isInside && !shape.nodeIds?.includes(node.id)) {
+        // Visual feedback could be added here
+      }
+    });
+  }, [shapes, reactFlowInstance]);
+
+  const onNodeDragStop = useCallback((event, node) => {
+    // Sync only the dragged node position to store
+    updateNodePositions([{ id: node.id, position: node.position }]);
+
+    // Check if node should be added to a shape
+    if (!reactFlowInstance) return;
+
+    const nodePos = node.position;
+    shapes.forEach(shape => {
+      const isInside =
+        nodePos.x >= shape.x &&
+        nodePos.x <= shape.x + shape.width &&
+        nodePos.y >= shape.y &&
+        nodePos.y <= shape.y + shape.height;
+
+      if (isInside && !shape.nodeIds?.includes(node.id)) {
+        addNodeToShape(shape.id, node.id);
+      }
+    });
+  }, [updateNodePositions, shapes, reactFlowInstance, addNodeToShape]);
+
   const handleLoadMore = useCallback(() => {
     setLoadedNodeCount(prev => Math.min(prev + 100, visibleNodes.length));
   }, [visibleNodes.length]);
@@ -186,7 +262,8 @@ function VisualizationPanel() {
       metadata: {
         node_ids: nodeIds,
         positions: positions,
-        hidden_node_ids: hiddenNodeIds
+        hidden_node_ids: hiddenNodeIds,
+        shapes: shapes // Save custom shapes
       },
       communities: [] // Optional: inherit from current selection?
     };
@@ -254,33 +331,60 @@ function VisualizationPanel() {
       ) : (
         <>
           <StatsPanel />
-          <ReactFlow
-            nodes={nodes}
-            edges={edges}
-            onNodesChange={onNodesChange}
-            onEdgesChange={onEdgesChange}
-            onConnect={onConnect}
-            onNodeContextMenu={onNodeContextMenu}
-            onNodeDragStop={onNodeDragStop}
-            nodeTypes={nodeTypes}
-            fitView
-            fitViewOptions={{
-              padding: 0.2,
-              duration: 800,
-            }}
-            attributionPosition="bottom-right"
-            defaultEdgeOptions={{
-              animated: true,
-              style: { strokeWidth: 2 }
-            }}
-          >
-            <Background color="#333" gap={16} />
-            <Controls />
-            <MiniMap
-              nodeColor={(node) => node.data.color}
-              maskColor="rgba(0, 0, 0, 0.5)"
+          <div ref={reactFlowWrapper} style={{ width: '100%', height: '100%', position: 'relative' }}>
+            {/* Render shapes layer behind ReactFlow */}
+            <div className="shapes-layer">
+              {shapes.map(shape => (
+                <ShapeRectangle
+                  key={shape.id}
+                  shape={shape}
+                  reactFlowInstance={reactFlowInstance}
+                  reactFlowWrapper={reactFlowWrapper}
+                />
+              ))}
+            </div>
+
+            <ReactFlow
+              nodes={nodes}
+              edges={edges}
+              onNodesChange={onNodesChange}
+              onEdgesChange={onEdgesChange}
+              onConnect={onConnect}
+              onNodeContextMenu={onNodeContextMenu}
+              onNodeDragStop={onNodeDragStop}
+              onNodeDrag={handleNodeDrag}
+              onPaneContextMenu={onPaneContextMenu}
+              onInit={setReactFlowInstance}
+              nodeTypes={nodeTypes}
+              fitView
+              fitViewOptions={{
+                padding: 0.2,
+                duration: 800,
+              }}
+              attributionPosition="bottom-right"
+              defaultEdgeOptions={{
+                animated: true,
+                style: { strokeWidth: 2 }
+              }}
+            >
+              <Background color="#333" gap={16} />
+              <Controls />
+              <MiniMap
+                nodeColor={(node) => node.data.color}
+                maskColor="rgba(0, 0, 0, 0.5)"
+              />
+            </ReactFlow>
+          </div>
+
+          {/* Context menu */}
+          {contextMenu && (
+            <ContextMenu
+              x={contextMenu.x}
+              y={contextMenu.y}
+              onClose={() => setContextMenu(null)}
+              onAddRectangle={handleAddRectangle}
             />
-          </ReactFlow>
+          )}
         </>
       )}
     </div>
