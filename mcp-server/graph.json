@@ -6,7 +6,9 @@
       "name": "eSam",
       "description": "En svensk samverkansorganisation för offentlig sektor",
       "summary": "Samverkan för digital förvaltning",
-      "communities": ["eSam"],
+      "communities": [
+        "eSam"
+      ],
       "metadata": {},
       "embedding": null,
       "created_at": "2025-12-03T10:00:00Z",
@@ -18,7 +20,9 @@
       "name": "Myndigheter",
       "description": "Svenska myndigheter",
       "summary": "Myndighetsgemenskapen",
-      "communities": ["Myndigheter"],
+      "communities": [
+        "Myndigheter"
+      ],
       "metadata": {},
       "embedding": null,
       "created_at": "2025-12-03T10:00:00Z",
@@ -30,7 +34,10 @@
       "name": "DIGG",
       "description": "Myndigheten för digital förvaltning",
       "summary": "Digital förvaltning",
-      "communities": ["eSam", "Myndigheter"],
+      "communities": [
+        "eSam",
+        "Myndigheter"
+      ],
       "metadata": {
         "website": "https://www.digg.se"
       },
@@ -44,7 +51,10 @@
       "name": "MSB",
       "description": "Myndigheten för samhällsskydd och beredskap",
       "summary": "Samhällsskydd",
-      "communities": ["eSam", "Myndigheter"],
+      "communities": [
+        "eSam",
+        "Myndigheter"
+      ],
       "metadata": {
         "website": "https://www.msb.se"
       },
@@ -58,7 +68,9 @@
       "name": "SCB",
       "description": "Statistiska centralbyrån",
       "summary": "Officiell statistik",
-      "communities": ["Myndigheter"],
+      "communities": [
+        "Myndigheter"
+      ],
       "metadata": {
         "website": "https://www.scb.se"
       },
@@ -72,7 +84,10 @@
       "name": "NIS2-direktivet",
       "description": "EU-direktiv om åtgärder för en hög gemensam nivå av cybersäkerhet",
       "summary": "Cybersäkerhetsdirektiv",
-      "communities": ["eSam", "Myndigheter"],
+      "communities": [
+        "eSam",
+        "Myndigheter"
+      ],
       "metadata": {
         "effective_date": "2024-10-17"
       },
@@ -86,7 +101,10 @@
       "name": "GDPR",
       "description": "Dataskyddsförordningen",
       "summary": "Dataskydd och integritet",
-      "communities": ["eSam", "Myndigheter"],
+      "communities": [
+        "eSam",
+        "Myndigheter"
+      ],
       "metadata": {
         "effective_date": "2018-05-25"
       },
@@ -100,7 +118,10 @@
       "name": "NIS2 Implementeringsprojekt",
       "description": "MSBs projekt för att implementera NIS2-direktivet i Sverige",
       "summary": "NIS2-implementering Sverige",
-      "communities": ["eSam", "Myndigheter"],
+      "communities": [
+        "eSam",
+        "Myndigheter"
+      ],
       "metadata": {
         "start_date": "2024-01-01",
         "status": "pågående"
@@ -115,7 +136,10 @@
       "name": "Cybersäkerhetssamverkan Myndigheter",
       "description": "Samverkansprojekt för att dela kunskap om cybersäkerhet mellan myndigheter",
       "summary": "Myndighetssamverkan cyber",
-      "communities": ["eSam", "Myndigheter"],
+      "communities": [
+        "eSam",
+        "Myndigheter"
+      ],
       "metadata": {
         "start_date": "2024-06-01",
         "status": "pågående"
@@ -130,7 +154,10 @@
       "name": "Dataskyddsstrategi 2025",
       "description": "DIGGs strategi för att stödja myndigheter med GDPR-efterlevnad",
       "summary": "GDPR-strategi",
-      "communities": ["eSam", "Myndigheter"],
+      "communities": [
+        "eSam",
+        "Myndigheter"
+      ],
       "metadata": {
         "start_date": "2025-01-01",
         "status": "planering"
@@ -145,7 +172,10 @@
       "name": "Cybersäkerhet",
       "description": "Tema för cybersäkerhet och informationssäkerhet",
       "summary": "Cybersäkerhet",
-      "communities": ["eSam", "Myndigheter"],
+      "communities": [
+        "eSam",
+        "Myndigheter"
+      ],
       "metadata": {},
       "embedding": null,
       "created_at": "2025-12-03T10:00:00Z",
@@ -157,7 +187,10 @@
       "name": "Dataskydd och integritet",
       "description": "Tema för dataskydd, GDPR och personuppgiftshantering",
       "summary": "Dataskydd",
-      "communities": ["eSam", "Myndigheter"],
+      "communities": [
+        "eSam",
+        "Myndigheter"
+      ],
       "metadata": {},
       "embedding": null,
       "created_at": "2025-12-03T10:00:00Z",
@@ -169,7 +202,10 @@
       "name": "Säkerhetsanalys",
       "description": "Förmåga att genomföra säkerhetsanalyser och riskbedömningar",
       "summary": "Säkerhetsanalys",
-      "communities": ["eSam", "Myndigheter"],
+      "communities": [
+        "eSam",
+        "Myndigheter"
+      ],
       "metadata": {},
       "embedding": null,
       "created_at": "2025-12-03T10:00:00Z",
@@ -181,7 +217,10 @@
       "name": "NIS2 Vägledning för Myndigheter",
       "description": "Vägledningsdokument från MSB om hur myndigheter ska implementera NIS2",
       "summary": "NIS2-vägledning",
-      "communities": ["eSam", "Myndigheter"],
+      "communities": [
+        "eSam",
+        "Myndigheter"
+      ],
       "metadata": {
         "document_type": "vägledning",
         "url": "https://www.msb.se/nis2-vagledning"
@@ -189,6 +228,132 @@
       "embedding": null,
       "created_at": "2025-12-03T10:00:00Z",
       "updated_at": "2025-12-03T10:00:00Z"
+    },
+    {
+      "id": "view-nis2",
+      "name": "NIS2 Regulatory Overview",
+      "type": "VisualizationView",
+      "description": "Overview of NIS2-related initiatives and actors",
+      "summary": "Contains nodes related to NIS2 implementation",
+      "communities": [],
+      "metadata": {
+        "node_ids": [
+          "leg-001",
+          "init-001",
+          "actor-001",
+          "theme-001",
+          "res-001"
+        ],
+        "positions": {
+          "leg-001": {
+            "x": 100,
+            "y": 50
+          },
+          "init-001": {
+            "x": 300,
+            "y": 50
+          },
+          "actor-001": {
+            "x": 200,
+            "y": 150
+          },
+          "theme-001": {
+            "x": 100,
+            "y": 250
+          },
+          "res-001": {
+            "x": 300,
+            "y": 250
+          }
+        },
+        "hidden_node_ids": []
+      },
+      "created_at": "2025-12-06T09:08:31.928898Z",
+      "updated_at": "2025-12-06T09:08:31.928915Z"
+    },
+    {
+      "id": "view-cybersec",
+      "name": "Cybersecurity Initiatives",
+      "type": "VisualizationView",
+      "description": "Overview of cybersecurity work across agencies",
+      "summary": "Contains nodes related to cybersecurity initiatives",
+      "communities": [],
+      "metadata": {
+        "node_ids": [
+          "init-001",
+          "init-002",
+          "theme-001",
+          "actor-001",
+          "actor-002"
+        ],
+        "positions": {
+          "init-001": {
+            "x": 150,
+            "y": 50
+          },
+          "init-002": {
+            "x": 250,
+            "y": 50
+          },
+          "theme-001": {
+            "x": 200,
+            "y": 150
+          },
+          "actor-001": {
+            "x": 100,
+            "y": 250
+          },
+          "actor-002": {
+            "x": 300,
+            "y": 250
+          }
+        },
+        "hidden_node_ids": []
+      },
+      "created_at": "2025-12-06T09:08:31.928921Z",
+      "updated_at": "2025-12-06T09:08:31.928922Z"
+    },
+    {
+      "id": "view-actors",
+      "name": "Key Actors",
+      "type": "VisualizationView",
+      "description": "Overview of key actors in eSam and Myndigheter communities",
+      "summary": "Contains main actors and their community connections",
+      "communities": [],
+      "metadata": {
+        "node_ids": [
+          "actor-001",
+          "actor-002",
+          "actor-003",
+          "comm-001",
+          "comm-002"
+        ],
+        "positions": {
+          "actor-001": {
+            "x": 100,
+            "y": 100
+          },
+          "actor-002": {
+            "x": 200,
+            "y": 100
+          },
+          "actor-003": {
+            "x": 300,
+            "y": 100
+          },
+          "comm-001": {
+            "x": 150,
+            "y": 200
+          },
+          "comm-002": {
+            "x": 250,
+            "y": 200
+          }
+        },
+        "hidden_node_ids": []
+      },
+      "created_at": "2025-12-06T09:08:31.928924Z",
+      "updated_at": "2025-12-06T09:08:31.928925Z"
     }
   ],
   "edges": [
@@ -289,6 +454,6 @@
   ],
   "metadata": {
     "version": "1.0",
-    "last_updated": "2025-12-03T10:00:00Z"
+    "last_updated": "2025-12-06T09:08:31.928927Z"
   }
 }

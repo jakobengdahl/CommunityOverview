@@ -137,19 +137,24 @@ function VisualizationPanel() {
   );
 
   const handleSaveView = async (name) => {
-    // Gather current state
-    const viewData = {
-      nodes: nodes.map(n => ({ id: n.id, position: n.position })),
-      hidden_nodes: hiddenNodeIds
-    };
+    // Gather current state with standardized format
+    const positions = {};
+    nodes.forEach(n => {
+      positions[n.id] = n.position;
+    });
+
+    const nodeIds = nodes.map(n => n.id);
 
     // Create a node representing the view
     const viewNode = {
       name: name,
       type: 'VisualizationView',
       description: `Saved view: ${name}`,
+      summary: `Contains ${nodeIds.length} nodes`,
       metadata: {
-        view_data: viewData
+        node_ids: nodeIds,
+        positions: positions,
+        hidden_node_ids: hiddenNodeIds
       },
       communities: [] // Optional: inherit from current selection?
     };
@@ -160,7 +165,7 @@ function VisualizationPanel() {
       edges: []
     });
 
-    alert(`View '${name}' saved successfully!`);
+    alert(`View '${name}' saved successfully! Share this view with: ?view=${encodeURIComponent(name)}`);
   };
 
   // Custom node types
