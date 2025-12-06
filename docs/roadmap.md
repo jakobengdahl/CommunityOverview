@@ -112,13 +112,14 @@ Status for Community Knowledge Graph PoC.
 
 ---
 
-## ⚠️ Phase 5: Advanced Functionality (NEARLY COMPLETE)
+## ✅ Phase 5: Advanced Functionality (COMPLETE)
 
-### 5.1 Graph statistics and overview ⚠️
+### 5.1 Graph statistics and overview ✅
 - [x] `get_graph_stats()` MCP tool
 - [x] Show stats in GUI (collapsible StatsPanel)
 - [x] Breakdown by node type and community
-- [ ] Backend integration (StatsPanel calls get_graph_stats endpoint)
+- [x] Backend integration (StatsPanel calls get_graph_stats endpoint)
+- [x] Shows both local (displayed) and backend (total) statistics
 - [ ] "Show entire graph" button (optional)
 
 ### 5.2 Node editing ✅
@@ -199,14 +200,14 @@ Status for Community Knowledge Graph PoC.
 - ✅ Phase 2: Graph Visualization
 - ✅ Phase 3: Claude Integration & Chat
 - ✅ Phase 4: Document Text Extraction
-- ⚠️ Phase 5: Advanced Functionality (95% - missing view loading URL, stats backend integration)
+- ✅ Phase 5: Advanced Functionality (All core features complete)
 - ✅ Phase 6: Improvements and Polish (Similarity Search complete)
 - ⚠️ Phase 7: Testing and Deployment Prep (Backend complete, Frontend minimal)
 
-**Priority Tasks (In Progress):**
-1. **Priority 1 (Current):** Complete VisualizationViews URL support and view loading
-2. **Priority 2:** Integrate backend statistics in StatsPanel
-3. **Priority 3:** Expand frontend test coverage
+**Priority Tasks:**
+1. ✅ **Priority 1 (DONE):** Complete VisualizationViews URL support and view loading
+2. ✅ **Priority 2 (DONE):** Integrate backend statistics in StatsPanel
+3. **Priority 3 (Next):** Expand frontend test coverage
 4. **Priority 4:** Performance optimization (Phase 7.3)
 5. **Priority 5:** Production readiness (API proxy, audit logging, responsive design)
 

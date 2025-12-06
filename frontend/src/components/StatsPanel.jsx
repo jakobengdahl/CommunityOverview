@@ -1,11 +1,42 @@
-import { useState } from 'react';
+import { useState, useEffect } from 'react';
 import useGraphStore from '../store/graphStore';
+import { executeTool } from '../services/api';
 // import { DEMO_GRAPH_DATA } from '../services/demoData'; // REMOVED
 import './StatsPanel.css';
 
 function StatsPanel() {
   const { nodes, edges, selectedCommunities } = useGraphStore();
   const [isExpanded, setIsExpanded] = useState(false);
+  const [backendStats, setBackendStats] = useState(null);
+  const [isLoadingStats, setIsLoadingStats] = useState(false);
+  const [statsError, setStatsError] = useState(null);
+
+  // Fetch backend statistics when component mounts or communities change
+  useEffect(() => {
+    const fetchBackendStats = async () => {
+      setIsLoadingStats(true);
+      setStatsError(null);
+
+      try {
+        const args = selectedCommunities.length > 0
+          ? { communities: selectedCommunities }
+          : {};
+
+        const result = await executeTool('get_graph_stats', args);
+        setBackendStats(result);
+      } catch (error) {
+        console.error('Error fetching backend stats:', error);
+        setStatsError(error.message);
+      } finally {
+        setIsLoadingStats(false);
+      }
+    };
+
+    // Only fetch if panel is expanded or on first mount
+    if (isExpanded || backendStats === null) {
+      fetchBackendStats();
+    }
+  }, [selectedCommunities, isExpanded]);
 
   // Calculate statistics
   const calculateStats = () => {
@@ -36,7 +67,10 @@ function StatsPanel() {
       totalEdges: edges.length,
       nodesByType,
       nodesByCommunity,
-      totalInDatabase: 0 // Placeholder until backend stats integration
+      totalInDatabase: backendStats?.total_nodes || 0,
+      totalEdgesInDatabase: backendStats?.total_edges || 0,
+      backendNodesByType: backendStats?.nodes_by_type || {},
+      backendNodesByCommunity: backendStats?.nodes_by_community || {}
     };
   };
 
@@ -53,6 +87,14 @@ function StatsPanel() {
 
       {isExpanded && (
         <div className="stats-content">
+          {isLoadingStats && (
+            <div className="stats-loading">Laddar statistik...</div>
+          )}
+
+          {statsError && (
+            <div className="stats-error">Fel: {statsError}</div>
+          )}
+
           <div className="stats-section">
             <h4>Översikt</h4>
             <div className="stat-item">
@@ -61,39 +103,84 @@ function StatsPanel() {
             </div>
             <div className="stat-item">
               <span className="stat-label">Totalt i databasen:</span>
-              <span className="stat-value">{stats.totalInDatabase}</span>
+              <span className="stat-value">
+                {isLoadingStats ? '...' : stats.totalInDatabase}
+              </span>
             </div>
             <div className="stat-item">
-              <span className="stat-label">Kopplingar:</span>
+              <span className="stat-label">Visade kopplingar:</span>
               <span className="stat-value">{stats.totalEdges}</span>
+            </div>
+            <div className="stat-item">
+              <span className="stat-label">Totalt kopplingar:</span>
+              <span className="stat-value">
+                {isLoadingStats ? '...' : stats.totalEdgesInDatabase}
+              </span>
             </div>
           </div>
 
-          {Object.keys(stats.nodesByType).length > 0 && (
+          {(Object.keys(stats.nodesByType).length > 0 || Object.keys(stats.backendNodesByType).length > 0) && (
             <div className="stats-section">
               <h4>Noder per typ</h4>
-              {Object.entries(stats.nodesByType)
-                .sort((a, b) => b[1] - a[1])
-                .map(([type, count]) => (
-                  <div key={type} className="stat-item">
-                    <span className="stat-label">{type}:</span>
-                    <span className="stat-value">{count}</span>
-                  </div>
-                ))}
+              {Object.keys(stats.nodesByType).length > 0 ? (
+                Object.entries(stats.nodesByType)
+                  .sort((a, b) => b[1] - a[1])
+                  .map(([type, count]) => {
+                    const totalInDb = stats.backendNodesByType[type] || 0;
+                    return (
+                      <div key={type} className="stat-item">
+                        <span className="stat-label">{type}:</span>
+                        <span className="stat-value">
+                          {count}
+                          {totalInDb > 0 && totalInDb !== count && (
+                            <span className="stat-total"> / {totalInDb}</span>
+                          )}
+                        </span>
+                      </div>
+                    );
+                  })
+              ) : (
+                <div className="stat-item">
+                  <span className="stat-label">Inga noder laddade ännu</span>
+                </div>
+              )}
             </div>
           )}
 
-          {Object.keys(stats.nodesByCommunity).length > 0 && (
+          {(Object.keys(stats.nodesByCommunity).length > 0 || Object.keys(stats.backendNodesByCommunity).length > 0) && (
             <div className="stats-section">
               <h4>Noder per community</h4>
-              {Object.entries(stats.nodesByCommunity)
-                .sort((a, b) => b[1] - a[1])
-                .map(([community, count]) => (
-                  <div key={community} className="stat-item">
-                    <span className="stat-label">{community}:</span>
-                    <span className="stat-value">{count}</span>
-                  </div>
-                ))}
+              {Object.keys(stats.nodesByCommunity).length > 0 ? (
+                Object.entries(stats.nodesByCommunity)
+                  .sort((a, b) => b[1] - a[1])
+                  .map(([community, count]) => {
+                    const totalInDb = stats.backendNodesByCommunity[community] || 0;
+                    return (
+                      <div key={community} className="stat-item">
+                        <span className="stat-label">{community}:</span>
+                        <span className="stat-value">
+                          {count}
+                          {totalInDb > 0 && totalInDb !== count && (
+                            <span className="stat-total"> / {totalInDb}</span>
+                          )}
+                        </span>
+                      </div>
+                    );
+                  })
+              ) : backendStats && Object.keys(stats.backendNodesByCommunity).length > 0 ? (
+                Object.entries(stats.backendNodesByCommunity)
+                  .sort((a, b) => b[1] - a[1])
+                  .map(([community, count]) => (
+                    <div key={community} className="stat-item">
+                      <span className="stat-label">{community}:</span>
+                      <span className="stat-value">{count} i databasen</span>
+                    </div>
+                  ))
+              ) : (
+                <div className="stat-item">
+                  <span className="stat-label">Inga communities ännu</span>
+                </div>
+              )}
             </div>
           )}
         </div>
