@@ -547,5 +547,6 @@ if __name__ == "__main__":
 
     # Run as HTTP server on port 8000 (required for frontend)
     import uvicorn
-    # FastMCP stores the Starlette app in _app attribute
-    uvicorn.run(mcp._app, host="0.0.0.0", port=8000)
+    # Get the ASGI application from FastMCP using streamable HTTP transport
+    app = mcp.streamable_http_app()
+    uvicorn.run(app, host="0.0.0.0", port=8000)
