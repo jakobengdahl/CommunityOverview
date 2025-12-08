@@ -16,7 +16,7 @@ import SaveViewDialog from './SaveViewDialog';
 import ShapeRectangle from './ShapeRectangle';
 import ContextMenu from './ContextMenu';
 import { executeTool } from '../services/api';
-import { getLayoutedElements } from '../utils/graphLayout';
+import { getLayoutedElements, getCircularLayout } from '../utils/graphLayout';
 import { useMemoizedLayout } from '../hooks/useMemoizedLayout';
 import './VisualizationPanel.css';
 
@@ -109,12 +109,17 @@ function VisualizationPanel() {
       position: { x: 0, y: 0 }, // Will be set by layout algorithm
     }));
 
-    // Calculate positions using memoized dagre layout
-    if (nodesWithoutPosition.length > 0 && reactFlowEdges.length > 0) {
+    if (nodesWithoutPosition.length === 0) {
+      return nodesWithoutPosition;
+    }
+
+    // Calculate positions using memoized dagre layout if we have edges
+    if (reactFlowEdges.length > 0) {
       return getLayoutedElements(nodesWithoutPosition, reactFlowEdges, 'TB');
     }
 
-    return nodesWithoutPosition;
+    // Fallback to circular layout if no edges (isolated nodes)
+    return getCircularLayout(nodesWithoutPosition, 400, 300, 250);
   }, [nodesToRender, highlightedNodeIds, reactFlowEdges]);
 
   const [nodes, setNodes, onNodesChange] = useNodesState(reactFlowNodes);

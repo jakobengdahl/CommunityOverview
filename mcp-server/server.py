@@ -179,7 +179,7 @@ def search_graph(
         limit: Max number of results (default 50)
 
     Returns:
-        Dict with matching nodes
+        Dict with matching nodes and edges connecting them
     """
     # Convert node_types to NodeType enum
     type_filters = None
@@ -193,8 +193,18 @@ def search_graph(
         limit=limit
     )
 
+    # Get node IDs for edge filtering
+    result_node_ids = set(node.id for node in results)
+
+    # Find edges connecting these nodes
+    connecting_edges = [
+        edge for edge in graph.edges.values()
+        if edge.source in result_node_ids or edge.target in result_node_ids
+    ]
+
     return {
         "nodes": [node.model_dump() for node in results],
+        "edges": [edge.model_dump() for edge in connecting_edges],
         "total": len(results),
         "query": query,
         "filters": {
