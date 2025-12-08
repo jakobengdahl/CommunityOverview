@@ -336,7 +336,11 @@ function VisualizationPanel() {
       ) : (
         <>
           <StatsPanel />
-          <div ref={reactFlowWrapper} style={{ width: '100%', height: '100%', position: 'relative' }}>
+          <div
+            ref={reactFlowWrapper}
+            style={{ width: '100%', height: '100%', position: 'relative' }}
+            onContextMenu={(e) => e.preventDefault()}
+          >
             {/* Render shapes layer behind ReactFlow */}
             <div className="shapes-layer">
               {shapes.map(shape => (
