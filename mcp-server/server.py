@@ -544,4 +544,7 @@ if __name__ == "__main__":
     print("Starting Community Knowledge Graph MCP Server...")
     print(f"Loaded graph with {len(graph.nodes)} nodes and {len(graph.edges)} edges")
     print(SYSTEM_PROMPT)
-    mcp.run()
+
+    # Run as HTTP server on port 8000 (required for frontend)
+    import uvicorn
+    uvicorn.run(mcp.app, host="0.0.0.0", port=8000)
