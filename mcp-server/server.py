@@ -68,7 +68,16 @@ async def chat_endpoint(request: Request):
         processor = get_chat_processor()
         result = processor.process_message(messages, api_key=api_key)
 
-        return JSONResponse(result)
+        # Use custom JSON encoder to handle datetime objects
+        import json
+        from datetime import datetime
+
+        def json_serializer(obj):
+            if isinstance(obj, datetime):
+                return obj.isoformat()
+            raise TypeError(f"Object of type {type(obj)} is not JSON serializable")
+
+        return JSONResponse(json.loads(json.dumps(result, default=json_serializer)))
     except Exception as e:
         import traceback
         traceback.print_exc()
@@ -135,7 +144,16 @@ async def execute_tool_endpoint(request: Request):
         func = TOOLS_MAP[tool_name]
         result = func(**arguments)
 
-        return JSONResponse(result)
+        # Use custom JSON encoder to handle datetime objects
+        import json
+        from datetime import datetime
+
+        def json_serializer(obj):
+            if isinstance(obj, datetime):
+                return obj.isoformat()
+            raise TypeError(f"Object of type {type(obj)} is not JSON serializable")
+
+        return JSONResponse(json.loads(json.dumps(result, default=json_serializer)))
     except Exception as e:
         import traceback
         traceback.print_exc()
