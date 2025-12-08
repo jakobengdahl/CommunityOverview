@@ -479,7 +479,14 @@ Always be helpful, transparent, and data-driven in your responses.
             messages=messages
         )
 
-        final_text = final_response.content[0].text
+        # Check if Claude wants to use another tool (tool chaining)
+        if final_response.stop_reason == "tool_use":
+            # Claude wants to use another tool - handle it recursively
+            return self._handle_tool_use(messages, final_response, client)
+
+        # Extract text from response
+        text_block = next((block for block in final_response.content if hasattr(block, 'text')), None)
+        final_text = text_block.text if text_block else ""
 
         return {
             "content": final_text,
