@@ -1,7 +1,7 @@
 import { useEffect, useRef } from 'react';
 import './ContextMenu.css';
 
-function ContextMenu({ x, y, onClose }) {
+function ContextMenu({ x, y, onClose, onAddGroup }) {
   const menuRef = useRef(null);
 
   useEffect(() => {
@@ -33,7 +33,16 @@ function ContextMenu({ x, y, onClose }) {
       style={{ left: x, top: y }}
     >
       <div className="context-menu-header">Add Element</div>
-      {/* Group nodes will be added here during React Flow subflow implementation */}
+      <button
+        className="context-menu-item"
+        onClick={() => {
+          onAddGroup();
+          onClose();
+        }}
+      >
+        <span className="context-menu-icon">📁</span>
+        Group
+      </button>
     </div>
   );
 }

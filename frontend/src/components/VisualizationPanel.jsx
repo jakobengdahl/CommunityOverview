@@ -11,6 +11,7 @@ import ReactFlow, {
 import 'reactflow/dist/style.css';
 import useGraphStore from '../store/graphStore';
 import CustomNode from './CustomNode';
+import GroupNode from './GroupNode';
 import StatsPanel from './StatsPanel';
 import SaveViewDialog from './SaveViewDialog';
 import ContextMenu from './ContextMenu';
@@ -190,10 +191,77 @@ function VisualizationPanel() {
     []
   );
 
-  const onNodeDragStop = useCallback((event, node) => {
+  const onNodeDragStop = useCallback((event, draggedNode) => {
     // Sync only the dragged node position to store
-    updateNodePositions([{ id: node.id, position: node.position }]);
-  }, [updateNodePositions]);
+    updateNodePositions([{ id: draggedNode.id, position: draggedNode.position }]);
+
+    // Check if the node was dropped inside a group
+    if (draggedNode.type === 'group') return; // Don't process groups themselves
+
+    const groupNodes = nodes.filter(n => n.type === 'group');
+    let droppedInGroup = null;
+
+    // Check each group to see if the dragged node is inside it
+    for (const groupNode of groupNodes) {
+      const groupBounds = {
+        left: groupNode.position.x,
+        right: groupNode.position.x + (groupNode.style?.width || 300),
+        top: groupNode.position.y,
+        bottom: groupNode.position.y + (groupNode.style?.height || 200),
+      };
+
+      const nodeBounds = {
+        x: draggedNode.position.x,
+        y: draggedNode.position.y,
+      };
+
+      // Check if node center is within group bounds
+      if (
+        nodeBounds.x >= groupBounds.left &&
+        nodeBounds.x <= groupBounds.right &&
+        nodeBounds.y >= groupBounds.top &&
+        nodeBounds.y <= groupBounds.bottom
+      ) {
+        droppedInGroup = groupNode.id;
+        break;
+      }
+    }
+
+    // Update parentId if needed
+    setNodes((nds) =>
+      nds.map((n) => {
+        if (n.id === draggedNode.id) {
+          // Convert absolute position to relative if dropping into group
+          if (droppedInGroup && n.parentId !== droppedInGroup) {
+            const groupNode = nodes.find(gn => gn.id === droppedInGroup);
+            return {
+              ...n,
+              parentId: droppedInGroup,
+              position: {
+                x: n.position.x - groupNode.position.x,
+                y: n.position.y - groupNode.position.y,
+              },
+              extent: 'parent', // Keep node within parent bounds
+            };
+          }
+          // Remove from group if dragged outside
+          if (!droppedInGroup && n.parentId) {
+            const oldParent = nodes.find(gn => gn.id === n.parentId);
+            return {
+              ...n,
+              parentId: undefined,
+              position: {
+                x: n.position.x + (oldParent?.position.x || 0),
+                y: n.position.y + (oldParent?.position.y || 0),
+              },
+              extent: undefined,
+            };
+          }
+        }
+        return n;
+      })
+    );
+  }, [updateNodePositions, nodes, setNodes]);
 
   const handleLoadMore = useCallback(() => {
     setLoadedNodeCount(prev => Math.min(prev + 100, visibleNodes.length));
@@ -248,9 +316,39 @@ function VisualizationPanel() {
     setTimeout(() => setNotification(null), 5000);
   };
 
+  const handleAddGroup = useCallback(() => {
+    if (!reactFlowInstance || !contextMenu) return;
+
+    // Convert screen coordinates to flow coordinates
+    const position = reactFlowInstance.screenToFlowPosition({
+      x: contextMenu.x,
+      y: contextMenu.y,
+    });
+
+    // Create a new group node
+    const newGroupNode = {
+      id: `group-${Date.now()}`,
+      type: 'group',
+      position,
+      data: {
+        label: 'New Group',
+        description: 'Drag nodes here to group them',
+        color: '#646cff'
+      },
+      style: {
+        width: 300,
+        height: 200,
+      },
+    };
+
+    setNodes((nds) => [...nds, newGroupNode]);
+    setContextMenu(null);
+  }, [reactFlowInstance, contextMenu, setNodes]);
+
   // Custom node types
   const nodeTypes = useMemo(() => ({
     custom: CustomNode,
+    group: GroupNode,
   }), []);
 
   return (
@@ -343,6 +441,7 @@ function VisualizationPanel() {
               x={contextMenu.x}
               y={contextMenu.y}
               onClose={() => setContextMenu(null)}
+              onAddGroup={handleAddGroup}
             />
           )}
         </>
