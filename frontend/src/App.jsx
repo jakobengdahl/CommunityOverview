@@ -1,4 +1,4 @@
-import { useState, useEffect } from 'react'
+import { useState, useEffect, useRef } from 'react'
 import './App.css'
 import Header from './components/Header'
 import ChatPanel from './components/ChatPanel'
@@ -10,9 +10,14 @@ import { loadVisualizationView, executeTool } from './services/api'
 function App() {
   const { selectedCommunities, updateVisualization, loadVisualizationView: loadViewToStore, addChatMessage, setApiKey } = useGraphStore();
   const [viewLoadError, setViewLoadError] = useState(null);
+  const hasLoadedFromUrl = useRef(false);
 
   // Load communities and view from URL query on initial load
   useEffect(() => {
+    // Prevent duplicate execution in React Strict Mode
+    if (hasLoadedFromUrl.current) return;
+    hasLoadedFromUrl.current = true;
+
     const params = new URLSearchParams(window.location.search);
     const communitiesParam = params.getAll('community');
     const viewParam = params.get('view');
