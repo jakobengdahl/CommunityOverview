@@ -26,6 +26,7 @@ const useGraphStore = create((set, get) => ({
   edges: [],
   highlightedNodeIds: [],
   hiddenNodeIds: [], // Set of IDs for hidden nodes
+  clearGroupsFlag: false, // Signal to clear groups in visualization
 
   // Update graph visualization
   updateVisualization: (nodes, edges, highlightNodeIds = []) => {
@@ -67,22 +68,29 @@ const useGraphStore = create((set, get) => ({
     }
   },
 
-  // Add nodes to existing graph
-  addNodesToVisualization: (newNodes, newEdges) => {
-    const currentNodes = get().nodes;
-    const currentEdges = get().edges;
+  // Add nodes to existing graph (replaces visualization to show only new nodes + connections)
+  addNodesToVisualization: (newNodes, newEdges = []) => {
+    // Get IDs of all new nodes
+    const newNodeIds = new Set(newNodes.map(n => n.id));
 
-    // Filter out duplicates based on ID
-    const existingNodeIds = new Set(currentNodes.map(n => n.id));
-    const existingEdgeIds = new Set(currentEdges.map(e => e.id));
+    // Filter edges to only include those connected to new nodes
+    const relevantEdges = newEdges.filter(e =>
+      newNodeIds.has(e.source) || newNodeIds.has(e.target)
+    );
 
-    const uniqueNewNodes = newNodes.filter(n => !existingNodeIds.has(n.id));
-    const uniqueNewEdges = newEdges.filter(e => !existingEdgeIds.has(e.id));
-
+    // Replace visualization with only new nodes and their connections
     set({
-      nodes: [...currentNodes, ...uniqueNewNodes],
-      edges: [...currentEdges, ...uniqueNewEdges]
+      nodes: newNodes,
+      edges: relevantEdges,
+      highlightedNodeIds: Array.from(newNodeIds),
+      hiddenNodeIds: [], // Clear hidden nodes
+      clearGroupsFlag: true, // Signal to clear groups
     });
+
+    // Reset flag after a short delay
+    setTimeout(() => {
+      set({ clearGroupsFlag: false });
+    }, 100);
   },
 
   // Highlight specific nodes

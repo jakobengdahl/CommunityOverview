@@ -45,6 +45,29 @@ function Header() {
     setTempApiKey('');
   };
 
+  const handleExportGraph = () => {
+    const { nodes, edges } = useGraphStore.getState();
+
+    const exportData = {
+      version: '1.0',
+      exportDate: new Date().toISOString(),
+      nodes: nodes,
+      edges: edges,
+    };
+
+    const dataStr = JSON.stringify(exportData, null, 2);
+    const dataBlob = new Blob([dataStr], { type: 'application/json' });
+    const url = URL.createObjectURL(dataBlob);
+
+    const link = document.createElement('a');
+    link.href = url;
+    link.download = `knowledge-graph-${new Date().toISOString().split('T')[0]}.json`;
+    document.body.appendChild(link);
+    link.click();
+    document.body.removeChild(link);
+    URL.revokeObjectURL(url);
+  };
+
   return (
     <header className="app-header">
       <div className="header-left">
@@ -81,6 +104,13 @@ function Header() {
       </div>
 
       <div className="header-right">
+        <button
+          className="export-button"
+          onClick={handleExportGraph}
+          title="Export Graph"
+        >
+          💾
+        </button>
         <button
           className="settings-button"
           onClick={() => setIsSettingsOpen(!isSettingsOpen)}

@@ -33,6 +33,24 @@
   text-overflow: ellipsis;
 }
 
+.group-node-label-input {
+  flex: 1;
+  background: rgba(255, 255, 255, 0.2);
+  border: 1px solid rgba(255, 255, 255, 0.4);
+  border-radius: 4px;
+  color: white;
+  padding: 2px 6px;
+  font-size: 14px;
+  font-weight: 600;
+  font-family: inherit;
+}
+
+.group-node-label-input:focus {
+  outline: none;
+  background: rgba(255, 255, 255, 0.3);
+  border-color: rgba(255, 255, 255, 0.6);
+}
+
 .group-node-description {
   padding: 8px 12px;
   font-size: 12px;
@@ -50,16 +68,21 @@
 }
 
 /* Ensure group nodes appear behind regular nodes but above edges */
-.react-flow__node[data-type="group"] {
-  z-index: 0 !important;
+.react-flow__node-group {
+  z-index: -1 !important;
 }
 
-/* Regular nodes stay above groups */
-.react-flow__node:not([data-type="group"]) {
+/* Regular nodes (custom type) stay above groups */
+.react-flow__node-custom {
   z-index: 1 !important;
 }
 
 /* Selected nodes get highest priority */
 .react-flow__node.selected {
   z-index: 10 !important;
+}
+
+/* When a group is selected, keep it below regular nodes but show selection */
+.react-flow__node-group.selected {
+  z-index: 0 !important;
 }

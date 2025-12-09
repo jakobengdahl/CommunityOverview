@@ -15,6 +15,8 @@ import GroupNode from './GroupNode';
 import StatsPanel from './StatsPanel';
 import SaveViewDialog from './SaveViewDialog';
 import ContextMenu from './ContextMenu';
+import NodeContextMenu from './NodeContextMenu';
+import EditNodeDialog from './EditNodeDialog';
 import { executeTool } from '../services/api';
 import { getLayoutedElements, getCircularLayout } from '../utils/graphLayout';
 import { useMemoizedLayout } from '../hooks/useMemoizedLayout';
@@ -44,11 +46,14 @@ function VisualizationPanel() {
     hiddenNodeIds,
     toggleNodeVisibility,
     addNodesToVisualization,
+    clearGroupsFlag,
   } = useGraphStore();
 
   const [isSaveDialogOpen, setIsSaveDialogOpen] = useState(false);
   const [loadedNodeCount, setLoadedNodeCount] = useState(INITIAL_LOAD_COUNT);
   const [contextMenu, setContextMenu] = useState(null);
+  const [nodeContextMenu, setNodeContextMenu] = useState(null);
+  const [editingNode, setEditingNode] = useState(null);
   const [reactFlowInstance, setReactFlowInstance] = useState(null);
   const [notification, setNotification] = useState(null);
   const reactFlowWrapper = useRef(null);
@@ -137,6 +142,13 @@ function VisualizationPanel() {
 
   const { updateNodePositions } = useGraphStore();
 
+  // Clear groups when flag is set (e.g., when loading new view or adding nodes)
+  useEffect(() => {
+    if (clearGroupsFlag) {
+      setNodes((nds) => nds.filter(n => n.type !== 'group' && !n.id.startsWith('group-')));
+    }
+  }, [clearGroupsFlag, setNodes]);
+
   // Update nodes when reactFlowNodes changes (for layout recalculation)
   useEffect(() => {
     // Only update if IDs changed or we have a massive shift, to avoid resetting dragged positions
@@ -144,7 +156,8 @@ function VisualizationPanel() {
     // Ideally we merge positions and preserve manually created nodes (like groups).
     setNodes((nds) => {
         // Preserve manually created nodes that aren't from backend (e.g., groups)
-        const manualNodes = nds.filter(n => n.type === 'group' || n.id.startsWith('group-'));
+        // Unless clearGroupsFlag is set
+        const manualNodes = clearGroupsFlag ? [] : nds.filter(n => n.type === 'group' || n.id.startsWith('group-'));
 
         const newNodes = reactFlowNodes.map(n => {
             const existing = nds.find(curr => curr.id === n.id);
@@ -164,7 +177,7 @@ function VisualizationPanel() {
         // Combine backend nodes with manually created nodes
         return [...newNodes, ...manualNodes];
     });
-  }, [reactFlowNodes, setNodes]);
+  }, [reactFlowNodes, clearGroupsFlag, setNodes]);
 
   // Update edges when reactFlowEdges changes
   useEffect(() => {
@@ -179,11 +192,93 @@ function VisualizationPanel() {
   const onNodeContextMenu = useCallback(
     (event, node) => {
       event.preventDefault();
-      // Hide the node on right click
-      toggleNodeVisibility(node.id);
+      event.stopPropagation();
+
+      setNodeContextMenu({
+        x: event.clientX,
+        y: event.clientY,
+        node: node,
+      });
     },
-    [toggleNodeVisibility]
+    []
   );
+
+  const handleEditNode = useCallback((node) => {
+    setEditingNode(node);
+  }, []);
+
+  const handleHideNode = useCallback((nodeId) => {
+    toggleNodeVisibility(nodeId);
+  }, [toggleNodeVisibility]);
+
+  const handleDeleteNode = useCallback(async (nodeId) => {
+    // TODO: Implement delete node from graph
+    console.log('Delete node:', nodeId);
+    // For now, just hide it
+    toggleNodeVisibility(nodeId);
+  }, [toggleNodeVisibility]);
+
+  const handleExpandNode = useCallback(async (nodeId) => {
+    // Fetch related nodes and add them to visualization
+    try {
+      const result = await executeTool('get_related_nodes', {
+        node_id: nodeId,
+        depth: 1
+      });
+
+      if (result.nodes && result.nodes.length > 0) {
+        addNodesToVisualization(result.nodes);
+      }
+      if (result.edges && result.edges.length > 0) {
+        // Edges will be added automatically when nodes are in store
+      }
+
+      setNotification({
+        type: 'success',
+        message: `Expanderade nod med ${result.nodes?.length || 0} relaterade noder`
+      });
+      setTimeout(() => setNotification(null), 3000);
+    } catch (error) {
+      console.error('Error expanding node:', error);
+      setNotification({
+        type: 'error',
+        message: 'Kunde inte expandera nod'
+      });
+      setTimeout(() => setNotification(null), 3000);
+    }
+  }, [addNodesToVisualization]);
+
+  const handleShowInNewView = useCallback(async (nodeId) => {
+    // Clear current view and show only this node + its connections
+    try {
+      const result = await executeTool('get_related_nodes', {
+        node_id: nodeId,
+        depth: 1
+      });
+
+      // Clear hidden nodes to show everything
+      const { clearHiddenNodes, setNodes } = useGraphStore.getState();
+      clearHiddenNodes();
+
+      // Set only the target node and its related nodes
+      if (result.nodes && result.nodes.length > 0) {
+        setNodes(result.nodes);
+      }
+
+      setNotification({
+        type: 'success',
+        message: 'Visar nod i ny visualisering'
+      });
+      setTimeout(() => setNotification(null), 3000);
+    } catch (error) {
+      console.error('Error showing in new view:', error);
+      setNotification({
+        type: 'error',
+        message: 'Kunde inte visa i ny visualisering'
+      });
+      setTimeout(() => setNotification(null), 3000);
+    }
+  }, []);
 
   const onPaneContextMenu = useCallback(
     (event) => {
@@ -446,13 +541,41 @@ function VisualizationPanel() {
             </ReactFlow>
           </div>
 
-          {/* Context menu */}
+          {/* Pane context menu (for adding groups) */}
           {contextMenu && (
             <ContextMenu
               x={contextMenu.x}
               y={contextMenu.y}
               onClose={() => setContextMenu(null)}
               onAddGroup={handleAddGroup}
+            />
+          )}
+
+          {/* Node context menu */}
+          {nodeContextMenu && (
+            <NodeContextMenu
+              x={nodeContextMenu.x}
+              y={nodeContextMenu.y}
+              node={nodeContextMenu.node}
+              onClose={() => setNodeContextMenu(null)}
+              onEdit={handleEditNode}
+              onHide={handleHideNode}
+              onDelete={handleDeleteNode}
+              onExpand={handleExpandNode}
+              onShowInNewView={handleShowInNewView}
+            />
+          )}
+
+          {/* Edit node dialog */}
+          {editingNode && (
+            <EditNodeDialog
+              node={editingNode}
+              onClose={() => setEditingNode(null)}
+              onSave={(updatedNode) => {
+                // TODO: Save updated node to backend
+                console.log('Save node:', updatedNode);
+                setEditingNode(null);
+              }}
             />
           )}
         </>
