@@ -1,7 +1,7 @@
 import { useEffect, useRef, useState } from 'react';
 import './ContextMenu.css';
 
-function GroupContextMenu({ x, y, onClose, onChangeColor }) {
+function GroupContextMenu({ x, y, onClose, onChangeColor, onDelete }) {
   const menuRef = useRef(null);
   const [showColorPicker, setShowColorPicker] = useState(false);
 
@@ -49,8 +49,9 @@ function GroupContextMenu({ x, y, onClose, onChangeColor }) {
       className="context-menu"
       style={{ left: x, top: y }}
     >
-      <div className="context-menu-header">Välj Färg</div>
+      <div className="context-menu-header">Gruppinställningar</div>
 
+      <div className="context-menu-section-label">Välj Färg</div>
       <div className="color-picker-grid">
         {colors.map((color) => (
           <button
@@ -62,6 +63,24 @@ function GroupContextMenu({ x, y, onClose, onChangeColor }) {
           />
         ))}
       </div>
+
+      {onDelete && (
+        <>
+          <div className="context-menu-separator"></div>
+          <button
+            className="context-menu-item context-menu-item-danger"
+            onClick={() => {
+              if (window.confirm('Är du säker på att du vill ta bort denna grupp?')) {
+                onDelete();
+                onClose();
+              }
+            }}
+          >
+            <span className="context-menu-icon">🗑️</span>
+            Ta bort grupp
+          </button>
+        </>
+      )}
     </div>
   );
 }

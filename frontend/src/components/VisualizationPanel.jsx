@@ -571,10 +571,48 @@ function VisualizationPanel() {
             <EditNodeDialog
               node={editingNode}
               onClose={() => setEditingNode(null)}
-              onSave={(updatedNode) => {
-                // TODO: Save updated node to backend
-                console.log('Save node:', updatedNode);
-                setEditingNode(null);
+              onSave={async (updatedNode) => {
+                try {
+                  // Call backend to update node
+                  await executeTool('update_node', {
+                    node_id: updatedNode.id,
+                    updates: {
+                      name: updatedNode.data.name,
+                      type: updatedNode.data.type,
+                      description: updatedNode.data.description,
+                      summary: updatedNode.data.summary,
+                    }
+                  });
+
+                  // Update local state
+                  const { nodes, updateVisualization } = useGraphStore.getState();
+                  const updatedNodes = nodes.map(n =>
+                    n.id === updatedNode.id
+                      ? {
+                          ...n,
+                          name: updatedNode.data.name,
+                          type: updatedNode.data.type,
+                          description: updatedNode.data.description,
+                          summary: updatedNode.data.summary,
+                        }
+                      : n
+                  );
+                  updateVisualization(updatedNodes, useGraphStore.getState().edges);
+
+                  setNotification({
+                    type: 'success',
+                    message: 'Nod uppdaterad'
+                  });
+                  setTimeout(() => setNotification(null), 3000);
+                  setEditingNode(null);
+                } catch (error) {
+                  console.error('Error updating node:', error);
+                  setNotification({
+                    type: 'error',
+                    message: 'Kunde inte uppdatera nod'
+                  });
+                  setTimeout(() => setNotification(null), 3000);
+                }
               }}
             />
           )}

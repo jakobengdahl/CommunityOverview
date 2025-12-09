@@ -89,6 +89,34 @@ function GroupNode({ id, data, selected }) {
     );
   };
 
+  const handleDeleteGroup = () => {
+    // Remove this group node and unparent any child nodes
+    setNodes((nds) => {
+      // Find children of this group
+      const children = nds.filter(n => n.parentId === id);
+
+      // Calculate absolute positions for children
+      const groupNode = nds.find(n => n.id === id);
+      const updatedChildren = children.map(child => ({
+        ...child,
+        parentId: undefined,
+        extent: undefined,
+        position: {
+          x: child.position.x + (groupNode?.position.x || 0),
+          y: child.position.y + (groupNode?.position.y || 0),
+        },
+      }));
+
+      // Remove group and update children
+      return nds
+        .filter(n => n.id !== id)
+        .map(n => {
+          const updated = updatedChildren.find(c => c.id === n.id);
+          return updated || n;
+        });
+    });
+  };
+
   return (
     <>
       <NodeResizer
@@ -146,6 +174,7 @@ function GroupNode({ id, data, selected }) {
           y={contextMenu.y}
           onClose={() => setContextMenu(null)}
           onChangeColor={handleChangeColor}
+          onDelete={handleDeleteGroup}
         />
       )}
     </>
