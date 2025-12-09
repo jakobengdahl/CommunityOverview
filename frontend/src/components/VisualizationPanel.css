@@ -1,3 +1,26 @@
+/* Main visualization panel container */
+.visualization-panel {
+  flex: 1;
+  height: 100%;
+  position: relative;
+  background-color: #1a1a1a;
+}
+
+.empty-graph-message {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  height: 100%;
+  padding: 2rem;
+  text-align: center;
+  color: #888;
+}
+
+.empty-graph-message h3 {
+  margin-bottom: 0.5rem;
+  color: #646cff;
+}
 
 .view-controls {
   position: absolute;
