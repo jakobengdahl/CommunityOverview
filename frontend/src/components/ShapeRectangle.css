@@ -82,17 +82,17 @@
   position: relative;
 }
 
-.color-swatch {
-  width: 28px;
-  height: 28px;
-  border-radius: 4px;
-  cursor: pointer;
-  transition: transform 0.2s;
-}
 
-.color-swatch:hover {
-  transform: scale(1.1);
-}
+
+
+
+
+
+
+
+
+
+
 
 .color-picker-palette {
   position: absolute;
@@ -216,4 +216,24 @@
   bottom: -5px;
   right: -5px;
   cursor: nwse-resize;
+}
+.color-swatch {
+  width: 28px;
+  height: 28px;
+  border-radius: 4px;
+  cursor: pointer;
+  transition: transform 0.2s;
+  border: 2px solid white;
+  box-shadow: 0 2px 4px rgba(0, 0, 0, 0.2);
+}
+
+.color-swatch-gradient {
+  background: linear-gradient(135deg,
+    #EF4444 0%, #F97316 10%, #F59E0B 20%, #FBBF24 30%, #84CC16 40%,
+    #10B981 50%, #14B8A6 60%, #3B82F6 70%, #8B5CF6 80%, #EC4899 90%, #EF4444 100%);
+}
+
+.color-swatch:hover {
+  transform: scale(1.15);
+  box-shadow: 0 4px 8px rgba(0, 0, 0, 0.3);
 }

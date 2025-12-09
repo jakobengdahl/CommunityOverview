@@ -53,6 +53,7 @@ function VisualizationPanel() {
   const [loadedNodeCount, setLoadedNodeCount] = useState(INITIAL_LOAD_COUNT);
   const [contextMenu, setContextMenu] = useState(null);
   const [reactFlowInstance, setReactFlowInstance] = useState(null);
+  const [notification, setNotification] = useState(null);
   const reactFlowWrapper = useRef(null);
 
   // Filter out hidden nodes and their edges
@@ -87,9 +88,21 @@ function VisualizationPanel() {
       source: edge.source,
       target: edge.target,
       label: edge.type,
-      type: 'smoothstep',
+      type: 'default', // Use default bezier edges for better routing
       animated: false,
-      style: { stroke: '#666' },
+      style: {
+        stroke: '#666',
+        strokeWidth: 2
+      },
+      labelStyle: {
+        fill: '#888',
+        fontSize: 10,
+        fontWeight: 500
+      },
+      labelBgStyle: {
+        fill: '#1a1a1a',
+        fillOpacity: 0.8
+      }
     }));
   }, [visibleEdges]);
 
@@ -285,7 +298,15 @@ function VisualizationPanel() {
       edges: []
     });
 
-    alert(`View '${name}' saved successfully! Share this view with: ?view=${encodeURIComponent(name)}`);
+    // Show success notification
+    setNotification({
+      type: 'success',
+      message: `View '${name}' saved successfully!`,
+      shareUrl: `?view=${encodeURIComponent(name)}`
+    });
+
+    // Auto-hide after 5 seconds
+    setTimeout(() => setNotification(null), 5000);
   };
 
   // Custom node types
@@ -400,6 +421,31 @@ function VisualizationPanel() {
             />
           )}
         </>
+      )}
+
+      {/* Notification toast */}
+      {notification && (
+        <div className={`notification notification-${notification.type}`}>
+          <div className="notification-content">
+            <span className="notification-icon">
+              {notification.type === 'success' ? '✓' : 'ℹ'}
+            </span>
+            <div className="notification-message">
+              <strong>{notification.message}</strong>
+              {notification.shareUrl && (
+                <div className="notification-share">
+                  Share: <code>{notification.shareUrl}</code>
+                </div>
+              )}
+            </div>
+            <button
+              className="notification-close"
+              onClick={() => setNotification(null)}
+            >
+              ×
+            </button>
+          </div>
+        </div>
       )}
     </div>
   );

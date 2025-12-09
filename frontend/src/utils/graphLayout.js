@@ -17,13 +17,16 @@ export function getLayoutedElements(nodes, edges, direction = 'TB') {
   const dagreGraph = new dagre.graphlib.Graph();
   dagreGraph.setDefaultEdgeLabel(() => ({}));
 
-  // Configure the graph
+  // Configure the graph with improved spacing to prevent edge overlaps
   dagreGraph.setGraph({
     rankdir: direction,
-    nodesep: 80,  // Horizontal spacing between nodes
-    ranksep: 120, // Vertical spacing between ranks
+    nodesep: 150,  // Increased horizontal spacing between nodes
+    ranksep: 200,  // Increased vertical spacing between ranks
+    edgesep: 50,   // Space to leave between edges
+    ranker: 'tight-tree', // Use tight-tree ranking for better edge distribution
     marginx: 50,
-    marginy: 50
+    marginy: 50,
+    acyclicer: 'greedy' // Better handling of cycles
   });
 
   // Add nodes to dagre graph

@@ -4,6 +4,7 @@
   height: 100%;
   position: relative;
   background-color: #1a1a1a;
+  overflow: hidden; /* Keep shapes within panel */
 }
 
 .empty-graph-message {
@@ -108,15 +109,114 @@
   width: 100%;
   height: 100%;
   pointer-events: none;
+  z-index: 0; /* Behind React Flow nodes (which are z-index: 3 by default) */
+}
+
+/* Ensure ReactFlow is above shapes */
+.react-flow {
+  position: relative;
   z-index: 1;
 }
 
-/* Override ReactFlow z-index to be above shapes */
-.react-flow {
-  z-index: 2;
-}
-
-/* But allow shapes to receive pointer events for their own elements */
+/* Allow shapes to receive pointer events for their own elements */
 .shapes-layer > * {
   pointer-events: auto;
+}
+
+/* Notification toast */
+.notification {
+  position: absolute;
+  top: 20px;
+  right: 20px;
+  background: white;
+  border-radius: 8px;
+  box-shadow: 0 4px 12px rgba(0, 0, 0, 0.3);
+  z-index: 1000;
+  animation: slideInRight 0.3s ease-out;
+  max-width: 400px;
+}
+
+@keyframes slideInRight {
+  from {
+    transform: translateX(100%);
+    opacity: 0;
+  }
+  to {
+    transform: translateX(0);
+    opacity: 1;
+  }
+}
+
+.notification-success {
+  border-left: 4px solid #10B981;
+}
+
+.notification-info {
+  border-left: 4px solid #3B82F6;
+}
+
+.notification-content {
+  display: flex;
+  align-items: flex-start;
+  gap: 12px;
+  padding: 16px;
+}
+
+.notification-icon {
+  font-size: 20px;
+  font-weight: bold;
+  flex-shrink: 0;
+}
+
+.notification-success .notification-icon {
+  color: #10B981;
+}
+
+.notification-info .notification-icon {
+  color: #3B82F6;
+}
+
+.notification-message {
+  flex: 1;
+  font-size: 14px;
+  color: #1a1a1a;
+}
+
+.notification-message strong {
+  display: block;
+  margin-bottom: 4px;
+}
+
+.notification-share {
+  margin-top: 8px;
+  font-size: 12px;
+  color: #666;
+}
+
+.notification-share code {
+  background: #f0f0f0;
+  padding: 2px 6px;
+  border-radius: 3px;
+  font-family: monospace;
+  color: #646cff;
+}
+
+.notification-close {
+  background: none;
+  border: none;
+  font-size: 24px;
+  color: #999;
+  cursor: pointer;
+  padding: 0;
+  width: 24px;
+  height: 24px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  flex-shrink: 0;
+  transition: color 0.2s;
+}
+
+.notification-close:hover {
+  color: #333;
 }

@@ -241,11 +241,7 @@ function ShapeRectangle({ shape, reactFlowInstance, reactFlowWrapper }) {
           {/* Color picker button */}
           <div className="color-picker-container">
             <button
-              className="color-swatch"
-              style={{
-                backgroundColor: shape.color || '#3B82F6',
-                border: '2px solid white'
-              }}
+              className="color-swatch color-swatch-gradient"
               onClick={() => setShowColorPicker(!showColorPicker)}
               title="Change color"
             />
