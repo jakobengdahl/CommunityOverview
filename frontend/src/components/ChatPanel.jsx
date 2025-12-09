@@ -66,6 +66,20 @@ function ChatPanel() {
       // Call Backend API
       const response = await sendMessageToBackend(conversationMessages);
 
+      console.log('[ChatPanel] ========== BACKEND RESPONSE ==========');
+      console.log('[ChatPanel] Full response:', JSON.stringify(response, null, 2));
+      console.log('[ChatPanel] Response keys:', Object.keys(response));
+      console.log('[ChatPanel] toolResult exists:', !!response.toolResult);
+
+      if (response.toolResult) {
+        console.log('[ChatPanel] toolResult keys:', Object.keys(response.toolResult));
+        console.log('[ChatPanel] toolResult.nodes exists:', !!response.toolResult.nodes);
+        console.log('[ChatPanel] toolResult.nodes length:', response.toolResult.nodes?.length);
+        console.log('[ChatPanel] toolResult.edges exists:', !!response.toolResult.edges);
+        console.log('[ChatPanel] toolResult.edges length:', response.toolResult.edges?.length);
+      }
+      console.log('[ChatPanel] ==========================================');
+
       // Handle tool results from response
       const toolResult = response.toolResult;
 
@@ -136,8 +150,17 @@ function ChatPanel() {
 
         // 3. Handle standard updates
         else if (toolResult.nodes && toolResult.nodes.length > 0) {
+           console.log('[ChatPanel] Calling updateVisualization with:');
+           console.log('[ChatPanel]   - Nodes count:', toolResult.nodes.length);
+           console.log('[ChatPanel]   - Edges count:', toolResult.edges?.length || 0);
+           console.log('[ChatPanel]   - First node:', toolResult.nodes[0]);
            const edges = toolResult.edges || [];
            updateVisualization(toolResult.nodes, edges);
+           console.log('[ChatPanel] updateVisualization called successfully');
+        } else {
+           console.log('[ChatPanel] NOT calling updateVisualization because:');
+           console.log('[ChatPanel]   - toolResult.nodes exists:', !!toolResult.nodes);
+           console.log('[ChatPanel]   - toolResult.nodes.length:', toolResult.nodes?.length);
         }
       }
 

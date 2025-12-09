@@ -29,11 +29,20 @@ const useGraphStore = create((set, get) => ({
 
   // Update graph visualization
   updateVisualization: (nodes, edges, highlightNodeIds = []) => {
+    console.log('[GraphStore] updateVisualization called with:');
+    console.log('[GraphStore]   - Nodes:', nodes.length, 'nodes');
+    console.log('[GraphStore]   - Edges:', edges.length, 'edges');
+    console.log('[GraphStore]   - Highlighted:', highlightNodeIds.length, 'nodes');
+    console.log('[GraphStore]   - First node sample:', nodes[0]);
+    console.log('[GraphStore]   - First edge sample:', edges[0]);
+
     set({
       nodes,
       edges,
       highlightedNodeIds: highlightNodeIds
     });
+
+    console.log('[GraphStore] State updated successfully');
   },
 
   // Update node positions (from React Flow)

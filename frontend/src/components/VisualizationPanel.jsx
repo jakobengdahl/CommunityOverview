@@ -166,44 +166,20 @@ function VisualizationPanel() {
 
   const onPaneContextMenu = useCallback(
     (event) => {
+      console.log('[VisualizationPanel] onPaneContextMenu triggered');
+      // Prevent default browser menu
       event.preventDefault();
       event.stopPropagation();
+
       setContextMenu({
         x: event.clientX,
         y: event.clientY,
       });
+
+      console.log('[VisualizationPanel] Context menu should show at:', event.clientX, event.clientY);
     },
     []
   );
-
-  // Prevent browser context menu and handle it ourselves
-  useEffect(() => {
-    const wrapper = reactFlowWrapper.current;
-    if (!wrapper) return;
-
-    const handleContextMenu = (e) => {
-      e.preventDefault();
-      e.stopPropagation();
-
-      // Only show context menu if clicking on the pane (not on a node)
-      const target = e.target;
-      const isNode = target.closest('.react-flow__node');
-
-      if (!isNode) {
-        setContextMenu({
-          x: e.clientX,
-          y: e.clientY,
-        });
-      }
-
-      return false;
-    };
-
-    wrapper.addEventListener('contextmenu', handleContextMenu, true);
-    return () => {
-      wrapper.removeEventListener('contextmenu', handleContextMenu, true);
-    };
-  }, []);
 
   const handleAddRectangle = useCallback(() => {
     if (!reactFlowInstance || !contextMenu || !reactFlowWrapper.current) return;
@@ -369,7 +345,6 @@ function VisualizationPanel() {
           <div
             ref={reactFlowWrapper}
             style={{ width: '100%', height: '100%', position: 'relative' }}
-            onContextMenu={(e) => e.preventDefault()}
           >
             {/* Render shapes layer behind ReactFlow */}
             <div className="shapes-layer">
