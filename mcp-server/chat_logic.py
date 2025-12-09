@@ -395,7 +395,13 @@ Always be helpful, transparent, and data-driven in your responses.
                 "toolResult": None
             }
 
-    def _handle_tool_use(self, messages: List[Dict], response, client: Anthropic) -> Dict:
+    def _handle_tool_use(self, messages: List[Dict], response, client: Anthropic, accumulated_nodes=None, accumulated_edges=None) -> Dict:
+        """Handle tool use with support for tool chaining and result aggregation"""
+        if accumulated_nodes is None:
+            accumulated_nodes = []
+        if accumulated_edges is None:
+            accumulated_edges = []
+
         tool_use = next(block for block in response.content if block.type == "tool_use")
         tool_name = tool_use.name
         tool_input = tool_use.input
@@ -413,17 +419,11 @@ Always be helpful, transparent, and data-driven in your responses.
                 "similar_nodes": tool_input.get("similar_nodes"),
                 "requires_approval": True
             }
-            # For this one, we might want to return early or let Claude wrap it up?
-            # The frontend logic for 'propose_new_node' was: return result to frontend so it can show the UI.
-            # In server-side logic, we can still do that.
 
         elif tool_name in self.tools_map:
             try:
                 # Call the actual python function
                 func = self.tools_map[tool_name]
-                # Filter input args to match function signature
-                # But for now assuming mapping is clean or using **tool_input
-                # Some functions might need specific handling if signatures don't match exactly
 
                 # Check signature
                 sig = inspect.signature(func)
@@ -435,29 +435,25 @@ Always be helpful, transparent, and data-driven in your responses.
         else:
             tool_result = {"error": f"Tool {tool_name} not found"}
 
-        # Now we need to send the result back to Claude to get the final text response
-        # OR if it's a specific tool that requires frontend interaction (like propose),
-        # we might want to return the structured data to the frontend.
+        # Accumulate nodes and edges from tools that return them
+        if tool_result and isinstance(tool_result, dict):
+            if "nodes" in tool_result and isinstance(tool_result["nodes"], list):
+                # Add unique nodes (avoid duplicates by ID)
+                existing_ids = {n.get("id") for n in accumulated_nodes if isinstance(n, dict) and "id" in n}
+                for node in tool_result["nodes"]:
+                    if isinstance(node, dict) and node.get("id") not in existing_ids:
+                        accumulated_nodes.append(node)
+                        existing_ids.add(node.get("id"))
 
-        # The frontend expects:
-        # {
-        #   role: 'assistant',
-        #   content: response.content,
-        #   toolUsed: response.toolUsed,
-        #   proposal: ...,
-        #   deleteConfirmation: ...
-        # }
+            if "edges" in tool_result and isinstance(tool_result["edges"], list):
+                # Add unique edges (avoid duplicates by ID)
+                existing_edge_ids = {e.get("id") for e in accumulated_edges if isinstance(e, dict) and "id" in e}
+                for edge in tool_result["edges"]:
+                    if isinstance(edge, dict) and edge.get("id") not in existing_edge_ids:
+                        accumulated_edges.append(edge)
+                        existing_edge_ids.add(edge.get("id"))
 
-        # If we just return the text from Claude after feeding back the tool result,
-        # we lose the "structured" aspect that the frontend uses to render buttons.
-
-        # However, the frontend logic shows:
-        # if (toolResult.tool_type === 'update' || toolResult.tool_type === 'delete') -> reload
-        # if (toolResult.nodes) -> update visualization
-
-        # So we definitely need to return the tool result payload to the frontend.
-
-        # Let's get Claude's final response text
+        # Send the result back to Claude
         messages.append({
             "role": "assistant",
             "content": response.content
@@ -481,15 +477,24 @@ Always be helpful, transparent, and data-driven in your responses.
 
         # Check if Claude wants to use another tool (tool chaining)
         if final_response.stop_reason == "tool_use":
-            # Claude wants to use another tool - handle it recursively
-            return self._handle_tool_use(messages, final_response, client)
+            # Claude wants to use another tool - continue recursively with accumulated data
+            return self._handle_tool_use(messages, final_response, client, accumulated_nodes, accumulated_edges)
 
         # Extract text from response
         text_block = next((block for block in final_response.content if hasattr(block, 'text')), None)
         final_text = text_block.text if text_block else ""
 
+        # Prepare final tool result with accumulated data
+        final_tool_result = tool_result if tool_result else {}
+
+        # If we accumulated nodes/edges from multiple tools, use those
+        if accumulated_nodes:
+            final_tool_result["nodes"] = accumulated_nodes
+        if accumulated_edges:
+            final_tool_result["edges"] = accumulated_edges
+
         return {
             "content": final_text,
             "toolUsed": tool_name,
-            "toolResult": tool_result
+            "toolResult": final_tool_result
         }
