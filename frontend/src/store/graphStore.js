@@ -94,19 +94,17 @@ const useGraphStore = create((set, get) => ({
   // Load visualization view
   loadVisualizationView: (viewData) => {
     // viewData comes from the backend (VisualizationView node's metadata)
-    // It should contain: node_ids, positions, hidden_node_ids, shapes
+    // It should contain: node_ids, positions, hidden_node_ids
     const metadata = viewData.metadata || {};
     const nodeIds = metadata.node_ids || [];
     const positions = metadata.positions || {};
     const hiddenNodeIds = metadata.hidden_node_ids || [];
-    const shapes = metadata.shapes || [];
 
     // Note: We need to fetch the actual nodes based on node_ids
-    // For now, we'll just set the hidden nodes, positions, and shapes
+    // For now, we'll just set the hidden nodes and positions
     // The actual node loading should happen via a search/query
     set({
       hiddenNodeIds: hiddenNodeIds,
-      shapes: shapes,
     });
 
     // Update positions if nodes already exist in store
@@ -141,55 +139,6 @@ const useGraphStore = create((set, get) => ({
   // API Key (temporary, session-only storage)
   apiKey: null,
   setApiKey: (key) => set({ apiKey: key }),
-
-  // Custom shapes (rectangles, etc.)
-  shapes: [],
-
-  // Add a new shape
-  addShape: (shape) => {
-    const shapes = get().shapes;
-    set({ shapes: [...shapes, { ...shape, id: `shape-${Date.now()}` }] });
-  },
-
-  // Update a shape
-  updateShape: (shapeId, updates) => {
-    const shapes = get().shapes.map(shape =>
-      shape.id === shapeId ? { ...shape, ...updates } : shape
-    );
-    set({ shapes });
-  },
-
-  // Delete a shape
-  deleteShape: (shapeId) => {
-    const shapes = get().shapes.filter(shape => shape.id !== shapeId);
-    set({ shapes });
-  },
-
-  // Add node to shape group
-  addNodeToShape: (shapeId, nodeId) => {
-    const shapes = get().shapes.map(shape => {
-      if (shape.id === shapeId) {
-        const nodeIds = shape.nodeIds || [];
-        if (!nodeIds.includes(nodeId)) {
-          return { ...shape, nodeIds: [...nodeIds, nodeId] };
-        }
-      }
-      return shape;
-    });
-    set({ shapes });
-  },
-
-  // Remove node from shape group
-  removeNodeFromShape: (shapeId, nodeId) => {
-    const shapes = get().shapes.map(shape => {
-      if (shape.id === shapeId) {
-        const nodeIds = (shape.nodeIds || []).filter(id => id !== nodeId);
-        return { ...shape, nodeIds };
-      }
-      return shape;
-    });
-    set({ shapes });
-  }
 }));
 
 export default useGraphStore;
