@@ -402,69 +402,96 @@ Always be helpful, transparent, and data-driven in your responses.
         if accumulated_edges is None:
             accumulated_edges = []
 
-        tool_use = next(block for block in response.content if block.type == "tool_use")
-        tool_name = tool_use.name
-        tool_input = tool_use.input
-        tool_id = tool_use.id
+        # Find ALL tool_use blocks (Claude can request multiple tools in parallel)
+        tool_uses = [block for block in response.content if block.type == "tool_use"]
 
-        print(f"Executing tool: {tool_name} with input: {tool_input}")
-
-        # Execute the tool
-        tool_result = None
-
-        # Special case for propose_new_node which is a helper tool, not in the graph
-        if tool_name == "propose_new_node":
-            tool_result = {
-                "proposed_node": tool_input.get("node"),
-                "similar_nodes": tool_input.get("similar_nodes"),
-                "requires_approval": True
+        if not tool_uses:
+            # No tool uses found, shouldn't happen but handle gracefully
+            return {
+                "content": "No tool uses found in response",
+                "toolUsed": None,
+                "toolResult": None
             }
 
-        elif tool_name in self.tools_map:
-            try:
-                # Call the actual python function
-                func = self.tools_map[tool_name]
+        # Execute all tools
+        tool_results = []
+        last_tool_name = None
 
-                # Check signature
-                sig = inspect.signature(func)
-                valid_args = {k: v for k, v in tool_input.items() if k in sig.parameters}
+        for tool_use in tool_uses:
+            tool_name = tool_use.name
+            tool_input = tool_use.input
+            tool_id = tool_use.id
+            last_tool_name = tool_name
 
-                tool_result = func(**valid_args)
-            except Exception as e:
-                tool_result = {"error": str(e)}
-        else:
-            tool_result = {"error": f"Tool {tool_name} not found"}
+            print(f"Executing tool: {tool_name} with input: {tool_input}")
 
-        # Accumulate nodes and edges from tools that return them
-        if tool_result and isinstance(tool_result, dict):
-            if "nodes" in tool_result and isinstance(tool_result["nodes"], list):
-                # Add unique nodes (avoid duplicates by ID)
-                existing_ids = {n.get("id") for n in accumulated_nodes if isinstance(n, dict) and "id" in n}
-                for node in tool_result["nodes"]:
-                    if isinstance(node, dict) and node.get("id") not in existing_ids:
-                        accumulated_nodes.append(node)
-                        existing_ids.add(node.get("id"))
+            # Execute the tool
+            tool_result = None
 
-            if "edges" in tool_result and isinstance(tool_result["edges"], list):
-                # Add unique edges (avoid duplicates by ID)
-                existing_edge_ids = {e.get("id") for e in accumulated_edges if isinstance(e, dict) and "id" in e}
-                for edge in tool_result["edges"]:
-                    if isinstance(edge, dict) and edge.get("id") not in existing_edge_ids:
-                        accumulated_edges.append(edge)
-                        existing_edge_ids.add(edge.get("id"))
+            # Special case for propose_new_node which is a helper tool, not in the graph
+            if tool_name == "propose_new_node":
+                tool_result = {
+                    "proposed_node": tool_input.get("node"),
+                    "similar_nodes": tool_input.get("similar_nodes"),
+                    "requires_approval": True
+                }
 
-        # Send the result back to Claude
+            elif tool_name in self.tools_map:
+                try:
+                    # Call the actual python function
+                    func = self.tools_map[tool_name]
+
+                    # Check signature
+                    sig = inspect.signature(func)
+                    valid_args = {k: v for k, v in tool_input.items() if k in sig.parameters}
+
+                    tool_result = func(**valid_args)
+                except Exception as e:
+                    tool_result = {"error": str(e)}
+            else:
+                tool_result = {"error": f"Tool {tool_name} not found"}
+
+            # Accumulate nodes and edges from tools that return them
+            if tool_result and isinstance(tool_result, dict):
+                if "nodes" in tool_result and isinstance(tool_result["nodes"], list):
+                    # Add unique nodes (avoid duplicates by ID)
+                    existing_ids = {n.get("id") for n in accumulated_nodes if isinstance(n, dict) and "id" in n}
+                    for node in tool_result["nodes"]:
+                        if isinstance(node, dict) and node.get("id") not in existing_ids:
+                            accumulated_nodes.append(node)
+                            existing_ids.add(node.get("id"))
+
+                if "edges" in tool_result and isinstance(tool_result["edges"], list):
+                    # Add unique edges (avoid duplicates by ID)
+                    existing_edge_ids = {e.get("id") for e in accumulated_edges if isinstance(e, dict) and "id" in e}
+                    for edge in tool_result["edges"]:
+                        if isinstance(edge, dict) and edge.get("id") not in existing_edge_ids:
+                            accumulated_edges.append(edge)
+                            existing_edge_ids.add(edge.get("id"))
+
+            # Store tool result with its ID for the response
+            tool_results.append({
+                "tool_use_id": tool_id,
+                "result": tool_result
+            })
+
+        # Send the results back to Claude
         messages.append({
             "role": "assistant",
             "content": response.content
         })
+
+        # Add all tool results in a single user message
         messages.append({
             "role": "user",
-            "content": [{
-                "type": "tool_result",
-                "tool_use_id": tool_id,
-                "content": json.dumps(tool_result, default=str)
-            }]
+            "content": [
+                {
+                    "type": "tool_result",
+                    "tool_use_id": tr["tool_use_id"],
+                    "content": json.dumps(tr["result"], default=str)
+                }
+                for tr in tool_results
+            ]
         })
 
         final_response = client.messages.create(
@@ -485,7 +512,7 @@ Always be helpful, transparent, and data-driven in your responses.
         final_text = text_block.text if text_block else ""
 
         # Prepare final tool result with accumulated data
-        final_tool_result = tool_result if tool_result else {}
+        final_tool_result = {}
 
         # If we accumulated nodes/edges from multiple tools, use those
         if accumulated_nodes:
@@ -493,8 +520,12 @@ Always be helpful, transparent, and data-driven in your responses.
         if accumulated_edges:
             final_tool_result["edges"] = accumulated_edges
 
+        # If no accumulated data but we have tool results, use the last one
+        if not final_tool_result and tool_results:
+            final_tool_result = tool_results[-1]["result"]
+
         return {
             "content": final_text,
-            "toolUsed": tool_name,
+            "toolUsed": last_tool_name,  # Return the name of the last tool executed
             "toolResult": final_tool_result
         }

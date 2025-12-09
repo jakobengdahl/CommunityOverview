@@ -141,17 +141,28 @@ function VisualizationPanel() {
   useEffect(() => {
     // Only update if IDs changed or we have a massive shift, to avoid resetting dragged positions
     // This is tricky with React Flow controlled mode.
-    // Ideally we merge positions.
+    // Ideally we merge positions and preserve manually created nodes (like groups).
     setNodes((nds) => {
+        // Preserve manually created nodes that aren't from backend (e.g., groups)
+        const manualNodes = nds.filter(n => n.type === 'group' || n.id.startsWith('group-'));
+
         const newNodes = reactFlowNodes.map(n => {
             const existing = nds.find(curr => curr.id === n.id);
             if (existing && existing.position.x !== 0) {
-                // Keep existing position if valid
-                return { ...n, position: existing.position };
+                // Keep existing position, parentId, extent, and style
+                return {
+                    ...n,
+                    position: existing.position,
+                    parentId: existing.parentId,
+                    extent: existing.extent,
+                    style: existing.style || n.style
+                };
             }
             return n;
         });
-        return newNodes;
+
+        // Combine backend nodes with manually created nodes
+        return [...newNodes, ...manualNodes];
     });
   }, [reactFlowNodes, setNodes]);
 
