@@ -272,13 +272,34 @@ class GraphStorage:
             if nodes_to_embed:
                 self.vector_store.update_nodes_embeddings(nodes_to_embed)
 
+            # Create name-to-ID mapping for newly added nodes and existing nodes
+            name_to_id = {}
+            for node_id, node in self.nodes.items():
+                name_to_id[node.name] = node_id
+
             # Add edges
             for edge in edges:
-                # Validate that source and target exist
-                if edge.source not in self.nodes:
-                    raise ValueError(f"Source node {edge.source} does not exist")
-                if edge.target not in self.nodes:
-                    raise ValueError(f"Target node {edge.target} does not exist")
+                # Resolve source and target - they might be names or IDs
+                source_id = edge.source
+                target_id = edge.target
+
+                # If source is not a valid ID, try to resolve it as a name
+                if source_id not in self.nodes:
+                    if source_id in name_to_id:
+                        source_id = name_to_id[source_id]
+                    else:
+                        raise ValueError(f"Source node '{edge.source}' does not exist (not found by ID or name)")
+
+                # If target is not a valid ID, try to resolve it as a name
+                if target_id not in self.nodes:
+                    if target_id in name_to_id:
+                        target_id = name_to_id[target_id]
+                    else:
+                        raise ValueError(f"Target node '{edge.target}' does not exist (not found by ID or name)")
+
+                # Update edge with resolved IDs
+                edge.source = source_id
+                edge.target = target_id
 
                 if edge.id in self.edges:
                     return AddNodesResult(

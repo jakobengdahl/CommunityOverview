@@ -167,6 +167,7 @@ function VisualizationPanel() {
   const onPaneContextMenu = useCallback(
     (event) => {
       event.preventDefault();
+      event.stopPropagation();
       setContextMenu({
         x: event.clientX,
         y: event.clientY,
@@ -174,6 +175,35 @@ function VisualizationPanel() {
     },
     []
   );
+
+  // Prevent browser context menu and handle it ourselves
+  useEffect(() => {
+    const wrapper = reactFlowWrapper.current;
+    if (!wrapper) return;
+
+    const handleContextMenu = (e) => {
+      e.preventDefault();
+      e.stopPropagation();
+
+      // Only show context menu if clicking on the pane (not on a node)
+      const target = e.target;
+      const isNode = target.closest('.react-flow__node');
+
+      if (!isNode) {
+        setContextMenu({
+          x: e.clientX,
+          y: e.clientY,
+        });
+      }
+
+      return false;
+    };
+
+    wrapper.addEventListener('contextmenu', handleContextMenu, true);
+    return () => {
+      wrapper.removeEventListener('contextmenu', handleContextMenu, true);
+    };
+  }, []);
 
   const handleAddRectangle = useCallback(() => {
     if (!reactFlowInstance || !contextMenu || !reactFlowWrapper.current) return;
