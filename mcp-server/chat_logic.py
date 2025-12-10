@@ -76,20 +76,30 @@ When a user uploads a document, analyze their intent from any accompanying messa
 CASE 1 - EXTRACTION REQUEST (user wants to extract specific entities):
 Examples: "hitta alla myndigheter", "extrahera aktörer", "vilka organisationer nämns"
 
-IMPORTANT - RATE LIMIT HANDLING:
-To avoid API rate limits, ALWAYS process entities in SMALL BATCHES of 5-10 at a time:
-1. Analyze document and identify ALL relevant nodes matching the requested type/theme
-2. Select the FIRST 5-10 most important/relevant nodes for initial batch
-3. For EACH node in the batch: Run find_similar_nodes() to check duplicates
-4. Use propose_new_node() for each unique node in the batch
-5. Present the batch to user with a message like: "Jag hittade X totalt. Här är de första 5-10. Vill du att jag fortsätter med nästa batch?"
-6. Let user review and approve/reject each proposal in this batch
-7. WAIT for user confirmation before processing next batch
-8. When user approves continuing, process next batch of 5-10 nodes
-9. Automatically link to user's active communities
-10. Suggest relationships between extracted nodes
+IMPORTANT - RATE LIMIT HANDLING AND BATCH PROCESSING:
+To avoid API rate limits, use the BATCH similarity search tool:
 
-NEVER try to process all nodes at once if there are more than 10. Always batch them.
+1. Analyze document and identify ALL relevant nodes matching the requested type/theme
+2. Extract names into a list (e.g., ["Arbetsförmedlingen", "Skatteverket", "Polisen"])
+3. Use find_similar_nodes_batch() with the ENTIRE list - this does ONE API call instead of N calls
+4. Review the batch results to see which nodes have duplicates
+5. Present findings to user: "Jag hittade X totalt. Y av dem verkar vara nya, Z har liknande noder."
+6. For nodes without duplicates or low similarity: propose them in a batch
+7. Let user review and approve/reject proposals
+8. Automatically link to user's active communities
+9. Suggest relationships between extracted nodes
+
+CRITICAL: ALWAYS use find_similar_nodes_batch() when checking multiple nodes.
+NEVER loop and call find_similar_nodes() multiple times - this causes rate limit errors.
+
+Example correct usage:
+- find_similar_nodes_batch(names=["Arbetsförmedlingen", "Skatteverket", "Polisen"], node_type="Actor")
+
+Example WRONG usage (DON'T DO THIS):
+- find_similar_nodes(name="Arbetsförmedlingen")
+- find_similar_nodes(name="Skatteverket")
+- find_similar_nodes(name="Polisen")
+→ This uses 3 API calls instead of 1!
 
 CASE 2 - SIMILARITY SEARCH (user wants to find matching existing nodes):
 Examples: "finns det liknande projekt", "vilka initiativ liknar detta", "har vi något snarlikt"
@@ -123,13 +133,17 @@ TOOL USAGE GUIDELINES:
 - search_graph: For text-based searches, exploring themes, finding specific nodes
 - get_related_nodes: For expanding from a known node, exploring connections
 - get_node_details: For detailed information about a specific node
-- find_similar_nodes: MANDATORY before adding nodes, detecting duplicates
+- find_similar_nodes: For checking ONE node for duplicates
+- find_similar_nodes_batch: For checking MULTIPLE nodes at once - ALWAYS use this when extracting from documents
 - add_nodes: Only after user approval, with proper validation
 - update_node: For editing existing nodes (name, description, summary, communities)
 - delete_nodes: CAREFUL - max 10 nodes, requires confirmation=True
 - list_node_types: When user asks about available types
 - get_graph_stats: For overview of graph size and composition
 - save_visualization_metadata/get_visualization: For saving/loading views
+
+EFFICIENCY TIP: When extracting multiple entities from a document, ALWAYS use find_similar_nodes_batch()
+instead of calling find_similar_nodes() in a loop. This reduces API calls from N to 1.
 
 RESPONSE GUIDELINES:
 1. Be concise but informative
@@ -248,6 +262,35 @@ Always be helpful, transparent, and data-driven in your responses.
                         }
                     },
                     "required": ["name"]
+                }
+            },
+            {
+                "name": "find_similar_nodes_batch",
+                "description": "Find similar nodes for MULTIPLE names at once (batch processing). MUCH more efficient than calling find_similar_nodes in a loop. Use this when extracting multiple nodes from a document.",
+                "input_schema": {
+                    "type": "object",
+                    "properties": {
+                        "names": {
+                            "type": "array",
+                            "items": {"type": "string"},
+                            "description": "List of names to search for similar nodes"
+                        },
+                        "node_type": {
+                            "type": "string",
+                            "description": "Optional: Node type to filter on (Actor, Initiative, etc.)"
+                        },
+                        "threshold": {
+                            "type": "number",
+                            "description": "Similarity threshold 0.0-1.0 (default 0.7)",
+                            "default": 0.7
+                        },
+                        "limit": {
+                            "type": "integer",
+                            "description": "Max results per name (default 5)",
+                            "default": 5
+                        }
+                    },
+                    "required": ["names"]
                 }
             },
             {

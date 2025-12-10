@@ -239,6 +239,32 @@ class GraphStorage:
         results.sort(key=lambda x: x.similarity_score, reverse=True)
         return results[:limit]
 
+    def find_similar_nodes_batch(
+        self,
+        names: List[str],
+        node_type: Optional[NodeType] = None,
+        threshold: float = 0.7,
+        limit: int = 5
+    ) -> Dict[str, List[SimilarNode]]:
+        """
+        Find similar nodes for multiple names at once (batch processing)
+        Returns a dictionary mapping each name to its similar nodes
+
+        This is much more efficient than calling find_similar_nodes multiple times
+        as it processes all names in one go.
+        """
+        results = {}
+
+        for name in names:
+            results[name] = self.find_similar_nodes(
+                name=name,
+                node_type=node_type,
+                threshold=threshold,
+                limit=limit
+            )
+
+        return results
+
     def add_nodes(
         self,
         nodes: List[Node],

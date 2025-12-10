@@ -389,6 +389,60 @@ def find_similar_nodes(
 
 
 @tool_wrapper
+def find_similar_nodes_batch(
+    names: List[str],
+    node_type: Optional[str] = None,
+    threshold: float = 0.7,
+    limit: int = 5
+) -> Dict[str, Any]:
+    """
+    Find similar nodes for multiple names at once (batch processing)
+
+    This is MUCH more efficient than calling find_similar_nodes multiple times
+    when processing documents with many entities. Use this when extracting
+    multiple nodes from a document.
+
+    Args:
+        names: List of names to search for similar nodes
+        node_type: Optional node type to filter on
+        threshold: Similarity threshold 0.0-1.0 (default 0.7)
+        limit: Max number of results per name (default 5)
+
+    Returns:
+        Dict with results for each name
+    """
+    type_filter = NodeType(node_type) if node_type else None
+
+    results = graph.find_similar_nodes_batch(
+        names=names,
+        node_type=type_filter,
+        threshold=threshold,
+        limit=limit
+    )
+
+    # Format results for JSON
+    formatted_results = {}
+    for name, similar_list in results.items():
+        formatted_results[name] = {
+            "similar_nodes": [
+                {
+                    "node": s.node.model_dump(),
+                    "similarity_score": s.similarity_score,
+                    "match_reason": s.match_reason
+                }
+                for s in similar_list
+            ],
+            "total": len(similar_list)
+        }
+
+    return {
+        "results": formatted_results,
+        "total_searched": len(names),
+        "message": f"Searched for {len(names)} names"
+    }
+
+
+@tool_wrapper
 def add_nodes(
     nodes: List[Dict[str, Any]],
     edges: List[Dict[str, Any]]
