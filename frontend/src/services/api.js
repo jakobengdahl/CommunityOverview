@@ -104,6 +104,33 @@ export async function uploadFileToBackend(file) {
 }
 
 /**
+ * Download a document from a URL and extract text
+ * @param {string} url - The URL to download from
+ * @returns {Promise<Object>} Response with extracted text
+ */
+export async function downloadDocumentFromUrl(url) {
+  try {
+    const response = await fetch('/download_url', {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify({ url }),
+    });
+
+    if (!response.ok) {
+      const errorData = await response.json().catch(() => ({}));
+      throw new Error(errorData.error || `HTTP error! status: ${response.status}`);
+    }
+
+    return await response.json();
+  } catch (error) {
+    console.error('Error downloading document from URL:', error);
+    throw error;
+  }
+}
+
+/**
  * Load a saved visualization view by name
  * @param {string} viewName - Name of the view to load
  * @returns {Promise<Object>} View data with nodes and metadata
