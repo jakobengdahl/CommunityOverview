@@ -2,12 +2,16 @@
 const API_URL = '/chat'; // Using proxy in Vite or direct URL
 
 /**
- * Get API key from store
+ * Get API configuration from store
  */
-async function getApiKey() {
+async function getApiConfig() {
   // Dynamic import to avoid circular dependency
   const { default: useGraphStore } = await import('../store/graphStore.js');
-  return useGraphStore.getState().apiKey;
+  const state = useGraphStore.getState();
+  return {
+    apiKey: state.apiKey,
+    provider: state.llmProvider || 'claude' // Default to claude if not set
+  };
 }
 
 /**
@@ -17,14 +21,23 @@ async function getApiKey() {
  */
 export async function sendMessageToBackend(messages) {
   try {
-    const apiKey = await getApiKey();
+    const { apiKey, provider } = await getApiConfig();
     const headers = {
       'Content-Type': 'application/json',
     };
 
-    // Add API key header if provided
+    // Add provider header to let backend know which provider to use
+    if (provider) {
+      headers['X-LLM-Provider'] = provider;
+    }
+
+    // Add API key header if provided (with provider-specific header name)
     if (apiKey) {
-      headers['X-Anthropic-API-Key'] = apiKey;
+      if (provider === 'openai') {
+        headers['X-OpenAI-API-Key'] = apiKey;
+      } else {
+        headers['X-Anthropic-API-Key'] = apiKey;
+      }
     }
 
     const response = await fetch(API_URL, {

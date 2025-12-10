@@ -55,7 +55,7 @@ def get_chat_processor():
 @mcp.custom_route("/chat", methods=["POST"])
 async def chat_endpoint(request: Request):
     """
-    Endpoint for the frontend to chat with Claude via the backend.
+    Endpoint for the frontend to chat with LLM (Claude or OpenAI) via the backend.
     """
     try:
         body = await request.json()
@@ -64,11 +64,15 @@ async def chat_endpoint(request: Request):
         if not messages:
             return JSONResponse({"error": "No messages provided"}, status_code=400)
 
+        # Check for provider in header
+        provider = request.headers.get("X-LLM-Provider")
+
         # Check for API key in header (user-provided key takes precedence)
-        api_key = request.headers.get("X-Anthropic-API-Key")
+        # Try both Anthropic and OpenAI headers
+        api_key = request.headers.get("X-OpenAI-API-Key") or request.headers.get("X-Anthropic-API-Key")
 
         processor = get_chat_processor()
-        result = processor.process_message(messages, api_key=api_key)
+        result = processor.process_message(messages, api_key=api_key, provider=provider)
 
         # Use custom JSON encoder to handle datetime objects
         import json

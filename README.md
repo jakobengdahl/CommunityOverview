@@ -10,7 +10,8 @@ This system helps organizations avoid overlapping investments by making visible:
 - Connections between actors, legislation, and themes
 
 **Key Features:**
-- 🤖 **AI-Powered Chat:** Natural language interface with Claude for exploring and managing the knowledge graph
+- 🤖 **AI-Powered Chat:** Natural language interface with Claude or OpenAI for exploring and managing the knowledge graph
+- 🔄 **Multi-Provider Support:** Switch between Claude (Anthropic) and OpenAI backends
 - 📄 **Document Upload:** Upload PDF, Word, or text documents for automatic entity extraction
 - 🔗 **URL Integration:** Paste document URLs for automatic download and analysis
 - 🔍 **Batch Processing:** Efficient similarity search for multiple entities at once
@@ -21,7 +22,7 @@ This system helps organizations avoid overlapping investments by making visible:
 **Tech stack:**
 - **Frontend:** React + React Flow + Zustand
 - **Backend:** FastMCP Server (Python) with NetworkX + JSON
-- **AI:** Claude Sonnet 4.5 for natural language understanding and entity extraction
+- **AI:** Claude Sonnet 4.5 or OpenAI GPT-4o for natural language understanding and entity extraction
 - **Graph storage:** NetworkX in-memory + JSON persistence
 - **Similarity search:** sentence-transformers (all-MiniLM-L6-v2) + Levenshtein distance
 
@@ -75,6 +76,29 @@ docker-compose up
 
 ### GitHub Codespaces
 Open the project in Codespaces - everything is pre-configured.
+
+## LLM Provider Configuration
+
+This project supports both **Claude (Anthropic)** and **OpenAI (GPT-4)** as AI backends.
+
+### Quick Setup
+
+**For Claude (default):**
+```bash
+export LLM_PROVIDER=claude
+export ANTHROPIC_API_KEY=sk-ant-xxxxx
+```
+
+**For OpenAI:**
+```bash
+export LLM_PROVIDER=openai
+export OPENAI_API_KEY=sk-xxxxx
+```
+
+**Frontend Override:**
+Users can override the backend provider through the UI Settings (⚙️) by selecting their preferred provider and optionally providing their own API key.
+
+📖 **For detailed configuration, see [LLM_PROVIDERS.md](./LLM_PROVIDERS.md)**
 
 ## URL Parameters
 

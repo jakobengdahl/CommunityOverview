@@ -10,10 +10,11 @@ const AVAILABLE_COMMUNITIES = [
 ];
 
 function Header() {
-  const { selectedCommunities, setSelectedCommunities, apiKey, setApiKey } = useGraphStore();
+  const { selectedCommunities, setSelectedCommunities, apiKey, setApiKey, llmProvider, setLlmProvider } = useGraphStore();
   const [isDropdownOpen, setIsDropdownOpen] = useState(false);
   const [isSettingsOpen, setIsSettingsOpen] = useState(false);
   const [tempApiKey, setTempApiKey] = useState(apiKey || '');
+  const [tempProvider, setTempProvider] = useState(llmProvider || 'claude');
 
   const toggleCommunity = (community) => {
     if (selectedCommunities.includes(community)) {
@@ -37,12 +38,15 @@ function Header() {
 
   const handleSaveApiKey = () => {
     setApiKey(tempApiKey);
+    setLlmProvider(tempProvider);
     setIsSettingsOpen(false);
   };
 
   const handleClearApiKey = () => {
     setApiKey(null);
     setTempApiKey('');
+    setLlmProvider(null);
+    setTempProvider('claude');
   };
 
   const handleExportGraph = () => {
@@ -136,8 +140,26 @@ function Header() {
             </div>
             <div className="settings-body">
               <div className="settings-section">
+                <label htmlFor="provider-select">
+                  LLM Provider
+                </label>
+                <p className="settings-description">
+                  Select which LLM provider to use. Backend must be configured with the appropriate API key via environment variables, or you can provide your own key below.
+                </p>
+                <select
+                  id="provider-select"
+                  className="provider-select"
+                  value={tempProvider}
+                  onChange={(e) => setTempProvider(e.target.value)}
+                >
+                  <option value="claude">Claude (Anthropic)</option>
+                  <option value="openai">OpenAI (GPT-4)</option>
+                </select>
+              </div>
+
+              <div className="settings-section">
                 <label htmlFor="api-key-input">
-                  Anthropic API Key (Optional)
+                  {tempProvider === 'openai' ? 'OpenAI API Key' : 'Anthropic API Key'} (Optional)
                 </label>
                 <p className="settings-description">
                   Enter your own API key for temporary use during this session.
@@ -149,7 +171,7 @@ function Header() {
                   className="api-key-input"
                   value={tempApiKey}
                   onChange={(e) => setTempApiKey(e.target.value)}
-                  placeholder="sk-ant-..."
+                  placeholder={tempProvider === 'openai' ? 'sk-...' : 'sk-ant-...'}
                 />
                 <div className="settings-actions">
                   <button

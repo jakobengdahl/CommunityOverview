@@ -1,18 +1,27 @@
 from typing import List, Dict, Any, Callable
 import os
 import json
-from anthropic import Anthropic
 from dotenv import load_dotenv
 import inspect
+from llm_providers import create_provider, LLMProvider
 
 # Load environment variables
 load_dotenv()
 
 class ChatProcessor:
     def __init__(self, tools_map: Dict[str, Callable]):
-        self.default_api_key = os.getenv("ANTHROPIC_API_KEY")
-        if not self.default_api_key:
-            print("Warning: ANTHROPIC_API_KEY not found in environment variables")
+        # Determine which provider to use
+        self.provider_type = os.getenv("LLM_PROVIDER", "claude").lower()
+
+        # Set default API key based on provider
+        if self.provider_type == "openai":
+            self.default_api_key = os.getenv("OPENAI_API_KEY")
+            if not self.default_api_key:
+                print("Warning: OPENAI_API_KEY not found in environment variables")
+        else:  # claude
+            self.default_api_key = os.getenv("ANTHROPIC_API_KEY")
+            if not self.default_api_key:
+                print("Warning: ANTHROPIC_API_KEY not found in environment variables")
 
         self.tools_map = tools_map
         self.tool_definitions = self._generate_tool_definitions()
@@ -452,47 +461,51 @@ Always be helpful, transparent, and data-driven in your responses while minimizi
             }
         ]
 
-    def process_message(self, messages: List[Dict], api_key: str = None) -> Dict:
+    def process_message(self, messages: List[Dict], api_key: str = None, provider: str = None) -> Dict:
         """
-        Process a message history, call Claude, handle tools, return final response.
+        Process a message history, call LLM, handle tools, return final response.
 
         Args:
             messages: Conversation history
             api_key: Optional API key to use instead of default
+            provider: Optional provider override ('claude' or 'openai')
         """
         try:
+            # Use provided provider or fall back to configured provider
+            provider_to_use = provider if provider else self.provider_type
+
             # Use provided API key or fall back to default
             key_to_use = api_key if api_key else self.default_api_key
 
             if not key_to_use:
+                provider_name = provider_to_use.upper()
                 return {
-                    "content": "❌ Error: No API key available. Please set ANTHROPIC_API_KEY environment variable or provide your own key in settings.",
+                    "content": f"❌ Error: No API key available. Please set {provider_name}_API_KEY environment variable or provide your own key in settings.",
                     "toolUsed": None,
                     "toolResult": None
                 }
 
-            # Create client with the appropriate key
-            client = Anthropic(api_key=key_to_use)
+            # Create provider with the appropriate key
+            llm_provider = create_provider(key_to_use, provider_to_use)
 
-            # First call to Claude
-            response = client.messages.create(
-                model="claude-sonnet-4-5",
-                max_tokens=4096,
-                system=self.system_prompt,
+            # First call to LLM
+            response = llm_provider.create_completion(
+                messages=messages,
+                system_prompt=self.system_prompt,
                 tools=self.tool_definitions,
-                messages=messages
+                max_tokens=4096
             )
 
             # Check if tool use
             if response.stop_reason == "tool_use":
-                return self._handle_tool_use(messages, response, client)
+                return self._handle_tool_use(messages, response, llm_provider)
 
             # Just text response
-            # Extract text from content blocks (handle both TextBlock and other types)
+            # Extract text from content blocks
             text_content = ""
             for block in response.content:
-                if hasattr(block, 'text'):
-                    text_content += block.text
+                if isinstance(block, dict) and block.get("type") == "text":
+                    text_content += block.get("text", "")
 
             return {
                 "content": text_content if text_content else "No text response from AI",
@@ -515,15 +528,15 @@ Always be helpful, transparent, and data-driven in your responses while minimizi
                 "toolResult": None
             }
 
-    def _handle_tool_use(self, messages: List[Dict], response, client: Anthropic, accumulated_nodes=None, accumulated_edges=None) -> Dict:
+    def _handle_tool_use(self, messages: List[Dict], response, provider: LLMProvider, accumulated_nodes=None, accumulated_edges=None) -> Dict:
         """Handle tool use with support for tool chaining and result aggregation"""
         if accumulated_nodes is None:
             accumulated_nodes = []
         if accumulated_edges is None:
             accumulated_edges = []
 
-        # Find ALL tool_use blocks (Claude can request multiple tools in parallel)
-        tool_uses = [block for block in response.content if block.type == "tool_use"]
+        # Find ALL tool_use blocks (LLM can request multiple tools in parallel)
+        tool_uses = [block for block in response.content if isinstance(block, dict) and block.get("type") == "tool_use"]
 
         if not tool_uses:
             # No tool uses found, shouldn't happen but handle gracefully
@@ -538,9 +551,9 @@ Always be helpful, transparent, and data-driven in your responses while minimizi
         last_tool_name = None
 
         for tool_use in tool_uses:
-            tool_name = tool_use.name
-            tool_input = tool_use.input
-            tool_id = tool_use.id
+            tool_name = tool_use.get("name")
+            tool_input = tool_use.get("input")
+            tool_id = tool_use.get("id")
             last_tool_name = tool_name
 
             print(f"Executing tool: {tool_name} with input: {tool_input}")
@@ -595,7 +608,7 @@ Always be helpful, transparent, and data-driven in your responses while minimizi
                 "result": tool_result
             })
 
-        # Send the results back to Claude
+        # Send the results back to LLM
         messages.append({
             "role": "assistant",
             "content": response.content
@@ -614,24 +627,23 @@ Always be helpful, transparent, and data-driven in your responses while minimizi
             ]
         })
 
-        final_response = client.messages.create(
-            model="claude-sonnet-4-5",
-            max_tokens=4096,
-            system=self.system_prompt,
+        final_response = provider.create_completion(
+            messages=messages,
+            system_prompt=self.system_prompt,
             tools=self.tool_definitions,
-            messages=messages
+            max_tokens=4096
         )
 
-        # Check if Claude wants to use another tool (tool chaining)
+        # Check if LLM wants to use another tool (tool chaining)
         if final_response.stop_reason == "tool_use":
-            # Claude wants to use another tool - continue recursively with accumulated data
-            return self._handle_tool_use(messages, final_response, client, accumulated_nodes, accumulated_edges)
+            # LLM wants to use another tool - continue recursively with accumulated data
+            return self._handle_tool_use(messages, final_response, provider, accumulated_nodes, accumulated_edges)
 
         # Extract text from response (handle multiple text blocks)
         final_text = ""
         for block in final_response.content:
-            if hasattr(block, 'text'):
-                final_text += block.text
+            if isinstance(block, dict) and block.get("type") == "text":
+                final_text += block.get("text", "")
 
         # Prepare final tool result with accumulated data
         final_tool_result = {}
