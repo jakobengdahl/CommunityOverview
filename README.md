@@ -1,6 +1,6 @@
 # Community Knowledge Sharing PoC
 
-AI-powered knowledge sharing for communities with graph visualization and conversational chat.
+AI-powered knowledge sharing for communities with graph visualization, conversational chat, and intelligent document analysis.
 
 ## Overview
 
@@ -9,11 +9,21 @@ This system helps organizations avoid overlapping investments by making visible:
 - Resources and capabilities
 - Connections between actors, legislation, and themes
 
+**Key Features:**
+- 🤖 **AI-Powered Chat:** Natural language interface with Claude for exploring and managing the knowledge graph
+- 📄 **Document Upload:** Upload PDF, Word, or text documents for automatic entity extraction
+- 🔗 **URL Integration:** Paste document URLs for automatic download and analysis
+- 🔍 **Batch Processing:** Efficient similarity search for multiple entities at once
+- 🎨 **Interactive Visualization:** React Flow graph with drag-and-drop, zoom, and pan
+- 💾 **Save Views:** Create and share custom graph views
+- 📊 **Duplicate Detection:** Automatic similarity checking using Levenshtein distance and semantic embeddings
+
 **Tech stack:**
 - **Frontend:** React + React Flow + Zustand
-- **Backend:** MCP Server (Python) with NetworkX + JSON
-- **AI:** Claude API for RAG and extraction
+- **Backend:** FastMCP Server (Python) with NetworkX + JSON
+- **AI:** Claude Sonnet 4.5 for natural language understanding and entity extraction
 - **Graph storage:** NetworkX in-memory + JSON persistence
+- **Similarity search:** sentence-transformers (all-MiniLM-L6-v2) + Levenshtein distance
 
 ## Project Structure
 
@@ -125,14 +135,29 @@ You can combine multiple parameters:
 http://localhost:5173/?loaddata=https%3A%2F%2F...&apikey=sk-ant-api03-...
 ```
 
-## User Scenario
+## User Scenarios
 
-1. **Search:** User searches for initiatives related to NIS2
-2. **Visualize:** Graph shows connections between initiatives, actors, and legislation
-3. **Discover gaps:** User sees that their project is missing
-4. **Upload:** User uploads project report
-5. **Review:** System proposes nodes and connections
-6. **Approve:** User reviews and approves additions
+### Scenario 1: Document Analysis
+1. **Upload:** User uploads a project description (PDF/Word/URL)
+2. **Chat:** User asks "vilka myndigheter nämns här?"
+3. **Process:** AI extracts all agencies using batch similarity search
+4. **Review:** System shows which agencies are new vs. duplicates
+5. **Approve:** User reviews and approves additions
+6. **Visualize:** New nodes appear in the graph with automatic connections
+
+### Scenario 2: Finding Similar Projects
+1. **Upload:** User uploads their project proposal
+2. **Chat:** User asks "finns det liknande projekt i grafen?"
+3. **Search:** AI searches existing graph for similar initiatives
+4. **Present:** System shows matching projects with similarity scores
+5. **Decide:** User can add their project or join existing initiative
+
+### Scenario 3: Exploring the Graph
+1. **Search:** User asks "sök i databasen efter AI-projekt"
+2. **Visualize:** Graph shows all AI-related initiatives
+3. **Expand:** User right-clicks node to see related actors and legislation
+4. **Navigate:** User uses zoom, pan, and drag to explore connections
+5. **Save:** User saves custom view for future reference
 
 ## Security
 
@@ -143,9 +168,34 @@ http://localhost:5173/?loaddata=https%3A%2F%2F...&apikey=sk-ant-api03-...
 
 ## Development Status
 
-See [Implementation Roadmap](docs/roadmap.md) for detailed progress.
+**Current Phase:** Phase 2 - Document Analysis & UX Enhancements
 
-**Current Phase:** Phase 1 - Basic Infrastructure
+### Completed Features ✅
+- ✅ Basic graph visualization with React Flow
+- ✅ AI chat interface with Claude integration
+- ✅ Node CRUD operations with duplicate detection
+- ✅ Document upload (PDF, Word, Text)
+- ✅ URL-based document download
+- ✅ Batch similarity search (90% fewer API calls)
+- ✅ Loading indicators and progress feedback
+- ✅ Modal dialogs for node editing
+- ✅ Right-click panning in visualization
+- ✅ Context menus auto-close on background click
+- ✅ Save and load custom views
+- ✅ Community-based filtering
+
+### In Progress 🚧
+- 🚧 Enhanced relationship suggestions
+- 🚧 Advanced search filters
+- 🚧 Export functionality
+
+### Planned 📋
+- 📋 Real-time collaboration
+- 📋 Graph analytics and insights
+- 📋 Advanced RAG with document chunks
+- 📋 Integration with external data sources
+
+See [Implementation Roadmap](docs/roadmap.md) for detailed progress.
 
 ## License
 

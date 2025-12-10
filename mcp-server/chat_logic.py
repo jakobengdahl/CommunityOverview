@@ -51,10 +51,19 @@ SECURITY RULES:
 4. Filter results based on user's active communities when relevant
 
 WORKFLOW FOR SEARCHING:
+When user asks to search "i databasen", "i nätverket", "i communityn", "i grafen/graphen",
+"i underlaget", or similar phrases - they are referring to searching the graph database.
+
 1. Use search_graph() with appropriate query and filters (node_types, communities)
 2. If user wants to explore connections, use get_related_nodes()
 3. Present results clearly with node types and summaries
 4. Suggest relevant follow-up queries
+
+Examples of search requests:
+- "sök i databasen efter AI-projekt" → search_graph(query="AI-projekt", node_types=["Initiative"])
+- "finns det något i nätverket om cybersäkerhet?" → search_graph(query="cybersäkerhet")
+- "vad har vi i grafen kring Skatteverket?" → search_graph(query="Skatteverket", node_types=["Actor"])
+- "leta i underlaget efter myndigheter" → search_graph(node_types=["Actor"])
 
 WORKFLOW FOR ADDING NODES:
 1. FIRST: Run find_similar_nodes() for EACH new node to check for duplicates
@@ -457,8 +466,14 @@ Always be helpful, transparent, and data-driven in your responses.
                 return self._handle_tool_use(messages, response, client)
 
             # Just text response
+            # Extract text from content blocks (handle both TextBlock and other types)
+            text_content = ""
+            for block in response.content:
+                if hasattr(block, 'text'):
+                    text_content += block.text
+
             return {
-                "content": response.content[0].text,
+                "content": text_content if text_content else "No text response from AI",
                 "toolUsed": None,
                 "toolResult": None
             }
@@ -590,9 +605,11 @@ Always be helpful, transparent, and data-driven in your responses.
             # Claude wants to use another tool - continue recursively with accumulated data
             return self._handle_tool_use(messages, final_response, client, accumulated_nodes, accumulated_edges)
 
-        # Extract text from response
-        text_block = next((block for block in final_response.content if hasattr(block, 'text')), None)
-        final_text = text_block.text if text_block else ""
+        # Extract text from response (handle multiple text blocks)
+        final_text = ""
+        for block in final_response.content:
+            if hasattr(block, 'text'):
+                final_text += block.text
 
         # Prepare final tool result with accumulated data
         final_tool_result = {}
