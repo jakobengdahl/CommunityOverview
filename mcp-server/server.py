@@ -7,6 +7,8 @@ from typing import List, Optional, Dict, Any
 import os
 import tempfile
 import shutil
+import requests
+from urllib.parse import urlparse
 from mcp.server.fastmcp import FastMCP
 from starlette.requests import Request
 from starlette.responses import JSONResponse
@@ -112,6 +114,74 @@ async def upload_endpoint(request: Request):
                 "filename": filename,
                 "text": text,
                 "message": f"Successfully extracted {len(text)} characters"
+            })
+
+        finally:
+            # Cleanup
+            if os.path.exists(tmp_path):
+                os.remove(tmp_path)
+
+    except Exception as e:
+        import traceback
+        traceback.print_exc()
+        return JSONResponse({"error": str(e)}, status_code=500)
+
+
+@mcp.custom_route("/download_url", methods=["POST"])
+async def download_url_endpoint(request: Request):
+    """
+    Endpoint to download a document from a URL and extract text
+    """
+    try:
+        body = await request.json()
+        url = body.get("url")
+
+        if not url:
+            return JSONResponse({"error": "No URL provided"}, status_code=400)
+
+        # Validate URL
+        parsed = urlparse(url)
+        if not parsed.scheme or not parsed.netloc:
+            return JSONResponse({"error": "Invalid URL"}, status_code=400)
+
+        # Download the file
+        try:
+            response = requests.get(url, timeout=30, headers={
+                'User-Agent': 'Mozilla/5.0 (compatible; CommunityGraph/1.0)'
+            })
+            response.raise_for_status()
+        except requests.RequestException as e:
+            return JSONResponse({"error": f"Failed to download file: {str(e)}"}, status_code=400)
+
+        # Determine file extension from URL or Content-Type
+        content_type = response.headers.get('Content-Type', '')
+        filename = parsed.path.split('/')[-1] or 'document'
+
+        if not os.path.splitext(filename)[1]:
+            # Try to infer extension from Content-Type
+            if 'pdf' in content_type:
+                filename += '.pdf'
+            elif 'word' in content_type or 'msword' in content_type:
+                filename += '.docx'
+            elif 'text' in content_type:
+                filename += '.txt'
+
+        # Save to temp file
+        ext = os.path.splitext(filename)[1]
+        with tempfile.NamedTemporaryFile(delete=False, suffix=ext) as tmp:
+            tmp.write(response.content)
+            tmp_path = tmp.name
+
+        try:
+            # Extract text
+            text = DocumentProcessor.extract_text(tmp_path)
+
+            return JSONResponse({
+                "success": True,
+                "filename": filename,
+                "url": url,
+                "text": text,
+                "message": f"Successfully downloaded and extracted {len(text)} characters"
             })
 
         finally:
