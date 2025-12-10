@@ -2,7 +2,7 @@ import { useState } from 'react';
 import { Handle, Position } from 'reactflow';
 import useGraphStore from '../store/graphStore';
 import NodeEditDialog from './NodeEditDialog';
-// import { DEMO_GRAPH_DATA } from '../services/demoData'; // REMOVED
+import { executeTool } from '../services/api';
 import './CustomNode.css';
 
 function CustomNode({ data, id }) {
@@ -14,10 +14,34 @@ function CustomNode({ data, id }) {
   // Get full node data for tooltip - In real app, this should be in 'data' prop
   const fullNode = data; // Assuming 'data' contains necessary info for now
 
-  const handleShowRelated = () => {
-    // In backend integration, this should trigger a fetch
-    console.log("Expanding node:", id);
-    // TODO: Call backend to get related nodes
+  const handleShowRelated = async (e) => {
+    e.stopPropagation();
+    try {
+      const result = await executeTool('get_related_nodes', {
+        node_id: id,
+        depth: 1
+      });
+
+      if (result.nodes && result.nodes.length > 0) {
+        // Add to existing visualization instead of replacing
+        const { nodes: currentNodes, edges: currentEdges } = useGraphStore.getState();
+        const existingNodeIds = new Set(currentNodes.map(n => n.id));
+        const existingEdgeIds = new Set(currentEdges.map(e => e.id));
+
+        const newNodes = result.nodes.filter(n => !existingNodeIds.has(n.id));
+        const newEdges = (result.edges || []).filter(e => !existingEdgeIds.has(e.id));
+
+        if (newNodes.length > 0 || newEdges.length > 0) {
+          useGraphStore.getState().updateVisualization(
+            [...currentNodes, ...newNodes],
+            [...currentEdges, ...newEdges],
+            newNodes.map(n => n.id) // Highlight new nodes
+          );
+        }
+      }
+    } catch (error) {
+      console.error('Error expanding node:', error);
+    }
   };
 
   return (

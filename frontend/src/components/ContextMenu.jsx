@@ -1,7 +1,7 @@
 import { useEffect, useRef } from 'react';
 import './ContextMenu.css';
 
-function ContextMenu({ x, y, onClose, onAddRectangle }) {
+function ContextMenu({ x, y, onClose, onAddGroup }) {
   const menuRef = useRef(null);
 
   useEffect(() => {
@@ -36,18 +36,13 @@ function ContextMenu({ x, y, onClose, onAddRectangle }) {
       <button
         className="context-menu-item"
         onClick={() => {
-          onAddRectangle();
+          onAddGroup();
           onClose();
         }}
       >
-        <span className="context-menu-icon">▭</span>
-        Rectangle
+        <span className="context-menu-icon">📁</span>
+        Group
       </button>
-      {/* Future additions can go here */}
-      {/* <button className="context-menu-item">
-        <span className="context-menu-icon">⬮</span>
-        Circle
-      </button> */}
     </div>
   );
 }

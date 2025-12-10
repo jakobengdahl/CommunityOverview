@@ -68,7 +68,16 @@ async def chat_endpoint(request: Request):
         processor = get_chat_processor()
         result = processor.process_message(messages, api_key=api_key)
 
-        return JSONResponse(result)
+        # Use custom JSON encoder to handle datetime objects
+        import json
+        from datetime import datetime
+
+        def json_serializer(obj):
+            if isinstance(obj, datetime):
+                return obj.isoformat()
+            raise TypeError(f"Object of type {type(obj)} is not JSON serializable")
+
+        return JSONResponse(json.loads(json.dumps(result, default=json_serializer)))
     except Exception as e:
         import traceback
         traceback.print_exc()
@@ -135,7 +144,16 @@ async def execute_tool_endpoint(request: Request):
         func = TOOLS_MAP[tool_name]
         result = func(**arguments)
 
-        return JSONResponse(result)
+        # Use custom JSON encoder to handle datetime objects
+        import json
+        from datetime import datetime
+
+        def json_serializer(obj):
+            if isinstance(obj, datetime):
+                return obj.isoformat()
+            raise TypeError(f"Object of type {type(obj)} is not JSON serializable")
+
+        return JSONResponse(json.loads(json.dumps(result, default=json_serializer)))
     except Exception as e:
         import traceback
         traceback.print_exc()
@@ -161,7 +179,7 @@ def search_graph(
         limit: Max number of results (default 50)
 
     Returns:
-        Dict with matching nodes
+        Dict with matching nodes and edges connecting them
     """
     # Convert node_types to NodeType enum
     type_filters = None
@@ -175,8 +193,18 @@ def search_graph(
         limit=limit
     )
 
+    # Get node IDs for edge filtering
+    result_node_ids = set(node.id for node in results)
+
+    # Find edges connecting these nodes
+    connecting_edges = [
+        edge for edge in graph.edges.values()
+        if edge.source in result_node_ids or edge.target in result_node_ids
+    ]
+
     return {
         "nodes": [node.model_dump() for node in results],
+        "edges": [edge.model_dump() for edge in connecting_edges],
         "total": len(results),
         "query": query,
         "filters": {
@@ -536,6 +564,9 @@ WORKFLOW FOR DOCUMENT UPLOAD:
 6. Automatically link to user's active communities
 
 Always be clear about what you're doing and ask for confirmation for important operations.
+
+TONE: Use a neutral, professional tone. Avoid excessive enthusiasm and superlatives (e.g., "Utmärkt!", "Perfekt!").
+Start responses directly with information rather than enthusiastic acknowledgments.
 """
 
 
@@ -547,4 +578,6 @@ if __name__ == "__main__":
 
     # Run as HTTP server on port 8000 (required for frontend)
     import uvicorn
-    uvicorn.run(mcp.app, host="0.0.0.0", port=8000)
+    # Get the ASGI application from FastMCP using streamable HTTP transport
+    app = mcp.streamable_http_app()
+    uvicorn.run(app, host="0.0.0.0", port=8000)

@@ -96,6 +96,7 @@
   justify-content: flex-end;
 }
 
+.export-button,
 .settings-button {
   background: none;
   border: 1px solid #444;
@@ -107,6 +108,7 @@
   transition: border-color 0.2s;
 }
 
+.export-button:hover,
 .settings-button:hover {
   border-color: #646cff;
 }

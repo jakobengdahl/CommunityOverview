@@ -17,6 +17,11 @@ export default defineConfig({
       '/upload': {
         target: 'http://localhost:8000',
         changeOrigin: true,
+      },
+      // Proxy to backend execute_tool endpoint
+      '/execute_tool': {
+        target: 'http://localhost:8000',
+        changeOrigin: true,
       }
     }
   }
