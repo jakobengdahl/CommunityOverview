@@ -120,6 +120,7 @@ function VisualizationPanel() {
         nodeType: node.type,
         color: NODE_COLORS[node.type] || '#9CA3AF',
         isHighlighted: highlightedNodeIds.includes(node.id),
+        onEdit: (nodeToEdit) => setEditingNode({ id: node.id, data: nodeToEdit }), // Pass edit callback
       },
       position: { x: 0, y: 0 }, // Will be set by layout algorithm
     }));
@@ -519,6 +520,11 @@ function VisualizationPanel() {
               onNodeContextMenu={onNodeContextMenu}
               onNodeDragStop={onNodeDragStop}
               onPaneContextMenu={onPaneContextMenu}
+              onPaneClick={() => {
+                // Close any open context menus when clicking on background
+                setContextMenu(null);
+                setNodeContextMenu(null);
+              }}
               onInit={setReactFlowInstance}
               nodeTypes={nodeTypes}
               fitView
@@ -531,6 +537,8 @@ function VisualizationPanel() {
                 animated: true,
                 style: { strokeWidth: 2 }
               }}
+              panOnDrag={[1, 2]} // Enable panning with left-click (1) and right-click (2)
+              selectionOnDrag={false} // Disable selection box to allow panning
             >
               <Background color="#333" gap={16} />
               <Controls />

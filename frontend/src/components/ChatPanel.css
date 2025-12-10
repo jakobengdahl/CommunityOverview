@@ -53,6 +53,57 @@
   margin-bottom: 0.5rem;
 }
 
+/* Loading indicator */
+.message-loading {
+  display: flex;
+  align-items: center;
+  gap: 0.75rem;
+  margin-top: 1rem;
+  padding: 0.75rem;
+  background-color: rgba(100, 108, 255, 0.1);
+  border-left: 3px solid #646cff;
+  border-radius: 4px;
+  animation: fadeIn 0.3s ease-in;
+}
+
+.loading-dots {
+  display: flex;
+  gap: 0.4rem;
+}
+
+.loading-dots span {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background-color: #646cff;
+  animation: bounce 1.4s infinite ease-in-out both;
+}
+
+.loading-dots span:nth-child(1) {
+  animation-delay: -0.32s;
+}
+
+.loading-dots span:nth-child(2) {
+  animation-delay: -0.16s;
+}
+
+@keyframes bounce {
+  0%, 80%, 100% {
+    transform: scale(0);
+    opacity: 0.5;
+  }
+  40% {
+    transform: scale(1);
+    opacity: 1;
+  }
+}
+
+.loading-text {
+  color: #646cff;
+  font-size: 0.9rem;
+  font-weight: 500;
+}
+
 .message-timestamp {
   font-size: 0.75rem;
   opacity: 0.6;

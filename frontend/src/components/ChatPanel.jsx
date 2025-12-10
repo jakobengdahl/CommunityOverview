@@ -442,6 +442,18 @@ function ChatPanel() {
             <div className="message-content">
               {msg.content}
 
+              {/* Loading indicator - show under user's last message while processing */}
+              {msg.role === 'user' && idx === chatMessages.length - 1 && isProcessing && (
+                <div className="message-loading">
+                  <div className="loading-dots">
+                    <span></span>
+                    <span></span>
+                    <span></span>
+                  </div>
+                  <span className="loading-text">AI bearbetar din fråga...</span>
+                </div>
+              )}
+
               {/* Render proposal with approve/reject buttons */}
               {msg.proposal && (
                 <div className="proposal-card">

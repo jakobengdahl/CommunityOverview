@@ -75,12 +75,21 @@ When a user uploads a document, analyze their intent from any accompanying messa
 
 CASE 1 - EXTRACTION REQUEST (user wants to extract specific entities):
 Examples: "hitta alla myndigheter", "extrahera aktörer", "vilka organisationer nämns"
-1. Analyze document and identify nodes matching the requested type/theme
-2. For EACH identified node: Run find_similar_nodes() to check duplicates
-3. Use propose_new_node() for each unique node
-4. Let user review and approve/reject each proposal
-5. Automatically link to user's active communities
-6. Suggest relationships between extracted nodes
+
+IMPORTANT - RATE LIMIT HANDLING:
+To avoid API rate limits, ALWAYS process entities in SMALL BATCHES of 5-10 at a time:
+1. Analyze document and identify ALL relevant nodes matching the requested type/theme
+2. Select the FIRST 5-10 most important/relevant nodes for initial batch
+3. For EACH node in the batch: Run find_similar_nodes() to check duplicates
+4. Use propose_new_node() for each unique node in the batch
+5. Present the batch to user with a message like: "Jag hittade X totalt. Här är de första 5-10. Vill du att jag fortsätter med nästa batch?"
+6. Let user review and approve/reject each proposal in this batch
+7. WAIT for user confirmation before processing next batch
+8. When user approves continuing, process next batch of 5-10 nodes
+9. Automatically link to user's active communities
+10. Suggest relationships between extracted nodes
+
+NEVER try to process all nodes at once if there are more than 10. Always batch them.
 
 CASE 2 - SIMILARITY SEARCH (user wants to find matching existing nodes):
 Examples: "finns det liknande projekt", "vilka initiativ liknar detta", "har vi något snarlikt"
@@ -413,8 +422,15 @@ Always be helpful, transparent, and data-driven in your responses.
 
         except Exception as e:
             print(f"Error in process_message: {e}")
+            error_msg = str(e)
+
+            # Provide user-friendly message for rate limits
+            if "rate_limit" in error_msg.lower() or "429" in error_msg:
+                error_msg = ("⚠️ API rate limit uppnådd. Detta händer när många noder bearbetas samtidigt. "
+                            "Försök igen om ~60 sekunder, eller be om färre noder åt gången (5-10 st).")
+
             return {
-                "content": f"Error: {str(e)}",
+                "content": error_msg,
                 "toolUsed": None,
                 "toolResult": None
             }
