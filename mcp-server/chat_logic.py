@@ -375,11 +375,16 @@ Always be helpful, transparent, and data-driven in your responses while minimizi
                     "properties": {
                         "node": {
                             "type": "object",
-                            "description": "The node to propose"
+                            "description": "The node to propose",
+                            "additionalProperties": True
                         },
                         "similar_nodes": {
                             "type": "array",
-                            "description": "List of similar nodes found"
+                            "description": "List of similar nodes found",
+                            "items": {
+                                "type": "object",
+                                "additionalProperties": True
+                            }
                         }
                     },
                     "required": ["node", "similar_nodes"]
@@ -397,7 +402,8 @@ Always be helpful, transparent, and data-driven in your responses while minimizi
                         },
                         "updates": {
                             "type": "object",
-                            "description": "Fields to update"
+                            "description": "Fields to update",
+                            "additionalProperties": True
                         }
                     },
                     "required": ["node_id", "updates"]
