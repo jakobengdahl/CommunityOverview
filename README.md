@@ -67,7 +67,43 @@ TROUBLESHOOTING_OPENAI.md     # OpenAI setup troubleshooting
 
 ## Quick Start
 
-### Local Development
+### 🚀 Easy Mode (Recommended)
+
+Start both backend and frontend with a single command:
+
+**Linux/Mac:**
+```bash
+./start-dev.sh
+```
+
+**Windows:**
+```bash
+start-dev.bat
+```
+
+The script will:
+- ✅ Check and install dependencies automatically
+- ✅ Start backend (MCP server) on http://localhost:8000
+- ✅ Start frontend (React) on http://localhost:5173
+- ✅ Show which LLM provider is configured
+- ✅ Display logs from both services
+- ✅ Handle graceful shutdown with Ctrl+C
+
+**First time setup:**
+```bash
+# Set your API key (pick one)
+export OPENAI_API_KEY=sk-xxxxx        # For OpenAI
+export ANTHROPIC_API_KEY=sk-ant-xxxxx # For Claude
+
+# Start everything
+./start-dev.sh
+```
+
+📖 **For detailed startup options and troubleshooting, see [STARTUP.md](./STARTUP.md)**
+
+### Manual Start (Advanced)
+
+If you prefer to start services separately:
 
 **MCP Server:**
 ```bash
