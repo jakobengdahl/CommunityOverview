@@ -10,22 +10,23 @@ load_dotenv()
 
 class ChatProcessor:
     def __init__(self, tools_map: Dict[str, Callable]):
-        # Determine which provider to use
-        self.provider_type = os.getenv("LLM_PROVIDER", "claude").lower()
+        # Auto-detect provider based on available API keys
+        self.provider_type = self._detect_provider()
 
-        # Set default API key based on provider
+        # Set default API key based on detected provider
         if self.provider_type == "openai":
             self.default_api_key = os.getenv("OPENAI_API_KEY")
+            print(f"✓ Using OpenAI provider (LLM_PROVIDER={self.provider_type})")
             if not self.default_api_key:
                 print("Warning: OPENAI_API_KEY not found in environment variables")
         else:  # claude
             self.default_api_key = os.getenv("ANTHROPIC_API_KEY")
+            print(f"✓ Using Claude provider (LLM_PROVIDER={self.provider_type})")
             if not self.default_api_key:
                 print("Warning: ANTHROPIC_API_KEY not found in environment variables")
 
         self.tools_map = tools_map
         self.tool_definitions = self._generate_tool_definitions()
-
         self.system_prompt = """You are a helpful assistant for the Community Knowledge Graph system.
 
 LANGUAGE HANDLING:
@@ -216,6 +217,45 @@ User: "Lägg till ett nytt projekt om cybersäkerhet"
 
 Always be helpful, transparent, and data-driven in your responses while minimizing API calls.
 """
+
+    def _detect_provider(self) -> str:
+        """
+        Detect which LLM provider to use based on environment variables.
+
+        Priority:
+        1. LLM_PROVIDER env variable (if set)
+        2. Auto-detect based on which API keys are available
+        3. Default to 'claude'
+        """
+        # Check if LLM_PROVIDER is explicitly set
+        explicit_provider = os.getenv("LLM_PROVIDER")
+        if explicit_provider:
+            provider = explicit_provider.lower()
+            if provider in ["claude", "openai"]:
+                print(f"Provider explicitly set via LLM_PROVIDER: {provider}")
+                return provider
+            else:
+                print(f"Warning: Invalid LLM_PROVIDER value '{explicit_provider}', falling back to auto-detection")
+
+        # Auto-detect based on available API keys
+        has_openai = bool(os.getenv("OPENAI_API_KEY"))
+        has_claude = bool(os.getenv("ANTHROPIC_API_KEY"))
+
+        if has_openai and has_claude:
+            # Both keys available - prefer OpenAI (more cost-effective)
+            print("Both API keys found, auto-selecting OpenAI (more cost-effective)")
+            return "openai"
+        elif has_openai:
+            print("OPENAI_API_KEY found, auto-selecting OpenAI provider")
+            return "openai"
+        elif has_claude:
+            print("ANTHROPIC_API_KEY found, auto-selecting Claude provider")
+            return "claude"
+        else:
+            # No keys found, default to claude
+            print("No API keys found in environment, defaulting to Claude")
+            return "claude"
+
 
     def _generate_tool_definitions(self) -> List[Dict]:
         """

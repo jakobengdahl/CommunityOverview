@@ -8,7 +8,7 @@ import { loadVisualizationView, executeTool } from './services/api'
 // import { loadDemoData } from './services/demoData' // REMOVED
 
 function App() {
-  const { selectedCommunities, updateVisualization, loadVisualizationView: loadViewToStore, addChatMessage, setApiKey } = useGraphStore();
+  const { selectedCommunities, updateVisualization, loadVisualizationView: loadViewToStore, addChatMessage, setApiKey, setLlmProvider } = useGraphStore();
   const [viewLoadError, setViewLoadError] = useState(null);
   const hasLoadedFromUrl = useRef(false);
 
@@ -23,6 +23,20 @@ function App() {
     const viewParam = params.get('view');
     const loadDataParam = params.get('loaddata');
     const apiKeyParam = params.get('apikey');
+    const providerParam = params.get('provider'); // New: support provider selection via URL
+
+    // Set LLM provider if specified
+    if (providerParam) {
+      const provider = providerParam.toLowerCase();
+      if (provider === 'openai' || provider === 'claude') {
+        setLlmProvider(provider);
+        addChatMessage({
+          role: 'assistant',
+          content: `🤖 LLM provider set to: ${provider === 'openai' ? 'OpenAI (GPT-4)' : 'Claude (Anthropic)'}`,
+          timestamp: new Date()
+        });
+      }
+    }
 
     // Set API key if provided
     if (apiKeyParam) {

@@ -29,10 +29,26 @@ This system helps organizations avoid overlapping investments by making visible:
 ## Project Structure
 
 ```
-/frontend          # React app with graph visualization
-/mcp-server        # Python MCP server with graph logic
-/docs              # Documentation and specifications
+/frontend                      # React app with graph visualization
+  /src/components             # UI components (Header, ChatPanel, etc.)
+  /src/services               # API client for backend communication
+  /src/store                  # Zustand state management
+/mcp-server                   # Python MCP server with graph logic
+  graph.json                  # Graph data storage (auto-created)
+  llm_providers.py            # LLM provider abstraction (Claude/OpenAI)
+  chat_logic.py               # Chat processing and tool execution
+  graph_storage.py            # NetworkX graph operations
+  server.py                   # FastAPI HTTP server
+  /tests                      # Unit and integration tests
+/docs                          # Documentation and specifications
+LLM_PROVIDERS.md              # Detailed LLM configuration guide
+TROUBLESHOOTING_OPENAI.md     # OpenAI setup troubleshooting
 ```
+
+**Data Storage:**
+- Graph data is stored in `/mcp-server/graph.json`
+- Vector embeddings in `/mcp-server/embeddings.pkl`
+- Both files are auto-created on first run
 
 ## Metamodel
 
@@ -79,42 +95,89 @@ Open the project in Codespaces - everything is pre-configured.
 
 ## LLM Provider Configuration
 
-This project supports both **Claude (Anthropic)** and **OpenAI (GPT-4)** as AI backends.
+This project supports both **Claude (Anthropic)** and **OpenAI (GPT-4)** as AI backends with **automatic provider detection**.
 
-### Quick Setup
+### Auto-Detection (Recommended)
 
-**For Claude (default):**
+The system automatically detects which provider to use based on available API keys:
+
+```bash
+# Just set your API key - provider is auto-detected
+export OPENAI_API_KEY=sk-xxxxx           # Auto-selects OpenAI
+# OR
+export ANTHROPIC_API_KEY=sk-ant-xxxxx    # Auto-selects Claude
+
+# Start the server
+cd mcp-server
+python server.py
+```
+
+**Priority when both keys are set:**
+1. `LLM_PROVIDER` env variable (if explicitly set)
+2. OpenAI (preferred as more cost-effective)
+3. Claude (fallback)
+
+### Manual Provider Selection
+
+**Force Claude:**
 ```bash
 export LLM_PROVIDER=claude
 export ANTHROPIC_API_KEY=sk-ant-xxxxx
 ```
 
-**For OpenAI:**
+**Force OpenAI:**
 ```bash
 export LLM_PROVIDER=openai
 export OPENAI_API_KEY=sk-xxxxx
 ```
 
-**Frontend Override:**
-Users can override the backend provider through the UI Settings (⚙️) by selecting their preferred provider and optionally providing their own API key.
+### Runtime Override
 
-📖 **For detailed configuration, see [LLM_PROVIDERS.md](./LLM_PROVIDERS.md)**
+Users can override the provider at runtime through:
+- **UI Settings (⚙️)**: Select provider and optionally provide API key
+- **URL Parameters**: `?provider=openai&apikey=sk-xxxxx`
+
+📖 **For detailed configuration and troubleshooting, see [LLM_PROVIDERS.md](./LLM_PROVIDERS.md)**
 
 ## URL Parameters
 
-The application supports loading external graph data and custom API keys via URL parameters:
+The application supports configuration via URL parameters for easy sharing and testing:
 
-### Load External Graph Data
+### Available Parameters
 
-Load graph data from an external JSON file:
+| Parameter | Description | Example |
+|-----------|-------------|---------|
+| `provider` | LLM provider (`claude` or `openai`) | `?provider=openai` |
+| `apikey` | Custom API key for the session | `?apikey=sk-xxxxx` |
+| `loaddata` | Load external graph data from URL | `?loaddata=https://...` |
+| `view` | Load a saved visualization view | `?view=MyView` |
+| `community` | Pre-select communities (multiple) | `?community=eSam&community=Myndigheter` |
+
+### Examples
+
+**Use OpenAI with custom key:**
 ```
-http://localhost:5173/?loaddata=https%3A%2F%2Fraw.githubusercontent.com%2Fuser%2Frepo%2Fmain%2Fdata.json
+http://localhost:5173/?provider=openai&apikey=sk-xxxxx
 ```
 
-**Parameters:**
-- `loaddata` - URL-encoded URL to a JSON file containing graph data
+**Use Claude with custom key:**
+```
+http://localhost:5173/?provider=claude&apikey=sk-ant-xxxxx
+```
 
-**JSON Format:**
+**Load external data with OpenAI:**
+```
+http://localhost:5173/?provider=openai&loaddata=https%3A%2F%2Fraw.githubusercontent.com%2Fuser%2Frepo%2Fmain%2Fdata.json
+```
+
+**Open specific view with community filter:**
+```
+http://localhost:5173/?view=AI-Projects&community=eSam
+```
+
+### External Data Format
+
+When using `loaddata`, the JSON should follow this format:
 ```json
 {
   "nodes": [
@@ -141,23 +204,6 @@ http://localhost:5173/?loaddata=https%3A%2F%2Fraw.githubusercontent.com%2Fuser%2
 ```
 
 See `example-graph-data.json` for a complete example.
-
-### Custom API Key
-
-Provide a custom Anthropic API key:
-```
-http://localhost:5173/?apikey=sk-ant-api03-...
-```
-
-**Parameters:**
-- `apikey` - URL-encoded Anthropic API key
-
-### Combining Parameters
-
-You can combine multiple parameters:
-```
-http://localhost:5173/?loaddata=https%3A%2F%2F...&apikey=sk-ant-api03-...
-```
 
 ## User Scenarios
 
