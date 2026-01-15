@@ -611,6 +611,7 @@ function VisualizationPanel() {
                       type: updatedNode.data.type,
                       description: updatedNode.data.description,
                       summary: updatedNode.data.summary,
+                      tags: updatedNode.data.tags || [],
                     }
                   });
 
@@ -624,6 +625,7 @@ function VisualizationPanel() {
                           type: updatedNode.data.type,
                           description: updatedNode.data.description,
                           summary: updatedNode.data.summary,
+                          tags: updatedNode.data.tags || [],
                         }
                       : n
                   );

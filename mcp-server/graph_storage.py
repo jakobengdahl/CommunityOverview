@@ -371,7 +371,7 @@ class GraphStorage:
         node = self.nodes[node_id]
 
         # Update allowed fields
-        allowed_fields = {'name', 'description', 'summary', 'communities', 'metadata'}
+        allowed_fields = {'name', 'description', 'summary', 'communities', 'tags', 'metadata'}
         for key, value in updates.items():
             if key in allowed_fields:
                 setattr(node, key, value)
@@ -381,8 +381,8 @@ class GraphStorage:
         # Update in graph
         self.graph.nodes[node_id]['data'] = node
 
-        # Update embedding if text fields changed
-        if any(k in updates for k in ['name', 'description', 'summary']):
+        # Update embedding if text fields or tags changed
+        if any(k in updates for k in ['name', 'description', 'summary', 'tags']):
             self.vector_store.update_node_embedding(node)
 
         # Save
