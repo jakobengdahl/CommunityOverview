@@ -1,7 +1,6 @@
 .chat-panel {
-  width: 600px; /* Fixed width instead of percentage */
-  max-width: 40%; /* Fallback to 40% on smaller screens */
-  min-width: 400px; /* Minimum width to prevent too narrow on small screens */
+  width: 400px; /* Fixed width - does not grow on larger screens */
+  flex-shrink: 0; /* Prevent shrinking */
   height: 100%;
   display: flex;
   flex-direction: column;
