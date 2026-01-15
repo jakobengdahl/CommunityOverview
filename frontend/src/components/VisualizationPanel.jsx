@@ -58,7 +58,7 @@ function VisualizationPanel() {
   const [notification, setNotification] = useState(null);
   const reactFlowWrapper = useRef(null);
   const [isRightDragging, setIsRightDragging] = useState(false);
-  const rightDragStart = useRef({ x: 0, y: 0, time: 0 });
+  const rightDragStart = useRef({ x: 0, y: 0, time: null });
 
   // Filter out hidden nodes and their edges
   const visibleNodes = useMemo(() =>
@@ -291,6 +291,16 @@ function VisualizationPanel() {
       event.stopPropagation();
 
       // Only show context menu if it was a quick click (not a drag)
+      // If no mousedown was tracked, always show context menu
+      if (rightDragStart.current.time === null) {
+        setContextMenu({
+          x: event.clientX,
+          y: event.clientY,
+        });
+        console.log('[VisualizationPanel] Context menu shown (no drag tracked)');
+        return;
+      }
+
       // Check if mouse moved less than 5px and time was less than 300ms
       const timeDiff = Date.now() - rightDragStart.current.time;
       const xDiff = Math.abs(event.clientX - rightDragStart.current.x);
@@ -302,10 +312,13 @@ function VisualizationPanel() {
           x: event.clientX,
           y: event.clientY,
         });
-        console.log('[VisualizationPanel] Context menu should show at:', event.clientX, event.clientY);
+        console.log('[VisualizationPanel] Context menu shown (quick click)');
       } else {
-        console.log('[VisualizationPanel] Suppressed context menu (was a drag)');
+        console.log('[VisualizationPanel] Context menu suppressed (was a drag)');
       }
+
+      // Reset tracking after handling
+      rightDragStart.current.time = null;
     },
     []
   );
@@ -559,7 +572,7 @@ function VisualizationPanel() {
                 animated: true,
                 style: { strokeWidth: 2 }
               }}
-              panOnDrag={true} // Enable panning with any mouse button on background
+              panOnDrag={[0, 2]} // Enable panning with left (0) and right (2) mouse buttons
               selectionOnDrag={false} // Disable selection box to allow panning
             >
               <Background color="#333" gap={16} />
