@@ -537,7 +537,7 @@ function VisualizationPanel() {
                 animated: true,
                 style: { strokeWidth: 2 }
               }}
-              panOnDrag={[1, 2]} // Enable panning with left-click (1) and right-click (2)
+              panOnDrag={true} // Enable panning with any mouse button on background
               selectionOnDrag={false} // Disable selection box to allow panning
             >
               <Background color="#333" gap={16} />
