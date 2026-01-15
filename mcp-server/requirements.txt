@@ -20,7 +20,12 @@ scikit-learn>=1.0.0
 pytest>=7.0.0
 pytest-asyncio>=0.21.0
 black>=23.0.0
+
+# LLM Providers
 anthropic>=0.18.0
+openai>=1.0.0
+
+# Core
 python-dotenv>=1.0.0
 fastapi>=0.100.0
 uvicorn>=0.20.0

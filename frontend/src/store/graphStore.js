@@ -145,8 +145,13 @@ const useGraphStore = create((set, get) => ({
   clearError: () => set({ error: null }),
 
   // API Key (temporary, session-only storage)
+  // Support both Claude and OpenAI API keys
   apiKey: null,
   setApiKey: (key) => set({ apiKey: key }),
+
+  // LLM Provider type (defaults to what backend is configured to use)
+  llmProvider: null, // 'claude' or 'openai' - null means use backend default
+  setLlmProvider: (provider) => set({ llmProvider: provider }),
 }));
 
 export default useGraphStore;
