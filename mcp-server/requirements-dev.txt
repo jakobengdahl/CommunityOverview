@@ -1,0 +1,12 @@
+# Development and Testing Dependencies
+# Install with: pip install --no-cache-dir -r requirements-dev.txt
+
+# First install core requirements
+-r requirements.txt
+
+# Testing
+pytest>=7.0.0
+pytest-asyncio>=0.21.0
+
+# Code formatting
+black>=23.0.0

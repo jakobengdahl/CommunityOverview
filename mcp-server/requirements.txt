@@ -1,6 +1,6 @@
 # Core MCP Server Dependencies
-# These are essential for the server to run
-# For ML features (similarity search), also install: requirements-ml.txt
+# Optimized for GitHub Codespaces (minimal disk usage)
+# For development/testing: pip install -r requirements-dev.txt
 
 # MCP Core
 mcp>=1.0.0
@@ -9,16 +9,11 @@ pydantic>=2.0.0
 networkx>=3.0
 python-dateutil>=2.8.0
 
-# Document processing (lightweight)
+# Document processing
 PyMuPDF>=1.23.0
 python-docx>=1.0.0
 python-multipart>=0.0.9
 requests>=2.31.0
-
-# Development
-pytest>=7.0.0
-pytest-asyncio>=0.21.0
-black>=23.0.0
 
 # LLM Providers
 anthropic>=0.18.0
@@ -29,5 +24,17 @@ python-dotenv>=1.0.0
 fastapi>=0.100.0
 uvicorn>=0.20.0
 
-# Note: For similarity search features, install requirements-ml.txt separately
-# This keeps the base installation smaller and faster
+# String similarity (lightweight)
+python-Levenshtein>=0.21.0
+
+# ===== ML Dependencies (OPTIMIZED FOR DISK SPACE) =====
+# Install PyTorch CPU-only version (much smaller than CUDA version)
+--extra-index-url https://download.pytorch.org/whl/cpu
+torch>=2.0.0
+
+# Sentence transformers for semantic similarity
+# This will use the CPU-only PyTorch installed above
+sentence-transformers>=2.2.0
+
+# Lightweight ML utilities
+scikit-learn>=1.0.0

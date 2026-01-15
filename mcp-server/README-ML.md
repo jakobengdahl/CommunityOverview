@@ -1,36 +1,46 @@
-# Optional ML Dependencies
+# ML Dependencies - Optimized Installation
 
 ## Diskutrymme-optimering
 
-För att minska diskutrymme har vi delat upp dependencies i två filer:
-- **requirements.txt** - Core dependencies (~500MB)
-- **requirements-ml.txt** - ML dependencies (~5-10GB)
+ML-funktionalitet är nu **inkluderad i requirements.txt** med optimeringar för att minska diskutrymme:
 
-## Installera ML-funktioner
+### Vad har optimerats?
 
-ML-paketen behövs endast för:
-- Similarity search (liknande dokument)
-- Avancerad RAG (Retrieval-Augmented Generation)
+1. **PyTorch CPU-only** (~800MB istället för ~4GB)
+   - Använder `--extra-index-url https://download.pytorch.org/whl/cpu`
+   - Ingen CUDA/GPU support (behövs ej för Codespaces)
 
-### Installation
+2. **Minimala dependencies**
+   - Bara det som faktiskt används av koden
+   - Development tools flyttade till `requirements-dev.txt`
 
-Om du behöver dessa funktioner, kör:
+3. **--no-cache-dir flag**
+   - Förhindrar pip från att spara cache
+   - Sparar ytterligare 1-2GB
 
-```bash
-cd mcp-server
-source venv/bin/activate
-pip install --no-cache-dir -r requirements-ml.txt
-```
+### Resultat
 
-**OBS:** Detta kräver minst 10GB ledigt diskutrymme!
+- **Tidigare:** ~10GB total installation
+- **Nu:** ~2-3GB total installation
+- **Besparing:** ~70% mindre diskutrymme!
+
+## Funktioner inkluderade
+
+✅ Full MCP-server funktionalitet
+✅ LLM-integration (OpenAI & Anthropic)
+✅ Kunskapsgrafer med semantic similarity
+✅ Dokumenthantering (PDF, DOCX)
+✅ Vector embeddings (sentence-transformers)
+✅ Similarity search
+✅ String matching (Levenshtein)
 
 ## GitHub Codespaces
 
-I GitHub Codespaces är diskutrymmet begränsat (32GB). De flesta funktioner fungerar utan ML-paketen.
+Installation fungerar nu i GitHub Codespaces utan att fylla disken!
 
 ### Tips för Codespaces:
-1. Core-funktionalitet fungerar utan ML-dependencies
-2. Installera bara ML-paketen om du verkligen behöver similarity search
+1. Alla ML-funktioner fungerar nu direkt
+2. CPU-only PyTorch är tillräckligt snabbt för de flesta use cases
 3. Om du får diskutrymme-problem, kör:
    ```bash
    # Rensa pip cache
@@ -40,13 +50,12 @@ I GitHub Codespaces är diskutrymmet begränsat (32GB). De flesta funktioner fun
    npm cache clean --force
    ```
 
-## Vad är inkluderat utan ML-dependencies?
+## Development
 
-✅ Full MCP-server funktionalitet
-✅ LLM-integration (OpenAI & Anthropic)
-✅ Kunskapsgrafer
-✅ Dokumenthantering
-✅ API endpoints
+För testing och utveckling, installera även:
 
-❌ Similarity search
-❌ Sentence embeddings
+```bash
+pip install --no-cache-dir -r requirements-dev.txt
+```
+
+Detta inkluderar pytest och black för code formatting.

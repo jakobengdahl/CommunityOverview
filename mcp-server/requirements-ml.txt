@@ -1,8 +1,5 @@
-# Optional ML Dependencies for Advanced Features
-# These packages are large and only needed for similarity search and RAG features
-# Install with: pip install --no-cache-dir -r requirements-ml.txt
-
-# Similarity search (requires PyTorch - very large!)
-sentence-transformers>=2.2.0
-scikit-learn>=1.0.0
-python-Levenshtein>=0.21.0
+# DEPRECATED - ML dependencies are now in requirements.txt
+# This file is kept for backward compatibility only
+#
+# The main requirements.txt now includes optimized CPU-only ML packages
+# to reduce disk usage while maintaining full functionality
