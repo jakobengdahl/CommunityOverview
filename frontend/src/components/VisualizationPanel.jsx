@@ -57,6 +57,8 @@ function VisualizationPanel() {
   const [reactFlowInstance, setReactFlowInstance] = useState(null);
   const [notification, setNotification] = useState(null);
   const reactFlowWrapper = useRef(null);
+  const [isRightDragging, setIsRightDragging] = useState(false);
+  const rightDragStart = useRef({ x: 0, y: 0, time: 0 });
 
   // Filter out hidden nodes and their edges
   const visibleNodes = useMemo(() =>
@@ -288,12 +290,22 @@ function VisualizationPanel() {
       event.preventDefault();
       event.stopPropagation();
 
-      setContextMenu({
-        x: event.clientX,
-        y: event.clientY,
-      });
+      // Only show context menu if it was a quick click (not a drag)
+      // Check if mouse moved less than 5px and time was less than 300ms
+      const timeDiff = Date.now() - rightDragStart.current.time;
+      const xDiff = Math.abs(event.clientX - rightDragStart.current.x);
+      const yDiff = Math.abs(event.clientY - rightDragStart.current.y);
+      const wasDrag = timeDiff > 300 || xDiff > 5 || yDiff > 5;
 
-      console.log('[VisualizationPanel] Context menu should show at:', event.clientX, event.clientY);
+      if (!wasDrag) {
+        setContextMenu({
+          x: event.clientX,
+          y: event.clientY,
+        });
+        console.log('[VisualizationPanel] Context menu should show at:', event.clientX, event.clientY);
+      } else {
+        console.log('[VisualizationPanel] Suppressed context menu (was a drag)');
+      }
     },
     []
   );
@@ -524,6 +536,16 @@ function VisualizationPanel() {
                 // Close any open context menus when clicking on background
                 setContextMenu(null);
                 setNodeContextMenu(null);
+              }}
+              onPaneMouseDown={(event) => {
+                // Track right-click start position and time
+                if (event.button === 2) {
+                  rightDragStart.current = {
+                    x: event.clientX,
+                    y: event.clientY,
+                    time: Date.now()
+                  };
+                }
               }}
               onInit={setReactFlowInstance}
               nodeTypes={nodeTypes}

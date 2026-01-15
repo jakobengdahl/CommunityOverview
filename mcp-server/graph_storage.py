@@ -91,7 +91,7 @@ class GraphStorage:
     ) -> List[Node]:
         """
         Search nodes based on text query
-        Matches against name, description, summary
+        Matches against name, description, summary, and tags
         """
         query_lower = query.lower()
         results = []
@@ -106,8 +106,9 @@ class GraphStorage:
                 if not any(comm in node.communities for comm in communities):
                     continue
 
-            # Text matching
-            searchable_text = f"{node.name} {node.description} {node.summary}".lower()
+            # Text matching including tags
+            tags_text = " ".join(node.tags) if hasattr(node, 'tags') and node.tags else ""
+            searchable_text = f"{node.name} {node.description} {node.summary} {tags_text}".lower()
             if query_lower in searchable_text:
                 results.append(node)
 

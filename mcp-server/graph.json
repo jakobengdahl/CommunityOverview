@@ -9,6 +9,7 @@
       "communities": [
         "eSam"
       ],
+      "tags": ["digitalisering", "e-förvaltning", "samverkan", "offentlig sektor"],
       "metadata": {},
       "embedding": null,
       "created_at": "2025-12-03T10:00:00Z",
@@ -23,6 +24,7 @@
       "communities": [
         "eSam"
       ],
+      "tags": ["samverkansorganisation", "digitalisering", "e-förvaltning", "myndighetssamverkan"],
       "metadata": {
         "organization_type": "samverkansorganisation",
         "country": "Sverige",
@@ -45,6 +47,7 @@
       "communities": [
         "eSam"
       ],
+      "tags": ["myndighet", "utvecklingssamarbete", "bistånd", "fattigdomsbekämpning"],
       "metadata": {
         "organization_type": "myndighet",
         "country": "Sverige",
@@ -65,6 +68,7 @@
       "description": "Bank for International Settlements (BIS) är en internationell finansiell organisation som ägs av centralbanker och som verkar för internationellt monetärt och finansiellt samarbete.",
       "summary": "Internationell finansiell organisation som bistår centralbanker",
       "communities": [],
+      "tags": ["international organisation", "centralbank", "finansiell stabilitet", "monetärt samarbete"],
       "metadata": {
         "organization_type": "international_organization",
         "headquarters": "Basel, Switzerland",
@@ -85,6 +89,7 @@
       "description": "Ett projekt som fokuserar på användningen av generativ AI inom officiell statistik, involverande 13 statistiska kontor, centralbanker och akademiska institutioner.",
       "summary": "Generativ AI och officiell statistik workshop i Genève, 14 maj 2025",
       "communities": [],
+      "tags": ["AI", "generativ AI", "officiell statistik", "maskininlärning", "LLM"],
       "metadata": {
         "project_type": "research",
         "participants": 13,
@@ -105,6 +110,7 @@
       "description": "High-Level Group for the Modernisation of Official Statistics projekt som organiserar workshops om generativ AI och officiell statistik.",
       "summary": "Fokus på styrning, tekniska kapitel och organisatorisk kapacitet",
       "communities": [],
+      "tags": ["statistik", "modernisering", "AI", "governance", "kapacitetsbyggnad"],
       "metadata": {
         "project_type": "modernization",
         "focus_areas": ["governance", "technical_capacity", "organizational_capacity"]
@@ -124,6 +130,7 @@
       "description": "United Nations Economic Commission for Europe (UNECE) är en av FN:s fem regionala ekonomiska kommissioner som arbetar med ekonomiskt samarbete i Europa.",
       "summary": "FN:s ekonomiska kommission för Europa",
       "communities": [],
+      "tags": ["international organisation", "FN", "ekonomiskt samarbete", "Europa", "standardisering"],
       "metadata": {
         "organization_type": "international_organization",
         "parent_organization": "United Nations",
