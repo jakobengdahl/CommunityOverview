@@ -64,12 +64,14 @@ async def chat_endpoint(request: Request):
         if not messages:
             return JSONResponse({"error": "No messages provided"}, status_code=400)
 
-        # Check for provider in header
-        provider = request.headers.get("X-LLM-Provider")
-
         # Check for API key in header (user-provided key takes precedence)
         # Try both Anthropic and OpenAI headers
         api_key = request.headers.get("X-OpenAI-API-Key") or request.headers.get("X-Anthropic-API-Key")
+
+        # Check for provider in header - but only use it if user provided their own API key
+        # This allows backend's auto-detection (based on env vars) to take priority
+        provider_header = request.headers.get("X-LLM-Provider")
+        provider = provider_header if api_key else None  # Only use header provider if custom key provided
 
         processor = get_chat_processor()
         result = processor.process_message(messages, api_key=api_key, provider=provider)
