@@ -18,7 +18,7 @@ import ContextMenu from './ContextMenu';
 import NodeContextMenu from './NodeContextMenu';
 import EditNodeDialog from './EditNodeDialog';
 import { executeTool } from '../services/api';
-import { getLayoutedElements, getCircularLayout } from '../utils/graphLayout';
+import { getLayoutedElements, getCircularLayout, getGridLayout } from '../utils/graphLayout';
 import { useMemoizedLayout } from '../hooks/useMemoizedLayout';
 import './VisualizationPanel.css';
 
@@ -131,8 +131,19 @@ function VisualizationPanel() {
       return nodesWithoutPosition;
     }
 
-    // Calculate positions using memoized dagre layout if we have edges
-    if (reactFlowEdges.length > 0) {
+    // Use grid layout for many nodes with sparse edges
+    // This prevents long horizontal lines when expanding nodes with many connections
+    const nodeCount = nodesWithoutPosition.length;
+    const edgeCount = reactFlowEdges.length;
+    const shouldUseGrid = nodeCount > 15 && edgeCount < nodeCount * 1.5;
+
+    if (shouldUseGrid) {
+      // Grid layout for many nodes (e.g., 40 nodes → ~7x6 grid in 4:3 ratio)
+      return getGridLayout(nodesWithoutPosition);
+    }
+
+    // Calculate positions using dagre layout if we have edges
+    if (edgeCount > 0) {
       return getLayoutedElements(nodesWithoutPosition, reactFlowEdges, 'TB');
     }
 
@@ -230,10 +241,21 @@ function VisualizationPanel() {
       });
 
       if (result.nodes && result.nodes.length > 0) {
-        addNodesToVisualization(result.nodes);
-      }
-      if (result.edges && result.edges.length > 0) {
-        // Edges will be added automatically when nodes are in store
+        // Get current state and merge with new nodes/edges (same logic as + icon)
+        const { nodes: currentNodes, edges: currentEdges } = useGraphStore.getState();
+        const existingNodeIds = new Set(currentNodes.map(n => n.id));
+        const existingEdgeIds = new Set(currentEdges.map(e => e.id));
+
+        const newNodes = result.nodes.filter(n => !existingNodeIds.has(n.id));
+        const newEdges = (result.edges || []).filter(e => !existingEdgeIds.has(e.id));
+
+        if (newNodes.length > 0 || newEdges.length > 0) {
+          useGraphStore.getState().updateVisualization(
+            [...currentNodes, ...newNodes],
+            [...currentEdges, ...newEdges],
+            newNodes.map(n => n.id) // Highlight new nodes
+          );
+        }
       }
 
       setNotification({
@@ -249,7 +271,7 @@ function VisualizationPanel() {
       });
       setTimeout(() => setNotification(null), 3000);
     }
-  }, [addNodesToVisualization]);
+  }, []);
 
   const handleShowInNewView = useCallback(async (nodeId) => {
     // Clear current view and show only this node + its connections
@@ -259,13 +281,15 @@ function VisualizationPanel() {
         depth: 1
       });
 
-      // Clear hidden nodes to show everything
-      const { clearHiddenNodes, setNodes } = useGraphStore.getState();
-      clearHiddenNodes();
-
-      // Set only the target node and its related nodes
+      // Replace visualization with only this node and its connections
       if (result.nodes && result.nodes.length > 0) {
-        setNodes(result.nodes);
+        useGraphStore.getState().updateVisualization(
+          result.nodes,
+          result.edges || [],
+          [] // No highlighting
+        );
+        // Clear hidden nodes
+        useGraphStore.setState({ hiddenNodeIds: [] });
       }
 
       setNotification({
