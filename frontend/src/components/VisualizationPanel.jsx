@@ -608,13 +608,14 @@ function VisualizationPanel() {
             </ReactFlow>
           </div>
 
-          {/* Pane context menu (for adding groups) */}
+          {/* Pane context menu (for adding groups and saving views) */}
           {contextMenu && (
             <ContextMenu
               x={contextMenu.x}
               y={contextMenu.y}
               onClose={() => setContextMenu(null)}
               onAddGroup={handleAddGroup}
+              onSaveView={() => setIsSaveDialogOpen(true)}
             />
           )}
 

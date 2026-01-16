@@ -201,6 +201,31 @@ async def download_url_endpoint(request: Request):
         return JSONResponse({"error": str(e)}, status_code=500)
 
 
+@mcp.custom_route("/export_graph", methods=["GET"])
+async def export_graph_endpoint():
+    """
+    Endpoint to export the entire graph (all nodes and edges)
+    Returns the complete graph data in JSON format
+    """
+    try:
+        # Get all nodes and edges from the graph storage
+        all_nodes = [node.model_dump() for node in graph.nodes.values()]
+        all_edges = [edge.model_dump() for edge in graph.edges.values()]
+
+        return JSONResponse({
+            "version": "1.0",
+            "exportDate": datetime.utcnow().isoformat(),
+            "nodes": all_nodes,
+            "edges": all_edges,
+            "total_nodes": len(all_nodes),
+            "total_edges": len(all_edges)
+        })
+    except Exception as e:
+        import traceback
+        traceback.print_exc()
+        return JSONResponse({"error": str(e)}, status_code=500)
+
+
 @mcp.custom_route("/execute_tool", methods=["POST"])
 async def execute_tool_endpoint(request: Request):
     """
