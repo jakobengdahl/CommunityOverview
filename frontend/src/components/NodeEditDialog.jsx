@@ -69,6 +69,28 @@ function NodeEditDialog({ node, onClose, onSave }) {
     }
   };
 
+  // Keyboard shortcuts: Escape to cancel, Ctrl+Enter to save
+  useEffect(() => {
+    if (!node) return;
+
+    const handleKeyDown = (e) => {
+      if (e.key === 'Escape') {
+        if (!isSaving) {
+          onClose();
+        }
+      } else if (e.key === 'Enter' && (e.ctrlKey || e.metaKey) && !e.shiftKey && !e.altKey) {
+        // Ctrl/Cmd+Enter to save (allows Enter in textarea for newlines)
+        if (formData.name.trim() && !isSaving) {
+          e.preventDefault();
+          handleSave();
+        }
+      }
+    };
+
+    document.addEventListener('keydown', handleKeyDown);
+    return () => document.removeEventListener('keydown', handleKeyDown);
+  }, [node, formData.name, isSaving, onClose]);
+
   if (!node) return null;
 
   return (

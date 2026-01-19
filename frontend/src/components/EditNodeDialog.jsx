@@ -35,18 +35,25 @@ function EditNodeDialog({ node, onClose, onSave }) {
       }
     };
 
-    const handleEscape = (e) => {
+    const handleKeyDown = (e) => {
       if (e.key === 'Escape') {
         onClose();
+      } else if (e.key === 'Enter' && (e.ctrlKey || e.metaKey) && !e.shiftKey && !e.altKey) {
+        // Ctrl/Cmd+Enter to save (allows Enter in textarea for newlines)
+        e.preventDefault();
+        const form = dialogRef.current?.querySelector('form');
+        if (form) {
+          form.requestSubmit();
+        }
       }
     };
 
     document.addEventListener('mousedown', handleClickOutside);
-    document.addEventListener('keydown', handleEscape);
+    document.addEventListener('keydown', handleKeyDown);
 
     return () => {
       document.removeEventListener('mousedown', handleClickOutside);
-      document.removeEventListener('keydown', handleEscape);
+      document.removeEventListener('keydown', handleKeyDown);
     };
   }, [onClose]);
 
@@ -85,7 +92,7 @@ function EditNodeDialog({ node, onClose, onSave }) {
     <div className="edit-node-overlay">
       <div ref={dialogRef} className="edit-node-dialog">
         <div className="edit-node-header">
-          <h3>Redigera Nod</h3>
+          <h3>Edit Node</h3>
           <button
             className="edit-node-close"
             onClick={onClose}
@@ -97,26 +104,26 @@ function EditNodeDialog({ node, onClose, onSave }) {
 
         <form onSubmit={handleSubmit} className="edit-node-form">
           <div className="form-group">
-            <label htmlFor="name">Namn</label>
+            <label htmlFor="name">Name</label>
             <input
               id="name"
               type="text"
               value={formData.name}
               onChange={(e) => handleChange('name', e.target.value)}
-              placeholder="Namn på noden"
+              placeholder="Node name"
               required
             />
           </div>
 
           <div className="form-group">
-            <label htmlFor="type">Typ</label>
+            <label htmlFor="type">Type</label>
             <select
               id="type"
               value={formData.type}
               onChange={(e) => handleChange('type', e.target.value)}
               required
             >
-              <option value="">Välj typ...</option>
+              <option value="">Select type...</option>
               <option value="Actor">Actor</option>
               <option value="Community">Community</option>
               <option value="Initiative">Initiative</option>
@@ -129,38 +136,38 @@ function EditNodeDialog({ node, onClose, onSave }) {
           </div>
 
           <div className="form-group">
-            <label htmlFor="summary">Sammanfattning</label>
+            <label htmlFor="summary">Summary</label>
             <input
               id="summary"
               type="text"
               value={formData.summary}
               onChange={(e) => handleChange('summary', e.target.value)}
-              placeholder="Kort sammanfattning"
+              placeholder="Short summary"
             />
           </div>
 
           <div className="form-group">
-            <label htmlFor="description">Beskrivning</label>
+            <label htmlFor="description">Description</label>
             <textarea
               id="description"
               value={formData.description}
               onChange={(e) => handleChange('description', e.target.value)}
-              placeholder="Detaljerad beskrivning"
+              placeholder="Detailed description"
               rows={6}
             />
           </div>
 
           <div className="form-group">
-            <label htmlFor="tags">Taggar</label>
+            <label htmlFor="tags">Tags</label>
             <input
               id="tags"
               type="text"
               value={formData.tags}
               onChange={(e) => handleChange('tags', e.target.value)}
-              placeholder="AI, Maskininlärning, Öppen källkod"
+              placeholder="AI, Machine Learning, Open Source"
             />
             <small className="form-hint">
-              Separera taggar med kommatecken. Exempel: "AI, Maskininlärning, Öppen källkod"
+              Separate tags with commas. Example: "AI, Machine Learning, Open Source"
             </small>
           </div>
 
@@ -170,13 +177,13 @@ function EditNodeDialog({ node, onClose, onSave }) {
               onClick={onClose}
               className="button-secondary"
             >
-              Avbryt
+              Cancel
             </button>
             <button
               type="submit"
               className="button-primary"
             >
-              Spara
+              Save
             </button>
           </div>
         </form>

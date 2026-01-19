@@ -1,5 +1,5 @@
 
-import { useState } from 'react';
+import { useState, useEffect } from 'react';
 import useGraphStore from '../store/graphStore';
 import { executeTool } from '../services/api';
 import './SaveViewDialog.css';
@@ -51,6 +51,27 @@ function SaveViewDialog({ isOpen, onClose, onSave }) {
         setIsSaving(false);
     }
   };
+
+  // Keyboard shortcuts: Escape to cancel, Enter to save
+  useEffect(() => {
+    if (!isOpen) return;
+
+    const handleKeyDown = (e) => {
+      if (e.key === 'Escape') {
+        if (!isSaving) {
+          onClose();
+        }
+      } else if (e.key === 'Enter' && !e.shiftKey && !e.ctrlKey && !e.altKey && !e.metaKey) {
+        if (viewName.trim() && !isSaving) {
+          e.preventDefault();
+          handleSave();
+        }
+      }
+    };
+
+    document.addEventListener('keydown', handleKeyDown);
+    return () => document.removeEventListener('keydown', handleKeyDown);
+  }, [isOpen, viewName, isSaving, onClose]);
 
   if (!isOpen) return null;
 
