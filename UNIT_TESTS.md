@@ -2,7 +2,32 @@
 
 This document describes the unit tests for graph export and visualization functionality.
 
+## Quick Start - Run All Tests
+
+Before committing code, run the pre-commit test script:
+
+```bash
+./run_tests.sh
+```
+
+This script will:
+- Test export serialization logic (minimal dependencies)
+- Run full test suite if dependencies are installed
+- Test frontend if node_modules exists
+- Check if server is running and test export endpoint
+
 ## Backend Tests
+
+### Minimal Test (No Dependencies Required)
+
+The quickest way to verify export logic works:
+
+```bash
+cd mcp-server
+python3 test_export_logic.py
+```
+
+This tests JSON serialization without requiring GraphStorage or ML dependencies.
 
 ### Installation
 
@@ -11,6 +36,12 @@ Install the development dependencies:
 ```bash
 cd mcp-server
 pip install -r requirements-dev.txt
+```
+
+Or install just the core testing dependencies:
+
+```bash
+pip install --user pytest pytest-asyncio httpx
 ```
 
 ### Running Tests
@@ -130,6 +161,121 @@ The file `src/store/graphStore.test.js` includes:
 [Header] Export data received: { nodes: X, edges: Y, ... }
 [Header] Graph exported successfully
 ```
+
+## Debugging "Failed to export graph: Failed to fetch"
+
+If you see this error in the browser, it means the frontend cannot reach the backend. Follow these steps:
+
+### Step 1: Check if Backend is Running
+
+```bash
+# Check if Python process is running
+ps aux | grep "python.*server.py"
+
+# Try to access the export endpoint directly
+curl http://localhost:8000/export_graph
+```
+
+**If curl returns nothing or "Connection refused":**
+- Backend is not running
+- Check backend terminal for errors
+- Look in ./start-dev.sh output for startup errors
+
+### Step 2: Check Backend Logs
+
+When you run `./start-dev.sh`, the backend output should show:
+
+```
+Starting Backend (MCP Server)...
+✓ Backend started (PID: XXXX)
+Backend URL: http://localhost:8000
+```
+
+Then you should see:
+```
+INFO:     Started server process [XXXX]
+INFO:     Waiting for application startup.
+INFO:     Application startup complete.
+INFO:     Uvicorn running on http://0.0.0.0:8000
+```
+
+**If you DON'T see these logs:**
+1. Backend failed to start
+2. Check for Python errors in the terminal
+3. Common issues:
+   - Missing dependencies: `pip install -r mcp-server/requirements.txt`
+   - Port 8000 already in use: `lsof -i :8000` to find what's using it
+   - Import errors: Check Python version (`python3 --version`)
+
+### Step 3: Test Export Endpoint Manually
+
+While server is running:
+
+```bash
+# Test export endpoint
+curl -v http://localhost:8000/export_graph
+
+# Should return JSON like:
+# {"version":"1.0","exportDate":"2026-01-19T...","nodes":[...],"edges":[...]}
+```
+
+**If curl works but browser doesn't:**
+- CORS issue (unlikely with current setup)
+- Browser caching issue: Clear browser cache and reload
+
+**If curl returns error:**
+```bash
+# Check backend logs for [Export] ERROR messages
+# Backend should print detailed error with traceback
+```
+
+### Step 4: Check Browser Console
+
+Open DevTools (F12) → Console tab, look for:
+
+```
+[Header] Starting graph export...
+[Header] Fetching from http://localhost:8000/export_graph
+[Header] Response status: XXX
+```
+
+**If you see:** `Failed to export graph: Failed to fetch`
+- This is a network error BEFORE reaching server
+- Server is not accessible
+- Check Step 1 again
+
+**If you see:** `Failed to export graph: 500 - ...`
+- Server is running but returned an error
+- Check backend terminal for `[Export] ERROR:` logs
+- Backend will print full traceback
+
+### Step 5: Verify Serialization Logic
+
+Even if server won't start, you can test the export logic:
+
+```bash
+cd mcp-server
+python3 test_export_logic.py
+```
+
+If this passes, the serialization code is correct. Problem is elsewhere.
+
+### Step 6: Start Backend Manually (for Better Error Visibility)
+
+Instead of `./start-dev.sh`, start backend manually:
+
+```bash
+cd mcp-server
+python3 server.py
+```
+
+This will show ALL output directly in terminal, including:
+- Import errors
+- Startup errors
+- Runtime errors
+- All `[Export]` and `[GetVisualization]` logs
+
+Now try export in browser and watch terminal for logs.
 
 ## Debugging Test Failures
 
