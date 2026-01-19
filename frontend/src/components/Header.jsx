@@ -50,15 +50,29 @@ function Header() {
   };
 
   const handleExportGraph = async () => {
+    console.log('[Header] Starting graph export...');
     try {
       // Fetch complete graph from backend instead of just visualization state
+      console.log('[Header] Fetching from http://localhost:8000/export_graph');
       const response = await fetch('http://localhost:8000/export_graph');
 
+      console.log('[Header] Response status:', response.status);
+      console.log('[Header] Response ok:', response.ok);
+
       if (!response.ok) {
-        throw new Error('Failed to export graph');
+        const errorText = await response.text();
+        console.error('[Header] Export failed with status:', response.status);
+        console.error('[Header] Error response:', errorText);
+        throw new Error(`Failed to export graph: ${response.status} - ${errorText}`);
       }
 
       const exportData = await response.json();
+      console.log('[Header] Export data received:', {
+        nodes: exportData.nodes?.length || 0,
+        edges: exportData.edges?.length || 0,
+        version: exportData.version,
+        exportDate: exportData.exportDate
+      });
 
       const dataStr = JSON.stringify(exportData, null, 2);
       const dataBlob = new Blob([dataStr], { type: 'application/json' });
@@ -71,9 +85,12 @@ function Header() {
       link.click();
       document.body.removeChild(link);
       URL.revokeObjectURL(url);
+
+      console.log('[Header] Graph exported successfully');
     } catch (error) {
-      console.error('Error exporting graph:', error);
-      alert('Failed to export graph. Please try again.');
+      console.error('[Header] Error exporting graph:', error);
+      console.error('[Header] Error stack:', error.stack);
+      alert(`Failed to export graph: ${error.message}`);
     }
   };
 

@@ -211,9 +211,30 @@ async def export_graph_endpoint():
     try:
         import json
 
+        print("[Export] Starting graph export...")
+        print(f"[Export] Total nodes in storage: {len(graph.nodes)}")
+        print(f"[Export] Total edges in storage: {len(graph.edges)}")
+
         # Get all nodes and edges from the graph storage
-        all_nodes = [node.model_dump() for node in graph.nodes.values()]
-        all_edges = [edge.model_dump() for edge in graph.edges.values()]
+        all_nodes = []
+        for node in graph.nodes.values():
+            try:
+                node_dict = node.model_dump()
+                all_nodes.append(node_dict)
+            except Exception as e:
+                print(f"[Export] Error dumping node {node.id}: {e}")
+                raise
+
+        all_edges = []
+        for edge in graph.edges.values():
+            try:
+                edge_dict = edge.model_dump()
+                all_edges.append(edge_dict)
+            except Exception as e:
+                print(f"[Export] Error dumping edge {edge.id}: {e}")
+                raise
+
+        print(f"[Export] Successfully dumped {len(all_nodes)} nodes and {len(all_edges)} edges")
 
         export_data = {
             "version": "1.0",
@@ -230,11 +251,20 @@ async def export_graph_endpoint():
                 return obj.isoformat()
             raise TypeError(f"Object of type {type(obj)} is not JSON serializable")
 
-        return JSONResponse(json.loads(json.dumps(export_data, default=json_serializer)))
+        print("[Export] Serializing export data to JSON...")
+        serialized_data = json.dumps(export_data, default=json_serializer)
+        print(f"[Export] Serialized {len(serialized_data)} bytes")
+
+        result = json.loads(serialized_data)
+        print("[Export] Successfully parsed JSON, returning response")
+
+        return JSONResponse(result)
     except Exception as e:
         import traceback
-        traceback.print_exc()
-        return JSONResponse({"error": str(e)}, status_code=500)
+        error_trace = traceback.format_exc()
+        print(f"[Export] ERROR: {str(e)}")
+        print(f"[Export] Traceback:\n{error_trace}")
+        return JSONResponse({"error": str(e), "traceback": error_trace}, status_code=500)
 
 
 @mcp.custom_route("/execute_tool", methods=["POST"])
@@ -655,23 +685,31 @@ def get_visualization(name: str) -> Dict[str, Any]:
     Returns:
         The nodes and edges to display, with position and hidden node data
     """
+    print(f"[GetVisualization] Loading visualization: {name}")
+
     # Search for a node of type VISUALIZATION_VIEW with the given name
     results = graph.search_nodes(query=name, node_types=[NodeType.VISUALIZATION_VIEW], limit=1)
 
     if not results:
+        print(f"[GetVisualization] View '{name}' not found")
         return {
             "success": False,
             "error": f"View '{name}' not found."
         }
 
     view_node = results[0]
+    print(f"[GetVisualization] Found view node: {view_node.id}")
+
     view_data = view_node.metadata.get('view_data', {})
+    print(f"[GetVisualization] View data keys: {list(view_data.keys())}")
 
     # Extract node IDs from the view data
     node_position_data = view_data.get('nodes', [])
     hidden_node_ids = view_data.get('hidden_nodes', [])
+    print(f"[GetVisualization] Node positions: {len(node_position_data)}, Hidden nodes: {len(hidden_node_ids)}")
 
     if not node_position_data:
+        print(f"[GetVisualization] View '{name}' contains no nodes")
         return {
             "success": False,
             "error": f"View '{name}' contains no nodes."
@@ -680,15 +718,23 @@ def get_visualization(name: str) -> Dict[str, Any]:
     # Create a map of node_id -> position
     position_map = {item['id']: item.get('position') for item in node_position_data if isinstance(item, dict)}
     node_ids = list(position_map.keys())
+    print(f"[GetVisualization] Extracted {len(node_ids)} node IDs from view")
 
     # Fetch all the actual nodes
     nodes = []
+    missing_nodes = []
     for node_id in node_ids:
         node = graph.get_node(node_id)
         if node:
             nodes.append(node.model_dump())
+        else:
+            missing_nodes.append(node_id)
+
+    if missing_nodes:
+        print(f"[GetVisualization] WARNING: {len(missing_nodes)} nodes not found: {missing_nodes[:5]}")
 
     if not nodes:
+        print(f"[GetVisualization] No nodes could be loaded from view '{name}'")
         return {
             "success": False,
             "error": f"No nodes could be loaded from view '{name}'. The referenced nodes may have been deleted."
@@ -700,6 +746,8 @@ def get_visualization(name: str) -> Dict[str, Any]:
     for edge in graph.edges.values():
         if edge.source in node_id_set and edge.target in node_id_set:
             edges.append(edge.model_dump())
+
+    print(f"[GetVisualization] Successfully loaded {len(nodes)} nodes and {len(edges)} edges")
 
     return {
         "success": True,
