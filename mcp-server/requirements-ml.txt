@@ -1,0 +1,5 @@
+# DEPRECATED - ML dependencies are now in requirements.txt
+# This file is kept for backward compatibility only
+#
+# The main requirements.txt now includes optimized CPU-only ML packages
+# to reduce disk usage while maintaining full functionality

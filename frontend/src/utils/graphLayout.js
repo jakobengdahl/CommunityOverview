@@ -81,3 +81,37 @@ export function getCircularLayout(nodes, centerX = 400, centerY = 300, radius = 
     };
   });
 }
+
+/**
+ * Calculate positions for nodes in a grid layout
+ * Useful for displaying many nodes in an organized way
+ * @param {Array} nodes - Array of React Flow nodes
+ * @param {number} columns - Number of columns (0 = auto-calculate for square-ish grid)
+ * @param {number} cellWidth - Width of each grid cell
+ * @param {number} cellHeight - Height of each grid cell
+ * @returns {Array} Nodes with calculated positions
+ */
+export function getGridLayout(nodes, columns = 0, cellWidth = 280, cellHeight = 180) {
+  if (nodes.length === 0) return nodes;
+
+  // Auto-calculate columns if not specified
+  // Aim for a roughly square or 4:3 aspect ratio
+  if (columns === 0) {
+    // For 40 nodes: sqrt(40 * 1.2) ≈ 6.9, so 7 columns → 7x6 grid
+    // For 50 nodes: sqrt(50 * 1.2) ≈ 7.7, so 8 columns → 8x7 grid
+    columns = Math.ceil(Math.sqrt(nodes.length * 1.2)); // 1.2 factor gives 4:3-ish aspect ratio
+  }
+
+  return nodes.map((node, index) => {
+    const row = Math.floor(index / columns);
+    const col = index % columns;
+
+    return {
+      ...node,
+      position: {
+        x: col * cellWidth + 100, // Add offset so it's not at the edge
+        y: row * cellHeight + 100,
+      },
+    };
+  });
+}

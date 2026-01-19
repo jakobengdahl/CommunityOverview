@@ -69,11 +69,17 @@ source venv/bin/activate
 
 # Check if requirements are installed
 if ! python -c "import anthropic" 2>/dev/null; then
-    echo -e "${YELLOW}Installing backend dependencies...${NC}"
-    pip install -q -r requirements.txt
+    echo -e "${YELLOW}Installing backend dependencies (optimized for disk space)...${NC}"
+    pip install --no-cache-dir -q -r requirements.txt
     echo -e "${GREEN}✓ Backend dependencies installed${NC}"
 else
     echo -e "${GREEN}✓ Backend dependencies already installed${NC}"
+fi
+
+# Check if sentence-transformers is installed (ML features)
+if ! python -c "import sentence_transformers" 2>/dev/null; then
+    echo -e "${YELLOW}⚠️  ML dependencies not fully installed${NC}"
+    echo -e "${YELLOW}   Re-run: pip install --no-cache-dir -r requirements.txt${NC}"
 fi
 
 echo ""

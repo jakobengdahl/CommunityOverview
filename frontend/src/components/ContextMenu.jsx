@@ -1,7 +1,7 @@
 import { useEffect, useRef } from 'react';
 import './ContextMenu.css';
 
-function ContextMenu({ x, y, onClose, onAddGroup }) {
+function ContextMenu({ x, y, onClose, onAddGroup, onSaveView }) {
   const menuRef = useRef(null);
 
   useEffect(() => {
@@ -32,7 +32,21 @@ function ContextMenu({ x, y, onClose, onAddGroup }) {
       className="context-menu"
       style={{ left: x, top: y }}
     >
-      <div className="context-menu-header">Add Element</div>
+      <div className="context-menu-header">Visualisering</div>
+
+      {onSaveView && (
+        <button
+          className="context-menu-item"
+          onClick={() => {
+            onSaveView();
+            onClose();
+          }}
+        >
+          <span className="context-menu-icon">💾</span>
+          Skapa visualisering
+        </button>
+      )}
+
       <button
         className="context-menu-item"
         onClick={() => {
@@ -41,7 +55,7 @@ function ContextMenu({ x, y, onClose, onAddGroup }) {
         }}
       >
         <span className="context-menu-icon">📁</span>
-        Group
+        Skapa grupp
       </button>
     </div>
   );

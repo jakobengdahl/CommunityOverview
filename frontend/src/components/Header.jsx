@@ -49,27 +49,32 @@ function Header() {
     setTempProvider('claude');
   };
 
-  const handleExportGraph = () => {
-    const { nodes, edges } = useGraphStore.getState();
+  const handleExportGraph = async () => {
+    try {
+      // Fetch complete graph from backend instead of just visualization state
+      const response = await fetch('http://localhost:8000/export_graph');
 
-    const exportData = {
-      version: '1.0',
-      exportDate: new Date().toISOString(),
-      nodes: nodes,
-      edges: edges,
-    };
+      if (!response.ok) {
+        throw new Error('Failed to export graph');
+      }
 
-    const dataStr = JSON.stringify(exportData, null, 2);
-    const dataBlob = new Blob([dataStr], { type: 'application/json' });
-    const url = URL.createObjectURL(dataBlob);
+      const exportData = await response.json();
 
-    const link = document.createElement('a');
-    link.href = url;
-    link.download = `knowledge-graph-${new Date().toISOString().split('T')[0]}.json`;
-    document.body.appendChild(link);
-    link.click();
-    document.body.removeChild(link);
-    URL.revokeObjectURL(url);
+      const dataStr = JSON.stringify(exportData, null, 2);
+      const dataBlob = new Blob([dataStr], { type: 'application/json' });
+      const url = URL.createObjectURL(dataBlob);
+
+      const link = document.createElement('a');
+      link.href = url;
+      link.download = `knowledge-graph-${new Date().toISOString().split('T')[0]}.json`;
+      document.body.appendChild(link);
+      link.click();
+      document.body.removeChild(link);
+      URL.revokeObjectURL(url);
+    } catch (error) {
+      console.error('Error exporting graph:', error);
+      alert('Failed to export graph. Please try again.');
+    }
   };
 
   return (

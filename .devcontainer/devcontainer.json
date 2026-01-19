@@ -34,6 +34,6 @@
       "onAutoForward": "silent"
     }
   },
-  "postCreateCommand": "pip install -r mcp-server/requirements.txt && cd frontend && npm install",
+  "postCreateCommand": "pip install --no-cache-dir -r mcp-server/requirements.txt && cd frontend && npm install",
   "remoteUser": "vscode"
 }

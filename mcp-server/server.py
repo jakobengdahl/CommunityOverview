@@ -8,6 +8,7 @@ import os
 import tempfile
 import shutil
 import requests
+from datetime import datetime
 from urllib.parse import urlparse
 from mcp.server.fastmcp import FastMCP
 from starlette.requests import Request
@@ -64,12 +65,14 @@ async def chat_endpoint(request: Request):
         if not messages:
             return JSONResponse({"error": "No messages provided"}, status_code=400)
 
-        # Check for provider in header
-        provider = request.headers.get("X-LLM-Provider")
-
         # Check for API key in header (user-provided key takes precedence)
         # Try both Anthropic and OpenAI headers
         api_key = request.headers.get("X-OpenAI-API-Key") or request.headers.get("X-Anthropic-API-Key")
+
+        # Check for provider in header - but only use it if user provided their own API key
+        # This allows backend's auto-detection (based on env vars) to take priority
+        provider_header = request.headers.get("X-LLM-Provider")
+        provider = provider_header if api_key else None  # Only use header provider if custom key provided
 
         processor = get_chat_processor()
         result = processor.process_message(messages, api_key=api_key, provider=provider)
@@ -193,6 +196,31 @@ async def download_url_endpoint(request: Request):
             if os.path.exists(tmp_path):
                 os.remove(tmp_path)
 
+    except Exception as e:
+        import traceback
+        traceback.print_exc()
+        return JSONResponse({"error": str(e)}, status_code=500)
+
+
+@mcp.custom_route("/export_graph", methods=["GET"])
+async def export_graph_endpoint():
+    """
+    Endpoint to export the entire graph (all nodes and edges)
+    Returns the complete graph data in JSON format
+    """
+    try:
+        # Get all nodes and edges from the graph storage
+        all_nodes = [node.model_dump() for node in graph.nodes.values()]
+        all_edges = [edge.model_dump() for edge in graph.edges.values()]
+
+        return JSONResponse({
+            "version": "1.0",
+            "exportDate": datetime.utcnow().isoformat(),
+            "nodes": all_nodes,
+            "edges": all_edges,
+            "total_nodes": len(all_nodes),
+            "total_edges": len(all_edges)
+        })
     except Exception as e:
         import traceback
         traceback.print_exc()

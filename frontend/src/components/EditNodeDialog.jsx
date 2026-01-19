@@ -7,6 +7,7 @@ function EditNodeDialog({ node, onClose, onSave }) {
     type: '',
     description: '',
     summary: '',
+    tags: '',
   });
 
   const dialogRef = useRef(null);
@@ -14,11 +15,15 @@ function EditNodeDialog({ node, onClose, onSave }) {
   useEffect(() => {
     // Initialize form with node data
     if (node && node.data) {
+      const tagsArray = node.data.tags || [];
+      const tagsString = Array.isArray(tagsArray) ? tagsArray.join(', ') : '';
+
       setFormData({
         name: node.data.label || node.data.name || '',
         type: node.data.nodeType || node.data.type || '',
         description: node.data.description || '',
         summary: node.data.summary || '',
+        tags: tagsString,
       });
     }
   }, [node]);
@@ -47,6 +52,13 @@ function EditNodeDialog({ node, onClose, onSave }) {
 
   const handleSubmit = (e) => {
     e.preventDefault();
+
+    // Parse tags from comma-separated string to array
+    const tagsArray = formData.tags
+      .split(',')
+      .map(tag => tag.trim())
+      .filter(tag => tag.length > 0);
+
     onSave({
       ...node,
       data: {
@@ -57,6 +69,7 @@ function EditNodeDialog({ node, onClose, onSave }) {
         nodeType: formData.type,
         description: formData.description,
         summary: formData.summary,
+        tags: tagsArray,
       }
     });
   };
@@ -135,6 +148,20 @@ function EditNodeDialog({ node, onClose, onSave }) {
               placeholder="Detaljerad beskrivning"
               rows={6}
             />
+          </div>
+
+          <div className="form-group">
+            <label htmlFor="tags">Taggar</label>
+            <input
+              id="tags"
+              type="text"
+              value={formData.tags}
+              onChange={(e) => handleChange('tags', e.target.value)}
+              placeholder="AI, Maskininlärning, Öppen källkod"
+            />
+            <small className="form-hint">
+              Separera taggar med kommatecken. Exempel: "AI, Maskininlärning, Öppen källkod"
+            </small>
           </div>
 
           <div className="edit-node-actions">

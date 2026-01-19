@@ -26,13 +26,12 @@ export async function sendMessageToBackend(messages) {
       'Content-Type': 'application/json',
     };
 
-    // Add provider header to let backend know which provider to use
-    if (provider) {
+    // Only set provider header if user provided their own API key
+    // This allows backend to use its own auto-detection based on environment variables
+    if (apiKey && provider) {
       headers['X-LLM-Provider'] = provider;
-    }
 
-    // Add API key header if provided (with provider-specific header name)
-    if (apiKey) {
+      // Add API key header with provider-specific header name
       if (provider === 'openai') {
         headers['X-OpenAI-API-Key'] = apiKey;
       } else {

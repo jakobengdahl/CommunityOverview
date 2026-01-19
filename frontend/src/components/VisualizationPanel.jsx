@@ -18,7 +18,7 @@ import ContextMenu from './ContextMenu';
 import NodeContextMenu from './NodeContextMenu';
 import EditNodeDialog from './EditNodeDialog';
 import { executeTool } from '../services/api';
-import { getLayoutedElements, getCircularLayout } from '../utils/graphLayout';
+import { getLayoutedElements, getCircularLayout, getGridLayout } from '../utils/graphLayout';
 import { useMemoizedLayout } from '../hooks/useMemoizedLayout';
 import './VisualizationPanel.css';
 
@@ -57,6 +57,8 @@ function VisualizationPanel() {
   const [reactFlowInstance, setReactFlowInstance] = useState(null);
   const [notification, setNotification] = useState(null);
   const reactFlowWrapper = useRef(null);
+  const [isRightDragging, setIsRightDragging] = useState(false);
+  const rightDragStart = useRef({ x: 0, y: 0, time: null });
 
   // Filter out hidden nodes and their edges
   const visibleNodes = useMemo(() =>
@@ -129,8 +131,19 @@ function VisualizationPanel() {
       return nodesWithoutPosition;
     }
 
-    // Calculate positions using memoized dagre layout if we have edges
-    if (reactFlowEdges.length > 0) {
+    // Use grid layout for many nodes with sparse edges
+    // This prevents long horizontal lines when expanding nodes with many connections
+    const nodeCount = nodesWithoutPosition.length;
+    const edgeCount = reactFlowEdges.length;
+    const shouldUseGrid = nodeCount > 15 && edgeCount < nodeCount * 1.5;
+
+    if (shouldUseGrid) {
+      // Grid layout for many nodes (e.g., 40 nodes → ~7x6 grid in 4:3 ratio)
+      return getGridLayout(nodesWithoutPosition);
+    }
+
+    // Calculate positions using dagre layout if we have edges
+    if (edgeCount > 0) {
       return getLayoutedElements(nodesWithoutPosition, reactFlowEdges, 'TB');
     }
 
@@ -228,10 +241,21 @@ function VisualizationPanel() {
       });
 
       if (result.nodes && result.nodes.length > 0) {
-        addNodesToVisualization(result.nodes);
-      }
-      if (result.edges && result.edges.length > 0) {
-        // Edges will be added automatically when nodes are in store
+        // Get current state and merge with new nodes/edges (same logic as + icon)
+        const { nodes: currentNodes, edges: currentEdges } = useGraphStore.getState();
+        const existingNodeIds = new Set(currentNodes.map(n => n.id));
+        const existingEdgeIds = new Set(currentEdges.map(e => e.id));
+
+        const newNodes = result.nodes.filter(n => !existingNodeIds.has(n.id));
+        const newEdges = (result.edges || []).filter(e => !existingEdgeIds.has(e.id));
+
+        if (newNodes.length > 0 || newEdges.length > 0) {
+          useGraphStore.getState().updateVisualization(
+            [...currentNodes, ...newNodes],
+            [...currentEdges, ...newEdges],
+            newNodes.map(n => n.id) // Highlight new nodes
+          );
+        }
       }
 
       setNotification({
@@ -247,7 +271,7 @@ function VisualizationPanel() {
       });
       setTimeout(() => setNotification(null), 3000);
     }
-  }, [addNodesToVisualization]);
+  }, []);
 
   const handleShowInNewView = useCallback(async (nodeId) => {
     // Clear current view and show only this node + its connections
@@ -257,13 +281,15 @@ function VisualizationPanel() {
         depth: 1
       });
 
-      // Clear hidden nodes to show everything
-      const { clearHiddenNodes, setNodes } = useGraphStore.getState();
-      clearHiddenNodes();
-
-      // Set only the target node and its related nodes
+      // Replace visualization with only this node and its connections
       if (result.nodes && result.nodes.length > 0) {
-        setNodes(result.nodes);
+        useGraphStore.getState().updateVisualization(
+          result.nodes,
+          result.edges || [],
+          [] // No highlighting
+        );
+        // Clear hidden nodes
+        useGraphStore.setState({ hiddenNodeIds: [] });
       }
 
       setNotification({
@@ -288,12 +314,35 @@ function VisualizationPanel() {
       event.preventDefault();
       event.stopPropagation();
 
-      setContextMenu({
-        x: event.clientX,
-        y: event.clientY,
-      });
+      // Only show context menu if it was a quick click (not a drag)
+      // If no mousedown was tracked, always show context menu
+      if (rightDragStart.current.time === null) {
+        setContextMenu({
+          x: event.clientX,
+          y: event.clientY,
+        });
+        console.log('[VisualizationPanel] Context menu shown (no drag tracked)');
+        return;
+      }
 
-      console.log('[VisualizationPanel] Context menu should show at:', event.clientX, event.clientY);
+      // Check if mouse moved less than 5px and time was less than 300ms
+      const timeDiff = Date.now() - rightDragStart.current.time;
+      const xDiff = Math.abs(event.clientX - rightDragStart.current.x);
+      const yDiff = Math.abs(event.clientY - rightDragStart.current.y);
+      const wasDrag = timeDiff > 300 || xDiff > 5 || yDiff > 5;
+
+      if (!wasDrag) {
+        setContextMenu({
+          x: event.clientX,
+          y: event.clientY,
+        });
+        console.log('[VisualizationPanel] Context menu shown (quick click)');
+      } else {
+        console.log('[VisualizationPanel] Context menu suppressed (was a drag)');
+      }
+
+      // Reset tracking after handling
+      rightDragStart.current.time = null;
     },
     []
   );
@@ -525,6 +574,16 @@ function VisualizationPanel() {
                 setContextMenu(null);
                 setNodeContextMenu(null);
               }}
+              onPaneMouseDown={(event) => {
+                // Track right-click start position and time
+                if (event.button === 2) {
+                  rightDragStart.current = {
+                    x: event.clientX,
+                    y: event.clientY,
+                    time: Date.now()
+                  };
+                }
+              }}
               onInit={setReactFlowInstance}
               nodeTypes={nodeTypes}
               fitView
@@ -537,7 +596,7 @@ function VisualizationPanel() {
                 animated: true,
                 style: { strokeWidth: 2 }
               }}
-              panOnDrag={[1, 2]} // Enable panning with left-click (1) and right-click (2)
+              panOnDrag={[0, 2]} // Enable panning with left (0) and right (2) mouse buttons
               selectionOnDrag={false} // Disable selection box to allow panning
             >
               <Background color="#333" gap={16} />
@@ -549,13 +608,14 @@ function VisualizationPanel() {
             </ReactFlow>
           </div>
 
-          {/* Pane context menu (for adding groups) */}
+          {/* Pane context menu (for adding groups and saving views) */}
           {contextMenu && (
             <ContextMenu
               x={contextMenu.x}
               y={contextMenu.y}
               onClose={() => setContextMenu(null)}
               onAddGroup={handleAddGroup}
+              onSaveView={() => setIsSaveDialogOpen(true)}
             />
           )}
 
@@ -589,6 +649,7 @@ function VisualizationPanel() {
                       type: updatedNode.data.type,
                       description: updatedNode.data.description,
                       summary: updatedNode.data.summary,
+                      tags: updatedNode.data.tags || [],
                     }
                   });
 
@@ -602,6 +663,7 @@ function VisualizationPanel() {
                           type: updatedNode.data.type,
                           description: updatedNode.data.description,
                           summary: updatedNode.data.summary,
+                          tags: updatedNode.data.tags || [],
                         }
                       : n
                   );
