@@ -5,8 +5,7 @@ You reported: Export test passes, but browser shows "Failed to export graph: Fai
 ## 🚨 Most Likely Causes
 
 1. **Browser cache** - Old JavaScript is still loaded
-2. **Wrong URL** - Opening port 3000 instead of 5173
-3. **Backend not running** - Server crashed or didn't start
+2. **Backend not running** - Server crashed or didn't start
 
 ## ✅ Solution (Do This First!)
 
@@ -55,10 +54,9 @@ pkill -f "vite|npm"
 
 ### 2. Open Browser Correctly
 
-**CRITICAL:** The URL changed from port 3000 to 5173!
+**IMPORTANT:** Use the correct port configured in vite.config.js:
 
-✅ Correct: `http://localhost:5173`
-❌ Wrong: `http://localhost:3000`
+✅ Correct: `http://localhost:3000`
 
 ### 3. Hard Refresh Browser
 
@@ -106,7 +104,7 @@ Click the Export button in the header.
 **Cause:** JavaScript not refreshed or wrong URL
 
 **Solution:**
-1. Verify URL is `http://localhost:5173` (NOT 3000)
+1. Verify URL is `http://localhost:3000`
 2. Hard refresh: Ctrl+Shift+R
 3. Clear browser cache completely
 4. Check DevTools → Sources tab → See if `Header.jsx` contains `console.log('[Header]')`
@@ -193,5 +191,5 @@ Based on "no logs in console", the issue is **99% browser cache**:
 # 1. Hard refresh in browser (Ctrl+Shift+R)
 # 2. If that doesn't work, clear all browser cache
 # 3. If that doesn't work, try different browser
-# 4. Verify you're on http://localhost:5173 NOT 3000
+# 4. Verify you're on http://localhost:3000
 ```

@@ -49,15 +49,29 @@ echo -e "${GREEN}✓ Backend started (PID: $BACKEND_PID)${NC}"
 echo -e "  Backend logs will be prefixed with ${BLUE}[BACKEND]${NC}"
 echo ""
 
-# Wait for backend to start
-echo -e "${YELLOW}Waiting for backend to start...${NC}"
-sleep 3
+# Wait for backend to start (increased timeout for loading ML models)
+echo -e "${YELLOW}Waiting for backend to start (this may take 10-15 seconds)...${NC}"
+sleep 5
 
-# Test if backend is responding
-if curl -s http://localhost:8000/export_graph > /dev/null 2>&1; then
+# Test if backend is responding (with retries)
+MAX_RETRIES=6
+RETRY_COUNT=0
+BACKEND_READY=false
+
+while [ $RETRY_COUNT -lt $MAX_RETRIES ]; do
+    if curl -s http://localhost:8000/export_graph > /dev/null 2>&1; then
+        BACKEND_READY=true
+        break
+    fi
+    RETRY_COUNT=$((RETRY_COUNT + 1))
+    echo -e "${YELLOW}   Waiting... (attempt $RETRY_COUNT/$MAX_RETRIES)${NC}"
+    sleep 2
+done
+
+if [ "$BACKEND_READY" = true ]; then
     echo -e "${GREEN}✓ Backend is responding!${NC}"
 else
-    echo -e "${RED}✗ Backend failed to start or not responding${NC}"
+    echo -e "${RED}✗ Backend failed to start or not responding after $((MAX_RETRIES * 2)) seconds${NC}"
     echo -e "${YELLOW}   Check [BACKEND] logs above for errors${NC}"
     cleanup
 fi
@@ -80,13 +94,13 @@ echo -e "${BLUE}================================================${NC}"
 echo -e "${GREEN}✓ Both services running with logging${NC}"
 echo -e "${BLUE}================================================${NC}"
 echo ""
-echo -e "📱 Frontend: ${BLUE}http://localhost:5173${NC}"
+echo -e "📱 Frontend: ${BLUE}http://localhost:3000${NC}"
 echo -e "🔌 Backend:  ${BLUE}http://localhost:8000${NC}"
 echo ""
 echo -e "${YELLOW}Important Instructions:${NC}"
 echo ""
-echo -e "1. Open browser to: ${BLUE}http://localhost:5173${NC}"
-echo -e "   ${RED}Make sure it's 5173, NOT 3000!${NC}"
+echo -e "1. Open browser to: ${BLUE}http://localhost:3000${NC}"
+echo -e "   ${RED}This is the correct port for your Vite config${NC}"
 echo ""
 echo -e "2. Open DevTools (F12) → Console tab"
 echo ""

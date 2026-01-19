@@ -51,10 +51,10 @@ echo ""
 
 # Test 3: Is frontend running?
 echo -e "${YELLOW}[3/5] Checking if frontend is running...${NC}"
-if curl -s http://localhost:5173 > /dev/null 2>&1; then
-    echo -e "${GREEN}✓ Frontend is responding on port 5173${NC}"
+if curl -s http://localhost:3000 > /dev/null 2>&1; then
+    echo -e "${GREEN}✓ Frontend is responding on port 3000${NC}"
 else
-    echo -e "${RED}✗ Frontend is NOT responding on port 5173${NC}"
+    echo -e "${RED}✗ Frontend is NOT responding on port 3000${NC}"
     echo -e "${YELLOW}    Solution: Check if frontend started correctly${NC}"
     echo -e "${YELLOW}    Run: ps aux | grep 'vite\\|npm'${NC}"
     exit 1
@@ -95,8 +95,8 @@ echo -e "${BLUE}================================================${NC}"
 echo ""
 echo -e "${YELLOW}Next Steps for Browser Testing:${NC}"
 echo ""
-echo -e "1. Open browser to: ${BLUE}http://localhost:5173${NC}"
-echo -e "   ${RED}NOT http://localhost:3000${NC}"
+echo -e "1. Open browser to: ${BLUE}http://localhost:3000${NC}"
+echo -e "   ${RED}This is the port configured in vite.config.js${NC}"
 echo ""
 echo -e "2. Open DevTools (F12) → Console tab"
 echo ""
