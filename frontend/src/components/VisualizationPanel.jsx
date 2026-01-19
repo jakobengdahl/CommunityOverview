@@ -47,6 +47,9 @@ function VisualizationPanel() {
     toggleNodeVisibility,
     addNodesToVisualization,
     clearGroupsFlag,
+    groupsToRestore,
+    setGroupsToRestore,
+    setReactFlowNodes,
   } = useGraphStore();
 
   const [isSaveDialogOpen, setIsSaveDialogOpen] = useState(false);
@@ -162,6 +165,41 @@ function VisualizationPanel() {
       setNodes((nds) => nds.filter(n => n.type !== 'group' && !n.id.startsWith('group-')));
     }
   }, [clearGroupsFlag, setNodes]);
+
+  // Restore groups when loading a saved visualization
+  useEffect(() => {
+    if (groupsToRestore && groupsToRestore.length > 0) {
+      console.log('[VisualizationPanel] Restoring groups:', groupsToRestore.length);
+
+      // Create group nodes from the saved data
+      const groupNodesToAdd = groupsToRestore.map(group => ({
+        id: group.id,
+        type: 'group',
+        position: group.position || { x: 0, y: 0 },
+        data: {
+          label: group.label || 'Group',
+          description: group.description || '',
+        },
+        style: group.style || {
+          width: 300,
+          height: 200,
+          backgroundColor: 'rgba(240, 240, 240, 0.25)',
+        },
+      }));
+
+      // Add groups to nodes (wait a bit for other nodes to be rendered first)
+      setTimeout(() => {
+        setNodes((nds) => [...nds, ...groupNodesToAdd]);
+        // Clear the restore list
+        setGroupsToRestore([]);
+      }, 200);
+    }
+  }, [groupsToRestore, setNodes, setGroupsToRestore]);
+
+  // Sync React Flow nodes (including groups) to Zustand for saving
+  useEffect(() => {
+    setReactFlowNodes(nodes);
+  }, [nodes, setReactFlowNodes]);
 
   // Update nodes when reactFlowNodes changes (for layout recalculation)
   useEffect(() => {

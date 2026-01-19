@@ -14,8 +14,10 @@ function ChatPanel() {
     setError,
     clearError,
     nodes, // Need existing nodes to capture state
+    reactFlowNodes, // React Flow nodes including groups for saving
     hiddenNodeIds,
-    setHiddenNodeIds
+    setHiddenNodeIds,
+    setGroupsToRestore
   } = useGraphStore();
   const [inputValue, setInputValue] = useState('');
   const [isProcessing, setIsProcessing] = useState(false);
@@ -149,22 +151,27 @@ function ChatPanel() {
         // 1. Handle "Save Visualization" signal from backend
         if (toolResult.action === 'save_visualization') {
              const viewName = toolResult.name;
-             // Capture state from store
-             // Note: store positions might be outdated if we haven't synced.
-             // But we added sync logic in VisualizationPanel.
-             const currentNodes = useGraphStore.getState().nodes;
+             // Use React Flow nodes (includes groups) instead of store nodes
+             const currentNodes = useGraphStore.getState().reactFlowNodes;
              const currentHidden = useGraphStore.getState().hiddenNodeIds;
 
-             const viewData = {
-                nodes: currentNodes.map(n => ({ id: n.id, position: n.position })),
-                hidden_nodes: currentHidden
-             };
+             // Use OLD format (node_ids + positions) to match VisualizationPanel save
+             const positions = {};
+             currentNodes.forEach(n => {
+               positions[n.id] = n.position;
+             });
+             const nodeIds = currentNodes.map(n => n.id);
 
              const viewNode = {
                 name: viewName,
                 type: 'VisualizationView',
                 description: `Saved view: ${viewName}`,
-                metadata: { view_data: viewData },
+                summary: `Contains ${nodeIds.length} nodes`,
+                metadata: {
+                  node_ids: nodeIds,
+                  positions: positions,
+                  hidden_node_ids: currentHidden
+                },
                 communities: []
              };
 
@@ -181,6 +188,14 @@ function ChatPanel() {
         // 2. Handle "Load Visualization" signal
         else if (toolResult.action === 'load_visualization') {
             if (toolResult.nodes && toolResult.nodes.length > 0) {
+                // Set groups to restore (if any)
+                if (toolResult.groups && toolResult.groups.length > 0) {
+                    console.log('[ChatPanel] Setting groups to restore:', toolResult.groups.length);
+                    setGroupsToRestore(toolResult.groups);
+                } else {
+                    setGroupsToRestore([]);
+                }
+
                 // Clear existing visualization and show only the nodes from the view
                 updateVisualization(toolResult.nodes, toolResult.edges || []);
 

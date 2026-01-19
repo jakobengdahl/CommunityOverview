@@ -700,30 +700,50 @@ def get_visualization(name: str) -> Dict[str, Any]:
     view_node = results[0]
     print(f"[GetVisualization] Found view node: {view_node.id}")
 
+    # Support both old and new formats
+    # Old format: metadata.node_ids + metadata.positions
+    # New format: metadata.view_data.nodes + metadata.view_data.hidden_nodes
+
+    position_map = {}
+    node_ids = []
+    hidden_node_ids = []
+
+    # Try new format first
     view_data = view_node.metadata.get('view_data', {})
-    print(f"[GetVisualization] View data keys: {list(view_data.keys())}")
+    if view_data and 'nodes' in view_data:
+        print(f"[GetVisualization] Using NEW format (view_data)")
+        node_position_data = view_data.get('nodes', [])
+        hidden_node_ids = view_data.get('hidden_nodes', [])
+        position_map = {item['id']: item.get('position') for item in node_position_data if isinstance(item, dict)}
+        node_ids = list(position_map.keys())
 
-    # Extract node IDs from the view data
-    node_position_data = view_data.get('nodes', [])
-    hidden_node_ids = view_data.get('hidden_nodes', [])
-    print(f"[GetVisualization] Node positions: {len(node_position_data)}, Hidden nodes: {len(hidden_node_ids)}")
+    # Fall back to old format
+    elif 'node_ids' in view_node.metadata:
+        print(f"[GetVisualization] Using OLD format (node_ids + positions)")
+        node_ids = view_node.metadata.get('node_ids', [])
+        position_map = view_node.metadata.get('positions', {})
+        hidden_node_ids = view_node.metadata.get('hidden_nodes', [])
 
-    if not node_position_data:
-        print(f"[GetVisualization] View '{name}' contains no nodes")
+    else:
+        print(f"[GetVisualization] View '{name}' has no node data in any format")
         return {
             "success": False,
             "error": f"View '{name}' contains no nodes."
         }
 
-    # Create a map of node_id -> position
-    position_map = {item['id']: item.get('position') for item in node_position_data if isinstance(item, dict)}
-    node_ids = list(position_map.keys())
-    print(f"[GetVisualization] Extracted {len(node_ids)} node IDs from view")
+    print(f"[GetVisualization] Extracted {len(node_ids)} node IDs, {len(hidden_node_ids)} hidden nodes")
+
+    # Filter out group IDs (frontend-only concept, not stored in backend graph)
+    actual_node_ids = [nid for nid in node_ids if not nid.startswith('group-')]
+    group_ids = [nid for nid in node_ids if nid.startswith('group-')]
+
+    if group_ids:
+        print(f"[GetVisualization] Filtered out {len(group_ids)} group IDs (frontend-only)")
 
     # Fetch all the actual nodes
     nodes = []
     missing_nodes = []
-    for node_id in node_ids:
+    for node_id in actual_node_ids:
         node = graph.get_node(node_id)
         if node:
             nodes.append(node.model_dump())
@@ -731,7 +751,7 @@ def get_visualization(name: str) -> Dict[str, Any]:
             missing_nodes.append(node_id)
 
     if missing_nodes:
-        print(f"[GetVisualization] WARNING: {len(missing_nodes)} nodes not found: {missing_nodes[:5]}")
+        print(f"[GetVisualization] WARNING: {len(missing_nodes)} real nodes not found: {missing_nodes[:5]}")
 
     if not nodes:
         print(f"[GetVisualization] No nodes could be loaded from view '{name}'")
@@ -741,7 +761,7 @@ def get_visualization(name: str) -> Dict[str, Any]:
         }
 
     # Get all edges between these nodes
-    node_id_set = set(node_ids)
+    node_id_set = set(actual_node_ids)
     edges = []
     for edge in graph.edges.values():
         if edge.source in node_id_set and edge.target in node_id_set:
@@ -749,12 +769,26 @@ def get_visualization(name: str) -> Dict[str, Any]:
 
     print(f"[GetVisualization] Successfully loaded {len(nodes)} nodes and {len(edges)} edges")
 
+    # Extract group positions for frontend to restore
+    group_data = []
+    for group_id in group_ids:
+        group_position = position_map.get(group_id)
+        if group_position:
+            group_data.append({
+                "id": group_id,
+                "position": group_position
+            })
+
+    if group_data:
+        print(f"[GetVisualization] Returning {len(group_data)} groups to restore")
+
     return {
         "success": True,
         "nodes": nodes,
         "edges": edges,
         "positions": position_map,
         "hidden_node_ids": hidden_node_ids,
+        "groups": group_data,  # Frontend groups to restore
         "action": "load_visualization"  # Signal for frontend
     }
 
