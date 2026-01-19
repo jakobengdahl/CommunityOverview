@@ -22,6 +22,11 @@ export default defineConfig({
       '/execute_tool': {
         target: 'http://localhost:8000',
         changeOrigin: true,
+      },
+      // Proxy to backend export_graph endpoint
+      '/export_graph': {
+        target: 'http://localhost:8000',
+        changeOrigin: true,
       }
     }
   }
