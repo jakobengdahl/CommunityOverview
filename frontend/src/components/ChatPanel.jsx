@@ -180,32 +180,25 @@ function ChatPanel() {
 
         // 2. Handle "Load Visualization" signal
         else if (toolResult.action === 'load_visualization') {
-            const viewData = toolResult.view.metadata.view_data;
-            if (viewData) {
-                if (viewData.hidden_nodes) {
-                    setHiddenNodeIds(viewData.hidden_nodes);
+            if (toolResult.nodes && toolResult.nodes.length > 0) {
+                // Clear existing visualization and show only the nodes from the view
+                updateVisualization(toolResult.nodes, toolResult.edges || []);
+
+                // Apply saved positions if available
+                if (toolResult.positions) {
+                    // Wait a bit for the nodes to be rendered, then apply positions
+                    setTimeout(() => {
+                        const positionUpdates = Object.entries(toolResult.positions).map(([id, position]) => ({
+                            id,
+                            position
+                        }));
+                        useGraphStore.getState().updateNodePositions(positionUpdates);
+                    }, 100);
                 }
 
-                // We need to apply positions.
-                // updateVisualization expects full nodes.
-                // We should probably just update positions of existing nodes?
-                // Or if the view contains specific nodes (filtering?), we might want to filter?
-                // The prompt said "which nodes ... are present".
-                // If the view implies filtering, we should handle that.
-                // But for now, let's assume it just restores positions and hidden state.
-
-                // Note: If the graph currently loaded doesn't have these nodes, we can't show them.
-                // We assume the user has searched/loaded the graph or the view contains enough info to load them?
-                // The view only stores IDs.
-                // So this only works if the nodes are already loaded.
-                // Ideally, `load_visualization` should probably return the full node objects too?
-                // But `get_visualization` returns the view node itself.
-
-                // TODO: In a real implementation, we might need to fetch the nodes listed in the view
-                // if they are not currently in the store.
-                // For now, let's update positions for nodes we DO have.
-                if (viewData.nodes) {
-                   useGraphStore.getState().updateNodePositions(viewData.nodes);
+                // Apply hidden nodes if available
+                if (toolResult.hidden_node_ids) {
+                    setHiddenNodeIds(toolResult.hidden_node_ids);
                 }
             }
         }

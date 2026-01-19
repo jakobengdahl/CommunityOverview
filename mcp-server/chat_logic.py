@@ -190,6 +190,22 @@ WORKFLOW FOR SAVING/LOADING VIEWS:
 4. To load a view, use get_visualization() with the view name
 5. Suggest existing views when relevant
 
+VISUALIZATION DISPLAY BEHAVIOR:
+1. When the user asks to "show a visualization" or "load a view":
+   - Use get_visualization(name) to load the saved view
+   - This will CLEAR existing nodes and show ONLY the nodes from the visualization
+   - The VisualizationView node itself is NOT displayed - only its content
+   - The frontend will automatically apply saved positions and hidden node states
+
+2. When adding new nodes to the graph (via search, get_related_nodes, etc.):
+   - New nodes are ADDED to the existing visualization (merged, not replaced)
+   - Any edges connecting new nodes to existing nodes are automatically included
+   - The new nodes will be highlighted for visibility
+
+3. Important distinction:
+   - "Show/load visualization X" = REPLACE current view with visualization content
+   - "Add nodes" / "Show related nodes" = ADD to current view
+
 TOOL USAGE GUIDELINES:
 - search_graph: For text-based searches, exploring themes, finding specific nodes
 - get_related_nodes: For expanding from a known node, exploring connections

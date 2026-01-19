@@ -209,18 +209,28 @@ async def export_graph_endpoint():
     Returns the complete graph data in JSON format
     """
     try:
+        import json
+
         # Get all nodes and edges from the graph storage
         all_nodes = [node.model_dump() for node in graph.nodes.values()]
         all_edges = [edge.model_dump() for edge in graph.edges.values()]
 
-        return JSONResponse({
+        export_data = {
             "version": "1.0",
             "exportDate": datetime.utcnow().isoformat(),
             "nodes": all_nodes,
             "edges": all_edges,
             "total_nodes": len(all_nodes),
             "total_edges": len(all_edges)
-        })
+        }
+
+        # Use custom JSON encoder to handle datetime objects
+        def json_serializer(obj):
+            if isinstance(obj, datetime):
+                return obj.isoformat()
+            raise TypeError(f"Object of type {type(obj)} is not JSON serializable")
+
+        return JSONResponse(json.loads(json.dumps(export_data, default=json_serializer)))
     except Exception as e:
         import traceback
         traceback.print_exc()
@@ -633,13 +643,17 @@ def save_visualization_metadata(name: str) -> Dict[str, Any]:
 @tool_wrapper
 def get_visualization(name: str) -> Dict[str, Any]:
     """
-    Get a saved visualization view by name.
+    Get a saved visualization view by name and load its content.
+
+    This returns the actual nodes and edges that are part of the visualization,
+    NOT the VisualizationView node itself. The visualization node is just metadata
+    storage - what the user wants to see is the content it references.
 
     Args:
         name: Name of the view
 
     Returns:
-        The view data (nodes, positions, etc.)
+        The nodes and edges to display, with position and hidden node data
     """
     # Search for a node of type VISUALIZATION_VIEW with the given name
     results = graph.search_nodes(query=name, node_types=[NodeType.VISUALIZATION_VIEW], limit=1)
@@ -651,9 +665,48 @@ def get_visualization(name: str) -> Dict[str, Any]:
         }
 
     view_node = results[0]
+    view_data = view_node.metadata.get('view_data', {})
+
+    # Extract node IDs from the view data
+    node_position_data = view_data.get('nodes', [])
+    hidden_node_ids = view_data.get('hidden_nodes', [])
+
+    if not node_position_data:
+        return {
+            "success": False,
+            "error": f"View '{name}' contains no nodes."
+        }
+
+    # Create a map of node_id -> position
+    position_map = {item['id']: item.get('position') for item in node_position_data if isinstance(item, dict)}
+    node_ids = list(position_map.keys())
+
+    # Fetch all the actual nodes
+    nodes = []
+    for node_id in node_ids:
+        node = graph.get_node(node_id)
+        if node:
+            nodes.append(node.model_dump())
+
+    if not nodes:
+        return {
+            "success": False,
+            "error": f"No nodes could be loaded from view '{name}'. The referenced nodes may have been deleted."
+        }
+
+    # Get all edges between these nodes
+    node_id_set = set(node_ids)
+    edges = []
+    for edge in graph.edges.values():
+        if edge.source in node_id_set and edge.target in node_id_set:
+            edges.append(edge.model_dump())
+
     return {
         "success": True,
-        "view": view_node.model_dump(),
+        "nodes": nodes,
+        "edges": edges,
+        "positions": position_map,
+        "hidden_node_ids": hidden_node_ids,
         "action": "load_visualization"  # Signal for frontend
     }
 
