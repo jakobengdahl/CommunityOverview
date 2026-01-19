@@ -592,9 +592,9 @@ function ChatPanel() {
             className="chat-upload-button"
             onClick={() => fileInputRef.current?.click()}
             disabled={isUploading || isProcessing}
-            title="Ladda upp dokument (PDF, Word, Text)"
+            title="Upload document (PDF, Word, Text)"
           >
-            {isUploading ? '📤 Laddar upp...' : '📤 Ladda upp'}
+            {isUploading ? '📤 Uploading...' : '📤 Upload'}
           </button>
           <button
             className="chat-send-button"

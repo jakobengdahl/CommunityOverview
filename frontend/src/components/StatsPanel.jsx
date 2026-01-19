@@ -82,37 +82,37 @@ function StatsPanel() {
         className="stats-toggle"
         onClick={() => setIsExpanded(!isExpanded)}
       >
-        📊 Graf-statistik {isExpanded ? '▼' : '▶'}
+        📊 Graph Stats {isExpanded ? '▼' : '▶'}
       </button>
 
       {isExpanded && (
         <div className="stats-content">
           {isLoadingStats && (
-            <div className="stats-loading">Laddar statistik...</div>
+            <div className="stats-loading">Loading statistics...</div>
           )}
 
           {statsError && (
-            <div className="stats-error">Fel: {statsError}</div>
+            <div className="stats-error">Error: {statsError}</div>
           )}
 
           <div className="stats-section">
-            <h4>Översikt</h4>
+            <h4>Overview</h4>
             <div className="stat-item">
-              <span className="stat-label">Visade noder:</span>
+              <span className="stat-label">Displayed nodes:</span>
               <span className="stat-value">{stats.totalNodes}</span>
             </div>
             <div className="stat-item">
-              <span className="stat-label">Totalt i databasen:</span>
+              <span className="stat-label">Total in database:</span>
               <span className="stat-value">
                 {isLoadingStats ? '...' : stats.totalInDatabase}
               </span>
             </div>
             <div className="stat-item">
-              <span className="stat-label">Visade kopplingar:</span>
+              <span className="stat-label">Displayed edges:</span>
               <span className="stat-value">{stats.totalEdges}</span>
             </div>
             <div className="stat-item">
-              <span className="stat-label">Totalt kopplingar:</span>
+              <span className="stat-label">Total edges:</span>
               <span className="stat-value">
                 {isLoadingStats ? '...' : stats.totalEdgesInDatabase}
               </span>
@@ -121,7 +121,7 @@ function StatsPanel() {
 
           {(Object.keys(stats.nodesByType).length > 0 || Object.keys(stats.backendNodesByType).length > 0) && (
             <div className="stats-section">
-              <h4>Noder per typ</h4>
+              <h4>Nodes by type</h4>
               {Object.keys(stats.nodesByType).length > 0 ? (
                 Object.entries(stats.nodesByType)
                   .sort((a, b) => b[1] - a[1])
@@ -141,7 +141,7 @@ function StatsPanel() {
                   })
               ) : (
                 <div className="stat-item">
-                  <span className="stat-label">Inga noder laddade ännu</span>
+                  <span className="stat-label">No nodes loaded yet</span>
                 </div>
               )}
             </div>
@@ -149,7 +149,7 @@ function StatsPanel() {
 
           {(Object.keys(stats.nodesByCommunity).length > 0 || Object.keys(stats.backendNodesByCommunity).length > 0) && (
             <div className="stats-section">
-              <h4>Noder per community</h4>
+              <h4>Nodes by community</h4>
               {Object.keys(stats.nodesByCommunity).length > 0 ? (
                 Object.entries(stats.nodesByCommunity)
                   .sort((a, b) => b[1] - a[1])
@@ -173,12 +173,12 @@ function StatsPanel() {
                   .map(([community, count]) => (
                     <div key={community} className="stat-item">
                       <span className="stat-label">{community}:</span>
-                      <span className="stat-value">{count} i databasen</span>
+                      <span className="stat-value">{count} in database</span>
                     </div>
                   ))
               ) : (
                 <div className="stat-item">
-                  <span className="stat-label">Inga communities ännu</span>
+                  <span className="stat-label">No communities yet</span>
                 </div>
               )}
             </div>
