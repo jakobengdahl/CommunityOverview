@@ -759,6 +759,40 @@ def get_visualization(name: str) -> Dict[str, Any]:
     }
 
 
+@tool_wrapper
+def list_visualizations() -> Dict[str, Any]:
+    """
+    List all saved visualization views.
+
+    Returns:
+        List of all VisualizationView nodes with their names and summaries
+    """
+    print("[ListVisualizations] Listing all saved visualization views...")
+
+    # Search for all VisualizationView nodes
+    views = graph.search_nodes(query="", node_types=[NodeType.VISUALIZATION_VIEW], limit=100)
+
+    print(f"[ListVisualizations] Found {len(views)} saved views")
+
+    # Format the views for display
+    view_list = []
+    for view in views:
+        view_info = {
+            "name": view.name,
+            "description": view.description,
+            "summary": view.summary,
+            "created_at": view.created_at.isoformat() if view.created_at else None,
+            "node_count": len(view.metadata.get('node_ids', [])) if 'node_ids' in view.metadata else len(view.metadata.get('view_data', {}).get('nodes', []))
+        }
+        view_list.append(view_info)
+
+    return {
+        "success": True,
+        "views": view_list,
+        "total": len(view_list)
+    }
+
+
 def _get_node_type_description(node_type: NodeType) -> str:
     """Helper for node type descriptions"""
     descriptions = {

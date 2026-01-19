@@ -541,6 +541,14 @@ Always be helpful, transparent, and data-driven in your responses while minimizi
                     },
                     "required": ["name"]
                 }
+            },
+            {
+                "name": "list_visualizations",
+                "description": "List all saved visualization views. Use this to discover what visualization views are available.",
+                "input_schema": {
+                    "type": "object",
+                    "properties": {}
+                }
             }
         ]
 
