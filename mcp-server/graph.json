@@ -9,11 +9,16 @@
       "communities": [
         "eSam"
       ],
-      "tags": ["digitalisering", "e-förvaltning", "samverkan", "offentlig sektor"],
+      "tags": [
+        "digitalisering",
+        "e-förvaltning",
+        "samverkan",
+        "offentlig sektor"
+      ],
       "metadata": {},
       "embedding": null,
-      "created_at": "2025-12-03T10:00:00Z",
-      "updated_at": "2025-12-03T10:00:00Z"
+      "created_at": "2025-12-03T10:00:00+00:00",
+      "updated_at": "2025-12-03T10:00:00+00:00"
     },
     {
       "id": "org-esam",
@@ -24,19 +29,20 @@
       "communities": [
         "eSam"
       ],
-      "tags": ["samverkansorganisation", "digitalisering", "e-förvaltning", "myndighetssamverkan"],
+      "tags": [
+        "samverkansorganisation",
+        "digitalisering",
+        "e-förvaltning",
+        "myndighetssamverkan"
+      ],
       "metadata": {
         "organization_type": "samverkansorganisation",
         "country": "Sverige",
         "website": "https://www.esamverka.se"
       },
       "embedding": null,
-      "created_at": "2026-01-15T10:00:00Z",
-      "updated_at": "2026-01-15T10:00:00Z",
-      "position": {
-        "x": 600,
-        "y": 200
-      }
+      "created_at": "2026-01-15T10:00:00+00:00",
+      "updated_at": "2026-01-15T10:00:00+00:00"
     },
     {
       "id": "2b7c062d-f589-4346-9412-c87a898cdbbd",
@@ -47,7 +53,12 @@
       "communities": [
         "eSam"
       ],
-      "tags": ["myndighet", "utvecklingssamarbete", "bistånd", "fattigdomsbekämpning"],
+      "tags": [
+        "myndighet",
+        "utvecklingssamarbete",
+        "bistånd",
+        "fattigdomsbekämpning"
+      ],
       "metadata": {
         "organization_type": "myndighet",
         "country": "Sverige",
@@ -55,11 +66,7 @@
       },
       "embedding": null,
       "created_at": "2026-01-14T12:30:17.657849",
-      "updated_at": "2026-01-15T10:00:00Z",
-      "position": {
-        "x": 800,
-        "y": 400
-      }
+      "updated_at": "2026-01-15T10:00:00+00:00"
     },
     {
       "id": "dc17958d-c02d-4094-ac9c-79499addeab9",
@@ -68,7 +75,13 @@
       "description": "Bank for International Settlements (BIS) är en internationell finansiell organisation som ägs av centralbanker och som verkar för internationellt monetärt och finansiellt samarbete.",
       "summary": "Internationell finansiell organisation som bistår centralbanker",
       "communities": [],
-      "tags": ["international organisation", "centralbank", "finansiell stabilitet", "monetärt samarbete"],
+      "tags": [
+        "international organisation",
+        "centralbank",
+        "finansiell stabilitet",
+        "monetärt samarbete",
+        "statistik"
+      ],
       "metadata": {
         "organization_type": "international_organization",
         "headquarters": "Basel, Switzerland",
@@ -76,11 +89,7 @@
       },
       "embedding": null,
       "created_at": "2026-01-14T13:30:51.855044",
-      "updated_at": "2026-01-15T10:00:00Z",
-      "position": {
-        "x": 150,
-        "y": 300
-      }
+      "updated_at": "2026-01-15T16:44:24.795485"
     },
     {
       "id": "1f59225a-9323-4884-97c6-6493669306fe",
@@ -89,19 +98,25 @@
       "description": "Ett projekt som fokuserar på användningen av generativ AI inom officiell statistik, involverande 13 statistiska kontor, centralbanker och akademiska institutioner.",
       "summary": "Generativ AI och officiell statistik workshop i Genève, 14 maj 2025",
       "communities": [],
-      "tags": ["AI", "generativ AI", "officiell statistik", "maskininlärning", "LLM"],
+      "tags": [
+        "AI",
+        "generativ AI",
+        "officiell statistik",
+        "maskininlärning",
+        "LLM"
+      ],
       "metadata": {
         "project_type": "research",
         "participants": 13,
-        "topics": ["generative_ai", "official_statistics", "governance"]
+        "topics": [
+          "generative_ai",
+          "official_statistics",
+          "governance"
+        ]
       },
       "embedding": null,
       "created_at": "2026-01-14T13:30:51.855018",
-      "updated_at": "2026-01-15T10:00:00Z",
-      "position": {
-        "x": 200,
-        "y": 650
-      }
+      "updated_at": "2026-01-15T10:00:00+00:00"
     },
     {
       "id": "68ea8f12-3c79-4290-abff-e503e9897785",
@@ -110,18 +125,24 @@
       "description": "High-Level Group for the Modernisation of Official Statistics projekt som organiserar workshops om generativ AI och officiell statistik.",
       "summary": "Fokus på styrning, tekniska kapitel och organisatorisk kapacitet",
       "communities": [],
-      "tags": ["statistik", "modernisering", "AI", "governance", "kapacitetsbyggnad"],
+      "tags": [
+        "statistik",
+        "modernisering",
+        "AI",
+        "governance",
+        "kapacitetsbyggnad"
+      ],
       "metadata": {
         "project_type": "modernization",
-        "focus_areas": ["governance", "technical_capacity", "organizational_capacity"]
+        "focus_areas": [
+          "governance",
+          "technical_capacity",
+          "organizational_capacity"
+        ]
       },
       "embedding": null,
       "created_at": "2026-01-14T13:30:51.855053",
-      "updated_at": "2026-01-15T10:00:00Z",
-      "position": {
-        "x": 400,
-        "y": 500
-      }
+      "updated_at": "2026-01-15T16:42:49.436015"
     },
     {
       "id": "77b58c6c-b018-4c0a-abab-df83e0bab79e",
@@ -130,7 +151,13 @@
       "description": "United Nations Economic Commission for Europe (UNECE) är en av FN:s fem regionala ekonomiska kommissioner som arbetar med ekonomiskt samarbete i Europa.",
       "summary": "FN:s ekonomiska kommission för Europa",
       "communities": [],
-      "tags": ["international organisation", "FN", "ekonomiskt samarbete", "Europa", "standardisering"],
+      "tags": [
+        "international organisation",
+        "FN",
+        "ekonomiskt samarbete",
+        "Europa",
+        "standardisering"
+      ],
       "metadata": {
         "organization_type": "international_organization",
         "parent_organization": "United Nations",
@@ -139,11 +166,1123 @@
       },
       "embedding": null,
       "created_at": "2026-01-14T13:30:51.855035",
-      "updated_at": "2026-01-15T10:00:00Z",
-      "position": {
-        "x": 600,
-        "y": 350
-      }
+      "updated_at": "2026-01-15T10:00:00+00:00"
+    },
+    {
+      "id": "4b2e8d61-55e5-4412-92c9-5e14cf65f4e9",
+      "type": "Actor",
+      "name": "Arbetsförmedlingen",
+      "description": "Förvaltningsmyndighet för arbetsmarknadspolitiska frågor och ansvarar för den arbetsmarknadspolitiska verksamheten.",
+      "summary": "",
+      "communities": [
+        "eSam"
+      ],
+      "tags": [
+        "arbetsmarknad",
+        "förvaltning",
+        "offentlig sektor"
+      ],
+      "metadata": {},
+      "embedding": null,
+      "created_at": "2026-01-15T16:47:57.605394",
+      "updated_at": "2026-01-15T16:47:57.605397"
+    },
+    {
+      "id": "4f760b01-5ef5-41bf-a3c1-6ec8a68212b9",
+      "type": "Actor",
+      "name": "Arbetsmiljöverket",
+      "description": "Säkerställer att arbetsmiljö- och arbetstidslagstiftning följs genom föreskrifter, inspektioner och information.",
+      "summary": "",
+      "communities": [
+        "eSam"
+      ],
+      "tags": [
+        "arbetsmiljö",
+        "inspektion",
+        "lagstiftning"
+      ],
+      "metadata": {},
+      "embedding": null,
+      "created_at": "2026-01-15T16:47:57.605413",
+      "updated_at": "2026-01-15T16:47:57.605413"
+    },
+    {
+      "id": "542821eb-b412-4ad9-8e9c-449c8d694246",
+      "type": "Actor",
+      "name": "Bolagsverket",
+      "description": "Registrerar företag och ändringar, tar emot årsredovisningar samt hanterar bland annat företagsinteckningar och vissa likvidationsärenden.",
+      "summary": "",
+      "communities": [
+        "eSam"
+      ],
+      "tags": [
+        "företag",
+        "registrering",
+        "ekonomi"
+      ],
+      "metadata": {},
+      "embedding": null,
+      "created_at": "2026-01-15T16:47:57.605424",
+      "updated_at": "2026-01-15T16:47:57.605424"
+    },
+    {
+      "id": "6a0fc2db-fe77-4c2b-855a-1630f5a39e0f",
+      "type": "Actor",
+      "name": "Boverket",
+      "description": "Nationell myndighet för samhällsplanering, byggande och boende samt frågor om byggd miljö och fysisk planering.",
+      "summary": "",
+      "communities": [
+        "eSam"
+      ],
+      "tags": [
+        "samhällsplanering",
+        "byggande",
+        "boende"
+      ],
+      "metadata": {},
+      "embedding": null,
+      "created_at": "2026-01-15T16:47:57.605434",
+      "updated_at": "2026-01-15T16:47:57.605434"
+    },
+    {
+      "id": "6c7edcb9-a15a-45ed-8720-717f45770e61",
+      "type": "Actor",
+      "name": "Centrala studiestödsnämnden (CSN)",
+      "description": "Beslutar om och betalar ut studiestöd, hanterar återbetalning av lån och administrerar körkortslån.",
+      "summary": "",
+      "communities": [
+        "eSam"
+      ],
+      "tags": [
+        "utbildning",
+        "studiestöd",
+        "lån"
+      ],
+      "metadata": {},
+      "embedding": null,
+      "created_at": "2026-01-15T16:47:57.605444",
+      "updated_at": "2026-01-15T16:47:57.605444"
+    },
+    {
+      "id": "545ca5ab-cc59-45b1-a1df-3ca5a17b18cc",
+      "type": "Actor",
+      "name": "Domstolsverket",
+      "description": "Central förvaltningsmyndighet för domstolarna samt arrende- och hyresnämnderna och Rättshjälpsmyndigheten.",
+      "summary": "",
+      "communities": [
+        "eSam"
+      ],
+      "tags": [
+        "domstol",
+        "rättshjälp",
+        "förvaltning"
+      ],
+      "metadata": {},
+      "embedding": null,
+      "created_at": "2026-01-15T16:47:57.605454",
+      "updated_at": "2026-01-15T16:47:57.605455"
+    },
+    {
+      "id": "f8f54f0e-7944-47c2-bfb8-b61f5b74a15f",
+      "type": "Actor",
+      "name": "E-hälsomyndigheten",
+      "description": "Ansvarar för nationell infrastruktur och tjänster för e-hälsa, bland annat e-recept och informationsförsörjning inom läkemedelsområdet.",
+      "summary": "",
+      "communities": [
+        "eSam"
+      ],
+      "tags": [
+        "e-hälsa",
+        "infrastruktur",
+        "tjänster"
+      ],
+      "metadata": {},
+      "embedding": null,
+      "created_at": "2026-01-15T16:49:51.203919",
+      "updated_at": "2026-01-15T16:49:51.203921"
+    },
+    {
+      "id": "ff14f8de-07d2-4da8-b0e6-041ac5f50fe2",
+      "type": "Actor",
+      "name": "Finansinspektionen",
+      "description": "Utövar tillsyn över finansmarknaden och finansiella företag för stabilitet samt konsument- och investerarskydd.",
+      "summary": "",
+      "communities": [
+        "eSam"
+      ],
+      "tags": [
+        "tillsyn",
+        "finansmarknad",
+        "konsumentskydd"
+      ],
+      "metadata": {},
+      "embedding": null,
+      "created_at": "2026-01-15T16:49:51.203940",
+      "updated_at": "2026-01-15T16:49:51.203941"
+    },
+    {
+      "id": "0ff6823f-3289-4636-a8b3-aefacc150825",
+      "type": "Actor",
+      "name": "Folkhälsomyndigheten",
+      "description": "Utvecklar och stödjer arbetet för bättre folkhälsa samt samordnar och följer upp smittskydd och epidemiologisk kunskap.",
+      "summary": "",
+      "communities": [
+        "eSam"
+      ],
+      "tags": [
+        "folkhälsa",
+        "smittskydd",
+        "epidemiologi"
+      ],
+      "metadata": {},
+      "embedding": null,
+      "created_at": "2026-01-15T16:49:51.203953",
+      "updated_at": "2026-01-15T16:49:51.203953"
+    },
+    {
+      "id": "e7750643-f4e0-4c72-9aa1-f9fc195c72ed",
+      "type": "Actor",
+      "name": "Försäkringskassan",
+      "description": "Administrerar stora delar av socialförsäkringen och handlägger och betalar ut ersättningar och bidrag enligt regelverken.",
+      "summary": "",
+      "communities": [
+        "eSam"
+      ],
+      "tags": [
+        "socialförsäkring",
+        "ersättningar",
+        "bidrag"
+      ],
+      "metadata": {},
+      "embedding": null,
+      "created_at": "2026-01-15T16:49:51.203965",
+      "updated_at": "2026-01-15T16:49:51.203966"
+    },
+    {
+      "id": "b221532f-17f2-43e4-be9c-ba9abd1c0644",
+      "type": "Actor",
+      "name": "Havs- och vattenmyndigheten",
+      "description": "Ansvarar för förvaltning av havs- och vattenmiljö samt genomför och samordnar arbete inom vattenförvaltning och fiskefrågor.",
+      "summary": "",
+      "communities": [],
+      "tags": [
+        "vattenmiljö",
+        "förvaltning",
+        "fiskefrågor"
+      ],
+      "metadata": {},
+      "embedding": null,
+      "created_at": "2026-01-15T16:51:59.991843",
+      "updated_at": "2026-01-15T16:51:59.991845"
+    },
+    {
+      "id": "f2d5ac0f-6a23-4221-9eee-636ee34ff898",
+      "type": "Actor",
+      "name": "Inspektionen för vård och omsorg (IVO)",
+      "description": "Utövar tillsyn över hälso- och sjukvård och socialtjänst samt prövar vissa tillstånd och hanterar klagomål.",
+      "summary": "",
+      "communities": [],
+      "tags": [
+        "tillsyn",
+        "vård",
+        "omsorg"
+      ],
+      "metadata": {},
+      "embedding": null,
+      "created_at": "2026-01-15T16:51:59.991861",
+      "updated_at": "2026-01-15T16:51:59.991861"
+    },
+    {
+      "id": "badd1921-8e3d-45d4-b41c-fafbb7c15212",
+      "type": "Actor",
+      "name": "Jordbruksverket",
+      "description": "Central myndighet för jordbruk, landsbygd och djurhållning, inklusive genomförande av delar av EU:s jordbrukspolitik.",
+      "summary": "",
+      "communities": [],
+      "tags": [
+        "jordbruk",
+        "landsbygd",
+        "djurhållning"
+      ],
+      "metadata": {},
+      "embedding": null,
+      "created_at": "2026-01-15T16:51:59.991870",
+      "updated_at": "2026-01-15T16:51:59.991871"
+    },
+    {
+      "id": "49a0aa73-23bb-44cc-86ac-8c22386c6a26",
+      "type": "Actor",
+      "name": "Kemikalieinspektionen",
+      "description": "Ansvarar för regler, prövning och tillsyn som ska minska risker med kemikalier och bekämpningsmedel.",
+      "summary": "",
+      "communities": [],
+      "tags": [
+        "kemikalier",
+        "tillsyn",
+        "bekämpningsmedel"
+      ],
+      "metadata": {},
+      "embedding": null,
+      "created_at": "2026-01-15T16:53:01.071750",
+      "updated_at": "2026-01-15T16:53:01.071753"
+    },
+    {
+      "id": "49b950f9-fd31-4616-b4cf-60e74d5fb3de",
+      "type": "Actor",
+      "name": "Kronofogden",
+      "description": "Verkställer skulder genom indrivning och utmätning, hanterar skuldsanering och arbetar mot överskuldsättning.",
+      "summary": "",
+      "communities": [],
+      "tags": [
+        "indrivning",
+        "skuldsanering",
+        "överskuldsättning"
+      ],
+      "metadata": {},
+      "embedding": null,
+      "created_at": "2026-01-15T16:53:01.071768",
+      "updated_at": "2026-01-15T16:53:01.071768"
+    },
+    {
+      "id": "5eb2743a-ca7f-4dc4-a6ef-b6a782f8bed0",
+      "type": "Actor",
+      "name": "Kustbevakningen",
+      "description": "Bedriver sjöövervakning och brottsbekämpning till sjöss samt genomför miljöräddningstjänst och vissa kontrolluppgifter.",
+      "summary": "",
+      "communities": [],
+      "tags": [
+        "sjöövervakning",
+        "brottsbekämpning",
+        "miljöräddning"
+      ],
+      "metadata": {},
+      "embedding": null,
+      "created_at": "2026-01-15T16:53:01.071777",
+      "updated_at": "2026-01-15T16:53:01.071778"
+    },
+    {
+      "id": "fffc9863-d82c-497f-a6ba-fd7f7a42f75e",
+      "type": "Actor",
+      "name": "Lantmäteriet",
+      "description": "Ansvarar för fastighetsindelning och fastighetsinformation samt producerar och tillhandahåller geodata och kartor.",
+      "summary": "",
+      "communities": [],
+      "tags": [
+        "fastighetsindelning",
+        "geodata",
+        "kartor"
+      ],
+      "metadata": {},
+      "embedding": null,
+      "created_at": "2026-01-15T16:53:49.579777",
+      "updated_at": "2026-01-15T16:53:49.579779"
+    },
+    {
+      "id": "b14e84ed-7b31-48e3-bae6-d018e54eb2ba",
+      "type": "Actor",
+      "name": "Livsmedelsverket",
+      "description": "Arbetar för säkra livsmedel och bra dricksvatten samt ger vägledning och stöd till kontroll och nutrition.",
+      "summary": "",
+      "communities": [],
+      "tags": [
+        "livsmedelssäkerhet",
+        "dricksvatten",
+        "nutrition"
+      ],
+      "metadata": {},
+      "embedding": null,
+      "created_at": "2026-01-15T16:53:49.579793",
+      "updated_at": "2026-01-15T16:53:49.579793"
+    },
+    {
+      "id": "f984439f-ab86-42b6-b533-184c6ff594c4",
+      "type": "Actor",
+      "name": "Läkemedelsverket",
+      "description": "Ansvarar för reglering och tillsyn inom läkemedelsområdet för att säkerställa kvalitet, effekt och säker användning.",
+      "summary": "",
+      "communities": [],
+      "tags": [
+        "läkemedel",
+        "tillsyn",
+        "kvalitetssäkring"
+      ],
+      "metadata": {},
+      "embedding": null,
+      "created_at": "2026-01-15T16:53:49.579802",
+      "updated_at": "2026-01-15T16:53:49.579802"
+    },
+    {
+      "id": "94c5d40c-96e4-4efb-b487-d01c1713a678",
+      "type": "Actor",
+      "name": "Länsstyrelserna",
+      "description": "Statlig regional förvaltning som ska få nationella mål att få genomslag i länen med hänsyn till regionala förutsättningar.",
+      "summary": "",
+      "communities": [
+        "eSam"
+      ],
+      "tags": [
+        "regional förvaltning",
+        "nationella mål",
+        "län"
+      ],
+      "metadata": {},
+      "embedding": null,
+      "created_at": "2026-01-15T16:54:21.075899",
+      "updated_at": "2026-01-15T16:54:21.075901"
+    },
+    {
+      "id": "8854efc9-9103-43d6-9ff4-4e5a1764a961",
+      "type": "Actor",
+      "name": "Migrationsverket",
+      "description": "Prövar bland annat asyl och andra uppehållstillstånd samt ansvarar för mottagande och återvändandearbete enligt uppdrag.",
+      "summary": "",
+      "communities": [
+        "eSam"
+      ],
+      "tags": [
+        "asyl",
+        "uppehållstillstånd",
+        "mottagande"
+      ],
+      "metadata": {},
+      "embedding": null,
+      "created_at": "2026-01-15T16:54:21.075920",
+      "updated_at": "2026-01-15T16:54:21.075920"
+    },
+    {
+      "id": "e86f1931-db28-4446-b499-8ba4cb837b67",
+      "type": "Actor",
+      "name": "Naturvårdsverket",
+      "description": "Central myndighet för miljö och naturvård, inklusive arbete med miljömål, klimat, avfall och tillsynsvägledning.",
+      "summary": "",
+      "communities": [
+        "eSam"
+      ],
+      "tags": [
+        "miljö",
+        "naturvård",
+        "klimat"
+      ],
+      "metadata": {},
+      "embedding": null,
+      "created_at": "2026-01-15T16:54:21.075931",
+      "updated_at": "2026-01-15T16:54:21.075931"
+    },
+    {
+      "id": "afe456b5-2a03-4948-9d1f-d5ea643ed4af",
+      "type": "Actor",
+      "name": "Pensionsmyndigheten",
+      "description": "Administrerar den allmänna pensionen genom att informera, besluta och betala ut pension samt ta fram prognoser.",
+      "summary": "",
+      "communities": [
+        "eSam"
+      ],
+      "tags": [
+        "pension",
+        "förvaltning",
+        "prognoser"
+      ],
+      "metadata": {},
+      "embedding": null,
+      "created_at": "2026-01-15T16:54:38.120501",
+      "updated_at": "2026-01-15T16:54:38.120503"
+    },
+    {
+      "id": "3478ac2e-dd43-489a-b3f4-fb4675face51",
+      "type": "Actor",
+      "name": "Riksantikvarieämbetet",
+      "description": "Nationell myndighet för kulturarv och kulturmiljöfrågor med stöd, samordning och kunskapsuppbyggnad.",
+      "summary": "",
+      "communities": [
+        "eSam"
+      ],
+      "tags": [
+        "kulturarv",
+        "kulturmiljö",
+        "samordning"
+      ],
+      "metadata": {},
+      "embedding": null,
+      "created_at": "2026-01-15T16:54:38.120520",
+      "updated_at": "2026-01-15T16:54:38.120521"
+    },
+    {
+      "id": "43489637-dd61-4eb7-95ec-5413d614978c",
+      "type": "Actor",
+      "name": "Riksarkivet",
+      "description": "Statlig arkivmyndighet som bevarar arkiv samt utövar tillsyn och ger stöd i arkivfrågor.",
+      "summary": "",
+      "communities": [
+        "eSam"
+      ],
+      "tags": [
+        "arkiv",
+        "tillsyn",
+        "stöd"
+      ],
+      "metadata": {},
+      "embedding": null,
+      "created_at": "2026-01-15T16:54:38.120532",
+      "updated_at": "2026-01-15T16:54:38.120533"
+    },
+    {
+      "id": "5db29627-d209-4f51-8ebe-31ae0a5b3ad2",
+      "type": "Actor",
+      "name": "Rättsmedicinalverket (RMV)",
+      "description": "Central myndighet för rättspsykiatrisk, rättskemisk, rättsmedicinsk och rättsgenetisk verksamhet.",
+      "summary": "",
+      "communities": [],
+      "tags": [
+        "rättspsykiatri",
+        "rättskemi",
+        "rättsmedicin",
+        "rättsgenetik"
+      ],
+      "metadata": {},
+      "embedding": null,
+      "created_at": "2026-01-15T16:56:52.617123",
+      "updated_at": "2026-01-15T16:56:52.617126"
+    },
+    {
+      "id": "e5e8fa38-0cb0-4590-995b-32dfb2ac0e94",
+      "type": "Actor",
+      "name": "Skatteverket",
+      "description": "Ansvarar bland annat för skatter, socialavgifter, folkbokföring och vissa borgenärsuppgifter.",
+      "summary": "",
+      "communities": [
+        "eSam"
+      ],
+      "tags": [
+        "skatter",
+        "folkbokföring",
+        "avgifter"
+      ],
+      "metadata": {},
+      "embedding": null,
+      "created_at": "2026-01-15T16:57:12.645986",
+      "updated_at": "2026-01-15T16:57:12.645987"
+    },
+    {
+      "id": "b1882e65-874c-469e-8697-f0db0005b59b",
+      "type": "Actor",
+      "name": "Skolverket",
+      "description": "Främjar likvärdig utbildning av god kvalitet, utvecklar styrdokument och prov samt ger stöd till skolutveckling och hanterar statsbidrag.",
+      "summary": "",
+      "communities": [],
+      "tags": [
+        "utbildning",
+        "styrdokument",
+        "skolutveckling"
+      ],
+      "metadata": {},
+      "embedding": null,
+      "created_at": "2026-01-15T16:57:36.040190",
+      "updated_at": "2026-01-15T16:57:36.040192"
+    },
+    {
+      "id": "98f98937-f1c1-4cd8-a69d-beb032d35da8",
+      "type": "Actor",
+      "name": "Statens institutionsstyrelse (SiS)",
+      "description": "Bedriver tvångsvård och behandling för ungdomar och vuxna med missbruksproblematik, med mål att stärka förutsättningar för ett fungerande liv.",
+      "summary": "",
+      "communities": [],
+      "tags": [
+        "tvångsvård",
+        "behandling",
+        "missbruk"
+      ],
+      "metadata": {},
+      "embedding": null,
+      "created_at": "2026-01-15T16:57:36.040206",
+      "updated_at": "2026-01-15T16:57:36.040206"
+    },
+    {
+      "id": "4639c2c2-6e99-4c06-a482-0fe5df08df9c",
+      "type": "Actor",
+      "name": "Statens servicecenter",
+      "description": "Samordnar statlig administration genom stödtjänster (lön, ekonomi, e-handel) och tillhandahåller lokal statlig service via servicekontor.",
+      "summary": "",
+      "communities": [],
+      "tags": [
+        "administration",
+        "stödtjänster",
+        "servicekontor"
+      ],
+      "metadata": {},
+      "embedding": null,
+      "created_at": "2026-01-15T16:59:21.039355",
+      "updated_at": "2026-01-15T16:59:21.039358"
+    },
+    {
+      "id": "45a53955-2a43-4046-b539-572cdd967167",
+      "type": "Actor",
+      "name": "Statens tjänstepensionsverk (SPV)",
+      "description": "Administrerar statlig tjänstepension, beräknar premier och levererar prognoser och statistik.",
+      "summary": "",
+      "communities": [],
+      "tags": [
+        "pension",
+        "administration",
+        "prognoser"
+      ],
+      "metadata": {},
+      "embedding": null,
+      "created_at": "2026-01-15T16:59:21.039372",
+      "updated_at": "2026-01-15T16:59:21.039373"
+    },
+    {
+      "id": "98beee80-9ccd-417f-ac26-c301c7da761e",
+      "type": "Actor",
+      "name": "Statens veterinärmedicinska anstalt (SVA)",
+      "description": "Veterinärmedicinskt expert- och serviceorgan som främjar djurs och människors hälsa genom diagnostik, forskning, beredskap och rådgivning.",
+      "summary": "",
+      "communities": [
+        "eSam"
+      ],
+      "tags": [
+        "veterinärmedicin",
+        "diagnostik",
+        "beredskap"
+      ],
+      "metadata": {},
+      "embedding": null,
+      "created_at": "2026-01-15T17:00:06.687633",
+      "updated_at": "2026-01-15T17:00:06.687636"
+    },
+    {
+      "id": "c52b1f23-7aa5-4323-bceb-e9fb5a2c0f16",
+      "type": "Actor",
+      "name": "Statistiska centralbyrån (SCB)",
+      "description": "Ansvarar för officiell statistik och samordnar det statliga statistiksystemet samt överlämnande av statistik till internationella organisationer.",
+      "summary": "",
+      "communities": [
+        "eSam"
+      ],
+      "tags": [
+        "statistik",
+        "samordning",
+        "datahantering"
+      ],
+      "metadata": {},
+      "embedding": null,
+      "created_at": "2026-01-15T17:00:06.687652",
+      "updated_at": "2026-01-15T17:00:06.687653"
+    },
+    {
+      "id": "6fc69d7f-a8b2-4e26-9e8a-d56c1d01f579",
+      "type": "Actor",
+      "name": "Statskontoret",
+      "description": "Analyserar och utvärderar statlig verksamhet och förvaltning för att bidra till effektivitet och förbättrad styrning.",
+      "summary": "",
+      "communities": [],
+      "tags": [
+        "analys",
+        "utvärdering",
+        "styrning"
+      ],
+      "metadata": {},
+      "embedding": null,
+      "created_at": "2026-01-15T17:00:52.348118",
+      "updated_at": "2026-01-15T17:00:52.348120"
+    },
+    {
+      "id": "4768167e-7b32-429f-a767-118d390d45fa",
+      "type": "Actor",
+      "name": "Tillväxtverket",
+      "description": "Arbetar för fler och växande företag samt hållbart och konkurrenskraftigt näringsliv i hela landet.",
+      "summary": "",
+      "communities": [],
+      "tags": [
+        "tillväxt",
+        "företag",
+        "näringsliv"
+      ],
+      "metadata": {},
+      "embedding": null,
+      "created_at": "2026-01-15T17:00:52.348134",
+      "updated_at": "2026-01-15T17:00:52.348134"
+    },
+    {
+      "id": "d1885127-9250-4631-8b1b-e5de6ca1bfbe",
+      "type": "Actor",
+      "name": "Trafikverket",
+      "description": "Ansvarar för långsiktig infrastrukturplanering samt planering, byggande, drift och underhåll av statliga vägar och järnvägar.",
+      "summary": "",
+      "communities": [],
+      "tags": [
+        "infrastruktur",
+        "vägar",
+        "järnvägar"
+      ],
+      "metadata": {},
+      "embedding": null,
+      "created_at": "2026-01-15T17:00:52.348144",
+      "updated_at": "2026-01-15T17:00:52.348144"
+    },
+    {
+      "id": "552ed513-71b7-40b8-8f10-da05da867e07",
+      "type": "Actor",
+      "name": "Transportstyrelsen",
+      "description": "Ansvarar för regelgivning, tillsyn, tillstånd och register inom transportområdet för alla trafikslag.",
+      "summary": "",
+      "communities": [],
+      "tags": [
+        "transporter",
+        "regelgivning",
+        "tillsyn"
+      ],
+      "metadata": {},
+      "embedding": null,
+      "created_at": "2026-01-15T17:00:52.348153",
+      "updated_at": "2026-01-15T17:00:52.348153"
+    },
+    {
+      "id": "7b930fa6-4204-494b-b4cc-211a56b4f5c7",
+      "type": "Actor",
+      "name": "Tullverket",
+      "description": "Fastställer och tar ut tullar och vissa skatter samt kontrollerar varutrafik till och från utlandet så att regler följs.",
+      "summary": "",
+      "communities": [
+        "eSam"
+      ],
+      "tags": [
+        "tullar",
+        "skatter",
+        "varutrafik"
+      ],
+      "metadata": {},
+      "embedding": null,
+      "created_at": "2026-01-15T17:01:41.787633",
+      "updated_at": "2026-01-15T17:01:41.787635"
+    },
+    {
+      "id": "8dd818bd-af1a-4855-bda9-b18afe9fcf51",
+      "type": "Actor",
+      "name": "Universitets- och högskolerådet (UHR)",
+      "description": "Informerar om högskolestudier, ansvarar för högskoleprovet och samordnar antagning samt bedömer utländska utbildningar.",
+      "summary": "",
+      "communities": [
+        "eSam"
+      ],
+      "tags": [
+        "högskolestudier",
+        "antagning",
+        "utbildningsbedömning"
+      ],
+      "metadata": {},
+      "embedding": null,
+      "created_at": "2026-01-15T17:01:41.787650",
+      "updated_at": "2026-01-15T17:01:41.787650"
+    },
+    {
+      "id": "4a9247ce-b806-4efd-b292-7e734d50913c",
+      "type": "Actor",
+      "name": "Utbetalningsmyndigheten",
+      "description": "Förebygger, förhindrar och upptäcker felaktiga utbetalningar från välfärdssystemet via systemövergripande analyser och transaktionskonto.",
+      "summary": "",
+      "communities": [
+        "eSam"
+      ],
+      "tags": [
+        "utbetalningar",
+        "välfärdssystem",
+        "analys"
+      ],
+      "metadata": {},
+      "embedding": null,
+      "created_at": "2026-01-15T17:01:41.787660",
+      "updated_at": "2026-01-15T17:01:41.787660"
+    },
+    {
+      "id": "371e3007-7fe3-4300-8fb8-22419409d1f9",
+      "type": "Initiative",
+      "name": "AI-Ready Dissemination: Optimizing Statistical Products for Third-Party AI Consumption",
+      "description": "Optimizing the accessibility and usability of official statistical data for AI systems. The project includes work packages on AI-ready data dissemination, quality frameworks, technical approaches, and communication strategies.",
+      "summary": "Project proposal focusing on making official statistics AI-ready for better data consumption by AI.",
+      "communities": [
+        "eSam"
+      ],
+      "tags": [
+        "AI",
+        "officiell statistik",
+        "dataoptimering",
+        "LLM",
+        "dissemination"
+      ],
+      "metadata": {},
+      "embedding": null,
+      "created_at": "2026-01-16T08:44:50.412999",
+      "updated_at": "2026-01-16T15:26:23.822918"
+    },
+    {
+      "id": "82439196-0912-44ac-a68d-12343ab8aba7",
+      "type": "Initiative",
+      "name": "AI-Ready Dissemination: Optimizing Statistical Products for Third-Party AI Consumption",
+      "description": "Optimizing the accessibility and usability of official statistical data for AI systems. The project includes work packages on AI-ready data dissemination, quality frameworks, technical approaches, and communication strategies.",
+      "summary": "Project proposal focusing on making official statistics AI-ready for better data consumption by AI.",
+      "communities": [
+        "eSam"
+      ],
+      "tags": [
+        "AI",
+        "officiell statistik",
+        "dataoptimering",
+        "LLM",
+        "dissemination"
+      ],
+      "metadata": {},
+      "embedding": null,
+      "created_at": "2026-01-16T08:45:31.956269",
+      "updated_at": "2026-01-16T08:45:31.956271"
+    },
+    {
+      "id": "69145d15-364a-4622-9a85-55fa31dcec40",
+      "type": "Actor",
+      "name": "Statistics Canada",
+      "description": "",
+      "summary": "",
+      "communities": [],
+      "tags": [],
+      "metadata": {},
+      "embedding": null,
+      "created_at": "2026-01-16T15:22:12.724448",
+      "updated_at": "2026-01-16T15:22:12.724450"
+    },
+    {
+      "id": "51cf15da-b0d4-468c-a7cd-536705ca6254",
+      "type": "Actor",
+      "name": "CSO Ireland",
+      "description": "",
+      "summary": "",
+      "communities": [],
+      "tags": [],
+      "metadata": {},
+      "embedding": null,
+      "created_at": "2026-01-16T15:22:12.724467",
+      "updated_at": "2026-01-16T15:22:12.724467"
+    },
+    {
+      "id": "54805932-3745-40d9-8a81-4bb0a9f29313",
+      "type": "Actor",
+      "name": "Istat",
+      "description": "",
+      "summary": "",
+      "communities": [],
+      "tags": [],
+      "metadata": {},
+      "embedding": null,
+      "created_at": "2026-01-16T15:22:12.724478",
+      "updated_at": "2026-01-16T15:22:12.724479"
+    },
+    {
+      "id": "0d073081-e1be-491c-b899-dae121132cd8",
+      "type": "Actor",
+      "name": "Statistics Netherlands",
+      "description": "",
+      "summary": "",
+      "communities": [],
+      "tags": [],
+      "metadata": {},
+      "embedding": null,
+      "created_at": "2026-01-16T15:22:12.724490",
+      "updated_at": "2026-01-16T15:22:12.724490"
+    },
+    {
+      "id": "91769eeb-e81f-4a5a-a6f4-78a3438e06eb",
+      "type": "Actor",
+      "name": "Statistics New Zealand",
+      "description": "",
+      "summary": "",
+      "communities": [],
+      "tags": [],
+      "metadata": {},
+      "embedding": null,
+      "created_at": "2026-01-16T15:22:12.724500",
+      "updated_at": "2026-01-16T15:22:12.724500"
+    },
+    {
+      "id": "ecb76372-b888-4def-b4c7-a939dcd96e0d",
+      "type": "Actor",
+      "name": "INEGI",
+      "description": "",
+      "summary": "",
+      "communities": [],
+      "tags": [],
+      "metadata": {},
+      "embedding": null,
+      "created_at": "2026-01-16T15:22:12.724511",
+      "updated_at": "2026-01-16T15:22:12.724511"
+    },
+    {
+      "id": "442265c9-2b3b-49e6-b5ca-0f5ce92d6063",
+      "type": "Actor",
+      "name": "INSEE",
+      "description": "",
+      "summary": "",
+      "communities": [],
+      "tags": [],
+      "metadata": {},
+      "embedding": null,
+      "created_at": "2026-01-16T15:22:12.724521",
+      "updated_at": "2026-01-16T15:22:12.724521"
+    },
+    {
+      "id": "ff4e6811-4136-496d-ab73-4122eb7dc638",
+      "type": "Actor",
+      "name": "SORS",
+      "description": "",
+      "summary": "",
+      "communities": [],
+      "tags": [],
+      "metadata": {},
+      "embedding": null,
+      "created_at": "2026-01-16T15:22:12.724531",
+      "updated_at": "2026-01-16T15:22:12.724531"
+    },
+    {
+      "id": "4de08667-b63b-494a-8162-b9c03cc5b3ae",
+      "type": "Actor",
+      "name": "Statistics Centre Abu Dhabi",
+      "description": "",
+      "summary": "",
+      "communities": [],
+      "tags": [],
+      "metadata": {},
+      "embedding": null,
+      "created_at": "2026-01-16T15:22:12.724538",
+      "updated_at": "2026-01-16T15:22:12.724538"
+    },
+    {
+      "id": "c07652cd-b7ba-4d24-9ce4-5adea64c0e21",
+      "type": "Actor",
+      "name": "Statistics Finland",
+      "description": "",
+      "summary": "",
+      "communities": [],
+      "tags": [],
+      "metadata": {},
+      "embedding": null,
+      "created_at": "2026-01-16T15:22:12.724545",
+      "updated_at": "2026-01-16T15:22:12.724545"
+    },
+    {
+      "id": "360cd9fa-7318-4ea9-986a-db17c4bde33a",
+      "type": "Actor",
+      "name": "Switzerland FSO",
+      "description": "",
+      "summary": "",
+      "communities": [],
+      "tags": [],
+      "metadata": {},
+      "embedding": null,
+      "created_at": "2026-01-16T15:22:12.724552",
+      "updated_at": "2026-01-16T15:22:12.724552"
+    },
+    {
+      "id": "e90640b0-c3e9-441c-8a00-b47282a6e97c",
+      "type": "Actor",
+      "name": "Eurostat",
+      "description": "",
+      "summary": "",
+      "communities": [],
+      "tags": [],
+      "metadata": {},
+      "embedding": null,
+      "created_at": "2026-01-16T15:22:12.724558",
+      "updated_at": "2026-01-16T15:22:12.724559"
+    },
+    {
+      "id": "cdb3f93d-0246-4745-952f-00bf23c11998",
+      "type": "Actor",
+      "name": "OECD",
+      "description": "",
+      "summary": "",
+      "communities": [],
+      "tags": [],
+      "metadata": {},
+      "embedding": null,
+      "created_at": "2026-01-16T15:22:12.724565",
+      "updated_at": "2026-01-16T15:22:12.724565"
+    },
+    {
+      "id": "fefcd32e-b787-49ee-a83b-2da10ce6804a",
+      "type": "Actor",
+      "name": "Blue-Skies Thinking Network",
+      "description": "",
+      "summary": "",
+      "communities": [],
+      "tags": [],
+      "metadata": {},
+      "embedding": null,
+      "created_at": "2026-01-16T15:22:12.724571",
+      "updated_at": "2026-01-16T15:22:12.724571"
+    },
+    {
+      "id": "d624dc38-780b-4962-af83-f82237c51542",
+      "type": "Actor",
+      "name": "United Nations Statistical Commission",
+      "description": "",
+      "summary": "",
+      "communities": [],
+      "tags": [],
+      "metadata": {},
+      "embedding": null,
+      "created_at": "2026-01-16T15:22:12.724578",
+      "updated_at": "2026-01-16T15:22:12.724578"
+    },
+    {
+      "id": "2a9905c6-7d5c-4cd0-b727-64635feb7d29",
+      "type": "Actor",
+      "name": "OECD/PARIS21 Artificial Intelligence for Official Statistics Task Team",
+      "description": "",
+      "summary": "",
+      "communities": [],
+      "tags": [],
+      "metadata": {},
+      "embedding": null,
+      "created_at": "2026-01-16T15:22:12.724584",
+      "updated_at": "2026-01-16T15:22:12.724584"
+    },
+    {
+      "id": "8139c7ae-ced0-4e78-9ee8-a2122bf1e488",
+      "type": "Initiative",
+      "name": "Artificial Intelligence and Machine Learning for Official Statistics",
+      "description": "Ett projekt inriktat på tillämpningen av AI och maskininlärning inom officiell statistik. Mer information finns på https://cros.ec.europa.eu/dashboard/aiml4os",
+      "summary": "",
+      "communities": [],
+      "tags": [
+        "AI",
+        "maskininlärning",
+        "officiell statistik",
+        "EU-projekt",
+        "dataanalys"
+      ],
+      "metadata": {},
+      "embedding": null,
+      "created_at": "2026-01-19T08:19:10.883695",
+      "updated_at": "2026-01-19T08:19:10.883698"
+    },
+    {
+      "id": "7b00db1d-5bc1-454e-8c5e-6dbb56deb7ec",
+      "type": "VisualizationView",
+      "name": "Internationella ai-projekt",
+      "description": "Saved view: Internationella ai-projekt",
+      "summary": "Contains 20 nodes",
+      "communities": [],
+      "tags": [],
+      "metadata": {
+        "node_ids": [
+          "e90640b0-c3e9-441c-8a00-b47282a6e97c",
+          "82439196-0912-44ac-a68d-12343ab8aba7",
+          "8139c7ae-ced0-4e78-9ee8-a2122bf1e488",
+          "c52b1f23-7aa5-4323-bceb-e9fb5a2c0f16",
+          "51cf15da-b0d4-468c-a7cd-536705ca6254",
+          "442265c9-2b3b-49e6-b5ca-0f5ce92d6063",
+          "0d073081-e1be-491c-b899-dae121132cd8",
+          "ff4e6811-4136-496d-ab73-4122eb7dc638",
+          "69145d15-364a-4622-9a85-55fa31dcec40",
+          "91769eeb-e81f-4a5a-a6f4-78a3438e06eb",
+          "54805932-3745-40d9-8a81-4bb0a9f29313",
+          "4de08667-b63b-494a-8162-b9c03cc5b3ae",
+          "2a9905c6-7d5c-4cd0-b727-64635feb7d29",
+          "d624dc38-780b-4962-af83-f82237c51542",
+          "ecb76372-b888-4def-b4c7-a939dcd96e0d",
+          "360cd9fa-7318-4ea9-986a-db17c4bde33a",
+          "77b58c6c-b018-4c0a-abab-df83e0bab79e",
+          "c07652cd-b7ba-4d24-9ce4-5adea64c0e21",
+          "cdb3f93d-0246-4745-952f-00bf23c11998",
+          "group-1768810865644"
+        ],
+        "positions": {
+          "e90640b0-c3e9-441c-8a00-b47282a6e97c": {
+            "x": 816.2402328357125,
+            "y": 92.51537209288682
+          },
+          "82439196-0912-44ac-a68d-12343ab8aba7": {
+            "x": 12.288981879826906,
+            "y": -86.25276284579999
+          },
+          "8139c7ae-ced0-4e78-9ee8-a2122bf1e488": {
+            "x": 828.9381718895136,
+            "y": -425.029409262915
+          },
+          "c52b1f23-7aa5-4323-bceb-e9fb5a2c0f16": {
+            "x": 56.95552553769221,
+            "y": 92.50166897674569
+          },
+          "51cf15da-b0d4-468c-a7cd-536705ca6254": {
+            "x": 171.9487039092553,
+            "y": 285.99166342001746
+          },
+          "442265c9-2b3b-49e6-b5ca-0f5ce92d6063": {
+            "x": 565.9487039092551,
+            "y": 291.99166342001746
+          },
+          "0d073081-e1be-491c-b899-dae121132cd8": {
+            "x": 541.9487039092551,
+            "y": 163.99166342001746
+          },
+          "ff4e6811-4136-496d-ab73-4122eb7dc638": {
+            "x": 366.2886081158183,
+            "y": 290.985803163352
+          },
+          "69145d15-364a-4622-9a85-55fa31dcec40": {
+            "x": -243.20000000000005,
+            "y": -144
+          },
+          "91769eeb-e81f-4a5a-a6f4-78a3438e06eb": {
+            "x": -270,
+            "y": 30
+          },
+          "54805932-3745-40d9-8a81-4bb0a9f29313": {
+            "x": 763.9487039092553,
+            "y": 301.99166342001746
+          },
+          "4de08667-b63b-494a-8162-b9c03cc5b3ae": {
+            "x": -254,
+            "y": 464
+          },
+          "2a9905c6-7d5c-4cd0-b727-64635feb7d29": {
+            "x": -319.9999999999999,
+            "y": -382
+          },
+          "d624dc38-780b-4962-af83-f82237c51542": {
+            "x": 312,
+            "y": -390
+          },
+          "ecb76372-b888-4def-b4c7-a939dcd96e0d": {
+            "x": -228,
+            "y": 220
+          },
+          "360cd9fa-7318-4ea9-986a-db17c4bde33a": {
+            "x": -230.0000000000001,
+            "y": 640
+          },
+          "77b58c6c-b018-4c0a-abab-df83e0bab79e": {
+            "x": 4,
+            "y": -390
+          },
+          "c07652cd-b7ba-4d24-9ce4-5adea64c0e21": {
+            "x": 349.9487039092551,
+            "y": 177.99166342001746
+          },
+          "cdb3f93d-0246-4745-952f-00bf23c11998": {
+            "x": -299.60000000000014,
+            "y": -538
+          },
+          "group-1768810865644": {
+            "x": 508.0512960907449,
+            "y": -223.99166342001746
+          }
+        },
+        "hidden_node_ids": [
+          "371e3007-7fe3-4300-8fb8-22419409d1f9",
+          "fefcd32e-b787-49ee-a83b-2da10ce6804a"
+        ]
+      },
+      "embedding": null,
+      "created_at": "2026-01-19T08:22:59.023274",
+      "updated_at": "2026-01-19T08:22:59.023276"
     }
   ],
   "edges": [
@@ -155,7 +1294,7 @@
       "metadata": {
         "description": "Sida är medlem i eSam"
       },
-      "created_at": "2026-01-15T10:00:00Z"
+      "created_at": "2026-01-15T10:00:00+00:00"
     },
     {
       "id": "edge-esam-community",
@@ -165,7 +1304,7 @@
       "metadata": {
         "description": "eSam-organisationen tillhör eSam-communityn"
       },
-      "created_at": "2026-01-15T10:00:00Z"
+      "created_at": "2026-01-15T10:00:00+00:00"
     },
     {
       "id": "32360bac-4d23-4254-9bc1-0edcbe33b6e7",
@@ -206,10 +1345,466 @@
         "description": "UNECE organiserar HLG-MOS projektet"
       },
       "created_at": "2026-01-14T13:30:51.855081"
+    },
+    {
+      "id": "7b9bb810-f047-42fb-95f7-e5650b9f0503",
+      "source": "4b2e8d61-55e5-4412-92c9-5e14cf65f4e9",
+      "target": "org-esam",
+      "type": "BELONGS_TO",
+      "metadata": {},
+      "created_at": "2026-01-15T16:47:57.605469"
+    },
+    {
+      "id": "dce98e4c-ebd2-4810-8154-135b0e3146d3",
+      "source": "4f760b01-5ef5-41bf-a3c1-6ec8a68212b9",
+      "target": "org-esam",
+      "type": "BELONGS_TO",
+      "metadata": {},
+      "created_at": "2026-01-15T16:47:57.605481"
+    },
+    {
+      "id": "5f69c107-9161-40c1-8a55-1300fb93e469",
+      "source": "542821eb-b412-4ad9-8e9c-449c8d694246",
+      "target": "org-esam",
+      "type": "BELONGS_TO",
+      "metadata": {},
+      "created_at": "2026-01-15T16:47:57.605488"
+    },
+    {
+      "id": "f9d86721-a7b1-4846-814a-a90eb2e4cf24",
+      "source": "6a0fc2db-fe77-4c2b-855a-1630f5a39e0f",
+      "target": "org-esam",
+      "type": "BELONGS_TO",
+      "metadata": {},
+      "created_at": "2026-01-15T16:47:57.605493"
+    },
+    {
+      "id": "f03b270b-4929-4d1c-a070-12e32e61f856",
+      "source": "6c7edcb9-a15a-45ed-8720-717f45770e61",
+      "target": "org-esam",
+      "type": "BELONGS_TO",
+      "metadata": {},
+      "created_at": "2026-01-15T16:47:57.605498"
+    },
+    {
+      "id": "cfc84884-c7aa-4e06-8484-248f2feaacf6",
+      "source": "545ca5ab-cc59-45b1-a1df-3ca5a17b18cc",
+      "target": "org-esam",
+      "type": "BELONGS_TO",
+      "metadata": {},
+      "created_at": "2026-01-15T16:47:57.605504"
+    },
+    {
+      "id": "9eb27a59-e5a9-4456-b7e5-3f148374076c",
+      "source": "b221532f-17f2-43e4-be9c-ba9abd1c0644",
+      "target": "org-esam",
+      "type": "BELONGS_TO",
+      "metadata": {},
+      "created_at": "2026-01-15T16:51:59.991885"
+    },
+    {
+      "id": "d51714f5-0d40-4b29-8d4a-1e46f0bd9d63",
+      "source": "f2d5ac0f-6a23-4221-9eee-636ee34ff898",
+      "target": "org-esam",
+      "type": "BELONGS_TO",
+      "metadata": {},
+      "created_at": "2026-01-15T16:51:59.991895"
+    },
+    {
+      "id": "4cbdbb47-072b-405c-a6d8-b5cd20cb8208",
+      "source": "badd1921-8e3d-45d4-b41c-fafbb7c15212",
+      "target": "org-esam",
+      "type": "BELONGS_TO",
+      "metadata": {},
+      "created_at": "2026-01-15T16:51:59.991911"
+    },
+    {
+      "id": "8912645b-7a48-4c12-813b-472029670833",
+      "source": "49a0aa73-23bb-44cc-86ac-8c22386c6a26",
+      "target": "org-esam",
+      "type": "BELONGS_TO",
+      "metadata": {},
+      "created_at": "2026-01-15T16:53:01.071791"
+    },
+    {
+      "id": "7bbc8eb3-d262-4875-b0ef-da60729e928c",
+      "source": "49b950f9-fd31-4616-b4cf-60e74d5fb3de",
+      "target": "org-esam",
+      "type": "BELONGS_TO",
+      "metadata": {},
+      "created_at": "2026-01-15T16:53:01.071800"
+    },
+    {
+      "id": "e862daf3-7ca0-4614-94a8-a633b422e3d3",
+      "source": "5eb2743a-ca7f-4dc4-a6ef-b6a782f8bed0",
+      "target": "org-esam",
+      "type": "BELONGS_TO",
+      "metadata": {},
+      "created_at": "2026-01-15T16:53:01.071808"
+    },
+    {
+      "id": "6a0cbb6a-1461-4296-b13a-aaa535146420",
+      "source": "fffc9863-d82c-497f-a6ba-fd7f7a42f75e",
+      "target": "org-esam",
+      "type": "BELONGS_TO",
+      "metadata": {},
+      "created_at": "2026-01-15T16:53:49.579815"
+    },
+    {
+      "id": "16656203-d757-473c-a628-b567b29ff3f9",
+      "source": "b14e84ed-7b31-48e3-bae6-d018e54eb2ba",
+      "target": "org-esam",
+      "type": "BELONGS_TO",
+      "metadata": {},
+      "created_at": "2026-01-15T16:53:49.579822"
+    },
+    {
+      "id": "62901cc6-1b9e-441e-8b53-16f1e90f2ba0",
+      "source": "f984439f-ab86-42b6-b533-184c6ff594c4",
+      "target": "org-esam",
+      "type": "BELONGS_TO",
+      "metadata": {},
+      "created_at": "2026-01-15T16:53:49.579829"
+    },
+    {
+      "id": "6d1c9573-d053-4fe8-9c85-71c8a8b109c6",
+      "source": "94c5d40c-96e4-4efb-b487-d01c1713a678",
+      "target": "org-esam",
+      "type": "BELONGS_TO",
+      "metadata": {},
+      "created_at": "2026-01-15T16:54:21.075945"
+    },
+    {
+      "id": "e577ec9b-95a1-4596-b110-8632c5efd0c4",
+      "source": "8854efc9-9103-43d6-9ff4-4e5a1764a961",
+      "target": "org-esam",
+      "type": "BELONGS_TO",
+      "metadata": {},
+      "created_at": "2026-01-15T16:54:21.075954"
+    },
+    {
+      "id": "69a95066-744b-4bdc-9a1b-2c5d09fd0529",
+      "source": "e86f1931-db28-4446-b499-8ba4cb837b67",
+      "target": "org-esam",
+      "type": "BELONGS_TO",
+      "metadata": {},
+      "created_at": "2026-01-15T16:54:21.075960"
+    },
+    {
+      "id": "1a181d23-85c6-44d5-8631-43b8268e3606",
+      "source": "afe456b5-2a03-4948-9d1f-d5ea643ed4af",
+      "target": "org-esam",
+      "type": "BELONGS_TO",
+      "metadata": {},
+      "created_at": "2026-01-15T16:54:38.120547"
+    },
+    {
+      "id": "1549047b-d345-43f6-ac08-2a3bb412e146",
+      "source": "3478ac2e-dd43-489a-b3f4-fb4675face51",
+      "target": "org-esam",
+      "type": "BELONGS_TO",
+      "metadata": {},
+      "created_at": "2026-01-15T16:54:38.120556"
+    },
+    {
+      "id": "09b7467a-2a42-4df7-b29e-d58ccf1eddab",
+      "source": "43489637-dd61-4eb7-95ec-5413d614978c",
+      "target": "org-esam",
+      "type": "BELONGS_TO",
+      "metadata": {},
+      "created_at": "2026-01-15T16:54:38.120565"
+    },
+    {
+      "id": "87896ea6-091d-4e62-a98a-f4235a8262de",
+      "source": "5db29627-d209-4f51-8ebe-31ae0a5b3ad2",
+      "target": "org-esam",
+      "type": "BELONGS_TO",
+      "metadata": {},
+      "created_at": "2026-01-15T16:56:52.617147"
+    },
+    {
+      "id": "49be931f-869c-4850-a5c8-b7ac19d26857",
+      "source": "e5e8fa38-0cb0-4590-995b-32dfb2ac0e94",
+      "target": "org-esam",
+      "type": "BELONGS_TO",
+      "metadata": {},
+      "created_at": "2026-01-15T16:57:12.646007"
+    },
+    {
+      "id": "9a6181ad-b3ea-44ee-ad0d-09c5a08a8b86",
+      "source": "b1882e65-874c-469e-8697-f0db0005b59b",
+      "target": "org-esam",
+      "type": "BELONGS_TO",
+      "metadata": {},
+      "created_at": "2026-01-15T16:57:36.040218"
+    },
+    {
+      "id": "1857f8fb-49c4-4489-bf16-430500f5e333",
+      "source": "98f98937-f1c1-4cd8-a69d-beb032d35da8",
+      "target": "org-esam",
+      "type": "BELONGS_TO",
+      "metadata": {},
+      "created_at": "2026-01-15T16:57:36.040226"
+    },
+    {
+      "id": "3054415c-3605-4833-913e-88a4d3f4c1f0",
+      "source": "4639c2c2-6e99-4c06-a482-0fe5df08df9c",
+      "target": "org-esam",
+      "type": "BELONGS_TO",
+      "metadata": {},
+      "created_at": "2026-01-15T16:59:21.039386"
+    },
+    {
+      "id": "0549b051-b73a-4b8f-bc70-696202f24836",
+      "source": "45a53955-2a43-4046-b539-572cdd967167",
+      "target": "org-esam",
+      "type": "BELONGS_TO",
+      "metadata": {},
+      "created_at": "2026-01-15T16:59:21.039395"
+    },
+    {
+      "id": "cee87533-cd97-4b17-9acb-5ad8b00cc2fc",
+      "source": "98beee80-9ccd-417f-ac26-c301c7da761e",
+      "target": "org-esam",
+      "type": "BELONGS_TO",
+      "metadata": {},
+      "created_at": "2026-01-15T17:00:06.687666"
+    },
+    {
+      "id": "f4371cdd-858a-4d8e-9d2a-89e3190b8afd",
+      "source": "c52b1f23-7aa5-4323-bceb-e9fb5a2c0f16",
+      "target": "org-esam",
+      "type": "BELONGS_TO",
+      "metadata": {},
+      "created_at": "2026-01-15T17:00:06.687675"
+    },
+    {
+      "id": "ec0c8191-04d0-41e8-963a-4a97da7f06bd",
+      "source": "6fc69d7f-a8b2-4e26-9e8a-d56c1d01f579",
+      "target": "org-esam",
+      "type": "BELONGS_TO",
+      "metadata": {},
+      "created_at": "2026-01-15T17:00:52.348167"
+    },
+    {
+      "id": "e35c3bec-77f9-4087-83df-b0e3556054df",
+      "source": "4768167e-7b32-429f-a767-118d390d45fa",
+      "target": "org-esam",
+      "type": "BELONGS_TO",
+      "metadata": {},
+      "created_at": "2026-01-15T17:00:52.348175"
+    },
+    {
+      "id": "9f02738a-b66b-4f5f-97bb-df36f94bef0b",
+      "source": "d1885127-9250-4631-8b1b-e5de6ca1bfbe",
+      "target": "org-esam",
+      "type": "BELONGS_TO",
+      "metadata": {},
+      "created_at": "2026-01-15T17:00:52.348182"
+    },
+    {
+      "id": "e2511b95-ddf8-42c3-9c47-bacce136c05c",
+      "source": "552ed513-71b7-40b8-8f10-da05da867e07",
+      "target": "org-esam",
+      "type": "BELONGS_TO",
+      "metadata": {},
+      "created_at": "2026-01-15T17:00:52.348187"
+    },
+    {
+      "id": "e7af72cf-da52-4548-a0dd-810a4b6c0d7e",
+      "source": "7b930fa6-4204-494b-b4cc-211a56b4f5c7",
+      "target": "org-esam",
+      "type": "BELONGS_TO",
+      "metadata": {},
+      "created_at": "2026-01-15T17:01:41.787674"
+    },
+    {
+      "id": "c3317890-15a8-49d1-bde2-72a4ca3155fa",
+      "source": "8dd818bd-af1a-4855-bda9-b18afe9fcf51",
+      "target": "org-esam",
+      "type": "BELONGS_TO",
+      "metadata": {},
+      "created_at": "2026-01-15T17:01:41.787682"
+    },
+    {
+      "id": "86ce09b3-2958-4744-b6ff-e6c892719751",
+      "source": "4a9247ce-b806-4efd-b292-7e734d50913c",
+      "target": "org-esam",
+      "type": "BELONGS_TO",
+      "metadata": {},
+      "created_at": "2026-01-15T17:01:41.787689"
+    },
+    {
+      "id": "f7435daf-7e3f-4a50-8fd8-ef280b49a3d4",
+      "source": "77b58c6c-b018-4c0a-abab-df83e0bab79e",
+      "target": "82439196-0912-44ac-a68d-12343ab8aba7",
+      "type": "BELONGS_TO",
+      "metadata": {},
+      "created_at": "2026-01-16T08:45:31.956291"
+    },
+    {
+      "id": "f7ec624f-b028-447b-80f5-4bc2618c4371",
+      "source": "c52b1f23-7aa5-4323-bceb-e9fb5a2c0f16",
+      "target": "82439196-0912-44ac-a68d-12343ab8aba7",
+      "type": "BELONGS_TO",
+      "metadata": {},
+      "created_at": "2026-01-16T08:45:31.956300"
+    },
+    {
+      "id": "5c09d97a-07ea-4477-bd75-7c416435b735",
+      "source": "c52b1f23-7aa5-4323-bceb-e9fb5a2c0f16",
+      "target": "82439196-0912-44ac-a68d-12343ab8aba7",
+      "type": "BELONGS_TO",
+      "metadata": {},
+      "created_at": "2026-01-16T15:22:12.724602"
+    },
+    {
+      "id": "9007d6d5-f0d2-4ff6-a389-c394b5d20cdf",
+      "source": "69145d15-364a-4622-9a85-55fa31dcec40",
+      "target": "82439196-0912-44ac-a68d-12343ab8aba7",
+      "type": "BELONGS_TO",
+      "metadata": {},
+      "created_at": "2026-01-16T15:22:12.724608"
+    },
+    {
+      "id": "77a1c439-bf03-42cb-af10-75d0ed92b83d",
+      "source": "51cf15da-b0d4-468c-a7cd-536705ca6254",
+      "target": "82439196-0912-44ac-a68d-12343ab8aba7",
+      "type": "BELONGS_TO",
+      "metadata": {},
+      "created_at": "2026-01-16T15:22:12.724614"
+    },
+    {
+      "id": "821e4995-42c9-469a-83ed-0c5d9746f04b",
+      "source": "54805932-3745-40d9-8a81-4bb0a9f29313",
+      "target": "82439196-0912-44ac-a68d-12343ab8aba7",
+      "type": "BELONGS_TO",
+      "metadata": {},
+      "created_at": "2026-01-16T15:22:12.724620"
+    },
+    {
+      "id": "3b220f39-04ac-4573-afaa-9157e0180187",
+      "source": "0d073081-e1be-491c-b899-dae121132cd8",
+      "target": "82439196-0912-44ac-a68d-12343ab8aba7",
+      "type": "BELONGS_TO",
+      "metadata": {},
+      "created_at": "2026-01-16T15:22:12.724626"
+    },
+    {
+      "id": "b0462078-07c7-4eea-8e2e-b61a3e171ccd",
+      "source": "91769eeb-e81f-4a5a-a6f4-78a3438e06eb",
+      "target": "82439196-0912-44ac-a68d-12343ab8aba7",
+      "type": "BELONGS_TO",
+      "metadata": {},
+      "created_at": "2026-01-16T15:22:12.724632"
+    },
+    {
+      "id": "e86b3a02-bb31-4a2c-82d9-7620c66c09af",
+      "source": "ecb76372-b888-4def-b4c7-a939dcd96e0d",
+      "target": "82439196-0912-44ac-a68d-12343ab8aba7",
+      "type": "BELONGS_TO",
+      "metadata": {},
+      "created_at": "2026-01-16T15:22:12.724638"
+    },
+    {
+      "id": "b32945a3-e9ad-4db0-8c25-e6c593e13f1a",
+      "source": "442265c9-2b3b-49e6-b5ca-0f5ce92d6063",
+      "target": "82439196-0912-44ac-a68d-12343ab8aba7",
+      "type": "BELONGS_TO",
+      "metadata": {},
+      "created_at": "2026-01-16T15:22:12.724644"
+    },
+    {
+      "id": "c2a4c01b-a221-4da0-817b-1dc783aec83a",
+      "source": "ff4e6811-4136-496d-ab73-4122eb7dc638",
+      "target": "82439196-0912-44ac-a68d-12343ab8aba7",
+      "type": "BELONGS_TO",
+      "metadata": {},
+      "created_at": "2026-01-16T15:22:12.724650"
+    },
+    {
+      "id": "e8e33a3a-d6c2-4d97-974e-7b9a071a8cfe",
+      "source": "4de08667-b63b-494a-8162-b9c03cc5b3ae",
+      "target": "82439196-0912-44ac-a68d-12343ab8aba7",
+      "type": "BELONGS_TO",
+      "metadata": {},
+      "created_at": "2026-01-16T15:22:12.724656"
+    },
+    {
+      "id": "c4f00b34-5a35-4287-b0ab-26051a9bdd08",
+      "source": "c07652cd-b7ba-4d24-9ce4-5adea64c0e21",
+      "target": "82439196-0912-44ac-a68d-12343ab8aba7",
+      "type": "BELONGS_TO",
+      "metadata": {},
+      "created_at": "2026-01-16T15:22:12.724662"
+    },
+    {
+      "id": "75e059da-9555-477c-a758-708aff569657",
+      "source": "360cd9fa-7318-4ea9-986a-db17c4bde33a",
+      "target": "82439196-0912-44ac-a68d-12343ab8aba7",
+      "type": "BELONGS_TO",
+      "metadata": {},
+      "created_at": "2026-01-16T15:22:12.724667"
+    },
+    {
+      "id": "a1470d3f-4bd3-43ac-ab1b-a57b7e5a89c6",
+      "source": "e90640b0-c3e9-441c-8a00-b47282a6e97c",
+      "target": "82439196-0912-44ac-a68d-12343ab8aba7",
+      "type": "BELONGS_TO",
+      "metadata": {},
+      "created_at": "2026-01-16T15:22:12.724672"
+    },
+    {
+      "id": "bfb6e386-bc56-4265-8531-cdf85f7d30cc",
+      "source": "cdb3f93d-0246-4745-952f-00bf23c11998",
+      "target": "82439196-0912-44ac-a68d-12343ab8aba7",
+      "type": "BELONGS_TO",
+      "metadata": {},
+      "created_at": "2026-01-16T15:22:12.724678"
+    },
+    {
+      "id": "2ab93046-6234-4386-be69-c22b45ff598b",
+      "source": "fefcd32e-b787-49ee-a83b-2da10ce6804a",
+      "target": "82439196-0912-44ac-a68d-12343ab8aba7",
+      "type": "BELONGS_TO",
+      "metadata": {},
+      "created_at": "2026-01-16T15:22:12.724683"
+    },
+    {
+      "id": "6949ded0-bd43-4a2d-9df2-1523d8ba1299",
+      "source": "d624dc38-780b-4962-af83-f82237c51542",
+      "target": "82439196-0912-44ac-a68d-12343ab8aba7",
+      "type": "BELONGS_TO",
+      "metadata": {},
+      "created_at": "2026-01-16T15:22:12.724689"
+    },
+    {
+      "id": "ad90e12b-3941-41fc-ab99-f0ecc364f058",
+      "source": "2a9905c6-7d5c-4cd0-b727-64635feb7d29",
+      "target": "82439196-0912-44ac-a68d-12343ab8aba7",
+      "type": "BELONGS_TO",
+      "metadata": {},
+      "created_at": "2026-01-16T15:22:12.724694"
+    },
+    {
+      "id": "5d582807-e10c-4fcc-8004-a2dd220c93db",
+      "source": "c52b1f23-7aa5-4323-bceb-e9fb5a2c0f16",
+      "target": "8139c7ae-ced0-4e78-9ee8-a2122bf1e488",
+      "type": "BELONGS_TO",
+      "metadata": {},
+      "created_at": "2026-01-19T08:19:10.883716"
+    },
+    {
+      "id": "50e546ef-de71-47f2-ae19-2f1cd7658ff1",
+      "source": "e90640b0-c3e9-441c-8a00-b47282a6e97c",
+      "target": "8139c7ae-ced0-4e78-9ee8-a2122bf1e488",
+      "type": "BELONGS_TO",
+      "metadata": {},
+      "created_at": "2026-01-19T08:19:10.883726"
     }
   ],
   "metadata": {
     "version": "1.0",
-    "last_updated": "2026-01-15T10:00:00Z"
+    "last_updated": "2026-01-19T08:22:59.287082"
   }
 }
