@@ -203,7 +203,7 @@ async def download_url_endpoint(request: Request):
 
 
 @mcp.custom_route("/export_graph", methods=["GET"])
-async def export_graph_endpoint():
+async def export_graph_endpoint(request: Request):
     """
     Endpoint to export the entire graph (all nodes and edges)
     Returns the complete graph data in JSON format

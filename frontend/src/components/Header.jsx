@@ -1,4 +1,4 @@
-import { useState } from 'react';
+import { useState, useEffect, useRef } from 'react';
 import useGraphStore from '../store/graphStore';
 import './Header.css';
 
@@ -15,6 +15,29 @@ function Header() {
   const [isSettingsOpen, setIsSettingsOpen] = useState(false);
   const [tempApiKey, setTempApiKey] = useState(apiKey || '');
   const [tempProvider, setTempProvider] = useState(llmProvider || 'claude');
+
+  // Refs for click-outside detection
+  const dropdownRef = useRef(null);
+  const settingsRef = useRef(null);
+
+  // Close dropdown when clicking outside
+  useEffect(() => {
+    const handleClickOutside = (event) => {
+      if (dropdownRef.current && !dropdownRef.current.contains(event.target)) {
+        setIsDropdownOpen(false);
+      }
+      if (settingsRef.current && !settingsRef.current.contains(event.target)) {
+        setIsSettingsOpen(false);
+      }
+    };
+
+    if (isDropdownOpen || isSettingsOpen) {
+      document.addEventListener('mousedown', handleClickOutside);
+      return () => {
+        document.removeEventListener('mousedown', handleClickOutside);
+      };
+    }
+  }, [isDropdownOpen, isSettingsOpen]);
 
   const toggleCommunity = (community) => {
     if (selectedCommunities.includes(community)) {
@@ -101,7 +124,7 @@ function Header() {
       </div>
 
       <div className="header-center">
-        <div className="community-selector">
+        <div className="community-selector" ref={dropdownRef}>
           <button
             className="community-dropdown-toggle"
             onClick={() => setIsDropdownOpen(!isDropdownOpen)}
@@ -150,7 +173,7 @@ function Header() {
       {/* Settings Dialog */}
       {isSettingsOpen && (
         <div className="settings-overlay" onClick={() => setIsSettingsOpen(false)}>
-          <div className="settings-dialog" onClick={(e) => e.stopPropagation()}>
+          <div className="settings-dialog" ref={settingsRef} onClick={(e) => e.stopPropagation()}>
             <div className="settings-header">
               <h2>Settings</h2>
               <button
