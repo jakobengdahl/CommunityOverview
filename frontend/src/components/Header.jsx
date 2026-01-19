@@ -75,9 +75,9 @@ function Header() {
   const handleExportGraph = async () => {
     console.log('[Header] Starting graph export...');
     try {
-      // Fetch complete graph from backend instead of just visualization state
-      console.log('[Header] Fetching from http://localhost:8000/export_graph');
-      const response = await fetch('http://localhost:8000/export_graph');
+      // Fetch complete graph from backend through Vite proxy
+      console.log('[Header] Fetching from /export_graph (via Vite proxy)');
+      const response = await fetch('/export_graph');
 
       console.log('[Header] Response status:', response.status);
       console.log('[Header] Response ok:', response.ok);
