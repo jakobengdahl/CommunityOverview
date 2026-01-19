@@ -197,9 +197,27 @@ function VisualizationPanel() {
   }, [groupsToRestore, setNodes, setGroupsToRestore]);
 
   // Sync React Flow nodes (including groups) to Zustand for saving
+  // Use a ref to avoid triggering updates on every node change
+  const nodesRef = useRef(nodes);
   useEffect(() => {
-    setReactFlowNodes(nodes);
-  }, [nodes, setReactFlowNodes]);
+    nodesRef.current = nodes;
+  }, [nodes]);
+
+  // Only sync to store when needed (e.g., before saving)
+  useEffect(() => {
+    const syncNodes = () => {
+      try {
+        setReactFlowNodes(nodesRef.current);
+      } catch (error) {
+        console.error('[VisualizationPanel] Error syncing nodes to store:', error);
+      }
+    };
+
+    // Sync every 2 seconds instead of on every change to avoid performance issues
+    const intervalId = setInterval(syncNodes, 2000);
+
+    return () => clearInterval(intervalId);
+  }, []); // Empty deps - only set up once
 
   // Update nodes when reactFlowNodes changes (for layout recalculation)
   useEffect(() => {
@@ -386,17 +404,18 @@ function VisualizationPanel() {
   );
 
   const onNodeDragStop = useCallback((event, draggedNode) => {
-    // Sync only the dragged node position to store
-    updateNodePositions([{ id: draggedNode.id, position: draggedNode.position }]);
+    try {
+      // Sync only the dragged node position to store
+      updateNodePositions([{ id: draggedNode.id, position: draggedNode.position }]);
 
-    // Check if the node was dropped inside a group
-    if (draggedNode.type === 'group') return; // Don't process groups themselves
+      // Check if the node was dropped inside a group
+      if (draggedNode.type === 'group') return; // Don't process groups themselves
 
-    const groupNodes = nodes.filter(n => n.type === 'group');
-    let droppedInGroup = null;
+      const groupNodes = nodes.filter(n => n.type === 'group');
+      let droppedInGroup = null;
 
-    // Check each group to see if the dragged node is inside it
-    for (const groupNode of groupNodes) {
+      // Check each group to see if the dragged node is inside it
+      for (const groupNode of groupNodes) {
       const groupBounds = {
         left: groupNode.position.x,
         right: groupNode.position.x + (groupNode.style?.width || 300),
@@ -428,15 +447,17 @@ function VisualizationPanel() {
           // Convert absolute position to relative if dropping into group
           if (droppedInGroup && n.parentId !== droppedInGroup) {
             const groupNode = nodes.find(gn => gn.id === droppedInGroup);
-            return {
-              ...n,
-              parentId: droppedInGroup,
-              position: {
-                x: n.position.x - groupNode.position.x,
-                y: n.position.y - groupNode.position.y,
-              },
-              extent: 'parent', // Keep node within parent bounds
-            };
+            if (groupNode) {
+              return {
+                ...n,
+                parentId: droppedInGroup,
+                position: {
+                  x: n.position.x - groupNode.position.x,
+                  y: n.position.y - groupNode.position.y,
+                },
+                extent: 'parent', // Keep node within parent bounds
+              };
+            }
           }
           // Remove from group if dragged outside
           if (!droppedInGroup && n.parentId) {
@@ -455,6 +476,9 @@ function VisualizationPanel() {
         return n;
       })
     );
+    } catch (error) {
+      console.error('[VisualizationPanel] Error in onNodeDragStop:', error);
+    }
   }, [updateNodePositions, nodes, setNodes]);
 
   const handleLoadMore = useCallback(() => {
@@ -471,6 +495,9 @@ function VisualizationPanel() {
   }, [visibleNodes.length]);
 
   const handleSaveView = async (name) => {
+    // Sync React Flow nodes to store before saving
+    setReactFlowNodes(nodes);
+
     // Gather current state with standardized format
     const positions = {};
     nodes.forEach(n => {
