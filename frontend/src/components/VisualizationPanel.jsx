@@ -35,7 +35,8 @@ const NODE_COLORS = {
   Resource: '#FBBF24',
   Legislation: '#EF4444',
   Theme: '#14B8A6',
-  VisualizationView: '#6B7280',
+  SavedView: '#6B7280',
+  VisualizationView: '#6B7280', // Legacy support
 };
 
 function VisualizationPanel() {
@@ -506,10 +507,10 @@ function VisualizationPanel() {
 
     const nodeIds = nodes.map(n => n.id);
 
-    // Create a node representing the view
+    // Create a SavedView node to store the current visualization state
     const viewNode = {
       name: name,
-      type: 'VisualizationView',
+      type: 'SavedView',
       description: `Saved view: ${name}`,
       summary: `Contains ${nodeIds.length} nodes`,
       metadata: {

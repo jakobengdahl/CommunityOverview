@@ -148,14 +148,14 @@ function ChatPanel() {
       const toolResult = response.toolResult;
 
       if (toolResult) {
-        // 1. Handle "Save Visualization" signal from backend
-        if (toolResult.action === 'save_visualization') {
+        // 1. Handle "Save View" signal from backend
+        if (toolResult.action === 'save_view' || toolResult.action === 'save_visualization') {
              const viewName = toolResult.name;
-             // Use React Flow nodes (includes groups) instead of store nodes
+             // Use React Flow nodes (includes groups) from latest sync
              const currentNodes = useGraphStore.getState().reactFlowNodes;
              const currentHidden = useGraphStore.getState().hiddenNodeIds;
 
-             // Use OLD format (node_ids + positions) to match VisualizationPanel save
+             // Create saved view node with standardized format
              const positions = {};
              currentNodes.forEach(n => {
                positions[n.id] = n.position;
@@ -164,7 +164,7 @@ function ChatPanel() {
 
              const viewNode = {
                 name: viewName,
-                type: 'VisualizationView',
+                type: 'SavedView',
                 description: `Saved view: ${viewName}`,
                 summary: `Contains ${nodeIds.length} nodes`,
                 metadata: {
@@ -175,17 +175,17 @@ function ChatPanel() {
                 communities: []
              };
 
-             // Execute actual save
+             // Execute actual save to graph
              try {
                 await executeTool('add_nodes', { nodes: [viewNode], edges: [] });
-                // We could add a system message here, but Claude usually replies "Ready to save..."
+                console.log('[ChatPanel] Saved view successfully');
              } catch (err) {
-                console.error("Failed to save view via chat:", err);
+                console.error("[ChatPanel] Failed to save view:", err);
                 setError(`Failed to save view: ${err.message}`);
              }
         }
 
-        // 2. Handle "Load Visualization" signal
+        // 2. Handle "Load Saved View" signal
         else if (toolResult.action === 'load_visualization') {
             if (toolResult.nodes && toolResult.nodes.length > 0) {
                 // Set groups to restore (if any)
