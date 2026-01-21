@@ -1,4 +1,4 @@
-import { useState } from 'react';
+import { useState, useEffect, useRef } from 'react';
 import useGraphStore from '../store/graphStore';
 import './Header.css';
 
@@ -15,6 +15,29 @@ function Header() {
   const [isSettingsOpen, setIsSettingsOpen] = useState(false);
   const [tempApiKey, setTempApiKey] = useState(apiKey || '');
   const [tempProvider, setTempProvider] = useState(llmProvider || 'claude');
+
+  // Refs for click-outside detection
+  const dropdownRef = useRef(null);
+  const settingsRef = useRef(null);
+
+  // Close dropdown when clicking outside
+  useEffect(() => {
+    const handleClickOutside = (event) => {
+      if (dropdownRef.current && !dropdownRef.current.contains(event.target)) {
+        setIsDropdownOpen(false);
+      }
+      if (settingsRef.current && !settingsRef.current.contains(event.target)) {
+        setIsSettingsOpen(false);
+      }
+    };
+
+    if (isDropdownOpen || isSettingsOpen) {
+      document.addEventListener('mousedown', handleClickOutside);
+      return () => {
+        document.removeEventListener('mousedown', handleClickOutside);
+      };
+    }
+  }, [isDropdownOpen, isSettingsOpen]);
 
   const toggleCommunity = (community) => {
     if (selectedCommunities.includes(community)) {
@@ -50,15 +73,29 @@ function Header() {
   };
 
   const handleExportGraph = async () => {
+    console.log('[Header] Starting graph export...');
     try {
-      // Fetch complete graph from backend instead of just visualization state
-      const response = await fetch('http://localhost:8000/export_graph');
+      // Fetch complete graph from backend through Vite proxy
+      console.log('[Header] Fetching from /export_graph (via Vite proxy)');
+      const response = await fetch('/export_graph');
+
+      console.log('[Header] Response status:', response.status);
+      console.log('[Header] Response ok:', response.ok);
 
       if (!response.ok) {
-        throw new Error('Failed to export graph');
+        const errorText = await response.text();
+        console.error('[Header] Export failed with status:', response.status);
+        console.error('[Header] Error response:', errorText);
+        throw new Error(`Failed to export graph: ${response.status} - ${errorText}`);
       }
 
       const exportData = await response.json();
+      console.log('[Header] Export data received:', {
+        nodes: exportData.nodes?.length || 0,
+        edges: exportData.edges?.length || 0,
+        version: exportData.version,
+        exportDate: exportData.exportDate
+      });
 
       const dataStr = JSON.stringify(exportData, null, 2);
       const dataBlob = new Blob([dataStr], { type: 'application/json' });
@@ -71,9 +108,12 @@ function Header() {
       link.click();
       document.body.removeChild(link);
       URL.revokeObjectURL(url);
+
+      console.log('[Header] Graph exported successfully');
     } catch (error) {
-      console.error('Error exporting graph:', error);
-      alert('Failed to export graph. Please try again.');
+      console.error('[Header] Error exporting graph:', error);
+      console.error('[Header] Error stack:', error.stack);
+      alert(`Failed to export graph: ${error.message}`);
     }
   };
 
@@ -84,7 +124,7 @@ function Header() {
       </div>
 
       <div className="header-center">
-        <div className="community-selector">
+        <div className="community-selector" ref={dropdownRef}>
           <button
             className="community-dropdown-toggle"
             onClick={() => setIsDropdownOpen(!isDropdownOpen)}
@@ -133,7 +173,7 @@ function Header() {
       {/* Settings Dialog */}
       {isSettingsOpen && (
         <div className="settings-overlay" onClick={() => setIsSettingsOpen(false)}>
-          <div className="settings-dialog" onClick={(e) => e.stopPropagation()}>
+          <div className="settings-dialog" ref={settingsRef} onClick={(e) => e.stopPropagation()}>
             <div className="settings-header">
               <h2>Settings</h2>
               <button

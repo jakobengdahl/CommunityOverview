@@ -58,7 +58,7 @@ describe('VisualizationPanel', () => {
   it('renders StatsPanel', () => {
     render(<VisualizationPanel />);
     // StatsPanel should be rendered
-    expect(screen.getByRole('button', { name: /Graf-statistik/i })).toBeDefined();
+    expect(screen.getByRole('button', { name: /Graph Stats/i })).toBeDefined();
   });
 
   it('renders save view button when nodes exist', () => {

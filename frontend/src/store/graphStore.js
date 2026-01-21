@@ -27,6 +27,8 @@ const useGraphStore = create((set, get) => ({
   highlightedNodeIds: [],
   hiddenNodeIds: [], // Set of IDs for hidden nodes
   clearGroupsFlag: false, // Signal to clear groups in visualization
+  groupsToRestore: [], // Groups to restore when loading visualization
+  reactFlowNodes: [], // Current React Flow nodes (including groups) for saving
 
   // Update graph visualization
   updateVisualization: (nodes, edges, highlightNodeIds = []) => {
@@ -40,10 +42,16 @@ const useGraphStore = create((set, get) => ({
     set({
       nodes,
       edges,
-      highlightedNodeIds: highlightNodeIds
+      highlightedNodeIds: highlightNodeIds,
+      clearGroupsFlag: true // Signal to clear groups when loading new visualization
     });
 
     console.log('[GraphStore] State updated successfully');
+
+    // Reset flag after a short delay
+    setTimeout(() => {
+      set({ clearGroupsFlag: false });
+    }, 100);
   },
 
   // Update node positions (from React Flow)
@@ -68,22 +76,44 @@ const useGraphStore = create((set, get) => ({
     }
   },
 
-  // Add nodes to existing graph (replaces visualization to show only new nodes + connections)
+  // Set groups to restore when loading visualization
+  setGroupsToRestore: (groups) => set({ groupsToRestore: groups }),
+
+  // Update React Flow nodes (including groups) for saving
+  setReactFlowNodes: (reactFlowNodes) => set({ reactFlowNodes }),
+
+  // Add nodes to existing graph (merges with existing nodes)
   addNodesToVisualization: (newNodes, newEdges = []) => {
-    // Get IDs of all new nodes
+    const currentState = get();
+    const existingNodes = currentState.nodes;
+    const existingEdges = currentState.edges;
+
+    // Get IDs of existing and new nodes
+    const existingNodeIds = new Set(existingNodes.map(n => n.id));
     const newNodeIds = new Set(newNodes.map(n => n.id));
 
-    // Filter edges to only include those connected to new nodes
-    const relevantEdges = newEdges.filter(e =>
-      newNodeIds.has(e.source) || newNodeIds.has(e.target)
-    );
+    // Merge nodes (avoid duplicates)
+    const mergedNodes = [...existingNodes];
+    for (const newNode of newNodes) {
+      if (!existingNodeIds.has(newNode.id)) {
+        mergedNodes.push(newNode);
+      }
+    }
 
-    // Replace visualization with only new nodes and their connections
+    // Merge edges (avoid duplicates)
+    const existingEdgeIds = new Set(existingEdges.map(e => e.id));
+    const mergedEdges = [...existingEdges];
+    for (const newEdge of newEdges) {
+      if (!existingEdgeIds.has(newEdge.id)) {
+        mergedEdges.push(newEdge);
+      }
+    }
+
+    // Update state with merged data
     set({
-      nodes: newNodes,
-      edges: relevantEdges,
-      highlightedNodeIds: Array.from(newNodeIds),
-      hiddenNodeIds: [], // Clear hidden nodes
+      nodes: mergedNodes,
+      edges: mergedEdges,
+      highlightedNodeIds: Array.from(newNodeIds), // Highlight only the newly added nodes
       clearGroupsFlag: true, // Signal to clear groups
     });
 
@@ -97,7 +127,19 @@ const useGraphStore = create((set, get) => ({
   highlightNodes: (nodeIds) => set({ highlightedNodeIds: nodeIds }),
 
   // Clear graph
-  clearVisualization: () => set({ nodes: [], edges: [], highlightedNodeIds: [] }),
+  clearVisualization: () => {
+    set({
+      nodes: [],
+      edges: [],
+      highlightedNodeIds: [],
+      clearGroupsFlag: true // Signal to clear groups
+    });
+
+    // Reset flag after a short delay
+    setTimeout(() => {
+      set({ clearGroupsFlag: false });
+    }, 100);
+  },
 
   // Load visualization view
   loadVisualizationView: (viewData) => {

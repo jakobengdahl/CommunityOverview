@@ -14,8 +14,10 @@ function ChatPanel() {
     setError,
     clearError,
     nodes, // Need existing nodes to capture state
+    reactFlowNodes, // React Flow nodes including groups for saving
     hiddenNodeIds,
-    setHiddenNodeIds
+    setHiddenNodeIds,
+    setGroupsToRestore
   } = useGraphStore();
   const [inputValue, setInputValue] = useState('');
   const [isProcessing, setIsProcessing] = useState(false);
@@ -146,66 +148,72 @@ function ChatPanel() {
       const toolResult = response.toolResult;
 
       if (toolResult) {
-        // 1. Handle "Save Visualization" signal from backend
-        if (toolResult.action === 'save_visualization') {
+        // 1. Handle "Save View" signal from backend
+        if (toolResult.action === 'save_view' || toolResult.action === 'save_visualization') {
              const viewName = toolResult.name;
-             // Capture state from store
-             // Note: store positions might be outdated if we haven't synced.
-             // But we added sync logic in VisualizationPanel.
-             const currentNodes = useGraphStore.getState().nodes;
+             // Use React Flow nodes (includes groups) from latest sync
+             const currentNodes = useGraphStore.getState().reactFlowNodes;
              const currentHidden = useGraphStore.getState().hiddenNodeIds;
 
-             const viewData = {
-                nodes: currentNodes.map(n => ({ id: n.id, position: n.position })),
-                hidden_nodes: currentHidden
-             };
+             // Create saved view node with standardized format
+             const positions = {};
+             currentNodes.forEach(n => {
+               positions[n.id] = n.position;
+             });
+             const nodeIds = currentNodes.map(n => n.id);
 
              const viewNode = {
                 name: viewName,
-                type: 'VisualizationView',
+                type: 'SavedView',
                 description: `Saved view: ${viewName}`,
-                metadata: { view_data: viewData },
+                summary: `Contains ${nodeIds.length} nodes`,
+                metadata: {
+                  node_ids: nodeIds,
+                  positions: positions,
+                  hidden_node_ids: currentHidden
+                },
                 communities: []
              };
 
-             // Execute actual save
+             // Execute actual save to graph
              try {
                 await executeTool('add_nodes', { nodes: [viewNode], edges: [] });
-                // We could add a system message here, but Claude usually replies "Ready to save..."
+                console.log('[ChatPanel] Saved view successfully');
              } catch (err) {
-                console.error("Failed to save view via chat:", err);
+                console.error("[ChatPanel] Failed to save view:", err);
                 setError(`Failed to save view: ${err.message}`);
              }
         }
 
-        // 2. Handle "Load Visualization" signal
+        // 2. Handle "Load Saved View" signal
         else if (toolResult.action === 'load_visualization') {
-            const viewData = toolResult.view.metadata.view_data;
-            if (viewData) {
-                if (viewData.hidden_nodes) {
-                    setHiddenNodeIds(viewData.hidden_nodes);
+            if (toolResult.nodes && toolResult.nodes.length > 0) {
+                // Set groups to restore (if any)
+                if (toolResult.groups && toolResult.groups.length > 0) {
+                    console.log('[ChatPanel] Setting groups to restore:', toolResult.groups.length);
+                    setGroupsToRestore(toolResult.groups);
+                } else {
+                    setGroupsToRestore([]);
                 }
 
-                // We need to apply positions.
-                // updateVisualization expects full nodes.
-                // We should probably just update positions of existing nodes?
-                // Or if the view contains specific nodes (filtering?), we might want to filter?
-                // The prompt said "which nodes ... are present".
-                // If the view implies filtering, we should handle that.
-                // But for now, let's assume it just restores positions and hidden state.
+                // Clear existing visualization and show only the nodes from the view
+                updateVisualization(toolResult.nodes, toolResult.edges || []);
 
-                // Note: If the graph currently loaded doesn't have these nodes, we can't show them.
-                // We assume the user has searched/loaded the graph or the view contains enough info to load them?
-                // The view only stores IDs.
-                // So this only works if the nodes are already loaded.
-                // Ideally, `load_visualization` should probably return the full node objects too?
-                // But `get_visualization` returns the view node itself.
+                // Apply saved positions if available
+                if (toolResult.positions) {
+                    // Wait a bit for the nodes to be rendered, then apply positions
+                    setTimeout(() => {
+                        const positionUpdates = Object.entries(toolResult.positions).map(([id, position]) => ({
+                            id,
+                            position
+                        }));
+                        useGraphStore.getState().updateNodePositions(positionUpdates);
+                    }, 100);
+                }
 
-                // TODO: In a real implementation, we might need to fetch the nodes listed in the view
-                // if they are not currently in the store.
-                // For now, let's update positions for nodes we DO have.
-                if (viewData.nodes) {
-                   useGraphStore.getState().updateNodePositions(viewData.nodes);
+                // Apply hidden nodes if available
+                if (toolResult.hidden_node_ids) {
+                    setHiddenNodeIds(toolResult.hidden_node_ids);
                 }
             }
         }
@@ -584,9 +592,9 @@ function ChatPanel() {
             className="chat-upload-button"
             onClick={() => fileInputRef.current?.click()}
             disabled={isUploading || isProcessing}
-            title="Ladda upp dokument (PDF, Word, Text)"
+            title="Upload document (PDF, Word, Text)"
           >
-            {isUploading ? '📤 Laddar upp...' : '📤 Ladda upp'}
+            {isUploading ? '📤 Uploading...' : '📤 Upload'}
           </button>
           <button
             className="chat-send-button"

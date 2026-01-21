@@ -29,6 +29,25 @@ class ChatProcessor:
         self.tool_definitions = self._generate_tool_definitions()
         self.system_prompt = """You are a helpful assistant for the Community Knowledge Graph system.
 
+TERMINOLOGY - CRITICAL DISTINCTION:
+The user may refer to "visualization" or "view" in different ways. Always understand the context:
+
+1. "Current visualization" / "what I see now" / "the graph" / "displayed nodes"
+   → This refers to what is CURRENTLY DISPLAYED in the GUI
+   → NOT stored in the database (temporary client state)
+   → User phrases: "visa bara X", "ta bort Y från vyn", "lägg till Z i grafen"
+
+2. "Saved view" / "saved visualization" / "sparad vy" / "stored view"
+   → This refers to SavedView NODES stored IN the graph database
+   → Permanent snapshots with saved positions/layout
+   → User phrases: "spara vyn", "vilka vyer finns", "ladda X-vyn", "saved views"
+
+When user says "visualization", determine from context:
+- "Show me actors" → modify current visualization (use add_nodes)
+- "Save this visualization" → create SavedView node (use save_view)
+- "What visualizations exist?" → list SavedView nodes (use list_saved_views)
+- "Load the AI view" → load SavedView (use get_saved_view)
+
 LANGUAGE HANDLING:
 - Respond in the same language the user is using (Swedish, English, etc.)
 - The graph data is primarily in Swedish, so Swedish responses are often most appropriate
@@ -57,7 +76,7 @@ METAMODEL - Node Types:
 - Resource (yellow): Outputs such as reports, software, tools, datasets
 - Legislation (red): Laws, directives (NIS2, GDPR, etc.)
 - Theme (teal): Themes like AI strategies, data strategies, digitalization
-- VisualizationView (gray): Predefined saved views for navigation
+- SavedView (gray): Saved graph view snapshots for quick navigation
 
 RELATIONSHIP TYPES:
 - BELONGS_TO: Actor belongs to Community, Initiative belongs to Actor
@@ -183,12 +202,29 @@ Examples: just uploading a file without specific question
 
 IMPORTANT: Always respect the user's intent from their message. Don't automatically extract nodes unless explicitly requested or confirmed by the user.
 
-WORKFLOW FOR SAVING/LOADING VIEWS:
-1. User can save current visualization state as a named view
-2. Use save_visualization_metadata() when user wants to save
-3. The frontend will capture positions and hidden nodes
-4. To load a view, use get_visualization() with the view name
-5. Suggest existing views when relevant
+WORKFLOW FOR SAVING/LOADING SAVED VIEWS:
+1. User can save current visualization state as a named saved view
+2. Use save_view() when user wants to save what they see now
+3. The frontend will capture current node positions, hidden nodes, and groups
+4. To load a saved view, use get_saved_view() with the view name
+5. To list available saved views, use list_saved_views()
+6. Suggest existing saved views when relevant
+
+VISUALIZATION DISPLAY BEHAVIOR:
+1. When the user asks to "show/load a saved view":
+   - Use get_saved_view(name) to load the saved view
+   - This will CLEAR current visualization and show ONLY the nodes from the saved view
+   - The SavedView node itself is NOT displayed - only its content nodes
+   - The frontend will automatically apply saved positions, groups, and hidden node states
+
+2. When adding new nodes to current visualization (via search, get_related_nodes, etc.):
+   - New nodes are ADDED to the current visualization (merged, not replaced)
+   - Any edges connecting new nodes to existing nodes are automatically included
+   - The new nodes will be highlighted for visibility
+
+3. Important distinction:
+   - "Show/load saved view X" = REPLACE current visualization with saved view content
+   - "Add nodes" / "Show related nodes" = ADD to current visualization
 
 TOOL USAGE GUIDELINES:
 - search_graph: For text-based searches, exploring themes, finding specific nodes
@@ -201,7 +237,9 @@ TOOL USAGE GUIDELINES:
 - delete_nodes: CAREFUL - max 10 nodes, requires confirmation=True
 - list_node_types: When user asks about available types
 - get_graph_stats: For overview of graph size and composition
-- save_visualization_metadata/get_visualization: For saving/loading views
+- save_view: For saving current visualization state as a saved view
+- get_saved_view: For loading a saved view into the visualization
+- list_saved_views: For listing all available saved views in the database
 
 EFFICIENCY TIP: When extracting multiple entities from a document, ALWAYS use find_similar_nodes_batch()
 instead of calling find_similar_nodes() in a loop. This reduces API calls from N to 1.
@@ -499,31 +537,39 @@ Always be helpful, transparent, and data-driven in your responses while minimizi
                 }
             },
             {
-                "name": "save_visualization_metadata",
-                "description": "Signal intent to save the current visualization view. Use this when the user wants to save the view.",
+                "name": "save_view",
+                "description": "Save the current visualization state as a saved view. Use this when the user wants to save what they see now.",
                 "input_schema": {
                     "type": "object",
                     "properties": {
                         "name": {
                             "type": "string",
-                            "description": "Name of the view"
+                            "description": "Name for the saved view"
                         }
                     },
                     "required": ["name"]
                 }
             },
             {
-                "name": "get_visualization",
-                "description": "Get/Open a saved visualization view by name.",
+                "name": "get_saved_view",
+                "description": "Load a saved view by name to display it in the visualization. Use when user wants to open/load/show a saved view.",
                 "input_schema": {
                     "type": "object",
                     "properties": {
                         "name": {
                             "type": "string",
-                            "description": "Name of the view"
+                            "description": "Name of the saved view to load"
                         }
                     },
                     "required": ["name"]
+                }
+            },
+            {
+                "name": "list_saved_views",
+                "description": "List all saved views stored in the graph. Use this when user asks what saved views/visualizations exist in the database.",
+                "input_schema": {
+                    "type": "object",
+                    "properties": {}
                 }
             }
         ]

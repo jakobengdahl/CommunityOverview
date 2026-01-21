@@ -203,28 +203,68 @@ async def download_url_endpoint(request: Request):
 
 
 @mcp.custom_route("/export_graph", methods=["GET"])
-async def export_graph_endpoint():
+async def export_graph_endpoint(request: Request):
     """
     Endpoint to export the entire graph (all nodes and edges)
     Returns the complete graph data in JSON format
     """
     try:
-        # Get all nodes and edges from the graph storage
-        all_nodes = [node.model_dump() for node in graph.nodes.values()]
-        all_edges = [edge.model_dump() for edge in graph.edges.values()]
+        import json
 
-        return JSONResponse({
+        print("[Export] Starting graph export...")
+        print(f"[Export] Total nodes in storage: {len(graph.nodes)}")
+        print(f"[Export] Total edges in storage: {len(graph.edges)}")
+
+        # Get all nodes and edges from the graph storage
+        all_nodes = []
+        for node in graph.nodes.values():
+            try:
+                node_dict = node.model_dump()
+                all_nodes.append(node_dict)
+            except Exception as e:
+                print(f"[Export] Error dumping node {node.id}: {e}")
+                raise
+
+        all_edges = []
+        for edge in graph.edges.values():
+            try:
+                edge_dict = edge.model_dump()
+                all_edges.append(edge_dict)
+            except Exception as e:
+                print(f"[Export] Error dumping edge {edge.id}: {e}")
+                raise
+
+        print(f"[Export] Successfully dumped {len(all_nodes)} nodes and {len(all_edges)} edges")
+
+        export_data = {
             "version": "1.0",
             "exportDate": datetime.utcnow().isoformat(),
             "nodes": all_nodes,
             "edges": all_edges,
             "total_nodes": len(all_nodes),
             "total_edges": len(all_edges)
-        })
+        }
+
+        # Use custom JSON encoder to handle datetime objects
+        def json_serializer(obj):
+            if isinstance(obj, datetime):
+                return obj.isoformat()
+            raise TypeError(f"Object of type {type(obj)} is not JSON serializable")
+
+        print("[Export] Serializing export data to JSON...")
+        serialized_data = json.dumps(export_data, default=json_serializer)
+        print(f"[Export] Serialized {len(serialized_data)} bytes")
+
+        result = json.loads(serialized_data)
+        print("[Export] Successfully parsed JSON, returning response")
+
+        return JSONResponse(result)
     except Exception as e:
         import traceback
-        traceback.print_exc()
-        return JSONResponse({"error": str(e)}, status_code=500)
+        error_trace = traceback.format_exc()
+        print(f"[Export] ERROR: {str(e)}")
+        print(f"[Export] Traceback:\n{error_trace}")
+        return JSONResponse({"error": str(e), "traceback": error_trace}, status_code=500)
 
 
 @mcp.custom_route("/execute_tool", methods=["POST"])
@@ -609,13 +649,14 @@ def list_relationship_types() -> Dict[str, Any]:
 
 
 @tool_wrapper
-def save_visualization_metadata(name: str) -> Dict[str, Any]:
+def save_view(name: str) -> Dict[str, Any]:
     """
-    Signal intent to save the current visualization view.
+    Signal intent to save the current view state.
 
     This tool does NOT save the view data itself (positions, etc.) because
     the backend does not know the client state. Instead, it acts as a signal
-    for the frontend to capture the state and save it.
+    for the frontend to capture the current visualization state and save it
+    as a SavedView.
 
     Args:
         name: Name of the view to save
@@ -624,38 +665,183 @@ def save_visualization_metadata(name: str) -> Dict[str, Any]:
         A signal object that the frontend will intercept.
     """
     return {
-        "action": "save_visualization",
+        "action": "save_view",
         "name": name,
-        "message": f"Ready to save view '{name}'. Client will capture state."
+        "message": f"Ready to save view '{name}'. Client will capture current visualization state."
     }
+
+# Legacy alias for backwards compatibility
+save_visualization_metadata = save_view
 
 
 @tool_wrapper
-def get_visualization(name: str) -> Dict[str, Any]:
+def get_saved_view(name: str) -> Dict[str, Any]:
     """
-    Get a saved visualization view by name.
+    Get a saved view by name and load its content for display.
+
+    This returns the actual nodes and edges that are part of the saved view,
+    NOT the SavedView node itself. The SavedView node is just metadata
+    storage - what the user wants to see is the content it references.
+
+    Note: "Saved view" = a snapshot of nodes/edges/positions saved in the graph.
+          "Current visualization" = what is currently displayed in the GUI.
 
     Args:
-        name: Name of the view
+        name: Name of the saved view
 
     Returns:
-        The view data (nodes, positions, etc.)
+        The nodes and edges to display in the visualization, with position and hidden node data
     """
-    # Search for a node of type VISUALIZATION_VIEW with the given name
-    results = graph.search_nodes(query=name, node_types=[NodeType.VISUALIZATION_VIEW], limit=1)
+    print(f"[GetSavedView] Loading saved view: {name}")
+
+    # Search for a node of type SAVED_VIEW (or legacy VISUALIZATION_VIEW) with the given name
+    results = graph.search_nodes(query=name, node_types=[NodeType.SAVED_VIEW, NodeType.VISUALIZATION_VIEW], limit=1)
 
     if not results:
+        print(f"[GetSavedView] View '{name}' not found")
         return {
             "success": False,
             "error": f"View '{name}' not found."
         }
 
     view_node = results[0]
+    print(f"[GetSavedView] Found view node: {view_node.id}")
+
+    # Support both old and new formats
+    # Old format: metadata.node_ids + metadata.positions
+    # New format: metadata.view_data.nodes + metadata.view_data.hidden_nodes
+
+    position_map = {}
+    node_ids = []
+    hidden_node_ids = []
+
+    # Try new format first
+    view_data = view_node.metadata.get('view_data', {})
+    if view_data and 'nodes' in view_data:
+        print(f"[GetSavedView] Using NEW format (view_data)")
+        node_position_data = view_data.get('nodes', [])
+        hidden_node_ids = view_data.get('hidden_nodes', [])
+        position_map = {item['id']: item.get('position') for item in node_position_data if isinstance(item, dict)}
+        node_ids = list(position_map.keys())
+
+    # Fall back to old format
+    elif 'node_ids' in view_node.metadata:
+        print(f"[GetSavedView] Using OLD format (node_ids + positions)")
+        node_ids = view_node.metadata.get('node_ids', [])
+        position_map = view_node.metadata.get('positions', {})
+        hidden_node_ids = view_node.metadata.get('hidden_nodes', [])
+
+    else:
+        print(f"[GetSavedView] View '{name}' has no node data in any format")
+        return {
+            "success": False,
+            "error": f"View '{name}' contains no nodes."
+        }
+
+    print(f"[GetSavedView] Extracted {len(node_ids)} node IDs, {len(hidden_node_ids)} hidden nodes")
+
+    # Filter out group IDs (frontend-only concept, not stored in backend graph)
+    actual_node_ids = [nid for nid in node_ids if not nid.startswith('group-')]
+    group_ids = [nid for nid in node_ids if nid.startswith('group-')]
+
+    if group_ids:
+        print(f"[GetSavedView] Filtered out {len(group_ids)} group IDs (frontend-only)")
+
+    # Fetch all the actual nodes
+    nodes = []
+    missing_nodes = []
+    for node_id in actual_node_ids:
+        node = graph.get_node(node_id)
+        if node:
+            nodes.append(node.model_dump())
+        else:
+            missing_nodes.append(node_id)
+
+    if missing_nodes:
+        print(f"[GetSavedView] WARNING: {len(missing_nodes)} real nodes not found: {missing_nodes[:5]}")
+
+    if not nodes:
+        print(f"[GetSavedView] No nodes could be loaded from view '{name}'")
+        return {
+            "success": False,
+            "error": f"No nodes could be loaded from view '{name}'. The referenced nodes may have been deleted."
+        }
+
+    # Get all edges between these nodes
+    node_id_set = set(actual_node_ids)
+    edges = []
+    for edge in graph.edges.values():
+        if edge.source in node_id_set and edge.target in node_id_set:
+            edges.append(edge.model_dump())
+
+    print(f"[GetSavedView] Successfully loaded {len(nodes)} nodes and {len(edges)} edges")
+
+    # Extract group positions for frontend to restore
+    group_data = []
+    for group_id in group_ids:
+        group_position = position_map.get(group_id)
+        if group_position:
+            group_data.append({
+                "id": group_id,
+                "position": group_position
+            })
+
+    if group_data:
+        print(f"[GetSavedView] Returning {len(group_data)} groups to restore")
+
     return {
         "success": True,
-        "view": view_node.model_dump(),
+        "nodes": nodes,
+        "edges": edges,
+        "positions": position_map,
+        "hidden_node_ids": hidden_node_ids,
+        "groups": group_data,  # Frontend groups to restore
         "action": "load_visualization"  # Signal for frontend
     }
+
+# Legacy alias for backwards compatibility
+get_visualization = get_saved_view
+
+
+@tool_wrapper
+def list_saved_views() -> Dict[str, Any]:
+    """
+    List all saved views.
+
+    Returns a list of all saved view snapshots stored in the graph.
+    These are NOT the current visualization - they are saved snapshots
+    that can be loaded to restore a specific graph view.
+
+    Returns:
+        List of all SavedView nodes with their names and summaries
+    """
+    print("[ListSavedViews] Listing all saved views...")
+
+    # Search for all SavedView nodes (including legacy VisualizationView)
+    views = graph.search_nodes(query="", node_types=[NodeType.SAVED_VIEW, NodeType.VISUALIZATION_VIEW], limit=100)
+
+    print(f"[ListSavedViews] Found {len(views)} saved views")
+
+    # Format the views for display
+    view_list = []
+    for view in views:
+        view_info = {
+            "name": view.name,
+            "description": view.description,
+            "summary": view.summary,
+            "created_at": view.created_at.isoformat() if view.created_at else None,
+            "node_count": len(view.metadata.get('node_ids', [])) if 'node_ids' in view.metadata else len(view.metadata.get('view_data', {}).get('nodes', []))
+        }
+        view_list.append(view_info)
+
+    return {
+        "success": True,
+        "views": view_list,
+        "total": len(view_list)
+    }
+
+# Legacy alias for backwards compatibility
+list_visualizations = list_saved_views
 
 
 def _get_node_type_description(node_type: NodeType) -> str:
@@ -668,7 +854,8 @@ def _get_node_type_description(node_type: NodeType) -> str:
         NodeType.RESOURCE: "Outputs (reports, software, etc.)",
         NodeType.LEGISLATION: "Laws and directives (NIS2, GDPR, etc.)",
         NodeType.THEME: "Themes (AI, data strategies, etc.)",
-        NodeType.VISUALIZATION_VIEW: "Predefined views for navigation"
+        NodeType.SAVED_VIEW: "Saved graph view snapshots for quick navigation",
+        NodeType.VISUALIZATION_VIEW: "Saved graph view snapshots (legacy)"
     }
     return descriptions.get(node_type, "")
 
@@ -690,6 +877,10 @@ def _get_relationship_description(rel_type: RelationshipType) -> str:
 SYSTEM_PROMPT = """
 You are a helpful assistant for the Community Knowledge Graph system.
 
+TERMINOLOGY:
+- "Current visualization" = what is currently displayed in the GUI
+- "Saved view" = a saved snapshot of nodes/edges/positions stored in the graph that can be loaded
+
 METAMODEL:
 - Actor (blue): Government agencies, organizations
 - Community (purple): eSam, Myndigheter, Officiell Statistik
@@ -698,7 +889,7 @@ METAMODEL:
 - Resource (yellow): Reports, software
 - Legislation (red): NIS2, GDPR
 - Theme (teal): AI, data strategies
-- VisualizationView (gray): Predefined views
+- SavedView (gray): Saved graph view snapshots
 
 SECURITY RULES:
 1. ALWAYS warn if the user tries to store personal data

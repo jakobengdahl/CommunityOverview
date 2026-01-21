@@ -19,6 +19,8 @@ class NodeType(str, Enum):
     RESOURCE = "Resource"
     LEGISLATION = "Legislation"
     THEME = "Theme"
+    SAVED_VIEW = "SavedView"
+    # Legacy support (to be removed)
     VISUALIZATION_VIEW = "VisualizationView"
 
 
@@ -41,7 +43,8 @@ NODE_COLORS = {
     NodeType.RESOURCE: "#FBBF24",  # yellow
     NodeType.LEGISLATION: "#EF4444",  # red
     NodeType.THEME: "#14B8A6",  # teal
-    NodeType.VISUALIZATION_VIEW: "#6B7280",  # gray
+    NodeType.SAVED_VIEW: "#6B7280",  # gray
+    NodeType.VISUALIZATION_VIEW: "#6B7280",  # gray (legacy)
 }
 
 

@@ -44,29 +44,29 @@ describe('StatsPanel', () => {
 
   it('renders toggle button', () => {
     render(<StatsPanel />);
-    expect(screen.getByRole('button', { name: /Graf-statistik/i })).toBeDefined();
+    expect(screen.getByRole('button', { name: /Graph Stats/i })).toBeDefined();
   });
 
   it('expands when toggle button is clicked', async () => {
     render(<StatsPanel />);
 
-    const toggleButton = screen.getByRole('button', { name: /Graf-statistik/i });
+    const toggleButton = screen.getByRole('button', { name: /Graph Stats/i });
     fireEvent.click(toggleButton);
 
     await waitFor(() => {
-      expect(screen.getByText(/Översikt/i)).toBeDefined();
+      expect(screen.getByText(/Overview/i)).toBeDefined();
     });
   });
 
   it('displays local statistics', async () => {
     render(<StatsPanel />);
 
-    const toggleButton = screen.getByRole('button', { name: /Graf-statistik/i });
+    const toggleButton = screen.getByRole('button', { name: /Graph Stats/i });
     fireEvent.click(toggleButton);
 
     await waitFor(() => {
       // Check that it shows 2 displayed nodes (from the store)
-      expect(screen.getByText(/Visade noder:/i)).toBeDefined();
+      expect(screen.getByText(/Displayed nodes:/i)).toBeDefined();
       expect(screen.getByText('2')).toBeDefined(); // 2 nodes in store
     });
   });
@@ -76,7 +76,7 @@ describe('StatsPanel', () => {
 
     render(<StatsPanel />);
 
-    const toggleButton = screen.getByRole('button', { name: /Graf-statistik/i });
+    const toggleButton = screen.getByRole('button', { name: /Graph Stats/i });
     fireEvent.click(toggleButton);
 
     await waitFor(() => {
@@ -93,11 +93,11 @@ describe('StatsPanel', () => {
   it('displays nodes by type', async () => {
     render(<StatsPanel />);
 
-    const toggleButton = screen.getByRole('button', { name: /Graf-statistik/i });
+    const toggleButton = screen.getByRole('button', { name: /Graph Stats/i });
     fireEvent.click(toggleButton);
 
     await waitFor(() => {
-      expect(screen.getByText(/Noder per typ/i)).toBeDefined();
+      expect(screen.getByText(/Nodes by type/i)).toBeDefined();
       expect(screen.getByText(/Actor:/i)).toBeDefined();
       expect(screen.getByText(/Initiative:/i)).toBeDefined();
     });
@@ -106,11 +106,11 @@ describe('StatsPanel', () => {
   it('displays nodes by community', async () => {
     render(<StatsPanel />);
 
-    const toggleButton = screen.getByRole('button', { name: /Graf-statistik/i });
+    const toggleButton = screen.getByRole('button', { name: /Graph Stats/i });
     fireEvent.click(toggleButton);
 
     await waitFor(() => {
-      expect(screen.getByText(/Noder per community/i)).toBeDefined();
+      expect(screen.getByText(/Nodes by community/i)).toBeDefined();
       expect(screen.getByText(/eSam:/i)).toBeDefined();
     });
   });
@@ -126,11 +126,11 @@ describe('StatsPanel', () => {
 
     render(<StatsPanel />);
 
-    const toggleButton = screen.getByRole('button', { name: /Graf-statistik/i });
+    const toggleButton = screen.getByRole('button', { name: /Graph Stats/i });
     fireEvent.click(toggleButton);
 
     await waitFor(() => {
-      expect(screen.getByText(/Laddar statistik.../i)).toBeDefined();
+      expect(screen.getByText(/Loading statistics.../i)).toBeDefined();
     });
   });
 
@@ -140,11 +140,11 @@ describe('StatsPanel', () => {
 
     render(<StatsPanel />);
 
-    const toggleButton = screen.getByRole('button', { name: /Graf-statistik/i });
+    const toggleButton = screen.getByRole('button', { name: /Graph Stats/i });
     fireEvent.click(toggleButton);
 
     await waitFor(() => {
-      expect(screen.getByText(/Fel:/i)).toBeDefined();
+      expect(screen.getByText(/Error:/i)).toBeDefined();
     });
   });
 });
