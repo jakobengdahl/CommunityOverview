@@ -12,6 +12,7 @@ function GroupNode({ id, data, selected }) {
   const [editedLabel, setEditedLabel] = useState(data.label || 'Group');
   const [contextMenu, setContextMenu] = useState(null);
   const inputRef = useRef(null);
+  const groupRef = useRef(null);
   const { setNodes } = useReactFlow();
 
   useEffect(() => {
@@ -20,6 +21,32 @@ function GroupNode({ id, data, selected }) {
       inputRef.current.select();
     }
   }, [isEditing]);
+
+  // Close context menu when clicking elsewhere or dragging
+  useEffect(() => {
+    if (!contextMenu) return;
+
+    const handleGlobalClick = (e) => {
+      // Close menu if clicking outside the group entirely
+      if (groupRef.current && !groupRef.current.contains(e.target)) {
+        setContextMenu(null);
+      }
+    };
+
+    const handleNodeDrag = () => {
+      // Close menu when any node is dragged
+      setContextMenu(null);
+    };
+
+    // Listen to global clicks and React Flow events
+    document.addEventListener('mousedown', handleGlobalClick);
+    window.addEventListener('react-flow-node-drag-start', handleNodeDrag);
+
+    return () => {
+      document.removeEventListener('mousedown', handleGlobalClick);
+      window.removeEventListener('react-flow-node-drag-start', handleNodeDrag);
+    };
+  }, [contextMenu]);
 
   const handleDoubleClick = (e) => {
     e.stopPropagation();
@@ -132,10 +159,18 @@ function GroupNode({ id, data, selected }) {
         }}
       />
       <div
+        ref={groupRef}
         className="group-node"
         style={{
           borderColor: data.color || '#646cff',
           backgroundColor: `${data.color || '#646cff'}15` // 15 = ~8% opacity in hex
+        }}
+        onContextMenu={(e) => {
+          // Prevent pane context menu from showing when right-clicking inside group (but not on header)
+          if (e.target.classList.contains('group-node') || e.target.classList.contains('group-node-description')) {
+            e.stopPropagation();
+            e.preventDefault();
+          }
         }}
       >
         <div

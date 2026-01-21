@@ -49,9 +49,9 @@ function GroupContextMenu({ x, y, onClose, onChangeColor, onDelete }) {
       className="context-menu"
       style={{ left: x, top: y }}
     >
-      <div className="context-menu-header">Gruppinställningar</div>
+      <div className="context-menu-header">Group Settings</div>
 
-      <div className="context-menu-section-label">Välj Färg</div>
+      <div className="context-menu-section-label">Choose Color</div>
       <div className="color-picker-grid">
         {colors.map((color) => (
           <button
@@ -70,14 +70,14 @@ function GroupContextMenu({ x, y, onClose, onChangeColor, onDelete }) {
           <button
             className="context-menu-item context-menu-item-danger"
             onClick={() => {
-              if (window.confirm('Är du säker på att du vill ta bort denna grupp?')) {
+              if (window.confirm('Are you sure you want to delete this group?')) {
                 onDelete();
                 onClose();
               }
             }}
           >
             <span className="context-menu-icon">🗑️</span>
-            Ta bort grupp
+            Delete Group
           </button>
         </>
       )}
