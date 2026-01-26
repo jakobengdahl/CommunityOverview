@@ -1,6 +1,9 @@
 """
 MCP Server for Community Knowledge Graph
 Exposes tools for graph operations via MCP
+
+This module provides the HTTP/MCP interface layer on top of graph_core.
+It handles API endpoints, MCP tool registration, and request/response formatting.
 """
 
 from typing import List, Optional, Dict, Any
@@ -13,11 +16,13 @@ from urllib.parse import urlparse
 from mcp.server.fastmcp import FastMCP
 from starlette.requests import Request
 from starlette.responses import JSONResponse
-from graph_storage import GraphStorage
-from models import (
-    Node, Edge, NodeType, RelationshipType,
-    SimilarNode, AddNodesResult, DeleteNodesResult
+
+# Import from graph_core package
+from graph_core import (
+    GraphStorage, Node, Edge, NodeType, RelationshipType,
+    SimilarNode, AddNodesResult, DeleteNodesResult, NODE_COLORS
 )
+
 from document_processor import DocumentProcessor
 
 # Initialize MCP server
@@ -615,8 +620,6 @@ def list_node_types() -> Dict[str, Any]:
     Returns:
         Dict with node types and their color coding
     """
-    from models import NODE_COLORS
-
     return {
         "node_types": [
             {
