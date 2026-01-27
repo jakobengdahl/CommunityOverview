@@ -1,0 +1,221 @@
+.graph-custom-node {
+  background: #1a1a1a;
+  border: 2px solid;
+  border-radius: 8px;
+  min-width: 150px;
+  max-width: 250px;
+  box-shadow: 0 2px 8px rgba(0, 0, 0, 0.3);
+  position: relative;
+  transition: all 0.2s ease;
+}
+
+.graph-custom-node:hover {
+  box-shadow: 0 4px 12px rgba(0, 0, 0, 0.5);
+  transform: scale(1.02);
+}
+
+.graph-custom-node.highlighted {
+  box-shadow: 0 0 20px rgba(100, 108, 255, 0.6);
+  animation: graphNodePulse 2s infinite;
+}
+
+@keyframes graphNodePulse {
+  0%, 100% { box-shadow: 0 0 20px rgba(100, 108, 255, 0.6); }
+  50% { box-shadow: 0 0 30px rgba(100, 108, 255, 0.9); }
+}
+
+.graph-node-header {
+  padding: 0.4rem 0.6rem;
+  border-radius: 6px 6px 0 0;
+  color: white;
+  font-size: 0.75rem;
+  font-weight: 600;
+  text-align: center;
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+}
+
+.graph-node-content {
+  padding: 0.75rem;
+  color: #ddd;
+}
+
+.graph-node-label {
+  font-weight: 600;
+  font-size: 0.9rem;
+  margin-bottom: 0.4rem;
+  line-height: 1.2;
+}
+
+.graph-node-summary {
+  font-size: 0.75rem;
+  color: #999;
+  line-height: 1.3;
+  display: -webkit-box;
+  -webkit-line-clamp: 2;
+  -webkit-box-orient: vertical;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.graph-expand-button {
+  position: absolute;
+  right: -12px;
+  top: 50%;
+  transform: translateY(-50%);
+  width: 24px;
+  height: 24px;
+  border-radius: 50%;
+  background-color: #646cff;
+  color: white;
+  border: 2px solid #1a1a1a;
+  font-size: 1rem;
+  font-weight: bold;
+  cursor: pointer;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  transition: all 0.2s ease;
+  z-index: 10;
+}
+
+.graph-expand-button:hover {
+  background-color: #535bf2;
+  transform: translateY(-50%) scale(1.1);
+}
+
+.graph-edit-button {
+  position: absolute;
+  right: -12px;
+  top: calc(50% + 32px);
+  width: 24px;
+  height: 24px;
+  border-radius: 50%;
+  background-color: #10B981;
+  color: white;
+  border: 2px solid #1a1a1a;
+  font-size: 0.8rem;
+  cursor: pointer;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  transition: all 0.2s ease;
+  z-index: 10;
+}
+
+.graph-edit-button:hover {
+  background-color: #059669;
+  transform: scale(1.1);
+}
+
+.graph-node-tooltip {
+  position: absolute;
+  bottom: 100%;
+  left: 50%;
+  transform: translateX(-50%) translateY(-8px);
+  background-color: #2a2a2a;
+  border: 1px solid #444;
+  border-radius: 8px;
+  padding: 0.75rem;
+  min-width: 200px;
+  max-width: 350px;
+  box-shadow: 0 4px 12px rgba(0, 0, 0, 0.5);
+  z-index: 1000;
+  pointer-events: none;
+  animation: graphTooltipFadeIn 0.2s ease-in;
+}
+
+@keyframes graphTooltipFadeIn {
+  from { opacity: 0; transform: translateX(-50%) translateY(-4px); }
+  to { opacity: 1; transform: translateX(-50%) translateY(-8px); }
+}
+
+.graph-node-tooltip::after {
+  content: '';
+  position: absolute;
+  top: 100%;
+  left: 50%;
+  transform: translateX(-50%);
+  border: 6px solid transparent;
+  border-top-color: #2a2a2a;
+}
+
+.graph-node-tooltip .tooltip-header {
+  font-size: 0.85rem;
+  margin-bottom: 0.5rem;
+  color: #fff;
+  line-height: 1.3;
+}
+
+.graph-node-tooltip .tooltip-description {
+  font-size: 0.8rem;
+  color: #bbb;
+  line-height: 1.4;
+  margin-bottom: 0.5rem;
+}
+
+.graph-node-tooltip .tooltip-communities {
+  font-size: 0.75rem;
+  color: #999;
+  padding-top: 0.5rem;
+  border-top: 1px solid #444;
+}
+
+.graph-node-tooltip .tooltip-communities strong {
+  color: #10B981;
+}
+
+/* React Flow handles */
+.graph-custom-node .react-flow__handle {
+  width: 8px;
+  height: 8px;
+  background-color: #646cff;
+  border: 2px solid #1a1a1a;
+}
+
+/* Light mode support */
+@media (prefers-color-scheme: light) {
+  .graph-custom-node {
+    background: white;
+    box-shadow: 0 2px 8px rgba(0, 0, 0, 0.1);
+  }
+
+  .graph-custom-node:hover {
+    box-shadow: 0 4px 12px rgba(0, 0, 0, 0.15);
+  }
+
+  .graph-node-content {
+    color: #213547;
+  }
+
+  .graph-node-summary {
+    color: #666;
+  }
+
+  .graph-expand-button,
+  .graph-edit-button {
+    border-color: white;
+  }
+
+  .graph-custom-node .react-flow__handle {
+    border-color: white;
+  }
+
+  .graph-node-tooltip {
+    background-color: #fff;
+    border-color: #ddd;
+    box-shadow: 0 4px 12px rgba(0, 0, 0, 0.15);
+  }
+
+  .graph-node-tooltip::after {
+    border-top-color: #fff;
+  }
+
+  .graph-node-tooltip .tooltip-header {
+    color: #213547;
+  }
+
+  .graph-node-tooltip .tooltip-description {
+    color: #666;
+  }
+}

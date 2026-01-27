@@ -1,0 +1,4 @@
+/* ui-graph-canvas styles - import this for all component styles */
+@import '../components/CustomNode.css';
+@import '../components/GroupNode.css';
+@import '../components/GraphCanvas.css';
