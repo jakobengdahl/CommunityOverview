@@ -1,9 +1,13 @@
 """
 MCP Server for Community Knowledge Graph
-Exposes tools for graph operations via MCP
+Exposes tools for graph operations via MCP and REST API
 
-This module provides the HTTP/MCP interface layer on top of graph_core.
-It handles API endpoints, MCP tool registration, and request/response formatting.
+This module provides the HTTP/MCP interface layer using:
+- graph_core: Core graph storage and persistence
+- graph_services: Service layer with REST API and MCP tools
+
+Architecture:
+    graph_core (storage) -> graph_services (business logic) -> server.py (transport)
 """
 
 from typing import List, Optional, Dict, Any
@@ -18,36 +22,27 @@ from starlette.requests import Request
 from starlette.responses import JSONResponse
 
 # Import from graph_core package
-from graph_core import (
-    GraphStorage, Node, Edge, NodeType, RelationshipType,
-    SimilarNode, AddNodesResult, DeleteNodesResult, NODE_COLORS
-)
+from graph_core import GraphStorage
+
+# Import from graph_services package
+from graph_services import GraphService, register_mcp_tools, json_serializer
 
 from document_processor import DocumentProcessor
 
 # Initialize MCP server
 mcp = FastMCP("community-knowledge-graph")
 
-# Initialize graph storage
-graph = GraphStorage("graph.json")
+# Initialize graph storage and service
+graph_storage = GraphStorage("graph.json")
+graph_service = GraphService(graph_storage)
+
+# Register MCP tools and get tools map for ChatProcessor
+TOOLS_MAP = register_mcp_tools(mcp, graph_service)
 
 
 # --- Chat Endpoint (Backend Integration) ---
 
 from chat_logic import ChatProcessor
-
-# Map tools to functions for the chat processor
-TOOLS_MAP = {}
-
-def register_tool(name, func):
-    TOOLS_MAP[name] = func
-    return func
-
-# Wrapper to register tools both in MCP and locally for ChatProcessor
-def tool_wrapper(func):
-    mcp.tool()(func)
-    register_tool(func.__name__, func)
-    return func
 
 # Initialize ChatProcessor (lazy load to avoid circular deps if any)
 chat_processor = None
@@ -57,6 +52,7 @@ def get_chat_processor():
     if not chat_processor:
         chat_processor = ChatProcessor(TOOLS_MAP)
     return chat_processor
+
 
 @mcp.custom_route("/chat", methods=["POST"])
 async def chat_endpoint(request: Request):
@@ -71,26 +67,16 @@ async def chat_endpoint(request: Request):
             return JSONResponse({"error": "No messages provided"}, status_code=400)
 
         # Check for API key in header (user-provided key takes precedence)
-        # Try both Anthropic and OpenAI headers
         api_key = request.headers.get("X-OpenAI-API-Key") or request.headers.get("X-Anthropic-API-Key")
 
         # Check for provider in header - but only use it if user provided their own API key
-        # This allows backend's auto-detection (based on env vars) to take priority
         provider_header = request.headers.get("X-LLM-Provider")
-        provider = provider_header if api_key else None  # Only use header provider if custom key provided
+        provider = provider_header if api_key else None
 
         processor = get_chat_processor()
         result = processor.process_message(messages, api_key=api_key, provider=provider)
 
-        # Use custom JSON encoder to handle datetime objects
         import json
-        from datetime import datetime
-
-        def json_serializer(obj):
-            if isinstance(obj, datetime):
-                return obj.isoformat()
-            raise TypeError(f"Object of type {type(obj)} is not JSON serializable")
-
         return JSONResponse(json.loads(json.dumps(result, default=json_serializer)))
     except Exception as e:
         import traceback
@@ -118,7 +104,6 @@ async def upload_endpoint(request: Request):
             tmp_path = tmp.name
 
         try:
-            # Extract text
             text = DocumentProcessor.extract_text(tmp_path)
 
             return JSONResponse({
@@ -129,7 +114,6 @@ async def upload_endpoint(request: Request):
             })
 
         finally:
-            # Cleanup
             if os.path.exists(tmp_path):
                 os.remove(tmp_path)
 
@@ -151,12 +135,10 @@ async def download_url_endpoint(request: Request):
         if not url:
             return JSONResponse({"error": "No URL provided"}, status_code=400)
 
-        # Validate URL
         parsed = urlparse(url)
         if not parsed.scheme or not parsed.netloc:
             return JSONResponse({"error": "Invalid URL"}, status_code=400)
 
-        # Download the file
         try:
             response = requests.get(url, timeout=30, headers={
                 'User-Agent': 'Mozilla/5.0 (compatible; CommunityGraph/1.0)'
@@ -165,12 +147,10 @@ async def download_url_endpoint(request: Request):
         except requests.RequestException as e:
             return JSONResponse({"error": f"Failed to download file: {str(e)}"}, status_code=400)
 
-        # Determine file extension from URL or Content-Type
         content_type = response.headers.get('Content-Type', '')
         filename = parsed.path.split('/')[-1] or 'document'
 
         if not os.path.splitext(filename)[1]:
-            # Try to infer extension from Content-Type
             if 'pdf' in content_type:
                 filename += '.pdf'
             elif 'word' in content_type or 'msword' in content_type:
@@ -178,14 +158,12 @@ async def download_url_endpoint(request: Request):
             elif 'text' in content_type:
                 filename += '.txt'
 
-        # Save to temp file
         ext = os.path.splitext(filename)[1]
         with tempfile.NamedTemporaryFile(delete=False, suffix=ext) as tmp:
             tmp.write(response.content)
             tmp_path = tmp.name
 
         try:
-            # Extract text
             text = DocumentProcessor.extract_text(tmp_path)
 
             return JSONResponse({
@@ -197,7 +175,6 @@ async def download_url_endpoint(request: Request):
             })
 
         finally:
-            # Cleanup
             if os.path.exists(tmp_path):
                 os.remove(tmp_path)
 
@@ -211,64 +188,14 @@ async def download_url_endpoint(request: Request):
 async def export_graph_endpoint(request: Request):
     """
     Endpoint to export the entire graph (all nodes and edges)
-    Returns the complete graph data in JSON format
     """
     try:
         import json
-
-        print("[Export] Starting graph export...")
-        print(f"[Export] Total nodes in storage: {len(graph.nodes)}")
-        print(f"[Export] Total edges in storage: {len(graph.edges)}")
-
-        # Get all nodes and edges from the graph storage
-        all_nodes = []
-        for node in graph.nodes.values():
-            try:
-                node_dict = node.model_dump()
-                all_nodes.append(node_dict)
-            except Exception as e:
-                print(f"[Export] Error dumping node {node.id}: {e}")
-                raise
-
-        all_edges = []
-        for edge in graph.edges.values():
-            try:
-                edge_dict = edge.model_dump()
-                all_edges.append(edge_dict)
-            except Exception as e:
-                print(f"[Export] Error dumping edge {edge.id}: {e}")
-                raise
-
-        print(f"[Export] Successfully dumped {len(all_nodes)} nodes and {len(all_edges)} edges")
-
-        export_data = {
-            "version": "1.0",
-            "exportDate": datetime.utcnow().isoformat(),
-            "nodes": all_nodes,
-            "edges": all_edges,
-            "total_nodes": len(all_nodes),
-            "total_edges": len(all_edges)
-        }
-
-        # Use custom JSON encoder to handle datetime objects
-        def json_serializer(obj):
-            if isinstance(obj, datetime):
-                return obj.isoformat()
-            raise TypeError(f"Object of type {type(obj)} is not JSON serializable")
-
-        print("[Export] Serializing export data to JSON...")
-        serialized_data = json.dumps(export_data, default=json_serializer)
-        print(f"[Export] Serialized {len(serialized_data)} bytes")
-
-        result = json.loads(serialized_data)
-        print("[Export] Successfully parsed JSON, returning response")
-
+        result = graph_service.export_graph()
         return JSONResponse(result)
     except Exception as e:
         import traceback
         error_trace = traceback.format_exc()
-        print(f"[Export] ERROR: {str(e)}")
-        print(f"[Export] Traceback:\n{error_trace}")
         return JSONResponse({"error": str(e), "traceback": error_trace}, status_code=500)
 
 
@@ -291,589 +218,12 @@ async def execute_tool_endpoint(request: Request):
         func = TOOLS_MAP[tool_name]
         result = func(**arguments)
 
-        # Use custom JSON encoder to handle datetime objects
         import json
-        from datetime import datetime
-
-        def json_serializer(obj):
-            if isinstance(obj, datetime):
-                return obj.isoformat()
-            raise TypeError(f"Object of type {type(obj)} is not JSON serializable")
-
         return JSONResponse(json.loads(json.dumps(result, default=json_serializer)))
     except Exception as e:
         import traceback
         traceback.print_exc()
         return JSONResponse({"error": str(e)}, status_code=500)
-
-
-# --- MCP Tools ---
-
-@tool_wrapper
-def search_graph(
-    query: str,
-    node_types: Optional[List[str]] = None,
-    communities: Optional[List[str]] = None,
-    limit: int = 50
-) -> Dict[str, Any]:
-    """
-    Search for nodes in the graph based on text query
-
-    Args:
-        query: Search text (matches against name, description, summary)
-        node_types: List of node types to filter on (Actor, Initiative, etc.)
-        communities: List of communities to filter on
-        limit: Max number of results (default 50)
-
-    Returns:
-        Dict with matching nodes and edges connecting them
-    """
-    # Convert node_types to NodeType enum
-    type_filters = None
-    if node_types:
-        type_filters = [NodeType(t) for t in node_types]
-
-    results = graph.search_nodes(
-        query=query,
-        node_types=type_filters,
-        communities=communities,
-        limit=limit
-    )
-
-    # Get node IDs for edge filtering
-    result_node_ids = set(node.id for node in results)
-
-    # Find edges connecting these nodes
-    connecting_edges = [
-        edge for edge in graph.edges.values()
-        if edge.source in result_node_ids or edge.target in result_node_ids
-    ]
-
-    return {
-        "nodes": [node.model_dump() for node in results],
-        "edges": [edge.model_dump() for edge in connecting_edges],
-        "total": len(results),
-        "query": query,
-        "filters": {
-            "node_types": node_types,
-            "communities": communities
-        }
-    }
-
-
-@tool_wrapper
-def get_node_details(node_id: str) -> Dict[str, Any]:
-    """
-    Get complete information about a specific node
-
-    Args:
-        node_id: ID of the node
-
-    Returns:
-        Dict with node data or error
-    """
-    node = graph.get_node(node_id)
-
-    if not node:
-        return {
-            "success": False,
-            "error": f"Node with ID {node_id} not found"
-        }
-
-    return {
-        "success": True,
-        "node": node.model_dump()
-    }
-
-
-@tool_wrapper
-def get_related_nodes(
-    node_id: str,
-    relationship_types: Optional[List[str]] = None,
-    depth: int = 1
-) -> Dict[str, Any]:
-    """
-    Get nodes connected to the given node
-
-    Args:
-        node_id: ID of the starting node
-        relationship_types: List of relationship types to filter on
-        depth: How many hops from the starting node (default 1)
-
-    Returns:
-        Dict with nodes and edges
-    """
-    # Convert relationship_types to enum
-    rel_filters = None
-    if relationship_types:
-        rel_filters = [RelationshipType(r) for r in relationship_types]
-
-    result = graph.get_related_nodes(
-        node_id=node_id,
-        relationship_types=rel_filters,
-        depth=depth
-    )
-
-    return {
-        "nodes": [node.model_dump() for node in result['nodes']],
-        "edges": [edge.model_dump() for edge in result['edges']],
-        "total_nodes": len(result['nodes']),
-        "total_edges": len(result['edges']),
-        "depth": depth
-    }
-
-
-@tool_wrapper
-def find_similar_nodes(
-    name: str,
-    node_type: Optional[str] = None,
-    threshold: float = 0.7,
-    limit: int = 5
-) -> Dict[str, Any]:
-    """
-    Find similar nodes based on name (for duplicate detection)
-
-    Args:
-        name: The name to search for similar nodes
-        node_type: Optional node type to filter on
-        threshold: Similarity threshold 0.0-1.0 (default 0.7)
-        limit: Max number of results (default 5)
-
-    Returns:
-        Dict with similar nodes and similarity scores
-    """
-    type_filter = NodeType(node_type) if node_type else None
-
-    similar = graph.find_similar_nodes(
-        name=name,
-        node_type=type_filter,
-        threshold=threshold,
-        limit=limit
-    )
-
-    return {
-        "similar_nodes": [
-            {
-                "node": s.node.model_dump(),
-                "similarity_score": s.similarity_score,
-                "match_reason": s.match_reason
-            }
-            for s in similar
-        ],
-        "total": len(similar),
-        "search_name": name
-    }
-
-
-@tool_wrapper
-def find_similar_nodes_batch(
-    names: List[str],
-    node_type: Optional[str] = None,
-    threshold: float = 0.7,
-    limit: int = 5
-) -> Dict[str, Any]:
-    """
-    Find similar nodes for multiple names at once (batch processing)
-
-    This is MUCH more efficient than calling find_similar_nodes multiple times
-    when processing documents with many entities. Use this when extracting
-    multiple nodes from a document.
-
-    Args:
-        names: List of names to search for similar nodes
-        node_type: Optional node type to filter on
-        threshold: Similarity threshold 0.0-1.0 (default 0.7)
-        limit: Max number of results per name (default 5)
-
-    Returns:
-        Dict with results for each name
-    """
-    type_filter = NodeType(node_type) if node_type else None
-
-    results = graph.find_similar_nodes_batch(
-        names=names,
-        node_type=type_filter,
-        threshold=threshold,
-        limit=limit
-    )
-
-    # Format results for JSON
-    formatted_results = {}
-    for name, similar_list in results.items():
-        formatted_results[name] = {
-            "similar_nodes": [
-                {
-                    "node": s.node.model_dump(),
-                    "similarity_score": s.similarity_score,
-                    "match_reason": s.match_reason
-                }
-                for s in similar_list
-            ],
-            "total": len(similar_list)
-        }
-
-    return {
-        "results": formatted_results,
-        "total_searched": len(names),
-        "message": f"Searched for {len(names)} names"
-    }
-
-
-@tool_wrapper
-def add_nodes(
-    nodes: List[Dict[str, Any]],
-    edges: List[Dict[str, Any]]
-) -> Dict[str, Any]:
-    """
-    Add new nodes and edges to the graph
-
-    Args:
-        nodes: List of node objects to add
-        edges: List of edge objects to add
-
-    Returns:
-        Dict with result (added_node_ids, added_edge_ids, success, message)
-    """
-    # Convert dicts to Node and Edge objects
-    try:
-        node_objects = [Node(**n) for n in nodes]
-        edge_objects = [Edge(**e) for e in edges]
-    except Exception as e:
-        return {
-            "success": False,
-            "message": f"Error validating input: {str(e)}",
-            "added_node_ids": [],
-            "added_edge_ids": []
-        }
-
-    result = graph.add_nodes(node_objects, edge_objects)
-    return result.model_dump()
-
-
-@tool_wrapper
-def update_node(node_id: str, updates: Dict[str, Any]) -> Dict[str, Any]:
-    """
-    Update an existing node
-
-    Args:
-        node_id: ID of the node to update
-        updates: Dict with fields to update (name, description, summary, communities, metadata)
-
-    Returns:
-        Dict with updated node or error
-    """
-    updated_node = graph.update_node(node_id, updates)
-
-    if not updated_node:
-        return {
-            "success": False,
-            "error": f"Node with ID {node_id} not found"
-        }
-
-    return {
-        "success": True,
-        "node": updated_node.model_dump()
-    }
-
-
-@tool_wrapper
-def delete_nodes(
-    node_ids: List[str],
-    confirmed: bool = False
-) -> Dict[str, Any]:
-    """
-    Delete nodes from the graph (max 10 at a time)
-
-    SECURITY: Requires confirmed=True and max 10 nodes per call
-
-    Args:
-        node_ids: List of node IDs to delete
-        confirmed: Must be True to execute deletion
-
-    Returns:
-        Dict with result (deleted_node_ids, affected_edge_ids, success, message)
-    """
-    result = graph.delete_nodes(node_ids, confirmed)
-    return result.model_dump()
-
-
-@tool_wrapper
-def get_graph_stats(communities: Optional[List[str]] = None) -> Dict[str, Any]:
-    """
-    Get statistics for the graph
-
-    Args:
-        communities: Optional list of communities to filter on
-
-    Returns:
-        Dict with statistics (total_nodes, total_edges, nodes_by_type, nodes_by_community)
-    """
-    stats = graph.get_stats(communities)
-    return stats.model_dump()
-
-
-@tool_wrapper
-def list_node_types() -> Dict[str, Any]:
-    """
-    List all allowed node types according to the metamodel
-
-    Returns:
-        Dict with node types and their color coding
-    """
-    return {
-        "node_types": [
-            {
-                "type": nt.value,
-                "color": NODE_COLORS[nt],
-                "description": _get_node_type_description(nt)
-            }
-            for nt in NodeType
-        ]
-    }
-
-
-@tool_wrapper
-def list_relationship_types() -> Dict[str, Any]:
-    """
-    List all allowed relationship types
-
-    Returns:
-        Dict with relationship types
-    """
-    return {
-        "relationship_types": [
-            {
-                "type": rt.value,
-                "description": _get_relationship_description(rt)
-            }
-            for rt in RelationshipType
-        ]
-    }
-
-
-@tool_wrapper
-def save_view(name: str) -> Dict[str, Any]:
-    """
-    Signal intent to save the current view state.
-
-    This tool does NOT save the view data itself (positions, etc.) because
-    the backend does not know the client state. Instead, it acts as a signal
-    for the frontend to capture the current visualization state and save it
-    as a SavedView.
-
-    Args:
-        name: Name of the view to save
-
-    Returns:
-        A signal object that the frontend will intercept.
-    """
-    return {
-        "action": "save_view",
-        "name": name,
-        "message": f"Ready to save view '{name}'. Client will capture current visualization state."
-    }
-
-# Legacy alias for backwards compatibility
-save_visualization_metadata = save_view
-
-
-@tool_wrapper
-def get_saved_view(name: str) -> Dict[str, Any]:
-    """
-    Get a saved view by name and load its content for display.
-
-    This returns the actual nodes and edges that are part of the saved view,
-    NOT the SavedView node itself. The SavedView node is just metadata
-    storage - what the user wants to see is the content it references.
-
-    Note: "Saved view" = a snapshot of nodes/edges/positions saved in the graph.
-          "Current visualization" = what is currently displayed in the GUI.
-
-    Args:
-        name: Name of the saved view
-
-    Returns:
-        The nodes and edges to display in the visualization, with position and hidden node data
-    """
-    print(f"[GetSavedView] Loading saved view: {name}")
-
-    # Search for a node of type SAVED_VIEW (or legacy VISUALIZATION_VIEW) with the given name
-    results = graph.search_nodes(query=name, node_types=[NodeType.SAVED_VIEW, NodeType.VISUALIZATION_VIEW], limit=1)
-
-    if not results:
-        print(f"[GetSavedView] View '{name}' not found")
-        return {
-            "success": False,
-            "error": f"View '{name}' not found."
-        }
-
-    view_node = results[0]
-    print(f"[GetSavedView] Found view node: {view_node.id}")
-
-    # Support both old and new formats
-    # Old format: metadata.node_ids + metadata.positions
-    # New format: metadata.view_data.nodes + metadata.view_data.hidden_nodes
-
-    position_map = {}
-    node_ids = []
-    hidden_node_ids = []
-
-    # Try new format first
-    view_data = view_node.metadata.get('view_data', {})
-    if view_data and 'nodes' in view_data:
-        print(f"[GetSavedView] Using NEW format (view_data)")
-        node_position_data = view_data.get('nodes', [])
-        hidden_node_ids = view_data.get('hidden_nodes', [])
-        position_map = {item['id']: item.get('position') for item in node_position_data if isinstance(item, dict)}
-        node_ids = list(position_map.keys())
-
-    # Fall back to old format
-    elif 'node_ids' in view_node.metadata:
-        print(f"[GetSavedView] Using OLD format (node_ids + positions)")
-        node_ids = view_node.metadata.get('node_ids', [])
-        position_map = view_node.metadata.get('positions', {})
-        hidden_node_ids = view_node.metadata.get('hidden_nodes', [])
-
-    else:
-        print(f"[GetSavedView] View '{name}' has no node data in any format")
-        return {
-            "success": False,
-            "error": f"View '{name}' contains no nodes."
-        }
-
-    print(f"[GetSavedView] Extracted {len(node_ids)} node IDs, {len(hidden_node_ids)} hidden nodes")
-
-    # Filter out group IDs (frontend-only concept, not stored in backend graph)
-    actual_node_ids = [nid for nid in node_ids if not nid.startswith('group-')]
-    group_ids = [nid for nid in node_ids if nid.startswith('group-')]
-
-    if group_ids:
-        print(f"[GetSavedView] Filtered out {len(group_ids)} group IDs (frontend-only)")
-
-    # Fetch all the actual nodes
-    nodes = []
-    missing_nodes = []
-    for node_id in actual_node_ids:
-        node = graph.get_node(node_id)
-        if node:
-            nodes.append(node.model_dump())
-        else:
-            missing_nodes.append(node_id)
-
-    if missing_nodes:
-        print(f"[GetSavedView] WARNING: {len(missing_nodes)} real nodes not found: {missing_nodes[:5]}")
-
-    if not nodes:
-        print(f"[GetSavedView] No nodes could be loaded from view '{name}'")
-        return {
-            "success": False,
-            "error": f"No nodes could be loaded from view '{name}'. The referenced nodes may have been deleted."
-        }
-
-    # Get all edges between these nodes
-    node_id_set = set(actual_node_ids)
-    edges = []
-    for edge in graph.edges.values():
-        if edge.source in node_id_set and edge.target in node_id_set:
-            edges.append(edge.model_dump())
-
-    print(f"[GetSavedView] Successfully loaded {len(nodes)} nodes and {len(edges)} edges")
-
-    # Extract group positions for frontend to restore
-    group_data = []
-    for group_id in group_ids:
-        group_position = position_map.get(group_id)
-        if group_position:
-            group_data.append({
-                "id": group_id,
-                "position": group_position
-            })
-
-    if group_data:
-        print(f"[GetSavedView] Returning {len(group_data)} groups to restore")
-
-    return {
-        "success": True,
-        "nodes": nodes,
-        "edges": edges,
-        "positions": position_map,
-        "hidden_node_ids": hidden_node_ids,
-        "groups": group_data,  # Frontend groups to restore
-        "action": "load_visualization"  # Signal for frontend
-    }
-
-# Legacy alias for backwards compatibility
-get_visualization = get_saved_view
-
-
-@tool_wrapper
-def list_saved_views() -> Dict[str, Any]:
-    """
-    List all saved views.
-
-    Returns a list of all saved view snapshots stored in the graph.
-    These are NOT the current visualization - they are saved snapshots
-    that can be loaded to restore a specific graph view.
-
-    Returns:
-        List of all SavedView nodes with their names and summaries
-    """
-    print("[ListSavedViews] Listing all saved views...")
-
-    # Search for all SavedView nodes (including legacy VisualizationView)
-    views = graph.search_nodes(query="", node_types=[NodeType.SAVED_VIEW, NodeType.VISUALIZATION_VIEW], limit=100)
-
-    print(f"[ListSavedViews] Found {len(views)} saved views")
-
-    # Format the views for display
-    view_list = []
-    for view in views:
-        view_info = {
-            "name": view.name,
-            "description": view.description,
-            "summary": view.summary,
-            "created_at": view.created_at.isoformat() if view.created_at else None,
-            "node_count": len(view.metadata.get('node_ids', [])) if 'node_ids' in view.metadata else len(view.metadata.get('view_data', {}).get('nodes', []))
-        }
-        view_list.append(view_info)
-
-    return {
-        "success": True,
-        "views": view_list,
-        "total": len(view_list)
-    }
-
-# Legacy alias for backwards compatibility
-list_visualizations = list_saved_views
-
-
-def _get_node_type_description(node_type: NodeType) -> str:
-    """Helper for node type descriptions"""
-    descriptions = {
-        NodeType.ACTOR: "Government agencies, organizations",
-        NodeType.COMMUNITY: "Communities (eSam, Myndigheter, etc.)",
-        NodeType.INITIATIVE: "Projects, collaborative activities",
-        NodeType.CAPABILITY: "Capabilities (procurement, IT development, etc.)",
-        NodeType.RESOURCE: "Outputs (reports, software, etc.)",
-        NodeType.LEGISLATION: "Laws and directives (NIS2, GDPR, etc.)",
-        NodeType.THEME: "Themes (AI, data strategies, etc.)",
-        NodeType.SAVED_VIEW: "Saved graph view snapshots for quick navigation",
-        NodeType.VISUALIZATION_VIEW: "Saved graph view snapshots (legacy)"
-    }
-    return descriptions.get(node_type, "")
-
-
-def _get_relationship_description(rel_type: RelationshipType) -> str:
-    """Helper for relationship type descriptions"""
-    descriptions = {
-        RelationshipType.BELONGS_TO: "Belongs to (actor belongs to community, initiative belongs to actor)",
-        RelationshipType.IMPLEMENTS: "Implements (initiative implements legislation)",
-        RelationshipType.PRODUCES: "Produces (initiative produces resource/capability)",
-        RelationshipType.GOVERNED_BY: "Governed by (initiative governed by legislation)",
-        RelationshipType.RELATES_TO: "Relates to (general connection)",
-        RelationshipType.PART_OF: "Part of (component is part of larger whole)"
-    }
-    return descriptions.get(rel_type, "")
 
 
 # Instructions for LLM when using MCP
@@ -923,11 +273,10 @@ Start responses directly with information rather than enthusiastic acknowledgmen
 if __name__ == "__main__":
     # Start MCP server
     print("Starting Community Knowledge Graph MCP Server...")
-    print(f"Loaded graph with {len(graph.nodes)} nodes and {len(graph.edges)} edges")
+    print(f"Loaded graph with {len(graph_storage.nodes)} nodes and {len(graph_storage.edges)} edges")
     print(SYSTEM_PROMPT)
 
     # Run as HTTP server on port 8000 (required for frontend)
     import uvicorn
-    # Get the ASGI application from FastMCP using streamable HTTP transport
     app = mcp.streamable_http_app()
     uvicorn.run(app, host="0.0.0.0", port=8000)
