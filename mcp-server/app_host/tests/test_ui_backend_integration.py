@@ -16,9 +16,9 @@ import io
 class TestUIBackendMounting:
     """Tests that UI Backend is correctly mounted."""
 
-    def test_ui_endpoints_available(self, test_app):
+    def test_ui_endpoints_available(self, test_app_with_mock):
         """UI Backend endpoints should be accessible."""
-        client, _ = test_app
+        client, _ = test_app_with_mock
         # Check /ui/info endpoint
         response = client.get("/ui/info")
         assert response.status_code == 200
@@ -26,17 +26,17 @@ class TestUIBackendMounting:
         assert "provider" in data
         assert "available_tools" in data
 
-    def test_root_includes_ui_endpoint(self, test_app):
+    def test_root_includes_ui_endpoint(self, test_app_with_mock):
         """Root endpoint should list /ui endpoint."""
-        client, _ = test_app
+        client, _ = test_app_with_mock
         response = client.get("/")
         assert response.status_code == 200
         data = response.json()
         assert "/ui" in data["endpoints"]["ui"]
 
-    def test_supported_formats_endpoint(self, test_app):
+    def test_supported_formats_endpoint(self, test_app_with_mock):
         """Supported formats endpoint should work."""
-        client, _ = test_app
+        client, _ = test_app_with_mock
         response = client.get("/ui/supported-formats")
         assert response.status_code == 200
         data = response.json()
@@ -47,9 +47,9 @@ class TestUIBackendMounting:
 class TestChatIntegration:
     """Integration tests for chat with GraphService."""
 
-    def test_chat_with_search_tool(self, test_app):
+    def test_chat_with_search_tool(self, test_app_with_mock):
         """Chat search should query GraphService and return results."""
-        client, mock_llm = test_app
+        client, mock_llm = test_app_with_mock
         mock_llm.mock_tool_calls = [
             {"name": "search_graph", "input": {"query": "Test", "limit": 10}}
         ]
@@ -66,9 +66,9 @@ class TestChatIntegration:
         tool_result = data["toolResult"]
         assert tool_result.get("total", 0) >= 1 or len(tool_result.get("nodes", [])) >= 1
 
-    def test_chat_add_node_updates_graph(self, test_app):
+    def test_chat_add_node_updates_graph(self, test_app_with_mock):
         """Adding a node via chat should persist in GraphService."""
-        client, mock_llm = test_app
+        client, mock_llm = test_app_with_mock
         # First add a node
         mock_llm.mock_tool_calls = [
             {
@@ -108,9 +108,9 @@ class TestChatIntegration:
         tool_result = data["toolResult"]
         assert tool_result.get("total", 0) >= 1 or len(tool_result.get("nodes", [])) >= 1
 
-    def test_chat_update_node_persists(self, test_app):
+    def test_chat_update_node_persists(self, test_app_with_mock):
         """Updating a node via chat should persist in GraphService."""
-        client, mock_llm = test_app
+        client, mock_llm = test_app_with_mock
         # Update existing node from sample data
         mock_llm.mock_tool_calls = [
             {
@@ -134,9 +134,9 @@ class TestChatIntegration:
         data = response.json()
         assert data["node"]["description"] == "Updated via integration test"
 
-    def test_chat_delete_node_removes_from_graph(self, test_app):
+    def test_chat_delete_node_removes_from_graph(self, test_app_with_mock):
         """Deleting a node via chat should remove it from GraphService."""
-        client, mock_llm = test_app
+        client, mock_llm = test_app_with_mock
         # First add a node to delete
         mock_llm.mock_tool_calls = [
             {
@@ -185,9 +185,9 @@ class TestChatIntegration:
 class TestDocumentUploadIntegration:
     """Integration tests for document upload."""
 
-    def test_upload_text_file_extracts_content(self, test_app):
+    def test_upload_text_file_extracts_content(self, test_app_with_mock):
         """Uploading a text file should extract content."""
-        client, _ = test_app
+        client, _ = test_app_with_mock
         file_content = b"This is a test document about government services."
 
         response = client.post(
@@ -200,9 +200,9 @@ class TestDocumentUploadIntegration:
         assert data["success"]
         assert "government" in data["text"].lower()
 
-    def test_upload_with_analysis(self, test_app):
+    def test_upload_with_analysis(self, test_app_with_mock):
         """Uploading with analysis should process through ChatService."""
-        client, mock_llm = test_app
+        client, mock_llm = test_app_with_mock
         mock_llm.mock_tool_calls = []
         mock_llm.mock_text_response = "The document discusses government services."
 
@@ -219,9 +219,9 @@ class TestDocumentUploadIntegration:
         assert data["success"]
         assert data["chat_response"] is not None
 
-    def test_upload_unsupported_format_rejected(self, test_app):
+    def test_upload_unsupported_format_rejected(self, test_app_with_mock):
         """Unsupported file formats should be rejected."""
-        client, _ = test_app
+        client, _ = test_app_with_mock
         response = client.post(
             "/ui/upload",
             files={"file": ("test.xyz", io.BytesIO(b"data"), "application/octet-stream")},
@@ -236,9 +236,9 @@ class TestDocumentUploadIntegration:
 class TestGraphServiceSharing:
     """Tests that GraphService is properly shared between REST and UI Backend."""
 
-    def test_rest_and_chat_share_graph(self, test_app):
+    def test_rest_and_chat_share_graph(self, test_app_with_mock):
         """REST API and Chat should share the same GraphService."""
-        client, mock_llm = test_app
+        client, mock_llm = test_app_with_mock
         # Add node via REST API
         response = client.post("/api/nodes", json={
             "nodes": [{
@@ -266,9 +266,9 @@ class TestGraphServiceSharing:
         tool_result = data["toolResult"]
         assert tool_result.get("total", 0) >= 1 or len(tool_result.get("nodes", [])) >= 1
 
-    def test_chat_changes_visible_in_rest(self, test_app):
+    def test_chat_changes_visible_in_rest(self, test_app_with_mock):
         """Changes made via chat should be visible via REST API."""
-        client, mock_llm = test_app
+        client, mock_llm = test_app_with_mock
         # Add node via chat
         mock_llm.mock_tool_calls = [
             {
@@ -298,9 +298,9 @@ class TestGraphServiceSharing:
         assert data["success"]
         assert data["node"]["name"] == "Chat to REST"
 
-    def test_mcp_and_chat_share_graph(self, test_app):
+    def test_mcp_and_chat_share_graph(self, test_app_with_mock):
         """MCP execute_tool and Chat should share the same GraphService."""
-        client, mock_llm = test_app
+        client, mock_llm = test_app_with_mock
         # Add node via execute_tool (MCP)
         response = client.post("/execute_tool", json={
             "tool_name": "add_nodes",
@@ -334,9 +334,9 @@ class TestGraphServiceSharing:
 class TestSimpleChatEndpoint:
     """Tests for simplified chat endpoint."""
 
-    def test_simple_chat_works(self, test_app):
+    def test_simple_chat_works(self, test_app_with_mock):
         """Simple chat endpoint should work."""
-        client, mock_llm = test_app
+        client, mock_llm = test_app_with_mock
         mock_llm.mock_tool_calls = []
         mock_llm.mock_text_response = "Hello! I can help with the graph."
 

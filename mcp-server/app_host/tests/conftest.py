@@ -67,6 +67,20 @@ class MockLLMProvider:
         self.mock_text_response: str = "Mock response from LLM"
         self.call_count = 0
 
+    def set_response(self, text: str, tool_use: Dict[str, Any] = None):
+        """Configure the mock response for the next call.
+
+        Args:
+            text: Text response to return
+            tool_use: Optional tool use dict with 'name' and 'input' keys
+        """
+        self.mock_text_response = text
+        if tool_use:
+            self.mock_tool_calls = [tool_use]
+        else:
+            self.mock_tool_calls = []
+        self.call_count = 0
+
     def create_completion(self, messages, system_prompt, tools, max_tokens=4096):
         from llm_providers import LLMResponse
         self.call_count += 1
@@ -206,7 +220,24 @@ def app_config(temp_graph_file, temp_static_dirs) -> AppConfig:
 
 
 @pytest.fixture
-def test_app(app_config, mock_llm_provider):
+def test_app(app_config, mock_llm_provider) -> TestClient:
+    """Create test application with TestClient.
+
+    Returns TestClient for backwards compatibility with existing tests.
+    For tests that need to configure the mock LLM, use test_app_with_mock.
+    """
+    # Patch LLM provider BEFORE creating app
+    with patch('chat_logic.create_provider', return_value=mock_llm_provider):
+        with patch.dict(os.environ, {'ANTHROPIC_API_KEY': 'test-key'}):
+            app = create_app(app_config)
+            # Update the chat service to use our mock
+            if hasattr(app.state, 'chat_service'):
+                app.state.chat_service._processor.default_api_key = 'test-key'
+            yield TestClient(app)
+
+
+@pytest.fixture
+def test_app_with_mock(app_config, mock_llm_provider):
     """Create test application with TestClient and mocked LLM.
 
     Returns a tuple of (TestClient, mock_llm_provider) for tests that need to configure the mock.

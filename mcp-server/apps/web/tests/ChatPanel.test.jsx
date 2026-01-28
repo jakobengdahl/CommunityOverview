@@ -36,7 +36,7 @@ describe('ChatPanel', () => {
       render(<ChatPanel onClose={mockOnClose} />);
 
       expect(screen.getByText('Graph Assistant')).toBeInTheDocument();
-      expect(screen.getByRole('button', { name: /close/i })).toBeInTheDocument();
+      expect(screen.getByTitle(/close chat/i)).toBeInTheDocument();
     });
 
     it('shows welcome message when no messages', () => {
@@ -117,8 +117,10 @@ describe('ChatPanel', () => {
       await user.type(input, 'Search');
       await user.click(screen.getByRole('button', { name: /send/i }));
 
+      // Check that the send button shows "Processing..."
       await waitFor(() => {
-        expect(screen.getByText(/processing/i)).toBeInTheDocument();
+        const sendButton = screen.getByRole('button', { name: /processing/i });
+        expect(sendButton).toBeInTheDocument();
       });
     });
 

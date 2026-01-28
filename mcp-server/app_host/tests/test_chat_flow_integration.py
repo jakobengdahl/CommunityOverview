@@ -17,9 +17,9 @@ from fastapi.testclient import TestClient
 class TestChatFlowIntegration:
     """Integration tests for complete chat workflows."""
 
-    def test_chat_search_flow(self, test_app):
+    def test_chat_search_flow(self, test_app_with_mock):
         """Test: User searches for nodes via chat, results appear in graph."""
-        client, mock_llm = test_app
+        client, mock_llm = test_app_with_mock
 
         # First add a test node
         response = client.post(
@@ -68,9 +68,9 @@ class TestChatFlowIntegration:
         # Search should return results
         assert tool_result.get("total", 0) >= 1 or len(tool_result.get("nodes", [])) >= 1
 
-    def test_chat_add_node_flow(self, test_app):
+    def test_chat_add_node_flow(self, test_app_with_mock):
         """Test: Full flow of adding a node via chat with confirmation."""
-        client, mock_llm = test_app
+        client, mock_llm = test_app_with_mock
 
         # Step 1: User requests to add a node
         mock_llm.set_response(
@@ -117,9 +117,9 @@ class TestChatFlowIntegration:
         assert node_data["node"]["name"] == "Smart City Initiative"
         assert node_data["node"]["type"] == "Initiative"
 
-    def test_chat_update_node_flow(self, test_app):
+    def test_chat_update_node_flow(self, test_app_with_mock):
         """Test: Update an existing node via chat."""
-        client, mock_llm = test_app
+        client, mock_llm = test_app_with_mock
 
         # Create a node first
         response = client.post(
@@ -172,9 +172,9 @@ class TestChatFlowIntegration:
         assert "Updated description" in node_data["description"]
         assert "updated" in node_data["tags"]
 
-    def test_chat_delete_flow_with_confirmation(self, test_app):
+    def test_chat_delete_flow_with_confirmation(self, test_app_with_mock):
         """Test: Delete nodes via chat requires confirmation."""
-        client, mock_llm = test_app
+        client, mock_llm = test_app_with_mock
 
         # Create nodes to delete
         response = client.post(
@@ -248,9 +248,9 @@ class TestChatFlowIntegration:
             else:
                 assert response.status_code == 404
 
-    def test_chat_conversation_context(self, test_app):
+    def test_chat_conversation_context(self, test_app_with_mock):
         """Test: Chat maintains conversation context across messages."""
-        client, mock_llm = test_app
+        client, mock_llm = test_app_with_mock
 
         # First message
         mock_llm.set_response("I found 5 initiatives in the graph.")
@@ -281,9 +281,9 @@ class TestChatFlowIntegration:
         assert response.status_code == 200
         # The mock received all messages in context
 
-    def test_chat_with_document_context(self, test_app):
+    def test_chat_with_document_context(self, test_app_with_mock):
         """Test: Chat can analyze uploaded document content."""
-        client, mock_llm = test_app
+        client, mock_llm = test_app_with_mock
 
         # Upload a document
         from io import BytesIO
@@ -319,9 +319,9 @@ class TestChatFlowIntegration:
         result = response.json()
         assert "AI governance" in result["content"] or result.get("toolUsed")
 
-    def test_propose_nodes_from_text_endpoint(self, test_app):
+    def test_propose_nodes_from_text_endpoint(self, test_app_with_mock):
         """Test: propose-nodes endpoint extracts entities from text."""
-        client, mock_llm = test_app
+        client, mock_llm = test_app_with_mock
 
         # Configure mock to return extracted entities
         mock_llm.set_response(
@@ -344,9 +344,9 @@ class TestChatFlowIntegration:
             assert len(result["proposed_nodes"]) >= 1
             assert result.get("requires_confirmation")
 
-    def test_chat_simple_endpoint(self, test_app):
+    def test_chat_simple_endpoint(self, test_app_with_mock):
         """Test: Simple chat endpoint for quick queries."""
-        client, mock_llm = test_app
+        client, mock_llm = test_app_with_mock
 
         mock_llm.set_response("The graph currently contains 10 nodes and 5 edges.")
 
@@ -358,9 +358,9 @@ class TestChatFlowIntegration:
         result = response.json()
         assert "content" in result
 
-    def test_mcp_and_rest_share_graph_state(self, test_app):
+    def test_mcp_and_rest_share_graph_state(self, test_app_with_mock):
         """Test: Changes via chat affect REST API and vice versa."""
-        client, mock_llm = test_app
+        client, mock_llm = test_app_with_mock
 
         # Add node via REST
         response = client.post(
@@ -432,9 +432,9 @@ class TestChatFlowIntegration:
         nodes = response.json()["nodes"]
         assert any(n.get("name") == "Chat Created Node" for n in nodes)
 
-    def test_widget_compatible_response_format(self, test_app):
+    def test_widget_compatible_response_format(self, test_app_with_mock):
         """Test: Chat responses are compatible with ChatGPT widget format."""
-        client, mock_llm = test_app
+        client, mock_llm = test_app_with_mock
 
         mock_llm.set_response(
             "Here are the search results.",
