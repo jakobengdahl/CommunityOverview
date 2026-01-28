@@ -16,6 +16,7 @@ function App() {
     hiddenNodeIds,
     addNodesToVisualization,
     updateVisualization,
+    toggleNodeVisibility,
     stats,
     setStats,
     editingNode,
@@ -60,6 +61,12 @@ function App() {
   const handleEdit = useCallback((nodeId, nodeData) => {
     setEditingNode({ id: nodeId, data: nodeData });
   }, [setEditingNode]);
+
+  // Callback: Hide node
+  const handleHide = useCallback((nodeId) => {
+    toggleNodeVisibility(nodeId);
+    showNotification('info', 'Nod dold');
+  }, [toggleNodeVisibility, showNotification]);
 
   // Callback: Delete node
   const handleDelete = useCallback(async (nodeId) => {
@@ -143,6 +150,7 @@ function App() {
             onExpand={handleExpand}
             onEdit={handleEdit}
             onDelete={handleDelete}
+            onHide={handleHide}
             onCreateGroup={handleCreateGroup}
             onSaveView={handleSaveView}
           />

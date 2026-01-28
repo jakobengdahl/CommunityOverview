@@ -28,6 +28,7 @@ import './GraphCanvas.css';
  * @param {Function} props.onExpand - Called when expand button clicked (nodeId, nodeData)
  * @param {Function} props.onEdit - Called when edit button clicked (nodeId, nodeData)
  * @param {Function} props.onDelete - Called when delete requested (nodeId)
+ * @param {Function} props.onHide - Called when hide requested (nodeId)
  * @param {Function} props.onCreateGroup - Called when creating a group (position)
  * @param {Function} props.onSaveView - Called when save view requested (viewData)
  * @param {Function} props.onNodePositionChange - Called when node positions change
@@ -41,6 +42,7 @@ function GraphCanvasInner({
   onExpand,
   onEdit,
   onDelete,
+  onHide,
   onCreateGroup,
   onSaveView,
   onNodePositionChange,
@@ -48,6 +50,7 @@ function GraphCanvasInner({
 }) {
   const [loadedNodeCount, setLoadedNodeCount] = useState(INITIAL_LOAD_COUNT);
   const [contextMenu, setContextMenu] = useState(null);
+  const [nodeContextMenu, setNodeContextMenu] = useState(null);
   const [notification, setNotification] = useState(null);
   const reactFlowWrapper = useRef(null);
   const rightDragStart = useRef({ x: 0, y: 0, time: null });
@@ -296,6 +299,24 @@ function GraphCanvasInner({
     setLoadedNodeCount(prev => Math.min(prev + 100, visibleNodes.length));
   }, [visibleNodes.length]);
 
+  // Node context menu handler
+  const onNodeContextMenu = useCallback((event, node) => {
+    event.preventDefault();
+    event.stopPropagation();
+    setContextMenu(null);
+    setNodeContextMenu({
+      x: event.clientX,
+      y: event.clientY,
+      node: node,
+    });
+  }, []);
+
+  // Close all context menus
+  const closeAllMenus = useCallback(() => {
+    setContextMenu(null);
+    setNodeContextMenu(null);
+  }, []);
+
   const nodeTypes = useMemo(() => ({
     custom: CustomNode,
     group: GroupNode,
@@ -341,7 +362,8 @@ function GraphCanvasInner({
             onConnect={onConnect}
             onNodeDragStop={onNodeDragStop}
             onPaneContextMenu={onPaneContextMenu}
-            onPaneClick={() => setContextMenu(null)}
+            onNodeContextMenu={onNodeContextMenu}
+            onPaneClick={closeAllMenus}
             onPaneMouseDown={(event) => {
               if (event.button === 2) {
                 rightDragStart.current = {
@@ -354,6 +376,8 @@ function GraphCanvasInner({
             nodeTypes={nodeTypes}
             fitView
             fitViewOptions={{ padding: 0.2, duration: 800 }}
+            minZoom={0.1}
+            maxZoom={2}
             attributionPosition="bottom-right"
             defaultEdgeOptions={{ animated: true, style: { strokeWidth: 2 } }}
             panOnDrag={[0, 2]}
@@ -374,8 +398,52 @@ function GraphCanvasInner({
           className="graph-context-menu"
           style={{ left: contextMenu.x, top: contextMenu.y }}
         >
-          <button onClick={handleAddGroup}>📁 Add Group</button>
-          {onSaveView && <button onClick={handleSaveView}>💾 Save View</button>}
+          <button onClick={handleAddGroup}>📁 Lägg till grupp</button>
+          {onSaveView && <button onClick={handleSaveView}>💾 Spara vy</button>}
+        </div>
+      )}
+
+      {nodeContextMenu && (
+        <div
+          className="graph-context-menu node-context-menu"
+          style={{ left: nodeContextMenu.x, top: nodeContextMenu.y }}
+        >
+          <div className="context-menu-header">{nodeContextMenu.node.data?.label}</div>
+          {onEdit && (
+            <button onClick={() => {
+              onEdit(nodeContextMenu.node.id, nodeContextMenu.node.data);
+              setNodeContextMenu(null);
+            }}>
+              ✏️ Redigera
+            </button>
+          )}
+          {onHide && (
+            <button onClick={() => {
+              onHide(nodeContextMenu.node.id);
+              setNodeContextMenu(null);
+            }}>
+              👁️ Dölj
+            </button>
+          )}
+          {onExpand && (
+            <button onClick={() => {
+              onExpand(nodeContextMenu.node.id, nodeContextMenu.node.data);
+              setNodeContextMenu(null);
+            }}>
+              🔍 Expandera
+            </button>
+          )}
+          {onDelete && (
+            <>
+              <div className="context-menu-separator"></div>
+              <button className="context-menu-danger" onClick={() => {
+                onDelete(nodeContextMenu.node.id);
+                setNodeContextMenu(null);
+              }}>
+                🗑️ Ta bort
+              </button>
+            </>
+          )}
         </div>
       )}
 

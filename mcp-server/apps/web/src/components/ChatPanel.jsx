@@ -136,9 +136,10 @@ function ChatPanel() {
           }
         }
         // Handle standard node/edge updates (search results, etc.)
+        // Use updateVisualization to clear and replace (not add to existing)
         else if (toolResult.nodes && toolResult.nodes.length > 0) {
           const filteredNodes = filterCommunityNodes(toolResult.nodes);
-          addNodesToVisualization(filteredNodes, toolResult.edges || []);
+          updateVisualization(filteredNodes, toolResult.edges || []);
         }
       }
 

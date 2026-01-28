@@ -107,6 +107,33 @@
   background: rgba(100, 108, 255, 0.2);
 }
 
+.context-menu-header {
+  padding: 8px 12px;
+  font-weight: 600;
+  color: #fff;
+  border-bottom: 1px solid #444;
+  margin-bottom: 4px;
+  font-size: 13px;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  max-width: 200px;
+}
+
+.context-menu-separator {
+  height: 1px;
+  background: #444;
+  margin: 4px 0;
+}
+
+.context-menu-danger {
+  color: #EF4444 !important;
+}
+
+.context-menu-danger:hover {
+  background: rgba(239, 68, 68, 0.2) !important;
+}
+
 .graph-notification {
   position: absolute;
   bottom: 20px;
