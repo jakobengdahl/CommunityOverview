@@ -36,20 +36,48 @@ pip install -r requirements.txt
 
 ## Användning
 
-### Starta MCP server
+### Starta server
 ```bash
-python server.py
+cd mcp-server
+uvicorn app_host.server:get_app --factory --reload --port 8000
+```
+
+Servern tillhandahåller:
+- **REST API**: http://localhost:8000/api/
+- **MCP endpoint**: http://localhost:8000/mcp
+- **Chat API**: http://localhost:8000/ui/
+
+### Starta webbappen
+```bash
+cd mcp-server/apps/web
+npm run dev
 ```
 
 ### Kör tester
 ```bash
-python test_graph.py
+# Python-tester
+cd mcp-server
+pytest
+
+# JavaScript-tester
+npm test
+
+# E2E-tester
+cd apps/web && npm run test:e2e
 ```
 
-### Kör pytest
-```bash
-pytest
-```
+## Chattfunktionalitet
+
+Webbappen innehåller en ChatPanel för konversationsbaserad interaktion med grafen:
+
+- **Sök och fråga**: "Hitta AI-projekt", "Visa aktörer i eSam"
+- **Lägg till noder**: "Lägg till ett initiativ om digital identitet"
+- **Nodförslag**: LLM föreslår noder med dublettkontroll, användaren måste bekräfta
+- **Dokumentuppladdning**: Ladda upp PDF, Word eller textfiler för analys
+
+### ChatGPT-widget
+
+Samma chattfunktionalitet finns som en inbäddningsbar widget (`apps/widget/`). Widgeten kan bäddas in i ChatGPT eller andra gränssnitt som stöder custom widgets.
 
 ## Metamodell
 

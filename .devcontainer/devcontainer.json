@@ -23,17 +23,17 @@
       }
     }
   },
-  "forwardPorts": [3000, 8000],
+  "forwardPorts": [5173, 8000],
   "portsAttributes": {
-    "3000": {
-      "label": "Frontend",
+    "5173": {
+      "label": "Frontend Dev Server",
       "onAutoForward": "notify"
     },
     "8000": {
-      "label": "MCP Server",
-      "onAutoForward": "silent"
+      "label": "Backend Server",
+      "onAutoForward": "notify"
     }
   },
-  "postCreateCommand": "pip install --no-cache-dir -r mcp-server/requirements.txt && cd frontend && npm install",
+  "postCreateCommand": "pip install --no-cache-dir -r mcp-server/requirements.txt && cd mcp-server && npm install",
   "remoteUser": "vscode"
 }

@@ -1,151 +1,96 @@
 #!/bin/bash
-# Community Knowledge Graph - Development Startup Script
-# Starts both MCP server (backend) and React frontend (frontend) concurrently
+#
+# Start Development Environment
+# This script sets up and starts all services needed to run the full application.
+#
 
-set -e  # Exit on error
+set -e
 
 # Colors for output
-GREEN='\033[0;32m'
-BLUE='\033[0;34m'
-YELLOW='\033[1;33m'
 RED='\033[0;31m'
+GREEN='\033[0;32m'
+YELLOW='\033[1;33m'
+BLUE='\033[0;34m'
 NC='\033[0m' # No Color
 
-# Project root directory
-PROJECT_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+echo -e "${BLUE}========================================${NC}"
+echo -e "${BLUE}  Community Knowledge Graph - Dev Start${NC}"
+echo -e "${BLUE}========================================${NC}"
 
-echo -e "${BLUE}================================================${NC}"
-echo -e "${BLUE}  Community Knowledge Graph - Development Mode${NC}"
-echo -e "${BLUE}================================================${NC}"
-echo ""
+# Get the directory where the script is located
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+MCP_SERVER_DIR="$SCRIPT_DIR/mcp-server"
 
-# Function to cleanup on exit
-cleanup() {
-    echo ""
-    echo -e "${YELLOW}Shutting down services...${NC}"
+cd "$MCP_SERVER_DIR"
 
-    # Kill backend if running
-    if [ ! -z "$BACKEND_PID" ]; then
-        echo -e "${YELLOW}Stopping backend (PID: $BACKEND_PID)...${NC}"
-        kill $BACKEND_PID 2>/dev/null || true
-    fi
-
-    # Kill frontend if running
-    if [ ! -z "$FRONTEND_PID" ]; then
-        echo -e "${YELLOW}Stopping frontend (PID: $FRONTEND_PID)...${NC}"
-        kill $FRONTEND_PID 2>/dev/null || true
-    fi
-
-    echo -e "${GREEN}✓ Services stopped${NC}"
-    exit 0
-}
-
-# Set up trap to catch Ctrl+C and other termination signals
-trap cleanup SIGINT SIGTERM
-
-# Check for Python
-if ! command -v python3 &> /dev/null; then
-    echo -e "${RED}✗ Python 3 is not installed${NC}"
-    echo "Please install Python 3.8 or higher"
-    exit 1
-fi
-
-# Check for Node.js
-if ! command -v node &> /dev/null; then
-    echo -e "${RED}✗ Node.js is not installed${NC}"
-    echo "Please install Node.js 16 or higher"
-    exit 1
-fi
-
-echo -e "${BLUE}1. Checking Backend Dependencies...${NC}"
-cd "$PROJECT_ROOT/mcp-server"
+# =====================
+# Python Environment
+# =====================
+echo -e "\n${YELLOW}[1/5] Setting up Python environment...${NC}"
 
 if [ ! -d "venv" ]; then
-    echo -e "${YELLOW}Creating Python virtual environment...${NC}"
+    echo "Creating virtual environment..."
     python3 -m venv venv
 fi
 
+# Activate virtual environment
 source venv/bin/activate
 
-# Check if requirements are installed
-if ! python -c "import anthropic" 2>/dev/null; then
-    echo -e "${YELLOW}Installing backend dependencies (optimized for disk space)...${NC}"
-    pip install --no-cache-dir -q -r requirements.txt
-    echo -e "${GREEN}✓ Backend dependencies installed${NC}"
-else
-    echo -e "${GREEN}✓ Backend dependencies already installed${NC}"
-fi
+# Install Python dependencies
+echo "Installing Python dependencies..."
+pip install -q -r requirements.txt
 
-# Check if sentence-transformers is installed (ML features)
-if ! python -c "import sentence_transformers" 2>/dev/null; then
-    echo -e "${YELLOW}⚠️  ML dependencies not fully installed${NC}"
-    echo -e "${YELLOW}   Re-run: pip install --no-cache-dir -r requirements.txt${NC}"
-fi
+echo -e "${GREEN}Python environment ready.${NC}"
 
-echo ""
-echo -e "${BLUE}2. Checking Frontend Dependencies...${NC}"
-cd "$PROJECT_ROOT/frontend"
+# =====================
+# Node.js Dependencies
+# =====================
+echo -e "\n${YELLOW}[2/5] Installing Node.js dependencies...${NC}"
 
 if [ ! -d "node_modules" ]; then
-    echo -e "${YELLOW}Installing frontend dependencies...${NC}"
     npm install
-    echo -e "${GREEN}✓ Frontend dependencies installed${NC}"
 else
-    echo -e "${GREEN}✓ Frontend dependencies already installed${NC}"
+    echo "Node modules already installed. Run 'npm install' manually to update."
 fi
 
-echo ""
-echo -e "${BLUE}3. Checking LLM Provider Configuration...${NC}"
+echo -e "${GREEN}Node.js dependencies ready.${NC}"
 
-# Check which provider is configured
-if [ ! -z "$LLM_PROVIDER" ]; then
-    echo -e "${GREEN}✓ LLM_PROVIDER set to: $LLM_PROVIDER${NC}"
-elif [ ! -z "$OPENAI_API_KEY" ]; then
-    echo -e "${GREEN}✓ OPENAI_API_KEY found (will auto-select OpenAI)${NC}"
-elif [ ! -z "$ANTHROPIC_API_KEY" ]; then
-    echo -e "${GREEN}✓ ANTHROPIC_API_KEY found (will auto-select Claude)${NC}"
-else
-    echo -e "${YELLOW}⚠️  No API keys found in environment${NC}"
-    echo -e "${YELLOW}   Backend will start but LLM features won't work${NC}"
-    echo -e "${YELLOW}   Set OPENAI_API_KEY or ANTHROPIC_API_KEY to enable AI${NC}"
-fi
+# =====================
+# Build Web App
+# =====================
+echo -e "\n${YELLOW}[3/5] Building web application...${NC}"
 
-echo ""
-echo -e "${BLUE}4. Starting Services...${NC}"
-echo ""
+npm run build:web
 
-# Start backend
-echo -e "${GREEN}Starting Backend (MCP Server)...${NC}"
-cd "$PROJECT_ROOT/mcp-server"
-source venv/bin/activate
-python server.py &
-BACKEND_PID=$!
-echo -e "${GREEN}✓ Backend started (PID: $BACKEND_PID)${NC}"
-echo -e "  Backend URL: ${BLUE}http://localhost:8000${NC}"
+echo -e "${GREEN}Web app built to apps/web/dist/${NC}"
 
-# Wait a bit for backend to start
-sleep 2
+# =====================
+# Build Widget
+# =====================
+echo -e "\n${YELLOW}[4/5] Building ChatGPT widget...${NC}"
 
-# Start frontend
-echo -e "${GREEN}Starting Frontend (React)...${NC}"
-cd "$PROJECT_ROOT/frontend"
-npm run dev &
-FRONTEND_PID=$!
-echo -e "${GREEN}✓ Frontend started (PID: $FRONTEND_PID)${NC}"
-echo -e "  Frontend URL: ${BLUE}http://localhost:5173${NC}"
+npm run build:widget
 
+echo -e "${GREEN}Widget built to apps/widget/dist/${NC}"
+
+# =====================
+# Start Server
+# =====================
+echo -e "\n${YELLOW}[5/5] Starting FastAPI server...${NC}"
 echo ""
-echo -e "${BLUE}================================================${NC}"
-echo -e "${GREEN}✓ Both services are running!${NC}"
-echo -e "${BLUE}================================================${NC}"
+echo -e "${GREEN}========================================${NC}"
+echo -e "${GREEN}  Services available at:${NC}"
+echo -e "${GREEN}========================================${NC}"
+echo -e "  ${BLUE}Web App:${NC}     http://localhost:8000/web/"
+echo -e "  ${BLUE}Widget:${NC}      http://localhost:8000/widget/"
+echo -e "  ${BLUE}REST API:${NC}    http://localhost:8000/api/"
+echo -e "  ${BLUE}Chat API:${NC}    http://localhost:8000/ui/"
+echo -e "  ${BLUE}MCP:${NC}         http://localhost:8000/mcp"
+echo -e "  ${BLUE}Health:${NC}      http://localhost:8000/health"
 echo ""
-echo -e "📱 Frontend: ${BLUE}http://localhost:5173${NC}"
-echo -e "🔌 Backend:  ${BLUE}http://localhost:8000${NC}"
-echo ""
-echo -e "${YELLOW}Press Ctrl+C to stop both services${NC}"
-echo ""
-echo -e "${BLUE}================================================${NC}"
+echo -e "Press Ctrl+C to stop the server."
+echo -e "${GREEN}========================================${NC}"
 echo ""
 
-# Wait for both processes
-wait $BACKEND_PID $FRONTEND_PID
+# Start the server
+exec uvicorn app_host.server:get_app --factory --reload --host 0.0.0.0 --port 8000

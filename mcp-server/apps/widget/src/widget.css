@@ -1,0 +1,124 @@
+.widget-container {
+  width: 100%;
+  height: 100%;
+  display: flex;
+  flex-direction: column;
+  background: #1a1a2e;
+  color: #eee;
+  font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+  position: relative;
+}
+
+.widget-header {
+  padding: 12px;
+  background: #16213e;
+  border-bottom: 1px solid #0f3460;
+}
+
+.widget-search {
+  display: flex;
+  gap: 8px;
+}
+
+.widget-search input {
+  flex: 1;
+  padding: 8px 12px;
+  background: #0f3460;
+  border: 1px solid #1a4080;
+  border-radius: 6px;
+  color: #eee;
+  font-size: 14px;
+}
+
+.widget-search input:focus {
+  outline: none;
+  border-color: #e94560;
+}
+
+.widget-search input::placeholder {
+  color: #666;
+}
+
+.widget-search button {
+  padding: 8px 16px;
+  background: #e94560;
+  color: white;
+  border: none;
+  border-radius: 6px;
+  font-size: 14px;
+  font-weight: 500;
+  cursor: pointer;
+  transition: background 0.2s;
+}
+
+.widget-search button:hover:not(:disabled) {
+  background: #d63850;
+}
+
+.widget-search button:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
+.widget-canvas {
+  flex: 1;
+  min-height: 0;
+}
+
+.widget-error {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  height: 100%;
+  text-align: center;
+  padding: 40px;
+}
+
+.widget-error h3 {
+  color: #e94560;
+  margin-bottom: 16px;
+}
+
+.widget-error p {
+  color: #999;
+  margin: 8px 0;
+}
+
+.widget-error code {
+  background: #0f3460;
+  padding: 2px 6px;
+  border-radius: 4px;
+  font-size: 0.9em;
+}
+
+.widget-error-banner {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 10px 16px;
+  background: rgba(233, 69, 96, 0.2);
+  border: 1px solid #e94560;
+  color: #e94560;
+  font-size: 14px;
+}
+
+.widget-error-banner button {
+  background: transparent;
+  border: none;
+  color: #e94560;
+  font-size: 18px;
+  cursor: pointer;
+  padding: 0;
+}
+
+.widget-loading {
+  position: absolute;
+  top: 50%;
+  left: 50%;
+  transform: translate(-50%, -50%);
+  background: rgba(22, 33, 62, 0.9);
+  padding: 16px 24px;
+  border-radius: 8px;
+  font-size: 14px;
+}

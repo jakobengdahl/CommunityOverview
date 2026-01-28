@@ -1,0 +1,140 @@
+.graph-group-node {
+  width: 100%;
+  height: 100%;
+  border: 2px solid;
+  border-radius: 8px;
+  background-clip: padding-box;
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+}
+
+.graph-group-header {
+  padding: 8px 12px;
+  font-size: 14px;
+  font-weight: 600;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  border-bottom: 1px solid rgba(255, 255, 255, 0.2);
+  user-select: none;
+}
+
+.graph-group-icon {
+  font-size: 16px;
+  line-height: 1;
+}
+
+.graph-group-label {
+  flex: 1;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.graph-group-label-input {
+  flex: 1;
+  background: rgba(255, 255, 255, 0.2);
+  border: 1px solid rgba(255, 255, 255, 0.4);
+  border-radius: 4px;
+  color: white;
+  padding: 2px 6px;
+  font-size: 14px;
+  font-weight: 600;
+  font-family: inherit;
+}
+
+.graph-group-label-input:focus {
+  outline: none;
+  background: rgba(255, 255, 255, 0.3);
+  border-color: rgba(255, 255, 255, 0.6);
+}
+
+.graph-group-description {
+  padding: 8px 12px;
+  font-size: 12px;
+  color: #666;
+  line-height: 1.4;
+  overflow: auto;
+  flex: 1;
+}
+
+.graph-group-context-menu {
+  position: fixed;
+  background: #2a2a2a;
+  border: 1px solid #444;
+  border-radius: 8px;
+  padding: 8px;
+  box-shadow: 0 4px 12px rgba(0, 0, 0, 0.5);
+  z-index: 1000;
+  min-width: 150px;
+}
+
+.graph-group-context-menu .context-menu-title {
+  font-size: 12px;
+  color: #999;
+  margin-bottom: 8px;
+  padding-bottom: 4px;
+  border-bottom: 1px solid #444;
+}
+
+.graph-group-context-menu .context-menu-colors {
+  display: flex;
+  gap: 6px;
+  margin-bottom: 8px;
+}
+
+.graph-group-context-menu .color-button {
+  width: 24px;
+  height: 24px;
+  border-radius: 50%;
+  border: 2px solid transparent;
+  cursor: pointer;
+  transition: all 0.2s;
+}
+
+.graph-group-context-menu .color-button:hover {
+  transform: scale(1.1);
+  border-color: white;
+}
+
+.graph-group-context-menu .context-menu-delete {
+  width: 100%;
+  background: transparent;
+  border: 1px solid #EF4444;
+  color: #EF4444;
+  padding: 6px 12px;
+  border-radius: 4px;
+  cursor: pointer;
+  font-size: 13px;
+  transition: all 0.2s;
+}
+
+.graph-group-context-menu .context-menu-delete:hover {
+  background: #EF4444;
+  color: white;
+}
+
+/* React Flow NodeResizer handles */
+.react-flow__resize-control.handle {
+  width: 10px;
+  height: 10px;
+  border-radius: 50%;
+}
+
+/* Ensure group nodes appear behind regular nodes */
+.react-flow__node-group {
+  z-index: -1 !important;
+}
+
+.react-flow__node-custom {
+  z-index: 1 !important;
+}
+
+.react-flow__node.selected {
+  z-index: 10 !important;
+}
+
+.react-flow__node-group.selected {
+  z-index: 0 !important;
+}

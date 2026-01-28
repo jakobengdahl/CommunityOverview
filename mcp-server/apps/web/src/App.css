@@ -1,0 +1,113 @@
+.app {
+  width: 100%;
+  height: 100vh;
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+}
+
+.app-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  padding: 12px 20px;
+  background: #1a1a1a;
+  border-bottom: 1px solid #333;
+  flex-shrink: 0;
+}
+
+.app-header h1 {
+  margin: 0;
+  font-size: 1.25rem;
+  font-weight: 600;
+  color: #fff;
+}
+
+.app-content {
+  flex: 1;
+  display: flex;
+  overflow: hidden;
+}
+
+.app-main {
+  flex: 1;
+  position: relative;
+  background: #1e1e1e;
+}
+
+/* Notifications */
+.app-notification {
+  position: fixed;
+  bottom: 20px;
+  left: 50%;
+  transform: translateX(-50%);
+  background: #2a2a2a;
+  border: 1px solid #444;
+  border-radius: 8px;
+  padding: 12px 20px;
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  box-shadow: 0 4px 12px rgba(0, 0, 0, 0.5);
+  z-index: 1000;
+  animation: slideUp 0.3s ease;
+  color: #fff;
+}
+
+@keyframes slideUp {
+  from {
+    opacity: 0;
+    transform: translateX(-50%) translateY(20px);
+  }
+  to {
+    opacity: 1;
+    transform: translateX(-50%) translateY(0);
+  }
+}
+
+.app-notification-success {
+  border-color: #10B981;
+}
+
+.app-notification-info {
+  border-color: #3B82F6;
+}
+
+.app-notification-error {
+  border-color: #EF4444;
+}
+
+.app-notification button {
+  background: transparent;
+  border: none;
+  color: #666;
+  font-size: 18px;
+  padding: 0;
+  line-height: 1;
+  cursor: pointer;
+}
+
+.app-notification button:hover {
+  color: #999;
+}
+
+/* No community message */
+.no-community-selected {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  height: 100%;
+  padding: 2rem;
+  text-align: center;
+}
+
+.no-community-selected h2 {
+  margin-bottom: 1rem;
+  color: #646cff;
+}
+
+.no-community-selected p {
+  color: #888;
+  max-width: 500px;
+}

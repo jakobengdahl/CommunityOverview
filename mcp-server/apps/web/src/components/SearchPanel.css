@@ -1,0 +1,122 @@
+.search-panel h2 {
+  margin: 0 0 16px 0;
+  font-size: 1rem;
+  font-weight: 600;
+  color: #ddd;
+}
+
+.search-panel form {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+
+.search-panel input[type="text"] {
+  width: 100%;
+  padding: 10px 12px;
+  background: #333;
+  border: 1px solid #444;
+  border-radius: 6px;
+  color: #ddd;
+  font-size: 14px;
+}
+
+.search-panel input[type="text"]:focus {
+  outline: none;
+  border-color: #646cff;
+}
+
+.search-panel input[type="text"]::placeholder {
+  color: #666;
+}
+
+.search-buttons {
+  display: flex;
+  gap: 8px;
+}
+
+.search-buttons button {
+  flex: 1;
+  padding: 8px 16px;
+  border-radius: 6px;
+  font-size: 14px;
+  font-weight: 500;
+  transition: all 0.2s;
+}
+
+.search-buttons button:first-child {
+  background: #646cff;
+  color: white;
+  border: none;
+}
+
+.search-buttons button:first-child:hover:not(:disabled) {
+  background: #535bf2;
+}
+
+.search-buttons button.secondary {
+  background: transparent;
+  color: #646cff;
+  border: 1px solid #646cff;
+}
+
+.search-buttons button.secondary:hover:not(:disabled) {
+  background: rgba(100, 108, 255, 0.1);
+}
+
+.search-buttons button:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
+.search-actions {
+  margin-top: 24px;
+  padding-top: 16px;
+  border-top: 1px solid #333;
+}
+
+.export-button {
+  width: 100%;
+  padding: 10px 16px;
+  background: #333;
+  border: 1px solid #444;
+  border-radius: 6px;
+  color: #ddd;
+  font-size: 14px;
+  transition: all 0.2s;
+}
+
+.export-button:hover:not(:disabled) {
+  background: #3a3a3a;
+  border-color: #555;
+}
+
+@media (prefers-color-scheme: light) {
+  .search-panel h2 {
+    color: #333;
+  }
+
+  .search-panel input[type="text"] {
+    background: white;
+    border-color: #ddd;
+    color: #333;
+  }
+
+  .search-panel input[type="text"]::placeholder {
+    color: #999;
+  }
+
+  .search-actions {
+    border-color: #ddd;
+  }
+
+  .export-button {
+    background: white;
+    border-color: #ddd;
+    color: #333;
+  }
+
+  .export-button:hover:not(:disabled) {
+    background: #f5f5f5;
+  }
+}

@@ -1,0 +1,170 @@
+.edit-dialog-overlay {
+  position: fixed;
+  top: 0;
+  left: 0;
+  right: 0;
+  bottom: 0;
+  background: rgba(0, 0, 0, 0.7);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  z-index: 1000;
+}
+
+.edit-dialog {
+  background: #2a2a2a;
+  border: 1px solid #444;
+  border-radius: 12px;
+  width: 90%;
+  max-width: 500px;
+  max-height: 90vh;
+  overflow-y: auto;
+}
+
+.edit-dialog-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  padding: 16px 20px;
+  border-bottom: 1px solid #444;
+}
+
+.edit-dialog-header h2 {
+  margin: 0;
+  font-size: 1.1rem;
+}
+
+.close-button {
+  background: transparent;
+  border: none;
+  color: #888;
+  font-size: 24px;
+  line-height: 1;
+  padding: 0;
+}
+
+.close-button:hover {
+  color: #ddd;
+}
+
+.edit-dialog form {
+  padding: 20px;
+}
+
+.form-group {
+  margin-bottom: 16px;
+}
+
+.form-group label {
+  display: block;
+  margin-bottom: 6px;
+  font-size: 0.9rem;
+  font-weight: 500;
+  color: #bbb;
+}
+
+.form-group input,
+.form-group select,
+.form-group textarea {
+  width: 100%;
+  padding: 10px 12px;
+  background: #333;
+  border: 1px solid #444;
+  border-radius: 6px;
+  color: #ddd;
+  font-size: 14px;
+}
+
+.form-group input:focus,
+.form-group select:focus,
+.form-group textarea:focus {
+  outline: none;
+  border-color: #646cff;
+}
+
+.form-group textarea {
+  resize: vertical;
+  min-height: 80px;
+}
+
+.form-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 12px;
+  padding-top: 16px;
+  border-top: 1px solid #444;
+  margin-top: 8px;
+}
+
+.form-actions button {
+  padding: 10px 20px;
+  border-radius: 6px;
+  font-size: 14px;
+  font-weight: 500;
+}
+
+.form-actions button.primary {
+  background: #646cff;
+  color: white;
+  border: none;
+}
+
+.form-actions button.primary:hover {
+  background: #535bf2;
+}
+
+.form-actions button.secondary {
+  background: transparent;
+  color: #888;
+  border: 1px solid #444;
+}
+
+.form-actions button.secondary:hover {
+  background: #333;
+  color: #ddd;
+}
+
+@media (prefers-color-scheme: light) {
+  .edit-dialog-overlay {
+    background: rgba(0, 0, 0, 0.5);
+  }
+
+  .edit-dialog {
+    background: white;
+    border-color: #ddd;
+  }
+
+  .edit-dialog-header {
+    border-color: #ddd;
+  }
+
+  .edit-dialog-header h2 {
+    color: #333;
+  }
+
+  .form-group label {
+    color: #555;
+  }
+
+  .form-group input,
+  .form-group select,
+  .form-group textarea {
+    background: #fafafa;
+    border-color: #ddd;
+    color: #333;
+  }
+
+  .form-actions {
+    border-color: #ddd;
+  }
+
+  .form-actions button.secondary {
+    border-color: #ddd;
+    color: #666;
+  }
+
+  .form-actions button.secondary:hover {
+    background: #f5f5f5;
+    color: #333;
+  }
+}
