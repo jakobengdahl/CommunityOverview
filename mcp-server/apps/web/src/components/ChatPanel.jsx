@@ -12,8 +12,9 @@ import './ChatPanel.css';
  * - Handle node proposals with approval/rejection
  * - Document upload and analysis integration
  * - Auto-scroll and loading states
+ * - Always visible on left side with fixed width
  */
-function ChatPanel({ onClose }) {
+function ChatPanel() {
   const {
     chatMessages,
     addChatMessage,
@@ -50,6 +51,15 @@ function ChatPanel({ onClose }) {
   }, [error]);
 
   /**
+   * Filter out Community nodes from results
+   */
+  const filterCommunityNodes = (nodeList) => {
+    return nodeList.filter(n =>
+      n.type !== 'Community' && n.data?.type !== 'Community'
+    );
+  };
+
+  /**
    * Send message to backend
    */
   const handleSend = async () => {
@@ -59,10 +69,10 @@ function ChatPanel({ onClose }) {
     let messageContent = inputValue.trim();
 
     if (uploadedFile) {
-      const fileContext = `\n\n[Uploaded file: ${uploadedFile.filename}]\n\nContent:\n${uploadedFile.text}`;
+      const fileContext = `\n\n[Uppladdad fil: ${uploadedFile.filename}]\n\nInnehåll:\n${uploadedFile.text}`;
       messageContent = messageContent
         ? messageContent + fileContext
-        : `Analyze the following document:\n${fileContext}`;
+        : `Analysera följande dokument:\n${fileContext}`;
     }
 
     // Add user message to chat
@@ -80,9 +90,9 @@ function ChatPanel({ onClose }) {
     setError(null);
 
     try {
-      // Build conversation history for API
+      // Build conversation history for API (skip welcome message)
       const conversationMessages = chatMessages
-        .filter(m => m.role !== 'system')
+        .filter(m => m.role !== 'system' && m.id !== 'welcome')
         .map(m => ({ role: m.role, content: m.content }));
 
       conversationMessages.push({ role: 'user', content: messageContent });
@@ -104,8 +114,8 @@ function ChatPanel({ onClose }) {
           const viewNode = {
             name: viewName,
             type: 'SavedView',
-            description: `Saved view: ${viewName}`,
-            summary: `Contains ${currentNodes.length} nodes`,
+            description: `Sparad vy: ${viewName}`,
+            summary: `Innehåller ${currentNodes.length} noder`,
             metadata: {
               node_ids: currentNodes.map(n => n.id),
             },
@@ -121,12 +131,14 @@ function ChatPanel({ onClose }) {
         // Handle load view action
         else if (toolResult.action === 'load_visualization') {
           if (toolResult.nodes && toolResult.nodes.length > 0) {
-            updateVisualization(toolResult.nodes, toolResult.edges || []);
+            const filteredNodes = filterCommunityNodes(toolResult.nodes);
+            updateVisualization(filteredNodes, toolResult.edges || []);
           }
         }
-        // Handle standard node/edge updates
+        // Handle standard node/edge updates (search results, etc.)
         else if (toolResult.nodes && toolResult.nodes.length > 0) {
-          addNodesToVisualization(toolResult.nodes, toolResult.edges || []);
+          const filteredNodes = filterCommunityNodes(toolResult.nodes);
+          addNodesToVisualization(filteredNodes, toolResult.edges || []);
         }
       }
 
@@ -143,6 +155,7 @@ function ChatPanel({ onClose }) {
         deleteConfirmation: toolResult?.requires_confirmation ? {
           nodes_to_delete: toolResult.nodes_to_delete,
           affected_edges: toolResult.affected_edges,
+          node_ids: toolResult.node_ids,
         } : null,
       };
       addChatMessage(assistantMessage);
@@ -151,7 +164,7 @@ function ChatPanel({ onClose }) {
       console.error('[ChatPanel] Error:', err);
       addChatMessage({
         role: 'assistant',
-        content: `Error: ${err.message}`,
+        content: `Fel: ${err.message}`,
         timestamp: new Date(),
       });
       setError(err.message);
@@ -188,11 +201,11 @@ function ChatPanel({ onClose }) {
           text: result.text,
         });
       } else {
-        setError('Could not extract text from file.');
+        setError('Kunde inte extrahera text från filen.');
       }
     } catch (err) {
       console.error('[ChatPanel] Upload error:', err);
-      setError(`Upload failed: ${err.message}`);
+      setError(`Uppladdning misslyckades: ${err.message}`);
     } finally {
       setIsUploading(false);
       if (fileInputRef.current) {
@@ -215,18 +228,21 @@ function ChatPanel({ onClose }) {
    * Approve a node proposal
    */
   const handleApproveProposal = async (proposal) => {
-    const msg = `Yes, add the node "${proposal.node.name}"`;
+    const msg = `Ja, lägg till noden "${proposal.node.name}"`;
     addChatMessage({ role: 'user', content: msg, timestamp: new Date() });
     setIsProcessing(true);
 
     try {
-      const conversationMessages = chatMessages.map(m => ({ role: m.role, content: m.content }));
+      const conversationMessages = chatMessages
+        .filter(m => m.id !== 'welcome')
+        .map(m => ({ role: m.role, content: m.content }));
       conversationMessages.push({ role: 'user', content: msg });
 
       const response = await api.sendChatMessage(conversationMessages);
 
       if (response.toolResult?.nodes) {
-        addNodesToVisualization(response.toolResult.nodes, response.toolResult.edges || []);
+        const filteredNodes = filterCommunityNodes(response.toolResult.nodes);
+        addNodesToVisualization(filteredNodes, response.toolResult.edges || []);
       }
 
       addChatMessage({
@@ -238,7 +254,7 @@ function ChatPanel({ onClose }) {
     } catch (err) {
       addChatMessage({
         role: 'assistant',
-        content: `Error: ${err.message}`,
+        content: `Fel: ${err.message}`,
         timestamp: new Date(),
       });
     } finally {
@@ -250,12 +266,14 @@ function ChatPanel({ onClose }) {
    * Reject a node proposal
    */
   const handleRejectProposal = async (proposal) => {
-    const msg = 'No, do not add the node.';
+    const msg = 'Nej, lägg inte till noden.';
     addChatMessage({ role: 'user', content: msg, timestamp: new Date() });
     setIsProcessing(true);
 
     try {
-      const conversationMessages = chatMessages.map(m => ({ role: m.role, content: m.content }));
+      const conversationMessages = chatMessages
+        .filter(m => m.id !== 'welcome')
+        .map(m => ({ role: m.role, content: m.content }));
       conversationMessages.push({ role: 'user', content: msg });
 
       const response = await api.sendChatMessage(conversationMessages);
@@ -275,12 +293,14 @@ function ChatPanel({ onClose }) {
    * Confirm node deletion
    */
   const handleConfirmDelete = async (deleteConfirmation) => {
-    const msg = 'Yes, delete the nodes.';
+    const msg = 'Ja, ta bort noderna.';
     addChatMessage({ role: 'user', content: msg, timestamp: new Date() });
     setIsProcessing(true);
 
     try {
-      const conversationMessages = chatMessages.map(m => ({ role: m.role, content: m.content }));
+      const conversationMessages = chatMessages
+        .filter(m => m.id !== 'welcome')
+        .map(m => ({ role: m.role, content: m.content }));
       conversationMessages.push({ role: 'user', content: msg });
 
       const response = await api.sendChatMessage(conversationMessages);
@@ -302,7 +322,7 @@ function ChatPanel({ onClose }) {
     } catch (err) {
       addChatMessage({
         role: 'assistant',
-        content: `Error: ${err.message}`,
+        content: `Fel: ${err.message}`,
         timestamp: new Date(),
       });
     } finally {
@@ -316,7 +336,7 @@ function ChatPanel({ onClose }) {
   const handleCancelDelete = () => {
     addChatMessage({
       role: 'assistant',
-      content: 'Deletion cancelled.',
+      content: 'Borttagning avbruten.',
       timestamp: new Date(),
     });
   };
@@ -327,31 +347,16 @@ function ChatPanel({ onClose }) {
   const formatTime = (timestamp) => {
     if (!timestamp) return '';
     const date = new Date(timestamp);
-    return date.toLocaleTimeString('en-US', { hour: '2-digit', minute: '2-digit' });
+    return date.toLocaleTimeString('sv-SE', { hour: '2-digit', minute: '2-digit' });
   };
 
   return (
     <div className="chat-panel">
       <div className="chat-header">
-        <h3>Graph Assistant</h3>
-        <button className="chat-close-button" onClick={onClose} title="Close chat">
-          &times;
-        </button>
+        <h3>Graf-assistent</h3>
       </div>
 
       <div className="chat-messages">
-        {chatMessages.length === 0 && (
-          <div className="chat-welcome">
-            <p>Ask questions about the graph or request modifications.</p>
-            <p className="chat-examples">
-              Examples:
-              <br />- "Show me all AI initiatives"
-              <br />- "Find actors related to NIS2"
-              <br />- "Add a new project about cybersecurity"
-            </p>
-          </div>
-        )}
-
         {chatMessages.map((msg, idx) => (
           <div key={msg.id || idx} className={`chat-message ${msg.role}`}>
             <div className="message-content">
@@ -365,18 +370,18 @@ function ChatPanel({ onClose }) {
                     <span></span>
                     <span></span>
                   </div>
-                  <span className="loading-text">Processing...</span>
+                  <span className="loading-text">Bearbetar...</span>
                 </div>
               )}
 
               {/* Node proposal card */}
               {msg.proposal && (
                 <div className="proposal-card">
-                  <h4>Proposed addition:</h4>
+                  <h4>Föreslaget tillägg:</h4>
                   <div className="proposal-details">
-                    <p><strong>Type:</strong> {msg.proposal.node.type}</p>
-                    <p><strong>Name:</strong> {msg.proposal.node.name}</p>
-                    <p><strong>Description:</strong> {msg.proposal.node.description}</p>
+                    <p><strong>Typ:</strong> {msg.proposal.node.type}</p>
+                    <p><strong>Namn:</strong> {msg.proposal.node.name}</p>
+                    <p><strong>Beskrivning:</strong> {msg.proposal.node.description}</p>
                     {msg.proposal.node.communities?.length > 0 && (
                       <p><strong>Communities:</strong> {msg.proposal.node.communities.join(', ')}</p>
                     )}
@@ -384,7 +389,7 @@ function ChatPanel({ onClose }) {
 
                   {msg.proposal.similar_nodes?.length > 0 && (
                     <div className="similar-nodes-warning">
-                      <p><strong>Similar nodes found:</strong></p>
+                      <p><strong>Liknande noder hittades:</strong></p>
                       <ul>
                         {msg.proposal.similar_nodes.map((sim, i) => (
                           <li key={i}>
@@ -401,14 +406,14 @@ function ChatPanel({ onClose }) {
                       onClick={() => handleApproveProposal(msg.proposal)}
                       disabled={isProcessing}
                     >
-                      Approve
+                      Godkänn
                     </button>
                     <button
                       className="reject-button"
                       onClick={() => handleRejectProposal(msg.proposal)}
                       disabled={isProcessing}
                     >
-                      Reject
+                      Avvisa
                     </button>
                   </div>
                 </div>
@@ -417,19 +422,19 @@ function ChatPanel({ onClose }) {
               {/* Delete confirmation card */}
               {msg.deleteConfirmation && (
                 <div className="delete-card">
-                  <h4>Confirm deletion:</h4>
+                  <h4>Bekräfta borttagning:</h4>
                   <div className="proposal-details">
-                    <p><strong>Nodes to delete:</strong></p>
+                    <p><strong>Noder att ta bort:</strong></p>
                     <ul>
                       {msg.deleteConfirmation.nodes_to_delete?.map((node, i) => (
                         <li key={i}>{node.name} ({node.type})</li>
                       ))}
                     </ul>
-                    <p><strong>Affected edges:</strong> {msg.deleteConfirmation.affected_edges?.length || 0}</p>
+                    <p><strong>Påverkade relationer:</strong> {msg.deleteConfirmation.affected_edges?.length || 0}</p>
                   </div>
 
                   <div className="similar-nodes-warning">
-                    <p><strong>Warning:</strong> This action cannot be undone!</p>
+                    <p><strong>Varning:</strong> Denna åtgärd kan inte ångras!</p>
                   </div>
 
                   <div className="proposal-actions">
@@ -438,14 +443,14 @@ function ChatPanel({ onClose }) {
                       onClick={() => handleConfirmDelete(msg.deleteConfirmation)}
                       disabled={isProcessing}
                     >
-                      Confirm Delete
+                      Bekräfta borttagning
                     </button>
                     <button
                       className="approve-button"
                       onClick={handleCancelDelete}
                       disabled={isProcessing}
                     >
-                      Cancel
+                      Avbryt
                     </button>
                   </div>
                 </div>
@@ -477,7 +482,7 @@ function ChatPanel({ onClose }) {
             <button
               className="remove-file-button"
               onClick={handleRemoveFile}
-              title="Remove file"
+              title="Ta bort fil"
             >
               &times;
             </button>
@@ -490,8 +495,8 @@ function ChatPanel({ onClose }) {
           onChange={(e) => setInputValue(e.target.value)}
           onKeyPress={handleKeyPress}
           placeholder={uploadedFile
-            ? "Describe what to do with the document..."
-            : "Ask a question or request an action..."}
+            ? "Beskriv vad du vill göra med dokumentet..."
+            : "Ställ en fråga eller begär en åtgärd..."}
           rows={3}
           disabled={isProcessing}
         />
@@ -508,16 +513,16 @@ function ChatPanel({ onClose }) {
             className="chat-upload-button"
             onClick={() => fileInputRef.current?.click()}
             disabled={isUploading || isProcessing}
-            title="Upload document (PDF, Word, Text)"
+            title="Ladda upp dokument (PDF, Word, Text)"
           >
-            {isUploading ? 'Uploading...' : 'Upload'}
+            {isUploading ? 'Laddar...' : 'Ladda upp'}
           </button>
           <button
             className="chat-send-button"
             onClick={handleSend}
             disabled={(!inputValue.trim() && !uploadedFile) || isProcessing}
           >
-            {isProcessing ? 'Processing...' : 'Send'}
+            {isProcessing ? 'Bearbetar...' : 'Skicka'}
           </button>
         </div>
       </div>

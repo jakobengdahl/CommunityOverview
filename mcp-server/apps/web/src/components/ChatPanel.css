@@ -1,11 +1,11 @@
 .chat-panel {
-  width: 380px;
+  width: 400px;
   flex-shrink: 0;
   height: 100%;
   display: flex;
   flex-direction: column;
   background-color: #1a1a1a;
-  border-left: 1px solid #333;
+  border-right: 1px solid #333;
 }
 
 .chat-header {
@@ -20,27 +20,6 @@
 .chat-header h3 {
   margin: 0;
   font-size: 1rem;
-  color: #fff;
-}
-
-.chat-close-button {
-  background: none;
-  border: none;
-  color: #999;
-  font-size: 1.5rem;
-  cursor: pointer;
-  padding: 0;
-  width: 28px;
-  height: 28px;
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  border-radius: 4px;
-  transition: all 0.2s;
-}
-
-.chat-close-button:hover {
-  background-color: #333;
   color: #fff;
 }
 

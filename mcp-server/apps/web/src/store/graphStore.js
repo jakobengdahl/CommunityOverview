@@ -1,5 +1,23 @@
 import { create } from 'zustand';
 
+// Welcome message shown when chat starts
+const WELCOME_MESSAGE = {
+  role: 'assistant',
+  content: `Välkommen till Community Knowledge Graph!
+
+Du kan ställa frågor som:
+• "Vilka initiativ relaterar till NIS2?"
+• "Visa alla aktörer i eSam-communityt"
+• "Finns det några AI-strategiprojekt?"
+• "Sök efter myndigheter som jobbar med digital identitet"
+
+Du kan också ladda upp dokument (PDF, Word, text) för att extrahera entiteter.
+
+**OBS:** Hantera inte personuppgifter i denna tjänst.`,
+  timestamp: new Date(),
+  id: 'welcome',
+};
+
 /**
  * Zustand store for graph state management
  */
@@ -12,14 +30,15 @@ const useGraphStore = create((set, get) => ({
   highlightedNodeIds: [],
   hiddenNodeIds: [],
   selectedNodeId: null,
+  editingNode: null,
+  contextMenu: null,
 
   // Search state
   searchQuery: '',
   searchResults: null,
 
-  // Chat state
-  chatMessages: [],
-  isChatOpen: false,
+  // Chat state (always visible, no toggle)
+  chatMessages: [WELCOME_MESSAGE],
 
   // Stats
   stats: null,
@@ -93,17 +112,27 @@ const useGraphStore = create((set, get) => ({
   // Chat actions
   addChatMessage: (message) => {
     const { chatMessages } = get();
-    set({ chatMessages: [...chatMessages, { ...message, id: Date.now() }] });
+    set({ chatMessages: [...chatMessages, { ...message, id: message.id || Date.now() }] });
   },
 
-  clearChatMessages: () => set({ chatMessages: [] }),
+  clearChatMessages: () => set({ chatMessages: [WELCOME_MESSAGE] }),
 
-  toggleChat: () => {
-    const { isChatOpen } = get();
-    set({ isChatOpen: !isChatOpen });
+  // Context menu actions
+  setContextMenu: (menu) => set({ contextMenu: menu }),
+  closeContextMenu: () => set({ contextMenu: null }),
+
+  // Node editing
+  setEditingNode: (node) => set({ editingNode: node }),
+  closeEditingNode: () => set({ editingNode: null }),
+
+  // Delete node from visualization
+  removeNode: (nodeId) => {
+    const { nodes, edges } = get();
+    set({
+      nodes: nodes.filter(n => n.id !== nodeId),
+      edges: edges.filter(e => e.source !== nodeId && e.target !== nodeId),
+    });
   },
-
-  setChatOpen: (isOpen) => set({ isChatOpen: isOpen }),
 }));
 
 export default useGraphStore;

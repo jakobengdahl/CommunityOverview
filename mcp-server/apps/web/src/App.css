@@ -1,7 +1,9 @@
 .app {
+  width: 100%;
   height: 100vh;
   display: flex;
   flex-direction: column;
+  overflow: hidden;
 }
 
 .app-header {
@@ -9,55 +11,16 @@
   justify-content: space-between;
   align-items: center;
   padding: 12px 20px;
-  background: #2a2a2a;
+  background: #1a1a1a;
   border-bottom: 1px solid #333;
+  flex-shrink: 0;
 }
 
 .app-header h1 {
   margin: 0;
   font-size: 1.25rem;
   font-weight: 600;
-}
-
-.header-actions {
-  display: flex;
-  align-items: center;
-  gap: 16px;
-}
-
-.chat-toggle-button {
-  display: flex;
-  align-items: center;
-  gap: 6px;
-  padding: 8px 14px;
-  background-color: #646cff;
-  color: white;
-  border: none;
-  border-radius: 6px;
-  cursor: pointer;
-  font-weight: 500;
-  font-size: 0.9rem;
-  transition: all 0.2s;
-}
-
-.chat-toggle-button:hover {
-  background-color: #535bf2;
-}
-
-.chat-toggle-button.active {
-  background-color: #10B981;
-}
-
-.chat-toggle-button.active:hover {
-  background-color: #059669;
-}
-
-.chat-icon {
-  font-size: 1rem;
-}
-
-.chat-label {
-  font-size: 0.85rem;
+  color: #fff;
 }
 
 .app-content {
@@ -66,19 +29,13 @@
   overflow: hidden;
 }
 
-.app-sidebar {
-  width: 280px;
-  background: #252525;
-  border-right: 1px solid #333;
-  padding: 16px;
-  overflow-y: auto;
-}
-
 .app-main {
   flex: 1;
   position: relative;
+  background: #1e1e1e;
 }
 
+/* Notifications */
 .app-notification {
   position: fixed;
   bottom: 20px;
@@ -94,6 +51,7 @@
   box-shadow: 0 4px 12px rgba(0, 0, 0, 0.5);
   z-index: 1000;
   animation: slideUp 0.3s ease;
+  color: #fff;
 }
 
 @keyframes slideUp {
@@ -126,30 +84,30 @@
   font-size: 18px;
   padding: 0;
   line-height: 1;
+  cursor: pointer;
 }
 
 .app-notification button:hover {
   color: #999;
 }
 
-@media (prefers-color-scheme: light) {
-  .app-header {
-    background: #f5f5f5;
-    border-color: #ddd;
-  }
+/* No community message */
+.no-community-selected {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  height: 100%;
+  padding: 2rem;
+  text-align: center;
+}
 
-  .app-header h1 {
-    color: #333;
-  }
+.no-community-selected h2 {
+  margin-bottom: 1rem;
+  color: #646cff;
+}
 
-  .app-sidebar {
-    background: #fafafa;
-    border-color: #ddd;
-  }
-
-  .app-notification {
-    background: white;
-    border-color: #ddd;
-    box-shadow: 0 4px 12px rgba(0, 0, 0, 0.1);
-  }
+.no-community-selected p {
+  color: #888;
+  max-width: 500px;
 }

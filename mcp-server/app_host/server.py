@@ -25,7 +25,7 @@ from typing import Optional, Dict, Any, Callable
 
 from fastapi import FastAPI
 from fastapi.staticfiles import StaticFiles
-from fastapi.responses import FileResponse, JSONResponse
+from fastapi.responses import FileResponse, JSONResponse, RedirectResponse
 from starlette.requests import Request
 from mcp.server.fastmcp import FastMCP
 
@@ -153,10 +153,16 @@ def create_app(
             "graph_edges": len(graph_storage.edges),
         }
 
-    # Root endpoint info
+    # Root endpoint - redirect to web app
     @app.get("/")
-    async def root() -> Dict[str, Any]:
-        """Root endpoint with API information."""
+    async def root() -> RedirectResponse:
+        """Redirect root to web application."""
+        return RedirectResponse(url="/web/", status_code=302)
+
+    # API info endpoint
+    @app.get("/info")
+    async def info() -> Dict[str, Any]:
+        """API information endpoint."""
         return {
             "name": "Community Knowledge Graph",
             "version": "1.0.0",

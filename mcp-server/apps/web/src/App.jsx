@@ -2,7 +2,6 @@ import { useState, useCallback, useEffect } from 'react';
 import { GraphCanvas } from '@community-graph/ui-graph-canvas';
 import '@community-graph/ui-graph-canvas/styles';
 import useGraphStore from './store/graphStore';
-import SearchPanel from './components/SearchPanel';
 import StatsPanel from './components/StatsPanel';
 import EditNodeDialog from './components/EditNodeDialog';
 import ChatPanel from './components/ChatPanel';
@@ -19,11 +18,12 @@ function App() {
     updateVisualization,
     stats,
     setStats,
-    isChatOpen,
-    setChatOpen,
+    editingNode,
+    setEditingNode,
+    closeEditingNode,
+    removeNode,
   } = useGraphStore();
 
-  const [editingNode, setEditingNode] = useState(null);
   const [notification, setNotification] = useState(null);
 
   // Load initial stats
@@ -41,56 +41,57 @@ function App() {
     try {
       const result = await api.getRelatedNodes(nodeId, { depth: 1 });
       if (result.nodes && result.nodes.length > 0) {
-        addNodesToVisualization(result.nodes, result.edges || []);
-        showNotification('success', `Added ${result.nodes.length} related nodes`);
+        // Filter out Community nodes
+        const filteredNodes = result.nodes.filter(n =>
+          n.type !== 'Community' && n.data?.type !== 'Community'
+        );
+        addNodesToVisualization(filteredNodes, result.edges || []);
+        showNotification('success', `Lade till ${filteredNodes.length} relaterade noder`);
       } else {
-        showNotification('info', 'No related nodes found');
+        showNotification('info', 'Inga relaterade noder hittades');
       }
     } catch (error) {
       console.error('Error expanding node:', error);
-      showNotification('error', 'Failed to expand node');
+      showNotification('error', 'Kunde inte expandera nod');
     }
   }, [addNodesToVisualization, showNotification]);
 
   // Callback: Edit node
   const handleEdit = useCallback((nodeId, nodeData) => {
     setEditingNode({ id: nodeId, data: nodeData });
-  }, []);
+  }, [setEditingNode]);
 
   // Callback: Delete node
   const handleDelete = useCallback(async (nodeId) => {
-    if (!window.confirm('Are you sure you want to delete this node?')) {
+    if (!window.confirm('Är du säker på att du vill ta bort denna nod?')) {
       return;
     }
     try {
       await api.deleteNodes([nodeId], true);
-      const newNodes = nodes.filter(n => n.id !== nodeId);
-      const newEdges = edges.filter(e => e.source !== nodeId && e.target !== nodeId);
-      updateVisualization(newNodes, newEdges);
-      showNotification('success', 'Node deleted');
+      removeNode(nodeId);
+      showNotification('success', 'Nod borttagen');
     } catch (error) {
       console.error('Error deleting node:', error);
-      showNotification('error', 'Failed to delete node');
+      showNotification('error', 'Kunde inte ta bort nod');
     }
-  }, [nodes, edges, updateVisualization, showNotification]);
+  }, [removeNode, showNotification]);
 
   // Callback: Create group
   const handleCreateGroup = useCallback((position, groupNode) => {
-    showNotification('success', 'Group created');
+    showNotification('success', 'Grupp skapad');
   }, [showNotification]);
 
   // Callback: Save view
   const handleSaveView = useCallback(async (viewData) => {
-    const name = window.prompt('Enter view name:');
+    const name = window.prompt('Ange vynamn:');
     if (!name) return;
 
     try {
-      // Create a SavedView node with metadata
       const viewNode = {
         name,
         type: 'SavedView',
-        description: `Saved view: ${name}`,
-        summary: `Contains ${viewData.nodes.length} nodes`,
+        description: `Sparad vy: ${name}`,
+        summary: `Innehåller ${viewData.nodes.length} noder`,
         metadata: {
           node_ids: viewData.nodes.map(n => n.id),
           positions: Object.fromEntries(viewData.nodes.map(n => [n.id, n.position])),
@@ -100,10 +101,10 @@ function App() {
       };
 
       await api.addNodes([viewNode], []);
-      showNotification('success', `View "${name}" saved`);
+      showNotification('success', `Vy "${name}" sparad`);
     } catch (error) {
       console.error('Error saving view:', error);
-      showNotification('error', 'Failed to save view');
+      showNotification('error', 'Kunde inte spara vy');
     }
   }, [showNotification]);
 
@@ -115,35 +116,23 @@ function App() {
         n.id === nodeId ? { ...n, ...updates } : n
       );
       updateVisualization(newNodes, edges);
-      setEditingNode(null);
-      showNotification('success', 'Node updated');
+      closeEditingNode();
+      showNotification('success', 'Nod uppdaterad');
     } catch (error) {
       console.error('Error updating node:', error);
-      showNotification('error', 'Failed to update node');
+      showNotification('error', 'Kunde inte uppdatera nod');
     }
-  }, [nodes, edges, updateVisualization, showNotification]);
+  }, [nodes, edges, updateVisualization, closeEditingNode, showNotification]);
 
   return (
     <div className="app">
       <header className="app-header">
         <h1>Community Knowledge Graph</h1>
-        <div className="header-actions">
-          <StatsPanel stats={stats} />
-          <button
-            className={`chat-toggle-button ${isChatOpen ? 'active' : ''}`}
-            onClick={() => setChatOpen(!isChatOpen)}
-            title={isChatOpen ? 'Close chat' : 'Open chat assistant'}
-          >
-            <span className="chat-icon">💬</span>
-            <span className="chat-label">{isChatOpen ? 'Close Chat' : 'Chat'}</span>
-          </button>
-        </div>
+        <StatsPanel stats={stats} />
       </header>
 
       <div className="app-content">
-        <aside className="app-sidebar">
-          <SearchPanel />
-        </aside>
+        <ChatPanel />
 
         <main className="app-main">
           <GraphCanvas
@@ -158,16 +147,12 @@ function App() {
             onSaveView={handleSaveView}
           />
         </main>
-
-        {isChatOpen && (
-          <ChatPanel onClose={() => setChatOpen(false)} />
-        )}
       </div>
 
       {editingNode && (
         <EditNodeDialog
           node={editingNode}
-          onClose={() => setEditingNode(null)}
+          onClose={closeEditingNode}
           onSave={(updates) => handleNodeUpdate(editingNode.id, updates)}
         />
       )}
