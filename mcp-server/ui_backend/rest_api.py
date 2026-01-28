@@ -60,6 +60,15 @@ class UploadResponse(BaseModel):
     chat_response: Optional[ChatResponse] = None
 
 
+class ProposeNodesRequest(BaseModel):
+    """Request for /propose-nodes endpoint."""
+    text: str = Field(..., description="Text to extract nodes from")
+    node_type: Optional[str] = Field(None, description="Optional node type to focus on (Actor, Initiative, etc.)")
+    communities: Optional[List[str]] = Field(None, description="Optional communities to associate with nodes")
+    api_key: Optional[str] = Field(None, description="Optional API key override")
+    provider: Optional[str] = Field(None, description="Optional provider: 'claude' or 'openai'")
+
+
 # ==================== Router Factory ====================
 
 def create_ui_router(
@@ -142,6 +151,37 @@ def create_ui_router(
                 toolUsed=result.get("toolUsed"),
                 toolResult=result.get("toolResult")
             )
+        except Exception as e:
+            raise HTTPException(status_code=500, detail=str(e))
+
+    @router.post("/propose-nodes")
+    async def propose_nodes_from_text(request: ProposeNodesRequest) -> Dict[str, Any]:
+        """
+        Extract and propose nodes from text using LLM analysis.
+
+        This endpoint:
+        1. Uses LLM to identify entities in the text
+        2. Checks for similar existing nodes in the graph
+        3. Returns proposed nodes for user confirmation
+
+        The nodes are NOT added automatically - they require explicit
+        confirmation via the /chat endpoint or add_nodes API.
+
+        Args:
+            request: Text and optional configuration
+
+        Returns:
+            Proposed nodes with similarity information
+        """
+        try:
+            result = chat_service.propose_nodes_from_text(
+                text=request.text,
+                node_type=request.node_type,
+                communities=request.communities,
+                api_key=request.api_key,
+                provider=request.provider
+            )
+            return result
         except Exception as e:
             raise HTTPException(status_code=500, detail=str(e))
 

@@ -17,6 +17,10 @@ const useGraphStore = create((set, get) => ({
   searchQuery: '',
   searchResults: null,
 
+  // Chat state
+  chatMessages: [],
+  isChatOpen: false,
+
   // Stats
   stats: null,
 
@@ -85,6 +89,21 @@ const useGraphStore = create((set, get) => ({
   clearHighlights: () => {
     setTimeout(() => set({ highlightedNodeIds: [] }), 3000);
   },
+
+  // Chat actions
+  addChatMessage: (message) => {
+    const { chatMessages } = get();
+    set({ chatMessages: [...chatMessages, { ...message, id: Date.now() }] });
+  },
+
+  clearChatMessages: () => set({ chatMessages: [] }),
+
+  toggleChat: () => {
+    const { isChatOpen } = get();
+    set({ isChatOpen: !isChatOpen });
+  },
+
+  setChatOpen: (isOpen) => set({ isChatOpen: isOpen }),
 }));
 
 export default useGraphStore;

@@ -19,6 +19,47 @@
   font-weight: 600;
 }
 
+.header-actions {
+  display: flex;
+  align-items: center;
+  gap: 16px;
+}
+
+.chat-toggle-button {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 8px 14px;
+  background-color: #646cff;
+  color: white;
+  border: none;
+  border-radius: 6px;
+  cursor: pointer;
+  font-weight: 500;
+  font-size: 0.9rem;
+  transition: all 0.2s;
+}
+
+.chat-toggle-button:hover {
+  background-color: #535bf2;
+}
+
+.chat-toggle-button.active {
+  background-color: #10B981;
+}
+
+.chat-toggle-button.active:hover {
+  background-color: #059669;
+}
+
+.chat-icon {
+  font-size: 1rem;
+}
+
+.chat-label {
+  font-size: 0.85rem;
+}
+
 .app-content {
   flex: 1;
   display: flex;

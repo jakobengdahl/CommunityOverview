@@ -5,6 +5,7 @@ import useGraphStore from './store/graphStore';
 import SearchPanel from './components/SearchPanel';
 import StatsPanel from './components/StatsPanel';
 import EditNodeDialog from './components/EditNodeDialog';
+import ChatPanel from './components/ChatPanel';
 import * as api from './services/api';
 import './App.css';
 
@@ -18,6 +19,8 @@ function App() {
     updateVisualization,
     stats,
     setStats,
+    isChatOpen,
+    setChatOpen,
   } = useGraphStore();
 
   const [editingNode, setEditingNode] = useState(null);
@@ -124,7 +127,17 @@ function App() {
     <div className="app">
       <header className="app-header">
         <h1>Community Knowledge Graph</h1>
-        <StatsPanel stats={stats} />
+        <div className="header-actions">
+          <StatsPanel stats={stats} />
+          <button
+            className={`chat-toggle-button ${isChatOpen ? 'active' : ''}`}
+            onClick={() => setChatOpen(!isChatOpen)}
+            title={isChatOpen ? 'Close chat' : 'Open chat assistant'}
+          >
+            <span className="chat-icon">💬</span>
+            <span className="chat-label">{isChatOpen ? 'Close Chat' : 'Chat'}</span>
+          </button>
+        </div>
       </header>
 
       <div className="app-content">
@@ -145,6 +158,10 @@ function App() {
             onSaveView={handleSaveView}
           />
         </main>
+
+        {isChatOpen && (
+          <ChatPanel onClose={() => setChatOpen(false)} />
+        )}
       </div>
 
       {editingNode && (

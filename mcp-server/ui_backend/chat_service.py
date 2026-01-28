@@ -188,3 +188,143 @@ User's question: {user_message}"""
             "available_tools": list(self._tools_map.keys()),
             "graph_stats": self._graph_service.get_graph_stats()
         }
+
+    def propose_nodes_from_text(
+        self,
+        text: str,
+        node_type: Optional[str] = None,
+        communities: Optional[List[str]] = None,
+        api_key: Optional[str] = None,
+        provider: Optional[str] = None
+    ) -> Dict[str, Any]:
+        """
+        Extract and propose nodes from text using LLM analysis.
+
+        This method:
+        1. Analyzes the text using LLM to extract entities
+        2. Checks for similar existing nodes using find_similar_nodes_batch
+        3. Returns proposed nodes with similarity information for user confirmation
+
+        Args:
+            text: The text to analyze (document content)
+            node_type: Optional specific node type to extract (Actor, Initiative, etc.)
+            communities: Optional list of communities to associate with new nodes
+            api_key: Optional API key override
+            provider: Optional provider override
+
+        Returns:
+            Dict with:
+            - proposed_nodes: List of extracted nodes
+            - similar_existing: Dict mapping proposed names to similar existing nodes
+            - requires_confirmation: Always True (user must confirm before adding)
+        """
+        # Build the extraction prompt
+        type_instruction = ""
+        if node_type:
+            type_instruction = f"Focus specifically on extracting {node_type} entities."
+
+        community_instruction = ""
+        if communities:
+            community_instruction = f"Associate extracted nodes with communities: {', '.join(communities)}"
+
+        extraction_prompt = f"""Analyze the following text and extract relevant entities that should be added to the knowledge graph.
+
+{type_instruction}
+{community_instruction}
+
+For each entity you find, provide:
+1. type: The node type (Actor, Initiative, Capability, Resource, Legislation, Theme)
+2. name: The entity name
+3. description: A brief description based on the text
+4. summary: A one-line summary (max 100 characters)
+5. tags: Relevant tags for categorization
+
+Return the entities as a JSON array. Only extract entities that are clearly identifiable and relevant.
+Do NOT include generic terms or overly broad categories.
+
+Text to analyze:
+---
+{text[:8000]}
+---
+
+Respond with ONLY a JSON array of extracted entities, no other text. Example format:
+[
+  {{"type": "Actor", "name": "Example Agency", "description": "...", "summary": "...", "tags": ["tag1", "tag2"]}}
+]"""
+
+        messages = [{"role": "user", "content": extraction_prompt}]
+
+        try:
+            # Get LLM to extract entities
+            key_to_use = api_key if api_key else self._processor.default_api_key
+            provider_to_use = provider if provider else self._processor.provider_type
+
+            if not key_to_use:
+                return {
+                    "success": False,
+                    "error": "No API key available",
+                    "proposed_nodes": [],
+                    "similar_existing": {}
+                }
+
+            llm_provider = create_provider(key_to_use, provider_to_use)
+
+            response = llm_provider.create_completion(
+                messages=messages,
+                system_prompt="You are a precise entity extraction assistant. Extract entities from text and return them as a JSON array.",
+                tools=[],
+                max_tokens=4096
+            )
+
+            # Extract JSON from response
+            response_text = ""
+            for block in response.content:
+                if isinstance(block, dict) and block.get("type") == "text":
+                    response_text += block.get("text", "")
+
+            # Parse the JSON response
+            import re
+            # Find JSON array in response
+            json_match = re.search(r'\[[\s\S]*\]', response_text)
+            if not json_match:
+                return {
+                    "success": False,
+                    "error": "Could not parse entity extraction result",
+                    "proposed_nodes": [],
+                    "similar_existing": {}
+                }
+
+            proposed_nodes = json.loads(json_match.group())
+
+            # Add communities to each node if specified
+            if communities:
+                for node in proposed_nodes:
+                    node['communities'] = communities
+
+            # Check for similar existing nodes using batch search
+            if proposed_nodes:
+                names = [node.get('name', '') for node in proposed_nodes if node.get('name')]
+                similar_results = self._graph_service.find_similar_nodes_batch(
+                    names=names,
+                    node_type=node_type,
+                    threshold=0.7,
+                    limit=3
+                )
+            else:
+                similar_results = {"results": {}}
+
+            return {
+                "success": True,
+                "proposed_nodes": proposed_nodes,
+                "similar_existing": similar_results.get("results", {}),
+                "requires_confirmation": True,
+                "message": f"Found {len(proposed_nodes)} potential entities. Please review before adding."
+            }
+
+        except Exception as e:
+            return {
+                "success": False,
+                "error": str(e),
+                "proposed_nodes": [],
+                "similar_existing": {}
+            }

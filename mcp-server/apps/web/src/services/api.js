@@ -206,3 +206,101 @@ export async function executeTool(toolName, args) {
     }),
   });
 }
+
+// ============================================================
+// UI Backend Chat API (/ui/*)
+// ============================================================
+
+const UI_API_BASE = '/ui';
+
+/**
+ * Send a chat message to the backend
+ * @param {Array} messages - Conversation history
+ * @param {string} documentContext - Optional document text to include
+ * @returns {Promise<{content: string, toolUsed: string|null, toolResult: Object|null}>}
+ */
+export async function sendChatMessage(messages, documentContext = null) {
+  const body = { messages };
+  if (documentContext) {
+    body.document_context = documentContext;
+  }
+  return apiFetch(`${UI_API_BASE}/chat`, {
+    method: 'POST',
+    body: JSON.stringify(body),
+  });
+}
+
+/**
+ * Send a simple chat message (single message, no history)
+ * @param {string} message - The message to send
+ * @param {string} documentContext - Optional document text
+ * @returns {Promise<{content: string, toolUsed: string|null, toolResult: Object|null}>}
+ */
+export async function sendSimpleChatMessage(message, documentContext = null) {
+  const body = { message };
+  if (documentContext) {
+    body.document_context = documentContext;
+  }
+  return apiFetch(`${UI_API_BASE}/chat/simple`, {
+    method: 'POST',
+    body: JSON.stringify(body),
+  });
+}
+
+/**
+ * Upload a file for analysis
+ * @param {File} file - The file to upload
+ * @param {boolean} analyze - Whether to analyze with LLM (default: false, just extract text)
+ * @returns {Promise<{success: boolean, filename: string, text: string, analysis?: string}>}
+ */
+export async function uploadFile(file, analyze = false) {
+  const formData = new FormData();
+  formData.append('file', file);
+
+  const endpoint = analyze ? `${UI_API_BASE}/upload` : `${UI_API_BASE}/upload/extract`;
+
+  const response = await fetch(endpoint, {
+    method: 'POST',
+    body: formData,
+  });
+
+  if (!response.ok) {
+    const errorData = await response.json().catch(() => ({}));
+    throw new Error(errorData.detail || `Upload failed: ${response.status}`);
+  }
+
+  return response.json();
+}
+
+/**
+ * Get chat service info
+ * @returns {Promise<{llm_provider: string, supported_formats: string[]}>}
+ */
+export async function getChatInfo() {
+  return apiFetch(`${UI_API_BASE}/info`);
+}
+
+/**
+ * Get supported file formats for upload
+ * @returns {Promise<{formats: string[]}>}
+ */
+export async function getSupportedFormats() {
+  return apiFetch(`${UI_API_BASE}/supported-formats`);
+}
+
+/**
+ * Propose nodes from text using LLM analysis
+ * @param {string} text - Text to extract nodes from
+ * @param {Object} options - Extraction options
+ * @returns {Promise<{proposed_nodes: Array, similar_existing: Object, requires_confirmation: boolean}>}
+ */
+export async function proposeNodesFromText(text, options = {}) {
+  return apiFetch(`${UI_API_BASE}/propose-nodes`, {
+    method: 'POST',
+    body: JSON.stringify({
+      text,
+      node_type: options.nodeType,
+      communities: options.communities,
+    }),
+  });
+}
