@@ -32,6 +32,7 @@ const useGraphStore = create((set, get) => ({
   selectedNodeId: null,
   editingNode: null,
   contextMenu: null,
+  clearGroupsFlag: false, // Signal to clear groups in visualization
 
   // Search state
   searchQuery: '',
@@ -51,11 +52,16 @@ const useGraphStore = create((set, get) => ({
   setNodes: (nodes) => set({ nodes }),
   setEdges: (edges) => set({ edges }),
 
-  updateVisualization: (nodes, edges, highlightIds = []) => set({
-    nodes,
-    edges,
-    highlightedNodeIds: highlightIds,
-  }),
+  updateVisualization: (nodes, edges, highlightIds = []) => {
+    set({
+      nodes,
+      edges,
+      highlightedNodeIds: highlightIds,
+      clearGroupsFlag: true, // Signal to clear groups
+    });
+    // Reset flag after a short delay
+    setTimeout(() => set({ clearGroupsFlag: false }), 100);
+  },
 
   addNodesToVisualization: (newNodes, newEdges = []) => {
     const { nodes, edges } = get();

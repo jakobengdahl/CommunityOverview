@@ -31,7 +31,7 @@
     },
     "8000": {
       "label": "Backend Server",
-      "onAutoForward": "openBrowser"
+      "onAutoForward": "notify"
     }
   },
   "postCreateCommand": "pip install --no-cache-dir -r mcp-server/requirements.txt && cd mcp-server && npm install",

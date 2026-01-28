@@ -33,12 +33,14 @@ import './GraphCanvas.css';
  * @param {Function} props.onSaveView - Called when save view requested (viewData)
  * @param {Function} props.onNodePositionChange - Called when node positions change
  * @param {string} props.layoutType - Force specific layout: 'dagre', 'grid', 'circular', or null for auto
+ * @param {boolean} props.clearGroupsFlag - Signal to clear groups when true
  */
 function GraphCanvasInner({
   nodes: inputNodes = [],
   edges: inputEdges = [],
   highlightedNodeIds = [],
   hiddenNodeIds = [],
+  clearGroupsFlag = false,
   onExpand,
   onEdit,
   onDelete,
@@ -127,7 +129,10 @@ function GraphCanvasInner({
   // Update nodes when input changes
   useEffect(() => {
     setNodes((nds) => {
-      const manualNodes = nds.filter(n => n.type === 'group' || n.id.startsWith('group-'));
+      // Only preserve groups if clearGroupsFlag is false
+      const manualNodes = clearGroupsFlag
+        ? []
+        : nds.filter(n => n.type === 'group' || n.id.startsWith('group-'));
       const newNodes = reactFlowNodes.map(n => {
         const existing = nds.find(curr => curr.id === n.id);
         if (existing && existing.position.x !== 0) {
@@ -143,7 +148,7 @@ function GraphCanvasInner({
       });
       return [...newNodes, ...manualNodes];
     });
-  }, [reactFlowNodes, setNodes]);
+  }, [reactFlowNodes, setNodes, clearGroupsFlag]);
 
   // Update edges when input changes
   useEffect(() => {
@@ -388,6 +393,8 @@ function GraphCanvasInner({
             <MiniMap
               nodeColor={(node) => node.data?.color || '#9CA3AF'}
               maskColor="rgba(0, 0, 0, 0.5)"
+              pannable
+              zoomable
             />
           </ReactFlow>
         </div>

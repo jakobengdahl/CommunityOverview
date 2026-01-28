@@ -123,12 +123,13 @@ function GroupNode({ id, data, selected }) {
         minWidth={200}
         minHeight={150}
         isVisible={selected}
-        lineStyle={{ stroke: data.color || '#646cff', strokeWidth: 2 }}
+        lineStyle={{ stroke: data.color || '#646cff', strokeWidth: 4 }}
         handleStyle={{
-          width: 8,
-          height: 8,
+          width: 14,
+          height: 14,
           background: data.color || '#646cff',
-          border: '2px solid white'
+          border: '2px solid white',
+          borderRadius: '3px',
         }}
       />
       <div

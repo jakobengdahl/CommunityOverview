@@ -14,6 +14,7 @@ function App() {
     edges,
     highlightedNodeIds,
     hiddenNodeIds,
+    clearGroupsFlag,
     addNodesToVisualization,
     updateVisualization,
     toggleNodeVisibility,
@@ -147,6 +148,7 @@ function App() {
             edges={edges}
             highlightedNodeIds={highlightedNodeIds}
             hiddenNodeIds={hiddenNodeIds}
+            clearGroupsFlag={clearGroupsFlag}
             onExpand={handleExpand}
             onEdit={handleEdit}
             onDelete={handleDelete}

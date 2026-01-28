@@ -110,7 +110,8 @@
 .context-menu-header {
   padding: 8px 12px;
   font-weight: 600;
-  color: #fff;
+  color: #646cff;
+  background: #1a1a1a;
   border-bottom: 1px solid #444;
   margin-bottom: 4px;
   font-size: 13px;
@@ -118,6 +119,7 @@
   overflow: hidden;
   text-overflow: ellipsis;
   max-width: 200px;
+  border-radius: 4px 4px 0 0;
 }
 
 .context-menu-separator {
@@ -227,6 +229,11 @@
 
   .graph-context-menu button {
     color: #333;
+  }
+
+  .context-menu-header {
+    color: #646cff;
+    background: #f5f5f5;
   }
 
   .graph-notification {
