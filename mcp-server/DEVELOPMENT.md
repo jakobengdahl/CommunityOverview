@@ -214,6 +214,31 @@ Tests include:
 - `mcpClient.test.js` - MCP client module tests
 - `Widget.test.jsx` - Widget component tests with mocked MCP
 
+#### Web App Tests
+
+```bash
+cd mcp-server/apps/web
+npm test
+```
+
+Tests include:
+- `ChatPanel.test.jsx` - ChatPanel component tests with mocked API
+
+#### Playwright E2E Tests (Web App)
+
+```bash
+cd mcp-server/apps/web
+
+# Install Playwright browsers (first time)
+npx playwright install chromium
+
+# Run e2e tests
+npm run test:e2e
+```
+
+E2E tests include:
+- `chat.spec.js` - Complete chat workflow testing
+
 ### E2E Tests with Live Backend
 
 These tests run against a live server using real HTTP requests:
@@ -281,6 +306,7 @@ npm test
 |--------|----------|-------------|
 | POST | `/ui/chat` | Process chat with conversation history |
 | POST | `/ui/chat/simple` | Simple chat with single message |
+| POST | `/ui/propose-nodes` | Extract entities from text (returns proposals) |
 | POST | `/ui/upload` | Upload and analyze document |
 | POST | `/ui/upload/extract` | Extract text only (no LLM analysis) |
 | GET | `/ui/info` | Get service info (provider, tools) |
@@ -295,6 +321,19 @@ curl -X POST http://localhost:8000/ui/chat \
     "messages": [{"role": "user", "content": "Search for AI projects"}]
   }'
 ```
+
+#### Propose Nodes Example
+
+```bash
+curl -X POST http://localhost:8000/ui/propose-nodes \
+  -H "Content-Type: application/json" \
+  -d '{
+    "text": "The Ministry of Innovation launched Digital Strategy 2030.",
+    "communities": ["Government"]
+  }'
+```
+
+Response includes proposed nodes and similar existing nodes for confirmation.
 
 #### Document Upload Example
 
@@ -314,6 +353,32 @@ curl -X POST http://localhost:8000/execute_tool \
   -H "Content-Type: application/json" \
   -d '{"tool_name": "search_graph", "arguments": {"query": "test", "limit": 10}}'
 ```
+
+## Using the Chat Panel
+
+The web application includes a ChatPanel for conversational interaction with the graph.
+
+### Features
+
+- **Search and Query**: Ask questions about the graph ("Find AI projects", "Show me actors in eSam")
+- **Add Nodes**: Request node creation ("Add a new initiative about digital identity")
+- **Node Proposals**: The LLM proposes nodes with similar node detection, user must confirm before adding
+- **Delete Confirmation**: Destructive actions require explicit user confirmation
+- **Document Upload**: Upload PDF, Word, or text files for analysis and entity extraction
+
+### Opening the Chat Panel
+
+Click the "Chat" button in the application header to open the panel. The panel displays:
+- Welcome message with example queries
+- Conversation history
+- Loading indicators during processing
+- Error messages when something goes wrong
+
+### ChatGPT Widget Integration
+
+The same chat functionality is available via the embeddable widget (`apps/widget/`). This widget can be embedded in ChatGPT or other interfaces that support custom widgets.
+
+The widget uses the same `/ui/chat` endpoint, ensuring consistent behavior between the web app and external integrations.
 
 ## Development Workflow
 
