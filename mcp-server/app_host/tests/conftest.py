@@ -10,7 +10,8 @@ import tempfile
 import json
 import os
 from pathlib import Path
-from typing import Generator
+from typing import Generator, List, Dict, Any
+from unittest.mock import patch, MagicMock
 
 from fastapi.testclient import TestClient
 
@@ -20,6 +21,82 @@ sys.path.insert(0, str(Path(__file__).parent.parent.parent))
 
 from app_host import create_app, AppConfig
 from graph_core import GraphStorage
+
+
+class MockSentenceTransformer:
+    """Mock SentenceTransformer that generates deterministic embeddings."""
+
+    def __init__(self, model_name=None):
+        self.model_name = model_name
+        import numpy as np
+        self._np = np
+
+    def encode(self, texts, convert_to_numpy=True, show_progress_bar=False):
+        """Generate mock embeddings based on text hash."""
+        if isinstance(texts, str):
+            texts = [texts]
+        embeddings = []
+        for text in texts:
+            self._np.random.seed(abs(hash(text)) % (2**32))
+            embedding = self._np.random.rand(384).astype(self._np.float32)
+            embeddings.append(embedding)
+        return self._np.array(embeddings)
+
+
+@pytest.fixture(autouse=True)
+def mock_embedding_model():
+    """Mock the embedding model to avoid network calls."""
+    import graph_core.vector_store as vs
+    original_ensure = vs._ensure_sentence_transformers
+
+    def mock_ensure():
+        return MockSentenceTransformer
+
+    vs._ensure_sentence_transformers = mock_ensure
+    vs._SentenceTransformer = None
+    yield
+    vs._ensure_sentence_transformers = original_ensure
+    vs._SentenceTransformer = None
+
+
+class MockLLMProvider:
+    """Mock LLM provider for testing."""
+
+    def __init__(self):
+        self.mock_tool_calls: List[Dict[str, Any]] = []
+        self.mock_text_response: str = "Mock response from LLM"
+        self.call_count = 0
+
+    def create_completion(self, messages, system_prompt, tools, max_tokens=4096):
+        from llm_providers import LLMResponse
+        self.call_count += 1
+
+        if self.mock_tool_calls and self.call_count == 1:
+            content = []
+            for i, tool_call in enumerate(self.mock_tool_calls):
+                content.append({
+                    "type": "tool_use",
+                    "id": f"mock_tool_{i}",
+                    "name": tool_call["name"],
+                    "input": tool_call.get("input", {})
+                })
+            return LLMResponse(content=content, stop_reason="tool_use")
+        else:
+            return LLMResponse(
+                content=[{"type": "text", "text": self.mock_text_response}],
+                stop_reason="end_turn"
+            )
+
+    def reset(self):
+        self.mock_tool_calls = []
+        self.mock_text_response = "Mock response from LLM"
+        self.call_count = 0
+
+
+@pytest.fixture
+def mock_llm_provider():
+    """Create a mock LLM provider."""
+    return MockLLMProvider()
 
 
 @pytest.fixture
@@ -129,10 +206,19 @@ def app_config(temp_graph_file, temp_static_dirs) -> AppConfig:
 
 
 @pytest.fixture
-def test_app(app_config) -> TestClient:
-    """Create test application with TestClient."""
-    app = create_app(app_config)
-    return TestClient(app)
+def test_app(app_config, mock_llm_provider):
+    """Create test application with TestClient and mocked LLM.
+
+    Returns a tuple of (TestClient, mock_llm_provider) for tests that need to configure the mock.
+    """
+    # Patch LLM provider BEFORE creating app
+    with patch('chat_logic.create_provider', return_value=mock_llm_provider):
+        with patch.dict(os.environ, {'ANTHROPIC_API_KEY': 'test-key'}):
+            app = create_app(app_config)
+            # Update the chat service to use our mock
+            if hasattr(app.state, 'chat_service'):
+                app.state.chat_service._processor.default_api_key = 'test-key'
+            yield TestClient(app), mock_llm_provider
 
 
 @pytest.fixture

@@ -10,12 +10,50 @@ The system is organized into several packages:
 mcp-server/
 ├── graph_core/          # Core graph data structures and storage
 ├── graph_services/      # GraphService layer, REST API, MCP tools
+├── ui_backend/          # User chat and document analysis (LLM integration)
 ├── app_host/            # FastAPI application server
 ├── packages/
 │   └── ui-graph-canvas/ # React component for graph visualization
 └── apps/
     ├── web/             # Full web application
     └── widget/          # Embeddable widget for ChatGPT etc.
+```
+
+### Key Architectural Principles
+
+**GraphService vs ui_backend separation:**
+
+- **GraphService** handles all graph operations (search, CRUD, statistics). It does NOT make any LLM calls.
+- **ui_backend** handles user-facing chat and document analysis. It uses LLM providers (OpenAI/Claude) and routes ALL graph mutations through GraphService.
+
+**Why this separation matters:**
+
+1. **Consistency**: All graph mutations go through GraphService, ensuring validation and proper handling.
+2. **Testability**: GraphService can be tested without LLM mocking; ui_backend can be tested with mocked LLM.
+3. **Flexibility**: Different frontends (REST, MCP, chat) all use the same GraphService.
+
+```
+┌─────────────┐     ┌─────────────┐     ┌─────────────┐
+│   REST API  │     │  MCP Tools  │     │  ui_backend │
+│  /api/v1/*  │     │   /mcp/*    │     │    /ui/*    │
+└──────┬──────┘     └──────┬──────┘     └──────┬──────┘
+       │                   │                   │
+       │                   │            ┌──────┴──────┐
+       │                   │            │ ChatService │
+       │                   │            │ (LLM calls) │
+       │                   │            └──────┬──────┘
+       │                   │                   │
+       └───────────────────┴───────────────────┘
+                           │
+                    ┌──────┴──────┐
+                    │ GraphService │
+                    │ (no LLM)     │
+                    └──────┬──────┘
+                           │
+                    ┌──────┴──────┐
+                    │ GraphStorage │
+                    │ (graph_core) │
+                    └─────────────┘
 ```
 
 ## Prerequisites
@@ -62,6 +100,7 @@ uvicorn app_host.server:get_app --factory --reload --port 8000
 
 The server will be available at:
 - REST API: http://localhost:8000/api/v1/
+- UI Backend (chat): http://localhost:8000/ui/
 - MCP endpoint: http://localhost:8000/mcp
 - Health check: http://localhost:8000/health
 
@@ -78,6 +117,10 @@ uvicorn app_host.server:get_app --factory --host 0.0.0.0 --port 8000
 | `GRAPH_FILE` | `graph.json` | Path to graph data file |
 | `API_PREFIX` | `/api/v1` | REST API URL prefix |
 | `MCP_NAME` | `community-graph` | MCP server name |
+| `OPENAI_API_KEY` | - | OpenAI API key (for chat) |
+| `ANTHROPIC_API_KEY` | - | Anthropic API key (for chat) |
+| `LLM_PROVIDER` | auto-detect | Force LLM provider: `openai` or `claude` |
+| `OPENAI_MODEL` | `gpt-4o` | OpenAI model to use |
 
 ## Building Frontend
 
@@ -133,6 +176,23 @@ These tests verify that REST API and MCP tools produce identical results:
 ```bash
 pytest graph_services/tests/test_integration_rest_vs_mcp.py -v
 ```
+
+#### UI Backend Tests
+
+These tests verify chat and document upload functionality:
+
+```bash
+# Run ui_backend unit tests
+pytest ui_backend/tests/ -v
+
+# Run ui_backend integration tests (with full app stack)
+pytest app_host/tests/test_ui_backend_integration.py -v
+```
+
+The ui_backend tests use mocked LLM providers to verify:
+- Tool calls are routed through GraphService
+- Graph mutations persist correctly
+- Document upload and extraction work
 
 ### JavaScript Tests
 
@@ -214,6 +274,36 @@ npm test
 | `delete_nodes` | Delete nodes by ID |
 | `get_graph_stats` | Get graph statistics |
 | `save_view` | Save a named view (creates SavedView node) |
+
+### UI Backend Endpoints
+
+| Method | Endpoint | Description |
+|--------|----------|-------------|
+| POST | `/ui/chat` | Process chat with conversation history |
+| POST | `/ui/chat/simple` | Simple chat with single message |
+| POST | `/ui/upload` | Upload and analyze document |
+| POST | `/ui/upload/extract` | Extract text only (no LLM analysis) |
+| GET | `/ui/info` | Get service info (provider, tools) |
+| GET | `/ui/supported-formats` | Get supported document formats |
+
+#### Chat Example
+
+```bash
+curl -X POST http://localhost:8000/ui/chat \
+  -H "Content-Type: application/json" \
+  -d '{
+    "messages": [{"role": "user", "content": "Search for AI projects"}]
+  }'
+```
+
+#### Document Upload Example
+
+```bash
+curl -X POST http://localhost:8000/ui/upload \
+  -F "file=@document.pdf" \
+  -F "message=What is this document about?" \
+  -F "analyze=true"
+```
 
 ### Direct Tool Execution
 

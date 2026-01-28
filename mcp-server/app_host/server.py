@@ -31,6 +31,7 @@ from mcp.server.fastmcp import FastMCP
 
 from graph_core import GraphStorage
 from graph_services import GraphService, create_rest_router, register_mcp_tools, json_serializer
+from ui_backend import ChatService, DocumentService, create_ui_router
 
 from .config import AppConfig
 
@@ -77,6 +78,18 @@ def create_app(
     # Create and mount REST API router
     rest_router = create_rest_router(graph_service)
     app.include_router(rest_router, prefix=config.api_prefix)
+
+    # Create UI Backend services (ChatService and DocumentService)
+    chat_service = ChatService(graph_service)
+    document_service = DocumentService()
+
+    # Store chat service on app state for access in routes
+    app.state.chat_service = chat_service
+    app.state.document_service = document_service
+
+    # Create and mount UI Backend router
+    ui_router = create_ui_router(chat_service, document_service)
+    app.include_router(ui_router, prefix="/ui")
 
     # Initialize FastMCP and register tools
     mcp = FastMCP(config.mcp_name)
@@ -149,6 +162,7 @@ def create_app(
             "version": "1.0.0",
             "endpoints": {
                 "api": config.api_prefix,
+                "ui": "/ui",
                 "mcp": "/mcp",
                 "web": "/web",
                 "widget": "/widget",
@@ -157,7 +171,8 @@ def create_app(
             "graph_stats": {
                 "nodes": len(graph_storage.nodes),
                 "edges": len(graph_storage.edges),
-            }
+            },
+            "llm_provider": chat_service.provider_type
         }
 
     return app
