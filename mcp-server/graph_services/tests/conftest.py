@@ -12,9 +12,62 @@ import pytest
 import tempfile
 import os
 from typing import Generator
+from unittest.mock import patch, MagicMock
 
 from graph_core import GraphStorage, Node, Edge, NodeType, RelationshipType
 from graph_services import GraphService
+
+
+# ==================== Mock Embedding Model ====================
+# This fixture mocks the embedding model to avoid network requests during tests.
+# The mock returns random-ish but deterministic embeddings based on input text.
+
+class MockSentenceTransformer:
+    """Mock SentenceTransformer that generates deterministic embeddings without network."""
+
+    def __init__(self, model_name=None):
+        self.model_name = model_name
+        import numpy as np
+        self._np = np
+
+    def encode(self, texts, convert_to_numpy=True, show_progress_bar=False):
+        """Generate mock embeddings based on text hash."""
+        if isinstance(texts, str):
+            texts = [texts]
+        embeddings = []
+        for text in texts:
+            # Create deterministic embedding based on text content
+            self._np.random.seed(abs(hash(text)) % (2**32))
+            embedding = self._np.random.rand(384).astype(self._np.float32)  # MiniLM dimension
+            embeddings.append(embedding)
+        return self._np.array(embeddings)
+
+
+@pytest.fixture(autouse=True)
+def mock_embedding_model():
+    """
+    Automatically mock the embedding model for all tests.
+    This prevents network requests to HuggingFace during testing.
+    """
+    import graph_core.vector_store as vs
+
+    # Save original function
+    original_ensure = vs._ensure_sentence_transformers
+
+    # Replace with mock
+    def mock_ensure():
+        return MockSentenceTransformer
+
+    vs._ensure_sentence_transformers = mock_ensure
+
+    # Also reset the global to force reload
+    vs._SentenceTransformer = None
+
+    yield
+
+    # Restore original
+    vs._ensure_sentence_transformers = original_ensure
+    vs._SentenceTransformer = None
 
 
 @pytest.fixture

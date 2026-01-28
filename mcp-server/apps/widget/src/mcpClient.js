@@ -9,9 +9,9 @@
  * Check if MCP tools are available
  */
 export function isMCPAvailable() {
-  return typeof window !== 'undefined' &&
-         window.openai &&
-         typeof window.openai.callTool === 'function';
+  return !!(typeof window !== 'undefined' &&
+            window.openai &&
+            typeof window.openai.callTool === 'function');
 }
 
 /**

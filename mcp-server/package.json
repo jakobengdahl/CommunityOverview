@@ -11,7 +11,14 @@
     "build:web": "npm run build -w @community-graph/web",
     "build:widget": "npm run build -w @community-graph/widget",
     "test": "npm run test --workspaces --if-present",
+    "test:unit": "npm run test --workspaces --if-present",
+    "test:widget": "npm run test -w @community-graph/widget",
+    "test:canvas": "npm run test -w @community-graph/ui-graph-canvas",
     "test:e2e": "npm run test:e2e -w @community-graph/web",
+    "test:e2e-live": "./scripts/test-e2e.sh",
+    "test:python": "pytest",
+    "test:integration": "pytest graph_services/tests/test_integration_rest_vs_mcp.py -v",
+    "test:all": "npm run test:python && npm run test:unit",
     "dev": "npm run dev -w @community-graph/web"
   }
 }
