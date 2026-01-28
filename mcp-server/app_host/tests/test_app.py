@@ -21,9 +21,15 @@ class TestHealthAndRoot:
         assert "graph_nodes" in data
         assert "graph_edges" in data
 
-    def test_root_endpoint(self, test_app: TestClient):
-        """Root endpoint returns API information."""
-        response = test_app.get("/")
+    def test_root_endpoint_redirects(self, test_app: TestClient):
+        """Root endpoint redirects to /web/."""
+        response = test_app.get("/", follow_redirects=False)
+        assert response.status_code == 302
+        assert response.headers["location"] == "/web/"
+
+    def test_info_endpoint(self, test_app: TestClient):
+        """Info endpoint returns API information."""
+        response = test_app.get("/info")
         assert response.status_code == 200
         data = response.json()
         assert data["name"] == "Community Knowledge Graph"
