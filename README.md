@@ -28,34 +28,35 @@ This system helps organizations avoid overlapping investments by making visible:
 ## Project Structure
 
 ```
-/mcp-server                       # Main application directory
-  /app_host                       # FastAPI server host
+/backend                          # Python backend directory
+  /api_host                       # FastAPI server host
     server.py                     # Main server with REST, MCP, and static files
     config.py                     # Server configuration
-  /graph_core                     # Core graph data structures
+  /core                           # Core graph data structures
     storage.py                    # NetworkX graph operations
     models.py                     # Node/Edge data models
     vector_store.py               # Similarity search
-  /graph_services                 # Graph service layer
+  /service                        # Graph service layer
     service.py                    # High-level graph operations
     rest_api.py                   # REST API router
     mcp_tools.py                  # MCP tool definitions
-  /ui_backend                     # Chat and document handling
+  /ui                             # Chat and document handling
     chat_service.py               # LLM chat with tool execution
     document_service.py           # Document parsing
     rest_api.py                   # Chat REST endpoints
-  /apps
-    /web                          # React web application
-      /src/components             # UI components (ChatPanel, etc.)
-      /src/services               # API client
-      /src/store                  # Zustand state
-      /tests                      # Unit and e2e tests
-    /widget                       # ChatGPT embeddable widget
-  /packages
-    /ui-graph-canvas              # Shared React Flow component
   graph.json                      # Graph data (auto-created)
   llm_providers.py                # LLM provider abstraction
   chat_logic.py                   # Chat processing logic
+/frontend                         # Frontend applications
+  /web                            # React web application
+    /src/components               # UI components (ChatPanel, etc.)
+    /src/services                 # API client
+    /src/store                    # Zustand state
+    /tests                        # Unit and e2e tests
+  /widget                         # ChatGPT embeddable widget
+/packages                         # Shared packages
+  /ui-graph-canvas                # Shared React Flow component
+/scripts                          # Utility scripts
 start-dev.sh                      # Development startup script
 LLM_PROVIDERS.md                  # LLM configuration guide
 ```
@@ -112,16 +113,14 @@ If you prefer to start services separately:
 
 **Backend:**
 ```bash
-cd mcp-server
 python -m venv venv
 source venv/bin/activate  # Windows: venv\Scripts\activate
-pip install -r requirements.txt
-uvicorn app_host.server:get_app --factory --reload --port 8000
+pip install -r backend/requirements.txt
+uvicorn backend.api_host.server:get_app --factory --reload --port 8000
 ```
 
 **Frontend (development with hot reload):**
 ```bash
-cd mcp-server
 npm install
 npm run dev  # Starts Vite dev server on http://localhost:5173
 ```
@@ -150,10 +149,8 @@ See [LLM_PROVIDERS.md](./LLM_PROVIDERS.md) for detailed configuration.
 ## Testing
 
 ```bash
-cd mcp-server
-
 # All Python tests
-python -m pytest
+python -m pytest backend
 
 # JavaScript tests
 npm test
@@ -210,7 +207,7 @@ The widget provides:
 
 ## Development
 
-See [mcp-server/DEVELOPMENT.md](./mcp-server/DEVELOPMENT.md) for detailed development guide including:
+See [backend/DEVELOPMENT.md](./backend/DEVELOPMENT.md) for detailed development guide including:
 - Architecture overview
 - Adding new MCP tools
 - Testing strategies
