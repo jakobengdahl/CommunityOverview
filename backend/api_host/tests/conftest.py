@@ -78,7 +78,7 @@ class MockLLMProvider:
         self.call_count = 0
 
     def create_completion(self, messages, system_prompt, tools, max_tokens=4096):
-        from llm_providers import LLMResponse
+        from backend.llm_providers import LLMResponse
         self.call_count += 1
 
         if self.mock_tool_calls and self.call_count == 1:

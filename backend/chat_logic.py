@@ -3,7 +3,7 @@ import os
 import json
 from dotenv import load_dotenv
 import inspect
-from llm_providers import create_provider, LLMProvider
+from backend.llm_providers import create_provider, LLMProvider
 
 # Load environment variables
 load_dotenv()

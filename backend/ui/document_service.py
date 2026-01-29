@@ -16,11 +16,7 @@ import shutil
 from typing import Optional, Dict, Any, BinaryIO
 from pathlib import Path
 
-# Import from parent directory (legacy module)
-import sys
-sys.path.insert(0, str(Path(__file__).parent.parent))
-
-from document_processor import DocumentProcessor
+from backend.document_processor import DocumentProcessor
 
 
 class DocumentService:
