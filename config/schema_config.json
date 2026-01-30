@@ -1,0 +1,91 @@
+{
+  "schema": {
+    "node_types": {
+      "SavedView": {
+        "fields": ["name", "description", "summary", "metadata"],
+        "static": true,
+        "description": "Saved graph view snapshots for quick navigation",
+        "color": "#6B7280"
+      },
+      "VisualizationView": {
+        "fields": ["name", "description", "summary", "metadata"],
+        "static": true,
+        "description": "Saved graph view snapshots (legacy)",
+        "color": "#6B7280"
+      },
+      "Actor": {
+        "fields": ["name", "description", "summary", "tags", "communities"],
+        "description": "Government agencies, organizations, individuals responsible for initiatives",
+        "color": "#3B82F6"
+      },
+      "Community": {
+        "fields": ["name", "description", "summary", "tags"],
+        "description": "Communities like eSam, Myndigheter, Officiell Statistik",
+        "color": "#A855F7"
+      },
+      "Initiative": {
+        "fields": ["name", "description", "summary", "tags", "communities", "start_date", "end_date"],
+        "description": "Projects, programs, collaborative activities",
+        "color": "#10B981"
+      },
+      "Capability": {
+        "fields": ["name", "description", "summary", "tags", "communities"],
+        "description": "Capabilities, competencies, skills needed/provided",
+        "color": "#F97316"
+      },
+      "Resource": {
+        "fields": ["name", "description", "summary", "tags", "communities", "url"],
+        "description": "Outputs such as reports, software, tools, datasets",
+        "color": "#FBBF24"
+      },
+      "Legislation": {
+        "fields": ["name", "description", "summary", "tags", "effective_date"],
+        "description": "Laws, directives (NIS2, GDPR, etc.)",
+        "color": "#EF4444"
+      },
+      "Theme": {
+        "fields": ["name", "description", "summary", "tags"],
+        "description": "Themes like AI strategies, data strategies, digitalization",
+        "color": "#14B8A6"
+      }
+    },
+    "relationship_types": {
+      "BELONGS_TO": {
+        "description": "Belongs to (actor belongs to community, initiative belongs to actor)"
+      },
+      "IMPLEMENTS": {
+        "description": "Implements (initiative implements legislation)"
+      },
+      "PRODUCES": {
+        "description": "Produces (initiative produces resource/capability)"
+      },
+      "GOVERNED_BY": {
+        "description": "Governed by (initiative governed by legislation)"
+      },
+      "RELATES_TO": {
+        "description": "Relates to (general connection)"
+      },
+      "PART_OF": {
+        "description": "Part of (component is part of larger whole)"
+      }
+    }
+  },
+  "presentation": {
+    "title": "Community Knowledge Graph",
+    "introduction": "Utforska nätverket av myndigheter, initiativ och resurser inom det offentliga samarbetet.",
+    "colors": {
+      "Actor": "#3B82F6",
+      "Community": "#A855F7",
+      "Initiative": "#10B981",
+      "Capability": "#F97316",
+      "Resource": "#FBBF24",
+      "Legislation": "#EF4444",
+      "Theme": "#14B8A6",
+      "SavedView": "#6B7280",
+      "VisualizationView": "#6B7280"
+    },
+    "prompt_prefix": "Du är en kunskapsagent som hjälper användare att navigera och underhålla en knowledge graph över det svenska offentliga digitaliseringssamarbetet.",
+    "prompt_suffix": "Kom ihåg att föreslå sparade vyer när det är relevant, och att alltid fråga efter bekräftelse innan du gör ändringar i grafen.",
+    "default_language": "sv"
+  }
+}

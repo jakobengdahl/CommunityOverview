@@ -155,6 +155,22 @@ export async function getRelationshipTypes() {
 }
 
 /**
+ * Get the complete schema configuration
+ * @returns {Promise<{node_types: Object, relationship_types: Object}>}
+ */
+export async function getSchema() {
+  return apiFetch(`${API_BASE}/schema`);
+}
+
+/**
+ * Get the presentation configuration
+ * @returns {Promise<{title: string, introduction: string, colors: Object, prompt_prefix: string, prompt_suffix: string}>}
+ */
+export async function getPresentation() {
+  return apiFetch(`${API_BASE}/presentation`);
+}
+
+/**
  * Export the entire graph
  * @returns {Promise<{nodes: Array, edges: Array}>}
  */

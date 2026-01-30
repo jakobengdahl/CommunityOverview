@@ -9,6 +9,7 @@ Key design principles:
 - Stateless operations - all state is managed by graph_core
 - Consistent response format across all methods
 - Thread-safe operations through graph_core
+- Schema and presentation config are loaded from config_loader
 """
 
 from typing import List, Optional, Dict, Any
@@ -16,8 +17,11 @@ from datetime import datetime
 
 from backend.core import (
     GraphStorage, Node, Edge, NodeType, RelationshipType,
-    SimilarNode, GraphStats, AddNodesResult, DeleteNodesResult, NODE_COLORS
+    SimilarNode, GraphStats, AddNodesResult, DeleteNodesResult, NODE_COLORS,
+    get_node_type_names, get_relationship_type_names, get_node_color
 )
+
+from backend import config_loader
 
 from .serializers import (
     serialize_node, serialize_nodes,
@@ -366,38 +370,60 @@ class GraphService:
 
     def list_node_types(self) -> Dict[str, Any]:
         """
-        List all allowed node types according to the metamodel.
+        List all allowed node types according to the schema config.
 
         Returns:
             Dict with node types and their color coding
         """
-        return {
-            "node_types": [
-                {
-                    "type": nt.value,
-                    "color": NODE_COLORS[nt],
-                    "description": NODE_TYPE_DESCRIPTIONS.get(nt, "")
-                }
-                for nt in NodeType
-            ]
-        }
+        schema = config_loader.get_schema()
+        node_types = []
+
+        for type_name, type_config in schema.get("node_types", {}).items():
+            node_types.append({
+                "type": type_name,
+                "color": type_config.get("color", "#9CA3AF"),
+                "description": type_config.get("description", ""),
+                "fields": type_config.get("fields", []),
+                "static": type_config.get("static", False)
+            })
+
+        return {"node_types": node_types}
 
     def list_relationship_types(self) -> Dict[str, Any]:
         """
-        List all allowed relationship types.
+        List all allowed relationship types according to schema config.
 
         Returns:
             Dict with relationship types
         """
-        return {
-            "relationship_types": [
-                {
-                    "type": rt.value,
-                    "description": RELATIONSHIP_TYPE_DESCRIPTIONS.get(rt, "")
-                }
-                for rt in RelationshipType
-            ]
-        }
+        schema = config_loader.get_schema()
+        relationship_types = []
+
+        for type_name, type_config in schema.get("relationship_types", {}).items():
+            relationship_types.append({
+                "type": type_name,
+                "description": type_config.get("description", "")
+            })
+
+        return {"relationship_types": relationship_types}
+
+    def get_schema(self) -> Dict[str, Any]:
+        """
+        Get the complete schema configuration.
+
+        Returns:
+            Dict with node_types and relationship_types
+        """
+        return config_loader.get_schema()
+
+    def get_presentation(self) -> Dict[str, Any]:
+        """
+        Get the presentation configuration.
+
+        Returns:
+            Dict with title, introduction, colors, prompt_prefix, prompt_suffix
+        """
+        return config_loader.get_presentation()
 
     # ==================== Saved Views ====================
 

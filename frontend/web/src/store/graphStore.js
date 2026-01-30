@@ -1,7 +1,7 @@
 import { create } from 'zustand';
 
-// Welcome message shown when chat starts
-const WELCOME_MESSAGE = {
+// Default welcome message (used before presentation is loaded)
+const DEFAULT_WELCOME_MESSAGE = {
   role: 'assistant',
   content: `Välkommen till Community Knowledge Graph!
 
@@ -19,12 +19,39 @@ Du kan också ladda upp dokument (PDF, Word, text) för att extrahera entiteter.
 };
 
 /**
+ * Create a welcome message using the presentation config
+ */
+function createWelcomeMessage(presentation) {
+  const intro = presentation?.introduction || DEFAULT_WELCOME_MESSAGE.content;
+  return {
+    role: 'assistant',
+    content: `${intro}
+
+Du kan ställa frågor som:
+• "Vilka initiativ relaterar till NIS2?"
+• "Visa alla aktörer"
+• "Finns det några AI-strategiprojekt?"
+• "Sök efter myndigheter som jobbar med digital identitet"
+
+Du kan också ladda upp dokument (PDF, Word, text) för att extrahera entiteter.
+
+**OBS:** Hantera inte personuppgifter i denna tjänst.`,
+    timestamp: new Date(),
+    id: 'welcome',
+  };
+}
+
+/**
  * Zustand store for graph state management
  */
 const useGraphStore = create((set, get) => ({
   // Graph data
   nodes: [],
   edges: [],
+
+  // Schema and presentation config (loaded from backend)
+  schema: null,
+  presentation: null,
 
   // UI state
   highlightedNodeIds: [],
@@ -39,13 +66,14 @@ const useGraphStore = create((set, get) => ({
   searchResults: null,
 
   // Chat state (always visible, no toggle)
-  chatMessages: [WELCOME_MESSAGE],
+  chatMessages: [DEFAULT_WELCOME_MESSAGE],
 
   // Stats
   stats: null,
 
   // Loading states
   isLoading: false,
+  configLoaded: false,
   error: null,
 
   // Actions
@@ -110,6 +138,80 @@ const useGraphStore = create((set, get) => ({
 
   setError: (error) => set({ error }),
 
+  // Schema and presentation actions
+  setSchema: (schema) => set({ schema }),
+
+  setPresentation: (presentation) => {
+    // Update welcome message with new presentation
+    const welcomeMessage = createWelcomeMessage(presentation);
+    const { chatMessages } = get();
+
+    // Replace the welcome message if it's the first message
+    const updatedMessages = chatMessages.length > 0 && chatMessages[0].id === 'welcome'
+      ? [welcomeMessage, ...chatMessages.slice(1)]
+      : chatMessages;
+
+    set({
+      presentation,
+      chatMessages: updatedMessages,
+      configLoaded: true,
+    });
+  },
+
+  setConfig: (schema, presentation) => {
+    const welcomeMessage = createWelcomeMessage(presentation);
+    set({
+      schema,
+      presentation,
+      chatMessages: [welcomeMessage],
+      configLoaded: true,
+    });
+  },
+
+  // Get node color from schema/presentation
+  getNodeColor: (nodeType) => {
+    const { presentation, schema } = get();
+
+    // Check presentation colors first
+    if (presentation?.colors?.[nodeType]) {
+      return presentation.colors[nodeType];
+    }
+
+    // Fall back to schema-defined color
+    if (schema?.node_types?.[nodeType]?.color) {
+      return schema.node_types[nodeType].color;
+    }
+
+    // Default gray
+    return '#9CA3AF';
+  },
+
+  // Get node type config
+  getNodeTypeConfig: (nodeType) => {
+    const { schema } = get();
+    return schema?.node_types?.[nodeType] || null;
+  },
+
+  // Get all node types
+  getNodeTypes: () => {
+    const { schema } = get();
+    if (!schema?.node_types) return [];
+    return Object.entries(schema.node_types).map(([name, config]) => ({
+      type: name,
+      ...config,
+    }));
+  },
+
+  // Get all relationship types
+  getRelationshipTypes: () => {
+    const { schema } = get();
+    if (!schema?.relationship_types) return [];
+    return Object.entries(schema.relationship_types).map(([name, config]) => ({
+      type: name,
+      ...config,
+    }));
+  },
+
   // Clear highlights after a delay
   clearHighlights: () => {
     setTimeout(() => set({ highlightedNodeIds: [] }), 3000);
@@ -121,7 +223,11 @@ const useGraphStore = create((set, get) => ({
     set({ chatMessages: [...chatMessages, { ...message, id: message.id || Date.now() }] });
   },
 
-  clearChatMessages: () => set({ chatMessages: [WELCOME_MESSAGE] }),
+  clearChatMessages: () => {
+    const { presentation } = get();
+    const welcomeMessage = createWelcomeMessage(presentation);
+    set({ chatMessages: [welcomeMessage] });
+  },
 
   // Context menu actions
   setContextMenu: (menu) => set({ contextMenu: menu }),

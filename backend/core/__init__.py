@@ -31,10 +31,18 @@ from .vector_store import VectorStore
 
 # Data models
 from .models import (
-    # Enums
+    # Enums (legacy, kept for backward compatibility)
     NodeType,
     RelationshipType,
     NODE_COLORS,
+
+    # Dynamic type functions (new, config-based)
+    get_node_type_names,
+    get_relationship_type_names,
+    is_valid_node_type,
+    is_valid_relationship_type,
+    get_node_color,
+    NODE_COLORS_LOOKUP,
 
     # Core models
     Node,
@@ -53,10 +61,18 @@ __all__ = [
     "GraphStorage",
     "VectorStore",
 
-    # Enums
+    # Enums (legacy)
     "NodeType",
     "RelationshipType",
     "NODE_COLORS",
+
+    # Dynamic type functions (new)
+    "get_node_type_names",
+    "get_relationship_type_names",
+    "is_valid_node_type",
+    "is_valid_relationship_type",
+    "get_node_color",
+    "NODE_COLORS_LOOKUP",
 
     # Core models
     "Node",

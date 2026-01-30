@@ -248,6 +248,32 @@ def register_mcp_tools(mcp, service: GraphService) -> Dict[str, Callable]:
         """
         return service.list_relationship_types()
 
+    @register_tool
+    def get_schema() -> Dict[str, Any]:
+        """
+        Get the complete schema configuration.
+
+        Returns the full schema including all node types with their fields,
+        colors, and descriptions, as well as all relationship types.
+
+        Returns:
+            Dict with node_types and relationship_types
+        """
+        return service.get_schema()
+
+    @register_tool
+    def get_presentation() -> Dict[str, Any]:
+        """
+        Get the presentation configuration for the UI.
+
+        Returns settings for UI display including colors, introduction text,
+        and prompt configuration.
+
+        Returns:
+            Dict with title, introduction, colors, prompt_prefix, prompt_suffix
+        """
+        return service.get_presentation()
+
     # ==================== Saved Views Tools ====================
 
     @register_tool

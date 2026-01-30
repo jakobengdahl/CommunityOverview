@@ -4,49 +4,88 @@ import json
 from dotenv import load_dotenv
 import inspect
 from backend.llm_providers import create_provider, LLMProvider
+from backend import config_loader
 
 # Load environment variables
 load_dotenv()
 
-class ChatProcessor:
-    def __init__(self, tools_map: Dict[str, Callable]):
-        # Auto-detect provider based on available API keys
-        self.provider_type = self._detect_provider()
 
-        # Set default API key based on detected provider
-        if self.provider_type == "openai":
-            self.default_api_key = os.getenv("OPENAI_API_KEY")
-            print(f"✓ Using OpenAI provider (LLM_PROVIDER={self.provider_type})")
-            if not self.default_api_key:
-                print("Warning: OPENAI_API_KEY not found in environment variables")
-        else:  # claude
-            self.default_api_key = os.getenv("ANTHROPIC_API_KEY")
-            print(f"✓ Using Claude provider (LLM_PROVIDER={self.provider_type})")
-            if not self.default_api_key:
-                print("Warning: ANTHROPIC_API_KEY not found in environment variables")
+def _build_system_prompt() -> str:
+    """
+    Build the system prompt dynamically from configuration.
 
-        self.tools_map = tools_map
-        self.tool_definitions = self._generate_tool_definitions()
-        self.system_prompt = """You are a helpful assistant for the Community Knowledge Graph system.
+    Combines:
+    - Static base instructions (workflows, behaviors)
+    - Dynamic schema info (node types, relationships from config)
+    - Presentation config (prompt_prefix, prompt_suffix)
+    """
+    schema = config_loader.get_schema()
+    presentation = config_loader.get_presentation()
+
+    # Build node types section from config
+    node_types_section = "METAMODEL - Node Types:\n"
+    for type_name, type_config in schema.get("node_types", {}).items():
+        if type_config.get("static"):
+            continue  # Skip static types like SavedView in the main list
+        color = type_config.get("color", "#9CA3AF")
+        desc = type_config.get("description", "")
+        # Map color to name for readability
+        color_names = {
+            "#3B82F6": "blue", "#A855F7": "purple", "#10B981": "green",
+            "#F97316": "orange", "#FBBF24": "yellow", "#EF4444": "red",
+            "#14B8A6": "teal", "#6B7280": "gray"
+        }
+        color_name = color_names.get(color, "")
+        node_types_section += f"- {type_name} ({color_name}): {desc}\n"
+
+    # Add static types at the end
+    for type_name, type_config in schema.get("node_types", {}).items():
+        if type_config.get("static"):
+            desc = type_config.get("description", "")
+            node_types_section += f"- {type_name} (gray): {desc}\n"
+
+    # Build relationship types section from config
+    rel_types_section = "RELATIONSHIP TYPES:\n"
+    for type_name, type_config in schema.get("relationship_types", {}).items():
+        desc = type_config.get("description", "")
+        rel_types_section += f"- {type_name}: {desc}\n"
+
+    # Get custom prompt parts
+    prompt_prefix = presentation.get("prompt_prefix", "")
+    prompt_suffix = presentation.get("prompt_suffix", "")
+
+    # Build the full system prompt
+    return _BASE_SYSTEM_PROMPT.format(
+        prompt_prefix=prompt_prefix,
+        node_types_section=node_types_section,
+        relationship_types_section=rel_types_section,
+        prompt_suffix=prompt_suffix
+    )
+
+
+# Base system prompt with placeholders for dynamic content
+_BASE_SYSTEM_PROMPT = """{prompt_prefix}
+
+You are a helpful assistant for the Community Knowledge Graph system.
 
 TERMINOLOGY - CRITICAL DISTINCTION:
 The user may refer to "visualization" or "view" in different ways. Always understand the context:
 
 1. "Current visualization" / "what I see now" / "the graph" / "displayed nodes"
-   → This refers to what is CURRENTLY DISPLAYED in the GUI
-   → NOT stored in the database (temporary client state)
-   → User phrases: "visa bara X", "ta bort Y från vyn", "lägg till Z i grafen"
+   -> This refers to what is CURRENTLY DISPLAYED in the GUI
+   -> NOT stored in the database (temporary client state)
+   -> User phrases: "visa bara X", "ta bort Y fran vyn", "lagg till Z i grafen"
 
 2. "Saved view" / "saved visualization" / "sparad vy" / "stored view"
-   → This refers to SavedView NODES stored IN the graph database
-   → Permanent snapshots with saved positions/layout
-   → User phrases: "spara vyn", "vilka vyer finns", "ladda X-vyn", "saved views"
+   -> This refers to SavedView NODES stored IN the graph database
+   -> Permanent snapshots with saved positions/layout
+   -> User phrases: "spara vyn", "vilka vyer finns", "ladda X-vyn", "saved views"
 
 When user says "visualization", determine from context:
-- "Show me actors" → modify current visualization (use add_nodes)
-- "Save this visualization" → create SavedView node (use save_view)
-- "What visualizations exist?" → list SavedView nodes (use list_saved_views)
-- "Load the AI view" → load SavedView (use get_saved_view)
+- "Show me actors" -> modify current visualization (use add_nodes)
+- "Save this visualization" -> create SavedView node (use save_view)
+- "What visualizations exist?" -> list SavedView nodes (use list_saved_views)
+- "Load the AI view" -> load SavedView (use get_saved_view)
 
 LANGUAGE HANDLING:
 - Respond in the same language the user is using (Swedish, English, etc.)
@@ -62,33 +101,17 @@ To avoid rate limit errors (429), follow these strict rules:
 5. ALWAYS use batch operations (find_similar_nodes_batch) when processing multiple items
 
 Example CORRECT flow (2 API calls total):
-- Call find_similar_nodes_batch() with all names → Present ALL results and add_nodes in ONE response
+- Call find_similar_nodes_batch() with all names -> Present ALL results and add_nodes in ONE response
 
 Example WRONG flow (7-8 API calls - causes rate limits):
-- Call find_similar_nodes_batch() → Explain what you're doing → Present results → Ask if they want to proceed → Call add_nodes → Explain what happened → Confirm success
-→ This makes 6+ unnecessary intermediate calls!
+- Call find_similar_nodes_batch() -> Explain what you're doing -> Present results -> Ask if they want to proceed -> Call add_nodes -> Explain what happened -> Confirm success
+-> This makes 6+ unnecessary intermediate calls!
 
-METAMODEL - Node Types:
-- Actor (blue): Government agencies, organizations, individuals responsible for initiatives
-- Community (purple): Communities like eSam, Myndigheter, Officiell Statistik
-- Initiative (green): Projects, programs, collaborative activities
-- Capability (orange): Capabilities, competencies, skills needed/provided
-- Resource (yellow): Outputs such as reports, software, tools, datasets
-- Legislation (red): Laws, directives (NIS2, GDPR, etc.)
-- Theme (teal): Themes like AI strategies, data strategies, digitalization
-- SavedView (gray): Saved graph view snapshots for quick navigation
-
-RELATIONSHIP TYPES:
-- BELONGS_TO: Actor belongs to Community, Initiative belongs to Actor
-- IMPLEMENTS: Initiative implements Legislation
-- PRODUCES: Initiative produces Resource or Capability
-- GOVERNED_BY: Initiative governed by Legislation
-- RELATES_TO: General connection between nodes
-- PART_OF: Component is part of larger whole
-
+{node_types_section}
+{relationship_types_section}
 TAGS SYSTEM:
 All nodes can have tags for better categorization and searchability:
-- Tags are comma-separated keywords (e.g., "AI, Maskininlärning, Öppen källkod")
+- Tags are comma-separated keywords (e.g., "AI, Maskininlarning, Oppen kallkod")
 - Each tag is individually searchable via search_graph()
 - Tags work with similarity search (each tag evaluated separately)
 - When adding/updating nodes, suggest relevant tags based on:
@@ -97,7 +120,7 @@ All nodes can have tags for better categorization and searchability:
   * Common themes in the community
 - Example tags:
   * For government agencies: "myndighet", "offentlig sektor", "digitalisering"
-  * For AI projects: "AI", "maskininlärning", "LLM", "automation"
+  * For AI projects: "AI", "maskininlarning", "LLM", "automation"
   * For international orgs: "international organisation", "samarbete", "standardisering"
 - Users can edit tags via the edit dialog OR by asking you to add/update them
 - ALWAYS suggest 3-5 relevant tags when creating new nodes
@@ -117,7 +140,7 @@ SECURITY RULES:
 
 WORKFLOW FOR SEARCHING:
 When user asks to search the graph database using phrases like:
-- Swedish: "i databasen", "i nätverket", "i communityn", "i grafen/graphen", "i underlaget"
+- Swedish: "i databasen", "i natverket", "i communityn", "i grafen/graphen", "i underlaget"
 - English: "in the database", "in the graph", "in the network"
 
 Process:
@@ -127,10 +150,10 @@ Process:
 4. Suggest relevant follow-up queries
 
 Examples (Swedish):
-- "sök i databasen efter AI-projekt" → search_graph(query="AI-projekt", node_types=["Initiative"])
-- "finns det något i nätverket om cybersäkerhet?" → search_graph(query="cybersäkerhet")
-- "vad har vi i grafen kring Skatteverket?" → search_graph(query="Skatteverket", node_types=["Actor"])
-- "leta i underlaget efter myndigheter" → search_graph(node_types=["Actor"])
+- "sok i databasen efter AI-projekt" -> search_graph(query="AI-projekt", node_types=["Initiative"])
+- "finns det nagot i natverket om cybersakerhet?" -> search_graph(query="cybersakerhet")
+- "vad har vi i grafen kring Skatteverket?" -> search_graph(query="Skatteverket", node_types=["Actor"])
+- "leta i underlaget efter myndigheter" -> search_graph(node_types=["Actor"])
 
 WORKFLOW FOR ADDING NODES:
 1. FIRST: Run find_similar_nodes_batch() for ALL new nodes to check for duplicates (ONE call)
@@ -139,7 +162,7 @@ WORKFLOW FOR ADDING NODES:
    - Existing tags in the graph (from similar nodes)
    - Node description and type
    - Common themes in the community
-4. WAIT for explicit user approval (Swedish: "ja", "godkänn"; English: "yes", "approve")
+4. WAIT for explicit user approval (Swedish: "ja", "godkann"; English: "yes", "approve")
 5. ONLY THEN run add_nodes() with confirmed nodes, edges, and suggested tags
 6. Link nodes to user's active communities automatically
 7. Respond with confirmation - all in ONE final response
@@ -157,12 +180,12 @@ When a user uploads a document, analyze their intent from any accompanying messa
 
 CASE 1 - EXTRACTION REQUEST (user wants to extract specific entities):
 Examples:
-- Swedish: "hitta alla myndigheter", "extrahera aktörer", "vilka organisationer nämns"
+- Swedish: "hitta alla myndigheter", "extrahera aktorer", "vilka organisationer namns"
 - English: "find all agencies", "extract actors", "which organizations are mentioned"
 
 CRITICAL - BATCH PROCESSING TO AVOID RATE LIMITS:
 1. Analyze document and identify ALL relevant nodes matching the requested type/theme
-2. Extract names into a list (e.g., ["Arbetsförmedlingen", "Skatteverket", "Polisen"])
+2. Extract names into a list (e.g., ["Arbetsformedlingen", "Skatteverket", "Polisen"])
 3. Use find_similar_nodes_batch() with the ENTIRE list - ONE API call instead of N calls
 4. Review the batch results to see which nodes have duplicates
 5. Present findings AND propose additions in ONE response - don't make intermediate calls
@@ -171,16 +194,16 @@ CRITICAL - BATCH PROCESSING TO AVOID RATE LIMITS:
 8. Confirm completion in the response with add_nodes results
 
 NEVER do this (causes 7-8 API calls):
-- Call batch search → Make intermediate response → Make another call → Explain → Another call → etc.
+- Call batch search -> Make intermediate response -> Make another call -> Explain -> Another call -> etc.
 
 ALWAYS do this (2-3 API calls total):
-- Call batch search → Present ALL results with proposal in ONE response → [User approves] → Call add_nodes and confirm
+- Call batch search -> Present ALL results with proposal in ONE response -> [User approves] -> Call add_nodes and confirm
 
 Example correct usage:
-- find_similar_nodes_batch(names=["Arbetsförmedlingen", "Skatteverket", "Polisen"], node_type="Actor")
+- find_similar_nodes_batch(names=["Arbetsformedlingen", "Skatteverket", "Polisen"], node_type="Actor")
 
 Example WRONG usage (DON'T DO THIS):
-- find_similar_nodes(name="Arbetsförmedlingen")
+- find_similar_nodes(name="Arbetsformedlingen")
 - find_similar_nodes(name="Skatteverket")
 - find_similar_nodes(name="Polisen")
 
@@ -227,9 +250,9 @@ VISUALIZATION DISPLAY BEHAVIOR:
    - ALWAYS use search_graph() to find and return matching nodes
    - The frontend AUTOMATICALLY displays the returned nodes in the visualization
    - You do NOT need the user to explicitly say "in the visualization"
-   - Example: "visa SCB" → search_graph(query="SCB") → nodes displayed automatically
-   - Example: "visa alla aktörer" → search_graph(node_types=["Actor"]) → actors displayed
-   - Example: "show AI projects" → search_graph(query="AI", node_types=["Initiative"]) → displayed
+   - Example: "visa SCB" -> search_graph(query="SCB") -> nodes displayed automatically
+   - Example: "visa alla aktorer" -> search_graph(node_types=["Actor"]) -> actors displayed
+   - Example: "show AI projects" -> search_graph(query="AI", node_types=["Initiative"]) -> displayed
 
 4. Important distinction:
    - "Show/load saved view X" = REPLACE current visualization with saved view content
@@ -250,6 +273,8 @@ TOOL USAGE GUIDELINES:
 - save_view: For saving current visualization state as a saved view
 - get_saved_view: For loading a saved view into the visualization
 - list_saved_views: For listing all available saved views in the database
+- get_schema: For getting the complete schema configuration
+- get_presentation: For getting UI presentation settings
 
 EFFICIENCY TIP: When extracting multiple entities from a document, ALWAYS use find_similar_nodes_batch()
 instead of calling find_similar_nodes() in a loop. This reduces API calls from N to 1.
@@ -272,28 +297,54 @@ TONE AND STYLE:
 
 EXAMPLE INTERACTIONS:
 User: "Vilka initiativ har vi kring AI?"
-→ Use search_graph(query="AI", node_types=["Initiative"]) and present results in ONE response
+-> Use search_graph(query="AI", node_types=["Initiative"]) and present results in ONE response
 
 User: "Visa SCB" or "Show SCB"
-→ Use search_graph(query="SCB") - nodes are automatically displayed in visualization
-→ Respond with found nodes summary
+-> Use search_graph(query="SCB") - nodes are automatically displayed in visualization
+-> Respond with found nodes summary
 
-User: "Visa alla aktörer" or "Show all actors"
-→ Use search_graph(node_types=["Actor"]) - nodes displayed automatically
-→ Respond with found actors
+User: "Visa alla aktorer" or "Show all actors"
+-> Use search_graph(node_types=["Actor"]) - nodes displayed automatically
+-> Respond with found actors
 
-User: "Visa relaterade noder för NIS2"
-→ First search_graph(query="NIS2", node_types=["Legislation"])
-→ Then get_related_nodes(node_id=<found_id>, depth=1)
-→ Present both results together
+User: "Visa relaterade noder for NIS2"
+-> First search_graph(query="NIS2", node_types=["Legislation"])
+-> Then get_related_nodes(node_id=<found_id>, depth=1)
+-> Present both results together
 
-User: "Lägg till ett nytt projekt om cybersäkerhet"
-→ find_similar_nodes(name="cybersäkerhet", node_type="Initiative")
-→ propose_new_node() with results in ONE response
-→ WAIT for approval before add_nodes()
+User: "Lagg till ett nytt projekt om cybersakerhet"
+-> find_similar_nodes(name="cybersakerhet", node_type="Initiative")
+-> propose_new_node() with results in ONE response
+-> WAIT for approval before add_nodes()
+
+{prompt_suffix}
 
 Always be helpful, transparent, and data-driven in your responses while minimizing API calls.
 """
+
+class ChatProcessor:
+    def __init__(self, tools_map: Dict[str, Callable]):
+        # Auto-detect provider based on available API keys
+        self.provider_type = self._detect_provider()
+
+        # Set default API key based on detected provider
+        if self.provider_type == "openai":
+            self.default_api_key = os.getenv("OPENAI_API_KEY")
+            print(f"Using OpenAI provider (LLM_PROVIDER={self.provider_type})")
+            if not self.default_api_key:
+                print("Warning: OPENAI_API_KEY not found in environment variables")
+        else:  # claude
+            self.default_api_key = os.getenv("ANTHROPIC_API_KEY")
+            print(f"Using Claude provider (LLM_PROVIDER={self.provider_type})")
+            if not self.default_api_key:
+                print("Warning: ANTHROPIC_API_KEY not found in environment variables")
+
+        self.tools_map = tools_map
+        self.tool_definitions = self._generate_tool_definitions()
+
+        # Build system prompt dynamically from configuration
+        self.system_prompt = _build_system_prompt()
+        print(f"Loaded system prompt from schema configuration")
 
     def _detect_provider(self) -> str:
         """
@@ -585,6 +636,22 @@ Always be helpful, transparent, and data-driven in your responses while minimizi
             {
                 "name": "list_saved_views",
                 "description": "List all saved views stored in the graph. Use this when user asks what saved views/visualizations exist in the database.",
+                "input_schema": {
+                    "type": "object",
+                    "properties": {}
+                }
+            },
+            {
+                "name": "get_schema",
+                "description": "Get the complete schema configuration including all node types with their fields, colors, and descriptions, as well as all relationship types.",
+                "input_schema": {
+                    "type": "object",
+                    "properties": {}
+                }
+            },
+            {
+                "name": "get_presentation",
+                "description": "Get the presentation configuration for the UI including colors, introduction text, and prompt settings.",
                 "input_schema": {
                     "type": "object",
                     "properties": {}
