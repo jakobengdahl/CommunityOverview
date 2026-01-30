@@ -19,9 +19,9 @@ echo -e "${BLUE}========================================${NC}"
 
 # Get the directory where the script is located
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-MCP_SERVER_DIR="$SCRIPT_DIR/mcp-server"
+BACKEND_DIR="$SCRIPT_DIR/backend"
 
-cd "$MCP_SERVER_DIR"
+cd "$SCRIPT_DIR"
 
 # =====================
 # Python Environment
@@ -38,7 +38,7 @@ source venv/bin/activate
 
 # Install Python dependencies
 echo "Installing Python dependencies..."
-pip install -q -r requirements.txt
+pip install -q -r "$BACKEND_DIR/requirements.txt"
 
 echo -e "${GREEN}Python environment ready.${NC}"
 
@@ -62,7 +62,7 @@ echo -e "\n${YELLOW}[3/5] Building web application...${NC}"
 
 npm run build:web
 
-echo -e "${GREEN}Web app built to apps/web/dist/${NC}"
+echo -e "${GREEN}Web app built to frontend/web/dist/${NC}"
 
 # =====================
 # Build Widget
@@ -71,7 +71,7 @@ echo -e "\n${YELLOW}[4/5] Building ChatGPT widget...${NC}"
 
 npm run build:widget
 
-echo -e "${GREEN}Widget built to apps/widget/dist/${NC}"
+echo -e "${GREEN}Widget built to frontend/widget/dist/${NC}"
 
 # =====================
 # Start Server
@@ -93,4 +93,4 @@ echo -e "${GREEN}========================================${NC}"
 echo ""
 
 # Start the server
-exec uvicorn app_host.server:get_app --factory --reload --host 0.0.0.0 --port 8000
+exec uvicorn backend.api_host.server:get_app --factory --reload --host 0.0.0.0 --port 8000
