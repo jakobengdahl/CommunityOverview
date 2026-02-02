@@ -1,6 +1,7 @@
 import { useState, useEffect, useRef } from 'react';
 import useGraphStore from '../store/graphStore';
 import * as api from '../services/api';
+import { positionNewNodes } from '@community-graph/ui-graph-canvas';
 import './ChatPanel.css';
 
 /**
@@ -135,6 +136,18 @@ function ChatPanel() {
             updateVisualization(filteredNodes, toolResult.edges || []);
           }
         }
+        // Handle "add to visualization" action (user said "lägg till X")
+        // This ADDS nodes to the current view instead of replacing
+        else if (toolResult.action === 'add_to_visualization') {
+          if (toolResult.nodes && toolResult.nodes.length > 0) {
+            const filteredNodes = filterCommunityNodes(toolResult.nodes);
+            // Position new nodes to avoid overlap with existing nodes
+            const currentNodes = useGraphStore.getState().nodes;
+            const allEdges = [...edges, ...(toolResult.edges || [])];
+            const positionedNodes = positionNewNodes(filteredNodes, currentNodes, allEdges);
+            addNodesToVisualization(positionedNodes, toolResult.edges || []);
+          }
+        }
         // Handle standard node/edge updates (search results, etc.)
         // Use updateVisualization to clear and replace (not add to existing)
         else if (toolResult.nodes && toolResult.nodes.length > 0) {
@@ -243,7 +256,11 @@ function ChatPanel() {
 
       if (response.toolResult?.nodes) {
         const filteredNodes = filterCommunityNodes(response.toolResult.nodes);
-        addNodesToVisualization(filteredNodes, response.toolResult.edges || []);
+        // Position new nodes to avoid overlap with existing nodes
+        const currentNodes = useGraphStore.getState().nodes;
+        const allEdges = [...edges, ...(response.toolResult.edges || [])];
+        const positionedNodes = positionNewNodes(filteredNodes, currentNodes, allEdges);
+        addNodesToVisualization(positionedNodes, response.toolResult.edges || []);
       }
 
       addChatMessage({

@@ -20,6 +20,7 @@ export {
   getGridLayout,
   chooseLayout,
   applyLayout,
+  positionNewNodes,
 } from './utils/graphLayout';
 
 // Constants

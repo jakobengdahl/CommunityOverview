@@ -77,6 +77,8 @@ class ChatService:
             "save_view": self._graph_service.save_view,
             "get_saved_view": self._graph_service.get_saved_view,
             "list_saved_views": self._graph_service.list_saved_views,
+            "get_schema": self._graph_service.get_schema,
+            "get_presentation": self._graph_service.get_presentation,
         }
 
     @property

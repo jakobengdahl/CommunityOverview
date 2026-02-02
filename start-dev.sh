@@ -3,6 +3,11 @@
 # Start Development Environment
 # This script sets up and starts all services needed to run the full application.
 #
+# Environment Variables:
+#   GRAPH_SCHEMA_CONFIG - Path to custom schema configuration file (default: config/schema_config.json)
+#   GRAPH_FILE - Path to graph data file (default: graph.json)
+#   LLM_PROVIDER - LLM provider to use: "openai" or "claude" (auto-detected from API keys if not set)
+#
 
 set -e
 
@@ -22,6 +27,14 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 BACKEND_DIR="$SCRIPT_DIR/backend"
 
 cd "$SCRIPT_DIR"
+
+# =====================
+# Configuration
+# =====================
+if [ -n "$GRAPH_SCHEMA_CONFIG" ]; then
+    echo -e "${YELLOW}Using custom schema config: $GRAPH_SCHEMA_CONFIG${NC}"
+    export SCHEMA_FILE="$GRAPH_SCHEMA_CONFIG"
+fi
 
 # =====================
 # Python Environment
@@ -87,6 +100,13 @@ echo -e "  ${BLUE}REST API:${NC}    http://localhost:8000/api/"
 echo -e "  ${BLUE}Chat API:${NC}    http://localhost:8000/ui/"
 echo -e "  ${BLUE}MCP:${NC}         http://localhost:8000/mcp"
 echo -e "  ${BLUE}Health:${NC}      http://localhost:8000/health"
+echo ""
+echo -e "${GREEN}  Configuration:${NC}"
+if [ -n "$SCHEMA_FILE" ]; then
+    echo -e "  ${BLUE}Schema:${NC}      $SCHEMA_FILE"
+else
+    echo -e "  ${BLUE}Schema:${NC}      config/schema_config.json (default)"
+fi
 echo ""
 echo -e "Press Ctrl+C to stop the server."
 echo -e "${GREEN}========================================${NC}"

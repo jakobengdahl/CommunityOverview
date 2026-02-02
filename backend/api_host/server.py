@@ -26,6 +26,7 @@ from typing import Optional, Dict, Any, Callable
 from fastapi import FastAPI
 from fastapi.staticfiles import StaticFiles
 from fastapi.responses import FileResponse, JSONResponse, RedirectResponse
+from fastapi.middleware.cors import CORSMiddleware
 from starlette.requests import Request
 from mcp.server.fastmcp import FastMCP
 
@@ -60,6 +61,15 @@ def create_app(
         title="Community Knowledge Graph",
         description="REST API and MCP server for community knowledge graph operations",
         version="1.0.0",
+    )
+
+    # Add CORS middleware to allow external clients (like ChatGPT MCP connector)
+    app.add_middleware(
+        CORSMiddleware,
+        allow_origins=["*"],  # Allow all origins for MCP clients
+        allow_credentials=True,
+        allow_methods=["*"],  # Allow all methods (GET, POST, OPTIONS, etc.)
+        allow_headers=["*"],  # Allow all headers
     )
 
     # Initialize graph storage if not provided
@@ -101,6 +111,33 @@ def create_app(
 
     # Mount MCP HTTP endpoint
     mcp_app = mcp.streamable_http_app()
+
+    # Add a middleware to handle browser requests to /mcp
+    # The MCP endpoint expects MCP protocol requests (GET with Accept: text/event-stream for SSE),
+    # not regular browser GET requests which would hang waiting for SSE
+    @app.middleware("http")
+    async def mcp_browser_handler(request: Request, call_next):
+        if request.url.path.startswith("/mcp"):
+            # Check if this is an MCP client (expects SSE) or a browser
+            accept_header = request.headers.get("accept", "")
+
+            # If client expects SSE or is POST request, let it through to MCP app
+            if "text/event-stream" in accept_header or request.method == "POST":
+                return await call_next(request)
+
+            # For regular browser GET requests, return helpful info
+            if request.method == "GET":
+                return JSONResponse({
+                    "endpoint": "/mcp",
+                    "type": "MCP (Model Context Protocol) Server",
+                    "description": "This endpoint is for MCP clients, not direct browser access.",
+                    "usage": "Use an MCP-compatible client (like Claude Desktop or ChatGPT) to connect to this endpoint.",
+                    "protocol": "MCP uses Server-Sent Events (SSE) for streaming communication.",
+                    "documentation": "https://modelcontextprotocol.io/",
+                    "available_tools": list(tools_map.keys()),
+                })
+        return await call_next(request)
+
     app.mount("/mcp", mcp_app)
 
     # Add execute_tool endpoint for direct tool execution

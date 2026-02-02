@@ -1,7 +1,20 @@
 import { useState, useEffect } from 'react';
+import useGraphStore from '../store/graphStore';
 import './EditNodeDialog.css';
 
+// Default node types as fallback if schema not loaded
+const DEFAULT_NODE_TYPES = [
+  { type: 'Actor', description: 'Government agencies, organizations' },
+  { type: 'Community', description: 'Communities' },
+  { type: 'Initiative', description: 'Projects, programs' },
+  { type: 'Capability', description: 'Capabilities, skills' },
+  { type: 'Resource', description: 'Reports, software, tools' },
+  { type: 'Legislation', description: 'Laws, directives' },
+  { type: 'Theme', description: 'Themes, strategies' },
+];
+
 function EditNodeDialog({ node, onClose, onSave }) {
+  const { getNodeTypes } = useGraphStore();
   const [formData, setFormData] = useState({
     name: '',
     type: '',
@@ -9,6 +22,12 @@ function EditNodeDialog({ node, onClose, onSave }) {
     summary: '',
     tags: '',
   });
+
+  // Get node types from schema or use defaults
+  const nodeTypes = getNodeTypes();
+  const availableTypes = nodeTypes.length > 0
+    ? nodeTypes.filter(t => !t.static) // Exclude static types like SavedView
+    : DEFAULT_NODE_TYPES;
 
   useEffect(() => {
     if (node?.data) {
@@ -43,7 +62,7 @@ function EditNodeDialog({ node, onClose, onSave }) {
       <div className="edit-dialog" onClick={e => e.stopPropagation()}>
         <header className="edit-dialog-header">
           <h2>Edit Node</h2>
-          <button className="close-button" onClick={onClose}>×</button>
+          <button className="close-button" onClick={onClose}>x</button>
         </header>
 
         <form onSubmit={handleSubmit}>
@@ -69,13 +88,11 @@ function EditNodeDialog({ node, onClose, onSave }) {
               required
             >
               <option value="">Select type...</option>
-              <option value="Actor">Actor</option>
-              <option value="Community">Community</option>
-              <option value="Initiative">Initiative</option>
-              <option value="Capability">Capability</option>
-              <option value="Resource">Resource</option>
-              <option value="Legislation">Legislation</option>
-              <option value="Theme">Theme</option>
+              {availableTypes.map(nodeType => (
+                <option key={nodeType.type} value={nodeType.type}>
+                  {nodeType.type}
+                </option>
+              ))}
             </select>
           </div>
 

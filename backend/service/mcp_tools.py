@@ -46,7 +46,8 @@ def register_mcp_tools(mcp, service: GraphService) -> Dict[str, Callable]:
         query: str,
         node_types: Optional[List[str]] = None,
         communities: Optional[List[str]] = None,
-        limit: int = 50
+        limit: int = 50,
+        action: Optional[str] = None
     ) -> Dict[str, Any]:
         """
         Search for nodes in the graph based on text query
@@ -56,6 +57,7 @@ def register_mcp_tools(mcp, service: GraphService) -> Dict[str, Callable]:
             node_types: List of node types to filter on (Actor, Initiative, etc.)
             communities: List of communities to filter on
             limit: Max number of results (default 50)
+            action: Optional action for frontend ('add_to_visualization' to add to current view)
 
         Returns:
             Dict with matching nodes and edges connecting them
@@ -64,7 +66,8 @@ def register_mcp_tools(mcp, service: GraphService) -> Dict[str, Callable]:
             query=query,
             node_types=node_types,
             communities=communities,
-            limit=limit
+            limit=limit,
+            action=action
         )
 
     @register_tool
@@ -247,6 +250,32 @@ def register_mcp_tools(mcp, service: GraphService) -> Dict[str, Callable]:
             Dict with relationship types
         """
         return service.list_relationship_types()
+
+    @register_tool
+    def get_schema() -> Dict[str, Any]:
+        """
+        Get the complete schema configuration.
+
+        Returns the full schema including all node types with their fields,
+        colors, and descriptions, as well as all relationship types.
+
+        Returns:
+            Dict with node_types and relationship_types
+        """
+        return service.get_schema()
+
+    @register_tool
+    def get_presentation() -> Dict[str, Any]:
+        """
+        Get the presentation configuration for the UI.
+
+        Returns settings for UI display including colors, introduction text,
+        and prompt configuration.
+
+        Returns:
+            Dict with title, introduction, colors, prompt_prefix, prompt_suffix
+        """
+        return service.get_presentation()
 
     # ==================== Saved Views Tools ====================
 

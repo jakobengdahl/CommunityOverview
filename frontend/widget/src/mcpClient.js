@@ -87,3 +87,19 @@ export async function exportGraph() {
   // Fallback to search with empty query to get all nodes
   return callTool('search_graph', { query: '', limit: 1000 });
 }
+
+/**
+ * Get the schema configuration
+ * @returns {Promise<{node_types: Object, relationship_types: Object}>}
+ */
+export async function getSchema() {
+  return callTool('get_schema', {});
+}
+
+/**
+ * Get the presentation configuration
+ * @returns {Promise<{title: string, introduction: string, colors: Object}>}
+ */
+export async function getPresentation() {
+  return callTool('get_presentation', {});
+}

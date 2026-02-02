@@ -1,0 +1,35 @@
+{
+  "schema": {
+    "node_types": {
+      "CustomActor": {
+        "fields": ["name", "description", "custom_field"],
+        "description": "Custom actor type for testing",
+        "color": "#FF0000"
+      },
+      "TestNode": {
+        "fields": ["name", "summary"],
+        "description": "Test node type",
+        "color": "#00FF00"
+      }
+    },
+    "relationship_types": {
+      "CUSTOM_RELATION": {
+        "description": "Custom relationship for testing"
+      },
+      "TEST_EDGE": {
+        "description": "Test edge type"
+      }
+    }
+  },
+  "presentation": {
+    "title": "Test Knowledge Graph",
+    "introduction": "This is a test instance.",
+    "colors": {
+      "CustomActor": "#FF0000",
+      "TestNode": "#00FF00"
+    },
+    "prompt_prefix": "You are a test assistant.",
+    "prompt_suffix": "Always be helpful in tests.",
+    "default_language": "en"
+  }
+}

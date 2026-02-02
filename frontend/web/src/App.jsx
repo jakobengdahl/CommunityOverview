@@ -26,16 +26,33 @@ function App() {
     setEditingNode,
     closeEditingNode,
     removeNode,
+    presentation,
+    setConfig,
   } = useGraphStore();
 
   const [notification, setNotification] = useState(null);
   const [deleteDialog, setDeleteDialog] = useState(null); // { nodeId, nodeName }
   const [saveViewDialog, setSaveViewDialog] = useState(null); // { viewData }
 
-  // Load initial stats
+  // Load schema, presentation, and stats on startup
   useEffect(() => {
-    api.getGraphStats().then(setStats).catch(console.error);
-  }, [setStats]);
+    const loadConfig = async () => {
+      try {
+        const [schemaData, presentationData, statsData] = await Promise.all([
+          api.getSchema(),
+          api.getPresentation(),
+          api.getGraphStats(),
+        ]);
+        setConfig(schemaData, presentationData);
+        setStats(statsData);
+      } catch (error) {
+        console.error('Error loading configuration:', error);
+        // Still try to load stats even if config fails
+        api.getGraphStats().then(setStats).catch(console.error);
+      }
+    };
+    loadConfig();
+  }, [setConfig, setStats]);
 
   const showNotification = useCallback((type, message) => {
     setNotification({ type, message });
@@ -152,10 +169,13 @@ function App() {
     }
   }, [nodes, edges, updateVisualization, closeEditingNode, showNotification]);
 
+  // Get title from presentation config or use default
+  const title = presentation?.title || 'Community Knowledge Graph';
+
   return (
     <div className="app">
       <header className="app-header">
-        <h1>Community Knowledge Graph</h1>
+        <h1>{title}</h1>
         <StatsPanel stats={stats} />
       </header>
 

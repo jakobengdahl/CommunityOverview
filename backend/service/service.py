@@ -9,6 +9,7 @@ Key design principles:
 - Stateless operations - all state is managed by graph_core
 - Consistent response format across all methods
 - Thread-safe operations through graph_core
+- Schema and presentation config are loaded from config_loader
 """
 
 from typing import List, Optional, Dict, Any
@@ -16,8 +17,11 @@ from datetime import datetime
 
 from backend.core import (
     GraphStorage, Node, Edge, NodeType, RelationshipType,
-    SimilarNode, GraphStats, AddNodesResult, DeleteNodesResult, NODE_COLORS
+    SimilarNode, GraphStats, AddNodesResult, DeleteNodesResult, NODE_COLORS,
+    get_node_type_names, get_relationship_type_names, get_node_color
 )
+
+from backend import config_loader
 
 from .serializers import (
     serialize_node, serialize_nodes,
@@ -88,7 +92,8 @@ class GraphService:
         query: str,
         node_types: Optional[List[str]] = None,
         communities: Optional[List[str]] = None,
-        limit: int = 50
+        limit: int = 50,
+        action: Optional[str] = None
     ) -> Dict[str, Any]:
         """
         Search for nodes in the graph based on text query.
@@ -98,6 +103,7 @@ class GraphService:
             node_types: List of node types to filter on (Actor, Initiative, etc.)
             communities: List of communities to filter on
             limit: Max number of results (default 50)
+            action: Optional action for frontend ('add_to_visualization' or 'replace_visualization')
 
         Returns:
             Dict with matching nodes, connecting edges, and search metadata
@@ -123,7 +129,7 @@ class GraphService:
             if edge.source in result_node_ids or edge.target in result_node_ids
         ]
 
-        return {
+        result = {
             "nodes": serialize_nodes(results),
             "edges": serialize_edges(connecting_edges),
             "total": len(results),
@@ -133,6 +139,12 @@ class GraphService:
                 "communities": communities
             }
         }
+
+        # Include action if specified (for frontend to know how to display results)
+        if action:
+            result["action"] = action
+
+        return result
 
     def get_node_details(self, node_id: str) -> Dict[str, Any]:
         """
@@ -366,38 +378,60 @@ class GraphService:
 
     def list_node_types(self) -> Dict[str, Any]:
         """
-        List all allowed node types according to the metamodel.
+        List all allowed node types according to the schema config.
 
         Returns:
             Dict with node types and their color coding
         """
-        return {
-            "node_types": [
-                {
-                    "type": nt.value,
-                    "color": NODE_COLORS[nt],
-                    "description": NODE_TYPE_DESCRIPTIONS.get(nt, "")
-                }
-                for nt in NodeType
-            ]
-        }
+        schema = config_loader.get_schema()
+        node_types = []
+
+        for type_name, type_config in schema.get("node_types", {}).items():
+            node_types.append({
+                "type": type_name,
+                "color": type_config.get("color", "#9CA3AF"),
+                "description": type_config.get("description", ""),
+                "fields": type_config.get("fields", []),
+                "static": type_config.get("static", False)
+            })
+
+        return {"node_types": node_types}
 
     def list_relationship_types(self) -> Dict[str, Any]:
         """
-        List all allowed relationship types.
+        List all allowed relationship types according to schema config.
 
         Returns:
             Dict with relationship types
         """
-        return {
-            "relationship_types": [
-                {
-                    "type": rt.value,
-                    "description": RELATIONSHIP_TYPE_DESCRIPTIONS.get(rt, "")
-                }
-                for rt in RelationshipType
-            ]
-        }
+        schema = config_loader.get_schema()
+        relationship_types = []
+
+        for type_name, type_config in schema.get("relationship_types", {}).items():
+            relationship_types.append({
+                "type": type_name,
+                "description": type_config.get("description", "")
+            })
+
+        return {"relationship_types": relationship_types}
+
+    def get_schema(self) -> Dict[str, Any]:
+        """
+        Get the complete schema configuration.
+
+        Returns:
+            Dict with node_types and relationship_types
+        """
+        return config_loader.get_schema()
+
+    def get_presentation(self) -> Dict[str, Any]:
+        """
+        Get the presentation configuration.
+
+        Returns:
+            Dict with title, introduction, colors, prompt_prefix, prompt_suffix
+        """
+        return config_loader.get_presentation()
 
     # ==================== Saved Views ====================
 

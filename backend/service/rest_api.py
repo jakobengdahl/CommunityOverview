@@ -192,13 +192,23 @@ def create_rest_router(service: GraphService, prefix: str = "") -> APIRouter:
 
     @router.get("/meta/node-types")
     async def list_node_types() -> Dict[str, Any]:
-        """List all allowed node types according to the metamodel."""
+        """List all allowed node types according to the schema config."""
         return service.list_node_types()
 
     @router.get("/meta/relationship-types")
     async def list_relationship_types() -> Dict[str, Any]:
-        """List all allowed relationship types."""
+        """List all allowed relationship types according to schema config."""
         return service.list_relationship_types()
+
+    @router.get("/schema")
+    async def get_schema() -> Dict[str, Any]:
+        """Get the complete schema configuration (node types, relationship types)."""
+        return service.get_schema()
+
+    @router.get("/presentation")
+    async def get_presentation() -> Dict[str, Any]:
+        """Get the presentation configuration (colors, prompts, introduction text)."""
+        return service.get_presentation()
 
     # ==================== Saved Views Endpoints ====================
 
