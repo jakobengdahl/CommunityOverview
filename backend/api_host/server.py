@@ -101,6 +101,26 @@ def create_app(
 
     # Mount MCP HTTP endpoint
     mcp_app = mcp.streamable_http_app()
+
+    # Add a middleware to handle browser requests to /mcp
+    # The MCP endpoint expects MCP protocol requests (POST with JSON-RPC),
+    # not regular browser GET requests which would hang waiting for SSE
+    @app.middleware("http")
+    async def mcp_browser_handler(request: Request, call_next):
+        if request.url.path.startswith("/mcp"):
+            # For GET requests (browsers), return helpful info instead of hanging
+            if request.method == "GET":
+                return JSONResponse({
+                    "endpoint": "/mcp",
+                    "type": "MCP (Model Context Protocol) Server",
+                    "description": "This endpoint is for MCP clients, not direct browser access.",
+                    "usage": "Use an MCP-compatible client (like Claude Desktop) to connect to this endpoint.",
+                    "protocol": "MCP uses Server-Sent Events (SSE) for streaming communication.",
+                    "documentation": "https://modelcontextprotocol.io/",
+                    "available_tools": list(tools_map.keys()),
+                })
+        return await call_next(request)
+
     app.mount("/mcp", mcp_app)
 
     # Add execute_tool endpoint for direct tool execution

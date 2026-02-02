@@ -138,6 +138,29 @@ SECURITY RULES:
 3. Show affected connections before deletion
 4. Filter results based on user's active communities when relevant
 
+CRITICAL - "LAGG TILL" vs "VISA" DISTINCTION:
+These are TWO DIFFERENT operations - understand the user's intent:
+
+1. "LAGG TILL X" / "ADD X (to visualization)" / "inkludera X":
+   -> User wants to ADD nodes to what's ALREADY displayed
+   -> ALWAYS search for X first using search_graph()
+   -> Return results with "action": "add_to_visualization" in the tool response
+   -> Frontend will ADD these nodes to existing visualization (not replace)
+   -> Example: "lagg till SCB" -> search_graph(query="SCB") and add to current view
+
+2. "VISA X" / "SHOW X" / "display X":
+   -> User wants to SEE X (replace current view with new results)
+   -> Use search_graph() and return normally (no special action)
+   -> Frontend will REPLACE current visualization with results
+   -> Example: "visa alla aktorer" -> search_graph(node_types=["Actor"]) replaces view
+
+IMPORTANT - ABBREVIATION AND SYNONYM SEARCH:
+Swedish organizations often use abbreviations. When searching:
+- If abbreviation search returns few/no results, try the full name
+- Common examples: SCB = Statistiska centralbyran, SKR = Sveriges Kommuner och Regioner
+- MSB = Myndigheten for samhallsskydd och beredskap, PTS = Post- och telestyrelsen
+- Try both the abbreviation AND full name in your search
+
 WORKFLOW FOR SEARCHING:
 When user asks to search the graph database using phrases like:
 - Swedish: "i databasen", "i natverket", "i communityn", "i grafen/graphen", "i underlaget"
@@ -145,15 +168,17 @@ When user asks to search the graph database using phrases like:
 
 Process:
 1. Use search_graph() with appropriate query and filters (node_types, communities)
-2. If user wants to explore connections, use get_related_nodes()
-3. Present results clearly with node types and summaries
-4. Suggest relevant follow-up queries
+2. If abbreviation search returns few results, try the full organization name
+3. If user wants to explore connections, use get_related_nodes()
+4. Present results clearly with node types and summaries
+5. Suggest relevant follow-up queries
 
 Examples (Swedish):
 - "sok i databasen efter AI-projekt" -> search_graph(query="AI-projekt", node_types=["Initiative"])
 - "finns det nagot i natverket om cybersakerhet?" -> search_graph(query="cybersakerhet")
 - "vad har vi i grafen kring Skatteverket?" -> search_graph(query="Skatteverket", node_types=["Actor"])
 - "leta i underlaget efter myndigheter" -> search_graph(node_types=["Actor"])
+- "lagg till SCB" -> search_graph(query="SCB") OR search_graph(query="Statistiska centralbyran")
 
 WORKFLOW FOR ADDING NODES:
 1. FIRST: Run find_similar_nodes_batch() for ALL new nodes to check for duplicates (ONE call)
@@ -299,9 +324,15 @@ EXAMPLE INTERACTIONS:
 User: "Vilka initiativ har vi kring AI?"
 -> Use search_graph(query="AI", node_types=["Initiative"]) and present results in ONE response
 
-User: "Visa SCB" or "Show SCB"
--> Use search_graph(query="SCB") - nodes are automatically displayed in visualization
+User: "Visa SCB" or "Show SCB" (REPLACE current visualization)
+-> Use search_graph(query="SCB") - nodes REPLACE current visualization
+-> If no results for "SCB", try search_graph(query="Statistiska centralbyran")
 -> Respond with found nodes summary
+
+User: "Lagg till SCB" or "Add SCB to visualization" (ADD to current)
+-> Use search_graph(query="SCB") with action: "add_to_visualization"
+-> If no results, try "Statistiska centralbyran"
+-> Nodes are ADDED to existing visualization (not replaced)
 
 User: "Visa alla aktorer" or "Show all actors"
 -> Use search_graph(node_types=["Actor"]) - nodes displayed automatically
@@ -312,7 +343,8 @@ User: "Visa relaterade noder for NIS2"
 -> Then get_related_nodes(node_id=<found_id>, depth=1)
 -> Present both results together
 
-User: "Lagg till ett nytt projekt om cybersakerhet"
+User: "Lagg till ett nytt projekt om cybersakerhet" (CREATE new node)
+-> This is different from "lagg till X" (add existing node to view)
 -> find_similar_nodes(name="cybersakerhet", node_type="Initiative")
 -> propose_new_node() with results in ONE response
 -> WAIT for approval before add_nodes()
@@ -416,6 +448,11 @@ class ChatProcessor:
                             "type": "integer",
                             "description": "Max number of results",
                             "default": 50
+                        },
+                        "action": {
+                            "type": "string",
+                            "enum": ["add_to_visualization", "replace_visualization"],
+                            "description": "Optional: 'add_to_visualization' to ADD results to current view (for 'lagg till X'), or 'replace_visualization' (default) to REPLACE current view (for 'visa X')"
                         }
                     },
                     "required": ["query"]

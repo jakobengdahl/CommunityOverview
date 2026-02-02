@@ -46,7 +46,8 @@ def register_mcp_tools(mcp, service: GraphService) -> Dict[str, Callable]:
         query: str,
         node_types: Optional[List[str]] = None,
         communities: Optional[List[str]] = None,
-        limit: int = 50
+        limit: int = 50,
+        action: Optional[str] = None
     ) -> Dict[str, Any]:
         """
         Search for nodes in the graph based on text query
@@ -56,6 +57,7 @@ def register_mcp_tools(mcp, service: GraphService) -> Dict[str, Callable]:
             node_types: List of node types to filter on (Actor, Initiative, etc.)
             communities: List of communities to filter on
             limit: Max number of results (default 50)
+            action: Optional action for frontend ('add_to_visualization' to add to current view)
 
         Returns:
             Dict with matching nodes and edges connecting them
@@ -64,7 +66,8 @@ def register_mcp_tools(mcp, service: GraphService) -> Dict[str, Callable]:
             query=query,
             node_types=node_types,
             communities=communities,
-            limit=limit
+            limit=limit,
+            action=action
         )
 
     @register_tool

@@ -92,7 +92,8 @@ class GraphService:
         query: str,
         node_types: Optional[List[str]] = None,
         communities: Optional[List[str]] = None,
-        limit: int = 50
+        limit: int = 50,
+        action: Optional[str] = None
     ) -> Dict[str, Any]:
         """
         Search for nodes in the graph based on text query.
@@ -102,6 +103,7 @@ class GraphService:
             node_types: List of node types to filter on (Actor, Initiative, etc.)
             communities: List of communities to filter on
             limit: Max number of results (default 50)
+            action: Optional action for frontend ('add_to_visualization' or 'replace_visualization')
 
         Returns:
             Dict with matching nodes, connecting edges, and search metadata
@@ -127,7 +129,7 @@ class GraphService:
             if edge.source in result_node_ids or edge.target in result_node_ids
         ]
 
-        return {
+        result = {
             "nodes": serialize_nodes(results),
             "edges": serialize_edges(connecting_edges),
             "total": len(results),
@@ -137,6 +139,12 @@ class GraphService:
                 "communities": communities
             }
         }
+
+        # Include action if specified (for frontend to know how to display results)
+        if action:
+            result["action"] = action
+
+        return result
 
     def get_node_details(self, node_id: str) -> Dict[str, Any]:
         """
