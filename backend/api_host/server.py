@@ -110,7 +110,8 @@ def create_app(
     app.state.tools_map = tools_map
 
     # Mount MCP HTTP endpoint
-    mcp_app = mcp.streamable_http_app()
+    # Use sse_app to provide standard /sse and /messages endpoints
+    mcp_app = mcp.sse_app()
 
     # Add a middleware to handle browser requests to /mcp
     # The MCP endpoint expects MCP protocol requests (GET with Accept: text/event-stream for SSE),
@@ -128,10 +129,10 @@ def create_app(
             # For regular browser GET requests, return helpful info
             if request.method == "GET":
                 return JSONResponse({
-                    "endpoint": "/mcp",
+                    "endpoint": "/mcp/sse",
                     "type": "MCP (Model Context Protocol) Server",
                     "description": "This endpoint is for MCP clients, not direct browser access.",
-                    "usage": "Use an MCP-compatible client (like Claude Desktop or ChatGPT) to connect to this endpoint.",
+                    "usage": "Use an MCP-compatible client (like Claude Desktop or ChatGPT) to connect to this endpoint: /mcp/sse",
                     "protocol": "MCP uses Server-Sent Events (SSE) for streaming communication.",
                     "documentation": "https://modelcontextprotocol.io/",
                     "available_tools": list(tools_map.keys()),
