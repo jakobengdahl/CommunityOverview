@@ -113,18 +113,25 @@ def create_app(
     mcp_app = mcp.streamable_http_app()
 
     # Add a middleware to handle browser requests to /mcp
-    # The MCP endpoint expects MCP protocol requests (POST with JSON-RPC),
+    # The MCP endpoint expects MCP protocol requests (GET with Accept: text/event-stream for SSE),
     # not regular browser GET requests which would hang waiting for SSE
     @app.middleware("http")
     async def mcp_browser_handler(request: Request, call_next):
         if request.url.path.startswith("/mcp"):
-            # For GET requests (browsers), return helpful info instead of hanging
+            # Check if this is an MCP client (expects SSE) or a browser
+            accept_header = request.headers.get("accept", "")
+
+            # If client expects SSE or is POST request, let it through to MCP app
+            if "text/event-stream" in accept_header or request.method == "POST":
+                return await call_next(request)
+
+            # For regular browser GET requests, return helpful info
             if request.method == "GET":
                 return JSONResponse({
                     "endpoint": "/mcp",
                     "type": "MCP (Model Context Protocol) Server",
                     "description": "This endpoint is for MCP clients, not direct browser access.",
-                    "usage": "Use an MCP-compatible client (like Claude Desktop) to connect to this endpoint.",
+                    "usage": "Use an MCP-compatible client (like Claude Desktop or ChatGPT) to connect to this endpoint.",
                     "protocol": "MCP uses Server-Sent Events (SSE) for streaming communication.",
                     "documentation": "https://modelcontextprotocol.io/",
                     "available_tools": list(tools_map.keys()),
