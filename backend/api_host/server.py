@@ -26,6 +26,7 @@ from typing import Optional, Dict, Any, Callable
 from fastapi import FastAPI
 from fastapi.staticfiles import StaticFiles
 from fastapi.responses import FileResponse, JSONResponse, RedirectResponse
+from fastapi.middleware.cors import CORSMiddleware
 from starlette.requests import Request
 from mcp.server.fastmcp import FastMCP
 
@@ -60,6 +61,15 @@ def create_app(
         title="Community Knowledge Graph",
         description="REST API and MCP server for community knowledge graph operations",
         version="1.0.0",
+    )
+
+    # Add CORS middleware to allow external clients (like ChatGPT MCP connector)
+    app.add_middleware(
+        CORSMiddleware,
+        allow_origins=["*"],  # Allow all origins for MCP clients
+        allow_credentials=True,
+        allow_methods=["*"],  # Allow all methods (GET, POST, OPTIONS, etc.)
+        allow_headers=["*"],  # Allow all headers
     )
 
     # Initialize graph storage if not provided
