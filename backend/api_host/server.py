@@ -115,29 +115,48 @@ def create_app(
 
     # Add a middleware to handle browser requests to /mcp
     # The MCP endpoint expects MCP protocol requests (GET with Accept: text/event-stream for SSE),
-    # not regular browser GET requests which would hang waiting for SSE
-    @app.middleware("http")
-    async def mcp_browser_handler(request: Request, call_next):
-        if request.url.path.startswith("/mcp"):
-            # Check if this is an MCP client (expects SSE) or a browser
-            accept_header = request.headers.get("accept", "")
+    # not regular browser GET requests which would hang waiting for SSE.
+    # We use a pure ASGI middleware class to avoid BaseHTTPMiddleware limitations with streaming responses.
+    class MCPBrowserHandlerMiddleware:
+        def __init__(self, app):
+            self.app = app
 
-            # If client expects SSE or is POST request, let it through to MCP app
-            if "text/event-stream" in accept_header or request.method == "POST":
-                return await call_next(request)
+        async def __call__(self, scope, receive, send):
+            if scope["type"] != "http":
+                await self.app(scope, receive, send)
+                return
 
-            # For regular browser GET requests, return helpful info
-            if request.method == "GET":
-                return JSONResponse({
-                    "endpoint": "/mcp/sse",
-                    "type": "MCP (Model Context Protocol) Server",
-                    "description": "This endpoint is for MCP clients, not direct browser access.",
-                    "usage": "Use an MCP-compatible client (like Claude Desktop or ChatGPT) to connect to this endpoint: /mcp/sse",
-                    "protocol": "MCP uses Server-Sent Events (SSE) for streaming communication.",
-                    "documentation": "https://modelcontextprotocol.io/",
-                    "available_tools": list(tools_map.keys()),
-                })
-        return await call_next(request)
+            path = scope.get("path", "")
+            # Only intercept specific paths if needed, here we check startswith /mcp
+            # Note: scope['path'] does not include root_path, but here we assume standard mounting
+            if path.startswith("/mcp"):
+                headers = dict(scope.get("headers", []))
+                # Headers are bytes
+                accept_header = headers.get(b"accept", b"").decode("utf-8", errors="ignore")
+                method = scope.get("method", "GET")
+
+                # If client expects SSE or is POST request, let it through to MCP app
+                if "text/event-stream" in accept_header or method == "POST":
+                    await self.app(scope, receive, send)
+                    return
+
+                # For regular browser GET requests, return helpful info
+                if method == "GET":
+                    response = JSONResponse({
+                        "endpoint": "/mcp/sse",
+                        "type": "MCP (Model Context Protocol) Server",
+                        "description": "This endpoint is for MCP clients, not direct browser access.",
+                        "usage": "Use an MCP-compatible client (like Claude Desktop or ChatGPT) to connect to this endpoint: /mcp/sse",
+                        "protocol": "MCP uses Server-Sent Events (SSE) for streaming communication.",
+                        "documentation": "https://modelcontextprotocol.io/",
+                        "available_tools": list(tools_map.keys()),
+                    })
+                    await response(scope, receive, send)
+                    return
+
+            await self.app(scope, receive, send)
+
+    app.add_middleware(MCPBrowserHandlerMiddleware)
 
     app.mount("/mcp", mcp_app)
 
