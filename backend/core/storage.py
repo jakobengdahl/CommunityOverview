@@ -106,10 +106,14 @@ class GraphStorage:
     ) -> List[Node]:
         """
         Search nodes based on text query
-        Matches against name, description, summary, and tags
+        Matches against name, description, summary, and tags.
+        Empty query or '*' returns all nodes (subject to filtering and limit).
         """
-        query_lower = query.lower()
+        query_lower = query.lower().strip()
         results = []
+
+        # Handle wildcard or empty query
+        match_all = query_lower == "" or query_lower == "*"
 
         for node in self.nodes.values():
             # Filter by node type
@@ -121,11 +125,14 @@ class GraphStorage:
                 if not any(comm in node.communities for comm in communities):
                     continue
 
-            # Text matching including tags
-            tags_text = " ".join(node.tags) if hasattr(node, 'tags') and node.tags else ""
-            searchable_text = f"{node.name} {node.description} {node.summary} {tags_text}".lower()
-            if query_lower in searchable_text:
-                results.append(node)
+            # Text matching including tags (if not matching all)
+            if not match_all:
+                tags_text = " ".join(node.tags) if hasattr(node, 'tags') and node.tags else ""
+                searchable_text = f"{node.name} {node.description} {node.summary} {tags_text}".lower()
+                if query_lower not in searchable_text:
+                    continue
+
+            results.append(node)
 
             if len(results) >= limit:
                 break

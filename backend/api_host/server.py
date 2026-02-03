@@ -102,7 +102,27 @@ def create_app(
     app.include_router(ui_router, prefix="/ui")
 
     # Initialize FastMCP and register tools
-    mcp = FastMCP(config.mcp_name)
+    # We add custom instructions to guide the LLM on how to use the tools effectively.
+    instructions = """
+    You are a helpful knowledge agent assisting users with the Community Knowledge Graph.
+
+    SEARCH STRATEGY:
+    - Start with broad search terms (e.g., "AI" instead of "AI projects in Sweden").
+    - If a search yields no results, try broader terms or synonyms.
+    - An empty query or "*" returns a list of nodes (limited by 'limit').
+
+    DATA MANAGEMENT:
+    - ALWAYS check for existing nodes/actors using 'find_similar_nodes' before creating new ones.
+    - Avoid creating generic actor nodes like "Universities" or "Research Institutes". Be specific.
+    - When adding initiatives, try to link them to existing actors and communities.
+
+    VISUALIZATION:
+    - If the user asks to see the graph visually or mentions "widget", "canvas", or "visualize",
+      provide them with the Widget URL (available via 'get_presentation').
+      Normally this URL is: https://{host}/widget/
+    """
+
+    mcp = FastMCP(config.mcp_name, instructions=instructions)
     tools_map = register_mcp_tools(mcp, graph_service)
 
     # Store MCP instance and tools map on app state
@@ -127,13 +147,19 @@ def create_app(
                 return
 
             path = scope.get("path", "")
+            method = scope.get("method", "GET")
+
+            # Simple request logging for MCP endpoints
+            if path.startswith("/mcp"):
+                import logging
+                logging.getLogger("uvicorn.access").info(f"MCP Request: {method} {path}")
+
             # Only intercept specific paths if needed, here we check startswith /mcp
             # Note: scope['path'] does not include root_path, but here we assume standard mounting
             if path.startswith("/mcp"):
                 headers = dict(scope.get("headers", []))
                 # Headers are bytes
                 accept_header = headers.get(b"accept", b"").decode("utf-8", errors="ignore")
-                method = scope.get("method", "GET")
 
                 # If client expects SSE or is POST request, let it through to MCP app
                 if "text/event-stream" in accept_header or method == "POST":
