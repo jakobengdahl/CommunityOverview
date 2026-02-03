@@ -152,7 +152,12 @@ def create_app(
             # Simple request logging for MCP endpoints
             if path.startswith("/mcp"):
                 import logging
-                logging.getLogger("uvicorn.access").info(f"MCP Request: {method} {path}")
+                # Use a standard logger instead of uvicorn.access to avoid formatting errors
+                # uvicorn.access expects specific args (client, method, path, etc.)
+                logger = logging.getLogger("mcp.server")
+                if not logger.handlers:
+                    logging.basicConfig()
+                logger.info(f"MCP Request: {method} {path}")
 
             # Only intercept specific paths if needed, here we check startswith /mcp
             # Note: scope['path'] does not include root_path, but here we assume standard mounting
