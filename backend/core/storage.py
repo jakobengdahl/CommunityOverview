@@ -29,16 +29,15 @@ class GraphStorage:
 
         Args:
             json_path: Path to the JSON file for graph persistence
-            embeddings_path: Path to the embeddings pickle file.
-                           If None, uses same directory as json_path with 'embeddings.pkl'
+            embeddings_path: Path to the embeddings pickle file (Legacy/Deprecated).
+                           New implementation stores embeddings in graph.json directly.
         """
         self.json_path = Path(json_path)
 
-        # Determine embeddings path
-        if embeddings_path is None:
-            embeddings_path = self.json_path.parent / "embeddings.pkl"
+        # We initialize VectorStore without a storage path as it now holds state in memory
+        # and relies on GraphStorage for persistence via graph.json
+        self.vector_store = VectorStore()
 
-        self.vector_store = VectorStore(storage_path=str(embeddings_path))
         self.graph = nx.MultiDiGraph()  # MultiDiGraph allows multiple edges between same nodes
         self.nodes: Dict[str, Node] = {}  # node_id -> Node
         self.edges: Dict[str, Edge] = {}  # edge_id -> Edge
@@ -71,6 +70,9 @@ class GraphStorage:
                     key=edge.id,
                     data=edge
                 )
+
+            # Rebuild vector store index from loaded nodes
+            self.vector_store.rebuild_index(list(self.nodes.values()))
 
             print(f"Loaded {len(self.nodes)} nodes and {len(self.edges)} edges from {self.json_path}")
 
@@ -332,6 +334,9 @@ class GraphStorage:
                 except Exception as embed_error:
                     # Embedding generation is optional - log but don't fail
                     print(f"Warning: Could not generate embeddings: {embed_error}")
+
+            # Save again to persist embeddings generated above
+            self.save()
 
             # Create name-to-ID mapping for newly added nodes and existing nodes
             name_to_id = {}

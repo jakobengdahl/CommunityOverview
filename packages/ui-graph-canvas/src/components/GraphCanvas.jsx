@@ -13,6 +13,7 @@ import 'reactflow/dist/style.css';
 
 import CustomNode from './CustomNode';
 import GroupNode from './GroupNode';
+import SimpleFloatingEdge from './SimpleFloatingEdge';
 import { applyLayout, getGridLayout, getCircularLayout, getLayoutedElements } from '../utils/graphLayout';
 import { getNodeColor, LAZY_LOAD_THRESHOLD, INITIAL_LOAD_COUNT, DEFAULT_EDGE_STYLE } from '../utils/constants';
 import './GraphCanvas.css';
@@ -90,7 +91,7 @@ function GraphCanvasInner({
       source: edge.source,
       target: edge.target,
       label: edge.type,
-      type: 'default',
+      type: 'floating', // Use the custom floating edge type
       animated: false,
       style: DEFAULT_EDGE_STYLE,
       labelStyle: { fill: '#888', fontSize: 10, fontWeight: 500 },
@@ -327,6 +328,10 @@ function GraphCanvasInner({
     group: GroupNode,
   }), []);
 
+  const edgeTypes = useMemo(() => ({
+    floating: SimpleFloatingEdge,
+  }), []);
+
   const showNotification = useCallback((type, message) => {
     setNotification({ type, message });
     setTimeout(() => setNotification(null), 3000);
@@ -379,6 +384,7 @@ function GraphCanvasInner({
               }
             }}
             nodeTypes={nodeTypes}
+            edgeTypes={edgeTypes}
             fitView
             fitViewOptions={{ padding: 0.2, duration: 800 }}
             minZoom={0.1}

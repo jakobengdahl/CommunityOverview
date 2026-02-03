@@ -53,17 +53,17 @@ class VectorStore:
     Manages vector embeddings for graph nodes.
     Uses sentence-transformers for generating embeddings
     and sklearn for cosine similarity search.
+
+    Embeddings are stored directly on the Node objects and passed to this class
+    to build the in-memory search index.
     """
 
-    def __init__(self, storage_path: str = "embeddings.pkl", model_name: str = "all-MiniLM-L6-v2"):
-        self.storage_path = Path(storage_path)
+    def __init__(self, model_name: str = "all-MiniLM-L6-v2"):
         self.model_name = model_name
         self.model = None
         self.embeddings: Dict[str, Any] = {}  # node_id -> embedding (numpy array)
         self.node_ids: List[str] = []  # ordered list of node ids corresponding to embeddings matrix
         self.embedding_matrix: Optional[Any] = None  # numpy array
-
-        self.load()
 
     def _load_model(self):
         """Lazy load the model"""
@@ -73,32 +73,18 @@ class VectorStore:
             self.model = SentenceTransformer(self.model_name)
             print("Model loaded.")
 
-    def load(self):
-        """Load embeddings from disk"""
-        if self.storage_path.exists():
-            try:
-                with open(self.storage_path, 'rb') as f:
-                    data = pickle.load(f)
-                    self.embeddings = data.get('embeddings', {})
-                    self._update_matrix()
-                print(f"Loaded {len(self.embeddings)} embeddings from {self.storage_path}")
-            except Exception as e:
-                print(f"Error loading embeddings: {e}")
-                self.embeddings = {}
-        else:
-            print(f"No existing embeddings found at {self.storage_path}")
+    def rebuild_index(self, nodes: List[Node]):
+        """Rebuild the search index from a list of nodes"""
+        np = _ensure_numpy()
+        self.embeddings = {}
 
-    def save(self):
-        """Save embeddings to disk"""
-        try:
-            with open(self.storage_path, 'wb') as f:
-                pickle.dump({
-                    'embeddings': self.embeddings,
-                    'model_name': self.model_name
-                }, f)
-            print(f"Saved {len(self.embeddings)} embeddings to {self.storage_path}")
-        except Exception as e:
-            print(f"Error saving embeddings: {e}")
+        for node in nodes:
+            if node.embedding is not None:
+                # Convert list to numpy array if needed
+                self.embeddings[node.id] = np.array(node.embedding)
+
+        self._update_matrix()
+        print(f"VectorStore index rebuilt with {len(self.embeddings)} embeddings")
 
     def _update_matrix(self):
         """Update the numpy matrix for vectorized operations"""
@@ -109,7 +95,8 @@ class VectorStore:
 
         np = _ensure_numpy()
         self.node_ids = list(self.embeddings.keys())
-        self.embedding_matrix = np.array([self.embeddings[nid] for nid in self.node_ids])
+        # Stack embeddings into a matrix
+        self.embedding_matrix = np.vstack([self.embeddings[nid] for nid in self.node_ids])
 
     def _get_text_representation(self, node: Node) -> str:
         """Create a text representation of the node for embedding"""
@@ -119,19 +106,22 @@ class VectorStore:
         text = f"{node.name}. {node.description or ''}. {node.summary or ''}. {tags_text}"
         return text.strip()
 
-    def generate_embedding(self, node: Node) -> Any:
-        """Generate embedding for a single node"""
+    def generate_embedding(self, node: Node) -> List[float]:
+        """Generate embedding for a single node and return as list"""
         self._load_model()
         text = self._get_text_representation(node)
         embedding = self.model.encode(text)
-        return embedding
+        return embedding.tolist()
 
     def update_node_embedding(self, node: Node):
-        """Update or add embedding for a node"""
-        embedding = self.generate_embedding(node)
-        self.embeddings[node.id] = embedding
+        """Update or add embedding for a node (updates the node object too)"""
+        embedding_list = self.generate_embedding(node)
+        node.embedding = embedding_list
+
+        # Update internal index
+        np = _ensure_numpy()
+        self.embeddings[node.id] = np.array(embedding_list)
         self._update_matrix()
-        self.save()
 
     def update_nodes_embeddings(self, nodes: List[Node]):
         """Update embeddings for multiple nodes in batch"""
@@ -143,17 +133,18 @@ class VectorStore:
         embeddings = self.model.encode(texts)
 
         for node, embedding in zip(nodes, embeddings):
+            # Convert to list for JSON storage
+            node.embedding = embedding.tolist()
+            # Update internal index
             self.embeddings[node.id] = embedding
 
         self._update_matrix()
-        self.save()
 
     def remove_node_embedding(self, node_id: str):
         """Remove embedding for a node"""
         if node_id in self.embeddings:
             del self.embeddings[node_id]
             self._update_matrix()
-            self.save()
 
     def remove_nodes_embeddings(self, node_ids: List[str]):
         """Remove embeddings for multiple nodes"""
@@ -165,7 +156,6 @@ class VectorStore:
 
         if changed:
             self._update_matrix()
-            self.save()
 
     def search(self, query_text: str = None, query_node: Node = None, limit: int = 5, threshold: float = 0.0) -> List[Tuple[str, float]]:
         """
