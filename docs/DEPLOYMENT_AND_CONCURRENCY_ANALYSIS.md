@@ -2,12 +2,13 @@
 
 > Analysrapport för CommunityOverview-applikationen
 > Datum: 2026-02-04
+> **Uppdaterad: 2026-02-04 - Concurrency-skydd implementerat**
 
 ---
 
 ## Innehåll
 
-1. [Samtidiga Användare - Analys](#1-samtidiga-användare---analys)
+1. [Samtidiga Användare - Implementerat Skydd](#1-samtidiga-användare---implementerat-skydd)
 2. [Deployment Setup - Analys](#2-deployment-setup---analys)
 3. [Google Cloud Deployment Guide](#3-google-cloud-deployment-guide)
 4. [CI/CD-upplägg](#4-cicd-upplägg)
@@ -16,95 +17,121 @@
 
 ---
 
-## 1. Samtidiga Användare - Analys
+## 1. Samtidiga Användare - Implementerat Skydd
 
-### 1.1 Nuvarande Sessionshantering
+### 1.1 Implementerad Trådsäkerhet (PoC-nivå)
 
-**Status: INGEN SESSIONSHANTERING**
+**Status: IMPLEMENTERAT**
 
-Applikationen använder enbart Basic Authentication utan sessionshantering:
+Följande skyddsmekanismer har implementerats i `GraphStorage` (`backend/core/storage.py`):
 
-```python
-# backend/api_host/server.py (rad 66-105)
-@app.middleware("http")
-async def basic_auth_middleware(request: Request, call_next):
-    # Endast username/password-kontroll per request
-    # Ingen session skapas eller spåras
-```
-
-**Konsekvenser:**
-- Användare med samma inloggningsuppgifter kan inte särskiljas
-- Ingen spårning av vem som gjort vilka ändringar
-- Ingen möjlighet till per-användare rate limiting
-- Fungerar för single-user men problematisk för multi-user
-
-### 1.2 Filåtkomst till graph.json
-
-**Status: KRITISKA RACE CONDITIONS**
-
-`GraphStorage`-klassen (`backend/core/storage.py`) har **inga låsmekanismer**:
+#### Threading Lock (In-Memory Protection)
 
 ```python
-# Nuvarande implementation (rad 46-100)
-def load(self) -> None:
-    with open(self.json_path, 'r') as f:
-        data = json.load(f)  # INGEN LÅS
+class GraphStorage:
+    def __init__(self, ...):
+        # RLock tillåter samma tråd att ta låset flera gånger (reentrant)
+        self._lock = threading.RLock()
 
-def save(self) -> None:
-    with open(self.json_path, 'w') as f:
-        json.dump(data, f)  # INGEN LÅS
+    def add_nodes(self, nodes, edges):
+        with self._lock:  # Skyddar hela operationen
+            # ... all logik körs atomärt
+            self.save()
 ```
 
-**Race Condition Scenario:**
-```
-Användare A: läser graph.json (inga noder)
-Användare B: läser graph.json (inga noder)
-Användare A: lägger till nod X, sparar (nu finns X)
-Användare B: lägger till nod Y, sparar (skriver över - X FÖRLORAD!)
-```
+**Skyddade operationer:**
+- `load()` - Läsning av graph.json
+- `save()` - Skrivning till graph.json
+- `add_nodes()` - Lägga till noder och kanter
+- `update_node()` - Uppdatera befintlig nod
+- `delete_nodes()` - Ta bort noder
 
-**Operationer som triggar save():**
-| Operation | Antal saves | Risk |
-|-----------|-------------|------|
-| `add_nodes()` | 2 | Hög - dubbla skrivningar |
-| `update_node()` | 1 | Medel |
-| `delete_nodes()` | 1 | Hög - kan bryta relationer |
-
-### 1.3 Delat State
-
-**Status: SINGEL INSTANS FÖR ALLA ANVÄNDARE**
+#### File Locking (Multi-Process Protection)
 
 ```python
-# backend/api_host/server.py (rad 117-126)
-graph_storage = GraphStorage(str(graph_path))  # EN instans
-graph_service = GraphService(graph_storage)    # Delas av alla
-app.state.graph_service = graph_service
+# Cross-platform fillåsning
+if sys.platform == 'win32':
+    import msvcrt
+    # Windows-specifik låsning
+else:
+    import fcntl
+    # Unix/Linux/Mac låsning med flock()
 ```
 
-**Problem:**
-- Python-dictionaries (`self.nodes`, `self.edges`) är inte trådsäkra
-- Vector store (embeddings) kan bli osynkroniserat
-- Inga transaktioner - delvis state synligt för andra användare
+**Funktioner:**
+- Shared lock för läsning (flera kan läsa samtidigt)
+- Exclusive lock för skrivning (endast en skrivare åt gången)
+- Cross-platform stöd (Windows, Linux, macOS)
 
-### 1.4 SSE/MCP-anslutningar
-
-Alla MCP-klienter delar samma `GraphService`:
+#### Atomic Writes (Corruption Prevention)
 
 ```python
-mcp = FastMCP(config.mcp_name, instructions=instructions)
-tools_map = register_mcp_tools(mcp, graph_service)  # Samma instans
+def save(self):
+    # 1. Skriv till temporär fil
+    temp_fd, temp_path = tempfile.mkstemp(...)
+
+    # 2. Synka till disk
+    os.fsync(f.fileno())
+
+    # 3. Atomic rename
+    os.rename(temp_path, self.json_path)
 ```
 
-### 1.5 Sammanfattning - Samtidiga Användare
+**Fördelar:**
+- Om processen dör mitt i skrivning förblir original-filen intakt
+- Rename är atomärt på de flesta filsystem
+- `fsync()` säkerställer att data når disk innan rename
 
-| Problem | Allvarlighet | Status |
-|---------|--------------|--------|
-| Inga fillås på graph.json | **KRITISK** | Datakorruption möjlig |
-| Inget in-memory lås | **KRITISK** | Race conditions |
-| Ingen sessionshantering | Medel | Kan ej särskilja användare |
-| Inga transaktioner | Hög | Inkonsistent state |
+### 1.2 Sessionshantering
 
-**Slutsats:** Applikationen är **INTE säker för samtidiga användare**. Med 2-3 användare som redigerar grafen samtidigt är dataförlust högst sannolik.
+**Status: GRUNDLÄGGANDE (Basic Auth)**
+
+Applikationen använder Basic Authentication utan sessioner:
+- Lämpligt för PoC med få användare
+- Alla användare med samma credentials behandlas lika
+- Ingen per-användare spårning
+
+### 1.3 Kvarvarande Begränsningar
+
+| Aspekt | Status | Kommentar |
+|--------|--------|-----------|
+| Trådsäkerhet | ✅ Implementerat | `threading.RLock` på alla mutationer |
+| Fillåsning | ✅ Implementerat | `fcntl.flock` / `msvcrt.locking` |
+| Atomic writes | ✅ Implementerat | Temp-fil + rename |
+| Sessionshantering | ⚠️ Grundläggande | Basic Auth utan per-user tracking |
+| Transaktioner | ⚠️ Ej stöd | Rollback vid fel ej implementerat |
+| Multi-process | ✅ Fungerar | Fillås skyddar mellan processer |
+
+### 1.4 Test Coverage
+
+Concurrent access testas i `backend/core/tests/test_storage.py`:
+
+```python
+class TestGraphStorageConcurrency:
+    def test_concurrent_add_nodes_no_data_loss()     # 10 trådar, 5 noder var
+    def test_concurrent_update_nodes_no_data_loss()  # 10 trådar uppdaterar samma nod
+    def test_concurrent_mixed_operations()           # 20 trådar med blandade operationer
+    def test_atomic_save_prevents_corruption()       # 20 trådar sparar samtidigt
+    def test_reload_during_concurrent_writes()       # Reload under pågående skrivningar
+```
+
+**Kör testerna:**
+```bash
+cd backend
+pytest core/tests/test_storage.py::TestGraphStorageConcurrency -v
+```
+
+### 1.5 Sammanfattning
+
+| Problem | Ursprunglig Status | Nuvarande Status |
+|---------|-------------------|------------------|
+| Inga fillås på graph.json | **KRITISK** | ✅ **ÅTGÄRDAT** |
+| Inget in-memory lås | **KRITISK** | ✅ **ÅTGÄRDAT** |
+| Filkorruption vid crash | **HÖG** | ✅ **ÅTGÄRDAT** |
+| Ingen sessionshantering | Medel | ⚠️ Kvarstår (PoC-acceptabelt) |
+| Inga transaktioner | Hög | ⚠️ Kvarstår (PoC-acceptabelt) |
+
+**Slutsats:** Applikationen är nu **säker för samtidiga användare i PoC-nivå**. Flera användare kan arbeta med samma graf utan risk för dataförlust på grund av race conditions.
 
 ---
 
