@@ -33,6 +33,11 @@ class AppConfig:
     # MCP configuration
     mcp_name: str = field(default_factory=lambda: os.getenv("MCP_NAME", "community-knowledge-graph"))
 
+    # Security configuration
+    auth_enabled: bool = field(default_factory=lambda: os.getenv("AUTH_ENABLED", "false").lower() == "true")
+    auth_username: str = field(default_factory=lambda: os.getenv("AUTH_USERNAME", "admin"))
+    auth_password: Optional[str] = field(default_factory=lambda: os.getenv("AUTH_PASSWORD"))
+
     def __post_init__(self):
         """Resolve default static paths relative to this package."""
         if self.web_static_path is None:

@@ -63,6 +63,47 @@ def create_app(
         version="1.0.0",
     )
 
+    # Add Basic Auth Middleware if enabled
+    if config.auth_enabled and config.auth_password:
+        import base64
+
+        @app.middleware("http")
+        async def basic_auth_middleware(request: Request, call_next):
+            if request.method == "OPTIONS":
+                return await call_next(request)
+
+            # Allow health check and info without auth
+            if request.url.path in ["/health", "/info"]:
+                return await call_next(request)
+
+            # Check for Authorization header
+            auth_header = request.headers.get("Authorization")
+            if not auth_header:
+                return JSONResponse(
+                    status_code=401,
+                    content={"detail": "Authentication required"},
+                    headers={"WWW-Authenticate": "Basic"},
+                )
+
+            try:
+                scheme, credentials = auth_header.split()
+                if scheme.lower() != 'basic':
+                    raise ValueError
+
+                decoded = base64.b64decode(credentials).decode("utf-8")
+                username, _, password = decoded.partition(":")
+
+                if username != config.auth_username or password != config.auth_password:
+                    raise ValueError
+            except (ValueError, Exception):
+                return JSONResponse(
+                    status_code=401,
+                    content={"detail": "Invalid credentials"},
+                    headers={"WWW-Authenticate": "Basic"},
+                )
+
+            return await call_next(request)
+
     # Add CORS middleware to allow external clients (like ChatGPT MCP connector)
     app.add_middleware(
         CORSMiddleware,

@@ -1,0 +1,14 @@
+services:
+  app:
+    build: .
+    ports:
+      - "8000:8000"
+    volumes:
+      - ./data:/data
+    environment:
+      - GRAPH_FILE=/data/graph.json
+      - ANTHROPIC_API_KEY=${ANTHROPIC_API_KEY}
+      # Set AUTH_ENABLED=true and AUTH_PASSWORD=... if using Basic Auth
+      # - AUTH_ENABLED=${AUTH_ENABLED:-false}
+      # - AUTH_USERNAME=${AUTH_USERNAME:-admin}
+      # - AUTH_PASSWORD=${AUTH_PASSWORD}
