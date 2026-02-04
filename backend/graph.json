@@ -1283,6 +1283,3806 @@
       "embedding": null,
       "created_at": "2026-01-19T08:22:59.023274",
       "updated_at": "2026-01-19T08:22:59.023276"
+    },
+    {
+      "id": "599aace6-ce13-4f3e-8167-5098a25ab98c",
+      "type": "Initiative",
+      "name": "AI-verkstaden",
+      "description": "AI-verkstaden är ett initiativ som stödjer organisationer i att förstå, testa och införa artificiell intelligens i praktiken. Fokus ligger på lärande, experiment, samverkan och ansvarsfull användning av AI.",
+      "summary": "Praktiskt AI-initiativ för lärande, test och införande av AI i organisationer.",
+      "communities": [],
+      "tags": [
+        "AI",
+        "kompetensutveckling",
+        "innovation",
+        "samverkan",
+        "ansvarsfull AI"
+      ],
+      "metadata": {
+        "website": "https://www.aiverkstaden.ai/",
+        "project_type": "capacity_building"
+      },
+      "embedding": null,
+      "created_at": "2026-02-03T10:13:31.717703",
+      "updated_at": "2026-02-03T10:13:31.717705"
+    },
+    {
+      "id": "ce28d749-31ac-4b04-b7f9-cc3c8b39e0ca",
+      "type": "Actor",
+      "name": "Offentlig sektor",
+      "description": "Myndigheter, kommuner och regioner som arbetar med eller berörs av AI-utveckling.",
+      "summary": "Offentliga organisationer",
+      "communities": [],
+      "tags": [
+        "public_sector"
+      ],
+      "metadata": {},
+      "embedding": null,
+      "created_at": "2026-02-03T10:13:31.717727",
+      "updated_at": "2026-02-03T10:13:31.717727"
+    },
+    {
+      "id": "80d03e7d-f43d-4cf6-905a-d903d1edc76b",
+      "type": "Actor",
+      "name": "Näringsliv",
+      "description": "Företag och branschorganisationer som utvecklar eller använder AI-lösningar.",
+      "summary": "Privata aktörer",
+      "communities": [],
+      "tags": [
+        "industry"
+      ],
+      "metadata": {},
+      "embedding": null,
+      "created_at": "2026-02-03T10:13:31.717743",
+      "updated_at": "2026-02-03T10:13:31.717743"
+    },
+    {
+      "id": "baac3a3d-5433-425d-a069-a5c4ad8b8104",
+      "type": "Actor",
+      "name": "Akademi",
+      "description": "Universitet och forskningsinstitut som bedriver forskning och utbildning inom AI.",
+      "summary": "Forskning och utbildning",
+      "communities": [],
+      "tags": [
+        "academia"
+      ],
+      "metadata": {},
+      "embedding": null,
+      "created_at": "2026-02-03T10:13:31.717757",
+      "updated_at": "2026-02-03T10:13:31.717757"
+    },
+    {
+      "id": "adf2dbfb-2f6f-47c2-9ab8-ce312275790f",
+      "type": "Resource",
+      "name": "Vägledning e-legitimation och e-underskrift 1_1 2018",
+      "description": "Möjligheten att kunna identifiera användare av e-tjänster på ett säkert sätt och att kontrollera att elektroniskt underskrivna handlingar är äkta, är en viktig grundfunktion. E-legitimering och e-underskrift är därför en nödvändig del av den grundläggande infrastrukturen för såväl e-förvaltningen som för kommersiella aktörer.\n\nKälla: https://www.esamverka.se/publikationer.html (direkt fil-länk saknas i underlaget).",
+      "summary": "Vägledning om e-legitimation och e-underskrift (2018).",
+      "communities": [
+        "eSam"
+      ],
+      "tags": [
+        "e-legitimation",
+        "e-underskrift",
+        "identitet",
+        "infrastruktur",
+        "vägledning"
+      ],
+      "metadata": {
+        "year": 2018,
+        "document_type": "Vägledning",
+        "source": "eSam publikationer"
+      },
+      "embedding": null,
+      "created_at": "2026-02-03T10:31:00.474293",
+      "updated_at": "2026-02-03T10:31:00.474296"
+    },
+    {
+      "id": "f25bd9d9-a38c-4caa-a860-b9690107d740",
+      "type": "Resource",
+      "name": "Digitalisera rätt - en praktisk juridisk vägledning, 2019",
+      "description": "Stöd vid införande av digital hantering av information i verksamhets-, och stödsystem så att de används samordnat på ett rättsenligt sätt.\n\nKälla: https://www.esamverka.se/publikationer.html (direkt fil-länk saknas i underlaget).",
+      "summary": "Praktisk juridisk vägledning för rättsenlig digitalisering (2019).",
+      "communities": [
+        "eSam"
+      ],
+      "tags": [
+        "juridik",
+        "digitalisering",
+        "informationshantering",
+        "vägledning"
+      ],
+      "metadata": {
+        "year": 2019,
+        "document_type": "Vägledning",
+        "source": "eSam publikationer"
+      },
+      "embedding": null,
+      "created_at": "2026-02-03T10:31:00.474321",
+      "updated_at": "2026-02-03T10:31:00.474321"
+    },
+    {
+      "id": "3fce219d-fe33-4d11-ba3e-bf43b2e8fe97",
+      "type": "Resource",
+      "name": "Eget utrymme hos myndighet - en vägledning 2016",
+      "description": "Vägledning om \"eget utrymme\" hos myndighet och tillhörande frågor kopplat till digital infrastruktur.\n\nKälla: https://www.esamverka.se/publikationer.html (direkt fil-länk saknas i underlaget).",
+      "summary": "Vägledning om eget utrymme hos myndighet (2016).",
+      "communities": [
+        "eSam"
+      ],
+      "tags": [
+        "eget utrymme",
+        "digital infrastruktur",
+        "vägledning"
+      ],
+      "metadata": {
+        "year": 2016,
+        "document_type": "Vägledning",
+        "source": "eSam publikationer"
+      },
+      "embedding": null,
+      "created_at": "2026-02-03T10:31:00.474339",
+      "updated_at": "2026-02-03T10:31:00.474339"
+    },
+    {
+      "id": "e50e8f6d-2bc6-4cc1-bd82-0732b5710157",
+      "type": "Resource",
+      "name": "Vägledning för verksamhetsutveckling inom e-förvaltningen 3.0 2018",
+      "description": "Förklaring av juridiska frågor vid utveckling av e-tjänster. Rättsliga bedömningar för kombination av teknik och juridik på ett rättsenligt och lämpligt sätt.\n\nKälla: https://www.esamverka.se/publikationer.html (direkt fil-länk saknas i underlaget).",
+      "summary": "Vägledning för verksamhetsutveckling inom e-förvaltningen (version 3.0, 2018).",
+      "communities": [
+        "eSam"
+      ],
+      "tags": [
+        "verksamhetsutveckling",
+        "e-förvaltning",
+        "e-tjänster",
+        "juridik",
+        "vägledning"
+      ],
+      "metadata": {
+        "year": 2018,
+        "document_type": "Vägledning",
+        "version": "3.0",
+        "source": "eSam publikationer"
+      },
+      "embedding": null,
+      "created_at": "2026-02-03T10:31:00.474357",
+      "updated_at": "2026-02-03T10:31:00.474357"
+    },
+    {
+      "id": "c955638b-5bd9-4ce7-b877-e988b20a3dde",
+      "type": "Resource",
+      "name": "Vägledning Lagringsytor 2021",
+      "description": "Ett stöd för att på ett rättsenligt sätt utveckla och införa lagringsytor och tillhörande infrastruktur.\n\nKälla: https://www.esamverka.se/publikationer.html (direkt fil-länk saknas i underlaget).",
+      "summary": "Vägledning för rättsenlig utveckling och införande av lagringsytor (2021).",
+      "communities": [
+        "eSam"
+      ],
+      "tags": [
+        "lagringsytor",
+        "infrastruktur",
+        "it-drift",
+        "juridik",
+        "vägledning"
+      ],
+      "metadata": {
+        "file_type": "pdf",
+        "verified": true
+      },
+      "embedding": null,
+      "created_at": "2026-02-03T10:31:00.474372",
+      "updated_at": "2026-02-03T10:53:05.221409"
+    },
+    {
+      "id": "c65aac2e-70ed-4679-b941-7146b595f8ec",
+      "type": "Resource",
+      "name": "Vägledning Eget utrymme hos myndighet 2021",
+      "description": "Vägledningen rör frågor om eget utrymme och tillhörande digital infrastruktur. Se även Vägledning lagringsytor 2021 — infrastruktur för it-drift och samverkan.\n\nKälla: https://www.esamverka.se/publikationer.html (direkt fil-länk saknas i underlaget).",
+      "summary": "Uppdaterad vägledning om eget utrymme hos myndighet (2021).",
+      "communities": [
+        "eSam"
+      ],
+      "tags": [
+        "eget utrymme",
+        "digital infrastruktur",
+        "samverkan",
+        "vägledning"
+      ],
+      "metadata": {
+        "year": 2021,
+        "document_type": "Vägledning",
+        "source": "eSam publikationer"
+      },
+      "embedding": null,
+      "created_at": "2026-02-03T10:31:00.474389",
+      "updated_at": "2026-02-03T10:31:00.474389"
+    },
+    {
+      "id": "9ff459a6-1352-4e00-b4fe-78c082c428fc",
+      "type": "Resource",
+      "name": "Vägledning programvarulicensiering 2021",
+      "description": "Om licensavtalets nyckelregleringar, även angränsande områden som underhåll, support, källkodsdeponering och licensrevision.\n\nKälla: https://www.esamverka.se/publikationer.html (direkt fil-länk saknas i underlaget).",
+      "summary": "Vägledning om programvarulicensiering och licensavtal (2021).",
+      "communities": [
+        "eSam"
+      ],
+      "tags": [
+        "programvarulicensiering",
+        "licensavtal",
+        "support",
+        "källkod",
+        "licensrevision",
+        "vägledning"
+      ],
+      "metadata": {
+        "year": 2021,
+        "document_type": "Vägledning",
+        "source": "eSam publikationer"
+      },
+      "embedding": null,
+      "created_at": "2026-02-03T10:31:00.474405",
+      "updated_at": "2026-02-03T10:31:00.474405"
+    },
+    {
+      "id": "35696d21-9769-415f-86fa-4262d301fd41",
+      "type": "Resource",
+      "name": "ES2022-01 Vägledning Pseudonymisering av personuppgifter",
+      "description": "Ökad säkerhet för intern personuppgiftsbehandling, i relationen till externa samt ökad möjlighet att utbyta information mellan aktörer.\n\nKälla: https://www.esamverka.se/publikationer.html (direkt fil-länk saknas i underlaget).",
+      "summary": "Vägledning om pseudonymisering av personuppgifter (ES2022-01).",
+      "communities": [
+        "eSam"
+      ],
+      "tags": [
+        "pseudonymisering",
+        "personuppgifter",
+        "integritet",
+        "säkerhet",
+        "vägledning",
+        "ES2022-01"
+      ],
+      "metadata": {
+        "year": 2022,
+        "document_type": "Vägledning",
+        "es_id": "ES2022-01",
+        "source": "eSam publikationer"
+      },
+      "embedding": null,
+      "created_at": "2026-02-03T10:31:00.474420",
+      "updated_at": "2026-02-03T10:31:00.474421"
+    },
+    {
+      "id": "e434f3ee-b800-420f-a8f5-717475820498",
+      "type": "Resource",
+      "name": "Elektroniskt informationsutbyte - en vägledning för utlämnande i elektronisk form",
+      "description": "När myndigheter ska införa tjänster för att lämna ut uppgifter automatiserat, utan att detta leder till s.k. direktåtkomst, behöver ett antal frågor övervägas.\n\nKälla: https://www.esamverka.se/publikationer.html (direkt fil-länk saknas i underlaget).",
+      "summary": "Vägledning för utlämnande i elektronisk form utan direktåtkomst.",
+      "communities": [
+        "eSam"
+      ],
+      "tags": [
+        "informationsutbyte",
+        "utlämnande",
+        "automatisering",
+        "direktåtkomst",
+        "vägledning"
+      ],
+      "metadata": {
+        "year": 2016,
+        "document_type": "Vägledning",
+        "source": "eSam publikationer"
+      },
+      "embedding": null,
+      "created_at": "2026-02-03T10:31:00.474436",
+      "updated_at": "2026-02-03T10:31:00.474436"
+    },
+    {
+      "id": "417efa7b-f990-4a0c-94ea-1b404635cb73",
+      "type": "Resource",
+      "name": "Analysverktyg och eget utrymme 200303",
+      "description": "I PM:n tas upp vad som kan göras inom ramen för eget utrymme och vad som faller utanför. Avslutar med fem praktiska exempel på vad som är tillåtet och vad som inte är det.\n\nKälla: https://www.esamverka.se/publikationer.html (direkt fil-länk saknas i underlaget).",
+      "summary": "PM om analysverktyg inom ramen för eget utrymme (2020).",
+      "communities": [
+        "eSam"
+      ],
+      "tags": [
+        "analysverktyg",
+        "eget utrymme",
+        "PM",
+        "juridik"
+      ],
+      "metadata": {
+        "year": 2020,
+        "document_type": "Promemoria",
+        "source": "eSam publikationer"
+      },
+      "embedding": null,
+      "created_at": "2026-02-03T10:31:00.474450",
+      "updated_at": "2026-02-03T10:31:00.474451"
+    },
+    {
+      "id": "6797dd84-a339-499a-8364-c769aaeeea05",
+      "type": "Resource",
+      "name": "Rättsligt uttalande för sekretess enligt 40 kap 5§ OSL_2016",
+      "description": "Rättsligt uttalande kopplat till sekretess enligt 40 kap. 5 § OSL.\n\nKälla: https://www.esamverka.se/publikationer.html (direkt fil-länk saknas i underlaget).",
+      "summary": "Rättsligt uttalande om sekretess enligt 40 kap 5§ OSL (2016).",
+      "communities": [
+        "eSam"
+      ],
+      "tags": [
+        "sekretess",
+        "OSL",
+        "rättsligt uttalande"
+      ],
+      "metadata": {
+        "year": 2016,
+        "document_type": "Rättsligt uttalande",
+        "source": "eSam publikationer"
+      },
+      "embedding": null,
+      "created_at": "2026-02-03T10:31:00.474466",
+      "updated_at": "2026-02-03T10:31:00.474466"
+    },
+    {
+      "id": "043e5a44-b7f8-4265-8722-1d5a22132d35",
+      "type": "Resource",
+      "name": "Rättsligt uttalande inkommandetidpunkten_2017",
+      "description": "Rättsligt uttalande om inkommandetidpunkten för elektroniska handlingar.\n\nKälla: https://www.esamverka.se/publikationer.html (direkt fil-länk saknas i underlaget).",
+      "summary": "Rättsligt uttalande om inkommandetidpunkten (2017).",
+      "communities": [
+        "eSam"
+      ],
+      "tags": [
+        "inkommandetidpunkt",
+        "elektroniska handlingar",
+        "rättsligt uttalande"
+      ],
+      "metadata": {
+        "year": 2017,
+        "document_type": "Rättsligt uttalande",
+        "source": "eSam publikationer"
+      },
+      "embedding": null,
+      "created_at": "2026-02-03T10:31:00.474481",
+      "updated_at": "2026-02-03T10:31:00.474482"
+    },
+    {
+      "id": "02c2583a-51ff-4928-8590-26e0a8bbce64",
+      "type": "Resource",
+      "name": "Rättsligt uttalande art 22, autobeslut_2018",
+      "description": "Rättsligt uttalande kopplat till artikel 22 (automatiserade beslut).\n\nKälla: https://www.esamverka.se/publikationer.html (direkt fil-länk saknas i underlaget).",
+      "summary": "Rättsligt uttalande om art. 22 och automatiserade beslut (2018).",
+      "communities": [
+        "eSam"
+      ],
+      "tags": [
+        "artikel 22",
+        "automatiserade beslut",
+        "GDPR",
+        "rättsligt uttalande"
+      ],
+      "metadata": {
+        "year": 2018,
+        "document_type": "Rättsligt uttalande",
+        "source": "eSam publikationer"
+      },
+      "embedding": null,
+      "created_at": "2026-02-03T10:31:00.474496",
+      "updated_at": "2026-02-03T10:31:00.474497"
+    },
+    {
+      "id": "2c87633e-85c6-429b-8672-f836e1dd7bff",
+      "type": "Resource",
+      "name": "Rättsligt uttalande Missbruk av e-leg 2017",
+      "description": "Rättsligt uttalande om missbruk av e-legitimation.\n\nKälla: https://www.esamverka.se/publikationer.html (direkt fil-länk saknas i underlaget).",
+      "summary": "Rättsligt uttalande om missbruk av e-leg (2017).",
+      "communities": [
+        "eSam"
+      ],
+      "tags": [
+        "e-legitimation",
+        "missbruk",
+        "rättsligt uttalande"
+      ],
+      "metadata": {
+        "year": 2017,
+        "document_type": "Rättsligt uttalande",
+        "source": "eSam publikationer"
+      },
+      "embedding": null,
+      "created_at": "2026-02-03T10:31:00.474511",
+      "updated_at": "2026-02-03T10:31:00.474512"
+    },
+    {
+      "id": "db0a617e-855f-4093-b351-c32b2759e215",
+      "type": "Resource",
+      "name": "Rättsligt uttalande Eget utrymme 2017",
+      "description": "Rättsligt uttalande kopplat till eget utrymme hos myndighet.\n\nKälla: https://www.esamverka.se/publikationer.html (direkt fil-länk saknas i underlaget).",
+      "summary": "Rättsligt uttalande om eget utrymme (2017).",
+      "communities": [
+        "eSam"
+      ],
+      "tags": [
+        "eget utrymme",
+        "rättsligt uttalande"
+      ],
+      "metadata": {
+        "year": 2017,
+        "document_type": "Rättsligt uttalande",
+        "source": "eSam publikationer"
+      },
+      "embedding": null,
+      "created_at": "2026-02-03T10:31:00.474525",
+      "updated_at": "2026-02-03T10:31:00.474525"
+    },
+    {
+      "id": "347636e5-4c9d-4938-924d-fa40806d19ba",
+      "type": "Resource",
+      "name": "PM inkommande handlingar, 2017",
+      "description": "Resonemang kring tolkningssvårigheter avseende när en elektronisk handling anses ha inkommit till myndigheten.\n\nKälla: https://www.esamverka.se/publikationer.html (direkt fil-länk saknas i underlaget).",
+      "summary": "PM om när elektroniska handlingar anses inkomna (2017).",
+      "communities": [
+        "eSam"
+      ],
+      "tags": [
+        "inkommande handlingar",
+        "elektroniska handlingar",
+        "PM"
+      ],
+      "metadata": {
+        "year": 2017,
+        "document_type": "Promemoria",
+        "source": "eSam publikationer"
+      },
+      "embedding": null,
+      "created_at": "2026-02-03T10:31:00.474539",
+      "updated_at": "2026-02-03T10:31:00.474539"
+    },
+    {
+      "id": "55cd1962-b436-4a7a-bc91-8222d05b2ce4",
+      "type": "Resource",
+      "name": "PM Eget utrymme, 2017",
+      "description": "Resonemang kring juridisk bedömning av eget utrymme vilket senare ledde till uppdatering av tidigare utgivna vägledningar.\n\nKälla: https://www.esamverka.se/publikationer.html (direkt fil-länk saknas i underlaget).",
+      "summary": "PM om juridisk bedömning av eget utrymme (2017).",
+      "communities": [
+        "eSam"
+      ],
+      "tags": [
+        "eget utrymme",
+        "PM",
+        "juridik"
+      ],
+      "metadata": {
+        "year": 2017,
+        "document_type": "Promemoria",
+        "source": "eSam publikationer"
+      },
+      "embedding": null,
+      "created_at": "2026-02-03T10:31:00.474553",
+      "updated_at": "2026-02-03T10:31:00.474553"
+    },
+    {
+      "id": "d82c2323-2a65-4ab8-a634-765890542039",
+      "type": "Resource",
+      "name": "ES2022-06 En modern registerförfattning",
+      "description": "Förslag till utformning av modernare registerförfattningar som stödjer digitaliseringen med bibehållet integritetsskydd.\n\nKälla: https://www.esamverka.se/publikationer.html (direkt fil-länk saknas i underlaget).",
+      "summary": "Promemoria: modern registerförfattning (ES2022-06).",
+      "communities": [
+        "eSam"
+      ],
+      "tags": [
+        "registerförfattning",
+        "digitalisering",
+        "integritet",
+        "promemoria",
+        "ES2022-06"
+      ],
+      "metadata": {
+        "year": 2022,
+        "document_type": "Promemoria",
+        "es_id": "ES2022-06",
+        "source": "eSam publikationer"
+      },
+      "embedding": null,
+      "created_at": "2026-02-03T10:31:00.474568",
+      "updated_at": "2026-02-03T10:31:00.474568"
+    },
+    {
+      "id": "9d5d460d-94c5-43d4-bb6c-ecdb4ad024b2",
+      "type": "Resource",
+      "name": "ES2023-2 Stordataanalyser och datasjöar - begrepp och rättsliga förutsättningar",
+      "description": "Rättsliga förutsättningar, möjligheter och utmaningar för myndigheter som vill arbeta med stordataanalyser och datasjöar.\n\nKälla: https://www.esamverka.se/publikationer.html (direkt fil-länk saknas i underlaget).",
+      "summary": "Promemoria om stordataanalyser och datasjöar (ES2023-2).",
+      "communities": [
+        "eSam"
+      ],
+      "tags": [
+        "stordataanalyser",
+        "datasjöar",
+        "rättsliga förutsättningar",
+        "promemoria",
+        "ES2023-2"
+      ],
+      "metadata": {
+        "year": 2023,
+        "document_type": "Promemoria",
+        "es_id": "ES2023-2",
+        "source": "eSam publikationer"
+      },
+      "embedding": null,
+      "created_at": "2026-02-03T10:31:00.474584",
+      "updated_at": "2026-02-03T10:31:00.474584"
+    },
+    {
+      "id": "8acdeb82-5497-4ca6-a211-4d0a76cd6a79",
+      "type": "Resource",
+      "name": "Digitaliserbar lagstiftning",
+      "description": "Exempel på lagstiftning med utmaningar för digitalisering. Exempel på när digitalisering av rättsregler har kunnat genomföras.\n\nKälla: https://www.esamverka.se/publikationer.html (direkt fil-länk saknas i underlaget).",
+      "summary": "Promemoria om digitaliserbar lagstiftning (2023).",
+      "communities": [
+        "eSam"
+      ],
+      "tags": [
+        "lagstiftning",
+        "digitalisering",
+        "rättsregler",
+        "promemoria"
+      ],
+      "metadata": {
+        "year": 2023,
+        "document_type": "Promemoria",
+        "es_id": "ES2023-09",
+        "source": "eSam publikationer"
+      },
+      "embedding": null,
+      "created_at": "2026-02-03T10:31:00.474598",
+      "updated_at": "2026-02-03T10:31:00.474599"
+    },
+    {
+      "id": "eccd0cf5-3582-448f-9450-8fd34a32b8cf",
+      "type": "Resource",
+      "name": "Skyddade personuppgifter - myndigheters hantering",
+      "description": "Promemorian ger praktiskt stöd och konkreta tips vid myndigheters hantering av skyddade personuppgifter.\n\nKälla: https://www.esamverka.se/publikationer.html (direkt fil-länk saknas i underlaget).",
+      "summary": "Promemoria om hantering av skyddade personuppgifter (2023).",
+      "communities": [
+        "eSam"
+      ],
+      "tags": [
+        "skyddade personuppgifter",
+        "integritet",
+        "promemoria",
+        "ES2023-12"
+      ],
+      "metadata": {
+        "year": 2023,
+        "document_type": "Promemoria",
+        "es_id": "ES2023-12",
+        "source": "eSam publikationer"
+      },
+      "embedding": null,
+      "created_at": "2026-02-03T10:31:00.474612",
+      "updated_at": "2026-02-03T10:31:00.474612"
+    },
+    {
+      "id": "20ad587a-6a9f-465c-a932-21c31a4b3f86",
+      "type": "Resource",
+      "name": "Checklista - Rättsliga förutsättningar i utvecklingsinsatser 2.0 2019",
+      "description": "Övergripande juridiska frågeställningar vid samverkan kring e-förvaltningsinsatser samt vägledning till var det finns stöd i arbetet.\n\nKälla: https://www.esamverka.se/publikationer.html (direkt fil-länk saknas i underlaget).",
+      "summary": "Checklista för rättsliga förutsättningar i utvecklingsinsatser (2.0, 2019).",
+      "communities": [
+        "eSam"
+      ],
+      "tags": [
+        "checklista",
+        "juridik",
+        "samverkan",
+        "e-förvaltning"
+      ],
+      "metadata": {
+        "year": 2019,
+        "document_type": "Checklista",
+        "version": "2.0",
+        "source": "eSam publikationer"
+      },
+      "embedding": null,
+      "created_at": "2026-02-03T10:31:00.474626",
+      "updated_at": "2026-02-03T10:31:00.474626"
+    },
+    {
+      "id": "f2c2c0b2-6ffc-4ccb-b14a-84bba43c72a0",
+      "type": "Resource",
+      "name": "Juridik vid användning av AI",
+      "description": "Beskrivning av rättsliga frågor som särskilt behöver beaktas vid användning av AI.\n\nDirekt PDF: https://www.esamverka.se/download/18.2191f2561817fd04d7c4fe78/1656583943622/ES2022-08%20Checklista%20Juridik%20vid%20anv%C3%A4ndning%20av%20AI.pdf\n\nKälla: https://www.esamverka.se/publikationer.html",
+      "summary": "Checklista om juridik vid användning av AI (ES2022-08).",
+      "communities": [
+        "eSam"
+      ],
+      "tags": [
+        "AI",
+        "juridik",
+        "checklista",
+        "ES2022-08"
+      ],
+      "metadata": {
+        "year": 2022,
+        "document_type": "Checklista",
+        "es_id": "ES2022-08",
+        "source": "eSam publikationer",
+        "file_type": "pdf",
+        "verified": true
+      },
+      "embedding": null,
+      "created_at": "2026-02-03T10:31:00.474640",
+      "updated_at": "2026-02-03T10:55:24.577459"
+    },
+    {
+      "id": "64da48c7-8535-473d-821d-8d5f0b51968a",
+      "type": "Resource",
+      "name": "Vägledning it-avtal 2020",
+      "description": "En överblick över it-avtalsområdet och en orientering över vanligt förekommande it-avtal.\n\nKälla: https://www.esamverka.se/publikationer.html (direkt fil-länk saknas i underlaget).",
+      "summary": "Vägledning om it-avtal (2020).",
+      "communities": [
+        "eSam"
+      ],
+      "tags": [
+        "it-avtal",
+        "avtal",
+        "upphandling",
+        "vägledning"
+      ],
+      "metadata": {
+        "year": 2020,
+        "document_type": "It-avtal",
+        "source": "eSam publikationer"
+      },
+      "embedding": null,
+      "created_at": "2026-02-03T10:31:00.474654",
+      "updated_at": "2026-02-03T10:31:00.474655"
+    },
+    {
+      "id": "6152018a-6e51-4ea4-b91f-3192fe316371",
+      "type": "Resource",
+      "name": "Vägledning e-legitimation och e-underskrift 1_1 2018",
+      "description": "Möjligheten att kunna identifiera användare av e-tjänster på ett säkert sätt och att kontrollera att elektroniskt underskrivna handlingar är äkta, är en viktig grundfunktion. E-legitimering och e-underskrift är därför en nödvändig del av den grundläggande infrastrukturen för såväl e-förvaltningen som för kommersiella aktörer.\n\nKälla: https://www.esamverka.se/publikationer.html (direkt fil-länk saknas i underlaget).",
+      "summary": "Vägledning om e-legitimation och e-underskrift (2018).",
+      "communities": [
+        "eSam"
+      ],
+      "tags": [
+        "e-legitimation",
+        "e-underskrift",
+        "identitet",
+        "infrastruktur",
+        "vägledning"
+      ],
+      "metadata": {
+        "year": 2018,
+        "document_type": "Vägledning",
+        "source": "eSam publikationer"
+      },
+      "embedding": null,
+      "created_at": "2026-02-03T10:38:47.778601",
+      "updated_at": "2026-02-03T10:38:47.778603"
+    },
+    {
+      "id": "3858a022-6a49-4f57-b406-5a5b247e81f8",
+      "type": "Resource",
+      "name": "Digitalisera rätt - en praktisk juridisk vägledning, 2019",
+      "description": "Stöd vid införande av digital hantering av information i verksamhets-, och stödsystem så att de används samordnat på ett rättsenligt sätt.\n\nKälla: https://www.esamverka.se/publikationer.html (direkt fil-länk saknas i underlaget).",
+      "summary": "Praktisk juridisk vägledning för rättsenlig digitalisering (2019).",
+      "communities": [
+        "eSam"
+      ],
+      "tags": [
+        "juridik",
+        "digitalisering",
+        "informationshantering",
+        "vägledning"
+      ],
+      "metadata": {
+        "year": 2019,
+        "document_type": "Vägledning",
+        "source": "eSam publikationer"
+      },
+      "embedding": null,
+      "created_at": "2026-02-03T10:38:47.778623",
+      "updated_at": "2026-02-03T10:38:47.778624"
+    },
+    {
+      "id": "34ac6889-24da-4df6-90c5-2c676fc08240",
+      "type": "Resource",
+      "name": "Eget utrymme hos myndighet - en vägledning 2016",
+      "description": "Vägledning om \"eget utrymme\" hos myndighet och tillhörande frågor kopplat till digital infrastruktur.\n\nKälla: https://www.esamverka.se/publikationer.html (direkt fil-länk saknas i underlaget).",
+      "summary": "Vägledning om eget utrymme hos myndighet (2016).",
+      "communities": [
+        "eSam"
+      ],
+      "tags": [
+        "eget utrymme",
+        "digital infrastruktur",
+        "vägledning"
+      ],
+      "metadata": {
+        "year": 2016,
+        "document_type": "Vägledning",
+        "source": "eSam publikationer"
+      },
+      "embedding": null,
+      "created_at": "2026-02-03T10:38:47.778640",
+      "updated_at": "2026-02-03T10:38:47.778640"
+    },
+    {
+      "id": "00610450-e2f4-4bfb-845b-8f8649e1030b",
+      "type": "Resource",
+      "name": "Vägledning för verksamhetsutveckling inom e-förvaltningen 3.0 2018",
+      "description": "Förklaring av juridiska frågor vid utveckling av e-tjänster. Rättsliga bedömningar för kombination av teknik och juridik på ett rättsenligt och lämpligt sätt.\n\nKälla: https://www.esamverka.se/publikationer.html (direkt fil-länk saknas i underlaget).",
+      "summary": "Vägledning för verksamhetsutveckling inom e-förvaltningen (version 3.0, 2018).",
+      "communities": [
+        "eSam"
+      ],
+      "tags": [
+        "verksamhetsutveckling",
+        "e-förvaltning",
+        "e-tjänster",
+        "juridik",
+        "vägledning"
+      ],
+      "metadata": {
+        "year": 2018,
+        "document_type": "Vägledning",
+        "version": "3.0",
+        "source": "eSam publikationer"
+      },
+      "embedding": null,
+      "created_at": "2026-02-03T10:38:47.778656",
+      "updated_at": "2026-02-03T10:38:47.778656"
+    },
+    {
+      "id": "26b91aae-ba7e-44b4-9ba2-d7f1c7355b5c",
+      "type": "Resource",
+      "name": "Vägledning Lagringsytor 2021",
+      "description": "Ett stöd för att på ett rättsenligt sätt utveckla och införa lagringsytor och tillhörande infrastruktur.\n\nKälla: https://www.esamverka.se/publikationer.html (direkt fil-länk saknas i underlaget).",
+      "summary": "Vägledning för rättsenlig utveckling och införande av lagringsytor (2021).",
+      "communities": [
+        "eSam"
+      ],
+      "tags": [
+        "lagringsytor",
+        "infrastruktur",
+        "it-drift",
+        "juridik",
+        "vägledning"
+      ],
+      "metadata": {
+        "year": 2021,
+        "document_type": "Vägledning",
+        "source": "eSam publikationer"
+      },
+      "embedding": null,
+      "created_at": "2026-02-03T10:38:47.778670",
+      "updated_at": "2026-02-03T10:38:47.778670"
+    },
+    {
+      "id": "30b5bdc1-9b88-4f1c-a08f-257ba855573d",
+      "type": "Resource",
+      "name": "Vägledning Eget utrymme hos myndighet 2021",
+      "description": "Vägledningen rör frågor om eget utrymme och tillhörande digital infrastruktur. Se även Vägledning lagringsytor 2021 — infrastruktur för it-drift och samverkan.\n\nKälla: https://www.esamverka.se/publikationer.html (direkt fil-länk saknas i underlaget).",
+      "summary": "Uppdaterad vägledning om eget utrymme hos myndighet (2021).",
+      "communities": [
+        "eSam"
+      ],
+      "tags": [
+        "eget utrymme",
+        "digital infrastruktur",
+        "samverkan",
+        "vägledning"
+      ],
+      "metadata": {
+        "year": 2021,
+        "document_type": "Vägledning",
+        "source": "eSam publikationer"
+      },
+      "embedding": null,
+      "created_at": "2026-02-03T10:38:47.778685",
+      "updated_at": "2026-02-03T10:38:47.778685"
+    },
+    {
+      "id": "a703bf1f-53d4-409f-a65a-c20acf628152",
+      "type": "Resource",
+      "name": "Vägledning programvarulicensiering 2021",
+      "description": "Om licensavtalets nyckelregleringar, även angränsande områden som underhåll, support, källkodsdeponering och licensrevision.\n\nKälla: https://www.esamverka.se/publikationer.html (direkt fil-länk saknas i underlaget).",
+      "summary": "Vägledning om programvarulicensiering och licensavtal (2021).",
+      "communities": [
+        "eSam"
+      ],
+      "tags": [
+        "programvarulicensiering",
+        "licensavtal",
+        "support",
+        "källkod",
+        "licensrevision",
+        "vägledning"
+      ],
+      "metadata": {
+        "year": 2021,
+        "document_type": "Vägledning",
+        "source": "eSam publikationer"
+      },
+      "embedding": null,
+      "created_at": "2026-02-03T10:38:47.778699",
+      "updated_at": "2026-02-03T10:38:47.778700"
+    },
+    {
+      "id": "62a63a31-9118-4701-91d6-9f5a9991144f",
+      "type": "Resource",
+      "name": "ES2022-01 Vägledning Pseudonymisering av personuppgifter",
+      "description": "Ökad säkerhet för intern personuppgiftsbehandling, i relationen till externa samt ökad möjlighet att utbyta information mellan aktörer.\n\nKälla: https://www.esamverka.se/publikationer.html (direkt fil-länk saknas i underlaget).",
+      "summary": "Vägledning om pseudonymisering av personuppgifter (ES2022-01).",
+      "communities": [
+        "eSam"
+      ],
+      "tags": [
+        "pseudonymisering",
+        "personuppgifter",
+        "integritet",
+        "säkerhet",
+        "vägledning",
+        "ES2022-01"
+      ],
+      "metadata": {
+        "year": 2022,
+        "document_type": "Vägledning",
+        "es_id": "ES2022-01",
+        "source": "eSam publikationer"
+      },
+      "embedding": null,
+      "created_at": "2026-02-03T10:38:47.778714",
+      "updated_at": "2026-02-03T10:38:47.778714"
+    },
+    {
+      "id": "b9bd7215-0e85-44f8-a6cb-6b769a96e496",
+      "type": "Resource",
+      "name": "Elektroniskt informationsutbyte - en vägledning för utlämnande i elektronisk form",
+      "description": "När myndigheter ska införa tjänster för att lämna ut uppgifter automatiserat, utan att detta leder till s.k. direktåtkomst, behöver ett antal frågor övervägas.\n\nKälla: https://www.esamverka.se/publikationer.html (direkt fil-länk saknas i underlaget).",
+      "summary": "Vägledning för utlämnande i elektronisk form utan direktåtkomst (2016).",
+      "communities": [
+        "eSam"
+      ],
+      "tags": [
+        "informationsutbyte",
+        "utlämnande",
+        "automatisering",
+        "direktåtkomst",
+        "vägledning"
+      ],
+      "metadata": {
+        "year": 2016,
+        "document_type": "Vägledning",
+        "source": "eSam publikationer"
+      },
+      "embedding": null,
+      "created_at": "2026-02-03T10:38:47.778728",
+      "updated_at": "2026-02-03T10:38:47.778728"
+    },
+    {
+      "id": "87bb3703-3d5c-457f-8f0c-307372db7498",
+      "type": "Resource",
+      "name": "Analysverktyg och eget utrymme 200303",
+      "description": "I PM:n tas upp vad som kan göras inom ramen för eget utrymme och vad som faller utanför. Avslutar med fem praktiska exempel på vad som är tillåtet och vad som inte är det.\n\nKälla: https://www.esamverka.se/publikationer.html (direkt fil-länk saknas i underlaget).",
+      "summary": "PM om analysverktyg inom ramen för eget utrymme (2020).",
+      "communities": [
+        "eSam"
+      ],
+      "tags": [
+        "analysverktyg",
+        "eget utrymme",
+        "PM",
+        "juridik"
+      ],
+      "metadata": {
+        "year": 2020,
+        "document_type": "Promemoria",
+        "source": "eSam publikationer"
+      },
+      "embedding": null,
+      "created_at": "2026-02-03T10:38:47.778742",
+      "updated_at": "2026-02-03T10:38:47.778742"
+    },
+    {
+      "id": "4ae57197-154f-40a4-9077-365673bb42f1",
+      "type": "Resource",
+      "name": "Rättsligt uttalande för sekretess enligt 40 kap 5§ OSL_2016",
+      "description": "Rättsligt uttalande kopplat till sekretess enligt 40 kap. 5 § OSL.\n\nKälla: https://www.esamverka.se/publikationer.html (direkt fil-länk saknas i underlaget).",
+      "summary": "Rättsligt uttalande om sekretess enligt 40 kap 5§ OSL (2016).",
+      "communities": [
+        "eSam"
+      ],
+      "tags": [
+        "sekretess",
+        "OSL",
+        "rättsligt uttalande"
+      ],
+      "metadata": {
+        "year": 2016,
+        "document_type": "Rättsligt uttalande",
+        "source": "eSam publikationer"
+      },
+      "embedding": null,
+      "created_at": "2026-02-03T10:38:47.778755",
+      "updated_at": "2026-02-03T10:38:47.778755"
+    },
+    {
+      "id": "5e8e9e87-e7c0-4f71-afbb-2d3c431ef087",
+      "type": "Resource",
+      "name": "Rättsligt uttalande inkommandetidpunkten_2017",
+      "description": "Rättsligt uttalande om inkommandetidpunkten för elektroniska handlingar.\n\nKälla: https://www.esamverka.se/publikationer.html (direkt fil-länk saknas i underlaget).",
+      "summary": "Rättsligt uttalande om inkommandetidpunkten (2017).",
+      "communities": [
+        "eSam"
+      ],
+      "tags": [
+        "inkommandetidpunkt",
+        "elektroniska handlingar",
+        "rättsligt uttalande"
+      ],
+      "metadata": {
+        "year": 2017,
+        "document_type": "Rättsligt uttalande",
+        "source": "eSam publikationer"
+      },
+      "embedding": null,
+      "created_at": "2026-02-03T10:38:47.778769",
+      "updated_at": "2026-02-03T10:38:47.778769"
+    },
+    {
+      "id": "c8d3532e-1fd6-4718-9248-db713eafa776",
+      "type": "Resource",
+      "name": "Rättsligt uttalande art 22, autobeslut_2018",
+      "description": "Rättsligt uttalande kopplat till artikel 22 (automatiserade beslut).\n\nKälla: https://www.esamverka.se/publikationer.html (direkt fil-länk saknas i underlaget).",
+      "summary": "Rättsligt uttalande om art. 22 och automatiserade beslut (2018).",
+      "communities": [
+        "eSam"
+      ],
+      "tags": [
+        "artikel 22",
+        "automatiserade beslut",
+        "GDPR",
+        "rättsligt uttalande"
+      ],
+      "metadata": {
+        "year": 2018,
+        "document_type": "Rättsligt uttalande",
+        "source": "eSam publikationer"
+      },
+      "embedding": null,
+      "created_at": "2026-02-03T10:38:47.778783",
+      "updated_at": "2026-02-03T10:38:47.778783"
+    },
+    {
+      "id": "2e2a8361-614c-459d-bbcf-548d35801c33",
+      "type": "Resource",
+      "name": "Rättsligt uttalande Missbruk av e-leg 2017",
+      "description": "Rättsligt uttalande om missbruk av e-legitimation.\n\nKälla: https://www.esamverka.se/publikationer.html (direkt fil-länk saknas i underlaget).",
+      "summary": "Rättsligt uttalande om missbruk av e-leg (2017).",
+      "communities": [
+        "eSam"
+      ],
+      "tags": [
+        "e-legitimation",
+        "missbruk",
+        "rättsligt uttalande"
+      ],
+      "metadata": {
+        "year": 2017,
+        "document_type": "Rättsligt uttalande",
+        "source": "eSam publikationer"
+      },
+      "embedding": null,
+      "created_at": "2026-02-03T10:38:47.778796",
+      "updated_at": "2026-02-03T10:38:47.778796"
+    },
+    {
+      "id": "5ada1e83-1516-426d-8fd7-8dacaadb8222",
+      "type": "Resource",
+      "name": "Rättsligt uttalande Eget utrymme 2017",
+      "description": "Rättsligt uttalande kopplat till eget utrymme hos myndighet.\n\nKälla: https://www.esamverka.se/publikationer.html (direkt fil-länk saknas i underlaget).",
+      "summary": "Rättsligt uttalande om eget utrymme (2017).",
+      "communities": [
+        "eSam"
+      ],
+      "tags": [
+        "eget utrymme",
+        "rättsligt uttalande"
+      ],
+      "metadata": {
+        "year": 2017,
+        "document_type": "Rättsligt uttalande",
+        "source": "eSam publikationer"
+      },
+      "embedding": null,
+      "created_at": "2026-02-03T10:38:47.778809",
+      "updated_at": "2026-02-03T10:38:47.778810"
+    },
+    {
+      "id": "9ef98213-6725-4983-bf1f-4dc3dfa1c7bc",
+      "type": "Resource",
+      "name": "PM inkommande handlingar, 2017",
+      "description": "Resonemang kring tolkningssvårigheter avseende när en elektronisk handling anses ha inkommit till myndigheten.\n\nKälla: https://www.esamverka.se/publikationer.html (direkt fil-länk saknas i underlaget).",
+      "summary": "PM om när elektroniska handlingar anses inkomna (2017).",
+      "communities": [
+        "eSam"
+      ],
+      "tags": [
+        "inkommande handlingar",
+        "elektroniska handlingar",
+        "PM"
+      ],
+      "metadata": {
+        "year": 2017,
+        "document_type": "Promemoria",
+        "source": "eSam publikationer"
+      },
+      "embedding": null,
+      "created_at": "2026-02-03T10:38:47.778823",
+      "updated_at": "2026-02-03T10:38:47.778823"
+    },
+    {
+      "id": "d17afd1c-7cf5-4357-b8f1-be1ebf76ee5b",
+      "type": "Resource",
+      "name": "PM Eget utrymme, 2017",
+      "description": "Resonemang kring juridisk bedömning av eget utrymme vilket senare ledde till uppdatering av tidigare utgivna vägledningar.\n\nKälla: https://www.esamverka.se/publikationer.html (direkt fil-länk saknas i underlaget).",
+      "summary": "PM om juridisk bedömning av eget utrymme (2017).",
+      "communities": [
+        "eSam"
+      ],
+      "tags": [
+        "eget utrymme",
+        "PM",
+        "juridik"
+      ],
+      "metadata": {
+        "year": 2017,
+        "document_type": "Promemoria",
+        "source": "eSam publikationer"
+      },
+      "embedding": null,
+      "created_at": "2026-02-03T10:38:47.778837",
+      "updated_at": "2026-02-03T10:38:47.778837"
+    },
+    {
+      "id": "00bf4404-6623-45a4-994f-ec867ba0b47c",
+      "type": "Resource",
+      "name": "ES2022-06 En modern registerförfattning",
+      "description": "Förslag till utformning av modernare registerförfattningar som stödjer digitaliseringen med bibehållet integritetsskydd.\n\nKälla: https://www.esamverka.se/publikationer.html (direkt fil-länk saknas i underlaget).",
+      "summary": "Promemoria: modern registerförfattning (ES2022-06).",
+      "communities": [
+        "eSam"
+      ],
+      "tags": [
+        "registerförfattning",
+        "digitalisering",
+        "integritet",
+        "promemoria",
+        "ES2022-06"
+      ],
+      "metadata": {
+        "year": 2022,
+        "document_type": "Promemoria",
+        "es_id": "ES2022-06",
+        "source": "eSam publikationer"
+      },
+      "embedding": null,
+      "created_at": "2026-02-03T10:38:47.778852",
+      "updated_at": "2026-02-03T10:38:47.778853"
+    },
+    {
+      "id": "637597b4-2f62-45ec-8697-903695cabcb2",
+      "type": "Resource",
+      "name": "ES2023-2 Stordataanalyser och datasjöar - begrepp och rättsliga förutsättningar",
+      "description": "Rättsliga förutsättningar, möjligheter och utmaningar för myndigheter som vill arbeta med stordataanalyser och datasjöar.\n\nKälla: https://www.esamverka.se/publikationer.html (direkt fil-länk saknas i underlaget).",
+      "summary": "Promemoria om stordataanalyser och datasjöar (ES2023-2).",
+      "communities": [
+        "eSam"
+      ],
+      "tags": [
+        "stordataanalyser",
+        "datasjöar",
+        "rättsliga förutsättningar",
+        "promemoria",
+        "ES2023-2"
+      ],
+      "metadata": {
+        "year": 2023,
+        "document_type": "Promemoria",
+        "es_id": "ES2023-2",
+        "source": "eSam publikationer"
+      },
+      "embedding": null,
+      "created_at": "2026-02-03T10:38:47.778868",
+      "updated_at": "2026-02-03T10:38:47.778868"
+    },
+    {
+      "id": "3efcc82b-2172-458c-acdf-0891dc44a79c",
+      "type": "Resource",
+      "name": "Digitaliserbar lagstiftning",
+      "description": "Exempel på lagstiftning med utmaningar för digitalisering. Exempel på när digitalisering av rättsregler har kunnat genomföras.\n\nKälla: https://www.esamverka.se/publikationer.html (direkt fil-länk saknas i underlaget).",
+      "summary": "Promemoria om digitaliserbar lagstiftning (2023).",
+      "communities": [
+        "eSam"
+      ],
+      "tags": [
+        "lagstiftning",
+        "digitalisering",
+        "rättsregler",
+        "promemoria"
+      ],
+      "metadata": {
+        "year": 2023,
+        "document_type": "Promemoria",
+        "es_id": "ES2023-09",
+        "source": "eSam publikationer"
+      },
+      "embedding": null,
+      "created_at": "2026-02-03T10:38:47.778880",
+      "updated_at": "2026-02-03T10:38:47.778880"
+    },
+    {
+      "id": "952a310f-1b4c-4cd3-a4b3-6fc0eafade19",
+      "type": "Resource",
+      "name": "Skyddade personuppgifter - myndigheters hantering",
+      "description": "Promemorian ger praktiskt stöd och konkreta tips vid myndigheters hantering av skyddade personuppgifter.\n\nKälla: https://www.esamverka.se/publikationer.html (direkt fil-länk saknas i underlaget).",
+      "summary": "Promemoria om hantering av skyddade personuppgifter (2023).",
+      "communities": [
+        "eSam"
+      ],
+      "tags": [
+        "skyddade personuppgifter",
+        "integritet",
+        "promemoria",
+        "ES2023-12"
+      ],
+      "metadata": {
+        "year": 2023,
+        "document_type": "Promemoria",
+        "es_id": "ES2023-12",
+        "source": "eSam publikationer"
+      },
+      "embedding": null,
+      "created_at": "2026-02-03T10:38:47.778894",
+      "updated_at": "2026-02-03T10:38:47.778894"
+    },
+    {
+      "id": "634a8826-c4b5-466c-b193-3321fd5c7f84",
+      "type": "Resource",
+      "name": "Checklista - Rättsliga förutsättningar i utvecklingsinsatser 2.0 2019",
+      "description": "Övergripande juridiska frågeställningar vid samverkan kring e-förvaltningsinsatser samt vägledning till var det finns stöd i arbetet.\n\nKälla: https://www.esamverka.se/publikationer.html (direkt fil-länk saknas i underlaget).",
+      "summary": "Checklista för rättsliga förutsättningar i utvecklingsinsatser (2.0, 2019).",
+      "communities": [
+        "eSam"
+      ],
+      "tags": [
+        "checklista",
+        "juridik",
+        "samverkan",
+        "e-förvaltning"
+      ],
+      "metadata": {
+        "year": 2019,
+        "document_type": "Checklista",
+        "version": "2.0",
+        "source": "eSam publikationer"
+      },
+      "embedding": null,
+      "created_at": "2026-02-03T10:38:47.778907",
+      "updated_at": "2026-02-03T10:38:47.778908"
+    },
+    {
+      "id": "a1c081c7-3187-461c-a975-4801f43ddbda",
+      "type": "Resource",
+      "name": "Juridik vid användning av AI",
+      "description": "Beskrivning av rättsliga frågor som särskilt behöver beaktas vid användning av AI.\n\nKälla: https://www.esamverka.se/publikationer.html (direkt fil-länk saknas i underlaget).",
+      "summary": "Checklista om juridik vid användning av AI (ES2022-08).",
+      "communities": [
+        "eSam"
+      ],
+      "tags": [
+        "AI",
+        "juridik",
+        "checklista",
+        "ES2022-08"
+      ],
+      "metadata": {
+        "year": 2022,
+        "document_type": "Checklista",
+        "es_id": "ES2022-08",
+        "source": "eSam publikationer"
+      },
+      "embedding": null,
+      "created_at": "2026-02-03T10:38:47.778925",
+      "updated_at": "2026-02-03T10:38:47.778925"
+    },
+    {
+      "id": "8fc6fc20-5dd0-4756-b746-d308603a9634",
+      "type": "Resource",
+      "name": "Vägledning it-avtal 2020",
+      "description": "En överblick över it-avtalsområdet och en orientering över vanligt förekommande it-avtal.\n\nKälla: https://www.esamverka.se/publikationer.html (direkt fil-länk saknas i underlaget).",
+      "summary": "Vägledning om it-avtal (2020).",
+      "communities": [
+        "eSam"
+      ],
+      "tags": [
+        "it-avtal",
+        "avtal",
+        "upphandling",
+        "vägledning"
+      ],
+      "metadata": {
+        "year": 2020,
+        "document_type": "It-avtal",
+        "source": "eSam publikationer"
+      },
+      "embedding": null,
+      "created_at": "2026-02-03T10:38:47.778937",
+      "updated_at": "2026-02-03T10:38:47.778938"
+    },
+    {
+      "id": "d309e65f-b7d6-4b42-bc2a-12fa0b8c992c",
+      "type": "Resource",
+      "name": "Kommentar Allmänna villkor it-konsulttjänster 2021",
+      "description": "Underlättar användningen av och förklarar vissa regleringar i eSams allmänna villkor för it-konsulttjänster samt hur avtalsvillkoret är tänkt att användas.",
+      "summary": "Kommentar som underlättar användningen av eSams allmänna villkor för it-konsulttjänster.",
+      "communities": [
+        "eSam"
+      ],
+      "tags": [
+        "it-avtal",
+        "it-konsulttjänster",
+        "kommentar"
+      ],
+      "metadata": {
+        "year": 2021,
+        "document_type": "Kommentar",
+        "publisher": "eSam"
+      },
+      "embedding": null,
+      "created_at": "2026-02-03T11:04:50.873373",
+      "updated_at": "2026-02-03T11:04:50.873375"
+    },
+    {
+      "id": "07c1a8c8-b407-4e21-a589-d151bb3225f5",
+      "type": "Resource",
+      "name": "Kommentarer till Allmänna villkor för it-support 2021",
+      "description": "Underlättar användningen av avtalsvillkoret, förklarar vissa regleringar och hur villkoren för it-support är tänkta att användas.",
+      "summary": "Kommentar till eSams allmänna villkor för it-support.",
+      "communities": [
+        "eSam"
+      ],
+      "tags": [
+        "it-avtal",
+        "it-support",
+        "kommentar"
+      ],
+      "metadata": {
+        "year": 2021,
+        "document_type": "Kommentar",
+        "publisher": "eSam"
+      },
+      "embedding": null,
+      "created_at": "2026-02-03T11:04:50.873398",
+      "updated_at": "2026-02-03T11:04:50.873398"
+    },
+    {
+      "id": "a62576fc-b740-4917-86e1-04a400c5eb7b",
+      "type": "Resource",
+      "name": "Kommentar Allmänna villkor it-projekt och agila it-projekt 2021",
+      "description": "Underlättar användningen av avtalsvillkoren och förklarar vissa regleringar för både traditionella och agila it-projekt.",
+      "summary": "Kommentar till eSams allmänna villkor för it-projekt och agila it-projekt.",
+      "communities": [
+        "eSam"
+      ],
+      "tags": [
+        "it-avtal",
+        "it-projekt",
+        "agila it-projekt",
+        "kommentar"
+      ],
+      "metadata": {
+        "year": 2021,
+        "document_type": "Kommentar",
+        "publisher": "eSam"
+      },
+      "embedding": null,
+      "created_at": "2026-02-03T11:04:50.873416",
+      "updated_at": "2026-02-03T11:04:50.873416"
+    },
+    {
+      "id": "1cb58a6b-75f6-4035-b5ea-d55ba8295cec",
+      "type": "Resource",
+      "name": "Kommentar till eSams huvudavtalsmallar 2022",
+      "description": "Tar upp huvudavtalens nyckelregleringar och behov av kompletteringar för att underlätta användningen av eSams huvudavtalsmallar.",
+      "summary": "Kommentar som förklarar eSams huvudavtalsmallar.",
+      "communities": [
+        "eSam"
+      ],
+      "tags": [
+        "it-avtal",
+        "huvudavtal",
+        "kommentar"
+      ],
+      "metadata": {
+        "year": 2022,
+        "document_type": "Kommentar",
+        "publisher": "eSam"
+      },
+      "embedding": null,
+      "created_at": "2026-02-03T11:04:50.873431",
+      "updated_at": "2026-02-03T11:04:50.873432"
+    },
+    {
+      "id": "21fa148a-9e90-46c6-b1a5-94b8280d2292",
+      "type": "Resource",
+      "name": "eSams Allmänna villkor för it-konsulttjänster 2023",
+      "description": "Tillämpas vid upphandling och kontraktering av it-konsulttjänster, till exempel systemutveckling, it-säkerhet och programmering.",
+      "summary": "Allmänna villkor för upphandling och kontraktering av it-konsulttjänster.",
+      "communities": [
+        "eSam"
+      ],
+      "tags": [
+        "it-avtal",
+        "it-konsulttjänster",
+        "allmänna villkor"
+      ],
+      "metadata": {
+        "year": 2023,
+        "document_type": "It-avtal",
+        "publisher": "eSam",
+        "file_type": "pdf",
+        "verified": true
+      },
+      "embedding": null,
+      "created_at": "2026-02-03T11:04:50.873447",
+      "updated_at": "2026-02-03T11:04:50.873447"
+    },
+    {
+      "id": "efd77918-c60c-4dbd-a139-cf6e880d2f1c",
+      "type": "Resource",
+      "name": "eSams Allmänna villkor för it-support 2023",
+      "description": "Tillämpas på avtal där leverantören tillhandahåller it-supporttjänster för programvara, appar, system och viss hårdvara.",
+      "summary": "Allmänna villkor för it-supporttjänster.",
+      "communities": [
+        "eSam"
+      ],
+      "tags": [
+        "it-avtal",
+        "it-support",
+        "allmänna villkor"
+      ],
+      "metadata": {
+        "year": 2023,
+        "document_type": "It-avtal",
+        "publisher": "eSam",
+        "file_type": "pdf",
+        "verified": true
+      },
+      "embedding": null,
+      "created_at": "2026-02-03T11:04:50.873462",
+      "updated_at": "2026-02-03T11:04:50.873462"
+    },
+    {
+      "id": "669f8f31-5bab-4e15-9d44-ce4498cbcc46",
+      "type": "Resource",
+      "name": "221122 Huvudavtalmall it-drift 2022",
+      "description": "Mallen kan användas när myndigheten saknar en huvudavtalsmall eller när myndighetens mall inte passar för ändamålet.\n\nKälla: https://www.esamverka.se/publikationer.html",
+      "summary": "Huvudavtalsmall för it-drift (2022).",
+      "communities": [
+        "eSam"
+      ],
+      "tags": [
+        "it-avtal",
+        "huvudavtal",
+        "it-drift",
+        "mall"
+      ],
+      "metadata": {
+        "year": 2022,
+        "document_type": "It-avtal",
+        "publisher": "eSam",
+        "source": "eSam publikationer",
+        "file_type": "unknown",
+        "verified": false
+      },
+      "embedding": null,
+      "created_at": "2026-02-03T11:07:13.356820",
+      "updated_at": "2026-02-03T11:07:13.356823"
+    },
+    {
+      "id": "1b2f8882-e274-436a-9562-3b61fee6e57c",
+      "type": "Resource",
+      "name": "Huvudavtalsmall agila it-projekt 2022",
+      "description": "Används när myndigheten saknar huvudavtalsmall eller myndighetens mall inte passar för ändamålet.\n\nKälla: https://www.esamverka.se/publikationer.html",
+      "summary": "Huvudavtalsmall för agila it-projekt (2022).",
+      "communities": [
+        "eSam"
+      ],
+      "tags": [
+        "it-avtal",
+        "huvudavtal",
+        "agila it-projekt",
+        "mall"
+      ],
+      "metadata": {
+        "year": 2022,
+        "document_type": "It-avtal",
+        "publisher": "eSam",
+        "source": "eSam publikationer",
+        "file_type": "unknown",
+        "verified": false
+      },
+      "embedding": null,
+      "created_at": "2026-02-03T11:07:13.356845",
+      "updated_at": "2026-02-03T11:07:13.356845"
+    },
+    {
+      "id": "abca958c-2a25-41b8-9b0d-73562545f098",
+      "type": "Resource",
+      "name": "Huvudavtalsmall it-konsulttjänster 2022",
+      "description": "Mallen kan användas när myndigheten saknar huvudavtalsmall, eller när myndighetens mall inte passar för ändamålet.\n\nKälla: https://www.esamverka.se/publikationer.html",
+      "summary": "Huvudavtalsmall för it-konsulttjänster (2022).",
+      "communities": [
+        "eSam"
+      ],
+      "tags": [
+        "it-avtal",
+        "huvudavtal",
+        "it-konsulttjänster",
+        "mall"
+      ],
+      "metadata": {
+        "year": 2022,
+        "document_type": "It-avtal",
+        "publisher": "eSam",
+        "source": "eSam publikationer",
+        "file_type": "unknown",
+        "verified": false
+      },
+      "embedding": null,
+      "created_at": "2026-02-03T11:07:13.356862",
+      "updated_at": "2026-02-03T11:07:13.356862"
+    },
+    {
+      "id": "bc6e30fa-3e50-4a18-915a-f9dd3983d1b3",
+      "type": "Resource",
+      "name": "Huvudavtalsmall it-projekt 2022",
+      "description": "Används när myndigheten saknar huvudavtalsmall eller myndighetens mall inte passar för ändamålet.\n\nKälla: https://www.esamverka.se/publikationer.html",
+      "summary": "Huvudavtalsmall för it-projekt (2022).",
+      "communities": [
+        "eSam"
+      ],
+      "tags": [
+        "it-avtal",
+        "huvudavtal",
+        "it-projekt",
+        "mall"
+      ],
+      "metadata": {
+        "year": 2022,
+        "document_type": "It-avtal",
+        "publisher": "eSam",
+        "source": "eSam publikationer",
+        "file_type": "unknown",
+        "verified": false
+      },
+      "embedding": null,
+      "created_at": "2026-02-03T11:07:13.356877",
+      "updated_at": "2026-02-03T11:07:13.356878"
+    },
+    {
+      "id": "d7289e2c-084e-41c9-8b42-a23c61b466b1",
+      "type": "Resource",
+      "name": "Huvudavtalsmall it-support 2022",
+      "description": "Används när myndigheten saknar en huvudavtalsmall eller myndighetens mall inte passar för ändamålet.\n\nKälla: https://www.esamverka.se/publikationer.html",
+      "summary": "Huvudavtalsmall för it-support (2022).",
+      "communities": [
+        "eSam"
+      ],
+      "tags": [
+        "it-avtal",
+        "huvudavtal",
+        "it-support",
+        "mall"
+      ],
+      "metadata": {
+        "year": 2022,
+        "document_type": "It-avtal",
+        "publisher": "eSam",
+        "source": "eSam publikationer",
+        "file_type": "unknown",
+        "verified": false
+      },
+      "embedding": null,
+      "created_at": "2026-02-03T11:07:13.356892",
+      "updated_at": "2026-02-03T11:07:13.356893"
+    },
+    {
+      "id": "aaa2a121-8a57-4f88-8f3e-644386be50e6",
+      "type": "Resource",
+      "name": "Kommentar Allmänna villkor för it-drift 2023",
+      "description": "Underlätta användningen av avtalsvillkoret genom att förklara vissa regleringar och hur avtalsvillkoret är tänkt att användas.\n\nKälla: https://www.esamverka.se/publikationer.html",
+      "summary": "Kommentar till eSams allmänna villkor för it-drift (2023).",
+      "communities": [
+        "eSam"
+      ],
+      "tags": [
+        "it-avtal",
+        "it-drift",
+        "kommentar"
+      ],
+      "metadata": {
+        "year": 2023,
+        "document_type": "Kommentar",
+        "publisher": "eSam",
+        "source": "eSam publikationer",
+        "file_type": "unknown",
+        "verified": false
+      },
+      "embedding": null,
+      "created_at": "2026-02-03T11:07:13.356907",
+      "updated_at": "2026-02-03T11:07:13.356908"
+    },
+    {
+      "id": "1b843d65-9d80-426f-b4d6-63165cecb7b3",
+      "type": "Resource",
+      "name": "eSams Allmänna villkor för it-konsulttjänster 2023",
+      "description": "Tillämpas vid upphandling och kontraktering av it-konsulttjänster för t.ex. systemutveckling, it-säkerhet eller programmering.\n\nKälla: https://www.esamverka.se/publikationer.html",
+      "summary": "Allmänna villkor för it-konsulttjänster (2023).",
+      "communities": [
+        "eSam"
+      ],
+      "tags": [
+        "it-avtal",
+        "it-konsulttjänster",
+        "allmänna villkor"
+      ],
+      "metadata": {
+        "year": 2023,
+        "document_type": "It-avtal",
+        "publisher": "eSam",
+        "source": "eSam publikationer",
+        "file_type": "unknown",
+        "verified": false
+      },
+      "embedding": null,
+      "created_at": "2026-02-03T11:07:13.356922",
+      "updated_at": "2026-02-03T11:07:13.356923"
+    },
+    {
+      "id": "223c76fd-9755-494b-b35d-cdbb561a1a1d",
+      "type": "Resource",
+      "name": "eSams Allmänna villkor för it-drift 2023",
+      "description": "Tillämpas på avtal där leverantören tillhandahåller it-drifttjänster och närliggande infrastrukturtjänster (t.ex. serverdrift, databasdrift, backup och lagring).\n\nKälla: https://www.esamverka.se/publikationer.html",
+      "summary": "Allmänna villkor för it-drift (2023).",
+      "communities": [
+        "eSam"
+      ],
+      "tags": [
+        "it-avtal",
+        "it-drift",
+        "allmänna villkor"
+      ],
+      "metadata": {
+        "year": 2023,
+        "document_type": "It-avtal",
+        "publisher": "eSam",
+        "source": "eSam publikationer",
+        "file_type": "unknown",
+        "verified": false
+      },
+      "embedding": null,
+      "created_at": "2026-02-03T11:07:13.356937",
+      "updated_at": "2026-02-03T11:07:13.356938"
+    },
+    {
+      "id": "72c45511-af99-4ad0-9cb7-f63214683259",
+      "type": "Resource",
+      "name": "eSams allmänna villkor för agila it-projekt 2023",
+      "description": "Används när leverantören med agil projektmetod ska utveckla ny, alternativt förändra eller integrera befintlig programvara i ett it-projekt.\n\nKälla: https://www.esamverka.se/publikationer.html",
+      "summary": "Allmänna villkor för agila it-projekt (2023).",
+      "communities": [
+        "eSam"
+      ],
+      "tags": [
+        "it-avtal",
+        "agila it-projekt",
+        "allmänna villkor"
+      ],
+      "metadata": {
+        "year": 2023,
+        "document_type": "It-avtal",
+        "publisher": "eSam",
+        "source": "eSam publikationer",
+        "file_type": "unknown",
+        "verified": false
+      },
+      "embedding": null,
+      "created_at": "2026-02-03T11:07:13.356953",
+      "updated_at": "2026-02-03T11:07:13.356953"
+    },
+    {
+      "id": "34e8f738-1d97-4309-9675-149f277e6bdc",
+      "type": "Resource",
+      "name": "eSams Allmänna villkor för it-projekt 2023",
+      "description": "Används när leverantören med traditionell projektmetod ska tillhandahålla ett visst resultat enligt avtalad tidplan och ersättning.\n\nKälla: https://www.esamverka.se/publikationer.html",
+      "summary": "Allmänna villkor för it-projekt (2023).",
+      "communities": [
+        "eSam"
+      ],
+      "tags": [
+        "it-avtal",
+        "it-projekt",
+        "allmänna villkor"
+      ],
+      "metadata": {
+        "year": 2023,
+        "document_type": "It-avtal",
+        "publisher": "eSam",
+        "source": "eSam publikationer",
+        "file_type": "unknown",
+        "verified": false
+      },
+      "embedding": null,
+      "created_at": "2026-02-03T11:07:13.356968",
+      "updated_at": "2026-02-03T11:07:13.356969"
+    },
+    {
+      "id": "d1e8d4a7-4be3-48d8-9787-de8d5109cf67",
+      "type": "Resource",
+      "name": "Alt ensidig sekretess - Allmänna villkor för agila it-projekt 2023",
+      "description": "Alternativ skrivning om sekretess (avsnitt 19) med ensidig avtalssekretess.\n\nKälla: https://www.esamverka.se/publikationer.html",
+      "summary": "Alternativ sekretessklausul (ensidig avtalssekretess) för agila it-projekt.",
+      "communities": [
+        "eSam"
+      ],
+      "tags": [
+        "it-avtal",
+        "agila it-projekt",
+        "sekretess",
+        "alternativ skrivning"
+      ],
+      "metadata": {
+        "year": 2023,
+        "document_type": "It-avtal",
+        "publisher": "eSam",
+        "source": "eSam publikationer",
+        "file_type": "unknown",
+        "verified": false,
+        "variant": "ensidig sekretess"
+      },
+      "embedding": null,
+      "created_at": "2026-02-03T11:07:13.356983",
+      "updated_at": "2026-02-03T11:07:13.356984"
+    },
+    {
+      "id": "21e213bd-af97-4eae-b0dd-04c3fe5bc3f8",
+      "type": "Resource",
+      "name": "Alt ensidig sekretess - eSams Allmänna villkor för it-projekt 2023",
+      "description": "Alternativ skrivning om sekretess (avsnitt 19) med ensidig avtalssekretess.\n\nKälla: https://www.esamverka.se/publikationer.html",
+      "summary": "Alternativ sekretessklausul (ensidig avtalssekretess) för it-projekt.",
+      "communities": [
+        "eSam"
+      ],
+      "tags": [
+        "it-avtal",
+        "it-projekt",
+        "sekretess",
+        "alternativ skrivning"
+      ],
+      "metadata": {
+        "year": 2023,
+        "document_type": "It-avtal",
+        "publisher": "eSam",
+        "source": "eSam publikationer",
+        "file_type": "unknown",
+        "verified": false,
+        "variant": "ensidig sekretess"
+      },
+      "embedding": null,
+      "created_at": "2026-02-03T11:07:13.356998",
+      "updated_at": "2026-02-03T11:07:13.356998"
+    },
+    {
+      "id": "c0a9ac34-ae70-4f9b-8a0a-0ea71dbd44ba",
+      "type": "Resource",
+      "name": "Alt ensidig sekretess - eSams Allmänna villkor för it-drift 2023",
+      "description": "Alternativ skrivning om sekretess (avsnitt 20) med ensidig avtalssekretess.\n\nKälla: https://www.esamverka.se/publikationer.html",
+      "summary": "Alternativ sekretessklausul (ensidig avtalssekretess) för it-drift.",
+      "communities": [
+        "eSam"
+      ],
+      "tags": [
+        "it-avtal",
+        "it-drift",
+        "sekretess",
+        "alternativ skrivning"
+      ],
+      "metadata": {
+        "year": 2023,
+        "document_type": "It-avtal",
+        "publisher": "eSam",
+        "source": "eSam publikationer",
+        "file_type": "unknown",
+        "verified": false,
+        "variant": "ensidig sekretess"
+      },
+      "embedding": null,
+      "created_at": "2026-02-03T11:07:13.357027",
+      "updated_at": "2026-02-03T11:07:13.357028"
+    },
+    {
+      "id": "0d727c2e-c397-4827-a92f-a7663f982188",
+      "type": "Resource",
+      "name": "Alt ensidig sekretess - eSams Allmänna villkor för it-support 2023",
+      "description": "Alternativ skrivning om sekretess (avsnitt 19) med ensidig avtalssekretess.\n\nKälla: https://www.esamverka.se/publikationer.html",
+      "summary": "Alternativ sekretessklausul (ensidig avtalssekretess) för it-support.",
+      "communities": [
+        "eSam"
+      ],
+      "tags": [
+        "it-avtal",
+        "it-support",
+        "sekretess",
+        "alternativ skrivning"
+      ],
+      "metadata": {
+        "year": 2023,
+        "document_type": "It-avtal",
+        "publisher": "eSam",
+        "source": "eSam publikationer",
+        "file_type": "unknown",
+        "verified": false,
+        "variant": "ensidig sekretess"
+      },
+      "embedding": null,
+      "created_at": "2026-02-03T11:07:13.357045",
+      "updated_at": "2026-02-03T11:07:13.357045"
+    },
+    {
+      "id": "06f99c1b-e0c8-4f6b-9244-1818c82e40f3",
+      "type": "Resource",
+      "name": "Alt ensidig sekretess - eSams Allmänna villkor för it-konsulttjänster 2023",
+      "description": "Alternativ skrivning om sekretess (avsnitt 17) med ensidig avtalssekretess.\n\nKälla: https://www.esamverka.se/publikationer.html",
+      "summary": "Alternativ sekretessklausul (ensidig avtalssekretess) för it-konsulttjänster.",
+      "communities": [
+        "eSam"
+      ],
+      "tags": [
+        "it-avtal",
+        "it-konsulttjänster",
+        "sekretess",
+        "alternativ skrivning"
+      ],
+      "metadata": {
+        "year": 2023,
+        "document_type": "It-avtal",
+        "publisher": "eSam",
+        "source": "eSam publikationer",
+        "file_type": "unknown",
+        "verified": false,
+        "variant": "ensidig sekretess"
+      },
+      "embedding": null,
+      "created_at": "2026-02-03T11:07:13.357060",
+      "updated_at": "2026-02-03T11:07:13.357060"
+    },
+    {
+      "id": "54ddd06a-adcb-4432-943c-fd80cd655a8e",
+      "type": "Resource",
+      "name": "Vidareutnyttjande och tillgängliggörande av data 1.0 2021",
+      "description": "En lägesbeskrivning och omvärldsbevakning från 2021.\n\nKälla: https://www.esamverka.se/publikationer.html",
+      "summary": "Lägesbeskrivning och omvärldsbevakning om vidareutnyttjande/tillgängliggörande av data (2021).",
+      "communities": [
+        "eSam"
+      ],
+      "tags": [
+        "rapport",
+        "data",
+        "vidareutnyttjande",
+        "tillgängliggörande"
+      ],
+      "metadata": {
+        "year": 2021,
+        "document_type": "Rapport",
+        "publisher": "eSam",
+        "source": "eSam publikationer",
+        "file_type": "unknown",
+        "verified": false,
+        "version": "1.0"
+      },
+      "embedding": null,
+      "created_at": "2026-02-03T11:07:13.357075",
+      "updated_at": "2026-02-03T11:07:13.357075"
+    },
+    {
+      "id": "21385adf-9de0-4362-81af-ca8f5da2f92e",
+      "type": "Resource",
+      "name": "Delrapport AI-regulatorisk sandlåda - en första iteration (ES2024-14)",
+      "description": "Inom eSam har Bolagsverket, Skatteverket och Arbetsförmedlingen tillsammans med Integritetsskyddsmyndigheten startat ett initiativ med att genomföra en pilot av en AI-regulatorisk sandlåda. Syftet är att ta reda på hur AI-regulatoriska sandlådor bör inrättas och fungera i Sverige och vilka förutsättningar som krävs.\n\nKälla: https://www.esamverka.se/publikationer.html",
+      "summary": "Delrapport om AI-regulatorisk sandlåda – första iterationen (ES2024-14).",
+      "communities": [
+        "eSam"
+      ],
+      "tags": [
+        "rapport",
+        "AI",
+        "regulatorisk sandlåda",
+        "pilot"
+      ],
+      "metadata": {
+        "year": 2024,
+        "document_type": "Rapport",
+        "publisher": "eSam",
+        "source": "eSam publikationer",
+        "file_type": "unknown",
+        "verified": false,
+        "es_id": "ES2024-14"
+      },
+      "embedding": null,
+      "created_at": "2026-02-03T11:07:13.357091",
+      "updated_at": "2026-02-03T11:07:13.357091"
+    },
+    {
+      "id": "758cdbc9-2098-4bfe-895f-de3583b91d10",
+      "type": "Resource",
+      "name": "ES2024-18 Delrapport AI-regulatorisk sandlåda - den andra iterationen",
+      "description": "Delrapport (andra iterationen) inom arbetet med AI-regulatorisk sandlåda.\n\nKälla: https://www.esamverka.se/publikationer.html",
+      "summary": "Delrapport om AI-regulatorisk sandlåda – andra iterationen (ES2024-18).",
+      "communities": [
+        "eSam"
+      ],
+      "tags": [
+        "rapport",
+        "AI",
+        "regulatorisk sandlåda"
+      ],
+      "metadata": {
+        "year": 2024,
+        "document_type": "Rapport",
+        "publisher": "eSam",
+        "source": "eSam publikationer",
+        "file_type": "unknown",
+        "verified": false,
+        "es_id": "ES2024-18"
+      },
+      "embedding": null,
+      "created_at": "2026-02-03T11:07:13.357108",
+      "updated_at": "2026-02-03T11:07:13.357108"
+    },
+    {
+      "id": "3cc726cb-edaf-4e29-a078-fd2e1c1956fa",
+      "type": "Resource",
+      "name": "Digitalt bevarande av data - problemområden (ES2025-01)",
+      "description": "Myndigheters förmåga till exempelvis datadrivna analyser och informationsstyrning hänger på att data bevaras på ett hållbart sätt. För organisationer som hanterar stora mängder information är detta högaktuellt.\n\nKälla: https://www.esamverka.se/publikationer.html",
+      "summary": "Rapport om digitalt bevarande av data – problemområden (ES2025-01).",
+      "communities": [
+        "eSam"
+      ],
+      "tags": [
+        "rapport",
+        "data",
+        "digitalt bevarande",
+        "informationsstyrning"
+      ],
+      "metadata": {
+        "year": 2025,
+        "document_type": "Rapport",
+        "publisher": "eSam",
+        "source": "eSam publikationer",
+        "file_type": "unknown",
+        "verified": false,
+        "es_id": "ES2025-01"
+      },
+      "embedding": null,
+      "created_at": "2026-02-03T11:07:13.357124",
+      "updated_at": "2026-02-03T11:07:13.357124"
+    },
+    {
+      "id": "55d781dd-28a7-4b78-9896-1cdf2d85b8f5",
+      "type": "Resource",
+      "name": "Delrapport AI-regulatorisk sandlåda – tredje iterationen",
+      "description": "I den tredje iterationen av piloten för AI-regulatorisk sandlåda har arbetsgruppen analyserat ett system som är tänkt att stödja skattebrottsutredare i brottsutredningar.\n\nDirekt PDF: https://www.esamverka.se/download/18.29c7ec891975d4083ec7d/1749632805660/ES2025-09%20AI-regulatorisk%20sandl%C3%A5da%20tredje%20iterationen%20m%20bilagor.pdf",
+      "summary": "Tredje iterationen av AI-regulatorisk sandlåda.",
+      "communities": [
+        "eSam"
+      ],
+      "tags": [
+        "AI",
+        "regulatorisk sandlåda",
+        "rapport"
+      ],
+      "metadata": {
+        "year": 2025,
+        "document_type": "Rapport",
+        "publisher": "eSam",
+        "es_id": "ES2025-09",
+        "file_type": "pdf",
+        "verified": true
+      },
+      "embedding": null,
+      "created_at": "2026-02-03T11:20:52.889150",
+      "updated_at": "2026-02-03T11:20:52.889152"
+    },
+    {
+      "id": "5d0a8cef-b9ab-4e62-a863-9555f99bb47c",
+      "type": "Resource",
+      "name": "Allmänna handlingar i AI-utveckling",
+      "description": "Analys av när informationsmängder som uppstår vid AI-utveckling, såsom källkod samt tränings- och valideringsdata, kan utgöra allmänna handlingar enligt svensk rätt.\n\nDirekt PDF: https://www.esamverka.se/download/18.2c1061191975d5b3870ef6/1750145864554/ES2025-11.pdf",
+      "summary": "Allmänna handlingar vid AI-utveckling.",
+      "communities": [
+        "eSam"
+      ],
+      "tags": [
+        "AI",
+        "allmänna handlingar",
+        "juridik"
+      ],
+      "metadata": {
+        "year": 2025,
+        "document_type": "Rapport",
+        "publisher": "eSam",
+        "es_id": "ES2025-11",
+        "file_type": "pdf",
+        "verified": true
+      },
+      "embedding": null,
+      "created_at": "2026-02-03T11:20:52.889172",
+      "updated_at": "2026-02-03T11:20:52.889172"
+    },
+    {
+      "id": "3af51572-3373-43c4-9986-8906805130f3",
+      "type": "Resource",
+      "name": "Digitalt bevarande av data – kravställning",
+      "description": "Rapport om hur myndigheter behöver styra och hantera data och information för långsiktigt digitalt bevarande.\n\nKälla: https://www.esamverka.se/publikationer/juridik/2025-08-18-es-2025-12-digitalt-bevarande-av-data---kravstallning.html",
+      "summary": "Kravställning för digitalt bevarande.",
+      "communities": [
+        "eSam"
+      ],
+      "tags": [
+        "data",
+        "digitalt bevarande",
+        "rapport"
+      ],
+      "metadata": {
+        "year": 2025,
+        "document_type": "Rapport",
+        "publisher": "eSam",
+        "es_id": "ES2025-12",
+        "file_type": "unknown",
+        "verified": false
+      },
+      "embedding": null,
+      "created_at": "2026-02-03T11:20:52.889188",
+      "updated_at": "2026-02-03T11:20:52.889188"
+    },
+    {
+      "id": "82c2623a-9334-4c64-9286-bfd4673ffc04",
+      "type": "Resource",
+      "name": "ES2025-11 Allmänna handlingar i AI-utveckling",
+      "description": "God ordning i hanteringen av myndigheternas information vid AI-utveckling och analys av när nya allmänna handlingar uppstår.",
+      "summary": "Analys av allmänna handlingar vid AI-utveckling.",
+      "communities": [
+        "eSam"
+      ],
+      "tags": [
+        "AI",
+        "juridik",
+        "allmänna handlingar",
+        "rapport"
+      ],
+      "metadata": {
+        "year": 2025,
+        "document_type": "Rapport",
+        "publisher": "eSam",
+        "es_id": "ES2025-11",
+        "file_type": "unknown",
+        "verified": false
+      },
+      "embedding": null,
+      "created_at": "2026-02-03T11:22:37.129967",
+      "updated_at": "2026-02-03T11:22:37.129969"
+    },
+    {
+      "id": "b1cd989e-ebf6-40c2-b10e-a5734ca42537",
+      "type": "Resource",
+      "name": "ES2025-12 Digitalt bevarande av data – kravkatalog",
+      "description": "Kompletterande kravkatalog till arbetet om digitalt bevarande av data inom offentlig sektor.",
+      "summary": "Kravkatalog för digitalt bevarande av data.",
+      "communities": [
+        "eSam"
+      ],
+      "tags": [
+        "data",
+        "digitalt bevarande",
+        "rapport"
+      ],
+      "metadata": {
+        "year": 2025,
+        "document_type": "Rapport",
+        "publisher": "eSam",
+        "es_id": "ES2025-12",
+        "file_type": "unknown",
+        "verified": false
+      },
+      "embedding": null,
+      "created_at": "2026-02-03T11:22:37.129990",
+      "updated_at": "2026-02-03T11:22:37.129990"
+    },
+    {
+      "id": "220b932d-469b-472e-a34d-0c8e79580777",
+      "type": "Resource",
+      "name": "ES2023-09 Promemoria Digitaliserbar lagstiftning",
+      "description": "Exempel på lagstiftning med särskilda utmaningar och möjligheter kopplade till digitalisering.",
+      "summary": "Promemoria om digitaliserbar lagstiftning.",
+      "communities": [
+        "eSam"
+      ],
+      "tags": [
+        "juridik",
+        "lagstiftning",
+        "digitalisering",
+        "promemoria"
+      ],
+      "metadata": {
+        "year": 2023,
+        "document_type": "Promemoria",
+        "publisher": "eSam",
+        "es_id": "ES2023-09",
+        "file_type": "unknown",
+        "verified": false
+      },
+      "embedding": null,
+      "created_at": "2026-02-03T11:22:37.130020",
+      "updated_at": "2026-02-03T11:22:37.130021"
+    },
+    {
+      "id": "75291d27-007c-4237-8b8d-ece60f00a207",
+      "type": "Resource",
+      "name": "ES2022-06 Promemoria En modern registerförfattning",
+      "description": "Förslag till modernare registerförfattningar som stödjer digitalisering med bibehållet integritetsskydd.",
+      "summary": "Promemoria om modern registerförfattning.",
+      "communities": [
+        "eSam"
+      ],
+      "tags": [
+        "juridik",
+        "register",
+        "integritet",
+        "promemoria"
+      ],
+      "metadata": {
+        "year": 2022,
+        "document_type": "Promemoria",
+        "publisher": "eSam",
+        "es_id": "ES2022-06",
+        "file_type": "unknown",
+        "verified": false
+      },
+      "embedding": null,
+      "created_at": "2026-02-03T11:22:37.130036",
+      "updated_at": "2026-02-03T11:22:37.130036"
+    },
+    {
+      "id": "03a30db2-a6ef-48eb-9e8a-c61bd331941f",
+      "type": "Resource",
+      "name": "Expertgrupp säkerhet – rapport 1.0",
+      "description": "Förslag att permanenta en expertgrupp för säkerhetsområdet inom digitaliseringsarbetet.",
+      "summary": "Rapport om expertgrupp säkerhet.",
+      "communities": [
+        "eSam"
+      ],
+      "tags": [
+        "säkerhet",
+        "styrning",
+        "rapport"
+      ],
+      "metadata": {
+        "year": 2017,
+        "document_type": "Rapport",
+        "publisher": "eSam",
+        "file_type": "unknown",
+        "verified": false
+      },
+      "embedding": null,
+      "created_at": "2026-02-03T11:22:37.130051",
+      "updated_at": "2026-02-03T11:22:37.130051"
+    },
+    {
+      "id": "6b6d65e6-e1bb-4393-955e-c24de59fe46b",
+      "type": "Resource",
+      "name": "Organisering för säkerhet 1.0",
+      "description": "Råd kring hur säkerhetsarbetet kan organiseras i myndigheter.",
+      "summary": "Råd om organisering för säkerhet.",
+      "communities": [
+        "eSam"
+      ],
+      "tags": [
+        "säkerhet",
+        "organisation",
+        "råd"
+      ],
+      "metadata": {
+        "year": 2019,
+        "document_type": "Råd",
+        "publisher": "eSam",
+        "file_type": "unknown",
+        "verified": false
+      },
+      "embedding": null,
+      "created_at": "2026-02-03T11:22:37.130065",
+      "updated_at": "2026-02-03T11:22:37.130066"
+    },
+    {
+      "id": "844f95e6-d8fb-4635-bccd-fa2d364456b9",
+      "type": "Resource",
+      "name": "Teknik och molntjänster 1.0",
+      "description": "Översikt av tekniska och juridiska frågor kring användning av molntjänster.",
+      "summary": "Promemoria om teknik och molntjänster.",
+      "communities": [
+        "eSam"
+      ],
+      "tags": [
+        "molntjänster",
+        "teknik",
+        "promemoria"
+      ],
+      "metadata": {
+        "year": 2021,
+        "document_type": "Promemoria",
+        "publisher": "eSam",
+        "file_type": "unknown",
+        "verified": false
+      },
+      "embedding": null,
+      "created_at": "2026-02-03T11:22:37.130080",
+      "updated_at": "2026-02-03T11:22:37.130080"
+    },
+    {
+      "id": "d4ffac27-3c97-47ab-afef-30c0d1119bd2",
+      "type": "Resource",
+      "name": "ES2022-05 Tekniska förutsättningar i molntjänster",
+      "description": "Övergripande beskrivning av krav på tekniska förutsättningar i molntjänster.",
+      "summary": "Tekniska krav i molntjänster.",
+      "communities": [
+        "eSam"
+      ],
+      "tags": [
+        "molntjänster",
+        "säkerhet",
+        "promemoria"
+      ],
+      "metadata": {
+        "year": 2022,
+        "document_type": "Promemoria",
+        "publisher": "eSam",
+        "es_id": "ES2022-05",
+        "file_type": "unknown",
+        "verified": false
+      },
+      "embedding": null,
+      "created_at": "2026-02-03T11:22:37.130094",
+      "updated_at": "2026-02-03T11:22:37.130094"
+    },
+    {
+      "id": "1da929f8-3481-4716-ab4f-503cea93a1e2",
+      "type": "Resource",
+      "name": "Säkerheten i mobila informationssystem 1.0",
+      "description": "Analys av säkerhetsaspekter i mobila informationssystem.",
+      "summary": "Promemoria om säkerhet i mobila informationssystem.",
+      "communities": [
+        "eSam"
+      ],
+      "tags": [
+        "mobilitet",
+        "säkerhet",
+        "promemoria"
+      ],
+      "metadata": {
+        "year": 2022,
+        "document_type": "Promemoria",
+        "publisher": "eSam",
+        "file_type": "unknown",
+        "verified": false
+      },
+      "embedding": null,
+      "created_at": "2026-02-03T11:22:37.130107",
+      "updated_at": "2026-02-03T11:22:37.130108"
+    },
+    {
+      "id": "4b2babfc-e403-4d8c-a499-65c865c3850d",
+      "type": "Resource",
+      "name": "ES2023-10 Adekvansbeslut och ny sekretessbrytande bestämmelse",
+      "description": "Analys av EU–USA-adecvansbeslutet och ny sekretessbrytande bestämmelse från 1 juli 2023.",
+      "summary": "Promemoria om adekvansbeslut.",
+      "communities": [
+        "eSam"
+      ],
+      "tags": [
+        "dataskydd",
+        "sekretess",
+        "promemoria"
+      ],
+      "metadata": {
+        "year": 2023,
+        "document_type": "Promemoria",
+        "publisher": "eSam",
+        "es_id": "ES2023-10",
+        "file_type": "unknown",
+        "verified": false
+      },
+      "embedding": null,
+      "created_at": "2026-02-03T11:22:37.130121",
+      "updated_at": "2026-02-03T11:22:37.130122"
+    },
+    {
+      "id": "0caf4f8e-0a81-437d-9ff3-97080e7c2b42",
+      "type": "Resource",
+      "name": "ES2024-16 Vägledning ransomware",
+      "description": "Stöd för myndigheter att stärka sin förmåga att förebygga och hantera ransomware-attacker.",
+      "summary": "Vägledning om ransomware.",
+      "communities": [
+        "eSam"
+      ],
+      "tags": [
+        "cybersäkerhet",
+        "ransomware",
+        "vägledning"
+      ],
+      "metadata": {
+        "year": 2024,
+        "document_type": "Vägledning",
+        "publisher": "eSam",
+        "es_id": "ES2024-16",
+        "file_type": "unknown",
+        "verified": false
+      },
+      "embedding": null,
+      "created_at": "2026-02-03T11:22:37.130135",
+      "updated_at": "2026-02-03T11:22:37.130136"
+    },
+    {
+      "id": "756d6ecd-ae33-49da-bce2-030bb301c43c",
+      "type": "Resource",
+      "name": "ES2025-05 Ledningens förberedelser inför ny säkerhetslagstiftning",
+      "description": "Stöd framtaget av eSams arbetsgrupp för NIS2- och CER-direktiven.",
+      "summary": "Stöd till ledningar inför ny säkerhetslagstiftning.",
+      "communities": [
+        "eSam"
+      ],
+      "tags": [
+        "säkerhet",
+        "ledning",
+        "rapport"
+      ],
+      "metadata": {
+        "year": 2025,
+        "document_type": "Rapport",
+        "publisher": "eSam",
+        "es_id": "ES2025-05",
+        "file_type": "unknown",
+        "verified": false
+      },
+      "embedding": null,
+      "created_at": "2026-02-03T11:22:37.130149",
+      "updated_at": "2026-02-03T11:22:37.130149"
+    },
+    {
+      "id": "2b748814-1a83-4b81-b36b-935367990629",
+      "type": "Resource",
+      "name": "Ledningens förberedelser inför ny säkerhetslagstiftning 2025",
+      "description": "Stöd framtaget av eSams arbetsgrupp för NIS2 och CER-direktiven för att underlätta implementering och effektivt resursutnyttjande.\n\nKälla: https://www.esamverka.se/publikationer.html",
+      "summary": "Stöd till ledningen inför ny säkerhetslagstiftning.",
+      "communities": [
+        "eSam"
+      ],
+      "tags": [
+        "säkerhet",
+        "NIS2",
+        "CER",
+        "rapport"
+      ],
+      "metadata": {
+        "year": 2025,
+        "document_type": "Rapport",
+        "publisher": "eSam",
+        "es_id": "ES2025-05",
+        "source": "eSam publikationer (användarunderlag)",
+        "file_type": "unknown",
+        "verified": false
+      },
+      "embedding": null,
+      "created_at": "2026-02-03T11:23:40.405998",
+      "updated_at": "2026-02-03T11:23:40.406001"
+    },
+    {
+      "id": "14ed5c0f-5558-47bc-96dc-e290f287d8a7",
+      "type": "Resource",
+      "name": "Rekommendation AI-baserade stödverktyg vid kodutveckling",
+      "description": "Rekommendation/råd om användning av AI-baserade stödverktyg vid kodutveckling.\n\nKälla: https://www.esamverka.se/publikationer.html",
+      "summary": "Rekommendation om AI-stöd vid kodutveckling.",
+      "communities": [
+        "eSam"
+      ],
+      "tags": [
+        "AI",
+        "kodutveckling",
+        "rekommendation",
+        "råd"
+      ],
+      "metadata": {
+        "year": 2025,
+        "document_type": "Råd",
+        "publisher": "eSam",
+        "es_id": "ES2025-03",
+        "source": "eSam publikationer (användarunderlag)",
+        "file_type": "unknown",
+        "verified": false
+      },
+      "embedding": null,
+      "created_at": "2026-02-03T11:23:40.406036",
+      "updated_at": "2026-02-03T11:23:40.406036"
+    },
+    {
+      "id": "d1133d8b-bff7-4f76-aae6-f421ae307ca8",
+      "type": "Resource",
+      "name": "Radarbild 2025 - rapport och stödmaterial",
+      "description": "Sammanställning av väsentliga initiativ nationellt och inom EU som påverkar myndigheters digitalisering, inklusive stödmaterial (bilagor).\n\nKälla: https://www.esamverka.se/publikationer.html",
+      "summary": "Radarbild över initiativ som påverkar digitalisering.",
+      "communities": [
+        "eSam"
+      ],
+      "tags": [
+        "radarbild",
+        "styrning",
+        "digitalisering",
+        "rapport"
+      ],
+      "metadata": {
+        "year": 2025,
+        "document_type": "Rapport",
+        "publisher": "eSam",
+        "es_id": "ES2025-04",
+        "source": "eSam publikationer (användarunderlag)",
+        "file_type": "unknown",
+        "verified": false
+      },
+      "embedding": null,
+      "created_at": "2026-02-03T11:23:40.406053",
+      "updated_at": "2026-02-03T11:23:40.406053"
+    },
+    {
+      "id": "21878db6-1683-4926-b21a-f16bb43b2309",
+      "type": "Resource",
+      "name": "ES2025-19 Radarbilden - initiativ som påverkar myndigheternas digitalisering",
+      "description": "Rapport (ingress enligt publikationslistan) om initiativ som påverkar myndigheternas digitalisering.\n\nKälla: https://www.esamverka.se/publikationer.html",
+      "summary": "Radarbilden: initiativ som påverkar digitalisering.",
+      "communities": [
+        "eSam"
+      ],
+      "tags": [
+        "radarbild",
+        "digitalisering",
+        "rapport"
+      ],
+      "metadata": {
+        "year": 2025,
+        "document_type": "Rapport",
+        "publisher": "eSam",
+        "es_id": "ES2025-19",
+        "source": "eSam publikationer (användarunderlag)",
+        "file_type": "unknown",
+        "verified": false
+      },
+      "embedding": null,
+      "created_at": "2026-02-03T11:23:40.406068",
+      "updated_at": "2026-02-03T11:23:40.406068"
+    },
+    {
+      "id": "f776d0f5-6831-435b-910a-0ed3036a7566",
+      "type": "Resource",
+      "name": "ES2025-20 Gemensamt federationsprotokoll för chatt i offentlig sektor",
+      "description": "Rapport om gemensamt federationsprotokoll för chatt i offentlig sektor och dess betydelse för interoperabilitet, säkerhet och digital suveränitet.\n\nKälla: https://www.esamverka.se/publikationer.html",
+      "summary": "Gemensamt federationsprotokoll för chatt i offentlig sektor.",
+      "communities": [
+        "eSam"
+      ],
+      "tags": [
+        "chat",
+        "federation",
+        "öppna protokoll",
+        "interoperabilitet",
+        "rapport"
+      ],
+      "metadata": {
+        "year": 2025,
+        "document_type": "Rapport",
+        "publisher": "eSam",
+        "es_id": "ES2025-20",
+        "source": "eSam publikationer (användarunderlag)",
+        "file_type": "unknown",
+        "verified": false
+      },
+      "embedding": null,
+      "created_at": "2026-02-03T11:23:40.406082",
+      "updated_at": "2026-02-03T11:23:40.406082"
+    },
+    {
+      "id": "56a6c5d5-2bc7-43b8-a59c-f3f1f4a36770",
+      "type": "Resource",
+      "name": "Nationella Dataområden",
+      "description": "Rapport om hur nationella dataområden kan stärka en datadriven förvaltning, stödja EU-standardisering och interoperabilitet samt effektivare nyttjande av data.\n\nKälla: https://www.esamverka.se/publikationer.html",
+      "summary": "Rapport om etablering av nationella dataområden.",
+      "communities": [
+        "eSam"
+      ],
+      "tags": [
+        "dataområden",
+        "datadriven förvaltning",
+        "interoperabilitet",
+        "rapport"
+      ],
+      "metadata": {
+        "year": 2025,
+        "document_type": "Rapport",
+        "publisher": "eSam",
+        "es_id": "ES2025-21",
+        "source": "eSam publikationer (användarunderlag)",
+        "file_type": "unknown",
+        "verified": false
+      },
+      "embedding": null,
+      "created_at": "2026-02-03T11:23:40.406097",
+      "updated_at": "2026-02-03T11:23:40.406097"
+    },
+    {
+      "id": "1b699729-6fb7-4fd1-a231-f0cec4baf859",
+      "type": "Resource",
+      "name": "AI-regulatorisk sandlåda, fjärde iterationen",
+      "description": "Rapport om fjärde iterationen i piloten för AI-regulatorisk sandlåda, inklusive analys av riskvärdering och praktisk hantering av dokumentationskrav.\n\nKälla: https://www.esamverka.se/publikationer.html",
+      "summary": "Fjärde iterationen av AI-regulatorisk sandlåda.",
+      "communities": [
+        "eSam"
+      ],
+      "tags": [
+        "AI",
+        "regulatorisk sandlåda",
+        "rapport"
+      ],
+      "metadata": {
+        "year": 2025,
+        "document_type": "Rapport",
+        "publisher": "eSam",
+        "es_id": "ES2025-25",
+        "source": "eSam publikationer (användarunderlag)",
+        "file_type": "unknown",
+        "verified": false
+      },
+      "embedding": null,
+      "created_at": "2026-02-03T11:23:40.406110",
+      "updated_at": "2026-02-03T11:23:40.406110"
+    },
+    {
+      "id": "9ff29032-29d8-4851-a566-315e8642181e",
+      "type": "Resource",
+      "name": "Uppdatering kring adekvansbeslutet i en turbulent tid",
+      "description": "Promemoria om adekvansbeslutet från juni 2023 och kvarstående risker kring utländska myndigheters åtkomst till uppgifter via extraterritoriell lagstiftning.\n\nKälla: https://www.esamverka.se/publikationer.html",
+      "summary": "Uppdatering om EU–USA-adevkans och risker.",
+      "communities": [
+        "eSam"
+      ],
+      "tags": [
+        "adevkansbeslut",
+        "EU-USA",
+        "tredjelandsöverföring",
+        "promemoria"
+      ],
+      "metadata": {
+        "year": 2025,
+        "document_type": "Promemoria",
+        "publisher": "eSam",
+        "es_id": "ES2025-18",
+        "source": "eSam publikationer (användarunderlag)",
+        "file_type": "unknown",
+        "verified": false
+      },
+      "embedding": null,
+      "created_at": "2026-02-03T11:23:40.406124",
+      "updated_at": "2026-02-03T11:23:40.406124"
+    },
+    {
+      "id": "660d884f-d5e6-4835-8aa2-3094bb409101",
+      "type": "Resource",
+      "name": "Tekniska förutsättningar i molntjänster",
+      "description": "Promemoria med övergripande beskrivning av krav på tekniska förutsättningar i molntjänster.\n\nKälla: https://www.esamverka.se/publikationer.html",
+      "summary": "Övergripande krav på tekniska molnförutsättningar.",
+      "communities": [
+        "eSam"
+      ],
+      "tags": [
+        "molntjänster",
+        "tekniska krav",
+        "promemoria"
+      ],
+      "metadata": {
+        "year": 2022,
+        "document_type": "Promemoria",
+        "publisher": "eSam",
+        "es_id": "ES2022-05",
+        "source": "eSam publikationer (användarunderlag)",
+        "file_type": "unknown",
+        "verified": false
+      },
+      "embedding": null,
+      "created_at": "2026-02-03T11:23:40.406137",
+      "updated_at": "2026-02-03T11:23:40.406137"
+    },
+    {
+      "id": "f93a0c63-171c-4b77-9bcc-61eb2eea29d7",
+      "type": "Resource",
+      "name": "Att analysera molntjänster - några utgångspunkter",
+      "description": "Promemoria med överblick av kritiska frågor vid anskaffning eller utkontraktering av molntjänster.\n\nKälla: https://www.esamverka.se/publikationer.html",
+      "summary": "Utgångspunkter vid analys av molntjänster.",
+      "communities": [
+        "eSam"
+      ],
+      "tags": [
+        "molntjänster",
+        "anskaffning",
+        "utkontraktering",
+        "promemoria"
+      ],
+      "metadata": {
+        "year": 2025,
+        "document_type": "Promemoria",
+        "publisher": "eSam",
+        "es_id": "ES2025-02",
+        "source": "eSam publikationer (användarunderlag)",
+        "file_type": "unknown",
+        "verified": false
+      },
+      "embedding": null,
+      "created_at": "2026-02-03T11:23:40.406151",
+      "updated_at": "2026-02-03T11:23:40.406151"
+    },
+    {
+      "id": "ff24de24-fbe6-4a35-9db3-520a5e4efb72",
+      "type": "Resource",
+      "name": "Vägledning arkitekturstyrning",
+      "description": "Vägledning för att etablera organisation och arbetssätt så att arkitekturstyrning blir en del av organisationens utvecklingsprocess.\n\nKälla: https://www.esamverka.se/publikationer.html",
+      "summary": "Stöd för att etablera arkitekturstyrning.",
+      "communities": [
+        "eSam"
+      ],
+      "tags": [
+        "arkitekturstyrning",
+        "styrning",
+        "vägledning"
+      ],
+      "metadata": {
+        "year": 2025,
+        "document_type": "Vägledning",
+        "publisher": "eSam",
+        "es_id": "ES2025-07",
+        "source": "eSam publikationer (användarunderlag)",
+        "file_type": "unknown",
+        "verified": false
+      },
+      "embedding": null,
+      "created_at": "2026-02-03T11:23:40.406165",
+      "updated_at": "2026-02-03T11:23:40.406165"
+    },
+    {
+      "id": "32f6f025-1022-4350-a78e-d4ee8e7f7b3f",
+      "type": "Resource",
+      "name": "Ledningens förberedelser inför ny säkerhetslagstiftning 2025",
+      "description": "Stöd framtaget av eSams arbetsgrupp för NIS2 och CER-direktiven för att underlätta implementering och effektivt resursutnyttjande.\n\nKälla: https://www.esamverka.se/publikationer.html",
+      "summary": "Stöd till ledningen inför ny säkerhetslagstiftning.",
+      "communities": [
+        "eSam"
+      ],
+      "tags": [
+        "säkerhet",
+        "NIS2",
+        "CER",
+        "rapport"
+      ],
+      "metadata": {
+        "year": 2025,
+        "document_type": "Rapport",
+        "publisher": "eSam",
+        "es_id": "ES2025-05",
+        "source": "eSam publikationer (användarunderlag)",
+        "file_type": "unknown",
+        "verified": false
+      },
+      "embedding": null,
+      "created_at": "2026-02-03T11:32:55.961886",
+      "updated_at": "2026-02-03T11:32:55.961889"
+    },
+    {
+      "id": "07fd5876-4fe4-4632-8d33-b1c295b16ea0",
+      "type": "Resource",
+      "name": "Rekommendation AI-baserade stödverktyg vid kodutveckling",
+      "description": "Rekommendation/råd om användning av AI-baserade stödverktyg vid kodutveckling.\n\nKälla: https://www.esamverka.se/publikationer.html",
+      "summary": "Rekommendation om AI-stöd vid kodutveckling.",
+      "communities": [
+        "eSam"
+      ],
+      "tags": [
+        "AI",
+        "kodutveckling",
+        "rekommendation",
+        "råd"
+      ],
+      "metadata": {
+        "year": 2025,
+        "document_type": "Råd",
+        "publisher": "eSam",
+        "es_id": "ES2025-03",
+        "source": "eSam publikationer (användarunderlag)",
+        "file_type": "unknown",
+        "verified": false
+      },
+      "embedding": null,
+      "created_at": "2026-02-03T11:32:55.961913",
+      "updated_at": "2026-02-03T11:32:55.961913"
+    },
+    {
+      "id": "3c2fc0f9-5bd4-4244-9e72-f28786be32df",
+      "type": "Resource",
+      "name": "Radarbild 2025 - rapport och stödmaterial",
+      "description": "Sammanställning av väsentliga initiativ nationellt och inom EU som påverkar myndigheters digitalisering, inklusive stödmaterial (bilagor).\n\nKälla: https://www.esamverka.se/publikationer.html",
+      "summary": "Radarbild över initiativ som påverkar digitalisering.",
+      "communities": [
+        "eSam"
+      ],
+      "tags": [
+        "radarbild",
+        "styrning",
+        "digitalisering",
+        "rapport"
+      ],
+      "metadata": {
+        "year": 2025,
+        "document_type": "Rapport",
+        "publisher": "eSam",
+        "es_id": "ES2025-04",
+        "source": "eSam publikationer (användarunderlag)",
+        "file_type": "unknown",
+        "verified": false
+      },
+      "embedding": null,
+      "created_at": "2026-02-03T11:32:55.961932",
+      "updated_at": "2026-02-03T11:32:55.961932"
+    },
+    {
+      "id": "4385d363-354e-4069-9cf5-af508db84017",
+      "type": "Resource",
+      "name": "ES2025-19 Radarbilden - initiativ som påverkar myndigheternas digitalisering",
+      "description": "Rapport (ingress enligt publikationslistan) om initiativ som påverkar myndigheternas digitalisering.\n\nKälla: https://www.esamverka.se/publikationer.html",
+      "summary": "Radarbilden: initiativ som påverkar digitalisering.",
+      "communities": [
+        "eSam"
+      ],
+      "tags": [
+        "radarbild",
+        "digitalisering",
+        "rapport"
+      ],
+      "metadata": {
+        "year": 2025,
+        "document_type": "Rapport",
+        "publisher": "eSam",
+        "es_id": "ES2025-19",
+        "source": "eSam publikationer (användarunderlag)",
+        "file_type": "unknown",
+        "verified": false
+      },
+      "embedding": null,
+      "created_at": "2026-02-03T11:32:55.961949",
+      "updated_at": "2026-02-03T11:32:55.961949"
+    },
+    {
+      "id": "d850e541-bee3-4b0c-9948-5d2478f1c1d5",
+      "type": "Resource",
+      "name": "ES2025-20 Gemensamt federationsprotokoll för chatt i offentlig sektor",
+      "description": "Rapport om gemensamt federationsprotokoll för chatt i offentlig sektor och dess betydelse för interoperabilitet, säkerhet och digital suveränitet.\n\nKälla: https://www.esamverka.se/publikationer.html",
+      "summary": "Federationsprotokoll för chatt i offentlig sektor.",
+      "communities": [
+        "eSam"
+      ],
+      "tags": [
+        "chat",
+        "federation",
+        "öppna protokoll",
+        "interoperabilitet",
+        "rapport"
+      ],
+      "metadata": {
+        "year": 2025,
+        "document_type": "Rapport",
+        "publisher": "eSam",
+        "es_id": "ES2025-20",
+        "source": "eSam publikationer (användarunderlag)",
+        "file_type": "unknown",
+        "verified": false
+      },
+      "embedding": null,
+      "created_at": "2026-02-03T11:32:55.961967",
+      "updated_at": "2026-02-03T11:32:55.961967"
+    },
+    {
+      "id": "5a00f9c5-bfc9-41bf-93dd-f0c97c220d1e",
+      "type": "Resource",
+      "name": "Nationella Dataområden",
+      "description": "Rapport om hur nationella dataområden kan stärka en datadriven förvaltning, stödja EU-standardisering och interoperabilitet samt effektivare nyttjande av data.\n\nKälla: https://www.esamverka.se/publikationer.html",
+      "summary": "Etablering av nationella dataområden.",
+      "communities": [
+        "eSam"
+      ],
+      "tags": [
+        "dataområden",
+        "datadriven förvaltning",
+        "interoperabilitet",
+        "rapport"
+      ],
+      "metadata": {
+        "year": 2025,
+        "document_type": "Rapport",
+        "publisher": "eSam",
+        "es_id": "ES2025-21",
+        "source": "eSam publikationer (användarunderlag)",
+        "file_type": "unknown",
+        "verified": false
+      },
+      "embedding": null,
+      "created_at": "2026-02-03T11:32:55.961984",
+      "updated_at": "2026-02-03T11:32:55.961984"
+    },
+    {
+      "id": "222520c2-9184-4c54-9364-e7055d28af85",
+      "type": "Resource",
+      "name": "AI-regulatorisk sandlåda, fjärde iterationen",
+      "description": "Rapport om fjärde iterationen i piloten för AI-regulatorisk sandlåda, inklusive analys av riskvärdering och hantering av dokumentationskrav.\n\nKälla: https://www.esamverka.se/publikationer.html",
+      "summary": "Fjärde iterationen av AI-regulatorisk sandlåda.",
+      "communities": [
+        "eSam"
+      ],
+      "tags": [
+        "AI",
+        "regulatorisk sandlåda",
+        "rapport"
+      ],
+      "metadata": {
+        "year": 2025,
+        "document_type": "Rapport",
+        "publisher": "eSam",
+        "es_id": "ES2025-25",
+        "source": "eSam publikationer (användarunderlag)",
+        "file_type": "unknown",
+        "verified": false
+      },
+      "embedding": null,
+      "created_at": "2026-02-03T11:32:55.962001",
+      "updated_at": "2026-02-03T11:32:55.962001"
+    },
+    {
+      "id": "684df3cd-cf56-44f2-9877-d8976aaa500e",
+      "type": "Resource",
+      "name": "Uppdatering kring adekvansbeslutet i en turbulent tid",
+      "description": "Promemoria om adekvansbeslutet från juni 2023 och kvarstående risker kring utländska myndigheters åtkomst till uppgifter via extraterritoriell lagstiftning.\n\nKälla: https://www.esamverka.se/publikationer.html",
+      "summary": "Promemoria om EU–USA-adevkans och risker.",
+      "communities": [
+        "eSam"
+      ],
+      "tags": [
+        "adevkansbeslut",
+        "EU-USA",
+        "tredjelandsöverföring",
+        "promemoria"
+      ],
+      "metadata": {
+        "year": 2025,
+        "document_type": "Promemoria",
+        "publisher": "eSam",
+        "es_id": "ES2025-18",
+        "source": "eSam publikationer (användarunderlag)",
+        "file_type": "unknown",
+        "verified": false
+      },
+      "embedding": null,
+      "created_at": "2026-02-03T11:32:55.962032",
+      "updated_at": "2026-02-03T11:32:55.962032"
+    },
+    {
+      "id": "9ec8c0ad-a7ef-4c0a-9f22-baceebe89c20",
+      "type": "Resource",
+      "name": "Tekniska förutsättningar i molntjänster",
+      "description": "Promemoria med övergripande beskrivning av krav på tekniska förutsättningar i molntjänster.\n\nKälla: https://www.esamverka.se/publikationer.html",
+      "summary": "Övergripande tekniska krav i molntjänster.",
+      "communities": [
+        "eSam"
+      ],
+      "tags": [
+        "molntjänster",
+        "tekniska krav",
+        "promemoria"
+      ],
+      "metadata": {
+        "year": 2022,
+        "document_type": "Promemoria",
+        "publisher": "eSam",
+        "es_id": "ES2022-05",
+        "source": "eSam publikationer (användarunderlag)",
+        "file_type": "unknown",
+        "verified": false
+      },
+      "embedding": null,
+      "created_at": "2026-02-03T11:32:55.962048",
+      "updated_at": "2026-02-03T11:32:55.962048"
+    },
+    {
+      "id": "51c1a56b-e33d-4908-82ec-1ec419f4e676",
+      "type": "Resource",
+      "name": "Att analysera molntjänster - några utgångspunkter",
+      "description": "Promemoria med överblick av kritiska frågor vid anskaffning eller utkontraktering av molntjänster.\n\nKälla: https://www.esamverka.se/publikationer.html",
+      "summary": "Utgångspunkter vid analys av molntjänster.",
+      "communities": [
+        "eSam"
+      ],
+      "tags": [
+        "molntjänster",
+        "anskaffning",
+        "utkontraktering",
+        "promemoria"
+      ],
+      "metadata": {
+        "year": 2025,
+        "document_type": "Promemoria",
+        "publisher": "eSam",
+        "es_id": "ES2025-02",
+        "source": "eSam publikationer (användarunderlag)",
+        "file_type": "unknown",
+        "verified": false
+      },
+      "embedding": null,
+      "created_at": "2026-02-03T11:32:55.962063",
+      "updated_at": "2026-02-03T11:32:55.962064"
+    },
+    {
+      "id": "549f9005-d43b-49b4-be96-c4311f6f249b",
+      "type": "Resource",
+      "name": "Vägledning arkitekturstyrning",
+      "description": "Vägledning för att etablera organisation och arbetssätt så att arkitekturstyrning blir en del av organisationens utvecklingsprocess.\n\nKälla: https://www.esamverka.se/publikationer.html",
+      "summary": "Stöd för att etablera arkitekturstyrning.",
+      "communities": [
+        "eSam"
+      ],
+      "tags": [
+        "arkitekturstyrning",
+        "styrning",
+        "vägledning"
+      ],
+      "metadata": {
+        "year": 2025,
+        "document_type": "Vägledning",
+        "publisher": "eSam",
+        "es_id": "ES2025-07",
+        "source": "eSam publikationer (användarunderlag)",
+        "file_type": "unknown",
+        "verified": false
+      },
+      "embedding": null,
+      "created_at": "2026-02-03T11:32:55.962078",
+      "updated_at": "2026-02-03T11:32:55.962078"
+    },
+    {
+      "id": "59252bc2-5043-4396-835f-6a335a6409ab",
+      "type": "Resource",
+      "name": "Radarbild 2025 – bilaga 1",
+      "description": "Bilaga med fullständig sammanställning av initiativ som ingår i Radarbild 2025.",
+      "summary": "Sammanställning av samtliga initiativ i Radarbild 2025.",
+      "communities": [
+        "eSam"
+      ],
+      "tags": [
+        "radarbild",
+        "styrning",
+        "digitalisering",
+        "bilaga"
+      ],
+      "metadata": {
+        "year": 2025,
+        "document_type": "Rapport",
+        "publisher": "eSam",
+        "es_id": "ES2025-04",
+        "file_type": "unknown",
+        "verified": false
+      },
+      "embedding": null,
+      "created_at": "2026-02-03T12:27:40.421145",
+      "updated_at": "2026-02-03T12:27:40.421147"
+    },
+    {
+      "id": "4f88bf09-3ec7-4716-8f0e-f7afd83cabe1",
+      "type": "Resource",
+      "name": "Radarbilden USA 2025",
+      "description": "Analys av USA-relaterade händelser och initiativ med påverkan på svensk offentlig digitalisering.",
+      "summary": "USA-relaterade initiativ som påverkar svensk digitalisering.",
+      "communities": [
+        "eSam"
+      ],
+      "tags": [
+        "radarbild",
+        "USA",
+        "digitalisering"
+      ],
+      "metadata": {
+        "year": 2025,
+        "document_type": "Rapport",
+        "publisher": "eSam",
+        "es_id": "ES2025-14",
+        "file_type": "unknown",
+        "verified": false
+      },
+      "embedding": null,
+      "created_at": "2026-02-03T12:27:40.421167",
+      "updated_at": "2026-02-03T12:27:40.421168"
+    },
+    {
+      "id": "85a73daf-11b4-430f-982d-e4a550e68565",
+      "type": "Resource",
+      "name": "Verksamhetsberättelse 2024–25",
+      "description": "Sammanfattar eSams arbete, samverkan och resultat under verksamhetsåret 2024–25.",
+      "summary": "eSams verksamhetsberättelse för 2024–25.",
+      "communities": [
+        "eSam"
+      ],
+      "tags": [
+        "verksamhetsberättelse"
+      ],
+      "metadata": {
+        "year": 2025,
+        "document_type": "Rapport",
+        "publisher": "eSam",
+        "es_id": "ES2025-08",
+        "file_type": "pdf",
+        "verified": true
+      },
+      "embedding": null,
+      "created_at": "2026-02-03T12:27:40.421184",
+      "updated_at": "2026-02-03T12:27:40.421184"
+    },
+    {
+      "id": "1b28c8d5-cf4a-440e-8f1b-56d09baa49ee",
+      "type": "Resource",
+      "name": "Vägledning E-legitimation och E-underskrift 1.1",
+      "description": "Vägledning som beskriver juridiska, tekniska och administrativa aspekter av e-legitimation och e-underskrift.",
+      "summary": "Vägledning om e-legitimation och e-underskrift.",
+      "communities": [
+        "eSam"
+      ],
+      "tags": [
+        "e-legitimation",
+        "e-underskrift",
+        "vägledning"
+      ],
+      "metadata": {
+        "year": 2018,
+        "document_type": "Vägledning",
+        "publisher": "eSam",
+        "file_type": "unknown",
+        "verified": false
+      },
+      "embedding": null,
+      "created_at": "2026-02-03T12:27:40.421198",
+      "updated_at": "2026-02-03T12:27:40.421198"
+    },
+    {
+      "id": "5c64df38-7a98-415c-9735-cf0ffa402747",
+      "type": "Resource",
+      "name": "Vägledning Bedömning och utveckling av chattbotar",
+      "description": "Vägledning för hur myndigheter bör hantera införande och utveckling av chattbotar.",
+      "summary": "Stöd för införande och utveckling av chattbotar.",
+      "communities": [
+        "eSam"
+      ],
+      "tags": [
+        "chattbot",
+        "AI",
+        "vägledning"
+      ],
+      "metadata": {
+        "year": 2022,
+        "document_type": "Vägledning",
+        "publisher": "eSam",
+        "es_id": "ES2022-02",
+        "file_type": "unknown",
+        "verified": false
+      },
+      "embedding": null,
+      "created_at": "2026-02-03T12:27:40.421212",
+      "updated_at": "2026-02-03T12:27:40.421212"
+    },
+    {
+      "id": "060cbc71-fa65-47cb-8993-cc9e72601b87",
+      "type": "Resource",
+      "name": "Vägledning Designprinciper och krav för eget utrymme",
+      "description": "Stöd för utformning av e-tjänster och eget utrymme på ett rättssäkert sätt.",
+      "summary": "Designprinciper för eget utrymme i e-tjänster.",
+      "communities": [
+        "eSam"
+      ],
+      "tags": [
+        "eget utrymme",
+        "design",
+        "vägledning"
+      ],
+      "metadata": {
+        "year": 2022,
+        "document_type": "Vägledning",
+        "publisher": "eSam",
+        "es_id": "ES2022-04",
+        "file_type": "unknown",
+        "verified": false
+      },
+      "embedding": null,
+      "created_at": "2026-02-03T12:27:40.421227",
+      "updated_at": "2026-02-03T12:27:40.421228"
+    },
+    {
+      "id": "05f770fe-c0c4-41d6-97e9-eed59a084ebb",
+      "type": "Resource",
+      "name": "Vägledning Innovation i en myndighet",
+      "description": "Vägledning som förtydligar vad innovation i en myndighet innebär och hur förmågan kan stärkas.",
+      "summary": "Stöd för att stärka innovationsförmåga.",
+      "communities": [
+        "eSam"
+      ],
+      "tags": [
+        "innovation",
+        "vägledning"
+      ],
+      "metadata": {
+        "year": 2022,
+        "document_type": "Vägledning",
+        "publisher": "eSam",
+        "es_id": "ES2022-07",
+        "file_type": "unknown",
+        "verified": false
+      },
+      "embedding": null,
+      "created_at": "2026-02-03T12:27:40.421241",
+      "updated_at": "2026-02-03T12:27:40.421242"
+    },
+    {
+      "id": "1baae5e7-57c6-4dd2-b9ed-0e61059b73af",
+      "type": "Resource",
+      "name": "Vägledning Pseudonymisering av personuppgifter",
+      "description": "Scenarier, rättsliga förutsättningar och exempel på lösningar för pseudonymisering.",
+      "summary": "Rättsliga och tekniska förutsättningar för pseudonymisering.",
+      "communities": [
+        "eSam"
+      ],
+      "tags": [
+        "pseudonymisering",
+        "dataskydd",
+        "vägledning"
+      ],
+      "metadata": {
+        "year": 2022,
+        "document_type": "Vägledning",
+        "publisher": "eSam",
+        "es_id": "ES2022-01",
+        "file_type": "unknown",
+        "verified": false
+      },
+      "embedding": null,
+      "created_at": "2026-02-03T12:27:40.421255",
+      "updated_at": "2026-02-03T12:27:40.421255"
+    },
+    {
+      "id": "cefc6352-5857-459d-92da-a319f449e98f",
+      "type": "Resource",
+      "name": "Roadmap för myndigheters datahantering",
+      "description": "Stöd för proaktiv planering av myndigheters datahantering i EU- och nationellt perspektiv.",
+      "summary": "Roadmap för framtida datahantering.",
+      "communities": [
+        "eSam"
+      ],
+      "tags": [
+        "data",
+        "roadmap",
+        "styrning"
+      ],
+      "metadata": {
+        "year": 2024,
+        "document_type": "Rapport",
+        "publisher": "eSam",
+        "es_id": "ES2024-15",
+        "file_type": "unknown",
+        "verified": false
+      },
+      "embedding": null,
+      "created_at": "2026-02-03T12:27:40.421269",
+      "updated_at": "2026-02-03T12:27:40.421269"
+    },
+    {
+      "id": "6bd4034a-84e2-4d55-9463-5b40950eaf19",
+      "type": "Resource",
+      "name": "Mina Data v1.0",
+      "description": "Rapport som etablerar konceptet Mina Data som grund för vidare utveckling.",
+      "summary": "Personcentrerad informationshantering.",
+      "communities": [
+        "eSam"
+      ],
+      "tags": [
+        "Mina Data",
+        "informationshantering"
+      ],
+      "metadata": {
+        "year": 2019,
+        "document_type": "Rapport",
+        "publisher": "eSam",
+        "file_type": "unknown",
+        "verified": false
+      },
+      "embedding": null,
+      "created_at": "2026-02-03T12:27:40.421282",
+      "updated_at": "2026-02-03T12:27:40.421282"
+    },
+    {
+      "id": "9a7d97f8-186c-47f4-a461-00624067367c",
+      "type": "Resource",
+      "name": "Rapport – En effektiv informationsförsörjning",
+      "description": "Förslag och krav för ändamålsenlig informationsförsörjning i offentlig sektor.",
+      "summary": "Krav på informationstillgångar i offentlig sektor.",
+      "communities": [
+        "eSam"
+      ],
+      "tags": [
+        "informationsförsörjning",
+        "rapport"
+      ],
+      "metadata": {
+        "year": 2017,
+        "document_type": "Rapport",
+        "publisher": "eSam",
+        "file_type": "unknown",
+        "verified": false
+      },
+      "embedding": null,
+      "created_at": "2026-02-03T12:27:40.421295",
+      "updated_at": "2026-02-03T12:27:40.421295"
+    },
+    {
+      "id": "9867d36f-2fd7-473a-8dac-bfa75534a393",
+      "type": "Resource",
+      "name": "Rapport – Samverkan kring tillämpad AI",
+      "description": "Olika perspektiv på införskaffning och användning av AI, inklusive juridik och organisatorisk mognad.",
+      "summary": "Samverkan och mognad kring tillämpad AI.",
+      "communities": [
+        "eSam"
+      ],
+      "tags": [
+        "AI",
+        "samverkan",
+        "rapport"
+      ],
+      "metadata": {
+        "year": 2022,
+        "document_type": "Rapport",
+        "publisher": "eSam",
+        "es_id": "ES2022-03",
+        "file_type": "unknown",
+        "verified": false
+      },
+      "embedding": null,
+      "created_at": "2026-02-03T12:27:40.421306",
+      "updated_at": "2026-02-03T12:27:40.421306"
+    },
+    {
+      "id": "428d1ae8-3c32-4276-b101-480209a0a4ec",
+      "type": "Resource",
+      "name": "Rapport AI – Utvecklingsprocessen och data",
+      "description": "Exempel på AI/ML-utvecklingsprocesser samt roller och för- och nackdelar vid användning av dessa processer.\n\nDirekt PDF: https://www.esamverka.se/download/18.2dd7967a18d1ce21a754049/1705654566213/ES2024-01%20Rapport%20AI%20-%20Utvecklingsprocessen%20och%20data.pdf\n\nKälla: https://www.esamverka.se/publikationer.html",
+      "summary": "AI-utvecklingsprocesser och data.",
+      "communities": [
+        "eSam"
+      ],
+      "tags": [
+        "AI",
+        "utvecklingsprocess",
+        "data"
+      ],
+      "metadata": {
+        "year": 2024,
+        "document_type": "Rapport",
+        "publisher": "eSam",
+        "es_id": "ES2024-01",
+        "file_type": "pdf",
+        "verified": true
+      },
+      "embedding": null,
+      "created_at": "2026-02-03T12:27:40.421317",
+      "updated_at": "2026-02-03T12:41:59.544446"
+    },
+    {
+      "id": "15c07f55-4d48-4832-8c91-30199a89edae",
+      "type": "Resource",
+      "name": "Vägledning Innovation i en myndighet",
+      "description": "Förtydligar vad en innovativ myndighet är och stödjer eSams medlemmar att stärka organisationens förmåga att vara innovativ.\n\nKälla: https://www.esamverka.se/publikationer.html",
+      "summary": "Vägledning som stödjer myndigheter att stärka innovationsförmåga.",
+      "communities": [
+        "eSam"
+      ],
+      "tags": [
+        "innovation",
+        "vägledning"
+      ],
+      "metadata": {
+        "year": 2022,
+        "document_type": "Vägledning",
+        "publisher": "eSam",
+        "es_id": "ES2022-07",
+        "source": "eSam publikationer (användarunderlag)",
+        "file_type": "unknown",
+        "verified": false
+      },
+      "embedding": null,
+      "created_at": "2026-02-03T12:30:27.303445",
+      "updated_at": "2026-02-03T12:30:27.303449"
+    },
+    {
+      "id": "568a80e8-a70f-470b-ad8b-bc19f2232f66",
+      "type": "Resource",
+      "name": "Vägledning Innovation i en myndighet",
+      "description": "Förtydligar vad en innovativ myndighet är och stödjer eSams medlemmar att stärka organisationens förmåga att vara innovativ.\n\nKälla: https://www.esamverka.se/publikationer.html",
+      "summary": "Vägledning som stödjer myndigheter att stärka innovationsförmåga.",
+      "communities": [
+        "eSam"
+      ],
+      "tags": [
+        "innovation",
+        "vägledning",
+        "organisationsutveckling"
+      ],
+      "metadata": {
+        "year": 2022,
+        "document_type": "Vägledning",
+        "publisher": "eSam",
+        "es_id": "ES2022-07",
+        "source": "eSam publikationer",
+        "file_type": "unknown",
+        "verified": false
+      },
+      "embedding": null,
+      "created_at": "2026-02-03T12:32:05.739447",
+      "updated_at": "2026-02-03T12:32:05.739450"
+    },
+    {
+      "id": "bf22a834-f420-4f45-954e-2055ca702a76",
+      "type": "Resource",
+      "name": "Vägledning Innovation i en myndighet",
+      "description": "Förtydligar vad en innovativ myndighet är och stödjer eSams medlemmar att stärka organisationens förmåga att vara innovativ.\n\nKälla: https://www.esamverka.se/publikationer.html",
+      "summary": "Vägledning som stödjer myndigheter att stärka innovationsförmåga.",
+      "communities": [
+        "eSam"
+      ],
+      "tags": [
+        "innovation",
+        "vägledning",
+        "organisationsutveckling"
+      ],
+      "metadata": {
+        "year": 2022,
+        "document_type": "Vägledning",
+        "publisher": "eSam",
+        "es_id": "ES2022-07",
+        "source": "eSam publikationer",
+        "file_type": "unknown",
+        "verified": false
+      },
+      "embedding": null,
+      "created_at": "2026-02-03T12:32:17.895954",
+      "updated_at": "2026-02-03T12:32:17.895957"
+    },
+    {
+      "id": "bb84d9b3-e69e-4eb9-9806-7ddea787beb3",
+      "type": "Resource",
+      "name": "Rapport AI – Utvecklingsprocessen och data",
+      "description": "Exempel på utvecklingsprocesser för AI/ML samt för- och nackdelar, inklusive rollbeskrivningar.\n\nDirekt PDF: https://www.esamverka.se/download/18.2dd7967a18d1ce21a754049/1705654566213/ES2024-01%20Rapport%20AI%20-%20Utvecklingsprocessen%20och%20data.pdf",
+      "summary": "Utvecklingsprocesser för AI/ML, roller och avvägningar.",
+      "communities": [
+        "eSam"
+      ],
+      "tags": [
+        "AI",
+        "utvecklingsprocess",
+        "data",
+        "rapport"
+      ],
+      "metadata": {
+        "year": 2024,
+        "document_type": "Rapport",
+        "publisher": "eSam",
+        "es_id": "ES2024-01",
+        "file_type": "pdf",
+        "verified": true
+      },
+      "embedding": null,
+      "created_at": "2026-02-03T12:36:49.560599",
+      "updated_at": "2026-02-03T12:36:49.560602"
+    },
+    {
+      "id": "09a7ff25-8502-475c-89a0-4b1b0e77b7d1",
+      "type": "Resource",
+      "name": "Datadriven automatisering mellan kommuner och myndigheter",
+      "description": "Arbete för att identifiera konkreta dataflöden mellan kommuner och myndigheter som kan automatiseras.\n\nKälla: https://www.esamverka.se/publikationer.html",
+      "summary": "Identifierar automatiserbara dataflöden.",
+      "communities": [
+        "eSam"
+      ],
+      "tags": [
+        "data",
+        "automatisering",
+        "samverkan",
+        "rapport"
+      ],
+      "metadata": {
+        "year": 2024,
+        "document_type": "Rapport",
+        "publisher": "eSam",
+        "es_id": "ES2024-02",
+        "file_type": "unknown",
+        "verified": false
+      },
+      "embedding": null,
+      "created_at": "2026-02-03T12:36:49.560623",
+      "updated_at": "2026-02-03T12:36:49.560624"
+    },
+    {
+      "id": "bbbfb9f6-54a4-441f-a24e-36dd5a6fff32",
+      "type": "Resource",
+      "name": "Stärkt förmåga till AI i samverkan",
+      "description": "Gemensamma labb-, utvecklings-, delnings- och tillhandahållandeförmågor för att stärka AI-utveckling.\n\nDirekt PDF: https://www.esamverka.se/download/18.494db7261900c5885b41e93/1718717466677/ES2024-08%20Rapport%20St%C3%A4rkt%20f%C3%B6rm%C3%A5ga%20till%20AI%20i%20samverkan.pdf",
+      "summary": "Gemensamma AI-förmågor i samverkan.",
+      "communities": [
+        "eSam"
+      ],
+      "tags": [
+        "AI",
+        "samverkan",
+        "rapport"
+      ],
+      "metadata": {
+        "year": 2024,
+        "document_type": "Rapport",
+        "publisher": "eSam",
+        "es_id": "ES2024-08",
+        "file_type": "pdf",
+        "verified": true
+      },
+      "embedding": null,
+      "created_at": "2026-02-03T12:36:49.560643",
+      "updated_at": "2026-02-03T12:36:49.560643"
+    },
+    {
+      "id": "c2d020e2-a909-4b8a-83d7-5ed074761ddd",
+      "type": "Resource",
+      "name": "Referensarkitektur datahantering",
+      "description": "Stöd för effektiv och säker tillgång till data inom och mellan organisationer.\n\nPublikationssida: https://www.esamverka.se/publikationer/arkitektur/2025-04-15-referensarkitektur-datahantering.html",
+      "summary": "Referensarkitektur för säker dataåtkomst och delning.",
+      "communities": [
+        "eSam"
+      ],
+      "tags": [
+        "arkitektur",
+        "datahantering",
+        "rapport"
+      ],
+      "metadata": {
+        "year": 2024,
+        "document_type": "Rapport",
+        "publisher": "eSam",
+        "es_id": "ES2024-09",
+        "file_type": "unknown",
+        "verified": false
+      },
+      "embedding": null,
+      "created_at": "2026-02-03T12:36:49.560660",
+      "updated_at": "2026-02-03T12:36:49.560660"
+    },
+    {
+      "id": "924a3025-33cd-4d3c-a9c7-d6315ecde12c",
+      "type": "Resource",
+      "name": "Beskrivning av datakatalog",
+      "description": "Stöd för katalogisering och sökbarhet bland dataprodukter.\n\nPublikationssida: https://www.esamverka.se/publikationer/arkitektur/2025-04-15-beskrivning-av-datakatalog.html",
+      "summary": "Stöd för katalogisering av dataprodukter.",
+      "communities": [
+        "eSam"
+      ],
+      "tags": [
+        "datakatalog",
+        "data",
+        "rapport"
+      ],
+      "metadata": {
+        "year": 2024,
+        "document_type": "Rapport",
+        "publisher": "eSam",
+        "es_id": "ES2024-10",
+        "file_type": "unknown",
+        "verified": false
+      },
+      "embedding": null,
+      "created_at": "2026-02-03T12:36:49.560676",
+      "updated_at": "2026-02-03T12:36:49.560677"
+    },
+    {
+      "id": "03d7ed6c-39bf-48da-8e47-f4ce730a4d45",
+      "type": "Resource",
+      "name": "Dataprodukt och dataproduktspecifikation",
+      "description": "Stöd och vägledning för konceptet data som produkt samt dokumentation av dataprodukter.\n\nPublikationssida: https://www.esamverka.se/publikationer/arkitektur/2025-04-15-dataprodukt-och-dataproduktspecifikation.html",
+      "summary": "Vägledning för data som produkt.",
+      "communities": [
+        "eSam"
+      ],
+      "tags": [
+        "dataprodukt",
+        "data",
+        "rapport"
+      ],
+      "metadata": {
+        "year": 2024,
+        "document_type": "Rapport",
+        "publisher": "eSam",
+        "es_id": "ES2024-11",
+        "file_type": "unknown",
+        "verified": false
+      },
+      "embedding": null,
+      "created_at": "2026-02-03T12:36:49.560693",
+      "updated_at": "2026-02-03T12:36:49.560693"
+    },
+    {
+      "id": "63c2de67-d510-42f0-bea5-456958331a2c",
+      "type": "Resource",
+      "name": "Delning och användning av öppen källkod",
+      "description": "Medlemmars erfarenheter av att använda och dela öppen källkod.\n\nKälla: https://www.esamverka.se/publikationer.html",
+      "summary": "Erfarenheter av öppen källkod.",
+      "communities": [
+        "eSam"
+      ],
+      "tags": [
+        "öppen källkod",
+        "råd"
+      ],
+      "metadata": {
+        "year": 2022,
+        "document_type": "Råd",
+        "publisher": "eSam",
+        "es_id": "ES2022-09",
+        "file_type": "unknown",
+        "verified": false
+      },
+      "embedding": null,
+      "created_at": "2026-02-03T12:36:49.560707",
+      "updated_at": "2026-02-03T12:36:49.560707"
+    },
+    {
+      "id": "d168f6f8-d806-452f-bb64-ff80ff58a1b1",
+      "type": "Resource",
+      "name": "Råd: Intern kommunikation om användande av AI-baserade chattbotar",
+      "description": "Stöd och inspiration till internkommunikation vid användning av externa chattbotar.\n\nKälla: https://www.esamverka.se/publikationer.html",
+      "summary": "Stöd för intern kommunikation om chattbotar.",
+      "communities": [
+        "eSam"
+      ],
+      "tags": [
+        "AI",
+        "chattbotar",
+        "kommunikation",
+        "råd"
+      ],
+      "metadata": {
+        "year": 2023,
+        "document_type": "Råd",
+        "publisher": "eSam",
+        "es_id": "ES2023-05",
+        "file_type": "unknown",
+        "verified": false
+      },
+      "embedding": null,
+      "created_at": "2026-02-03T12:36:49.560721",
+      "updated_at": "2026-02-03T12:36:49.560721"
+    },
+    {
+      "id": "01d4bbb4-6fef-49be-b501-be39621b0c9f",
+      "type": "Resource",
+      "name": "Råd: Praktisk användning av vägledning för innovation",
+      "description": "Praktiskt stöd för att stärka organisationers innovationsförmåga.\n\nKälla: https://www.esamverka.se/publikationer.html",
+      "summary": "Praktiskt innovationsstöd.",
+      "communities": [
+        "eSam"
+      ],
+      "tags": [
+        "innovation",
+        "råd"
+      ],
+      "metadata": {
+        "year": 2023,
+        "document_type": "Råd",
+        "publisher": "eSam",
+        "es_id": "ES2023-04",
+        "file_type": "unknown",
+        "verified": false
+      },
+      "embedding": null,
+      "created_at": "2026-02-03T12:36:49.560735",
+      "updated_at": "2026-02-03T12:36:49.560735"
+    },
+    {
+      "id": "0ed96a99-8ca4-41ad-856f-05bf0ecd2250",
+      "type": "Resource",
+      "name": "Råd: Säkrare extern överföring av information",
+      "description": "Stöd för säkrare uppkopplingar och kompetensutveckling.\n\nKälla: https://www.esamverka.se/publikationer.html",
+      "summary": "Säkrare serverkonfigurationer.",
+      "communities": [
+        "eSam"
+      ],
+      "tags": [
+        "säkerhet",
+        "överföring",
+        "råd"
+      ],
+      "metadata": {
+        "year": 2021,
+        "document_type": "Råd",
+        "publisher": "eSam",
+        "file_type": "unknown",
+        "verified": false
+      },
+      "embedding": null,
+      "created_at": "2026-02-03T12:36:49.560748",
+      "updated_at": "2026-02-03T12:36:49.560749"
+    },
+    {
+      "id": "53743979-643a-4be7-a9d2-622ebd54f546",
+      "type": "Resource",
+      "name": "AI-labb för anpassningsbara AI-assistenter",
+      "description": "Myndigheters erfarenheter från AI-labb för anpassningsbara assistenter.\n\nKälla: https://www.esamverka.se/publikationer.html",
+      "summary": "Labb för lärande och användning av AI.",
+      "communities": [
+        "eSam"
+      ],
+      "tags": [
+        "AI",
+        "labb",
+        "rapport"
+      ],
+      "metadata": {
+        "year": 2025,
+        "document_type": "Rapport",
+        "publisher": "eSam",
+        "es_id": "ES2025-13",
+        "file_type": "unknown",
+        "verified": false
+      },
+      "embedding": null,
+      "created_at": "2026-02-03T12:36:49.560762",
+      "updated_at": "2026-02-03T12:36:49.560763"
+    },
+    {
+      "id": "d120048d-2df8-4e5b-9570-ad080ee359bd",
+      "type": "Resource",
+      "name": "Metod för utveckling i samverkan 1.1",
+      "description": "Metodstöd för utveckling i samverkan.\n\nKälla: https://www.esamverka.se/publikationer.html",
+      "summary": "Metodstöd för samverkan.",
+      "communities": [
+        "eSam"
+      ],
+      "tags": [
+        "samverkan",
+        "metod",
+        "promemoria"
+      ],
+      "metadata": {
+        "year": 2016,
+        "document_type": "Promemoria",
+        "publisher": "eSam",
+        "file_type": "unknown",
+        "verified": false
+      },
+      "embedding": null,
+      "created_at": "2026-02-03T12:36:49.560775",
+      "updated_at": "2026-02-03T12:36:49.560775"
+    },
+    {
+      "id": "60a4dab5-e9f8-4f43-8ed0-5de3c62a92f2",
+      "type": "Resource",
+      "name": "Vägledning Digital Samverkan 4.1",
+      "description": "Vägledning och fördjupningar kring digital samverkan.\n\nKälla: https://www.esamverka.se/publikationer.html",
+      "summary": "Vägledning för digital samverkan.",
+      "communities": [
+        "eSam"
+      ],
+      "tags": [
+        "digital samverkan",
+        "vägledning"
+      ],
+      "metadata": {
+        "year": 2016,
+        "document_type": "Vägledning",
+        "publisher": "eSam",
+        "file_type": "unknown",
+        "verified": false
+      },
+      "embedding": null,
+      "created_at": "2026-02-03T12:36:49.560788",
+      "updated_at": "2026-02-03T12:36:49.560788"
+    },
+    {
+      "id": "cf2cba26-3232-42d6-8961-38acf680ce13",
+      "type": "Resource",
+      "name": "Mall för informations- och datastrategi",
+      "description": "Mall som vägleder myndigheter i informations- och datastrategi.\n\nKälla: https://www.esamverka.se/publikationer.html",
+      "summary": "Strategimall för datadriven omställning.",
+      "communities": [
+        "eSam"
+      ],
+      "tags": [
+        "datastrategi",
+        "rapport"
+      ],
+      "metadata": {
+        "year": 2025,
+        "document_type": "Rapport",
+        "publisher": "eSam",
+        "es_id": "ES2025-22",
+        "file_type": "unknown",
+        "verified": false
+      },
+      "embedding": null,
+      "created_at": "2026-02-03T12:36:49.560801",
+      "updated_at": "2026-02-03T12:36:49.560802"
+    },
+    {
+      "id": "ea04d6c9-4ad3-467c-8a01-73db68af867a",
+      "type": "Resource",
+      "name": "Nationella Dataområden",
+      "description": "Stärker datadriven förvaltning och interoperabilitet.\n\nKälla: https://www.esamverka.se/publikationer.html",
+      "summary": "Etablering av nationella dataområden.",
+      "communities": [
+        "eSam"
+      ],
+      "tags": [
+        "dataområden",
+        "interoperabilitet",
+        "rapport"
+      ],
+      "metadata": {
+        "year": 2025,
+        "document_type": "Rapport",
+        "publisher": "eSam",
+        "es_id": "ES2025-21",
+        "file_type": "unknown",
+        "verified": false
+      },
+      "embedding": null,
+      "created_at": "2026-02-03T12:36:49.560816",
+      "updated_at": "2026-02-03T12:36:49.560817"
+    },
+    {
+      "id": "f00b987b-113c-4354-a603-587814124023",
+      "type": "Resource",
+      "name": "AI-regulatorisk sandlåda – fjärde iterationen",
+      "description": "Analys av riskvärdering och dokumentationskrav enligt AI-förordningen.\n\nKälla: https://www.esamverka.se/publikationer.html",
+      "summary": "Fjärde iterationen av AI-sandlådan.",
+      "communities": [
+        "eSam"
+      ],
+      "tags": [
+        "AI",
+        "regulatorisk sandlåda",
+        "rapport"
+      ],
+      "metadata": {
+        "year": 2025,
+        "document_type": "Rapport",
+        "publisher": "eSam",
+        "es_id": "ES2025-25",
+        "file_type": "unknown",
+        "verified": false
+      },
+      "embedding": null,
+      "created_at": "2026-02-03T12:36:49.560831",
+      "updated_at": "2026-02-03T12:36:49.560831"
+    },
+    {
+      "id": "cd00becc-9d64-4b8e-b761-517b8656850e",
+      "type": "Resource",
+      "name": "Vägledning Utkontraktering – sekretess och dataskydd",
+      "description": "Stöd för överväganden kring sekretess och dataskydd vid utkontraktering.\n\nKälla: https://www.esamverka.se/publikationer.html",
+      "summary": "Juridiskt stöd vid utkontraktering.",
+      "communities": [
+        "eSam"
+      ],
+      "tags": [
+        "juridik",
+        "dataskydd",
+        "vägledning"
+      ],
+      "metadata": {
+        "year": 2023,
+        "document_type": "Vägledning",
+        "publisher": "eSam",
+        "es_id": "ES2023-06",
+        "file_type": "unknown",
+        "verified": false
+      },
+      "embedding": null,
+      "created_at": "2026-02-03T12:36:49.560845",
+      "updated_at": "2026-02-03T12:36:49.560845"
+    },
+    {
+      "id": "fe850ea0-f092-434f-a187-65daa55d8990",
+      "type": "Resource",
+      "name": "Att analysera molntjänster – några utgångspunkter",
+      "description": "Överblick av kritiska frågor vid anskaffning eller utkontraktering av molntjänster.\n\nKälla: https://www.esamverka.se/publikationer.html",
+      "summary": "Analysstöd för molntjänster.",
+      "communities": [
+        "eSam"
+      ],
+      "tags": [
+        "molntjänster",
+        "analys",
+        "promemoria"
+      ],
+      "metadata": {
+        "year": 2025,
+        "document_type": "Promemoria",
+        "publisher": "eSam",
+        "es_id": "ES2025-02",
+        "file_type": "unknown",
+        "verified": false
+      },
+      "embedding": null,
+      "created_at": "2026-02-03T12:36:49.560859",
+      "updated_at": "2026-02-03T12:36:49.560859"
+    },
+    {
+      "id": "a254cb51-784c-4ae9-9da1-c1344b13391a",
+      "type": "Resource",
+      "name": "Gemensamt federationsprotokoll för chatt i offentlig sektor",
+      "description": "Gemensamt öppet federationsprotokoll för säker och interoperabel chatt.\n\nKälla: https://www.esamverka.se/publikationer.html",
+      "summary": "Federerat chattprotokoll för offentlig sektor.",
+      "communities": [
+        "eSam"
+      ],
+      "tags": [
+        "chat",
+        "federation",
+        "interoperabilitet",
+        "rapport"
+      ],
+      "metadata": {
+        "year": 2025,
+        "document_type": "Rapport",
+        "publisher": "eSam",
+        "es_id": "ES2025-20",
+        "file_type": "unknown",
+        "verified": false
+      },
+      "embedding": null,
+      "created_at": "2026-02-03T12:36:49.560872",
+      "updated_at": "2026-02-03T12:36:49.560872"
     }
   ],
   "edges": [
@@ -1801,10 +5601,702 @@
       "type": "BELONGS_TO",
       "metadata": {},
       "created_at": "2026-01-19T08:19:10.883726"
+    },
+    {
+      "id": "cda80ec8-fa7b-4bd8-a827-ed9156a14986",
+      "source": "599aace6-ce13-4f3e-8167-5098a25ab98c",
+      "target": "ce28d749-31ac-4b04-b7f9-cc3c8b39e0ca",
+      "type": "RELATES_TO",
+      "metadata": {
+        "description": "AI-verkstaden samverkar med offentlig sektor kring AI-användning"
+      },
+      "created_at": "2026-02-03T10:13:31.717778"
+    },
+    {
+      "id": "1ef87618-bb85-4cf7-9ad0-f8dba4c45b51",
+      "source": "599aace6-ce13-4f3e-8167-5098a25ab98c",
+      "target": "80d03e7d-f43d-4cf6-905a-d903d1edc76b",
+      "type": "RELATES_TO",
+      "metadata": {
+        "description": "AI-verkstaden samverkar med företag och näringsliv kring AI"
+      },
+      "created_at": "2026-02-03T10:13:31.717791"
+    },
+    {
+      "id": "b9887dc6-dc62-4f48-ab7c-d723a176b101",
+      "source": "599aace6-ce13-4f3e-8167-5098a25ab98c",
+      "target": "baac3a3d-5433-425d-a069-a5c4ad8b8104",
+      "type": "RELATES_TO",
+      "metadata": {
+        "description": "AI-verkstaden samverkar med akademin kring kunskap och forskning om AI"
+      },
+      "created_at": "2026-02-03T10:13:31.717803"
+    },
+    {
+      "id": "5ee454ac-53f0-455c-842b-75102c7fcfdb",
+      "source": "599aace6-ce13-4f3e-8167-5098a25ab98c",
+      "target": "e5e8fa38-0cb0-4590-995b-32dfb2ac0e94",
+      "type": "RELATES_TO",
+      "metadata": {
+        "description": "Skatteverket deltar explicit i arbetet inom AI-verkstaden"
+      },
+      "created_at": "2026-02-03T10:20:16.063564"
+    },
+    {
+      "id": "9091cc9f-855e-4f29-bbb3-25fe6eed3558",
+      "source": "599aace6-ce13-4f3e-8167-5098a25ab98c",
+      "target": "e7750643-f4e0-4c72-9aa1-f9fc195c72ed",
+      "type": "RELATES_TO",
+      "metadata": {
+        "description": "Försäkringskassan deltar explicit i arbetet inom AI-verkstaden"
+      },
+      "created_at": "2026-02-03T10:20:16.063584"
+    },
+    {
+      "id": "9777a001-5136-4d85-a7b5-30f085a08008",
+      "source": "org-esam",
+      "target": "20ad587a-6a9f-465c-a932-21c31a4b3f86",
+      "type": "PRODUCES",
+      "metadata": {
+        "description": "eSam publicerar checklistan"
+      },
+      "created_at": "2026-02-03T10:42:07.842690"
+    },
+    {
+      "id": "b8635e96-73bc-4dcd-860b-a84f7feb04a6",
+      "source": "org-esam",
+      "target": "634a8826-c4b5-466c-b193-3321fd5c7f84",
+      "type": "PRODUCES",
+      "metadata": {
+        "description": "eSam publicerar checklistan"
+      },
+      "created_at": "2026-02-03T10:42:07.842707"
+    },
+    {
+      "id": "ee0b838d-c373-41e8-a583-8de34b12001d",
+      "source": "org-esam",
+      "target": "d309e65f-b7d6-4b42-bc2a-12fa0b8c992c",
+      "type": "PRODUCES",
+      "metadata": {
+        "description": "eSam publicerar resursen"
+      },
+      "created_at": "2026-02-03T11:04:50.873482"
+    },
+    {
+      "id": "3e0ba5e6-a044-4c51-b3db-66363e390db2",
+      "source": "org-esam",
+      "target": "07c1a8c8-b407-4e21-a589-d151bb3225f5",
+      "type": "PRODUCES",
+      "metadata": {
+        "description": "eSam publicerar resursen"
+      },
+      "created_at": "2026-02-03T11:04:50.873494"
+    },
+    {
+      "id": "a748dc69-ff51-4019-abae-915d73d2b4fb",
+      "source": "org-esam",
+      "target": "a62576fc-b740-4917-86e1-04a400c5eb7b",
+      "type": "PRODUCES",
+      "metadata": {
+        "description": "eSam publicerar resursen"
+      },
+      "created_at": "2026-02-03T11:04:50.873506"
+    },
+    {
+      "id": "e948e76b-bdf3-40d5-9ac3-485c9a4a2b1d",
+      "source": "org-esam",
+      "target": "1cb58a6b-75f6-4035-b5ea-d55ba8295cec",
+      "type": "PRODUCES",
+      "metadata": {
+        "description": "eSam publicerar resursen"
+      },
+      "created_at": "2026-02-03T11:04:50.873518"
+    },
+    {
+      "id": "2ee61a7c-c10f-48d2-85f6-4b1bbc9c54d3",
+      "source": "org-esam",
+      "target": "21fa148a-9e90-46c6-b1a5-94b8280d2292",
+      "type": "PRODUCES",
+      "metadata": {
+        "description": "eSam publicerar resursen"
+      },
+      "created_at": "2026-02-03T11:04:50.873529"
+    },
+    {
+      "id": "a757b37f-8cd1-4154-b08c-59c8fabcba59",
+      "source": "org-esam",
+      "target": "efd77918-c60c-4dbd-a139-cf6e880d2f1c",
+      "type": "PRODUCES",
+      "metadata": {
+        "description": "eSam publicerar resursen"
+      },
+      "created_at": "2026-02-03T11:04:50.873540"
+    },
+    {
+      "id": "66b8e6ec-b9b4-4f47-968f-c4271d55d324",
+      "source": "org-esam",
+      "target": "d309e65f-b7d6-4b42-bc2a-12fa0b8c992c",
+      "type": "PRODUCES",
+      "metadata": {
+        "description": "eSam publicerar resursen"
+      },
+      "created_at": "2026-02-03T11:14:19.436732"
+    },
+    {
+      "id": "0d6a1ed2-97ba-4e19-b6ec-ebed1fb412c4",
+      "source": "org-esam",
+      "target": "07c1a8c8-b407-4e21-a589-d151bb3225f5",
+      "type": "PRODUCES",
+      "metadata": {
+        "description": "eSam publicerar resursen"
+      },
+      "created_at": "2026-02-03T11:14:19.436745"
+    },
+    {
+      "id": "4248df3e-db09-4130-97a6-1069a2ef8e90",
+      "source": "org-esam",
+      "target": "a62576fc-b740-4917-86e1-04a400c5eb7b",
+      "type": "PRODUCES",
+      "metadata": {
+        "description": "eSam publicerar resursen"
+      },
+      "created_at": "2026-02-03T11:14:19.436753"
+    },
+    {
+      "id": "7ef179aa-752b-4692-9bf4-e9b78db0fe66",
+      "source": "org-esam",
+      "target": "1cb58a6b-75f6-4035-b5ea-d55ba8295cec",
+      "type": "PRODUCES",
+      "metadata": {
+        "description": "eSam publicerar resursen"
+      },
+      "created_at": "2026-02-03T11:14:19.436760"
+    },
+    {
+      "id": "ed33c8f1-9d19-4046-a5a4-c2ed4e1b237e",
+      "source": "org-esam",
+      "target": "efd77918-c60c-4dbd-a139-cf6e880d2f1c",
+      "type": "PRODUCES",
+      "metadata": {
+        "description": "eSam publicerar resursen"
+      },
+      "created_at": "2026-02-03T11:14:19.436766"
+    },
+    {
+      "id": "4b4e8379-1873-4289-9b3c-e5af1ed4239d",
+      "source": "org-esam",
+      "target": "669f8f31-5bab-4e15-9d44-ce4498cbcc46",
+      "type": "PRODUCES",
+      "metadata": {
+        "description": "eSam publicerar resursen"
+      },
+      "created_at": "2026-02-03T11:14:19.436773"
+    },
+    {
+      "id": "6b99ad93-4ede-4a62-b74a-88e776498804",
+      "source": "org-esam",
+      "target": "1b2f8882-e274-436a-9562-3b61fee6e57c",
+      "type": "PRODUCES",
+      "metadata": {
+        "description": "eSam publicerar resursen"
+      },
+      "created_at": "2026-02-03T11:14:19.436779"
+    },
+    {
+      "id": "10db89db-93f7-4084-b66d-297a11bdae56",
+      "source": "org-esam",
+      "target": "abca958c-2a25-41b8-9b0d-73562545f098",
+      "type": "PRODUCES",
+      "metadata": {
+        "description": "eSam publicerar resursen"
+      },
+      "created_at": "2026-02-03T11:14:19.436785"
+    },
+    {
+      "id": "ec268f08-a91a-4f09-b03a-e2d7532905a0",
+      "source": "org-esam",
+      "target": "bc6e30fa-3e50-4a18-915a-f9dd3983d1b3",
+      "type": "PRODUCES",
+      "metadata": {
+        "description": "eSam publicerar resursen"
+      },
+      "created_at": "2026-02-03T11:14:19.436791"
+    },
+    {
+      "id": "fbd63e9f-14d1-4416-bca3-305bca26bc3e",
+      "source": "org-esam",
+      "target": "d7289e2c-084e-41c9-8b42-a23c61b466b1",
+      "type": "PRODUCES",
+      "metadata": {
+        "description": "eSam publicerar resursen"
+      },
+      "created_at": "2026-02-03T11:14:19.436797"
+    },
+    {
+      "id": "38ee8c86-410f-420b-8291-3c7a2ce5fe76",
+      "source": "org-esam",
+      "target": "aaa2a121-8a57-4f88-8f3e-644386be50e6",
+      "type": "PRODUCES",
+      "metadata": {
+        "description": "eSam publicerar resursen"
+      },
+      "created_at": "2026-02-03T11:14:19.436803"
+    },
+    {
+      "id": "ec527f6b-672a-422e-8bf0-4155d8e22ebf",
+      "source": "org-esam",
+      "target": "1b843d65-9d80-426f-b4d6-63165cecb7b3",
+      "type": "PRODUCES",
+      "metadata": {
+        "description": "eSam publicerar resursen"
+      },
+      "created_at": "2026-02-03T11:14:19.436809"
+    },
+    {
+      "id": "264775a0-b711-4ab0-a62a-8bac350ccaf5",
+      "source": "org-esam",
+      "target": "223c76fd-9755-494b-b35d-cdbb561a1a1d",
+      "type": "PRODUCES",
+      "metadata": {
+        "description": "eSam publicerar resursen"
+      },
+      "created_at": "2026-02-03T11:14:19.436815"
+    },
+    {
+      "id": "7dd9c3c4-bc5e-4a4f-b040-1c0be40e226a",
+      "source": "org-esam",
+      "target": "72c45511-af99-4ad0-9cb7-f63214683259",
+      "type": "PRODUCES",
+      "metadata": {
+        "description": "eSam publicerar resursen"
+      },
+      "created_at": "2026-02-03T11:14:19.436821"
+    },
+    {
+      "id": "872b6519-29e5-42bd-b751-968aedeb311a",
+      "source": "org-esam",
+      "target": "34e8f738-1d97-4309-9675-149f277e6bdc",
+      "type": "PRODUCES",
+      "metadata": {
+        "description": "eSam publicerar resursen"
+      },
+      "created_at": "2026-02-03T11:14:19.436827"
+    },
+    {
+      "id": "3fcc3c12-760f-4470-b97c-9fa871397eda",
+      "source": "org-esam",
+      "target": "d1e8d4a7-4be3-48d8-9787-de8d5109cf67",
+      "type": "PRODUCES",
+      "metadata": {
+        "description": "eSam publicerar resursen"
+      },
+      "created_at": "2026-02-03T11:14:19.436833"
+    },
+    {
+      "id": "e09a6c6b-63aa-4f15-830f-47fef5046166",
+      "source": "org-esam",
+      "target": "21e213bd-af97-4eae-b0dd-04c3fe5bc3f8",
+      "type": "PRODUCES",
+      "metadata": {
+        "description": "eSam publicerar resursen"
+      },
+      "created_at": "2026-02-03T11:14:19.436839"
+    },
+    {
+      "id": "fe45cbdc-c2e2-48a8-9381-8a876a5b2976",
+      "source": "org-esam",
+      "target": "c0a9ac34-ae70-4f9b-8a0a-0ea71dbd44ba",
+      "type": "PRODUCES",
+      "metadata": {
+        "description": "eSam publicerar resursen"
+      },
+      "created_at": "2026-02-03T11:14:19.436845"
+    },
+    {
+      "id": "f13f7223-a022-4967-8990-18f3f2ea62ee",
+      "source": "org-esam",
+      "target": "0d727c2e-c397-4827-a92f-a7663f982188",
+      "type": "PRODUCES",
+      "metadata": {
+        "description": "eSam publicerar resursen"
+      },
+      "created_at": "2026-02-03T11:14:19.436850"
+    },
+    {
+      "id": "baf5cbd7-8109-47d3-adeb-64490cfdf664",
+      "source": "org-esam",
+      "target": "06f99c1b-e0c8-4f6b-9244-1818c82e40f3",
+      "type": "PRODUCES",
+      "metadata": {
+        "description": "eSam publicerar resursen"
+      },
+      "created_at": "2026-02-03T11:14:19.436856"
+    },
+    {
+      "id": "7e638cc6-2e16-4ded-8114-14b4564ac884",
+      "source": "org-esam",
+      "target": "54ddd06a-adcb-4432-943c-fd80cd655a8e",
+      "type": "PRODUCES",
+      "metadata": {
+        "description": "eSam publicerar resursen"
+      },
+      "created_at": "2026-02-03T11:14:19.436862"
+    },
+    {
+      "id": "d0b0473d-d818-4bc3-bc65-54a5c7d941bf",
+      "source": "org-esam",
+      "target": "21385adf-9de0-4362-81af-ca8f5da2f92e",
+      "type": "PRODUCES",
+      "metadata": {
+        "description": "eSam publicerar resursen"
+      },
+      "created_at": "2026-02-03T11:14:19.436868"
+    },
+    {
+      "id": "b969de93-2a9c-4182-a64f-dcc2baec8857",
+      "source": "org-esam",
+      "target": "758cdbc9-2098-4bfe-895f-de3583b91d10",
+      "type": "PRODUCES",
+      "metadata": {
+        "description": "eSam publicerar resursen"
+      },
+      "created_at": "2026-02-03T11:14:19.436874"
+    },
+    {
+      "id": "22902c33-604b-476e-9efa-cc94dab91274",
+      "source": "org-esam",
+      "target": "3cc726cb-edaf-4e29-a078-fd2e1c1956fa",
+      "type": "PRODUCES",
+      "metadata": {
+        "description": "eSam publicerar resursen"
+      },
+      "created_at": "2026-02-03T11:14:19.436880"
+    },
+    {
+      "id": "63eee47a-d9c2-473e-ac19-7818838a8d2f",
+      "source": "org-esam",
+      "target": "55d781dd-28a7-4b78-9896-1cdf2d85b8f5",
+      "type": "PRODUCES",
+      "metadata": {},
+      "created_at": "2026-02-03T11:20:52.889207"
+    },
+    {
+      "id": "766f0966-579f-45c0-8366-400fcfc0a793",
+      "source": "org-esam",
+      "target": "5d0a8cef-b9ab-4e62-a863-9555f99bb47c",
+      "type": "PRODUCES",
+      "metadata": {},
+      "created_at": "2026-02-03T11:20:52.889217"
+    },
+    {
+      "id": "48e01e3e-b031-4d32-9a6f-262c198bca72",
+      "source": "org-esam",
+      "target": "3af51572-3373-43c4-9986-8906805130f3",
+      "type": "PRODUCES",
+      "metadata": {},
+      "created_at": "2026-02-03T11:20:52.889227"
+    },
+    {
+      "id": "f56fcd12-d1c9-4546-b2ef-7091aed26303",
+      "source": "org-esam",
+      "target": "82c2623a-9334-4c64-9286-bfd4673ffc04",
+      "type": "PRODUCES",
+      "metadata": {},
+      "created_at": "2026-02-03T11:22:37.130167"
+    },
+    {
+      "id": "9872d860-4177-4cf2-9f53-788893b29286",
+      "source": "org-esam",
+      "target": "b1cd989e-ebf6-40c2-b10e-a5734ca42537",
+      "type": "PRODUCES",
+      "metadata": {},
+      "created_at": "2026-02-03T11:22:37.130178"
+    },
+    {
+      "id": "e945685e-6d1f-401b-b83d-81005921608f",
+      "source": "org-esam",
+      "target": "220b932d-469b-472e-a34d-0c8e79580777",
+      "type": "PRODUCES",
+      "metadata": {},
+      "created_at": "2026-02-03T11:22:37.130188"
+    },
+    {
+      "id": "a4460384-7cba-41e5-9a4f-778f6d9485e1",
+      "source": "org-esam",
+      "target": "75291d27-007c-4237-8b8d-ece60f00a207",
+      "type": "PRODUCES",
+      "metadata": {},
+      "created_at": "2026-02-03T11:22:37.130198"
+    },
+    {
+      "id": "27f20a08-f780-4b87-bef8-0a596ef2896a",
+      "source": "org-esam",
+      "target": "03a30db2-a6ef-48eb-9e8a-c61bd331941f",
+      "type": "PRODUCES",
+      "metadata": {},
+      "created_at": "2026-02-03T11:22:37.130207"
+    },
+    {
+      "id": "5d90b8b4-92ea-4acd-a15c-ec8dc056ba3c",
+      "source": "org-esam",
+      "target": "6b6d65e6-e1bb-4393-955e-c24de59fe46b",
+      "type": "PRODUCES",
+      "metadata": {},
+      "created_at": "2026-02-03T11:22:37.130218"
+    },
+    {
+      "id": "32f09896-a852-4411-8ade-5b407632d2a3",
+      "source": "org-esam",
+      "target": "844f95e6-d8fb-4635-bccd-fa2d364456b9",
+      "type": "PRODUCES",
+      "metadata": {},
+      "created_at": "2026-02-03T11:22:37.130227"
+    },
+    {
+      "id": "7c59052a-6252-4f80-88a8-adbad9eb4d2f",
+      "source": "org-esam",
+      "target": "d4ffac27-3c97-47ab-afef-30c0d1119bd2",
+      "type": "PRODUCES",
+      "metadata": {},
+      "created_at": "2026-02-03T11:22:37.130237"
+    },
+    {
+      "id": "79f07ffd-97d9-4d8f-ad66-99fd66cf0f22",
+      "source": "org-esam",
+      "target": "1da929f8-3481-4716-ab4f-503cea93a1e2",
+      "type": "PRODUCES",
+      "metadata": {},
+      "created_at": "2026-02-03T11:22:37.130247"
+    },
+    {
+      "id": "1f406095-1acd-4bf6-8177-4205431977b5",
+      "source": "org-esam",
+      "target": "4b2babfc-e403-4d8c-a499-65c865c3850d",
+      "type": "PRODUCES",
+      "metadata": {},
+      "created_at": "2026-02-03T11:22:37.130257"
+    },
+    {
+      "id": "a58331e3-293e-4dcf-8499-fa7496a0a655",
+      "source": "org-esam",
+      "target": "0caf4f8e-0a81-437d-9ff3-97080e7c2b42",
+      "type": "PRODUCES",
+      "metadata": {},
+      "created_at": "2026-02-03T11:22:37.130267"
+    },
+    {
+      "id": "e7bc3bae-3418-4543-8afd-dfbf673756c7",
+      "source": "org-esam",
+      "target": "756d6ecd-ae33-49da-bce2-030bb301c43c",
+      "type": "PRODUCES",
+      "metadata": {},
+      "created_at": "2026-02-03T11:22:37.130277"
+    },
+    {
+      "id": "747520a7-daac-4f7b-be0d-58eba11728f1",
+      "source": "org-esam",
+      "target": "32f6f025-1022-4350-a78e-d4ee8e7f7b3f",
+      "type": "PRODUCES",
+      "metadata": {},
+      "created_at": "2026-02-03T11:33:14.926682"
+    },
+    {
+      "id": "10432b22-df9f-4c0f-90f8-34c78fcea711",
+      "source": "org-esam",
+      "target": "07fd5876-4fe4-4632-8d33-b1c295b16ea0",
+      "type": "PRODUCES",
+      "metadata": {},
+      "created_at": "2026-02-03T11:33:14.926698"
+    },
+    {
+      "id": "a90f723e-3f4a-4ee2-9c89-ba0bbe1ae2a0",
+      "source": "org-esam",
+      "target": "3c2fc0f9-5bd4-4244-9e72-f28786be32df",
+      "type": "PRODUCES",
+      "metadata": {},
+      "created_at": "2026-02-03T11:33:14.926710"
+    },
+    {
+      "id": "36f44f78-0d35-4368-b730-d01c386af6ac",
+      "source": "org-esam",
+      "target": "4385d363-354e-4069-9cf5-af508db84017",
+      "type": "PRODUCES",
+      "metadata": {},
+      "created_at": "2026-02-03T11:33:14.926721"
+    },
+    {
+      "id": "e7b8d415-7a12-46b9-a197-c6558b86d74a",
+      "source": "org-esam",
+      "target": "d850e541-bee3-4b0c-9948-5d2478f1c1d5",
+      "type": "PRODUCES",
+      "metadata": {},
+      "created_at": "2026-02-03T11:33:14.926731"
+    },
+    {
+      "id": "b8b7702b-0827-4d07-bc5d-01c0e33d4391",
+      "source": "org-esam",
+      "target": "5a00f9c5-bfc9-41bf-93dd-f0c97c220d1e",
+      "type": "PRODUCES",
+      "metadata": {},
+      "created_at": "2026-02-03T11:33:14.926741"
+    },
+    {
+      "id": "47792a02-e46b-404b-85f3-93f80a5d6f9b",
+      "source": "org-esam",
+      "target": "222520c2-9184-4c54-9364-e7055d28af85",
+      "type": "PRODUCES",
+      "metadata": {},
+      "created_at": "2026-02-03T11:33:14.926751"
+    },
+    {
+      "id": "55a71624-d7c8-4d9f-b303-81cdee52f7a7",
+      "source": "org-esam",
+      "target": "684df3cd-cf56-44f2-9877-d8976aaa500e",
+      "type": "PRODUCES",
+      "metadata": {},
+      "created_at": "2026-02-03T11:33:14.926762"
+    },
+    {
+      "id": "e3a9a7da-25bf-47ac-a0c2-e1f6cb2dc6c7",
+      "source": "org-esam",
+      "target": "9ec8c0ad-a7ef-4c0a-9f22-baceebe89c20",
+      "type": "PRODUCES",
+      "metadata": {},
+      "created_at": "2026-02-03T11:33:14.926772"
+    },
+    {
+      "id": "62826172-df03-47ab-ade2-a4525c8ba7d3",
+      "source": "org-esam",
+      "target": "51c1a56b-e33d-4908-82ec-1ec419f4e676",
+      "type": "PRODUCES",
+      "metadata": {},
+      "created_at": "2026-02-03T11:33:14.926781"
+    },
+    {
+      "id": "abe106e2-50d7-4484-8565-079f91835c99",
+      "source": "org-esam",
+      "target": "549f9005-d43b-49b4-be96-c4311f6f249b",
+      "type": "PRODUCES",
+      "metadata": {},
+      "created_at": "2026-02-03T11:33:14.926791"
+    },
+    {
+      "id": "66244033-4d5d-4566-a066-aac06ba9675c",
+      "source": "org-esam",
+      "target": "59252bc2-5043-4396-835f-6a335a6409ab",
+      "type": "PRODUCES",
+      "metadata": {},
+      "created_at": "2026-02-03T12:27:40.421334"
+    },
+    {
+      "id": "c17d5ae0-5bf0-4bf8-bf37-3bf08c434c45",
+      "source": "org-esam",
+      "target": "4f88bf09-3ec7-4716-8f0e-f7afd83cabe1",
+      "type": "PRODUCES",
+      "metadata": {},
+      "created_at": "2026-02-03T12:27:40.421343"
+    },
+    {
+      "id": "33e75d25-bc36-4261-afc5-f898c195fdbf",
+      "source": "org-esam",
+      "target": "85a73daf-11b4-430f-982d-e4a550e68565",
+      "type": "PRODUCES",
+      "metadata": {},
+      "created_at": "2026-02-03T12:27:40.421353"
+    },
+    {
+      "id": "1f82b8aa-ea51-46b0-a006-adc6ec0395d0",
+      "source": "org-esam",
+      "target": "1b28c8d5-cf4a-440e-8f1b-56d09baa49ee",
+      "type": "PRODUCES",
+      "metadata": {},
+      "created_at": "2026-02-03T12:27:40.421362"
+    },
+    {
+      "id": "69722f3e-b2f7-4073-82ec-043085bb8881",
+      "source": "org-esam",
+      "target": "5c64df38-7a98-415c-9735-cf0ffa402747",
+      "type": "PRODUCES",
+      "metadata": {},
+      "created_at": "2026-02-03T12:27:40.421371"
+    },
+    {
+      "id": "3a1c7a69-ad08-452b-99d3-0c16a051efdd",
+      "source": "org-esam",
+      "target": "060cbc71-fa65-47cb-8993-cc9e72601b87",
+      "type": "PRODUCES",
+      "metadata": {},
+      "created_at": "2026-02-03T12:27:40.421380"
+    },
+    {
+      "id": "9b507049-35b9-4128-8ab8-c26cb1a15cb8",
+      "source": "org-esam",
+      "target": "05f770fe-c0c4-41d6-97e9-eed59a084ebb",
+      "type": "PRODUCES",
+      "metadata": {},
+      "created_at": "2026-02-03T12:27:40.421388"
+    },
+    {
+      "id": "ea330ee8-01bf-4d41-a59e-57afe318c2aa",
+      "source": "org-esam",
+      "target": "1baae5e7-57c6-4dd2-b9ed-0e61059b73af",
+      "type": "PRODUCES",
+      "metadata": {},
+      "created_at": "2026-02-03T12:27:40.421395"
+    },
+    {
+      "id": "0e615bbd-8996-4c30-8c81-635fe8e12340",
+      "source": "org-esam",
+      "target": "cefc6352-5857-459d-92da-a319f449e98f",
+      "type": "PRODUCES",
+      "metadata": {},
+      "created_at": "2026-02-03T12:27:40.421404"
+    },
+    {
+      "id": "50bdacbf-45af-47a2-aff5-db85d1c8936f",
+      "source": "org-esam",
+      "target": "6bd4034a-84e2-4d55-9463-5b40950eaf19",
+      "type": "PRODUCES",
+      "metadata": {},
+      "created_at": "2026-02-03T12:27:40.421412"
+    },
+    {
+      "id": "2a0d1922-472a-4795-83d6-6d39a2154560",
+      "source": "org-esam",
+      "target": "9a7d97f8-186c-47f4-a461-00624067367c",
+      "type": "PRODUCES",
+      "metadata": {},
+      "created_at": "2026-02-03T12:27:40.421420"
+    },
+    {
+      "id": "b58e1fe5-2422-4d14-8e8b-5835c58def65",
+      "source": "org-esam",
+      "target": "9867d36f-2fd7-473a-8dac-bfa75534a393",
+      "type": "PRODUCES",
+      "metadata": {},
+      "created_at": "2026-02-03T12:27:40.421428"
+    },
+    {
+      "id": "cdd5b6e4-220e-46bf-86e4-3fcd7e8d380b",
+      "source": "org-esam",
+      "target": "428d1ae8-3c32-4276-b101-480209a0a4ec",
+      "type": "PRODUCES",
+      "metadata": {},
+      "created_at": "2026-02-03T12:27:40.421436"
+    },
+    {
+      "id": "a6b9cbb8-4b66-41ff-a2c0-f06756fe8a64",
+      "source": "org-esam",
+      "target": "bf22a834-f420-4f45-954e-2055ca702a76",
+      "type": "PRODUCES",
+      "metadata": {
+        "description": "eSam publicerar vägledningen"
+      },
+      "created_at": "2026-02-03T12:32:17.895981"
     }
   ],
   "metadata": {
     "version": "1.0",
-    "last_updated": "2026-01-19T08:22:59.287082"
+    "last_updated": "2026-02-03T12:41:59.613302"
   }
 }

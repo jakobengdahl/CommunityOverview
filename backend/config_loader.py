@@ -78,6 +78,7 @@ class PresentationConfig(BaseModel):
     prompt_prefix: str = ""
     prompt_suffix: str = ""
     default_language: str = "en"
+    widget_url: str = ""  # URL template for the graph widget
 
 
 class SchemaFileConfig(BaseModel):
@@ -257,7 +258,8 @@ def get_presentation() -> Dict[str, Any]:
         "colors": colors,
         "prompt_prefix": pres.prompt_prefix,
         "prompt_suffix": pres.prompt_suffix,
-        "default_language": pres.default_language
+        "default_language": pres.default_language,
+        "widget_url": pres.widget_url
     }
 
 

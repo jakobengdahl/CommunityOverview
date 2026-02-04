@@ -108,6 +108,9 @@ class GraphService:
         Returns:
             Dict with matching nodes, connecting edges, and search metadata
         """
+        # Log search request
+        print(f"SEARCH: query='{query}' types={node_types} communities={communities} limit={limit}")
+
         # Convert node_types to NodeType enum
         type_filters = None
         if node_types:
@@ -119,6 +122,7 @@ class GraphService:
             communities=communities,
             limit=limit
         )
+        print(f"SEARCH: Found {len(results)} results")
 
         # Get node IDs for edge filtering
         result_node_ids = set(node.id for node in results)

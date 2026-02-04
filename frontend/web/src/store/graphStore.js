@@ -81,9 +81,13 @@ const useGraphStore = create((set, get) => ({
   setEdges: (edges) => set({ edges }),
 
   updateVisualization: (nodes, edges, highlightIds = []) => {
+    // Ensure uniqueness for nodes and edges
+    const uniqueNodes = Array.from(new Map(nodes.map(n => [n.id, n])).values());
+    const uniqueEdges = Array.from(new Map(edges.map(e => [e.id, e])).values());
+
     set({
-      nodes,
-      edges,
+      nodes: uniqueNodes,
+      edges: uniqueEdges,
       highlightedNodeIds: highlightIds,
       clearGroupsFlag: true, // Signal to clear groups
     });
@@ -93,16 +97,36 @@ const useGraphStore = create((set, get) => ({
 
   addNodesToVisualization: (newNodes, newEdges = []) => {
     const { nodes, edges } = get();
-    const existingNodeIds = new Set(nodes.map(n => n.id));
-    const existingEdgeIds = new Set(edges.map(e => e.id));
 
-    const filteredNodes = newNodes.filter(n => !existingNodeIds.has(n.id));
-    const filteredEdges = newEdges.filter(e => !existingEdgeIds.has(e.id));
+    // Create maps from existing items for uniqueness check
+    // We use a Map to ensure that if a node comes in that already exists,
+    // we assume the existing one is fine (or we could update it, but here we just dedup).
+    const nodeMap = new Map(nodes.map(n => [n.id, n]));
+    const edgeMap = new Map(edges.map(e => [e.id, e]));
+
+    // Add new items to the map (this handles duplicates within newNodes too)
+    newNodes.forEach(node => {
+      if (!nodeMap.has(node.id)) {
+        nodeMap.set(node.id, node);
+      }
+    });
+
+    newEdges.forEach(edge => {
+      if (!edgeMap.has(edge.id)) {
+        edgeMap.set(edge.id, edge);
+      }
+    });
+
+    // Calculate which IDs are actually new for highlighting
+    const existingNodeIds = new Set(nodes.map(n => n.id));
+    const actuallyNewNodeIds = newNodes
+      .filter(n => !existingNodeIds.has(n.id))
+      .map(n => n.id);
 
     set({
-      nodes: [...nodes, ...filteredNodes],
-      edges: [...edges, ...filteredEdges],
-      highlightedNodeIds: filteredNodes.map(n => n.id),
+      nodes: Array.from(nodeMap.values()),
+      edges: Array.from(edgeMap.values()),
+      highlightedNodeIds: actuallyNewNodeIds,
     });
   },
 

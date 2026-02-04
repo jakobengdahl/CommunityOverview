@@ -186,6 +186,98 @@ function getBoundingBox(nodes) {
  * @param {Array} edges - Array of edges (for considering connections)
  * @returns {Array} New nodes with calculated positions
  */
+import { Position } from 'reactflow';
+
+// Helper to get absolute position of a node (handling nested groups)
+function getAbsolutePosition(node, nodeInternals) {
+  if (!node.parentId || !nodeInternals) {
+    return node.positionAbsolute || node.position;
+  }
+
+  const parent = nodeInternals.get(node.parentId);
+  if (!parent) {
+    return node.positionAbsolute || node.position;
+  }
+
+  const parentPos = getAbsolutePosition(parent, nodeInternals);
+  return {
+    x: (node.position.x || 0) + parentPos.x,
+    y: (node.position.y || 0) + parentPos.y,
+  };
+}
+
+// Helper function to get intersection point between line and rectangle
+function getNodeIntersection(intersectionNode, targetNode, nodeInternals) {
+  const { width: intersectionNodeWidth, height: intersectionNodeHeight } = intersectionNode;
+
+  // Use absolute positions
+  const intersectionNodePosition = getAbsolutePosition(intersectionNode, nodeInternals);
+  const targetPosition = getAbsolutePosition(targetNode, nodeInternals);
+
+  const w = intersectionNodeWidth / 2;
+  const h = intersectionNodeHeight / 2;
+
+  const x2 = intersectionNodePosition.x + w;
+  const y2 = intersectionNodePosition.y + h;
+  const x1 = targetPosition.x + (targetNode.width || NODE_WIDTH) / 2;
+  const y1 = targetPosition.y + (targetNode.height || NODE_HEIGHT) / 2;
+
+  const xx1 = (x1 - x2) / (2 * w) - (y1 - y2) / (2 * h);
+  const yy1 = (x1 - x2) / (2 * w) + (y1 - y2) / (2 * h);
+  const a = 1 / (Math.abs(xx1) + Math.abs(yy1));
+  const xx3 = a * xx1;
+  const yy3 = a * yy1;
+  const x = w * (xx3 + yy3) + x2;
+  const y = h * (-xx3 + yy3) + y2;
+
+  return { x, y };
+}
+
+// Helper to determine Handle position based on intersection
+function getEdgePosition(node, intersectionPoint, nodeInternals) {
+  const absPos = getAbsolutePosition(node, nodeInternals);
+  const n = { ...absPos, ...node };
+  const nx = Math.round(n.x);
+  const ny = Math.round(n.y);
+  const px = Math.round(intersectionPoint.x);
+  const py = Math.round(intersectionPoint.y);
+
+  if (px <= nx + 1) {
+    return Position.Left;
+  }
+  if (px >= nx + (n.width || NODE_WIDTH) - 1) {
+    return Position.Right;
+  }
+  if (py <= ny + 1) {
+    return Position.Top;
+  }
+  if (py >= ny + (n.height || NODE_HEIGHT) - 1) {
+    return Position.Bottom;
+  }
+
+  return Position.Top;
+}
+
+/**
+ * Calculate parameters for floating edge
+ */
+export function getEdgeParams(source, target, nodeInternals) {
+  const sourceIntersectionPoint = getNodeIntersection(source, target, nodeInternals);
+  const targetIntersectionPoint = getNodeIntersection(target, source, nodeInternals);
+
+  const sourcePos = getEdgePosition(source, sourceIntersectionPoint, nodeInternals);
+  const targetPos = getEdgePosition(target, targetIntersectionPoint, nodeInternals);
+
+  return {
+    sx: sourceIntersectionPoint.x,
+    sy: sourceIntersectionPoint.y,
+    tx: targetIntersectionPoint.x,
+    ty: targetIntersectionPoint.y,
+    sourcePos,
+    targetPos,
+  };
+}
+
 export function positionNewNodes(newNodes, existingNodes, edges = []) {
   if (newNodes.length === 0) return newNodes;
 

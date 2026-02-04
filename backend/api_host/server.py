@@ -102,7 +102,27 @@ def create_app(
     app.include_router(ui_router, prefix="/ui")
 
     # Initialize FastMCP and register tools
-    mcp = FastMCP(config.mcp_name)
+    # We add custom instructions to guide the LLM on how to use the tools effectively.
+    instructions = """
+    You are a helpful knowledge agent assisting users with the Community Knowledge Graph.
+
+    SEARCH STRATEGY:
+    - Start with broad search terms (e.g., "AI" instead of "AI projects in Sweden").
+    - If a search yields no results, try broader terms or synonyms.
+    - An empty query or "*" returns a list of nodes (limited by 'limit').
+
+    DATA MANAGEMENT:
+    - ALWAYS check for existing nodes/actors using 'find_similar_nodes' before creating new ones.
+    - Avoid creating generic actor nodes like "Universities" or "Research Institutes". Be specific.
+    - When adding initiatives, try to link them to existing actors and communities.
+
+    VISUALIZATION:
+    - If the user asks to see the graph visually or mentions "widget", "canvas", or "visualize",
+      provide them with the Widget URL (available via 'get_presentation').
+      Normally this URL is: https://{host}/widget/
+    """
+
+    mcp = FastMCP(config.mcp_name, instructions=instructions)
     tools_map = register_mcp_tools(mcp, graph_service)
 
     # Store MCP instance and tools map on app state
@@ -110,33 +130,64 @@ def create_app(
     app.state.tools_map = tools_map
 
     # Mount MCP HTTP endpoint
-    mcp_app = mcp.streamable_http_app()
+    # Use sse_app to provide standard /sse and /messages endpoints
+    mcp_app = mcp.sse_app()
 
     # Add a middleware to handle browser requests to /mcp
     # The MCP endpoint expects MCP protocol requests (GET with Accept: text/event-stream for SSE),
-    # not regular browser GET requests which would hang waiting for SSE
-    @app.middleware("http")
-    async def mcp_browser_handler(request: Request, call_next):
-        if request.url.path.startswith("/mcp"):
-            # Check if this is an MCP client (expects SSE) or a browser
-            accept_header = request.headers.get("accept", "")
+    # not regular browser GET requests which would hang waiting for SSE.
+    # We use a pure ASGI middleware class to avoid BaseHTTPMiddleware limitations with streaming responses.
+    class MCPBrowserHandlerMiddleware:
+        def __init__(self, app):
+            self.app = app
 
-            # If client expects SSE or is POST request, let it through to MCP app
-            if "text/event-stream" in accept_header or request.method == "POST":
-                return await call_next(request)
+        async def __call__(self, scope, receive, send):
+            if scope["type"] != "http":
+                await self.app(scope, receive, send)
+                return
 
-            # For regular browser GET requests, return helpful info
-            if request.method == "GET":
-                return JSONResponse({
-                    "endpoint": "/mcp",
-                    "type": "MCP (Model Context Protocol) Server",
-                    "description": "This endpoint is for MCP clients, not direct browser access.",
-                    "usage": "Use an MCP-compatible client (like Claude Desktop or ChatGPT) to connect to this endpoint.",
-                    "protocol": "MCP uses Server-Sent Events (SSE) for streaming communication.",
-                    "documentation": "https://modelcontextprotocol.io/",
-                    "available_tools": list(tools_map.keys()),
-                })
-        return await call_next(request)
+            path = scope.get("path", "")
+            method = scope.get("method", "GET")
+
+            # Simple request logging for MCP endpoints
+            if path.startswith("/mcp"):
+                import logging
+                # Use a standard logger instead of uvicorn.access to avoid formatting errors
+                # uvicorn.access expects specific args (client, method, path, etc.)
+                logger = logging.getLogger("mcp.server")
+                if not logger.handlers:
+                    logging.basicConfig()
+                logger.info(f"MCP Request: {method} {path}")
+
+            # Only intercept specific paths if needed, here we check startswith /mcp
+            # Note: scope['path'] does not include root_path, but here we assume standard mounting
+            if path.startswith("/mcp"):
+                headers = dict(scope.get("headers", []))
+                # Headers are bytes
+                accept_header = headers.get(b"accept", b"").decode("utf-8", errors="ignore")
+
+                # If client expects SSE or is POST request, let it through to MCP app
+                if "text/event-stream" in accept_header or method == "POST":
+                    await self.app(scope, receive, send)
+                    return
+
+                # For regular browser GET requests, return helpful info
+                if method == "GET":
+                    response = JSONResponse({
+                        "endpoint": "/mcp/sse",
+                        "type": "MCP (Model Context Protocol) Server",
+                        "description": "This endpoint is for MCP clients, not direct browser access.",
+                        "usage": "Use an MCP-compatible client (like Claude Desktop or ChatGPT) to connect to this endpoint: /mcp/sse",
+                        "protocol": "MCP uses Server-Sent Events (SSE) for streaming communication.",
+                        "documentation": "https://modelcontextprotocol.io/",
+                        "available_tools": list(tools_map.keys()),
+                    })
+                    await response(scope, receive, send)
+                    return
+
+            await self.app(scope, receive, send)
+
+    app.add_middleware(MCPBrowserHandlerMiddleware)
 
     app.mount("/mcp", mcp_app)
 
