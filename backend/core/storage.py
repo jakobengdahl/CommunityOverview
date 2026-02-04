@@ -547,3 +547,27 @@ class GraphStorage:
             edge for edge in self.edges.values()
             if edge.source == node_id or edge.target == node_id
         ]
+
+    def get_incident_edges(self, node_ids: List[str]) -> List[Edge]:
+        """
+        Get all edges connected to any of the given nodes (incoming or outgoing).
+        More efficient than iterating through all edges.
+        """
+        collected_edges = {}
+
+        for node_id in node_ids:
+            if node_id not in self.nodes:
+                continue
+
+            if node_id in self.graph:
+                # Outgoing edges
+                for _, _, _, edge_data in self.graph.out_edges(node_id, keys=True, data=True):
+                    edge = edge_data['data']
+                    collected_edges[edge.id] = edge
+
+                # Incoming edges
+                for _, _, _, edge_data in self.graph.in_edges(node_id, keys=True, data=True):
+                    edge = edge_data['data']
+                    collected_edges[edge.id] = edge
+
+        return list(collected_edges.values())

@@ -396,3 +396,36 @@ class TestGraphStorageEdgeHelpers:
 
         # init-1 has 3 edges: edge-1, edge-2 (incoming) and edge-3 (outgoing)
         assert len(edges) == 3
+
+class TestGraphStorageIncidentEdges:
+    """Tests for get_incident_edges"""
+
+    def test_get_incident_edges(self, storage_with_data):
+        """Test getting edges for a list of nodes"""
+        # actor-1 has edge-1 (outgoing)
+        # init-1 has edge-1 (incoming), edge-2 (incoming), edge-3 (outgoing)
+        edges = storage_with_data.get_incident_edges(["actor-1", "init-1"])
+
+        edge_ids = sorted([e.id for e in edges])
+        # Should include edge-1, edge-2, edge-3
+        # edge-1 connects actor-1 and init-1 (internal to the set) - should appear once
+        # edge-2 connects actor-2 -> init-1 (incoming to set)
+        # edge-3 connects init-1 -> community-1 (outgoing from set)
+
+        assert len(edges) == 3
+        assert "edge-1" in edge_ids
+        assert "edge-2" in edge_ids
+        assert "edge-3" in edge_ids
+
+    def test_get_incident_edges_no_edges(self, temp_storage):
+        """Test with node having no edges"""
+        node = Node(type=NodeType.ACTOR, name="Lonely Node")
+        temp_storage.add_nodes([node], [])
+
+        edges = temp_storage.get_incident_edges([node.id])
+        assert len(edges) == 0
+
+    def test_get_incident_edges_nonexistent_node(self, storage_with_data):
+        """Test with non-existent node"""
+        edges = storage_with_data.get_incident_edges(["nonexistent"])
+        assert len(edges) == 0
