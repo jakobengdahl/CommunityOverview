@@ -128,10 +128,7 @@ class GraphService:
         result_node_ids = set(node.id for node in results)
 
         # Find edges connecting these nodes (either endpoint in results)
-        connecting_edges = [
-            edge for edge in self._storage.edges.values()
-            if edge.source in result_node_ids or edge.target in result_node_ids
-        ]
+        connecting_edges = self._storage.get_incident_edges(list(result_node_ids))
 
         result = {
             "nodes": serialize_nodes(results),
