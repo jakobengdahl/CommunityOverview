@@ -188,10 +188,31 @@ function getBoundingBox(nodes) {
  */
 import { Position } from 'reactflow';
 
+// Helper to get absolute position of a node (handling nested groups)
+function getAbsolutePosition(node, nodeInternals) {
+  if (!node.parentId || !nodeInternals) {
+    return node.positionAbsolute || node.position;
+  }
+
+  const parent = nodeInternals.get(node.parentId);
+  if (!parent) {
+    return node.positionAbsolute || node.position;
+  }
+
+  const parentPos = getAbsolutePosition(parent, nodeInternals);
+  return {
+    x: (node.position.x || 0) + parentPos.x,
+    y: (node.position.y || 0) + parentPos.y,
+  };
+}
+
 // Helper function to get intersection point between line and rectangle
-function getNodeIntersection(intersectionNode, targetNode) {
-  const { width: intersectionNodeWidth, height: intersectionNodeHeight, position: intersectionNodePosition } = intersectionNode;
-  const targetPosition = targetNode.position;
+function getNodeIntersection(intersectionNode, targetNode, nodeInternals) {
+  const { width: intersectionNodeWidth, height: intersectionNodeHeight } = intersectionNode;
+
+  // Use absolute positions
+  const intersectionNodePosition = getAbsolutePosition(intersectionNode, nodeInternals);
+  const targetPosition = getAbsolutePosition(targetNode, nodeInternals);
 
   const w = intersectionNodeWidth / 2;
   const h = intersectionNodeHeight / 2;
@@ -213,8 +234,9 @@ function getNodeIntersection(intersectionNode, targetNode) {
 }
 
 // Helper to determine Handle position based on intersection
-function getEdgePosition(node, intersectionPoint) {
-  const n = { ...node.position, ...node };
+function getEdgePosition(node, intersectionPoint, nodeInternals) {
+  const absPos = getAbsolutePosition(node, nodeInternals);
+  const n = { ...absPos, ...node };
   const nx = Math.round(n.x);
   const ny = Math.round(n.y);
   const px = Math.round(intersectionPoint.x);
@@ -239,12 +261,12 @@ function getEdgePosition(node, intersectionPoint) {
 /**
  * Calculate parameters for floating edge
  */
-export function getEdgeParams(source, target) {
-  const sourceIntersectionPoint = getNodeIntersection(source, target);
-  const targetIntersectionPoint = getNodeIntersection(target, source);
+export function getEdgeParams(source, target, nodeInternals) {
+  const sourceIntersectionPoint = getNodeIntersection(source, target, nodeInternals);
+  const targetIntersectionPoint = getNodeIntersection(target, source, nodeInternals);
 
-  const sourcePos = getEdgePosition(source, sourceIntersectionPoint);
-  const targetPos = getEdgePosition(target, targetIntersectionPoint);
+  const sourcePos = getEdgePosition(source, sourceIntersectionPoint, nodeInternals);
+  const targetPos = getEdgePosition(target, targetIntersectionPoint, nodeInternals);
 
   return {
     sx: sourceIntersectionPoint.x,

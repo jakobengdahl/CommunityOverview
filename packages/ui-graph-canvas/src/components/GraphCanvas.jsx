@@ -393,6 +393,7 @@ function GraphCanvasInner({
             defaultEdgeOptions={{ animated: true, style: { strokeWidth: 2 } }}
             panOnDrag={[0, 2]}
             selectionOnDrag={false}
+            onMoveStart={closeAllMenus}
           >
             <Background color="#333" gap={16} />
             <Controls />

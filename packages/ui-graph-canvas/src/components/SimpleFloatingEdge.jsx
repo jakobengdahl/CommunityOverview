@@ -9,12 +9,13 @@ import { getEdgeParams } from '../utils/graphLayout';
 function SimpleFloatingEdge({ id, source, target, markerEnd, style }) {
   const sourceNode = useStore(useCallback((store) => store.nodeInternals.get(source), [source]));
   const targetNode = useStore(useCallback((store) => store.nodeInternals.get(target), [target]));
+  const nodeInternals = useStore(useCallback((store) => store.nodeInternals, []));
 
   if (!sourceNode || !targetNode) {
     return null;
   }
 
-  const { sx, sy, tx, ty, sourcePos, targetPos } = getEdgeParams(sourceNode, targetNode);
+  const { sx, sy, tx, ty, sourcePos, targetPos } = getEdgeParams(sourceNode, targetNode, nodeInternals);
 
   const [edgePath] = getBezierPath({
     sourceX: sx,
