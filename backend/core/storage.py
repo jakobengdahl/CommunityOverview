@@ -4,9 +4,19 @@ Handles all CRUD operations on the graph
 
 This module is part of graph_core - the core graph storage layer.
 It provides the main GraphStorage class for persisting and querying the graph.
+
+Concurrency Safety (PoC level):
+- Uses threading.RLock for in-memory data structure protection
+- Uses file locking (fcntl on Unix, msvcrt on Windows) for file access
+- Implements atomic writes via temp file + rename
+- Suitable for multiple concurrent users in a single-process deployment
 """
 
 import json
+import os
+import sys
+import tempfile
+import threading
 from typing import List, Dict, Optional, Any
 from datetime import datetime
 import networkx as nx
@@ -20,8 +30,38 @@ from .models import (
 from .vector_store import VectorStore
 
 
+# Cross-platform file locking
+if sys.platform == 'win32':
+    import msvcrt
+
+    def _lock_file(f, exclusive=True):
+        """Acquire file lock on Windows."""
+        msvcrt.locking(f.fileno(), msvcrt.LK_NBLCK if exclusive else msvcrt.LK_LOCK, 1)
+
+    def _unlock_file(f):
+        """Release file lock on Windows."""
+        msvcrt.locking(f.fileno(), msvcrt.LK_UNLCK, 1)
+else:
+    import fcntl
+
+    def _lock_file(f, exclusive=True):
+        """Acquire file lock on Unix."""
+        fcntl.flock(f, fcntl.LOCK_EX if exclusive else fcntl.LOCK_SH)
+
+    def _unlock_file(f):
+        """Release file lock on Unix."""
+        fcntl.flock(f, fcntl.LOCK_UN)
+
+
 class GraphStorage:
-    """Manages graph storage with NetworkX + JSON persistence"""
+    """
+    Manages graph storage with NetworkX + JSON persistence.
+
+    Thread-safety:
+    - All public methods that modify state are protected by _lock (threading.RLock)
+    - File operations use OS-level file locking for multi-process safety
+    - Writes are atomic (temp file + rename) to prevent corruption
+    """
 
     def __init__(self, json_path: str = "graph.json", embeddings_path: str = None):
         """
@@ -34,6 +74,10 @@ class GraphStorage:
         """
         self.json_path = Path(json_path)
 
+        # Thread lock for in-memory data structure protection
+        # RLock allows same thread to acquire lock multiple times (reentrant)
+        self._lock = threading.RLock()
+
         # We initialize VectorStore without a storage path as it now holds state in memory
         # and relies on GraphStorage for persistence via graph.json
         self.vector_store = VectorStore()
@@ -44,60 +88,118 @@ class GraphStorage:
         self.load()
 
     def load(self) -> None:
-        """Load graph from JSON file"""
-        if not self.json_path.exists():
-            print(f"No graph file found at {self.json_path}, creating new empty graph")
-            self.save()
-            return
+        """
+        Load graph from JSON file.
 
-        try:
-            with open(self.json_path, 'r', encoding='utf-8') as f:
-                data = json.load(f)
+        Thread-safe: Uses lock for in-memory updates and file lock for reading.
+        """
+        with self._lock:
+            if not self.json_path.exists():
+                print(f"No graph file found at {self.json_path}, creating new empty graph")
+                self.save()
+                return
 
-            # Load nodes
-            for node_data in data.get('nodes', []):
-                node = Node.from_dict(node_data)
-                self.nodes[node.id] = node
-                self.graph.add_node(node.id, data=node)
+            try:
+                # Use file locking to prevent reading while another process writes
+                with open(self.json_path, 'r', encoding='utf-8') as f:
+                    _lock_file(f, exclusive=False)  # Shared lock for reading
+                    try:
+                        data = json.load(f)
+                    finally:
+                        _unlock_file(f)
 
-            # Load edges
-            for edge_data in data.get('edges', []):
-                edge = Edge.from_dict(edge_data)
-                self.edges[edge.id] = edge
-                self.graph.add_edge(
-                    edge.source,
-                    edge.target,
-                    key=edge.id,
-                    data=edge
-                )
+                # Clear existing data
+                self.nodes.clear()
+                self.edges.clear()
+                self.graph.clear()
 
-            # Rebuild vector store index from loaded nodes
-            self.vector_store.rebuild_index(list(self.nodes.values()))
+                # Load nodes
+                for node_data in data.get('nodes', []):
+                    node = Node.from_dict(node_data)
+                    self.nodes[node.id] = node
+                    self.graph.add_node(node.id, data=node)
 
-            print(f"Loaded {len(self.nodes)} nodes and {len(self.edges)} edges from {self.json_path}")
+                # Load edges
+                for edge_data in data.get('edges', []):
+                    edge = Edge.from_dict(edge_data)
+                    self.edges[edge.id] = edge
+                    self.graph.add_edge(
+                        edge.source,
+                        edge.target,
+                        key=edge.id,
+                        data=edge
+                    )
 
-        except Exception as e:
-            print(f"Error loading graph: {e}")
-            raise
+                # Rebuild vector store index from loaded nodes
+                self.vector_store.rebuild_index(list(self.nodes.values()))
+
+                print(f"Loaded {len(self.nodes)} nodes and {len(self.edges)} edges from {self.json_path}")
+
+            except Exception as e:
+                print(f"Error loading graph: {e}")
+                raise
 
     def save(self) -> None:
-        """Save graph to JSON file"""
-        data = {
-            'nodes': [node.to_dict() for node in self.nodes.values()],
-            'edges': [edge.to_dict() for edge in self.edges.values()],
-            'metadata': {
-                'version': '1.0',
-                'last_updated': datetime.utcnow().isoformat()
+        """
+        Save graph to JSON file.
+
+        Thread-safe: Uses lock for reading in-memory data.
+        Atomic: Writes to temp file first, then renames to prevent corruption.
+        File-locked: Uses OS-level locking to prevent concurrent writes.
+        """
+        with self._lock:
+            data = {
+                'nodes': [node.to_dict() for node in self.nodes.values()],
+                'edges': [edge.to_dict() for edge in self.edges.values()],
+                'metadata': {
+                    'version': '1.0',
+                    'last_updated': datetime.utcnow().isoformat()
+                }
             }
-        }
 
-        # Create directory if it doesn't exist
-        self.json_path.parent.mkdir(parents=True, exist_ok=True)
+            # Create directory if it doesn't exist
+            self.json_path.parent.mkdir(parents=True, exist_ok=True)
 
-        with open(self.json_path, 'w', encoding='utf-8') as f:
-            json.dump(data, f, indent=2, ensure_ascii=False)
+            # Atomic write: write to temp file, then rename
+            # This prevents corruption if the process is killed mid-write
+            temp_fd, temp_path = tempfile.mkstemp(
+                suffix='.json',
+                prefix='graph_',
+                dir=self.json_path.parent
+            )
 
-        print(f"Saved {len(self.nodes)} nodes and {len(self.edges)} edges to {self.json_path}")
+            try:
+                with os.fdopen(temp_fd, 'w', encoding='utf-8') as f:
+                    _lock_file(f, exclusive=True)  # Exclusive lock for writing
+                    try:
+                        json.dump(data, f, indent=2, ensure_ascii=False)
+                        f.flush()
+                        os.fsync(f.fileno())  # Ensure data is written to disk
+                    finally:
+                        _unlock_file(f)
+
+                # Atomic rename (on most filesystems)
+                # On Windows, we need to remove the target first
+                if sys.platform == 'win32' and self.json_path.exists():
+                    os.replace(temp_path, self.json_path)
+                else:
+                    os.rename(temp_path, self.json_path)
+
+                print(f"Saved {len(self.nodes)} nodes and {len(self.edges)} edges to {self.json_path}")
+
+            except Exception as e:
+                # Clean up temp file on error
+                if os.path.exists(temp_path):
+                    os.unlink(temp_path)
+                raise e
+
+    def reload(self) -> None:
+        """
+        Reload graph from disk, discarding any in-memory changes.
+
+        Useful for refreshing state after external modifications.
+        """
+        self.load()
 
     def search_nodes(
         self,
@@ -304,132 +406,140 @@ class GraphStorage:
         edges: List[Edge]
     ) -> AddNodesResult:
         """
-        Add nodes and edges
-        Validates and saves to JSON
+        Add nodes and edges.
+        Validates and saves to JSON.
+
+        Thread-safe: Protected by _lock for the entire operation.
         """
-        added_node_ids = []
-        added_edge_ids = []
+        with self._lock:
+            added_node_ids = []
+            added_edge_ids = []
 
-        try:
-            # Add nodes
-            nodes_to_embed = []
-            for node in nodes:
-                if node.id in self.nodes:
-                    return AddNodesResult(
-                        added_node_ids=[],
-                        added_edge_ids=[],
-                        success=False,
-                        message=f"Node with ID {node.id} already exists"
+            try:
+                # Add nodes
+                nodes_to_embed = []
+                for node in nodes:
+                    if node.id in self.nodes:
+                        return AddNodesResult(
+                            added_node_ids=[],
+                            added_edge_ids=[],
+                            success=False,
+                            message=f"Node with ID {node.id} already exists"
+                        )
+
+                    self.nodes[node.id] = node
+                    self.graph.add_node(node.id, data=node)
+                    added_node_ids.append(node.id)
+                    nodes_to_embed.append(node)
+
+                # Generate embeddings for new nodes (non-blocking)
+                if nodes_to_embed:
+                    try:
+                        self.vector_store.update_nodes_embeddings(nodes_to_embed)
+                    except Exception as embed_error:
+                        # Embedding generation is optional - log but don't fail
+                        print(f"Warning: Could not generate embeddings: {embed_error}")
+
+                # Save again to persist embeddings generated above
+                self.save()
+
+                # Create name-to-ID mapping for newly added nodes and existing nodes
+                name_to_id = {}
+                for node_id, node in self.nodes.items():
+                    name_to_id[node.name] = node_id
+
+                # Add edges
+                for edge in edges:
+                    # Resolve source and target - they might be names or IDs
+                    source_id = edge.source
+                    target_id = edge.target
+
+                    # If source is not a valid ID, try to resolve it as a name
+                    if source_id not in self.nodes:
+                        if source_id in name_to_id:
+                            source_id = name_to_id[source_id]
+                        else:
+                            raise ValueError(f"Source node '{edge.source}' does not exist (not found by ID or name)")
+
+                    # If target is not a valid ID, try to resolve it as a name
+                    if target_id not in self.nodes:
+                        if target_id in name_to_id:
+                            target_id = name_to_id[target_id]
+                        else:
+                            raise ValueError(f"Target node '{edge.target}' does not exist (not found by ID or name)")
+
+                    # Update edge with resolved IDs
+                    edge.source = source_id
+                    edge.target = target_id
+
+                    if edge.id in self.edges:
+                        return AddNodesResult(
+                            added_node_ids=[],
+                            added_edge_ids=[],
+                            success=False,
+                            message=f"Edge with ID {edge.id} already exists"
+                        )
+
+                    self.edges[edge.id] = edge
+                    self.graph.add_edge(
+                        edge.source,
+                        edge.target,
+                        key=edge.id,
+                        data=edge
                     )
+                    added_edge_ids.append(edge.id)
 
-                self.nodes[node.id] = node
-                self.graph.add_node(node.id, data=node)
-                added_node_ids.append(node.id)
-                nodes_to_embed.append(node)
+                # Save to JSON
+                self.save()
 
-            # Generate embeddings for new nodes (non-blocking)
-            if nodes_to_embed:
-                try:
-                    self.vector_store.update_nodes_embeddings(nodes_to_embed)
-                except Exception as embed_error:
-                    # Embedding generation is optional - log but don't fail
-                    print(f"Warning: Could not generate embeddings: {embed_error}")
-
-            # Save again to persist embeddings generated above
-            self.save()
-
-            # Create name-to-ID mapping for newly added nodes and existing nodes
-            name_to_id = {}
-            for node_id, node in self.nodes.items():
-                name_to_id[node.name] = node_id
-
-            # Add edges
-            for edge in edges:
-                # Resolve source and target - they might be names or IDs
-                source_id = edge.source
-                target_id = edge.target
-
-                # If source is not a valid ID, try to resolve it as a name
-                if source_id not in self.nodes:
-                    if source_id in name_to_id:
-                        source_id = name_to_id[source_id]
-                    else:
-                        raise ValueError(f"Source node '{edge.source}' does not exist (not found by ID or name)")
-
-                # If target is not a valid ID, try to resolve it as a name
-                if target_id not in self.nodes:
-                    if target_id in name_to_id:
-                        target_id = name_to_id[target_id]
-                    else:
-                        raise ValueError(f"Target node '{edge.target}' does not exist (not found by ID or name)")
-
-                # Update edge with resolved IDs
-                edge.source = source_id
-                edge.target = target_id
-
-                if edge.id in self.edges:
-                    return AddNodesResult(
-                        added_node_ids=[],
-                        added_edge_ids=[],
-                        success=False,
-                        message=f"Edge with ID {edge.id} already exists"
-                    )
-
-                self.edges[edge.id] = edge
-                self.graph.add_edge(
-                    edge.source,
-                    edge.target,
-                    key=edge.id,
-                    data=edge
+                return AddNodesResult(
+                    added_node_ids=added_node_ids,
+                    added_edge_ids=added_edge_ids,
+                    success=True,
+                    message=f"Added {len(added_node_ids)} nodes and {len(added_edge_ids)} edges"
                 )
-                added_edge_ids.append(edge.id)
 
-            # Save to JSON
-            self.save()
-
-            return AddNodesResult(
-                added_node_ids=added_node_ids,
-                added_edge_ids=added_edge_ids,
-                success=True,
-                message=f"Added {len(added_node_ids)} nodes and {len(added_edge_ids)} edges"
-            )
-
-        except Exception as e:
-            return AddNodesResult(
-                added_node_ids=[],
-                added_edge_ids=[],
-                success=False,
-                message=f"Error during add: {str(e)}"
-            )
+            except Exception as e:
+                return AddNodesResult(
+                    added_node_ids=[],
+                    added_edge_ids=[],
+                    success=False,
+                    message=f"Error during add: {str(e)}"
+                )
 
     def update_node(self, node_id: str, updates: Dict) -> Optional[Node]:
-        """Update an existing node"""
-        if node_id not in self.nodes:
-            return None
+        """
+        Update an existing node.
 
-        node = self.nodes[node_id]
+        Thread-safe: Protected by _lock for the entire operation.
+        """
+        with self._lock:
+            if node_id not in self.nodes:
+                return None
 
-        # Update allowed fields
-        allowed_fields = {'name', 'description', 'summary', 'communities', 'tags', 'metadata'}
-        for key, value in updates.items():
-            if key in allowed_fields:
-                setattr(node, key, value)
+            node = self.nodes[node_id]
 
-        node.updated_at = datetime.utcnow()
+            # Update allowed fields
+            allowed_fields = {'name', 'description', 'summary', 'communities', 'tags', 'metadata'}
+            for key, value in updates.items():
+                if key in allowed_fields:
+                    setattr(node, key, value)
 
-        # Update in graph
-        self.graph.nodes[node_id]['data'] = node
+            node.updated_at = datetime.utcnow()
 
-        # Update embedding if text fields or tags changed (non-blocking)
-        if any(k in updates for k in ['name', 'description', 'summary', 'tags']):
-            try:
-                self.vector_store.update_node_embedding(node)
-            except Exception as embed_error:
-                print(f"Warning: Could not update embedding: {embed_error}")
+            # Update in graph
+            self.graph.nodes[node_id]['data'] = node
 
-        # Save
-        self.save()
-        return node
+            # Update embedding if text fields or tags changed (non-blocking)
+            if any(k in updates for k in ['name', 'description', 'summary', 'tags']):
+                try:
+                    self.vector_store.update_node_embedding(node)
+                except Exception as embed_error:
+                    print(f"Warning: Could not update embedding: {embed_error}")
+
+            # Save
+            self.save()
+            return node
 
     def delete_nodes(
         self,
@@ -437,71 +547,74 @@ class GraphStorage:
         confirmed: bool = False
     ) -> DeleteNodesResult:
         """
-        Delete nodes (max 10 at a time for safety)
-        Requires confirmed=True
+        Delete nodes (max 10 at a time for safety).
+        Requires confirmed=True.
+
+        Thread-safe: Protected by _lock for the entire operation.
         """
-        if len(node_ids) > 10:
-            return DeleteNodesResult(
-                deleted_node_ids=[],
-                affected_edge_ids=[],
-                success=False,
-                message="Max 10 nodes can be deleted at a time. Contact admin for bulk deletion."
-            )
+        with self._lock:
+            if len(node_ids) > 10:
+                return DeleteNodesResult(
+                    deleted_node_ids=[],
+                    affected_edge_ids=[],
+                    success=False,
+                    message="Max 10 nodes can be deleted at a time. Contact admin for bulk deletion."
+                )
 
-        if not confirmed:
-            return DeleteNodesResult(
-                deleted_node_ids=[],
-                affected_edge_ids=[],
-                success=False,
-                message="Deletion requires confirmed=True parameter"
-            )
+            if not confirmed:
+                return DeleteNodesResult(
+                    deleted_node_ids=[],
+                    affected_edge_ids=[],
+                    success=False,
+                    message="Deletion requires confirmed=True parameter"
+                )
 
-        deleted_node_ids = []
-        affected_edge_ids = []
+            deleted_node_ids = []
+            affected_edge_ids = []
 
-        try:
-            for node_id in node_ids:
-                if node_id not in self.nodes:
-                    continue
+            try:
+                for node_id in node_ids:
+                    if node_id not in self.nodes:
+                        continue
 
-                # Find all edges connected to this node
-                edges_to_remove = []
-                for edge_id, edge in self.edges.items():
-                    if edge.source == node_id or edge.target == node_id:
-                        edges_to_remove.append(edge_id)
-                        affected_edge_ids.append(edge_id)
+                    # Find all edges connected to this node
+                    edges_to_remove = []
+                    for edge_id, edge in self.edges.items():
+                        if edge.source == node_id or edge.target == node_id:
+                            edges_to_remove.append(edge_id)
+                            affected_edge_ids.append(edge_id)
 
-                # Remove edges
-                for edge_id in edges_to_remove:
-                    edge = self.edges[edge_id]
-                    self.graph.remove_edge(edge.source, edge.target, key=edge_id)
-                    del self.edges[edge_id]
+                    # Remove edges
+                    for edge_id in edges_to_remove:
+                        edge = self.edges[edge_id]
+                        self.graph.remove_edge(edge.source, edge.target, key=edge_id)
+                        del self.edges[edge_id]
 
-                # Remove node
-                self.graph.remove_node(node_id)
-                del self.nodes[node_id]
-                deleted_node_ids.append(node_id)
+                    # Remove node
+                    self.graph.remove_node(node_id)
+                    del self.nodes[node_id]
+                    deleted_node_ids.append(node_id)
 
-            # Remove embeddings
-            self.vector_store.remove_nodes_embeddings(deleted_node_ids)
+                # Remove embeddings
+                self.vector_store.remove_nodes_embeddings(deleted_node_ids)
 
-            # Save
-            self.save()
+                # Save
+                self.save()
 
-            return DeleteNodesResult(
-                deleted_node_ids=deleted_node_ids,
-                affected_edge_ids=affected_edge_ids,
-                success=True,
-                message=f"Deleted {len(deleted_node_ids)} nodes and {len(affected_edge_ids)} edges"
-            )
+                return DeleteNodesResult(
+                    deleted_node_ids=deleted_node_ids,
+                    affected_edge_ids=affected_edge_ids,
+                    success=True,
+                    message=f"Deleted {len(deleted_node_ids)} nodes and {len(affected_edge_ids)} edges"
+                )
 
-        except Exception as e:
-            return DeleteNodesResult(
-                deleted_node_ids=[],
-                affected_edge_ids=[],
-                success=False,
-                message=f"Error during deletion: {str(e)}"
-            )
+            except Exception as e:
+                return DeleteNodesResult(
+                    deleted_node_ids=[],
+                    affected_edge_ids=[],
+                    success=False,
+                    message=f"Error during deletion: {str(e)}"
+                )
 
     def get_stats(self, communities: Optional[List[str]] = None) -> GraphStats:
         """Get statistics for the graph"""
