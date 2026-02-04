@@ -34,8 +34,11 @@ def serialize_to_json(data: Any) -> Any:
 
 
 def serialize_node(node: Node) -> Dict[str, Any]:
-    """Serialize a Node to a dictionary."""
-    return serialize_to_json(node.model_dump())
+    """
+    Serialize a Node to a dictionary.
+    Excludes large internal fields like 'embedding'.
+    """
+    return serialize_to_json(node.model_dump(exclude={'embedding'}))
 
 
 def serialize_edge(edge: Edge) -> Dict[str, Any]:
