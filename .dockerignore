@@ -1,0 +1,98 @@
+# =============================================================================
+# Docker Build Context Exclusions
+# =============================================================================
+# This file specifies files and directories that should NOT be sent to the
+# Docker daemon during build. This speeds up builds and reduces image size.
+# =============================================================================
+
+# === Version Control ===
+.git
+.gitignore
+.gitattributes
+
+# === Dependencies (will be installed fresh in container) ===
+node_modules
+**/node_modules
+__pycache__
+**/__pycache__
+*.pyc
+*.pyo
+*.pyd
+.Python
+pip-log.txt
+pip-delete-this-directory.txt
+.venv
+venv
+ENV
+
+# === Build artifacts ===
+# Frontend build output (rebuilt in container)
+frontend/web/dist
+frontend/widget/dist
+*.egg-info
+dist
+build
+*.egg
+
+# === IDE and Editor ===
+.idea
+.vscode
+*.swp
+*.swo
+*~
+.project
+.settings
+
+# === Testing ===
+.pytest_cache
+.coverage
+htmlcov
+.tox
+.nox
+
+# === Documentation (not needed in runtime) ===
+docs
+*.md
+!README.md
+
+# === Local Development ===
+.env
+.env.local
+.env.*.local
+*.log
+logs
+
+# === OS Files ===
+.DS_Store
+Thumbs.db
+
+# === Docker ===
+Dockerfile*
+docker-compose*.yml
+.docker
+
+# === CI/CD ===
+.github
+.gitlab-ci.yml
+.circleci
+Jenkinsfile
+
+# === Temporary files ===
+tmp
+temp
+*.tmp
+*.temp
+
+# === Data files (mounted as volume) ===
+data
+*.json
+!package.json
+!package-lock.json
+!tsconfig.json
+!config/*.json
+
+# === Large files that shouldn't be in build context ===
+*.pkl
+*.pickle
+*.sqlite
+*.db

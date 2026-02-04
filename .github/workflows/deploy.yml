@@ -1,0 +1,168 @@
+# =============================================================================
+# Deployment Pipeline - Deploy to Cloud Platforms
+# =============================================================================
+# This workflow deploys the application to various cloud platforms.
+# Enable the platform(s) you want to use by uncommenting and configuring secrets.
+#
+# Required secrets per platform:
+# - Google Cloud Run: GCP_PROJECT_ID, GCP_SA_KEY, GCP_REGION
+# - DigitalOcean: DIGITALOCEAN_ACCESS_TOKEN
+# - Fly.io: FLY_API_TOKEN
+# - Railway: RAILWAY_TOKEN
+# =============================================================================
+
+name: Deploy
+
+on:
+  workflow_run:
+    workflows: [CI]
+    types: [completed]
+    branches: [main]
+  workflow_dispatch:
+    inputs:
+      environment:
+        description: 'Environment to deploy to'
+        required: true
+        default: 'production'
+        type: choice
+        options:
+          - production
+          - staging
+
+env:
+  REGISTRY: ghcr.io
+  IMAGE_NAME: ${{ github.repository }}
+
+jobs:
+  # ---------------------------------------------------------------------------
+  # Google Cloud Run Deployment
+  # ---------------------------------------------------------------------------
+  # Uncomment to enable. Required secrets:
+  # - GCP_PROJECT_ID: Your Google Cloud project ID
+  # - GCP_SA_KEY: Service account JSON key (base64 encoded)
+  # - GCP_REGION: Region (e.g., europe-north1)
+  # ---------------------------------------------------------------------------
+  # deploy-cloudrun:
+  #   name: Deploy to Cloud Run
+  #   runs-on: ubuntu-latest
+  #   if: ${{ github.event.workflow_run.conclusion == 'success' }}
+  #
+  #   steps:
+  #     - name: Authenticate to Google Cloud
+  #       uses: google-github-actions/auth@v2
+  #       with:
+  #         credentials_json: ${{ secrets.GCP_SA_KEY }}
+  #
+  #     - name: Set up Cloud SDK
+  #       uses: google-github-actions/setup-gcloud@v2
+  #
+  #     - name: Deploy to Cloud Run
+  #       run: |
+  #         gcloud run deploy communityoverview \
+  #           --image ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:latest \
+  #           --platform managed \
+  #           --region ${{ secrets.GCP_REGION }} \
+  #           --allow-unauthenticated \
+  #           --port 8000 \
+  #           --memory 2Gi \
+  #           --cpu 1 \
+  #           --set-env-vars "AUTH_ENABLED=true" \
+  #           --set-secrets "ANTHROPIC_API_KEY=anthropic-api-key:latest,AUTH_PASSWORD=auth-password:latest"
+  #
+  #     - name: Output URL
+  #       run: |
+  #         URL=$(gcloud run services describe communityoverview --region ${{ secrets.GCP_REGION }} --format 'value(status.url)')
+  #         echo "## Deployed to Cloud Run" >> $GITHUB_STEP_SUMMARY
+  #         echo "URL: $URL" >> $GITHUB_STEP_SUMMARY
+
+  # ---------------------------------------------------------------------------
+  # DigitalOcean App Platform Deployment
+  # ---------------------------------------------------------------------------
+  # Uncomment to enable. Required secrets:
+  # - DIGITALOCEAN_ACCESS_TOKEN: DigitalOcean API token
+  # - DIGITALOCEAN_APP_ID: App Platform app ID (create app first)
+  # ---------------------------------------------------------------------------
+  # deploy-digitalocean:
+  #   name: Deploy to DigitalOcean
+  #   runs-on: ubuntu-latest
+  #   if: ${{ github.event.workflow_run.conclusion == 'success' }}
+  #
+  #   steps:
+  #     - name: Install doctl
+  #       uses: digitalocean/action-doctl@v2
+  #       with:
+  #         token: ${{ secrets.DIGITALOCEAN_ACCESS_TOKEN }}
+  #
+  #     - name: Deploy to App Platform
+  #       run: |
+  #         doctl apps create-deployment ${{ secrets.DIGITALOCEAN_APP_ID }}
+
+  # ---------------------------------------------------------------------------
+  # Fly.io Deployment
+  # ---------------------------------------------------------------------------
+  # Uncomment to enable. Required secrets:
+  # - FLY_API_TOKEN: Fly.io API token
+  # ---------------------------------------------------------------------------
+  # deploy-flyio:
+  #   name: Deploy to Fly.io
+  #   runs-on: ubuntu-latest
+  #   if: ${{ github.event.workflow_run.conclusion == 'success' }}
+  #
+  #   steps:
+  #     - name: Checkout code
+  #       uses: actions/checkout@v4
+  #
+  #     - name: Setup Fly.io CLI
+  #       uses: superfly/flyctl-actions/setup-flyctl@master
+  #
+  #     - name: Deploy to Fly.io
+  #       run: flyctl deploy --remote-only
+  #       env:
+  #         FLY_API_TOKEN: ${{ secrets.FLY_API_TOKEN }}
+
+  # ---------------------------------------------------------------------------
+  # Railway Deployment
+  # ---------------------------------------------------------------------------
+  # Uncomment to enable. Required secrets:
+  # - RAILWAY_TOKEN: Railway API token
+  # ---------------------------------------------------------------------------
+  # deploy-railway:
+  #   name: Deploy to Railway
+  #   runs-on: ubuntu-latest
+  #   if: ${{ github.event.workflow_run.conclusion == 'success' }}
+  #
+  #   steps:
+  #     - name: Checkout code
+  #       uses: actions/checkout@v4
+  #
+  #     - name: Install Railway CLI
+  #       run: npm install -g @railway/cli
+  #
+  #     - name: Deploy to Railway
+  #       run: railway up --detach
+  #       env:
+  #         RAILWAY_TOKEN: ${{ secrets.RAILWAY_TOKEN }}
+
+  # ---------------------------------------------------------------------------
+  # Placeholder job (remove when enabling a real deployment)
+  # ---------------------------------------------------------------------------
+  placeholder:
+    name: Deployment Placeholder
+    runs-on: ubuntu-latest
+    if: ${{ github.event.workflow_run.conclusion == 'success' }}
+    steps:
+      - name: Info
+        run: |
+          echo "## Deployment Pipeline" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "No deployment targets configured." >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "To enable deployment, edit .github/workflows/deploy.yml and:" >> $GITHUB_STEP_SUMMARY
+          echo "1. Uncomment one or more deployment jobs" >> $GITHUB_STEP_SUMMARY
+          echo "2. Add required secrets to your repository" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "**Available targets:**" >> $GITHUB_STEP_SUMMARY
+          echo "- Google Cloud Run" >> $GITHUB_STEP_SUMMARY
+          echo "- DigitalOcean App Platform" >> $GITHUB_STEP_SUMMARY
+          echo "- Fly.io" >> $GITHUB_STEP_SUMMARY
+          echo "- Railway" >> $GITHUB_STEP_SUMMARY
