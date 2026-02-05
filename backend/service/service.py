@@ -112,10 +112,10 @@ class GraphService:
         # Log search request
         print(f"SEARCH: query='{query}' types={node_types} communities={communities} limit={limit}")
 
-        # Convert node_types to NodeType enum
+        # Convert node_types to NodeType enum or keep as string for dynamic types
         type_filters = None
         if node_types:
-            type_filters = [NodeType(t) for t in node_types]
+            type_filters = [NodeType.from_string(t) for t in node_types]
 
         results = self._storage.search_nodes(
             query=query,
@@ -231,7 +231,7 @@ class GraphService:
         Returns:
             Dict with similar nodes and similarity scores
         """
-        type_filter = NodeType(node_type) if node_type else None
+        type_filter = NodeType.from_string(node_type) if node_type else None
 
         similar = self._storage.find_similar_nodes(
             name=name,
@@ -267,7 +267,7 @@ class GraphService:
         Returns:
             Dict with results for each name
         """
-        type_filter = NodeType(node_type) if node_type else None
+        type_filter = NodeType.from_string(node_type) if node_type else None
 
         results = self._storage.find_similar_nodes_batch(
             names=names,

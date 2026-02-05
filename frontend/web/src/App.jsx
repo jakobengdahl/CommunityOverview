@@ -198,25 +198,55 @@ function App() {
   // Save subscription node
   const handleSaveSubscription = useCallback(async (subscriptionNode) => {
     try {
-      await api.addNodes([subscriptionNode], []);
+      const result = await api.addNodes([subscriptionNode], []);
+      console.log('Subscription created:', result);
+
+      // Add the created node to the visualization
+      if (result.added_node_ids && result.added_node_ids.length > 0) {
+        const nodeId = result.added_node_ids[0];
+        const nodeWithId = { ...subscriptionNode, id: nodeId };
+        addNodesToVisualization([nodeWithId], []);
+        console.log('Subscription added to visualization:', nodeId);
+      }
+
       showNotification('success', `Prenumeration "${subscriptionNode.name}" skapad`);
     } catch (error) {
       console.error('Error creating subscription:', error);
       showNotification('error', 'Kunde inte skapa prenumeration');
     }
-  }, [showNotification]);
+  }, [addNodesToVisualization, showNotification]);
 
   // Save agent nodes (agent + subscription + edge)
   const handleSaveAgent = useCallback(async ({ nodes: agentNodes, edges: agentEdges }) => {
     try {
-      await api.addNodes(agentNodes, agentEdges);
+      const result = await api.addNodes(agentNodes, agentEdges);
+      console.log('Agent created:', result);
+
+      // Add the created nodes to the visualization
+      if (result.added_node_ids && result.added_node_ids.length > 0) {
+        // Map the returned IDs to the nodes
+        const nodesWithIds = agentNodes.map((node, index) => ({
+          ...node,
+          id: result.added_node_ids[index] || node.id,
+        }));
+        // Map edge IDs
+        const edgesWithIds = agentEdges.map((edge, index) => ({
+          ...edge,
+          id: result.added_edge_ids?.[index] || edge.id,
+          source: result.added_node_ids[agentNodes.findIndex(n => n.type === 'Agent')] || edge.source,
+          target: result.added_node_ids[agentNodes.findIndex(n => n.type === 'EventSubscription')] || edge.target,
+        }));
+        addNodesToVisualization(nodesWithIds, edgesWithIds);
+        console.log('Agent and subscription added to visualization:', result.added_node_ids);
+      }
+
       const agentNode = agentNodes.find(n => n.type === 'Agent');
       showNotification('success', `Agent "${agentNode?.name || 'Agent'}" skapad`);
     } catch (error) {
       console.error('Error creating agent:', error);
       showNotification('error', 'Kunde inte skapa agent');
     }
-  }, [showNotification]);
+  }, [addNodesToVisualization, showNotification]);
 
   // Handle node update from edit dialog
   const handleNodeUpdate = useCallback(async (nodeId, updates) => {
