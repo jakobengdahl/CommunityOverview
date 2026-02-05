@@ -169,7 +169,9 @@ def register_mcp_tools(mcp, service: GraphService) -> Dict[str, Callable]:
     @register_tool
     def add_nodes(
         nodes: List[Dict[str, Any]],
-        edges: List[Dict[str, Any]]
+        edges: List[Dict[str, Any]],
+        event_session_id: Optional[str] = None,
+        event_correlation_id: Optional[str] = None,
     ) -> Dict[str, Any]:
         """
         Add new nodes and edges to the graph
@@ -177,30 +179,53 @@ def register_mcp_tools(mcp, service: GraphService) -> Dict[str, Callable]:
         Args:
             nodes: List of node objects to add
             edges: List of edge objects to add
+            event_session_id: Optional session ID for webhook loop prevention
+            event_correlation_id: Optional correlation ID for chaining events
 
         Returns:
             Dict with result (added_node_ids, added_edge_ids, success, message)
         """
-        return service.add_nodes(nodes=nodes, edges=edges)
+        return service.add_nodes(
+            nodes=nodes,
+            edges=edges,
+            event_origin="mcp",
+            event_session_id=event_session_id,
+            event_correlation_id=event_correlation_id,
+        )
 
     @register_tool
-    def update_node(node_id: str, updates: Dict[str, Any]) -> Dict[str, Any]:
+    def update_node(
+        node_id: str,
+        updates: Dict[str, Any],
+        event_session_id: Optional[str] = None,
+        event_correlation_id: Optional[str] = None,
+    ) -> Dict[str, Any]:
         """
         Update an existing node
 
         Args:
             node_id: ID of the node to update
             updates: Dict with fields to update (name, description, summary, communities, metadata)
+            event_session_id: Optional session ID for webhook loop prevention
+            event_correlation_id: Optional correlation ID for chaining events
 
         Returns:
             Dict with updated node or error
         """
-        return service.update_node(node_id, updates)
+        return service.update_node(
+            node_id,
+            updates,
+            event_origin="mcp",
+            event_session_id=event_session_id,
+            event_correlation_id=event_correlation_id,
+        )
 
     @register_tool
     def delete_nodes(
         node_ids: List[str],
-        confirmed: bool = False
+        confirmed: bool = False,
+        event_session_id: Optional[str] = None,
+        event_correlation_id: Optional[str] = None,
     ) -> Dict[str, Any]:
         """
         Delete nodes from the graph (max 10 at a time)
@@ -210,11 +235,19 @@ def register_mcp_tools(mcp, service: GraphService) -> Dict[str, Callable]:
         Args:
             node_ids: List of node IDs to delete
             confirmed: Must be True to execute deletion
+            event_session_id: Optional session ID for webhook loop prevention
+            event_correlation_id: Optional correlation ID for chaining events
 
         Returns:
             Dict with result (deleted_node_ids, affected_edge_ids, success, message)
         """
-        return service.delete_nodes(node_ids=node_ids, confirmed=confirmed)
+        return service.delete_nodes(
+            node_ids=node_ids,
+            confirmed=confirmed,
+            event_origin="mcp",
+            event_session_id=event_session_id,
+            event_correlation_id=event_correlation_id,
+        )
 
     # ==================== Statistics & Metadata Tools ====================
 

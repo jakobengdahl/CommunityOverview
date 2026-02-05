@@ -10,6 +10,11 @@ Concurrency Safety (PoC level):
 - Uses file locking (fcntl on Unix, msvcrt on Windows) for file access
 - Implements atomic writes via temp file + rename
 - Suitable for multiple concurrent users in a single-process deployment
+
+Event System:
+- Mutations emit events that can be delivered to webhooks
+- EventSubscription nodes in the graph define webhook targets
+- Event context (origin, session_id) enables loop prevention
 """
 
 import json
@@ -17,7 +22,7 @@ import os
 import sys
 import tempfile
 import threading
-from typing import List, Dict, Optional, Any
+from typing import List, Dict, Optional, Any, TYPE_CHECKING
 from datetime import datetime
 import networkx as nx
 from pathlib import Path
@@ -28,6 +33,15 @@ from .models import (
     SimilarNode, GraphStats, AddNodesResult, DeleteNodesResult
 )
 from .vector_store import VectorStore
+
+# Event system imports
+from .events.models import (
+    Event, EventType, EntityKind, EventContext, EntityData
+)
+
+if TYPE_CHECKING:
+    from .events.dispatcher import EventDispatcher
+    from .events.delivery import DeliveryWorker
 
 
 # Cross-platform file locking
@@ -85,7 +99,115 @@ class GraphStorage:
         self.graph = nx.MultiDiGraph()  # MultiDiGraph allows multiple edges between same nodes
         self.nodes: Dict[str, Node] = {}  # node_id -> Node
         self.edges: Dict[str, Edge] = {}  # edge_id -> Edge
+
+        # Event system (initialized lazily via setup_events())
+        self._event_dispatcher: Optional["EventDispatcher"] = None
+        self._delivery_worker: Optional["DeliveryWorker"] = None
+        self._events_enabled = False
+
         self.load()
+
+    def setup_events(
+        self,
+        enabled: bool = True,
+        max_attempts: int = 3,
+        backoff_times: Optional[List[float]] = None,
+    ) -> None:
+        """
+        Initialize the event system for webhook delivery.
+
+        This must be called after the graph is loaded to enable event delivery.
+        Events are dispatched to EventSubscription nodes in the graph.
+
+        Args:
+            enabled: Whether to enable event delivery
+            max_attempts: Maximum delivery attempts per event
+            backoff_times: Wait times between retries (seconds)
+        """
+        if not enabled:
+            self._events_enabled = False
+            return
+
+        # Import here to avoid circular imports
+        from .events.dispatcher import EventDispatcher
+        from .events.delivery import DeliveryWorker
+
+        # Create delivery worker
+        self._delivery_worker = DeliveryWorker(
+            max_attempts=max_attempts,
+            backoff_times=backoff_times,
+        )
+        self._delivery_worker.start()
+
+        # Create dispatcher with delivery callback
+        self._event_dispatcher = EventDispatcher(
+            storage=self,
+            on_deliver=self._delivery_worker.enqueue,
+        )
+
+        self._events_enabled = True
+        print(f"Event system initialized with max_attempts={max_attempts}")
+
+    def shutdown_events(self) -> None:
+        """Shutdown the event system gracefully."""
+        if self._delivery_worker:
+            self._delivery_worker.stop(wait=True)
+            self._delivery_worker = None
+
+        self._event_dispatcher = None
+        self._events_enabled = False
+
+    def _emit_event(
+        self,
+        event_type: EventType,
+        entity_kind: EntityKind,
+        entity_id: str,
+        entity_type: str,
+        before: Optional[Dict[str, Any]] = None,
+        after: Optional[Dict[str, Any]] = None,
+        context: Optional[EventContext] = None,
+    ) -> None:
+        """
+        Emit a graph mutation event.
+
+        Args:
+            event_type: Type of event (create, update, delete)
+            entity_kind: Node or edge
+            entity_id: ID of the entity
+            entity_type: Type of the entity (node type or relationship type)
+            before: Entity state before mutation (for updates/deletes)
+            after: Entity state after mutation (for creates/updates)
+            context: Event context for tracking and loop prevention
+        """
+        if not self._events_enabled or not self._event_dispatcher:
+            return
+
+        # Build patch for updates
+        patch = None
+        if before and after and event_type == EventType.NODE_UPDATE:
+            patch = {}
+            for key in after:
+                if key not in before or before.get(key) != after.get(key):
+                    patch[key] = after[key]
+
+        event = Event(
+            event_type=event_type,
+            origin=context or EventContext(),
+            entity=EntityData(
+                kind=entity_kind,
+                id=entity_id,
+                type=entity_type,
+                before=before,
+                after=after,
+                patch=patch,
+            ),
+        )
+
+        # Dispatch asynchronously (non-blocking)
+        try:
+            self._event_dispatcher.dispatch(event)
+        except Exception as e:
+            print(f"Warning: Failed to dispatch event: {e}")
 
     def load(self) -> None:
         """
@@ -403,13 +525,19 @@ class GraphStorage:
     def add_nodes(
         self,
         nodes: List[Node],
-        edges: List[Edge]
+        edges: List[Edge],
+        event_context: Optional[EventContext] = None,
     ) -> AddNodesResult:
         """
         Add nodes and edges.
         Validates and saves to JSON.
 
         Thread-safe: Protected by _lock for the entire operation.
+
+        Args:
+            nodes: List of nodes to add
+            edges: List of edges to add
+            event_context: Optional context for event tracking and loop prevention
         """
         with self._lock:
             added_node_ids = []
@@ -492,6 +620,36 @@ class GraphStorage:
                 # Save to JSON
                 self.save()
 
+                # Emit events for added nodes
+                for node_id in added_node_ids:
+                    node = self.nodes.get(node_id)
+                    if node:
+                        node_type = node.type.value if hasattr(node.type, 'value') else str(node.type)
+                        self._emit_event(
+                            event_type=EventType.NODE_CREATE,
+                            entity_kind=EntityKind.NODE,
+                            entity_id=node_id,
+                            entity_type=node_type,
+                            before=None,
+                            after=node.to_dict(),
+                            context=event_context,
+                        )
+
+                # Emit events for added edges
+                for edge_id in added_edge_ids:
+                    edge = self.edges.get(edge_id)
+                    if edge:
+                        edge_type = edge.type.value if hasattr(edge.type, 'value') else str(edge.type)
+                        self._emit_event(
+                            event_type=EventType.EDGE_CREATE,
+                            entity_kind=EntityKind.EDGE,
+                            entity_id=edge_id,
+                            entity_type=edge_type,
+                            before=None,
+                            after=edge.to_dict(),
+                            context=event_context,
+                        )
+
                 return AddNodesResult(
                     added_node_ids=added_node_ids,
                     added_edge_ids=added_edge_ids,
@@ -507,17 +665,30 @@ class GraphStorage:
                     message=f"Error during add: {str(e)}"
                 )
 
-    def update_node(self, node_id: str, updates: Dict) -> Optional[Node]:
+    def update_node(
+        self,
+        node_id: str,
+        updates: Dict,
+        event_context: Optional[EventContext] = None,
+    ) -> Optional[Node]:
         """
         Update an existing node.
 
         Thread-safe: Protected by _lock for the entire operation.
+
+        Args:
+            node_id: ID of the node to update
+            updates: Dict with fields to update
+            event_context: Optional context for event tracking and loop prevention
         """
         with self._lock:
             if node_id not in self.nodes:
                 return None
 
             node = self.nodes[node_id]
+
+            # Capture before state for events
+            before_state = node.to_dict()
 
             # Update allowed fields
             allowed_fields = {'name', 'description', 'summary', 'communities', 'tags', 'metadata'}
@@ -539,18 +710,37 @@ class GraphStorage:
 
             # Save
             self.save()
+
+            # Emit update event
+            node_type = node.type.value if hasattr(node.type, 'value') else str(node.type)
+            self._emit_event(
+                event_type=EventType.NODE_UPDATE,
+                entity_kind=EntityKind.NODE,
+                entity_id=node_id,
+                entity_type=node_type,
+                before=before_state,
+                after=node.to_dict(),
+                context=event_context,
+            )
+
             return node
 
     def delete_nodes(
         self,
         node_ids: List[str],
-        confirmed: bool = False
+        confirmed: bool = False,
+        event_context: Optional[EventContext] = None,
     ) -> DeleteNodesResult:
         """
         Delete nodes (max 10 at a time for safety).
         Requires confirmed=True.
 
         Thread-safe: Protected by _lock for the entire operation.
+
+        Args:
+            node_ids: List of node IDs to delete
+            confirmed: Must be True to execute deletion
+            event_context: Optional context for event tracking and loop prevention
         """
         with self._lock:
             if len(node_ids) > 10:
@@ -572,10 +762,18 @@ class GraphStorage:
             deleted_node_ids = []
             affected_edge_ids = []
 
+            # Capture before states for events
+            node_before_states: Dict[str, Dict[str, Any]] = {}
+            edge_before_states: Dict[str, Dict[str, Any]] = {}
+
             try:
                 for node_id in node_ids:
                     if node_id not in self.nodes:
                         continue
+
+                    # Capture node before state
+                    node = self.nodes[node_id]
+                    node_before_states[node_id] = node.to_dict()
 
                     # Find all edges connected to this node
                     edges_to_remove = []
@@ -583,6 +781,9 @@ class GraphStorage:
                         if edge.source == node_id or edge.target == node_id:
                             edges_to_remove.append(edge_id)
                             affected_edge_ids.append(edge_id)
+                            # Capture edge before state
+                            if edge_id not in edge_before_states:
+                                edge_before_states[edge_id] = edge.to_dict()
 
                     # Remove edges
                     for edge_id in edges_to_remove:
@@ -600,6 +801,32 @@ class GraphStorage:
 
                 # Save
                 self.save()
+
+                # Emit delete events for edges (before nodes, to maintain referential integrity info)
+                for edge_id, before_state in edge_before_states.items():
+                    edge_type = before_state.get("type", "RELATES_TO")
+                    self._emit_event(
+                        event_type=EventType.EDGE_DELETE,
+                        entity_kind=EntityKind.EDGE,
+                        entity_id=edge_id,
+                        entity_type=edge_type,
+                        before=before_state,
+                        after=None,
+                        context=event_context,
+                    )
+
+                # Emit delete events for nodes
+                for node_id, before_state in node_before_states.items():
+                    node_type = before_state.get("type", "Unknown")
+                    self._emit_event(
+                        event_type=EventType.NODE_DELETE,
+                        entity_kind=EntityKind.NODE,
+                        entity_id=node_id,
+                        entity_type=node_type,
+                        before=before_state,
+                        after=None,
+                        context=event_context,
+                    )
 
                 return DeleteNodesResult(
                     deleted_node_ids=deleted_node_ids,

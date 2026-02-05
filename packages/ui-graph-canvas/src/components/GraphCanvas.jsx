@@ -39,6 +39,8 @@ import './GraphCanvas.css';
  * @param {Function} props.onNodePositionChange - Called when node positions change
  * @param {string} props.layoutType - Force specific layout: 'dagre', 'grid', 'circular', or null for auto
  * @param {boolean} props.clearGroupsFlag - Signal to clear groups when true
+ * @param {Function} props.onCreateSubscription - Called when creating an EventSubscription
+ * @param {Function} props.onCreateAgent - Called when creating an Agent
  */
 function GraphCanvasInner({
   nodes: inputNodes = [],
@@ -56,6 +58,8 @@ function GraphCanvasInner({
   onSaveView,
   onNodePositionChange,
   layoutType = null,
+  onCreateSubscription,
+  onCreateAgent,
 }) {
   const [loadedNodeCount, setLoadedNodeCount] = useState(INITIAL_LOAD_COUNT);
   const [contextMenu, setContextMenu] = useState(null);
@@ -449,6 +453,19 @@ function GraphCanvasInner({
         >
           <button onClick={handleAddGroup}>📁 Lägg till grupp</button>
           {onSaveView && <button onClick={handleSaveView}>💾 Spara vy</button>}
+          <div className="context-menu-separator"></div>
+          {onCreateSubscription && (
+            <button onClick={() => {
+              onCreateSubscription();
+              setContextMenu(null);
+            }}>🔔 Skapa webhook-prenumeration</button>
+          )}
+          {onCreateAgent && (
+            <button onClick={() => {
+              onCreateAgent();
+              setContextMenu(null);
+            }}>🤖 Skapa agent</button>
+          )}
         </div>
       )}
 

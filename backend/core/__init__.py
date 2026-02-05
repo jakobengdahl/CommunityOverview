@@ -8,6 +8,7 @@ Main components:
 - GraphStorage: Main class for persisting and querying the graph
 - VectorStore: Manages embeddings for semantic search
 - Models: Data models for nodes, edges, and result types
+- Events: Event system for graph mutation webhooks
 
 Usage:
     from backend.core import GraphStorage, Node, Edge, NodeType, RelationshipType
@@ -15,12 +16,17 @@ Usage:
     # Initialize storage
     storage = GraphStorage("path/to/graph.json")
 
+    # Enable event system for webhooks
+    storage.setup_events(enabled=True)
+
     # Search nodes
     results = storage.search_nodes("query text")
 
-    # Add nodes
+    # Add nodes with event context
+    from backend.core import EventContext
+    ctx = EventContext(event_origin="web-ui", event_session_id="abc123")
     node = Node(type=NodeType.ACTOR, name="Test Actor")
-    result = storage.add_nodes([node], [])
+    result = storage.add_nodes([node], [], event_context=ctx)
 """
 
 # Core storage
@@ -56,6 +62,9 @@ from .models import (
     DeleteNodesResult,
 )
 
+# Event system
+from .events import EventContext, EventOrigin
+
 __all__ = [
     # Core storage
     "GraphStorage",
@@ -84,6 +93,10 @@ __all__ = [
     "ProposedNodesResult",
     "AddNodesResult",
     "DeleteNodesResult",
+
+    # Event system
+    "EventContext",
+    "EventOrigin",
 ]
 
 __version__ = "1.0.0"

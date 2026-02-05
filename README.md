@@ -72,6 +72,8 @@ LLM_PROVIDERS.md                  # LLM configuration guide
 - **Legislation** (red) - NIS2, GDPR, etc.
 - **Theme** (teal) - AI, data strategies
 - **VisualizationView** (gray) - Predefined views
+- **EventSubscription** (violet) - Webhook subscriptions for graph mutation events
+- **Agent** (pink) - AI agent configurations (runtime not implemented)
 
 ### Relationships
 - BELONGS_TO, IMPLEMENTS, PRODUCES, GOVERNED_BY, RELATES_TO, PART_OF
@@ -197,6 +199,17 @@ The widget provides:
 - Graph visualization
 - Chat interface
 - MCP tool execution
+
+## Event Subscriptions & Webhooks
+
+The system supports webhook notifications for graph mutations:
+
+- **EventSubscription nodes** define webhook targets and filters
+- **Events** are generated when nodes are created, updated, or deleted
+- **Loop prevention** via `event_origin` and `event_session_id` tracking
+- **Retry logic** with exponential backoff for failed deliveries
+
+Create subscriptions via the web UI (right-click on canvas) or API. See [docs/EVENT_SUBSCRIPTIONS.md](./docs/EVENT_SUBSCRIPTIONS.md) for detailed documentation.
 
 ## Security
 

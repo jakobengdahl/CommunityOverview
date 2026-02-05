@@ -7,6 +7,8 @@ import EditNodeDialog from './components/EditNodeDialog';
 import ConfirmDialog from './components/ConfirmDialog';
 import InputDialog from './components/InputDialog';
 import ChatPanel from './components/ChatPanel';
+import CreateSubscriptionDialog from './components/CreateSubscriptionDialog';
+import CreateAgentDialog from './components/CreateAgentDialog';
 import * as api from './services/api';
 import './App.css';
 
@@ -33,6 +35,8 @@ function App() {
   const [notification, setNotification] = useState(null);
   const [deleteDialog, setDeleteDialog] = useState(null); // { nodeId, nodeName } or { nodeIds, nodeNames, isMultiple }
   const [saveViewDialog, setSaveViewDialog] = useState(null); // { viewData }
+  const [showSubscriptionDialog, setShowSubscriptionDialog] = useState(false);
+  const [showAgentDialog, setShowAgentDialog] = useState(false);
 
   // Load schema, presentation, and stats on startup
   useEffect(() => {
@@ -181,6 +185,39 @@ function App() {
     }
   }, [saveViewDialog, showNotification]);
 
+  // Callback: Create subscription
+  const handleCreateSubscription = useCallback(() => {
+    setShowSubscriptionDialog(true);
+  }, []);
+
+  // Callback: Create agent
+  const handleCreateAgent = useCallback(() => {
+    setShowAgentDialog(true);
+  }, []);
+
+  // Save subscription node
+  const handleSaveSubscription = useCallback(async (subscriptionNode) => {
+    try {
+      await api.addNodes([subscriptionNode], []);
+      showNotification('success', `Prenumeration "${subscriptionNode.name}" skapad`);
+    } catch (error) {
+      console.error('Error creating subscription:', error);
+      showNotification('error', 'Kunde inte skapa prenumeration');
+    }
+  }, [showNotification]);
+
+  // Save agent nodes (agent + subscription + edge)
+  const handleSaveAgent = useCallback(async ({ nodes: agentNodes, edges: agentEdges }) => {
+    try {
+      await api.addNodes(agentNodes, agentEdges);
+      const agentNode = agentNodes.find(n => n.type === 'Agent');
+      showNotification('success', `Agent "${agentNode?.name || 'Agent'}" skapad`);
+    } catch (error) {
+      console.error('Error creating agent:', error);
+      showNotification('error', 'Kunde inte skapa agent');
+    }
+  }, [showNotification]);
+
   // Handle node update from edit dialog
   const handleNodeUpdate = useCallback(async (nodeId, updates) => {
     try {
@@ -225,6 +262,8 @@ function App() {
             onHideMultiple={handleHideMultiple}
             onCreateGroup={handleCreateGroup}
             onSaveView={handleSaveView}
+            onCreateSubscription={handleCreateSubscription}
+            onCreateAgent={handleCreateAgent}
           />
         </main>
       </div>
@@ -270,6 +309,20 @@ function App() {
           <span>{notification.message}</span>
           <button onClick={() => setNotification(null)}>×</button>
         </div>
+      )}
+
+      {showSubscriptionDialog && (
+        <CreateSubscriptionDialog
+          onClose={() => setShowSubscriptionDialog(false)}
+          onSave={handleSaveSubscription}
+        />
+      )}
+
+      {showAgentDialog && (
+        <CreateAgentDialog
+          onClose={() => setShowAgentDialog(false)}
+          onSave={handleSaveAgent}
+        />
       )}
     </div>
   );

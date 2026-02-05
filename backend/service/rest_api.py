@@ -61,17 +61,29 @@ class AddNodesRequest(BaseModel):
     """Request model for adding nodes."""
     nodes: List[Dict[str, Any]] = Field(..., description="Nodes to add")
     edges: List[Dict[str, Any]] = Field(default_factory=list, description="Edges to add")
+    # Event context (optional, for webhooks/loop prevention)
+    event_origin: Optional[str] = Field(None, description="Source of mutation (web-ui, mcp, system, agent:<id>)")
+    event_session_id: Optional[str] = Field(None, description="Session ID for loop prevention")
+    event_correlation_id: Optional[str] = Field(None, description="Correlation ID for chaining events")
 
 
 class UpdateNodeRequest(BaseModel):
     """Request model for updating a node."""
     updates: Dict[str, Any] = Field(..., description="Fields to update")
+    # Event context (optional, for webhooks/loop prevention)
+    event_origin: Optional[str] = Field(None, description="Source of mutation (web-ui, mcp, system, agent:<id>)")
+    event_session_id: Optional[str] = Field(None, description="Session ID for loop prevention")
+    event_correlation_id: Optional[str] = Field(None, description="Correlation ID for chaining events")
 
 
 class DeleteNodesRequest(BaseModel):
     """Request model for deleting nodes."""
     node_ids: List[str] = Field(..., max_length=10, description="Node IDs to delete (max 10)")
     confirmed: bool = Field(False, description="Confirmation flag")
+    # Event context (optional, for webhooks/loop prevention)
+    event_origin: Optional[str] = Field(None, description="Source of mutation (web-ui, mcp, system, agent:<id>)")
+    event_session_id: Optional[str] = Field(None, description="Session ID for loop prevention")
+    event_correlation_id: Optional[str] = Field(None, description="Correlation ID for chaining events")
 
 
 class SaveViewRequest(BaseModel):
@@ -156,7 +168,10 @@ def create_rest_router(service: GraphService, prefix: str = "") -> APIRouter:
         """Add new nodes and edges to the graph."""
         result = service.add_nodes(
             nodes=request.nodes,
-            edges=request.edges
+            edges=request.edges,
+            event_origin=request.event_origin,
+            event_session_id=request.event_session_id,
+            event_correlation_id=request.event_correlation_id,
         )
         if not result.get("success", True):
             raise HTTPException(status_code=400, detail=result.get("message"))
@@ -165,7 +180,13 @@ def create_rest_router(service: GraphService, prefix: str = "") -> APIRouter:
     @router.patch("/nodes/{node_id}")
     async def update_node(node_id: str, request: UpdateNodeRequest) -> Dict[str, Any]:
         """Update an existing node."""
-        result = service.update_node(node_id, request.updates)
+        result = service.update_node(
+            node_id,
+            request.updates,
+            event_origin=request.event_origin,
+            event_session_id=request.event_session_id,
+            event_correlation_id=request.event_correlation_id,
+        )
         if not result.get("success", True):
             raise HTTPException(status_code=404, detail=result.get("error"))
         return result
@@ -175,7 +196,10 @@ def create_rest_router(service: GraphService, prefix: str = "") -> APIRouter:
         """Delete nodes from the graph (max 10 at a time)."""
         result = service.delete_nodes(
             node_ids=request.node_ids,
-            confirmed=request.confirmed
+            confirmed=request.confirmed,
+            event_origin=request.event_origin,
+            event_session_id=request.event_session_id,
+            event_correlation_id=request.event_correlation_id,
         )
         if not result.get("success", True):
             raise HTTPException(status_code=400, detail=result.get("message"))

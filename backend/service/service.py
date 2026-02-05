@@ -18,7 +18,8 @@ from datetime import datetime
 from backend.core import (
     GraphStorage, Node, Edge, NodeType, RelationshipType,
     SimilarNode, GraphStats, AddNodesResult, DeleteNodesResult, NODE_COLORS,
-    get_node_type_names, get_relationship_type_names, get_node_color
+    get_node_type_names, get_relationship_type_names, get_node_color,
+    EventContext,
 )
 
 from backend import config_loader
@@ -294,7 +295,10 @@ class GraphService:
     def add_nodes(
         self,
         nodes: List[Dict[str, Any]],
-        edges: List[Dict[str, Any]]
+        edges: List[Dict[str, Any]],
+        event_origin: Optional[str] = None,
+        event_session_id: Optional[str] = None,
+        event_correlation_id: Optional[str] = None,
     ) -> Dict[str, Any]:
         """
         Add new nodes and edges to the graph.
@@ -302,6 +306,9 @@ class GraphService:
         Args:
             nodes: List of node dictionaries to add
             edges: List of edge dictionaries to add
+            event_origin: Source of the mutation (web-ui, mcp, system, agent:<id>)
+            event_session_id: Unique session ID for loop prevention
+            event_correlation_id: Correlation ID for chaining related events
 
         Returns:
             Dict with result (added_node_ids, added_edge_ids, success, message)
@@ -318,21 +325,49 @@ class GraphService:
                 "added_edge_ids": []
             }
 
-        result = self._storage.add_nodes(node_objects, edge_objects)
+        # Create event context if any event parameters provided
+        event_context = None
+        if event_origin or event_session_id or event_correlation_id:
+            event_context = EventContext(
+                event_origin=event_origin,
+                event_session_id=event_session_id,
+                event_correlation_id=event_correlation_id,
+            )
+
+        result = self._storage.add_nodes(node_objects, edge_objects, event_context=event_context)
         return serialize_add_result(result)
 
-    def update_node(self, node_id: str, updates: Dict[str, Any]) -> Dict[str, Any]:
+    def update_node(
+        self,
+        node_id: str,
+        updates: Dict[str, Any],
+        event_origin: Optional[str] = None,
+        event_session_id: Optional[str] = None,
+        event_correlation_id: Optional[str] = None,
+    ) -> Dict[str, Any]:
         """
         Update an existing node.
 
         Args:
             node_id: ID of the node to update
             updates: Dict with fields to update (name, description, summary, communities, tags, metadata)
+            event_origin: Source of the mutation (web-ui, mcp, system, agent:<id>)
+            event_session_id: Unique session ID for loop prevention
+            event_correlation_id: Correlation ID for chaining related events
 
         Returns:
             Dict with updated node or error
         """
-        updated_node = self._storage.update_node(node_id, updates)
+        # Create event context if any event parameters provided
+        event_context = None
+        if event_origin or event_session_id or event_correlation_id:
+            event_context = EventContext(
+                event_origin=event_origin,
+                event_session_id=event_session_id,
+                event_correlation_id=event_correlation_id,
+            )
+
+        updated_node = self._storage.update_node(node_id, updates, event_context=event_context)
 
         if not updated_node:
             return {
@@ -348,7 +383,10 @@ class GraphService:
     def delete_nodes(
         self,
         node_ids: List[str],
-        confirmed: bool = False
+        confirmed: bool = False,
+        event_origin: Optional[str] = None,
+        event_session_id: Optional[str] = None,
+        event_correlation_id: Optional[str] = None,
     ) -> Dict[str, Any]:
         """
         Delete nodes from the graph (max 10 at a time).
@@ -358,11 +396,23 @@ class GraphService:
         Args:
             node_ids: List of node IDs to delete
             confirmed: Must be True to execute deletion
+            event_origin: Source of the mutation (web-ui, mcp, system, agent:<id>)
+            event_session_id: Unique session ID for loop prevention
+            event_correlation_id: Correlation ID for chaining related events
 
         Returns:
             Dict with result (deleted_node_ids, affected_edge_ids, success, message)
         """
-        result = self._storage.delete_nodes(node_ids, confirmed)
+        # Create event context if any event parameters provided
+        event_context = None
+        if event_origin or event_session_id or event_correlation_id:
+            event_context = EventContext(
+                event_origin=event_origin,
+                event_session_id=event_session_id,
+                event_correlation_id=event_correlation_id,
+            )
+
+        result = self._storage.delete_nodes(node_ids, confirmed, event_context=event_context)
         return serialize_delete_result(result)
 
     # ==================== Statistics & Metadata ====================
