@@ -856,7 +856,7 @@ class GraphStorage:
         # Count nodes per type
         nodes_by_type = {}
         for node in relevant_nodes:
-            type_name = node.type.value
+            type_name = node.type.value if hasattr(node.type, 'value') else str(node.type)
             nodes_by_type[type_name] = nodes_by_type.get(type_name, 0) + 1
 
         # Count nodes per community
