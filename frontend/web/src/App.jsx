@@ -199,24 +199,26 @@ function App() {
   const handleSaveSubscription = useCallback(async (subscriptionNode) => {
     try {
       await api.addNodes([subscriptionNode], []);
+      addNodesToVisualization([subscriptionNode], []);
       showNotification('success', `Prenumeration "${subscriptionNode.name}" skapad`);
     } catch (error) {
       console.error('Error creating subscription:', error);
       showNotification('error', 'Kunde inte skapa prenumeration');
     }
-  }, [showNotification]);
+  }, [addNodesToVisualization, showNotification]);
 
   // Save agent nodes (agent + subscription + edge)
   const handleSaveAgent = useCallback(async ({ nodes: agentNodes, edges: agentEdges }) => {
     try {
       await api.addNodes(agentNodes, agentEdges);
+      addNodesToVisualization(agentNodes, agentEdges);
       const agentNode = agentNodes.find(n => n.type === 'Agent');
       showNotification('success', `Agent "${agentNode?.name || 'Agent'}" skapad`);
     } catch (error) {
       console.error('Error creating agent:', error);
       showNotification('error', 'Kunde inte skapa agent');
     }
-  }, [showNotification]);
+  }, [addNodesToVisualization, showNotification]);
 
   // Handle node update from edit dialog
   const handleNodeUpdate = useCallback(async (nodeId, updates) => {
