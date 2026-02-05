@@ -57,6 +57,7 @@ export default function CreateSubscriptionDialog({ onClose, onSave }) {
 
     // Build the subscription node
     const subscriptionNode = {
+      id: crypto.randomUUID(),
       name: name.trim(),
       type: 'EventSubscription',
       description: description.trim() || `Webhook-prenumeration: ${name}`,
