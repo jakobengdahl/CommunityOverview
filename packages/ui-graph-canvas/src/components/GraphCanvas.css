@@ -136,6 +136,12 @@
   background: rgba(239, 68, 68, 0.2) !important;
 }
 
+/* Multi-node context menu */
+.multi-node-context-menu .context-menu-header {
+  color: #FBBF24;
+  background: #1a1a1a;
+}
+
 .graph-notification {
   position: absolute;
   bottom: 20px;

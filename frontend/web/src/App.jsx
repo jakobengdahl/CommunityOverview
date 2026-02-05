@@ -31,7 +31,7 @@ function App() {
   } = useGraphStore();
 
   const [notification, setNotification] = useState(null);
-  const [deleteDialog, setDeleteDialog] = useState(null); // { nodeId, nodeName }
+  const [deleteDialog, setDeleteDialog] = useState(null); // { nodeId, nodeName } or { nodeIds, nodeNames, isMultiple }
   const [saveViewDialog, setSaveViewDialog] = useState(null); // { viewData }
 
   // Load schema, presentation, and stats on startup
@@ -90,12 +90,32 @@ function App() {
     showNotification('info', 'Node hidden');
   }, [toggleNodeVisibility, showNotification]);
 
+  // Callback: Hide multiple nodes
+  const handleHideMultiple = useCallback((nodeIds) => {
+    nodeIds.forEach(id => toggleNodeVisibility(id));
+    showNotification('info', `${nodeIds.length} nodes hidden`);
+  }, [toggleNodeVisibility, showNotification]);
+
   // Callback: Delete node - shows dialog
   const handleDelete = useCallback((nodeId) => {
     const node = nodes.find(n => n.id === nodeId);
     setDeleteDialog({
       nodeId,
       nodeName: node?.name || node?.data?.label || nodeId,
+      isMultiple: false,
+    });
+  }, [nodes]);
+
+  // Callback: Delete multiple nodes - shows dialog
+  const handleDeleteMultiple = useCallback((nodeIds) => {
+    const nodeNames = nodeIds.map(id => {
+      const node = nodes.find(n => n.id === id);
+      return node?.name || node?.data?.label || id;
+    });
+    setDeleteDialog({
+      nodeIds,
+      nodeNames,
+      isMultiple: true,
     });
   }, [nodes]);
 
@@ -104,12 +124,20 @@ function App() {
     if (!deleteDialog) return;
 
     try {
-      await api.deleteNodes([deleteDialog.nodeId], true);
-      removeNode(deleteDialog.nodeId);
-      showNotification('success', 'Node deleted');
+      if (deleteDialog.isMultiple) {
+        // Delete multiple nodes
+        await api.deleteNodes(deleteDialog.nodeIds, true);
+        deleteDialog.nodeIds.forEach(id => removeNode(id));
+        showNotification('success', `${deleteDialog.nodeIds.length} nodes deleted`);
+      } else {
+        // Delete single node
+        await api.deleteNodes([deleteDialog.nodeId], true);
+        removeNode(deleteDialog.nodeId);
+        showNotification('success', 'Node deleted');
+      }
     } catch (error) {
-      console.error('Error deleting node:', error);
-      showNotification('error', 'Could not delete node');
+      console.error('Error deleting node(s):', error);
+      showNotification('error', 'Could not delete node(s)');
     } finally {
       setDeleteDialog(null);
     }
@@ -193,6 +221,8 @@ function App() {
             onEdit={handleEdit}
             onDelete={handleDelete}
             onHide={handleHide}
+            onDeleteMultiple={handleDeleteMultiple}
+            onHideMultiple={handleHideMultiple}
             onCreateGroup={handleCreateGroup}
             onSaveView={handleSaveView}
           />
@@ -209,8 +239,12 @@ function App() {
 
       {deleteDialog && (
         <ConfirmDialog
-          title="Delete Node"
-          message={`Are you sure you want to delete "${deleteDialog.nodeName}"? This action cannot be undone.`}
+          title={deleteDialog.isMultiple ? "Delete Nodes" : "Delete Node"}
+          message={
+            deleteDialog.isMultiple
+              ? `Are you sure you want to delete ${deleteDialog.nodeIds.length} nodes? This action cannot be undone.\n\nNodes to delete:\n• ${deleteDialog.nodeNames.slice(0, 5).join('\n• ')}${deleteDialog.nodeNames.length > 5 ? `\n• ... and ${deleteDialog.nodeNames.length - 5} more` : ''}`
+              : `Are you sure you want to delete "${deleteDialog.nodeName}"? This action cannot be undone.`
+          }
           confirmText="Delete"
           cancelText="Cancel"
           confirmStyle="danger"
