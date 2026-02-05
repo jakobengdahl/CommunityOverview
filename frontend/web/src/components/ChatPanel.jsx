@@ -23,6 +23,7 @@ function ChatPanel() {
     edges,
     addNodesToVisualization,
     updateVisualization,
+    clearVisualization,
   } = useGraphStore();
 
   const [inputValue, setInputValue] = useState('');
@@ -128,6 +129,10 @@ function ChatPanel() {
           } catch (err) {
             console.error('[ChatPanel] Failed to save view:', err);
           }
+        }
+        // Handle clear visualization action
+        else if (toolResult.action === 'clear_visualization') {
+          clearVisualization();
         }
         // Handle load view action
         else if (toolResult.action === 'load_visualization') {

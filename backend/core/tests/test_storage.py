@@ -66,13 +66,9 @@ class TestGraphStorageInit:
     def test_loads_existing_graph(self, storage_with_data):
         """Test that storage can reload existing data"""
         json_path = storage_with_data.json_path
-        embeddings_path = storage_with_data.vector_store.storage_path
 
         # Create new storage instance pointing to same file
-        new_storage = GraphStorage(
-            json_path=str(json_path),
-            embeddings_path=str(embeddings_path)
-        )
+        new_storage = GraphStorage(json_path=str(json_path))
 
         assert len(new_storage.nodes) == 4
         assert len(new_storage.edges) == 3
@@ -353,15 +349,11 @@ class TestGraphStoragePersistence:
         node = Node(id="persist-1", type=NodeType.ACTOR, name="Persistent Node")
         temp_storage.add_nodes([node], [])
 
-        # Get paths before closing
+        # Get path before closing
         json_path = str(temp_storage.json_path)
-        embeddings_path = str(temp_storage.vector_store.storage_path)
 
         # Create new instance
-        new_storage = GraphStorage(
-            json_path=json_path,
-            embeddings_path=embeddings_path
-        )
+        new_storage = GraphStorage(json_path=json_path)
 
         # Verify data loaded
         loaded_node = new_storage.get_node("persist-1")
@@ -396,3 +388,334 @@ class TestGraphStorageEdgeHelpers:
 
         # init-1 has 3 edges: edge-1, edge-2 (incoming) and edge-3 (outgoing)
         assert len(edges) == 3
+
+
+class TestGraphStorageConcurrency:
+    """Tests for concurrent access safety.
+
+    These tests verify that multiple threads can safely access the storage
+    without data loss or corruption.
+    """
+
+    def test_concurrent_add_nodes_no_data_loss(self, temp_storage):
+        """
+        Test that concurrent add_nodes operations don't lose data.
+
+        Multiple threads adding nodes simultaneously should result in
+        all nodes being present in the final graph.
+        """
+        import threading
+        import uuid
+
+        num_threads = 10
+        nodes_per_thread = 5
+        errors = []
+        added_ids = []
+        lock = threading.Lock()
+
+        def add_nodes_worker(thread_id):
+            try:
+                for i in range(nodes_per_thread):
+                    node_id = f"concurrent-{thread_id}-{i}-{uuid.uuid4().hex[:8]}"
+                    node = Node(
+                        id=node_id,
+                        type=NodeType.ACTOR,
+                        name=f"Thread {thread_id} Node {i}",
+                        description=f"Created by thread {thread_id}"
+                    )
+                    result = temp_storage.add_nodes([node], [])
+                    if result.success:
+                        with lock:
+                            added_ids.extend(result.added_node_ids)
+                    else:
+                        with lock:
+                            errors.append(f"Thread {thread_id}: {result.message}")
+            except Exception as e:
+                with lock:
+                    errors.append(f"Thread {thread_id} exception: {e}")
+
+        # Start all threads
+        threads = []
+        for t_id in range(num_threads):
+            t = threading.Thread(target=add_nodes_worker, args=(t_id,))
+            threads.append(t)
+            t.start()
+
+        # Wait for all threads to complete
+        for t in threads:
+            t.join()
+
+        # Verify results
+        assert len(errors) == 0, f"Errors occurred: {errors}"
+
+        expected_count = num_threads * nodes_per_thread
+        assert len(added_ids) == expected_count, \
+            f"Expected {expected_count} nodes added, got {len(added_ids)}"
+
+        # Verify all nodes are actually in storage
+        for node_id in added_ids:
+            assert temp_storage.get_node(node_id) is not None, \
+                f"Node {node_id} was added but not found in storage"
+
+        # Verify persistence - reload and check
+        json_path = str(temp_storage.json_path)
+        reloaded = GraphStorage(json_path=json_path)
+        assert len(reloaded.nodes) == expected_count, \
+            f"After reload: expected {expected_count} nodes, got {len(reloaded.nodes)}"
+
+    def test_concurrent_update_nodes_no_data_loss(self, temp_storage):
+        """
+        Test that concurrent update operations don't lose changes.
+
+        Multiple threads updating the same node should all apply their changes
+        (though order may vary due to race conditions).
+        """
+        import threading
+
+        # First add a node to update
+        node = Node(
+            id="update-target",
+            type=NodeType.ACTOR,
+            name="Update Target",
+            tags=[]
+        )
+        temp_storage.add_nodes([node], [])
+
+        num_threads = 10
+        errors = []
+        lock = threading.Lock()
+
+        def update_worker(thread_id):
+            try:
+                # Each thread adds its own tag
+                result = temp_storage.update_node("update-target", {
+                    "tags": [f"tag-{thread_id}"]
+                })
+                if result is None:
+                    with lock:
+                        errors.append(f"Thread {thread_id}: update returned None")
+            except Exception as e:
+                with lock:
+                    errors.append(f"Thread {thread_id} exception: {e}")
+
+        # Start all threads
+        threads = []
+        for t_id in range(num_threads):
+            t = threading.Thread(target=update_worker, args=(t_id,))
+            threads.append(t)
+            t.start()
+
+        # Wait for all threads
+        for t in threads:
+            t.join()
+
+        # Verify no errors
+        assert len(errors) == 0, f"Errors occurred: {errors}"
+
+        # The final state should have ONE tag (last write wins)
+        # But critically, the node should still exist and be valid
+        final_node = temp_storage.get_node("update-target")
+        assert final_node is not None, "Node was lost during concurrent updates"
+        assert final_node.name == "Update Target", "Node name was corrupted"
+
+    def test_concurrent_mixed_operations(self, temp_storage):
+        """
+        Test mixed concurrent operations (add, update, delete, read).
+
+        This simulates real-world usage where different users perform
+        different operations simultaneously.
+        """
+        import threading
+        import uuid
+        import random
+        import time
+
+        # First add some base nodes
+        base_nodes = []
+        for i in range(5):
+            node = Node(
+                id=f"base-{i}",
+                type=NodeType.ACTOR,
+                name=f"Base Node {i}"
+            )
+            base_nodes.append(node)
+        temp_storage.add_nodes(base_nodes, [])
+
+        num_threads = 20
+        operations_per_thread = 10
+        errors = []
+        lock = threading.Lock()
+
+        def mixed_worker(thread_id):
+            try:
+                for _ in range(operations_per_thread):
+                    op = random.choice(['add', 'read', 'update', 'search'])
+
+                    if op == 'add':
+                        node_id = f"mixed-{thread_id}-{uuid.uuid4().hex[:8]}"
+                        node = Node(id=node_id, type=NodeType.ACTOR, name=f"Mixed {node_id}")
+                        temp_storage.add_nodes([node], [])
+
+                    elif op == 'read':
+                        # Read a random base node
+                        node_id = f"base-{random.randint(0, 4)}"
+                        temp_storage.get_node(node_id)
+
+                    elif op == 'update':
+                        # Update a random base node
+                        node_id = f"base-{random.randint(0, 4)}"
+                        temp_storage.update_node(node_id, {
+                            "description": f"Updated by thread {thread_id}"
+                        })
+
+                    elif op == 'search':
+                        temp_storage.search_nodes("Node", limit=10)
+
+                    # Small random delay to increase interleaving
+                    time.sleep(random.uniform(0, 0.01))
+
+            except Exception as e:
+                with lock:
+                    errors.append(f"Thread {thread_id} exception: {e}")
+
+        # Start all threads
+        threads = []
+        for t_id in range(num_threads):
+            t = threading.Thread(target=mixed_worker, args=(t_id,))
+            threads.append(t)
+            t.start()
+
+        # Wait for all threads
+        for t in threads:
+            t.join()
+
+        # Verify no errors
+        assert len(errors) == 0, f"Errors occurred: {errors}"
+
+        # Verify base nodes still exist and are valid
+        for i in range(5):
+            node = temp_storage.get_node(f"base-{i}")
+            assert node is not None, f"Base node {i} was lost"
+            assert node.name == f"Base Node {i}", f"Base node {i} name was corrupted"
+
+        # Verify graph is still loadable
+        json_path = str(temp_storage.json_path)
+        reloaded = GraphStorage(json_path=json_path)
+        assert len(reloaded.nodes) >= 5, "Graph is corrupted after concurrent operations"
+
+    def test_atomic_save_prevents_corruption(self, temp_storage):
+        """
+        Test that the atomic save mechanism prevents file corruption.
+
+        Even if multiple saves happen simultaneously, the JSON file
+        should always be valid and parseable.
+        """
+        import threading
+        import json as json_module
+
+        num_threads = 20
+        saves_per_thread = 10
+        errors = []
+        lock = threading.Lock()
+
+        # Add initial data
+        for i in range(10):
+            node = Node(id=f"atomic-{i}", type=NodeType.ACTOR, name=f"Atomic Node {i}")
+            temp_storage.add_nodes([node], [])
+
+        def save_worker(thread_id):
+            try:
+                for i in range(saves_per_thread):
+                    # Force a save
+                    temp_storage.save()
+
+                    # Immediately try to read and parse the JSON file
+                    try:
+                        with open(temp_storage.json_path, 'r') as f:
+                            data = json_module.load(f)
+                            # Verify structure is valid
+                            assert 'nodes' in data
+                            assert 'edges' in data
+                    except json_module.JSONDecodeError as e:
+                        with lock:
+                            errors.append(f"Thread {thread_id} save {i}: JSON decode error - {e}")
+                    except Exception as e:
+                        with lock:
+                            errors.append(f"Thread {thread_id} save {i}: {e}")
+
+            except Exception as e:
+                with lock:
+                    errors.append(f"Thread {thread_id} exception: {e}")
+
+        # Start all threads
+        threads = []
+        for t_id in range(num_threads):
+            t = threading.Thread(target=save_worker, args=(t_id,))
+            threads.append(t)
+            t.start()
+
+        # Wait for all threads
+        for t in threads:
+            t.join()
+
+        # Verify no errors
+        assert len(errors) == 0, f"Corruption detected: {errors}"
+
+        # Final verification
+        with open(temp_storage.json_path, 'r') as f:
+            final_data = json_module.load(f)
+            assert len(final_data['nodes']) == 10
+
+    def test_reload_during_concurrent_writes(self, temp_storage):
+        """
+        Test that reload() works correctly during concurrent writes.
+
+        This tests the scenario where one thread calls reload() while
+        other threads are writing.
+        """
+        import threading
+        import uuid
+
+        errors = []
+        lock = threading.Lock()
+
+        # Add initial data
+        node = Node(id="reload-test", type=NodeType.ACTOR, name="Reload Test")
+        temp_storage.add_nodes([node], [])
+
+        def writer_thread(thread_id):
+            try:
+                for i in range(20):
+                    node_id = f"writer-{thread_id}-{i}-{uuid.uuid4().hex[:8]}"
+                    node = Node(id=node_id, type=NodeType.ACTOR, name=f"Writer {thread_id}")
+                    temp_storage.add_nodes([node], [])
+            except Exception as e:
+                with lock:
+                    errors.append(f"Writer {thread_id}: {e}")
+
+        def reader_thread():
+            try:
+                for _ in range(10):
+                    temp_storage.reload()
+                    # After reload, graph should be valid
+                    assert temp_storage.get_node("reload-test") is not None
+            except Exception as e:
+                with lock:
+                    errors.append(f"Reader: {e}")
+
+        # Start threads
+        threads = []
+        for t_id in range(3):
+            t = threading.Thread(target=writer_thread, args=(t_id,))
+            threads.append(t)
+            t.start()
+
+        reader = threading.Thread(target=reader_thread)
+        threads.append(reader)
+        reader.start()
+
+        # Wait for all
+        for t in threads:
+            t.join()
+
+        assert len(errors) == 0, f"Errors: {errors}"

@@ -43,7 +43,7 @@ function ConfirmDialog({
         </div>
 
         <div className="confirm-dialog-content">
-          <p>{message}</p>
+          <p style={{ whiteSpace: 'pre-line' }}>{message}</p>
         </div>
 
         <div className="confirm-dialog-actions">

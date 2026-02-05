@@ -20,10 +20,9 @@ from backend.core.models import Node, NodeType
 @pytest.fixture
 def temp_vector_store():
     """Create a temporary VectorStore instance"""
-    with tempfile.TemporaryDirectory() as tmpdir:
-        storage_path = os.path.join(tmpdir, "test_embeddings.pkl")
-        store = VectorStore(storage_path=storage_path)
-        yield store
+    # VectorStore no longer uses storage_path - embeddings are stored in graph.json
+    store = VectorStore()
+    yield store
 
 
 @pytest.fixture
@@ -50,9 +49,9 @@ class TestVectorStoreInit:
         """Test that model is not loaded until needed"""
         assert temp_vector_store.model is None
 
-    def test_storage_path_set(self, temp_vector_store):
-        """Test that storage path is set correctly"""
-        assert temp_vector_store.storage_path.name == "test_embeddings.pkl"
+    def test_default_model_name(self, temp_vector_store):
+        """Test that default model name is set correctly"""
+        assert temp_vector_store.model_name == "all-MiniLM-L6-v2"
 
 
 class TestVectorStoreTextRepresentation:
@@ -205,44 +204,42 @@ class TestVectorStoreSearch:
         assert results == []
 
 
-class TestVectorStorePersistence:
-    """Tests for embedding persistence"""
+class TestVectorStoreRebuild:
+    """Tests for rebuilding index from nodes"""
 
     @pytest.mark.slow
-    def test_save_and_load(self, sample_nodes):
-        """Test that embeddings persist across instances"""
-        with tempfile.TemporaryDirectory() as tmpdir:
-            storage_path = os.path.join(tmpdir, "embeddings.pkl")
+    def test_rebuild_index(self, sample_nodes):
+        """Test that index can be rebuilt from nodes with embeddings"""
+        # First create a store and generate embeddings
+        store1 = VectorStore()
+        store1.update_nodes_embeddings(sample_nodes)
 
-            # Create and populate store
-            store1 = VectorStore(storage_path=storage_path)
-            store1.update_nodes_embeddings(sample_nodes)
-            store1.save()
+        # Get the embeddings stored on nodes
+        for node in sample_nodes:
+            assert node.embedding is not None
 
-            # Create new instance
-            store2 = VectorStore(storage_path=storage_path)
+        # Create a new store and rebuild from nodes
+        store2 = VectorStore()
+        store2.rebuild_index(sample_nodes)
 
-            # Verify embeddings loaded
-            assert store2.get_embedding_count() == 3
-            for node in sample_nodes:
-                assert store2.has_embedding(node.id)
+        # Verify embeddings were loaded
+        assert store2.get_embedding_count() == 3
+        for node in sample_nodes:
+            assert store2.has_embedding(node.id)
 
     @pytest.mark.slow
-    def test_auto_save_on_update(self, sample_nodes):
-        """Test that embeddings are auto-saved on update"""
-        with tempfile.TemporaryDirectory() as tmpdir:
-            storage_path = os.path.join(tmpdir, "embeddings.pkl")
+    def test_rebuild_empty_nodes(self):
+        """Test rebuilding with nodes that have no embeddings"""
+        nodes = [
+            Node(id="no-embed-1", type=NodeType.ACTOR, name="No Embedding 1"),
+            Node(id="no-embed-2", type=NodeType.ACTOR, name="No Embedding 2"),
+        ]
 
-            store1 = VectorStore(storage_path=storage_path)
-            store1.update_nodes_embeddings(sample_nodes)
-            # Don't explicitly call save()
+        store = VectorStore()
+        store.rebuild_index(nodes)
 
-            # Check file was created
-            assert Path(storage_path).exists()
-
-            # Load in new instance
-            store2 = VectorStore(storage_path=storage_path)
-            assert store2.get_embedding_count() == 3
+        # Should have no embeddings since nodes had none
+        assert store.get_embedding_count() == 0
 
 
 class TestVectorStoreMatrix:

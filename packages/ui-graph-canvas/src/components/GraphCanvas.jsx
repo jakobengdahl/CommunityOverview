@@ -8,6 +8,8 @@ import ReactFlow, {
   addEdge,
   useReactFlow,
   ReactFlowProvider,
+  useOnSelectionChange,
+  SelectionMode,
 } from 'reactflow';
 import 'reactflow/dist/style.css';
 
@@ -30,6 +32,8 @@ import './GraphCanvas.css';
  * @param {Function} props.onEdit - Called when edit button clicked (nodeId, nodeData)
  * @param {Function} props.onDelete - Called when delete requested (nodeId)
  * @param {Function} props.onHide - Called when hide requested (nodeId)
+ * @param {Function} props.onDeleteMultiple - Called when delete multiple nodes requested (nodeIds)
+ * @param {Function} props.onHideMultiple - Called when hide multiple nodes requested (nodeIds)
  * @param {Function} props.onCreateGroup - Called when creating a group (position)
  * @param {Function} props.onSaveView - Called when save view requested (viewData)
  * @param {Function} props.onNodePositionChange - Called when node positions change
@@ -46,6 +50,8 @@ function GraphCanvasInner({
   onEdit,
   onDelete,
   onHide,
+  onDeleteMultiple,
+  onHideMultiple,
   onCreateGroup,
   onSaveView,
   onNodePositionChange,
@@ -54,10 +60,19 @@ function GraphCanvasInner({
   const [loadedNodeCount, setLoadedNodeCount] = useState(INITIAL_LOAD_COUNT);
   const [contextMenu, setContextMenu] = useState(null);
   const [nodeContextMenu, setNodeContextMenu] = useState(null);
+  const [multiNodeContextMenu, setMultiNodeContextMenu] = useState(null);
   const [notification, setNotification] = useState(null);
+  const [selectedNodes, setSelectedNodes] = useState([]);
   const reactFlowWrapper = useRef(null);
   const rightDragStart = useRef({ x: 0, y: 0, time: null });
   const { screenToFlowPosition } = useReactFlow();
+
+  // Track selected nodes
+  useOnSelectionChange({
+    onChange: ({ nodes: selected }) => {
+      setSelectedNodes(selected);
+    },
+  });
 
   // Filter out hidden nodes
   const visibleNodes = useMemo(() =>
@@ -310,17 +325,35 @@ function GraphCanvasInner({
     event.preventDefault();
     event.stopPropagation();
     setContextMenu(null);
-    setNodeContextMenu({
-      x: event.clientX,
-      y: event.clientY,
-      node: node,
-    });
-  }, []);
+
+    // Check if multiple nodes are selected and the right-clicked node is one of them
+    const isNodeSelected = selectedNodes.some(n => n.id === node.id);
+    const hasMultipleSelected = selectedNodes.length > 1;
+
+    if (hasMultipleSelected && isNodeSelected) {
+      // Show multi-node context menu
+      setNodeContextMenu(null);
+      setMultiNodeContextMenu({
+        x: event.clientX,
+        y: event.clientY,
+        nodes: selectedNodes,
+      });
+    } else {
+      // Show single node context menu
+      setMultiNodeContextMenu(null);
+      setNodeContextMenu({
+        x: event.clientX,
+        y: event.clientY,
+        node: node,
+      });
+    }
+  }, [selectedNodes]);
 
   // Close all context menus
   const closeAllMenus = useCallback(() => {
     setContextMenu(null);
     setNodeContextMenu(null);
+    setMultiNodeContextMenu(null);
   }, []);
 
   const nodeTypes = useMemo(() => ({
@@ -392,7 +425,9 @@ function GraphCanvasInner({
             attributionPosition="bottom-right"
             defaultEdgeOptions={{ animated: true, style: { strokeWidth: 2 } }}
             panOnDrag={[0, 2]}
-            selectionOnDrag={false}
+            selectionOnDrag={true}
+            selectionMode={SelectionMode.Partial}
+            selectNodesOnDrag={true}
             onMoveStart={closeAllMenus}
           >
             <Background color="#333" gap={16} />
@@ -455,6 +490,48 @@ function GraphCanvasInner({
                 setNodeContextMenu(null);
               }}>
                 🗑️ Ta bort
+              </button>
+            </>
+          )}
+        </div>
+      )}
+
+      {multiNodeContextMenu && (
+        <div
+          className="graph-context-menu node-context-menu multi-node-context-menu"
+          style={{ left: multiNodeContextMenu.x, top: multiNodeContextMenu.y }}
+        >
+          <div className="context-menu-header">
+            {multiNodeContextMenu.nodes.length} noder markerade
+          </div>
+          {(onHideMultiple || onHide) && (
+            <button onClick={() => {
+              const nodeIds = multiNodeContextMenu.nodes.map(n => n.id);
+              if (onHideMultiple) {
+                onHideMultiple(nodeIds);
+              } else if (onHide) {
+                // Fallback: call onHide for each node
+                nodeIds.forEach(id => onHide(id));
+              }
+              setMultiNodeContextMenu(null);
+            }}>
+              👁️ Dölj alla
+            </button>
+          )}
+          {(onDeleteMultiple || onDelete) && (
+            <>
+              <div className="context-menu-separator"></div>
+              <button className="context-menu-danger" onClick={() => {
+                const nodeIds = multiNodeContextMenu.nodes.map(n => n.id);
+                if (onDeleteMultiple) {
+                  onDeleteMultiple(nodeIds);
+                } else if (onDelete) {
+                  // Fallback: call onDelete for each node (but this may not work well)
+                  nodeIds.forEach(id => onDelete(id));
+                }
+                setMultiNodeContextMenu(null);
+              }}>
+                🗑️ Ta bort alla
               </button>
             </>
           )}

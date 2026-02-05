@@ -1,0 +1,127 @@
+# =============================================================================
+# CommunityOverview - Production Docker Compose
+# =============================================================================
+# Use this for self-hosted production deployments.
+# For cloud platforms (Cloud Run, App Platform, etc.), use the Dockerfile directly.
+#
+# Usage:
+#   docker compose -f docker-compose.prod.yml up -d
+#
+# Prerequisites:
+#   1. Copy .env.example to .env and configure
+#   2. Create data directory: mkdir -p ./data
+#   3. Optional: Configure SSL with reverse proxy
+# =============================================================================
+
+services:
+  app:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: communityoverview:latest
+    container_name: communityoverview
+    ports:
+      - "${PORT:-8000}:8000"
+    volumes:
+      # Persistent data storage
+      - app_data:/data
+      # Configuration (read-only)
+      - ./config:/app/config:ro
+    environment:
+      # === Data & Storage ===
+      - GRAPH_FILE=/data/graph.json
+      - EMBEDDINGS_FILE=${EMBEDDINGS_FILE:-}
+      - SCHEMA_FILE=/app/config/schema_config.json
+
+      # === LLM Provider ===
+      - LLM_PROVIDER=${LLM_PROVIDER:-claude}
+      - ANTHROPIC_API_KEY=${ANTHROPIC_API_KEY}
+      - OPENAI_API_KEY=${OPENAI_API_KEY:-}
+      - OPENAI_MODEL=${OPENAI_MODEL:-gpt-4o}
+
+      # === Authentication ===
+      - AUTH_ENABLED=${AUTH_ENABLED:-true}
+      - AUTH_USERNAME=${AUTH_USERNAME:-admin}
+      - AUTH_PASSWORD=${AUTH_PASSWORD:?AUTH_PASSWORD is required in production}
+
+      # === Server ===
+      - HOST=0.0.0.0
+      - PORT=8000
+      - API_PREFIX=${API_PREFIX:-/api}
+      - MCP_NAME=${MCP_NAME:-community-knowledge-graph}
+
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8000/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 40s
+
+    restart: unless-stopped
+
+    # Resource limits
+    deploy:
+      resources:
+        limits:
+          cpus: '2'
+          memory: 2G
+        reservations:
+          cpus: '0.5'
+          memory: 512M
+
+    # Logging configuration
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+    # Security options
+    security_opt:
+      - no-new-privileges:true
+    read_only: false  # Needs write for /data
+
+    networks:
+      - app_network
+
+# Named volumes for data persistence
+volumes:
+  app_data:
+    driver: local
+
+# Network configuration
+networks:
+  app_network:
+    driver: bridge
+
+# =============================================================================
+# Optional: Add reverse proxy for SSL termination
+# Uncomment and configure if you need HTTPS without a cloud load balancer
+# =============================================================================
+#
+#   caddy:
+#     image: caddy:2-alpine
+#     container_name: caddy
+#     ports:
+#       - "80:80"
+#       - "443:443"
+#     volumes:
+#       - ./Caddyfile:/etc/caddy/Caddyfile:ro
+#       - caddy_data:/data
+#       - caddy_config:/config
+#     depends_on:
+#       - app
+#     networks:
+#       - app_network
+#     restart: unless-stopped
+#
+# volumes:
+#   caddy_data:
+#   caddy_config:
+#
+# Example Caddyfile:
+# ---
+# your-domain.com {
+#     reverse_proxy app:8000
+# }
+# ---

@@ -154,6 +154,14 @@ These are TWO DIFFERENT operations - understand the user's intent:
    -> Frontend will REPLACE current visualization with results
    -> Example: "visa alla aktorer" -> search_graph(node_types=["Actor"]) replaces view
 
+3. "TÖM" / "RENSA" / "CLEAR" / "EMPTY" (visualization):
+   -> User wants to CLEAR/EMPTY the current visualization
+   -> Use clear_visualization() tool
+   -> This removes all nodes from the canvas (does NOT delete from database)
+   -> Swedish phrases: "töm visualiseringen", "rensa grafen", "ta bort allt"
+   -> English phrases: "clear the visualization", "empty the canvas", "clear all nodes"
+   -> Example: "töm visualiseringen" -> clear_visualization()
+
 IMPORTANT - ABBREVIATION AND SYNONYM SEARCH:
 Swedish organizations often use abbreviations. When searching:
 - If abbreviation search returns few/no results, try the full name
@@ -679,6 +687,14 @@ class ChatProcessor:
                 }
             },
             {
+                "name": "clear_visualization",
+                "description": "Clear the current visualization, removing all nodes and edges from the canvas. Use this when the user wants to clear, reset, or empty the visualization (Swedish: 'töm', 'rensa', 'ta bort allt från'). This does NOT delete nodes from the database - it only clears the visual display.",
+                "input_schema": {
+                    "type": "object",
+                    "properties": {}
+                }
+            },
+            {
                 "name": "get_schema",
                 "description": "Get the complete schema configuration including all node types with their fields, colors, and descriptions, as well as all relationship types.",
                 "input_schema": {
@@ -802,6 +818,14 @@ class ChatProcessor:
                     "proposed_node": tool_input.get("node"),
                     "similar_nodes": tool_input.get("similar_nodes"),
                     "requires_approval": True
+                }
+
+            # Special case for clear_visualization - signals frontend to clear the canvas
+            elif tool_name == "clear_visualization":
+                tool_result = {
+                    "action": "clear_visualization",
+                    "success": True,
+                    "message": "Visualization cleared"
                 }
 
             elif tool_name in self.tools_map:
