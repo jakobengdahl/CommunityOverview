@@ -335,7 +335,31 @@ class GraphService:
             )
 
         result = self._storage.add_nodes(node_objects, edge_objects, event_context=event_context)
-        return serialize_add_result(result)
+
+        # Build response with serialized result and the actual nodes/edges for visualization
+        response = serialize_add_result(result)
+
+        # Include the added nodes and edges so frontend can add them to visualization
+        if result.success:
+            # Fetch the added nodes to get their full data (including generated IDs)
+            added_nodes = [
+                self._storage.get_node(node_id)
+                for node_id in result.added_node_ids
+            ]
+            added_nodes = [n for n in added_nodes if n is not None]
+
+            # Fetch the added edges
+            added_edges = [
+                self._storage.edges.get(edge_id)
+                for edge_id in result.added_edge_ids
+            ]
+            added_edges = [e for e in added_edges if e is not None]
+
+            response["nodes"] = serialize_nodes(added_nodes)
+            response["edges"] = serialize_edges(added_edges)
+            response["action"] = "add_to_visualization"
+
+        return response
 
     def update_node(
         self,
@@ -375,9 +399,12 @@ class GraphService:
                 "error": f"Node with ID {node_id} not found"
             }
 
+        # Return the updated node with action for frontend to refresh visualization
         return {
             "success": True,
-            "node": serialize_node(updated_node)
+            "node": serialize_node(updated_node),
+            "nodes": [serialize_node(updated_node)],
+            "action": "update_in_visualization"
         }
 
     def delete_nodes(
