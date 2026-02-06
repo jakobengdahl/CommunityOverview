@@ -118,6 +118,9 @@ def create_app(
         graph_path = config.get_graph_path()
         graph_storage = GraphStorage(str(graph_path))
 
+    # Initialize event system for webhook delivery
+    graph_storage.setup_events(enabled=True)
+
     # Initialize GraphService
     graph_service = GraphService(graph_storage)
 

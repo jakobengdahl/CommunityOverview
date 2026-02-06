@@ -114,6 +114,7 @@ class EventDispatcher:
         self._subscriptions_cache = subscriptions
         self._cache_time = now
 
+        print(f"EVENT: Loaded {len(subscriptions)} EventSubscription(s)")
         logger.debug(f"Loaded {len(subscriptions)} EventSubscription(s)")
         return subscriptions
 
@@ -167,8 +168,12 @@ class EventDispatcher:
         subscriptions = self._load_subscriptions()
         dispatch_count = 0
 
+        print(f"EVENT: Dispatching to {len(subscriptions)} subscription(s), event type: {event.event_type.value}")
+
         for sub in subscriptions:
-            if self._matches(event, sub):
+            matches = self._matches(event, sub)
+            print(f"EVENT: Subscription '{sub['name']}' matches={matches}")
+            if matches:
                 # Check loop prevention
                 if self._should_block(event, sub["delivery"]):
                     logger.debug(

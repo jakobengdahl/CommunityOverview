@@ -180,7 +180,10 @@ class GraphStorage:
             context: Event context for tracking and loop prevention
         """
         if not self._events_enabled or not self._event_dispatcher:
+            print(f"EVENT: Skipped (events_enabled={self._events_enabled}, dispatcher={self._event_dispatcher is not None})")
             return
+
+        print(f"EVENT: Emitting {event_type.value} for {entity_kind.value} {entity_id} ({entity_type})")
 
         # Build patch for updates
         patch = None
