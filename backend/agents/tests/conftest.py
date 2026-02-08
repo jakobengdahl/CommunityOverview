@@ -87,11 +87,11 @@ def sample_agent_node():
         description="Test agent for unit tests",
         metadata={
             "subscription_id": "sub-001",
-            "agent": {
-                "enabled": True,
+            "enabled": True,
+            "prompts": {
                 "task_prompt": "Process events and log a summary.",
-                "mcp_integrations": ["GRAPH"],
             },
+            "mcp_integration_ids": ["GRAPH"],
         },
     )
 

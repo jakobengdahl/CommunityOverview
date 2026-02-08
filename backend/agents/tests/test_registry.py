@@ -7,7 +7,7 @@ from unittest.mock import MagicMock, patch, PropertyMock
 import threading
 import time
 
-from backend.agents.config import AgentConfig, AgentsSettings, MCPIntegration
+from backend.agents.config import AgentConfig, AgentsSettings, MCPIntegration, MCPTransport
 from backend.agents.registry import AgentRegistry
 
 
@@ -29,7 +29,8 @@ class TestAgentRegistry:
             mcp_integrations=[
                 MCPIntegration(
                     id="GRAPH",
-                    type="http",
+                    name="Graph API",
+                    transport=MCPTransport.HTTP,
                     url="http://localhost:8000/mcp",
                 )
             ],
@@ -236,15 +237,16 @@ class TestGetAvailableIntegrations:
             mcp_integrations=[
                 MCPIntegration(
                     id="GRAPH",
-                    type="http",
+                    name="Graph API",
+                    transport=MCPTransport.HTTP,
                     url="http://localhost:8000/mcp",
                     description="Graph tools",
                 ),
                 MCPIntegration(
                     id="WEB",
-                    type="stdio",
-                    command="node",
-                    args=["mcp-web"],
+                    name="Web Fetch",
+                    transport=MCPTransport.STDIO,
+                    command=["node", "mcp-web"],
                     description="Web search",
                 ),
             ],
