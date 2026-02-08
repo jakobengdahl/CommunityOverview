@@ -33,6 +33,7 @@ from mcp.server.fastmcp import FastMCP
 from backend.core import GraphStorage
 from backend.service import GraphService, create_rest_router, register_mcp_tools, json_serializer
 from backend.ui import ChatService, DocumentService, create_ui_router
+from backend.agents import AgentRegistry, AgentsSettings
 
 from .config import AppConfig
 
@@ -124,9 +125,36 @@ def create_app(
     # Initialize GraphService
     graph_service = GraphService(graph_storage)
 
+    # Initialize Agent Registry for background agent workers
+    agent_settings = AgentsSettings.from_env()
+    agent_registry = AgentRegistry(
+        settings=agent_settings,
+        graph_storage=graph_storage,
+        graph_service=graph_service,
+    )
+
+    # Connect agent delivery callback to event system
+    # This allows agent-linked subscriptions to route events internally
+    def agent_delivery_callback(event, subscription_id: str) -> bool:
+        """Route events to agent queues for agent-linked subscriptions."""
+        if not agent_registry.is_enabled:
+            return False
+        if not agent_registry.is_agent_subscription(subscription_id):
+            return False
+        return agent_registry.enqueue_for_subscription(
+            subscription_id,
+            event.to_webhook_payload()
+        )
+
+    graph_storage.set_agent_delivery_callback(agent_delivery_callback)
+
+    # Start agent registry (loads agents and starts workers)
+    agent_registry.start()
+
     # Store service on app state for access in routes
     app.state.graph_service = graph_service
     app.state.graph_storage = graph_storage
+    app.state.agent_registry = agent_registry
     app.state.config = config
 
     # Create and mount REST API router
@@ -312,6 +340,24 @@ def create_app(
             },
             "llm_provider": chat_service.provider_type
         }
+
+    # Agent system endpoints
+    @app.get("/agents/status")
+    async def agents_status() -> Dict[str, Any]:
+        """Get agent system status and all worker statuses."""
+        return agent_registry.get_all_status()
+
+    @app.get("/agents/integrations")
+    async def agents_integrations():
+        """Get available MCP integrations for agent configuration."""
+        return agent_registry.get_available_mcp_integrations()
+
+    # Shutdown handler for graceful cleanup
+    @app.on_event("shutdown")
+    async def shutdown_event():
+        """Gracefully shutdown agent registry and event system."""
+        agent_registry.stop()
+        graph_storage.shutdown_events()
 
     return app
 

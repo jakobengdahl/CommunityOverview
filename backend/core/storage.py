@@ -22,7 +22,7 @@ import os
 import sys
 import tempfile
 import threading
-from typing import List, Dict, Optional, Any, TYPE_CHECKING
+from typing import List, Dict, Optional, Any, TYPE_CHECKING, Callable
 from datetime import datetime
 import networkx as nx
 from pathlib import Path
@@ -147,6 +147,23 @@ class GraphStorage:
 
         self._events_enabled = True
         print(f"Event system initialized with max_attempts={max_attempts}")
+
+    def set_agent_delivery_callback(
+        self,
+        callback: Callable[["Event", str], bool],
+    ) -> None:
+        """
+        Set the callback for agent event delivery.
+
+        This allows the agent registry to receive events for agent-linked
+        subscriptions directly, bypassing webhook delivery.
+
+        Args:
+            callback: Function that receives (event, subscription_id) and
+                     returns True if handled by an agent, False otherwise.
+        """
+        if self._event_dispatcher:
+            self._event_dispatcher.set_agent_delivery_callback(callback)
 
     def shutdown_events(self) -> None:
         """Shutdown the event system gracefully."""

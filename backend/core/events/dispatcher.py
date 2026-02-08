@@ -38,31 +38,49 @@ class EventDispatcher:
     1. Loads EventSubscription nodes from the graph
     2. Filters events based on subscription configuration
     3. Applies loop prevention rules
-    4. Calls the delivery callback for matched events
+    4. Routes events to agents or webhooks based on subscription type
     """
 
     def __init__(
         self,
         storage: "GraphStorage",
-        on_deliver: Optional[Callable[[Event, str], None]] = None
+        on_deliver: Optional[Callable[[Event, str], None]] = None,
+        on_agent_deliver: Optional[Callable[[Event, str], bool]] = None,
     ):
         """
         Initialize the dispatcher.
 
         Args:
             storage: GraphStorage instance to load subscriptions from
-            on_deliver: Callback when an event should be delivered.
+            on_deliver: Callback for webhook delivery.
                        Called with (event, webhook_url).
+            on_agent_deliver: Callback for agent delivery.
+                             Called with (event, subscription_id).
+                             Returns True if handled by agent, False otherwise.
         """
         self._storage = storage
         self._on_deliver = on_deliver
+        self._on_agent_deliver = on_agent_deliver
         self._subscriptions_cache: Optional[List[Dict[str, Any]]] = None
         self._cache_time: Optional[datetime] = None
         self._cache_ttl_seconds = 30  # Refresh cache every 30 seconds
 
     def set_delivery_callback(self, callback: Callable[[Event, str], None]) -> None:
-        """Set the delivery callback."""
+        """Set the webhook delivery callback."""
         self._on_deliver = callback
+
+    def set_agent_delivery_callback(
+        self,
+        callback: Callable[[Event, str], bool],
+    ) -> None:
+        """
+        Set the agent delivery callback.
+
+        Args:
+            callback: Function that receives (event, subscription_id) and
+                     returns True if handled by an agent, False otherwise.
+        """
+        self._on_agent_deliver = callback
 
     def _load_subscriptions(self) -> List[Dict[str, Any]]:
         """
@@ -189,18 +207,38 @@ class EventDispatcher:
                     name=sub["name"],
                 )
 
-                # Deliver
-                try:
-                    self._on_deliver(event_copy, sub["delivery"].webhook_url)
-                    dispatch_count += 1
-                    logger.info(
-                        f"Dispatched event {event.event_id} ({event.event_type.value}) "
-                        f"to subscription {sub['name']}"
-                    )
-                except Exception as e:
-                    logger.error(
-                        f"Error dispatching event {event.event_id} to {sub['name']}: {e}"
-                    )
+                # Try agent delivery first
+                handled_by_agent = False
+                if self._on_agent_deliver:
+                    try:
+                        handled_by_agent = self._on_agent_deliver(
+                            event_copy, sub["id"]
+                        )
+                        if handled_by_agent:
+                            dispatch_count += 1
+                            print(f"EVENT: Routed to agent for subscription '{sub['name']}'")
+                            logger.info(
+                                f"Routed event {event.event_id} to agent "
+                                f"via subscription {sub['name']}"
+                            )
+                    except Exception as e:
+                        logger.error(
+                            f"Error routing event {event.event_id} to agent: {e}"
+                        )
+
+                # Fall back to webhook delivery if not handled by agent
+                if not handled_by_agent and self._on_deliver:
+                    try:
+                        self._on_deliver(event_copy, sub["delivery"].webhook_url)
+                        dispatch_count += 1
+                        logger.info(
+                            f"Dispatched event {event.event_id} ({event.event_type.value}) "
+                            f"to webhook for subscription {sub['name']}"
+                        )
+                    except Exception as e:
+                        logger.error(
+                            f"Error dispatching event {event.event_id} to {sub['name']}: {e}"
+                        )
 
         return dispatch_count
 
