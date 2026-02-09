@@ -12,7 +12,7 @@ import './CreateSubscriptionDialog.css'; // Reuse the same styles
  * The agent runtime will start a background worker for enabled agents and
  * route matching events to the agent's LLM-based processing loop.
  */
-export default function CreateAgentDialog({ onClose, onSave }) {
+export default function CreateAgentDialog({ onClose, onSave, initialData }) {
   const schema = useGraphStore((state) => state.schema);
 
   // Agent info
@@ -36,6 +36,60 @@ export default function CreateAgentDialog({ onClose, onSave }) {
   const [keywords, setKeywords] = useState('');
   const [webhookUrl, setWebhookUrl] = useState('');
 
+  // Initialize form with initialData if provided
+  useEffect(() => {
+    if (initialData) {
+      const { agent, subscription } = initialData;
+
+      // Agent fields
+      setName(agent.name || '');
+      setDescription(agent.description || '');
+
+      if (agent.metadata) {
+        // Try new structure first (flattened)
+        if (agent.metadata.prompts || agent.metadata.mcp_integration_ids) {
+          setEnabled(agent.metadata.enabled ?? true);
+          setTaskPrompt(agent.metadata.prompts?.task_prompt || '');
+          setSelectedIntegrations(agent.metadata.mcp_integration_ids || []);
+        }
+        // Fallback to legacy nested "agent" structure
+        else if (agent.metadata.agent) {
+          setEnabled(agent.metadata.agent.enabled ?? true);
+          setTaskPrompt(agent.metadata.agent.task_prompt || '');
+          if (agent.metadata.agent.mcp_integrations) {
+            setSelectedIntegrations(agent.metadata.agent.mcp_integrations);
+          }
+        }
+      }
+
+      // Subscription fields
+      if (subscription?.metadata) {
+        const filters = subscription.metadata.filters || {};
+        const delivery = subscription.metadata.delivery || {};
+
+        if (filters.target?.node_types) {
+          setSelectedNodeTypes(filters.target.node_types);
+        }
+
+        if (filters.operations) {
+          setOperations({
+            create: filters.operations.includes('create'),
+            update: filters.operations.includes('update'),
+            delete: filters.operations.includes('delete'),
+          });
+        }
+
+        if (filters.keywords?.any) {
+          setKeywords(filters.keywords.any.join(', '));
+        }
+
+        if (delivery.webhook_url && !delivery.webhook_url.startsWith('internal://')) {
+          setWebhookUrl(delivery.webhook_url);
+        }
+      }
+    }
+  }, [initialData]);
+
   // Fetch available MCP integrations from server
   useEffect(() => {
     async function fetchIntegrations() {
@@ -44,10 +98,13 @@ export default function CreateAgentDialog({ onClose, onSave }) {
         if (response.ok) {
           const data = await response.json();
           setAvailableIntegrations(data);
-          // Select GRAPH by default if available
-          const graphIntegration = data.find(i => i.id === 'GRAPH');
-          if (graphIntegration) {
-            setSelectedIntegrations(['GRAPH']);
+
+          // Select GRAPH by default if available (only if not editing)
+          if (!initialData) {
+            const graphIntegration = data.find(i => i.id === 'GRAPH');
+            if (graphIntegration) {
+              setSelectedIntegrations(['GRAPH']);
+            }
           }
         }
       } catch (error) {
@@ -57,7 +114,7 @@ export default function CreateAgentDialog({ onClose, onSave }) {
       }
     }
     fetchIntegrations();
-  }, []);
+  }, [initialData]);
 
   // Get available node types from schema
   const nodeTypes = schema?.node_types
@@ -97,72 +154,133 @@ export default function CreateAgentDialog({ onClose, onSave }) {
       return;
     }
 
-    // Generate a unique ID prefix for linking the nodes
-    const idPrefix = 'agent-' + Date.now().toString(36);
-    const subscriptionId = idPrefix + '-subscription';
+    // Logic for Create vs Update
+    if (initialData) {
+      // UPDATE existing agent
+      const agentId = initialData.agent.id;
+      const subscriptionId = initialData.subscription?.id;
 
-    // Create the EventSubscription node
-    const subscriptionNode = {
-      id: subscriptionId,
-      name: `${name} - Subscription`,
-      type: 'EventSubscription',
-      description: `Event subscription for agent: ${name}`,
-      summary: `Listens to ${Object.entries(operations).filter(([_, v]) => v).map(([k]) => k).join(', ')} events`,
-      metadata: {
-        filters: {
-          target: {
-            entity_kind: 'node',
-            node_types: selectedNodeTypes,
-          },
-          operations: Object.entries(operations).filter(([_, v]) => v).map(([k]) => k),
-          keywords: {
-            any: keywords.split(',').map(k => k.trim()).filter(k => k),
-          },
-        },
-        delivery: {
-          webhook_url: webhookUrl.trim() || `internal://agent/${idPrefix}`,
-          ignore_origins: [`agent:${idPrefix}`], // Prevent loops - ignore events from this agent
-          ignore_session_ids: [],
-        },
-      },
-      communities: [],
-    };
-
-    // Create the Agent node
-    const agentNode = {
-      name: name.trim(),
-      type: 'Agent',
-      description: description.trim() || `AI agent: ${name}`,
-      summary: `MCP agent with ${selectedIntegrations.length} integration(s)`,
-      metadata: {
-        subscription_id: subscriptionId,
-        agent: {
+      // Update Agent Node
+      const agentUpdates = {
+        name: name.trim(),
+        description: description.trim(),
+        summary: `MCP agent with ${selectedIntegrations.length} integration(s)`,
+        metadata: {
+          ...initialData.agent.metadata,
+          subscription_id: subscriptionId, // Preserve or set ID
+          // New structure
           enabled: enabled,
-          task_prompt: taskPrompt.trim(),
-          mcp_integrations: selectedIntegrations,
+          prompts: {
+            task_prompt: taskPrompt.trim(),
+          },
+          mcp_integration_ids: selectedIntegrations,
+          // Remove legacy key if it exists to avoid confusion
+          agent: undefined,
         },
-      },
-      communities: [],
-    };
+      };
 
-    // Save both nodes (and optionally a relationship edge)
-    onSave({
-      nodes: [subscriptionNode, agentNode],
-      edges: [
-        {
-          source: agentNode.name, // Will be resolved to ID by backend
-          target: subscriptionNode.id,
-          type: 'RELATES_TO',
+      // Update Subscription Node (if exists)
+      let subscriptionUpdates = null;
+      if (subscriptionId && initialData.subscription) {
+        subscriptionUpdates = {
+          name: `${name} - Subscription`,
+          description: `Event subscription for agent: ${name}`,
+          summary: `Listens to ${Object.entries(operations).filter(([_, v]) => v).map(([k]) => k).join(', ')} events`,
+          metadata: {
+            ...initialData.subscription.metadata,
+            filters: {
+              target: {
+                entity_kind: 'node',
+                node_types: selectedNodeTypes,
+              },
+              operations: Object.entries(operations).filter(([_, v]) => v).map(([k]) => k),
+              keywords: {
+                any: keywords.split(',').map(k => k.trim()).filter(k => k),
+              },
+            },
+            delivery: {
+              ...initialData.subscription.metadata.delivery,
+              webhook_url: webhookUrl.trim() || `internal://agent/${agentId}`,
+            },
+          },
+        };
+      }
+
+      onSave({
+        agentId,
+        agentUpdates,
+        subscriptionId,
+        subscriptionUpdates
+      });
+
+    } else {
+      // CREATE new agent
+      const idPrefix = 'agent-' + Date.now().toString(36);
+      const subscriptionId = idPrefix + '-subscription';
+
+      // Create the EventSubscription node
+      const subscriptionNode = {
+        id: subscriptionId,
+        name: `${name} - Subscription`,
+        type: 'EventSubscription',
+        description: `Event subscription for agent: ${name}`,
+        summary: `Listens to ${Object.entries(operations).filter(([_, v]) => v).map(([k]) => k).join(', ')} events`,
+        metadata: {
+          filters: {
+            target: {
+              entity_kind: 'node',
+              node_types: selectedNodeTypes,
+            },
+            operations: Object.entries(operations).filter(([_, v]) => v).map(([k]) => k),
+            keywords: {
+              any: keywords.split(',').map(k => k.trim()).filter(k => k),
+            },
+          },
+          delivery: {
+            webhook_url: webhookUrl.trim() || `internal://agent/${idPrefix}`,
+            ignore_origins: [`agent:${idPrefix}`], // Prevent loops - ignore events from this agent
+            ignore_session_ids: [],
+          },
         },
-      ],
-    });
+        communities: [],
+      };
+
+      // Create the Agent node
+      const agentNode = {
+        name: name.trim(),
+        type: 'Agent',
+        description: description.trim() || `AI agent: ${name}`,
+        summary: `MCP agent with ${selectedIntegrations.length} integration(s)`,
+        metadata: {
+          subscription_id: subscriptionId,
+          enabled: enabled,
+          prompts: {
+            task_prompt: taskPrompt.trim(),
+          },
+          mcp_integration_ids: selectedIntegrations,
+        },
+        communities: [],
+      };
+
+      // Save both nodes (and optionally a relationship edge)
+      onSave({
+        nodes: [subscriptionNode, agentNode],
+        edges: [
+          {
+            source: agentNode.name, // Will be resolved to ID by backend
+            target: subscriptionNode.id,
+            type: 'RELATES_TO',
+          },
+        ],
+      });
+    }
     onClose();
   };
 
   return (
     <div className="dialog-overlay" onClick={onClose}>
       <div className="dialog-content subscription-dialog" onClick={e => e.stopPropagation()}>
-        <h2>Create Agent</h2>
+        <h2>{initialData ? 'Edit Agent' : 'Create Agent'}</h2>
         <p className="dialog-description">
           An agent listens to graph changes and processes events using an LLM with MCP tools.
         </p>
@@ -350,7 +468,7 @@ When a new Initiative node is created:
               Cancel
             </button>
             <button type="submit" className="btn-primary">
-              Create Agent
+              {initialData ? 'Save Changes' : 'Create Agent'}
             </button>
           </div>
         </form>

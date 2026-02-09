@@ -37,6 +37,7 @@ function App() {
   const [saveViewDialog, setSaveViewDialog] = useState(null); // { viewData }
   const [showSubscriptionDialog, setShowSubscriptionDialog] = useState(false);
   const [showAgentDialog, setShowAgentDialog] = useState(false);
+  const [editingAgentData, setEditingAgentData] = useState(null); // { agent, subscription }
 
   // Load schema, presentation, and stats on startup
   useEffect(() => {
@@ -84,9 +85,29 @@ function App() {
   }, [addNodesToVisualization, showNotification]);
 
   // Callback: Edit node
-  const handleEdit = useCallback((nodeId, nodeData) => {
-    setEditingNode({ id: nodeId, data: nodeData });
-  }, [setEditingNode]);
+  const handleEdit = useCallback(async (nodeId, nodeData) => {
+    if (nodeData.type === 'Agent') {
+      try {
+        let subscriptionNode = null;
+        const subId = nodeData.metadata?.subscription_id;
+
+        if (subId) {
+          const result = await api.getNodeDetails(subId);
+          if (result.success) {
+            subscriptionNode = result.node;
+          }
+        }
+
+        setEditingAgentData({ agent: nodeData, subscription: subscriptionNode });
+        setShowAgentDialog(true);
+      } catch (error) {
+        console.error('Error preparing agent editor:', error);
+        showNotification('error', 'Could not load agent details');
+      }
+    } else {
+      setEditingNode({ id: nodeId, data: nodeData });
+    }
+  }, [setEditingNode, showNotification]);
 
   // Callback: Hide node
   const handleHide = useCallback((nodeId) => {
@@ -192,6 +213,7 @@ function App() {
 
   // Callback: Create agent
   const handleCreateAgent = useCallback(() => {
+    setEditingAgentData(null);
     setShowAgentDialog(true);
   }, []);
 
@@ -216,37 +238,59 @@ function App() {
     }
   }, [addNodesToVisualization, showNotification]);
 
-  // Save agent nodes (agent + subscription + edge)
-  const handleSaveAgent = useCallback(async ({ nodes: agentNodes, edges: agentEdges }) => {
+  // Save agent nodes (create or update)
+  const handleSaveAgent = useCallback(async (data) => {
     try {
-      const result = await api.addNodes(agentNodes, agentEdges);
-      console.log('Agent created:', result);
+      // Check if this is an update (has agentId) or create (has nodes array)
+      if (data.agentId) {
+        // UPDATE
+        const { agentId, agentUpdates, subscriptionId, subscriptionUpdates } = data;
 
-      // Add the created nodes to the visualization
-      if (result.added_node_ids && result.added_node_ids.length > 0) {
-        // Map the returned IDs to the nodes
-        const nodesWithIds = agentNodes.map((node, index) => ({
-          ...node,
-          id: result.added_node_ids[index] || node.id,
-        }));
-        // Map edge IDs
-        const edgesWithIds = agentEdges.map((edge, index) => ({
-          ...edge,
-          id: result.added_edge_ids?.[index] || edge.id,
-          source: result.added_node_ids[agentNodes.findIndex(n => n.type === 'Agent')] || edge.source,
-          target: result.added_node_ids[agentNodes.findIndex(n => n.type === 'EventSubscription')] || edge.target,
-        }));
-        addNodesToVisualization(nodesWithIds, edgesWithIds);
-        console.log('Agent and subscription added to visualization:', result.added_node_ids);
+        await api.updateNode(agentId, agentUpdates);
+        if (subscriptionId && subscriptionUpdates) {
+          await api.updateNode(subscriptionId, subscriptionUpdates);
+        }
+
+        // Update visualization locally
+        const newNodes = nodes.map(n => {
+          if (n.id === agentId) return { ...n, ...agentUpdates };
+          if (n.id === subscriptionId) return { ...n, ...subscriptionUpdates };
+          return n;
+        });
+        updateVisualization(newNodes, edges);
+
+        showNotification('success', 'Agent updated');
+      } else {
+        // CREATE
+        const { nodes: agentNodes, edges: agentEdges } = data;
+        const result = await api.addNodes(agentNodes, agentEdges);
+        console.log('Agent created:', result);
+
+        // Add the created nodes to the visualization
+        if (result.added_node_ids && result.added_node_ids.length > 0) {
+          // Map the returned IDs to the nodes
+          const nodesWithIds = agentNodes.map((node, index) => ({
+            ...node,
+            id: result.added_node_ids[index] || node.id,
+          }));
+          // Map edge IDs
+          const edgesWithIds = agentEdges.map((edge, index) => ({
+            ...edge,
+            id: result.added_edge_ids?.[index] || edge.id,
+            source: result.added_node_ids[agentNodes.findIndex(n => n.type === 'Agent')] || edge.source,
+            target: result.added_node_ids[agentNodes.findIndex(n => n.type === 'EventSubscription')] || edge.target,
+          }));
+          addNodesToVisualization(nodesWithIds, edgesWithIds);
+        }
+
+        const agentNode = agentNodes.find(n => n.type === 'Agent');
+        showNotification('success', `Agent "${agentNode?.name || 'Agent'}" created`);
       }
-
-      const agentNode = agentNodes.find(n => n.type === 'Agent');
-      showNotification('success', `Agent "${agentNode?.name || 'Agent'}" skapad`);
     } catch (error) {
-      console.error('Error creating agent:', error);
-      showNotification('error', 'Kunde inte skapa agent');
+      console.error('Error saving agent:', error);
+      showNotification('error', 'Could not save agent');
     }
-  }, [addNodesToVisualization, showNotification]);
+  }, [nodes, edges, addNodesToVisualization, updateVisualization, showNotification]);
 
   // Handle node update from edit dialog
   const handleNodeUpdate = useCallback(async (nodeId, updates) => {
@@ -350,8 +394,12 @@ function App() {
 
       {showAgentDialog && (
         <CreateAgentDialog
-          onClose={() => setShowAgentDialog(false)}
+          onClose={() => {
+            setShowAgentDialog(false);
+            setEditingAgentData(null);
+          }}
           onSave={handleSaveAgent}
+          initialData={editingAgentData}
         />
       )}
     </div>

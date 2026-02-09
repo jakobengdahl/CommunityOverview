@@ -104,8 +104,18 @@ class GraphStorage:
         self._event_dispatcher: Optional["EventDispatcher"] = None
         self._delivery_worker: Optional["DeliveryWorker"] = None
         self._events_enabled = False
+        self._system_listeners: List[Callable[[Event], None]] = []
 
         self.load()
+
+    def add_system_listener(self, listener: Callable[["Event"], None]) -> None:
+        """
+        Add a system-level event listener.
+        This listener receives all events directly, bypassing filters/subscriptions.
+        Used for internal system components like the Agent Registry.
+        """
+        with self._lock:
+            self._system_listeners.append(listener)
 
     def setup_events(
         self,
@@ -196,19 +206,14 @@ class GraphStorage:
             after: Entity state after mutation (for creates/updates)
             context: Event context for tracking and loop prevention
         """
-        if not self._events_enabled or not self._event_dispatcher:
-            print(f"EVENT: Skipped (events_enabled={self._events_enabled}, dispatcher={self._event_dispatcher is not None})")
-            return
-
-        print(f"EVENT: Emitting {event_type.value} for {entity_kind.value} {entity_id} ({entity_type})")
-
+        # Create event object
         # Build patch for updates
-        patch = None
+        patch_data = None
         if before and after and event_type == EventType.NODE_UPDATE:
-            patch = {}
+            patch_data = {}
             for key in after:
                 if key not in before or before.get(key) != after.get(key):
-                    patch[key] = after[key]
+                    patch_data[key] = after[key]
 
         event = Event(
             event_type=event_type,
@@ -219,9 +224,22 @@ class GraphStorage:
                 type=entity_type,
                 before=before,
                 after=after,
-                patch=patch,
+                patch=patch_data,
             ),
         )
+
+        # Notify system listeners (always, even if events disabled for webhooks)
+        for listener in self._system_listeners:
+            try:
+                listener(event)
+            except Exception as e:
+                print(f"Error in system listener: {e}")
+
+        if not self._events_enabled or not self._event_dispatcher:
+            print(f"EVENT: Skipped (events_enabled={self._events_enabled}, dispatcher={self._event_dispatcher is not None})")
+            return
+
+        print(f"EVENT: Emitting {event_type.value} for {entity_kind.value} {entity_id} ({entity_type})")
 
         # Dispatch asynchronously (non-blocking)
         try:
