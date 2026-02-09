@@ -34,6 +34,6 @@
       "onAutoForward": "notify"
     }
   },
-  "postCreateCommand": "pip install --no-cache-dir -r mcp-server/requirements.txt && cd mcp-server && npm install",
+  "postCreateCommand": "pip install --no-cache-dir -r backend/requirements.txt && npm install",
   "remoteUser": "vscode"
 }
