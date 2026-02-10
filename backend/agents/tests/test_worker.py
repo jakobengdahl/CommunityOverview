@@ -149,8 +149,8 @@ class TestProcessingResult:
             handled=True,
             summary="Updated node with web search results",
             actions=[
-                {"tool": "GRAPH.search_graph", "input": {"query": "AI"}},
-                {"tool": "GRAPH.update_node", "input": {"node_id": "n-1"}},
+                {"tool": "GRAPH__search_graph", "input": {"query": "AI"}},
+                {"tool": "GRAPH__update_node", "input": {"node_id": "n-1"}},
             ],
             graph_changes=["Updated node n-1 description"],
         )

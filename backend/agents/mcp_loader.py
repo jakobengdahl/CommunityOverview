@@ -27,7 +27,7 @@ class NamespacedTool:
     """A tool with its integration namespace."""
     integration_id: str
     original_name: str
-    namespaced_name: str  # e.g., "GRAPH.search_graph"
+    namespaced_name: str  # e.g., "GRAPH__search_graph"
     description: str
     input_schema: Dict[str, Any]
 
@@ -238,7 +238,7 @@ class MCPLoader:
             NamespacedTool(
                 integration_id=integration.id,
                 original_name=name,
-                namespaced_name=f"{integration.id}.{name}",
+                namespaced_name=f"{integration.id}__{name}",
                 description=desc,
                 input_schema=schema,
             )
@@ -282,7 +282,7 @@ class MCPLoader:
             NamespacedTool(
                 integration_id=integration.id,
                 original_name="fetch",
-                namespaced_name=f"{integration.id}.fetch",
+                namespaced_name=f"{integration.id}__fetch",
                 description="Fetch content from a URL and convert to markdown",
                 input_schema={
                     "type": "object",
@@ -301,7 +301,7 @@ class MCPLoader:
             NamespacedTool(
                 integration_id=integration.id,
                 original_name="read_file",
-                namespaced_name=f"{integration.id}.read_file",
+                namespaced_name=f"{integration.id}__read_file",
                 description="Read contents of a file",
                 input_schema={
                     "type": "object",
@@ -314,7 +314,7 @@ class MCPLoader:
             NamespacedTool(
                 integration_id=integration.id,
                 original_name="write_file",
-                namespaced_name=f"{integration.id}.write_file",
+                namespaced_name=f"{integration.id}__write_file",
                 description="Write content to a file",
                 input_schema={
                     "type": "object",
@@ -328,7 +328,7 @@ class MCPLoader:
             NamespacedTool(
                 integration_id=integration.id,
                 original_name="list_directory",
-                namespaced_name=f"{integration.id}.list_directory",
+                namespaced_name=f"{integration.id}__list_directory",
                 description="List contents of a directory",
                 input_schema={
                     "type": "object",
@@ -346,7 +346,7 @@ class MCPLoader:
             NamespacedTool(
                 integration_id=integration.id,
                 original_name="search",
-                namespaced_name=f"{integration.id}.search",
+                namespaced_name=f"{integration.id}__search",
                 description="Search the web using Brave Search",
                 input_schema={
                     "type": "object",

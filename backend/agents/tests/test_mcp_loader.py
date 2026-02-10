@@ -45,24 +45,24 @@ class TestMCPLoader:
 
         # Manually add some tools to simulate discovery
         loader._tools_cache = {
-            "GRAPH.search_graph": NamespacedTool(
+            "GRAPH__search_graph": NamespacedTool(
                 integration_id="GRAPH",
                 original_name="search_graph",
-                namespaced_name="GRAPH.search_graph",
+                namespaced_name="GRAPH__search_graph",
                 description="Search the graph",
                 input_schema={}
             ),
-            "GRAPH.update_node": NamespacedTool(
+            "GRAPH__update_node": NamespacedTool(
                 integration_id="GRAPH",
                 original_name="update_node",
-                namespaced_name="GRAPH.update_node",
+                namespaced_name="GRAPH__update_node",
                 description="Update a node",
                 input_schema={}
             ),
-            "WEB.fetch": NamespacedTool(
+            "WEB__fetch": NamespacedTool(
                 integration_id="WEB",
                 original_name="fetch",
-                namespaced_name="WEB.fetch",
+                namespaced_name="WEB__fetch",
                 description="Fetch a URL",
                 input_schema={}
             ),
@@ -74,33 +74,33 @@ class TestMCPLoader:
         assert len(tools) == 2
         # Check namespacing
         names = [t["name"] for t in tools]
-        assert "GRAPH.search_graph" in names
-        assert "GRAPH.update_node" in names
-        assert "WEB.fetch" not in names
+        assert "GRAPH__search_graph" in names
+        assert "GRAPH__update_node" in names
+        assert "WEB__fetch" not in names
 
     def test_get_tool_definitions_multiple_integrations(self):
         """Test getting tools from multiple integrations."""
         loader = MCPLoader([])
 
         loader._tools_cache = {
-            "GRAPH.search_graph": NamespacedTool(
+            "GRAPH__search_graph": NamespacedTool(
                 integration_id="GRAPH",
                 original_name="search_graph",
-                namespaced_name="GRAPH.search_graph",
+                namespaced_name="GRAPH__search_graph",
                 description="Search",
                 input_schema={}
             ),
-            "WEB.fetch": NamespacedTool(
+            "WEB__fetch": NamespacedTool(
                 integration_id="WEB",
                 original_name="fetch",
-                namespaced_name="WEB.fetch",
+                namespaced_name="WEB__fetch",
                 description="Fetch",
                 input_schema={}
             ),
-            "FS.read_file": NamespacedTool(
+            "FS__read_file": NamespacedTool(
                 integration_id="FS",
                 original_name="read_file",
-                namespaced_name="FS.read_file",
+                namespaced_name="FS__read_file",
                 description="Read file",
                 input_schema={}
             ),
@@ -110,9 +110,9 @@ class TestMCPLoader:
 
         assert len(tools) == 2
         names = [t["name"] for t in tools]
-        assert "GRAPH.search_graph" in names
-        assert "WEB.fetch" in names
-        assert "FS.read_file" not in names
+        assert "GRAPH__search_graph" in names
+        assert "WEB__fetch" in names
+        assert "FS__read_file" not in names
 
 
 class TestToolNamespacing:
@@ -123,10 +123,10 @@ class TestToolNamespacing:
         loader = MCPLoader([])
 
         loader._tools_cache = {
-            "GRAPH.search_graph": NamespacedTool(
+            "GRAPH__search_graph": NamespacedTool(
                 integration_id="GRAPH",
                 original_name="search_graph",
-                namespaced_name="GRAPH.search_graph",
+                namespaced_name="GRAPH__search_graph",
                 description="Search the knowledge graph",
                 input_schema={
                     "type": "object",
@@ -138,7 +138,7 @@ class TestToolNamespacing:
         tools = loader.get_tool_definitions(["GRAPH"])
 
         assert len(tools) == 1
-        assert tools[0]["name"] == "GRAPH.search_graph"
+        assert tools[0]["name"] == "GRAPH__search_graph"
         # The description in tool definition includes integration ID prefix
         assert tools[0]["description"] == "[GRAPH] Search the knowledge graph"
         assert "input_schema" in tools[0]
@@ -157,10 +157,10 @@ class TestToolNamespacing:
         }
 
         loader._tools_cache = {
-            "GRAPH.update_node": NamespacedTool(
+            "GRAPH__update_node": NamespacedTool(
                 integration_id="GRAPH",
                 original_name="update_node",
-                namespaced_name="GRAPH.update_node",
+                namespaced_name="GRAPH__update_node",
                 description="Update a node",
                 input_schema=original_schema
             )
@@ -195,10 +195,10 @@ class TestToolExecutor:
 
         # Pre-populate cache so executor finds the tool
         loader._tools_cache = {
-            "GRAPH.search_graph": NamespacedTool(
+            "GRAPH__search_graph": NamespacedTool(
                 integration_id="GRAPH",
                 original_name="search_graph",
-                namespaced_name="GRAPH.search_graph",
+                namespaced_name="GRAPH__search_graph",
                 description="Search",
                 input_schema={}
             )
@@ -207,7 +207,7 @@ class TestToolExecutor:
         executor = loader.create_tool_executor(graph_service=mock_service)
 
         # Call the executor with a GRAPH tool
-        result = executor("GRAPH.search_graph", {"query": "test"})
+        result = executor("GRAPH__search_graph", {"query": "test"})
 
         # Should have called the mock service
         assert len(mock_service.search_calls) == 1
@@ -231,10 +231,10 @@ class TestToolExecutor:
 
         # Pre-populate cache
         loader._tools_cache = {
-            "GRAPH.update_node": NamespacedTool(
+            "GRAPH__update_node": NamespacedTool(
                 integration_id="GRAPH",
                 original_name="update_node",
-                namespaced_name="GRAPH.update_node",
+                namespaced_name="GRAPH__update_node",
                 description="Update",
                 input_schema={}
             )
@@ -242,8 +242,8 @@ class TestToolExecutor:
 
         executor = loader.create_tool_executor(graph_service=mock_service)
 
-        # Test with dotted name
-        result = executor("GRAPH.update_node", {"node_id": "node-1", "name": "New Name"})
+        # Test with namespaced name
+        result = executor("GRAPH__update_node", {"node_id": "node-1", "name": "New Name"})
 
         assert len(mock_service.update_calls) == 1
 
@@ -263,7 +263,7 @@ class TestMCPLoaderLifecycle:
             NamespacedTool(
                 integration_id="GRAPH",
                 original_name="search_graph",
-                namespaced_name="GRAPH.search_graph",
+                namespaced_name="GRAPH__search_graph",
                 description="Search",
                 input_schema={}
             )
@@ -279,10 +279,10 @@ class TestMCPLoaderLifecycle:
         """Test that disconnect_all clears the tools map."""
         loader = MCPLoader([])
         loader._tools_cache = {
-            "GRAPH.test": NamespacedTool(
+            "GRAPH__test": NamespacedTool(
                 integration_id="GRAPH",
                 original_name="test",
-                namespaced_name="GRAPH.test",
+                namespaced_name="GRAPH__test",
                 description="test",
                 input_schema={}
             )
