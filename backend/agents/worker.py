@@ -215,10 +215,19 @@ class AgentWorker:
             )
             tool_names = [t["name"] for t in tool_definitions]
 
+            # Get schema context from graph service (if available)
+            schema = None
+            if self.graph_service and hasattr(self.graph_service, "get_schema"):
+                try:
+                    schema = self.graph_service.get_schema()
+                except Exception as e:
+                    logger.warning(f"Agent {self.config.name}: Could not load schema: {e}")
+
             # Build system prompt
             system_prompt = build_agent_system_prompt(
                 task_prompt=self.config.prompts.task_prompt,
                 available_tools=tool_names,
+                schema=schema,
             )
 
             # Build user message with event
