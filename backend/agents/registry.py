@@ -78,6 +78,36 @@ class AgentRegistry:
         """Set a callback for processing results."""
         self._on_result = callback
 
+    def _ensure_initialized(self) -> bool:
+        """
+        Ensure the agent runtime is initialized (MCP loader connected).
+
+        Called lazily when agents are created dynamically, handling the case
+        where AGENTS_ENABLED was not set at startup but a user creates an
+        agent via the UI.
+
+        Returns:
+            True if initialized successfully, False on error.
+        """
+        if self._mcp_loader is not None:
+            return True
+
+        self._mcp_loader = MCPLoader(self.settings.mcp_integrations)
+
+        try:
+            tool_results = self._mcp_loader.connect_all()
+            total_tools = sum(len(tools) for tools in tool_results.values())
+            logger.info(
+                f"MCP loader initialized: {total_tools} tools "
+                f"from {len(tool_results)} integrations"
+            )
+        except Exception as e:
+            logger.error(f"Failed to initialize MCP loader: {e}")
+            self._mcp_loader = None
+            return False
+
+        return True
+
     def start(self) -> None:
         """
         Start the agent registry.
@@ -91,15 +121,7 @@ class AgentRegistry:
         logger.info("Starting agent registry...")
 
         # Initialize MCP loader with configured integrations
-        self._mcp_loader = MCPLoader(self.settings.mcp_integrations)
-
-        # Connect to MCP servers and discover tools
-        try:
-            tool_results = self._mcp_loader.connect_all()
-            total_tools = sum(len(tools) for tools in tool_results.values())
-            logger.info(f"MCP loader initialized: {total_tools} tools from {len(tool_results)} integrations")
-        except Exception as e:
-            logger.error(f"Failed to initialize MCP loader: {e}")
+        if not self._ensure_initialized():
             return
 
         # Load and start agents
@@ -267,6 +289,22 @@ class AgentRegistry:
         try:
             config = AgentConfig.from_node(node)
             if config.enabled:
+                # Ensure runtime is initialized (handles dynamic creation
+                # when AGENTS_ENABLED was not set at startup)
+                if not self._ensure_initialized():
+                    logger.error(
+                        f"Cannot start agent {config.name}: "
+                        f"MCP initialization failed"
+                    )
+                    return
+
+                # Auto-enable agent system when agents are created dynamically
+                if not self.settings.enabled:
+                    self.settings.enabled = True
+                    logger.info(
+                        "Agent system auto-enabled (agent created dynamically)"
+                    )
+
                 self._start_worker(config)
                 logger.info(f"Started worker for new agent: {config.name}")
         except Exception as e:
@@ -310,11 +348,26 @@ class AgentRegistry:
 
                         logger.info(f"Reloaded agent: {config.name}")
                     else:
-                        # Start new worker
+                        # Start new worker - ensure runtime is initialized
                         self._lock.release()
                         try:
-                            self._start_worker(config)
-                            logger.info(f"Started worker for enabled agent: {config.name}")
+                            if self._ensure_initialized():
+                                if not self.settings.enabled:
+                                    self.settings.enabled = True
+                                    logger.info(
+                                        "Agent system auto-enabled "
+                                        "(agent enabled dynamically)"
+                                    )
+                                self._start_worker(config)
+                                logger.info(
+                                    f"Started worker for enabled agent: "
+                                    f"{config.name}"
+                                )
+                            else:
+                                logger.error(
+                                    f"Cannot start agent {config.name}: "
+                                    f"MCP initialization failed"
+                                )
                         finally:
                             self._lock.acquire()
                 else:
