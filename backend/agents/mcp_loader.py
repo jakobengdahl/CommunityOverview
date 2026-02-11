@@ -22,12 +22,25 @@ from .config import MCPIntegration, MCPTransport
 logger = logging.getLogger(__name__)
 
 
+def _summarize_args(args: Dict[str, Any], max_len: int = 200) -> str:
+    """Summarize tool arguments for logging (truncate long values)."""
+    import json
+
+    try:
+        text = json.dumps(args, default=str, ensure_ascii=False)
+    except Exception:
+        text = str(args)
+    if len(text) > max_len:
+        return text[:max_len] + "..."
+    return text
+
+
 @dataclass
 class NamespacedTool:
     """A tool with its integration namespace."""
     integration_id: str
     original_name: str
-    namespaced_name: str  # e.g., "GRAPH.search_graph"
+    namespaced_name: str  # e.g., "GRAPH__search_graph"
     description: str
     input_schema: Dict[str, Any]
 
@@ -167,70 +180,92 @@ class MCPLoader:
         """Get the known tools for the GRAPH MCP integration."""
         # These match the tools registered in mcp_tools.py
         graph_tools = [
-            ("search_graph", "Search nodes in the graph", {
+            ("search_graph", "Search nodes in the graph by text query. Use node_types from the schema to filter (e.g. 'Actor', 'Initiative', 'Goal', 'Event').", {
                 "type": "object",
                 "properties": {
-                    "query": {"type": "string", "description": "Search query"},
-                    "node_types": {"type": "array", "items": {"type": "string"}},
-                    "communities": {"type": "array", "items": {"type": "string"}},
-                    "limit": {"type": "integer", "default": 50},
+                    "query": {"type": "string", "description": "Search query (matches name, description, summary, tags)"},
+                    "node_types": {"type": "array", "items": {"type": "string"}, "description": "Filter by node types as defined in the schema (e.g. Actor, Initiative, Goal, Event, Resource)"},
+                    "limit": {"type": "integer", "default": 50, "description": "Max results"},
                 },
                 "required": ["query"],
             }),
-            ("get_node_details", "Get details for a specific node", {
+            ("get_node_details", "Get full details for a specific node by ID", {
                 "type": "object",
                 "properties": {
-                    "node_id": {"type": "string", "description": "Node ID"},
+                    "node_id": {"type": "string", "description": "Node ID (UUID)"},
                 },
                 "required": ["node_id"],
             }),
             ("get_related_nodes", "Get nodes related to a specific node", {
                 "type": "object",
                 "properties": {
-                    "node_id": {"type": "string", "description": "Node ID"},
+                    "node_id": {"type": "string", "description": "Node ID (UUID)"},
                     "max_depth": {"type": "integer", "default": 1},
                 },
                 "required": ["node_id"],
             }),
-            ("add_nodes", "Add new nodes and edges to the graph", {
+            ("add_nodes", "Add new nodes and edges to the graph. Both 'nodes' and 'edges' are required (use [] for edges if none needed).", {
                 "type": "object",
                 "properties": {
-                    "nodes": {"type": "array", "items": {"type": "object"}},
-                    "edges": {"type": "array", "items": {"type": "object"}},
+                    "nodes": {
+                        "type": "array",
+                        "description": "Nodes to add. Each: {type, name, description, tags?}",
+                        "items": {
+                            "type": "object",
+                            "properties": {
+                                "type": {"type": "string", "description": "Node type from schema (e.g. Actor, Initiative, Goal, Event, Resource)"},
+                                "name": {"type": "string"},
+                                "description": {"type": "string"},
+                                "tags": {"type": "array", "items": {"type": "string"}},
+                            },
+                            "required": ["type", "name"],
+                        },
+                    },
+                    "edges": {
+                        "type": "array",
+                        "description": "Edges to add. Each: {source, target, type}. Use [] if no edges.",
+                        "items": {
+                            "type": "object",
+                            "properties": {
+                                "source": {"type": "string", "description": "Source node ID or name"},
+                                "target": {"type": "string", "description": "Target node ID or name"},
+                                "type": {"type": "string", "description": "Relationship type from schema (e.g. PRODUCES, BELONGS_TO, AIMS_FOR, RELATES_TO)"},
+                            },
+                            "required": ["source", "target", "type"],
+                        },
+                    },
                 },
                 "required": ["nodes", "edges"],
             }),
-            ("update_node", "Update an existing node", {
+            ("update_node", "Update an existing node's properties", {
                 "type": "object",
                 "properties": {
-                    "node_id": {"type": "string"},
-                    "updates": {"type": "object"},
+                    "node_id": {"type": "string", "description": "Node ID (UUID) to update"},
+                    "updates": {"type": "object", "description": "Fields to update: {name?, description?, summary?, tags?}"},
                 },
                 "required": ["node_id", "updates"],
             }),
             ("delete_nodes", "Delete nodes from the graph", {
                 "type": "object",
                 "properties": {
-                    "node_ids": {"type": "array", "items": {"type": "string"}},
+                    "node_ids": {"type": "array", "items": {"type": "string"}, "description": "Node IDs to delete"},
                     "confirmed": {"type": "boolean", "default": False},
                 },
                 "required": ["node_ids"],
             }),
-            ("find_similar_nodes", "Find nodes with similar names", {
+            ("find_similar_nodes", "Find nodes with similar names (fuzzy match)", {
                 "type": "object",
                 "properties": {
-                    "name": {"type": "string"},
-                    "node_type": {"type": "string"},
-                    "threshold": {"type": "number", "default": 0.7},
+                    "name": {"type": "string", "description": "Name to search for"},
+                    "node_type": {"type": "string", "description": "Filter by node type from schema"},
+                    "threshold": {"type": "number", "default": 0.7, "description": "Similarity threshold 0-1"},
                     "limit": {"type": "integer", "default": 5},
                 },
                 "required": ["name"],
             }),
-            ("get_graph_stats", "Get graph statistics", {
+            ("get_graph_stats", "Get graph statistics (node counts, etc.)", {
                 "type": "object",
-                "properties": {
-                    "communities": {"type": "array", "items": {"type": "string"}},
-                },
+                "properties": {},
             }),
         ]
 
@@ -238,7 +273,7 @@ class MCPLoader:
             NamespacedTool(
                 integration_id=integration.id,
                 original_name=name,
-                namespaced_name=f"{integration.id}.{name}",
+                namespaced_name=f"{integration.id}__{name}",
                 description=desc,
                 input_schema=schema,
             )
@@ -282,7 +317,7 @@ class MCPLoader:
             NamespacedTool(
                 integration_id=integration.id,
                 original_name="fetch",
-                namespaced_name=f"{integration.id}.fetch",
+                namespaced_name=f"{integration.id}__fetch",
                 description="Fetch content from a URL and convert to markdown",
                 input_schema={
                     "type": "object",
@@ -301,7 +336,7 @@ class MCPLoader:
             NamespacedTool(
                 integration_id=integration.id,
                 original_name="read_file",
-                namespaced_name=f"{integration.id}.read_file",
+                namespaced_name=f"{integration.id}__read_file",
                 description="Read contents of a file",
                 input_schema={
                     "type": "object",
@@ -314,7 +349,7 @@ class MCPLoader:
             NamespacedTool(
                 integration_id=integration.id,
                 original_name="write_file",
-                namespaced_name=f"{integration.id}.write_file",
+                namespaced_name=f"{integration.id}__write_file",
                 description="Write content to a file",
                 input_schema={
                     "type": "object",
@@ -328,7 +363,7 @@ class MCPLoader:
             NamespacedTool(
                 integration_id=integration.id,
                 original_name="list_directory",
-                namespaced_name=f"{integration.id}.list_directory",
+                namespaced_name=f"{integration.id}__list_directory",
                 description="List contents of a directory",
                 input_schema={
                     "type": "object",
@@ -346,7 +381,7 @@ class MCPLoader:
             NamespacedTool(
                 integration_id=integration.id,
                 original_name="search",
-                namespaced_name=f"{integration.id}.search",
+                namespaced_name=f"{integration.id}__search",
                 description="Search the web using Brave Search",
                 input_schema={
                     "type": "object",
@@ -435,24 +470,37 @@ class MCPLoader:
             """Execute a namespaced tool."""
             tool = self.get_tool(namespaced_name)
             if not tool:
+                logger.warning(f"Tool not found: {namespaced_name}")
                 return {"error": f"Unknown tool: {namespaced_name}"}
 
             integration_id = tool.integration_id
             original_name = tool.original_name
 
+            logger.info(
+                f"Executing tool {namespaced_name} "
+                f"with args: {_summarize_args(input_args)}"
+            )
+
             # Route to appropriate executor
             if integration_id == "GRAPH":
-                return self._execute_graph_tool(
+                result = self._execute_graph_tool(
                     original_name, input_args, graph_service, agent_id
                 )
             elif integration_id == "WEB":
-                return self._execute_fetch_tool(original_name, input_args)
+                result = self._execute_fetch_tool(original_name, input_args)
             elif integration_id == "FS":
-                return self._execute_fs_tool(original_name, input_args)
+                result = self._execute_fs_tool(original_name, input_args)
             elif integration_id == "SEARCH":
-                return self._execute_search_tool(original_name, input_args)
+                result = self._execute_search_tool(original_name, input_args)
             else:
-                return {"error": f"No executor for integration: {integration_id}"}
+                result = {"error": f"No executor for integration: {integration_id}"}
+
+            if isinstance(result, dict) and "error" in result:
+                logger.warning(
+                    f"Tool {namespaced_name} returned error: {result['error']}"
+                )
+
+            return result
 
         return execute_tool
 
@@ -471,6 +519,11 @@ class MCPLoader:
         if agent_id and tool_name in ("add_nodes", "update_node", "delete_nodes"):
             input_args["event_origin"] = f"agent:{agent_id}"
 
+        # Ensure add_nodes always has both required args
+        if tool_name == "add_nodes":
+            input_args.setdefault("edges", [])
+            input_args.setdefault("nodes", [])
+
         # Route to the appropriate GraphService method
         method = getattr(graph_service, tool_name, None)
         if not method:
@@ -479,7 +532,10 @@ class MCPLoader:
         try:
             return method(**input_args)
         except Exception as e:
-            logger.error(f"Graph tool {tool_name} failed: {e}")
+            logger.error(
+                f"Graph tool {tool_name} failed: {e} "
+                f"(args: {_summarize_args(input_args)})"
+            )
             return {"error": str(e)}
 
     def _execute_fetch_tool(

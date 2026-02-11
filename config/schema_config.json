@@ -26,7 +26,7 @@
         "color": "#EC4899"
       },
       "Actor": {
-        "fields": ["name", "description", "summary", "tags", "communities"],
+        "fields": ["name", "description", "summary", "tags"],
         "description": "Government agencies, organizations, individuals responsible for initiatives",
         "color": "#3B82F6"
       },
@@ -36,18 +36,18 @@
         "color": "#A855F7"
       },
       "Initiative": {
-        "fields": ["name", "description", "summary", "tags", "communities", "start_date", "end_date"],
+        "fields": ["name", "description", "summary", "tags", "start_date", "end_date"],
         "description": "Projects, programs, collaborative activities",
         "color": "#10B981"
       },
       "Capability": {
-        "fields": ["name", "description", "summary", "tags", "communities"],
+        "fields": ["name", "description", "summary", "tags"],
         "description": "Capabilities, competencies, skills needed/provided",
         "color": "#F97316"
       },
       "Resource": {
-        "fields": ["name", "description", "summary", "tags", "communities", "url"],
-        "description": "Outputs such as reports, software, tools, datasets",
+        "fields": ["name", "description", "summary", "tags", "identifier"],
+        "description": "Outputs such as reports, software, tools, datasets. Field 'identifier' follows Dublin Core (dc:identifier) for URLs/URIs.",
         "color": "#FBBF24"
       },
       "Legislation": {
@@ -59,6 +59,16 @@
         "fields": ["name", "description", "summary", "tags"],
         "description": "Themes like AI strategies, data strategies, digitalization",
         "color": "#14B8A6"
+      },
+      "Goal": {
+        "fields": ["name", "description", "summary", "tags", "target_date"],
+        "description": "Strategic objectives and targets for digitalization efforts",
+        "color": "#6366F1"
+      },
+      "Event": {
+        "fields": ["name", "description", "summary", "tags", "start_date", "end_date"],
+        "description": "A non-persistent, time-based occurrence (aligned with dc:Event). Conferences, workshops, decisions, milestones.",
+        "color": "#D946EF"
       }
     },
     "relationship_types": {
@@ -79,6 +89,9 @@
       },
       "PART_OF": {
         "description": "Part of (component is part of larger whole)"
+      },
+      "AIMS_FOR": {
+        "description": "Aims for (initiative or actor aims for a goal)"
       }
     }
   },
@@ -93,6 +106,8 @@
       "Resource": "#FBBF24",
       "Legislation": "#EF4444",
       "Theme": "#14B8A6",
+      "Goal": "#6366F1",
+      "Event": "#D946EF",
       "SavedView": "#6B7280",
       "VisualizationView": "#6B7280",
       "EventSubscription": "#8B5CF6",

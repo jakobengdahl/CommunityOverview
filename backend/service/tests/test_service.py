@@ -31,17 +31,11 @@ class TestGraphServiceSearch:
         assert result["total"] >= 1
         assert all(n["type"] == "Actor" for n in result["nodes"])
 
-    def test_search_graph_with_community_filter(self, populated_service: GraphService):
-        """Test filtering search by community."""
-        result = populated_service.search_graph(
-            query="",
-            communities=["eSam"]
-        )
+    def test_search_graph_returns_all_with_empty_query(self, populated_service: GraphService):
+        """Test that empty query returns all nodes."""
+        result = populated_service.search_graph(query="")
 
         assert result["total"] >= 1
-        # All returned nodes should be in eSam
-        for node in result["nodes"]:
-            assert "eSam" in node.get("communities", [])
 
     def test_search_graph_returns_edges(self, populated_service: GraphService):
         """Test that search returns connecting edges."""
@@ -244,12 +238,12 @@ class TestGraphServiceStatistics:
         assert result["total_nodes"] == 5
         assert result["total_edges"] == 4
 
-    def test_get_graph_stats_with_community_filter(self, populated_service: GraphService):
-        """Test getting stats filtered by community."""
-        result = populated_service.get_graph_stats(communities=["eSam"])
+    def test_get_graph_stats_has_type_counts(self, populated_service: GraphService):
+        """Test that stats include node counts by type."""
+        result = populated_service.get_graph_stats()
 
-        # Should only count nodes in eSam
-        assert result["total_nodes"] == 4  # All except community-1 which has no community
+        assert "Actor" in result["nodes_by_type"]
+        assert result["nodes_by_type"]["Actor"] == 2
 
     def test_list_node_types(self, empty_service: GraphService):
         """Test listing node types."""

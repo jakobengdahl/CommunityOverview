@@ -242,7 +242,6 @@ export default function CreateAgentDialog({ onClose, onSave, initialData }) {
             ignore_session_ids: [],
           },
         },
-        communities: [],
       };
 
       // Create the Agent node
@@ -259,7 +258,6 @@ export default function CreateAgentDialog({ onClose, onSave, initialData }) {
           },
           mcp_integration_ids: selectedIntegrations,
         },
-        communities: [],
       };
 
       // Save both nodes (and optionally a relationship edge)
@@ -432,34 +430,15 @@ When a new Initiative node is created:
             </div>
 
             <div className="form-group">
-              <label htmlFor="agent-keywords">Keywords (comma-separated)</label>
+              <label htmlFor="agent-keywords">Keywords (comma-separated, optional)</label>
               <input
                 id="agent-keywords"
                 type="text"
                 value={keywords}
                 onChange={e => setKeywords(e.target.value)}
-                placeholder="e.g. 'AI, digitalization'"
+                placeholder="Leave empty to match all events"
               />
-              <small>Only trigger for events containing these keywords in name, description, or tags</small>
-            </div>
-          </div>
-
-          <div className="form-section">
-            <h3>Optional Webhook Endpoint</h3>
-
-            <div className="form-group">
-              <label htmlFor="agent-webhook">External Webhook URL</label>
-              <input
-                id="agent-webhook"
-                type="url"
-                value={webhookUrl}
-                onChange={e => setWebhookUrl(e.target.value)}
-                placeholder="https://example.com/agent-webhook"
-              />
-              <small>
-                Optional: If specified, events are also sent to this URL.
-                Leave empty to only use internal agent processing.
-              </small>
+              <small>Optional: only trigger for events containing these keywords. Leave empty to match all events matching the node type and operation filters above.</small>
             </div>
           </div>
 

@@ -101,7 +101,6 @@ def sample_nodes() -> list:
             name="Skatteverket",
             description="Swedish Tax Agency",
             summary="Tax authority",
-            communities=["eSam"],
             tags=["government", "tax"]
         ),
         Node(
@@ -110,7 +109,6 @@ def sample_nodes() -> list:
             name="Bolagsverket",
             description="Swedish Companies Registration Office",
             summary="Company registration",
-            communities=["eSam"],
             tags=["government", "registration"]
         ),
         Node(
@@ -119,7 +117,6 @@ def sample_nodes() -> list:
             name="Digital First",
             description="A digital transformation initiative",
             summary="Digital transformation",
-            communities=["eSam"],
             tags=["digital", "transformation"]
         ),
         Node(
@@ -135,7 +132,6 @@ def sample_nodes() -> list:
             name="GDPR",
             description="General Data Protection Regulation",
             summary="Data protection law",
-            communities=["eSam"],
             tags=["privacy", "data"]
         ),
     ]
