@@ -143,7 +143,6 @@ class Node(BaseModel):
     name: str = Field(..., min_length=1, max_length=200)
     description: str = Field(default="", max_length=2000)
     summary: str = Field(default="", max_length=100)  # For visualization
-    communities: List[str] = Field(default_factory=list)
     tags: List[str] = Field(default_factory=list)  # Searchable tags for categorization
     metadata: Dict[str, Any] = Field(default_factory=dict)
     embedding: Optional[List[float]] = None  # For future vector search
@@ -260,7 +259,6 @@ class GraphStats(BaseModel):
     total_nodes: int
     total_edges: int
     nodes_by_type: Dict[str, int]
-    nodes_by_community: Dict[str, int]
     last_updated: datetime
 
     class Config:
@@ -274,7 +272,6 @@ class ProposedNodesResult(BaseModel):
     proposed_nodes: List[Node]
     proposed_edges: List[Edge]
     similar_existing: List[SimilarNode]
-    communities: List[str]  # Communities to be linked
 
 
 class AddNodesResult(BaseModel):

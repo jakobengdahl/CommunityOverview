@@ -73,6 +73,30 @@ class VectorStore:
             self.model = SentenceTransformer(self.model_name)
             print("Model loaded.")
 
+    def preload_model(self):
+        """
+        Preload the embedding model in a background thread.
+        Call at startup to avoid slow first request.
+        Fails silently if ML dependencies are not installed.
+        """
+        try:
+            # Quick check that numpy is available before starting thread
+            import numpy  # noqa: F401
+        except ImportError:
+            return  # ML dependencies not installed, skip preload
+
+        import threading
+
+        def _load():
+            try:
+                self._load_model()
+                print(f"Embedding model '{self.model_name}' preloaded in background.")
+            except Exception as e:
+                print(f"Warning: Background model preload failed: {e}")
+
+        t = threading.Thread(target=_load, name="embedding-preload", daemon=True)
+        t.start()
+
     def rebuild_index(self, nodes: List[Node]):
         """Rebuild the search index from a list of nodes"""
         np = _ensure_numpy()

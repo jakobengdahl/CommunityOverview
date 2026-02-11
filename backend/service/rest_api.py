@@ -30,7 +30,6 @@ class SearchRequest(BaseModel):
     """Request model for search operations."""
     query: str = Field(..., description="Search text")
     node_types: Optional[List[str]] = Field(None, description="Filter by node types")
-    communities: Optional[List[str]] = Field(None, description="Filter by communities")
     limit: int = Field(50, ge=1, le=500, description="Max results")
 
 
@@ -114,7 +113,6 @@ def create_rest_router(service: GraphService, prefix: str = "") -> APIRouter:
         return service.search_graph(
             query=request.query,
             node_types=request.node_types,
-            communities=request.communities,
             limit=request.limit
         )
 
@@ -208,11 +206,9 @@ def create_rest_router(service: GraphService, prefix: str = "") -> APIRouter:
     # ==================== Statistics & Metadata Endpoints ====================
 
     @router.get("/stats")
-    async def get_graph_stats(
-        communities: Optional[List[str]] = Query(None)
-    ) -> Dict[str, Any]:
+    async def get_graph_stats() -> Dict[str, Any]:
         """Get statistics for the graph."""
-        return service.get_graph_stats(communities)
+        return service.get_graph_stats()
 
     @router.get("/meta/node-types")
     async def list_node_types() -> Dict[str, Any]:

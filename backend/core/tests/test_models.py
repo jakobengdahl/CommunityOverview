@@ -64,7 +64,6 @@ class TestNode:
         assert len(node.id) == 36  # UUID format
         assert node.description == ""
         assert node.summary == ""
-        assert node.communities == []
         assert node.tags == []
         assert node.metadata == {}
         assert isinstance(node.created_at, datetime)
@@ -78,7 +77,6 @@ class TestNode:
             name="Test Initiative",
             description="A test initiative description",
             summary="Test summary",
-            communities=["eSam", "Test Community"],
             tags=["tag1", "tag2"],
             metadata={"key": "value"}
         )
@@ -87,7 +85,6 @@ class TestNode:
         assert node.name == "Test Initiative"
         assert node.description == "A test initiative description"
         assert node.summary == "Test summary"
-        assert node.communities == ["eSam", "Test Community"]
         assert node.tags == ["tag1", "tag2"]
         assert node.metadata == {"key": "value"}
 
@@ -96,14 +93,14 @@ class TestNode:
         node = Node(
             type=NodeType.ACTOR,
             name="Test Actor",
-            communities=["eSam"]
+            tags=["governance"]
         )
 
         data = node.to_dict()
 
         assert data['name'] == "Test Actor"
         assert data['type'] == "Actor"
-        assert data['communities'] == ["eSam"]
+        assert data['tags'] == ["governance"]
         assert isinstance(data['created_at'], str)  # ISO format string
 
     def test_node_from_dict(self):
@@ -114,7 +111,6 @@ class TestNode:
             'name': 'Test Actor',
             'description': 'Test description',
             'summary': 'Summary',
-            'communities': ['eSam'],
             'tags': ['tag1'],
             'metadata': {},
             'created_at': '2024-01-01T00:00:00',
@@ -238,7 +234,6 @@ class TestGraphStats:
             total_nodes=100,
             total_edges=150,
             nodes_by_type={"Actor": 50, "Initiative": 30},
-            nodes_by_community={"eSam": 80},
             last_updated=datetime.utcnow()
         )
 

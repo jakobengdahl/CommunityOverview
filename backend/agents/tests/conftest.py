@@ -25,14 +25,11 @@ class MockNode:
     description: str = ""
     summary: str = ""
     metadata: Dict[str, Any] = None
-    communities: List[str] = None
     tags: List[str] = None
 
     def __post_init__(self):
         if self.metadata is None:
             self.metadata = {}
-        if self.communities is None:
-            self.communities = []
         if self.tags is None:
             self.tags = []
 

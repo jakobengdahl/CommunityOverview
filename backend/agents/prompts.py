@@ -76,7 +76,7 @@ def build_schema_context(schema: Dict[str, Any]) -> str:
     # Node structure reference
     lines.append("""
 Node structure for add_nodes tool:
-  Each node: {"type": "<NodeType>", "name": "...", "description": "...", "tags": [...], "communities": [...]}
+  Each node: {"type": "<NodeType>", "name": "...", "description": "...", "tags": [...]}
   Each edge: {"source": "<node_id_or_name>", "target": "<node_id_or_name>", "type": "<RelationshipType>"}
   Both 'nodes' and 'edges' arrays are REQUIRED (use empty array [] if no edges needed).
 --- END SCHEMA ---""")

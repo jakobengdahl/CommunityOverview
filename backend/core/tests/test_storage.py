@@ -29,11 +29,11 @@ def storage_with_data(temp_storage):
     # Add some test nodes
     nodes = [
         Node(id="actor-1", type=NodeType.ACTOR, name="Test Actor 1",
-             description="First test actor", communities=["eSam"]),
+             description="First test actor"),
         Node(id="actor-2", type=NodeType.ACTOR, name="Test Actor 2",
-             description="Second test actor", communities=["eSam"]),
+             description="Second test actor"),
         Node(id="init-1", type=NodeType.INITIATIVE, name="Test Initiative",
-             description="A test initiative", communities=["eSam"]),
+             description="A test initiative"),
         Node(id="community-1", type=NodeType.COMMUNITY, name="eSam",
              description="eSam community"),
     ]
@@ -222,12 +222,11 @@ class TestGraphStorageSearch:
         assert len(results) >= 1
         assert all(n.type == NodeType.ACTOR for n in results)
 
-    def test_search_filter_by_community(self, storage_with_data):
-        """Test filtering search by community"""
-        results = storage_with_data.search_nodes("", communities=["eSam"])
+    def test_search_wildcard_returns_all(self, storage_with_data):
+        """Test that empty query returns all nodes"""
+        results = storage_with_data.search_nodes("")
 
-        # Should return all nodes in eSam community
-        assert all(any(c == "eSam" for c in n.communities) for n in results)
+        assert len(results) == 4
 
     def test_search_limit(self, storage_with_data):
         """Test search result limit"""
@@ -332,12 +331,12 @@ class TestGraphStorageStats:
         assert "Actor" in stats.nodes_by_type
         assert stats.nodes_by_type["Actor"] == 2
 
-    def test_get_stats_filter_by_community(self, storage_with_data):
-        """Test getting stats filtered by community"""
-        stats = storage_with_data.get_stats(communities=["eSam"])
+    def test_get_stats_counts_by_type(self, storage_with_data):
+        """Test that stats correctly count nodes by type"""
+        stats = storage_with_data.get_stats()
 
-        # Should only count nodes in eSam
-        assert stats.total_nodes == 3  # 2 actors + 1 initiative
+        assert "Community" in stats.nodes_by_type
+        assert stats.nodes_by_type["Community"] == 1
 
 
 class TestGraphStoragePersistence:

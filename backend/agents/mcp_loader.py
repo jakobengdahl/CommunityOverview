@@ -185,7 +185,6 @@ class MCPLoader:
                 "properties": {
                     "query": {"type": "string", "description": "Search query (matches name, description, summary, tags)"},
                     "node_types": {"type": "array", "items": {"type": "string"}, "description": "Filter by node types as defined in the schema (e.g. Actor, Resource, Initiative)"},
-                    "communities": {"type": "array", "items": {"type": "string"}, "description": "Filter by community names"},
                     "limit": {"type": "integer", "default": 50, "description": "Max results"},
                 },
                 "required": ["query"],
@@ -210,7 +209,7 @@ class MCPLoader:
                 "properties": {
                     "nodes": {
                         "type": "array",
-                        "description": "Nodes to add. Each: {type, name, description, tags?, communities?}",
+                        "description": "Nodes to add. Each: {type, name, description, tags?}",
                         "items": {
                             "type": "object",
                             "properties": {
@@ -218,7 +217,6 @@ class MCPLoader:
                                 "name": {"type": "string"},
                                 "description": {"type": "string"},
                                 "tags": {"type": "array", "items": {"type": "string"}},
-                                "communities": {"type": "array", "items": {"type": "string"}},
                             },
                             "required": ["type", "name"],
                         },
@@ -243,7 +241,7 @@ class MCPLoader:
                 "type": "object",
                 "properties": {
                     "node_id": {"type": "string", "description": "Node ID (UUID) to update"},
-                    "updates": {"type": "object", "description": "Fields to update: {name?, description?, summary?, tags?, communities?}"},
+                    "updates": {"type": "object", "description": "Fields to update: {name?, description?, summary?, tags?}"},
                 },
                 "required": ["node_id", "updates"],
             }),
@@ -267,9 +265,7 @@ class MCPLoader:
             }),
             ("get_graph_stats", "Get graph statistics (node counts, etc.)", {
                 "type": "object",
-                "properties": {
-                    "communities": {"type": "array", "items": {"type": "string"}, "description": "Filter by communities"},
-                },
+                "properties": {},
             }),
         ]
 

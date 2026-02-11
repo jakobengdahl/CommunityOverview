@@ -95,6 +95,7 @@ class GraphStorage:
         # We initialize VectorStore without a storage path as it now holds state in memory
         # and relies on GraphStorage for persistence via graph.json
         self.vector_store = VectorStore()
+        self.vector_store.preload_model()  # Start loading embedding model in background
 
         self.graph = nx.MultiDiGraph()  # MultiDiGraph allows multiple edges between same nodes
         self.nodes: Dict[str, Node] = {}  # node_id -> Node
@@ -365,7 +366,6 @@ class GraphStorage:
         self,
         query: str,
         node_types: Optional[List[NodeType]] = None,
-        communities: Optional[List[str]] = None,
         limit: int = 50
     ) -> List[Node]:
         """
@@ -383,11 +383,6 @@ class GraphStorage:
             # Filter by node type
             if node_types and node.type not in node_types:
                 continue
-
-            # Filter by communities
-            if communities:
-                if not any(comm in node.communities for comm in communities):
-                    continue
 
             # Text matching including tags (if not matching all)
             if not match_all:
@@ -729,7 +724,7 @@ class GraphStorage:
             before_state = node.to_dict()
 
             # Update allowed fields
-            allowed_fields = {'name', 'description', 'summary', 'communities', 'tags', 'metadata'}
+            allowed_fields = {'name', 'description', 'summary', 'tags', 'metadata'}
             for key, value in updates.items():
                 if key in allowed_fields:
                     setattr(node, key, value)
@@ -881,33 +876,18 @@ class GraphStorage:
                     message=f"Error during deletion: {str(e)}"
                 )
 
-    def get_stats(self, communities: Optional[List[str]] = None) -> GraphStats:
+    def get_stats(self) -> GraphStats:
         """Get statistics for the graph"""
-        # Filter nodes based on communities
-        relevant_nodes = self.nodes.values()
-        if communities:
-            relevant_nodes = [
-                n for n in self.nodes.values()
-                if any(comm in n.communities for comm in communities)
-            ]
-
         # Count nodes per type
         nodes_by_type = {}
-        for node in relevant_nodes:
-            type_name = node.type.value
+        for node in self.nodes.values():
+            type_name = node.type.value if hasattr(node.type, 'value') else str(node.type)
             nodes_by_type[type_name] = nodes_by_type.get(type_name, 0) + 1
 
-        # Count nodes per community
-        nodes_by_community = {}
-        for node in relevant_nodes:
-            for comm in node.communities:
-                nodes_by_community[comm] = nodes_by_community.get(comm, 0) + 1
-
         return GraphStats(
-            total_nodes=len(relevant_nodes),
+            total_nodes=len(self.nodes),
             total_edges=len(self.edges),
             nodes_by_type=nodes_by_type,
-            nodes_by_community=nodes_by_community,
             last_updated=datetime.utcnow()
         )
 

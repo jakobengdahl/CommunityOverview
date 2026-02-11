@@ -45,7 +45,6 @@ def register_mcp_tools(mcp, service: GraphService) -> Dict[str, Callable]:
     def search_graph(
         query: str,
         node_types: Optional[List[str]] = None,
-        communities: Optional[List[str]] = None,
         limit: int = 50,
         action: Optional[str] = None
     ) -> Dict[str, Any]:
@@ -55,7 +54,6 @@ def register_mcp_tools(mcp, service: GraphService) -> Dict[str, Callable]:
         Args:
             query: Search text (matches against name, description, summary)
             node_types: List of node types to filter on (Actor, Initiative, etc.)
-            communities: List of communities to filter on
             limit: Max number of results (default 50)
             action: Optional action for frontend ('add_to_visualization' to add to current view)
 
@@ -65,7 +63,6 @@ def register_mcp_tools(mcp, service: GraphService) -> Dict[str, Callable]:
         return service.search_graph(
             query=query,
             node_types=node_types,
-            communities=communities,
             limit=limit,
             action=action
         )
@@ -205,7 +202,7 @@ def register_mcp_tools(mcp, service: GraphService) -> Dict[str, Callable]:
 
         Args:
             node_id: ID of the node to update
-            updates: Dict with fields to update (name, description, summary, communities, metadata)
+            updates: Dict with fields to update (name, description, summary, tags, metadata)
             event_session_id: Optional session ID for webhook loop prevention
             event_correlation_id: Optional correlation ID for chaining events
 
@@ -252,17 +249,14 @@ def register_mcp_tools(mcp, service: GraphService) -> Dict[str, Callable]:
     # ==================== Statistics & Metadata Tools ====================
 
     @register_tool
-    def get_graph_stats(communities: Optional[List[str]] = None) -> Dict[str, Any]:
+    def get_graph_stats() -> Dict[str, Any]:
         """
         Get statistics for the graph
 
-        Args:
-            communities: Optional list of communities to filter on
-
         Returns:
-            Dict with statistics (total_nodes, total_edges, nodes_by_type, nodes_by_community)
+            Dict with statistics (total_nodes, total_edges, nodes_by_type)
         """
-        return service.get_graph_stats(communities)
+        return service.get_graph_stats()
 
     @register_tool
     def list_node_types() -> Dict[str, Any]:
