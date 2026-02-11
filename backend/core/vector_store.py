@@ -5,8 +5,11 @@ Handles generating, storing, and searching embeddings for nodes.
 This module is part of graph_core - the core graph storage layer.
 It uses sentence-transformers with CPU-only PyTorch for lightweight embeddings.
 
-Note: ML dependencies (numpy, sentence-transformers, sklearn) are lazily imported
-to allow the package to load even when they are not installed.
+Required dependencies (see backend/requirements.txt):
+  numpy, sentence-transformers, scikit-learn, torch (CPU)
+
+Imports are deferred (lazy) to speed up initial module load, but the
+packages MUST be installed in the environment.
 """
 
 import pickle
@@ -77,14 +80,7 @@ class VectorStore:
         """
         Preload the embedding model in a background thread.
         Call at startup to avoid slow first request.
-        Fails silently if ML dependencies are not installed.
         """
-        try:
-            # Quick check that numpy is available before starting thread
-            import numpy  # noqa: F401
-        except ImportError:
-            return  # ML dependencies not installed, skip preload
-
         import threading
 
         def _load():
@@ -98,17 +94,8 @@ class VectorStore:
         t.start()
 
     def rebuild_index(self, nodes: List[Node]):
-        """Rebuild the search index from a list of nodes.
-
-        Gracefully handles missing numpy by skipping index rebuild.
-        Embeddings are still stored on the Node objects and will be
-        indexed when numpy becomes available.
-        """
-        try:
-            np = _ensure_numpy()
-        except ImportError:
-            return  # ML dependencies not installed, skip index rebuild
-
+        """Rebuild the search index from a list of nodes."""
+        np = _ensure_numpy()
         self.embeddings = {}
 
         for node in nodes:
@@ -126,11 +113,7 @@ class VectorStore:
             self.embedding_matrix = None
             return
 
-        try:
-            np = _ensure_numpy()
-        except ImportError:
-            return  # ML dependencies not installed, skip matrix update
-
+        np = _ensure_numpy()
         self.node_ids = list(self.embeddings.keys())
         # Stack embeddings into a matrix
         self.embedding_matrix = np.vstack([self.embeddings[nid] for nid in self.node_ids])
@@ -156,10 +139,7 @@ class VectorStore:
         node.embedding = embedding_list
 
         # Update internal index
-        try:
-            np = _ensure_numpy()
-        except ImportError:
-            return  # ML dependencies not installed, skip index update
+        np = _ensure_numpy()
         self.embeddings[node.id] = np.array(embedding_list)
         self._update_matrix()
 

@@ -32,6 +32,9 @@ python-Levenshtein>=0.21.0
 --extra-index-url https://download.pytorch.org/whl/cpu
 torch>=2.0.0
 
+# numpy - used directly by vector_store.py for embedding index
+numpy>=1.24.0
+
 # Sentence transformers for semantic similarity
 # This will use the CPU-only PyTorch installed above
 sentence-transformers>=2.2.0

@@ -180,11 +180,11 @@ class MCPLoader:
         """Get the known tools for the GRAPH MCP integration."""
         # These match the tools registered in mcp_tools.py
         graph_tools = [
-            ("search_graph", "Search nodes in the graph by text query. Use node_types from the schema to filter (e.g. 'Actor', 'Resource').", {
+            ("search_graph", "Search nodes in the graph by text query. Use node_types from the schema to filter (e.g. 'Actor', 'Initiative', 'Goal', 'Event').", {
                 "type": "object",
                 "properties": {
                     "query": {"type": "string", "description": "Search query (matches name, description, summary, tags)"},
-                    "node_types": {"type": "array", "items": {"type": "string"}, "description": "Filter by node types as defined in the schema (e.g. Actor, Resource, Initiative)"},
+                    "node_types": {"type": "array", "items": {"type": "string"}, "description": "Filter by node types as defined in the schema (e.g. Actor, Initiative, Goal, Event, Resource)"},
                     "limit": {"type": "integer", "default": 50, "description": "Max results"},
                 },
                 "required": ["query"],
@@ -213,7 +213,7 @@ class MCPLoader:
                         "items": {
                             "type": "object",
                             "properties": {
-                                "type": {"type": "string", "description": "Node type from schema (e.g. Actor, Resource, Initiative)"},
+                                "type": {"type": "string", "description": "Node type from schema (e.g. Actor, Initiative, Goal, Event, Resource)"},
                                 "name": {"type": "string"},
                                 "description": {"type": "string"},
                                 "tags": {"type": "array", "items": {"type": "string"}},
@@ -229,7 +229,7 @@ class MCPLoader:
                             "properties": {
                                 "source": {"type": "string", "description": "Source node ID or name"},
                                 "target": {"type": "string", "description": "Target node ID or name"},
-                                "type": {"type": "string", "description": "Relationship type from schema (e.g. PRODUCES, BELONGS_TO, RELATES_TO)"},
+                                "type": {"type": "string", "description": "Relationship type from schema (e.g. PRODUCES, BELONGS_TO, AIMS_FOR, RELATES_TO)"},
                             },
                             "required": ["source", "target", "type"],
                         },

@@ -9,7 +9,7 @@ Du kan ställa frågor som:
 • "Vilka initiativ relaterar till NIS2?"
 • "Visa alla aktörer"
 • "Finns det några AI-strategiprojekt?"
-• "Sök efter myndigheter som jobbar med digital identitet"
+• "Vilka mål finns kring digitalisering?"
 • "Visa alla AI-agenter"
 
 Du kan också ladda upp dokument (PDF, Word, text) för att extrahera entiteter.
@@ -32,7 +32,7 @@ Du kan ställa frågor som:
 • "Vilka initiativ relaterar till NIS2?"
 • "Visa alla aktörer"
 • "Finns det några AI-strategiprojekt?"
-• "Sök efter myndigheter som jobbar med digital identitet"
+• "Vilka mål finns kring digitalisering?"
 • "Visa alla AI-agenter"
 
 Du kan också ladda upp dokument (PDF, Word, text) för att extrahera entiteter.
