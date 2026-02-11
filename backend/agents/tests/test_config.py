@@ -10,6 +10,7 @@ from backend.agents.config import (
     MCPIntegration,
     AgentConfig,
     AgentsSettings,
+    MCPTransport,
 )
 
 
@@ -20,38 +21,38 @@ class TestMCPIntegration:
         """Test creating an HTTP-based MCP integration."""
         integration = MCPIntegration(
             id="GRAPH",
-            type="http",
+            name="Graph API",
+            transport=MCPTransport.HTTP,
             url="http://localhost:8000/mcp",
             description="Graph tools",
         )
 
         assert integration.id == "GRAPH"
-        assert integration.type == "http"
+        assert integration.transport == MCPTransport.HTTP
         assert integration.url == "http://localhost:8000/mcp"
         assert integration.command is None
-        assert integration.args is None
 
     def test_create_stdio_integration(self):
         """Test creating a stdio-based MCP integration."""
         integration = MCPIntegration(
             id="FS",
-            type="stdio",
-            command="/usr/bin/node",
-            args=["mcp-fs-server", "--read-only"],
+            name="Filesystem",
+            transport=MCPTransport.STDIO,
+            command=["/usr/bin/node", "mcp-fs-server", "--read-only"],
             description="Filesystem tools",
         )
 
         assert integration.id == "FS"
-        assert integration.type == "stdio"
-        assert integration.command == "/usr/bin/node"
-        assert integration.args == ["mcp-fs-server", "--read-only"]
+        assert integration.transport == MCPTransport.STDIO
+        assert integration.command == ["/usr/bin/node", "mcp-fs-server", "--read-only"]
         assert integration.url is None
 
     def test_to_dict(self):
         """Test converting integration to dictionary."""
         integration = MCPIntegration(
             id="WEB",
-            type="http",
+            name="Web Fetch",
+            transport=MCPTransport.HTTP,
             url="http://example.com/mcp",
             description="Web tools",
         )
@@ -59,7 +60,7 @@ class TestMCPIntegration:
         result = integration.to_dict()
 
         assert result["id"] == "WEB"
-        assert result["type"] == "http"
+        assert result["transport"] == "http"
         assert result["url"] == "http://example.com/mcp"
         assert result["description"] == "Web tools"
 
@@ -74,13 +75,13 @@ class TestAgentConfig:
         assert config.agent_id == "agent-001"
         assert config.name == "Test Agent"
         assert config.enabled is True
-        assert config.task_prompt == "Process events and log a summary."
+        assert config.prompts.task_prompt == "Process events and log a summary."
         assert config.subscription_id == "sub-001"
-        assert config.mcp_integrations == ["GRAPH"]
+        assert config.mcp_integration_ids == ["GRAPH"]
 
     def test_from_node_disabled(self, sample_agent_node):
         """Test AgentConfig with disabled agent."""
-        sample_agent_node.metadata["agent"]["enabled"] = False
+        sample_agent_node.metadata["enabled"] = False
 
         config = AgentConfig.from_node(sample_agent_node)
 
@@ -88,24 +89,25 @@ class TestAgentConfig:
 
     def test_from_node_missing_agent_config(self, sample_agent_node):
         """Test AgentConfig with missing agent configuration."""
-        del sample_agent_node.metadata["agent"]
+        # Clear metadata essentially
+        sample_agent_node.metadata = {}
 
         config = AgentConfig.from_node(sample_agent_node)
 
         # Should use defaults
-        assert config.enabled is False
-        assert config.task_prompt == ""
-        assert config.mcp_integrations == []
+        assert config.enabled is True  # default is True
+        assert config.prompts.task_prompt == ""
+        assert config.mcp_integration_ids == []
 
     def test_from_node_multiple_integrations(self, sample_agent_node):
         """Test AgentConfig with multiple MCP integrations."""
-        sample_agent_node.metadata["agent"]["mcp_integrations"] = [
+        sample_agent_node.metadata["mcp_integration_ids"] = [
             "GRAPH", "WEB", "SEARCH"
         ]
 
         config = AgentConfig.from_node(sample_agent_node)
 
-        assert config.mcp_integrations == ["GRAPH", "WEB", "SEARCH"]
+        assert config.mcp_integration_ids == ["GRAPH", "WEB", "SEARCH"]
 
 
 class TestAgentsSettings:
@@ -118,8 +120,7 @@ class TestAgentsSettings:
 
             assert settings.enabled is False
             assert settings.llm_provider == "openai"
-            assert settings.max_events_per_minute == 60
-            assert settings.max_turns_per_event == 10
+            assert settings.max_agent_turns == 10
 
     def test_from_env_enabled(self):
         """Test loading settings from environment with agents enabled."""
@@ -147,7 +148,7 @@ class TestAgentsSettings:
         """Test loading MCP integrations from JSON environment variable."""
         import json
         integrations = [
-            {"id": "CUSTOM", "type": "http", "url": "http://custom.com/mcp"}
+            {"id": "CUSTOM", "transport": "http", "url": "http://custom.com/mcp"}
         ]
         env = {
             "AGENTS_ENABLED": "true",
@@ -157,10 +158,10 @@ class TestAgentsSettings:
         with patch.dict(os.environ, env, clear=True):
             settings = AgentsSettings.from_env()
 
-            # Should include default GRAPH plus custom
+            # Should include custom only (defaults are skipped if env var provided)
             ids = [i.id for i in settings.mcp_integrations]
-            assert "GRAPH" in ids
             assert "CUSTOM" in ids
+            assert "GRAPH" not in ids
 
     def test_default_mcp_integrations(self):
         """Test that GRAPH integration is included by default."""

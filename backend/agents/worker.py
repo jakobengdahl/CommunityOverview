@@ -215,10 +215,19 @@ class AgentWorker:
             )
             tool_names = [t["name"] for t in tool_definitions]
 
+            # Get schema context from graph service (if available)
+            schema = None
+            if self.graph_service and hasattr(self.graph_service, "get_schema"):
+                try:
+                    schema = self.graph_service.get_schema()
+                except Exception as e:
+                    logger.warning(f"Agent {self.config.name}: Could not load schema: {e}")
+
             # Build system prompt
             system_prompt = build_agent_system_prompt(
                 task_prompt=self.config.prompts.task_prompt,
                 available_tools=tool_names,
+                schema=schema,
             )
 
             # Build user message with event
@@ -238,6 +247,9 @@ class AgentWorker:
                 tool_executor=tool_executor,
                 max_turns=self.settings.max_agent_turns,
             )
+
+            # Log detailed trace (reasoning and tool calls)
+            self._log_execution_trace(result)
 
             # Parse the agent's response
             processing_result = self._parse_agent_response(
@@ -276,6 +288,36 @@ class AgentWorker:
                 self.on_result(processing_result)
             except Exception as e:
                 logger.error(f"Result callback failed: {e}")
+
+    def _log_execution_trace(self, result: Dict[str, Any]) -> None:
+        """Log the LLM execution trace with reasoning and tool calls."""
+        trace = result.get("trace", [])
+        agent_name = self.config.name
+        for turn in trace:
+            turn_num = turn.get("turn", "?")
+            text = turn.get("text_response")
+            tool_calls = turn.get("tool_calls", [])
+
+            if text:
+                # Truncate long reasoning for console readability
+                display_text = text[:500] + "..." if len(text) > 500 else text
+                logger.info(f"Agent {agent_name} [turn {turn_num}] reasoning: {display_text}")
+
+            for tc in tool_calls:
+                tc_name = tc.get("name", "?")
+                tc_input = tc.get("input", {})
+                input_summary = json.dumps(tc_input, default=str, ensure_ascii=False)
+                if len(input_summary) > 300:
+                    input_summary = input_summary[:300] + "..."
+                logger.info(f"Agent {agent_name} [turn {turn_num}] tool call: {tc_name}({input_summary})")
+
+        final = result.get("final_response")
+        if final:
+            display_final = final[:500] + "..." if len(final) > 500 else final
+            logger.info(f"Agent {agent_name} final response: {display_final}")
+
+        if not result.get("success"):
+            logger.warning(f"Agent {agent_name} execution failed: {result.get('error', 'unknown')}")
 
     def _create_llm_client(self) -> LLMClient:
         """Create the LLM client."""

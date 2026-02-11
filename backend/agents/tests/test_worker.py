@@ -7,35 +7,37 @@ from unittest.mock import MagicMock, patch
 import queue
 import time
 
-from backend.agents.config import AgentConfig, AgentsSettings
+from backend.agents.config import AgentConfig, AgentsSettings, AgentPrompts
 from backend.agents.worker import AgentWorker, ProcessingResult
+
+
+@pytest.fixture
+def agent_config():
+    """Create a test agent configuration."""
+    return AgentConfig(
+        agent_id="agent-001",
+        name="Test Agent",
+        # description field removed
+        enabled=True,
+        prompts=AgentPrompts(task_prompt="Process events and return a summary."),
+        subscription_id="sub-001",
+        mcp_integration_ids=["GRAPH"],
+    )
+
+
+@pytest.fixture
+def agent_settings():
+    """Create test agent settings."""
+    return AgentsSettings(
+        enabled=True,
+        llm_provider="openai",
+        openai_api_key="test-key",
+        max_agent_turns=5,
+    )
 
 
 class TestAgentWorker:
     """Tests for AgentWorker functionality."""
-
-    @pytest.fixture
-    def agent_config(self):
-        """Create a test agent configuration."""
-        return AgentConfig(
-            agent_id="agent-001",
-            name="Test Agent",
-            description="Test agent for unit tests",
-            enabled=True,
-            task_prompt="Process events and return a summary.",
-            subscription_id="sub-001",
-            mcp_integrations=["GRAPH"],
-        )
-
-    @pytest.fixture
-    def agent_settings(self):
-        """Create test agent settings."""
-        return AgentsSettings(
-            enabled=True,
-            llm_provider="openai",
-            openai_api_key="test-key",
-            max_turns_per_event=5,
-        )
 
     def test_worker_init(self, agent_config, agent_settings):
         """Test worker initialization."""
@@ -93,18 +95,18 @@ class TestAgentWorker:
         new_config = AgentConfig(
             agent_id="agent-001",
             name="Updated Agent",
-            description="Updated description",
+            # description removed
             enabled=True,
-            task_prompt="New task prompt.",
+            prompts=AgentPrompts(task_prompt="New task prompt."),
             subscription_id="sub-001",
-            mcp_integrations=["GRAPH", "WEB"],
+            mcp_integration_ids=["GRAPH", "WEB"],
         )
 
         worker.reload_config(new_config)
 
         assert worker.config.name == "Updated Agent"
-        assert worker.config.task_prompt == "New task prompt."
-        assert worker.config.mcp_integrations == ["GRAPH", "WEB"]
+        assert worker.config.prompts.task_prompt == "New task prompt."
+        assert worker.config.mcp_integration_ids == ["GRAPH", "WEB"]
 
 
 class TestProcessingResult:
@@ -116,6 +118,7 @@ class TestProcessingResult:
             agent_id="agent-001",
             event_id="evt-001",
             success=True,
+            handled=True,
             summary="Processed event successfully",
         )
 
@@ -129,7 +132,9 @@ class TestProcessingResult:
             agent_id="agent-001",
             event_id="evt-001",
             success=False,
+            handled=False,
             error="LLM call failed",
+            summary="LLM call failed",
         )
 
         assert result.success is False
@@ -141,10 +146,11 @@ class TestProcessingResult:
             agent_id="agent-001",
             event_id="evt-001",
             success=True,
+            handled=True,
             summary="Updated node with web search results",
             actions=[
-                {"tool": "GRAPH.search_graph", "input": {"query": "AI"}},
-                {"tool": "GRAPH.update_node", "input": {"node_id": "n-1"}},
+                {"tool": "GRAPH__search_graph", "input": {"query": "AI"}},
+                {"tool": "GRAPH__update_node", "input": {"node_id": "n-1"}},
             ],
             graph_changes=["Updated node n-1 description"],
         )
@@ -229,4 +235,4 @@ class TestWorkerCallbacks:
         worker, results = worker_with_callback
 
         # The callback should be set
-        assert worker._on_result is not None
+        assert worker.on_result is not None

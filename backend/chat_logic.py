@@ -33,7 +33,8 @@ def _build_system_prompt() -> str:
         color_names = {
             "#3B82F6": "blue", "#A855F7": "purple", "#10B981": "green",
             "#F97316": "orange", "#FBBF24": "yellow", "#EF4444": "red",
-            "#14B8A6": "teal", "#6B7280": "gray"
+            "#14B8A6": "teal", "#6366F1": "indigo", "#D946EF": "fuchsia",
+            "#6B7280": "gray"
         }
         color_name = color_names.get(color, "")
         node_types_section += f"- {type_name} ({color_name}): {desc}\n"
@@ -136,7 +137,7 @@ SECURITY RULES:
 1. ALWAYS warn if the user tries to store personal data (names, email, phone numbers)
 2. For deletion: Maximum 10 nodes at once, ALWAYS require double confirmation
 3. Show affected connections before deletion
-4. Filter results based on user's active communities when relevant
+4. Filter results appropriately based on the user's query
 
 CRITICAL - "LAGG TILL" vs "VISA" DISTINCTION:
 These are TWO DIFFERENT operations - understand the user's intent:
@@ -175,7 +176,7 @@ When user asks to search the graph database using phrases like:
 - English: "in the database", "in the graph", "in the network"
 
 Process:
-1. Use search_graph() with appropriate query and filters (node_types, communities)
+1. Use search_graph() with appropriate query and filters (node_types)
 2. If abbreviation search returns few results, try the full organization name
 3. If user wants to explore connections, use get_related_nodes()
 4. Present results clearly with node types and summaries
@@ -197,8 +198,7 @@ WORKFLOW FOR ADDING NODES:
    - Common themes in the community
 4. WAIT for explicit user approval (Swedish: "ja", "godkann"; English: "yes", "approve")
 5. ONLY THEN run add_nodes() with confirmed nodes, edges, and suggested tags
-6. Link nodes to user's active communities automatically
-7. Respond with confirmation - all in ONE final response
+6. Respond with confirmation - all in ONE final response
 
 WORKFLOW FOR EDITING NODES:
 1. User can edit nodes via the GUI edit button OR by asking you
@@ -292,6 +292,12 @@ VISUALIZATION DISPLAY BEHAVIOR:
    - "Visa/Show X" (without "saved view") = SEARCH for X and display results
    - "Add nodes" / "Show related nodes" = ADD to current visualization
 
+AGENT NODES:
+The graph contains Agent nodes (type "Agent") that represent AI agents configured to process events.
+When a user asks about agents (e.g., "Visa alla agenter", "Vilka agenter finns?", "Show all agents"):
+- Use search_graph(query="", node_types=["Agent"]) to find all Agent nodes
+- Present the agents with their names and descriptions
+
 TOOL USAGE GUIDELINES:
 - search_graph: For text-based searches, exploring themes, finding specific nodes
 - get_related_nodes: For expanding from a known node, exploring connections
@@ -299,7 +305,7 @@ TOOL USAGE GUIDELINES:
 - find_similar_nodes: For checking ONE node for duplicates
 - find_similar_nodes_batch: For checking MULTIPLE nodes at once - ALWAYS use this when extracting from documents
 - add_nodes: Only after user approval, with proper validation
-- update_node: For editing existing nodes (name, description, summary, communities)
+- update_node: For editing existing nodes (name, description, summary, tags)
 - delete_nodes: CAREFUL - max 10 nodes, requires confirmation=True
 - list_node_types: When user asks about available types
 - get_graph_stats: For overview of graph size and composition
@@ -445,12 +451,7 @@ class ChatProcessor:
                         "node_types": {
                             "type": "array",
                             "items": {"type": "string"},
-                            "description": "Optional: Filter by node types (Actor, Initiative, Legislation, etc.)"
-                        },
-                        "communities": {
-                            "type": "array",
-                            "items": {"type": "string"},
-                            "description": "Optional: Filter by communities"
+                            "description": "Optional: Filter by node types (Actor, Initiative, Legislation, Goal, Event, etc.)"
                         },
                         "limit": {
                             "type": "integer",
@@ -561,7 +562,7 @@ class ChatProcessor:
                                     "name": {"type": "string"},
                                     "description": {"type": "string"},
                                     "summary": {"type": "string"},
-                                    "communities": {"type": "array", "items": {"type": "string"}}
+                                    "tags": {"type": "array", "items": {"type": "string"}}
                                 }
                             }
                         },

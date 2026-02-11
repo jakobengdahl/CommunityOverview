@@ -365,3 +365,23 @@ class TestMultipleSubscriptions:
         assert delivered_event.subscription is not None
         assert delivered_event.subscription.id == "sub-1"
         assert delivered_event.subscription.name == "My Subscription"
+
+    def test_internal_urls_skipped_for_webhook_delivery(self):
+        """Test that internal:// URLs are not sent to webhook delivery callback."""
+        sub = create_subscription_node(
+            "sub-1", "Internal Agent", webhook_url="internal://agent/agent-1"
+        )
+        storage = MockStorage([sub])
+        dispatcher = EventDispatcher(storage)
+
+        delivered = []
+        dispatcher.set_delivery_callback(lambda e, u: delivered.append((e, u)))
+
+        # Simulate agent delivery failing or not being handled
+        dispatcher.set_agent_delivery_callback(lambda e, s: False)
+
+        event = create_event()
+        dispatcher.dispatch(event)
+
+        # Should be skipped because URL starts with internal://
+        assert len(delivered) == 0

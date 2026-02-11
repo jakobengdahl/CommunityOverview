@@ -95,6 +95,7 @@ class GraphStorage:
         # We initialize VectorStore without a storage path as it now holds state in memory
         # and relies on GraphStorage for persistence via graph.json
         self.vector_store = VectorStore()
+        self.vector_store.preload_model()  # Start loading embedding model in background
 
         self.graph = nx.MultiDiGraph()  # MultiDiGraph allows multiple edges between same nodes
         self.nodes: Dict[str, Node] = {}  # node_id -> Node
@@ -104,8 +105,18 @@ class GraphStorage:
         self._event_dispatcher: Optional["EventDispatcher"] = None
         self._delivery_worker: Optional["DeliveryWorker"] = None
         self._events_enabled = False
+        self._system_listeners: List[Callable[[Event], None]] = []
 
         self.load()
+
+    def add_system_listener(self, listener: Callable[["Event"], None]) -> None:
+        """
+        Add a system-level event listener.
+        This listener receives all events directly, bypassing filters/subscriptions.
+        Used for internal system components like the Agent Registry.
+        """
+        with self._lock:
+            self._system_listeners.append(listener)
 
     def setup_events(
         self,
@@ -196,19 +207,14 @@ class GraphStorage:
             after: Entity state after mutation (for creates/updates)
             context: Event context for tracking and loop prevention
         """
-        if not self._events_enabled or not self._event_dispatcher:
-            print(f"EVENT: Skipped (events_enabled={self._events_enabled}, dispatcher={self._event_dispatcher is not None})")
-            return
-
-        print(f"EVENT: Emitting {event_type.value} for {entity_kind.value} {entity_id} ({entity_type})")
-
+        # Create event object
         # Build patch for updates
-        patch = None
+        patch_data = None
         if before and after and event_type == EventType.NODE_UPDATE:
-            patch = {}
+            patch_data = {}
             for key in after:
                 if key not in before or before.get(key) != after.get(key):
-                    patch[key] = after[key]
+                    patch_data[key] = after[key]
 
         event = Event(
             event_type=event_type,
@@ -219,9 +225,22 @@ class GraphStorage:
                 type=entity_type,
                 before=before,
                 after=after,
-                patch=patch,
+                patch=patch_data,
             ),
         )
+
+        # Notify system listeners (always, even if events disabled for webhooks)
+        for listener in self._system_listeners:
+            try:
+                listener(event)
+            except Exception as e:
+                print(f"Error in system listener: {e}")
+
+        if not self._events_enabled or not self._event_dispatcher:
+            print(f"EVENT: Skipped (events_enabled={self._events_enabled}, dispatcher={self._event_dispatcher is not None})")
+            return
+
+        print(f"EVENT: Emitting {event_type.value} for {entity_kind.value} {entity_id} ({entity_type})")
 
         # Dispatch asynchronously (non-blocking)
         try:
@@ -347,7 +366,6 @@ class GraphStorage:
         self,
         query: str,
         node_types: Optional[List[NodeType]] = None,
-        communities: Optional[List[str]] = None,
         limit: int = 50
     ) -> List[Node]:
         """
@@ -365,11 +383,6 @@ class GraphStorage:
             # Filter by node type
             if node_types and node.type not in node_types:
                 continue
-
-            # Filter by communities
-            if communities:
-                if not any(comm in node.communities for comm in communities):
-                    continue
 
             # Text matching including tags (if not matching all)
             if not match_all:
@@ -711,7 +724,7 @@ class GraphStorage:
             before_state = node.to_dict()
 
             # Update allowed fields
-            allowed_fields = {'name', 'description', 'summary', 'communities', 'tags', 'metadata'}
+            allowed_fields = {'name', 'description', 'summary', 'tags', 'metadata'}
             for key, value in updates.items():
                 if key in allowed_fields:
                     setattr(node, key, value)
@@ -863,33 +876,18 @@ class GraphStorage:
                     message=f"Error during deletion: {str(e)}"
                 )
 
-    def get_stats(self, communities: Optional[List[str]] = None) -> GraphStats:
+    def get_stats(self) -> GraphStats:
         """Get statistics for the graph"""
-        # Filter nodes based on communities
-        relevant_nodes = self.nodes.values()
-        if communities:
-            relevant_nodes = [
-                n for n in self.nodes.values()
-                if any(comm in n.communities for comm in communities)
-            ]
-
         # Count nodes per type
         nodes_by_type = {}
-        for node in relevant_nodes:
-            type_name = node.type.value
+        for node in self.nodes.values():
+            type_name = node.type.value if hasattr(node.type, 'value') else str(node.type)
             nodes_by_type[type_name] = nodes_by_type.get(type_name, 0) + 1
 
-        # Count nodes per community
-        nodes_by_community = {}
-        for node in relevant_nodes:
-            for comm in node.communities:
-                nodes_by_community[comm] = nodes_by_community.get(comm, 0) + 1
-
         return GraphStats(
-            total_nodes=len(relevant_nodes),
+            total_nodes=len(self.nodes),
             total_edges=len(self.edges),
             nodes_by_type=nodes_by_type,
-            nodes_by_community=nodes_by_community,
             last_updated=datetime.utcnow()
         )
 

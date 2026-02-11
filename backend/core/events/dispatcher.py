@@ -228,8 +228,20 @@ class EventDispatcher:
 
                 # Fall back to webhook delivery if not handled by agent
                 if not handled_by_agent and self._on_deliver:
+                    webhook_url = sub["delivery"].webhook_url
+
+                    # Prevent delivering internal agent URLs to external webhook handler
+                    # This happens if the agent system is disabled or the agent failed to handle it
+                    if webhook_url and webhook_url.startswith("internal://"):
+                        logger.warning(
+                            f"Event {event.event_id} matched subscription '{sub['name']}' "
+                            f"pointing to internal agent {webhook_url}, but agent did not handle it "
+                            f"(Agent system disabled? Agent not running?). Skipping webhook delivery."
+                        )
+                        continue
+
                     try:
-                        self._on_deliver(event_copy, sub["delivery"].webhook_url)
+                        self._on_deliver(event_copy, webhook_url)
                         dispatch_count += 1
                         logger.info(
                             f"Dispatched event {event.event_id} ({event.event_type.value}) "

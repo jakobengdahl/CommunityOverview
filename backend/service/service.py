@@ -92,7 +92,6 @@ class GraphService:
         self,
         query: str,
         node_types: Optional[List[str]] = None,
-        communities: Optional[List[str]] = None,
         limit: int = 50,
         action: Optional[str] = None
     ) -> Dict[str, Any]:
@@ -102,7 +101,6 @@ class GraphService:
         Args:
             query: Search text (matches against name, description, summary, tags)
             node_types: List of node types to filter on (Actor, Initiative, etc.)
-            communities: List of communities to filter on
             limit: Max number of results (default 50)
             action: Optional action for frontend ('add_to_visualization' or 'replace_visualization')
 
@@ -110,7 +108,7 @@ class GraphService:
             Dict with matching nodes, connecting edges, and search metadata
         """
         # Log search request
-        print(f"SEARCH: query='{query}' types={node_types} communities={communities} limit={limit}")
+        print(f"SEARCH: query='{query}' types={node_types} limit={limit}")
 
         # Convert node_types to NodeType enum or keep as string for dynamic types
         type_filters = None
@@ -120,7 +118,6 @@ class GraphService:
         results = self._storage.search_nodes(
             query=query,
             node_types=type_filters,
-            communities=communities,
             limit=limit
         )
         print(f"SEARCH: Found {len(results)} results")
@@ -141,7 +138,6 @@ class GraphService:
             "query": query,
             "filters": {
                 "node_types": node_types,
-                "communities": communities
             }
         }
 
@@ -374,7 +370,7 @@ class GraphService:
 
         Args:
             node_id: ID of the node to update
-            updates: Dict with fields to update (name, description, summary, communities, tags, metadata)
+            updates: Dict with fields to update (name, description, summary, tags, metadata)
             event_origin: Source of the mutation (web-ui, mcp, system, agent:<id>)
             event_session_id: Unique session ID for loop prevention
             event_correlation_id: Correlation ID for chaining related events
@@ -444,17 +440,14 @@ class GraphService:
 
     # ==================== Statistics & Metadata ====================
 
-    def get_graph_stats(self, communities: Optional[List[str]] = None) -> Dict[str, Any]:
+    def get_graph_stats(self) -> Dict[str, Any]:
         """
         Get statistics for the graph.
 
-        Args:
-            communities: Optional list of communities to filter on
-
         Returns:
-            Dict with statistics (total_nodes, total_edges, nodes_by_type, nodes_by_community)
+            Dict with statistics (total_nodes, total_edges, nodes_by_type)
         """
-        stats = self._storage.get_stats(communities)
+        stats = self._storage.get_stats()
         return serialize_graph_stats(stats)
 
     def list_node_types(self) -> Dict[str, Any]:

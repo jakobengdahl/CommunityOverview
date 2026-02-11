@@ -151,6 +151,21 @@ def create_app(
     # Start agent registry (loads agents and starts workers)
     agent_registry.start()
 
+    # Register system listener to update agent registry on Agent node changes
+    def agent_lifecycle_listener(event):
+        if event.entity.kind != "node" or event.entity.type != "Agent":
+            return
+
+        node_id = event.entity.id
+        if event.event_type == "node.create":
+            agent_registry.handle_agent_created(node_id)
+        elif event.event_type == "node.update":
+            agent_registry.handle_agent_updated(node_id)
+        elif event.event_type == "node.delete":
+            agent_registry.handle_agent_deleted(node_id)
+
+    graph_storage.add_system_listener(agent_lifecycle_listener)
+
     # Store service on app state for access in routes
     app.state.graph_service = graph_service
     app.state.graph_storage = graph_storage

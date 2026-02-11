@@ -25,14 +25,11 @@ class MockNode:
     description: str = ""
     summary: str = ""
     metadata: Dict[str, Any] = None
-    communities: List[str] = None
     tags: List[str] = None
 
     def __post_init__(self):
         if self.metadata is None:
             self.metadata = {}
-        if self.communities is None:
-            self.communities = []
         if self.tags is None:
             self.tags = []
 
@@ -87,11 +84,11 @@ def sample_agent_node():
         description="Test agent for unit tests",
         metadata={
             "subscription_id": "sub-001",
-            "agent": {
-                "enabled": True,
+            "enabled": True,
+            "prompts": {
                 "task_prompt": "Process events and log a summary.",
-                "mcp_integrations": ["GRAPH"],
             },
+            "mcp_integration_ids": ["GRAPH"],
         },
     )
 
