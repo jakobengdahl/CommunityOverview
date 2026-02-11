@@ -141,7 +141,7 @@ function ChatPanel() {
             updateVisualization(filteredNodes, toolResult.edges || []);
           }
         }
-        // Handle "add to visualization" action (user said "lägg till X")
+        // Handle "add to visualization" action (new nodes created)
         // This ADDS nodes to the current view instead of replacing
         else if (toolResult.action === 'add_to_visualization') {
           if (toolResult.nodes && toolResult.nodes.length > 0) {
@@ -151,6 +151,25 @@ function ChatPanel() {
             const allEdges = [...edges, ...(toolResult.edges || [])];
             const positionedNodes = positionNewNodes(filteredNodes, currentNodes, allEdges);
             addNodesToVisualization(positionedNodes, toolResult.edges || []);
+          }
+        }
+        // Handle "update in visualization" action (node was updated)
+        else if (toolResult.action === 'update_in_visualization') {
+          if (toolResult.nodes && toolResult.nodes.length > 0) {
+            // Update existing nodes in visualization
+            const { nodes: currentNodes, edges: currentEdges, updateVisualization } = useGraphStore.getState();
+            const updatedNodeIds = new Set(toolResult.nodes.map(n => n.id));
+            // Replace updated nodes, keep others
+            const mergedNodes = currentNodes.map(n =>
+              updatedNodeIds.has(n.id)
+                ? toolResult.nodes.find(un => un.id === n.id)
+                : n
+            );
+            // Add any new nodes that weren't in visualization before
+            const newNodes = toolResult.nodes.filter(n =>
+              !currentNodes.some(cn => cn.id === n.id)
+            );
+            updateVisualization([...mergedNodes, ...newNodes], currentEdges);
           }
         }
         // Handle standard node/edge updates (search results, etc.)

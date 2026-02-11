@@ -6,6 +6,49 @@
 
 const API_BASE = '/api';
 
+// ============================================================
+// Event Context / Session ID Management
+// ============================================================
+
+/**
+ * Generate a unique session ID for event tracking.
+ * This helps with webhook loop prevention.
+ */
+function generateSessionId() {
+  return 'session-' + Date.now().toString(36) + '-' + Math.random().toString(36).substr(2, 9);
+}
+
+// Session ID for this browser session (persisted in sessionStorage)
+let _eventSessionId = null;
+
+/**
+ * Get the current session ID, creating one if needed.
+ * @returns {string} The session ID
+ */
+export function getEventSessionId() {
+  if (!_eventSessionId) {
+    // Try to restore from sessionStorage
+    _eventSessionId = sessionStorage.getItem('eventSessionId');
+    if (!_eventSessionId) {
+      _eventSessionId = generateSessionId();
+      sessionStorage.setItem('eventSessionId', _eventSessionId);
+    }
+  }
+  return _eventSessionId;
+}
+
+/**
+ * Get the event origin identifier for web UI requests.
+ * @returns {string} The event origin
+ */
+export function getEventOrigin() {
+  return 'web-ui';
+}
+
+// ============================================================
+// API Client
+// ============================================================
+
 /**
  * Generic fetch helper with error handling
  */
@@ -96,7 +139,12 @@ export async function findSimilarNodes(name, options = {}) {
 export async function addNodes(nodes, edges = []) {
   return apiFetch(`${API_BASE}/nodes`, {
     method: 'POST',
-    body: JSON.stringify({ nodes, edges }),
+    body: JSON.stringify({
+      nodes,
+      edges,
+      event_origin: getEventOrigin(),
+      event_session_id: getEventSessionId(),
+    }),
   });
 }
 
@@ -109,7 +157,11 @@ export async function addNodes(nodes, edges = []) {
 export async function updateNode(nodeId, updates) {
   return apiFetch(`${API_BASE}/nodes/${encodeURIComponent(nodeId)}`, {
     method: 'PATCH',
-    body: JSON.stringify({ updates }),
+    body: JSON.stringify({
+      updates,
+      event_origin: getEventOrigin(),
+      event_session_id: getEventSessionId(),
+    }),
   });
 }
 
@@ -122,7 +174,12 @@ export async function updateNode(nodeId, updates) {
 export async function deleteNodes(nodeIds, confirmed = false) {
   return apiFetch(`${API_BASE}/nodes`, {
     method: 'DELETE',
-    body: JSON.stringify({ node_ids: nodeIds, confirmed }),
+    body: JSON.stringify({
+      node_ids: nodeIds,
+      confirmed,
+      event_origin: getEventOrigin(),
+      event_session_id: getEventSessionId(),
+    }),
   });
 }
 

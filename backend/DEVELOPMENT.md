@@ -59,6 +59,25 @@ packages/
                     └─────────────┘
 ```
 
+### Event System & Agents
+
+The system includes an event-driven architecture for webhooks and AI agents:
+
+- **Event System**: Tracks graph mutations (create, update, delete) and dispatches events to subscribers.
+  - See `docs/EVENT_SUBSCRIPTIONS.md` for details.
+- **Agent System**: Allows creating AI agents that react to graph events using MCP tools.
+  - Agents are configured via `Agent` nodes in the graph.
+  - See `backend/agents/README.md` (if available) or the code in `backend/agents/`.
+
+### Concurrency & Persistence
+
+The `GraphStorage` layer implements thread-safety and multi-process safety mechanisms:
+- **In-memory**: Uses `threading.RLock` to protect shared state.
+- **File System**: Uses `fcntl` (Unix) or `msvcrt` (Windows) for file locking.
+- **Atomic Writes**: Uses temp-file-and-rename strategy to prevent corruption.
+
+See `docs/DEPLOYMENT_AND_CONCURRENCY_ANALYSIS.md` for a deep dive.
+
 ## Prerequisites
 
 - Python 3.11+

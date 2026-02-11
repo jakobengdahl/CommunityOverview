@@ -57,8 +57,8 @@ class TestRESTAPIClient:
 
         # Pre-populate with test data
         nodes = [
-            Node(id="api-1", type=NodeType.ACTOR, name="API Actor", communities=["Test"]),
-            Node(id="api-2", type=NodeType.INITIATIVE, name="API Initiative", communities=["Test"]),
+            Node(id="api-1", type=NodeType.ACTOR, name="API Actor"),
+            Node(id="api-2", type=NodeType.INITIATIVE, name="API Initiative"),
         ]
         from backend.core import Edge, RelationshipType
         edges = [
@@ -209,8 +209,8 @@ class TestMCPClient:
 
         # Pre-populate
         nodes = [
-            Node(id="mcp-1", type=NodeType.ACTOR, name="MCP Actor", communities=["Test"]),
-            Node(id="mcp-2", type=NodeType.INITIATIVE, name="MCP Initiative", communities=["Test"]),
+            Node(id="mcp-1", type=NodeType.ACTOR, name="MCP Actor"),
+            Node(id="mcp-2", type=NodeType.INITIATIVE, name="MCP Initiative"),
         ]
         from backend.core import Edge, RelationshipType
         edges = [
@@ -414,7 +414,7 @@ class TestMultiClientScenarios:
                 "type": "Actor",
                 "name": "Skatteverket",
                 "description": "Swedish Tax Agency",
-                "communities": ["eSam"]
+                "tags": ["government", "tax"]
             }],
             edges=[]
         )

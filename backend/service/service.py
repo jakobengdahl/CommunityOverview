@@ -18,7 +18,8 @@ from datetime import datetime
 from backend.core import (
     GraphStorage, Node, Edge, NodeType, RelationshipType,
     SimilarNode, GraphStats, AddNodesResult, DeleteNodesResult, NODE_COLORS,
-    get_node_type_names, get_relationship_type_names, get_node_color
+    get_node_type_names, get_relationship_type_names, get_node_color,
+    EventContext,
 )
 
 from backend import config_loader
@@ -91,7 +92,6 @@ class GraphService:
         self,
         query: str,
         node_types: Optional[List[str]] = None,
-        communities: Optional[List[str]] = None,
         limit: int = 50,
         action: Optional[str] = None
     ) -> Dict[str, Any]:
@@ -101,7 +101,6 @@ class GraphService:
         Args:
             query: Search text (matches against name, description, summary, tags)
             node_types: List of node types to filter on (Actor, Initiative, etc.)
-            communities: List of communities to filter on
             limit: Max number of results (default 50)
             action: Optional action for frontend ('add_to_visualization' or 'replace_visualization')
 
@@ -109,17 +108,16 @@ class GraphService:
             Dict with matching nodes, connecting edges, and search metadata
         """
         # Log search request
-        print(f"SEARCH: query='{query}' types={node_types} communities={communities} limit={limit}")
+        print(f"SEARCH: query='{query}' types={node_types} limit={limit}")
 
-        # Convert node_types to NodeType enum
+        # Convert node_types to NodeType enum or keep as string for dynamic types
         type_filters = None
         if node_types:
-            type_filters = [NodeType(t) for t in node_types]
+            type_filters = [NodeType.from_string(t) for t in node_types]
 
         results = self._storage.search_nodes(
             query=query,
             node_types=type_filters,
-            communities=communities,
             limit=limit
         )
         print(f"SEARCH: Found {len(results)} results")
@@ -140,7 +138,6 @@ class GraphService:
             "query": query,
             "filters": {
                 "node_types": node_types,
-                "communities": communities
             }
         }
 
@@ -230,7 +227,7 @@ class GraphService:
         Returns:
             Dict with similar nodes and similarity scores
         """
-        type_filter = NodeType(node_type) if node_type else None
+        type_filter = NodeType.from_string(node_type) if node_type else None
 
         similar = self._storage.find_similar_nodes(
             name=name,
@@ -266,7 +263,7 @@ class GraphService:
         Returns:
             Dict with results for each name
         """
-        type_filter = NodeType(node_type) if node_type else None
+        type_filter = NodeType.from_string(node_type) if node_type else None
 
         results = self._storage.find_similar_nodes_batch(
             names=names,
@@ -294,7 +291,10 @@ class GraphService:
     def add_nodes(
         self,
         nodes: List[Dict[str, Any]],
-        edges: List[Dict[str, Any]]
+        edges: List[Dict[str, Any]],
+        event_origin: Optional[str] = None,
+        event_session_id: Optional[str] = None,
+        event_correlation_id: Optional[str] = None,
     ) -> Dict[str, Any]:
         """
         Add new nodes and edges to the graph.
@@ -302,6 +302,9 @@ class GraphService:
         Args:
             nodes: List of node dictionaries to add
             edges: List of edge dictionaries to add
+            event_origin: Source of the mutation (web-ui, mcp, system, agent:<id>)
+            event_session_id: Unique session ID for loop prevention
+            event_correlation_id: Correlation ID for chaining related events
 
         Returns:
             Dict with result (added_node_ids, added_edge_ids, success, message)
@@ -318,21 +321,73 @@ class GraphService:
                 "added_edge_ids": []
             }
 
-        result = self._storage.add_nodes(node_objects, edge_objects)
-        return serialize_add_result(result)
+        # Create event context if any event parameters provided
+        event_context = None
+        if event_origin or event_session_id or event_correlation_id:
+            event_context = EventContext(
+                event_origin=event_origin,
+                event_session_id=event_session_id,
+                event_correlation_id=event_correlation_id,
+            )
 
-    def update_node(self, node_id: str, updates: Dict[str, Any]) -> Dict[str, Any]:
+        result = self._storage.add_nodes(node_objects, edge_objects, event_context=event_context)
+
+        # Build response with serialized result and the actual nodes/edges for visualization
+        response = serialize_add_result(result)
+
+        # Include the added nodes and edges so frontend can add them to visualization
+        if result.success:
+            # Fetch the added nodes to get their full data (including generated IDs)
+            added_nodes = [
+                self._storage.get_node(node_id)
+                for node_id in result.added_node_ids
+            ]
+            added_nodes = [n for n in added_nodes if n is not None]
+
+            # Fetch the added edges
+            added_edges = [
+                self._storage.edges.get(edge_id)
+                for edge_id in result.added_edge_ids
+            ]
+            added_edges = [e for e in added_edges if e is not None]
+
+            response["nodes"] = serialize_nodes(added_nodes)
+            response["edges"] = serialize_edges(added_edges)
+            response["action"] = "add_to_visualization"
+
+        return response
+
+    def update_node(
+        self,
+        node_id: str,
+        updates: Dict[str, Any],
+        event_origin: Optional[str] = None,
+        event_session_id: Optional[str] = None,
+        event_correlation_id: Optional[str] = None,
+    ) -> Dict[str, Any]:
         """
         Update an existing node.
 
         Args:
             node_id: ID of the node to update
-            updates: Dict with fields to update (name, description, summary, communities, tags, metadata)
+            updates: Dict with fields to update (name, description, summary, tags, metadata)
+            event_origin: Source of the mutation (web-ui, mcp, system, agent:<id>)
+            event_session_id: Unique session ID for loop prevention
+            event_correlation_id: Correlation ID for chaining related events
 
         Returns:
             Dict with updated node or error
         """
-        updated_node = self._storage.update_node(node_id, updates)
+        # Create event context if any event parameters provided
+        event_context = None
+        if event_origin or event_session_id or event_correlation_id:
+            event_context = EventContext(
+                event_origin=event_origin,
+                event_session_id=event_session_id,
+                event_correlation_id=event_correlation_id,
+            )
+
+        updated_node = self._storage.update_node(node_id, updates, event_context=event_context)
 
         if not updated_node:
             return {
@@ -340,15 +395,21 @@ class GraphService:
                 "error": f"Node with ID {node_id} not found"
             }
 
+        # Return the updated node with action for frontend to refresh visualization
         return {
             "success": True,
-            "node": serialize_node(updated_node)
+            "node": serialize_node(updated_node),
+            "nodes": [serialize_node(updated_node)],
+            "action": "update_in_visualization"
         }
 
     def delete_nodes(
         self,
         node_ids: List[str],
-        confirmed: bool = False
+        confirmed: bool = False,
+        event_origin: Optional[str] = None,
+        event_session_id: Optional[str] = None,
+        event_correlation_id: Optional[str] = None,
     ) -> Dict[str, Any]:
         """
         Delete nodes from the graph (max 10 at a time).
@@ -358,26 +419,35 @@ class GraphService:
         Args:
             node_ids: List of node IDs to delete
             confirmed: Must be True to execute deletion
+            event_origin: Source of the mutation (web-ui, mcp, system, agent:<id>)
+            event_session_id: Unique session ID for loop prevention
+            event_correlation_id: Correlation ID for chaining related events
 
         Returns:
             Dict with result (deleted_node_ids, affected_edge_ids, success, message)
         """
-        result = self._storage.delete_nodes(node_ids, confirmed)
+        # Create event context if any event parameters provided
+        event_context = None
+        if event_origin or event_session_id or event_correlation_id:
+            event_context = EventContext(
+                event_origin=event_origin,
+                event_session_id=event_session_id,
+                event_correlation_id=event_correlation_id,
+            )
+
+        result = self._storage.delete_nodes(node_ids, confirmed, event_context=event_context)
         return serialize_delete_result(result)
 
     # ==================== Statistics & Metadata ====================
 
-    def get_graph_stats(self, communities: Optional[List[str]] = None) -> Dict[str, Any]:
+    def get_graph_stats(self) -> Dict[str, Any]:
         """
         Get statistics for the graph.
 
-        Args:
-            communities: Optional list of communities to filter on
-
         Returns:
-            Dict with statistics (total_nodes, total_edges, nodes_by_type, nodes_by_community)
+            Dict with statistics (total_nodes, total_edges, nodes_by_type)
         """
-        stats = self._storage.get_stats(communities)
+        stats = self._storage.get_stats()
         return serialize_graph_stats(stats)
 
     def list_node_types(self) -> Dict[str, Any]:
