@@ -98,8 +98,17 @@ class VectorStore:
         t.start()
 
     def rebuild_index(self, nodes: List[Node]):
-        """Rebuild the search index from a list of nodes"""
-        np = _ensure_numpy()
+        """Rebuild the search index from a list of nodes.
+
+        Gracefully handles missing numpy by skipping index rebuild.
+        Embeddings are still stored on the Node objects and will be
+        indexed when numpy becomes available.
+        """
+        try:
+            np = _ensure_numpy()
+        except ImportError:
+            return  # ML dependencies not installed, skip index rebuild
+
         self.embeddings = {}
 
         for node in nodes:
@@ -117,7 +126,11 @@ class VectorStore:
             self.embedding_matrix = None
             return
 
-        np = _ensure_numpy()
+        try:
+            np = _ensure_numpy()
+        except ImportError:
+            return  # ML dependencies not installed, skip matrix update
+
         self.node_ids = list(self.embeddings.keys())
         # Stack embeddings into a matrix
         self.embedding_matrix = np.vstack([self.embeddings[nid] for nid in self.node_ids])
@@ -143,7 +156,10 @@ class VectorStore:
         node.embedding = embedding_list
 
         # Update internal index
-        np = _ensure_numpy()
+        try:
+            np = _ensure_numpy()
+        except ImportError:
+            return  # ML dependencies not installed, skip index update
         self.embeddings[node.id] = np.array(embedding_list)
         self._update_matrix()
 

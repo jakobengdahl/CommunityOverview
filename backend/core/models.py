@@ -70,6 +70,8 @@ class NodeType(str, Enum):
     RESOURCE = "Resource"
     LEGISLATION = "Legislation"
     THEME = "Theme"
+    GOAL = "Goal"
+    EVENT = "Event"
     SAVED_VIEW = "SavedView"
     # Legacy support (to be removed)
     VISUALIZATION_VIEW = "VisualizationView"
@@ -101,6 +103,7 @@ class RelationshipType(str, Enum):
     GOVERNED_BY = "GOVERNED_BY"
     RELATES_TO = "RELATES_TO"
     PART_OF = "PART_OF"
+    AIMS_FOR = "AIMS_FOR"
 
     @classmethod
     def from_string(cls, value: str) -> Union['RelationshipType', str]:
@@ -131,6 +134,8 @@ NODE_COLORS = {
     NodeType.RESOURCE: "#FBBF24",  # yellow
     NodeType.LEGISLATION: "#EF4444",  # red
     NodeType.THEME: "#14B8A6",  # teal
+    NodeType.GOAL: "#6366F1",  # indigo
+    NodeType.EVENT: "#D946EF",  # fuchsia
     NodeType.SAVED_VIEW: "#6B7280",  # gray
     NodeType.VISUALIZATION_VIEW: "#6B7280",  # gray (legacy)
 }

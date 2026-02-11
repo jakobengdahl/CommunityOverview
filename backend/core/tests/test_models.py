@@ -20,7 +20,7 @@ class TestNodeType:
         """Verify all expected node types exist"""
         expected_types = [
             "Actor", "Community", "Initiative", "Capability",
-            "Resource", "Legislation", "Theme", "SavedView"
+            "Resource", "Legislation", "Theme", "Goal", "Event", "SavedView"
         ]
         for type_name in expected_types:
             assert NodeType(type_name) is not None
@@ -45,7 +45,7 @@ class TestRelationshipType:
         """Verify all expected relationship types exist"""
         expected_types = [
             "BELONGS_TO", "IMPLEMENTS", "PRODUCES",
-            "GOVERNED_BY", "RELATES_TO", "PART_OF"
+            "GOVERNED_BY", "RELATES_TO", "PART_OF", "AIMS_FOR"
         ]
         for type_name in expected_types:
             assert RelationshipType(type_name) is not None
