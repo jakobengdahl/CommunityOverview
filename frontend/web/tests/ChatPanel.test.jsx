@@ -14,15 +14,13 @@ vi.mock('../src/services/api', () => ({
 import * as api from '../src/services/api';
 
 describe('ChatPanel', () => {
-  const mockOnClose = vi.fn();
-
   beforeEach(() => {
     // Reset store state before each test
     useGraphStore.setState({
       chatMessages: [],
       nodes: [],
       edges: [],
-      isChatOpen: true,
+      chatPanelOpen: true,
     });
     vi.clearAllMocks();
   });
@@ -33,51 +31,55 @@ describe('ChatPanel', () => {
 
   describe('Rendering', () => {
     it('renders the chat panel with header', () => {
-      render(<ChatPanel onClose={mockOnClose} />);
+      render(<ChatPanel />);
 
-      expect(screen.getByText('Graph Assistant')).toBeInTheDocument();
-      expect(screen.getByTitle(/close chat/i)).toBeInTheDocument();
-    });
-
-    it('shows welcome message when no messages', () => {
-      render(<ChatPanel onClose={mockOnClose} />);
-
-      expect(screen.getByText(/ask questions about the graph/i)).toBeInTheDocument();
-      expect(screen.getByText(/examples:/i)).toBeInTheDocument();
+      expect(screen.getByText('Graph assistant')).toBeInTheDocument();
     });
 
     it('renders input field and buttons', () => {
-      render(<ChatPanel onClose={mockOnClose} />);
+      render(<ChatPanel />);
 
-      expect(screen.getByPlaceholderText(/ask a question/i)).toBeInTheDocument();
-      expect(screen.getByRole('button', { name: /upload/i })).toBeInTheDocument();
-      expect(screen.getByRole('button', { name: /send/i })).toBeInTheDocument();
+      expect(screen.getByPlaceholderText(/fråga|åtgärd/i)).toBeInTheDocument();
+      expect(screen.getByRole('button', { name: /ladda upp/i })).toBeInTheDocument();
+      expect(screen.getByRole('button', { name: /skicka/i })).toBeInTheDocument();
     });
 
-    it('calls onClose when close button clicked', () => {
-      render(<ChatPanel onClose={mockOnClose} />);
+    it('shows minimized bar when panel is closed', () => {
+      useGraphStore.setState({ chatPanelOpen: false });
+      render(<ChatPanel />);
 
-      fireEvent.click(screen.getByTitle(/close chat/i));
-      expect(mockOnClose).toHaveBeenCalled();
+      expect(screen.getByText('Graph assistant')).toBeInTheDocument();
+      // Should not have the full chat input
+      expect(screen.queryByPlaceholderText(/fråga|åtgärd/i)).not.toBeInTheDocument();
+    });
+
+    it('toggles between open and minimized when collapse button clicked', () => {
+      render(<ChatPanel />);
+
+      // Click collapse/minimize button
+      fireEvent.click(screen.getByTitle('Minimize'));
+
+      // Now should be in minimized state
+      expect(screen.queryByPlaceholderText(/fråga|åtgärd/i)).not.toBeInTheDocument();
     });
   });
 
   describe('Message sending', () => {
     it('disables send button when input is empty', () => {
-      render(<ChatPanel onClose={mockOnClose} />);
+      render(<ChatPanel />);
 
-      const sendButton = screen.getByRole('button', { name: /send/i });
+      const sendButton = screen.getByRole('button', { name: /skicka/i });
       expect(sendButton).toBeDisabled();
     });
 
     it('enables send button when input has text', async () => {
-      render(<ChatPanel onClose={mockOnClose} />);
+      render(<ChatPanel />);
       const user = userEvent.setup();
 
-      const input = screen.getByPlaceholderText(/ask a question/i);
+      const input = screen.getByPlaceholderText(/fråga|åtgärd/i);
       await user.type(input, 'Hello');
 
-      const sendButton = screen.getByRole('button', { name: /send/i });
+      const sendButton = screen.getByRole('button', { name: /skicka/i });
       expect(sendButton).not.toBeDisabled();
     });
 
@@ -88,12 +90,12 @@ describe('ChatPanel', () => {
         toolResult: { nodes: [], edges: [], total: 3 },
       });
 
-      render(<ChatPanel onClose={mockOnClose} />);
+      render(<ChatPanel />);
       const user = userEvent.setup();
 
-      const input = screen.getByPlaceholderText(/ask a question/i);
+      const input = screen.getByPlaceholderText(/fråga|åtgärd/i);
       await user.type(input, 'Search for AI');
-      await user.click(screen.getByRole('button', { name: /send/i }));
+      await user.click(screen.getByRole('button', { name: /skicka/i }));
 
       // User message should appear
       await waitFor(() => {
@@ -110,16 +112,16 @@ describe('ChatPanel', () => {
       // Make API call hang
       api.sendChatMessage.mockImplementationOnce(() => new Promise(() => {}));
 
-      render(<ChatPanel onClose={mockOnClose} />);
+      render(<ChatPanel />);
       const user = userEvent.setup();
 
-      const input = screen.getByPlaceholderText(/ask a question/i);
+      const input = screen.getByPlaceholderText(/fråga|åtgärd/i);
       await user.type(input, 'Search');
-      await user.click(screen.getByRole('button', { name: /send/i }));
+      await user.click(screen.getByRole('button', { name: /skicka/i }));
 
-      // Check that the send button shows "Processing..."
+      // Check that the send button shows "Bearbetar..."
       await waitFor(() => {
-        const sendButton = screen.getByRole('button', { name: /processing/i });
+        const sendButton = screen.getByRole('button', { name: /bearbetar/i });
         expect(sendButton).toBeInTheDocument();
       });
     });
@@ -127,15 +129,15 @@ describe('ChatPanel', () => {
     it('displays error message on API failure', async () => {
       api.sendChatMessage.mockRejectedValueOnce(new Error('Network error'));
 
-      render(<ChatPanel onClose={mockOnClose} />);
+      render(<ChatPanel />);
       const user = userEvent.setup();
 
-      const input = screen.getByPlaceholderText(/ask a question/i);
+      const input = screen.getByPlaceholderText(/fråga|åtgärd/i);
       await user.type(input, 'Search');
-      await user.click(screen.getByRole('button', { name: /send/i }));
+      await user.click(screen.getByRole('button', { name: /skicka/i }));
 
       await waitFor(() => {
-        expect(screen.getByText(/error: network error/i)).toBeInTheDocument();
+        expect(screen.getByText(/Fel: Network error/i)).toBeInTheDocument();
       });
     });
 
@@ -146,12 +148,12 @@ describe('ChatPanel', () => {
         toolResult: null,
       });
 
-      render(<ChatPanel onClose={mockOnClose} />);
+      render(<ChatPanel />);
       const user = userEvent.setup();
 
-      const input = screen.getByPlaceholderText(/ask a question/i);
+      const input = screen.getByPlaceholderText(/fråga|åtgärd/i);
       await user.type(input, 'Test message');
-      await user.click(screen.getByRole('button', { name: /send/i }));
+      await user.click(screen.getByRole('button', { name: /skicka/i }));
 
       await waitFor(() => {
         expect(input).toHaveValue('');
@@ -174,17 +176,17 @@ describe('ChatPanel', () => {
         },
       });
 
-      render(<ChatPanel onClose={mockOnClose} />);
+      render(<ChatPanel />);
       const user = userEvent.setup();
 
-      await user.type(screen.getByPlaceholderText(/ask a question/i), 'Add a node');
-      await user.click(screen.getByRole('button', { name: /send/i }));
+      await user.type(screen.getByPlaceholderText(/fråga|åtgärd/i), 'Add a node');
+      await user.click(screen.getByRole('button', { name: /skicka/i }));
 
       await waitFor(() => {
-        expect(screen.getByText(/proposed addition/i)).toBeInTheDocument();
+        expect(screen.getByText(/Föreslaget tillägg/i)).toBeInTheDocument();
         expect(screen.getByText('AI Strategy Project')).toBeInTheDocument();
-        expect(screen.getByRole('button', { name: /approve/i })).toBeInTheDocument();
-        expect(screen.getByRole('button', { name: /reject/i })).toBeInTheDocument();
+        expect(screen.getByRole('button', { name: /Godkänn/i })).toBeInTheDocument();
+        expect(screen.getByRole('button', { name: /Avvisa/i })).toBeInTheDocument();
       });
     });
 
@@ -205,14 +207,14 @@ describe('ChatPanel', () => {
         },
       });
 
-      render(<ChatPanel onClose={mockOnClose} />);
+      render(<ChatPanel />);
       const user = userEvent.setup();
 
-      await user.type(screen.getByPlaceholderText(/ask a question/i), 'Add AI node');
-      await user.click(screen.getByRole('button', { name: /send/i }));
+      await user.type(screen.getByPlaceholderText(/fråga|åtgärd/i), 'Add AI node');
+      await user.click(screen.getByRole('button', { name: /skicka/i }));
 
       await waitFor(() => {
-        expect(screen.getByText(/similar nodes found/i)).toBeInTheDocument();
+        expect(screen.getByText(/Liknande noder hittades/i)).toBeInTheDocument();
         expect(screen.getByText(/AI Strategy.*85%/)).toBeInTheDocument();
       });
     });
@@ -237,20 +239,20 @@ describe('ChatPanel', () => {
           toolResult: { nodes: [{ id: '123', name: 'Test Node' }] },
         });
 
-      render(<ChatPanel onClose={mockOnClose} />);
+      render(<ChatPanel />);
       const user = userEvent.setup();
 
-      await user.type(screen.getByPlaceholderText(/ask a question/i), 'Add node');
-      await user.click(screen.getByRole('button', { name: /send/i }));
+      await user.type(screen.getByPlaceholderText(/fråga|åtgärd/i), 'Add node');
+      await user.click(screen.getByRole('button', { name: /skicka/i }));
 
       await waitFor(() => {
-        expect(screen.getByRole('button', { name: /approve/i })).toBeInTheDocument();
+        expect(screen.getByRole('button', { name: /Godkänn/i })).toBeInTheDocument();
       });
 
-      await user.click(screen.getByRole('button', { name: /approve/i }));
+      await user.click(screen.getByRole('button', { name: /Godkänn/i }));
 
       await waitFor(() => {
-        expect(screen.getByText(/yes, add the node/i)).toBeInTheDocument();
+        expect(screen.getByText(/Ja, lägg till noden/i)).toBeInTheDocument();
       });
     });
   });
@@ -270,17 +272,17 @@ describe('ChatPanel', () => {
         },
       });
 
-      render(<ChatPanel onClose={mockOnClose} />);
+      render(<ChatPanel />);
       const user = userEvent.setup();
 
-      await user.type(screen.getByPlaceholderText(/ask a question/i), 'Delete nodes');
-      await user.click(screen.getByRole('button', { name: /send/i }));
+      await user.type(screen.getByPlaceholderText(/fråga|åtgärd/i), 'Delete nodes');
+      await user.click(screen.getByRole('button', { name: /skicka/i }));
 
       await waitFor(() => {
-        expect(screen.getByText(/confirm deletion/i)).toBeInTheDocument();
+        expect(screen.getAllByText(/Bekräfta borttagning/i).length).toBeGreaterThan(0);
         expect(screen.getByText(/Node 1/)).toBeInTheDocument();
         expect(screen.getByText(/Node 2/)).toBeInTheDocument();
-        expect(screen.getByText(/cannot be undone/i)).toBeInTheDocument();
+        expect(screen.getByText(/kan inte ångras/i)).toBeInTheDocument();
       });
     });
   });
@@ -293,13 +295,10 @@ describe('ChatPanel', () => {
         text: 'Sample text content from PDF',
       });
 
-      render(<ChatPanel onClose={mockOnClose} />);
+      render(<ChatPanel />);
 
-      // Find the hidden file input
       const fileInput = document.querySelector('input[type="file"]');
       const file = new File(['test content'], 'document.pdf', { type: 'application/pdf' });
-
-      // Trigger file upload
       fireEvent.change(fileInput, { target: { files: [file] } });
 
       await waitFor(() => {
@@ -314,7 +313,7 @@ describe('ChatPanel', () => {
         text: 'Content',
       });
 
-      render(<ChatPanel onClose={mockOnClose} />);
+      render(<ChatPanel />);
 
       const fileInput = document.querySelector('input[type="file"]');
       const file = new File(['test'], 'test.txt', { type: 'text/plain' });
@@ -324,8 +323,7 @@ describe('ChatPanel', () => {
         expect(screen.getByText('test.txt')).toBeInTheDocument();
       });
 
-      // Click remove button
-      fireEvent.click(screen.getByTitle(/remove file/i));
+      fireEvent.click(screen.getByTitle(/Ta bort fil/i));
 
       await waitFor(() => {
         expect(screen.queryByText('test.txt')).not.toBeInTheDocument();
@@ -344,10 +342,9 @@ describe('ChatPanel', () => {
         toolResult: null,
       });
 
-      render(<ChatPanel onClose={mockOnClose} />);
+      render(<ChatPanel />);
       const user = userEvent.setup();
 
-      // Upload file
       const fileInput = document.querySelector('input[type="file"]');
       const file = new File(['test'], 'report.pdf', { type: 'application/pdf' });
       fireEvent.change(fileInput, { target: { files: [file] } });
@@ -356,12 +353,10 @@ describe('ChatPanel', () => {
         expect(screen.getByText('report.pdf')).toBeInTheDocument();
       });
 
-      // Type message and send
-      await user.type(screen.getByPlaceholderText(/describe what to do/i), 'Analyze this');
-      await user.click(screen.getByRole('button', { name: /send/i }));
+      await user.type(screen.getByPlaceholderText(/Beskriv vad du vill göra/i), 'Analyze this');
+      await user.click(screen.getByRole('button', { name: /skicka/i }));
 
       await waitFor(() => {
-        // Message should include file reference
         const messages = api.sendChatMessage.mock.calls[0][0];
         const lastMessage = messages[messages.length - 1];
         expect(lastMessage.content).toContain('report.pdf');
@@ -372,14 +367,14 @@ describe('ChatPanel', () => {
     it('shows error when upload fails', async () => {
       api.uploadFile.mockRejectedValueOnce(new Error('Upload failed'));
 
-      render(<ChatPanel onClose={mockOnClose} />);
+      render(<ChatPanel />);
 
       const fileInput = document.querySelector('input[type="file"]');
       const file = new File(['test'], 'bad.pdf', { type: 'application/pdf' });
       fireEvent.change(fileInput, { target: { files: [file] } });
 
       await waitFor(() => {
-        expect(screen.getByText(/upload failed/i)).toBeInTheDocument();
+        expect(screen.getByText(/Upload failed/i)).toBeInTheDocument();
       });
     });
   });
@@ -392,10 +387,10 @@ describe('ChatPanel', () => {
         toolResult: null,
       });
 
-      render(<ChatPanel onClose={mockOnClose} />);
+      render(<ChatPanel />);
       const user = userEvent.setup();
 
-      const input = screen.getByPlaceholderText(/ask a question/i);
+      const input = screen.getByPlaceholderText(/fråga|åtgärd/i);
       await user.type(input, 'Test{Enter}');
 
       await waitFor(() => {
@@ -404,10 +399,10 @@ describe('ChatPanel', () => {
     });
 
     it('does not send on Shift+Enter (allows newline)', async () => {
-      render(<ChatPanel onClose={mockOnClose} />);
+      render(<ChatPanel />);
       const user = userEvent.setup();
 
-      const input = screen.getByPlaceholderText(/ask a question/i);
+      const input = screen.getByPlaceholderText(/fråga|åtgärd/i);
       await user.type(input, 'Line 1{Shift>}{Enter}{/Shift}Line 2');
 
       expect(api.sendChatMessage).not.toHaveBeenCalled();
@@ -420,9 +415,10 @@ describe('ChatPanel', () => {
         chatMessages: [
           { id: 1, role: 'user', content: 'Hello', timestamp: new Date() },
         ],
+        chatPanelOpen: true,
       });
 
-      render(<ChatPanel onClose={mockOnClose} />);
+      render(<ChatPanel />);
 
       const message = screen.getByText('Hello').closest('.chat-message');
       expect(message).toHaveClass('user');
@@ -433,9 +429,10 @@ describe('ChatPanel', () => {
         chatMessages: [
           { id: 1, role: 'assistant', content: 'Hi there', timestamp: new Date() },
         ],
+        chatPanelOpen: true,
       });
 
-      render(<ChatPanel onClose={mockOnClose} />);
+      render(<ChatPanel />);
 
       const message = screen.getByText('Hi there').closest('.chat-message');
       expect(message).toHaveClass('assistant');
@@ -447,9 +444,10 @@ describe('ChatPanel', () => {
         chatMessages: [
           { id: 1, role: 'user', content: 'Test', timestamp: testDate },
         ],
+        chatPanelOpen: true,
       });
 
-      render(<ChatPanel onClose={mockOnClose} />);
+      render(<ChatPanel />);
 
       expect(screen.getByText(/10:30/)).toBeInTheDocument();
     });

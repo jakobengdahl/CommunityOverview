@@ -2,7 +2,10 @@ import { useState, useCallback, useEffect } from 'react';
 import { GraphCanvas } from '@community-graph/ui-graph-canvas';
 import '@community-graph/ui-graph-canvas/styles';
 import useGraphStore from './store/graphStore';
-import StatsPanel from './components/StatsPanel';
+import FloatingHeader from './components/FloatingHeader';
+import FloatingToolbar from './components/FloatingToolbar';
+import FloatingSearch from './components/FloatingSearch';
+import CreateNodeDialog from './components/CreateNodeDialog';
 import EditNodeDialog from './components/EditNodeDialog';
 import ConfirmDialog from './components/ConfirmDialog';
 import InputDialog from './components/InputDialog';
@@ -30,14 +33,17 @@ function App() {
     removeNode,
     presentation,
     setConfig,
+    focusNodeId,
+    clearFocusNode,
   } = useGraphStore();
 
   const [notification, setNotification] = useState(null);
-  const [deleteDialog, setDeleteDialog] = useState(null); // { nodeId, nodeName } or { nodeIds, nodeNames, isMultiple }
-  const [saveViewDialog, setSaveViewDialog] = useState(null); // { viewData }
+  const [deleteDialog, setDeleteDialog] = useState(null);
+  const [saveViewDialog, setSaveViewDialog] = useState(null);
   const [showSubscriptionDialog, setShowSubscriptionDialog] = useState(false);
   const [showAgentDialog, setShowAgentDialog] = useState(false);
-  const [editingAgentData, setEditingAgentData] = useState(null); // { agent, subscription }
+  const [editingAgentData, setEditingAgentData] = useState(null);
+  const [createNodeType, setCreateNodeType] = useState(null);
 
   // Load schema, presentation, and stats on startup
   useEffect(() => {
@@ -52,7 +58,6 @@ function App() {
         setStats(statsData);
       } catch (error) {
         console.error('Error loading configuration:', error);
-        // Still try to load stats even if config fails
         api.getGraphStats().then(setStats).catch(console.error);
       }
     };
@@ -69,7 +74,6 @@ function App() {
     try {
       const result = await api.getRelatedNodes(nodeId, { depth: 1 });
       if (result.nodes && result.nodes.length > 0) {
-        // Filter out Community nodes
         const filteredNodes = result.nodes.filter(n =>
           n.type !== 'Community' && n.data?.type !== 'Community'
         );
@@ -150,12 +154,10 @@ function App() {
 
     try {
       if (deleteDialog.isMultiple) {
-        // Delete multiple nodes
         await api.deleteNodes(deleteDialog.nodeIds, true);
         deleteDialog.nodeIds.forEach(id => removeNode(id));
         showNotification('success', `${deleteDialog.nodeIds.length} nodes deleted`);
       } else {
-        // Delete single node
         await api.deleteNodes([deleteDialog.nodeId], true);
         removeNode(deleteDialog.nodeId);
         showNotification('success', 'Node deleted');
@@ -223,7 +225,6 @@ function App() {
       const result = await api.addNodes([subscriptionNode], []);
       console.log('Subscription created:', result);
 
-      // Add the created node to the visualization
       if (result.added_node_ids && result.added_node_ids.length > 0) {
         const nodeId = result.added_node_ids[0];
         const nodeWithId = { ...subscriptionNode, id: nodeId };
@@ -241,7 +242,6 @@ function App() {
   // Save agent nodes (create or update)
   const handleSaveAgent = useCallback(async (data) => {
     try {
-      // Check if this is an update (has agentId) or create (has nodes array)
       if (data.agentId) {
         // UPDATE
         const { agentId, agentUpdates, subscriptionId, subscriptionUpdates } = data;
@@ -251,7 +251,6 @@ function App() {
           await api.updateNode(subscriptionId, subscriptionUpdates);
         }
 
-        // Update visualization locally
         const newNodes = nodes.map(n => {
           if (n.id === agentId) return { ...n, ...agentUpdates };
           if (n.id === subscriptionId) return { ...n, ...subscriptionUpdates };
@@ -266,14 +265,11 @@ function App() {
         const result = await api.addNodes(agentNodes, agentEdges);
         console.log('Agent created:', result);
 
-        // Add the created nodes to the visualization
         if (result.added_node_ids && result.added_node_ids.length > 0) {
-          // Map the returned IDs to the nodes
           const nodesWithIds = agentNodes.map((node, index) => ({
             ...node,
             id: result.added_node_ids[index] || node.id,
           }));
-          // Map edge IDs
           const edgesWithIds = agentEdges.map((edge, index) => ({
             ...edge,
             id: result.added_edge_ids?.[index] || edge.id,
@@ -292,6 +288,36 @@ function App() {
     }
   }, [nodes, edges, addNodesToVisualization, updateVisualization, showNotification]);
 
+  // Callback: Create node from toolbar
+  const handleCreateNodeForType = useCallback((nodeType) => {
+    setCreateNodeType(nodeType);
+  }, []);
+
+  // Handle created node from CreateNodeDialog
+  const handleNodeCreated = useCallback((createdNode) => {
+    addNodesToVisualization([createdNode], []);
+    showNotification('success', `${createdNode.type} "${createdNode.name}" created`);
+  }, [addNodesToVisualization, showNotification]);
+
+  // Toolbar save view: collect current graph state and trigger dialog
+  const handleToolbarSaveView = useCallback(() => {
+    handleSaveView({
+      nodes: nodes.map(n => ({ id: n.id, position: n.position || { x: 0, y: 0 } })),
+      groups: [],
+    });
+  }, [nodes, handleSaveView]);
+
+  // Handle drop from toolbar onto canvas
+  const handleDropCreateNode = useCallback((nodeType, position) => {
+    if (nodeType === 'Agent') {
+      handleCreateAgent();
+    } else if (nodeType === 'EventSubscription') {
+      handleCreateSubscription();
+    } else {
+      setCreateNodeType(nodeType);
+    }
+  }, [handleCreateAgent, handleCreateSubscription]);
+
   // Handle node update from edit dialog
   const handleNodeUpdate = useCallback(async (nodeId, updates) => {
     try {
@@ -308,39 +334,48 @@ function App() {
     }
   }, [nodes, edges, updateVisualization, closeEditingNode, showNotification]);
 
-  // Get title from presentation config or use default
-  const title = presentation?.title || 'Community Knowledge Graph';
-
   return (
     <div className="app">
-      <header className="app-header">
-        <h1>{title}</h1>
-        <StatsPanel stats={stats} />
-      </header>
-
-      <div className="app-content">
-        <ChatPanel />
-
-        <main className="app-main">
-          <GraphCanvas
-            nodes={nodes}
-            edges={edges}
-            highlightedNodeIds={highlightedNodeIds}
-            hiddenNodeIds={hiddenNodeIds}
-            clearGroupsFlag={clearGroupsFlag}
-            onExpand={handleExpand}
-            onEdit={handleEdit}
-            onDelete={handleDelete}
-            onHide={handleHide}
-            onDeleteMultiple={handleDeleteMultiple}
-            onHideMultiple={handleHideMultiple}
-            onCreateGroup={handleCreateGroup}
-            onSaveView={handleSaveView}
-            onCreateSubscription={handleCreateSubscription}
-            onCreateAgent={handleCreateAgent}
-          />
-        </main>
+      <div className="app-canvas">
+        <GraphCanvas
+          nodes={nodes}
+          edges={edges}
+          highlightedNodeIds={highlightedNodeIds}
+          hiddenNodeIds={hiddenNodeIds}
+          clearGroupsFlag={clearGroupsFlag}
+          onExpand={handleExpand}
+          onEdit={handleEdit}
+          onDelete={handleDelete}
+          onHide={handleHide}
+          onDeleteMultiple={handleDeleteMultiple}
+          onHideMultiple={handleHideMultiple}
+          onCreateGroup={handleCreateGroup}
+          onSaveView={handleSaveView}
+          onCreateSubscription={handleCreateSubscription}
+          onCreateAgent={handleCreateAgent}
+          onDropCreateNode={handleDropCreateNode}
+          focusNodeId={focusNodeId}
+          onFocusComplete={clearFocusNode}
+        />
       </div>
+
+      <FloatingHeader stats={stats} />
+      <FloatingSearch />
+      <FloatingToolbar
+        onCreateNode={handleCreateNodeForType}
+        onCreateAgent={handleCreateAgent}
+        onCreateSubscription={handleCreateSubscription}
+        onSaveView={handleToolbarSaveView}
+      />
+      <ChatPanel />
+
+      {createNodeType && (
+        <CreateNodeDialog
+          nodeType={createNodeType}
+          onClose={() => setCreateNodeType(null)}
+          onSave={handleNodeCreated}
+        />
+      )}
 
       {editingNode && (
         <EditNodeDialog

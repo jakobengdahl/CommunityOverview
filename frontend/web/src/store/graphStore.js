@@ -62,12 +62,14 @@ const useGraphStore = create((set, get) => ({
   editingNode: null,
   contextMenu: null,
   clearGroupsFlag: false, // Signal to clear groups in visualization
+  focusNodeId: null, // Node ID to zoom/pan to
+  chatPanelOpen: true, // Chat panel expanded vs minimized
 
   // Search state
   searchQuery: '',
   searchResults: null,
 
-  // Chat state (always visible, no toggle)
+  // Chat state
   chatMessages: [DEFAULT_WELCOME_MESSAGE],
 
   // Stats
@@ -262,6 +264,14 @@ const useGraphStore = create((set, get) => ({
   // Node editing
   setEditingNode: (node) => set({ editingNode: node }),
   closeEditingNode: () => set({ editingNode: null }),
+
+  // Focus node actions
+  setFocusNodeId: (nodeId) => set({ focusNodeId: nodeId }),
+  clearFocusNode: () => set({ focusNodeId: null }),
+
+  // Chat panel actions
+  toggleChatPanel: () => set(state => ({ chatPanelOpen: !state.chatPanelOpen })),
+  setChatPanelOpen: (open) => set({ chatPanelOpen: open }),
 
   // Delete node from visualization
   removeNode: (nodeId) => {

@@ -1,0 +1,89 @@
+.floating-toolbar {
+  position: fixed;
+  left: 16px;
+  top: 80px;
+  z-index: 100;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  padding: 6px;
+  background: rgba(26, 26, 26, 0.92);
+  backdrop-filter: blur(12px);
+  -webkit-backdrop-filter: blur(12px);
+  border: 1px solid #333;
+  border-radius: 10px;
+  box-shadow: 0 4px 20px rgba(0, 0, 0, 0.4);
+}
+
+.floating-toolbar-separator {
+  height: 1px;
+  background: #333;
+  margin: 4px 2px;
+}
+
+.floating-toolbar-item-wrapper {
+  position: relative;
+}
+
+.floating-toolbar-item {
+  width: 40px;
+  height: 40px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: transparent;
+  border: none;
+  border-left: 3px solid var(--toolbar-item-color, #666);
+  border-radius: 6px;
+  color: #ccc;
+  cursor: pointer;
+  transition: background 0.15s, color 0.15s;
+}
+
+.floating-toolbar-item:hover {
+  background: color-mix(in srgb, var(--toolbar-item-color, #666) 20%, transparent);
+  color: var(--toolbar-item-color, #fff);
+}
+
+.floating-toolbar-item:active {
+  background: color-mix(in srgb, var(--toolbar-item-color, #666) 30%, transparent);
+}
+
+.floating-toolbar-item[draggable="true"] {
+  cursor: grab;
+}
+
+.floating-toolbar-item[draggable="true"]:active {
+  cursor: grabbing;
+}
+
+.floating-toolbar-tooltip {
+  position: absolute;
+  left: calc(100% + 12px);
+  top: 50%;
+  transform: translateY(-50%);
+  background: rgba(26, 26, 26, 0.95);
+  backdrop-filter: blur(8px);
+  -webkit-backdrop-filter: blur(8px);
+  border: 1px solid #444;
+  border-radius: 6px;
+  padding: 5px 10px;
+  font-size: 0.8rem;
+  color: #ddd;
+  white-space: nowrap;
+  pointer-events: none;
+  z-index: 110;
+  box-shadow: 0 2px 8px rgba(0, 0, 0, 0.3);
+  animation: tooltipFadeIn 0.1s ease-out;
+}
+
+@keyframes tooltipFadeIn {
+  from {
+    opacity: 0;
+    transform: translateY(-50%) translateX(-4px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(-50%) translateX(0);
+  }
+}

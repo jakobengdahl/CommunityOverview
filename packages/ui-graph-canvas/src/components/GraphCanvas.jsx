@@ -41,6 +41,9 @@ import './GraphCanvas.css';
  * @param {boolean} props.clearGroupsFlag - Signal to clear groups when true
  * @param {Function} props.onCreateSubscription - Called when creating an EventSubscription
  * @param {Function} props.onCreateAgent - Called when creating an Agent
+ * @param {Function} props.onDropCreateNode - Called when a node type is dropped from toolbar (nodeType, flowPosition)
+ * @param {string|null} props.focusNodeId - Node ID to zoom/pan to
+ * @param {Function} props.onFocusComplete - Called after focus animation completes
  */
 function GraphCanvasInner({
   nodes: inputNodes = [],
@@ -60,6 +63,9 @@ function GraphCanvasInner({
   layoutType = null,
   onCreateSubscription,
   onCreateAgent,
+  onDropCreateNode,
+  focusNodeId = null,
+  onFocusComplete,
 }) {
   const [loadedNodeCount, setLoadedNodeCount] = useState(INITIAL_LOAD_COUNT);
   const [contextMenu, setContextMenu] = useState(null);
@@ -69,7 +75,7 @@ function GraphCanvasInner({
   const [selectedNodes, setSelectedNodes] = useState([]);
   const reactFlowWrapper = useRef(null);
   const rightDragStart = useRef({ x: 0, y: 0, time: null });
-  const { screenToFlowPosition } = useReactFlow();
+  const { screenToFlowPosition, setCenter } = useReactFlow();
 
   // Track selected nodes
   useOnSelectionChange({
@@ -360,6 +366,42 @@ function GraphCanvasInner({
     setMultiNodeContextMenu(null);
   }, []);
 
+  // Handle external drag-and-drop (from toolbar)
+  const onDragOver = useCallback((event) => {
+    event.preventDefault();
+    event.dataTransfer.dropEffect = 'move';
+  }, []);
+
+  const onDrop = useCallback((event) => {
+    event.preventDefault();
+    const nodeType = event.dataTransfer.getData('application/reactflow-nodetype');
+    if (!nodeType || !onDropCreateNode) return;
+
+    const position = screenToFlowPosition({
+      x: event.clientX,
+      y: event.clientY,
+    });
+
+    onDropCreateNode(nodeType, position);
+  }, [screenToFlowPosition, onDropCreateNode]);
+
+  // Focus on a specific node when focusNodeId changes
+  useEffect(() => {
+    if (!focusNodeId) return;
+    const targetNode = nodes.find(n => n.id === focusNodeId);
+    if (targetNode && targetNode.position) {
+      setCenter(
+        targetNode.position.x + 100,
+        targetNode.position.y + 40,
+        { zoom: 1.2, duration: 800 }
+      );
+    }
+    const timer = setTimeout(() => {
+      onFocusComplete?.();
+    }, 900);
+    return () => clearTimeout(timer);
+  }, [focusNodeId, nodes, setCenter, onFocusComplete]);
+
   const nodeTypes = useMemo(() => ({
     custom: CustomNode,
     group: GroupNode,
@@ -411,6 +453,8 @@ function GraphCanvasInner({
             onPaneContextMenu={onPaneContextMenu}
             onNodeContextMenu={onNodeContextMenu}
             onPaneClick={closeAllMenus}
+            onDragOver={onDragOver}
+            onDrop={onDrop}
             onPaneMouseDown={(event) => {
               if (event.button === 2) {
                 rightDragStart.current = {
@@ -439,6 +483,7 @@ function GraphCanvasInner({
             <MiniMap
               nodeColor={(node) => node.data?.color || '#9CA3AF'}
               maskColor="rgba(0, 0, 0, 0.5)"
+              position="bottom-left"
               pannable
               zoomable
             />
