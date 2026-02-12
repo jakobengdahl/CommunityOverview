@@ -79,18 +79,39 @@ function FloatingSearch() {
   }, []);
 
   const selectResult = useCallback(async (node) => {
-    // SavedView: clear canvas and load the saved view's nodes
+    // SavedView: clear canvas and load the saved view's nodes with positions
     if (node.type === 'SavedView') {
       try {
         const nodeIds = node.metadata?.node_ids || [];
+        const positions = node.metadata?.positions || {};
         if (nodeIds.length > 0) {
           clearVisualization();
           const details = await Promise.all(
             nodeIds.map(id => api.getNodeDetails(id).catch(() => null))
           );
-          const loadedNodes = details.filter(d => d?.success).map(d => d.node);
+          const loadedNodes = details.filter(d => d?.success).map(d => {
+            const n = d.node;
+            // Attach saved position if available
+            if (positions[n.id]) {
+              return { ...n, _savedPosition: positions[n.id] };
+            }
+            return n;
+          });
           if (loadedNodes.length > 0) {
-            addNodesToVisualization(loadedNodes, []);
+            // Collect edges between these nodes
+            let allEdges = [];
+            const loadedIds = new Set(loadedNodes.map(n => n.id));
+            for (const d of details) {
+              if (d?.edges) {
+                const relevant = d.edges.filter(
+                  e => loadedIds.has(e.source) && loadedIds.has(e.target)
+                );
+                allEdges.push(...relevant);
+              }
+            }
+            // Deduplicate edges
+            const edgeMap = new Map(allEdges.map(e => [e.id, e]));
+            addNodesToVisualization(loadedNodes, Array.from(edgeMap.values()));
           }
         }
       } catch (err) {
@@ -112,7 +133,23 @@ function FloatingSearch() {
       toggleNodeVisibility(node.id);
       setTimeout(() => setFocusNodeId(node.id), 100);
     } else {
+      // Add node and fetch edges connecting it to existing visualization nodes
       addNodesToVisualization([node], []);
+      try {
+        const related = await api.getRelatedNodes(node.id, { depth: 1 });
+        if (related.edges && related.edges.length > 0) {
+          const vizNodeIds = new Set(vizNodes.map(n => n.id));
+          vizNodeIds.add(node.id);
+          const relevantEdges = related.edges.filter(
+            e => vizNodeIds.has(e.source) && vizNodeIds.has(e.target)
+          );
+          if (relevantEdges.length > 0) {
+            addNodesToVisualization([], relevantEdges);
+          }
+        }
+      } catch (err) {
+        console.error('Error loading edges for node:', err);
+      }
       setTimeout(() => setFocusNodeId(node.id), 100);
     }
 

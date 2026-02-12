@@ -44,6 +44,7 @@ import './GraphCanvas.css';
  * @param {Function} props.onDropCreateNode - Called when a node type is dropped from toolbar (nodeType, flowPosition)
  * @param {string|null} props.focusNodeId - Node ID to zoom/pan to
  * @param {Function} props.onFocusComplete - Called after focus animation completes
+ * @param {number} props.createGroupSignal - Increment to trigger group creation at canvas center
  */
 function GraphCanvasInner({
   nodes: inputNodes = [],
@@ -67,9 +68,9 @@ function GraphCanvasInner({
   onShowOnly,
   focusNodeId = null,
   onFocusComplete,
+  createGroupSignal = 0,
 }) {
   const [loadedNodeCount, setLoadedNodeCount] = useState(INITIAL_LOAD_COUNT);
-  const [contextMenu, setContextMenu] = useState(null);
   const [nodeContextMenu, setNodeContextMenu] = useState(null);
   const [multiNodeContextMenu, setMultiNodeContextMenu] = useState(null);
   const [notification, setNotification] = useState(null);
@@ -127,6 +128,9 @@ function GraphCanvasInner({
 
   // Convert to React Flow node format with layout
   const reactFlowNodes = useMemo(() => {
+    // Check if any nodes have saved positions
+    const hasSavedPositions = nodesToRender.some(n => n._savedPosition);
+
     const nodesWithoutPosition = nodesToRender.map(node => ({
       id: node.id,
       type: 'custom',
@@ -140,10 +144,15 @@ function GraphCanvasInner({
         onExpand: onExpand ? () => onExpand(node.id, node) : null,
         onEdit: onEdit ? () => onEdit(node.id, node) : null,
       },
-      position: { x: 0, y: 0 },
+      position: node._savedPosition || { x: 0, y: 0 },
     }));
 
     if (nodesWithoutPosition.length === 0) {
+      return nodesWithoutPosition;
+    }
+
+    // If nodes have saved positions, use those directly instead of layout algorithm
+    if (hasSavedPositions) {
       return nodesWithoutPosition;
     }
 
@@ -276,28 +285,26 @@ function GraphCanvasInner({
 
     if (wasRightDrag) return;
 
-    // If nodes are selected, show multi-node context menu instead of pane menu
+    // If nodes are selected, show multi-node context menu
     if (selectedNodes.length > 0) {
-      setContextMenu(null);
       setNodeContextMenu(null);
       setMultiNodeContextMenu({
         x: event.clientX,
         y: event.clientY,
         nodes: selectedNodes,
       });
-      return;
     }
-
-    setContextMenu({ x: event.clientX, y: event.clientY });
+    // No background context menu - toolbar provides all those functions
   }, [selectedNodes]);
 
   const handleAddGroup = useCallback(() => {
-    if (!contextMenu) return;
+    // Place group at canvas center
+    const wrapper = reactFlowWrapper.current;
+    const rect = wrapper?.getBoundingClientRect();
+    const centerX = rect ? rect.left + rect.width / 2 : window.innerWidth / 2;
+    const centerY = rect ? rect.top + rect.height / 2 : window.innerHeight / 2;
 
-    const position = screenToFlowPosition({
-      x: contextMenu.x,
-      y: contextMenu.y,
-    });
+    const position = screenToFlowPosition({ x: centerX, y: centerY });
 
     const newGroupNode = {
       id: `group-${Date.now()}`,
@@ -312,15 +319,13 @@ function GraphCanvasInner({
     };
 
     setNodes((nds) => [...nds, newGroupNode]);
-    setContextMenu(null);
 
     if (onCreateGroup) {
       onCreateGroup(position, newGroupNode);
     }
-  }, [contextMenu, screenToFlowPosition, setNodes, onCreateGroup]);
+  }, [screenToFlowPosition, setNodes, onCreateGroup]);
 
   const handleSaveView = useCallback(() => {
-    setContextMenu(null);
     if (onSaveView) {
       const viewData = {
         nodes: nodes.map(n => ({ id: n.id, position: n.position, parentId: n.parentId })),
@@ -344,7 +349,6 @@ function GraphCanvasInner({
   const onNodeContextMenu = useCallback((event, node) => {
     event.preventDefault();
     event.stopPropagation();
-    setContextMenu(null);
 
     // Check if multiple nodes are selected and the right-clicked node is one of them
     const isNodeSelected = selectedNodes.some(n => n.id === node.id);
@@ -369,9 +373,22 @@ function GraphCanvasInner({
     }
   }, [selectedNodes]);
 
+  // Prevent browser context menu on the entire canvas wrapper
+  useEffect(() => {
+    const wrapper = reactFlowWrapper.current;
+    if (!wrapper) return;
+    const handleNativeContextMenu = (e) => {
+      // If any app context menu is open or would be opened, prevent browser default
+      if (nodeContextMenu || multiNodeContextMenu) {
+        e.preventDefault();
+      }
+    };
+    wrapper.addEventListener('contextmenu', handleNativeContextMenu);
+    return () => wrapper.removeEventListener('contextmenu', handleNativeContextMenu);
+  }, [nodeContextMenu, multiNodeContextMenu]);
+
   // Close all context menus and clear selection
   const closeAllMenus = useCallback(() => {
-    setContextMenu(null);
     setNodeContextMenu(null);
     setMultiNodeContextMenu(null);
   }, []);
@@ -401,14 +418,20 @@ function GraphCanvasInner({
     onDropCreateNode(nodeType, position);
   }, [screenToFlowPosition, onDropCreateNode]);
 
-  // Delete/Backspace hides selected nodes
+  // Delete/Backspace hides selected nodes, Escape clears selection
   useEffect(() => {
     const handleKeyDown = (e) => {
-      if (e.key === 'Delete' || e.key === 'Backspace') {
-        // Don't trigger if user is typing in an input/textarea
-        const tag = e.target.tagName;
-        if (tag === 'INPUT' || tag === 'TEXTAREA' || e.target.isContentEditable) return;
+      // Don't trigger if user is typing in an input/textarea
+      const tag = e.target.tagName;
+      if (tag === 'INPUT' || tag === 'TEXTAREA' || e.target.isContentEditable) return;
 
+      if (e.key === 'Escape') {
+        closeAllMenus();
+        setNodes(nds => nds.map(n => n.selected ? { ...n, selected: false } : n));
+        return;
+      }
+
+      if (e.key === 'Delete' || e.key === 'Backspace') {
         if (selectedNodes.length > 0) {
           e.preventDefault();
           const nodeIds = selectedNodes.map(n => n.id);
@@ -422,7 +445,14 @@ function GraphCanvasInner({
     };
     document.addEventListener('keydown', handleKeyDown);
     return () => document.removeEventListener('keydown', handleKeyDown);
-  }, [selectedNodes, onHideMultiple, onHide]);
+  }, [selectedNodes, onHideMultiple, onHide, closeAllMenus, setNodes]);
+
+  // Create group when signal changes (triggered from toolbar)
+  useEffect(() => {
+    if (createGroupSignal > 0) {
+      handleAddGroup();
+    }
+  }, [createGroupSignal, handleAddGroup]);
 
   // Focus on a specific node when focusNodeId changes
   useEffect(() => {
@@ -517,29 +547,6 @@ function GraphCanvasInner({
           />
         </ReactFlow>
       </div>
-
-      {contextMenu && (
-        <div
-          className="graph-context-menu"
-          style={{ left: contextMenu.x, top: contextMenu.y }}
-        >
-          <button onClick={handleAddGroup}>📁 Lägg till grupp</button>
-          {onSaveView && <button onClick={handleSaveView}>💾 Spara vy</button>}
-          <div className="context-menu-separator"></div>
-          {onCreateSubscription && (
-            <button onClick={() => {
-              onCreateSubscription();
-              setContextMenu(null);
-            }}>🔔 Skapa webhook-prenumeration</button>
-          )}
-          {onCreateAgent && (
-            <button onClick={() => {
-              onCreateAgent();
-              setContextMenu(null);
-            }}>🤖 Skapa agent</button>
-          )}
-        </div>
-      )}
 
       {nodeContextMenu && (
         <div

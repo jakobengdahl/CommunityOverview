@@ -12,6 +12,7 @@ import {
   CpuFill,
   BellFill,
   BookmarkFill,
+  FolderFill,
 } from 'react-bootstrap-icons';
 import useGraphStore from '../store/graphStore';
 import './FloatingToolbar.css';
@@ -29,6 +30,7 @@ const ICON_MAP = {
   Agent: CpuFill,
   EventSubscription: BellFill,
   SavedView: BookmarkFill,
+  Group: FolderFill,
 };
 
 const COLOR_MAP = {
@@ -44,9 +46,10 @@ const COLOR_MAP = {
   Agent: '#EC4899',
   EventSubscription: '#8B5CF6',
   SavedView: '#6B7280',
+  Group: '#646cff',
 };
 
-// Order of toolbar items: metadata types first, then system types
+// Order of toolbar items: metadata types first, then system types, then layout tools
 const TOOLBAR_ORDER = [
   'Actor',
   'Community',
@@ -61,6 +64,7 @@ const TOOLBAR_ORDER = [
   'Agent',
   'EventSubscription',
   null, // separator
+  'Group',
   'SavedView',
 ];
 
@@ -69,6 +73,7 @@ function FloatingToolbar({
   onCreateAgent,
   onCreateSubscription,
   onSaveView,
+  onCreateGroup,
 }) {
   const [hoveredType, setHoveredType] = useState(null);
 
@@ -79,13 +84,15 @@ function FloatingToolbar({
       onCreateSubscription?.();
     } else if (nodeType === 'SavedView') {
       onSaveView?.();
+    } else if (nodeType === 'Group') {
+      onCreateGroup?.();
     } else {
       onCreateNode?.(nodeType);
     }
   };
 
   const handleDragStart = (event, nodeType) => {
-    if (nodeType === 'SavedView') {
+    if (nodeType === 'SavedView' || nodeType === 'Group') {
       event.preventDefault();
       return;
     }
@@ -102,7 +109,7 @@ function FloatingToolbar({
 
         const Icon = ICON_MAP[nodeType];
         const color = COLOR_MAP[nodeType];
-        const isDraggable = nodeType !== 'SavedView';
+        const isDraggable = nodeType !== 'SavedView' && nodeType !== 'Group';
 
         return (
           <div key={nodeType} className="floating-toolbar-item-wrapper">
@@ -120,7 +127,7 @@ function FloatingToolbar({
             </button>
             {hoveredType === nodeType && (
               <div className="floating-toolbar-tooltip">
-                {nodeType === 'EventSubscription' ? 'Webhook' : nodeType}
+                {nodeType === 'EventSubscription' ? 'Webhook' : nodeType === 'Group' ? 'Grupp' : nodeType}
               </div>
             )}
           </div>

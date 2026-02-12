@@ -45,6 +45,7 @@ function App() {
   const [showAgentDialog, setShowAgentDialog] = useState(false);
   const [editingAgentData, setEditingAgentData] = useState(null);
   const [createNodeType, setCreateNodeType] = useState(null);
+  const [createGroupSignal, setCreateGroupSignal] = useState(0);
 
   // Load schema, presentation, and stats on startup
   useEffect(() => {
@@ -78,8 +79,14 @@ function App() {
         const filteredNodes = result.nodes.filter(n =>
           n.type !== 'Community' && n.data?.type !== 'Community'
         );
+        const existingIds = new Set(nodes.map(n => n.id));
+        const newCount = filteredNodes.filter(n => !existingIds.has(n.id)).length;
         addNodesToVisualization(filteredNodes, result.edges || []);
-        showNotification('success', `Added ${filteredNodes.length} related nodes`);
+        if (newCount > 0) {
+          showNotification('success', `Added ${newCount} new node${newCount !== 1 ? 's' : ''}`);
+        } else {
+          showNotification('info', 'All related nodes already in view');
+        }
       } else {
         showNotification('info', 'No related nodes found');
       }
@@ -87,7 +94,7 @@ function App() {
       console.error('Error expanding node:', error);
       showNotification('error', 'Could not expand node');
     }
-  }, [addNodesToVisualization, showNotification]);
+  }, [nodes, addNodesToVisualization, showNotification]);
 
   // Callback: Edit node
   const handleEdit = useCallback(async (nodeId, nodeData) => {
@@ -179,10 +186,15 @@ function App() {
     }
   }, [deleteDialog, removeNode, showNotification]);
 
-  // Callback: Create group
+  // Callback: Create group (called when group is created inside GraphCanvas)
   const handleCreateGroup = useCallback((position, groupNode) => {
     showNotification('success', 'Group created');
   }, [showNotification]);
+
+  // Toolbar: trigger group creation in GraphCanvas
+  const handleToolbarCreateGroup = useCallback(() => {
+    setCreateGroupSignal(prev => prev + 1);
+  }, []);
 
   // Callback: Save view - shows dialog
   const handleSaveView = useCallback((viewData) => {
@@ -366,6 +378,7 @@ function App() {
           onShowOnly={handleShowOnly}
           focusNodeId={focusNodeId}
           onFocusComplete={clearFocusNode}
+          createGroupSignal={createGroupSignal}
         />
       </div>
 
@@ -376,6 +389,7 @@ function App() {
         onCreateAgent={handleCreateAgent}
         onCreateSubscription={handleCreateSubscription}
         onSaveView={handleToolbarSaveView}
+        onCreateGroup={handleToolbarCreateGroup}
       />
       <ChatPanel />
 
