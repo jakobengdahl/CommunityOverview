@@ -5,11 +5,16 @@
   z-index: 100;
 }
 
+.floating-header-app-icon {
+  color: #646cff;
+  flex-shrink: 0;
+}
+
 .floating-header-bar {
   display: flex;
   align-items: center;
-  gap: 10px;
-  padding: 8px 16px 8px 10px;
+  gap: 8px;
+  padding: 8px 16px 8px 12px;
   background: rgba(26, 26, 26, 0.92);
   backdrop-filter: blur(12px);
   -webkit-backdrop-filter: blur(12px);

@@ -8,7 +8,9 @@ import './FloatingSearch.css';
 function FloatingSearch() {
   const {
     nodes: vizNodes,
+    hiddenNodeIds,
     addNodesToVisualization,
+    clearVisualization,
     setFocusNodeId,
   } = useGraphStore();
 
@@ -35,7 +37,7 @@ function FloatingSearch() {
       try {
         const result = await api.searchGraph(query, { limit: 10 });
         const nodes = (result.nodes || []).filter(
-          n => n.type !== 'Community' && n.type !== 'SavedView' && n.type !== 'VisualizationView'
+          n => n.type !== 'Community' && n.type !== 'VisualizationView'
         );
         setResults(nodes);
         setSelectedIndex(0);
@@ -62,11 +64,53 @@ function FloatingSearch() {
     return () => document.removeEventListener('mousedown', handleClickOutside);
   }, []);
 
-  const selectResult = useCallback((node) => {
-    const existsInViz = vizNodes.some(n => n.id === node.id);
+  // Global keyboard shortcut: / to focus search
+  useEffect(() => {
+    const handleGlobalKey = (e) => {
+      if (e.key === '/' || (e.shiftKey && e.key === '7')) {
+        const tag = e.target.tagName;
+        if (tag === 'INPUT' || tag === 'TEXTAREA' || e.target.isContentEditable) return;
+        e.preventDefault();
+        inputRef.current?.focus();
+      }
+    };
+    document.addEventListener('keydown', handleGlobalKey);
+    return () => document.removeEventListener('keydown', handleGlobalKey);
+  }, []);
 
-    if (existsInViz) {
+  const selectResult = useCallback(async (node) => {
+    // SavedView: clear canvas and load the saved view's nodes
+    if (node.type === 'SavedView') {
+      try {
+        const nodeIds = node.metadata?.node_ids || [];
+        if (nodeIds.length > 0) {
+          clearVisualization();
+          const details = await Promise.all(
+            nodeIds.map(id => api.getNodeDetails(id).catch(() => null))
+          );
+          const loadedNodes = details.filter(d => d?.success).map(d => d.node);
+          if (loadedNodes.length > 0) {
+            addNodesToVisualization(loadedNodes, []);
+          }
+        }
+      } catch (err) {
+        console.error('Error loading saved view:', err);
+      }
+      setQuery('');
+      setResults([]);
+      setShowDropdown(false);
+      return;
+    }
+
+    const existsInViz = vizNodes.some(n => n.id === node.id);
+    const isHidden = hiddenNodeIds.includes(node.id);
+
+    if (existsInViz && !isHidden) {
       setFocusNodeId(node.id);
+    } else if (existsInViz && isHidden) {
+      const { toggleNodeVisibility } = useGraphStore.getState();
+      toggleNodeVisibility(node.id);
+      setTimeout(() => setFocusNodeId(node.id), 100);
     } else {
       addNodesToVisualization([node], []);
       setTimeout(() => setFocusNodeId(node.id), 100);
@@ -75,7 +119,7 @@ function FloatingSearch() {
     setQuery('');
     setResults([]);
     setShowDropdown(false);
-  }, [vizNodes, addNodesToVisualization, setFocusNodeId]);
+  }, [vizNodes, hiddenNodeIds, addNodesToVisualization, clearVisualization, setFocusNodeId]);
 
   const handleKeyDown = (e) => {
     if (!showDropdown) return;
@@ -122,7 +166,7 @@ function FloatingSearch() {
           {results.map((node, index) => {
             const Icon = ICON_MAP[node.type];
             const color = COLOR_MAP[node.type] || '#9CA3AF';
-            const isInViz = vizNodes.some(n => n.id === node.id);
+            const isInViz = vizNodes.some(n => n.id === node.id) && !hiddenNodeIds.includes(node.id);
 
             return (
               <button

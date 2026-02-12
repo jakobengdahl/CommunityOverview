@@ -1,4 +1,4 @@
-import { useState } from 'react';
+import { useState, useEffect } from 'react';
 import useGraphStore from '../store/graphStore';
 import * as api from '../services/api';
 import './CreateNodeDialog.css';
@@ -79,6 +79,12 @@ function CreateNodeDialog({ nodeType, onClose, onSave }) {
     }
   };
 
+  useEffect(() => {
+    const handleEsc = (e) => { if (e.key === 'Escape') onClose(); };
+    document.addEventListener('keydown', handleEsc);
+    return () => document.removeEventListener('keydown', handleEsc);
+  }, [onClose]);
+
   return (
     <div className="create-node-overlay" onClick={onClose}>
       <div className="create-node-dialog" onClick={e => e.stopPropagation()}>
@@ -145,19 +151,23 @@ function CreateNodeDialog({ nodeType, onClose, onSave }) {
             />
           </div>
 
-          {extraFields.map(field => (
-            <div className="form-group" key={field}>
-              <label htmlFor={`create-${field}`}>{FIELD_LABELS[field] || field}</label>
-              <input
-                type={field.includes('date') ? 'date' : 'text'}
-                id={`create-${field}`}
-                name={field}
-                value={formData[field]}
-                onChange={handleChange}
-                placeholder={field.includes('date') ? '' : `Enter ${FIELD_LABELS[field] || field}...`}
-              />
-            </div>
-          ))}
+          {extraFields.map(field => {
+            const isDateField = field.includes('date');
+            const useDateTime = isDateField && nodeType === 'Event';
+            return (
+              <div className="form-group" key={field}>
+                <label htmlFor={`create-${field}`}>{FIELD_LABELS[field] || field}</label>
+                <input
+                  type={useDateTime ? 'datetime-local' : isDateField ? 'date' : 'text'}
+                  id={`create-${field}`}
+                  name={field}
+                  value={formData[field]}
+                  onChange={handleChange}
+                  placeholder={isDateField ? '' : `Enter ${FIELD_LABELS[field] || field}...`}
+                />
+              </div>
+            );
+          })}
 
           {error && (
             <div className="create-node-error">{error}</div>

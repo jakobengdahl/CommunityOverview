@@ -502,6 +502,8 @@ function GraphCanvasInner({
           selectionOnDrag={true}
           selectionMode={SelectionMode.Partial}
           selectNodesOnDrag={true}
+          deleteKeyCode={null}
+          multiSelectionKeyCode="Shift"
           onMoveStart={closeAllMenus}
         >
           <Background color="#333" gap={16} />
@@ -509,7 +511,7 @@ function GraphCanvasInner({
           <MiniMap
             nodeColor={(node) => node.data?.color || '#9CA3AF'}
             maskColor="rgba(0, 0, 0, 0.5)"
-            position="bottom-left"
+            position="bottom-right"
             pannable
             zoomable
           />
@@ -544,7 +546,6 @@ function GraphCanvasInner({
           className="graph-context-menu node-context-menu"
           style={{ left: nodeContextMenu.x, top: nodeContextMenu.y }}
         >
-          <div className="context-menu-header">{nodeContextMenu.node.data?.label}</div>
           {onEdit && (
             <button onClick={() => {
               onEdit(nodeContextMenu.node.id, nodeContextMenu.node.data);

@@ -1,5 +1,5 @@
 import { useState, useRef, useEffect } from 'react';
-import { List } from 'react-bootstrap-icons';
+import { List, Feather } from 'react-bootstrap-icons';
 import useGraphStore from '../store/graphStore';
 import './FloatingHeader.css';
 
@@ -29,14 +29,16 @@ function FloatingHeader({ stats, title = 'Community Graph View' }) {
       }
     };
     if (menuOpen) {
-      document.addEventListener('mousedown', handleClickOutside);
+      // Use capture phase to catch clicks before ReactFlow stops propagation
+      document.addEventListener('mousedown', handleClickOutside, true);
     }
-    return () => document.removeEventListener('mousedown', handleClickOutside);
+    return () => document.removeEventListener('mousedown', handleClickOutside, true);
   }, [menuOpen]);
 
   return (
     <div className="floating-header" ref={menuRef}>
       <div className="floating-header-bar">
+        <Feather size={18} className="floating-header-app-icon" />
         <button
           className="floating-header-hamburger"
           onClick={() => setMenuOpen(!menuOpen)}
