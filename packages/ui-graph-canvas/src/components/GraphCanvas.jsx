@@ -64,6 +64,7 @@ function GraphCanvasInner({
   onCreateSubscription,
   onCreateAgent,
   onDropCreateNode,
+  onShowOnly,
   focusNodeId = null,
   onFocusComplete,
 }) {
@@ -264,22 +265,31 @@ function GraphCanvasInner({
     event.preventDefault();
     event.stopPropagation();
 
-    if (rightDragStart.current.time === null) {
-      setContextMenu({ x: event.clientX, y: event.clientY });
+    let wasRightDrag = false;
+    if (rightDragStart.current.time !== null) {
+      const timeDiff = Date.now() - rightDragStart.current.time;
+      const xDiff = Math.abs(event.clientX - rightDragStart.current.x);
+      const yDiff = Math.abs(event.clientY - rightDragStart.current.y);
+      wasRightDrag = timeDiff > 300 || xDiff > 5 || yDiff > 5;
+      rightDragStart.current.time = null;
+    }
+
+    if (wasRightDrag) return;
+
+    // If nodes are selected, show multi-node context menu instead of pane menu
+    if (selectedNodes.length > 0) {
+      setContextMenu(null);
+      setNodeContextMenu(null);
+      setMultiNodeContextMenu({
+        x: event.clientX,
+        y: event.clientY,
+        nodes: selectedNodes,
+      });
       return;
     }
 
-    const timeDiff = Date.now() - rightDragStart.current.time;
-    const xDiff = Math.abs(event.clientX - rightDragStart.current.x);
-    const yDiff = Math.abs(event.clientY - rightDragStart.current.y);
-    const wasDrag = timeDiff > 300 || xDiff > 5 || yDiff > 5;
-
-    if (!wasDrag) {
-      setContextMenu({ x: event.clientX, y: event.clientY });
-    }
-
-    rightDragStart.current.time = null;
-  }, []);
+    setContextMenu({ x: event.clientX, y: event.clientY });
+  }, [selectedNodes]);
 
   const handleAddGroup = useCallback(() => {
     if (!contextMenu) return;
@@ -359,12 +369,18 @@ function GraphCanvasInner({
     }
   }, [selectedNodes]);
 
-  // Close all context menus
+  // Close all context menus and clear selection
   const closeAllMenus = useCallback(() => {
     setContextMenu(null);
     setNodeContextMenu(null);
     setMultiNodeContextMenu(null);
   }, []);
+
+  const handlePaneClick = useCallback(() => {
+    closeAllMenus();
+    // Clear node selection when clicking on empty canvas
+    setNodes(nds => nds.map(n => n.selected ? { ...n, selected: false } : n));
+  }, [closeAllMenus, setNodes]);
 
   // Handle external drag-and-drop (from toolbar)
   const onDragOver = useCallback((event) => {
@@ -384,6 +400,29 @@ function GraphCanvasInner({
 
     onDropCreateNode(nodeType, position);
   }, [screenToFlowPosition, onDropCreateNode]);
+
+  // Delete/Backspace hides selected nodes
+  useEffect(() => {
+    const handleKeyDown = (e) => {
+      if (e.key === 'Delete' || e.key === 'Backspace') {
+        // Don't trigger if user is typing in an input/textarea
+        const tag = e.target.tagName;
+        if (tag === 'INPUT' || tag === 'TEXTAREA' || e.target.isContentEditable) return;
+
+        if (selectedNodes.length > 0) {
+          e.preventDefault();
+          const nodeIds = selectedNodes.map(n => n.id);
+          if (onHideMultiple) {
+            onHideMultiple(nodeIds);
+          } else if (onHide) {
+            nodeIds.forEach(id => onHide(id));
+          }
+        }
+      }
+    };
+    document.addEventListener('keydown', handleKeyDown);
+    return () => document.removeEventListener('keydown', handleKeyDown);
+  }, [selectedNodes, onHideMultiple, onHide]);
 
   // Focus on a specific node when focusNodeId changes
   useEffect(() => {
@@ -418,21 +457,14 @@ function GraphCanvasInner({
 
   return (
     <div className="graph-canvas-container">
-      {inputNodes.length > 0 && (
+      {inputNodes.length > 0 && visibleNodes.length > LAZY_LOAD_THRESHOLD && loadedNodeCount < visibleNodes.length && (
         <div className="graph-canvas-controls">
-          {onSaveView && (
-            <button className="graph-save-button" onClick={handleSaveView}>
-              💾 Save View
+          <div className="graph-lazy-load-info">
+            Showing {loadedNodeCount} of {visibleNodes.length} nodes
+            <button className="graph-load-more-button" onClick={handleLoadMore}>
+              Load More
             </button>
-          )}
-          {visibleNodes.length > LAZY_LOAD_THRESHOLD && loadedNodeCount < visibleNodes.length && (
-            <div className="graph-lazy-load-info">
-              Showing {loadedNodeCount} of {visibleNodes.length} nodes
-              <button className="graph-load-more-button" onClick={handleLoadMore}>
-                Load More
-              </button>
-            </div>
-          )}
+          </div>
         </div>
       )}
 
@@ -446,7 +478,7 @@ function GraphCanvasInner({
           onNodeDragStop={onNodeDragStop}
           onPaneContextMenu={onPaneContextMenu}
           onNodeContextMenu={onNodeContextMenu}
-          onPaneClick={closeAllMenus}
+          onPaneClick={handlePaneClick}
           onDragOver={onDragOver}
           onDrop={onDrop}
           onPaneMouseDown={(event) => {
@@ -559,13 +591,21 @@ function GraphCanvasInner({
           <div className="context-menu-header">
             {multiNodeContextMenu.nodes.length} noder markerade
           </div>
+          {onShowOnly && (
+            <button onClick={() => {
+              const nodeIds = multiNodeContextMenu.nodes.map(n => n.id);
+              onShowOnly(nodeIds);
+              setMultiNodeContextMenu(null);
+            }}>
+              🔍 Visa enbart dessa
+            </button>
+          )}
           {(onHideMultiple || onHide) && (
             <button onClick={() => {
               const nodeIds = multiNodeContextMenu.nodes.map(n => n.id);
               if (onHideMultiple) {
                 onHideMultiple(nodeIds);
               } else if (onHide) {
-                // Fallback: call onHide for each node
                 nodeIds.forEach(id => onHide(id));
               }
               setMultiNodeContextMenu(null);
@@ -581,7 +621,6 @@ function GraphCanvasInner({
                 if (onDeleteMultiple) {
                   onDeleteMultiple(nodeIds);
                 } else if (onDelete) {
-                  // Fallback: call onDelete for each node (but this may not work well)
                   nodeIds.forEach(id => onDelete(id));
                 }
                 setMultiNodeContextMenu(null);

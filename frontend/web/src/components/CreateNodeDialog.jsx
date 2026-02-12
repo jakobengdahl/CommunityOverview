@@ -17,7 +17,7 @@ const FIELD_LABELS = {
   end_date: 'End date',
   effective_date: 'Effective date',
   target_date: 'Target date',
-  identifier: 'Identifier (URL/URI)',
+  identifier: 'Länk till underlag (URL)',
 };
 
 function CreateNodeDialog({ nodeType, onClose, onSave }) {

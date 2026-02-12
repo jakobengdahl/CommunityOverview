@@ -25,6 +25,7 @@ function App() {
     addNodesToVisualization,
     updateVisualization,
     toggleNodeVisibility,
+    setHiddenNodeIds,
     stats,
     setStats,
     editingNode,
@@ -124,6 +125,14 @@ function App() {
     nodeIds.forEach(id => toggleNodeVisibility(id));
     showNotification('info', `${nodeIds.length} nodes hidden`);
   }, [toggleNodeVisibility, showNotification]);
+
+  // Callback: Show only selected nodes (hide all others)
+  const handleShowOnly = useCallback((nodeIds) => {
+    const keepSet = new Set(nodeIds);
+    const idsToHide = nodes.filter(n => !keepSet.has(n.id)).map(n => n.id);
+    setHiddenNodeIds(idsToHide);
+    showNotification('info', `Visar ${nodeIds.length} noder`);
+  }, [nodes, setHiddenNodeIds, showNotification]);
 
   // Callback: Delete node - shows dialog
   const handleDelete = useCallback((nodeId) => {
@@ -354,6 +363,7 @@ function App() {
           onCreateSubscription={handleCreateSubscription}
           onCreateAgent={handleCreateAgent}
           onDropCreateNode={handleDropCreateNode}
+          onShowOnly={handleShowOnly}
           focusNodeId={focusNodeId}
           onFocusComplete={clearFocusNode}
         />
