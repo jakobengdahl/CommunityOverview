@@ -436,60 +436,53 @@ function GraphCanvasInner({
         </div>
       )}
 
-      {inputNodes.length === 0 ? (
-        <div className="graph-empty-message">
-          <h3>No graph to display</h3>
-          <p>Search or add nodes to start exploring the knowledge graph.</p>
-        </div>
-      ) : (
-        <div ref={reactFlowWrapper} style={{ width: '100%', height: '100%' }}>
-          <ReactFlow
-            nodes={nodes}
-            edges={edges}
-            onNodesChange={onNodesChange}
-            onEdgesChange={onEdgesChange}
-            onConnect={onConnect}
-            onNodeDragStop={onNodeDragStop}
-            onPaneContextMenu={onPaneContextMenu}
-            onNodeContextMenu={onNodeContextMenu}
-            onPaneClick={closeAllMenus}
-            onDragOver={onDragOver}
-            onDrop={onDrop}
-            onPaneMouseDown={(event) => {
-              if (event.button === 2) {
-                rightDragStart.current = {
-                  x: event.clientX,
-                  y: event.clientY,
-                  time: Date.now()
-                };
-              }
-            }}
-            nodeTypes={nodeTypes}
-            edgeTypes={edgeTypes}
-            fitView
-            fitViewOptions={{ padding: 0.2, duration: 800 }}
-            minZoom={0.1}
-            maxZoom={2}
-            attributionPosition="bottom-right"
-            defaultEdgeOptions={{ animated: true, style: { strokeWidth: 2 } }}
-            panOnDrag={[0, 2]}
-            selectionOnDrag={true}
-            selectionMode={SelectionMode.Partial}
-            selectNodesOnDrag={true}
-            onMoveStart={closeAllMenus}
-          >
-            <Background color="#333" gap={16} />
-            <Controls />
-            <MiniMap
-              nodeColor={(node) => node.data?.color || '#9CA3AF'}
-              maskColor="rgba(0, 0, 0, 0.5)"
-              position="bottom-left"
-              pannable
-              zoomable
-            />
-          </ReactFlow>
-        </div>
-      )}
+      <div ref={reactFlowWrapper} style={{ width: '100%', height: '100%' }}>
+        <ReactFlow
+          nodes={nodes}
+          edges={edges}
+          onNodesChange={onNodesChange}
+          onEdgesChange={onEdgesChange}
+          onConnect={onConnect}
+          onNodeDragStop={onNodeDragStop}
+          onPaneContextMenu={onPaneContextMenu}
+          onNodeContextMenu={onNodeContextMenu}
+          onPaneClick={closeAllMenus}
+          onDragOver={onDragOver}
+          onDrop={onDrop}
+          onPaneMouseDown={(event) => {
+            if (event.button === 2) {
+              rightDragStart.current = {
+                x: event.clientX,
+                y: event.clientY,
+                time: Date.now()
+              };
+            }
+          }}
+          nodeTypes={nodeTypes}
+          edgeTypes={edgeTypes}
+          fitView
+          fitViewOptions={{ padding: 0.2, duration: 800 }}
+          minZoom={0.1}
+          maxZoom={2}
+          attributionPosition="bottom-right"
+          defaultEdgeOptions={{ animated: true, style: { strokeWidth: 2 } }}
+          panOnDrag={[0, 2]}
+          selectionOnDrag={true}
+          selectionMode={SelectionMode.Partial}
+          selectNodesOnDrag={true}
+          onMoveStart={closeAllMenus}
+        >
+          <Background color="#333" gap={16} />
+          <Controls />
+          <MiniMap
+            nodeColor={(node) => node.data?.color || '#9CA3AF'}
+            maskColor="rgba(0, 0, 0, 0.5)"
+            position="bottom-left"
+            pannable
+            zoomable
+          />
+        </ReactFlow>
+      </div>
 
       {contextMenu && (
         <div

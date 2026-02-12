@@ -58,26 +58,6 @@
   background: #2563EB;
 }
 
-.graph-empty-message {
-  display: flex;
-  flex-direction: column;
-  align-items: center;
-  justify-content: center;
-  height: 100%;
-  color: #666;
-  text-align: center;
-  padding: 40px;
-}
-
-.graph-empty-message h3 {
-  color: #999;
-  margin-bottom: 10px;
-}
-
-.graph-empty-message p {
-  font-size: 14px;
-}
-
 .graph-context-menu {
   position: fixed;
   background: #2a2a2a;
@@ -215,14 +195,6 @@
 
   .graph-lazy-load-info {
     background: rgba(255, 255, 255, 0.9);
-    color: #333;
-  }
-
-  .graph-empty-message {
-    color: #666;
-  }
-
-  .graph-empty-message h3 {
     color: #333;
   }
 
