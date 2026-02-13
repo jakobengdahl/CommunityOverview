@@ -79,11 +79,13 @@ function FloatingSearch() {
   }, []);
 
   const selectResult = useCallback(async (node) => {
-    // SavedView: clear canvas and load the saved view's nodes with positions
+    // SavedView: clear canvas and load the saved view's nodes with positions and edges
     if (node.type === 'SavedView') {
       try {
         const nodeIds = node.metadata?.node_ids || [];
         const positions = node.metadata?.positions || {};
+        const savedEdges = node.metadata?.edges || [];
+        const savedEdgeIds = new Set(node.metadata?.edge_ids || []);
         if (nodeIds.length > 0) {
           clearVisualization();
           const details = await Promise.all(
@@ -91,26 +93,30 @@ function FloatingSearch() {
           );
           const loadedNodes = details.filter(d => d?.success).map(d => {
             const n = d.node;
-            // Attach saved position if available
             if (positions[n.id]) {
               return { ...n, _savedPosition: positions[n.id] };
             }
             return n;
           });
           if (loadedNodes.length > 0) {
-            // Collect edges between these nodes
-            let allEdges = [];
-            const loadedIds = new Set(loadedNodes.map(n => n.id));
-            for (const d of details) {
-              if (d?.edges) {
-                const relevant = d.edges.filter(
-                  e => loadedIds.has(e.source) && loadedIds.has(e.target)
-                );
-                allEdges.push(...relevant);
+            let edgesToLoad = [];
+            if (savedEdges.length > 0) {
+              // Use saved edges directly
+              edgesToLoad = savedEdges;
+            } else {
+              // Discover edges between loaded nodes
+              const loadedIds = new Set(loadedNodes.map(n => n.id));
+              for (const d of details) {
+                if (d?.edges) {
+                  const relevant = d.edges.filter(
+                    e => loadedIds.has(e.source) && loadedIds.has(e.target) &&
+                      (savedEdgeIds.size === 0 || savedEdgeIds.has(e.id))
+                  );
+                  edgesToLoad.push(...relevant);
+                }
               }
             }
-            // Deduplicate edges
-            const edgeMap = new Map(allEdges.map(e => [e.id, e]));
+            const edgeMap = new Map(edgesToLoad.map(e => [e.id, e]));
             addNodesToVisualization(loadedNodes, Array.from(edgeMap.values()));
           }
         }
@@ -182,7 +188,7 @@ function FloatingSearch() {
   return (
     <div className="floating-search" ref={containerRef}>
       <div className="floating-search-bar">
-        <Search size={16} className="floating-search-icon" />
+        <Search size={18} className="floating-search-icon" />
         <input
           ref={inputRef}
           type="text"

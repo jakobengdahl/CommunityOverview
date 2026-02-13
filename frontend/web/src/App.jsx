@@ -21,10 +21,12 @@ function App() {
     edges,
     highlightedNodeIds,
     hiddenNodeIds,
+    hiddenEdgeIds,
     clearGroupsFlag,
     addNodesToVisualization,
     updateVisualization,
     toggleNodeVisibility,
+    toggleEdgeVisibility,
     setHiddenNodeIds,
     stats,
     setStats,
@@ -46,6 +48,7 @@ function App() {
   const [editingAgentData, setEditingAgentData] = useState(null);
   const [createNodeType, setCreateNodeType] = useState(null);
   const [createGroupSignal, setCreateGroupSignal] = useState(0);
+  const [saveViewSignal, setSaveViewSignal] = useState(0);
 
   // Load schema, presentation, and stats on startup
   useEffect(() => {
@@ -133,6 +136,25 @@ function App() {
     showNotification('info', `${nodeIds.length} nodes hidden`);
   }, [toggleNodeVisibility, showNotification]);
 
+  // Callback: Hide edge
+  const handleHideEdge = useCallback((edgeId) => {
+    toggleEdgeVisibility(edgeId);
+    showNotification('info', 'Edge hidden');
+  }, [toggleEdgeVisibility, showNotification]);
+
+  // Callback: Delete edge
+  const handleDeleteEdge = useCallback(async (edgeId) => {
+    try {
+      // Remove from visualization (edges don't have a separate delete API typically)
+      const newEdges = edges.filter(e => e.id !== edgeId);
+      updateVisualization(nodes, newEdges);
+      showNotification('success', 'Edge removed');
+    } catch (error) {
+      console.error('Error deleting edge:', error);
+      showNotification('error', 'Could not delete edge');
+    }
+  }, [nodes, edges, updateVisualization, showNotification]);
+
   // Callback: Show only selected nodes (hide all others)
   const handleShowOnly = useCallback((nodeIds) => {
     const keepSet = new Set(nodeIds);
@@ -214,6 +236,8 @@ function App() {
         metadata: {
           node_ids: saveViewDialog.viewData.nodes.map(n => n.id),
           positions: Object.fromEntries(saveViewDialog.viewData.nodes.map(n => [n.id, n.position])),
+          edge_ids: (saveViewDialog.viewData.edges || []).map(e => e.id),
+          edges: saveViewDialog.viewData.edges || [],
           groups: saveViewDialog.viewData.groups,
         },
         communities: [],
@@ -320,13 +344,10 @@ function App() {
     showNotification('success', `${createdNode.type} "${createdNode.name}" created`);
   }, [addNodesToVisualization, showNotification]);
 
-  // Toolbar save view: collect current graph state and trigger dialog
+  // Toolbar save view: signal GraphCanvas to collect positions and trigger dialog
   const handleToolbarSaveView = useCallback(() => {
-    handleSaveView({
-      nodes: nodes.map(n => ({ id: n.id, position: n.position || { x: 0, y: 0 } })),
-      groups: [],
-    });
-  }, [nodes, handleSaveView]);
+    setSaveViewSignal(prev => prev + 1);
+  }, []);
 
   // Handle drop from toolbar onto canvas
   const handleDropCreateNode = useCallback((nodeType, position) => {
@@ -363,6 +384,7 @@ function App() {
           edges={edges}
           highlightedNodeIds={highlightedNodeIds}
           hiddenNodeIds={hiddenNodeIds}
+          hiddenEdgeIds={hiddenEdgeIds}
           clearGroupsFlag={clearGroupsFlag}
           onExpand={handleExpand}
           onEdit={handleEdit}
@@ -370,6 +392,8 @@ function App() {
           onHide={handleHide}
           onDeleteMultiple={handleDeleteMultiple}
           onHideMultiple={handleHideMultiple}
+          onHideEdge={handleHideEdge}
+          onDeleteEdge={handleDeleteEdge}
           onCreateGroup={handleCreateGroup}
           onSaveView={handleSaveView}
           onCreateSubscription={handleCreateSubscription}
@@ -379,6 +403,7 @@ function App() {
           focusNodeId={focusNodeId}
           onFocusComplete={clearFocusNode}
           createGroupSignal={createGroupSignal}
+          saveViewSignal={saveViewSignal}
         />
       </div>
 

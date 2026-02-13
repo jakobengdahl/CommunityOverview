@@ -122,6 +122,23 @@
   background: #1a1a1a;
 }
 
+/* Edge context menu */
+.edge-context-menu .context-menu-header {
+  color: #60A5FA;
+  background: #1a1a1a;
+}
+
+/* Selected edge styling */
+.react-flow__edge.selected .react-flow__edge-path {
+  stroke: #646cff !important;
+  stroke-width: 3px !important;
+}
+
+.react-flow__edge:hover .react-flow__edge-path {
+  stroke: #818cf8 !important;
+  stroke-width: 2.5px !important;
+}
+
 .graph-notification {
   position: absolute;
   bottom: 20px;

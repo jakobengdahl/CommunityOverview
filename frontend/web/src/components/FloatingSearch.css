@@ -12,7 +12,7 @@
   display: flex;
   align-items: center;
   gap: 10px;
-  padding: 8px 14px;
+  padding: 8px 16px 8px 12px;
   background: rgba(26, 26, 26, 0.92);
   backdrop-filter: blur(12px);
   -webkit-backdrop-filter: blur(12px);
@@ -20,6 +20,8 @@
   border-radius: 10px;
   box-shadow: 0 4px 20px rgba(0, 0, 0, 0.4);
   transition: border-color 0.15s;
+  min-height: 20px;
+  box-sizing: border-box;
 }
 
 .floating-search-bar:focus-within {

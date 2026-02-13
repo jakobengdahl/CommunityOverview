@@ -4,11 +4,10 @@
 .chat-panel-floating {
   position: fixed;
   right: 16px;
-  top: 50%;
-  transform: translateY(-50%);
+  top: 80px;
   width: 380px;
-  height: 70vh;
-  max-height: calc(100vh - 32px);
+  height: calc(100vh - 96px);
+  max-height: calc(100vh - 96px);
   z-index: 100;
   background: rgba(26, 26, 26, 0.95);
   backdrop-filter: blur(12px);
@@ -24,11 +23,11 @@
 @keyframes chatPanelOpen {
   from {
     opacity: 0;
-    transform: translateY(-50%) translateX(20px);
+    transform: translateX(20px);
   }
   to {
     opacity: 1;
-    transform: translateY(-50%) translateX(0);
+    transform: translateX(0);
   }
 }
 
@@ -38,8 +37,7 @@
 .chat-panel-minimized {
   position: fixed;
   right: 16px;
-  top: 50%;
-  transform: translateY(-50%);
+  top: 80px;
   width: 40px;
   z-index: 100;
   background: rgba(26, 26, 26, 0.92);
@@ -61,11 +59,11 @@
 @keyframes chatPanelMinimize {
   from {
     opacity: 0;
-    transform: translateY(-50%) translateX(-10px);
+    transform: translateX(-10px);
   }
   to {
     opacity: 1;
-    transform: translateY(-50%) translateX(0);
+    transform: translateX(0);
   }
 }
 

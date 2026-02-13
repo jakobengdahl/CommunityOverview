@@ -58,6 +58,7 @@ const useGraphStore = create((set, get) => ({
   // UI state
   highlightedNodeIds: [],
   hiddenNodeIds: [],
+  hiddenEdgeIds: [],
   selectedNodeId: null,
   editingNode: null,
   contextMenu: null,
@@ -139,6 +140,7 @@ const useGraphStore = create((set, get) => ({
     edges: [],
     highlightedNodeIds: [],
     hiddenNodeIds: [],
+    hiddenEdgeIds: [],
   }),
 
   setHighlightedNodeIds: (ids) => set({ highlightedNodeIds: ids }),
@@ -153,6 +155,17 @@ const useGraphStore = create((set, get) => ({
   },
 
   setHiddenNodeIds: (ids) => set({ hiddenNodeIds: ids }),
+
+  toggleEdgeVisibility: (edgeId) => {
+    const { hiddenEdgeIds } = get();
+    if (hiddenEdgeIds.includes(edgeId)) {
+      set({ hiddenEdgeIds: hiddenEdgeIds.filter(id => id !== edgeId) });
+    } else {
+      set({ hiddenEdgeIds: [...hiddenEdgeIds, edgeId] });
+    }
+  },
+
+  setHiddenEdgeIds: (ids) => set({ hiddenEdgeIds: ids }),
 
   setSelectedNodeId: (nodeId) => set({ selectedNodeId: nodeId }),
 
