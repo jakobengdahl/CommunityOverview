@@ -38,6 +38,8 @@ function App() {
     setConfig,
     focusNodeId,
     clearFocusNode,
+    pendingGroups,
+    setPendingGroups,
   } = useGraphStore();
 
   const [notification, setNotification] = useState(null);
@@ -221,6 +223,7 @@ function App() {
   // Callback: Save view - shows dialog
   const handleSaveView = useCallback((viewData) => {
     setSaveViewDialog({ viewData });
+    setSaveViewSignal(0); // Reset signal so it doesn't re-trigger
   }, []);
 
   // Confirm save view
@@ -404,6 +407,8 @@ function App() {
           onFocusComplete={clearFocusNode}
           createGroupSignal={createGroupSignal}
           saveViewSignal={saveViewSignal}
+          groupsToRestore={pendingGroups}
+          onGroupsRestored={() => setPendingGroups(null)}
         />
       </div>
 

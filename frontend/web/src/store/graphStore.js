@@ -64,6 +64,7 @@ const useGraphStore = create((set, get) => ({
   contextMenu: null,
   clearGroupsFlag: false, // Signal to clear groups in visualization
   focusNodeId: null, // Node ID to zoom/pan to
+  pendingGroups: null, // Groups to restore from a saved view
   chatPanelOpen: true, // Chat panel expanded vs minimized
 
   // Search state
@@ -141,7 +142,10 @@ const useGraphStore = create((set, get) => ({
     highlightedNodeIds: [],
     hiddenNodeIds: [],
     hiddenEdgeIds: [],
+    pendingGroups: null,
   }),
+
+  setPendingGroups: (groups) => set({ pendingGroups: groups }),
 
   setHighlightedNodeIds: (ids) => set({ highlightedNodeIds: ids }),
 

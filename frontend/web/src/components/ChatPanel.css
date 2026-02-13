@@ -6,8 +6,9 @@
   right: 16px;
   top: 80px;
   width: 380px;
-  height: calc(100vh - 96px);
-  max-height: calc(100vh - 96px);
+  height: calc(100vh - 280px);
+  max-height: calc(100vh - 280px);
+  min-height: 300px;
   z-index: 100;
   background: rgba(26, 26, 26, 0.95);
   backdrop-filter: blur(12px);

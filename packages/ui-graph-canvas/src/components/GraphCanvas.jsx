@@ -50,6 +50,8 @@ function GraphCanvasInner({
   onFocusComplete,
   createGroupSignal = 0,
   saveViewSignal = 0,
+  groupsToRestore = null,
+  onGroupsRestored,
 }) {
   const [loadedNodeCount, setLoadedNodeCount] = useState(INITIAL_LOAD_COUNT);
   const [nodeContextMenu, setNodeContextMenu] = useState(null);
@@ -395,15 +397,37 @@ function GraphCanvasInner({
   const onDrop = useCallback((event) => {
     event.preventDefault();
     const nodeType = event.dataTransfer.getData('application/reactflow-nodetype');
-    if (!nodeType || !onDropCreateNode) return;
+    if (!nodeType) return;
 
     const position = screenToFlowPosition({
       x: event.clientX,
       y: event.clientY,
     });
 
-    onDropCreateNode(nodeType, position);
-  }, [screenToFlowPosition, onDropCreateNode]);
+    // Handle Group drop directly in GraphCanvas
+    if (nodeType === 'Group') {
+      const newGroupNode = {
+        id: `group-${Date.now()}`,
+        type: 'group',
+        position,
+        data: {
+          label: 'New Group',
+          description: 'Drag nodes here to group them',
+          color: '#646cff'
+        },
+        style: { width: 300, height: 200 },
+      };
+      setNodes((nds) => [...nds, newGroupNode]);
+      if (onCreateGroup) {
+        onCreateGroup(position, newGroupNode);
+      }
+      return;
+    }
+
+    if (onDropCreateNode) {
+      onDropCreateNode(nodeType, position);
+    }
+  }, [screenToFlowPosition, onDropCreateNode, setNodes, onCreateGroup]);
 
   // Delete/Backspace hides selected nodes/edges, Escape clears selection
   useEffect(() => {
@@ -452,6 +476,24 @@ function GraphCanvasInner({
       handleSaveView();
     }
   }, [saveViewSignal, handleSaveView]);
+
+  // Restore groups from a saved view
+  useEffect(() => {
+    if (groupsToRestore && groupsToRestore.length > 0) {
+      const groupNodes = groupsToRestore.map(g => ({
+        id: g.id,
+        type: 'group',
+        position: g.position,
+        data: { label: g.label || 'Group', description: '', color: g.color || '#646cff' },
+        style: g.style || { width: 300, height: 200 },
+      }));
+      setNodes((nds) => {
+        const nonGroups = nds.filter(n => n.type !== 'group' && !n.id.startsWith('group-'));
+        return [...nonGroups, ...groupNodes];
+      });
+      onGroupsRestored?.();
+    }
+  }, [groupsToRestore, setNodes, onGroupsRestored]);
 
   // Focus on a specific node when focusNodeId changes
   useEffect(() => {

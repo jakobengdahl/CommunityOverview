@@ -49,7 +49,7 @@ const COLOR_MAP = {
   Group: '#646cff',
 };
 
-// Order of toolbar items: metadata types first, then system types, then layout tools
+// Order of toolbar items: metadata types first, then system types (agents/webhooks/groups), then views
 const TOOLBAR_ORDER = [
   'Actor',
   'Community',
@@ -63,8 +63,8 @@ const TOOLBAR_ORDER = [
   null, // separator
   'Agent',
   'EventSubscription',
-  null, // separator
   'Group',
+  null, // separator
   'SavedView',
 ];
 
@@ -92,7 +92,7 @@ function FloatingToolbar({
   };
 
   const handleDragStart = (event, nodeType) => {
-    if (nodeType === 'SavedView' || nodeType === 'Group') {
+    if (nodeType === 'SavedView') {
       event.preventDefault();
       return;
     }
@@ -109,7 +109,7 @@ function FloatingToolbar({
 
         const Icon = ICON_MAP[nodeType];
         const color = COLOR_MAP[nodeType];
-        const isDraggable = nodeType !== 'SavedView' && nodeType !== 'Group';
+        const isDraggable = nodeType !== 'SavedView';
 
         return (
           <div key={nodeType} className="floating-toolbar-item-wrapper">

@@ -12,6 +12,7 @@ function FloatingSearch() {
     addNodesToVisualization,
     clearVisualization,
     setFocusNodeId,
+    setPendingGroups,
   } = useGraphStore();
 
   const [query, setQuery] = useState('');
@@ -86,6 +87,7 @@ function FloatingSearch() {
         const positions = node.metadata?.positions || {};
         const savedEdges = node.metadata?.edges || [];
         const savedEdgeIds = new Set(node.metadata?.edge_ids || []);
+        const savedGroups = node.metadata?.groups || [];
         if (nodeIds.length > 0) {
           clearVisualization();
           const details = await Promise.all(
@@ -118,6 +120,11 @@ function FloatingSearch() {
             }
             const edgeMap = new Map(edgesToLoad.map(e => [e.id, e]));
             addNodesToVisualization(loadedNodes, Array.from(edgeMap.values()));
+
+            // Restore groups if any were saved
+            if (savedGroups.length > 0) {
+              setPendingGroups(savedGroups);
+            }
           }
         }
       } catch (err) {
@@ -162,7 +169,7 @@ function FloatingSearch() {
     setQuery('');
     setResults([]);
     setShowDropdown(false);
-  }, [vizNodes, hiddenNodeIds, addNodesToVisualization, clearVisualization, setFocusNodeId]);
+  }, [vizNodes, hiddenNodeIds, addNodesToVisualization, clearVisualization, setFocusNodeId, setPendingGroups]);
 
   const handleKeyDown = (e) => {
     if (!showDropdown) return;
