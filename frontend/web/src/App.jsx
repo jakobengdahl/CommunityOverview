@@ -51,6 +51,7 @@ function App() {
   const [createNodeType, setCreateNodeType] = useState(null);
   const [createGroupSignal, setCreateGroupSignal] = useState(0);
   const [saveViewSignal, setSaveViewSignal] = useState(0);
+  const [isSavingView, setIsSavingView] = useState(false);
 
   // Load schema, presentation, and stats on startup
   useEffect(() => {
@@ -230,6 +231,7 @@ function App() {
   const handleConfirmSaveView = useCallback(async (name) => {
     if (!saveViewDialog) return;
 
+    setIsSavingView(true);
     try {
       const viewNode = {
         name,
@@ -252,6 +254,7 @@ function App() {
       console.error('Error saving view:', error);
       showNotification('error', 'Could not save view');
     } finally {
+      setIsSavingView(false);
       setSaveViewDialog(null);
     }
   }, [saveViewDialog, showNotification]);
@@ -462,6 +465,7 @@ function App() {
           placeholder="Enter a name for this view..."
           confirmText="Save"
           cancelText="Cancel"
+          isLoading={isSavingView}
           onConfirm={handleConfirmSaveView}
           onCancel={() => setSaveViewDialog(null)}
         />

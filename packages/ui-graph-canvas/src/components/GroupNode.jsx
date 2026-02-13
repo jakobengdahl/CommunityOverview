@@ -1,4 +1,5 @@
 import { memo, useState, useRef, useEffect } from 'react';
+import { createPortal } from 'react-dom';
 import { NodeResizer, useReactFlow } from 'reactflow';
 import './GroupNode.css';
 
@@ -167,7 +168,7 @@ function GroupNode({ id, data, selected }) {
         )}
       </div>
 
-      {contextMenu && (
+      {contextMenu && createPortal(
         <div
           className="graph-group-context-menu"
           style={{ left: contextMenu.x, top: contextMenu.y }}
@@ -186,7 +187,8 @@ function GroupNode({ id, data, selected }) {
           <button className="context-menu-delete" onClick={handleDeleteGroup}>
             🗑️ Delete Group
           </button>
-        </div>
+        </div>,
+        document.body
       )}
     </>
   );

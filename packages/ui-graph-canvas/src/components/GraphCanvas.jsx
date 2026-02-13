@@ -160,7 +160,6 @@ function GraphCanvasInner({
             ...n,
             position: existing.position,
             parentId: existing.parentId,
-            extent: existing.extent,
             style: existing.style || n.style
           };
         }
@@ -196,68 +195,83 @@ function GraphCanvasInner({
 
     if (draggedNode.type === 'group') return;
 
-    const groupNodes = nodes.filter(n => n.type === 'group');
-    let droppedInGroup = null;
+    // Handle all selected nodes (multi-select drag) or just the single dragged node
+    const isMultiDrag = selectedNodes.length > 1 && selectedNodes.some(n => n.id === draggedNode.id);
+    const draggedIds = new Set(
+      isMultiDrag
+        ? selectedNodes.filter(n => n.type !== 'group').map(n => n.id)
+        : [draggedNode.id]
+    );
 
-    for (const groupNode of groupNodes) {
-      const groupBounds = {
-        left: groupNode.position.x,
-        right: groupNode.position.x + (groupNode.style?.width || 300),
-        top: groupNode.position.y,
-        bottom: groupNode.position.y + (groupNode.style?.height || 200),
-      };
+    setNodes((nds) => {
+      const groupNodes = nds.filter(n => n.type === 'group');
 
-      if (
-        draggedNode.position.x >= groupBounds.left &&
-        draggedNode.position.x <= groupBounds.right &&
-        draggedNode.position.y >= groupBounds.top &&
-        draggedNode.position.y <= groupBounds.bottom
-      ) {
-        droppedInGroup = groupNode.id;
-        break;
-      }
-    }
+      return nds.map((n) => {
+        if (!draggedIds.has(n.id) || n.type === 'group') return n;
 
-    setNodes((nds) =>
-      nds.map((n) => {
-        if (n.id === draggedNode.id) {
-          if (droppedInGroup && n.parentId !== droppedInGroup) {
-            const groupNode = nodes.find(gn => gn.id === droppedInGroup);
-            if (groupNode) {
-              return {
-                ...n,
-                parentId: droppedInGroup,
-                position: {
-                  x: n.position.x - groupNode.position.x,
-                  y: n.position.y - groupNode.position.y,
-                },
-                extent: 'parent',
-              };
+        // Calculate absolute position (account for parent offset)
+        const absPos = n.parentId
+          ? {
+              x: n.position.x + (nds.find(g => g.id === n.parentId)?.position.x || 0),
+              y: n.position.y + (nds.find(g => g.id === n.parentId)?.position.y || 0),
             }
-          }
-          if (!droppedInGroup && n.parentId) {
-            const oldParent = nodes.find(gn => gn.id === n.parentId);
-            return {
-              ...n,
-              parentId: undefined,
-              position: {
-                x: n.position.x + (oldParent?.position.x || 0),
-                y: n.position.y + (oldParent?.position.y || 0),
-              },
-              extent: undefined,
-            };
+          : n.position;
+
+        // Find which group this node is inside
+        let targetGroup = null;
+        for (const groupNode of groupNodes) {
+          const gb = {
+            left: groupNode.position.x,
+            right: groupNode.position.x + (groupNode.style?.width || 300),
+            top: groupNode.position.y,
+            bottom: groupNode.position.y + (groupNode.style?.height || 200),
+          };
+          if (absPos.x >= gb.left && absPos.x <= gb.right &&
+              absPos.y >= gb.top && absPos.y <= gb.bottom) {
+            targetGroup = groupNode;
+            break;
           }
         }
-        return n;
-      })
-    );
-  }, [nodes, setNodes, onNodePositionChange]);
 
-  // Right-click on empty background: just prevent default
+        if (targetGroup && n.parentId !== targetGroup.id) {
+          // Enter group (no extent constraint - allows free dragging out)
+          return {
+            ...n,
+            parentId: targetGroup.id,
+            position: {
+              x: absPos.x - targetGroup.position.x,
+              y: absPos.y - targetGroup.position.y,
+            },
+            extent: undefined,
+          };
+        }
+
+        if (!targetGroup && n.parentId) {
+          // Exit group - convert to absolute position
+          const oldParent = nds.find(gn => gn.id === n.parentId);
+          return {
+            ...n,
+            parentId: undefined,
+            position: {
+              x: n.position.x + (oldParent?.position.x || 0),
+              y: n.position.y + (oldParent?.position.y || 0),
+            },
+            extent: undefined,
+          };
+        }
+
+        return n;
+      });
+    });
+  }, [selectedNodes, setNodes, onNodePositionChange]);
+
+  // Right-click on empty background: prevent default and clear selection
   const onPaneContextMenu = useCallback((event) => {
     event.preventDefault();
     event.stopPropagation();
-  }, []);
+    closeAllMenus();
+    clearSelection();
+  }, [closeAllMenus, clearSelection]);
 
   // Right-click on the selection box (multi-node selection)
   const onSelectionContextMenu = useCallback((event) => {
@@ -382,11 +396,22 @@ function GraphCanvasInner({
     setEdgeContextMenu(null);
   }, []);
 
+  const clearSelection = useCallback(() => {
+    // Use onNodesChange/onEdgesChange with select events to properly clear ReactFlow's internal selection state
+    const nodeDeselects = nodes.filter(n => n.selected).map(n => ({
+      id: n.id, type: 'select', selected: false,
+    }));
+    const edgeDeselects = edges.filter(e => e.selected).map(e => ({
+      id: e.id, type: 'select', selected: false,
+    }));
+    if (nodeDeselects.length > 0) onNodesChange(nodeDeselects);
+    if (edgeDeselects.length > 0) onEdgesChange(edgeDeselects);
+  }, [nodes, edges, onNodesChange, onEdgesChange]);
+
   const handlePaneClick = useCallback(() => {
     closeAllMenus();
-    setNodes(nds => nds.map(n => n.selected ? { ...n, selected: false } : n));
-    setEdges(eds => eds.map(e => e.selected ? { ...e, selected: false } : e));
-  }, [closeAllMenus, setNodes, setEdges]);
+    clearSelection();
+  }, [closeAllMenus, clearSelection]);
 
   // Handle external drag-and-drop (from toolbar)
   const onDragOver = useCallback((event) => {
@@ -437,8 +462,7 @@ function GraphCanvasInner({
 
       if (e.key === 'Escape') {
         closeAllMenus();
-        setNodes(nds => nds.map(n => n.selected ? { ...n, selected: false } : n));
-        setEdges(eds => eds.map(edge => edge.selected ? { ...edge, selected: false } : edge));
+        clearSelection();
         return;
       }
 
@@ -461,7 +485,7 @@ function GraphCanvasInner({
     };
     document.addEventListener('keydown', handleKeyDown);
     return () => document.removeEventListener('keydown', handleKeyDown);
-  }, [selectedNodes, selectedEdges, onHideMultiple, onHide, onHideEdge, closeAllMenus, setNodes, setEdges]);
+  }, [selectedNodes, selectedEdges, onHideMultiple, onHide, onHideEdge, closeAllMenus, clearSelection]);
 
   // Create group when signal changes (triggered from toolbar)
   useEffect(() => {
