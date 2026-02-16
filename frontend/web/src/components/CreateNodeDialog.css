@@ -1,4 +1,4 @@
-.edit-dialog-overlay {
+.create-node-overlay {
   position: fixed;
   top: 0;
   left: 0;
@@ -11,7 +11,7 @@
   z-index: 2000;
 }
 
-.edit-dialog {
+.create-node-dialog {
   background: #2a2a2a;
   border: 1px solid #444;
   border-radius: 12px;
@@ -21,7 +21,7 @@
   overflow-y: auto;
 }
 
-.edit-dialog-header {
+.create-node-header {
   display: flex;
   justify-content: space-between;
   align-items: center;
@@ -29,26 +29,26 @@
   border-bottom: 1px solid #444;
 }
 
-.edit-dialog-header-title {
+.create-node-header-title {
   display: flex;
   align-items: center;
   gap: 10px;
 }
 
-.edit-dialog-type-dot {
+.create-node-type-dot {
   width: 12px;
   height: 12px;
   border-radius: 50%;
   flex-shrink: 0;
 }
 
-.edit-dialog-header h2 {
+.create-node-header h2 {
   margin: 0;
   font-size: 1.1rem;
   color: #fff;
 }
 
-.edit-dialog .close-button {
+.create-node-dialog .close-button {
   background: transparent;
   border: none;
   color: #888;
@@ -58,19 +58,19 @@
   cursor: pointer;
 }
 
-.edit-dialog .close-button:hover {
+.create-node-dialog .close-button:hover {
   color: #ddd;
 }
 
-.edit-dialog form {
+.create-node-dialog form {
   padding: 20px;
 }
 
-.edit-dialog .form-group {
+.create-node-dialog .form-group {
   margin-bottom: 16px;
 }
 
-.edit-dialog .form-group label {
+.create-node-dialog .form-group label {
   display: block;
   margin-bottom: 6px;
   font-size: 0.9rem;
@@ -78,9 +78,8 @@
   color: #bbb;
 }
 
-.edit-dialog .form-group input,
-.edit-dialog .form-group select,
-.edit-dialog .form-group textarea {
+.create-node-dialog .form-group input,
+.create-node-dialog .form-group textarea {
   width: 100%;
   padding: 10px 12px;
   background: #333;
@@ -92,19 +91,28 @@
   box-sizing: border-box;
 }
 
-.edit-dialog .form-group input:focus,
-.edit-dialog .form-group select:focus,
-.edit-dialog .form-group textarea:focus {
+.create-node-dialog .form-group input:focus,
+.create-node-dialog .form-group textarea:focus {
   outline: none;
   border-color: #646cff;
 }
 
-.edit-dialog .form-group textarea {
+.create-node-dialog .form-group textarea {
   resize: vertical;
   min-height: 60px;
 }
 
-.edit-dialog .form-actions {
+.create-node-error {
+  padding: 8px 12px;
+  background: rgba(239, 68, 68, 0.1);
+  border-left: 3px solid #EF4444;
+  border-radius: 4px;
+  color: #EF4444;
+  font-size: 0.85rem;
+  margin-bottom: 16px;
+}
+
+.create-node-dialog .form-actions {
   display: flex;
   justify-content: flex-end;
   gap: 12px;
@@ -113,7 +121,7 @@
   margin-top: 8px;
 }
 
-.edit-dialog .form-actions button {
+.create-node-dialog .form-actions button {
   padding: 10px 20px;
   border-radius: 6px;
   font-size: 14px;
@@ -121,24 +129,28 @@
   cursor: pointer;
 }
 
-.edit-dialog .form-actions button.primary {
-  background: #646cff;
+.create-node-dialog .form-actions button.primary {
   color: white;
   border: none;
   transition: opacity 0.15s;
 }
 
-.edit-dialog .form-actions button.primary:hover {
+.create-node-dialog .form-actions button.primary:hover:not(:disabled) {
   opacity: 0.85;
 }
 
-.edit-dialog .form-actions button.secondary {
+.create-node-dialog .form-actions button.primary:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
+.create-node-dialog .form-actions button.secondary {
   background: transparent;
   color: #888;
   border: 1px solid #444;
 }
 
-.edit-dialog .form-actions button.secondary:hover {
+.create-node-dialog .form-actions button.secondary:hover {
   background: #333;
   color: #ddd;
 }

@@ -58,16 +58,20 @@ const useGraphStore = create((set, get) => ({
   // UI state
   highlightedNodeIds: [],
   hiddenNodeIds: [],
+  hiddenEdgeIds: [],
   selectedNodeId: null,
   editingNode: null,
   contextMenu: null,
   clearGroupsFlag: false, // Signal to clear groups in visualization
+  focusNodeId: null, // Node ID to zoom/pan to
+  pendingGroups: null, // Groups to restore from a saved view
+  chatPanelOpen: true, // Chat panel expanded vs minimized
 
   // Search state
   searchQuery: '',
   searchResults: null,
 
-  // Chat state (always visible, no toggle)
+  // Chat state
   chatMessages: [DEFAULT_WELCOME_MESSAGE],
 
   // Stats
@@ -137,7 +141,11 @@ const useGraphStore = create((set, get) => ({
     edges: [],
     highlightedNodeIds: [],
     hiddenNodeIds: [],
+    hiddenEdgeIds: [],
+    pendingGroups: null,
   }),
+
+  setPendingGroups: (groups) => set({ pendingGroups: groups }),
 
   setHighlightedNodeIds: (ids) => set({ highlightedNodeIds: ids }),
 
@@ -151,6 +159,17 @@ const useGraphStore = create((set, get) => ({
   },
 
   setHiddenNodeIds: (ids) => set({ hiddenNodeIds: ids }),
+
+  toggleEdgeVisibility: (edgeId) => {
+    const { hiddenEdgeIds } = get();
+    if (hiddenEdgeIds.includes(edgeId)) {
+      set({ hiddenEdgeIds: hiddenEdgeIds.filter(id => id !== edgeId) });
+    } else {
+      set({ hiddenEdgeIds: [...hiddenEdgeIds, edgeId] });
+    }
+  },
+
+  setHiddenEdgeIds: (ids) => set({ hiddenEdgeIds: ids }),
 
   setSelectedNodeId: (nodeId) => set({ selectedNodeId: nodeId }),
 
@@ -262,6 +281,14 @@ const useGraphStore = create((set, get) => ({
   // Node editing
   setEditingNode: (node) => set({ editingNode: node }),
   closeEditingNode: () => set({ editingNode: null }),
+
+  // Focus node actions
+  setFocusNodeId: (nodeId) => set({ focusNodeId: nodeId }),
+  clearFocusNode: () => set({ focusNodeId: null }),
+
+  // Chat panel actions
+  toggleChatPanel: () => set(state => ({ chatPanelOpen: !state.chatPanelOpen })),
+  setChatPanelOpen: (open) => set({ chatPanelOpen: open }),
 
   // Delete node from visualization
   removeNode: (nodeId) => {

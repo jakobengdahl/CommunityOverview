@@ -1,38 +1,16 @@
 .app {
-  width: 100%;
-  height: 100vh;
-  display: flex;
-  flex-direction: column;
-  overflow: hidden;
-}
-
-.app-header {
-  display: flex;
-  justify-content: space-between;
-  align-items: center;
-  padding: 12px 20px;
-  background: #1a1a1a;
-  border-bottom: 1px solid #333;
-  flex-shrink: 0;
-}
-
-.app-header h1 {
-  margin: 0;
-  font-size: 1.25rem;
-  font-weight: 600;
-  color: #fff;
-}
-
-.app-content {
-  flex: 1;
-  display: flex;
-  overflow: hidden;
-}
-
-.app-main {
-  flex: 1;
   position: relative;
-  background: #1e1e1e;
+  width: 100vw;
+  height: 100vh;
+  overflow: hidden;
+}
+
+.app-canvas {
+  width: 100%;
+  height: 100%;
+  position: absolute;
+  top: 0;
+  left: 0;
 }
 
 /* Notifications */
@@ -89,25 +67,4 @@
 
 .app-notification button:hover {
   color: #999;
-}
-
-/* No community message */
-.no-community-selected {
-  display: flex;
-  flex-direction: column;
-  align-items: center;
-  justify-content: center;
-  height: 100%;
-  padding: 2rem;
-  text-align: center;
-}
-
-.no-community-selected h2 {
-  margin-bottom: 1rem;
-  color: #646cff;
-}
-
-.no-community-selected p {
-  color: #888;
-  max-width: 500px;
 }

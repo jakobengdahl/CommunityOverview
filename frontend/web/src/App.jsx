@@ -2,7 +2,10 @@ import { useState, useCallback, useEffect } from 'react';
 import { GraphCanvas } from '@community-graph/ui-graph-canvas';
 import '@community-graph/ui-graph-canvas/styles';
 import useGraphStore from './store/graphStore';
-import StatsPanel from './components/StatsPanel';
+import FloatingHeader from './components/FloatingHeader';
+import FloatingToolbar from './components/FloatingToolbar';
+import FloatingSearch from './components/FloatingSearch';
+import CreateNodeDialog from './components/CreateNodeDialog';
 import EditNodeDialog from './components/EditNodeDialog';
 import ConfirmDialog from './components/ConfirmDialog';
 import InputDialog from './components/InputDialog';
@@ -18,10 +21,13 @@ function App() {
     edges,
     highlightedNodeIds,
     hiddenNodeIds,
+    hiddenEdgeIds,
     clearGroupsFlag,
     addNodesToVisualization,
     updateVisualization,
     toggleNodeVisibility,
+    toggleEdgeVisibility,
+    setHiddenNodeIds,
     stats,
     setStats,
     editingNode,
@@ -30,14 +36,22 @@ function App() {
     removeNode,
     presentation,
     setConfig,
+    focusNodeId,
+    clearFocusNode,
+    pendingGroups,
+    setPendingGroups,
   } = useGraphStore();
 
   const [notification, setNotification] = useState(null);
-  const [deleteDialog, setDeleteDialog] = useState(null); // { nodeId, nodeName } or { nodeIds, nodeNames, isMultiple }
-  const [saveViewDialog, setSaveViewDialog] = useState(null); // { viewData }
+  const [deleteDialog, setDeleteDialog] = useState(null);
+  const [saveViewDialog, setSaveViewDialog] = useState(null);
   const [showSubscriptionDialog, setShowSubscriptionDialog] = useState(false);
   const [showAgentDialog, setShowAgentDialog] = useState(false);
-  const [editingAgentData, setEditingAgentData] = useState(null); // { agent, subscription }
+  const [editingAgentData, setEditingAgentData] = useState(null);
+  const [createNodeType, setCreateNodeType] = useState(null);
+  const [createGroupSignal, setCreateGroupSignal] = useState(0);
+  const [saveViewSignal, setSaveViewSignal] = useState(0);
+  const [isSavingView, setIsSavingView] = useState(false);
 
   // Load schema, presentation, and stats on startup
   useEffect(() => {
@@ -52,7 +66,6 @@ function App() {
         setStats(statsData);
       } catch (error) {
         console.error('Error loading configuration:', error);
-        // Still try to load stats even if config fails
         api.getGraphStats().then(setStats).catch(console.error);
       }
     };
@@ -69,12 +82,17 @@ function App() {
     try {
       const result = await api.getRelatedNodes(nodeId, { depth: 1 });
       if (result.nodes && result.nodes.length > 0) {
-        // Filter out Community nodes
         const filteredNodes = result.nodes.filter(n =>
           n.type !== 'Community' && n.data?.type !== 'Community'
         );
+        const existingIds = new Set(nodes.map(n => n.id));
+        const newCount = filteredNodes.filter(n => !existingIds.has(n.id)).length;
         addNodesToVisualization(filteredNodes, result.edges || []);
-        showNotification('success', `Added ${filteredNodes.length} related nodes`);
+        if (newCount > 0) {
+          showNotification('success', `Added ${newCount} new node${newCount !== 1 ? 's' : ''}`);
+        } else {
+          showNotification('info', 'All related nodes already in view');
+        }
       } else {
         showNotification('info', 'No related nodes found');
       }
@@ -82,7 +100,7 @@ function App() {
       console.error('Error expanding node:', error);
       showNotification('error', 'Could not expand node');
     }
-  }, [addNodesToVisualization, showNotification]);
+  }, [nodes, addNodesToVisualization, showNotification]);
 
   // Callback: Edit node
   const handleEdit = useCallback(async (nodeId, nodeData) => {
@@ -121,6 +139,33 @@ function App() {
     showNotification('info', `${nodeIds.length} nodes hidden`);
   }, [toggleNodeVisibility, showNotification]);
 
+  // Callback: Hide edge
+  const handleHideEdge = useCallback((edgeId) => {
+    toggleEdgeVisibility(edgeId);
+    showNotification('info', 'Edge hidden');
+  }, [toggleEdgeVisibility, showNotification]);
+
+  // Callback: Delete edge
+  const handleDeleteEdge = useCallback(async (edgeId) => {
+    try {
+      // Remove from visualization (edges don't have a separate delete API typically)
+      const newEdges = edges.filter(e => e.id !== edgeId);
+      updateVisualization(nodes, newEdges);
+      showNotification('success', 'Edge removed');
+    } catch (error) {
+      console.error('Error deleting edge:', error);
+      showNotification('error', 'Could not delete edge');
+    }
+  }, [nodes, edges, updateVisualization, showNotification]);
+
+  // Callback: Show only selected nodes (hide all others)
+  const handleShowOnly = useCallback((nodeIds) => {
+    const keepSet = new Set(nodeIds);
+    const idsToHide = nodes.filter(n => !keepSet.has(n.id)).map(n => n.id);
+    setHiddenNodeIds(idsToHide);
+    showNotification('info', `Visar ${nodeIds.length} noder`);
+  }, [nodes, setHiddenNodeIds, showNotification]);
+
   // Callback: Delete node - shows dialog
   const handleDelete = useCallback((nodeId) => {
     const node = nodes.find(n => n.id === nodeId);
@@ -150,12 +195,10 @@ function App() {
 
     try {
       if (deleteDialog.isMultiple) {
-        // Delete multiple nodes
         await api.deleteNodes(deleteDialog.nodeIds, true);
         deleteDialog.nodeIds.forEach(id => removeNode(id));
         showNotification('success', `${deleteDialog.nodeIds.length} nodes deleted`);
       } else {
-        // Delete single node
         await api.deleteNodes([deleteDialog.nodeId], true);
         removeNode(deleteDialog.nodeId);
         showNotification('success', 'Node deleted');
@@ -168,20 +211,27 @@ function App() {
     }
   }, [deleteDialog, removeNode, showNotification]);
 
-  // Callback: Create group
+  // Callback: Create group (called when group is created inside GraphCanvas)
   const handleCreateGroup = useCallback((position, groupNode) => {
     showNotification('success', 'Group created');
   }, [showNotification]);
 
+  // Toolbar: trigger group creation in GraphCanvas
+  const handleToolbarCreateGroup = useCallback(() => {
+    setCreateGroupSignal(prev => prev + 1);
+  }, []);
+
   // Callback: Save view - shows dialog
   const handleSaveView = useCallback((viewData) => {
     setSaveViewDialog({ viewData });
+    setSaveViewSignal(0); // Reset signal so it doesn't re-trigger
   }, []);
 
   // Confirm save view
   const handleConfirmSaveView = useCallback(async (name) => {
     if (!saveViewDialog) return;
 
+    setIsSavingView(true);
     try {
       const viewNode = {
         name,
@@ -191,6 +241,8 @@ function App() {
         metadata: {
           node_ids: saveViewDialog.viewData.nodes.map(n => n.id),
           positions: Object.fromEntries(saveViewDialog.viewData.nodes.map(n => [n.id, n.position])),
+          edge_ids: (saveViewDialog.viewData.edges || []).map(e => e.id),
+          edges: saveViewDialog.viewData.edges || [],
           groups: saveViewDialog.viewData.groups,
         },
         communities: [],
@@ -202,6 +254,7 @@ function App() {
       console.error('Error saving view:', error);
       showNotification('error', 'Could not save view');
     } finally {
+      setIsSavingView(false);
       setSaveViewDialog(null);
     }
   }, [saveViewDialog, showNotification]);
@@ -223,7 +276,6 @@ function App() {
       const result = await api.addNodes([subscriptionNode], []);
       console.log('Subscription created:', result);
 
-      // Add the created node to the visualization
       if (result.added_node_ids && result.added_node_ids.length > 0) {
         const nodeId = result.added_node_ids[0];
         const nodeWithId = { ...subscriptionNode, id: nodeId };
@@ -241,7 +293,6 @@ function App() {
   // Save agent nodes (create or update)
   const handleSaveAgent = useCallback(async (data) => {
     try {
-      // Check if this is an update (has agentId) or create (has nodes array)
       if (data.agentId) {
         // UPDATE
         const { agentId, agentUpdates, subscriptionId, subscriptionUpdates } = data;
@@ -251,7 +302,6 @@ function App() {
           await api.updateNode(subscriptionId, subscriptionUpdates);
         }
 
-        // Update visualization locally
         const newNodes = nodes.map(n => {
           if (n.id === agentId) return { ...n, ...agentUpdates };
           if (n.id === subscriptionId) return { ...n, ...subscriptionUpdates };
@@ -266,14 +316,11 @@ function App() {
         const result = await api.addNodes(agentNodes, agentEdges);
         console.log('Agent created:', result);
 
-        // Add the created nodes to the visualization
         if (result.added_node_ids && result.added_node_ids.length > 0) {
-          // Map the returned IDs to the nodes
           const nodesWithIds = agentNodes.map((node, index) => ({
             ...node,
             id: result.added_node_ids[index] || node.id,
           }));
-          // Map edge IDs
           const edgesWithIds = agentEdges.map((edge, index) => ({
             ...edge,
             id: result.added_edge_ids?.[index] || edge.id,
@@ -292,6 +339,33 @@ function App() {
     }
   }, [nodes, edges, addNodesToVisualization, updateVisualization, showNotification]);
 
+  // Callback: Create node from toolbar
+  const handleCreateNodeForType = useCallback((nodeType) => {
+    setCreateNodeType(nodeType);
+  }, []);
+
+  // Handle created node from CreateNodeDialog
+  const handleNodeCreated = useCallback((createdNode) => {
+    addNodesToVisualization([createdNode], []);
+    showNotification('success', `${createdNode.type} "${createdNode.name}" created`);
+  }, [addNodesToVisualization, showNotification]);
+
+  // Toolbar save view: signal GraphCanvas to collect positions and trigger dialog
+  const handleToolbarSaveView = useCallback(() => {
+    setSaveViewSignal(prev => prev + 1);
+  }, []);
+
+  // Handle drop from toolbar onto canvas
+  const handleDropCreateNode = useCallback((nodeType, position) => {
+    if (nodeType === 'Agent') {
+      handleCreateAgent();
+    } else if (nodeType === 'EventSubscription') {
+      handleCreateSubscription();
+    } else {
+      setCreateNodeType(nodeType);
+    }
+  }, [handleCreateAgent, handleCreateSubscription]);
+
   // Handle node update from edit dialog
   const handleNodeUpdate = useCallback(async (nodeId, updates) => {
     try {
@@ -308,39 +382,57 @@ function App() {
     }
   }, [nodes, edges, updateVisualization, closeEditingNode, showNotification]);
 
-  // Get title from presentation config or use default
-  const title = presentation?.title || 'Community Knowledge Graph';
-
   return (
     <div className="app">
-      <header className="app-header">
-        <h1>{title}</h1>
-        <StatsPanel stats={stats} />
-      </header>
-
-      <div className="app-content">
-        <ChatPanel />
-
-        <main className="app-main">
-          <GraphCanvas
-            nodes={nodes}
-            edges={edges}
-            highlightedNodeIds={highlightedNodeIds}
-            hiddenNodeIds={hiddenNodeIds}
-            clearGroupsFlag={clearGroupsFlag}
-            onExpand={handleExpand}
-            onEdit={handleEdit}
-            onDelete={handleDelete}
-            onHide={handleHide}
-            onDeleteMultiple={handleDeleteMultiple}
-            onHideMultiple={handleHideMultiple}
-            onCreateGroup={handleCreateGroup}
-            onSaveView={handleSaveView}
-            onCreateSubscription={handleCreateSubscription}
-            onCreateAgent={handleCreateAgent}
-          />
-        </main>
+      <div className="app-canvas">
+        <GraphCanvas
+          nodes={nodes}
+          edges={edges}
+          highlightedNodeIds={highlightedNodeIds}
+          hiddenNodeIds={hiddenNodeIds}
+          hiddenEdgeIds={hiddenEdgeIds}
+          clearGroupsFlag={clearGroupsFlag}
+          onExpand={handleExpand}
+          onEdit={handleEdit}
+          onDelete={handleDelete}
+          onHide={handleHide}
+          onDeleteMultiple={handleDeleteMultiple}
+          onHideMultiple={handleHideMultiple}
+          onHideEdge={handleHideEdge}
+          onDeleteEdge={handleDeleteEdge}
+          onCreateGroup={handleCreateGroup}
+          onSaveView={handleSaveView}
+          onCreateSubscription={handleCreateSubscription}
+          onCreateAgent={handleCreateAgent}
+          onDropCreateNode={handleDropCreateNode}
+          onShowOnly={handleShowOnly}
+          focusNodeId={focusNodeId}
+          onFocusComplete={clearFocusNode}
+          createGroupSignal={createGroupSignal}
+          saveViewSignal={saveViewSignal}
+          groupsToRestore={pendingGroups}
+          onGroupsRestored={() => setPendingGroups(null)}
+        />
       </div>
+
+      <FloatingHeader stats={stats} />
+      <FloatingSearch />
+      <FloatingToolbar
+        onCreateNode={handleCreateNodeForType}
+        onCreateAgent={handleCreateAgent}
+        onCreateSubscription={handleCreateSubscription}
+        onSaveView={handleToolbarSaveView}
+        onCreateGroup={handleToolbarCreateGroup}
+      />
+      <ChatPanel />
+
+      {createNodeType && (
+        <CreateNodeDialog
+          nodeType={createNodeType}
+          onClose={() => setCreateNodeType(null)}
+          onSave={handleNodeCreated}
+        />
+      )}
 
       {editingNode && (
         <EditNodeDialog
@@ -373,6 +465,7 @@ function App() {
           placeholder="Enter a name for this view..."
           confirmText="Save"
           cancelText="Cancel"
+          isLoading={isSavingView}
           onConfirm={handleConfirmSaveView}
           onCancel={() => setSaveViewDialog(null)}
         />

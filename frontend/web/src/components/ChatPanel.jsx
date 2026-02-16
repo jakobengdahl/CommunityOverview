@@ -1,20 +1,10 @@
 import { useState, useEffect, useRef } from 'react';
+import { ChatDotsFill, ChevronRight, ChevronLeft } from 'react-bootstrap-icons';
 import useGraphStore from '../store/graphStore';
 import * as api from '../services/api';
 import { positionNewNodes } from '@community-graph/ui-graph-canvas';
 import './ChatPanel.css';
 
-/**
- * ChatPanel - Conversational interface for interacting with the graph
- *
- * Features:
- * - Send messages to LLM for graph queries and modifications
- * - Display conversation history with tool results
- * - Handle node proposals with approval/rejection
- * - Document upload and analysis integration
- * - Auto-scroll and loading states
- * - Always visible on left side with fixed width
- */
 function ChatPanel() {
   const {
     chatMessages,
@@ -24,6 +14,8 @@ function ChatPanel() {
     addNodesToVisualization,
     updateVisualization,
     clearVisualization,
+    chatPanelOpen,
+    toggleChatPanel,
   } = useGraphStore();
 
   const [inputValue, setInputValue] = useState('');
@@ -35,7 +27,6 @@ function ChatPanel() {
   const messagesEndRef = useRef(null);
   const fileInputRef = useRef(null);
 
-  // Auto-scroll to latest message
   const scrollToBottom = () => {
     messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' });
   };
@@ -44,7 +35,6 @@ function ChatPanel() {
     scrollToBottom();
   }, [chatMessages]);
 
-  // Clear error after 5 seconds
   useEffect(() => {
     if (error) {
       const timer = setTimeout(() => setError(null), 5000);
@@ -52,22 +42,15 @@ function ChatPanel() {
     }
   }, [error]);
 
-  /**
-   * Filter out Community nodes from results
-   */
   const filterCommunityNodes = (nodeList) => {
     return nodeList.filter(n =>
       n.type !== 'Community' && n.data?.type !== 'Community'
     );
   };
 
-  /**
-   * Send message to backend
-   */
   const handleSend = async () => {
     if ((!inputValue.trim() && !uploadedFile) || isProcessing) return;
 
-    // Build message content with file if present
     let messageContent = inputValue.trim();
 
     if (uploadedFile) {
@@ -77,7 +60,6 @@ function ChatPanel() {
         : `Analysera följande dokument:\n${fileContext}`;
     }
 
-    // Add user message to chat
     const userMessage = {
       role: 'user',
       content: messageContent,
@@ -92,23 +74,19 @@ function ChatPanel() {
     setError(null);
 
     try {
-      // Build conversation history for API (skip welcome message)
       const conversationMessages = chatMessages
         .filter(m => m.role !== 'system' && m.id !== 'welcome')
         .map(m => ({ role: m.role, content: m.content }));
 
       conversationMessages.push({ role: 'user', content: messageContent });
 
-      // Call chat API
       const response = await api.sendChatMessage(conversationMessages);
 
       console.log('[ChatPanel] Response:', response);
 
-      // Handle tool results
       const toolResult = response.toolResult;
 
       if (toolResult) {
-        // Handle save view action
         if (toolResult.action === 'save_view' || toolResult.action === 'save_visualization') {
           const viewName = toolResult.name;
           const currentNodes = useGraphStore.getState().nodes;
@@ -130,57 +108,45 @@ function ChatPanel() {
             console.error('[ChatPanel] Failed to save view:', err);
           }
         }
-        // Handle clear visualization action
         else if (toolResult.action === 'clear_visualization') {
           clearVisualization();
         }
-        // Handle load view action
         else if (toolResult.action === 'load_visualization') {
           if (toolResult.nodes && toolResult.nodes.length > 0) {
             const filteredNodes = filterCommunityNodes(toolResult.nodes);
             updateVisualization(filteredNodes, toolResult.edges || []);
           }
         }
-        // Handle "add to visualization" action (new nodes created)
-        // This ADDS nodes to the current view instead of replacing
         else if (toolResult.action === 'add_to_visualization') {
           if (toolResult.nodes && toolResult.nodes.length > 0) {
             const filteredNodes = filterCommunityNodes(toolResult.nodes);
-            // Position new nodes to avoid overlap with existing nodes
             const currentNodes = useGraphStore.getState().nodes;
             const allEdges = [...edges, ...(toolResult.edges || [])];
             const positionedNodes = positionNewNodes(filteredNodes, currentNodes, allEdges);
             addNodesToVisualization(positionedNodes, toolResult.edges || []);
           }
         }
-        // Handle "update in visualization" action (node was updated)
         else if (toolResult.action === 'update_in_visualization') {
           if (toolResult.nodes && toolResult.nodes.length > 0) {
-            // Update existing nodes in visualization
             const { nodes: currentNodes, edges: currentEdges, updateVisualization } = useGraphStore.getState();
             const updatedNodeIds = new Set(toolResult.nodes.map(n => n.id));
-            // Replace updated nodes, keep others
             const mergedNodes = currentNodes.map(n =>
               updatedNodeIds.has(n.id)
                 ? toolResult.nodes.find(un => un.id === n.id)
                 : n
             );
-            // Add any new nodes that weren't in visualization before
             const newNodes = toolResult.nodes.filter(n =>
               !currentNodes.some(cn => cn.id === n.id)
             );
             updateVisualization([...mergedNodes, ...newNodes], currentEdges);
           }
         }
-        // Handle standard node/edge updates (search results, etc.)
-        // Use updateVisualization to clear and replace (not add to existing)
         else if (toolResult.nodes && toolResult.nodes.length > 0) {
           const filteredNodes = filterCommunityNodes(toolResult.nodes);
           updateVisualization(filteredNodes, toolResult.edges || []);
         }
       }
 
-      // Add assistant response
       const assistantMessage = {
         role: 'assistant',
         content: response.content,
@@ -211,9 +177,6 @@ function ChatPanel() {
     }
   };
 
-  /**
-   * Handle keyboard events
-   */
   const handleKeyPress = (e) => {
     if (e.key === 'Enter' && !e.shiftKey) {
       e.preventDefault();
@@ -221,9 +184,6 @@ function ChatPanel() {
     }
   };
 
-  /**
-   * Handle file upload
-   */
   const handleFileUpload = async (e) => {
     const file = e.target.files[0];
     if (!file) return;
@@ -252,9 +212,6 @@ function ChatPanel() {
     }
   };
 
-  /**
-   * Remove uploaded file
-   */
   const handleRemoveFile = () => {
     setUploadedFile(null);
     if (fileInputRef.current) {
@@ -262,9 +219,6 @@ function ChatPanel() {
     }
   };
 
-  /**
-   * Approve a node proposal
-   */
   const handleApproveProposal = async (proposal) => {
     const msg = `Ja, lägg till noden "${proposal.node.name}"`;
     addChatMessage({ role: 'user', content: msg, timestamp: new Date() });
@@ -280,7 +234,6 @@ function ChatPanel() {
 
       if (response.toolResult?.nodes) {
         const filteredNodes = filterCommunityNodes(response.toolResult.nodes);
-        // Position new nodes to avoid overlap with existing nodes
         const currentNodes = useGraphStore.getState().nodes;
         const allEdges = [...edges, ...(response.toolResult.edges || [])];
         const positionedNodes = positionNewNodes(filteredNodes, currentNodes, allEdges);
@@ -304,9 +257,6 @@ function ChatPanel() {
     }
   };
 
-  /**
-   * Reject a node proposal
-   */
   const handleRejectProposal = async (proposal) => {
     const msg = 'Nej, lägg inte till noden.';
     addChatMessage({ role: 'user', content: msg, timestamp: new Date() });
@@ -331,9 +281,6 @@ function ChatPanel() {
     }
   };
 
-  /**
-   * Confirm node deletion
-   */
   const handleConfirmDelete = async (deleteConfirmation) => {
     const msg = 'Ja, ta bort noderna.';
     addChatMessage({ role: 'user', content: msg, timestamp: new Date() });
@@ -347,7 +294,6 @@ function ChatPanel() {
 
       const response = await api.sendChatMessage(conversationMessages);
 
-      // Remove deleted nodes from visualization
       if (deleteConfirmation.node_ids) {
         const deletedIds = new Set(deleteConfirmation.node_ids);
         const newNodes = nodes.filter(n => !deletedIds.has(n.id));
@@ -372,9 +318,6 @@ function ChatPanel() {
     }
   };
 
-  /**
-   * Cancel node deletion
-   */
   const handleCancelDelete = () => {
     addChatMessage({
       role: 'assistant',
@@ -383,19 +326,33 @@ function ChatPanel() {
     });
   };
 
-  /**
-   * Format timestamp
-   */
   const formatTime = (timestamp) => {
     if (!timestamp) return '';
     const date = new Date(timestamp);
     return date.toLocaleTimeString('sv-SE', { hour: '2-digit', minute: '2-digit' });
   };
 
+  // Minimized state
+  if (!chatPanelOpen) {
+    return (
+      <div className="chat-panel-minimized" onClick={toggleChatPanel}>
+        <ChatDotsFill size={18} className="chat-panel-minimized-icon" />
+        <span className="chat-panel-minimized-text">Graph assistant</span>
+      </div>
+    );
+  }
+
+  // Expanded state
   return (
-    <div className="chat-panel">
+    <div className="chat-panel-floating">
       <div className="chat-header">
-        <h3>Graf-assistent</h3>
+        <div className="chat-header-left" onClick={toggleChatPanel} style={{ cursor: 'pointer' }}>
+          <ChatDotsFill size={16} />
+          <h3>Graph assistant</h3>
+        </div>
+        <button className="chat-collapse-button" onClick={toggleChatPanel} title="Minimize">
+          <ChevronRight size={18} />
+        </button>
       </div>
 
       <div className="chat-messages">
@@ -404,7 +361,6 @@ function ChatPanel() {
             <div className="message-content">
               {msg.content}
 
-              {/* Loading indicator */}
               {msg.role === 'user' && idx === chatMessages.length - 1 && isProcessing && (
                 <div className="message-loading">
                   <div className="loading-dots">
@@ -416,7 +372,6 @@ function ChatPanel() {
                 </div>
               )}
 
-              {/* Node proposal card */}
               {msg.proposal && (
                 <div className="proposal-card">
                   <h4>Föreslaget tillägg:</h4>
@@ -461,7 +416,6 @@ function ChatPanel() {
                 </div>
               )}
 
-              {/* Delete confirmation card */}
               {msg.deleteConfirmation && (
                 <div className="delete-card">
                   <h4>Bekräfta borttagning:</h4>
@@ -513,7 +467,6 @@ function ChatPanel() {
       )}
 
       <div className="chat-input-container">
-        {/* File indicator */}
         {uploadedFile && (
           <div className="file-indicator">
             <div className="file-info">

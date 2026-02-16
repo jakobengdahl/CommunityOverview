@@ -14,7 +14,7 @@ const DEFAULT_NODE_TYPES = [
 ];
 
 function EditNodeDialog({ node, onClose, onSave }) {
-  const { getNodeTypes } = useGraphStore();
+  const { getNodeTypes, getNodeColor } = useGraphStore();
   const [formData, setFormData] = useState({
     name: '',
     type: '',
@@ -57,12 +57,24 @@ function EditNodeDialog({ node, onClose, onSave }) {
     });
   };
 
+  useEffect(() => {
+    const handleEsc = (e) => { if (e.key === 'Escape') onClose(); };
+    document.addEventListener('keydown', handleEsc);
+    return () => document.removeEventListener('keydown', handleEsc);
+  }, [onClose]);
+
   return (
     <div className="edit-dialog-overlay" onClick={onClose}>
       <div className="edit-dialog" onClick={e => e.stopPropagation()}>
         <header className="edit-dialog-header">
-          <h2>Edit Node</h2>
-          <button className="close-button" onClick={onClose}>x</button>
+          <div className="edit-dialog-header-title">
+            <span
+              className="edit-dialog-type-dot"
+              style={{ backgroundColor: getNodeColor(formData.type) }}
+            />
+            <h2>Edit {formData.type || 'Node'}</h2>
+          </div>
+          <button className="close-button" onClick={onClose}>×</button>
         </header>
 
         <form onSubmit={handleSubmit}>

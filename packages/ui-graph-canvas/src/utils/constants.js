@@ -11,6 +11,10 @@ export const NODE_COLORS = {
   Resource: '#FBBF24',
   Legislation: '#EF4444',
   Theme: '#14B8A6',
+  Goal: '#6366F1',
+  Event: '#D946EF',
+  Agent: '#EC4899',
+  EventSubscription: '#8B5CF6',
   SavedView: '#6B7280',
   VisualizationView: '#6B7280', // Legacy support
 };
