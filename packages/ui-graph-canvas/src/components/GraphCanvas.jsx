@@ -68,6 +68,11 @@ function GraphCanvasInner({
   // Track selected nodes and edges
   useOnSelectionChange({
     onChange: ({ nodes: selected, edges: selectedE }) => {
+      console.log('[GraphCanvas] Selection changed:', {
+        nodeCount: selected.length,
+        nodeIds: selected.map(n => n.id),
+        edgeCount: (selectedE || []).length,
+      });
       setSelectedNodes(selected);
       setSelectedEdges(selectedE || []);
     },
@@ -213,7 +218,7 @@ function GraphCanvasInner({
     clearSelection();
   }, [closeAllMenus, clearSelection]);
 
-  const onNodeDragStop = useCallback((event, draggedNode) => {
+  const onNodeDragStop = useCallback((event, draggedNode, allDraggedNodes) => {
     if (onNodePositionChange) {
       onNodePositionChange(draggedNode.id, draggedNode.position);
     }
@@ -221,20 +226,25 @@ function GraphCanvasInner({
     if (draggedNode.type === 'group') return;
 
     // Get latest node positions directly from ReactFlow's internal store
-    // (React state may not yet reflect the final drag positions)
     const currentNodes = getFlowNodes();
-
-    // Determine which nodes were dragged by reading selection state directly from
-    // ReactFlow's store (React state may be stale due to batching / timing).
-    const selectedInStore = currentNodes.filter(n => n.selected && n.type !== 'group');
-    const isMultiDrag = selectedInStore.length > 1 && selectedInStore.some(n => n.id === draggedNode.id);
-    const draggedIds = new Set(
-      isMultiDrag
-        ? selectedInStore.map(n => n.id)
-        : [draggedNode.id]
-    );
-
     const groupNodes = currentNodes.filter(n => n.type === 'group');
+
+    if (groupNodes.length === 0) return;
+
+    // Use the third parameter from ReactFlow which reliably contains ALL
+    // nodes involved in this drag operation (works for both single and multi-drag).
+    // Fall back to just the primary draggedNode if the parameter is missing.
+    const nodesToProcess = (allDraggedNodes && allDraggedNodes.length > 0)
+      ? allDraggedNodes.filter(n => n.type !== 'group')
+      : [draggedNode];
+    const draggedIds = new Set(nodesToProcess.map(n => n.id));
+
+    console.log('[GraphCanvas] onNodeDragStop:', {
+      primaryNode: draggedNode.id,
+      allDraggedCount: allDraggedNodes?.length ?? 0,
+      draggedIds: [...draggedIds],
+      groupCount: groupNodes.length,
+    });
 
     setNodes((nds) => nds.map((n) => {
       if (!draggedIds.has(n.id) || n.type === 'group') return n;
@@ -268,7 +278,13 @@ function GraphCanvasInner({
       }
 
       if (targetGroup && n.parentId !== targetGroup.id) {
-        // Enter group (no extent constraint - allows free dragging out from any side)
+        // Enter group
+        console.log('[GraphCanvas] Node entering group:', {
+          nodeId: n.id,
+          groupId: targetGroup.id,
+          absPos,
+          relPos: { x: absPos.x - targetGroup.position.x, y: absPos.y - targetGroup.position.y },
+        });
         return {
           ...n,
           parentId: targetGroup.id,
@@ -281,8 +297,12 @@ function GraphCanvasInner({
       }
 
       if (!targetGroup && n.parentId) {
-        // Exit group - convert to absolute position
+        // Exit group
         const oldParent = groupNodes.find(gn => gn.id === n.parentId);
+        console.log('[GraphCanvas] Node exiting group:', {
+          nodeId: n.id,
+          oldGroupId: n.parentId,
+        });
         return {
           ...n,
           parentId: undefined,
