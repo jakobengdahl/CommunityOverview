@@ -188,6 +188,30 @@ function GraphCanvasInner({
     [setEdges]
   );
 
+  // Close all context menus
+  const closeAllMenus = useCallback(() => {
+    setNodeContextMenu(null);
+    setMultiNodeContextMenu(null);
+    setEdgeContextMenu(null);
+  }, []);
+
+  const clearSelection = useCallback(() => {
+    // Use onNodesChange/onEdgesChange with select events to properly clear ReactFlow's internal selection state
+    const nodeDeselects = nodes.filter(n => n.selected).map(n => ({
+      id: n.id, type: 'select', selected: false,
+    }));
+    const edgeDeselects = edges.filter(e => e.selected).map(e => ({
+      id: e.id, type: 'select', selected: false,
+    }));
+    if (nodeDeselects.length > 0) onNodesChange(nodeDeselects);
+    if (edgeDeselects.length > 0) onEdgesChange(edgeDeselects);
+  }, [nodes, edges, onNodesChange, onEdgesChange]);
+
+  const handlePaneClick = useCallback(() => {
+    closeAllMenus();
+    clearSelection();
+  }, [closeAllMenus, clearSelection]);
+
   const onNodeDragStop = useCallback((event, draggedNode) => {
     if (onNodePositionChange) {
       onNodePositionChange(draggedNode.id, draggedNode.position);
@@ -388,30 +412,6 @@ function GraphCanvasInner({
     wrapper.addEventListener('contextmenu', handleNativeContextMenu);
     return () => wrapper.removeEventListener('contextmenu', handleNativeContextMenu);
   }, []);
-
-  // Close all context menus
-  const closeAllMenus = useCallback(() => {
-    setNodeContextMenu(null);
-    setMultiNodeContextMenu(null);
-    setEdgeContextMenu(null);
-  }, []);
-
-  const clearSelection = useCallback(() => {
-    // Use onNodesChange/onEdgesChange with select events to properly clear ReactFlow's internal selection state
-    const nodeDeselects = nodes.filter(n => n.selected).map(n => ({
-      id: n.id, type: 'select', selected: false,
-    }));
-    const edgeDeselects = edges.filter(e => e.selected).map(e => ({
-      id: e.id, type: 'select', selected: false,
-    }));
-    if (nodeDeselects.length > 0) onNodesChange(nodeDeselects);
-    if (edgeDeselects.length > 0) onEdgesChange(edgeDeselects);
-  }, [nodes, edges, onNodesChange, onEdgesChange]);
-
-  const handlePaneClick = useCallback(() => {
-    closeAllMenus();
-    clearSelection();
-  }, [closeAllMenus, clearSelection]);
 
   // Handle external drag-and-drop (from toolbar)
   const onDragOver = useCallback((event) => {
