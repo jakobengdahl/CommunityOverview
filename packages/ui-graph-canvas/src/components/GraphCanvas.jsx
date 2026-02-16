@@ -224,11 +224,13 @@ function GraphCanvasInner({
     // (React state may not yet reflect the final drag positions)
     const currentNodes = getFlowNodes();
 
-    // Handle all selected nodes (multi-select drag) or just the single dragged node
-    const isMultiDrag = selectedNodes.length > 1 && selectedNodes.some(n => n.id === draggedNode.id);
+    // Determine which nodes were dragged by reading selection state directly from
+    // ReactFlow's store (React state may be stale due to batching / timing).
+    const selectedInStore = currentNodes.filter(n => n.selected && n.type !== 'group');
+    const isMultiDrag = selectedInStore.length > 1 && selectedInStore.some(n => n.id === draggedNode.id);
     const draggedIds = new Set(
       isMultiDrag
-        ? selectedNodes.filter(n => n.type !== 'group').map(n => n.id)
+        ? selectedInStore.map(n => n.id)
         : [draggedNode.id]
     );
 
@@ -294,7 +296,7 @@ function GraphCanvasInner({
 
       return n;
     }));
-  }, [selectedNodes, setNodes, onNodePositionChange, getFlowNodes]);
+  }, [setNodes, onNodePositionChange, getFlowNodes]);
 
   // Right-click on empty background: prevent default and clear selection
   const onPaneContextMenu = useCallback((event) => {

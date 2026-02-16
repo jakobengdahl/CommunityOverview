@@ -346,7 +346,7 @@ function ChatPanel() {
   return (
     <div className="chat-panel-floating">
       <div className="chat-header">
-        <div className="chat-header-left">
+        <div className="chat-header-left" onClick={toggleChatPanel} style={{ cursor: 'pointer' }}>
           <ChatDotsFill size={16} />
           <h3>Graph assistant</h3>
         </div>
