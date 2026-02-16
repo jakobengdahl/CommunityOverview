@@ -18,6 +18,7 @@ function GroupNode({ id, data, selected }) {
   const [contextMenu, setContextMenu] = useState(null);
   const inputRef = useRef(null);
   const groupRef = useRef(null);
+  const contextMenuRef = useRef(null);
   const { setNodes } = useReactFlow();
 
   useEffect(() => {
@@ -31,13 +32,19 @@ function GroupNode({ id, data, selected }) {
     if (!contextMenu) return;
 
     const handleGlobalClick = (e) => {
-      if (groupRef.current && !groupRef.current.contains(e.target)) {
-        setContextMenu(null);
-      }
+      // Don't close if clicking inside the context menu itself (portal)
+      if (contextMenuRef.current && contextMenuRef.current.contains(e.target)) return;
+      setContextMenu(null);
     };
 
-    document.addEventListener('mousedown', handleGlobalClick);
-    return () => document.removeEventListener('mousedown', handleGlobalClick);
+    // Use setTimeout so the opening right-click doesn't immediately close the menu
+    const timer = setTimeout(() => {
+      document.addEventListener('mousedown', handleGlobalClick);
+    }, 0);
+    return () => {
+      clearTimeout(timer);
+      document.removeEventListener('mousedown', handleGlobalClick);
+    };
   }, [contextMenu]);
 
   const handleDoubleClick = (e) => {
@@ -170,6 +177,7 @@ function GroupNode({ id, data, selected }) {
 
       {contextMenu && createPortal(
         <div
+          ref={contextMenuRef}
           className="graph-group-context-menu"
           style={{ left: contextMenu.x, top: contextMenu.y }}
         >

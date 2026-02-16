@@ -62,7 +62,7 @@ function GraphCanvasInner({
   const [selectedEdges, setSelectedEdges] = useState([]);
   const reactFlowWrapper = useRef(null);
   const rightDragStart = useRef({ x: 0, y: 0, time: null });
-  const { screenToFlowPosition, setCenter } = useReactFlow();
+  const { screenToFlowPosition, setCenter, getNodes: getFlowNodes } = useReactFlow();
 
   // Track selected nodes and edges
   useOnSelectionChange({
@@ -219,6 +219,10 @@ function GraphCanvasInner({
 
     if (draggedNode.type === 'group') return;
 
+    // Get latest node positions directly from ReactFlow's internal store
+    // (React state may not yet reflect the final drag positions)
+    const currentNodes = getFlowNodes();
+
     // Handle all selected nodes (multi-select drag) or just the single dragged node
     const isMultiDrag = selectedNodes.length > 1 && selectedNodes.some(n => n.id === draggedNode.id);
     const draggedIds = new Set(
@@ -227,67 +231,69 @@ function GraphCanvasInner({
         : [draggedNode.id]
     );
 
-    setNodes((nds) => {
-      const groupNodes = nds.filter(n => n.type === 'group');
+    const groupNodes = currentNodes.filter(n => n.type === 'group');
 
-      return nds.map((n) => {
-        if (!draggedIds.has(n.id) || n.type === 'group') return n;
+    setNodes((nds) => nds.map((n) => {
+      if (!draggedIds.has(n.id) || n.type === 'group') return n;
 
-        // Calculate absolute position (account for parent offset)
-        const absPos = n.parentId
-          ? {
-              x: n.position.x + (nds.find(g => g.id === n.parentId)?.position.x || 0),
-              y: n.position.y + (nds.find(g => g.id === n.parentId)?.position.y || 0),
-            }
-          : n.position;
+      // Use position from ReactFlow's store for accurate post-drag coordinates
+      const flowNode = currentNodes.find(cn => cn.id === n.id);
+      const pos = flowNode?.position || n.position;
 
-        // Find which group this node is inside
-        let targetGroup = null;
-        for (const groupNode of groupNodes) {
-          const gb = {
-            left: groupNode.position.x,
-            right: groupNode.position.x + (groupNode.style?.width || 300),
-            top: groupNode.position.y,
-            bottom: groupNode.position.y + (groupNode.style?.height || 200),
-          };
-          if (absPos.x >= gb.left && absPos.x <= gb.right &&
-              absPos.y >= gb.top && absPos.y <= gb.bottom) {
-            targetGroup = groupNode;
-            break;
+      // Calculate absolute position (account for parent offset)
+      const absPos = n.parentId
+        ? {
+            x: pos.x + (groupNodes.find(g => g.id === n.parentId)?.position.x || 0),
+            y: pos.y + (groupNodes.find(g => g.id === n.parentId)?.position.y || 0),
           }
-        }
+        : pos;
 
-        if (targetGroup && n.parentId !== targetGroup.id) {
-          // Enter group (no extent constraint - allows free dragging out)
-          return {
-            ...n,
-            parentId: targetGroup.id,
-            position: {
-              x: absPos.x - targetGroup.position.x,
-              y: absPos.y - targetGroup.position.y,
-            },
-            extent: undefined,
-          };
+      // Find which group this node is inside
+      let targetGroup = null;
+      for (const g of groupNodes) {
+        const gb = {
+          left: g.position.x,
+          right: g.position.x + (g.style?.width || 300),
+          top: g.position.y,
+          bottom: g.position.y + (g.style?.height || 200),
+        };
+        if (absPos.x >= gb.left && absPos.x <= gb.right &&
+            absPos.y >= gb.top && absPos.y <= gb.bottom) {
+          targetGroup = g;
+          break;
         }
+      }
 
-        if (!targetGroup && n.parentId) {
-          // Exit group - convert to absolute position
-          const oldParent = nds.find(gn => gn.id === n.parentId);
-          return {
-            ...n,
-            parentId: undefined,
-            position: {
-              x: n.position.x + (oldParent?.position.x || 0),
-              y: n.position.y + (oldParent?.position.y || 0),
-            },
-            extent: undefined,
-          };
-        }
+      if (targetGroup && n.parentId !== targetGroup.id) {
+        // Enter group (no extent constraint - allows free dragging out from any side)
+        return {
+          ...n,
+          parentId: targetGroup.id,
+          position: {
+            x: absPos.x - targetGroup.position.x,
+            y: absPos.y - targetGroup.position.y,
+          },
+          extent: undefined,
+        };
+      }
 
-        return n;
-      });
-    });
-  }, [selectedNodes, setNodes, onNodePositionChange]);
+      if (!targetGroup && n.parentId) {
+        // Exit group - convert to absolute position
+        const oldParent = groupNodes.find(gn => gn.id === n.parentId);
+        return {
+          ...n,
+          parentId: undefined,
+          position: {
+            x: pos.x + (oldParent?.position.x || 0),
+            y: pos.y + (oldParent?.position.y || 0),
+          },
+          extent: undefined,
+        };
+      }
+
+      return n;
+    }));
+  }, [selectedNodes, setNodes, onNodePositionChange, getFlowNodes]);
 
   // Right-click on empty background: prevent default and clear selection
   const onPaneContextMenu = useCallback((event) => {
@@ -412,6 +418,27 @@ function GraphCanvasInner({
     wrapper.addEventListener('contextmenu', handleNativeContextMenu);
     return () => wrapper.removeEventListener('contextmenu', handleNativeContextMenu);
   }, []);
+
+  // Left-click on empty space clears selection (handles cases where onPaneClick doesn't fire,
+  // e.g. when ReactFlow's selection overlay intercepts the click)
+  useEffect(() => {
+    const wrapper = reactFlowWrapper.current;
+    if (!wrapper) return;
+    const handleClick = (e) => {
+      if (e.button !== 0) return;
+      const nodeEl = e.target.closest('.react-flow__node');
+      const edgeEl = e.target.closest('.react-flow__edge');
+      const menuEl = e.target.closest('.graph-context-menu') || e.target.closest('.graph-group-context-menu');
+      const controlsEl = e.target.closest('.react-flow__controls');
+      const minimapEl = e.target.closest('.react-flow__minimap');
+      if (!nodeEl && !edgeEl && !menuEl && !controlsEl && !minimapEl) {
+        clearSelection();
+        closeAllMenus();
+      }
+    };
+    wrapper.addEventListener('click', handleClick);
+    return () => wrapper.removeEventListener('click', handleClick);
+  }, [clearSelection, closeAllMenus]);
 
   // Handle external drag-and-drop (from toolbar)
   const onDragOver = useCallback((event) => {
