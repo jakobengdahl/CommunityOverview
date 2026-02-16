@@ -20,6 +20,7 @@ Usage:
 """
 
 import os
+import secrets
 from pathlib import Path
 from typing import Optional, Dict, Any, Callable
 
@@ -94,7 +95,14 @@ def create_app(
                 decoded = base64.b64decode(credentials).decode("utf-8")
                 username, _, password = decoded.partition(":")
 
-                if username != config.auth_username or password != config.auth_password:
+                is_correct_username = secrets.compare_digest(
+                    username, config.auth_username
+                )
+                is_correct_password = secrets.compare_digest(
+                    password, config.auth_password or ""
+                )
+
+                if not (is_correct_username and is_correct_password):
                     raise ValueError
             except (ValueError, Exception):
                 return JSONResponse(
