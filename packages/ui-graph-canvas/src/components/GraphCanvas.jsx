@@ -62,6 +62,7 @@ function GraphCanvasInner({
   const [selectedEdges, setSelectedEdges] = useState([]);
   const reactFlowWrapper = useRef(null);
   const rightDragStart = useRef({ x: 0, y: 0, time: null });
+  const mouseDownPos = useRef(null);
   const { screenToFlowPosition, setCenter, getNodes: getFlowNodes } = useReactFlow();
 
   // Track selected nodes and edges
@@ -420,24 +421,46 @@ function GraphCanvasInner({
   }, []);
 
   // Left-click on empty space clears selection (handles cases where onPaneClick doesn't fire,
-  // e.g. when ReactFlow's selection overlay intercepts the click)
+  // e.g. when ReactFlow's selection overlay intercepts the click).
+  // Track mousedown position to distinguish genuine clicks from drag-selects.
   useEffect(() => {
     const wrapper = reactFlowWrapper.current;
     if (!wrapper) return;
+    const handleMouseDown = (e) => {
+      if (e.button === 0) {
+        mouseDownPos.current = { x: e.clientX, y: e.clientY };
+      }
+    };
     const handleClick = (e) => {
       if (e.button !== 0) return;
+      // If the mouse moved significantly between mousedown and click, this was a
+      // drag operation (e.g. marquee select). Do not clear the selection.
+      if (mouseDownPos.current) {
+        const dx = e.clientX - mouseDownPos.current.x;
+        const dy = e.clientY - mouseDownPos.current.y;
+        if (dx * dx + dy * dy > 25) {
+          mouseDownPos.current = null;
+          return;
+        }
+      }
+      mouseDownPos.current = null;
       const nodeEl = e.target.closest('.react-flow__node');
       const edgeEl = e.target.closest('.react-flow__edge');
       const menuEl = e.target.closest('.graph-context-menu') || e.target.closest('.graph-group-context-menu');
       const controlsEl = e.target.closest('.react-flow__controls');
       const minimapEl = e.target.closest('.react-flow__minimap');
-      if (!nodeEl && !edgeEl && !menuEl && !controlsEl && !minimapEl) {
+      const selectionEl = e.target.closest('.react-flow__selection');
+      if (!nodeEl && !edgeEl && !menuEl && !controlsEl && !minimapEl && !selectionEl) {
         clearSelection();
         closeAllMenus();
       }
     };
+    wrapper.addEventListener('mousedown', handleMouseDown);
     wrapper.addEventListener('click', handleClick);
-    return () => wrapper.removeEventListener('click', handleClick);
+    return () => {
+      wrapper.removeEventListener('mousedown', handleMouseDown);
+      wrapper.removeEventListener('click', handleClick);
+    };
   }, [clearSelection, closeAllMenus]);
 
   // Handle external drag-and-drop (from toolbar)
