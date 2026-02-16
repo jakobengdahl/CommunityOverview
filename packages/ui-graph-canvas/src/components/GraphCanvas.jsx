@@ -21,6 +21,30 @@ import { getNodeColor, LAZY_LOAD_THRESHOLD, INITIAL_LOAD_COUNT, DEFAULT_EDGE_STY
 import './GraphCanvas.css';
 
 /**
+ * Ensure parent (group) nodes appear before their children in the array.
+ * ReactFlow requires this ordering for parent-child relationships to work.
+ * Groups are placed first so they render behind regular nodes in the DOM,
+ * allowing clicks to reach the custom nodes on top.
+ */
+function reorderNodesForParentChild(nodes) {
+  const groups = [];
+  const nonGroupWithoutParent = [];
+  const withParent = [];
+
+  for (const n of nodes) {
+    if (n.parentId) {
+      withParent.push(n);
+    } else if (n.type === 'group') {
+      groups.push(n);
+    } else {
+      nonGroupWithoutParent.push(n);
+    }
+  }
+
+  return [...groups, ...nonGroupWithoutParent, ...withParent];
+}
+
+/**
  * GraphCanvas - Main graph visualization component
  */
 function GraphCanvasInner({
@@ -171,7 +195,10 @@ function GraphCanvasInner({
         }
         return n;
       });
-      return [...newNodes, ...manualNodes];
+      // Groups must appear before their children in the array for ReactFlow
+      // parent-child relationships to work. This also ensures groups render
+      // behind custom nodes so clicks reach the nodes on top.
+      return reorderNodesForParentChild([...newNodes, ...manualNodes]);
     });
   }, [reactFlowNodes, setNodes, clearGroupsFlag]);
 
@@ -223,99 +250,102 @@ function GraphCanvasInner({
       onNodePositionChange(draggedNode.id, draggedNode.position);
     }
 
-    if (draggedNode.type === 'group') return;
-
     // Get latest node positions directly from ReactFlow's internal store
     const currentNodes = getFlowNodes();
     const groupNodes = currentNodes.filter(n => n.type === 'group');
 
-    if (groupNodes.length === 0) return;
-
-    // Use the third parameter from ReactFlow which reliably contains ALL
-    // nodes involved in this drag operation (works for both single and multi-drag).
-    // Fall back to just the primary draggedNode if the parameter is missing.
+    // Determine which non-group nodes were part of this drag
     const nodesToProcess = (allDraggedNodes && allDraggedNodes.length > 0)
       ? allDraggedNodes.filter(n => n.type !== 'group')
-      : [draggedNode];
+      : (draggedNode.type !== 'group' ? [draggedNode] : []);
     const draggedIds = new Set(nodesToProcess.map(n => n.id));
 
     console.log('[GraphCanvas] onNodeDragStop:', {
       primaryNode: draggedNode.id,
+      primaryType: draggedNode.type,
       allDraggedCount: allDraggedNodes?.length ?? 0,
-      draggedIds: [...draggedIds],
+      nonGroupDraggedIds: [...draggedIds],
       groupCount: groupNodes.length,
     });
 
-    setNodes((nds) => nds.map((n) => {
-      if (!draggedIds.has(n.id) || n.type === 'group') return n;
+    // Nothing to process: either no non-group nodes dragged or no groups exist
+    if (draggedIds.size === 0 || groupNodes.length === 0) return;
 
-      // Use position from ReactFlow's store for accurate post-drag coordinates
-      const flowNode = currentNodes.find(cn => cn.id === n.id);
-      const pos = flowNode?.position || n.position;
+    setNodes((nds) => {
+      const mapped = nds.map((n) => {
+        if (!draggedIds.has(n.id) || n.type === 'group') return n;
 
-      // Calculate absolute position (account for parent offset)
-      const absPos = n.parentId
-        ? {
-            x: pos.x + (groupNodes.find(g => g.id === n.parentId)?.position.x || 0),
-            y: pos.y + (groupNodes.find(g => g.id === n.parentId)?.position.y || 0),
+        // Use position from ReactFlow's store for accurate post-drag coordinates
+        const flowNode = currentNodes.find(cn => cn.id === n.id);
+        const pos = flowNode?.position || n.position;
+
+        // Calculate absolute position (account for parent offset)
+        const absPos = n.parentId
+          ? {
+              x: pos.x + (groupNodes.find(g => g.id === n.parentId)?.position.x || 0),
+              y: pos.y + (groupNodes.find(g => g.id === n.parentId)?.position.y || 0),
+            }
+          : pos;
+
+        // Find which group this node is inside
+        let targetGroup = null;
+        for (const g of groupNodes) {
+          const gb = {
+            left: g.position.x,
+            right: g.position.x + (g.style?.width || 300),
+            top: g.position.y,
+            bottom: g.position.y + (g.style?.height || 200),
+          };
+          if (absPos.x >= gb.left && absPos.x <= gb.right &&
+              absPos.y >= gb.top && absPos.y <= gb.bottom) {
+            targetGroup = g;
+            break;
           }
-        : pos;
-
-      // Find which group this node is inside
-      let targetGroup = null;
-      for (const g of groupNodes) {
-        const gb = {
-          left: g.position.x,
-          right: g.position.x + (g.style?.width || 300),
-          top: g.position.y,
-          bottom: g.position.y + (g.style?.height || 200),
-        };
-        if (absPos.x >= gb.left && absPos.x <= gb.right &&
-            absPos.y >= gb.top && absPos.y <= gb.bottom) {
-          targetGroup = g;
-          break;
         }
-      }
 
-      if (targetGroup && n.parentId !== targetGroup.id) {
-        // Enter group
-        console.log('[GraphCanvas] Node entering group:', {
-          nodeId: n.id,
-          groupId: targetGroup.id,
-          absPos,
-          relPos: { x: absPos.x - targetGroup.position.x, y: absPos.y - targetGroup.position.y },
-        });
-        return {
-          ...n,
-          parentId: targetGroup.id,
-          position: {
-            x: absPos.x - targetGroup.position.x,
-            y: absPos.y - targetGroup.position.y,
-          },
-          extent: undefined,
-        };
-      }
+        if (targetGroup && n.parentId !== targetGroup.id) {
+          // Enter group
+          console.log('[GraphCanvas] Node entering group:', {
+            nodeId: n.id,
+            groupId: targetGroup.id,
+            absPos,
+            relPos: { x: absPos.x - targetGroup.position.x, y: absPos.y - targetGroup.position.y },
+          });
+          return {
+            ...n,
+            parentId: targetGroup.id,
+            position: {
+              x: absPos.x - targetGroup.position.x,
+              y: absPos.y - targetGroup.position.y,
+            },
+            extent: undefined,
+          };
+        }
 
-      if (!targetGroup && n.parentId) {
-        // Exit group
-        const oldParent = groupNodes.find(gn => gn.id === n.parentId);
-        console.log('[GraphCanvas] Node exiting group:', {
-          nodeId: n.id,
-          oldGroupId: n.parentId,
-        });
-        return {
-          ...n,
-          parentId: undefined,
-          position: {
-            x: pos.x + (oldParent?.position.x || 0),
-            y: pos.y + (oldParent?.position.y || 0),
-          },
-          extent: undefined,
-        };
-      }
+        if (!targetGroup && n.parentId) {
+          // Exit group
+          const oldParent = groupNodes.find(gn => gn.id === n.parentId);
+          console.log('[GraphCanvas] Node exiting group:', {
+            nodeId: n.id,
+            oldGroupId: n.parentId,
+          });
+          return {
+            ...n,
+            parentId: undefined,
+            position: {
+              x: pos.x + (oldParent?.position.x || 0),
+              y: pos.y + (oldParent?.position.y || 0),
+            },
+            extent: undefined,
+          };
+        }
 
-      return n;
-    }));
+        return n;
+      });
+
+      // ReactFlow requires parent nodes before children in the array
+      return reorderNodesForParentChild(mapped);
+    });
   }, [setNodes, onNodePositionChange, getFlowNodes]);
 
   // Right-click on empty background: prevent default and clear selection
@@ -362,7 +392,7 @@ function GraphCanvasInner({
       style: { width: 300, height: 200 },
     };
 
-    setNodes((nds) => [...nds, newGroupNode]);
+    setNodes((nds) => reorderNodesForParentChild([...nds, newGroupNode]));
 
     if (onCreateGroup) {
       onCreateGroup(position, newGroupNode);
@@ -514,7 +544,7 @@ function GraphCanvasInner({
         },
         style: { width: 300, height: 200 },
       };
-      setNodes((nds) => [...nds, newGroupNode]);
+      setNodes((nds) => reorderNodesForParentChild([...nds, newGroupNode]));
       if (onCreateGroup) {
         onCreateGroup(position, newGroupNode);
       }
@@ -585,7 +615,7 @@ function GraphCanvasInner({
       }));
       setNodes((nds) => {
         const nonGroups = nds.filter(n => n.type !== 'group' && !n.id.startsWith('group-'));
-        return [...nonGroups, ...groupNodes];
+        return reorderNodesForParentChild([...nonGroups, ...groupNodes]);
       });
       onGroupsRestored?.();
     }
