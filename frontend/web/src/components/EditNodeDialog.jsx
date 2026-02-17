@@ -5,7 +5,6 @@ import './EditNodeDialog.css';
 // Default node types as fallback if schema not loaded
 const DEFAULT_NODE_TYPES = [
   { type: 'Actor', description: 'Government agencies, organizations' },
-  { type: 'Community', description: 'Communities' },
   { type: 'Initiative', description: 'Projects, programs' },
   { type: 'Capability', description: 'Capabilities, skills' },
   { type: 'Resource', description: 'Reports, software, tools' },

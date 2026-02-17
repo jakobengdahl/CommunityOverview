@@ -110,6 +110,17 @@ Example WRONG flow (7-8 API calls - causes rate limits):
 
 {node_types_section}
 {relationship_types_section}
+FIELD LIMITS:
+- name: required, 1-200 characters
+- description: optional, max 2000 characters
+- summary: optional, max 300 characters (short text for visualization labels)
+- tags: optional list of strings
+
+EDGE TYPE:
+Edge type is OPTIONAL when creating edges. If omitted, the edge defaults to "RELATES_TO" (a general connection).
+Use a specific relationship type from the list above only when the nature of the connection is clear.
+When unsure, it is perfectly fine to create an edge without a type.
+
 TAGS SYSTEM:
 All nodes can have tags for better categorization and searchability:
 - Tags are comma-separated keywords (e.g., "AI, Maskininlarning, Oppen kallkod")
@@ -549,7 +560,7 @@ class ChatProcessor:
             },
             {
                 "name": "add_nodes",
-                "description": "Add new nodes and edges to the graph. Use this AFTER user confirmation.",
+                "description": "Add new nodes and edges to the graph. Use this AFTER user confirmation. Node field limits: name 1-200 chars, description max 2000 chars, summary max 300 chars. Edge type is optional (defaults to RELATES_TO).",
                 "input_schema": {
                     "type": "object",
                     "properties": {
@@ -558,11 +569,11 @@ class ChatProcessor:
                             "items": {
                                 "type": "object",
                                 "properties": {
-                                    "type": {"type": "string"},
-                                    "name": {"type": "string"},
-                                    "description": {"type": "string"},
-                                    "summary": {"type": "string"},
-                                    "tags": {"type": "array", "items": {"type": "string"}}
+                                    "type": {"type": "string", "description": "Node type (required)"},
+                                    "name": {"type": "string", "description": "Node name (required, 1-200 chars)"},
+                                    "description": {"type": "string", "description": "Description (optional, max 2000 chars)"},
+                                    "summary": {"type": "string", "description": "Short summary for visualization (optional, max 300 chars)"},
+                                    "tags": {"type": "array", "items": {"type": "string"}, "description": "Tags for categorization"}
                                 }
                             }
                         },
@@ -571,9 +582,9 @@ class ChatProcessor:
                             "items": {
                                 "type": "object",
                                 "properties": {
-                                    "source": {"type": "string"},
-                                    "target": {"type": "string"},
-                                    "type": {"type": "string"}
+                                    "source": {"type": "string", "description": "Source node ID or name"},
+                                    "target": {"type": "string", "description": "Target node ID or name"},
+                                    "type": {"type": "string", "description": "Relationship type (optional, defaults to RELATES_TO)"}
                                 }
                             }
                         }

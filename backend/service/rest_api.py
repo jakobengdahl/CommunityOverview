@@ -85,6 +85,32 @@ class DeleteNodesRequest(BaseModel):
     event_correlation_id: Optional[str] = Field(None, description="Correlation ID for chaining events")
 
 
+class AddEdgeRequest(BaseModel):
+    """Request model for adding a single edge."""
+    source: str = Field(..., description="Source node ID")
+    target: str = Field(..., description="Target node ID")
+    type: Optional[str] = Field(None, description="Relationship type (optional, defaults to RELATES_TO)")
+    label: Optional[str] = Field(None, description="Free-text label (optional)")
+    event_origin: Optional[str] = Field(None, description="Source of mutation")
+    event_session_id: Optional[str] = Field(None, description="Session ID for loop prevention")
+    event_correlation_id: Optional[str] = Field(None, description="Correlation ID for chaining events")
+
+
+class UpdateEdgeRequest(BaseModel):
+    """Request model for updating an edge."""
+    updates: Dict[str, Any] = Field(..., description="Fields to update (type, label, metadata)")
+    event_origin: Optional[str] = Field(None, description="Source of mutation")
+    event_session_id: Optional[str] = Field(None, description="Session ID for loop prevention")
+    event_correlation_id: Optional[str] = Field(None, description="Correlation ID for chaining events")
+
+
+class DeleteEdgeRequest(BaseModel):
+    """Request model for deleting a single edge."""
+    event_origin: Optional[str] = Field(None, description="Source of mutation")
+    event_session_id: Optional[str] = Field(None, description="Session ID for loop prevention")
+    event_correlation_id: Optional[str] = Field(None, description="Correlation ID for chaining events")
+
+
 class SaveViewRequest(BaseModel):
     """Request model for saving a view."""
     name: str = Field(..., min_length=1, max_length=200, description="View name")
@@ -201,6 +227,46 @@ def create_rest_router(service: GraphService, prefix: str = "") -> APIRouter:
         )
         if not result.get("success", True):
             raise HTTPException(status_code=400, detail=result.get("message"))
+        return result
+
+    # ==================== Edge CRUD Endpoints ====================
+
+    @router.post("/edges")
+    async def add_edge(request: AddEdgeRequest) -> Dict[str, Any]:
+        """Add a single edge between existing nodes. Type is optional (defaults to RELATES_TO)."""
+        result = service.add_edge(
+            source=request.source,
+            target=request.target,
+            type=request.type,
+            label=request.label,
+            event_origin=request.event_origin,
+            event_session_id=request.event_session_id,
+            event_correlation_id=request.event_correlation_id,
+        )
+        if not result.get("success", True):
+            raise HTTPException(status_code=400, detail=result.get("message"))
+        return result
+
+    @router.patch("/edges/{edge_id}")
+    async def update_edge(edge_id: str, request: UpdateEdgeRequest) -> Dict[str, Any]:
+        """Update an existing edge (type, label, metadata)."""
+        result = service.update_edge(
+            edge_id,
+            request.updates,
+            event_origin=request.event_origin,
+            event_session_id=request.event_session_id,
+            event_correlation_id=request.event_correlation_id,
+        )
+        if not result.get("success", True):
+            raise HTTPException(status_code=404, detail=result.get("error"))
+        return result
+
+    @router.delete("/edges/{edge_id}")
+    async def delete_edge(edge_id: str) -> Dict[str, Any]:
+        """Delete a single edge."""
+        result = service.delete_edge(edge_id, event_origin="web-ui")
+        if not result.get("success", True):
+            raise HTTPException(status_code=404, detail=result.get("error"))
         return result
 
     # ==================== Statistics & Metadata Endpoints ====================

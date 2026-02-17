@@ -36,7 +36,6 @@ from .serializers import (
 # Node type descriptions for metadata
 NODE_TYPE_DESCRIPTIONS = {
     NodeType.ACTOR: "Government agencies, organizations",
-    NodeType.COMMUNITY: "Communities (eSam, Myndigheter, etc.)",
     NodeType.INITIATIVE: "Projects, collaborative activities",
     NodeType.CAPABILITY: "Capabilities (procurement, IT development, etc.)",
     NodeType.RESOURCE: "Outputs (reports, software, etc.)",
@@ -437,6 +436,138 @@ class GraphService:
 
         result = self._storage.delete_nodes(node_ids, confirmed, event_context=event_context)
         return serialize_delete_result(result)
+
+    # ==================== Edge CRUD Operations ====================
+
+    def add_edge(
+        self,
+        source: str,
+        target: str,
+        type: Optional[str] = None,
+        label: Optional[str] = None,
+        event_origin: Optional[str] = None,
+        event_session_id: Optional[str] = None,
+        event_correlation_id: Optional[str] = None,
+    ) -> Dict[str, Any]:
+        """
+        Add a single edge between existing nodes.
+
+        Args:
+            source: Source node ID
+            target: Target node ID
+            type: Relationship type (optional, defaults to RELATES_TO)
+            label: Free-text label (optional)
+            event_origin: Source of the mutation
+            event_session_id: Session ID for loop prevention
+            event_correlation_id: Correlation ID for chaining events
+
+        Returns:
+            Dict with added edge or error
+        """
+        from backend.core.models import Edge
+
+        edge_data = {"source": source, "target": target}
+        if type:
+            edge_data["type"] = type
+        if label:
+            edge_data["label"] = label
+
+        try:
+            edge = Edge(**edge_data)
+        except Exception as e:
+            return {"success": False, "message": f"Invalid edge data: {str(e)}"}
+
+        event_context = None
+        if event_origin or event_session_id or event_correlation_id:
+            event_context = EventContext(
+                event_origin=event_origin,
+                event_session_id=event_session_id,
+                event_correlation_id=event_correlation_id,
+            )
+
+        edge_id = self._storage.add_edge(edge, event_context=event_context)
+        if not edge_id:
+            return {"success": False, "message": "Could not add edge (source or target not found)"}
+
+        return {
+            "success": True,
+            "edge": serialize_edge(edge),
+            "edges": [serialize_edge(edge)],
+            "action": "add_to_visualization",
+        }
+
+    def update_edge(
+        self,
+        edge_id: str,
+        updates: Dict[str, Any],
+        event_origin: Optional[str] = None,
+        event_session_id: Optional[str] = None,
+        event_correlation_id: Optional[str] = None,
+    ) -> Dict[str, Any]:
+        """
+        Update an existing edge.
+
+        Args:
+            edge_id: ID of the edge to update
+            updates: Dict with fields to update (type, label, metadata)
+            event_origin: Source of the mutation
+            event_session_id: Session ID for loop prevention
+            event_correlation_id: Correlation ID for chaining events
+
+        Returns:
+            Dict with updated edge or error
+        """
+        event_context = None
+        if event_origin or event_session_id or event_correlation_id:
+            event_context = EventContext(
+                event_origin=event_origin,
+                event_session_id=event_session_id,
+                event_correlation_id=event_correlation_id,
+            )
+
+        updated_edge = self._storage.update_edge(edge_id, updates, event_context=event_context)
+
+        if not updated_edge:
+            return {"success": False, "error": f"Edge with ID {edge_id} not found"}
+
+        return {
+            "success": True,
+            "edge": serialize_edge(updated_edge),
+        }
+
+    def delete_edge(
+        self,
+        edge_id: str,
+        event_origin: Optional[str] = None,
+        event_session_id: Optional[str] = None,
+        event_correlation_id: Optional[str] = None,
+    ) -> Dict[str, Any]:
+        """
+        Delete a single edge.
+
+        Args:
+            edge_id: ID of the edge to delete
+            event_origin: Source of the mutation
+            event_session_id: Session ID for loop prevention
+            event_correlation_id: Correlation ID for chaining events
+
+        Returns:
+            Dict with success status
+        """
+        event_context = None
+        if event_origin or event_session_id or event_correlation_id:
+            event_context = EventContext(
+                event_origin=event_origin,
+                event_session_id=event_session_id,
+                event_correlation_id=event_correlation_id,
+            )
+
+        deleted = self._storage.delete_edge(edge_id, event_context=event_context)
+
+        if not deleted:
+            return {"success": False, "error": f"Edge with ID {edge_id} not found"}
+
+        return {"success": True, "deleted_edge_id": edge_id}
 
     # ==================== Statistics & Metadata ====================
 

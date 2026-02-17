@@ -1,7 +1,6 @@
 import { useState } from 'react';
 import {
   PersonFill,
-  PeopleFill,
   RocketTakeoffFill,
   LightningFill,
   FileEarmarkTextFill,
@@ -19,7 +18,6 @@ import './FloatingToolbar.css';
 
 const ICON_MAP = {
   Actor: PersonFill,
-  Community: PeopleFill,
   Initiative: RocketTakeoffFill,
   Capability: LightningFill,
   Resource: FileEarmarkTextFill,
@@ -35,7 +33,6 @@ const ICON_MAP = {
 
 const COLOR_MAP = {
   Actor: '#3B82F6',
-  Community: '#A855F7',
   Initiative: '#10B981',
   Capability: '#F97316',
   Resource: '#FBBF24',
@@ -52,7 +49,6 @@ const COLOR_MAP = {
 // Order of toolbar items: metadata types first, then system types (agents/webhooks/groups), then views
 const TOOLBAR_ORDER = [
   'Actor',
-  'Community',
   'Initiative',
   'Capability',
   'Resource',

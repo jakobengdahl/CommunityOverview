@@ -76,9 +76,18 @@ def build_schema_context(schema: Dict[str, Any]) -> str:
     # Node structure reference
     lines.append("""
 Node structure for add_nodes tool:
-  Each node: {"type": "<NodeType>", "name": "...", "description": "...", "tags": [...]}
+  Each node: {"type": "<NodeType>", "name": "...", "description": "...", "summary": "...", "tags": [...]}
   Each edge: {"source": "<node_id_or_name>", "target": "<node_id_or_name>", "type": "<RelationshipType>"}
   Both 'nodes' and 'edges' arrays are REQUIRED (use empty array [] if no edges needed).
+
+Field limits:
+  - name: required, 1-200 characters
+  - description: optional, max 2000 characters
+  - summary: optional, max 300 characters (short text for visualization labels)
+  - tags: optional list of strings
+
+Edge type is OPTIONAL. If omitted, the edge defaults to "RELATES_TO" (a general connection).
+You may specify a type from the relationship types list above when a more specific relationship is known.
 --- END SCHEMA ---""")
 
     return "\n".join(lines)

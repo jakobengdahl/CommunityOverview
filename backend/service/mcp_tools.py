@@ -173,9 +173,17 @@ def register_mcp_tools(mcp, service: GraphService) -> Dict[str, Callable]:
         """
         Add new nodes and edges to the graph
 
+        Field limits for nodes:
+          - name: required, 1-200 characters
+          - description: optional, max 2000 characters
+          - summary: optional, max 300 characters (short text for visualization)
+          - tags: optional list of strings
+
+        Edge type is optional. If omitted, it defaults to "RELATES_TO".
+
         Args:
             nodes: List of node objects to add
-            edges: List of edge objects to add
+            edges: List of edge objects (source, target, type). Type is optional.
             event_session_id: Optional session ID for webhook loop prevention
             event_correlation_id: Optional correlation ID for chaining events
 

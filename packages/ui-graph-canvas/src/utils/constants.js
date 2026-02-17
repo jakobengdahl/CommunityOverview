@@ -5,7 +5,6 @@
 // Node type color mapping from metamodel
 export const NODE_COLORS = {
   Actor: '#3B82F6',
-  Community: '#A855F7',
   Initiative: '#10B981',
   Capability: '#F97316',
   Resource: '#FBBF24',

@@ -64,7 +64,6 @@ class NodeType(str, Enum):
     This enum is kept for compatibility with existing code.
     """
     ACTOR = "Actor"
-    COMMUNITY = "Community"
     INITIATIVE = "Initiative"
     CAPABILITY = "Capability"
     RESOURCE = "Resource"
@@ -128,7 +127,6 @@ def NODE_COLORS_LOOKUP(node_type: Union[NodeType, str]) -> str:
 # Legacy color dict for backward compatibility (updated at import time)
 NODE_COLORS = {
     NodeType.ACTOR: "#3B82F6",  # blue
-    NodeType.COMMUNITY: "#A855F7",  # purple
     NodeType.INITIATIVE: "#10B981",  # green
     NodeType.CAPABILITY: "#F97316",  # orange
     NodeType.RESOURCE: "#FBBF24",  # yellow
@@ -147,7 +145,7 @@ class Node(BaseModel):
     type: Union[NodeType, str]  # Accept both enum and string types
     name: str = Field(..., min_length=1, max_length=200)
     description: str = Field(default="", max_length=2000)
-    summary: str = Field(default="", max_length=100)  # For visualization
+    summary: str = Field(default="", max_length=300)  # For visualization
     tags: List[str] = Field(default_factory=list)  # Searchable tags for categorization
     metadata: Dict[str, Any] = Field(default_factory=dict)
     embedding: Optional[List[float]] = None  # For future vector search
@@ -161,7 +159,7 @@ class Node(BaseModel):
 
     @validator('type', pre=True)
     def validate_type(cls, v):
-        """Validate and normalize node type."""
+        """Validate and normalize node type. Accepts any string for forward/backward compatibility."""
         if isinstance(v, NodeType):
             return v
         if isinstance(v, str):
@@ -169,10 +167,8 @@ class Node(BaseModel):
             try:
                 return NodeType(v)
             except ValueError:
-                # Check if it's a valid config-defined type
-                if is_valid_node_type(v):
-                    return v
-                raise ValueError(f"Invalid node type: {v}")
+                # Accept any string type (config-defined or legacy)
+                return v
         raise ValueError(f"Node type must be string or NodeType, got {type(v)}")
 
     @property
@@ -208,7 +204,8 @@ class Edge(BaseModel):
     id: str = Field(default_factory=lambda: str(uuid.uuid4()))
     source: str  # Node ID
     target: str  # Node ID
-    type: Union[RelationshipType, str]  # Accept both enum and string types
+    type: Union[RelationshipType, str] = Field(default="RELATES_TO")  # Optional, defaults to general connection
+    label: str = Field(default="")  # Optional free-text label for the connection
     metadata: Dict[str, Any] = Field(default_factory=dict)
     created_at: datetime = Field(default_factory=datetime.utcnow)
 
@@ -217,9 +214,11 @@ class Edge(BaseModel):
             datetime: lambda v: v.isoformat()
         }
 
-    @validator('type', pre=True)
+    @validator('type', pre=True, always=True)
     def validate_type(cls, v):
-        """Validate and normalize relationship type."""
+        """Validate and normalize relationship type. Defaults to RELATES_TO if empty/None."""
+        if v is None or v == "":
+            return RelationshipType.RELATES_TO
         if isinstance(v, RelationshipType):
             return v
         if isinstance(v, str):
@@ -227,10 +226,8 @@ class Edge(BaseModel):
             try:
                 return RelationshipType(v)
             except ValueError:
-                # Check if it's a valid config-defined type
-                if is_valid_relationship_type(v):
-                    return v
-                raise ValueError(f"Invalid relationship type: {v}")
+                # Accept any string as a free-form relationship type
+                return v
         raise ValueError(f"Relationship type must be string or RelationshipType, got {type(v)}")
 
     @property
@@ -249,6 +246,9 @@ class Edge(BaseModel):
     def from_dict(cls, data: dict) -> 'Edge':
         if isinstance(data.get('created_at'), str):
             data['created_at'] = datetime.fromisoformat(data['created_at'])
+        # Handle legacy data without label field
+        if 'label' not in data:
+            data['label'] = ""
         return cls(**data)
 
 

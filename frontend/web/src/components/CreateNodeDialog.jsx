@@ -134,8 +134,8 @@ function CreateNodeDialog({ nodeType, onClose, onSave }) {
               name="summary"
               value={formData.summary}
               onChange={handleChange}
-              placeholder="Short summary (max 100 chars)..."
-              maxLength={100}
+              placeholder="Short summary (max 300 chars)..."
+              maxLength={300}
             />
           </div>
 
