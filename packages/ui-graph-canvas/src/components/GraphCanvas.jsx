@@ -62,6 +62,8 @@ function GraphCanvasInner({
   onHideMultiple,
   onHideEdge,
   onDeleteEdge,
+  onEditEdge,
+  onConnect: onConnectCallback,
   onCreateGroup,
   onSaveView,
   onNodePositionChange,
@@ -217,8 +219,14 @@ function GraphCanvasInner({
   }, [visibleNodes.length]);
 
   const onConnect = useCallback(
-    (params) => setEdges((eds) => addEdge(params, eds)),
-    [setEdges]
+    (params) => {
+      setEdges((eds) => addEdge(params, eds));
+      // Notify parent to persist the connection to backend
+      if (onConnectCallback) {
+        onConnectCallback(params);
+      }
+    },
+    [setEdges, onConnectCallback]
   );
 
   // Close all context menus
@@ -816,8 +824,16 @@ function GraphCanvasInner({
           style={{ left: edgeContextMenu.x, top: edgeContextMenu.y }}
         >
           <div className="context-menu-header">
-            {edgeContextMenu.edge.label || 'Edge'}
+            {edgeContextMenu.edge.label || edgeContextMenu.edge.data?.type || 'Connection'}
           </div>
+          {onEditEdge && (
+            <button onClick={() => {
+              onEditEdge(edgeContextMenu.edge.id, edgeContextMenu.edge);
+              setEdgeContextMenu(null);
+            }}>
+              ✏️ Redigera
+            </button>
+          )}
           {onHideEdge && (
             <button onClick={() => {
               onHideEdge(edgeContextMenu.edge.id);

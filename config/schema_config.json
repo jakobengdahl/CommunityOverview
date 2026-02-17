@@ -30,11 +30,6 @@
         "description": "Government agencies, organizations, individuals responsible for initiatives",
         "color": "#3B82F6"
       },
-      "Community": {
-        "fields": ["name", "description", "summary", "tags"],
-        "description": "Communities like eSam, Myndigheter, Officiell Statistik",
-        "color": "#A855F7"
-      },
       "Initiative": {
         "fields": ["name", "description", "summary", "tags", "start_date", "end_date"],
         "description": "Projects, programs, collaborative activities",
@@ -100,7 +95,6 @@
     "introduction": "Utforska nätverket av myndigheter, initiativ och resurser inom det offentliga samarbetet.",
     "colors": {
       "Actor": "#3B82F6",
-      "Community": "#A855F7",
       "Initiative": "#10B981",
       "Capability": "#F97316",
       "Resource": "#FBBF24",

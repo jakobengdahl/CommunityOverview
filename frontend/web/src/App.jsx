@@ -12,6 +12,7 @@ import InputDialog from './components/InputDialog';
 import ChatPanel from './components/ChatPanel';
 import CreateSubscriptionDialog from './components/CreateSubscriptionDialog';
 import CreateAgentDialog from './components/CreateAgentDialog';
+import EditEdgeDialog from './components/EditEdgeDialog';
 import * as api from './services/api';
 import './App.css';
 
@@ -52,6 +53,7 @@ function App() {
   const [createGroupSignal, setCreateGroupSignal] = useState(0);
   const [saveViewSignal, setSaveViewSignal] = useState(0);
   const [isSavingView, setIsSavingView] = useState(false);
+  const [editingEdge, setEditingEdge] = useState(null);
 
   // Load schema, presentation, and stats on startup
   useEffect(() => {
@@ -82,12 +84,9 @@ function App() {
     try {
       const result = await api.getRelatedNodes(nodeId, { depth: 1 });
       if (result.nodes && result.nodes.length > 0) {
-        const filteredNodes = result.nodes.filter(n =>
-          n.type !== 'Community' && n.data?.type !== 'Community'
-        );
         const existingIds = new Set(nodes.map(n => n.id));
-        const newCount = filteredNodes.filter(n => !existingIds.has(n.id)).length;
-        addNodesToVisualization(filteredNodes, result.edges || []);
+        const newCount = result.nodes.filter(n => !existingIds.has(n.id)).length;
+        addNodesToVisualization(result.nodes, result.edges || []);
         if (newCount > 0) {
           showNotification('success', `Added ${newCount} new node${newCount !== 1 ? 's' : ''}`);
         } else {
@@ -145,18 +144,59 @@ function App() {
     showNotification('info', 'Edge hidden');
   }, [toggleEdgeVisibility, showNotification]);
 
-  // Callback: Delete edge
+  // Callback: Delete edge (from backend and visualization)
   const handleDeleteEdge = useCallback(async (edgeId) => {
     try {
-      // Remove from visualization (edges don't have a separate delete API typically)
+      await api.deleteEdge(edgeId);
       const newEdges = edges.filter(e => e.id !== edgeId);
       updateVisualization(nodes, newEdges);
-      showNotification('success', 'Edge removed');
+      showNotification('success', 'Edge deleted');
     } catch (error) {
       console.error('Error deleting edge:', error);
-      showNotification('error', 'Could not delete edge');
+      // Still remove from visualization even if backend fails
+      const newEdges = edges.filter(e => e.id !== edgeId);
+      updateVisualization(nodes, newEdges);
+      showNotification('info', 'Edge removed from view');
     }
   }, [nodes, edges, updateVisualization, showNotification]);
+
+  // Callback: Edit edge - opens EditEdgeDialog
+  const handleEditEdge = useCallback((edgeId, edgeData) => {
+    const edge = edges.find(e => e.id === edgeId);
+    if (edge) {
+      setEditingEdge({ ...edge, ...edgeData });
+    }
+  }, [edges]);
+
+  // Callback: Save edge updates from EditEdgeDialog
+  const handleEdgeUpdate = useCallback(async (updates) => {
+    if (!editingEdge) return;
+    try {
+      await api.updateEdge(editingEdge.id, updates);
+      const newEdges = edges.map(e =>
+        e.id === editingEdge.id ? { ...e, ...updates } : e
+      );
+      updateVisualization(nodes, newEdges);
+      setEditingEdge(null);
+      showNotification('success', 'Edge updated');
+    } catch (error) {
+      console.error('Error updating edge:', error);
+      showNotification('error', 'Could not update edge');
+    }
+  }, [editingEdge, nodes, edges, updateVisualization, showNotification]);
+
+  // Callback: Connect nodes (from drag-connect in canvas)
+  const handleConnect = useCallback(async (params) => {
+    try {
+      const result = await api.addEdge(params.source, params.target);
+      if (result.success && result.edge) {
+        addNodesToVisualization([], [result.edge]);
+      }
+    } catch (error) {
+      console.error('Error creating edge:', error);
+      showNotification('error', 'Could not create connection');
+    }
+  }, [addNodesToVisualization, showNotification]);
 
   // Callback: Show only selected nodes (hide all others)
   const handleShowOnly = useCallback((nodeIds) => {
@@ -400,6 +440,8 @@ function App() {
           onHideMultiple={handleHideMultiple}
           onHideEdge={handleHideEdge}
           onDeleteEdge={handleDeleteEdge}
+          onEditEdge={handleEditEdge}
+          onConnect={handleConnect}
           onCreateGroup={handleCreateGroup}
           onSaveView={handleSaveView}
           onCreateSubscription={handleCreateSubscription}
@@ -439,6 +481,19 @@ function App() {
           node={editingNode}
           onClose={closeEditingNode}
           onSave={(updates) => handleNodeUpdate(editingNode.id, updates)}
+        />
+      )}
+
+      {editingEdge && (
+        <EditEdgeDialog
+          edge={editingEdge}
+          nodes={nodes}
+          onClose={() => setEditingEdge(null)}
+          onSave={handleEdgeUpdate}
+          onDelete={(edgeId) => {
+            handleDeleteEdge(edgeId);
+            setEditingEdge(null);
+          }}
         />
       )}
 

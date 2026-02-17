@@ -905,3 +905,158 @@ class GraphStorage:
             edge for edge in self.edges.values()
             if edge.source == node_id or edge.target == node_id
         ]
+
+    def update_edge(
+        self,
+        edge_id: str,
+        updates: Dict,
+        event_context: Optional[EventContext] = None,
+    ) -> Optional[Edge]:
+        """
+        Update an existing edge.
+
+        Thread-safe: Protected by _lock for the entire operation.
+
+        Args:
+            edge_id: ID of the edge to update
+            updates: Dict with fields to update (type, label, metadata)
+            event_context: Optional context for event tracking
+        """
+        with self._lock:
+            if edge_id not in self.edges:
+                return None
+
+            edge = self.edges[edge_id]
+            before_state = edge.to_dict()
+
+            # Update allowed fields
+            allowed_fields = {'type', 'label', 'metadata'}
+            for key, value in updates.items():
+                if key in allowed_fields:
+                    if key == 'type' and (value is None or value == ""):
+                        value = "RELATES_TO"
+                    setattr(edge, key, value)
+
+            # Save
+            self.save()
+
+            # Emit update event
+            edge_type = edge.type.value if hasattr(edge.type, 'value') else str(edge.type)
+            self._emit_event(
+                event_type=EventType.EDGE_UPDATE,
+                entity_kind=EntityKind.EDGE,
+                entity_id=edge_id,
+                entity_type=edge_type,
+                before=before_state,
+                after=edge.to_dict(),
+                context=event_context,
+            )
+
+            return edge
+
+    def delete_edge(
+        self,
+        edge_id: str,
+        event_context: Optional[EventContext] = None,
+    ) -> bool:
+        """
+        Delete a single edge.
+
+        Thread-safe: Protected by _lock for the entire operation.
+
+        Args:
+            edge_id: ID of the edge to delete
+            event_context: Optional context for event tracking
+
+        Returns:
+            True if edge was deleted, False if not found
+        """
+        with self._lock:
+            if edge_id not in self.edges:
+                return False
+
+            edge = self.edges[edge_id]
+            before_state = edge.to_dict()
+            edge_type = edge.type.value if hasattr(edge.type, 'value') else str(edge.type)
+
+            # Remove from graph
+            try:
+                self.graph.remove_edge(edge.source, edge.target, key=edge_id)
+            except Exception:
+                pass  # Edge might not exist in graph
+
+            # Remove from edges dict
+            del self.edges[edge_id]
+
+            # Save
+            self.save()
+
+            # Emit delete event
+            self._emit_event(
+                event_type=EventType.EDGE_DELETE,
+                entity_kind=EntityKind.EDGE,
+                entity_id=edge_id,
+                entity_type=edge_type,
+                before=before_state,
+                after=None,
+                context=event_context,
+            )
+
+            return True
+
+    def add_edge(
+        self,
+        edge: Edge,
+        event_context: Optional[EventContext] = None,
+    ) -> Optional[str]:
+        """
+        Add a single edge between existing nodes.
+
+        Thread-safe: Protected by _lock for the entire operation.
+
+        Args:
+            edge: Edge object to add
+            event_context: Optional context for event tracking
+
+        Returns:
+            Edge ID if successful, None if failed
+        """
+        with self._lock:
+            # Validate source and target exist
+            if edge.source not in self.nodes:
+                # Try name resolution
+                name_to_id = {n.name: nid for nid, n in self.nodes.items()}
+                if edge.source in name_to_id:
+                    edge.source = name_to_id[edge.source]
+                else:
+                    return None
+
+            if edge.target not in self.nodes:
+                name_to_id = {n.name: nid for nid, n in self.nodes.items()}
+                if edge.target in name_to_id:
+                    edge.target = name_to_id[edge.target]
+                else:
+                    return None
+
+            if edge.id in self.edges:
+                return None
+
+            self.edges[edge.id] = edge
+            self.graph.add_edge(edge.source, edge.target, key=edge.id, data=edge)
+
+            # Save
+            self.save()
+
+            # Emit create event
+            edge_type = edge.type.value if hasattr(edge.type, 'value') else str(edge.type)
+            self._emit_event(
+                event_type=EventType.EDGE_CREATE,
+                entity_kind=EntityKind.EDGE,
+                entity_id=edge.id,
+                entity_type=edge_type,
+                before=None,
+                after=edge.to_dict(),
+                context=event_context,
+            )
+
+            return edge.id

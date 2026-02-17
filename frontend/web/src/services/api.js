@@ -184,6 +184,55 @@ export async function deleteNodes(nodeIds, confirmed = false) {
 }
 
 /**
+ * Add a single edge between existing nodes
+ * @param {string} source - Source node ID
+ * @param {string} target - Target node ID
+ * @param {Object} options - Edge options (type, label)
+ * @returns {Promise<{success: boolean, edge: Object}>}
+ */
+export async function addEdge(source, target, options = {}) {
+  return apiFetch(`${API_BASE}/edges`, {
+    method: 'POST',
+    body: JSON.stringify({
+      source,
+      target,
+      type: options.type || null,
+      label: options.label || null,
+      event_origin: getEventOrigin(),
+      event_session_id: getEventSessionId(),
+    }),
+  });
+}
+
+/**
+ * Update an existing edge
+ * @param {string} edgeId - Edge ID
+ * @param {Object} updates - Fields to update (type, label, metadata)
+ * @returns {Promise<{success: boolean, edge: Object}>}
+ */
+export async function updateEdge(edgeId, updates) {
+  return apiFetch(`${API_BASE}/edges/${encodeURIComponent(edgeId)}`, {
+    method: 'PATCH',
+    body: JSON.stringify({
+      updates,
+      event_origin: getEventOrigin(),
+      event_session_id: getEventSessionId(),
+    }),
+  });
+}
+
+/**
+ * Delete a single edge
+ * @param {string} edgeId - Edge ID
+ * @returns {Promise<{success: boolean}>}
+ */
+export async function deleteEdge(edgeId) {
+  return apiFetch(`${API_BASE}/edges/${encodeURIComponent(edgeId)}`, {
+    method: 'DELETE',
+  });
+}
+
+/**
  * Get graph statistics
  * @param {Array} communities - Optional community filter
  * @returns {Promise<{total_nodes: number, total_edges: number, ...}>}
