@@ -1,0 +1,93 @@
+{
+  "welcome": {
+    "title": "Welcome to Community Knowledge Graph!",
+    "prompt": "You can ask questions like:",
+    "examples": [
+      "What initiatives relate to NIS2?",
+      "Show all actors",
+      "Are there any AI strategy projects?",
+      "What goals exist around digitalization?",
+      "Show all AI agents"
+    ],
+    "upload_hint": "You can also upload documents (PDF, Word, text) to extract entities.",
+    "privacy_notice": "**NOTE:** Do not handle personal data in this service."
+  },
+  "chat": {
+    "placeholder": "Ask a question or request an action...",
+    "placeholder_with_file": "Describe what you want to do with the document...",
+    "send": "Send",
+    "processing": "Processing...",
+    "upload": "Upload",
+    "uploading": "Uploading...",
+    "upload_tooltip": "Upload document (PDF, Word, Text)",
+    "remove_file": "Remove file",
+    "file_context": "\n\n[Uploaded file: {filename}]\n\nContent:\n{text}",
+    "analyze_document": "Analyze the following document:\n{fileContext}",
+    "error_prefix": "Error: {message}",
+    "extract_error": "Could not extract text from the file.",
+    "upload_error": "Upload failed: {message}",
+    "approve_node": "Yes, add the node \"{name}\"",
+    "reject_node": "No, do not add the node.",
+    "confirm_delete": "Yes, delete the nodes.",
+    "delete_cancelled": "Deletion cancelled."
+  },
+  "proposal": {
+    "title": "Proposed addition:",
+    "type": "Type:",
+    "name": "Name:",
+    "description": "Description:",
+    "similar_found": "Similar nodes found:",
+    "approve": "Approve",
+    "reject": "Reject"
+  },
+  "delete_confirmation": {
+    "title": "Confirm deletion:",
+    "nodes_to_delete": "Nodes to delete:",
+    "affected_edges": "Affected relationships:",
+    "warning": "Warning: This action cannot be undone!",
+    "confirm": "Confirm deletion",
+    "cancel": "Cancel"
+  },
+  "subscription_dialog": {
+    "title": "Create webhook subscription",
+    "description": "A subscription sends events to a webhook URL when nodes are created, updated, or deleted.",
+    "basic_info": "Basic information",
+    "name_label": "Name *",
+    "name_placeholder": "E.g. 'Notify on new initiatives'",
+    "description_label": "Description",
+    "description_placeholder": "Optional description of the subscription's purpose",
+    "filters": "Filters",
+    "node_types_label": "Node types (empty = all)",
+    "operations_label": "Operations",
+    "op_create": "Create",
+    "op_update": "Update",
+    "op_delete": "Delete",
+    "keywords_label": "Keywords (comma-separated)",
+    "keywords_placeholder": "E.g. 'AI, digitalization, NIS2'",
+    "keywords_hint": "Matches against name, description, summary, and tags",
+    "delivery": "Delivery",
+    "webhook_label": "Webhook URL *",
+    "ignore_origins_label": "Ignore origins (comma-separated)",
+    "ignore_origins_placeholder": "E.g. 'agent:my-agent, mcp'",
+    "ignore_origins_hint": "For loop prevention: events from these origins are not sent",
+    "cancel": "Cancel",
+    "submit": "Create subscription",
+    "validation_error": "Name and webhook URL are required",
+    "webhook_description": "Webhook subscription: {name}",
+    "webhook_summary": "Listening on {events} events"
+  },
+  "toolbar": {
+    "group": "Group",
+    "webhook": "Webhook"
+  },
+  "node_fields": {
+    "identifier": "Resource link (URL)"
+  },
+  "notifications": {
+    "showing_nodes": "Showing {count} nodes",
+    "subscription_created": "Subscription \"{name}\" created",
+    "subscription_error": "Could not create subscription",
+    "saved_view_description": "Saved view: {name}",
+    "saved_view_summary": "Contains {count} nodes"
+  }
+}

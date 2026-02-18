@@ -3,10 +3,18 @@
 # Start Development Environment
 # This script sets up and starts all services needed to run the full application.
 #
+# Usage:
+#   ./start-dev.sh [OPTIONS]
+#
+# Options:
+#   --data <path|url>   Load graph data from a file path or URL (overwrites active data)
+#   --lang <en|sv>      Set the application language (default: en)
+#
 # Environment Variables:
 #   GRAPH_SCHEMA_CONFIG - Path to custom schema configuration file (default: config/schema_config.json)
-#   GRAPH_FILE - Path to graph data file (default: graph.json)
+#   GRAPH_FILE - Path to graph data file (default: data/active/graph.json)
 #   LLM_PROVIDER - LLM provider to use: "openai" or "claude" (auto-detected from API keys if not set)
+#   APP_LANGUAGE - Application language: "en" or "sv" (default: en)
 #
 
 set -e
@@ -18,15 +26,42 @@ YELLOW='\033[1;33m'
 BLUE='\033[0;34m'
 NC='\033[0m' # No Color
 
-echo -e "${BLUE}========================================${NC}"
-echo -e "${BLUE}  Community Knowledge Graph - Dev Start${NC}"
-echo -e "${BLUE}========================================${NC}"
-
 # Get the directory where the script is located
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 BACKEND_DIR="$SCRIPT_DIR/backend"
+DATA_DIR="$SCRIPT_DIR/data"
+ACTIVE_DATA="$DATA_DIR/active/graph.json"
+DEFAULT_EXAMPLE="$DATA_DIR/examples/default.json"
 
 cd "$SCRIPT_DIR"
+
+# =====================
+# Parse Arguments
+# =====================
+DATA_SOURCE=""
+LANG_OVERRIDE=""
+
+while [[ $# -gt 0 ]]; do
+    case $1 in
+        --data)
+            DATA_SOURCE="$2"
+            shift 2
+            ;;
+        --lang)
+            LANG_OVERRIDE="$2"
+            shift 2
+            ;;
+        *)
+            echo -e "${RED}Unknown option: $1${NC}"
+            echo "Usage: ./start-dev.sh [--data <path|url>] [--lang <en|sv>]"
+            exit 1
+            ;;
+    esac
+done
+
+echo -e "${BLUE}========================================${NC}"
+echo -e "${BLUE}  Community Knowledge Graph - Dev Start${NC}"
+echo -e "${BLUE}========================================${NC}"
 
 # =====================
 # Configuration
@@ -35,6 +70,67 @@ if [ -n "$GRAPH_SCHEMA_CONFIG" ]; then
     echo -e "${YELLOW}Using custom schema config: $GRAPH_SCHEMA_CONFIG${NC}"
     export SCHEMA_FILE="$GRAPH_SCHEMA_CONFIG"
 fi
+
+# =====================
+# Language Configuration
+# =====================
+if [ -n "$LANG_OVERRIDE" ]; then
+    export APP_LANGUAGE="$LANG_OVERRIDE"
+    echo -e "${YELLOW}Language set to: $APP_LANGUAGE${NC}"
+elif [ -z "$APP_LANGUAGE" ]; then
+    export APP_LANGUAGE="en"
+fi
+
+# =====================
+# Data Management
+# =====================
+echo -e "\n${YELLOW}[0/5] Setting up graph data...${NC}"
+
+mkdir -p "$DATA_DIR/active"
+mkdir -p "$DATA_DIR/examples"
+
+if [ -n "$DATA_SOURCE" ]; then
+    # Data source specified - load from path or URL
+    if [[ "$DATA_SOURCE" =~ ^https?:// ]]; then
+        echo -e "Downloading graph data from: ${BLUE}$DATA_SOURCE${NC}"
+        if command -v curl &> /dev/null; then
+            curl -sL "$DATA_SOURCE" -o "$ACTIVE_DATA"
+        elif command -v wget &> /dev/null; then
+            wget -q "$DATA_SOURCE" -O "$ACTIVE_DATA"
+        else
+            echo -e "${RED}Error: curl or wget required to download data from URL${NC}"
+            exit 1
+        fi
+        echo -e "${GREEN}Graph data downloaded to $ACTIVE_DATA${NC}"
+    else
+        # Resolve relative paths
+        if [[ ! "$DATA_SOURCE" = /* ]]; then
+            DATA_SOURCE="$SCRIPT_DIR/$DATA_SOURCE"
+        fi
+        if [ ! -f "$DATA_SOURCE" ]; then
+            echo -e "${RED}Error: Data file not found: $DATA_SOURCE${NC}"
+            exit 1
+        fi
+        echo -e "Copying graph data from: ${BLUE}$DATA_SOURCE${NC}"
+        cp "$DATA_SOURCE" "$ACTIVE_DATA"
+        echo -e "${GREEN}Graph data copied to $ACTIVE_DATA${NC}"
+    fi
+elif [ ! -f "$ACTIVE_DATA" ]; then
+    # No active data and no source specified - use default example
+    if [ -f "$DEFAULT_EXAMPLE" ]; then
+        echo -e "No active graph data found. Copying default example data..."
+        cp "$DEFAULT_EXAMPLE" "$ACTIVE_DATA"
+        echo -e "${GREEN}Default example data loaded.${NC}"
+    else
+        echo -e "${YELLOW}No example data found. Starting with empty graph.${NC}"
+        echo '{"nodes": [], "edges": [], "metadata": {"version": "1.0"}}' > "$ACTIVE_DATA"
+    fi
+else
+    echo -e "${GREEN}Using existing active graph data.${NC}"
+fi
+
+# Set GRAPH_FILE to point to active data
+export GRAPH_FILE="$ACTIVE_DATA"
 
 # =====================
 # Python Environment
@@ -107,6 +203,10 @@ if [ -n "$SCHEMA_FILE" ]; then
 else
     echo -e "  ${BLUE}Schema:${NC}      config/schema_config.json (default)"
 fi
+echo -e "  ${BLUE}Graph data:${NC}  $GRAPH_FILE"
+echo -e "  ${BLUE}Language:${NC}    $APP_LANGUAGE"
+echo ""
+echo -e "  ${YELLOW}Language can also be set via URL: http://localhost:8000/web/?lang=sv${NC}"
 echo ""
 echo -e "Press Ctrl+C to stop the server."
 echo -e "${GREEN}========================================${NC}"

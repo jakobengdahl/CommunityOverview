@@ -1,0 +1,93 @@
+{
+  "welcome": {
+    "title": "Välkommen till Community Knowledge Graph!",
+    "prompt": "Du kan ställa frågor som:",
+    "examples": [
+      "Vilka initiativ relaterar till NIS2?",
+      "Visa alla aktörer",
+      "Finns det några AI-strategiprojekt?",
+      "Vilka mål finns kring digitalisering?",
+      "Visa alla AI-agenter"
+    ],
+    "upload_hint": "Du kan också ladda upp dokument (PDF, Word, text) för att extrahera entiteter.",
+    "privacy_notice": "**OBS:** Hantera inte personuppgifter i denna tjänst."
+  },
+  "chat": {
+    "placeholder": "Ställ en fråga eller begär en åtgärd...",
+    "placeholder_with_file": "Beskriv vad du vill göra med dokumentet...",
+    "send": "Skicka",
+    "processing": "Bearbetar...",
+    "upload": "Ladda upp",
+    "uploading": "Laddar...",
+    "upload_tooltip": "Ladda upp dokument (PDF, Word, Text)",
+    "remove_file": "Ta bort fil",
+    "file_context": "\n\n[Uppladdad fil: {filename}]\n\nInnehåll:\n{text}",
+    "analyze_document": "Analysera följande dokument:\n{fileContext}",
+    "error_prefix": "Fel: {message}",
+    "extract_error": "Kunde inte extrahera text från filen.",
+    "upload_error": "Uppladdning misslyckades: {message}",
+    "approve_node": "Ja, lägg till noden \"{name}\"",
+    "reject_node": "Nej, lägg inte till noden.",
+    "confirm_delete": "Ja, ta bort noderna.",
+    "delete_cancelled": "Borttagning avbruten."
+  },
+  "proposal": {
+    "title": "Föreslaget tillägg:",
+    "type": "Typ:",
+    "name": "Namn:",
+    "description": "Beskrivning:",
+    "similar_found": "Liknande noder hittades:",
+    "approve": "Godkänn",
+    "reject": "Avvisa"
+  },
+  "delete_confirmation": {
+    "title": "Bekräfta borttagning:",
+    "nodes_to_delete": "Noder att ta bort:",
+    "affected_edges": "Påverkade relationer:",
+    "warning": "Varning: Denna åtgärd kan inte ångras!",
+    "confirm": "Bekräfta borttagning",
+    "cancel": "Avbryt"
+  },
+  "subscription_dialog": {
+    "title": "Skapa webhook-prenumeration",
+    "description": "En prenumeration skickar events till en webhook-URL när noder skapas, uppdateras eller tas bort.",
+    "basic_info": "Grundläggande information",
+    "name_label": "Namn *",
+    "name_placeholder": "T.ex. 'Notifiera vid nya initiativ'",
+    "description_label": "Beskrivning",
+    "description_placeholder": "Valfri beskrivning av prenumerationens syfte",
+    "filters": "Filter",
+    "node_types_label": "Nodtyper (tom = alla)",
+    "operations_label": "Operationer",
+    "op_create": "Skapa (create)",
+    "op_update": "Uppdatera (update)",
+    "op_delete": "Ta bort (delete)",
+    "keywords_label": "Nyckelord (kommaseparerade)",
+    "keywords_placeholder": "T.ex. 'AI, digitalisering, NIS2'",
+    "keywords_hint": "Matchar mot namn, beskrivning, sammanfattning och taggar",
+    "delivery": "Leverans",
+    "webhook_label": "Webhook-URL *",
+    "ignore_origins_label": "Ignorera origins (kommaseparerade)",
+    "ignore_origins_placeholder": "T.ex. 'agent:my-agent, mcp'",
+    "ignore_origins_hint": "För loopskydd: events från dessa origins skickas inte",
+    "cancel": "Avbryt",
+    "submit": "Skapa prenumeration",
+    "validation_error": "Namn och webhook-URL krävs",
+    "webhook_description": "Webhook-prenumeration: {name}",
+    "webhook_summary": "Lyssnar på {events} events"
+  },
+  "toolbar": {
+    "group": "Grupp",
+    "webhook": "Webhook"
+  },
+  "node_fields": {
+    "identifier": "Länk till underlag (URL)"
+  },
+  "notifications": {
+    "showing_nodes": "Visar {count} noder",
+    "subscription_created": "Prenumeration \"{name}\" skapad",
+    "subscription_error": "Kunde inte skapa prenumeration",
+    "saved_view_description": "Sparad vy: {name}",
+    "saved_view_summary": "Innehåller {count} noder"
+  }
+}

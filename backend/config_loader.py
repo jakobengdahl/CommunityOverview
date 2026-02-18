@@ -41,6 +41,7 @@ class NodeTypeConfig(BaseModel):
     """Configuration for a single node type."""
     fields: List[str] = Field(default_factory=lambda: ["name", "description", "summary"])
     static: bool = False
+    category: str = "domain"  # "domain" = configurable, "system" = foundational
     description: str = ""
     color: str = "#9CA3AF"  # Default gray
 
@@ -216,6 +217,7 @@ def get_schema() -> Dict[str, Any]:
             name: {
                 "fields": cfg.fields,
                 "static": cfg.static,
+                "category": cfg.category,
                 "description": cfg.description,
                 "color": cfg.color
             }

@@ -782,8 +782,8 @@ class ChatProcessor:
 
             # Provide user-friendly message for rate limits
             if "rate_limit" in error_msg.lower() or "429" in error_msg:
-                error_msg = ("⚠️ API rate limit uppnådd. Detta händer när många noder bearbetas samtidigt. "
-                            "Försök igen om ~60 sekunder, eller be om färre noder åt gången (5-10 st).")
+                error_msg = ("API rate limit reached. This happens when many nodes are processed simultaneously. "
+                            "Try again in ~60 seconds, or request fewer nodes at a time (5-10).")
 
             return {
                 "content": error_msg,

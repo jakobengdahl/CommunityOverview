@@ -14,6 +14,7 @@ import {
   FolderFill,
 } from 'react-bootstrap-icons';
 import useGraphStore from '../store/graphStore';
+import { useI18n } from '../i18n';
 import './FloatingToolbar.css';
 
 const ICON_MAP = {
@@ -71,6 +72,7 @@ function FloatingToolbar({
   onSaveView,
   onCreateGroup,
 }) {
+  const { t } = useI18n();
   const [hoveredType, setHoveredType] = useState(null);
 
   const handleClick = (nodeType) => {
@@ -123,7 +125,7 @@ function FloatingToolbar({
             </button>
             {hoveredType === nodeType && (
               <div className="floating-toolbar-tooltip">
-                {nodeType === 'EventSubscription' ? 'Webhook' : nodeType === 'Group' ? 'Grupp' : nodeType}
+                {nodeType === 'EventSubscription' ? t('toolbar.webhook') : nodeType === 'Group' ? t('toolbar.group') : nodeType}
               </div>
             )}
           </div>

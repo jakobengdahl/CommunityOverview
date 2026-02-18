@@ -1,5 +1,6 @@
 import { useState, useEffect } from 'react';
 import useGraphStore from '../store/graphStore';
+import { useI18n } from '../i18n';
 import './CreateSubscriptionDialog.css';
 
 /**
@@ -12,6 +13,7 @@ import './CreateSubscriptionDialog.css';
  */
 export default function CreateSubscriptionDialog({ onClose, onSave }) {
   const schema = useGraphStore((state) => state.schema);
+  const { t } = useI18n();
 
   // Basic info
   const [name, setName] = useState('');
@@ -51,16 +53,17 @@ export default function CreateSubscriptionDialog({ onClose, onSave }) {
     e.preventDefault();
 
     if (!name.trim() || !webhookUrl.trim()) {
-      alert('Namn och webhook-URL krävs');
+      alert(t('subscription_dialog.validation_error'));
       return;
     }
 
     // Build the subscription node
+    const activeOps = Object.entries(operations).filter(([_, v]) => v).map(([k]) => k).join(', ');
     const subscriptionNode = {
       name: name.trim(),
       type: 'EventSubscription',
-      description: description.trim() || `Webhook-prenumeration: ${name}`,
-      summary: `Lyssnar på ${Object.entries(operations).filter(([_, v]) => v).map(([k]) => k).join(', ')} events`,
+      description: description.trim() || t('subscription_dialog.webhook_description', { name }),
+      summary: t('subscription_dialog.webhook_summary', { events: activeOps }),
       metadata: {
         filters: {
           target: {
@@ -88,44 +91,44 @@ export default function CreateSubscriptionDialog({ onClose, onSave }) {
   return (
     <div className="dialog-overlay" onClick={onClose}>
       <div className="dialog-content subscription-dialog" onClick={e => e.stopPropagation()}>
-        <h2>Skapa webhook-prenumeration</h2>
+        <h2>{t('subscription_dialog.title')}</h2>
         <p className="dialog-description">
-          En prenumeration skickar events till en webhook-URL när noder skapas, uppdateras eller tas bort.
+          {t('subscription_dialog.description')}
         </p>
 
         <form onSubmit={handleSubmit}>
           <div className="form-section">
-            <h3>Grundläggande information</h3>
+            <h3>{t('subscription_dialog.basic_info')}</h3>
 
             <div className="form-group">
-              <label htmlFor="sub-name">Namn *</label>
+              <label htmlFor="sub-name">{t('subscription_dialog.name_label')}</label>
               <input
                 id="sub-name"
                 type="text"
                 value={name}
                 onChange={e => setName(e.target.value)}
-                placeholder="T.ex. 'Notifiera vid nya initiativ'"
+                placeholder={t('subscription_dialog.name_placeholder')}
                 required
               />
             </div>
 
             <div className="form-group">
-              <label htmlFor="sub-description">Beskrivning</label>
+              <label htmlFor="sub-description">{t('subscription_dialog.description_label')}</label>
               <textarea
                 id="sub-description"
                 value={description}
                 onChange={e => setDescription(e.target.value)}
-                placeholder="Valfri beskrivning av prenumerationens syfte"
+                placeholder={t('subscription_dialog.description_placeholder')}
                 rows={2}
               />
             </div>
           </div>
 
           <div className="form-section">
-            <h3>Filter</h3>
+            <h3>{t('subscription_dialog.filters')}</h3>
 
             <div className="form-group">
-              <label>Nodtyper (tom = alla)</label>
+              <label>{t('subscription_dialog.node_types_label')}</label>
               <div className="checkbox-group node-types-grid">
                 {nodeTypes.map(type => (
                   <label key={type} className="checkbox-label">
@@ -141,7 +144,7 @@ export default function CreateSubscriptionDialog({ onClose, onSave }) {
             </div>
 
             <div className="form-group">
-              <label>Operationer</label>
+              <label>{t('subscription_dialog.operations_label')}</label>
               <div className="checkbox-group">
                 <label className="checkbox-label">
                   <input
@@ -149,7 +152,7 @@ export default function CreateSubscriptionDialog({ onClose, onSave }) {
                     checked={operations.create}
                     onChange={() => handleToggleOperation('create')}
                   />
-                  Skapa (create)
+                  {t('subscription_dialog.op_create')}
                 </label>
                 <label className="checkbox-label">
                   <input
@@ -157,7 +160,7 @@ export default function CreateSubscriptionDialog({ onClose, onSave }) {
                     checked={operations.update}
                     onChange={() => handleToggleOperation('update')}
                   />
-                  Uppdatera (update)
+                  {t('subscription_dialog.op_update')}
                 </label>
                 <label className="checkbox-label">
                   <input
@@ -165,29 +168,29 @@ export default function CreateSubscriptionDialog({ onClose, onSave }) {
                     checked={operations.delete}
                     onChange={() => handleToggleOperation('delete')}
                   />
-                  Ta bort (delete)
+                  {t('subscription_dialog.op_delete')}
                 </label>
               </div>
             </div>
 
             <div className="form-group">
-              <label htmlFor="sub-keywords">Nyckelord (kommaseparerade)</label>
+              <label htmlFor="sub-keywords">{t('subscription_dialog.keywords_label')}</label>
               <input
                 id="sub-keywords"
                 type="text"
                 value={keywords}
                 onChange={e => setKeywords(e.target.value)}
-                placeholder="T.ex. 'AI, digitalisering, NIS2'"
+                placeholder={t('subscription_dialog.keywords_placeholder')}
               />
-              <small>Matchar mot namn, beskrivning, sammanfattning och taggar</small>
+              <small>{t('subscription_dialog.keywords_hint')}</small>
             </div>
           </div>
 
           <div className="form-section">
-            <h3>Leverans</h3>
+            <h3>{t('subscription_dialog.delivery')}</h3>
 
             <div className="form-group">
-              <label htmlFor="sub-webhook">Webhook-URL *</label>
+              <label htmlFor="sub-webhook">{t('subscription_dialog.webhook_label')}</label>
               <input
                 id="sub-webhook"
                 type="url"
@@ -199,24 +202,24 @@ export default function CreateSubscriptionDialog({ onClose, onSave }) {
             </div>
 
             <div className="form-group">
-              <label htmlFor="sub-ignore-origins">Ignorera origins (kommaseparerade)</label>
+              <label htmlFor="sub-ignore-origins">{t('subscription_dialog.ignore_origins_label')}</label>
               <input
                 id="sub-ignore-origins"
                 type="text"
                 value={ignoreOrigins}
                 onChange={e => setIgnoreOrigins(e.target.value)}
-                placeholder="T.ex. 'agent:my-agent, mcp'"
+                placeholder={t('subscription_dialog.ignore_origins_placeholder')}
               />
-              <small>För loopskydd: events från dessa origins skickas inte</small>
+              <small>{t('subscription_dialog.ignore_origins_hint')}</small>
             </div>
           </div>
 
           <div className="dialog-actions">
             <button type="button" className="btn-secondary" onClick={onClose}>
-              Avbryt
+              {t('subscription_dialog.cancel')}
             </button>
             <button type="submit" className="btn-primary">
-              Skapa prenumeration
+              {t('subscription_dialog.submit')}
             </button>
           </div>
         </form>

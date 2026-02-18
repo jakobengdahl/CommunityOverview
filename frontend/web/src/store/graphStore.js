@@ -3,41 +3,53 @@ import { create } from 'zustand';
 // Default welcome message (used before presentation is loaded)
 const DEFAULT_WELCOME_MESSAGE = {
   role: 'assistant',
-  content: `Välkommen till Community Knowledge Graph!
+  content: `Welcome to Community Knowledge Graph!
 
-Du kan ställa frågor som:
-• "Vilka initiativ relaterar till NIS2?"
-• "Visa alla aktörer"
-• "Finns det några AI-strategiprojekt?"
-• "Vilka mål finns kring digitalisering?"
-• "Visa alla AI-agenter"
+You can ask questions like:
+• "What initiatives relate to NIS2?"
+• "Show all actors"
+• "Are there any AI strategy projects?"
+• "What goals exist around digitalization?"
+• "Show all AI agents"
 
-Du kan också ladda upp dokument (PDF, Word, text) för att extrahera entiteter.
+You can also upload documents (PDF, Word, text) to extract entities.
 
-**OBS:** Hantera inte personuppgifter i denna tjänst.`,
+**NOTE:** Do not handle personal data in this service.`,
   timestamp: new Date(),
   id: 'welcome',
 };
 
 /**
- * Create a welcome message using the presentation config
+ * Create a welcome message using the presentation config and i18n translations.
+ * @param {Object} presentation - Presentation config from backend
+ * @param {Function} t - Translation function from i18n (optional)
  */
-function createWelcomeMessage(presentation) {
-  const intro = presentation?.introduction || DEFAULT_WELCOME_MESSAGE.content;
+function createWelcomeMessage(presentation, t) {
+  if (t) {
+    const title = t('welcome.title');
+    const prompt = t('welcome.prompt');
+    const examples = t('welcome.examples');
+    const uploadHint = t('welcome.upload_hint');
+    const privacyNotice = t('welcome.privacy_notice');
+    const intro = presentation?.introduction || '';
+
+    const exampleLines = Array.isArray(examples)
+      ? examples.map(e => `• "${e}"`).join('\n')
+      : '';
+
+    return {
+      role: 'assistant',
+      content: `${title}\n\n${intro ? intro + '\n\n' : ''}${prompt}\n${exampleLines}\n\n${uploadHint}\n\n${privacyNotice}`,
+      timestamp: new Date(),
+      id: 'welcome',
+    };
+  }
+
+  // Fallback without i18n
+  const intro = presentation?.introduction || '';
   return {
     role: 'assistant',
-    content: `${intro}
-
-Du kan ställa frågor som:
-• "Vilka initiativ relaterar till NIS2?"
-• "Visa alla aktörer"
-• "Finns det några AI-strategiprojekt?"
-• "Vilka mål finns kring digitalisering?"
-• "Visa alla AI-agenter"
-
-Du kan också ladda upp dokument (PDF, Word, text) för att extrahera entiteter.
-
-**OBS:** Hantera inte personuppgifter i denna tjänst.`,
+    content: intro ? `${DEFAULT_WELCOME_MESSAGE.content.split('\n')[0]}\n\n${intro}\n\n${DEFAULT_WELCOME_MESSAGE.content.split('\n').slice(2).join('\n')}` : DEFAULT_WELCOME_MESSAGE.content,
     timestamp: new Date(),
     id: 'welcome',
   };
@@ -186,9 +198,9 @@ const useGraphStore = create((set, get) => ({
   // Schema and presentation actions
   setSchema: (schema) => set({ schema }),
 
-  setPresentation: (presentation) => {
+  setPresentation: (presentation, t) => {
     // Update welcome message with new presentation
-    const welcomeMessage = createWelcomeMessage(presentation);
+    const welcomeMessage = createWelcomeMessage(presentation, t);
     const { chatMessages } = get();
 
     // Replace the welcome message if it's the first message
@@ -203,8 +215,8 @@ const useGraphStore = create((set, get) => ({
     });
   },
 
-  setConfig: (schema, presentation) => {
-    const welcomeMessage = createWelcomeMessage(presentation);
+  setConfig: (schema, presentation, t) => {
+    const welcomeMessage = createWelcomeMessage(presentation, t);
     set({
       schema,
       presentation,
@@ -268,9 +280,9 @@ const useGraphStore = create((set, get) => ({
     set({ chatMessages: [...chatMessages, { ...message, id: message.id || Date.now() }] });
   },
 
-  clearChatMessages: () => {
+  clearChatMessages: (t) => {
     const { presentation } = get();
-    const welcomeMessage = createWelcomeMessage(presentation);
+    const welcomeMessage = createWelcomeMessage(presentation, t);
     set({ chatMessages: [welcomeMessage] });
   },
 

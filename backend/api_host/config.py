@@ -59,7 +59,13 @@ class AppConfig:
         """Get resolved path to graph file."""
         graph_path = Path(self.graph_file)
         if not graph_path.is_absolute():
-            # Resolve relative to backend directory
-            backend_dir = Path(__file__).parent.parent
-            graph_path = backend_dir / self.graph_file
+            # Try resolving relative to project root first (for data/active/graph.json)
+            project_root = Path(__file__).parent.parent.parent
+            candidate = project_root / self.graph_file
+            if candidate.exists() or "data/" in self.graph_file:
+                graph_path = candidate
+            else:
+                # Fall back to resolving relative to backend directory
+                backend_dir = Path(__file__).parent.parent
+                graph_path = backend_dir / self.graph_file
         return graph_path
