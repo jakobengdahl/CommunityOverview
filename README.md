@@ -2,6 +2,8 @@
 
 AI-powered knowledge sharing for communities with graph visualization, conversational chat, and intelligent document analysis.
 
+![Screenshot of Community Knowledge Sharing application](docs/images/screenshot.png)
+
 ## Overview
 
 This system helps organizations avoid overlapping investments by making visible:
