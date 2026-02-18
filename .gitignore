@@ -53,3 +53,6 @@ htmlcov/
 embeddings.pkl
 test_embeddings.pkl
 test_embeddings_integration.pkl
+
+# Active graph data (managed by start-dev.sh)
+data/active/graph.json

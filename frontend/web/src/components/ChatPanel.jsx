@@ -1,6 +1,7 @@
 import { useState, useEffect, useRef } from 'react';
 import { ChatDotsFill, ChevronRight, ChevronLeft } from 'react-bootstrap-icons';
 import useGraphStore from '../store/graphStore';
+import { useI18n } from '../i18n';
 import * as api from '../services/api';
 import { positionNewNodes } from '@community-graph/ui-graph-canvas';
 import './ChatPanel.css';
@@ -17,6 +18,8 @@ function ChatPanel() {
     chatPanelOpen,
     toggleChatPanel,
   } = useGraphStore();
+
+  const { t, language } = useI18n();
 
   const [inputValue, setInputValue] = useState('');
   const [isProcessing, setIsProcessing] = useState(false);
@@ -54,10 +57,10 @@ function ChatPanel() {
     let messageContent = inputValue.trim();
 
     if (uploadedFile) {
-      const fileContext = `\n\n[Uppladdad fil: ${uploadedFile.filename}]\n\nInnehåll:\n${uploadedFile.text}`;
+      const fileContext = t('chat.file_context', { filename: uploadedFile.filename, text: uploadedFile.text });
       messageContent = messageContent
         ? messageContent + fileContext
-        : `Analysera följande dokument:\n${fileContext}`;
+        : t('chat.analyze_document', { fileContext });
     }
 
     const userMessage = {
@@ -94,8 +97,8 @@ function ChatPanel() {
           const viewNode = {
             name: viewName,
             type: 'SavedView',
-            description: `Sparad vy: ${viewName}`,
-            summary: `Innehåller ${currentNodes.length} noder`,
+            description: t('notifications.saved_view_description', { name: viewName }),
+            summary: t('notifications.saved_view_summary', { count: currentNodes.length }),
             metadata: {
               node_ids: currentNodes.map(n => n.id),
             },
@@ -168,7 +171,7 @@ function ChatPanel() {
       console.error('[ChatPanel] Error:', err);
       addChatMessage({
         role: 'assistant',
-        content: `Fel: ${err.message}`,
+        content: t('chat.error_prefix', { message: err.message }),
         timestamp: new Date(),
       });
       setError(err.message);
@@ -199,11 +202,11 @@ function ChatPanel() {
           text: result.text,
         });
       } else {
-        setError('Kunde inte extrahera text från filen.');
+        setError(t('chat.extract_error'));
       }
     } catch (err) {
       console.error('[ChatPanel] Upload error:', err);
-      setError(`Uppladdning misslyckades: ${err.message}`);
+      setError(t('chat.upload_error', { message: err.message }));
     } finally {
       setIsUploading(false);
       if (fileInputRef.current) {
@@ -220,7 +223,7 @@ function ChatPanel() {
   };
 
   const handleApproveProposal = async (proposal) => {
-    const msg = `Ja, lägg till noden "${proposal.node.name}"`;
+    const msg = t('chat.approve_node', { name: proposal.node.name });
     addChatMessage({ role: 'user', content: msg, timestamp: new Date() });
     setIsProcessing(true);
 
@@ -249,7 +252,7 @@ function ChatPanel() {
     } catch (err) {
       addChatMessage({
         role: 'assistant',
-        content: `Fel: ${err.message}`,
+        content: t('chat.error_prefix', { message: err.message }),
         timestamp: new Date(),
       });
     } finally {
@@ -258,7 +261,7 @@ function ChatPanel() {
   };
 
   const handleRejectProposal = async (proposal) => {
-    const msg = 'Nej, lägg inte till noden.';
+    const msg = t('chat.reject_node');
     addChatMessage({ role: 'user', content: msg, timestamp: new Date() });
     setIsProcessing(true);
 
@@ -282,7 +285,7 @@ function ChatPanel() {
   };
 
   const handleConfirmDelete = async (deleteConfirmation) => {
-    const msg = 'Ja, ta bort noderna.';
+    const msg = t('chat.confirm_delete');
     addChatMessage({ role: 'user', content: msg, timestamp: new Date() });
     setIsProcessing(true);
 
@@ -310,7 +313,7 @@ function ChatPanel() {
     } catch (err) {
       addChatMessage({
         role: 'assistant',
-        content: `Fel: ${err.message}`,
+        content: t('chat.error_prefix', { message: err.message }),
         timestamp: new Date(),
       });
     } finally {
@@ -321,7 +324,7 @@ function ChatPanel() {
   const handleCancelDelete = () => {
     addChatMessage({
       role: 'assistant',
-      content: 'Borttagning avbruten.',
+      content: t('chat.delete_cancelled'),
       timestamp: new Date(),
     });
   };
@@ -329,7 +332,8 @@ function ChatPanel() {
   const formatTime = (timestamp) => {
     if (!timestamp) return '';
     const date = new Date(timestamp);
-    return date.toLocaleTimeString('sv-SE', { hour: '2-digit', minute: '2-digit' });
+    const locale = language === 'sv' ? 'sv-SE' : 'en-US';
+    return date.toLocaleTimeString(locale, { hour: '2-digit', minute: '2-digit' });
   };
 
   // Minimized state
@@ -368,17 +372,17 @@ function ChatPanel() {
                     <span></span>
                     <span></span>
                   </div>
-                  <span className="loading-text">Bearbetar...</span>
+                  <span className="loading-text">{t('chat.processing')}</span>
                 </div>
               )}
 
               {msg.proposal && (
                 <div className="proposal-card">
-                  <h4>Föreslaget tillägg:</h4>
+                  <h4>{t('proposal.title')}</h4>
                   <div className="proposal-details">
-                    <p><strong>Typ:</strong> {msg.proposal.node.type}</p>
-                    <p><strong>Namn:</strong> {msg.proposal.node.name}</p>
-                    <p><strong>Beskrivning:</strong> {msg.proposal.node.description}</p>
+                    <p><strong>{t('proposal.type')}</strong> {msg.proposal.node.type}</p>
+                    <p><strong>{t('proposal.name')}</strong> {msg.proposal.node.name}</p>
+                    <p><strong>{t('proposal.description')}</strong> {msg.proposal.node.description}</p>
                     {msg.proposal.node.communities?.length > 0 && (
                       <p><strong>Communities:</strong> {msg.proposal.node.communities.join(', ')}</p>
                     )}
@@ -386,7 +390,7 @@ function ChatPanel() {
 
                   {msg.proposal.similar_nodes?.length > 0 && (
                     <div className="similar-nodes-warning">
-                      <p><strong>Liknande noder hittades:</strong></p>
+                      <p><strong>{t('proposal.similar_found')}</strong></p>
                       <ul>
                         {msg.proposal.similar_nodes.map((sim, i) => (
                           <li key={i}>
@@ -403,14 +407,14 @@ function ChatPanel() {
                       onClick={() => handleApproveProposal(msg.proposal)}
                       disabled={isProcessing}
                     >
-                      Godkänn
+                      {t('proposal.approve')}
                     </button>
                     <button
                       className="reject-button"
                       onClick={() => handleRejectProposal(msg.proposal)}
                       disabled={isProcessing}
                     >
-                      Avvisa
+                      {t('proposal.reject')}
                     </button>
                   </div>
                 </div>
@@ -418,19 +422,19 @@ function ChatPanel() {
 
               {msg.deleteConfirmation && (
                 <div className="delete-card">
-                  <h4>Bekräfta borttagning:</h4>
+                  <h4>{t('delete_confirmation.title')}</h4>
                   <div className="proposal-details">
-                    <p><strong>Noder att ta bort:</strong></p>
+                    <p><strong>{t('delete_confirmation.nodes_to_delete')}</strong></p>
                     <ul>
                       {msg.deleteConfirmation.nodes_to_delete?.map((node, i) => (
                         <li key={i}>{node.name} ({node.type})</li>
                       ))}
                     </ul>
-                    <p><strong>Påverkade relationer:</strong> {msg.deleteConfirmation.affected_edges?.length || 0}</p>
+                    <p><strong>{t('delete_confirmation.affected_edges')}</strong> {msg.deleteConfirmation.affected_edges?.length || 0}</p>
                   </div>
 
                   <div className="similar-nodes-warning">
-                    <p><strong>Varning:</strong> Denna åtgärd kan inte ångras!</p>
+                    <p><strong>{t('delete_confirmation.warning')}</strong></p>
                   </div>
 
                   <div className="proposal-actions">
@@ -439,14 +443,14 @@ function ChatPanel() {
                       onClick={() => handleConfirmDelete(msg.deleteConfirmation)}
                       disabled={isProcessing}
                     >
-                      Bekräfta borttagning
+                      {t('delete_confirmation.confirm')}
                     </button>
                     <button
                       className="approve-button"
                       onClick={handleCancelDelete}
                       disabled={isProcessing}
                     >
-                      Avbryt
+                      {t('delete_confirmation.cancel')}
                     </button>
                   </div>
                 </div>
@@ -477,7 +481,7 @@ function ChatPanel() {
             <button
               className="remove-file-button"
               onClick={handleRemoveFile}
-              title="Ta bort fil"
+              title={t('chat.remove_file')}
             >
               &times;
             </button>
@@ -490,8 +494,8 @@ function ChatPanel() {
           onChange={(e) => setInputValue(e.target.value)}
           onKeyPress={handleKeyPress}
           placeholder={uploadedFile
-            ? "Beskriv vad du vill göra med dokumentet..."
-            : "Ställ en fråga eller begär en åtgärd..."}
+            ? t('chat.placeholder_with_file')
+            : t('chat.placeholder')}
           rows={3}
           disabled={isProcessing}
         />
@@ -508,16 +512,16 @@ function ChatPanel() {
             className="chat-upload-button"
             onClick={() => fileInputRef.current?.click()}
             disabled={isUploading || isProcessing}
-            title="Ladda upp dokument (PDF, Word, Text)"
+            title={t('chat.upload_tooltip')}
           >
-            {isUploading ? 'Laddar...' : 'Ladda upp'}
+            {isUploading ? t('chat.uploading') : t('chat.upload')}
           </button>
           <button
             className="chat-send-button"
             onClick={handleSend}
             disabled={(!inputValue.trim() && !uploadedFile) || isProcessing}
           >
-            {isProcessing ? 'Bearbetar...' : 'Skicka'}
+            {isProcessing ? t('chat.processing') : t('chat.send')}
           </button>
         </div>
       </div>

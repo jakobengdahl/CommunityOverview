@@ -2,6 +2,7 @@ import { useState, useCallback, useEffect } from 'react';
 import { GraphCanvas } from '@community-graph/ui-graph-canvas';
 import '@community-graph/ui-graph-canvas/styles';
 import useGraphStore from './store/graphStore';
+import { useI18n } from './i18n';
 import FloatingHeader from './components/FloatingHeader';
 import FloatingToolbar from './components/FloatingToolbar';
 import FloatingSearch from './components/FloatingSearch';
@@ -43,6 +44,8 @@ function App() {
     setPendingGroups,
   } = useGraphStore();
 
+  const { t, setLanguage } = useI18n();
+
   const [notification, setNotification] = useState(null);
   const [deleteDialog, setDeleteDialog] = useState(null);
   const [saveViewDialog, setSaveViewDialog] = useState(null);
@@ -64,7 +67,15 @@ function App() {
           api.getPresentation(),
           api.getGraphStats(),
         ]);
-        setConfig(schemaData, presentationData);
+        // Apply backend default language if no user override
+        if (presentationData?.default_language) {
+          const urlLang = new URLSearchParams(window.location.search).get('lang');
+          const storedLang = localStorage.getItem('app_language');
+          if (!urlLang && !storedLang) {
+            setLanguage(presentationData.default_language);
+          }
+        }
+        setConfig(schemaData, presentationData, t);
         setStats(statsData);
       } catch (error) {
         console.error('Error loading configuration:', error);
@@ -72,7 +83,7 @@ function App() {
       }
     };
     loadConfig();
-  }, [setConfig, setStats]);
+  }, [setConfig, setStats, t, setLanguage]);
 
   const showNotification = useCallback((type, message) => {
     setNotification({ type, message });
@@ -203,7 +214,7 @@ function App() {
     const keepSet = new Set(nodeIds);
     const idsToHide = nodes.filter(n => !keepSet.has(n.id)).map(n => n.id);
     setHiddenNodeIds(idsToHide);
-    showNotification('info', `Visar ${nodeIds.length} noder`);
+    showNotification('info', t('notifications.showing_nodes', { count: nodeIds.length }));
   }, [nodes, setHiddenNodeIds, showNotification]);
 
   // Callback: Delete node - shows dialog
@@ -323,10 +334,10 @@ function App() {
         console.log('Subscription added to visualization:', nodeId);
       }
 
-      showNotification('success', `Prenumeration "${subscriptionNode.name}" skapad`);
+      showNotification('success', t('notifications.subscription_created', { name: subscriptionNode.name }));
     } catch (error) {
       console.error('Error creating subscription:', error);
-      showNotification('error', 'Kunde inte skapa prenumeration');
+      showNotification('error', t('notifications.subscription_error'));
     }
   }, [addNodesToVisualization, showNotification]);
 
