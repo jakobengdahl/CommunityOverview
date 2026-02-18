@@ -253,6 +253,74 @@
   flex-shrink: 0;
 }
 
+/* Selection indicator */
+.selection-indicator {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 6px 10px;
+  background-color: rgba(100, 108, 255, 0.08);
+  border: 1px solid rgba(100, 108, 255, 0.3);
+  border-radius: 6px;
+  animation: slideDown 0.2s ease-out;
+}
+
+.selection-indicator-content {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+  flex: 1;
+  overflow: hidden;
+}
+
+.selection-indicator-label {
+  font-size: 0.75rem;
+  font-weight: 600;
+  color: #646cff;
+}
+
+.selection-indicator-types {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px;
+}
+
+.selection-type-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  font-size: 0.7rem;
+  color: #bbb;
+  background: rgba(255, 255, 255, 0.05);
+  padding: 1px 7px;
+  border-radius: 10px;
+}
+
+.selection-type-dot {
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  flex-shrink: 0;
+}
+
+.selection-clear-button {
+  background: none;
+  border: none;
+  color: #666;
+  cursor: pointer;
+  padding: 4px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  border-radius: 4px;
+  transition: color 0.15s;
+  flex-shrink: 0;
+}
+
+.selection-clear-button:hover {
+  color: #EF4444;
+}
+
 /* File indicator */
 .file-indicator {
   display: flex;

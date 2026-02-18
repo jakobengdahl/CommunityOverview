@@ -72,6 +72,8 @@ function GraphCanvasInner({
   onCreateAgent,
   onDropCreateNode,
   onShowOnly,
+  onSelectionChange,
+  onNodeDoubleClick: onNodeDoubleClickCallback,
   focusNodeId = null,
   onFocusComplete,
   createGroupSignal = 0,
@@ -94,13 +96,11 @@ function GraphCanvasInner({
   // Track selected nodes and edges
   useOnSelectionChange({
     onChange: ({ nodes: selected, edges: selectedE }) => {
-      console.log('[GraphCanvas] Selection changed:', {
-        nodeCount: selected.length,
-        nodeIds: selected.map(n => n.id),
-        edgeCount: (selectedE || []).length,
-      });
       setSelectedNodes(selected);
       setSelectedEdges(selectedE || []);
+      if (onSelectionChange) {
+        onSelectionChange(selected);
+      }
     },
   });
 
@@ -456,6 +456,14 @@ function GraphCanvasInner({
     }
   }, [selectedNodes]);
 
+  // Double-click on node handler
+  const handleNodeDoubleClick = useCallback((event, node) => {
+    event.preventDefault();
+    if (onNodeDoubleClickCallback) {
+      onNodeDoubleClickCallback(node.id, node.data);
+    }
+  }, [onNodeDoubleClickCallback]);
+
   // Edge context menu handler
   const onEdgeContextMenu = useCallback((event, edge) => {
     event.preventDefault();
@@ -504,6 +512,8 @@ function GraphCanvasInner({
         }
       }
       mouseDownPos.current = null;
+      // Don't clear selection when modifier keys are held (multi-select)
+      if (e.ctrlKey || e.metaKey || e.shiftKey) return;
       const nodeEl = e.target.closest('.react-flow__node');
       const edgeEl = e.target.closest('.react-flow__edge');
       const menuEl = e.target.closest('.graph-context-menu') || e.target.closest('.graph-group-context-menu');
@@ -685,6 +695,7 @@ function GraphCanvasInner({
           onNodeContextMenu={onNodeContextMenu}
           onEdgeContextMenu={onEdgeContextMenu}
           onSelectionContextMenu={onSelectionContextMenu}
+          onNodeDoubleClick={handleNodeDoubleClick}
           onPaneClick={handlePaneClick}
           onDragOver={onDragOver}
           onDrop={onDrop}
@@ -710,7 +721,7 @@ function GraphCanvasInner({
           selectionMode={SelectionMode.Partial}
           selectNodesOnDrag={true}
           deleteKeyCode={null}
-          multiSelectionKeyCode="Shift"
+          multiSelectionKeyCode={['Shift', 'Meta', 'Control']}
           edgesUpdatable={false}
           onMoveStart={closeAllMenus}
         >

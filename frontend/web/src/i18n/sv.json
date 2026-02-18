@@ -29,7 +29,19 @@
     "approve_node": "Ja, lägg till noden \"{name}\"",
     "reject_node": "Nej, lägg inte till noden.",
     "confirm_delete": "Ja, ta bort noderna.",
-    "delete_cancelled": "Borttagning avbruten."
+    "delete_cancelled": "Borttagning avbruten.",
+    "selected_nodes": "{count} noder markerade",
+    "clear_selection": "Rensa markering",
+    "placeholder_with_selection": "Ställ en fråga om de markerade noderna..."
+  },
+  "detail": {
+    "summary": "Sammanfattning",
+    "description": "Beskrivning",
+    "tags": "Taggar",
+    "metadata": "Metadata",
+    "edit": "Redigera",
+    "close": "Stäng",
+    "unknown_node": "Okänd nod"
   },
   "proposal": {
     "title": "Föreslaget tillägg:",
