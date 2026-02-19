@@ -45618,6 +45618,115 @@
       ],
       "created_at": "2026-02-05T09:09:33.183080",
       "updated_at": "2026-02-05T09:09:33.183081"
+    },
+    {
+      "id": "data-001",
+      "type": "Data",
+      "name": "Nationella dataportalen",
+      "description": "Sveriges nationella portal för öppna data och datakataloger. Samlar metadata från offentliga organisationer och tillgängliggör datamängder för vidareutnyttjande.",
+      "summary": "Nationell portal för öppna data",
+      "tags": [
+        "öppna data",
+        "datakatalog",
+        "PSI",
+        "vidareutnyttjande"
+      ],
+      "metadata": {
+        "identifier": "https://www.dataportal.se"
+      },
+      "embedding": null,
+      "created_at": "2026-02-19T10:00:00+00:00",
+      "updated_at": "2026-02-19T10:00:00+00:00"
+    },
+    {
+      "id": "data-002",
+      "type": "Data",
+      "name": "Grunddatadomäner",
+      "description": "Nationella grunddatadomäner som identifierats av DIGG för att skapa en gemensam infrastruktur för grunddata i den offentliga förvaltningen. Omfattar domäner som person, företag, fastighet och geografi.",
+      "summary": "Gemensam infrastruktur för grunddata",
+      "tags": [
+        "grunddata",
+        "DIGG",
+        "infrastruktur",
+        "datadelning"
+      ],
+      "metadata": {
+        "identifier": "https://www.digg.se/grunddata"
+      },
+      "embedding": null,
+      "created_at": "2026-02-19T10:00:00+00:00",
+      "updated_at": "2026-02-19T10:00:00+00:00"
+    },
+    {
+      "id": "data-003",
+      "type": "Data",
+      "name": "European Data Spaces",
+      "description": "EU:s initiativ för att skapa gemensamma europeiska datarymder inom strategiska sektorer som hälsa, energi, jordbruk och offentlig förvaltning.",
+      "summary": "Gemensamma europeiska datarymder",
+      "tags": [
+        "EU",
+        "datarymder",
+        "datadelning",
+        "interoperabilitet"
+      ],
+      "metadata": {
+        "identifier": "https://digital-strategy.ec.europa.eu/en/policies/data-spaces"
+      },
+      "embedding": null,
+      "created_at": "2026-02-19T10:00:00+00:00",
+      "updated_at": "2026-02-19T10:00:00+00:00"
+    },
+    {
+      "id": "risk-001",
+      "type": "Risk",
+      "name": "Vendor lock-in vid molntjänster",
+      "description": "Risk att offentliga organisationer blir beroende av enskilda molntjänstleverantörer, vilket försvårar byte och kan leda till ökade kostnader och begränsad suveränitet.",
+      "summary": "Beroende av enskilda molnleverantörer",
+      "tags": [
+        "molntjänster",
+        "leverantörsberoende",
+        "suveränitet",
+        "upphandling"
+      ],
+      "metadata": {},
+      "embedding": null,
+      "created_at": "2026-02-19T10:00:00+00:00",
+      "updated_at": "2026-02-19T10:00:00+00:00"
+    },
+    {
+      "id": "risk-002",
+      "type": "Risk",
+      "name": "Cybersäkerhetshot mot kritisk infrastruktur",
+      "description": "Risk för cyberattacker mot samhällskritisk digital infrastruktur, inklusive ransomware, DDoS-attacker och riktade intrång mot myndigheter och kommuner.",
+      "summary": "Cyberattacker mot kritisk infrastruktur",
+      "tags": [
+        "cybersäkerhet",
+        "NIS2",
+        "kritisk infrastruktur",
+        "ransomware"
+      ],
+      "metadata": {},
+      "embedding": null,
+      "created_at": "2026-02-19T10:00:00+00:00",
+      "updated_at": "2026-02-19T10:00:00+00:00"
+    },
+    {
+      "id": "risk-003",
+      "type": "Risk",
+      "name": "AI-bias i offentliga beslutsstöd",
+      "description": "Risk att AI-system som används i offentlig förvaltning reproducerar eller förstärker befintliga fördomar och diskrimineringsmönster i automatiserade beslut.",
+      "summary": "Bias och diskriminering i AI-baserade beslutsstöd",
+      "tags": [
+        "AI",
+        "bias",
+        "diskriminering",
+        "etik",
+        "AI Act"
+      ],
+      "metadata": {},
+      "embedding": null,
+      "created_at": "2026-02-19T10:00:00+00:00",
+      "updated_at": "2026-02-19T10:00:00+00:00"
     }
   ],
   "edges": [
@@ -47122,6 +47231,33 @@
       "type": "BELONGS_TO",
       "metadata": {},
       "created_at": "2026-02-05T08:59:02.028954"
+    },
+    {
+      "id": "edge-data-001",
+      "source": "data-001",
+      "target": "data-002",
+      "type": "RELATES_TO",
+      "label": "",
+      "metadata": {},
+      "created_at": "2026-02-19T10:00:00+00:00"
+    },
+    {
+      "id": "edge-data-002",
+      "source": "data-002",
+      "target": "data-003",
+      "type": "PART_OF",
+      "label": "",
+      "metadata": {},
+      "created_at": "2026-02-19T10:00:00+00:00"
+    },
+    {
+      "id": "edge-risk-001",
+      "source": "risk-002",
+      "target": "risk-001",
+      "type": "RELATES_TO",
+      "label": "",
+      "metadata": {},
+      "created_at": "2026-02-19T10:00:00+00:00"
     }
   ],
   "metadata": {

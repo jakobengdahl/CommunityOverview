@@ -34,8 +34,8 @@ def storage_with_data(temp_storage):
              description="Second test actor"),
         Node(id="init-1", type=NodeType.INITIATIVE, name="Test Initiative",
              description="A test initiative"),
-        Node(id="community-1", type=NodeType.COMMUNITY, name="eSam",
-             description="eSam community"),
+        Node(id="theme-1", type=NodeType.THEME, name="eSam",
+             description="eSam collaboration theme"),
     ]
 
     edges = [
@@ -43,7 +43,7 @@ def storage_with_data(temp_storage):
              type=RelationshipType.BELONGS_TO),
         Edge(id="edge-2", source="actor-2", target="init-1",
              type=RelationshipType.RELATES_TO),
-        Edge(id="edge-3", source="init-1", target="community-1",
+        Edge(id="edge-3", source="init-1", target="theme-1",
              type=RelationshipType.PART_OF),
     ]
 
@@ -255,9 +255,9 @@ class TestGraphStorageRelated:
         """Test getting nodes at depth 2"""
         result = storage_with_data.get_related_nodes("actor-1", depth=2)
 
-        # Should reach community-1 through init-1
+        # Should reach theme-1 through init-1
         node_ids = [n.id for n in result['nodes']]
-        assert "community-1" in node_ids
+        assert "theme-1" in node_ids
 
     def test_get_related_nodes_filter_by_relationship(self, storage_with_data):
         """Test filtering by relationship type"""
@@ -335,8 +335,8 @@ class TestGraphStorageStats:
         """Test that stats correctly count nodes by type"""
         stats = storage_with_data.get_stats()
 
-        assert "Community" in stats.nodes_by_type
-        assert stats.nodes_by_type["Community"] == 1
+        assert "Theme" in stats.nodes_by_type
+        assert stats.nodes_by_type["Theme"] == 1
 
 
 class TestGraphStoragePersistence:

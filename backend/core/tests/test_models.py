@@ -19,7 +19,7 @@ class TestNodeType:
     def test_node_types_exist(self):
         """Verify all expected node types exist"""
         expected_types = [
-            "Actor", "Community", "Initiative", "Capability",
+            "Actor", "Initiative", "Capability",
             "Resource", "Legislation", "Theme", "Goal", "Event", "SavedView"
         ]
         for type_name in expected_types:
@@ -28,7 +28,6 @@ class TestNodeType:
     def test_node_type_values(self):
         """Verify node type string values"""
         assert NodeType.ACTOR.value == "Actor"
-        assert NodeType.COMMUNITY.value == "Community"
         assert NodeType.INITIATIVE.value == "Initiative"
 
     def test_all_node_types_have_colors(self):
