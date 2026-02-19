@@ -98,6 +98,26 @@
   border-color: white;
 }
 
+.graph-group-context-menu .context-menu-action {
+  width: 100%;
+  background: transparent;
+  border: 1px solid #666;
+  color: #ccc;
+  padding: 6px 12px;
+  border-radius: 4px;
+  cursor: pointer;
+  font-size: 13px;
+  text-align: left;
+  transition: all 0.2s;
+  margin-bottom: 6px;
+}
+
+.graph-group-context-menu .context-menu-action:hover {
+  background: #444;
+  color: white;
+  border-color: #888;
+}
+
 .graph-group-context-menu .context-menu-delete {
   width: 100%;
   background: transparent;
