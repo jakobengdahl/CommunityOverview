@@ -16,7 +16,7 @@ import './CustomNode.css';
  * - onExpand: Callback when expand button clicked
  * - onEdit: Callback when edit button clicked
  */
-function CustomNode({ data, id }) {
+function CustomNode({ data, id, selected }) {
   const [showButtons, setShowButtons] = useState(false);
   const [showTooltip, setShowTooltip] = useState(false);
 
@@ -36,7 +36,7 @@ function CustomNode({ data, id }) {
 
   return (
     <div
-      className={`graph-custom-node ${data.isHighlighted ? 'highlighted' : ''}`}
+      className={`graph-custom-node ${data.isHighlighted ? 'highlighted' : ''} ${selected ? 'selected' : ''}`}
       style={{ borderColor: data.color }}
       onMouseEnter={() => {
         setShowButtons(true);

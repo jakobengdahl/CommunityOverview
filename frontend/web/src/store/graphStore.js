@@ -72,7 +72,9 @@ const useGraphStore = create((set, get) => ({
   hiddenNodeIds: [],
   hiddenEdgeIds: [],
   selectedNodeId: null,
+  selectedGraphNodes: [], // Nodes selected in the graph canvas (full node data)
   editingNode: null,
+  detailNode: null, // Node to show in detail dialog (double-click)
   contextMenu: null,
   clearGroupsFlag: false, // Signal to clear groups in visualization
   focusNodeId: null, // Node ID to zoom/pan to
@@ -293,6 +295,14 @@ const useGraphStore = create((set, get) => ({
   // Node editing
   setEditingNode: (node) => set({ editingNode: node }),
   closeEditingNode: () => set({ editingNode: null }),
+
+  // Node detail view (double-click)
+  setDetailNode: (node) => set({ detailNode: node }),
+  closeDetailNode: () => set({ detailNode: null }),
+
+  // Graph canvas selection
+  setSelectedGraphNodes: (nodes) => set({ selectedGraphNodes: nodes }),
+  clearSelectedGraphNodes: () => set({ selectedGraphNodes: [] }),
 
   // Focus node actions
   setFocusNodeId: (nodeId) => set({ focusNodeId: nodeId }),

@@ -14,6 +14,7 @@ import ChatPanel from './components/ChatPanel';
 import CreateSubscriptionDialog from './components/CreateSubscriptionDialog';
 import CreateAgentDialog from './components/CreateAgentDialog';
 import EditEdgeDialog from './components/EditEdgeDialog';
+import NodeDetailDialog from './components/NodeDetailDialog';
 import * as api from './services/api';
 import './App.css';
 
@@ -42,6 +43,11 @@ function App() {
     clearFocusNode,
     pendingGroups,
     setPendingGroups,
+    setSelectedGraphNodes,
+    setDetailNode,
+    detailNode,
+    closeDetailNode,
+    clearVisualization,
   } = useGraphStore();
 
   const { t, setLanguage } = useI18n();
@@ -89,6 +95,73 @@ function App() {
     setNotification({ type, message });
     setTimeout(() => setNotification(null), 3000);
   }, []);
+
+  // Callback: Selection changed in GraphCanvas
+  const handleSelectionChange = useCallback((selectedNodes) => {
+    // Store full node data for the selected nodes
+    const selectedWithData = selectedNodes
+      .filter(n => n.type !== 'group')
+      .map(n => {
+        // n.data contains the full node info from the backend
+        return n.data || n;
+      });
+    setSelectedGraphNodes(selectedWithData);
+  }, [setSelectedGraphNodes]);
+
+  // Callback: Double-click on node
+  const handleNodeDoubleClick = useCallback(async (nodeId, nodeData) => {
+    // If it's a SavedView, load it directly
+    if (nodeData.type === 'SavedView' || nodeData.nodeType === 'SavedView') {
+      try {
+        const nodeIds = nodeData.metadata?.node_ids || [];
+        const positions = nodeData.metadata?.positions || {};
+        const savedEdges = nodeData.metadata?.edges || [];
+        const savedGroups = nodeData.metadata?.groups || [];
+        if (nodeIds.length > 0) {
+          clearVisualization();
+          const details = await Promise.all(
+            nodeIds.map(id => api.getNodeDetails(id).catch(() => null))
+          );
+          const loadedNodes = details.filter(d => d?.success).map(d => {
+            const n = d.node;
+            if (positions[n.id]) {
+              return { ...n, _savedPosition: positions[n.id] };
+            }
+            return n;
+          });
+          if (loadedNodes.length > 0) {
+            let edgesToLoad = savedEdges.length > 0 ? savedEdges : [];
+            if (edgesToLoad.length === 0) {
+              const loadedIds = new Set(loadedNodes.map(n => n.id));
+              const savedEdgeIds = new Set(nodeData.metadata?.edge_ids || []);
+              for (const d of details) {
+                if (d?.edges) {
+                  const relevant = d.edges.filter(
+                    e => loadedIds.has(e.source) && loadedIds.has(e.target) &&
+                      (savedEdgeIds.size === 0 || savedEdgeIds.has(e.id))
+                  );
+                  edgesToLoad.push(...relevant);
+                }
+              }
+            }
+            const edgeMap = new Map(edgesToLoad.map(e => [e.id, e]));
+            addNodesToVisualization(loadedNodes, Array.from(edgeMap.values()));
+            if (savedGroups.length > 0) {
+              setPendingGroups(savedGroups);
+            }
+          }
+        }
+        showNotification('info', `Loaded saved view: ${nodeData.name || nodeData.label}`);
+      } catch (err) {
+        console.error('Error loading saved view:', err);
+        showNotification('error', 'Could not load saved view');
+      }
+      return;
+    }
+
+    // For other nodes, show detail dialog
+    setDetailNode({ id: nodeId, data: nodeData });
+  }, [clearVisualization, addNodesToVisualization, setPendingGroups, setDetailNode, showNotification]);
 
   // Callback: Expand node to show related nodes
   const handleExpand = useCallback(async (nodeId, nodeData) => {
@@ -459,6 +532,8 @@ function App() {
           onCreateAgent={handleCreateAgent}
           onDropCreateNode={handleDropCreateNode}
           onShowOnly={handleShowOnly}
+          onSelectionChange={handleSelectionChange}
+          onNodeDoubleClick={handleNodeDoubleClick}
           focusNodeId={focusNodeId}
           onFocusComplete={clearFocusNode}
           createGroupSignal={createGroupSignal}
@@ -492,6 +567,17 @@ function App() {
           node={editingNode}
           onClose={closeEditingNode}
           onSave={(updates) => handleNodeUpdate(editingNode.id, updates)}
+        />
+      )}
+
+      {detailNode && (
+        <NodeDetailDialog
+          node={detailNode}
+          onClose={closeDetailNode}
+          onEdit={(nodeId, nodeData) => {
+            closeDetailNode();
+            handleEdit(nodeId, nodeData);
+          }}
         />
       )}
 

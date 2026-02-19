@@ -29,7 +29,19 @@
     "approve_node": "Yes, add the node \"{name}\"",
     "reject_node": "No, do not add the node.",
     "confirm_delete": "Yes, delete the nodes.",
-    "delete_cancelled": "Deletion cancelled."
+    "delete_cancelled": "Deletion cancelled.",
+    "selected_nodes": "{count} nodes selected",
+    "clear_selection": "Clear selection",
+    "placeholder_with_selection": "Ask a question about the selected nodes..."
+  },
+  "detail": {
+    "summary": "Summary",
+    "description": "Description",
+    "tags": "Tags",
+    "metadata": "Metadata",
+    "edit": "Edit",
+    "close": "Close",
+    "unknown_node": "Unknown node"
   },
   "proposal": {
     "title": "Proposed addition:",

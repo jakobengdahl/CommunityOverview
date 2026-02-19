@@ -1,10 +1,13 @@
-import { useState, useEffect, useRef } from 'react';
-import { ChatDotsFill, ChevronRight, ChevronLeft } from 'react-bootstrap-icons';
+import { useState, useEffect, useRef, useMemo } from 'react';
+import { ChatDotsFill, ChevronRight, ChevronLeft, XCircleFill } from 'react-bootstrap-icons';
 import useGraphStore from '../store/graphStore';
 import { useI18n } from '../i18n';
 import * as api from '../services/api';
-import { positionNewNodes } from '@community-graph/ui-graph-canvas';
+import { positionNewNodes, getNodeColor } from '@community-graph/ui-graph-canvas';
 import './ChatPanel.css';
+
+/** Max characters of node context to include with a message to the LLM */
+const MAX_SELECTION_CONTEXT_CHARS = 6000;
 
 function ChatPanel() {
   const {
@@ -17,6 +20,8 @@ function ChatPanel() {
     clearVisualization,
     chatPanelOpen,
     toggleChatPanel,
+    selectedGraphNodes,
+    clearSelectedGraphNodes,
   } = useGraphStore();
 
   const { t, language } = useI18n();
@@ -63,12 +68,20 @@ function ChatPanel() {
         : t('chat.analyze_document', { fileContext });
     }
 
+    // Append selected node context for the LLM (not shown in chat bubble)
+    const selectionContext = buildSelectionContext();
+    const messageForLLM = selectionContext
+      ? messageContent + selectionContext
+      : messageContent;
+
     const userMessage = {
       role: 'user',
-      content: messageContent,
+      content: messageContent, // Show only the user's text in chat
       timestamp: new Date(),
       hasFile: !!uploadedFile,
       filename: uploadedFile?.filename,
+      hasSelection: selectedGraphNodes.length > 0,
+      selectionCount: selectedGraphNodes.length,
     };
     addChatMessage(userMessage);
     setInputValue('');
@@ -81,7 +94,7 @@ function ChatPanel() {
         .filter(m => m.role !== 'system' && m.id !== 'welcome')
         .map(m => ({ role: m.role, content: m.content }));
 
-      conversationMessages.push({ role: 'user', content: messageContent });
+      conversationMessages.push({ role: 'user', content: messageForLLM });
 
       const response = await api.sendChatMessage(conversationMessages);
 
@@ -329,6 +342,63 @@ function ChatPanel() {
     });
   };
 
+  // Summarize selected nodes by type for display
+  const selectionSummary = useMemo(() => {
+    if (!selectedGraphNodes || selectedGraphNodes.length === 0) return null;
+    const byType = {};
+    for (const node of selectedGraphNodes) {
+      const type = node.type || node.nodeType || 'Unknown';
+      if (!byType[type]) byType[type] = [];
+      byType[type].push(node);
+    }
+    return {
+      total: selectedGraphNodes.length,
+      byType,
+      types: Object.entries(byType).map(([type, nodes]) => ({
+        type,
+        count: nodes.length,
+        color: getNodeColor(type),
+        names: nodes.map(n => n.name || n.label || '?').slice(0, 3),
+      })),
+    };
+  }, [selectedGraphNodes]);
+
+  // Build context string for selected nodes to send to LLM
+  const buildSelectionContext = () => {
+    if (!selectedGraphNodes || selectedGraphNodes.length === 0) return '';
+
+    let context = '\n\n[Selected nodes in the visualization:]\n';
+    let charCount = context.length;
+
+    for (const node of selectedGraphNodes) {
+      const type = node.type || node.nodeType || 'Unknown';
+      const name = node.name || node.label || '?';
+      const id = node.id || '';
+      const desc = node.description || '';
+      const summary = node.summary || '';
+      const tags = (node.tags || []).join(', ');
+      const identifier = node.identifier || node.metadata?.identifier || '';
+
+      let nodeStr = `- ${type}: "${name}" (ID: ${id})`;
+      if (summary) nodeStr += `\n  Summary: ${summary}`;
+      if (desc) nodeStr += `\n  Description: ${desc}`;
+      if (tags) nodeStr += `\n  Tags: ${tags}`;
+      if (identifier) nodeStr += `\n  Identifier/URL: ${identifier}`;
+      nodeStr += '\n';
+
+      if (charCount + nodeStr.length > MAX_SELECTION_CONTEXT_CHARS) {
+        const remaining = selectedGraphNodes.length - selectedGraphNodes.indexOf(node);
+        context += `\n(... and ${remaining} more selected nodes, truncated for brevity. Use get_node_details with the IDs above to get more information.)\n`;
+        break;
+      }
+
+      context += nodeStr;
+      charCount += nodeStr.length;
+    }
+
+    return context;
+  };
+
   const formatTime = (timestamp) => {
     if (!timestamp) return '';
     const date = new Date(timestamp);
@@ -471,6 +541,31 @@ function ChatPanel() {
       )}
 
       <div className="chat-input-container">
+        {selectionSummary && (
+          <div className="selection-indicator">
+            <div className="selection-indicator-content">
+              <span className="selection-indicator-label">
+                {t('chat.selected_nodes', { count: selectionSummary.total })}
+              </span>
+              <div className="selection-indicator-types">
+                {selectionSummary.types.map(({ type, count, color, names }) => (
+                  <span key={type} className="selection-type-chip" title={names.join(', ')}>
+                    <span className="selection-type-dot" style={{ backgroundColor: color }} />
+                    {type} ({count})
+                  </span>
+                ))}
+              </div>
+            </div>
+            <button
+              className="selection-clear-button"
+              onClick={clearSelectedGraphNodes}
+              title={t('chat.clear_selection')}
+            >
+              <XCircleFill size={14} />
+            </button>
+          </div>
+        )}
+
         {uploadedFile && (
           <div className="file-indicator">
             <div className="file-info">
@@ -495,7 +590,9 @@ function ChatPanel() {
           onKeyPress={handleKeyPress}
           placeholder={uploadedFile
             ? t('chat.placeholder_with_file')
-            : t('chat.placeholder')}
+            : selectionSummary
+              ? t('chat.placeholder_with_selection')
+              : t('chat.placeholder')}
           rows={3}
           disabled={isProcessing}
         />

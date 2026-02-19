@@ -18,6 +18,10 @@
   box-shadow: 0 0 12px rgba(100, 108, 255, 0.4);
 }
 
+.graph-custom-node.selected {
+  box-shadow: 0 0 0 3px rgba(100, 108, 255, 0.7), 0 0 16px rgba(100, 108, 255, 0.3);
+}
+
 .graph-node-header {
   padding: 0.4rem 0.6rem;
   border-radius: 6px 6px 0 0;
