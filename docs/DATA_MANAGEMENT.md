@@ -144,6 +144,8 @@ Node types fall into two categories:
 - **Theme** (teal) - AI strategies, data strategies, themes
 - **Goal** (indigo) - Strategic objectives and targets
 - **Event** (fuchsia) - Conferences, workshops, milestones
+- **Data** (cyan) - Datasets, registers, APIs, data sources
+- **Risk** (red) - Identified risks, threats, or vulnerabilities
 
 **System types** (foundational to the application):
 - **SavedView / VisualizationView** (gray) - Saved graph view snapshots

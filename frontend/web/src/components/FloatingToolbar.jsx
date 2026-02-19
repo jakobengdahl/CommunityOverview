@@ -46,7 +46,7 @@ const COLOR_MAP = {
   Goal: '#6366F1',
   Event: '#D946EF',
   Data: '#06B6D4',
-  Risk: '#F43F5E',
+  Risk: '#DC2626',
   Agent: '#EC4899',
   EventSubscription: '#8B5CF6',
   SavedView: '#6B7280',

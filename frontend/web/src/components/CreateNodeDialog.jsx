@@ -10,6 +10,7 @@ const TYPE_EXTRA_FIELDS = {
   Legislation: ['effective_date'],
   Goal: ['target_date'],
   Event: ['start_date', 'end_date'],
+  Data: ['identifier'],
 };
 
 const FIELD_LABELS = {

@@ -10,6 +10,10 @@ const DEFAULT_NODE_TYPES = [
   { type: 'Resource', description: 'Reports, software, tools' },
   { type: 'Legislation', description: 'Laws, directives' },
   { type: 'Theme', description: 'Themes, strategies' },
+  { type: 'Goal', description: 'Strategic objectives, targets' },
+  { type: 'Event', description: 'Conferences, workshops, milestones' },
+  { type: 'Data', description: 'Datasets, registers, APIs' },
+  { type: 'Risk', description: 'Risks, threats, vulnerabilities' },
 ];
 
 function EditNodeDialog({ node, onClose, onSave }) {

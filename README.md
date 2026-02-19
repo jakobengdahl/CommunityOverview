@@ -93,7 +93,7 @@ These represent the knowledge domain and can be customized per deployment:
 - **Goal** (indigo) - Strategic objectives and targets
 - **Event** (fuchsia) - Conferences, workshops, milestones
 - **Data** (cyan) - Datasets, registers, APIs, data sources
-- **Risk** (rose) - Identified risks, threats, or vulnerabilities
+- **Risk** (red) - Identified risks, threats, or vulnerabilities
 
 ### System Node Types (foundational to the application)
 
