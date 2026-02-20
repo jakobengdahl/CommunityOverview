@@ -42,10 +42,6 @@
   margin: 4px 2px;
 }
 
-.floating-toolbar-item-wrapper {
-  position: relative;
-}
-
 .floating-toolbar-item {
   width: 40px;
   height: 40px;
@@ -79,9 +75,7 @@
 }
 
 .floating-toolbar-tooltip {
-  position: absolute;
-  left: calc(100% + 12px);
-  top: 50%;
+  position: fixed;
   transform: translateY(-50%);
   background: rgba(26, 26, 26, 0.95);
   backdrop-filter: blur(8px);
@@ -93,7 +87,7 @@
   color: #ddd;
   white-space: nowrap;
   pointer-events: none;
-  z-index: 110;
+  z-index: 10000;
   box-shadow: 0 2px 8px rgba(0, 0, 0, 0.3);
   animation: tooltipFadeIn 0.1s ease-out;
 }
