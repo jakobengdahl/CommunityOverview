@@ -2,80 +2,180 @@
   "schema": {
     "node_types": {
       "SavedView": {
-        "fields": ["name", "description", "summary", "metadata"],
+        "fields": [
+          "name",
+          "description",
+          "summary",
+          "metadata"
+        ],
         "static": true,
         "category": "system",
         "description": "Saved graph view snapshots for quick navigation",
         "color": "#6B7280"
       },
       "VisualizationView": {
-        "fields": ["name", "description", "summary", "metadata"],
+        "fields": [
+          "name",
+          "description",
+          "summary",
+          "metadata"
+        ],
         "static": true,
         "category": "system",
         "description": "Saved graph view snapshots (legacy)",
         "color": "#6B7280"
       },
       "EventSubscription": {
-        "fields": ["name", "description", "summary", "metadata"],
+        "fields": [
+          "name",
+          "description",
+          "summary",
+          "metadata"
+        ],
         "static": true,
         "category": "system",
         "description": "Webhook subscription for graph mutation events. Configuration stored in metadata: filters (entity_kind, node_types, operations, keywords) and delivery (webhook_url, ignore_origins, ignore_session_ids)",
         "color": "#8B5CF6"
       },
       "Agent": {
-        "fields": ["name", "description", "summary", "metadata"],
+        "fields": [
+          "name",
+          "description",
+          "summary",
+          "metadata"
+        ],
         "static": true,
         "category": "system",
         "description": "AI agent configuration (runtime not implemented). Links to EventSubscription via metadata.subscription_id. Agent config in metadata.agent (type, config)",
         "color": "#EC4899"
       },
       "Actor": {
-        "fields": ["name", "description", "summary", "tags"],
+        "fields": [
+          "name",
+          "description",
+          "summary",
+          "tags",
+          "subtypes"
+        ],
         "category": "domain",
         "description": "Government agencies, organizations, individuals responsible for initiatives",
         "color": "#3B82F6"
       },
       "Initiative": {
-        "fields": ["name", "description", "summary", "tags", "start_date", "end_date"],
+        "fields": [
+          "name",
+          "description",
+          "summary",
+          "tags",
+          "subtypes",
+          "start_date",
+          "end_date"
+        ],
         "category": "domain",
         "description": "Projects, programs, collaborative activities",
         "color": "#10B981"
       },
       "Capability": {
-        "fields": ["name", "description", "summary", "tags"],
+        "fields": [
+          "name",
+          "description",
+          "summary",
+          "tags",
+          "subtypes"
+        ],
         "category": "domain",
         "description": "Capabilities, competencies, skills needed/provided",
         "color": "#F97316"
       },
       "Resource": {
-        "fields": ["name", "description", "summary", "tags", "identifier"],
+        "fields": [
+          "name",
+          "description",
+          "summary",
+          "tags",
+          "subtypes",
+          "identifier"
+        ],
         "category": "domain",
         "description": "Outputs such as reports, software, tools, datasets. Field 'identifier' follows Dublin Core (dc:identifier) for URLs/URIs.",
         "color": "#FBBF24"
       },
       "Legislation": {
-        "fields": ["name", "description", "summary", "tags", "effective_date"],
+        "fields": [
+          "name",
+          "description",
+          "summary",
+          "tags",
+          "subtypes",
+          "effective_date"
+        ],
         "category": "domain",
         "description": "Laws, directives (NIS2, GDPR, etc.)",
         "color": "#EF4444"
       },
       "Theme": {
-        "fields": ["name", "description", "summary", "tags"],
+        "fields": [
+          "name",
+          "description",
+          "summary",
+          "tags",
+          "subtypes"
+        ],
         "category": "domain",
         "description": "Themes like AI strategies, data strategies, digitalization",
         "color": "#14B8A6"
       },
       "Goal": {
-        "fields": ["name", "description", "summary", "tags", "target_date"],
+        "fields": [
+          "name",
+          "description",
+          "summary",
+          "tags",
+          "subtypes",
+          "target_date"
+        ],
         "category": "domain",
         "description": "Strategic objectives and targets for digitalization efforts",
         "color": "#6366F1"
       },
       "Event": {
-        "fields": ["name", "description", "summary", "tags", "start_date", "end_date"],
+        "fields": [
+          "name",
+          "description",
+          "summary",
+          "tags",
+          "subtypes",
+          "start_date",
+          "end_date"
+        ],
         "category": "domain",
         "description": "A non-persistent, time-based occurrence (aligned with dc:Event). Conferences, workshops, decisions, milestones.",
         "color": "#D946EF"
+      },
+      "Data": {
+        "fields": [
+          "name",
+          "description",
+          "summary",
+          "tags",
+          "subtypes",
+          "identifier"
+        ],
+        "category": "domain",
+        "description": "Datasets, registers, APIs, or other data sources. Field 'identifier' follows Dublin Core (dc:identifier) for URLs/URIs.",
+        "color": "#06B6D4"
+      },
+      "Risk": {
+        "fields": [
+          "name",
+          "description",
+          "summary",
+          "tags",
+          "subtypes"
+        ],
+        "category": "domain",
+        "description": "Identified risks, threats, or vulnerabilities relevant to initiatives, legislation, or capabilities",
+        "color": "#DC2626"
       }
     },
     "relationship_types": {
@@ -114,6 +214,8 @@
       "Theme": "#14B8A6",
       "Goal": "#6366F1",
       "Event": "#D946EF",
+      "Data": "#06B6D4",
+      "Risk": "#DC2626",
       "SavedView": "#6B7280",
       "VisualizationView": "#6B7280",
       "EventSubscription": "#8B5CF6",

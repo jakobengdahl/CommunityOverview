@@ -286,6 +286,11 @@ def create_rest_router(service: GraphService, prefix: str = "") -> APIRouter:
         """List all allowed relationship types according to schema config."""
         return service.list_relationship_types()
 
+    @router.get("/meta/subtypes")
+    async def get_subtypes(node_type: Optional[str] = Query(None, description="Filter by node type")) -> Dict[str, Any]:
+        """Get existing subtypes used in the graph, grouped by node type."""
+        return service.get_subtypes(node_type)
+
     @router.get("/schema")
     async def get_schema() -> Dict[str, Any]:
         """Get the complete schema configuration (node types, relationship types)."""

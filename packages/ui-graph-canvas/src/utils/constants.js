@@ -12,6 +12,8 @@ export const NODE_COLORS = {
   Theme: '#14B8A6',
   Goal: '#6366F1',
   Event: '#D946EF',
+  Data: '#06B6D4',
+  Risk: '#DC2626',
   Agent: '#EC4899',
   EventSubscription: '#8B5CF6',
   SavedView: '#6B7280',

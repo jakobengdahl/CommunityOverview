@@ -1,4 +1,5 @@
-import { useState } from 'react';
+import { useState, useRef, useEffect, useCallback } from 'react';
+import { createPortal } from 'react-dom';
 import {
   PersonFill,
   RocketTakeoffFill,
@@ -8,6 +9,8 @@ import {
   TagsFill,
   TrophyFill,
   CalendarEventFill,
+  DatabaseFill,
+  ExclamationTriangleFill,
   CpuFill,
   BellFill,
   BookmarkFill,
@@ -26,6 +29,8 @@ const ICON_MAP = {
   Theme: TagsFill,
   Goal: TrophyFill,
   Event: CalendarEventFill,
+  Data: DatabaseFill,
+  Risk: ExclamationTriangleFill,
   Agent: CpuFill,
   EventSubscription: BellFill,
   SavedView: BookmarkFill,
@@ -41,6 +46,8 @@ const COLOR_MAP = {
   Theme: '#14B8A6',
   Goal: '#6366F1',
   Event: '#D946EF',
+  Data: '#06B6D4',
+  Risk: '#DC2626',
   Agent: '#EC4899',
   EventSubscription: '#8B5CF6',
   SavedView: '#6B7280',
@@ -57,6 +64,8 @@ const TOOLBAR_ORDER = [
   'Theme',
   'Goal',
   'Event',
+  'Data',
+  'Risk',
   null, // separator
   'Agent',
   'EventSubscription',
@@ -74,6 +83,8 @@ function FloatingToolbar({
 }) {
   const { t } = useI18n();
   const [hoveredType, setHoveredType] = useState(null);
+  const [tooltipPos, setTooltipPos] = useState(null);
+  const buttonRefs = useRef({});
 
   const handleClick = (nodeType) => {
     if (nodeType === 'Agent') {
@@ -98,40 +109,68 @@ function FloatingToolbar({
     event.dataTransfer.effectAllowed = 'move';
   };
 
+  const handleMouseEnter = useCallback((nodeType) => {
+    setHoveredType(nodeType);
+    const btn = buttonRefs.current[nodeType];
+    if (btn) {
+      const rect = btn.getBoundingClientRect();
+      setTooltipPos({
+        top: rect.top + rect.height / 2,
+        left: rect.right + 12,
+      });
+    }
+  }, []);
+
+  const handleMouseLeave = useCallback(() => {
+    setHoveredType(null);
+    setTooltipPos(null);
+  }, []);
+
+  const getTooltipLabel = (nodeType) => {
+    if (nodeType === 'EventSubscription') return t('toolbar.webhook');
+    if (nodeType === 'Group') return t('toolbar.group');
+    return nodeType;
+  };
+
   return (
-    <div className="floating-toolbar">
-      {TOOLBAR_ORDER.map((nodeType, index) => {
-        if (nodeType === null) {
-          return <div key={`sep-${index}`} className="floating-toolbar-separator" />;
-        }
+    <>
+      <div className="floating-toolbar">
+        {TOOLBAR_ORDER.map((nodeType, index) => {
+          if (nodeType === null) {
+            return <div key={`sep-${index}`} className="floating-toolbar-separator" />;
+          }
 
-        const Icon = ICON_MAP[nodeType];
-        const color = COLOR_MAP[nodeType];
-        const isDraggable = nodeType !== 'SavedView';
+          const Icon = ICON_MAP[nodeType];
+          const color = COLOR_MAP[nodeType];
+          const isDraggable = nodeType !== 'SavedView';
 
-        return (
-          <div key={nodeType} className="floating-toolbar-item-wrapper">
+          return (
             <button
+              key={nodeType}
+              ref={(el) => { buttonRefs.current[nodeType] = el; }}
               className="floating-toolbar-item"
               onClick={() => handleClick(nodeType)}
-              onMouseEnter={() => setHoveredType(nodeType)}
-              onMouseLeave={() => setHoveredType(null)}
+              onMouseEnter={() => handleMouseEnter(nodeType)}
+              onMouseLeave={handleMouseLeave}
               draggable={isDraggable}
               onDragStart={(e) => handleDragStart(e, nodeType)}
               style={{ '--toolbar-item-color': color }}
-              title={nodeType}
             >
               {Icon && <Icon size={18} />}
             </button>
-            {hoveredType === nodeType && (
-              <div className="floating-toolbar-tooltip">
-                {nodeType === 'EventSubscription' ? t('toolbar.webhook') : nodeType === 'Group' ? t('toolbar.group') : nodeType}
-              </div>
-            )}
-          </div>
-        );
-      })}
-    </div>
+          );
+        })}
+      </div>
+      {hoveredType && tooltipPos && createPortal(
+        <div
+          className="floating-toolbar-tooltip"
+          style={{ top: tooltipPos.top, left: tooltipPos.left }}
+        >
+          {getTooltipLabel(hoveredType)}
+        </div>,
+        document.body
+      )}
+    </>
   );
 }
 

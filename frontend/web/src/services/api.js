@@ -253,6 +253,16 @@ export async function getNodeTypes() {
 }
 
 /**
+ * Get existing subtypes grouped by node type
+ * @param {string} [nodeType] - Optional filter by node type
+ * @returns {Promise<{subtypes: Object}>}
+ */
+export async function getSubtypes(nodeType) {
+  const params = nodeType ? `?node_type=${encodeURIComponent(nodeType)}` : '';
+  return apiFetch(`${API_BASE}/meta/subtypes${params}`);
+}
+
+/**
  * Get relationship type metadata
  * @returns {Promise<{relationship_types: Array}>}
  */

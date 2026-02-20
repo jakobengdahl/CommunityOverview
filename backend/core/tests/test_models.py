@@ -19,7 +19,7 @@ class TestNodeType:
     def test_node_types_exist(self):
         """Verify all expected node types exist"""
         expected_types = [
-            "Actor", "Community", "Initiative", "Capability",
+            "Actor", "Initiative", "Capability",
             "Resource", "Legislation", "Theme", "Goal", "Event", "SavedView"
         ]
         for type_name in expected_types:
@@ -28,7 +28,6 @@ class TestNodeType:
     def test_node_type_values(self):
         """Verify node type string values"""
         assert NodeType.ACTOR.value == "Actor"
-        assert NodeType.COMMUNITY.value == "Community"
         assert NodeType.INITIATIVE.value == "Initiative"
 
     def test_all_node_types_have_colors(self):
@@ -65,6 +64,7 @@ class TestNode:
         assert node.description == ""
         assert node.summary == ""
         assert node.tags == []
+        assert node.subtypes == []
         assert node.metadata == {}
         assert isinstance(node.created_at, datetime)
         assert isinstance(node.updated_at, datetime)
@@ -136,6 +136,56 @@ class TestNode:
         """Test that node name must be non-empty"""
         with pytest.raises(ValueError):
             Node(type=NodeType.ACTOR, name="")
+
+    def test_create_node_with_subtypes(self):
+        """Test creating a node with subtypes"""
+        node = Node(
+            type=NodeType.ACTOR,
+            name="Test Agency",
+            subtypes=["Government agency", "Regulatory body"]
+        )
+
+        assert node.subtypes == ["Government agency", "Regulatory body"]
+
+    def test_node_subtypes_default_empty(self):
+        """Test that subtypes defaults to empty list"""
+        node = Node(type=NodeType.ACTOR, name="Test")
+        assert node.subtypes == []
+
+    def test_node_subtypes_in_to_dict(self):
+        """Test that subtypes are included in to_dict"""
+        node = Node(
+            type=NodeType.ACTOR,
+            name="Test",
+            subtypes=["Municipality"]
+        )
+        data = node.to_dict()
+        assert data['subtypes'] == ["Municipality"]
+
+    def test_node_subtypes_from_dict(self):
+        """Test that subtypes are loaded from dict"""
+        data = {
+            'id': 'test-id',
+            'type': 'Actor',
+            'name': 'Test Actor',
+            'subtypes': ["Government agency"],
+            'created_at': '2024-01-01T00:00:00',
+            'updated_at': '2024-01-01T00:00:00'
+        }
+        node = Node.from_dict(data)
+        assert node.subtypes == ["Government agency"]
+
+    def test_node_subtypes_missing_from_dict(self):
+        """Test that missing subtypes in dict defaults to empty list"""
+        data = {
+            'id': 'test-id',
+            'type': 'Actor',
+            'name': 'Test Actor',
+            'created_at': '2024-01-01T00:00:00',
+            'updated_at': '2024-01-01T00:00:00'
+        }
+        node = Node.from_dict(data)
+        assert node.subtypes == []
 
     def test_node_auto_generates_uuid(self):
         """Test that nodes get unique UUIDs"""

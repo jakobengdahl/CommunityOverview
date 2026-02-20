@@ -73,6 +73,7 @@ class ChatService:
             "update_node": self._graph_service.update_node,
             "delete_nodes": self._graph_service.delete_nodes,
             "list_node_types": self._graph_service.list_node_types,
+            "get_subtypes": self._graph_service.get_subtypes,
             "get_graph_stats": self._graph_service.get_graph_stats,
             "save_view": self._graph_service.save_view,
             "get_saved_view": self._graph_service.get_saved_view,
@@ -230,11 +231,12 @@ User's question: {user_message}"""
 {community_instruction}
 
 For each entity you find, provide:
-1. type: The node type (Actor, Initiative, Capability, Resource, Legislation, Theme)
+1. type: The node type (Actor, Initiative, Capability, Resource, Legislation, Theme, Data, Risk, Goal, Event)
 2. name: The entity name
 3. description: A brief description based on the text
 4. summary: A one-line summary (max 100 characters)
 5. tags: Relevant tags for categorization
+6. subtypes: Sub-classifications within the node type (e.g., for Actor: "Government agency", "Municipality")
 
 Return the entities as a JSON array. Only extract entities that are clearly identifiable and relevant.
 Do NOT include generic terms or overly broad categories.
@@ -246,7 +248,7 @@ Text to analyze:
 
 Respond with ONLY a JSON array of extracted entities, no other text. Example format:
 [
-  {{"type": "Actor", "name": "Example Agency", "description": "...", "summary": "...", "tags": ["tag1", "tag2"]}}
+  {{"type": "Actor", "name": "Example Agency", "description": "...", "summary": "...", "tags": ["tag1", "tag2"], "subtypes": ["Government agency"]}}
 ]"""
 
         messages = [{"role": "user", "content": extraction_prompt}]

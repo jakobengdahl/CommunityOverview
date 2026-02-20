@@ -115,6 +115,20 @@ FIELD LIMITS:
 - description: optional, max 2000 characters
 - summary: optional, max 300 characters (short text for visualization labels)
 - tags: optional list of strings
+- subtypes: optional list of strings for sub-classification within a node type
+
+SUBTYPES SYSTEM:
+Nodes can have subtypes for finer categorization within their node type:
+- Subtypes are comma-separated classifications (e.g., an Actor can have subtypes ["Government agency", "Regulatory body"])
+- Each node type has its own set of subtypes (Actor subtypes differ from Initiative subtypes)
+- When adding/updating nodes, prefer EXISTING subtypes from the graph to maintain consistency
+- Use get_subtypes tool to see which subtypes already exist for a given node type
+- Case normalization: always match existing casing (e.g., if "Government agency" exists, don't use "government agency")
+- Example subtypes:
+  * Actor: "Government agency", "Municipality", "International organisation", "Steering group", "Industry body"
+  * Initiative: "Research project", "Pilot program", "Working group", "Standards development"
+  * Risk: "Cybersecurity", "Compliance", "Operational", "Strategic"
+  * Data: "Open data", "Register", "API", "Statistics"
 
 EDGE TYPE:
 Edge type is OPTIONAL when creating edges. If omitted, the edge defaults to "RELATES_TO" (a general connection).
@@ -573,7 +587,8 @@ class ChatProcessor:
                                     "name": {"type": "string", "description": "Node name (required, 1-200 chars)"},
                                     "description": {"type": "string", "description": "Description (optional, max 2000 chars)"},
                                     "summary": {"type": "string", "description": "Short summary for visualization (optional, max 300 chars)"},
-                                    "tags": {"type": "array", "items": {"type": "string"}, "description": "Tags for categorization"}
+                                    "tags": {"type": "array", "items": {"type": "string"}, "description": "Tags for categorization"},
+                                    "subtypes": {"type": "array", "items": {"type": "string"}, "description": "Sub-classifications within the node type (optional, use existing subtypes when possible)"}
                                 }
                             }
                         },
@@ -660,6 +675,19 @@ class ChatProcessor:
                 "input_schema": {
                     "type": "object",
                     "properties": {}
+                }
+            },
+            {
+                "name": "get_subtypes",
+                "description": "Get existing subtypes used in the graph, grouped by node type. Use this to suggest consistent subtypes when adding or updating nodes.",
+                "input_schema": {
+                    "type": "object",
+                    "properties": {
+                        "node_type": {
+                            "type": "string",
+                            "description": "Optional: filter subtypes for a specific node type (e.g. 'Actor')"
+                        }
+                    }
                 }
             },
             {

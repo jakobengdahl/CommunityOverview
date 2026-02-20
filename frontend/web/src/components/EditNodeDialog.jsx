@@ -1,5 +1,7 @@
 import { useState, useEffect } from 'react';
 import useGraphStore from '../store/graphStore';
+import * as api from '../services/api';
+import SubtypeInput from './SubtypeInput';
 import './EditNodeDialog.css';
 
 // Default node types as fallback if schema not loaded
@@ -10,6 +12,10 @@ const DEFAULT_NODE_TYPES = [
   { type: 'Resource', description: 'Reports, software, tools' },
   { type: 'Legislation', description: 'Laws, directives' },
   { type: 'Theme', description: 'Themes, strategies' },
+  { type: 'Goal', description: 'Strategic objectives, targets' },
+  { type: 'Event', description: 'Conferences, workshops, milestones' },
+  { type: 'Data', description: 'Datasets, registers, APIs' },
+  { type: 'Risk', description: 'Risks, threats, vulnerabilities' },
 ];
 
 function EditNodeDialog({ node, onClose, onSave }) {
@@ -21,6 +27,8 @@ function EditNodeDialog({ node, onClose, onSave }) {
     summary: '',
     tags: '',
   });
+  const [subtypes, setSubtypes] = useState([]);
+  const [existingSubtypes, setExistingSubtypes] = useState([]);
 
   // Get node types from schema or use defaults
   const nodeTypes = getNodeTypes();
@@ -37,8 +45,20 @@ function EditNodeDialog({ node, onClose, onSave }) {
         summary: node.data.summary || '',
         tags: (node.data.tags || []).join(', '),
       });
+      setSubtypes(node.data.subtypes || []);
     }
   }, [node]);
+
+  // Fetch existing subtypes when node type changes
+  useEffect(() => {
+    if (formData.type) {
+      api.getSubtypes(formData.type)
+        .then(data => {
+          setExistingSubtypes(data.subtypes?.[formData.type] || []);
+        })
+        .catch(() => {});
+    }
+  }, [formData.type]);
 
   const handleChange = (e) => {
     const { name, value } = e.target;
@@ -53,6 +73,7 @@ function EditNodeDialog({ node, onClose, onSave }) {
       description: formData.description,
       summary: formData.summary,
       tags: formData.tags.split(',').map(t => t.trim()).filter(Boolean),
+      subtypes,
     });
   };
 
@@ -105,6 +126,14 @@ function EditNodeDialog({ node, onClose, onSave }) {
                 </option>
               ))}
             </select>
+          </div>
+
+          <div className="form-group">
+            <SubtypeInput
+              value={subtypes}
+              onChange={setSubtypes}
+              existingSubtypes={existingSubtypes}
+            />
           </div>
 
           <div className="form-group">

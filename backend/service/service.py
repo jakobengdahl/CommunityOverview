@@ -602,6 +602,19 @@ class GraphService:
 
         return {"node_types": node_types}
 
+    def get_subtypes(self, node_type: str = None) -> Dict[str, Any]:
+        """
+        Get existing subtypes used in the graph, grouped by node type.
+
+        Args:
+            node_type: Optional filter for a specific node type
+
+        Returns:
+            Dict with subtypes grouped by node type
+        """
+        subtypes = self._storage.get_subtypes_by_node_type(node_type)
+        return {"subtypes": subtypes}
+
     def list_relationship_types(self) -> Dict[str, Any]:
         """
         List all allowed relationship types according to schema config.
