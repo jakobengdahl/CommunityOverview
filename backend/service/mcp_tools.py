@@ -178,6 +178,7 @@ def register_mcp_tools(mcp, service: GraphService) -> Dict[str, Callable]:
           - description: optional, max 2000 characters
           - summary: optional, max 300 characters (short text for visualization)
           - tags: optional list of strings
+          - subtypes: optional list of strings for sub-classification within the node type
 
         Edge type is optional. If omitted, it defaults to "RELATES_TO".
 
@@ -275,6 +276,20 @@ def register_mcp_tools(mcp, service: GraphService) -> Dict[str, Callable]:
             Dict with node types and their color coding
         """
         return service.list_node_types()
+
+    @register_tool
+    def get_subtypes(node_type: Optional[str] = None) -> Dict[str, Any]:
+        """
+        Get existing subtypes used in the graph, grouped by node type.
+        Use this to suggest consistent subtypes when adding or updating nodes.
+
+        Args:
+            node_type: Optional filter for a specific node type (e.g. 'Actor')
+
+        Returns:
+            Dict with subtypes grouped by node type
+        """
+        return service.get_subtypes(node_type)
 
     @register_tool
     def list_relationship_types() -> Dict[str, Any]:

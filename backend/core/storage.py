@@ -387,7 +387,8 @@ class GraphStorage:
             # Text matching including tags (if not matching all)
             if not match_all:
                 tags_text = " ".join(node.tags) if hasattr(node, 'tags') and node.tags else ""
-                searchable_text = f"{node.name} {node.description} {node.summary} {tags_text}".lower()
+                subtypes_text = " ".join(node.subtypes) if hasattr(node, 'subtypes') and node.subtypes else ""
+                searchable_text = f"{node.name} {node.description} {node.summary} {tags_text} {subtypes_text}".lower()
                 if query_lower not in searchable_text:
                     continue
 
@@ -724,7 +725,7 @@ class GraphStorage:
             before_state = node.to_dict()
 
             # Update allowed fields
-            allowed_fields = {'name', 'description', 'summary', 'tags', 'metadata'}
+            allowed_fields = {'name', 'description', 'summary', 'tags', 'subtypes', 'metadata'}
             for key, value in updates.items():
                 if key in allowed_fields:
                     setattr(node, key, value)
@@ -890,6 +891,26 @@ class GraphStorage:
             nodes_by_type=nodes_by_type,
             last_updated=datetime.utcnow()
         )
+
+    def get_subtypes_by_node_type(self, node_type: Optional[str] = None) -> Dict[str, List[str]]:
+        """Get all unique subtypes grouped by node type.
+
+        Args:
+            node_type: If provided, only return subtypes for this node type.
+
+        Returns:
+            Dict mapping node type names to sorted lists of unique subtypes.
+        """
+        result: Dict[str, set] = {}
+        for node in self.nodes.values():
+            type_name = node.type.value if hasattr(node.type, 'value') else str(node.type)
+            if node_type and type_name != node_type:
+                continue
+            if hasattr(node, 'subtypes') and node.subtypes:
+                if type_name not in result:
+                    result[type_name] = set()
+                result[type_name].update(node.subtypes)
+        return {k: sorted(v) for k, v in result.items()}
 
     def get_edges_between_nodes(self, node_ids: List[str]) -> List[Edge]:
         """Get all edges where both source and target are in the given node IDs"""

@@ -339,6 +339,73 @@ class TestGraphStorageStats:
         assert stats.nodes_by_type["Theme"] == 1
 
 
+class TestGraphStorageSubtypes:
+    """Tests for subtypes functionality"""
+
+    def test_add_node_with_subtypes(self, temp_storage):
+        """Test adding a node with subtypes"""
+        node = Node(
+            id="actor-sub-1",
+            type=NodeType.ACTOR,
+            name="Test Agency",
+            subtypes=["Government agency", "Regulatory body"]
+        )
+        temp_storage.add_nodes([node], [])
+        stored = temp_storage.get_node("actor-sub-1")
+        assert stored.subtypes == ["Government agency", "Regulatory body"]
+
+    def test_update_node_subtypes(self, temp_storage):
+        """Test updating subtypes on an existing node"""
+        node = Node(id="actor-sub-2", type=NodeType.ACTOR, name="Test Org")
+        temp_storage.add_nodes([node], [])
+
+        temp_storage.update_node("actor-sub-2", {"subtypes": ["Municipality"]})
+        updated = temp_storage.get_node("actor-sub-2")
+        assert updated.subtypes == ["Municipality"]
+
+    def test_get_subtypes_by_node_type(self, temp_storage):
+        """Test getting subtypes grouped by node type"""
+        nodes = [
+            Node(id="s1", type=NodeType.ACTOR, name="A1", subtypes=["Government agency"]),
+            Node(id="s2", type=NodeType.ACTOR, name="A2", subtypes=["Municipality", "Government agency"]),
+            Node(id="s3", type=NodeType.INITIATIVE, name="I1", subtypes=["Research project"]),
+            Node(id="s4", type=NodeType.ACTOR, name="A3"),  # No subtypes
+        ]
+        temp_storage.add_nodes(nodes, [])
+
+        result = temp_storage.get_subtypes_by_node_type()
+        assert "Actor" in result
+        assert sorted(result["Actor"]) == ["Government agency", "Municipality"]
+        assert "Initiative" in result
+        assert result["Initiative"] == ["Research project"]
+
+    def test_get_subtypes_filtered_by_type(self, temp_storage):
+        """Test filtering subtypes by a specific node type"""
+        nodes = [
+            Node(id="f1", type=NodeType.ACTOR, name="A1", subtypes=["Government agency"]),
+            Node(id="f2", type=NodeType.INITIATIVE, name="I1", subtypes=["Pilot program"]),
+        ]
+        temp_storage.add_nodes(nodes, [])
+
+        result = temp_storage.get_subtypes_by_node_type("Actor")
+        assert "Actor" in result
+        assert "Initiative" not in result
+
+    def test_search_includes_subtypes(self, temp_storage):
+        """Test that search matches against subtypes"""
+        node = Node(
+            id="search-sub-1",
+            type=NodeType.ACTOR,
+            name="Test Entity",
+            subtypes=["Steering group"]
+        )
+        temp_storage.add_nodes([node], [])
+
+        results = temp_storage.search_nodes("steering group")
+        assert len(results) == 1
+        assert results[0].id == "search-sub-1"
+
+
 class TestGraphStoragePersistence:
     """Tests for data persistence"""
 

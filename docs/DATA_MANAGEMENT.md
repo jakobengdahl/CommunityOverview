@@ -113,7 +113,7 @@ Each graph file follows this structure:
       "description": "Longer description text",
       "summary": "Short label for visualization",
       "tags": ["tag1", "tag2"],
-      "communities": []
+      "subtypes": ["Government agency"]
     }
   ],
   "edges": [
@@ -152,6 +152,12 @@ Node types fall into two categories:
 - **EventSubscription** (violet) - Webhook subscriptions for graph mutation events
 - **Agent** (pink) - AI agent configurations
 - **Groups** - Visual grouping of nodes in the canvas
+
+All domain node types support an optional **subtypes** field for sub-classification within each type. Subtypes are stored as a list of strings (e.g., `["Government agency", "Regulatory body"]`). The UI provides autocomplete with case normalization based on existing subtypes in the graph, helping maintain consistency. Example subtypes:
+- Actor: "Government agency", "Municipality", "International organisation", "Steering group"
+- Initiative: "Research project", "Pilot program", "Working group"
+- Risk: "Cybersecurity", "Compliance", "Operational"
+- Data: "Open data", "Register", "API", "Statistics"
 
 Domain types can be freely modified, added, or removed in the schema configuration file. System types are integral to application functionality and should not be removed.
 

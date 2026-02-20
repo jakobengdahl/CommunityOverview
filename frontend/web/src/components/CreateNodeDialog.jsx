@@ -1,6 +1,7 @@
 import { useState, useEffect } from 'react';
 import useGraphStore from '../store/graphStore';
 import * as api from '../services/api';
+import SubtypeInput from './SubtypeInput';
 import './CreateNodeDialog.css';
 
 // Fields that certain node types have beyond the basic set
@@ -33,8 +34,19 @@ function CreateNodeDialog({ nodeType, onClose, onSave }) {
     tags: '',
     ...Object.fromEntries(extraFields.map(f => [f, ''])),
   });
+  const [subtypes, setSubtypes] = useState([]);
+  const [existingSubtypes, setExistingSubtypes] = useState([]);
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState(null);
+
+  // Fetch existing subtypes for this node type
+  useEffect(() => {
+    api.getSubtypes(nodeType)
+      .then(data => {
+        setExistingSubtypes(data.subtypes?.[nodeType] || []);
+      })
+      .catch(() => {});
+  }, [nodeType]);
 
   const handleChange = (e) => {
     const { name, value } = e.target;
@@ -56,6 +68,10 @@ function CreateNodeDialog({ nodeType, onClose, onSave }) {
         summary: formData.summary.trim(),
         tags: formData.tags.split(',').map(t => t.trim()).filter(Boolean),
       };
+
+      if (subtypes.length > 0) {
+        node.subtypes = subtypes;
+      }
 
       // Add extra fields if they have values
       for (const field of extraFields) {
@@ -112,6 +128,14 @@ function CreateNodeDialog({ nodeType, onClose, onSave }) {
               placeholder={`Enter ${nodeType.toLowerCase()} name...`}
               required
               autoFocus
+            />
+          </div>
+
+          <div className="form-group">
+            <SubtypeInput
+              value={subtypes}
+              onChange={setSubtypes}
+              existingSubtypes={existingSubtypes}
             />
           </div>
 

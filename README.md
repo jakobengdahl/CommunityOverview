@@ -95,6 +95,8 @@ These represent the knowledge domain and can be customized per deployment:
 - **Data** (cyan) - Datasets, registers, APIs, data sources
 - **Risk** (red) - Identified risks, threats, or vulnerabilities
 
+All domain nodes support **subtypes** for finer sub-classification within each node type (e.g., an Actor can be tagged as "Government agency", "Municipality", "Steering group"). Subtypes are optional, stored as a list, and the UI provides autocomplete with case normalization based on existing subtypes in the graph.
+
 ### System Node Types (foundational to the application)
 
 These are integral to core application functionality:

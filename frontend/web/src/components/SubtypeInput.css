@@ -1,0 +1,100 @@
+.subtype-input-wrapper {
+  position: relative;
+}
+
+.subtype-label {
+  display: block;
+  margin-bottom: 4px;
+  font-size: 0.85rem;
+  color: #ccc;
+}
+
+.subtype-input-container {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px;
+  padding: 6px 8px;
+  background: #2a2a2a;
+  border: 1px solid #444;
+  border-radius: 6px;
+  cursor: text;
+  min-height: 38px;
+  align-items: center;
+}
+
+.subtype-input-container:focus-within {
+  border-color: #666;
+  outline: 1px solid #555;
+}
+
+.subtype-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 2px 8px;
+  background: #3a3a3a;
+  border: 1px solid #555;
+  border-radius: 4px;
+  font-size: 0.8rem;
+  color: #ddd;
+  white-space: nowrap;
+}
+
+.subtype-chip-remove {
+  background: none;
+  border: none;
+  color: #999;
+  cursor: pointer;
+  padding: 0 2px;
+  font-size: 1rem;
+  line-height: 1;
+}
+
+.subtype-chip-remove:hover {
+  color: #fff;
+}
+
+.subtype-text-input {
+  flex: 1;
+  min-width: 80px;
+  border: none;
+  background: transparent;
+  color: #ddd;
+  font-size: 0.85rem;
+  outline: none;
+  padding: 2px 0;
+}
+
+.subtype-text-input::placeholder {
+  color: #666;
+}
+
+.subtype-suggestions {
+  position: absolute;
+  top: 100%;
+  left: 0;
+  right: 0;
+  margin: 4px 0 0;
+  padding: 4px 0;
+  background: #2a2a2a;
+  border: 1px solid #444;
+  border-radius: 6px;
+  list-style: none;
+  max-height: 160px;
+  overflow-y: auto;
+  z-index: 200;
+  box-shadow: 0 4px 12px rgba(0, 0, 0, 0.4);
+}
+
+.subtype-suggestion-item {
+  padding: 6px 12px;
+  font-size: 0.85rem;
+  color: #ccc;
+  cursor: pointer;
+}
+
+.subtype-suggestion-item:hover,
+.subtype-suggestion-item.selected {
+  background: #3a3a3a;
+  color: #fff;
+}
