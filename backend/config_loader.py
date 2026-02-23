@@ -13,9 +13,13 @@ defaulting to config/schema_config.json.
 
 import os
 import json
+import logging
 from typing import Dict, List, Optional, Any
 from pathlib import Path
 from pydantic import BaseModel, Field, validator
+
+# Initialize logger
+logger = logging.getLogger(__name__)
 
 # Default config path relative to project root
 DEFAULT_CONFIG_PATH = "config/schema_config.json"
@@ -147,18 +151,18 @@ class ConfigLoader:
                 raw_config = json.load(f)
 
             self._config = SchemaFileConfig(**raw_config)
-            print(f"Loaded schema configuration from: {self._config_path}")
+            logger.info(f"Loaded schema configuration from: {self._config_path}")
 
         except FileNotFoundError:
-            print(f"Warning: Config file not found at {self._config_path}, using defaults")
+            logger.warning(f"Config file not found at {self._config_path}, using defaults")
             self._config = SchemaFileConfig()
 
         except json.JSONDecodeError as e:
-            print(f"Warning: Invalid JSON in config file: {e}, using defaults")
+            logger.warning(f"Invalid JSON in config file: {e}, using defaults")
             self._config = SchemaFileConfig()
 
         except Exception as e:
-            print(f"Warning: Error loading config: {e}, using defaults")
+            logger.warning(f"Error loading config: {e}, using defaults")
             self._config = SchemaFileConfig()
 
         # Ensure static node types are present
