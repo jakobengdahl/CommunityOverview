@@ -34,6 +34,7 @@ from backend.core import GraphStorage
 from backend.service import GraphService, create_rest_router, register_mcp_tools, json_serializer
 from backend.ui import ChatService, DocumentService, create_ui_router
 from backend.agents import AgentRegistry, AgentsSettings
+from backend.federation import FederationManager, load_federation_config, summarize_federation_config
 
 from .config import AppConfig
 
@@ -114,16 +115,45 @@ def create_app(
         allow_headers=["*"],  # Allow all headers
     )
 
+    federation_config = load_federation_config()
+    federation_summary = summarize_federation_config(federation_config)
+
     # Initialize graph storage if not provided
     if graph_storage is None:
         graph_path = config.get_graph_path()
         graph_storage = GraphStorage(str(graph_path))
 
+    def _on_federated_node_event(operation, before_node, after_node):
+        graph_storage.emit_federated_node_event(
+            operation=operation,
+            node_before=before_node,
+            node_after=after_node,
+            event_origin="federation-sync",
+        )
+
+    def _on_federated_edge_event(operation, before_edge, after_edge):
+        graph_storage.emit_federated_edge_event(
+            operation=operation,
+            edge_before=before_edge,
+            edge_after=after_edge,
+            event_origin="federation-sync",
+        )
+
+    federation_manager = FederationManager(
+        federation_config,
+        on_node_event=_on_federated_node_event,
+        on_edge_event=_on_federated_edge_event,
+    )
+
     # Initialize event system for webhook delivery
     graph_storage.setup_events(enabled=True)
 
     # Initialize GraphService
-    graph_service = GraphService(graph_storage)
+    graph_service = GraphService(graph_storage, federation_manager=federation_manager)
+
+    # Run federation startup sync (best effort, never blocks startup on failures)
+    federation_manager.sync_on_startup()
+    federation_manager.start()
 
     # Initialize Agent Registry for background agent workers
     agent_settings = AgentsSettings.from_env()
@@ -171,6 +201,9 @@ def create_app(
     app.state.graph_storage = graph_storage
     app.state.agent_registry = agent_registry
     app.state.config = config
+    app.state.federation_config = federation_config
+    app.state.federation_summary = federation_summary
+    app.state.federation_manager = federation_manager
 
     # Create and mount REST API router
     rest_router = create_rest_router(graph_service)
@@ -326,6 +359,10 @@ def create_app(
             "status": "healthy",
             "graph_nodes": len(graph_storage.nodes),
             "graph_edges": len(graph_storage.edges),
+            "federation": {
+                **federation_summary,
+                "runtime": federation_manager.get_status(),
+            },
         }
 
     # Root endpoint - redirect to web app
@@ -353,8 +390,22 @@ def create_app(
                 "nodes": len(graph_storage.nodes),
                 "edges": len(graph_storage.edges),
             },
-            "llm_provider": chat_service.provider_type
+            "llm_provider": chat_service.provider_type,
+            "federation": {
+                **federation_summary,
+                "runtime": federation_manager.get_status(),
+            },
         }
+
+    @app.get("/federation/status")
+    async def federation_status() -> Dict[str, Any]:
+        """Get federation cache and connectivity status."""
+        return federation_manager.get_status()
+
+    @app.post("/federation/sync")
+    async def federation_sync() -> Dict[str, Any]:
+        """Trigger best-effort sync for all enabled federated graph sources."""
+        return federation_manager.sync_all()
 
     # Agent system endpoints
     @app.get("/agents/status")
@@ -371,6 +422,7 @@ def create_app(
     @app.on_event("shutdown")
     async def shutdown_event():
         """Gracefully shutdown agent registry and event system."""
+        federation_manager.stop()
         agent_registry.stop()
         graph_storage.shutdown_events()
 

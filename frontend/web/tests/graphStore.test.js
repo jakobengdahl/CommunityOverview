@@ -1,4 +1,4 @@
-import { describe, it, expect, beforeEach, afterEach } from 'vitest';
+import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import useGraphStore from '../src/store/graphStore';
 
 describe('graphStore', () => {
@@ -17,6 +17,7 @@ describe('graphStore', () => {
       clearGroupsFlag: false,
       searchQuery: '',
       searchResults: null,
+      federationDepth: 1,
       stats: null,
       isLoading: false,
       configLoaded: false,
@@ -249,4 +250,28 @@ describe('graphStore', () => {
       expect(chatMessages[0].content).toContain('Custom welcome!');
     });
   });
+
+  describe('Federation depth persistence', () => {
+    it('persists federation depth to localStorage when updated', () => {
+      const setItemSpy = vi.spyOn(window.localStorage.__proto__, 'setItem');
+
+      useGraphStore.getState().setFederationDepth(3);
+
+      expect(useGraphStore.getState().federationDepth).toBe(3);
+      expect(setItemSpy).toHaveBeenCalledWith('federation_depth', '3');
+
+      setItemSpy.mockRestore();
+    });
+
+    it('ignores invalid federation depth values', () => {
+      useGraphStore.setState({ federationDepth: 2 });
+
+      useGraphStore.getState().setFederationDepth(0);
+      expect(useGraphStore.getState().federationDepth).toBe(2);
+
+      useGraphStore.getState().setFederationDepth('abc');
+      expect(useGraphStore.getState().federationDepth).toBe(2);
+    });
+  });
+
 });

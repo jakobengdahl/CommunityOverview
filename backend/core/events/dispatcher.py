@@ -22,6 +22,7 @@ from .models import (
     SubscriptionInfo,
     TargetFilters,
     KeywordFilters,
+    FederationFilters,
 )
 
 if TYPE_CHECKING:
@@ -150,10 +151,18 @@ class EventDispatcher:
             any=keywords_data.get("any", [])
         )
 
+        federation_data = data.get("federation", {})
+        federation = FederationFilters(
+            scope=federation_data.get("scope", "local_only"),
+            include_graph_ids=federation_data.get("include_graph_ids", []),
+            max_distance=federation_data.get("max_distance"),
+        )
+
         return SubscriptionFilters(
             target=target,
             operations=data.get("operations", ["create", "update", "delete"]),
             keywords=keywords,
+            federation=federation,
         )
 
     def _parse_delivery(self, data: Dict[str, Any]) -> SubscriptionDelivery:
@@ -293,6 +302,10 @@ class EventDispatcher:
             if not self._matches_keywords(event, filters.keywords.any):
                 return False
 
+        # Match federation scope/settings
+        if not self._matches_federation(event, filters.federation):
+            return False
+
         return True
 
     def _matches_keywords(self, event: Event, keywords: List[str]) -> bool:
@@ -325,6 +338,38 @@ class EventDispatcher:
             if keyword.lower() in searchable_text:
                 return True
 
+        return False
+
+
+    def _matches_federation(self, event: Event, federation: FederationFilters) -> bool:
+        """Check federation-scoped filters for local/federated event selection."""
+        entity_data = event.entity.after or event.entity.before or {}
+        metadata = entity_data.get("metadata", {}) if isinstance(entity_data, dict) else {}
+
+        origin_graph_id = metadata.get("origin_graph_id")
+        federation_distance = metadata.get("federation_distance")
+
+        is_federated = origin_graph_id is not None and federation_distance is not None
+
+        # Default behavior: local only (backward compatible)
+        if federation.scope == "local_only":
+            return not is_federated
+
+        if federation.scope == "local_and_federated":
+            if federation.include_graph_ids and is_federated:
+                if origin_graph_id not in federation.include_graph_ids:
+                    return False
+
+            if federation.max_distance is not None and is_federated:
+                try:
+                    if int(federation_distance) > int(federation.max_distance):
+                        return False
+                except Exception:
+                    return False
+
+            return True
+
+        # Unknown scope: reject
         return False
 
     def _should_block(self, event: Event, delivery: SubscriptionDelivery) -> bool:

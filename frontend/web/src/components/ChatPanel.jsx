@@ -21,10 +21,13 @@ function ChatPanel() {
     chatPanelOpen,
     toggleChatPanel,
     selectedGraphNodes,
+    federationDepth,
+    stats,
     clearSelectedGraphNodes,
   } = useGraphStore();
 
   const { t, language } = useI18n();
+  const effectiveMaxDepth = Math.max(1, stats?.federation?.max_selectable_depth || 1);
 
   const [inputValue, setInputValue] = useState('');
   const [isProcessing, setIsProcessing] = useState(false);
@@ -96,7 +99,7 @@ function ChatPanel() {
 
       conversationMessages.push({ role: 'user', content: messageForLLM });
 
-      const response = await api.sendChatMessage(conversationMessages);
+      const response = await api.sendChatMessage(conversationMessages, null, { federationDepth });
 
       console.log('[ChatPanel] Response:', response);
 
@@ -246,7 +249,7 @@ function ChatPanel() {
         .map(m => ({ role: m.role, content: m.content }));
       conversationMessages.push({ role: 'user', content: msg });
 
-      const response = await api.sendChatMessage(conversationMessages);
+      const response = await api.sendChatMessage(conversationMessages, null, { federationDepth });
 
       if (response.toolResult?.nodes) {
         const filteredNodes = filterCommunityNodes(response.toolResult.nodes);
@@ -284,7 +287,7 @@ function ChatPanel() {
         .map(m => ({ role: m.role, content: m.content }));
       conversationMessages.push({ role: 'user', content: msg });
 
-      const response = await api.sendChatMessage(conversationMessages);
+      const response = await api.sendChatMessage(conversationMessages, null, { federationDepth });
       addChatMessage({
         role: 'assistant',
         content: response.content,
@@ -308,7 +311,7 @@ function ChatPanel() {
         .map(m => ({ role: m.role, content: m.content }));
       conversationMessages.push({ role: 'user', content: msg });
 
-      const response = await api.sendChatMessage(conversationMessages);
+      const response = await api.sendChatMessage(conversationMessages, null, { federationDepth });
 
       if (deleteConfirmation.node_ids) {
         const deletedIds = new Set(deleteConfirmation.node_ids);
@@ -423,6 +426,9 @@ function ChatPanel() {
         <div className="chat-header-left" onClick={toggleChatPanel} style={{ cursor: 'pointer' }}>
           <ChatDotsFill size={16} />
           <h3>Graph assistant</h3>
+          <span className="chat-depth-indicator" title={t('federation.depth_indicator_tooltip')}>
+            {t('federation.depth_indicator', { current: federationDepth, max: effectiveMaxDepth })}
+          </span>
         </div>
         <button className="chat-collapse-button" onClick={toggleChatPanel} title="Minimize">
           <ChevronRight size={18} />

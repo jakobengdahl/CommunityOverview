@@ -46,6 +46,9 @@ def create_subscription_node(
     webhook_url: str = "https://example.com/hook",
     ignore_origins: List[str] = None,
     ignore_session_ids: List[str] = None,
+    federation_scope: str = "local_only",
+    include_graph_ids: List[str] = None,
+    max_distance: int = None,
 ) -> MockNode:
     """Helper to create a subscription node for testing."""
     metadata = {
@@ -57,6 +60,11 @@ def create_subscription_node(
             "operations": operations or ["create", "update", "delete"],
             "keywords": {
                 "any": keywords or [],
+            },
+            "federation": {
+                "scope": federation_scope,
+                "include_graph_ids": include_graph_ids or [],
+                "max_distance": max_distance,
             },
         },
         "delivery": {
@@ -385,3 +393,81 @@ class TestMultipleSubscriptions:
 
         # Should be skipped because URL starts with internal://
         assert len(delivered) == 0
+
+
+class TestFederationFilterMatching:
+    """Tests for federation-specific subscription filters."""
+
+    def test_default_local_only_excludes_federated_events(self):
+        sub = create_subscription_node("sub-1", "Local only")
+        storage = MockStorage([sub])
+        dispatcher = EventDispatcher(storage)
+
+        delivered = []
+        dispatcher.set_delivery_callback(lambda e, u: delivered.append((e, u)))
+
+        event = create_event(after={
+            "name": "Remote Actor",
+            "type": "Actor",
+            "metadata": {"origin_graph_id": "esam-main", "federation_distance": 1},
+        })
+        dispatcher.dispatch(event)
+
+        assert len(delivered) == 0
+
+    def test_local_and_federated_includes_federated_events(self):
+        sub = create_subscription_node(
+            "sub-1",
+            "Local and federated",
+            federation_scope="local_and_federated",
+        )
+        storage = MockStorage([sub])
+        dispatcher = EventDispatcher(storage)
+
+        delivered = []
+        dispatcher.set_delivery_callback(lambda e, u: delivered.append((e, u)))
+
+        event = create_event(after={
+            "name": "Remote Actor",
+            "type": "Actor",
+            "metadata": {"origin_graph_id": "esam-main", "federation_distance": 1},
+        })
+        dispatcher.dispatch(event)
+
+        assert len(delivered) == 1
+
+    def test_graph_id_and_distance_filters_apply(self):
+        sub = create_subscription_node(
+            "sub-1",
+            "Scoped federated",
+            federation_scope="local_and_federated",
+            include_graph_ids=["esam-main"],
+            max_distance=1,
+        )
+        storage = MockStorage([sub])
+        dispatcher = EventDispatcher(storage)
+
+        delivered = []
+        dispatcher.set_delivery_callback(lambda e, u: delivered.append((e, u)))
+
+        event_ok = create_event(after={
+            "name": "Remote Actor",
+            "type": "Actor",
+            "metadata": {"origin_graph_id": "esam-main", "federation_distance": 1},
+        })
+        event_wrong_graph = create_event(after={
+            "name": "Remote Actor",
+            "type": "Actor",
+            "metadata": {"origin_graph_id": "other-graph", "federation_distance": 1},
+        })
+        event_too_far = create_event(after={
+            "name": "Remote Actor",
+            "type": "Actor",
+            "metadata": {"origin_graph_id": "esam-main", "federation_distance": 2},
+        })
+
+        dispatcher.dispatch(event_ok)
+        dispatcher.dispatch(event_wrong_graph)
+        dispatcher.dispatch(event_too_far)
+
+        assert len(delivered) == 1

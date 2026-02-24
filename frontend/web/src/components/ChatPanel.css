@@ -592,3 +592,14 @@
 .chat-messages::-webkit-scrollbar-thumb:hover {
   background: #555;
 }
+
+
+.chat-depth-indicator {
+  margin-left: 8px;
+  font-size: 11px;
+  color: #aab4ff;
+  border: 1px solid rgba(129, 140, 248, 0.35);
+  border-radius: 999px;
+  padding: 2px 8px;
+  background: rgba(20, 20, 28, 0.85);
+}
