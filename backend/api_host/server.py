@@ -66,7 +66,11 @@ def create_app(
     )
 
     # Add Basic Auth Middleware if enabled
-    if config.auth_enabled and config.auth_password:
+    # Two modes:
+    #   1. auth_enabled=True: Basic Auth on ALL endpoints (except /health, /info)
+    #   2. mcp_basic_auth=True: Basic Auth ONLY on /mcp and /execute_tool endpoints
+    #      (for deployments where the rest is protected by Cloud Run/IAP)
+    if config.auth_password and (config.auth_enabled or config.mcp_basic_auth):
         import base64
 
         @app.middleware("http")
@@ -77,6 +81,12 @@ def create_app(
             # Allow health check and info without auth
             if request.url.path in ["/health", "/info"]:
                 return await call_next(request)
+
+            # In MCP-only mode, only require auth for MCP and execute_tool paths
+            if config.mcp_basic_auth and not config.auth_enabled:
+                path = request.url.path
+                if not (path.startswith("/mcp") or path.startswith("/execute_tool")):
+                    return await call_next(request)
 
             # Check for Authorization header
             auth_header = request.headers.get("Authorization")
@@ -253,11 +263,13 @@ def create_app(
     # Use sse_app to provide standard /sse and /messages endpoints
     mcp_app = mcp.sse_app()
 
-    # Add a middleware to handle browser requests to /mcp
+    # Wrap mcp_app with a handler for browser requests to /mcp.
     # The MCP endpoint expects MCP protocol requests (GET with Accept: text/event-stream for SSE),
     # not regular browser GET requests which would hang waiting for SSE.
     # We use a pure ASGI middleware class to avoid BaseHTTPMiddleware limitations with streaming responses.
-    class MCPBrowserHandlerMiddleware:
+    # This wraps mcp_app directly (not the outer FastAPI app) so that the auth middleware
+    # runs first and can reject unauthenticated requests before they reach this handler.
+    class MCPBrowserHandler:
         def __init__(self, app):
             self.app = app
 
@@ -269,47 +281,37 @@ def create_app(
             path = scope.get("path", "")
             method = scope.get("method", "GET")
 
-            # Simple request logging for MCP endpoints
-            if path.startswith("/mcp"):
-                import logging
-                # Use a standard logger instead of uvicorn.access to avoid formatting errors
-                # uvicorn.access expects specific args (client, method, path, etc.)
-                logger = logging.getLogger("mcp.server")
-                if not logger.handlers:
-                    logging.basicConfig()
-                logger.info(f"MCP Request: {method} {path}")
+            import logging
+            logger = logging.getLogger("mcp.server")
+            if not logger.handlers:
+                logging.basicConfig()
+            logger.info(f"MCP Request: {method} /mcp{path}")
 
-            # Only intercept specific paths if needed, here we check startswith /mcp
-            # Note: scope['path'] does not include root_path, but here we assume standard mounting
-            if path.startswith("/mcp"):
-                headers = dict(scope.get("headers", []))
-                # Headers are bytes
-                accept_header = headers.get(b"accept", b"").decode("utf-8", errors="ignore")
+            headers = dict(scope.get("headers", []))
+            accept_header = headers.get(b"accept", b"").decode("utf-8", errors="ignore")
 
-                # If client expects SSE or is POST request, let it through to MCP app
-                if "text/event-stream" in accept_header or method == "POST":
-                    await self.app(scope, receive, send)
-                    return
+            # If client expects SSE or is POST request, let it through to MCP app
+            if "text/event-stream" in accept_header or method == "POST":
+                await self.app(scope, receive, send)
+                return
 
-                # For regular browser GET requests, return helpful info
-                if method == "GET":
-                    response = JSONResponse({
-                        "endpoint": "/mcp/sse",
-                        "type": "MCP (Model Context Protocol) Server",
-                        "description": "This endpoint is for MCP clients, not direct browser access.",
-                        "usage": "Use an MCP-compatible client (like Claude Desktop or ChatGPT) to connect to this endpoint: /mcp/sse",
-                        "protocol": "MCP uses Server-Sent Events (SSE) for streaming communication.",
-                        "documentation": "https://modelcontextprotocol.io/",
-                        "available_tools": list(tools_map.keys()),
-                    })
-                    await response(scope, receive, send)
-                    return
+            # For regular browser GET requests, return helpful info
+            if method == "GET":
+                response = JSONResponse({
+                    "endpoint": "/mcp/sse",
+                    "type": "MCP (Model Context Protocol) Server",
+                    "description": "This endpoint is for MCP clients, not direct browser access.",
+                    "usage": "Use an MCP-compatible client (like Claude Desktop or ChatGPT) to connect to this endpoint: /mcp/sse",
+                    "protocol": "MCP uses Server-Sent Events (SSE) for streaming communication.",
+                    "documentation": "https://modelcontextprotocol.io/",
+                    "available_tools": list(tools_map.keys()),
+                })
+                await response(scope, receive, send)
+                return
 
             await self.app(scope, receive, send)
 
-    app.add_middleware(MCPBrowserHandlerMiddleware)
-
-    app.mount("/mcp", mcp_app)
+    app.mount("/mcp", MCPBrowserHandler(mcp_app))
 
     # Add execute_tool endpoint for direct tool execution
     @app.post("/execute_tool")

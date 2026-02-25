@@ -246,6 +246,36 @@ export LLM_PROVIDER=openai   # Force OpenAI
 
 See [LLM_PROVIDERS.md](./LLM_PROVIDERS.md) for detailed configuration.
 
+## Authentication
+
+### Full Basic Auth (all endpoints)
+
+```bash
+export AUTH_ENABLED=true
+export AUTH_USERNAME=admin
+export AUTH_PASSWORD=secret
+```
+
+### MCP-only Basic Auth (for Google Cloud Run / IAP deployments)
+
+When running behind Google Cloud Run with IAP, the web GUI and REST API are already protected by Google login. Use `MCP_BASIC_AUTH` to add Basic Auth only to MCP endpoints (`/mcp/*` and `/execute_tool`), which are called by external MCP clients that cannot use IAP:
+
+```bash
+export AUTH_ENABLED=false
+export MCP_BASIC_AUTH=true
+export AUTH_USERNAME=mcp-client
+export AUTH_PASSWORD=secret
+```
+
+| Variable | Default | Description |
+|---|---|---|
+| `AUTH_ENABLED` | `false` | Enable Basic Auth on **all** endpoints (except `/health`, `/info`) |
+| `MCP_BASIC_AUTH` | `false` | Enable Basic Auth **only** on `/mcp/*` and `/execute_tool` |
+| `AUTH_USERNAME` | `admin` | Username for Basic Auth |
+| `AUTH_PASSWORD` | *(none)* | Password for Basic Auth (required for either mode to activate) |
+
+If both `AUTH_ENABLED` and `MCP_BASIC_AUTH` are `true`, `AUTH_ENABLED` takes precedence and all endpoints require auth.
+
 ## Testing
 
 ```bash

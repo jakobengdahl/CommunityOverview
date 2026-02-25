@@ -37,6 +37,7 @@ class AppConfig:
     auth_enabled: bool = field(default_factory=lambda: os.getenv("AUTH_ENABLED", "false").lower() == "true")
     auth_username: str = field(default_factory=lambda: os.getenv("AUTH_USERNAME", "admin"))
     auth_password: Optional[str] = field(default_factory=lambda: os.getenv("AUTH_PASSWORD"))
+    mcp_basic_auth: bool = field(default_factory=lambda: os.getenv("MCP_BASIC_AUTH", "false").lower() == "true")
 
     def __post_init__(self):
         """Resolve default static paths relative to this package."""
