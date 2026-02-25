@@ -220,4 +220,10 @@ if [ -n "$CODESPACE_NAME" ]; then
     echo -e "${YELLOW}NOTE: Ensure port 8000 is set to Public visibility in the Ports tab.${NC}"
 fi
 
-exec uvicorn backend.api_host.server:get_app --factory --reload --host 0.0.0.0 --port 8000
+exec uvicorn backend.api_host.server:get_app --factory --reload --host 0.0.0.0 --port 8000 \
+    --reload-exclude 'venv/*' \
+    --reload-exclude 'data/*' \
+    --reload-exclude 'node_modules/*' \
+    --reload-exclude '.git/*' \
+    --reload-exclude 'frontend/web/dist/*' \
+    --reload-exclude 'frontend/widget/dist/*'
