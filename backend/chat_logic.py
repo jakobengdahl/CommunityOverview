@@ -1,10 +1,14 @@
 from typing import List, Dict, Any, Callable
 import os
 import json
+import logging
 from dotenv import load_dotenv
 import inspect
 from backend.llm_providers import create_provider, LLMProvider
 from backend import config_loader
+
+# Initialize logger
+logger = logging.getLogger(__name__)
 
 # Load environment variables
 load_dotenv()
@@ -401,21 +405,21 @@ class ChatProcessor:
         # Set default API key based on detected provider
         if self.provider_type == "openai":
             self.default_api_key = os.getenv("OPENAI_API_KEY")
-            print(f"Using OpenAI provider (LLM_PROVIDER={self.provider_type})")
+            logger.info(f"Using OpenAI provider (LLM_PROVIDER={self.provider_type})")
             if not self.default_api_key:
-                print("Warning: OPENAI_API_KEY not found in environment variables")
+                logger.warning("OPENAI_API_KEY not found in environment variables")
         else:  # claude
             self.default_api_key = os.getenv("ANTHROPIC_API_KEY")
-            print(f"Using Claude provider (LLM_PROVIDER={self.provider_type})")
+            logger.info(f"Using Claude provider (LLM_PROVIDER={self.provider_type})")
             if not self.default_api_key:
-                print("Warning: ANTHROPIC_API_KEY not found in environment variables")
+                logger.warning("ANTHROPIC_API_KEY not found in environment variables")
 
         self.tools_map = tools_map
         self.tool_definitions = self._generate_tool_definitions()
 
         # Build system prompt dynamically from configuration
         self.system_prompt = _build_system_prompt()
-        print(f"Loaded system prompt from schema configuration")
+        logger.info(f"Loaded system prompt from schema configuration")
 
     def _detect_provider(self) -> str:
         """
@@ -431,10 +435,10 @@ class ChatProcessor:
         if explicit_provider:
             provider = explicit_provider.lower()
             if provider in ["claude", "openai"]:
-                print(f"Provider explicitly set via LLM_PROVIDER: {provider}")
+                logger.info(f"Provider explicitly set via LLM_PROVIDER: {provider}")
                 return provider
             else:
-                print(f"Warning: Invalid LLM_PROVIDER value '{explicit_provider}', falling back to auto-detection")
+                logger.warning(f"Invalid LLM_PROVIDER value '{explicit_provider}', falling back to auto-detection")
 
         # Auto-detect based on available API keys
         has_openai = bool(os.getenv("OPENAI_API_KEY"))
@@ -442,17 +446,17 @@ class ChatProcessor:
 
         if has_openai and has_claude:
             # Both keys available - prefer OpenAI (more cost-effective)
-            print("Both API keys found, auto-selecting OpenAI (more cost-effective)")
+            logger.info("Both API keys found, auto-selecting OpenAI (more cost-effective)")
             return "openai"
         elif has_openai:
-            print("OPENAI_API_KEY found, auto-selecting OpenAI provider")
+            logger.info("OPENAI_API_KEY found, auto-selecting OpenAI provider")
             return "openai"
         elif has_claude:
-            print("ANTHROPIC_API_KEY found, auto-selecting Claude provider")
+            logger.info("ANTHROPIC_API_KEY found, auto-selecting Claude provider")
             return "claude"
         else:
             # No keys found, default to claude
-            print("No API keys found in environment, defaulting to Claude")
+            logger.info("No API keys found in environment, defaulting to Claude")
             return "claude"
 
 
@@ -805,7 +809,7 @@ class ChatProcessor:
             }
 
         except Exception as e:
-            print(f"Error in process_message: {e}")
+            logger.error(f"Error in process_message: {e}")
             error_msg = str(e)
 
             # Provide user-friendly message for rate limits
@@ -847,7 +851,7 @@ class ChatProcessor:
             tool_id = tool_use.get("id")
             last_tool_name = tool_name
 
-            print(f"Executing tool: {tool_name} with input: {tool_input}")
+            logger.info(f"Executing tool: {tool_name} with input: {tool_input}")
 
             # Execute the tool
             tool_result = None

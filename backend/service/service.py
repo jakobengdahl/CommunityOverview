@@ -12,6 +12,7 @@ Key design principles:
 - Schema and presentation config are loaded from config_loader
 """
 
+import logging
 from typing import List, Optional, Dict, Any
 from datetime import datetime
 
@@ -24,6 +25,9 @@ from backend.core import (
 
 from backend import config_loader
 from backend.federation import FederationManager
+
+# Initialize logger
+logger = logging.getLogger(__name__)
 
 from .serializers import (
     serialize_node, serialize_nodes,
@@ -110,7 +114,7 @@ class GraphService:
             Dict with matching nodes, connecting edges, and search metadata
         """
         # Log search request
-        print(f"SEARCH: query='{query}' types={node_types} limit={limit}")
+        logger.info(f"SEARCH: query='{query}' types={node_types} limit={limit}")
 
         # Convert node_types to NodeType enum or keep as string for dynamic types
         type_filters = None
@@ -122,7 +126,7 @@ class GraphService:
             node_types=type_filters,
             limit=limit
         )
-        print(f"SEARCH: Found {len(results)} results")
+        logger.info(f"SEARCH: Found {len(results)} results")
 
         # Get node IDs for edge filtering
         result_node_ids = set(node.id for node in results)
