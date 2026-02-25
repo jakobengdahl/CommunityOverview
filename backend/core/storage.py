@@ -26,7 +26,7 @@ from typing import List, Dict, Optional, Any, TYPE_CHECKING, Callable
 from datetime import datetime
 import networkx as nx
 from pathlib import Path
-import Levenshtein
+from rapidfuzz.distance import Levenshtein
 
 from .models import (
     Node, Edge, NodeType, RelationshipType,

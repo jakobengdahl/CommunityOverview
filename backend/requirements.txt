@@ -24,8 +24,8 @@ python-dotenv>=1.0.0
 fastapi>=0.100.0
 uvicorn>=0.20.0
 
-# String similarity (lightweight)
-python-Levenshtein>=0.21.0
+# String similarity (MIT-licensed, C++ optimized)
+rapidfuzz>=3.0.0
 
 # ===== ML Dependencies (OPTIMIZED FOR DISK SPACE) =====
 # Install PyTorch CPU-only version (much smaller than CUDA version)
