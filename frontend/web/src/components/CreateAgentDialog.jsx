@@ -217,6 +217,7 @@ export default function CreateAgentDialog({ onClose, onSave, initialData }) {
       // CREATE new agent
       const idPrefix = 'agent-' + Date.now().toString(36);
       const subscriptionId = idPrefix + '-subscription';
+      const agentId = idPrefix + '-node';
 
       // Create the EventSubscription node
       const subscriptionNode = {
@@ -246,6 +247,7 @@ export default function CreateAgentDialog({ onClose, onSave, initialData }) {
 
       // Create the Agent node
       const agentNode = {
+        id: agentId,
         name: name.trim(),
         type: 'Agent',
         description: description.trim() || `AI agent: ${name}`,
@@ -265,7 +267,7 @@ export default function CreateAgentDialog({ onClose, onSave, initialData }) {
         nodes: [subscriptionNode, agentNode],
         edges: [
           {
-            source: agentNode.name, // Will be resolved to ID by backend
+            source: agentNode.id,
             target: subscriptionNode.id,
             type: 'RELATES_TO',
           },

@@ -60,6 +60,7 @@ export default function CreateSubscriptionDialog({ onClose, onSave }) {
     // Build the subscription node
     const activeOps = Object.entries(operations).filter(([_, v]) => v).map(([k]) => k).join(', ');
     const subscriptionNode = {
+      id: crypto.randomUUID(),
       name: name.trim(),
       type: 'EventSubscription',
       description: description.trim() || t('subscription_dialog.webhook_description', { name }),
