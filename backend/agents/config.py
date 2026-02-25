@@ -212,12 +212,13 @@ class AgentsSettings:
         integrations = []
 
         # GRAPH: Internal graph MCP (always available via local endpoint)
+        port = os.environ.get("PORT", "8000")
         integrations.append(MCPIntegration(
             id="GRAPH",
             name="Graph API",
             description="Read and write to the knowledge graph",
             transport=MCPTransport.HTTP,
-            url="http://localhost:8000/mcp/sse",
+            url=f"http://localhost:{port}/mcp/sse",
             enabled=True,
         ))
 
