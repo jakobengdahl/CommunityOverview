@@ -101,5 +101,11 @@
     "subscription_error": "Kunde inte skapa prenumeration",
     "saved_view_description": "Sparad vy: {name}",
     "saved_view_summary": "Innehåller {count} noder"
+  },
+  "federation": {
+    "depth_label": "Djup",
+    "depth_tooltip": "Djupnivåer styrs av installationens konfiguration",
+    "depth_indicator": "Djup {current}/{max}",
+    "depth_indicator_tooltip": "Aktuell federerad söknivå och högsta tillåtna nivå"
   }
 }

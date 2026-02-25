@@ -32,6 +32,7 @@ class ChatRequest(BaseModel):
     messages: List[ChatMessage] = Field(..., description="Conversation history")
     api_key: Optional[str] = Field(None, description="Optional API key override")
     provider: Optional[str] = Field(None, description="Optional provider: 'claude' or 'openai'")
+    federation_depth: Optional[int] = Field(None, ge=1, le=9, description="Optional federated search depth")
 
 
 class SimpleChatRequest(BaseModel):
@@ -40,6 +41,7 @@ class SimpleChatRequest(BaseModel):
     conversation_id: Optional[str] = Field(None, description="Optional conversation ID for context")
     api_key: Optional[str] = Field(None, description="Optional API key override")
     provider: Optional[str] = Field(None, description="Optional provider: 'claude' or 'openai'")
+    federation_depth: Optional[int] = Field(None, ge=1, le=9, description="Optional federated search depth")
 
 
 class ChatResponse(BaseModel):
@@ -67,6 +69,7 @@ class ProposeNodesRequest(BaseModel):
     communities: Optional[List[str]] = Field(None, description="Optional communities to associate with nodes")
     api_key: Optional[str] = Field(None, description="Optional API key override")
     provider: Optional[str] = Field(None, description="Optional provider: 'claude' or 'openai'")
+    federation_depth: Optional[int] = Field(None, ge=1, le=9, description="Optional federated search depth")
 
 
 # ==================== Router Factory ====================
@@ -114,7 +117,8 @@ def create_ui_router(
             result = chat_service.process_message(
                 messages=messages,
                 api_key=request.api_key,
-                provider=request.provider
+                provider=request.provider,
+                federation_depth=request.federation_depth,
             )
 
             return ChatResponse(
@@ -143,7 +147,8 @@ def create_ui_router(
             result = chat_service.process_chat_request(
                 user_message=request.message,
                 api_key=request.api_key,
-                provider=request.provider
+                provider=request.provider,
+                federation_depth=request.federation_depth
             )
 
             return ChatResponse(
@@ -179,7 +184,8 @@ def create_ui_router(
                 node_type=request.node_type,
                 communities=request.communities,
                 api_key=request.api_key,
-                provider=request.provider
+                provider=request.provider,
+                federation_depth=request.federation_depth
             )
             return result
         except Exception as e:

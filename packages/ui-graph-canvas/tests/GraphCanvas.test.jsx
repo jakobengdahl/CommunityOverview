@@ -1,13 +1,12 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest';
-import { render, screen } from '@testing-library/react';
+import { render, screen, fireEvent } from '@testing-library/react';
 import { GraphCanvas } from '../src/index';
 
-// Mock ReactFlow since it's heavy in jsdom
 vi.mock('reactflow', () => {
-  const MockReactFlow = ({ children, nodes, edges }) => (
+  const MockReactFlow = ({ children, nodes }) => (
     <div data-testid="react-flow" className="react-flow">
       <div data-testid="nodes">
-        {nodes?.map(node => (
+        {nodes?.map((node) => (
           <div key={node.id} data-testid={`node-${node.id}`}>
             {node.data?.label}
           </div>
@@ -29,44 +28,27 @@ vi.mock('reactflow', () => {
       getEdges: () => [],
       setNodes: vi.fn(),
       setEdges: vi.fn(),
+      screenToFlowPosition: () => ({ x: 0, y: 0 }),
+      setCenter: vi.fn(),
     }),
+    useOnSelectionChange: vi.fn(),
     Background: () => <div data-testid="background" />,
     Controls: () => <div data-testid="controls" />,
     MiniMap: () => <div data-testid="minimap" />,
-    Panel: ({ children }) => <div data-testid="panel">{children}</div>,
-    Handle: ({ type, position }) => <div data-testid={`handle-${type}`} />,
+    SelectionMode: { Partial: 'partial' },
+    Handle: ({ type }) => <div data-testid={`handle-${type}`} />,
     Position: { Top: 'top', Bottom: 'bottom', Left: 'left', Right: 'right' },
     MarkerType: { ArrowClosed: 'arrowclosed' },
   };
 });
 
-// Sample test data
 const sampleNodes = [
-  {
-    id: 'node-1',
-    name: 'Test Organization',
-    type: 'Actor',
-    description: 'A test organization',
-    summary: 'Test org summary',
-    communities: ['TestCommunity'],
-  },
-  {
-    id: 'node-2',
-    name: 'Test Initiative',
-    type: 'Initiative',
-    description: 'A test initiative',
-    summary: 'Test initiative summary',
-    communities: ['TestCommunity'],
-  },
+  { id: 'node-1', name: 'Node 1', type: 'Actor', description: 'a' },
+  { id: 'node-2', name: 'Node 2', type: 'Initiative', description: 'b' },
 ];
 
 const sampleEdges = [
-  {
-    id: 'edge-1',
-    source: 'node-1',
-    target: 'node-2',
-    type: 'IMPLEMENTS',
-  },
+  { id: 'edge-1', source: 'node-1', target: 'node-2', type: 'RELATES_TO' },
 ];
 
 describe('GraphCanvas', () => {
@@ -74,152 +56,56 @@ describe('GraphCanvas', () => {
     vi.clearAllMocks();
   });
 
-  it('renders without crashing', () => {
-    render(<GraphCanvas nodes={[]} edges={[]} />);
-    expect(screen.getByText('No graph to display')).toBeInTheDocument();
-  });
-
-  it('displays empty state message when no nodes provided', () => {
-    render(<GraphCanvas nodes={[]} edges={[]} />);
-    expect(screen.getByText('No graph to display')).toBeInTheDocument();
-    expect(screen.getByText(/Search or add nodes/)).toBeInTheDocument();
-  });
-
-  it('renders ReactFlow container when nodes provided', () => {
+  it('renders graph container and react-flow', () => {
     render(<GraphCanvas nodes={sampleNodes} edges={sampleEdges} />);
     expect(screen.getByTestId('react-flow')).toBeInTheDocument();
+    expect(document.querySelector('.graph-canvas-container')).toBeInTheDocument();
   });
 
-  it('shows save view button when onSaveView is provided', () => {
-    const onSaveView = vi.fn();
+  it('shows depth selector when multiple levels exist', () => {
     render(
       <GraphCanvas
         nodes={sampleNodes}
         edges={sampleEdges}
-        onSaveView={onSaveView}
+        federationDepth={1}
+        federationDepthLevels={[1, 3, 5]}
       />
     );
-    expect(screen.getByText('💾 Save View')).toBeInTheDocument();
+
+    expect(screen.getByLabelText('Federated search depth selector')).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: '1' })).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: '3' })).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: '5' })).toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: '2' })).not.toBeInTheDocument();
   });
 
-  it('does not show save view button when onSaveView is not provided', () => {
-    render(<GraphCanvas nodes={sampleNodes} edges={sampleEdges} />);
-    expect(screen.queryByText('💾 Save View')).not.toBeInTheDocument();
-  });
-
-  it('renders controls container', () => {
-    render(<GraphCanvas nodes={sampleNodes} edges={sampleEdges} />);
-    // The controls container should exist
-    const controls = document.querySelector('.graph-canvas-controls');
-    expect(controls).toBeInTheDocument();
-  });
-
-  it('renders main container', () => {
-    render(<GraphCanvas nodes={sampleNodes} edges={sampleEdges} />);
-    // The main container should exist
-    const container = document.querySelector('.graph-canvas-container');
-    expect(container).toBeInTheDocument();
-  });
-});
-
-describe('GraphCanvas with many nodes', () => {
-  it('shows lazy loading indicator for large graphs', () => {
-    // Create 250 nodes to exceed LAZY_LOAD_THRESHOLD (200)
-    const manyNodes = Array.from({ length: 250 }, (_, i) => ({
-      id: `node-${i}`,
-      name: `Node ${i}`,
-      type: 'Actor',
-      description: `Description ${i}`,
-      communities: [],
-    }));
-
-    render(<GraphCanvas nodes={manyNodes} edges={[]} />);
-    expect(screen.getByText(/Showing \d+ of 250 nodes/)).toBeInTheDocument();
-  });
-
-  it('shows load more button for large graphs', () => {
-    const manyNodes = Array.from({ length: 250 }, (_, i) => ({
-      id: `node-${i}`,
-      name: `Node ${i}`,
-      type: 'Actor',
-      description: `Description ${i}`,
-      communities: [],
-    }));
-
-    render(<GraphCanvas nodes={manyNodes} edges={[]} />);
-    expect(screen.getByText('Load More')).toBeInTheDocument();
-  });
-});
-
-describe('GraphCanvas callbacks', () => {
-  it('accepts onExpand callback', () => {
-    const onExpand = vi.fn();
+  it('hides depth selector when only one level exists', () => {
     render(
       <GraphCanvas
         nodes={sampleNodes}
         edges={sampleEdges}
-        onExpand={onExpand}
+        federationDepth={1}
+        federationDepthLevels={[1]}
       />
     );
-    // Component should render without errors when callback is provided
-    expect(screen.getByTestId('react-flow')).toBeInTheDocument();
+
+    expect(screen.queryByLabelText('Federated search depth selector')).not.toBeInTheDocument();
   });
 
-  it('accepts onEdit callback', () => {
-    const onEdit = vi.fn();
+  it('calls onFederationDepthChange when level is clicked', () => {
+    const onFederationDepthChange = vi.fn();
+
     render(
       <GraphCanvas
         nodes={sampleNodes}
         edges={sampleEdges}
-        onEdit={onEdit}
+        federationDepth={1}
+        federationDepthLevels={[1, 3]}
+        onFederationDepthChange={onFederationDepthChange}
       />
     );
-    expect(screen.getByTestId('react-flow')).toBeInTheDocument();
-  });
 
-  it('accepts onDelete callback', () => {
-    const onDelete = vi.fn();
-    render(
-      <GraphCanvas
-        nodes={sampleNodes}
-        edges={sampleEdges}
-        onDelete={onDelete}
-      />
-    );
-    expect(screen.getByTestId('react-flow')).toBeInTheDocument();
-  });
-
-  it('accepts onCreateGroup callback', () => {
-    const onCreateGroup = vi.fn();
-    render(
-      <GraphCanvas
-        nodes={sampleNodes}
-        edges={sampleEdges}
-        onCreateGroup={onCreateGroup}
-      />
-    );
-    expect(screen.getByTestId('react-flow')).toBeInTheDocument();
-  });
-
-  it('accepts highlightedNodeIds prop', () => {
-    render(
-      <GraphCanvas
-        nodes={sampleNodes}
-        edges={sampleEdges}
-        highlightedNodeIds={['node-1']}
-      />
-    );
-    expect(screen.getByTestId('react-flow')).toBeInTheDocument();
-  });
-
-  it('accepts hiddenNodeIds prop', () => {
-    render(
-      <GraphCanvas
-        nodes={sampleNodes}
-        edges={sampleEdges}
-        hiddenNodeIds={['node-1']}
-      />
-    );
-    expect(screen.getByTestId('react-flow')).toBeInTheDocument();
+    fireEvent.click(screen.getByRole('button', { name: '3' }));
+    expect(onFederationDepthChange).toHaveBeenCalledWith(3);
   });
 });

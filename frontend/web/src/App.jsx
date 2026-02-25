@@ -48,6 +48,8 @@ function App() {
     detailNode,
     closeDetailNode,
     clearVisualization,
+    federationDepth,
+    setFederationDepth,
   } = useGraphStore();
 
   const { t, setLanguage } = useI18n();
@@ -63,6 +65,15 @@ function App() {
   const [saveViewSignal, setSaveViewSignal] = useState(0);
   const [isSavingView, setIsSavingView] = useState(false);
   const [editingEdge, setEditingEdge] = useState(null);
+
+  const federationDepthLevels = (stats?.federation?.selectable_depth_levels || [1]).filter(v => Number.isInteger(v) && v >= 1);
+  const maxFederationDepth = Math.max(1, ...federationDepthLevels, stats?.federation?.max_selectable_depth || 1);
+
+  useEffect(() => {
+    if (federationDepth > maxFederationDepth) {
+      setFederationDepth(maxFederationDepth);
+    }
+  }, [federationDepth, maxFederationDepth, setFederationDepth]);
 
   // Load schema, presentation, and stats on startup
   useEffect(() => {
@@ -540,10 +551,19 @@ function App() {
           saveViewSignal={saveViewSignal}
           groupsToRestore={pendingGroups}
           onGroupsRestored={() => setPendingGroups(null)}
+          federationDepth={federationDepth}
+          onFederationDepthChange={setFederationDepth}
+          maxFederationDepth={maxFederationDepth}
+          federationDepthLevels={federationDepthLevels}
+          federationDepthLabel={t('federation.depth_label')}
+          federationDepthTooltip={t('federation.depth_tooltip')}
         />
       </div>
 
       <FloatingHeader stats={stats} />
+      <div className="app-a11y-depth-live" aria-live="polite" aria-atomic="true">
+        {t('federation.depth_indicator', { current: federationDepth, max: maxFederationDepth })}
+      </div>
       <FloatingSearch />
       <FloatingToolbar
         onCreateNode={handleCreateNodeForType}

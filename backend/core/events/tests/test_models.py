@@ -190,6 +190,7 @@ class TestSubscriptionFilters:
         assert filters.target.node_types == []
         assert filters.operations == ["create", "update", "delete"]
         assert filters.keywords.any == []
+        assert filters.federation.scope == "local_only"
 
     def test_custom_filters(self):
         """Test custom filter configuration."""
@@ -200,11 +201,19 @@ class TestSubscriptionFilters:
             ),
             operations=["create"],
             keywords=KeywordFilters(any=["AI", "digitalisering"]),
+            federation={
+                "scope": "local_and_federated",
+                "include_graph_ids": ["esam-main"],
+                "max_distance": 1,
+            },
         )
 
         assert filters.target.node_types == ["Actor", "Initiative"]
         assert filters.operations == ["create"]
         assert "AI" in filters.keywords.any
+        assert filters.federation.scope == "local_and_federated"
+        assert filters.federation.include_graph_ids == ["esam-main"]
+        assert filters.federation.max_distance == 1
 
 
 class TestSubscriptionDelivery:

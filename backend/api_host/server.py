@@ -34,6 +34,7 @@ from backend.core import GraphStorage
 from backend.service import GraphService, create_rest_router, register_mcp_tools, json_serializer
 from backend.ui import ChatService, DocumentService, create_ui_router
 from backend.agents import AgentRegistry, AgentsSettings
+from backend.federation import FederationManager, load_federation_config, summarize_federation_config
 
 from .config import AppConfig
 
@@ -65,7 +66,11 @@ def create_app(
     )
 
     # Add Basic Auth Middleware if enabled
-    if config.auth_enabled and config.auth_password:
+    # Two modes:
+    #   1. auth_enabled=True: Basic Auth on ALL endpoints (except /health, /info)
+    #   2. mcp_basic_auth=True: Basic Auth ONLY on /mcp and /execute_tool endpoints
+    #      (for deployments where the rest is protected by Cloud Run/IAP)
+    if config.auth_password and (config.auth_enabled or config.mcp_basic_auth):
         import base64
 
         @app.middleware("http")
@@ -76,6 +81,12 @@ def create_app(
             # Allow health check and info without auth
             if request.url.path in ["/health", "/info"]:
                 return await call_next(request)
+
+            # In MCP-only mode, only require auth for MCP and execute_tool paths
+            if config.mcp_basic_auth and not config.auth_enabled:
+                path = request.url.path
+                if not (path.startswith("/mcp") or path.startswith("/execute_tool")):
+                    return await call_next(request)
 
             # Check for Authorization header
             auth_header = request.headers.get("Authorization")
@@ -114,16 +125,45 @@ def create_app(
         allow_headers=["*"],  # Allow all headers
     )
 
+    federation_config = load_federation_config()
+    federation_summary = summarize_federation_config(federation_config)
+
     # Initialize graph storage if not provided
     if graph_storage is None:
         graph_path = config.get_graph_path()
         graph_storage = GraphStorage(str(graph_path))
 
+    def _on_federated_node_event(operation, before_node, after_node):
+        graph_storage.emit_federated_node_event(
+            operation=operation,
+            node_before=before_node,
+            node_after=after_node,
+            event_origin="federation-sync",
+        )
+
+    def _on_federated_edge_event(operation, before_edge, after_edge):
+        graph_storage.emit_federated_edge_event(
+            operation=operation,
+            edge_before=before_edge,
+            edge_after=after_edge,
+            event_origin="federation-sync",
+        )
+
+    federation_manager = FederationManager(
+        federation_config,
+        on_node_event=_on_federated_node_event,
+        on_edge_event=_on_federated_edge_event,
+    )
+
     # Initialize event system for webhook delivery
     graph_storage.setup_events(enabled=True)
 
     # Initialize GraphService
-    graph_service = GraphService(graph_storage)
+    graph_service = GraphService(graph_storage, federation_manager=federation_manager)
+
+    # Run federation startup sync (best effort, never blocks startup on failures)
+    federation_manager.sync_on_startup()
+    federation_manager.start()
 
     # Initialize Agent Registry for background agent workers
     agent_settings = AgentsSettings.from_env()
@@ -171,6 +211,9 @@ def create_app(
     app.state.graph_storage = graph_storage
     app.state.agent_registry = agent_registry
     app.state.config = config
+    app.state.federation_config = federation_config
+    app.state.federation_summary = federation_summary
+    app.state.federation_manager = federation_manager
 
     # Create and mount REST API router
     rest_router = create_rest_router(graph_service)
@@ -220,11 +263,13 @@ def create_app(
     # Use sse_app to provide standard /sse and /messages endpoints
     mcp_app = mcp.sse_app()
 
-    # Add a middleware to handle browser requests to /mcp
+    # Wrap mcp_app with a handler for browser requests to /mcp.
     # The MCP endpoint expects MCP protocol requests (GET with Accept: text/event-stream for SSE),
     # not regular browser GET requests which would hang waiting for SSE.
     # We use a pure ASGI middleware class to avoid BaseHTTPMiddleware limitations with streaming responses.
-    class MCPBrowserHandlerMiddleware:
+    # This wraps mcp_app directly (not the outer FastAPI app) so that the auth middleware
+    # runs first and can reject unauthenticated requests before they reach this handler.
+    class MCPBrowserHandler:
         def __init__(self, app):
             self.app = app
 
@@ -236,47 +281,37 @@ def create_app(
             path = scope.get("path", "")
             method = scope.get("method", "GET")
 
-            # Simple request logging for MCP endpoints
-            if path.startswith("/mcp"):
-                import logging
-                # Use a standard logger instead of uvicorn.access to avoid formatting errors
-                # uvicorn.access expects specific args (client, method, path, etc.)
-                logger = logging.getLogger("mcp.server")
-                if not logger.handlers:
-                    logging.basicConfig()
-                logger.info(f"MCP Request: {method} {path}")
+            import logging
+            logger = logging.getLogger("mcp.server")
+            if not logger.handlers:
+                logging.basicConfig()
+            logger.info(f"MCP Request: {method} /mcp{path}")
 
-            # Only intercept specific paths if needed, here we check startswith /mcp
-            # Note: scope['path'] does not include root_path, but here we assume standard mounting
-            if path.startswith("/mcp"):
-                headers = dict(scope.get("headers", []))
-                # Headers are bytes
-                accept_header = headers.get(b"accept", b"").decode("utf-8", errors="ignore")
+            headers = dict(scope.get("headers", []))
+            accept_header = headers.get(b"accept", b"").decode("utf-8", errors="ignore")
 
-                # If client expects SSE or is POST request, let it through to MCP app
-                if "text/event-stream" in accept_header or method == "POST":
-                    await self.app(scope, receive, send)
-                    return
+            # If client expects SSE or is POST request, let it through to MCP app
+            if "text/event-stream" in accept_header or method == "POST":
+                await self.app(scope, receive, send)
+                return
 
-                # For regular browser GET requests, return helpful info
-                if method == "GET":
-                    response = JSONResponse({
-                        "endpoint": "/mcp/sse",
-                        "type": "MCP (Model Context Protocol) Server",
-                        "description": "This endpoint is for MCP clients, not direct browser access.",
-                        "usage": "Use an MCP-compatible client (like Claude Desktop or ChatGPT) to connect to this endpoint: /mcp/sse",
-                        "protocol": "MCP uses Server-Sent Events (SSE) for streaming communication.",
-                        "documentation": "https://modelcontextprotocol.io/",
-                        "available_tools": list(tools_map.keys()),
-                    })
-                    await response(scope, receive, send)
-                    return
+            # For regular browser GET requests, return helpful info
+            if method == "GET":
+                response = JSONResponse({
+                    "endpoint": "/mcp/sse",
+                    "type": "MCP (Model Context Protocol) Server",
+                    "description": "This endpoint is for MCP clients, not direct browser access.",
+                    "usage": "Use an MCP-compatible client (like Claude Desktop or ChatGPT) to connect to this endpoint: /mcp/sse",
+                    "protocol": "MCP uses Server-Sent Events (SSE) for streaming communication.",
+                    "documentation": "https://modelcontextprotocol.io/",
+                    "available_tools": list(tools_map.keys()),
+                })
+                await response(scope, receive, send)
+                return
 
             await self.app(scope, receive, send)
 
-    app.add_middleware(MCPBrowserHandlerMiddleware)
-
-    app.mount("/mcp", mcp_app)
+    app.mount("/mcp", MCPBrowserHandler(mcp_app))
 
     # Add execute_tool endpoint for direct tool execution
     @app.post("/execute_tool")
@@ -326,6 +361,10 @@ def create_app(
             "status": "healthy",
             "graph_nodes": len(graph_storage.nodes),
             "graph_edges": len(graph_storage.edges),
+            "federation": {
+                **federation_summary,
+                "runtime": federation_manager.get_status(),
+            },
         }
 
     # Root endpoint - redirect to web app
@@ -353,8 +392,22 @@ def create_app(
                 "nodes": len(graph_storage.nodes),
                 "edges": len(graph_storage.edges),
             },
-            "llm_provider": chat_service.provider_type
+            "llm_provider": chat_service.provider_type,
+            "federation": {
+                **federation_summary,
+                "runtime": federation_manager.get_status(),
+            },
         }
+
+    @app.get("/federation/status")
+    async def federation_status() -> Dict[str, Any]:
+        """Get federation cache and connectivity status."""
+        return federation_manager.get_status()
+
+    @app.post("/federation/sync")
+    async def federation_sync() -> Dict[str, Any]:
+        """Trigger best-effort sync for all enabled federated graph sources."""
+        return federation_manager.sync_all()
 
     # Agent system endpoints
     @app.get("/agents/status")
@@ -371,6 +424,7 @@ def create_app(
     @app.on_event("shutdown")
     async def shutdown_event():
         """Gracefully shutdown agent registry and event system."""
+        federation_manager.stop()
         agent_registry.stop()
         graph_storage.shutdown_events()
 

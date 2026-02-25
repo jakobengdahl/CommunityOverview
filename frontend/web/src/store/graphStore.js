@@ -1,5 +1,20 @@
 import { create } from 'zustand';
 
+const FEDERATION_DEPTH_STORAGE_KEY = 'federation_depth';
+
+function loadInitialFederationDepth() {
+  try {
+    const stored = window?.localStorage?.getItem(FEDERATION_DEPTH_STORAGE_KEY);
+    const parsed = Number(stored);
+    if (Number.isInteger(parsed) && parsed >= 1) {
+      return parsed;
+    }
+  } catch {
+    // ignore storage errors and use default
+  }
+  return 1;
+}
+
 // Default welcome message (used before presentation is loaded)
 const DEFAULT_WELCOME_MESSAGE = {
   role: 'assistant',
@@ -84,6 +99,7 @@ const useGraphStore = create((set, get) => ({
   // Search state
   searchQuery: '',
   searchResults: null,
+  federationDepth: loadInitialFederationDepth(),
 
   // Chat state
   chatMessages: [DEFAULT_WELCOME_MESSAGE],
@@ -190,6 +206,16 @@ const useGraphStore = create((set, get) => ({
   setSearchQuery: (query) => set({ searchQuery: query }),
 
   setSearchResults: (results) => set({ searchResults: results }),
+  setFederationDepth: (depth) => {
+    const normalized = Number(depth);
+    if (!Number.isInteger(normalized) || normalized < 1) return;
+    try {
+      window?.localStorage?.setItem(FEDERATION_DEPTH_STORAGE_KEY, String(normalized));
+    } catch {
+      // ignore storage errors
+    }
+    set({ federationDepth: normalized });
+  },
 
   setStats: (stats) => set({ stats }),
 

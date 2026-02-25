@@ -52,6 +52,7 @@ class ChatService:
 
         # Create the underlying ChatProcessor with our tools map
         self._processor = ChatProcessor(self._tools_map)
+        self._current_federation_depth: Optional[int] = None
 
     def _build_tools_map(self) -> Dict[str, Callable]:
         """
@@ -64,7 +65,7 @@ class ChatService:
             Dict mapping tool names to callable methods
         """
         return {
-            "search_graph": self._graph_service.search_graph,
+            "search_graph": self._search_graph_tool,
             "get_node_details": self._graph_service.get_node_details,
             "get_related_nodes": self._graph_service.get_related_nodes,
             "find_similar_nodes": self._graph_service.find_similar_nodes,
@@ -82,6 +83,24 @@ class ChatService:
             "get_presentation": self._graph_service.get_presentation,
         }
 
+
+    def _search_graph_tool(
+        self,
+        query: str,
+        node_types: Optional[List[str]] = None,
+        limit: int = 50,
+        action: Optional[str] = None,
+        federation_depth: Optional[int] = None,
+    ) -> Dict[str, Any]:
+        effective_depth = federation_depth if federation_depth is not None else self._current_federation_depth
+        return self._graph_service.search_graph(
+            query=query,
+            node_types=node_types,
+            limit=limit,
+            action=action,
+            federation_depth=effective_depth,
+        )
+
     @property
     def graph_service(self) -> GraphService:
         """Access the underlying GraphService."""
@@ -96,7 +115,8 @@ class ChatService:
         self,
         messages: List[Dict[str, Any]],
         api_key: Optional[str] = None,
-        provider: Optional[str] = None
+        provider: Optional[str] = None,
+        federation_depth: Optional[int] = None
     ) -> Dict[str, Any]:
         """
         Process a chat message and return the response.
@@ -117,11 +137,15 @@ class ChatService:
             - toolUsed: Name of the last tool used (if any)
             - toolResult: Result from the tool (if any)
         """
-        return self._processor.process_message(
-            messages=messages,
-            api_key=api_key,
-            provider=provider
-        )
+        self._current_federation_depth = federation_depth
+        try:
+            return self._processor.process_message(
+                messages=messages,
+                api_key=api_key,
+                provider=provider
+            )
+        finally:
+            self._current_federation_depth = None
 
     def process_chat_request(
         self,
@@ -129,7 +153,8 @@ class ChatService:
         conversation_history: Optional[List[Dict[str, Any]]] = None,
         api_key: Optional[str] = None,
         provider: Optional[str] = None,
-        document_context: Optional[str] = None
+        document_context: Optional[str] = None,
+        federation_depth: Optional[int] = None
     ) -> Dict[str, Any]:
         """
         Process a chat request with optional document context.
@@ -171,7 +196,8 @@ User's question: {user_message}"""
         return self.process_message(
             messages=messages,
             api_key=api_key,
-            provider=provider
+            provider=provider,
+            federation_depth=federation_depth
         )
 
     def get_system_info(self) -> Dict[str, Any]:
@@ -193,7 +219,8 @@ User's question: {user_message}"""
         node_type: Optional[str] = None,
         communities: Optional[List[str]] = None,
         api_key: Optional[str] = None,
-        provider: Optional[str] = None
+        provider: Optional[str] = None,
+        federation_depth: Optional[int] = None
     ) -> Dict[str, Any]:
         """
         Extract and propose nodes from text using LLM analysis.

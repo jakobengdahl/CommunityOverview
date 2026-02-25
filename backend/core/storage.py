@@ -26,7 +26,7 @@ from typing import List, Dict, Optional, Any, TYPE_CHECKING, Callable
 from datetime import datetime
 import networkx as nx
 from pathlib import Path
-import Levenshtein
+from rapidfuzz.distance import Levenshtein
 
 from .models import (
     Node, Edge, NodeType, RelationshipType,
@@ -100,6 +100,10 @@ class GraphStorage:
         self.graph = nx.MultiDiGraph()  # MultiDiGraph allows multiple edges between same nodes
         self.nodes: Dict[str, Node] = {}  # node_id -> Node
         self.edges: Dict[str, Edge] = {}  # edge_id -> Edge
+        self.graph_metadata: Dict[str, Any] = {
+            "version": "1.0",
+            "graph_name": self.json_path.stem,
+        }
 
         # Event system (initialized lazily via setup_events())
         self._event_dispatcher: Optional["EventDispatcher"] = None
@@ -248,6 +252,72 @@ class GraphStorage:
         except Exception as e:
             print(f"Warning: Failed to dispatch event: {e}")
 
+
+    def emit_federated_node_event(
+        self,
+        operation: str,
+        node_before: Optional[Node] = None,
+        node_after: Optional[Node] = None,
+        event_origin: str = "federation-sync",
+    ) -> None:
+        """Emit an event for federated cache changes so subscriptions can react."""
+        operation_map = {
+            "create": EventType.NODE_CREATE,
+            "update": EventType.NODE_UPDATE,
+            "delete": EventType.NODE_DELETE,
+        }
+        event_type = operation_map.get(operation)
+        if event_type is None:
+            return
+
+        entity_node = node_after or node_before
+        if entity_node is None:
+            return
+
+        context = EventContext(event_origin=event_origin)
+        self._emit_event(
+            event_type=event_type,
+            entity_kind=EntityKind.NODE,
+            entity_id=entity_node.id,
+            entity_type=entity_node.type_str,
+            before=node_before.to_dict() if node_before else None,
+            after=node_after.to_dict() if node_after else None,
+            context=context,
+        )
+
+
+    def emit_federated_edge_event(
+        self,
+        operation: str,
+        edge_before: Optional[Edge] = None,
+        edge_after: Optional[Edge] = None,
+        event_origin: str = "federation-sync",
+    ) -> None:
+        """Emit an event for federated cache edge changes."""
+        operation_map = {
+            "create": EventType.EDGE_CREATE,
+            "update": EventType.EDGE_UPDATE if hasattr(EventType, "EDGE_UPDATE") else EventType.EDGE_CREATE,
+            "delete": EventType.EDGE_DELETE,
+        }
+        event_type = operation_map.get(operation)
+        if event_type is None:
+            return
+
+        entity_edge = edge_after or edge_before
+        if entity_edge is None:
+            return
+
+        context = EventContext(event_origin=event_origin)
+        self._emit_event(
+            event_type=event_type,
+            entity_kind=EntityKind.EDGE,
+            entity_id=entity_edge.id,
+            entity_type=entity_edge.type_str,
+            before=edge_before.to_dict() if edge_before else None,
+            after=edge_after.to_dict() if edge_after else None,
+            context=context,
+        )
+
     def load(self) -> None:
         """
         Load graph from JSON file.
@@ -268,6 +338,19 @@ class GraphStorage:
                         data = json.load(f)
                     finally:
                         _unlock_file(f)
+
+                metadata = data.get('metadata') if isinstance(data, dict) else None
+                if isinstance(metadata, dict):
+                    self.graph_metadata = {
+                        "version": metadata.get("version", "1.0"),
+                        "graph_name": metadata.get("graph_name") or self.json_path.stem,
+                        **{k: v for k, v in metadata.items() if k not in {"version", "graph_name"}},
+                    }
+                else:
+                    self.graph_metadata = {
+                        "version": "1.0",
+                        "graph_name": self.json_path.stem,
+                    }
 
                 # Clear existing data
                 self.nodes.clear()
@@ -313,7 +396,9 @@ class GraphStorage:
                 'nodes': [node.to_dict() for node in self.nodes.values()],
                 'edges': [edge.to_dict() for edge in self.edges.values()],
                 'metadata': {
-                    'version': '1.0',
+                    **(self.graph_metadata or {}),
+                    'version': (self.graph_metadata or {}).get('version', '1.0'),
+                    'graph_name': (self.graph_metadata or {}).get('graph_name', self.json_path.stem),
                     'last_updated': datetime.utcnow().isoformat()
                 }
             }
@@ -353,6 +438,14 @@ class GraphStorage:
                 if os.path.exists(temp_path):
                     os.unlink(temp_path)
                 raise e
+
+
+    def get_graph_name(self) -> str:
+        """Return configured graph name from graph metadata."""
+        name = (self.graph_metadata or {}).get("graph_name")
+        if isinstance(name, str) and name.strip():
+            return name.strip()
+        return self.json_path.stem
 
     def reload(self) -> None:
         """

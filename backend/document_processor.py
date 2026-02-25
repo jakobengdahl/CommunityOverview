@@ -1,7 +1,8 @@
 import os
 from typing import Optional
-import fitz  # PyMuPDF
 import docx
+
+from backend.core.pdf_extractor import extract_text_from_pdf_path
 
 class DocumentProcessor:
     """Handles text extraction from PDF and Word documents"""
@@ -35,14 +36,9 @@ class DocumentProcessor:
 
     @staticmethod
     def parse_pdf(file_path: str) -> str:
-        """Extract text from PDF"""
+        """Extract text from PDF using pypdf."""
         try:
-            doc = fitz.open(file_path)
-            text = []
-            for page in doc:
-                text.append(page.get_text())
-            doc.close()
-            return "\n\n".join(text)
+            return extract_text_from_pdf_path(file_path)
         except Exception as e:
             raise Exception(f"Error parsing PDF: {str(e)}")
 

@@ -80,6 +80,12 @@ function GraphCanvasInner({
   saveViewSignal = 0,
   groupsToRestore = null,
   onGroupsRestored,
+  federationDepth = 1,
+  onFederationDepthChange,
+  maxFederationDepth = 4,
+  federationDepthLevels = null,
+  federationDepthLabel = "Depth",
+  federationDepthTooltip = "Depth levels are defined by installation configuration",
 }) {
   const [loadedNodeCount, setLoadedNodeCount] = useState(INITIAL_LOAD_COUNT);
   const [nodeContextMenu, setNodeContextMenu] = useState(null);
@@ -92,6 +98,19 @@ function GraphCanvasInner({
   const rightDragStart = useRef({ x: 0, y: 0, time: null });
   const mouseDownPos = useRef(null);
   const { screenToFlowPosition, setCenter, getNodes: getFlowNodes } = useReactFlow();
+
+  const depthLevels = useMemo(() => {
+    if (Array.isArray(federationDepthLevels) && federationDepthLevels.length > 0) {
+      const normalized = federationDepthLevels
+        .map((value) => Number(value))
+        .filter((value) => Number.isInteger(value) && value >= 1)
+        .sort((a, b) => a - b);
+      return Array.from(new Set(normalized));
+    }
+
+    const max = Math.max(1, maxFederationDepth || 1);
+    return Array.from({ length: max }, (_, index) => index + 1);
+  }, [federationDepthLevels, maxFederationDepth]);
 
   // Track selected nodes and edges
   useOnSelectionChange({
@@ -735,6 +754,29 @@ function GraphCanvasInner({
             zoomable
           />
         </ReactFlow>
+
+        {depthLevels.length > 1 && (
+          <div className="federation-depth-control" aria-label="Federated search depth selector">
+            <span className="federation-depth-label" title={federationDepthTooltip}>{federationDepthLabel}</span>
+            <div className="federation-depth-levels" role="group" aria-label="Federation depth levels">
+              {depthLevels.map((level) => {
+                const isActive = level === federationDepth;
+                return (
+                  <button
+                    key={level}
+                    type="button"
+                    className={`federation-depth-level${isActive ? ' active' : ''}`}
+                    onClick={() => onFederationDepthChange && onFederationDepthChange(level)}
+                    aria-pressed={isActive}
+                    title={`Search depth ${level}`}
+                  >
+                    {level}
+                  </button>
+                );
+              })}
+            </div>
+          </div>
+        )}
       </div>
 
       {nodeContextMenu && (

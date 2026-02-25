@@ -4,8 +4,10 @@ import useGraphStore from '../store/graphStore';
 import { ICON_MAP, COLOR_MAP } from './FloatingToolbar';
 import * as api from '../services/api';
 import './FloatingSearch.css';
+import { useI18n } from '../i18n';
 
 function FloatingSearch() {
+  const { t } = useI18n();
   const {
     nodes: vizNodes,
     hiddenNodeIds,
@@ -13,6 +15,8 @@ function FloatingSearch() {
     clearVisualization,
     setFocusNodeId,
     setPendingGroups,
+    federationDepth,
+    stats,
   } = useGraphStore();
 
   const [query, setQuery] = useState('');
@@ -23,6 +27,24 @@ function FloatingSearch() {
   const inputRef = useRef(null);
   const containerRef = useRef(null);
   const debounceRef = useRef(null);
+
+  const graphDisplayNames = stats?.federation?.graph_display_names || {};
+  const showGraphPrefix = Boolean(stats?.federation?.search_has_multiple_graphs);
+  const effectiveMaxDepth = Math.max(1, stats?.federation?.max_selectable_depth || 1);
+
+  const getResultLabel = useCallback((node) => {
+    if (!showGraphPrefix) {
+      return node.name;
+    }
+
+    const originGraphId = node.metadata?.origin_graph_id;
+    const originGraphName = node.metadata?.origin_graph_name
+      || (originGraphId ? graphDisplayNames[originGraphId] : null)
+      || graphDisplayNames.local
+      || 'Local';
+
+    return `${originGraphName}: ${node.name}`;
+  }, [graphDisplayNames, showGraphPrefix]);
 
   // Debounced search
   useEffect(() => {
@@ -36,7 +58,7 @@ function FloatingSearch() {
     debounceRef.current = setTimeout(async () => {
       setIsLoading(true);
       try {
-        const result = await api.searchGraph(query, { limit: 10 });
+        const result = await api.searchGraph(query, { limit: 10, federationDepth });
         const nodes = (result.nodes || []).filter(
           n => n.type !== 'Community' && n.type !== 'VisualizationView'
         );
@@ -52,7 +74,7 @@ function FloatingSearch() {
     }, 300);
 
     return () => clearTimeout(debounceRef.current);
-  }, [query]);
+  }, [query, federationDepth]);
 
   // Click outside to close
   useEffect(() => {
@@ -210,6 +232,9 @@ function FloatingSearch() {
         />
         {isLoading && <div className="floating-search-spinner" />}
       </div>
+      <div className="floating-search-depth-indicator" title={t('federation.depth_indicator_tooltip')}>
+        {t('federation.depth_indicator', { current: federationDepth, max: effectiveMaxDepth })}
+      </div>
 
       {showDropdown && results.length > 0 && (
         <div className="floating-search-dropdown">
@@ -230,7 +255,7 @@ function FloatingSearch() {
                   style={{ backgroundColor: color }}
                 />
                 {Icon && <Icon size={14} style={{ color, flexShrink: 0 }} />}
-                <span className="floating-search-result-name">{node.name}</span>
+                <span className="floating-search-result-name">{getResultLabel(node)}</span>
                 <span
                   className="floating-search-result-type"
                   style={{ color }}

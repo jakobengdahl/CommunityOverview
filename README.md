@@ -52,6 +52,7 @@ This system helps organizations avoid overlapping investments by making visible:
   chat_logic.py                   # Chat processing logic
 /config                           # Configuration files
   schema_config.json              # Node types, relationships, presentation
+  federation_config.json          # Startup-only federation graph connections
 /data                             # Graph data
   /examples                       # Example datasets (tracked in git)
     default.json                  # Default example dataset
@@ -72,6 +73,7 @@ This system helps organizations avoid overlapping investments by making visible:
   DATA_MANAGEMENT.md              # Graph data management guide
   EVENT_SUBSCRIPTIONS.md          # Webhook/event system docs
   DEPLOYMENT_GUIDE.md             # Deployment documentation
+  FEDERATED_GRAPH_DESIGN.md       # Federated multi-graph architecture proposal
 start-dev.sh                      # Development startup script
 LLM_PROVIDERS.md                  # LLM configuration guide
 ```
@@ -149,6 +151,8 @@ The script will:
 | http://localhost:8000/ui/ | Chat API |
 | http://localhost:8000/mcp | MCP endpoint |
 | http://localhost:8000/health | Health check |
+| http://localhost:8000/federation/status | Federation cache/status |
+| http://localhost:8000/federation/sync | Trigger federation sync (POST) |
 
 ### Manual Start
 
@@ -179,6 +183,44 @@ The application supports English and Swedish. Language can be set in three ways:
 3. **Schema config** (`config/schema_config.json`): `"default_language": "en"`
 
 The language setting affects the UI labels, chat placeholders, notifications, and welcome message. The AI chat assistant responds in whatever language the user writes in.
+Federation topology can be configured at startup with `FEDERATION_FILE` (default: `config/federation_config.json`). This is admin-only configuration and is not editable via GUI/chat tools.
+
+
+Example federation depth setup (installation policy):
+
+```json
+{
+  "federation": {
+    "enabled": true,
+    "max_traversal_depth": 4,
+    "depth_levels": [1, 2, 4],
+    "graphs": [
+      {
+        "graph_id": "esam-main",
+        "display_name": "eSam",
+        "enabled": true,
+        "max_depth_override": 2,
+        "endpoints": { "graph_json_url": "https://example.org/graph.json" }
+      }
+    ]
+  }
+}
+```
+
+UI behavior:
+- Only configured selectable levels are shown (bounded by effective max depth).
+- If only one level is available, the depth selector is hidden.
+- Search labels show `<GraphName>: <NodeName>` only when multiple graphs are available.
+
+You can also name the local graph in `graph.json` metadata:
+
+```json
+{
+  "metadata": {
+    "graph_name": "My Local Collaboration Graph"
+  }
+}
+```
 
 ## Data Management
 
@@ -187,6 +229,7 @@ Graph data is stored separately from the codebase:
 - **Active data** lives in `data/active/graph.json` (git-ignored)
 
 On first run, the default example data is automatically copied to the active location. Use `--data` to load different datasets. See [docs/DATA_MANAGEMENT.md](./docs/DATA_MANAGEMENT.md) for details.
+For upcoming multi-instance capabilities, see [docs/FEDERATED_GRAPH_DESIGN.md](./docs/FEDERATED_GRAPH_DESIGN.md).
 
 ## LLM Provider Configuration
 
@@ -206,6 +249,36 @@ export LLM_PROVIDER=openai   # Force OpenAI
 ```
 
 See [LLM_PROVIDERS.md](./LLM_PROVIDERS.md) for detailed configuration.
+
+## Authentication
+
+### Full Basic Auth (all endpoints)
+
+```bash
+export AUTH_ENABLED=true
+export AUTH_USERNAME=admin
+export AUTH_PASSWORD=secret
+```
+
+### MCP-only Basic Auth (for Google Cloud Run / IAP deployments)
+
+When running behind Google Cloud Run with IAP, the web GUI and REST API are already protected by Google login. Use `MCP_BASIC_AUTH` to add Basic Auth only to MCP endpoints (`/mcp/*` and `/execute_tool`), which are called by external MCP clients that cannot use IAP:
+
+```bash
+export AUTH_ENABLED=false
+export MCP_BASIC_AUTH=true
+export AUTH_USERNAME=mcp-client
+export AUTH_PASSWORD=secret
+```
+
+| Variable | Default | Description |
+|---|---|---|
+| `AUTH_ENABLED` | `false` | Enable Basic Auth on **all** endpoints (except `/health`, `/info`) |
+| `MCP_BASIC_AUTH` | `false` | Enable Basic Auth **only** on `/mcp/*` and `/execute_tool` |
+| `AUTH_USERNAME` | `admin` | Username for Basic Auth |
+| `AUTH_PASSWORD` | *(none)* | Password for Basic Auth (required for either mode to activate) |
+
+If both `AUTH_ENABLED` and `MCP_BASIC_AUTH` are `true`, `AUTH_ENABLED` takes precedence and all endpoints require auth.
 
 ## Testing
 

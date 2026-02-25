@@ -23,6 +23,7 @@ from backend.core import (
 )
 
 from backend import config_loader
+from backend.federation import FederationManager
 
 from .serializers import (
     serialize_node, serialize_nodes,
@@ -71,7 +72,7 @@ class GraphService:
     requests from clients and LLMs through various protocols.
     """
 
-    def __init__(self, storage: GraphStorage):
+    def __init__(self, storage: GraphStorage, federation_manager: Optional[FederationManager] = None):
         """
         Initialize GraphService with a GraphStorage instance.
 
@@ -79,6 +80,7 @@ class GraphService:
             storage: A GraphStorage instance for persistence
         """
         self._storage = storage
+        self._federation_manager = federation_manager
 
     @property
     def storage(self) -> GraphStorage:
@@ -92,7 +94,8 @@ class GraphService:
         query: str,
         node_types: Optional[List[str]] = None,
         limit: int = 50,
-        action: Optional[str] = None
+        action: Optional[str] = None,
+        federation_depth: Optional[int] = None,
     ) -> Dict[str, Any]:
         """
         Search for nodes in the graph based on text query.
@@ -130,13 +133,46 @@ class GraphService:
             if edge.source in result_node_ids or edge.target in result_node_ids
         ]
 
+        federated_nodes = []
+        federated_edges = []
+
+        if self._federation_manager and self._federation_manager.enabled:
+            remaining = max(0, limit - len(results))
+            if remaining > 0:
+                federated = self._federation_manager.search_nodes(
+                    query=query,
+                    node_types=node_types,
+                    limit=remaining,
+                    max_depth=federation_depth,
+                )
+                federated_nodes = federated["nodes"]
+                federated_edges = federated["edges"]
+
+        all_nodes = results + federated_nodes
+        all_edges = connecting_edges + federated_edges
+
+        # Deduplicate edges by ID when local/federated edge collections overlap in future extensions
+        deduped_edges = []
+        seen_edge_ids = set()
+        for edge in all_edges:
+            if edge.id in seen_edge_ids:
+                continue
+            seen_edge_ids.add(edge.id)
+            deduped_edges.append(edge)
+
         result = {
-            "nodes": serialize_nodes(results),
-            "edges": serialize_edges(connecting_edges),
-            "total": len(results),
+            "nodes": serialize_nodes(all_nodes),
+            "edges": serialize_edges(deduped_edges),
+            "total": len(all_nodes),
             "query": query,
             "filters": {
                 "node_types": node_types,
+            },
+            "federation": {
+                "included": bool(self._federation_manager and self._federation_manager.enabled),
+                "federated_nodes": len(federated_nodes),
+                "federated_edges": len(federated_edges),
+                "depth": federation_depth,
             }
         }
 
@@ -355,6 +391,135 @@ class GraphService:
             response["action"] = "add_to_visualization"
 
         return response
+
+    def adopt_federated_node(
+        self,
+        federated_node_id: str,
+        local_name: Optional[str] = None,
+        relationship_type: str = "ADOPTED_FROM",
+        create_new_copy: bool = False,
+        event_origin: Optional[str] = None,
+        event_session_id: Optional[str] = None,
+        event_correlation_id: Optional[str] = None,
+    ) -> Dict[str, Any]:
+        """Clone a federated cached node into the local graph and link lineage."""
+        if not self._federation_manager or not self._federation_manager.enabled:
+            return {
+                "success": False,
+                "message": "Federation is not enabled",
+                "added_node_ids": [],
+                "added_edge_ids": [],
+            }
+
+        source_node = self._federation_manager.get_cached_node(federated_node_id)
+        if source_node is None:
+            return {
+                "success": False,
+                "message": f"Federated node not found in cache: {federated_node_id}",
+                "added_node_ids": [],
+                "added_edge_ids": [],
+            }
+
+        graph_cfg = self._federation_manager.get_graph_config_for_node(federated_node_id)
+        if graph_cfg and not graph_cfg.capabilities.allow_adopt:
+            return {
+                "success": False,
+                "message": f"Adoption is not allowed for source graph: {graph_cfg.graph_id}",
+                "added_node_ids": [],
+                "added_edge_ids": [],
+            }
+
+        if not create_new_copy:
+            for local_node in self._storage.nodes.values():
+                adopted_from = (local_node.metadata or {}).get("adopted_from") or {}
+                if adopted_from.get("federated_node_id") == source_node.id:
+                    return {
+                        "success": True,
+                        "message": "Federated node already adopted",
+                        "adopted_node": serialize_node(local_node),
+                        "source_node": serialize_node(source_node),
+                        "lineage_edge": None,
+                        "added_node_ids": [],
+                        "added_edge_ids": [],
+                        "action": "add_to_visualization",
+                        "already_adopted": True,
+                    }
+
+        metadata = dict(source_node.metadata or {})
+        metadata.update({
+            "is_adopted": True,
+            "adopted_from": {
+                "federated_node_id": source_node.id,
+                "origin_graph_id": source_node.metadata.get("origin_graph_id"),
+                "origin_node_id": source_node.metadata.get("origin_node_id"),
+            },
+        })
+
+        local_node = Node(
+            type=source_node.type_str,
+            name=local_name or source_node.name,
+            description=source_node.description,
+            summary=source_node.summary,
+            tags=list(source_node.tags),
+            metadata=metadata,
+        )
+
+        # Persist a local reference copy for the federated source if not already present,
+        # so lineage edges are valid in local storage and visible in traversals.
+        source_reference = self._storage.get_node(source_node.id)
+        if source_reference is None:
+            source_reference = Node(
+                id=source_node.id,
+                type=source_node.type_str,
+                name=source_node.name,
+                description=source_node.description,
+                summary=source_node.summary,
+                tags=list(source_node.tags),
+                metadata={
+                    **(source_node.metadata or {}),
+                    "is_federated_reference": True,
+                    "read_only": True,
+                },
+            )
+
+        lineage_edge = Edge(
+            source=local_node.id,
+            target=source_reference.id,
+            type=relationship_type,
+            label="Adopted from federated source",
+            metadata={
+                "is_federated_lineage": True,
+                "origin_graph_id": source_node.metadata.get("origin_graph_id"),
+            },
+        )
+
+        event_context = None
+        if event_origin or event_session_id or event_correlation_id:
+            event_context = EventContext(
+                event_origin=event_origin,
+                event_session_id=event_session_id,
+                event_correlation_id=event_correlation_id,
+            )
+
+        nodes_to_add = [local_node]
+        if self._storage.get_node(source_reference.id) is None:
+            nodes_to_add.append(source_reference)
+
+        result = self._storage.add_nodes(nodes_to_add, [lineage_edge], event_context=event_context)
+
+        if not result.success:
+            return serialize_add_result(result)
+
+        return {
+            "success": True,
+            "message": "Federated node adopted into local graph",
+            "adopted_node": serialize_node(local_node),
+            "source_node": serialize_node(source_node),
+            "lineage_edge": serialize_edge(lineage_edge),
+            "added_node_ids": result.added_node_ids,
+            "added_edge_ids": result.added_edge_ids,
+            "action": "add_to_visualization",
+        }
 
     def update_node(
         self,
@@ -578,8 +743,31 @@ class GraphService:
         Returns:
             Dict with statistics (total_nodes, total_edges, nodes_by_type)
         """
-        stats = self._storage.get_stats()
-        return serialize_graph_stats(stats)
+        stats = serialize_graph_stats(self._storage.get_stats())
+
+        local_graph_name = self._storage.get_graph_name()
+        federation_info: Dict[str, Any] = {
+            "local_graph_name": local_graph_name,
+            "max_selectable_depth": 1,
+            "selectable_depth_levels": [1],
+            "search_has_multiple_graphs": False,
+            "graph_display_names": {"local": local_graph_name},
+        }
+
+        if self._federation_manager and self._federation_manager.enabled:
+            remote_graph_names = self._federation_manager.get_graph_display_names()
+            graph_display_names = {"local": local_graph_name, **remote_graph_names}
+            total_graph_count = len(graph_display_names)
+            federation_info = {
+                "local_graph_name": local_graph_name,
+                "max_selectable_depth": self._federation_manager.get_max_selectable_depth(),
+                "selectable_depth_levels": self._federation_manager.get_selectable_depth_levels(),
+                "search_has_multiple_graphs": total_graph_count > 1,
+                "graph_display_names": graph_display_names,
+            }
+
+        stats["federation"] = federation_info
+        return stats
 
     def list_node_types(self) -> Dict[str, Any]:
         """

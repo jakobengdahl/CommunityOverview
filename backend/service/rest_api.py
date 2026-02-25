@@ -31,6 +31,7 @@ class SearchRequest(BaseModel):
     query: str = Field(..., description="Search text")
     node_types: Optional[List[str]] = Field(None, description="Filter by node types")
     limit: int = Field(50, ge=1, le=500, description="Max results")
+    federation_depth: Optional[int] = Field(None, ge=1, le=9, description="Optional federated search depth")
 
 
 class RelatedNodesRequest(BaseModel):
@@ -111,6 +112,17 @@ class DeleteEdgeRequest(BaseModel):
     event_correlation_id: Optional[str] = Field(None, description="Correlation ID for chaining events")
 
 
+
+class AdoptFederatedNodeRequest(BaseModel):
+    """Request model for adopting a federated cached node into local graph."""
+    federated_node_id: str = Field(..., description="Federated cached node ID")
+    local_name: Optional[str] = Field(None, description="Optional local name override")
+    relationship_type: str = Field("ADOPTED_FROM", description="Lineage relation type")
+    create_new_copy: bool = Field(False, description="Create a new local copy even if already adopted")
+    event_origin: Optional[str] = Field(None, description="Source of mutation")
+    event_session_id: Optional[str] = Field(None, description="Session ID for loop prevention")
+    event_correlation_id: Optional[str] = Field(None, description="Correlation ID for chaining events")
+
 class SaveViewRequest(BaseModel):
     """Request model for saving a view."""
     name: str = Field(..., min_length=1, max_length=200, description="View name")
@@ -139,7 +151,8 @@ def create_rest_router(service: GraphService, prefix: str = "") -> APIRouter:
         return service.search_graph(
             query=request.query,
             node_types=request.node_types,
-            limit=request.limit
+            limit=request.limit,
+            federation_depth=request.federation_depth,
         )
 
     @router.get("/nodes/{node_id}")
@@ -184,6 +197,23 @@ def create_rest_router(service: GraphService, prefix: str = "") -> APIRouter:
             threshold=request.threshold,
             limit=request.limit
         )
+
+
+    @router.post("/federation/adopt")
+    async def adopt_federated_node(request: AdoptFederatedNodeRequest) -> Dict[str, Any]:
+        """Adopt (clone) a federated cached node into local graph."""
+        result = service.adopt_federated_node(
+            federated_node_id=request.federated_node_id,
+            local_name=request.local_name,
+            relationship_type=request.relationship_type,
+            create_new_copy=request.create_new_copy,
+            event_origin=request.event_origin,
+            event_session_id=request.event_session_id,
+            event_correlation_id=request.event_correlation_id,
+        )
+        if not result.get("success", True):
+            raise HTTPException(status_code=400, detail=result.get("message", "Adoption failed"))
+        return result
 
     # ==================== CRUD Endpoints ====================
 

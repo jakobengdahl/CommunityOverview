@@ -101,5 +101,11 @@
     "subscription_error": "Could not create subscription",
     "saved_view_description": "Saved view: {name}",
     "saved_view_summary": "Contains {count} nodes"
+  },
+  "federation": {
+    "depth_label": "Depth",
+    "depth_tooltip": "Depth levels are defined by installation configuration",
+    "depth_indicator": "Depth {current}/{max}",
+    "depth_indicator_tooltip": "Current federated search depth and maximum allowed depth"
   }
 }
