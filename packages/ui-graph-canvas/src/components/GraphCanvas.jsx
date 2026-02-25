@@ -733,7 +733,6 @@ function GraphCanvasInner({
           fitViewOptions={{ padding: 0.2, duration: 800 }}
           minZoom={0.1}
           maxZoom={2}
-          attributionPosition="bottom-right"
           defaultEdgeOptions={{ animated: true, style: { strokeWidth: 2 } }}
           panOnDrag={[0, 2]}
           selectionOnDrag={true}
@@ -743,6 +742,7 @@ function GraphCanvasInner({
           multiSelectionKeyCode={['Shift', 'Meta', 'Control']}
           edgesUpdatable={false}
           onMoveStart={closeAllMenus}
+          proOptions={{ hideAttribution: true }}
         >
           <Background color="#333" gap={16} />
           <Controls />
