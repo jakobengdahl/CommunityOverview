@@ -122,7 +122,7 @@ function ChatPanel() {
           };
 
           try {
-            await api.executeTool('add_nodes', { nodes: [viewNode], edges: [] });
+            await api.addNodes([viewNode], []);
           } catch (err) {
             console.error('[ChatPanel] Failed to save view:', err);
           }
