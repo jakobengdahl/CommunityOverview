@@ -78,6 +78,8 @@ function GraphCanvasInner({
   onFocusComplete,
   createGroupSignal = 0,
   saveViewSignal = 0,
+  exportGraphSignal = 0,
+  onExportGraph,
   groupsToRestore = null,
   onGroupsRestored,
   federationDepth = 1,
@@ -444,6 +446,36 @@ function GraphCanvasInner({
     }
   }, [nodes, edges, onSaveView]);
 
+  // Export graph: collect full node data with current positions and groups
+  const handleExportGraph = useCallback(() => {
+    if (onExportGraph) {
+      const groupNodes = nodes.filter(n => n.type === 'group');
+      const dataNodes = nodes.filter(n => n.type !== 'group');
+
+      const exportData = {
+        nodes: dataNodes.map(n => ({
+          ...(n.data || {}),
+          _position: n.position,
+          _parentId: n.parentId || undefined,
+        })),
+        edges: edges.map(e => ({
+          id: e.id,
+          source: e.source,
+          target: e.target,
+          type: e.label || e.data?.type,
+        })),
+        groups: groupNodes.map(g => ({
+          id: g.id,
+          label: g.data?.label,
+          position: g.position,
+          style: g.style,
+          color: g.data?.color,
+        })),
+      };
+      onExportGraph(exportData);
+    }
+  }, [nodes, edges, onExportGraph]);
+
   const handleLoadMore = useCallback(() => {
     setLoadedNodeCount(prev => Math.min(prev + 100, visibleNodes.length));
   }, [visibleNodes.length]);
@@ -639,6 +671,13 @@ function GraphCanvasInner({
       handleSaveView();
     }
   }, [saveViewSignal, handleSaveView]);
+
+  // Export graph when signal changes (triggered from header menu)
+  useEffect(() => {
+    if (exportGraphSignal > 0) {
+      handleExportGraph();
+    }
+  }, [exportGraphSignal, handleExportGraph]);
 
   // Restore groups from a saved view
   useEffect(() => {

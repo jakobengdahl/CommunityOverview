@@ -156,3 +156,24 @@
   padding: 4px;
   font-style: italic;
 }
+
+.floating-header-menu-item {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  width: 100%;
+  padding: 8px 10px;
+  background: transparent;
+  border: none;
+  border-radius: 6px;
+  color: #ccc;
+  font-size: 0.82rem;
+  cursor: pointer;
+  text-align: left;
+  transition: background 0.15s, color 0.15s;
+}
+
+.floating-header-menu-item:hover {
+  background: rgba(255, 255, 255, 0.1);
+  color: #fff;
+}

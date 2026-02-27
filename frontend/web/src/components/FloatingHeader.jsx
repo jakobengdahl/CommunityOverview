@@ -1,6 +1,7 @@
 import { useState, useRef, useEffect } from 'react';
-import { List, Feather } from 'react-bootstrap-icons';
+import { List, Feather, Download } from 'react-bootstrap-icons';
 import useGraphStore from '../store/graphStore';
+import { useI18n } from '../i18n';
 import './FloatingHeader.css';
 
 const NODE_TYPE_COLORS = {
@@ -18,7 +19,8 @@ const NODE_TYPE_COLORS = {
   SavedView: '#6B7280',
 };
 
-function FloatingHeader({ stats, title = 'Community Graph View' }) {
+function FloatingHeader({ stats, title = 'Community Graph View', onExportGraph }) {
+  const { t } = useI18n();
   const [menuOpen, setMenuOpen] = useState(false);
   const menuRef = useRef(null);
 
@@ -84,7 +86,16 @@ function FloatingHeader({ stats, title = 'Community Graph View' }) {
 
               <div className="floating-header-section-divider" />
               <div className="floating-header-section-title">Admin</div>
-              <div className="floating-header-placeholder">More options coming soon</div>
+              <button
+                className="floating-header-menu-item"
+                onClick={() => {
+                  onExportGraph?.();
+                  setMenuOpen(false);
+                }}
+              >
+                <Download size={14} />
+                <span>{t('menu.export_graph')}</span>
+              </button>
             </>
           ) : (
             <div className="floating-header-placeholder">Loading stats...</div>
