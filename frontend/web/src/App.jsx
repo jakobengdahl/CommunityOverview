@@ -490,6 +490,28 @@ function App() {
     setSaveViewSignal(prev => prev + 1);
   }, []);
 
+  // Export full graph from backend API
+  const handleExportGraph = useCallback(async () => {
+    try {
+      const data = await api.exportGraph();
+
+      const blob = new Blob([JSON.stringify(data, null, 2)], { type: 'application/json' });
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement('a');
+      a.href = url;
+      a.download = `graph-export-${new Date().toISOString().slice(0, 10)}.json`;
+      document.body.appendChild(a);
+      a.click();
+      document.body.removeChild(a);
+      URL.revokeObjectURL(url);
+
+      showNotification('success', t('menu.export_success'));
+    } catch (error) {
+      console.error('Error exporting graph:', error);
+      showNotification('error', t('menu.export_error'));
+    }
+  }, [showNotification, t]);
+
   // Handle drop from toolbar onto canvas
   const handleDropCreateNode = useCallback((nodeType, position) => {
     if (nodeType === 'Agent') {
@@ -560,7 +582,7 @@ function App() {
         />
       </div>
 
-      <FloatingHeader stats={stats} />
+      <FloatingHeader stats={stats} onExportGraph={handleExportGraph} />
       <div className="app-a11y-depth-live" aria-live="polite" aria-atomic="true">
         {t('federation.depth_indicator', { current: federationDepth, max: maxFederationDepth })}
       </div>
