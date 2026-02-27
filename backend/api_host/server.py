@@ -337,6 +337,22 @@ def create_app(
         "get_saved_view",
     }
 
+    # Define safe tools for unauthenticated access
+    SAFE_TOOLS = {
+        "search_graph",
+        "get_node_details",
+        "get_related_nodes",
+        "find_similar_nodes",
+        "find_similar_nodes_batch",
+        "get_graph_stats",
+        "list_node_types",
+        "list_relationship_types",
+        "get_schema",
+        "get_presentation",
+        "list_saved_views",
+        "get_saved_view",
+    }
+
     # Add execute_tool endpoint for direct tool execution
     @app.post("/execute_tool")
     async def execute_tool_endpoint(request: Request) -> JSONResponse:
