@@ -110,6 +110,7 @@ function FloatingSearch() {
         const savedEdges = node.metadata?.edges || [];
         const savedEdgeIds = new Set(node.metadata?.edge_ids || []);
         const savedGroups = node.metadata?.groups || [];
+        const savedParentIds = node.metadata?.parentIds || {};
         if (nodeIds.length > 0) {
           clearVisualization();
           const details = await Promise.all(
@@ -145,7 +146,7 @@ function FloatingSearch() {
 
             // Restore groups if any were saved
             if (savedGroups.length > 0) {
-              setPendingGroups(savedGroups);
+              setPendingGroups({ groups: savedGroups, parentIds: savedParentIds });
             }
           }
         }
