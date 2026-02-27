@@ -220,5 +220,11 @@ if [ -n "$CODESPACE_NAME" ]; then
     echo -e "${YELLOW}NOTE: Ensure port 8000 is set to Public visibility in the Ports tab.${NC}"
 fi
 
+# Ignore SIGINT until uvicorn registers its own signal handlers.
+# In Codespace terminals, a spurious SIGINT is delivered during process startup
+# which kills the server before it finishes initializing. The ignored disposition
+# is inherited across exec, and uvicorn's reloader overrides it with its own
+# handler via signal.signal(), so Ctrl+C still works once the server is ready.
+trap '' INT
 exec uvicorn backend.api_host.server:get_app --factory --reload --host 0.0.0.0 --port 8000 \
     --reload-dir backend
