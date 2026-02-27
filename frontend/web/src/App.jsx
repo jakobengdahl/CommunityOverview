@@ -65,7 +65,6 @@ function App() {
   const [saveViewSignal, setSaveViewSignal] = useState(0);
   const [isSavingView, setIsSavingView] = useState(false);
   const [editingEdge, setEditingEdge] = useState(null);
-  const [exportGraphSignal, setExportGraphSignal] = useState(0);
 
   const federationDepthLevels = (stats?.federation?.selectable_depth_levels || [1]).filter(v => Number.isInteger(v) && v >= 1);
   const maxFederationDepth = Math.max(1, ...federationDepthLevels, stats?.federation?.max_selectable_depth || 1);
@@ -491,28 +490,12 @@ function App() {
     setSaveViewSignal(prev => prev + 1);
   }, []);
 
-  // Trigger export graph signal (FloatingHeader → GraphCanvas)
-  const handleTriggerExportGraph = useCallback(() => {
-    setExportGraphSignal(prev => prev + 1);
-  }, []);
-
-  // Receive export data from GraphCanvas and download as JSON
-  const handleExportGraph = useCallback((exportData) => {
-    setExportGraphSignal(0);
+  // Export full graph from backend API
+  const handleExportGraph = useCallback(async () => {
     try {
-      const output = {
-        nodes: exportData.nodes,
-        edges: exportData.edges,
-        groups: exportData.groups,
-        metadata: {
-          version: '1.0',
-          exported_at: new Date().toISOString(),
-          node_count: exportData.nodes.length,
-          edge_count: exportData.edges.length,
-        },
-      };
+      const data = await api.exportGraph();
 
-      const blob = new Blob([JSON.stringify(output, null, 2)], { type: 'application/json' });
+      const blob = new Blob([JSON.stringify(data, null, 2)], { type: 'application/json' });
       const url = URL.createObjectURL(blob);
       const a = document.createElement('a');
       a.href = url;
@@ -588,8 +571,6 @@ function App() {
           onFocusComplete={clearFocusNode}
           createGroupSignal={createGroupSignal}
           saveViewSignal={saveViewSignal}
-          exportGraphSignal={exportGraphSignal}
-          onExportGraph={handleExportGraph}
           groupsToRestore={pendingGroups}
           onGroupsRestored={() => setPendingGroups(null)}
           federationDepth={federationDepth}
@@ -601,7 +582,7 @@ function App() {
         />
       </div>
 
-      <FloatingHeader stats={stats} onExportGraph={handleTriggerExportGraph} />
+      <FloatingHeader stats={stats} onExportGraph={handleExportGraph} />
       <div className="app-a11y-depth-live" aria-live="polite" aria-atomic="true">
         {t('federation.depth_indicator', { current: federationDepth, max: maxFederationDepth })}
       </div>
