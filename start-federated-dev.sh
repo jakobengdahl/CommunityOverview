@@ -377,12 +377,7 @@ APP_LANGUAGE="$APP_LANGUAGE" \
 uvicorn backend.api_host.server:get_app --factory \
     --host 0.0.0.0 --port "$PORT_A" \
     --reload \
-    --reload-exclude 'venv/*' \
-    --reload-exclude 'data/*' \
-    --reload-exclude 'node_modules/*' \
-    --reload-exclude '.git/*' \
-    --reload-exclude 'frontend/web/dist/*' \
-    --reload-exclude 'frontend/widget/dist/*' \
+    --reload-dir backend \
     2>&1 | sed "s/^/[Graph A] /" &
 PID_A=$!
 
@@ -398,12 +393,7 @@ APP_LANGUAGE="$APP_LANGUAGE" \
 uvicorn backend.api_host.server:get_app --factory \
     --host 0.0.0.0 --port "$PORT_B" \
     --reload \
-    --reload-exclude 'venv/*' \
-    --reload-exclude 'data/*' \
-    --reload-exclude 'node_modules/*' \
-    --reload-exclude '.git/*' \
-    --reload-exclude 'frontend/web/dist/*' \
-    --reload-exclude 'frontend/widget/dist/*' \
+    --reload-dir backend \
     2>&1 | sed "s/^/[Graph B] /" &
 PID_B=$!
 
