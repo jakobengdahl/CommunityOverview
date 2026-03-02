@@ -102,6 +102,11 @@
     "saved_view_description": "Saved view: {name}",
     "saved_view_summary": "Contains {count} nodes"
   },
+  "menu": {
+    "export_graph": "Export graph",
+    "export_success": "Graph exported",
+    "export_error": "Could not export graph"
+  },
   "federation": {
     "depth_label": "Depth",
     "depth_tooltip": "Depth levels are defined by installation configuration",

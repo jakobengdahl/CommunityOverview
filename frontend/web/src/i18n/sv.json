@@ -102,6 +102,11 @@
     "saved_view_description": "Sparad vy: {name}",
     "saved_view_summary": "Innehåller {count} noder"
   },
+  "menu": {
+    "export_graph": "Exportera graf",
+    "export_success": "Grafen exporterad",
+    "export_error": "Kunde inte exportera grafen"
+  },
   "federation": {
     "depth_label": "Djup",
     "depth_tooltip": "Djupnivåer styrs av installationens konfiguration",
