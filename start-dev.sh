@@ -7,11 +7,17 @@
 #   ./start-dev.sh [OPTIONS]
 #
 # Options:
+#   --profile <name>    Use a configuration profile (default: "default")
 #   --data <path|url>   Load graph data from a file path or URL (overwrites active data)
 #   --lang <en|sv>      Set the application language (default: en)
 #
+# Profiles:
+#   Profiles are directories under config/ (e.g. config/esam/, config/default/).
+#   Each can contain: schema_config.json, federation_config.json, .env, graph.json.
+#   Missing files fall back to config/default/.
+#
 # Environment Variables:
-#   GRAPH_SCHEMA_CONFIG - Path to custom schema configuration file (default: config/schema_config.json)
+#   SCHEMA_FILE - Path to custom schema configuration file
 #   GRAPH_FILE - Path to graph data file (default: data/active/graph.json)
 #   LLM_PROVIDER - LLM provider to use: "openai" or "claude" (auto-detected from API keys if not set)
 #   APP_LANGUAGE - Application language: "en" or "sv" (default: en)
@@ -35,14 +41,22 @@ DEFAULT_EXAMPLE="$DATA_DIR/examples/default.json"
 
 cd "$SCRIPT_DIR"
 
+# Source shared profile utilities
+source "$SCRIPT_DIR/config/profile-utils.sh"
+
 # =====================
 # Parse Arguments
 # =====================
 DATA_SOURCE=""
 LANG_OVERRIDE=""
+PROFILE_NAME="default"
 
 while [[ $# -gt 0 ]]; do
     case $1 in
+        --profile)
+            PROFILE_NAME="$2"
+            shift 2
+            ;;
         --data)
             DATA_SOURCE="$2"
             shift 2
@@ -53,7 +67,7 @@ while [[ $# -gt 0 ]]; do
             ;;
         *)
             echo -e "${RED}Unknown option: $1${NC}"
-            echo "Usage: ./start-dev.sh [--data <path|url>] [--lang <en|sv>]"
+            echo "Usage: ./start-dev.sh [--profile <name>] [--data <path|url>] [--lang <en|sv>]"
             exit 1
             ;;
     esac
@@ -64,12 +78,38 @@ echo -e "${BLUE}  Community Knowledge Graph - Dev Start${NC}"
 echo -e "${BLUE}========================================${NC}"
 
 # =====================
-# Configuration
+# Profile Resolution
 # =====================
+validate_profile "$PROFILE_NAME"
+PROFILE_DIR="$CONFIG_BASE_DIR/$PROFILE_NAME"
+
+echo -e "  ${BLUE}Profile:${NC}     $PROFILE_NAME"
+
+# Source .env files with fallback chain: profile → default → root
+apply_profile_env "$PROFILE_NAME"
+
+# Resolve schema config: env var takes precedence, then profile fallback
 if [ -n "$GRAPH_SCHEMA_CONFIG" ]; then
-    echo -e "${YELLOW}Using custom schema config: $GRAPH_SCHEMA_CONFIG${NC}"
     export SCHEMA_FILE="$GRAPH_SCHEMA_CONFIG"
+elif [ -z "$SCHEMA_FILE" ]; then
+    RESOLVED_SCHEMA=$(resolve_config "$PROFILE_NAME" "schema_config.json")
+    if [ -n "$RESOLVED_SCHEMA" ]; then
+        export SCHEMA_FILE="$RESOLVED_SCHEMA"
+    fi
 fi
+
+# Resolve federation config: env var takes precedence, then profile fallback
+if [ -z "$FEDERATION_FILE" ] && [ -z "$GRAPH_FEDERATION_CONFIG" ]; then
+    RESOLVED_FEDERATION=$(resolve_config "$PROFILE_NAME" "federation_config.json")
+    if [ -n "$RESOLVED_FEDERATION" ]; then
+        export FEDERATION_FILE="$RESOLVED_FEDERATION"
+    fi
+elif [ -n "$GRAPH_FEDERATION_CONFIG" ]; then
+    export FEDERATION_FILE="$GRAPH_FEDERATION_CONFIG"
+fi
+
+# Export profile name for backend /info endpoint
+export CONFIG_PROFILE="$PROFILE_NAME"
 
 # =====================
 # Language Configuration
@@ -116,8 +156,13 @@ if [ -n "$DATA_SOURCE" ]; then
         echo -e "${GREEN}Graph data copied to $ACTIVE_DATA${NC}"
     fi
 elif [ ! -f "$ACTIVE_DATA" ]; then
-    # No active data and no source specified - use default example
-    if [ -f "$DEFAULT_EXAMPLE" ]; then
+    # No active data and no source specified - try profile graph.json, then default example
+    PROFILE_GRAPH=$(resolve_config "$PROFILE_NAME" "graph.json")
+    if [ -n "$PROFILE_GRAPH" ]; then
+        echo -e "Loading graph data from profile: ${BLUE}$PROFILE_GRAPH${NC}"
+        cp "$PROFILE_GRAPH" "$ACTIVE_DATA"
+        echo -e "${GREEN}Profile graph data loaded.${NC}"
+    elif [ -f "$DEFAULT_EXAMPLE" ]; then
         echo -e "No active graph data found. Copying default example data..."
         cp "$DEFAULT_EXAMPLE" "$ACTIVE_DATA"
         echo -e "${GREEN}Default example data loaded.${NC}"
@@ -198,10 +243,14 @@ echo -e "  ${BLUE}MCP:${NC}         http://localhost:8000/mcp"
 echo -e "  ${BLUE}Health:${NC}      http://localhost:8000/health"
 echo ""
 echo -e "${GREEN}  Configuration:${NC}"
+echo -e "  ${BLUE}Profile:${NC}     $PROFILE_NAME"
 if [ -n "$SCHEMA_FILE" ]; then
     echo -e "  ${BLUE}Schema:${NC}      $SCHEMA_FILE"
 else
-    echo -e "  ${BLUE}Schema:${NC}      config/schema_config.json (default)"
+    echo -e "  ${BLUE}Schema:${NC}      config/default/schema_config.json (default)"
+fi
+if [ -n "$FEDERATION_FILE" ]; then
+    echo -e "  ${BLUE}Federation:${NC}  $FEDERATION_FILE"
 fi
 echo -e "  ${BLUE}Graph data:${NC}  $GRAPH_FILE"
 echo -e "  ${BLUE}Language:${NC}    $APP_LANGUAGE"

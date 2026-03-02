@@ -414,6 +414,7 @@ def create_app(
         return {
             "name": "Community Knowledge Graph",
             "version": "1.0.0",
+            "config_profile": config.config_profile,
             "endpoints": {
                 "api": config.api_prefix,
                 "ui": "/ui",

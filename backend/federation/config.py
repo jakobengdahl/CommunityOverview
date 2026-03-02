@@ -14,7 +14,7 @@ from typing import Any, Dict, List, Optional, Literal
 from pydantic import BaseModel, Field, validator
 
 
-DEFAULT_FEDERATION_PATH = "config/federation_config.json"
+DEFAULT_FEDERATION_PATH = "config/default/federation_config.json"
 
 
 class FederationEndpoints(BaseModel):
