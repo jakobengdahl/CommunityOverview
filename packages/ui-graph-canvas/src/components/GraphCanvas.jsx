@@ -642,16 +642,33 @@ function GraphCanvasInner({
 
   // Restore groups from a saved view
   useEffect(() => {
-    if (groupsToRestore && groupsToRestore.length > 0) {
-      const groupNodes = groupsToRestore.map(g => ({
+    // Support both legacy array format and new object format with parentIds
+    const groups = Array.isArray(groupsToRestore)
+      ? groupsToRestore
+      : groupsToRestore?.groups;
+    const parentIds = Array.isArray(groupsToRestore)
+      ? {}
+      : (groupsToRestore?.parentIds || {});
+
+    if (groups && groups.length > 0) {
+      const groupNodes = groups.map(g => ({
         id: g.id,
         type: 'group',
         position: g.position,
         data: { label: g.label || 'Group', description: '', color: g.color || '#646cff' },
         style: g.style || { width: 300, height: 200 },
       }));
+      const groupIdSet = new Set(groups.map(g => g.id));
       setNodes((nds) => {
-        const nonGroups = nds.filter(n => n.type !== 'group' && !n.id.startsWith('group-'));
+        const nonGroups = nds
+          .filter(n => n.type !== 'group' && !n.id.startsWith('group-'))
+          .map(n => {
+            const savedParent = parentIds[n.id];
+            if (savedParent && groupIdSet.has(savedParent)) {
+              return { ...n, parentId: savedParent };
+            }
+            return n;
+          });
         return reorderNodesForParentChild([...nonGroups, ...groupNodes]);
       });
       onGroupsRestored?.();

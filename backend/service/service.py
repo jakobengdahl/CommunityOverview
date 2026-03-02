@@ -935,15 +935,24 @@ class GraphService:
             self._storage.get_edges_between_nodes(actual_node_ids)
         )
 
-        # Extract group positions for frontend
-        group_data = []
-        for group_id in group_ids:
-            group_position = position_map.get(group_id)
-            if group_position:
-                group_data.append({
-                    "id": group_id,
-                    "position": group_position
-                })
+        # Extract group data for frontend - prefer full metadata if available
+        saved_groups = view_node.metadata.get('groups', [])
+        if saved_groups:
+            # Use full group metadata (includes label, color, style)
+            group_data = saved_groups
+        else:
+            # Fall back to reconstructing from position map
+            group_data = []
+            for group_id in group_ids:
+                group_position = position_map.get(group_id)
+                if group_position:
+                    group_data.append({
+                        "id": group_id,
+                        "position": group_position
+                    })
+
+        # Extract parentId mapping (which nodes belong to which groups)
+        parent_ids = view_node.metadata.get('parentIds', {})
 
         return {
             "success": True,
@@ -952,6 +961,7 @@ class GraphService:
             "positions": position_map,
             "hidden_node_ids": hidden_node_ids,
             "groups": group_data,
+            "parentIds": parent_ids,
             "action": "load_visualization"
         }
 

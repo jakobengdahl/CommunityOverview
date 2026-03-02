@@ -128,6 +128,7 @@ function App() {
         const positions = nodeData.metadata?.positions || {};
         const savedEdges = nodeData.metadata?.edges || [];
         const savedGroups = nodeData.metadata?.groups || [];
+        const savedParentIds = nodeData.metadata?.parentIds || {};
         if (nodeIds.length > 0) {
           clearVisualization();
           const details = await Promise.all(
@@ -158,7 +159,7 @@ function App() {
             const edgeMap = new Map(edgesToLoad.map(e => [e.id, e]));
             addNodesToVisualization(loadedNodes, Array.from(edgeMap.values()));
             if (savedGroups.length > 0) {
-              setPendingGroups(savedGroups);
+              setPendingGroups({ groups: savedGroups, parentIds: savedParentIds });
             }
           }
         }
@@ -376,6 +377,11 @@ function App() {
         metadata: {
           node_ids: saveViewDialog.viewData.nodes.map(n => n.id),
           positions: Object.fromEntries(saveViewDialog.viewData.nodes.map(n => [n.id, n.position])),
+          parentIds: Object.fromEntries(
+            saveViewDialog.viewData.nodes
+              .filter(n => n.parentId)
+              .map(n => [n.id, n.parentId])
+          ),
           edge_ids: (saveViewDialog.viewData.edges || []).map(e => e.id),
           edges: saveViewDialog.viewData.edges || [],
           groups: saveViewDialog.viewData.groups,
