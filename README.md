@@ -82,7 +82,7 @@ LLM_PROVIDERS.md                  # LLM configuration guide
 
 The metamodel defines two categories of node types:
 
-### Domain Node Types (configurable via `config/schema_config.json`)
+### Domain Node Types (configurable via `config/default/schema_config.json`)
 
 These represent the knowledge domain and can be customized per deployment:
 
@@ -180,10 +180,10 @@ The application supports English and Swedish. Language can be set in three ways:
 
 1. **URL parameter** (highest priority): `http://localhost:8000/web/?lang=sv`
 2. **Startup flag**: `./start-dev.sh --lang sv`
-3. **Schema config** (`config/schema_config.json`): `"default_language": "en"`
+3. **Schema config** (`config/default/schema_config.json`): `"default_language": "en"`
 
 The language setting affects the UI labels, chat placeholders, notifications, and welcome message. The AI chat assistant responds in whatever language the user writes in.
-Federation topology can be configured at startup with `FEDERATION_FILE` (default: `config/federation_config.json`). This is admin-only configuration and is not editable via GUI/chat tools.
+Federation topology can be configured at startup with `FEDERATION_FILE` (default: `config/default/federation_config.json`). This is admin-only configuration and is not editable via GUI/chat tools.
 
 
 Example federation depth setup (installation policy):

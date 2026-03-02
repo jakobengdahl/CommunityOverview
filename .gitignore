@@ -35,6 +35,9 @@ Thumbs.db
 .env
 .env.local
 .env.*.local
+config/*/.env
+config/*/.env.local
+config/*/.env.*.local
 
 # Logs
 *.log
@@ -60,3 +63,4 @@ data/active/graph.json
 # Federated test data (managed by start-federated-dev.sh)
 data/federated-a/
 data/federated-b/
+data/federated-*/

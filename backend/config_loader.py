@@ -8,7 +8,7 @@ The configuration defines:
 - Presentation settings (colors, prompts, introduction text)
 
 The config file path can be set via SCHEMA_FILE environment variable,
-defaulting to config/schema_config.json.
+defaulting to config/default/schema_config.json.
 """
 
 import os
@@ -18,7 +18,7 @@ from pathlib import Path
 from pydantic import BaseModel, Field, validator
 
 # Default config path relative to project root
-DEFAULT_CONFIG_PATH = "config/schema_config.json"
+DEFAULT_CONFIG_PATH = "config/default/schema_config.json"
 
 # Static node types that must always exist
 STATIC_NODE_TYPES = {

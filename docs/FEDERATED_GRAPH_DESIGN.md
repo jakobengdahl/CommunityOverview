@@ -77,7 +77,7 @@ This proposal extends the platform so one graph can **federate** with other grap
 
 ### 1. Federation configuration file (startup-only)
 
-Add a dedicated config file, for example `config/federation_config.json`:
+Add a dedicated config file, for example `config/default/federation_config.json`:
 
 ```json
 {
@@ -306,7 +306,7 @@ Use this checklist to quickly validate the current Option C baseline in a runnin
 
 ### 1) Configure one remote graph
 
-Update `config/federation_config.json` with one enabled graph that exposes `graph_json_url`:
+Update `config/default/federation_config.json` with one enabled graph that exposes `graph_json_url`:
 
 ```json
 {
@@ -452,7 +452,7 @@ A user can now choose the effective federation depth at runtime from the GUI wit
 
 ### Important constraints
 - This does **not** change federation topology or admin policy.
-- Topology remains startup-config only (`FEDERATION_FILE` / `config/federation_config.json`).
+- Topology remains startup-config only (`FEDERATION_FILE` / `config/default/federation_config.json`).
 - Runtime depth is only a user query/view lens within configured safety bounds.
 
 

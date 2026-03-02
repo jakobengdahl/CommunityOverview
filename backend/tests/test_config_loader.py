@@ -45,7 +45,7 @@ class TestConfigLoader:
         from backend import config_loader
 
         # Set custom config path
-        test_config_path = str(Path(__file__).parent.parent.parent / "config" / "test_schema_config.json")
+        test_config_path = str(Path(__file__).parent.parent.parent / "config" / "test" / "schema_config.json")
         os.environ["SCHEMA_FILE"] = test_config_path
 
         # Reset and reload
@@ -85,7 +85,7 @@ class TestConfigLoader:
         from backend import config_loader
 
         # Set custom config path
-        test_config_path = str(Path(__file__).parent.parent.parent / "config" / "test_schema_config.json")
+        test_config_path = str(Path(__file__).parent.parent.parent / "config" / "test" / "schema_config.json")
         os.environ["SCHEMA_FILE"] = test_config_path
 
         config_loader.reset_loader()
@@ -270,7 +270,7 @@ class TestConfigWithAlternateFile:
         from backend import config_loader
 
         # Use test config with extra types
-        test_config_path = str(Path(__file__).parent.parent.parent / "config" / "test_schema_config.json")
+        test_config_path = str(Path(__file__).parent.parent.parent / "config" / "test" / "schema_config.json")
         os.environ["SCHEMA_FILE"] = test_config_path
         config_loader.reset_loader()
 
@@ -289,7 +289,7 @@ class TestConfigWithAlternateFile:
         """Test that presentation colors are loaded from custom config."""
         from backend import config_loader
 
-        test_config_path = str(Path(__file__).parent.parent.parent / "config" / "test_schema_config.json")
+        test_config_path = str(Path(__file__).parent.parent.parent / "config" / "test" / "schema_config.json")
         os.environ["SCHEMA_FILE"] = test_config_path
         config_loader.reset_loader()
 

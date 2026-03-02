@@ -135,7 +135,7 @@ Each graph file follows this structure:
 
 Node types fall into two categories:
 
-**Domain types** (configurable via `config/schema_config.json`):
+**Domain types** (configurable via `config/default/schema_config.json`):
 - **Actor** (blue) - Organizations, agencies, individuals
 - **Initiative** (green) - Projects, programs, collaborative activities
 - **Capability** (orange) - Capabilities, competencies, skills
@@ -166,6 +166,6 @@ Domain types can be freely modified, added, or removed in the schema configurati
 | Variable | Default | Description |
 |----------|---------|-------------|
 | `GRAPH_FILE` | `data/active/graph.json` | Path to the active graph file |
-| `GRAPH_SCHEMA_CONFIG` | `config/schema_config.json` | Path to schema configuration |
+| `GRAPH_SCHEMA_CONFIG` | `config/default/schema_config.json` | Path to schema configuration |
 
 When using `./start-dev.sh`, the `GRAPH_FILE` variable is automatically set to `data/active/graph.json`.
