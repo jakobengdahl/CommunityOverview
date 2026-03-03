@@ -22,6 +22,7 @@ import os
 import sys
 import tempfile
 import threading
+from concurrent.futures import ThreadPoolExecutor
 from typing import List, Dict, Optional, Any, TYPE_CHECKING, Callable
 from datetime import datetime
 import networkx as nx
@@ -91,6 +92,10 @@ class GraphStorage:
         # Thread lock for in-memory data structure protection
         # RLock allows same thread to acquire lock multiple times (reentrant)
         self._lock = threading.RLock()
+
+        # Executor for background I/O operations (saving to disk)
+        # Using max_workers=1 to ensure sequential writes
+        self._io_executor = ThreadPoolExecutor(max_workers=1)
 
         # We initialize VectorStore without a storage path as it now holds state in memory
         # and relies on GraphStorage for persistence via graph.json
@@ -177,13 +182,16 @@ class GraphStorage:
             self._event_dispatcher.set_agent_delivery_callback(callback)
 
     def shutdown_events(self) -> None:
-        """Shutdown the event system gracefully."""
+        """Shutdown the event system and I/O executor gracefully."""
         if self._delivery_worker:
             self._delivery_worker.stop(wait=True)
             self._delivery_worker = None
 
         self._event_dispatcher = None
         self._events_enabled = False
+
+        # Shut down I/O executor and wait for pending saves
+        self._io_executor.shutdown(wait=True)
 
     def _emit_event(
         self,
@@ -304,6 +312,10 @@ class GraphStorage:
         """
         Save graph to JSON file.
 
+        This method captures the graph state while holding the lock,
+        then offloads the actual file I/O to a background thread to
+        prevent blocking the event loop in async applications.
+
         Thread-safe: Uses lock for reading in-memory data.
         Atomic: Writes to temp file first, then renames to prevent corruption.
         File-locked: Uses OS-level locking to prevent concurrent writes.
@@ -317,42 +329,60 @@ class GraphStorage:
                     'last_updated': datetime.utcnow().isoformat()
                 }
             }
+            node_count = len(self.nodes)
+            edge_count = len(self.edges)
 
-            # Create directory if it doesn't exist
-            self.json_path.parent.mkdir(parents=True, exist_ok=True)
+        # Offload blocking I/O to background thread to avoid blocking event loop
+        self._io_executor.submit(
+            self._do_save_to_disk,
+            data,
+            node_count,
+            edge_count
+        )
 
-            # Atomic write: write to temp file, then rename
-            # This prevents corruption if the process is killed mid-write
-            temp_fd, temp_path = tempfile.mkstemp(
-                suffix='.json',
-                prefix='graph_',
-                dir=self.json_path.parent
-            )
+    def _do_save_to_disk(self, data: Dict[str, Any], node_count: int, edge_count: int) -> None:
+        """
+        Internal method to handle the actual file I/O.
+        Atomic: Writes to temp file first, then renames to prevent corruption.
+        File-locked: Uses OS-level locking to prevent concurrent writes.
+        """
+        # Create directory if it doesn't exist
+        self.json_path.parent.mkdir(parents=True, exist_ok=True)
 
-            try:
-                with os.fdopen(temp_fd, 'w', encoding='utf-8') as f:
-                    _lock_file(f, exclusive=True)  # Exclusive lock for writing
-                    try:
-                        json.dump(data, f, indent=2, ensure_ascii=False)
-                        f.flush()
-                        os.fsync(f.fileno())  # Ensure data is written to disk
-                    finally:
-                        _unlock_file(f)
+        # Atomic write: write to temp file, then rename
+        # This prevents corruption if the process is killed mid-write
+        temp_fd, temp_path = tempfile.mkstemp(
+            suffix='.json',
+            prefix='graph_',
+            dir=self.json_path.parent
+        )
 
-                # Atomic rename (on most filesystems)
-                # On Windows, we need to remove the target first
-                if sys.platform == 'win32' and self.json_path.exists():
-                    os.replace(temp_path, self.json_path)
-                else:
-                    os.rename(temp_path, self.json_path)
+        try:
+            with os.fdopen(temp_fd, 'w', encoding='utf-8') as f:
+                _lock_file(f, exclusive=True)  # Exclusive lock for writing
+                try:
+                    json.dump(data, f, indent=2, ensure_ascii=False)
+                    f.flush()
+                    os.fsync(f.fileno())  # Ensure data is written to disk
+                finally:
+                    _unlock_file(f)
 
-                print(f"Saved {len(self.nodes)} nodes and {len(self.edges)} edges to {self.json_path}")
+            # Atomic rename (on most filesystems)
+            # On Windows, we need to remove the target first
+            if sys.platform == 'win32' and self.json_path.exists():
+                os.replace(temp_path, self.json_path)
+            else:
+                os.rename(temp_path, self.json_path)
 
-            except Exception as e:
-                # Clean up temp file on error
-                if os.path.exists(temp_path):
-                    os.unlink(temp_path)
-                raise e
+            print(f"Saved {node_count} nodes and {edge_count} edges to {self.json_path}")
+
+        except Exception as e:
+            # Clean up temp file on error
+            if os.path.exists(temp_path):
+                os.unlink(temp_path)
+            print(f"Error saving graph to disk: {e}")
+            # Note: We don't reraise here as it's running in a background thread,
+            # but we logged the error.
 
     def reload(self) -> None:
         """
