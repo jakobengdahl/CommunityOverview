@@ -106,10 +106,14 @@ def create_app(
             return await call_next(request)
 
     # Add CORS middleware to allow external clients (like ChatGPT MCP connector)
+    # Credentials cannot be allowed when wildcard origins are used for security
+    cors_origins = config.cors_allowed_origins
+    allow_credentials = "*" not in cors_origins
+
     app.add_middleware(
         CORSMiddleware,
-        allow_origins=["*"],  # Allow all origins for MCP clients
-        allow_credentials=True,
+        allow_origins=cors_origins,
+        allow_credentials=allow_credentials,
         allow_methods=["*"],  # Allow all methods (GET, POST, OPTIONS, etc.)
         allow_headers=["*"],  # Allow all headers
     )
