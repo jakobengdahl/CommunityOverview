@@ -100,6 +100,10 @@ class GraphStorage:
         self.graph = nx.MultiDiGraph()  # MultiDiGraph allows multiple edges between same nodes
         self.nodes: Dict[str, Node] = {}  # node_id -> Node
         self.edges: Dict[str, Edge] = {}  # edge_id -> Edge
+
+        # Cache for searchable text to speed up search_nodes
+        self._searchable_text_cache: Dict[str, str] = {}
+
         self.graph_metadata: Dict[str, Any] = {
             "version": "1.0",
             "graph_name": self.json_path.stem,
@@ -357,11 +361,19 @@ class GraphStorage:
                 self.edges.clear()
                 self.graph.clear()
 
+                # Clear searchable text cache
+                self._searchable_text_cache.clear()
+
                 # Load nodes
                 for node_data in data.get('nodes', []):
                     node = Node.from_dict(node_data)
                     self.nodes[node.id] = node
                     self.graph.add_node(node.id, data=node)
+
+                    # Precompute searchable text
+                    tags_text = " ".join(node.tags) if hasattr(node, 'tags') and node.tags else ""
+                    subtypes_text = " ".join(node.subtypes) if hasattr(node, 'subtypes') and node.subtypes else ""
+                    self._searchable_text_cache[node.id] = f"{node.name} {node.description} {node.summary} {tags_text} {subtypes_text}".lower()
 
                 # Load edges
                 for edge_data in data.get('edges', []):
@@ -479,9 +491,14 @@ class GraphStorage:
 
             # Text matching including tags (if not matching all)
             if not match_all:
-                tags_text = " ".join(node.tags) if hasattr(node, 'tags') and node.tags else ""
-                subtypes_text = " ".join(node.subtypes) if hasattr(node, 'subtypes') and node.subtypes else ""
-                searchable_text = f"{node.name} {node.description} {node.summary} {tags_text} {subtypes_text}".lower()
+                searchable_text = self._searchable_text_cache.get(node.id)
+                if searchable_text is None:
+                    # Fallback just in case cache wasn't populated
+                    tags_text = " ".join(node.tags) if hasattr(node, 'tags') and node.tags else ""
+                    subtypes_text = " ".join(node.subtypes) if hasattr(node, 'subtypes') and node.subtypes else ""
+                    searchable_text = f"{node.name} {node.description} {node.summary} {tags_text} {subtypes_text}".lower()
+                    self._searchable_text_cache[node.id] = searchable_text
+
                 if query_lower not in searchable_text:
                     continue
 
@@ -687,6 +704,11 @@ class GraphStorage:
                     added_node_ids.append(node.id)
                     nodes_to_embed.append(node)
 
+                    # Precompute searchable text
+                    tags_text = " ".join(node.tags) if hasattr(node, 'tags') and node.tags else ""
+                    subtypes_text = " ".join(node.subtypes) if hasattr(node, 'subtypes') and node.subtypes else ""
+                    self._searchable_text_cache[node.id] = f"{node.name} {node.description} {node.summary} {tags_text} {subtypes_text}".lower()
+
                 # Generate embeddings for new nodes (non-blocking)
                 if nodes_to_embed:
                     try:
@@ -828,6 +850,11 @@ class GraphStorage:
             # Update in graph
             self.graph.nodes[node_id]['data'] = node
 
+            # Update searchable text cache
+            tags_text = " ".join(node.tags) if hasattr(node, 'tags') and node.tags else ""
+            subtypes_text = " ".join(node.subtypes) if hasattr(node, 'subtypes') and node.subtypes else ""
+            self._searchable_text_cache[node.id] = f"{node.name} {node.description} {node.summary} {tags_text} {subtypes_text}".lower()
+
             # Update embedding if text fields or tags changed (non-blocking)
             if any(k in updates for k in ['name', 'description', 'summary', 'tags']):
                 try:
@@ -921,6 +948,7 @@ class GraphStorage:
                     # Remove node
                     self.graph.remove_node(node_id)
                     del self.nodes[node_id]
+                    self._searchable_text_cache.pop(node_id, None)
                     deleted_node_ids.append(node_id)
 
                 # Remove embeddings

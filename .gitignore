@@ -64,3 +64,6 @@ data/active/graph.json
 data/federated-a/
 data/federated-b/
 data/federated-*/
+dummy.json
+benchmark_search.py
+benchmark_search_real.py
