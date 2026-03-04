@@ -186,6 +186,7 @@ class TestSchemaIntegration:
 
     def test_models_use_schema_types(self):
         """Test that models module uses schema for type validation."""
+        pytest.importorskip("networkx")
         from backend.core import models
 
         # Get valid node types
@@ -197,6 +198,7 @@ class TestSchemaIntegration:
 
     def test_service_returns_schema(self):
         """Test that GraphService returns schema correctly."""
+        pytest.importorskip("networkx")
         import tempfile
         from backend.core import GraphStorage
         from backend.service import GraphService
@@ -225,6 +227,7 @@ class TestSchemaIntegration:
 
     def test_list_node_types_uses_config(self):
         """Test that list_node_types returns config-based types."""
+        pytest.importorskip("networkx")
         import tempfile
         from backend.core import GraphStorage
         from backend.service import GraphService
