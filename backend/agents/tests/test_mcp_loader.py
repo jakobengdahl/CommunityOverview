@@ -291,3 +291,18 @@ class TestMCPLoaderLifecycle:
         loader.disconnect_all()
 
         assert loader._tools_cache == {}
+
+    def test_execute_fs_tool_path_traversal(self):
+        """Test that _execute_fs_tool blocks path traversal attempts."""
+        loader = MCPLoader([])
+        # Use an input that exploits prefix startswith vulnerability
+        # E.g., if base_path is /tmp/agent-workspace,
+        # /tmp/agent-workspace-secret starts with /tmp/agent-workspace
+        input_args = {
+            "path": "../agent-workspace-secret/secret.txt"
+        }
+
+        result = loader._execute_fs_tool("read_file", input_args)
+
+        assert "error" in result
+        assert result["error"] == "Path must be within agent workspace"
