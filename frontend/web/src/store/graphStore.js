@@ -40,13 +40,26 @@ You can also upload documents (PDF, Word, text) to extract entities.
  * @param {Function} t - Translation function from i18n (optional)
  */
 function createWelcomeMessage(presentation, t) {
+  const intro = presentation?.introduction || '';
+  const title = presentation?.title || '';
+
+  // If the introduction contains multiple paragraphs, treat it as a complete
+  // welcome message and skip appending generic i18n examples/hints.
+  if (intro && intro.includes('\n')) {
+    return {
+      role: 'assistant',
+      content: title ? `**${title}**\n\n${intro}` : intro,
+      timestamp: new Date(),
+      id: 'welcome',
+    };
+  }
+
   if (t) {
-    const title = t('welcome.title');
+    const i18nTitle = t('welcome.title');
     const prompt = t('welcome.prompt');
     const examples = t('welcome.examples');
     const uploadHint = t('welcome.upload_hint');
     const privacyNotice = t('welcome.privacy_notice');
-    const intro = presentation?.introduction || '';
 
     const exampleLines = Array.isArray(examples)
       ? examples.map(e => `• "${e}"`).join('\n')
@@ -54,14 +67,13 @@ function createWelcomeMessage(presentation, t) {
 
     return {
       role: 'assistant',
-      content: `${title}\n\n${intro ? intro + '\n\n' : ''}${prompt}\n${exampleLines}\n\n${uploadHint}\n\n${privacyNotice}`,
+      content: `${i18nTitle}\n\n${intro ? intro + '\n\n' : ''}${prompt}\n${exampleLines}\n\n${uploadHint}\n\n${privacyNotice}`,
       timestamp: new Date(),
       id: 'welcome',
     };
   }
 
   // Fallback without i18n
-  const intro = presentation?.introduction || '';
   return {
     role: 'assistant',
     content: intro ? `${DEFAULT_WELCOME_MESSAGE.content.split('\n')[0]}\n\n${intro}\n\n${DEFAULT_WELCOME_MESSAGE.content.split('\n').slice(2).join('\n')}` : DEFAULT_WELCOME_MESSAGE.content,

@@ -1,4 +1,4 @@
-import { useState, useRef, useEffect, useCallback } from 'react';
+import { useState, useRef, useCallback, useMemo } from 'react';
 import { createPortal } from 'react-dom';
 import {
   PersonFill,
@@ -15,6 +15,12 @@ import {
   BellFill,
   BookmarkFill,
   FolderFill,
+  PinAngleFill,
+  ClipboardDataFill,
+  PeopleFill,
+  Sliders,
+  ListOl,
+  QuestionCircleFill,
 } from 'react-bootstrap-icons';
 import useGraphStore from '../store/graphStore';
 import { useI18n } from '../i18n';
@@ -30,7 +36,13 @@ const ICON_MAP = {
   Goal: TrophyFill,
   Event: CalendarEventFill,
   Data: DatabaseFill,
+  Dataset: DatabaseFill,
   Risk: ExclamationTriangleFill,
+  'Hållpunkt': PinAngleFill,
+  'Undersökning': ClipboardDataFill,
+  'Värdemängd': ListOl,
+  'Variabel': Sliders,
+  'Population': PeopleFill,
   Agent: CpuFill,
   EventSubscription: BellFill,
   SavedView: BookmarkFill,
@@ -47,31 +59,27 @@ const COLOR_MAP = {
   Goal: '#6366F1',
   Event: '#D946EF',
   Data: '#06B6D4',
+  Dataset: '#06B6D4',
   Risk: '#DC2626',
+  'Hållpunkt': '#8B5CF6',
+  'Undersökning': '#F97316',
+  'Värdemängd': '#FBBF24',
+  'Variabel': '#14B8A6',
+  'Population': '#EF4444',
   Agent: '#EC4899',
   EventSubscription: '#8B5CF6',
   SavedView: '#6B7280',
   Group: '#646cff',
 };
 
-// Order of toolbar items: metadata types first, then system types (agents/webhooks/groups), then views
-const TOOLBAR_ORDER = [
-  'Actor',
-  'Initiative',
-  'Capability',
-  'Resource',
-  'Legislation',
-  'Theme',
-  'Goal',
-  'Event',
-  'Data',
-  'Risk',
-  null, // separator
-  'Agent',
-  'EventSubscription',
-  'Group',
-  null, // separator
-  'SavedView',
+// System types always shown at the bottom (not from schema)
+const SYSTEM_TYPES = ['Agent', 'EventSubscription', 'Group'];
+const VIEW_TYPES = ['SavedView'];
+
+// Fallback order when schema hasn't loaded yet
+const FALLBACK_DOMAIN_ORDER = [
+  'Actor', 'Initiative', 'Capability', 'Resource', 'Legislation',
+  'Theme', 'Goal', 'Event', 'Data', 'Risk',
 ];
 
 function FloatingToolbar({
@@ -85,6 +93,31 @@ function FloatingToolbar({
   const [hoveredType, setHoveredType] = useState(null);
   const [tooltipPos, setTooltipPos] = useState(null);
   const buttonRefs = useRef({});
+  const schema = useGraphStore((s) => s.schema);
+
+  // Build toolbar order from schema node types
+  const toolbarOrder = useMemo(() => {
+    let domainTypes;
+    if (schema?.node_types) {
+      domainTypes = Object.entries(schema.node_types)
+        .filter(([, config]) => config.category !== 'system')
+        .map(([name]) => name);
+    } else {
+      domainTypes = FALLBACK_DOMAIN_ORDER;
+    }
+
+    const systemTypes = SYSTEM_TYPES.filter(
+      (t) => !schema?.node_types || schema.node_types[t]
+    );
+
+    return [
+      ...domainTypes,
+      null, // separator
+      ...systemTypes,
+      null, // separator
+      ...VIEW_TYPES,
+    ];
+  }, [schema]);
 
   const handleClick = (nodeType) => {
     if (nodeType === 'Agent') {
@@ -135,13 +168,13 @@ function FloatingToolbar({
   return (
     <>
       <div className="floating-toolbar">
-        {TOOLBAR_ORDER.map((nodeType, index) => {
+        {toolbarOrder.map((nodeType, index) => {
           if (nodeType === null) {
             return <div key={`sep-${index}`} className="floating-toolbar-separator" />;
           }
 
-          const Icon = ICON_MAP[nodeType];
-          const color = COLOR_MAP[nodeType];
+          const Icon = ICON_MAP[nodeType] || QuestionCircleFill;
+          const color = COLOR_MAP[nodeType] || schema?.node_types?.[nodeType]?.color || '#9CA3AF';
           const isDraggable = nodeType !== 'SavedView';
 
           return (

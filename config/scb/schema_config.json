@@ -238,7 +238,7 @@
   },
   "presentation": {
     "title": "SCB Kunskapsgraf",
-    "introduction": "Välkommen till SCB:s kunskapsgraf! Här kan du utforska och navigera bland statistiska dataset, undersökningar, variabler, populationer och hållpunkter. Du kan ställa frågor, skapa nya noder och se kopplingar mellan olika delar av statistikproduktionen.",
+    "introduction": "Välkommen till SCB:s kunskapsgraf! Här kan du utforska och navigera bland projekt, undersökningar, variabler, populationer och hållpunkter. Du kan ställa frågor, skapa nya noder och se kopplingar mellan olika delar av statistikproduktionen.\n\nDu kan ställa frågor som:\n• \"Vilka dataset finns det kring arbetsmarknad?\"\n• \"Populationstyper som finns?\"\n• \"Vilka AI-projekt pågår?\"\n• \"Vad kommer krävas för att börja använda BALSAM för min undersökning?\"\n• \"Visa alla AI-agenter\"\n\nDu kan också ladda upp dokument (PDF, Word, text) för att extrahera entiteter.\n\n⚠️ **OBS: Hantera inte personuppgifter i denna tjänst.**",
     "colors": {
       "Actor": "#3B82F6",
       "Initiative": "#10B981",
