@@ -11,7 +11,8 @@
         "static": true,
         "category": "system",
         "description": "Sparade grafvyer för snabbnavigering",
-        "color": "#6B7280"
+        "color": "#6B7280",
+        "icon": "BookmarkFill"
       },
       "VisualizationView": {
         "fields": [
@@ -23,7 +24,8 @@
         "static": true,
         "category": "system",
         "description": "Sparade grafvyer (äldre format)",
-        "color": "#6B7280"
+        "color": "#6B7280",
+        "icon": "BookmarkFill"
       },
       "EventSubscription": {
         "fields": [
@@ -35,7 +37,8 @@
         "static": false,
         "category": "system",
         "description": "Webhook-prenumeration för grafändringshändelser. Konfiguration lagras i metadata: filter (entity_kind, node_types, operations, keywords) och leverans (webhook_url, ignore_origins, ignore_session_ids)",
-        "color": "#8B5CF6"
+        "color": "#8B5CF6",
+        "icon": "BellFill"
       },
       "Agent": {
         "fields": [
@@ -47,7 +50,8 @@
         "static": false,
         "category": "system",
         "description": "AI-agentkonfiguration. Länkas till EventSubscription via metadata.subscription_id. Agentkonfiguration i metadata.agent (type, config)",
-        "color": "#EC4899"
+        "color": "#EC4899",
+        "icon": "CpuFill"
       },
       "Actor": {
         "fields": [
@@ -59,7 +63,8 @@
         ],
         "category": "domain",
         "description": "Organisationer, avdelningar eller personer som ansvarar för statistikproduktion och datainsamling",
-        "color": "#3B82F6"
+        "color": "#3B82F6",
+        "icon": "PersonFill"
       },
       "Initiative": {
         "fields": [
@@ -73,7 +78,8 @@
         ],
         "category": "domain",
         "description": "Initiativ, program och samarbetsaktiviteter. Subtyper inkluderar 'Projekt' för avgränsade projekt med start- och slutdatum",
-        "color": "#10B981"
+        "color": "#10B981",
+        "icon": "RocketTakeoffFill"
       },
       "Dataset": {
         "fields": [
@@ -86,7 +92,8 @@
         ],
         "category": "domain",
         "description": "Statistiska dataset som produceras och publiceras av SCB. Kan vara kopplade till undersökningar, variabler och populationer. Fältet 'identifier' följer Dublin Core (dc:identifier) för URL:er/URI:er",
-        "color": "#06B6D4"
+        "color": "#06B6D4",
+        "icon": "DatabaseFill"
       },
       "Hållpunkt": {
         "fields": [
@@ -98,7 +105,8 @@
         ],
         "category": "domain",
         "description": "Internt SCB-koncept som beskriver en dataprodukt som är hållbar och stabil över tid. En hållpunkt representerar ett åtagande om kontinuerlig leverans av statistik inom ett visst ämnesområde",
-        "color": "#8B5CF6"
+        "color": "#8B5CF6",
+        "icon": "PinAngleFill"
       },
       "Undersökning": {
         "fields": [
@@ -113,7 +121,8 @@
         ],
         "category": "domain",
         "description": "Statistisk undersökning som samlar in data för att producera statistik. Kan vara urvalsundersökning, totalundersökning eller registerbaserad. Kopplas till dataset, variabler och populationer",
-        "color": "#F97316"
+        "color": "#F97316",
+        "icon": "ClipboardDataFill"
       },
       "Värdemängd": {
         "fields": [
@@ -125,7 +134,8 @@
         ],
         "category": "domain",
         "description": "En definierad uppsättning tillåtna värden för en variabel. Kan vara kodlistor, klassifikationer eller intervallvärden som används för att standardisera och kategorisera statistiska data",
-        "color": "#FBBF24"
+        "color": "#FBBF24",
+        "icon": "ListOl"
       },
       "Variabel": {
         "fields": [
@@ -138,7 +148,8 @@
         ],
         "category": "domain",
         "description": "Statistisk variabel som mäter en egenskap hos en population. Har en definierad värdemängd och kan ingå i flera dataset och undersökningar. Fältet 'identifier' kan användas för variabel-ID",
-        "color": "#14B8A6"
+        "color": "#14B8A6",
+        "icon": "Sliders"
       },
       "Population": {
         "fields": [
@@ -150,7 +161,22 @@
         ],
         "category": "domain",
         "description": "Den statistiska population (målpopulation) som en undersökning eller ett dataset avser att beskriva. T.ex. 'Samtliga folkbokförda i Sverige', 'Alla företag med 10+ anställda'",
-        "color": "#EF4444"
+        "color": "#EF4444",
+        "icon": "PeopleFill"
+      },
+      "Klassifikation": {
+        "fields": [
+          "name",
+          "description",
+          "summary",
+          "tags",
+          "subtypes",
+          "identifier"
+        ],
+        "category": "domain",
+        "description": "Statistisk klassifikation eller nomenklatur som används för att gruppera och kategorisera statistiska data. T.ex. SNI (näringsgrenar), SSYK (yrkesklassifikation), KN (kombinerad nomenklatur). Fältet 'identifier' kan användas för klassifikations-ID",
+        "color": "#84CC16",
+        "icon": "Diagram3Fill"
       },
       "Capability": {
         "fields": [
@@ -162,7 +188,8 @@
         ],
         "category": "domain",
         "description": "Förmågor, kompetenser och färdigheter som behövs eller tillhandahålls",
-        "color": "#F59E0B"
+        "color": "#F59E0B",
+        "icon": "LightningFill"
       },
       "Resource": {
         "fields": [
@@ -175,7 +202,8 @@
         ],
         "category": "domain",
         "description": "Resultat och leverabler såsom rapporter, programvara, verktyg. Fältet 'identifier' följer Dublin Core (dc:identifier) för URL:er/URI:er",
-        "color": "#A855F7"
+        "color": "#A855F7",
+        "icon": "FileEarmarkTextFill"
       },
       "Theme": {
         "fields": [
@@ -187,7 +215,8 @@
         ],
         "category": "domain",
         "description": "Ämnesområden och teman inom statistikproduktion, t.ex. befolkning, arbetsmarknad, ekonomi, miljö",
-        "color": "#D946EF"
+        "color": "#D946EF",
+        "icon": "TagsFill"
       },
       "Goal": {
         "fields": [
@@ -200,7 +229,8 @@
         ],
         "category": "domain",
         "description": "Strategiska mål och delmål för statistikproduktion och digitalisering",
-        "color": "#6366F1"
+        "color": "#6366F1",
+        "icon": "TrophyFill"
       }
     },
     "relationship_types": {
@@ -248,6 +278,7 @@
       "Värdemängd": "#FBBF24",
       "Variabel": "#14B8A6",
       "Population": "#EF4444",
+      "Klassifikation": "#84CC16",
       "Capability": "#F59E0B",
       "Resource": "#A855F7",
       "Theme": "#D946EF",
@@ -257,7 +288,7 @@
       "EventSubscription": "#8B5CF6",
       "Agent": "#EC4899"
     },
-    "prompt_prefix": "Du är en kunskapsassistent för SCB:s (Statistiska centralbyrån) kunskapsgraf. Du hjälper användare att navigera, söka och underhålla en kunskapsgraf som beskriver SCB:s statistikproduktion.\n\nGrafen innehåller följande SCB-specifika nodtyper utöver standardtyperna:\n- **Dataset**: Statistiska dataset som publiceras av SCB\n- **Hållpunkt**: SCB:s interna koncept för dataprodukter som är hållbara och stabila över tid – ett åtagande om kontinuerlig statistikleverans\n- **Undersökning**: Statistiska undersökningar (urvalsundersökningar, totalundersökningar, registerbaserade) som samlar in data\n- **Variabel**: Statistiska variabler som mäter egenskaper hos populationer\n- **Värdemängd**: Definierade uppsättningar av tillåtna värden (kodlistor, klassifikationer) för variabler\n- **Population**: Målpopulationer som undersökningar och dataset avser beskriva\n- **Initiative** med subtypen **Projekt**: Avgränsade projekt med start- och slutdatum\n\nViktiga relationer i SCB-kontexten:\n- Undersökning PRODUCES Dataset\n- Variabel PART_OF Dataset\n- Variabel MEASURES Population\n- Variabel USES Värdemängd\n- Dataset DESCRIBES Population\n- Hållpunkt RELATES_TO Dataset\n- Initiative (Projekt) PRODUCES Dataset\n\nSvara alltid på svenska om inte användaren skriver på annat språk.",
+    "prompt_prefix": "Du är en kunskapsassistent för SCB:s (Statistiska centralbyrån) kunskapsgraf. Du hjälper användare att navigera, söka och underhålla en kunskapsgraf som beskriver SCB:s statistikproduktion.\n\nGrafen innehåller följande SCB-specifika nodtyper utöver standardtyperna:\n- **Dataset**: Statistiska dataset som publiceras av SCB\n- **Hållpunkt**: SCB:s interna koncept för dataprodukter som är hållbara och stabila över tid – ett åtagande om kontinuerlig statistikleverans\n- **Undersökning**: Statistiska undersökningar (urvalsundersökningar, totalundersökningar, registerbaserade) som samlar in data\n- **Variabel**: Statistiska variabler som mäter egenskaper hos populationer\n- **Värdemängd**: Definierade uppsättningar av tillåtna värden (kodlistor, klassifikationer) för variabler\n- **Population**: Målpopulationer som undersökningar och dataset avser beskriva\n- **Klassifikation**: Statistiska klassifikationer och nomenklaturer (SNI, SSYK, KN etc.)\n- **Initiative** med subtypen **Projekt**: Avgränsade projekt med start- och slutdatum\n\nViktiga relationer i SCB-kontexten:\n- Undersökning PRODUCES Dataset\n- Variabel PART_OF Dataset\n- Variabel MEASURES Population\n- Variabel USES Värdemängd\n- Dataset DESCRIBES Population\n- Hållpunkt RELATES_TO Dataset\n- Klassifikation USES Värdemängd\n- Initiative (Projekt) PRODUCES Dataset\n\nSvara alltid på svenska om inte användaren skriver på annat språk.",
     "prompt_suffix": "Kom ihåg att föreslå sparade vyer när det är relevant, och fråga alltid om bekräftelse innan du gör ändringar i grafen. Använd SCB-terminologi när det är lämpligt.",
     "default_language": "sv"
   }
