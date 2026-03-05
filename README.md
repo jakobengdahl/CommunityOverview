@@ -50,9 +50,16 @@ This system helps organizations avoid overlapping investments by making visible:
     rest_api.py                   # Chat REST endpoints
   llm_providers.py                # LLM provider abstraction
   chat_logic.py                   # Chat processing logic
-/config                           # Configuration files
-  schema_config.json              # Node types, relationships, presentation
-  federation_config.json          # Startup-only federation graph connections
+/config                           # Configuration profiles
+  /default                        # Default profile (base, always required)
+    schema_config.json            # Node types, relationships, presentation
+    federation_config.json        # Federation graph connections
+    .env.example                  # Environment variable template
+  /scb                            # SCB (Statistics Sweden) demo profile
+    schema_config.json            # Statistical metadata model
+  /test                           # Test profile
+    schema_config.json            # Minimal config for testing
+  profile-utils.sh                # Shared profile resolution utilities
 /data                             # Graph data
   /examples                       # Example datasets (tracked in git)
     default.json                  # Default example dataset
@@ -72,19 +79,20 @@ This system helps organizations avoid overlapping investments by making visible:
 /docs                             # Documentation
   DATA_MANAGEMENT.md              # Graph data management guide
   EVENT_SUBSCRIPTIONS.md          # Webhook/event system docs
+  PROFILES.md                     # Configuration profiles guide
   DEPLOYMENT_GUIDE.md             # Deployment documentation
-  FEDERATED_GRAPH_DESIGN.md       # Federated multi-graph architecture proposal
+  FEDERATED_GRAPH_DESIGN.md       # Federated multi-graph architecture
 start-dev.sh                      # Development startup script
 LLM_PROVIDERS.md                  # LLM configuration guide
 ```
 
 ## Metamodel
 
-The metamodel defines two categories of node types:
+The metamodel defines two categories of node types. Node types, relationships, colors, icons, and AI prompts are all **configurable per profile** via `schema_config.json`. See [docs/PROFILES.md](./docs/PROFILES.md) for the full guide.
 
-### Domain Node Types (configurable via `config/default/schema_config.json`)
+### Domain Node Types (configurable via profile)
 
-These represent the knowledge domain and can be customized per deployment:
+The default profile includes these domain types:
 
 - **Actor** (blue) - Organizations, agencies, individuals
 - **Initiative** (green) - Projects, programs, collaborative activities
@@ -96,6 +104,8 @@ These represent the knowledge domain and can be customized per deployment:
 - **Event** (fuchsia) - Conferences, workshops, milestones
 - **Data** (cyan) - Datasets, registers, APIs, data sources
 - **Risk** (red) - Identified risks, threats, or vulnerabilities
+
+Other profiles can add domain-specific types. For example, the SCB profile adds: Dataset, Hållpunkt, Undersökning, Variabel, Värdemängd, Population, Klassifikation.
 
 All domain nodes support **subtypes** for finer sub-classification within each node type (e.g., an Actor can be tagged as "Government agency", "Municipality", "Steering group"). Subtypes are optional, stored as a list, and the UI provides autocomplete with case normalization based on existing subtypes in the graph.
 
@@ -109,7 +119,8 @@ These are integral to core application functionality:
 - **Groups** - Visual grouping of nodes in the canvas
 
 ### Relationships
-- BELONGS_TO, IMPLEMENTS, PRODUCES, GOVERNED_BY, RELATES_TO, PART_OF, AIMS_FOR
+- Default: BELONGS_TO, IMPLEMENTS, PRODUCES, GOVERNED_BY, RELATES_TO, PART_OF, AIMS_FOR
+- Profiles can define additional relationship types (e.g., MEASURES, DESCRIBES, USES, DERIVED_FROM)
 
 ## Quick Start
 
@@ -122,14 +133,17 @@ Start all services with a single command:
 export OPENAI_API_KEY=sk-xxxxx        # For OpenAI
 export ANTHROPIC_API_KEY=sk-ant-xxxxx # For Claude
 
-# Start everything (default language: English)
+# Start everything (default profile, English)
 ./start-dev.sh
+
+# Start with a specific profile
+./start-dev.sh --profile scb
 
 # Start with Swedish UI
 ./start-dev.sh --lang sv
 
-# Start with a specific dataset
-./start-dev.sh --data data/examples/default.json
+# Combine profile, language, and data
+./start-dev.sh --profile scb --lang sv --data data/examples/default.json
 
 # Start with data from a URL
 ./start-dev.sh --data https://example.github.io/data/graph.json
@@ -183,6 +197,29 @@ The application supports English and Swedish. Language can be set in three ways:
 3. **Schema config** (`config/default/schema_config.json`): `"default_language": "en"`
 
 The language setting affects the UI labels, chat placeholders, notifications, and welcome message. The AI chat assistant responds in whatever language the user writes in.
+
+## Configuration Profiles
+
+Profiles allow you to run the application with different metadata models, node types, and AI prompts. Each profile is a directory under `config/` that can override the default configuration.
+
+```bash
+# Start with the SCB (Statistics Sweden) profile
+./start-dev.sh --profile scb
+
+# Profiles available out of the box:
+#   default  - General community knowledge graph
+#   scb      - Statistical metadata model (Dataset, Undersökning, Variabel, etc.)
+#   test     - Minimal config for testing
+```
+
+Each profile can contain:
+- `schema_config.json` — Node types, relationships, colors, icons, and AI prompts
+- `federation_config.json` — Federation topology
+- `.env` — Secrets and environment overrides (git-ignored)
+- `graph.json` — Seed data for initial setup
+
+Missing files fall back to `config/default/`. See [docs/PROFILES.md](./docs/PROFILES.md) for the complete guide on creating custom profiles.
+
 Federation topology can be configured at startup with `FEDERATION_FILE` (default: `config/default/federation_config.json`). This is admin-only configuration and is not editable via GUI/chat tools.
 
 
