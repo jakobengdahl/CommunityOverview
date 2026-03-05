@@ -116,6 +116,10 @@ const useGraphStore = create((set, get) => ({
   // Chat state
   chatMessages: [DEFAULT_WELCOME_MESSAGE],
 
+  // Expert agents
+  availableExperts: [],   // All expert agents from config
+  activeExperts: [],      // Currently active expert agent IDs
+
   // Stats
   stats: null,
 
@@ -252,6 +256,7 @@ const useGraphStore = create((set, get) => ({
       presentation,
       chatMessages: updatedMessages,
       configLoaded: true,
+      availableExperts: presentation?.expert_agents || [],
     });
   },
 
@@ -262,6 +267,7 @@ const useGraphStore = create((set, get) => ({
       presentation,
       chatMessages: [welcomeMessage],
       configLoaded: true,
+      availableExperts: presentation?.expert_agents || [],
     });
   },
 
@@ -345,6 +351,55 @@ const useGraphStore = create((set, get) => ({
   // Focus node actions
   setFocusNodeId: (nodeId) => set({ focusNodeId: nodeId }),
   clearFocusNode: () => set({ focusNodeId: null }),
+
+  // Expert agent actions
+  setAvailableExperts: (experts) => set({ availableExperts: experts }),
+
+  toggleExpertAgent: (agentId, language) => {
+    const { activeExperts, availableExperts, addChatMessage } = get();
+    const agent = availableExperts.find(a => a.id === agentId);
+    if (!agent) return;
+
+    const isActive = activeExperts.includes(agentId);
+    if (isActive) {
+      // Remove expert
+      set({ activeExperts: activeExperts.filter(id => id !== agentId) });
+      const agentName = language === 'sv' ? agent.name : (agent.name_en || agent.name);
+      const leaveMsg = language === 'sv'
+        ? `${agentName} har lämnat diskussionen.`
+        : `${agentName} has left the discussion.`;
+      addChatMessage({
+        role: 'expert',
+        expertId: agentId,
+        expertName: agentName,
+        expertColor: agent.color,
+        content: leaveMsg,
+        timestamp: new Date(),
+        isSystemEvent: true,
+      });
+    } else {
+      // Add expert
+      set({ activeExperts: [...activeExperts, agentId] });
+      const agentName = language === 'sv' ? agent.name : (agent.name_en || agent.name);
+      const introText = language === 'sv' ? agent.intro_sv : (agent.intro_en || agent.intro_sv);
+      // Intro message visible to user
+      addChatMessage({
+        role: 'expert',
+        expertId: agentId,
+        expertName: agentName,
+        expertColor: agent.color,
+        content: introText,
+        timestamp: new Date(),
+      });
+      // Notification to main assistant (hidden from rendering but in history)
+      addChatMessage({
+        role: 'system',
+        content: `[Expert agent "${agentName}" (${agent.id}) has joined the discussion. Specialty: ${agent.specialty_en || agent.specialty}. Coordinate with this expert when relevant questions arise.]`,
+        timestamp: new Date(),
+        expertJoinNotification: true,
+      });
+    }
+  },
 
   // Chat panel actions
   toggleChatPanel: () => set(state => ({ chatPanelOpen: !state.chatPanelOpen })),

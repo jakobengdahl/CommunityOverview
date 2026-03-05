@@ -594,6 +594,82 @@
 }
 
 
+/* ==========================================
+   Expert Agent Messages
+   ========================================== */
+.chat-message.expert-message {
+  align-self: flex-start;
+  background-color: rgba(30, 30, 30, 0.9);
+  border-left: 3px solid var(--expert-color, #9CA3AF);
+  color: #ddd;
+}
+
+.chat-message.expert-system-event {
+  align-self: center;
+  background-color: transparent;
+  border-left: none;
+  color: #777;
+  font-size: 0.78rem;
+  font-style: italic;
+  padding: 0.3rem 0.6rem;
+  max-width: 100%;
+  text-align: center;
+}
+
+.expert-message-header {
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  margin-bottom: 4px;
+}
+
+.expert-message-name {
+  font-size: 0.72rem;
+  font-weight: 600;
+  letter-spacing: 0.3px;
+}
+
+/* Active Experts Indicator (above button row) */
+.active-experts-indicator {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 4px 8px;
+  background: rgba(100, 108, 255, 0.06);
+  border: 1px solid rgba(100, 108, 255, 0.15);
+  border-radius: 6px;
+}
+
+.active-experts-icon {
+  color: #646cff;
+  flex-shrink: 0;
+}
+
+.active-experts-label {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px;
+}
+
+.active-expert-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  font-size: 0.68rem;
+  color: #bbb;
+  border: 1px solid;
+  padding: 1px 7px;
+  border-radius: 10px;
+  background: rgba(255, 255, 255, 0.03);
+}
+
+.active-expert-dot {
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  flex-shrink: 0;
+}
+
 .chat-depth-indicator {
   margin-left: 8px;
   font-size: 11px;

@@ -107,6 +107,10 @@
     "export_success": "Grafen exporterad",
     "export_error": "Kunde inte exportera grafen"
   },
+  "experts": {
+    "title": "Expert-agenter",
+    "toggle_panel": "Lägg till eller ta bort expert-agenter"
+  },
   "federation": {
     "depth_label": "Djup",
     "depth_tooltip": "Djupnivåer styrs av installationens konfiguration",

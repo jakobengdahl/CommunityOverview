@@ -107,6 +107,10 @@
     "export_success": "Graph exported",
     "export_error": "Could not export graph"
   },
+  "experts": {
+    "title": "Expert Agents",
+    "toggle_panel": "Add or remove expert agents"
+  },
   "federation": {
     "depth_label": "Depth",
     "depth_tooltip": "Depth levels are defined by installation configuration",
