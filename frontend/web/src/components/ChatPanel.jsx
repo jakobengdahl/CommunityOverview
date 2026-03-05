@@ -1,5 +1,5 @@
 import { useState, useEffect, useRef, useMemo } from 'react';
-import { ChatDotsFill, ChevronRight, ChevronLeft, XCircleFill, RobotFill } from 'react-bootstrap-icons';
+import { ChatDotsFill, ChevronRight, ChevronLeft, XCircleFill, Robot } from 'react-bootstrap-icons';
 import useGraphStore from '../store/graphStore';
 import { useI18n } from '../i18n';
 import * as api from '../services/api';
@@ -447,7 +447,7 @@ function ChatPanel() {
           >
             {msg.role === 'expert' && !msg.isSystemEvent && (
               <div className="expert-message-header">
-                <RobotFill size={11} style={{ color: msg.expertColor }} />
+                <Robot size={11} style={{ color: msg.expertColor }} />
                 <span className="expert-message-name" style={{ color: msg.expertColor }}>{msg.expertName}</span>
               </div>
             )}
@@ -618,7 +618,7 @@ function ChatPanel() {
 
         {activeExperts.length > 0 && (
           <div className="active-experts-indicator">
-            <RobotFill size={11} className="active-experts-icon" />
+            <Robot size={11} className="active-experts-icon" />
             <span className="active-experts-label">
               {activeExperts.map(id => {
                 const agent = availableExperts.find(a => a.id === id);

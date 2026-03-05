@@ -1,5 +1,5 @@
 import { useState, useRef, useEffect } from 'react';
-import { PlusCircleFill, RobotFill, CheckSquareFill, Square, XLg } from 'react-bootstrap-icons';
+import { PlusCircleFill, Robot, CheckSquareFill, Square, XLg } from 'react-bootstrap-icons';
 import useGraphStore from '../store/graphStore';
 import { useI18n } from '../i18n';
 import './ExpertAgentSelector.css';
@@ -39,7 +39,7 @@ function ExpertAgentSelector() {
         onClick={() => setIsOpen(!isOpen)}
         title={t('experts.toggle_panel')}
       >
-        <RobotFill size={13} />
+        <Robot size={13} />
         <PlusCircleFill size={9} className="expert-selector-plus" />
         {activeCount > 0 && (
           <span className="expert-selector-badge">{activeCount}</span>
