@@ -36,8 +36,72 @@ from backend.service import GraphService, create_rest_router, register_mcp_tools
 from backend.ui import ChatService, DocumentService, create_ui_router
 from backend.agents import AgentRegistry, AgentsSettings
 from backend.federation import FederationManager, load_federation_config, summarize_federation_config
+from backend import config_loader
 
 from .config import AppConfig
+
+
+def _build_mcp_instructions() -> str:
+    """Build MCP instructions dynamically from the loaded schema configuration."""
+    schema = config_loader.get_schema()
+    presentation = config_loader.get_presentation()
+    node_types = schema.get("node_types", {})
+    relationship_types = schema.get("relationship_types", {})
+
+    # Build node type descriptions
+    domain_lines = []
+    system_lines = []
+    for name, cfg in node_types.items():
+        category = cfg.get("category", "domain")
+        desc = cfg.get("description", "")
+        entry = f"  - {name}: {desc}" if desc else f"  - {name}"
+        if category == "system":
+            system_lines.append(entry)
+        else:
+            domain_lines.append(entry)
+
+    # Build relationship type descriptions
+    rel_lines = []
+    for name, cfg in relationship_types.items():
+        desc = cfg.get("description", "")
+        entry = f"  - {name}: {desc}" if desc else f"  - {name}"
+        rel_lines.append(entry)
+
+    # Include prompt_prefix if configured (contains domain-specific context)
+    prompt_context = ""
+    if presentation.get("prompt_prefix"):
+        prompt_context = f"\nDOMAIN CONTEXT:\n{presentation['prompt_prefix']}\n"
+
+    instructions = f"""You are a helpful knowledge agent for: {presentation.get('title', 'Knowledge Graph')}.
+{prompt_context}
+METADATA MODEL — Node Types available in this graph:
+
+Domain types (the core concepts users work with):
+{chr(10).join(domain_lines)}
+
+System types (infrastructure, not usually queried directly):
+{chr(10).join(system_lines)}
+
+Relationship types:
+{chr(10).join(rel_lines)}
+
+SEARCH STRATEGY:
+- Start with broad search terms (e.g., "AI" instead of "AI projects in Sweden").
+- If a search yields no results, try broader terms or synonyms.
+- An empty query or "*" returns a list of nodes (limited by 'limit').
+- Use the node_types parameter to filter by type (e.g., node_types=["Klassifikation"]).
+- When users ask about a concept that matches a node type name, search for that type.
+
+DATA MANAGEMENT:
+- ALWAYS check for existing nodes using 'find_similar_nodes' before creating new ones.
+- When adding nodes, use the correct type from the metadata model above.
+- Use 'get_subtypes' to find existing sub-classifications before adding new ones.
+
+VISUALIZATION:
+- If the user asks to see the graph visually or mentions "widget", "canvas", or "visualize",
+  provide them with the Widget URL (available via 'get_presentation').
+"""
+    return instructions
 
 
 def create_app(
@@ -239,26 +303,8 @@ def create_app(
     ui_router = create_ui_router(chat_service, document_service)
     app.include_router(ui_router, prefix="/ui")
 
-    # Initialize FastMCP and register tools
-    # We add custom instructions to guide the LLM on how to use the tools effectively.
-    instructions = """
-    You are a helpful knowledge agent assisting users with the Community Knowledge Graph.
-
-    SEARCH STRATEGY:
-    - Start with broad search terms (e.g., "AI" instead of "AI projects in Sweden").
-    - If a search yields no results, try broader terms or synonyms.
-    - An empty query or "*" returns a list of nodes (limited by 'limit').
-
-    DATA MANAGEMENT:
-    - ALWAYS check for existing nodes/actors using 'find_similar_nodes' before creating new ones.
-    - Avoid creating generic actor nodes like "Universities" or "Research Institutes". Be specific.
-    - When adding initiatives, try to link them to existing actors and communities.
-
-    VISUALIZATION:
-    - If the user asks to see the graph visually or mentions "widget", "canvas", or "visualize",
-      provide them with the Widget URL (available via 'get_presentation').
-      Normally this URL is: https://{host}/widget/
-    """
+    # Initialize FastMCP with dynamic instructions built from schema configuration
+    instructions = _build_mcp_instructions()
 
     mcp = FastMCP(config.mcp_name, instructions=instructions)
     tools_map = register_mcp_tools(mcp, graph_service)
@@ -383,6 +429,18 @@ def create_app(
             import traceback
             error_trace = traceback.format_exc()
             return JSONResponse({"error": str(e), "traceback": error_trace}, status_code=500)
+
+    # Serve favicon/graph-icon from web static path to prevent 404 noise
+    _favicon_path = Path(config.web_static_path) / "graph-icon.svg"
+
+    @app.get("/graph-icon.svg")
+    @app.get("/favicon.svg")
+    @app.get("/favicon.ico")
+    @app.get("/favicon.png")
+    async def favicon():
+        if _favicon_path.exists():
+            return FileResponse(str(_favicon_path), media_type="image/svg+xml")
+        return JSONResponse(status_code=204, content=None)
 
     # Mount static files for web app
     _mount_static_files(app, config)

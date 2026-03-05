@@ -26,11 +26,14 @@ When the application starts via `./start-dev.sh`, the following logic applies:
    → Copy/download that source to data/active/graph.json (overwrites existing)
 
 2. Else if data/active/graph.json does NOT exist:
-   → Copy data/examples/default.json to data/active/graph.json
+   → Check for config/<profile>/graph.json (profile-specific seed data)
+   → Else copy data/examples/default.json to data/active/graph.json
 
 3. Else (data/active/graph.json exists):
    → Use the existing file as-is
 ```
+
+Profiles can include a `graph.json` seed file that is used on first startup. See [PROFILES.md](./PROFILES.md) for details.
 
 This means:
 - **First run**: automatically starts with the default example data
@@ -135,17 +138,9 @@ Each graph file follows this structure:
 
 Node types fall into two categories:
 
-**Domain types** (configurable via `config/default/schema_config.json`):
-- **Actor** (blue) - Organizations, agencies, individuals
-- **Initiative** (green) - Projects, programs, collaborative activities
-- **Capability** (orange) - Capabilities, competencies, skills
-- **Resource** (yellow) - Reports, software, tools, datasets
-- **Legislation** (red) - Laws, directives (NIS2, GDPR, etc.)
-- **Theme** (teal) - AI strategies, data strategies, themes
-- **Goal** (indigo) - Strategic objectives and targets
-- **Event** (fuchsia) - Conferences, workshops, milestones
-- **Data** (cyan) - Datasets, registers, APIs, data sources
-- **Risk** (red) - Identified risks, threats, or vulnerabilities
+**Domain types** (configurable per profile via `schema_config.json`, see [PROFILES.md](./PROFILES.md)):
+
+The default profile includes: Actor, Initiative, Capability, Resource, Legislation, Theme, Goal, Event, Data, Risk. Other profiles can define additional types (e.g., the SCB profile adds Dataset, Undersökning, Variabel, etc.).
 
 **System types** (foundational to the application):
 - **SavedView / VisualizationView** (gray) - Saved graph view snapshots
@@ -159,7 +154,7 @@ All domain node types support an optional **subtypes** field for sub-classificat
 - Risk: "Cybersecurity", "Compliance", "Operational"
 - Data: "Open data", "Register", "API", "Statistics"
 
-Domain types can be freely modified, added, or removed in the schema configuration file. System types are integral to application functionality and should not be removed.
+Domain types can be freely modified, added, or removed in the schema configuration file. System types are integral to application functionality and should not be removed. See [PROFILES.md](./PROFILES.md) for how to create custom profiles with different node types.
 
 ## Environment Variables
 
@@ -167,5 +162,6 @@ Domain types can be freely modified, added, or removed in the schema configurati
 |----------|---------|-------------|
 | `GRAPH_FILE` | `data/active/graph.json` | Path to the active graph file |
 | `GRAPH_SCHEMA_CONFIG` | `config/default/schema_config.json` | Path to schema configuration |
+| `SCHEMA_FILE` | *(auto-resolved from profile)* | Alternative env var for schema path |
 
-When using `./start-dev.sh`, the `GRAPH_FILE` variable is automatically set to `data/active/graph.json`.
+When using `./start-dev.sh --profile <name>`, the `SCHEMA_FILE` variable is automatically set based on the profile's `schema_config.json` (with fallback to default).

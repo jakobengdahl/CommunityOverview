@@ -2,22 +2,8 @@ import { useState, useRef, useEffect } from 'react';
 import { List, Feather, Download } from 'react-bootstrap-icons';
 import useGraphStore from '../store/graphStore';
 import { useI18n } from '../i18n';
+import { COLOR_MAP } from './FloatingToolbar';
 import './FloatingHeader.css';
-
-const NODE_TYPE_COLORS = {
-  Actor: '#3B82F6',
-  Community: '#A855F7',
-  Initiative: '#10B981',
-  Capability: '#F97316',
-  Resource: '#FBBF24',
-  Legislation: '#EF4444',
-  Theme: '#14B8A6',
-  Goal: '#6366F1',
-  Event: '#D946EF',
-  Agent: '#EC4899',
-  EventSubscription: '#8B5CF6',
-  SavedView: '#6B7280',
-};
 
 function FloatingHeader({ stats, title = 'Community Graph View', onExportGraph }) {
   const { t } = useI18n();
@@ -75,7 +61,7 @@ function FloatingHeader({ stats, title = 'Community Graph View', onExportGraph }
                       <div key={type} className="floating-header-type-row">
                         <span
                           className="floating-header-type-dot"
-                          style={{ backgroundColor: NODE_TYPE_COLORS[type] || '#9CA3AF' }}
+                          style={{ backgroundColor: COLOR_MAP[type] || '#9CA3AF' }}
                         />
                         <span className="floating-header-type-name">{type}</span>
                         <span className="floating-header-type-count">{count}</span>
