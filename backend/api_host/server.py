@@ -500,7 +500,7 @@ def create_app(
     @app.post("/federation/sync")
     async def federation_sync() -> Dict[str, Any]:
         """Trigger best-effort sync for all enabled federated graph sources."""
-        return federation_manager.sync_all()
+        return await federation_manager.sync_all()
 
     # Agent system endpoints
     @app.get("/agents/status")
