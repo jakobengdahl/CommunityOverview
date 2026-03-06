@@ -2,6 +2,7 @@
 
 import json
 import threading
+import pytest
 from http.server import BaseHTTPRequestHandler, HTTPServer
 
 from backend.federation.config import FederationFileConfig
@@ -42,7 +43,8 @@ def _start_server():
     return server
 
 
-def test_sync_and_search_remote_graph_json():
+@pytest.mark.asyncio
+async def test_sync_and_search_remote_graph_json():
     server = _start_server()
     try:
         port = server.server_address[1]
@@ -64,7 +66,7 @@ def test_sync_and_search_remote_graph_json():
         })
 
         manager = FederationManager(config)
-        sync = manager.sync_all()
+        sync = await manager.sync_all()
 
         assert sync["success"] is True
         result = manager.search_nodes(query="esam", node_types=None, limit=10)
@@ -77,7 +79,8 @@ def test_sync_and_search_remote_graph_json():
         server.server_close()
 
 
-def test_sync_degrades_when_unreachable_url():
+@pytest.mark.asyncio
+async def test_sync_degrades_when_unreachable_url():
     config = FederationFileConfig.model_validate({
         "federation": {
             "enabled": True,
@@ -95,7 +98,7 @@ def test_sync_degrades_when_unreachable_url():
     })
 
     manager = FederationManager(config)
-    sync = manager.sync_all()
+    sync = await manager.sync_all()
     assert sync["success"] is False
 
     status = manager.get_status()
