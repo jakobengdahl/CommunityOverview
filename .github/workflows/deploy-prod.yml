@@ -126,7 +126,7 @@ jobs:
               --region "${REGION}" \
               --service-account "${SA_CORE}" \
               --no-allow-unauthenticated \
-              --set-env-vars="HOST=0.0.0.0,PORT=8000,GRAPH_FILE=/data/graph.json,SCHEMA_FILE=/app/config/schema_config.json,AUTH_ENABLED=false,MCP_BASIC_AUTH=false" \
+              --set-env-vars="HOST=0.0.0.0,GRAPH_FILE=/data/graph.json,SCHEMA_FILE=/app/config/schema_config.json,AUTH_ENABLED=false,MCP_BASIC_AUTH=false" \
               --set-secrets="OPENAI_API_KEY=OPENAI_API_KEY_${pilot_upper}:latest,ANTHROPIC_API_KEY=ANTHROPIC_API_KEY_${pilot_upper}:latest" \
               --add-volume="name=data,type=cloud-storage,bucket=${bucket}" \
               --add-volume-mount="volume=data,mount-path=/data" \
