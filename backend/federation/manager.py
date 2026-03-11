@@ -8,7 +8,8 @@ import time
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional, Callable
-from urllib.request import urlopen
+import asyncio
+import httpx
 
 from backend.core.models import Edge, Node
 
@@ -89,11 +90,26 @@ class FederationManager:
         if not self.enabled:
             return
 
-        for graph in self._config.federation.graphs:
-            if graph.enabled and graph.sync.on_startup:
-                self.sync_graph(graph.graph_id)
+        graphs_to_sync = [
+            graph for graph in self._config.federation.graphs
+            if graph.enabled and graph.sync.on_startup
+        ]
 
-    def sync_graph(self, graph_id: str) -> Dict[str, Any]:
+        if not graphs_to_sync:
+            return
+
+        async def run_sync():
+            async with httpx.AsyncClient() as client:
+                coros = [self.sync_graph(graph.graph_id, client) for graph in graphs_to_sync]
+                await asyncio.gather(*coros)
+
+        try:
+            loop = asyncio.get_running_loop()
+            loop.create_task(run_sync())
+        except RuntimeError:
+            asyncio.run(run_sync())
+
+    async def sync_graph(self, graph_id: str, client: Optional[httpx.AsyncClient] = None) -> Dict[str, Any]:
         graph = self._get_graph_config(graph_id)
         if graph is None:
             return {"success": False, "error": f"Unknown graph_id: {graph_id}"}
@@ -109,8 +125,15 @@ class FederationManager:
         timeout_s = max(0.1, self._config.federation.default_timeout_ms / 1000.0)
 
         try:
-            with urlopen(graph_json_url, timeout=timeout_s) as response:
-                payload = json.loads(response.read().decode("utf-8"))
+            if client is None:
+                async with httpx.AsyncClient() as new_client:
+                    response = await new_client.get(graph_json_url, timeout=timeout_s)
+                    response.raise_for_status()
+                    payload = response.json()
+            else:
+                response = await client.get(graph_json_url, timeout=timeout_s)
+                response.raise_for_status()
+                payload = response.json()
 
             nodes = payload.get("nodes", [])
             edges = payload.get("edges", [])
@@ -139,11 +162,18 @@ class FederationManager:
             self._set_degraded(graph.graph_id, str(exc))
             return {"success": False, "graph_id": graph.graph_id, "error": str(exc)}
 
-    def sync_all(self) -> Dict[str, Any]:
-        results = [self.sync_graph(graph.graph_id) for graph in self._config.federation.graphs if graph.enabled]
+    async def sync_all(self) -> Dict[str, Any]:
+        enabled_graphs = [graph.graph_id for graph in self._config.federation.graphs if graph.enabled]
+        if not enabled_graphs:
+            return {"success": True, "results": []}
+
+        async with httpx.AsyncClient() as client:
+            coros = [self.sync_graph(graph_id, client) for graph_id in enabled_graphs]
+            results = await asyncio.gather(*coros)
+
         return {
             "success": all(r.get("success", False) for r in results) if results else True,
-            "results": results,
+            "results": list(results),
         }
 
     def _allowed_depth_for_graph(self, graph_id: str) -> int:
@@ -294,8 +324,18 @@ class FederationManager:
             }
 
     def _sync_loop(self) -> None:
+        loop = asyncio.new_event_loop()
+        asyncio.set_event_loop(loop)
+
+        async def _run_sync(graphs_to_sync):
+            async with httpx.AsyncClient() as client:
+                coros = [self.sync_graph(g_id, client) for g_id in graphs_to_sync]
+                await asyncio.gather(*coros)
+
         while not self._stop_event.wait(1.0):
             now = time.monotonic()
+            graphs_to_sync = []
+
             for graph in self._config.federation.graphs:
                 if not graph.enabled or graph.sync.mode != "scheduled":
                     continue
@@ -306,8 +346,13 @@ class FederationManager:
                     continue
 
                 if now >= next_at:
-                    self.sync_graph(graph.graph_id)
+                    graphs_to_sync.append(graph.graph_id)
                     self._next_sync_at[graph.graph_id] = now + graph.sync.interval_seconds
+
+            if graphs_to_sync:
+                loop.run_until_complete(_run_sync(graphs_to_sync))
+
+        loop.close()
 
 
     def _emit_node_events(self, previous_nodes: Dict[str, Node], current_nodes: Dict[str, Node]) -> None:
