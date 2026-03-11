@@ -233,9 +233,11 @@ function FloatingSearch() {
         />
         {isLoading && <div className="floating-search-spinner" />}
       </div>
-      <div className="floating-search-depth-indicator" title={t('federation.depth_indicator_tooltip')}>
-        {t('federation.depth_indicator', { current: federationDepth, max: effectiveMaxDepth })}
-      </div>
+      {effectiveMaxDepth > 1 && (
+        <div className="floating-search-depth-indicator" title={t('federation.depth_indicator_tooltip')}>
+          {t('federation.depth_indicator', { current: federationDepth, max: effectiveMaxDepth })}
+        </div>
+      )}
 
       {showDropdown && results.length > 0 && (
         <div className="floating-search-dropdown">

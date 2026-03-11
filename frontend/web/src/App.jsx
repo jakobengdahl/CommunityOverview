@@ -589,9 +589,11 @@ function App() {
       </div>
 
       <FloatingHeader stats={stats} onExportGraph={handleExportGraph} />
-      <div className="app-a11y-depth-live" aria-live="polite" aria-atomic="true">
-        {t('federation.depth_indicator', { current: federationDepth, max: maxFederationDepth })}
-      </div>
+      {maxFederationDepth > 1 && (
+        <div className="app-a11y-depth-live" aria-live="polite" aria-atomic="true">
+          {t('federation.depth_indicator', { current: federationDepth, max: maxFederationDepth })}
+        </div>
+      )}
       <FloatingSearch />
       <FloatingToolbar
         onCreateNode={handleCreateNodeForType}
