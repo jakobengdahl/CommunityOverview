@@ -95,4 +95,33 @@ describe('FloatingSearch federation labels', () => {
       expect(screen.getByText('Depth 1/2')).toBeInTheDocument();
     });
   });
+
+  it('hides depth indicator when graph is not federated (max depth 1)', async () => {
+    useGraphStore.setState({
+      stats: {
+        federation: {
+          search_has_multiple_graphs: false,
+          graph_display_names: { local: 'Local Graph' },
+          max_selectable_depth: 1,
+        },
+      },
+    });
+
+    api.searchGraph.mockResolvedValueOnce({
+      nodes: [
+        { id: 'local-1', type: 'Actor', name: 'Only local node', metadata: {} },
+      ],
+      edges: [],
+    });
+
+    render(<FloatingSearch />);
+    const user = userEvent.setup();
+
+    await user.type(screen.getByPlaceholderText('Search graph...'), 'lo');
+
+    await waitFor(() => {
+      expect(screen.getByText('Only local node')).toBeInTheDocument();
+      expect(screen.queryByText(/Depth/)).not.toBeInTheDocument();
+    });
+  });
 });

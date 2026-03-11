@@ -1,0 +1,192 @@
+# =============================================================================
+# Deploy to Prod – triggered on push/merge to the `main` branch
+#
+# Deploys all three pilots (esam, unece, scb) for both services:
+#   - CommunityOverview core  (Cloud Run, --no-allow-unauthenticated)
+#   - MCP OAuth Gateway       (Cloud Run, --allow-unauthenticated)
+#
+# Authentication uses Workload Identity Federation – no long-lived SA keys.
+# All GCP-specific values (project, region, service names, etc.) are read
+# exclusively from GitHub Secrets; nothing is hardcoded here.
+# =============================================================================
+
+name: Deploy – Prod
+
+on:
+  push:
+    branches: ["main"]
+
+# Prevent two prod deploys from running in parallel.
+# A queued run is NOT cancelled so that every push eventually lands.
+concurrency:
+  group: deploy-prod
+  cancel-in-progress: false
+
+jobs:
+  build-and-deploy:
+    name: Build and deploy all prod services
+    runs-on: ubuntu-latest
+
+    permissions:
+      contents: read
+      id-token: write  # Required for Workload Identity Federation
+
+    steps:
+      # -----------------------------------------------------------------------
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      # -----------------------------------------------------------------------
+      - name: Authenticate to Google Cloud
+        uses: google-github-actions/auth@v2
+        with:
+          workload_identity_provider: ${{ secrets.GCP_WORKLOAD_IDENTITY_PROVIDER }}
+          service_account: ${{ secrets.GCP_SERVICE_ACCOUNT_CORE }}
+
+      # -----------------------------------------------------------------------
+      - name: Set up Cloud SDK
+        uses: google-github-actions/setup-gcloud@v2
+
+      # -----------------------------------------------------------------------
+      # Build the core image once and reuse the same digest for all three pilots.
+      # The image tag includes the Git SHA so each commit produces a unique,
+      # traceable image without overwriting a shared "latest" tag.
+      - name: Build and push core image
+        env:
+          PROJECT_ID: ${{ secrets.GCP_PROJECT_ID }}
+          REGION: ${{ secrets.GCP_REGION }}
+          AR_REPO: ${{ secrets.GCP_AR_REPO }}
+        run: |
+          set -euo pipefail
+          CORE_IMAGE="${REGION}-docker.pkg.dev/${PROJECT_ID}/${AR_REPO}/core:${GITHUB_SHA}"
+          # Export for subsequent steps
+          echo "CORE_IMAGE=${CORE_IMAGE}" >> "$GITHUB_ENV"
+          gcloud auth configure-docker ${{ secrets.GCP_REGION }}-docker.pkg.dev --quiet
+          docker buildx build \
+            --platform linux/amd64 \
+            --push \
+            -t "${CORE_IMAGE}" \
+            .
+
+      # -----------------------------------------------------------------------
+      # Build the gateway image from its subdirectory.
+      - name: Build and push gateway image
+        env:
+          PROJECT_ID: ${{ secrets.GCP_PROJECT_ID }}
+          REGION: ${{ secrets.GCP_REGION }}
+          AR_REPO: ${{ secrets.GCP_AR_REPO }}
+        run: |
+          set -euo pipefail
+          GW_IMAGE="${REGION}-docker.pkg.dev/${PROJECT_ID}/${AR_REPO}/gateway:${GITHUB_SHA}"
+          echo "GW_IMAGE=${GW_IMAGE}" >> "$GITHUB_ENV"
+          gcloud auth configure-docker ${{ secrets.GCP_REGION }}-docker.pkg.dev --quiet
+          docker buildx build \
+            --platform linux/amd64 \
+            --push \
+            -t "${GW_IMAGE}" \
+            services/mcp_oauth_gateway/
+
+      # -----------------------------------------------------------------------
+      # Deploy core to all three prod pilots.
+      # Each pilot's Cloud Run service name and GCS bucket come from dedicated
+      # GitHub Secrets (CORE_<PILOT>_PROD_SERVICE / CORE_<PILOT>_PROD_BUCKET).
+      # Per-pilot API keys are stored in Secret Manager under the names
+      # OPENAI_API_KEY_<PILOT> and ANTHROPIC_API_KEY_<PILOT>; they are
+      # referenced by name only – their values never pass through this runner.
+      - name: Deploy core services
+        env:
+          REGION: ${{ secrets.GCP_REGION }}
+          SA_CORE: ${{ secrets.GCP_SERVICE_ACCOUNT_CORE }}
+          # esam
+          CORE_ESAM_SERVICE: ${{ secrets.CORE_ESAM_PROD_SERVICE }}
+          CORE_ESAM_BUCKET:  ${{ secrets.CORE_ESAM_PROD_BUCKET }}
+          # unece
+          CORE_UNECE_SERVICE: ${{ secrets.CORE_UNECE_PROD_SERVICE }}
+          CORE_UNECE_BUCKET:  ${{ secrets.CORE_UNECE_PROD_BUCKET }}
+          # scb
+          CORE_SCB_SERVICE: ${{ secrets.CORE_SCB_PROD_SERVICE }}
+          CORE_SCB_BUCKET:  ${{ secrets.CORE_SCB_PROD_BUCKET }}
+        run: |
+          set -euo pipefail
+
+          deploy_core() {
+            local pilot_lower="$1"   # e.g. esam
+            local pilot_upper="$2"   # e.g. ESAM
+
+            # Resolve per-pilot env vars via bash indirect expansion
+            local service_var="CORE_${pilot_upper}_SERVICE"
+            local bucket_var="CORE_${pilot_upper}_BUCKET"
+            local service="${!service_var}"
+            local bucket="${!bucket_var}"
+
+            echo "Deploying core for pilot=${pilot_lower} service=${service}"
+
+            gcloud run deploy "${service}" \
+              --image "${CORE_IMAGE}" \
+              --region "${REGION}" \
+              --service-account "${SA_CORE}" \
+              --no-allow-unauthenticated \
+              --set-env-vars="HOST=0.0.0.0,PORT=8000,GRAPH_FILE=/data/graph.json,SCHEMA_FILE=/app/config/schema_config.json,AUTH_ENABLED=false,MCP_BASIC_AUTH=false" \
+              --set-secrets="OPENAI_API_KEY=OPENAI_API_KEY_${pilot_upper}:latest,ANTHROPIC_API_KEY=ANTHROPIC_API_KEY_${pilot_upper}:latest" \
+              --add-volume="name=data,type=cloud-storage,bucket=${bucket}" \
+              --add-volume-mount="volume=data,mount-path=/data" \
+              --labels="app=communityoverview-core,pilot=${pilot_lower},env=prod"
+          }
+
+          deploy_core esam  ESAM
+          deploy_core unece UNECE
+          deploy_core scb   SCB
+
+      # -----------------------------------------------------------------------
+      # Deploy the MCP OAuth Gateway to all three prod pilots.
+      # The gateway must be publicly reachable (--allow-unauthenticated) so
+      # ChatGPT can call the OAuth metadata and token endpoints.
+      # GOOGLE_OAUTH_CLIENT_SECRET and GW_JWT_SIGNING_KEY are loaded from
+      # Secret Manager by name; their values never touch this runner.
+      - name: Deploy gateway services
+        env:
+          REGION: ${{ secrets.GCP_REGION }}
+          SA_GW: ${{ secrets.GCP_SERVICE_ACCOUNT_GW }}
+          GOOGLE_OAUTH_CLIENT_ID: ${{ secrets.GOOGLE_OAUTH_CLIENT_ID }}
+          TEST_USERS: ${{ secrets.TEST_USERS }}
+          # esam
+          GW_ESAM_SERVICE:         ${{ secrets.GW_ESAM_PROD_SERVICE }}
+          GW_ESAM_UPSTREAM_URL:    ${{ secrets.GW_ESAM_PROD_UPSTREAM_URL }}
+          GW_ESAM_PUBLIC_BASE_URL: ${{ secrets.GW_ESAM_PROD_PUBLIC_BASE_URL }}
+          # unece
+          GW_UNECE_SERVICE:         ${{ secrets.GW_UNECE_PROD_SERVICE }}
+          GW_UNECE_UPSTREAM_URL:    ${{ secrets.GW_UNECE_PROD_UPSTREAM_URL }}
+          GW_UNECE_PUBLIC_BASE_URL: ${{ secrets.GW_UNECE_PROD_PUBLIC_BASE_URL }}
+          # scb
+          GW_SCB_SERVICE:         ${{ secrets.GW_SCB_PROD_SERVICE }}
+          GW_SCB_UPSTREAM_URL:    ${{ secrets.GW_SCB_PROD_UPSTREAM_URL }}
+          GW_SCB_PUBLIC_BASE_URL: ${{ secrets.GW_SCB_PROD_PUBLIC_BASE_URL }}
+        run: |
+          set -euo pipefail
+
+          deploy_gateway() {
+            local pilot_lower="$1"   # e.g. esam
+            local pilot_upper="$2"   # e.g. ESAM
+
+            local service_var="GW_${pilot_upper}_SERVICE"
+            local upstream_var="GW_${pilot_upper}_UPSTREAM_URL"
+            local base_url_var="GW_${pilot_upper}_PUBLIC_BASE_URL"
+            local service="${!service_var}"
+            local upstream_url="${!upstream_var}"
+            local public_base_url="${!base_url_var}"
+
+            echo "Deploying gateway for pilot=${pilot_lower} service=${service}"
+
+            gcloud run deploy "${service}" \
+              --image "${GW_IMAGE}" \
+              --region "${REGION}" \
+              --service-account "${SA_GW}" \
+              --allow-unauthenticated \
+              --set-env-vars="PORT=8080,GOOGLE_OAUTH_CLIENT_ID=${GOOGLE_OAUTH_CLIENT_ID},UPSTREAM_MCP_BASE_URL=${upstream_url},PUBLIC_BASE_URL=${public_base_url},TEST_USERS=${TEST_USERS}" \
+              --set-secrets="GOOGLE_OAUTH_CLIENT_SECRET=GOOGLE_OAUTH_CLIENT_SECRET:latest,GW_JWT_SIGNING_KEY=GW_JWT_SIGNING_KEY:latest" \
+              --labels="app=communityoverview-mcp-gw,pilot=${pilot_lower},env=prod"
+          }
+
+          deploy_gateway esam  ESAM
+          deploy_gateway unece UNECE
+          deploy_gateway scb   SCB

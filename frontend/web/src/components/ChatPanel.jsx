@@ -429,9 +429,11 @@ function ChatPanel() {
         <div className="chat-header-left" onClick={toggleChatPanel} style={{ cursor: 'pointer' }}>
           <ChatDotsFill size={16} />
           <h3>Graph assistant</h3>
-          <span className="chat-depth-indicator" title={t('federation.depth_indicator_tooltip')}>
-            {t('federation.depth_indicator', { current: federationDepth, max: effectiveMaxDepth })}
-          </span>
+          {effectiveMaxDepth > 1 && (
+            <span className="chat-depth-indicator" title={t('federation.depth_indicator_tooltip')}>
+              {t('federation.depth_indicator', { current: federationDepth, max: effectiveMaxDepth })}
+            </span>
+          )}
         </div>
         <button className="chat-collapse-button" onClick={toggleChatPanel} title="Minimize">
           <ChevronRight size={18} />
