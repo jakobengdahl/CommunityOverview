@@ -61,8 +61,11 @@ jobs:
           CORE_IMAGE="${REGION}-docker.pkg.dev/${PROJECT_ID}/${AR_REPO}/core:${GITHUB_SHA}"
           # Export for subsequent steps
           echo "CORE_IMAGE=${CORE_IMAGE}" >> "$GITHUB_ENV"
-          gcloud builds submit \
-            --tag "${CORE_IMAGE}" \
+          gcloud auth configure-docker ${{ secrets.GCP_REGION }}-docker.pkg.dev --quiet
+          docker buildx build \
+            --platform linux/amd64 \
+            --push \
+            -t "${CORE_IMAGE}" \
             .
 
       # -----------------------------------------------------------------------
@@ -76,8 +79,11 @@ jobs:
           set -euo pipefail
           GW_IMAGE="${REGION}-docker.pkg.dev/${PROJECT_ID}/${AR_REPO}/gateway:${GITHUB_SHA}"
           echo "GW_IMAGE=${GW_IMAGE}" >> "$GITHUB_ENV"
-          gcloud builds submit \
-            --tag "${GW_IMAGE}" \
+          gcloud auth configure-docker ${{ secrets.GCP_REGION }}-docker.pkg.dev --quiet
+          docker buildx build \
+            --platform linux/amd64 \
+            --push \
+            -t "${GW_IMAGE}" \
             services/mcp_oauth_gateway/
 
       # -----------------------------------------------------------------------
