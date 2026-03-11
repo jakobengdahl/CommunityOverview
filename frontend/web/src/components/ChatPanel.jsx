@@ -1,9 +1,10 @@
 import { useState, useEffect, useRef, useMemo } from 'react';
-import { ChatDotsFill, ChevronRight, ChevronLeft, XCircleFill } from 'react-bootstrap-icons';
+import { ChatDotsFill, ChevronRight, ChevronLeft, XCircleFill, Robot } from 'react-bootstrap-icons';
 import useGraphStore from '../store/graphStore';
 import { useI18n } from '../i18n';
 import * as api from '../services/api';
 import { positionNewNodes, getNodeColor } from '@community-graph/ui-graph-canvas';
+import ExpertAgentSelector from './ExpertAgentSelector';
 import './ChatPanel.css';
 
 /** Max characters of node context to include with a message to the LLM */
@@ -24,6 +25,8 @@ function ChatPanel() {
     federationDepth,
     stats,
     clearSelectedGraphNodes,
+    activeExperts,
+    availableExperts,
   } = useGraphStore();
 
   const { t, language } = useI18n();
@@ -436,8 +439,18 @@ function ChatPanel() {
       </div>
 
       <div className="chat-messages">
-        {chatMessages.map((msg, idx) => (
-          <div key={msg.id || idx} className={`chat-message ${msg.role}`}>
+        {chatMessages.filter(m => !m.expertJoinNotification).map((msg, idx) => (
+          <div
+            key={msg.id || idx}
+            className={`chat-message ${msg.role}${msg.role === 'expert' ? ' expert-message' : ''}${msg.isSystemEvent ? ' expert-system-event' : ''}`}
+            style={msg.role === 'expert' ? { '--expert-color': msg.expertColor || '#9CA3AF' } : undefined}
+          >
+            {msg.role === 'expert' && !msg.isSystemEvent && (
+              <div className="expert-message-header">
+                <Robot size={11} style={{ color: msg.expertColor }} />
+                <span className="expert-message-name" style={{ color: msg.expertColor }}>{msg.expertName}</span>
+              </div>
+            )}
             <div className="message-content">
               {msg.content}
 
@@ -603,7 +616,27 @@ function ChatPanel() {
           disabled={isProcessing}
         />
 
+        {activeExperts.length > 0 && (
+          <div className="active-experts-indicator">
+            <Robot size={11} className="active-experts-icon" />
+            <span className="active-experts-label">
+              {activeExperts.map(id => {
+                const agent = availableExperts.find(a => a.id === id);
+                if (!agent) return null;
+                const name = language === 'sv' ? agent.name : (agent.name_en || agent.name);
+                return (
+                  <span key={id} className="active-expert-chip" style={{ borderColor: agent.color }}>
+                    <span className="active-expert-dot" style={{ backgroundColor: agent.color }} />
+                    {name}
+                  </span>
+                );
+              })}
+            </span>
+          </div>
+        )}
+
         <div className="button-row">
+          <ExpertAgentSelector />
           <input
             type="file"
             ref={fileInputRef}

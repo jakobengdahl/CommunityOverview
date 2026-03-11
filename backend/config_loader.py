@@ -72,6 +72,20 @@ class SchemaConfig(BaseModel):
         return v
 
 
+class ExpertAgentConfig(BaseModel):
+    """Configuration for an expert agent available in the chat."""
+    id: str
+    name: str
+    name_en: str = ""
+    specialty: str = ""
+    specialty_en: str = ""
+    color: str = "#9CA3AF"
+    icon: str = "CpuFill"
+    intro_sv: str = ""
+    intro_en: str = ""
+    system_context: str = ""
+
+
 class PresentationConfig(BaseModel):
     """Presentation configuration for UI and prompts."""
     title: str = "Community Knowledge Graph"
@@ -81,6 +95,7 @@ class PresentationConfig(BaseModel):
     prompt_suffix: str = ""
     default_language: str = "en"
     widget_url: str = ""  # URL template for the graph widget
+    expert_agents: List[ExpertAgentConfig] = Field(default_factory=list)
 
 
 class SchemaFileConfig(BaseModel):
@@ -263,7 +278,8 @@ def get_presentation() -> Dict[str, Any]:
         "prompt_prefix": pres.prompt_prefix,
         "prompt_suffix": pres.prompt_suffix,
         "default_language": pres.default_language,
-        "widget_url": pres.widget_url
+        "widget_url": pres.widget_url,
+        "expert_agents": [agent.dict() for agent in pres.expert_agents]
     }
 
 

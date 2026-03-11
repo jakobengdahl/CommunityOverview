@@ -1,0 +1,194 @@
+/* Expert Agent Selector - Trigger Button */
+.expert-selector-wrapper {
+  position: relative;
+}
+
+.expert-selector-trigger {
+  display: flex;
+  align-items: center;
+  gap: 2px;
+  background: transparent;
+  border: 1px solid #444;
+  border-radius: 6px;
+  color: #888;
+  cursor: pointer;
+  padding: 4px 7px;
+  transition: all 0.15s;
+  position: relative;
+}
+
+.expert-selector-trigger:hover {
+  border-color: #646cff;
+  color: #646cff;
+  background: rgba(100, 108, 255, 0.08);
+}
+
+.expert-selector-trigger.has-active {
+  border-color: #646cff;
+  color: #646cff;
+}
+
+.expert-selector-plus {
+  margin-left: -2px;
+  margin-top: -6px;
+}
+
+.expert-selector-badge {
+  position: absolute;
+  top: -6px;
+  right: -6px;
+  background: #646cff;
+  color: white;
+  font-size: 0.6rem;
+  font-weight: 700;
+  width: 15px;
+  height: 15px;
+  border-radius: 50%;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  line-height: 1;
+}
+
+/* Expert Agent Selector - Panel */
+.expert-selector-panel {
+  position: absolute;
+  bottom: calc(100% + 8px);
+  left: 0;
+  width: 280px;
+  background: rgba(30, 30, 30, 0.98);
+  backdrop-filter: blur(12px);
+  border: 1px solid #444;
+  border-radius: 10px;
+  box-shadow: 0 4px 20px rgba(0, 0, 0, 0.5);
+  z-index: 200;
+  animation: expertPanelOpen 0.2s ease-out;
+  overflow: hidden;
+}
+
+@keyframes expertPanelOpen {
+  from {
+    opacity: 0;
+    transform: translateY(8px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
+.expert-selector-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 10px 12px;
+  border-bottom: 1px solid #333;
+}
+
+.expert-selector-title {
+  font-size: 0.8rem;
+  font-weight: 600;
+  color: #ccc;
+}
+
+.expert-selector-close {
+  background: none;
+  border: none;
+  color: #666;
+  cursor: pointer;
+  padding: 2px;
+  display: flex;
+  align-items: center;
+  border-radius: 4px;
+  transition: color 0.15s;
+}
+
+.expert-selector-close:hover {
+  color: #fff;
+}
+
+.expert-selector-list {
+  padding: 6px;
+  max-height: 260px;
+  overflow-y: auto;
+}
+
+/* Expert Agent Selector - Item */
+.expert-selector-item {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  width: 100%;
+  padding: 8px 8px;
+  background: transparent;
+  border: none;
+  border-radius: 6px;
+  cursor: pointer;
+  text-align: left;
+  transition: background 0.12s;
+  color: #ccc;
+}
+
+.expert-selector-item:hover {
+  background: rgba(255, 255, 255, 0.06);
+}
+
+.expert-selector-item.active {
+  background: rgba(100, 108, 255, 0.08);
+}
+
+.expert-selector-checkbox {
+  display: flex;
+  align-items: center;
+  flex-shrink: 0;
+  color: #555;
+}
+
+.expert-selector-item.active .expert-selector-checkbox {
+  color: inherit;
+}
+
+.expert-selector-dot {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  flex-shrink: 0;
+}
+
+.expert-selector-info {
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+  overflow: hidden;
+}
+
+.expert-selector-name {
+  font-size: 0.8rem;
+  font-weight: 500;
+  color: #ddd;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.expert-selector-specialty {
+  font-size: 0.68rem;
+  color: #888;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+/* Scrollbar for the list */
+.expert-selector-list::-webkit-scrollbar {
+  width: 4px;
+}
+
+.expert-selector-list::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+.expert-selector-list::-webkit-scrollbar-thumb {
+  background: #444;
+  border-radius: 2px;
+}

@@ -237,6 +237,56 @@
     },
     "prompt_prefix": "You are a knowledge agent that helps users navigate and maintain a knowledge graph for community collaboration on public digitalization.",
     "prompt_suffix": "Remember to suggest saved views when relevant, and always ask for confirmation before making changes to the graph.",
-    "default_language": "en"
+    "default_language": "en",
+    "expert_agents": [
+      {
+        "id": "legislation-expert",
+        "name": "Lagexpert",
+        "name_en": "Legislation Expert",
+        "specialty": "Lagstiftning, direktiv och regelefterlevnad",
+        "specialty_en": "Legislation, directives and regulatory compliance",
+        "color": "#EF4444",
+        "icon": "ShieldFillCheck",
+        "intro_sv": "Hej! Jag är Lagexperten. Jag kan hjälpa er med frågor kring lagstiftning, direktiv som NIS2 och GDPR, samt regelefterlevnad kopplat till digitaliseringsinitiativ.",
+        "intro_en": "Hello! I'm the Legislation Expert. I can help with questions about legislation, directives such as NIS2 and GDPR, and regulatory compliance related to digitalization initiatives.",
+        "system_context": "You are a legislation and regulatory compliance expert. Focus on laws, directives, and compliance aspects."
+      },
+      {
+        "id": "data-expert",
+        "name": "Dataexpert",
+        "name_en": "Data Expert",
+        "specialty": "Datakällor, API:er och datahantering",
+        "specialty_en": "Data sources, APIs and data management",
+        "color": "#06B6D4",
+        "icon": "DatabaseFill",
+        "intro_sv": "Hej! Jag är Dataexperten. Jag har kunskap om datakällor, register, API:er och datahanteringsstrategier inom offentlig digitalisering.",
+        "intro_en": "Hello! I'm the Data Expert. I have knowledge about data sources, registries, APIs and data management strategies in public digitalization.",
+        "system_context": "You are a data management expert. Focus on datasets, APIs, registries, and data strategies."
+      },
+      {
+        "id": "strategy-expert",
+        "name": "Strategiexpert",
+        "name_en": "Strategy Expert",
+        "specialty": "Digitaliseringsstrategi och målstyrning",
+        "specialty_en": "Digitalization strategy and goal management",
+        "color": "#6366F1",
+        "icon": "TrophyFill",
+        "intro_sv": "Hej! Jag är Strategiexperten. Jag kan bidra med perspektiv på digitaliseringsstrategier, mål och hur initiativ kopplas till övergripande strategiska ramverk.",
+        "intro_en": "Hello! I'm the Strategy Expert. I can contribute perspectives on digitalization strategies, goals and how initiatives connect to overarching strategic frameworks.",
+        "system_context": "You are a strategy and goal management expert. Focus on strategic objectives, digitalization strategies, and initiative alignment."
+      },
+      {
+        "id": "collaboration-expert",
+        "name": "Samverkansexpert",
+        "name_en": "Collaboration Expert",
+        "specialty": "Aktörssamverkan och nätverksanalys",
+        "specialty_en": "Actor collaboration and network analysis",
+        "color": "#3B82F6",
+        "icon": "PeopleFill",
+        "intro_sv": "Hej! Jag är Samverkansexperten. Jag kan analysera samarbeten mellan aktörer, identifiera synergier och föreslå nya kopplingar i nätverket.",
+        "intro_en": "Hello! I'm the Collaboration Expert. I can analyze collaborations between actors, identify synergies and suggest new connections in the network.",
+        "system_context": "You are a collaboration and network analysis expert. Focus on actor relationships, synergies, and partnership opportunities."
+      }
+    ]
   }
 }
