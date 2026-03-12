@@ -15,6 +15,7 @@ POST /messages                               – Proxy: MCP POST (auth required)
 """
 
 import logging
+import os
 import urllib.parse
 import uuid
 
@@ -254,3 +255,14 @@ async def messages_proxy(request: Request):
     claims = _require_valid_token(request)
     logger.info("POST proxy request from sub=%s", claims.get("sub"))
     return await proxy.proxy_post(request)
+
+
+# ---------------------------------------------------------------------------
+# Local / direct execution
+# ---------------------------------------------------------------------------
+
+if __name__ == "__main__":
+    import uvicorn
+
+    port = int(os.environ.get("PORT", 8080))
+    uvicorn.run(app, host="0.0.0.0", port=port)
