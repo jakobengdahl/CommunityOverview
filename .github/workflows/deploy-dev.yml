@@ -15,6 +15,7 @@ name: Deploy – Dev
 on:
   push:
     branches: ["dev"]
+  workflow_dispatch:
 
 # Prevent two dev deploys from running in parallel.
 # A queued run is NOT cancelled so that every push eventually lands.
