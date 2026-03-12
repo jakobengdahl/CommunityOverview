@@ -95,6 +95,7 @@ jobs:
       # referenced by name only – their values never pass through this runner.
       - name: Deploy core services
         env:
+          PROJECT_ID: ${{ secrets.GCP_PROJECT_ID }}
           REGION: ${{ secrets.GCP_REGION }}
           SA_CORE: ${{ secrets.GCP_SERVICE_ACCOUNT_CORE }}
           # esam
@@ -121,13 +122,28 @@ jobs:
 
             echo "Deploying core for pilot=${pilot_lower} service=${service}"
 
+            SECRETS=""
+            if gcloud secrets describe "OPENAI_API_KEY_${pilot_upper}" --project="$PROJECT_ID" \
+                >/dev/null 2>&1; then
+              SECRETS="${SECRETS},OPENAI_API_KEY=OPENAI_API_KEY_${pilot_upper}:latest"
+            fi
+            if gcloud secrets describe "ANTHROPIC_API_KEY_${pilot_upper}" --project="$PROJECT_ID" \
+                >/dev/null 2>&1; then
+              SECRETS="${SECRETS},ANTHROPIC_API_KEY=ANTHROPIC_API_KEY_${pilot_upper}:latest"
+            fi
+            SECRETS="${SECRETS#,}"  # strip leading comma
+
+            # Only add --set-secrets if at least one secret exists
+            SECRETS_FLAG=""
+            [[ -n "$SECRETS" ]] && SECRETS_FLAG="--set-secrets=$SECRETS"
+
             gcloud run deploy "${service}" \
               --image "${CORE_IMAGE}" \
               --region "${REGION}" \
               --service-account "${SA_CORE}" \
               --no-allow-unauthenticated \
               --set-env-vars="HOST=0.0.0.0,GRAPH_FILE=/data/graph.json,SCHEMA_FILE=/app/config/schema_config.json,AUTH_ENABLED=false,MCP_BASIC_AUTH=false" \
-              --set-secrets="OPENAI_API_KEY=OPENAI_API_KEY_${pilot_upper}:latest,ANTHROPIC_API_KEY=ANTHROPIC_API_KEY_${pilot_upper}:latest" \
+              $SECRETS_FLAG \
               --add-volume="name=data,type=cloud-storage,bucket=${bucket}" \
               --add-volume-mount="volume=data,mount-path=/data" \
               --labels="app=communityoverview-core,pilot=${pilot_lower},env=prod"
