@@ -193,13 +193,22 @@ jobs:
 
             echo "Deploying gateway for pilot=${pilot_lower} service=${service}"
 
+            # Write env vars to temp file to handle special characters
+            cat > /tmp/gw-env-${pilot_lower}.yaml << EOF
+            GOOGLE_OAUTH_CLIENT_ID: "${{ secrets.GOOGLE_OAUTH_CLIENT_ID }}"
+            UPSTREAM_MCP_BASE_URL: "${upstream_url}"
+            PUBLIC_BASE_URL: "${public_base_url}"
+            TEST_USERS: "${{ secrets.TEST_USERS }}"
+            EOF
+
             gcloud run deploy "${service}" \
               --image "${GW_IMAGE}" \
               --region "${REGION}" \
               --service-account "${SA_GW}" \
               --allow-unauthenticated \
-              --set-env-vars="PORT=8080,GOOGLE_OAUTH_CLIENT_ID=${GOOGLE_OAUTH_CLIENT_ID},UPSTREAM_MCP_BASE_URL=${upstream_url},PUBLIC_BASE_URL=${public_base_url},TEST_USERS=${TEST_USERS}" \
-              --set-secrets="GOOGLE_OAUTH_CLIENT_SECRET=GOOGLE_OAUTH_CLIENT_SECRET:latest,GW_JWT_SIGNING_KEY=GW_JWT_SIGNING_KEY:latest" \
+              --env-vars-file /tmp/gw-env-${pilot_lower}.yaml \
+              --set-secrets="GOOGLE_OAUTH_CLIENT_SECRET=GOOGLE_OAUTH_CLIENT_SECRET:latest,\
+            GW_JWT_SIGNING_KEY=GW_JWT_SIGNING_KEY:latest" \
               --labels="app=communityoverview-mcp-gw,pilot=${pilot_lower},env=prod"
           }
 
