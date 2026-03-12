@@ -193,6 +193,16 @@ jobs:
 
             echo "Deploying gateway for pilot=${pilot_lower} service=${service}"
 
+            # Fail fast if required secrets are missing
+            if [[ -z "$upstream_url" ]]; then
+              echo "::error::GW_${pilot_upper}_PROD_UPSTREAM_URL secret is not set – cannot deploy gateway for ${pilot_lower}"
+              exit 1
+            fi
+            if [[ -z "$public_base_url" ]]; then
+              echo "::error::GW_${pilot_upper}_PROD_PUBLIC_BASE_URL secret is not set – cannot deploy gateway for ${pilot_lower}"
+              exit 1
+            fi
+
             # Write env vars to temp file to handle special characters
             GW_ENV_FILE="/tmp/gw-env-${pilot_lower}.yaml"
             printf 'GOOGLE_OAUTH_CLIENT_ID: "%s"\n' "${{ secrets.GOOGLE_OAUTH_CLIENT_ID }}" > "$GW_ENV_FILE"
