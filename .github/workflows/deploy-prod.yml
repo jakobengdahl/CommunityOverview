@@ -15,6 +15,7 @@ name: Deploy – Prod
 on:
   push:
     branches: ["main"]
+  workflow_dispatch:
 
 # Prevent two prod deploys from running in parallel.
 # A queued run is NOT cancelled so that every push eventually lands.
