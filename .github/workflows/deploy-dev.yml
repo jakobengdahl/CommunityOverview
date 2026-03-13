@@ -15,6 +15,7 @@ name: Deploy – Dev
 on:
   push:
     branches: ["dev"]
+  workflow_dispatch:
 
 # Prevent two dev deploys from running in parallel.
 # A queued run is NOT cancelled so that every push eventually lands.
@@ -95,6 +96,7 @@ jobs:
       # referenced by name only – their values never pass through this runner.
       - name: Deploy core services
         env:
+          PROJECT_ID: ${{ secrets.GCP_PROJECT_ID }}
           REGION: ${{ secrets.GCP_REGION }}
           SA_CORE: ${{ secrets.GCP_SERVICE_ACCOUNT_CORE }}
           # esam
@@ -121,13 +123,28 @@ jobs:
 
             echo "Deploying core for pilot=${pilot_lower} service=${service}"
 
+            SECRETS=""
+            if gcloud secrets describe "OPENAI_API_KEY_${pilot_upper}" --project="$PROJECT_ID" \
+                >/dev/null 2>&1; then
+              SECRETS="${SECRETS},OPENAI_API_KEY=OPENAI_API_KEY_${pilot_upper}:latest"
+            fi
+            if gcloud secrets describe "ANTHROPIC_API_KEY_${pilot_upper}" --project="$PROJECT_ID" \
+                >/dev/null 2>&1; then
+              SECRETS="${SECRETS},ANTHROPIC_API_KEY=ANTHROPIC_API_KEY_${pilot_upper}:latest"
+            fi
+            SECRETS="${SECRETS#,}"  # strip leading comma
+
+            # Only add --set-secrets if at least one secret exists
+            SECRETS_FLAG=""
+            [[ -n "$SECRETS" ]] && SECRETS_FLAG="--set-secrets=$SECRETS"
+
             gcloud run deploy "${service}" \
               --image "${CORE_IMAGE}" \
               --region "${REGION}" \
               --service-account "${SA_CORE}" \
               --no-allow-unauthenticated \
               --set-env-vars="HOST=0.0.0.0,GRAPH_FILE=/data/graph.json,SCHEMA_FILE=/app/config/schema_config.json,AUTH_ENABLED=false,MCP_BASIC_AUTH=false" \
-              --set-secrets="OPENAI_API_KEY=OPENAI_API_KEY_${pilot_upper}:latest,ANTHROPIC_API_KEY=ANTHROPIC_API_KEY_${pilot_upper}:latest" \
+              $SECRETS_FLAG \
               --add-volume="name=data,type=cloud-storage,bucket=${bucket}" \
               --add-volume-mount="volume=data,mount-path=/data" \
               --labels="app=communityoverview-core,pilot=${pilot_lower},env=dev"
@@ -177,12 +194,19 @@ jobs:
 
             echo "Deploying gateway for pilot=${pilot_lower} service=${service}"
 
+            # Write env vars to temp file to handle special characters
+            GW_ENV_FILE="/tmp/gw-env-${pilot_lower}.yaml"
+            printf 'GOOGLE_OAUTH_CLIENT_ID: "%s"\n' "${{ secrets.GOOGLE_OAUTH_CLIENT_ID }}" > "$GW_ENV_FILE"
+            printf 'UPSTREAM_MCP_BASE_URL: "%s"\n' "${upstream_url}" >> "$GW_ENV_FILE"
+            printf 'PUBLIC_BASE_URL: "%s"\n' "${public_base_url}" >> "$GW_ENV_FILE"
+            printf 'TEST_USERS: "%s"\n' "${{ secrets.TEST_USERS }}" >> "$GW_ENV_FILE"
+
             gcloud run deploy "${service}" \
               --image "${GW_IMAGE}" \
               --region "${REGION}" \
-              --service-account "${SA_GW}" \
+              --service-account "${{ secrets.GCP_SERVICE_ACCOUNT_GW }}" \
               --allow-unauthenticated \
-              --set-env-vars="PORT=8080,GOOGLE_OAUTH_CLIENT_ID=${GOOGLE_OAUTH_CLIENT_ID},UPSTREAM_MCP_BASE_URL=${upstream_url},PUBLIC_BASE_URL=${public_base_url},TEST_USERS=${TEST_USERS}" \
+              --env-vars-file "$GW_ENV_FILE" \
               --set-secrets="GOOGLE_OAUTH_CLIENT_SECRET=GOOGLE_OAUTH_CLIENT_SECRET:latest,GW_JWT_SIGNING_KEY=GW_JWT_SIGNING_KEY:latest" \
               --labels="app=communityoverview-mcp-gw,pilot=${pilot_lower},env=dev"
           }
