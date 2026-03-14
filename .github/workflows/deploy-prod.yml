@@ -2,7 +2,7 @@
 # Deploy to Prod – triggered on push/merge to the `main` branch
 #
 # Deploys all three pilots (esam, unece, scb) for both services:
-#   - CommunityOverview core  (Cloud Run, --no-allow-unauthenticated)
+#   - CommunityOverview core  (Cloud Run, --allow-unauthenticated – protected by Cloud IAP at LB)
 #   - MCP OAuth Gateway       (Cloud Run, --allow-unauthenticated)
 #
 # Authentication uses Workload Identity Federation – no long-lived SA keys.
@@ -142,7 +142,7 @@ jobs:
               --image "${CORE_IMAGE}" \
               --region "${REGION}" \
               --service-account "${SA_CORE}" \
-              --no-allow-unauthenticated \
+              --allow-unauthenticated \
               --set-env-vars="HOST=0.0.0.0,GRAPH_FILE=/data/graph.json,SCHEMA_FILE=/app/config/schema_config.json,AUTH_ENABLED=false,MCP_BASIC_AUTH=false" \
               $SECRETS_FLAG \
               --add-volume="name=data,type=cloud-storage,bucket=${bucket}" \
