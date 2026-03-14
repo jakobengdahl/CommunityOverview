@@ -1,7 +1,7 @@
 # =============================================================================
 # Deploy to Dev – triggered on push/merge to the `dev` branch
 #
-# Deploys all three pilots (esam, unece, scb) for both services:
+# Deploys all pilots listed in pilots.txt for both services:
 #   - CommunityOverview core  (Cloud Run, --allow-unauthenticated – protected by Cloud IAP at LB)
 #   - MCP OAuth Gateway       (Cloud Run, --allow-unauthenticated)
 #
@@ -99,15 +99,6 @@ jobs:
           PROJECT_ID: ${{ secrets.GCP_PROJECT_ID }}
           REGION: ${{ secrets.GCP_REGION }}
           SA_CORE: ${{ secrets.GCP_SERVICE_ACCOUNT_CORE }}
-          # esam
-          CORE_ESAM_SERVICE: ${{ secrets.CORE_ESAM_DEV_SERVICE }}
-          CORE_ESAM_BUCKET:  ${{ secrets.CORE_ESAM_DEV_BUCKET }}
-          # unece
-          CORE_UNECE_SERVICE: ${{ secrets.CORE_UNECE_DEV_SERVICE }}
-          CORE_UNECE_BUCKET:  ${{ secrets.CORE_UNECE_DEV_BUCKET }}
-          # scb
-          CORE_SCB_SERVICE: ${{ secrets.CORE_SCB_DEV_SERVICE }}
-          CORE_SCB_BUCKET:  ${{ secrets.CORE_SCB_DEV_BUCKET }}
         run: |
           set -euo pipefail
 
@@ -115,11 +106,8 @@ jobs:
             local pilot_lower="$1"   # e.g. esam
             local pilot_upper="$2"   # e.g. ESAM
 
-            # Resolve per-pilot env vars via bash indirect expansion
-            local service_var="CORE_${pilot_upper}_SERVICE"
-            local bucket_var="CORE_${pilot_upper}_BUCKET"
-            local service="${!service_var}"
-            local bucket="${!bucket_var}"
+            local service="communityoverview-${pilot_lower}-dev"
+            local bucket="communityoverview-${pilot_lower}-dev"
 
             echo "Deploying core for pilot=${pilot_lower} service=${service}"
 
@@ -150,9 +138,10 @@ jobs:
               --labels="app=communityoverview-core,pilot=${pilot_lower},env=dev"
           }
 
-          deploy_core esam  ESAM
-          deploy_core unece UNECE
-          deploy_core scb   SCB
+          PILOTS=($(cat pilots.txt))
+          for pilot in "${PILOTS[@]}"; do
+            deploy_core "$pilot" "${pilot^^}"
+          done
 
       # -----------------------------------------------------------------------
       # Deploy the MCP OAuth Gateway to all three dev pilots.
@@ -162,22 +151,11 @@ jobs:
       # Secret Manager by name; their values never touch this runner.
       - name: Deploy gateway services
         env:
+          PROJECT_ID: ${{ secrets.GCP_PROJECT_ID }}
           REGION: ${{ secrets.GCP_REGION }}
           SA_GW: ${{ secrets.GCP_SERVICE_ACCOUNT_GW }}
           GOOGLE_OAUTH_CLIENT_ID: ${{ secrets.GOOGLE_OAUTH_CLIENT_ID }}
           TEST_USERS: ${{ secrets.TEST_USERS }}
-          # esam
-          GW_ESAM_SERVICE:       ${{ secrets.GW_ESAM_DEV_SERVICE }}
-          GW_ESAM_UPSTREAM_URL:  ${{ secrets.GW_ESAM_DEV_UPSTREAM_URL }}
-          GW_ESAM_PUBLIC_BASE_URL: ${{ secrets.GW_ESAM_DEV_PUBLIC_BASE_URL }}
-          # unece
-          GW_UNECE_SERVICE:       ${{ secrets.GW_UNECE_DEV_SERVICE }}
-          GW_UNECE_UPSTREAM_URL:  ${{ secrets.GW_UNECE_DEV_UPSTREAM_URL }}
-          GW_UNECE_PUBLIC_BASE_URL: ${{ secrets.GW_UNECE_DEV_PUBLIC_BASE_URL }}
-          # scb
-          GW_SCB_SERVICE:       ${{ secrets.GW_SCB_DEV_SERVICE }}
-          GW_SCB_UPSTREAM_URL:  ${{ secrets.GW_SCB_DEV_UPSTREAM_URL }}
-          GW_SCB_PUBLIC_BASE_URL: ${{ secrets.GW_SCB_DEV_PUBLIC_BASE_URL }}
         run: |
           set -euo pipefail
 
@@ -185,12 +163,15 @@ jobs:
             local pilot_lower="$1"   # e.g. esam
             local pilot_upper="$2"   # e.g. ESAM
 
-            local service_var="GW_${pilot_upper}_SERVICE"
-            local upstream_var="GW_${pilot_upper}_UPSTREAM_URL"
-            local base_url_var="GW_${pilot_upper}_PUBLIC_BASE_URL"
-            local service="${!service_var}"
-            local upstream_url="${!upstream_var}"
-            local public_base_url="${!base_url_var}"
+            local service="communityoverview-gw-${pilot_lower}-dev"
+            local upstream_url
+            local public_base_url
+            upstream_url=$(gcloud secrets versions access latest \
+              --secret="GW_${pilot_upper}_DEV_UPSTREAM_URL" \
+              --project="$PROJECT_ID" 2>/dev/null || echo "")
+            public_base_url=$(gcloud secrets versions access latest \
+              --secret="GW_${pilot_upper}_DEV_PUBLIC_BASE_URL" \
+              --project="$PROJECT_ID" 2>/dev/null || echo "")
 
             echo "Deploying gateway for pilot=${pilot_lower} service=${service}"
 
@@ -211,6 +192,7 @@ jobs:
               --labels="app=communityoverview-mcp-gw,pilot=${pilot_lower},env=dev"
           }
 
-          deploy_gateway esam  ESAM
-          deploy_gateway unece UNECE
-          deploy_gateway scb   SCB
+          PILOTS=($(cat pilots.txt))
+          for pilot in "${PILOTS[@]}"; do
+            deploy_gateway "$pilot" "${pilot^^}"
+          done
