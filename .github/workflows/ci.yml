@@ -1,37 +1,49 @@
 # =============================================================================
-# CI Pipeline - Build, Test, and Publish Docker Image
+# CI Pipeline – Test, Build, and Publish Docker Images
 # =============================================================================
 # This workflow:
-# 1. Runs tests on every push/PR
-# 2. Builds Docker image on main branch
-# 3. Publishes to GitHub Container Registry (ghcr.io)
+#   1. Runs tests on every push and pull request
+#   2. Builds and publishes both application images to GHCR on branch pushes
+#   3. Emits artifact metadata that the infra repo consumes for deployment
 #
-# The published image can then be deployed to any platform:
-# - Google Cloud Run
-# - DigitalOcean App Platform
-# - Fly.io
-# - Railway
-# - AWS ECS/Fargate
-# - Azure Container Apps
-# - Self-hosted Docker/Kubernetes
+# Responsibilities of this repo:
+#   - Build and test the application
+#   - Publish versioned, immutable images to GitHub Container Registry
+#   - Signal the infra repo with artifact metadata after a successful build
+#
+# Responsibilities of the infra repo (NOT this repo):
+#   - Deciding which pilots receive a deployment
+#   - Configuring Cloud Run services, GCS volumes, and per-pilot secrets
+#   - Orchestrating the actual rollout across environments
+#
+# Images produced:
+#   Core app  – ghcr.io/<owner>/communityoverview
+#   Gateway   – ghcr.io/<owner>/communityoverview-gateway
+#
+# Tags applied (see "Extract metadata" steps for full logic):
+#   sha-<commit>          immutable, used as the canonical artifact reference
+#   dev                   floating tag, latest successful build from dev branch
+#   latest                floating tag, latest successful build from main branch
+#   v<semver>             applied only when a version tag is pushed
 # =============================================================================
 
 name: CI
 
 on:
   push:
-    branches: [main]
+    branches: [main, dev]
     tags: ['v*']
   pull_request:
-    branches: [main]
+    branches: [main, dev]
 
 env:
   REGISTRY: ghcr.io
-  IMAGE_NAME: ${{ github.repository }}
+  CORE_IMAGE: ${{ github.repository }}
+  GATEWAY_IMAGE: ${{ github.repository }}-gateway
 
 jobs:
   # ---------------------------------------------------------------------------
-  # Test Job - Run on all pushes and PRs
+  # Test – run on every push and pull request
   # ---------------------------------------------------------------------------
   test:
     name: Run Tests
@@ -53,32 +65,46 @@ jobs:
           pip install pytest pytest-asyncio
 
       - name: Run tests
-        run: |
-          pytest backend/core/tests/ -v --tb=short
+        run: pytest backend/core/tests/ -v --tb=short
         env:
           PYTHONPATH: ${{ github.workspace }}
 
   # ---------------------------------------------------------------------------
-  # Build Job - Build and publish Docker image
+  # Build & Publish – only on branch/tag pushes, not pull requests
   # ---------------------------------------------------------------------------
   build:
-    name: Build & Publish Image
+    name: Build & Publish Images
     runs-on: ubuntu-latest
     needs: test
-    # Only build on main branch or tags
-    if: github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/tags/')
+    if: github.event_name == 'push'
 
     permissions:
       contents: read
       packages: write
 
     outputs:
-      image_tag: ${{ steps.meta.outputs.tags }}
-      image_digest: ${{ steps.build.outputs.digest }}
+      core_image:      ${{ env.REGISTRY }}/${{ env.CORE_IMAGE }}
+      core_digest:     ${{ steps.build-core.outputs.digest }}
+      gateway_image:   ${{ env.REGISTRY }}/${{ env.GATEWAY_IMAGE }}
+      gateway_digest:  ${{ steps.build-gateway.outputs.digest }}
+      image_tag:       sha-${{ github.sha }}
+      channel:         ${{ steps.channel.outputs.channel }}
 
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
+
+      # Determine release channel based on the ref that triggered this run.
+      # channel=dev  → pushed to dev branch
+      # channel=prod → pushed to main or a version tag
+      - name: Determine release channel
+        id: channel
+        run: |
+          if [[ "${GITHUB_REF}" == "refs/heads/dev" ]]; then
+            echo "channel=dev" >> "$GITHUB_OUTPUT"
+          else
+            echo "channel=prod" >> "$GITHUB_OUTPUT"
+          fi
 
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v3
@@ -90,41 +116,127 @@ jobs:
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
-      - name: Extract metadata for Docker
-        id: meta
+      # -------------------------------------------------------------------
+      # Core application image (built from root Dockerfile)
+      # -------------------------------------------------------------------
+      - name: Extract metadata for core image
+        id: meta-core
         uses: docker/metadata-action@v5
         with:
-          images: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}
+          images: ${{ env.REGISTRY }}/${{ env.CORE_IMAGE }}
           tags: |
-            # Tag with 'latest' for main branch
-            type=raw,value=latest,enable={{is_default_branch}}
-            # Tag with git sha
-            type=sha,prefix=
-            # Tag with semver for releases
+            # Immutable SHA tag – canonical artifact reference
+            type=sha,prefix=sha-
+            # Floating branch tag: "dev" or "latest"
+            type=raw,value=dev,enable=${{ github.ref == 'refs/heads/dev' }}
+            type=raw,value=latest,enable=${{ github.ref == 'refs/heads/main' }}
+            # Semver tags for version releases
             type=semver,pattern={{version}}
             type=semver,pattern={{major}}.{{minor}}
 
-      - name: Build and push Docker image
-        id: build
+      - name: Build and push core image
+        id: build-core
         uses: docker/build-push-action@v5
         with:
           context: .
           push: true
-          tags: ${{ steps.meta.outputs.tags }}
-          labels: ${{ steps.meta.outputs.labels }}
+          tags: ${{ steps.meta-core.outputs.tags }}
+          labels: ${{ steps.meta-core.outputs.labels }}
           cache-from: type=gha
           cache-to: type=gha,mode=max
           platforms: linux/amd64,linux/arm64
 
-      - name: Output image info
+      # -------------------------------------------------------------------
+      # Gateway image (built from services/mcp_oauth_gateway/Dockerfile)
+      # -------------------------------------------------------------------
+      - name: Extract metadata for gateway image
+        id: meta-gateway
+        uses: docker/metadata-action@v5
+        with:
+          images: ${{ env.REGISTRY }}/${{ env.GATEWAY_IMAGE }}
+          tags: |
+            type=sha,prefix=sha-
+            type=raw,value=dev,enable=${{ github.ref == 'refs/heads/dev' }}
+            type=raw,value=latest,enable=${{ github.ref == 'refs/heads/main' }}
+            type=semver,pattern={{version}}
+            type=semver,pattern={{major}}.{{minor}}
+
+      - name: Build and push gateway image
+        id: build-gateway
+        uses: docker/build-push-action@v5
+        with:
+          context: services/mcp_oauth_gateway/
+          push: true
+          tags: ${{ steps.meta-gateway.outputs.tags }}
+          labels: ${{ steps.meta-gateway.outputs.labels }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+          platforms: linux/amd64,linux/arm64
+
+      # -------------------------------------------------------------------
+      # Artifact metadata – written to the workflow summary so infra
+      # engineers can inspect the release at a glance.
+      # The same values are forwarded to the infra repo via notify-infra.
+      # -------------------------------------------------------------------
+      - name: Write artifact metadata to summary
         run: |
-          echo "## Docker Image Published" >> $GITHUB_STEP_SUMMARY
-          echo "" >> $GITHUB_STEP_SUMMARY
-          echo "**Image:** \`${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}\`" >> $GITHUB_STEP_SUMMARY
-          echo "" >> $GITHUB_STEP_SUMMARY
-          echo "**Tags:**" >> $GITHUB_STEP_SUMMARY
-          echo "\`\`\`" >> $GITHUB_STEP_SUMMARY
-          echo "${{ steps.meta.outputs.tags }}" >> $GITHUB_STEP_SUMMARY
-          echo "\`\`\`" >> $GITHUB_STEP_SUMMARY
-          echo "" >> $GITHUB_STEP_SUMMARY
-          echo "**Digest:** \`${{ steps.build.outputs.digest }}\`" >> $GITHUB_STEP_SUMMARY
+          echo "## Release Artifact" >> "$GITHUB_STEP_SUMMARY"
+          echo "" >> "$GITHUB_STEP_SUMMARY"
+          echo "| Field | Value |" >> "$GITHUB_STEP_SUMMARY"
+          echo "|-------|-------|" >> "$GITHUB_STEP_SUMMARY"
+          echo "| **channel** | \`${{ steps.channel.outputs.channel }}\` |" >> "$GITHUB_STEP_SUMMARY"
+          echo "| **commit_sha** | \`${{ github.sha }}\` |" >> "$GITHUB_STEP_SUMMARY"
+          echo "| **image_tag** | \`sha-${{ github.sha }}\` |" >> "$GITHUB_STEP_SUMMARY"
+          echo "| **core_image** | \`${{ env.REGISTRY }}/${{ env.CORE_IMAGE }}\` |" >> "$GITHUB_STEP_SUMMARY"
+          echo "| **core_digest** | \`${{ steps.build-core.outputs.digest }}\` |" >> "$GITHUB_STEP_SUMMARY"
+          echo "| **gateway_image** | \`${{ env.REGISTRY }}/${{ env.GATEWAY_IMAGE }}\` |" >> "$GITHUB_STEP_SUMMARY"
+          echo "| **gateway_digest** | \`${{ steps.build-gateway.outputs.digest }}\` |" >> "$GITHUB_STEP_SUMMARY"
+
+  # ---------------------------------------------------------------------------
+  # Notify Infra – optional repository_dispatch to the infra repo
+  #
+  # This job fires only when INFRA_DISPATCH_TOKEN is configured as a repository
+  # secret. It sends a repository_dispatch event to the infra repo so that
+  # infra-controlled deployment workflows can act on the new artifact.
+  #
+  # To enable: add INFRA_DISPATCH_TOKEN (a PAT with repo:write on the infra
+  # repo) and INFRA_REPO (e.g. "my-org/infra") to this repository's secrets.
+  # ---------------------------------------------------------------------------
+  notify-infra:
+    name: Notify Infra Repo
+    runs-on: ubuntu-latest
+    needs: build
+    # Only fire when the secret is configured; fail-safe if not set.
+    env:
+      INFRA_DISPATCH_TOKEN: ${{ secrets.INFRA_DISPATCH_TOKEN }}
+    if: |
+      needs.build.result == 'success' &&
+      (github.ref == 'refs/heads/dev' || github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/tags/'))
+
+    steps:
+      - name: Skip if INFRA_DISPATCH_TOKEN not configured
+        if: env.INFRA_DISPATCH_TOKEN == ''
+        run: |
+          echo "INFRA_DISPATCH_TOKEN is not set – skipping infra notification."
+          echo "To enable, add INFRA_DISPATCH_TOKEN and INFRA_REPO to repository secrets."
+
+      - name: Dispatch to infra repo
+        if: env.INFRA_DISPATCH_TOKEN != ''
+        uses: peter-evans/repository-dispatch@v3
+        with:
+          token: ${{ secrets.INFRA_DISPATCH_TOKEN }}
+          repository: ${{ secrets.INFRA_REPO }}
+          event-type: app-release
+          client-payload: |
+            {
+              "channel":        "${{ needs.build.outputs.channel }}",
+              "commit_sha":     "${{ github.sha }}",
+              "ref":            "${{ github.ref }}",
+              "image_tag":      "${{ needs.build.outputs.image_tag }}",
+              "core_image":     "${{ needs.build.outputs.core_image }}",
+              "core_digest":    "${{ needs.build.outputs.core_digest }}",
+              "gateway_image":  "${{ needs.build.outputs.gateway_image }}",
+              "gateway_digest": "${{ needs.build.outputs.gateway_digest }}",
+              "repository":     "${{ github.repository }}",
+              "run_id":         "${{ github.run_id }}"
+            }
