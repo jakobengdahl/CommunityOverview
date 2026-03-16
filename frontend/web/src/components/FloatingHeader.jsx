@@ -8,6 +8,7 @@ import './FloatingHeader.css';
 function FloatingHeader({ stats, title = 'Community Graph View', onExportGraph }) {
   const { t } = useI18n();
   const [menuOpen, setMenuOpen] = useState(false);
+  const [dropdownLeft, setDropdownLeft] = useState(null);
   const menuRef = useRef(null);
 
   useEffect(() => {
@@ -21,6 +22,17 @@ function FloatingHeader({ stats, title = 'Community Graph View', onExportGraph }
       document.addEventListener('mousedown', handleClickOutside, true);
     }
     return () => document.removeEventListener('mousedown', handleClickOutside, true);
+  }, [menuOpen]);
+
+  // Calculate dropdown left position to avoid overlapping the toolbar
+  useEffect(() => {
+    if (menuOpen) {
+      const toolbar = document.querySelector('.floating-toolbar');
+      if (toolbar) {
+        const rect = toolbar.getBoundingClientRect();
+        setDropdownLeft(rect.right + 8);
+      }
+    }
   }, [menuOpen]);
 
   return (
@@ -38,7 +50,7 @@ function FloatingHeader({ stats, title = 'Community Graph View', onExportGraph }
       </div>
 
       {menuOpen && (
-        <div className="floating-header-dropdown">
+        <div className="floating-header-dropdown" style={dropdownLeft ? { left: dropdownLeft } : undefined}>
           {stats ? (
             <>
               <div className="floating-header-stats-summary">
