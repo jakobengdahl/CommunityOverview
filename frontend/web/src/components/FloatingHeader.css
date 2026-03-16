@@ -52,7 +52,7 @@
 .floating-header-dropdown {
   position: fixed;
   top: 80px;
-  left: 78px;
+  left: 120px;
   background: rgba(26, 26, 26, 0.95);
   backdrop-filter: blur(12px);
   -webkit-backdrop-filter: blur(12px);
