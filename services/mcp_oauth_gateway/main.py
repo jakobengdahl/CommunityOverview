@@ -83,14 +83,6 @@ async def authorize(
             detail="Only code_challenge_method=S256 is supported",
         )
 
-    # Enforce that redirect_uri points back to this gateway's callback
-    expected_redirect = config.PUBLIC_BASE_URL + "/callback"
-    if redirect_uri != expected_redirect:
-        raise HTTPException(
-            status_code=400,
-            detail=f"redirect_uri must be {expected_redirect}",
-        )
-
     # Encode gateway state so we can recover it in the callback.
     # Format: <original_state>|<code_challenge>|<redirect_uri>
     # All parts are URL-encoded individually to avoid delimiter collisions.
@@ -192,6 +184,7 @@ async def token(request: Request) -> JSONResponse:
     grant_type = body.get("grant_type", "")
     code = body.get("code", "")
     code_verifier = body.get("code_verifier", "")
+    redirect_uri = body.get("redirect_uri", "")
 
     if grant_type != "authorization_code":
         raise HTTPException(status_code=400, detail="grant_type must be authorization_code")
@@ -199,12 +192,16 @@ async def token(request: Request) -> JSONResponse:
         raise HTTPException(status_code=400, detail="code is required")
     if not code_verifier:
         raise HTTPException(status_code=400, detail="code_verifier is required")
+    if not redirect_uri:
+        raise HTTPException(status_code=400, detail="redirect_uri is required")
 
-    access_token = auth.exchange_code_for_token(code=code, code_verifier=code_verifier)
+    access_token = auth.exchange_code_for_token(
+        code=code, code_verifier=code_verifier, redirect_uri=redirect_uri,
+    )
     if access_token is None:
         raise HTTPException(
             status_code=400,
-            detail="Invalid, expired, or already-used authorization code, or PKCE mismatch",
+            detail="Invalid, expired, or already-used authorization code, PKCE mismatch, or redirect_uri mismatch",
         )
 
     return JSONResponse(
