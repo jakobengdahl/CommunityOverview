@@ -177,8 +177,8 @@ def issue_auth_code(email: str, code_challenge: str, redirect_uri: str) -> str:
 # Token exchange (code + PKCE → gateway JWT)
 # ---------------------------------------------------------------------------
 
-def exchange_code_for_token(code: str, code_verifier: str) -> Optional[str]:
-    """Validate the auth code and PKCE verifier, then return a signed JWT.
+def exchange_code_for_token(code: str, code_verifier: str, redirect_uri: str) -> Optional[str]:
+    """Validate the auth code, PKCE verifier, and redirect_uri, then return a signed JWT.
 
     Returns the JWT string on success, or None if validation fails.
     """
@@ -200,6 +200,11 @@ def exchange_code_for_token(code: str, code_verifier: str) -> Optional[str]:
 
     if not verify_pkce(code_verifier, entry.code_challenge):
         logger.warning("PKCE verification failed for: %s", entry.email)
+        return None
+
+    # RFC 6749 §4.1.3: redirect_uri must match the one from the authorization request
+    if redirect_uri != entry.redirect_uri:
+        logger.warning("redirect_uri mismatch for: %s", entry.email)
         return None
 
     # Mark as used before issuing the token (prevent replay)

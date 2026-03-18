@@ -106,6 +106,8 @@ gcloud run deploy mcp-gateway-esam-prod \
   are rejected with HTTP 400.
 - Authorization codes are single-use and expire after **5 minutes**.
 - Gateway JWTs expire after **30 minutes**.
-- `redirect_uri` must exactly equal `PUBLIC_BASE_URL + "/callback"`.
+- `redirect_uri` is validated at the token endpoint: the value must match the one sent in the
+  original authorization request (per RFC 6749 §4.1.3). External OAuth clients may use their
+  own callback URLs.
 - The `TEST_USERS` allowlist is enforced after successful Google login – a valid Google
   account that is not in the list receives HTTP 403.
