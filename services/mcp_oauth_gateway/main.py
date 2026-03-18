@@ -83,14 +83,6 @@ async def authorize(
             detail="Only code_challenge_method=S256 is supported",
         )
 
-    # Enforce that redirect_uri points back to this gateway's callback
-    expected_redirect = config.PUBLIC_BASE_URL + "/callback"
-    if redirect_uri != expected_redirect:
-        raise HTTPException(
-            status_code=400,
-            detail=f"redirect_uri must be {expected_redirect}",
-        )
-
     # Encode gateway state so we can recover it in the callback.
     # Format: <original_state>|<code_challenge>|<redirect_uri>
     # All parts are URL-encoded individually to avoid delimiter collisions.
