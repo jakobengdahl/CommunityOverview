@@ -99,6 +99,7 @@ async def oauth_metadata() -> JSONResponse:
             "registration_endpoint": config.PUBLIC_BASE_URL + "/register",
             "response_types_supported": ["code"],
             "grant_types_supported": ["authorization_code"],
+            "scopes_supported": ["openid", "email", "profile"],
             "code_challenge_methods_supported": ["S256"],
             "token_endpoint_auth_methods_supported": ["none"],
         }
