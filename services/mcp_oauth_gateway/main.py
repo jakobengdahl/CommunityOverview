@@ -7,6 +7,7 @@ OAuth 2.1 Authorization Code + PKCE before forwarding traffic upstream.
 Endpoints
 ---------
 GET  /.well-known/oauth-authorization-server  – OAuth metadata (discovery)
+POST /register                                – Dynamic Client Registration (RFC 7591)
 GET  /authorize                               – Start the OAuth flow
 GET  /callback                               – Google OIDC callback
 POST /token                                  – Exchange auth code for JWT
@@ -16,11 +17,13 @@ POST /messages                               – Proxy: MCP POST (auth required)
 
 import logging
 import os
+import time
 import urllib.parse
 import uuid
 
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.responses import JSONResponse, RedirectResponse
+from pydantic import BaseModel
 
 import auth
 import config
@@ -33,6 +36,49 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 app = FastAPI(title="MCP OAuth Gateway", version="1.0.0")
+
+# In-memory Dynamic Client Registration store (RFC 7591)
+# Keyed by client_id → registration dict
+dcr_clients: dict[str, dict] = {}
+
+
+# ---------------------------------------------------------------------------
+# Dynamic Client Registration (RFC 7591)
+# ---------------------------------------------------------------------------
+
+class ClientRegistrationRequest(BaseModel):
+    client_name: str | None = None
+    redirect_uris: list[str]
+    grant_types: list[str] = ["authorization_code"]
+    token_endpoint_auth_method: str = "none"
+
+
+@app.post("/register")
+async def register_client(body: ClientRegistrationRequest) -> JSONResponse:
+    """Register a new OAuth client dynamically (RFC 7591).
+
+    No client_secret is issued – PKCE (S256) is the security mechanism.
+    """
+    if not body.redirect_uris:
+        raise HTTPException(status_code=400, detail="redirect_uris is required and must not be empty")
+
+    client_id = str(uuid.uuid4())
+    issued_at = int(time.time())
+
+    registration = {
+        "client_id": client_id,
+        "client_id_issued_at": issued_at,
+        "redirect_uris": body.redirect_uris,
+        "grant_types": body.grant_types,
+        "token_endpoint_auth_method": body.token_endpoint_auth_method,
+    }
+    if body.client_name is not None:
+        registration["client_name"] = body.client_name
+
+    dcr_clients[client_id] = registration
+    logger.info("Registered new DCR client %s (name=%s)", client_id, body.client_name)
+
+    return JSONResponse(registration, status_code=201)
 
 
 # ---------------------------------------------------------------------------
@@ -50,9 +96,11 @@ async def oauth_metadata() -> JSONResponse:
             "issuer": config.PUBLIC_BASE_URL,
             "authorization_endpoint": config.PUBLIC_BASE_URL + "/authorize",
             "token_endpoint": config.PUBLIC_BASE_URL + "/token",
+            "registration_endpoint": config.PUBLIC_BASE_URL + "/register",
             "response_types_supported": ["code"],
-            "code_challenge_methods_supported": ["S256"],
             "grant_types_supported": ["authorization_code"],
+            "code_challenge_methods_supported": ["S256"],
+            "token_endpoint_auth_methods_supported": ["none"],
         }
     )
 
