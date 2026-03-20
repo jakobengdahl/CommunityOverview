@@ -3,3 +3,4 @@ uvicorn[standard]==0.32.1
 httpx==0.28.0
 python-jose[cryptography]==3.3.0
 itsdangerous==2.2.0
+python-multipart
