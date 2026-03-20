@@ -37,6 +37,11 @@ async def proxy_sse(request: Request) -> StreamingResponse:
 
     logger.info("Proxying SSE to %s params=%s", upstream_url, params)
 
+    # Encode the upstream base URL once for byte-level replacement in SSE data lines.
+    # This rewrites any absolute upstream URL in "endpoint" events to a root-relative
+    # path so clients always POST back through the gateway rather than bypassing it.
+    upstream_prefix = config.UPSTREAM_MCP_BASE_URL.encode()
+
     async def event_stream() -> AsyncIterator[bytes]:
         async with _client.stream(
             "GET",
@@ -50,8 +55,15 @@ async def proxy_sse(request: Request) -> StreamingResponse:
                 )
                 yield b"event: error\ndata: upstream error\n\n"
                 return
+            buf = b""
             async for chunk in upstream_resp.aiter_bytes():
-                yield chunk
+                buf += chunk
+                # Emit complete lines, rewriting upstream base URL → root-relative path
+                while b"\n" in buf:
+                    line, buf = buf.split(b"\n", 1)
+                    yield line.replace(upstream_prefix, b"") + b"\n"
+            if buf:
+                yield buf.replace(upstream_prefix, b"")
 
     return StreamingResponse(
         event_stream(),
