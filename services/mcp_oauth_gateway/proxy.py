@@ -213,8 +213,22 @@ def _rewrite_endpoint_event(raw: bytes) -> bytes:
                 rewritten = True
                 logger.info("Rewrote endpoint URL %s → %s", url, new_url)
 
-        # Case 2: root-relative path like /mcp/messages/?session_id=…
-        # Leave it as-is since the gateway has matching routes.
+        # Case 2: root-relative path like /messages/?session_id=…
+        # MCP clients resolve this with urljoin(sse_url, data).
+        # Because data starts with "/", urljoin discards the /mcp prefix.
+        # E.g. urljoin("https://gw/mcp/sse", "/messages/?s=1")
+        #    → "https://gw/messages/?s=1"
+        # The gateway has POST /messages/ to handle this, but we also
+        # prepend /mcp so that clients doing correct relative resolution
+        # (without the leading /) also work.
+        elif url.startswith("/") and not url.startswith("/mcp"):
+            parsed = urllib.parse.urlparse(url)
+            new_url = "/mcp" + parsed.path
+            if parsed.query:
+                new_url += "?" + parsed.query
+            lines[i] = f"data: {new_url}"
+            rewritten = True
+            logger.info("Rewrote relative endpoint URL %s → %s", url, new_url)
 
     if rewritten:
         return "\n".join(lines).encode("utf-8")

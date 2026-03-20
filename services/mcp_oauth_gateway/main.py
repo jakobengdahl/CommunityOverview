@@ -360,8 +360,11 @@ async def mcp_sse_subpath_post(request: Request, subpath: str):
     return await proxy.proxy_post_mcp(request)
 
 
-# POST /messages – legacy messages endpoint
+# POST /messages and /messages/ – the upstream SSE app sends endpoint URLs
+# like /messages/?session_id=xxx which urljoin resolves against the root.
+# Both with and without trailing slash to avoid 307 redirect issues.
 @app.post("/messages")
+@app.post("/messages/")
 async def messages_proxy(request: Request):
     """Proxy MCP POST messages to the upstream service (auth required)."""
     claims = _require_valid_token(request)
@@ -369,8 +372,10 @@ async def messages_proxy(request: Request):
     return await proxy.proxy_post(request)
 
 
-# POST /mcp/messages – the upstream SSE app sends this URL in the endpoint event
+# POST /mcp/messages – some clients resolve the endpoint URL with the
+# /mcp prefix preserved (depending on urljoin behaviour).
 @app.post("/mcp/messages")
+@app.post("/mcp/messages/")
 async def mcp_messages_proxy(request: Request):
     """Proxy POST /mcp/messages to upstream (auth required)."""
     claims = _require_valid_token(request)
