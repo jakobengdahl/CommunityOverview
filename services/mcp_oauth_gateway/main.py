@@ -13,7 +13,8 @@ GET  /authorize                               – Start the OAuth flow
 GET  /callback                               – Google OIDC callback
 POST /token                                  – Exchange auth code for JWT
 GET  /sse                                    – Proxy: SSE stream (auth required)
-GET|POST /mcp/sse{/subpath}                  – Proxy: MCP SSE (auth required)
+GET  /mcp/sse                                – Proxy: MCP SSE stream (auth required)
+POST /mcp/sse{/subpath}                      – Proxy: MCP POST (auth required)
 POST /messages                               – Proxy: MCP POST (auth required)
 POST /mcp/messages/                          – Proxy: MCP message POST (auth required)
 """
@@ -25,6 +26,7 @@ import urllib.parse
 import uuid
 
 from fastapi import FastAPI, HTTPException, Request
+from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse, RedirectResponse
 from pydantic import BaseModel
 
@@ -39,6 +41,16 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 app = FastAPI(title="MCP OAuth Gateway", version="1.0.0")
+
+# CORS – required for browser-based MCP clients (MCPJam, ChatGPT plugin preview, etc.)
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+    expose_headers=["*"],
+)
 
 # In-memory Dynamic Client Registration store (RFC 7591)
 # Keyed by client_id → registration dict
@@ -304,6 +316,7 @@ def _require_valid_token(request: Request) -> dict:
     return claims
 
 
+# GET /sse – legacy SSE proxy
 @app.get("/sse")
 async def sse_proxy(request: Request):
     """Proxy SSE stream to the upstream MCP service (auth required)."""
@@ -312,24 +325,50 @@ async def sse_proxy(request: Request):
     return await proxy.proxy_sse(request)
 
 
-async def _mcp_sse_handler(request: Request):
-    """Proxy /mcp/sse requests to the upstream MCP service (auth required)."""
+# GET /mcp/sse – SSE proxy (MCP path)
+@app.get("/mcp/sse")
+async def mcp_sse_get(request: Request):
+    """Proxy GET /mcp/sse to upstream SSE stream (auth required)."""
     claims = _require_valid_token(request)
-    logger.info("MCP SSE proxy request from sub=%s method=%s path=%s",
-                claims.get("sub"), request.method, request.url.path)
-    if request.method == "POST":
-        return await proxy.proxy_post_mcp_sse(request)
+    logger.info("MCP SSE GET from sub=%s", claims.get("sub"))
     return await proxy.proxy_sse(request)
 
-app.api_route("/mcp/sse", methods=["GET", "POST"])(_mcp_sse_handler)
-app.api_route("/mcp/sse/{subpath:path}", methods=["GET", "POST"])(_mcp_sse_handler)
+
+# POST /mcp/sse – forward POST (Streamable HTTP or sub-path messages)
+@app.post("/mcp/sse")
+async def mcp_sse_post(request: Request):
+    """Proxy POST /mcp/sse to upstream (auth required)."""
+    claims = _require_valid_token(request)
+    logger.info("MCP SSE POST from sub=%s path=%s", claims.get("sub"), request.url.path)
+    return await proxy.proxy_post_mcp(request)
 
 
+# GET|POST /mcp/sse/{subpath} – catch sub-paths like /mcp/sse/messages
+@app.get("/mcp/sse/{subpath:path}")
+async def mcp_sse_subpath_get(request: Request, subpath: str):
+    """Proxy GET /mcp/sse/{subpath} to upstream (auth required)."""
+    claims = _require_valid_token(request)
+    logger.info("MCP SSE subpath GET from sub=%s path=%s", claims.get("sub"), request.url.path)
+    return await proxy.proxy_sse(request)
+
+
+@app.post("/mcp/sse/{subpath:path}")
+async def mcp_sse_subpath_post(request: Request, subpath: str):
+    """Proxy POST /mcp/sse/{subpath} to upstream (auth required)."""
+    claims = _require_valid_token(request)
+    logger.info("MCP SSE subpath POST from sub=%s path=%s", claims.get("sub"), request.url.path)
+    return await proxy.proxy_post_mcp(request)
+
+
+# POST /messages and /messages/ – the upstream SSE app sends endpoint URLs
+# like /messages/?session_id=xxx which urljoin resolves against the root.
+# Both with and without trailing slash to avoid 307 redirect issues.
 @app.post("/messages")
+@app.post("/messages/")
 async def messages_proxy(request: Request):
     """Proxy MCP POST messages to the upstream service (auth required)."""
     claims = _require_valid_token(request)
-    logger.info("POST proxy request from sub=%s", claims.get("sub"))
+    logger.info("POST /messages from sub=%s", claims.get("sub"))
     return await proxy.proxy_post(request)
 
 

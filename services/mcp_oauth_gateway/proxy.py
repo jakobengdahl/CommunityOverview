@@ -3,10 +3,12 @@ Reverse-proxy helpers for forwarding MCP traffic to the upstream service.
 
 Supports:
 - SSE (Server-Sent Events) streaming via GET /sse
-- Regular HTTP POST via POST /messages
+- Regular HTTP POST via POST /messages and /mcp/messages
+- Endpoint URL rewriting so MCP clients POST back through the gateway
 """
 
 import logging
+import urllib.parse
 from typing import AsyncIterator
 
 import httpx
@@ -24,7 +26,14 @@ _client = httpx.AsyncClient(timeout=None, http2=False)
 
 
 async def proxy_sse(request: Request) -> StreamingResponse:
-    """Forward a GET /sse request to the upstream and stream the response back."""
+    """Forward a GET /sse request to the upstream and stream the response back.
+
+    The SSE stream from the upstream contains an ``event: endpoint`` message
+    whose ``data:`` field carries the URL that MCP clients must POST messages
+    to.  Because the gateway sits between the client and the upstream, that
+    URL would otherwise point at the upstream host.  We rewrite it on the fly
+    so that clients always POST back through the gateway.
+    """
     upstream_url = config.UPSTREAM_MCP_BASE_URL + "/mcp/sse"
 
     # Forward all incoming query parameters (e.g. sessionId)
@@ -75,17 +84,19 @@ async def proxy_sse(request: Request) -> StreamingResponse:
     )
 
 
-async def proxy_post_mcp_sse(request: Request) -> Response:
-    """Forward a POST /mcp/sse request to the upstream and return the response."""
-    # Build upstream URL preserving the exact path (including any sub-paths)
-    path = request.url.path  # e.g. /mcp/sse or /mcp/sse/messages
+async def proxy_post_mcp(request: Request) -> Response:
+    """Forward a POST to an /mcp/* path to the upstream and return the response.
+
+    Handles both ``/mcp/messages`` and ``/mcp/sse/{subpath}`` paths.
+    """
+    path = request.url.path  # e.g. /mcp/messages or /mcp/sse/messages
     upstream_url = config.UPSTREAM_MCP_BASE_URL + path
 
     params = dict(request.query_params)
     headers = _forward_headers(request)
     body = await request.body()
 
-    logger.info("Proxying POST to %s", upstream_url)
+    logger.info("Proxying POST to %s params=%s", upstream_url, params)
 
     resp = await _client.post(
         upstream_url,
@@ -151,3 +162,66 @@ def _forward_headers(request: Request) -> dict:
         for k, v in request.headers.items()
         if k.lower() not in _HOP_BY_HOP
     }
+
+
+def _rewrite_endpoint_event(raw: bytes) -> bytes:
+    """If *raw* is an ``event: endpoint`` SSE frame, rewrite the data URL.
+
+    The upstream MCP server sends the message-posting URL (e.g.
+    ``http://upstream-host/mcp/messages/?session_id=…``).  We replace
+    the scheme+host with the gateway's PUBLIC_BASE_URL so clients POST
+    back through the gateway.
+    """
+    try:
+        text = raw.decode("utf-8")
+    except UnicodeDecodeError:
+        return raw
+
+    # Fast path: most events are not "endpoint".
+    if "event: endpoint" not in text and "event:endpoint" not in text:
+        return raw
+
+    upstream_base = config.UPSTREAM_MCP_BASE_URL.rstrip("/")
+    gateway_base = config.PUBLIC_BASE_URL.rstrip("/")
+
+    lines = text.split("\n")
+    rewritten = False
+    for i, line in enumerate(lines):
+        if not line.startswith("data:"):
+            continue
+        url = line[len("data:"):].strip()
+        if not url:
+            continue
+
+        # Case 1: absolute URL pointing at the upstream – replace origin.
+        if url.startswith(("http://", "https://")):
+            parsed = urllib.parse.urlparse(url)
+            upstream_parsed = urllib.parse.urlparse(upstream_base)
+            if parsed.hostname == upstream_parsed.hostname:
+                new_url = gateway_base + parsed.path
+                if parsed.query:
+                    new_url += "?" + parsed.query
+                lines[i] = f"data: {new_url}"
+                rewritten = True
+                logger.info("Rewrote endpoint URL %s → %s", url, new_url)
+
+        # Case 2: root-relative path like /messages/?session_id=…
+        # MCP clients resolve this with urljoin(sse_url, data).
+        # Because data starts with "/", urljoin discards the /mcp prefix.
+        # E.g. urljoin("https://gw/mcp/sse", "/messages/?s=1")
+        #    → "https://gw/messages/?s=1"
+        # The gateway has POST /messages/ to handle this, but we also
+        # prepend /mcp so that clients doing correct relative resolution
+        # (without the leading /) also work.
+        elif url.startswith("/") and not url.startswith("/mcp"):
+            parsed = urllib.parse.urlparse(url)
+            new_url = "/mcp" + parsed.path
+            if parsed.query:
+                new_url += "?" + parsed.query
+            lines[i] = f"data: {new_url}"
+            rewritten = True
+            logger.info("Rewrote relative endpoint URL %s → %s", url, new_url)
+
+    if rewritten:
+        return "\n".join(lines).encode("utf-8")
+    return raw
