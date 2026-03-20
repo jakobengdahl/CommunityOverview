@@ -313,59 +313,82 @@ def create_app(
     app.state.mcp = mcp
     app.state.tools_map = tools_map
 
-    # Mount MCP HTTP endpoint
-    # Use sse_app to provide standard /sse and /messages endpoints
-    mcp_app = mcp.sse_app()
+    # Mount MCP HTTP endpoints.
+    # Two transports are supported:
+    #   1. Legacy SSE  (GET /mcp/sse + POST /mcp/messages) – for older clients
+    #   2. Streamable HTTP (POST /mcp) – for ChatGPT, Claude, and MCP spec ≥2025-03-26
+    mcp_sse_app = mcp.sse_app()
 
-    # Wrap mcp_app with a handler for browser requests to /mcp.
-    # The MCP endpoint expects MCP protocol requests (GET with Accept: text/event-stream for SSE),
-    # not regular browser GET requests which would hang waiting for SSE.
-    # We use a pure ASGI middleware class to avoid BaseHTTPMiddleware limitations with streaming responses.
-    # This wraps mcp_app directly (not the outer FastAPI app) so that the auth middleware
-    # runs first and can reject unauthenticated requests before they reach this handler.
+    # Try to create Streamable HTTP app (requires mcp ≥ 1.8).
+    # If the installed version doesn't support it, fall back to SSE-only.
+    try:
+        mcp_streamable_app = mcp.streamable_http_app()
+        _has_streamable = True
+    except (AttributeError, TypeError):
+        mcp_streamable_app = None
+        _has_streamable = False
+
+    # Wrap the MCP apps with a handler for browser requests.
+    # Regular browser GETs would otherwise hang waiting for SSE.
+    # This ASGI middleware routes requests to the correct transport.
     class MCPBrowserHandler:
-        def __init__(self, app):
-            self.app = app
+        def __init__(self, sse_app, streamable_app=None):
+            self.sse_app = sse_app
+            self.streamable_app = streamable_app
 
         async def __call__(self, scope, receive, send):
             if scope["type"] != "http":
-                await self.app(scope, receive, send)
+                await self.sse_app(scope, receive, send)
                 return
 
             path = scope.get("path", "")
             method = scope.get("method", "GET")
 
             import logging
-            logger = logging.getLogger("mcp.server")
-            if not logger.handlers:
+            mcp_logger = logging.getLogger("mcp.server")
+            if not mcp_logger.handlers:
                 logging.basicConfig()
-            logger.info(f"MCP Request: {method} /mcp{path}")
+            mcp_logger.info(f"MCP Request: {method} /mcp{path}")
 
             headers = dict(scope.get("headers", []))
             accept_header = headers.get(b"accept", b"").decode("utf-8", errors="ignore")
 
-            # If client expects SSE or is POST request, let it through to MCP app
-            if "text/event-stream" in accept_header or method == "POST":
-                await self.app(scope, receive, send)
+            # POST to the mount root (/mcp) → Streamable HTTP transport
+            if method == "POST" and path in ("", "/") and self.streamable_app:
+                await self.streamable_app(scope, receive, send)
                 return
 
-            # For regular browser GET requests, return helpful info
+            # DELETE for session termination (Streamable HTTP)
+            if method == "DELETE" and self.streamable_app:
+                await self.streamable_app(scope, receive, send)
+                return
+
+            # GET with SSE accept or POST to sub-paths → legacy SSE app
+            if "text/event-stream" in accept_header or method == "POST":
+                await self.sse_app(scope, receive, send)
+                return
+
+            # Regular browser GET → return helpful info
             if method == "GET":
                 response = JSONResponse({
                     "endpoint": "/mcp/sse",
                     "type": "MCP (Model Context Protocol) Server",
                     "description": "This endpoint is for MCP clients, not direct browser access.",
                     "usage": "Use an MCP-compatible client (like Claude Desktop or ChatGPT) to connect to this endpoint: /mcp/sse",
-                    "protocol": "MCP uses Server-Sent Events (SSE) for streaming communication.",
+                    "protocol": "MCP supports SSE and Streamable HTTP transports.",
+                    "transports": {
+                        "sse": "/mcp/sse",
+                        "streamable_http": "/mcp" if self.streamable_app else "not available",
+                    },
                     "documentation": "https://modelcontextprotocol.io/",
                     "available_tools": list(tools_map.keys()),
                 })
                 await response(scope, receive, send)
                 return
 
-            await self.app(scope, receive, send)
+            await self.sse_app(scope, receive, send)
 
-    app.mount("/mcp", MCPBrowserHandler(mcp_app))
+    app.mount("/mcp", MCPBrowserHandler(mcp_sse_app, mcp_streamable_app))
 
     # Define safe tools for unauthenticated access
     SAFE_TOOLS = {
