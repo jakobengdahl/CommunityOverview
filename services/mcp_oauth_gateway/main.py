@@ -6,12 +6,14 @@ OAuth 2.1 Authorization Code + PKCE before forwarding traffic upstream.
 
 Endpoints
 ---------
+GET  /.well-known/oauth-protected-resource     – Protected resource metadata (RFC 9470)
 GET  /.well-known/oauth-authorization-server  – OAuth metadata (discovery)
 POST /register                                – Dynamic Client Registration (RFC 7591)
 GET  /authorize                               – Start the OAuth flow
 GET  /callback                               – Google OIDC callback
 POST /token                                  – Exchange auth code for JWT
 GET  /sse                                    – Proxy: SSE stream (auth required)
+GET|POST /mcp/sse{/subpath}                  – Proxy: MCP SSE (auth required)
 POST /messages                               – Proxy: MCP POST (auth required)
 """
 
@@ -84,6 +86,20 @@ async def register_client(body: ClientRegistrationRequest) -> JSONResponse:
 # ---------------------------------------------------------------------------
 # OAuth metadata discovery
 # ---------------------------------------------------------------------------
+
+@app.get("/.well-known/oauth-protected-resource")
+async def oauth_protected_resource():
+    """Return OAuth Protected Resource Metadata (RFC 9470).
+
+    Claude uses this endpoint to discover the authorization server.
+    """
+    return {
+        "resource": f"{config.PUBLIC_BASE_URL}/mcp/sse",
+        "authorization_servers": [config.PUBLIC_BASE_URL],
+        "bearer_methods_supported": ["header"],
+        "scopes_supported": ["openid", "email", "profile"],
+    }
+
 
 @app.get("/.well-known/oauth-authorization-server")
 async def oauth_metadata() -> JSONResponse:
@@ -293,6 +309,19 @@ async def sse_proxy(request: Request):
     claims = _require_valid_token(request)
     logger.info("SSE proxy request from sub=%s", claims.get("sub"))
     return await proxy.proxy_sse(request)
+
+
+async def _mcp_sse_handler(request: Request):
+    """Proxy /mcp/sse requests to the upstream MCP service (auth required)."""
+    claims = _require_valid_token(request)
+    logger.info("MCP SSE proxy request from sub=%s method=%s path=%s",
+                claims.get("sub"), request.method, request.url.path)
+    if request.method == "POST":
+        return await proxy.proxy_post_mcp_sse(request)
+    return await proxy.proxy_sse(request)
+
+app.api_route("/mcp/sse", methods=["GET", "POST"])(_mcp_sse_handler)
+app.api_route("/mcp/sse/{subpath:path}", methods=["GET", "POST"])(_mcp_sse_handler)
 
 
 @app.post("/messages")
