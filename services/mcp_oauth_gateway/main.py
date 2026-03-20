@@ -26,6 +26,7 @@ import urllib.parse
 import uuid
 
 from fastapi import FastAPI, HTTPException, Request
+from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse, RedirectResponse
 from pydantic import BaseModel
 
@@ -40,6 +41,16 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 app = FastAPI(title="MCP OAuth Gateway", version="1.0.0")
+
+# CORS – required for browser-based MCP clients (MCPJam, ChatGPT plugin preview, etc.)
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+    expose_headers=["*"],
+)
 
 # In-memory Dynamic Client Registration store (RFC 7591)
 # Keyed by client_id → registration dict
