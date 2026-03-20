@@ -17,8 +17,10 @@ import config
 
 logger = logging.getLogger(__name__)
 
-# Shared async HTTP client (re-used across requests for connection pooling)
-_client = httpx.AsyncClient(timeout=None)  # SSE streams are long-lived
+# Shared async HTTP client (re-used across requests for connection pooling).
+# http2=False is explicit: Cloud Run HTTP/2 multiplexing can cause 421 errors
+# when the proxied Host doesn't match the upstream's certificate.
+_client = httpx.AsyncClient(timeout=None, http2=False)
 
 
 async def proxy_sse(request: Request) -> StreamingResponse:
@@ -113,20 +115,18 @@ async def proxy_post(request: Request) -> Response:
 # Helpers
 # ---------------------------------------------------------------------------
 
-_HOP_BY_HOP = frozenset(
-    [
-        "connection",
-        "keep-alive",
-        "proxy-authenticate",
-        "proxy-authorization",
-        "te",
-        "trailers",
-        "transfer-encoding",
-        "upgrade",
-        # Host must match the upstream, not the gateway
-        "host",
-    ]
-)
+_HOP_BY_HOP = frozenset({
+    "host",
+    "connection",
+    "keep-alive",
+    "transfer-encoding",
+    "te",
+    "trailer",
+    "trailers",
+    "upgrade",
+    "proxy-authorization",
+    "proxy-authenticate",
+})
 
 
 def _forward_headers(request: Request) -> dict:
