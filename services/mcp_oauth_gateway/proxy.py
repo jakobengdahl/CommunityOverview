@@ -30,8 +30,10 @@ async def proxy_sse(request: Request) -> StreamingResponse:
     # Forward all incoming query parameters (e.g. sessionId)
     params = dict(request.query_params)
 
-    # Forward a safe subset of request headers
+    # Forward a safe subset of request headers and ensure the upstream
+    # MCPBrowserHandler sees the SSE accept type (otherwise it returns JSON).
     headers = _forward_headers(request)
+    headers["accept"] = "text/event-stream"
 
     logger.info("Proxying SSE to %s params=%s", upstream_url, params)
 
@@ -117,6 +119,7 @@ async def proxy_post(request: Request) -> Response:
 
 _HOP_BY_HOP = frozenset({
     "host",
+    "authorization",      # gateway JWT – must not leak to upstream
     "connection",
     "keep-alive",
     "transfer-encoding",
