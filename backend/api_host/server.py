@@ -306,7 +306,16 @@ def create_app(
     # Initialize FastMCP with dynamic instructions built from schema configuration
     instructions = _build_mcp_instructions()
 
-    mcp = FastMCP(config.mcp_name, instructions=instructions)
+    mcp = FastMCP(
+        config.mcp_name,
+        instructions=instructions,
+        # Disable DNS rebinding protection: the default host="127.0.0.1"
+        # auto-enables it, which rejects any Host header that isn't localhost.
+        # In production (Cloud Run) the Host header is the public URL, so
+        # requests get a 421 "Invalid Host header". Authentication is handled
+        # by the gateway / Cloud Run IAP, so this check is not needed.
+        host="0.0.0.0",
+    )
     tools_map = register_mcp_tools(mcp, graph_service)
 
     # Store MCP instance and tools map on app state
