@@ -13,8 +13,10 @@ GET  /authorize                               – Start the OAuth flow
 GET  /callback                               – Google OIDC callback
 POST /token                                  – Exchange auth code for JWT
 GET  /sse                                    – Proxy: SSE stream (auth required)
-GET|POST /mcp/sse{/subpath}                  – Proxy: MCP SSE (auth required)
+GET  /mcp/sse                                – Proxy: MCP SSE stream (auth required)
+POST /mcp/sse{/subpath}                      – Proxy: MCP POST (auth required)
 POST /messages                               – Proxy: MCP POST (auth required)
+POST /mcp/messages{/subpath}                 – Proxy: MCP POST (auth required)
 """
 
 import logging
@@ -303,6 +305,7 @@ def _require_valid_token(request: Request) -> dict:
     return claims
 
 
+# GET /sse – legacy SSE proxy
 @app.get("/sse")
 async def sse_proxy(request: Request):
     """Proxy SSE stream to the upstream MCP service (auth required)."""
@@ -311,25 +314,65 @@ async def sse_proxy(request: Request):
     return await proxy.proxy_sse(request)
 
 
-async def _mcp_sse_handler(request: Request):
-    """Proxy /mcp/sse requests to the upstream MCP service (auth required)."""
+# GET /mcp/sse – SSE proxy (MCP path)
+@app.get("/mcp/sse")
+async def mcp_sse_get(request: Request):
+    """Proxy GET /mcp/sse to upstream SSE stream (auth required)."""
     claims = _require_valid_token(request)
-    logger.info("MCP SSE proxy request from sub=%s method=%s path=%s",
-                claims.get("sub"), request.method, request.url.path)
-    if request.method == "POST":
-        return await proxy.proxy_post_mcp_sse(request)
+    logger.info("MCP SSE GET from sub=%s", claims.get("sub"))
     return await proxy.proxy_sse(request)
 
-app.api_route("/mcp/sse", methods=["GET", "POST"])(_mcp_sse_handler)
-app.api_route("/mcp/sse/{subpath:path}", methods=["GET", "POST"])(_mcp_sse_handler)
+
+# POST /mcp/sse – forward POST (Streamable HTTP or sub-path messages)
+@app.post("/mcp/sse")
+async def mcp_sse_post(request: Request):
+    """Proxy POST /mcp/sse to upstream (auth required)."""
+    claims = _require_valid_token(request)
+    logger.info("MCP SSE POST from sub=%s path=%s", claims.get("sub"), request.url.path)
+    return await proxy.proxy_post_mcp(request)
 
 
+# GET|POST /mcp/sse/{subpath} – catch sub-paths like /mcp/sse/messages
+@app.get("/mcp/sse/{subpath:path}")
+async def mcp_sse_subpath_get(request: Request, subpath: str):
+    """Proxy GET /mcp/sse/{subpath} to upstream (auth required)."""
+    claims = _require_valid_token(request)
+    logger.info("MCP SSE subpath GET from sub=%s path=%s", claims.get("sub"), request.url.path)
+    return await proxy.proxy_sse(request)
+
+
+@app.post("/mcp/sse/{subpath:path}")
+async def mcp_sse_subpath_post(request: Request, subpath: str):
+    """Proxy POST /mcp/sse/{subpath} to upstream (auth required)."""
+    claims = _require_valid_token(request)
+    logger.info("MCP SSE subpath POST from sub=%s path=%s", claims.get("sub"), request.url.path)
+    return await proxy.proxy_post_mcp(request)
+
+
+# POST /messages – legacy messages endpoint
 @app.post("/messages")
 async def messages_proxy(request: Request):
     """Proxy MCP POST messages to the upstream service (auth required)."""
     claims = _require_valid_token(request)
-    logger.info("POST proxy request from sub=%s", claims.get("sub"))
+    logger.info("POST /messages from sub=%s", claims.get("sub"))
     return await proxy.proxy_post(request)
+
+
+# POST /mcp/messages – the upstream SSE app sends this URL in the endpoint event
+@app.post("/mcp/messages")
+async def mcp_messages_proxy(request: Request):
+    """Proxy POST /mcp/messages to upstream (auth required)."""
+    claims = _require_valid_token(request)
+    logger.info("POST /mcp/messages from sub=%s", claims.get("sub"))
+    return await proxy.proxy_post_mcp(request)
+
+
+@app.post("/mcp/messages/{subpath:path}")
+async def mcp_messages_subpath_proxy(request: Request, subpath: str):
+    """Proxy POST /mcp/messages/{subpath} to upstream (auth required)."""
+    claims = _require_valid_token(request)
+    logger.info("POST /mcp/messages/%s from sub=%s", subpath, claims.get("sub"))
+    return await proxy.proxy_post_mcp(request)
 
 
 # ---------------------------------------------------------------------------
