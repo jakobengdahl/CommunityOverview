@@ -59,6 +59,32 @@ async def proxy_sse(request: Request) -> StreamingResponse:
     )
 
 
+async def proxy_post_mcp_sse(request: Request) -> Response:
+    """Forward a POST /mcp/sse request to the upstream and return the response."""
+    # Build upstream URL preserving the exact path (including any sub-paths)
+    path = request.url.path  # e.g. /mcp/sse or /mcp/sse/messages
+    upstream_url = config.UPSTREAM_MCP_BASE_URL + path
+
+    params = dict(request.query_params)
+    headers = _forward_headers(request)
+    body = await request.body()
+
+    logger.info("Proxying POST to %s", upstream_url)
+
+    resp = await _client.post(
+        upstream_url,
+        params=params,
+        headers=headers,
+        content=body,
+    )
+
+    return Response(
+        content=resp.content,
+        status_code=resp.status_code,
+        headers=dict(resp.headers),
+    )
+
+
 async def proxy_post(request: Request) -> Response:
     """Forward a POST /messages request to the upstream and return the response."""
     upstream_url = config.UPSTREAM_MCP_BASE_URL + "/mcp/messages"
@@ -97,8 +123,6 @@ _HOP_BY_HOP = frozenset(
         "trailers",
         "transfer-encoding",
         "upgrade",
-        # We supply our own Authorization header to the upstream if needed
-        "authorization",
         # Host must match the upstream, not the gateway
         "host",
     ]
