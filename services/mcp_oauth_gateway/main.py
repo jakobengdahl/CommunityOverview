@@ -15,6 +15,7 @@ POST /token                                  – Exchange auth code for JWT
 GET  /sse                                    – Proxy: SSE stream (auth required)
 GET|POST /mcp/sse{/subpath}                  – Proxy: MCP SSE (auth required)
 POST /messages                               – Proxy: MCP POST (auth required)
+POST /mcp/messages/                          – Proxy: MCP message POST (auth required)
 """
 
 import logging
@@ -330,6 +331,19 @@ async def messages_proxy(request: Request):
     claims = _require_valid_token(request)
     logger.info("POST proxy request from sub=%s", claims.get("sub"))
     return await proxy.proxy_post(request)
+
+
+@app.post("/mcp/messages/")
+async def mcp_messages_proxy(request: Request):
+    """Proxy MCP message POSTs (with session_id query param) to the upstream (auth required).
+
+    The SSE endpoint event directs clients to POST here. This route ensures
+    those requests are authenticated and forwarded rather than returning 404.
+    """
+    claims = _require_valid_token(request)
+    logger.info("MCP messages POST proxy request from sub=%s session=%s",
+                claims.get("sub"), request.query_params.get("session_id"))
+    return await proxy.proxy_post_mcp_sse(request)
 
 
 # ---------------------------------------------------------------------------
