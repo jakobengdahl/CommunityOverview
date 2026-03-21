@@ -16,7 +16,7 @@ GET  /sse                                    – Proxy: SSE stream (auth require
 GET  /mcp/sse                                – Proxy: MCP SSE stream (auth required)
 POST /mcp/sse{/subpath}                      – Proxy: MCP POST (auth required)
 POST /messages                               – Proxy: MCP POST (auth required)
-POST /mcp/messages{/subpath}                 – Proxy: MCP POST (auth required)
+POST /mcp/messages/                          – Proxy: MCP message POST (auth required)
 """
 
 import logging
@@ -372,23 +372,17 @@ async def messages_proxy(request: Request):
     return await proxy.proxy_post(request)
 
 
-# POST /mcp/messages – some clients resolve the endpoint URL with the
-# /mcp prefix preserved (depending on urljoin behaviour).
-@app.post("/mcp/messages")
 @app.post("/mcp/messages/")
 async def mcp_messages_proxy(request: Request):
-    """Proxy POST /mcp/messages to upstream (auth required)."""
-    claims = _require_valid_token(request)
-    logger.info("POST /mcp/messages from sub=%s", claims.get("sub"))
-    return await proxy.proxy_post_mcp(request)
+    """Proxy MCP message POSTs (with session_id query param) to the upstream (auth required).
 
-
-@app.post("/mcp/messages/{subpath:path}")
-async def mcp_messages_subpath_proxy(request: Request, subpath: str):
-    """Proxy POST /mcp/messages/{subpath} to upstream (auth required)."""
+    The SSE endpoint event directs clients to POST here. This route ensures
+    those requests are authenticated and forwarded rather than returning 404.
+    """
     claims = _require_valid_token(request)
-    logger.info("POST /mcp/messages/%s from sub=%s", subpath, claims.get("sub"))
-    return await proxy.proxy_post_mcp(request)
+    logger.info("MCP messages POST proxy request from sub=%s session=%s",
+                claims.get("sub"), request.query_params.get("session_id"))
+    return await proxy.proxy_post_mcp_sse(request)
 
 
 # ---------------------------------------------------------------------------

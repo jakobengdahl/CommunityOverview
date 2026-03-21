@@ -46,41 +46,33 @@ async def proxy_sse(request: Request) -> StreamingResponse:
 
     logger.info("Proxying SSE to %s params=%s", upstream_url, params)
 
-    async def event_stream() -> AsyncIterator[bytes]:
-        try:
-            async with _client.stream(
-                "GET",
-                upstream_url,
-                params=params,
-                headers=headers,
-                follow_redirects=True,
-            ) as upstream_resp:
-                if upstream_resp.status_code != 200:
-                    body = (await upstream_resp.aread()).decode("utf-8", errors="replace")[:500]
-                    logger.warning(
-                        "Upstream SSE returned %s: %s", upstream_resp.status_code, body
-                    )
-                    error_msg = f'{{"status":{upstream_resp.status_code},"detail":"{body[:200]}"}}'
-                    yield f"event: error\ndata: {error_msg}\n\n".encode()
-                    return
+    # Encode the upstream base URL once for byte-level replacement in SSE data lines.
+    # This rewrites any absolute upstream URL in "endpoint" events to a root-relative
+    # path so clients always POST back through the gateway rather than bypassing it.
+    upstream_prefix = config.UPSTREAM_MCP_BASE_URL.encode()
 
-                # Buffer partial SSE frames so we can inspect complete events.
-                buf = b""
-                async for chunk in upstream_resp.aiter_bytes():
-                    buf += chunk
-                    # SSE events are separated by a blank line (\n\n).
-                    while b"\n\n" in buf:
-                        raw_event, buf = buf.split(b"\n\n", 1)
-                        yield _rewrite_endpoint_event(raw_event) + b"\n\n"
-                # Flush any remaining partial data.
-                if buf:
-                    yield _rewrite_endpoint_event(buf)
-        except httpx.ConnectError as exc:
-            logger.error("Failed to connect to upstream %s: %s", upstream_url, exc)
-            yield f'event: error\ndata: {{"detail":"upstream connect failed"}}\n\n'.encode()
-        except Exception as exc:
-            logger.error("SSE proxy error: %s", exc, exc_info=True)
-            yield f'event: error\ndata: {{"detail":"proxy error"}}\n\n'.encode()
+    async def event_stream() -> AsyncIterator[bytes]:
+        async with _client.stream(
+            "GET",
+            upstream_url,
+            params=params,
+            headers=headers,
+        ) as upstream_resp:
+            if upstream_resp.status_code != 200:
+                logger.warning(
+                    "Upstream SSE returned %s", upstream_resp.status_code
+                )
+                yield b"event: error\ndata: upstream error\n\n"
+                return
+            buf = b""
+            async for chunk in upstream_resp.aiter_bytes():
+                buf += chunk
+                # Emit complete lines, rewriting upstream base URL → root-relative path
+                while b"\n" in buf:
+                    line, buf = buf.split(b"\n", 1)
+                    yield line.replace(upstream_prefix, b"") + b"\n"
+            if buf:
+                yield buf.replace(upstream_prefix, b"")
 
     return StreamingResponse(
         event_stream(),
