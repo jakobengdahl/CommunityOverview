@@ -104,6 +104,10 @@ class GraphStorage:
         # Cache for searchable text to speed up search_nodes
         self._searchable_text_cache: Dict[str, str] = {}
 
+        # Cache: node_type_key -> "typeName label1 label2 ..." (lowercased)
+        self._type_searchable_text: Dict[str, str] = {}
+        self._build_type_searchable_text()
+
         self.graph_metadata: Dict[str, Any] = {
             "version": "1.0",
             "graph_name": self.json_path.stem,
@@ -116,6 +120,26 @@ class GraphStorage:
         self._system_listeners: List[Callable[[Event], None]] = []
 
         self.load()
+
+    def _build_type_searchable_text(self) -> None:
+        """Build a lookup of node type -> searchable text including localized labels."""
+        try:
+            from backend.config_loader import get_schema
+            schema = get_schema()
+            for type_name, type_config in schema.get("node_types", {}).items():
+                labels = type_config.get("labels", {})
+                label_values = " ".join(labels.values()) if labels else ""
+                self._type_searchable_text[type_name] = f"{type_name} {label_values}".lower().strip()
+        except Exception:
+            # Config not available; type matching will use type name only
+            pass
+
+    def _build_searchable_text(self, node: "Node") -> str:
+        """Build searchable text for a node, including type name and localized labels."""
+        tags_text = " ".join(node.tags) if hasattr(node, 'tags') and node.tags else ""
+        subtypes_text = " ".join(node.subtypes) if hasattr(node, 'subtypes') and node.subtypes else ""
+        type_text = self._type_searchable_text.get(str(node.type), str(node.type).lower())
+        return f"{node.name} {node.description} {node.summary} {tags_text} {subtypes_text} {type_text}".lower()
 
     def add_system_listener(self, listener: Callable[["Event"], None]) -> None:
         """
@@ -371,9 +395,7 @@ class GraphStorage:
                     self.graph.add_node(node.id, data=node)
 
                     # Precompute searchable text
-                    tags_text = " ".join(node.tags) if hasattr(node, 'tags') and node.tags else ""
-                    subtypes_text = " ".join(node.subtypes) if hasattr(node, 'subtypes') and node.subtypes else ""
-                    self._searchable_text_cache[node.id] = f"{node.name} {node.description} {node.summary} {tags_text} {subtypes_text}".lower()
+                    self._searchable_text_cache[node.id] = self._build_searchable_text(node)
 
                 # Load edges
                 for edge_data in data.get('edges', []):
@@ -494,9 +516,7 @@ class GraphStorage:
                 searchable_text = self._searchable_text_cache.get(node.id)
                 if searchable_text is None:
                     # Fallback just in case cache wasn't populated
-                    tags_text = " ".join(node.tags) if hasattr(node, 'tags') and node.tags else ""
-                    subtypes_text = " ".join(node.subtypes) if hasattr(node, 'subtypes') and node.subtypes else ""
-                    searchable_text = f"{node.name} {node.description} {node.summary} {tags_text} {subtypes_text}".lower()
+                    searchable_text = self._build_searchable_text(node)
                     self._searchable_text_cache[node.id] = searchable_text
 
                 if query_lower not in searchable_text:
@@ -705,9 +725,7 @@ class GraphStorage:
                     nodes_to_embed.append(node)
 
                     # Precompute searchable text
-                    tags_text = " ".join(node.tags) if hasattr(node, 'tags') and node.tags else ""
-                    subtypes_text = " ".join(node.subtypes) if hasattr(node, 'subtypes') and node.subtypes else ""
-                    self._searchable_text_cache[node.id] = f"{node.name} {node.description} {node.summary} {tags_text} {subtypes_text}".lower()
+                    self._searchable_text_cache[node.id] = self._build_searchable_text(node)
 
                 # Generate embeddings for new nodes (non-blocking)
                 if nodes_to_embed:
@@ -851,9 +869,7 @@ class GraphStorage:
             self.graph.nodes[node_id]['data'] = node
 
             # Update searchable text cache
-            tags_text = " ".join(node.tags) if hasattr(node, 'tags') and node.tags else ""
-            subtypes_text = " ".join(node.subtypes) if hasattr(node, 'subtypes') and node.subtypes else ""
-            self._searchable_text_cache[node.id] = f"{node.name} {node.description} {node.summary} {tags_text} {subtypes_text}".lower()
+            self._searchable_text_cache[node.id] = self._build_searchable_text(node)
 
             # Update embedding if text fields or tags changed (non-blocking)
             if any(k in updates for k in ['name', 'description', 'summary', 'tags']):

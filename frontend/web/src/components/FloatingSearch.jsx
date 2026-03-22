@@ -7,7 +7,7 @@ import './FloatingSearch.css';
 import { useI18n } from '../i18n';
 
 function FloatingSearch() {
-  const { t } = useI18n();
+  const { t, language } = useI18n();
   const {
     nodes: vizNodes,
     hiddenNodeIds,
@@ -17,6 +17,7 @@ function FloatingSearch() {
     setPendingGroups,
     federationDepth,
     stats,
+    schema,
   } = useGraphStore();
 
   const [query, setQuery] = useState('');
@@ -27,6 +28,14 @@ function FloatingSearch() {
   const inputRef = useRef(null);
   const containerRef = useRef(null);
   const debounceRef = useRef(null);
+
+  const getTypeLabel = useCallback((nodeType) => {
+    const labels = schema?.node_types?.[nodeType]?.labels;
+    if (labels && language && labels[language]) {
+      return labels[language];
+    }
+    return nodeType;
+  }, [schema, language]);
 
   const graphDisplayNames = stats?.federation?.graph_display_names || {};
   const showGraphPrefix = Boolean(stats?.federation?.search_has_multiple_graphs);
@@ -263,7 +272,7 @@ function FloatingSearch() {
                   className="floating-search-result-type"
                   style={{ color }}
                 >
-                  {node.type}
+                  {getTypeLabel(node.type)}
                 </span>
                 {isInViz && (
                   <span className="floating-search-result-badge">in view</span>
