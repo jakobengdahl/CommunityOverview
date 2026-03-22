@@ -382,7 +382,7 @@ async def mcp_messages_proxy(request: Request):
     claims = _require_valid_token(request)
     logger.info("MCP messages POST proxy request from sub=%s session=%s",
                 claims.get("sub"), request.query_params.get("session_id"))
-    return await proxy.proxy_post_mcp_sse(request)
+    return await proxy.proxy_post_mcp(request)
 
 
 # ---------------------------------------------------------------------------
