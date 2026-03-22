@@ -45,6 +45,7 @@ class NodeTypeConfig(BaseModel):
     description: str = ""
     color: str = "#9CA3AF"  # Default gray
     icon: str = ""  # Bootstrap Icon name (e.g. "PersonFill", "DatabaseFill")
+    labels: Dict[str, str] = Field(default_factory=dict)  # Localized names, e.g. {"sv": "Mål"}
 
 
 class RelationshipTypeConfig(BaseModel):
@@ -236,7 +237,8 @@ def get_schema() -> Dict[str, Any]:
                 "category": cfg.category,
                 "description": cfg.description,
                 "color": cfg.color,
-                "icon": cfg.icon
+                "icon": cfg.icon,
+                "labels": cfg.labels
             }
             for name, cfg in schema.node_types.items()
         },

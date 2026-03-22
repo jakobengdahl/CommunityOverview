@@ -64,7 +64,10 @@
         "category": "domain",
         "description": "Government agencies, organizations, individuals responsible for initiatives",
         "color": "#3B82F6",
-        "icon": "PersonFill"
+        "icon": "PersonFill",
+        "labels": {
+          "sv": "Aktör"
+        }
       },
       "Initiative": {
         "fields": [
@@ -79,7 +82,10 @@
         "category": "domain",
         "description": "Projects, programs, collaborative activities",
         "color": "#10B981",
-        "icon": "RocketTakeoffFill"
+        "icon": "RocketTakeoffFill",
+        "labels": {
+          "sv": "Initiativ"
+        }
       },
       "Capability": {
         "fields": [
@@ -92,7 +98,10 @@
         "category": "domain",
         "description": "Capabilities, competencies, skills needed/provided",
         "color": "#F97316",
-        "icon": "LightningFill"
+        "icon": "LightningFill",
+        "labels": {
+          "sv": "Förmåga"
+        }
       },
       "Resource": {
         "fields": [
@@ -106,7 +115,10 @@
         "category": "domain",
         "description": "Outputs such as reports, software, tools, datasets. Field 'identifier' follows Dublin Core (dc:identifier) for URLs/URIs.",
         "color": "#FBBF24",
-        "icon": "FileEarmarkTextFill"
+        "icon": "FileEarmarkTextFill",
+        "labels": {
+          "sv": "Resurs"
+        }
       },
       "Legislation": {
         "fields": [
@@ -120,7 +132,10 @@
         "category": "domain",
         "description": "Laws, directives (NIS2, GDPR, etc.)",
         "color": "#EF4444",
-        "icon": "ShieldFillCheck"
+        "icon": "ShieldFillCheck",
+        "labels": {
+          "sv": "Lagstiftning"
+        }
       },
       "Theme": {
         "fields": [
@@ -133,7 +148,10 @@
         "category": "domain",
         "description": "Themes like AI strategies, data strategies, digitalization",
         "color": "#14B8A6",
-        "icon": "TagsFill"
+        "icon": "TagsFill",
+        "labels": {
+          "sv": "Tema"
+        }
       },
       "Goal": {
         "fields": [
@@ -147,7 +165,10 @@
         "category": "domain",
         "description": "Strategic objectives and targets for digitalization efforts",
         "color": "#6366F1",
-        "icon": "TrophyFill"
+        "icon": "TrophyFill",
+        "labels": {
+          "sv": "Mål"
+        }
       },
       "Event": {
         "fields": [
@@ -162,7 +183,10 @@
         "category": "domain",
         "description": "A non-persistent, time-based occurrence (aligned with dc:Event). Conferences, workshops, decisions, milestones.",
         "color": "#D946EF",
-        "icon": "CalendarEventFill"
+        "icon": "CalendarEventFill",
+        "labels": {
+          "sv": "Händelse"
+        }
       },
       "Data": {
         "fields": [
@@ -176,7 +200,10 @@
         "category": "domain",
         "description": "Datasets, registers, APIs, or other data sources. Field 'identifier' follows Dublin Core (dc:identifier) for URLs/URIs.",
         "color": "#06B6D4",
-        "icon": "DatabaseFill"
+        "icon": "DatabaseFill",
+        "labels": {
+          "sv": "Data"
+        }
       },
       "Risk": {
         "fields": [
@@ -189,7 +216,10 @@
         "category": "domain",
         "description": "Identified risks, threats, or vulnerabilities relevant to initiatives, legislation, or capabilities",
         "color": "#DC2626",
-        "icon": "ExclamationTriangleFill"
+        "icon": "ExclamationTriangleFill",
+        "labels": {
+          "sv": "Risk"
+        }
       }
     },
     "relationship_types": {
