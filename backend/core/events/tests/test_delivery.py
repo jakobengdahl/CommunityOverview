@@ -17,7 +17,7 @@ from backend.core.events.models import (
     DeliveryStatus,
     SubscriptionInfo,
 )
-from backend.core.events.delivery import DeliveryWorker, DeliveryItem
+from backend.core.events.delivery import DeliveryWorker, DeliveryItem, is_safe_url
 
 
 def create_test_event(
@@ -45,6 +45,50 @@ def create_test_event(
 
 class TestDeliveryWorker:
     """Tests for the DeliveryWorker class."""
+
+    def test_is_safe_url(self):
+        """Test the SSRF URL validation function."""
+        # Safe URLs
+        assert is_safe_url("https://example.com/hook") is True
+        assert is_safe_url("http://google.com") is True
+
+        # Invalid schemes
+        assert is_safe_url("ftp://example.com") is False
+        assert is_safe_url("file:///etc/passwd") is False
+        assert is_safe_url("javascript:alert(1)") is False
+
+        # Private/local IPs
+        assert is_safe_url("http://127.0.0.1/hook") is False
+        assert is_safe_url("http://localhost:8080") is False
+        assert is_safe_url("http://10.0.0.1") is False
+        assert is_safe_url("http://192.168.1.1") is False
+        assert is_safe_url("http://169.254.169.254") is False
+
+    @patch('backend.core.events.delivery.socket.gethostbyname')
+    def test_delivery_worker_ssrf_blocked(self, mock_gethostbyname):
+        """Test that SSRF attempts are blocked and marked as failed."""
+        # Mock DNS resolution to return a local IP
+        mock_gethostbyname.return_value = "127.0.0.1"
+
+        results = []
+        worker = DeliveryWorker(
+            max_attempts=1,  # Should fail immediately without retries
+            on_result=lambda r: results.append(r)
+        )
+        worker.start()
+
+        try:
+            event = create_test_event()
+            # The domain itself looks ok, but DNS resolves to 127.0.0.1
+            worker.enqueue(event, "http://malicious.com/hook")
+
+            time.sleep(0.5)
+
+            assert len(results) == 1
+            assert results[0].status == DeliveryStatus.DROPPED
+            assert "Blocked attempt to send webhook" in results[0].error_message
+        finally:
+            worker.stop(wait=True)
 
     def test_worker_starts_and_stops(self):
         """Test that worker can start and stop cleanly."""
