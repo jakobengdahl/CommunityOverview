@@ -15,6 +15,9 @@ import time
 from typing import Optional, Callable
 from datetime import datetime
 import requests
+import urllib.parse
+import socket
+import ipaddress
 
 from .models import (
     Event,
@@ -29,6 +32,40 @@ logger = logging.getLogger(__name__)
 DEFAULT_MAX_ATTEMPTS = 3
 DEFAULT_BACKOFF_TIMES = [0.5, 2.0, 5.0]  # Seconds between retries
 DEFAULT_TIMEOUT = 10  # HTTP request timeout in seconds
+
+
+def is_safe_url(url: str) -> bool:
+    """
+    Validates a URL to prevent SSRF attacks.
+    Ensures scheme is HTTP/HTTPS and IP is not private/reserved.
+    """
+    try:
+        parsed = urllib.parse.urlparse(url)
+        if parsed.scheme not in ('http', 'https'):
+            return False
+
+        hostname = parsed.hostname
+        if not hostname:
+            return False
+
+        # Resolve hostname to IP
+        ip_str = socket.gethostbyname(hostname)
+        ip = ipaddress.ip_address(ip_str)
+
+        # Check for reserved or internal IP ranges
+        if (
+            ip.is_private
+            or ip.is_loopback
+            or ip.is_link_local
+            or ip.is_multicast
+            or ip.is_reserved
+        ):
+            return False
+
+        return True
+    except (ValueError, socket.gaierror, Exception) as e:
+        logger.warning(f"URL validation failed for {url}: {e}")
+        return False
 
 
 class DeliveryItem:
@@ -154,6 +191,14 @@ class DeliveryWorker:
         attempt = item.attempt
 
         try:
+            # Validate URL to prevent SSRF
+            if not is_safe_url(webhook_url):
+                self._handle_failure(
+                    item,
+                    error_message="Blocked attempt to send webhook to restricted IP address",
+                )
+                return
+
             # Prepare payload
             payload = event.to_webhook_payload()
 
