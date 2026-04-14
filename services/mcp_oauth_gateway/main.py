@@ -19,6 +19,7 @@ POST /messages                               – Proxy: MCP POST (auth required)
 POST /mcp/messages/                          – Proxy: MCP message POST (auth required)
 """
 
+import hmac
 import logging
 import os
 import time
@@ -303,11 +304,24 @@ def _extract_bearer_token(request: Request) -> str | None:
     return None
 
 
+def _matches_static_api_key(token: str | None) -> bool:
+    """Return True when the bearer token matches the configured static API key."""
+    if config.GATEWAY_API_KEY is None or token is None:
+        return False
+
+    expected = config.GATEWAY_API_KEY.encode("utf-8")
+    provided = token.encode("utf-8")
+    return len(expected) == len(provided) and hmac.compare_digest(provided, expected)
+
+
 def _require_valid_token(request: Request) -> dict:
-    """Validate the Bearer token and return its claims, or raise 401."""
+    """Validate the Bearer token and return claims/identity, or raise 401."""
     token = _extract_bearer_token(request)
     if token is None:
         raise HTTPException(status_code=401, detail="Missing Bearer token")
+
+    if _matches_static_api_key(token):
+        return {"sub": "static-api-key", "auth_type": "api_key"}
 
     claims = auth.validate_token(token)
     if claims is None:

@@ -19,6 +19,7 @@ os.environ.setdefault("GW_JWT_SIGNING_KEY", "test-jwt-key-at-least-32-chars!!")
 os.environ.setdefault("TEST_USERS", "alice@example.com,bob@example.com")
 os.environ.setdefault("UPSTREAM_MCP_BASE_URL", "http://localhost:9000")
 os.environ.setdefault("PUBLIC_BASE_URL", "https://gateway.example.com")
+os.environ.setdefault("GATEWAY_API_KEY", "static-test-api-key")
 
 import auth
 import config
@@ -34,6 +35,36 @@ def _make_pkce_pair():
     digest = hashlib.sha256(verifier.encode("ascii")).digest()
     challenge = base64.urlsafe_b64encode(digest).rstrip(b"=").decode("ascii")
     return verifier, challenge
+
+
+class TestGatewayProxyAuth(unittest.TestCase):
+    """Tests for bearer auth on the proxy endpoints."""
+
+    def test_static_api_key_allows_request_without_jwt(self):
+        with patch("proxy.proxy_sse", new=AsyncMock(return_value=MagicMock(status_code=200))):
+            resp = client.get("/sse", headers={"Authorization": "Bearer static-test-api-key"})
+        assert resp.status_code == 200
+
+    def test_non_matching_api_key_falls_back_to_jwt_validation(self):
+        with patch("auth.validate_token", return_value={"sub": "alice@example.com"}) as mock_validate:
+            with patch("proxy.proxy_sse", new=AsyncMock(return_value=MagicMock(status_code=200))):
+                resp = client.get("/sse", headers={"Authorization": "Bearer wrong-key"})
+        assert resp.status_code == 200
+        mock_validate.assert_called_once_with("wrong-key")
+
+    def test_invalid_non_matching_api_key_is_rejected(self):
+        with patch("auth.validate_token", return_value=None) as mock_validate:
+            resp = client.get("/sse", headers={"Authorization": "Bearer wrong-key"})
+        assert resp.status_code == 401
+        mock_validate.assert_called_once_with("wrong-key")
+
+    def test_absent_gateway_api_key_skips_static_check(self):
+        with patch.object(config, "GATEWAY_API_KEY", None):
+            with patch("auth.validate_token", return_value={"sub": "alice@example.com"}) as mock_validate:
+                with patch("proxy.proxy_sse", new=AsyncMock(return_value=MagicMock(status_code=200))):
+                    resp = client.get("/sse", headers={"Authorization": "Bearer static-test-api-key"})
+        assert resp.status_code == 200
+        mock_validate.assert_called_once_with("static-test-api-key")
 
 
 class TestAuthorizeEndpoint(unittest.TestCase):
