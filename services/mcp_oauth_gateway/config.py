@@ -5,7 +5,7 @@ All configuration is read from environment variables at startup.
 """
 
 import os
-from typing import List
+from typing import List, Optional
 
 
 def _required(name: str) -> str:
@@ -26,6 +26,9 @@ GOOGLE_OAUTH_CLIENT_SECRET: str = _required("GOOGLE_OAUTH_CLIENT_SECRET")
 
 # Key used to sign gateway-issued JWTs (HMAC-SHA256)
 GW_JWT_SIGNING_KEY: str = _required("GW_JWT_SIGNING_KEY")
+
+# Optional static bearer token for non-OAuth clients. When absent, gateway remains OAuth-only.
+GATEWAY_API_KEY: Optional[str] = _optional("GATEWAY_API_KEY") or None
 
 # Comma-separated list of allowed user email addresses
 _raw_test_users: str = _required("TEST_USERS")
