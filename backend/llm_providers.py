@@ -94,12 +94,14 @@ class ClaudeProvider(LLMProvider):
 
 
 class OpenAIProvider(LLMProvider):
-    """OpenAI provider"""
+    """OpenAI provider — also works with any OpenAI-compatible API (Ollama, vLLM, Azure OpenAI, etc.)"""
 
     def __init__(self, api_key: str):
         from openai import OpenAI
-        self.client = OpenAI(api_key=api_key)
+        base_url = os.getenv("OPENAI_BASE_URL")  # None = use SDK default (api.openai.com)
+        self.client = OpenAI(api_key=api_key, base_url=base_url)
         self.model = os.getenv("OPENAI_MODEL", "gpt-4o")
+        self._tool_calling = os.getenv("OPENAI_TOOL_CALLING", "true").lower() != "false"
 
     def create_completion(
         self,
@@ -113,8 +115,8 @@ class OpenAIProvider(LLMProvider):
         # Convert messages to OpenAI format
         openai_messages = self._convert_messages_to_openai(messages, system_prompt)
 
-        # Format tools for OpenAI
-        openai_tools = self.format_tool_definitions(tools)
+        # Format tools for OpenAI (skip if tool calling is disabled for this endpoint)
+        openai_tools = self.format_tool_definitions(tools) if self._tool_calling else []
 
         response = self.client.chat.completions.create(
             model=self.model,
@@ -277,6 +279,9 @@ def create_provider(api_key: str, provider_type: Optional[str] = None) -> LLMPro
 
     Returns:
         LLMProvider instance
+
+    OpenAI-compatible APIs (Ollama, vLLM, Azure OpenAI, etc.) use provider_type='openai'
+    with the OPENAI_BASE_URL env var pointing at the custom endpoint.
     """
     if provider_type is None:
         provider_type = os.getenv("LLM_PROVIDER", "claude").lower()
