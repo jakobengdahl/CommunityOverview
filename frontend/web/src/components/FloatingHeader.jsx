@@ -1,5 +1,5 @@
 import { useState, useRef, useEffect } from 'react';
-import { List, Feather, Download } from 'react-bootstrap-icons';
+import { List, Feather, Download, BoxArrowRight } from 'react-bootstrap-icons';
 import useGraphStore from '../store/graphStore';
 import { useI18n } from '../i18n';
 import { COLOR_MAP } from './FloatingToolbar';
@@ -98,6 +98,21 @@ function FloatingHeader({ stats, title = 'Community Graph View', onExportGraph }
           ) : (
             <div className="floating-header-placeholder">Loading stats...</div>
           )}
+
+          {/* Logout is always shown — redirect is harmless regardless of
+              AUTH_ENABLED. Backend routes /auth/logout and /logged-out are
+              exempt from auth middleware so the user never gets stuck. */}
+          <div className="floating-header-section-divider" />
+          <button
+            className="floating-header-menu-item floating-header-menu-item-logout"
+            onClick={() => {
+              setMenuOpen(false);
+              window.location.href = '/auth/logout';
+            }}
+          >
+            <BoxArrowRight size={14} />
+            <span>{t('menu.logout')}</span>
+          </button>
         </div>
       )}
     </div>

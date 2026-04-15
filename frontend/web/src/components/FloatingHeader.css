@@ -177,3 +177,12 @@
   background: rgba(255, 255, 255, 0.1);
   color: #fff;
 }
+
+.floating-header-menu-item-logout {
+  color: #e57373;
+}
+
+.floating-header-menu-item-logout:hover {
+  background: rgba(229, 115, 115, 0.12);
+  color: #ff8a80;
+}
