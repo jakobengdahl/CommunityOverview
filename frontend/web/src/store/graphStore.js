@@ -1,6 +1,17 @@
 import { create } from 'zustand';
 
 const FEDERATION_DEPTH_STORAGE_KEY = 'federation_depth';
+const SHOW_MINIMAP_STORAGE_KEY = 'show_minimap';
+
+function loadInitialShowMinimap() {
+  try {
+    const stored = window?.localStorage?.getItem(SHOW_MINIMAP_STORAGE_KEY);
+    if (stored !== null) return stored === 'true';
+  } catch {
+    // ignore storage errors and use default
+  }
+  return false;
+}
 
 function loadInitialFederationDepth() {
   try {
@@ -107,6 +118,7 @@ const useGraphStore = create((set, get) => ({
   focusNodeId: null, // Node ID to zoom/pan to
   pendingGroups: null, // Groups to restore from a saved view
   chatPanelOpen: true, // Chat panel expanded vs minimized
+  showMinimap: loadInitialShowMinimap(), // Minimap visibility (persisted)
 
   // Search state
   searchQuery: '',
@@ -231,6 +243,15 @@ const useGraphStore = create((set, get) => ({
       // ignore storage errors
     }
     set({ federationDepth: normalized });
+  },
+
+  setShowMinimap: (show) => {
+    try {
+      window?.localStorage?.setItem(SHOW_MINIMAP_STORAGE_KEY, String(show));
+    } catch {
+      // ignore storage errors
+    }
+    set({ showMinimap: show });
   },
 
   setStats: (stats) => set({ stats }),

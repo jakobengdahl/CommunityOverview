@@ -1,5 +1,5 @@
 import { useState, useRef, useEffect } from 'react';
-import { List, Feather, Download } from 'react-bootstrap-icons';
+import { List, Feather, Download, Map } from 'react-bootstrap-icons';
 import useGraphStore from '../store/graphStore';
 import { useI18n } from '../i18n';
 import { COLOR_MAP } from './FloatingToolbar';
@@ -7,6 +7,7 @@ import './FloatingHeader.css';
 
 function FloatingHeader({ stats, title = 'Community Graph View', onExportGraph }) {
   const { t } = useI18n();
+  const { showMinimap, setShowMinimap } = useGraphStore();
   const [menuOpen, setMenuOpen] = useState(false);
   const [dropdownLeft, setDropdownLeft] = useState(null);
   const menuRef = useRef(null);
@@ -81,6 +82,17 @@ function FloatingHeader({ stats, title = 'Community Graph View', onExportGraph }
                     ))}
                 </div>
               )}
+
+              <div className="floating-header-section-divider" />
+              <div className="floating-header-section-title">{t('menu.view_section') || 'View'}</div>
+              <button
+                className="floating-header-menu-item"
+                onClick={() => setShowMinimap(!showMinimap)}
+              >
+                <Map size={14} />
+                <span>{t('menu.show_minimap') || 'Show minimap'}</span>
+                <span className={`floating-header-toggle${showMinimap ? ' active' : ''}`} />
+              </button>
 
               <div className="floating-header-section-divider" />
               <div className="floating-header-section-title">Admin</div>

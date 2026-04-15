@@ -50,6 +50,7 @@ function App() {
     clearVisualization,
     federationDepth,
     setFederationDepth,
+    showMinimap,
   } = useGraphStore();
 
   const { t, setLanguage } = useI18n();
@@ -585,6 +586,7 @@ function App() {
           federationDepthLevels={federationDepthLevels}
           federationDepthLabel={t('federation.depth_label')}
           federationDepthTooltip={t('federation.depth_tooltip')}
+          showMinimap={showMinimap}
         />
       </div>
 
