@@ -1,11 +1,11 @@
 # LLM Provider Configuration
 
-This project supports multiple LLM providers, allowing you to choose between Claude (Anthropic) and OpenAI (GPT-4) as your AI backend.
+This project supports multiple LLM providers, allowing you to choose between Claude (Anthropic) and OpenAI (GPT-4) as your AI backend. The OpenAI provider also works with any OpenAI-compatible API, including self-hosted models (Ollama, vLLM), managed inference services (Azure OpenAI, Groq, Together AI), and proxies like OpenWebUI.
 
 ## Supported Providers
 
 - **Claude** (Anthropic) - Uses Claude Sonnet 4.5
-- **OpenAI** - Uses GPT-4o (configurable)
+- **OpenAI** - Uses GPT-4o (configurable), or any OpenAI-compatible endpoint via `OPENAI_BASE_URL`
 
 ## Configuration
 
@@ -42,6 +42,16 @@ export OPENAI_MODEL=gpt-4o
 export OPENAI_MODEL=gpt-4-turbo
 ```
 
+**Optional: Custom base URL for OpenAI-compatible APIs:**
+```bash
+export OPENAI_BASE_URL=http://localhost:11434/v1
+```
+
+**Optional: Disable tool/function calling (for models that don't support it):**
+```bash
+export OPENAI_TOOL_CALLING=false
+```
+
 ### Docker Compose Configuration
 
 Add environment variables to your `docker-compose.yml`:
@@ -63,6 +73,60 @@ Then create a `.env` file in the project root:
 LLM_PROVIDER=openai
 OPENAI_API_KEY=sk-xxxxx
 ANTHROPIC_API_KEY=sk-ant-xxxxx
+```
+
+### OpenAI-Compatible APIs
+
+Setting `OPENAI_BASE_URL` redirects all OpenAI provider calls to a custom endpoint. The model, API key, and tool-calling behaviour are each controlled by their own variable.
+
+#### Ollama (local)
+
+```bash
+LLM_PROVIDER=openai
+OPENAI_BASE_URL=http://localhost:11434/v1
+OPENAI_API_KEY=ollama          # Ollama ignores the key, but a non-empty value is required
+OPENAI_MODEL=llama3.2
+# OPENAI_TOOL_CALLING=false    # uncomment if using a model without function-calling support
+```
+
+Start the model first: `ollama serve && ollama pull llama3.2`
+
+#### vLLM (local or remote)
+
+```bash
+LLM_PROVIDER=openai
+OPENAI_BASE_URL=http://localhost:8000/v1
+OPENAI_API_KEY=<your-vllm-key-or-any-string>
+OPENAI_MODEL=<model-id-as-loaded-in-vllm>
+```
+
+#### Azure OpenAI
+
+```bash
+LLM_PROVIDER=openai
+OPENAI_BASE_URL=https://<resource-name>.openai.azure.com/openai/deployments/<deployment-name>
+OPENAI_API_KEY=<azure-api-key>
+OPENAI_MODEL=<deployment-name>
+```
+
+#### OpenWebUI (proxy)
+
+```bash
+LLM_PROVIDER=openai
+OPENAI_BASE_URL=http://localhost:3000/openai
+OPENAI_API_KEY=<openwebui-api-key>
+OPENAI_MODEL=<model-name-in-openwebui>
+```
+
+#### Managed inference services (Groq, Together AI, Fireworks, etc.)
+
+Most managed inference services expose an OpenAI-compatible API. Consult the service's documentation for the correct base URL and model names.
+
+```bash
+LLM_PROVIDER=openai
+OPENAI_BASE_URL=https://api.groq.com/openai/v1
+OPENAI_API_KEY=<groq-api-key>
+OPENAI_MODEL=llama-3.3-70b-versatile
 ```
 
 ### Frontend Configuration (User Override)
@@ -218,8 +282,7 @@ python server.py
 ## Future Enhancements
 
 Potential additions:
-- Support for more providers (Gemini, Llama, etc.)
-- Provider-specific optimizations
+- Support for additional native providers (Gemini, etc.)
 - Automatic fallback between providers
 - Cost tracking per provider
 - Performance metrics comparison
