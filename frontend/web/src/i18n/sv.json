@@ -105,7 +105,8 @@
   "menu": {
     "export_graph": "Exportera graf",
     "export_success": "Grafen exporterad",
-    "export_error": "Kunde inte exportera grafen"
+    "export_error": "Kunde inte exportera grafen",
+    "logout": "Logga ut"
   },
   "experts": {
     "title": "Expert-agenter",
