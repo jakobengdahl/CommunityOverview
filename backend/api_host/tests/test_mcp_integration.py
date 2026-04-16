@@ -167,12 +167,46 @@ class TestMCPEndpointAvailability:
 
     def test_mcp_endpoint_mounted(self, test_app: TestClient):
         """MCP endpoint is mounted at /mcp."""
-        # Verify MCP is properly configured by checking app state
-        # FastMCP may not respond to GET / but should be mounted
         assert hasattr(test_app.app.state, "mcp")
         assert test_app.app.state.mcp is not None
         assert hasattr(test_app.app.state, "tools_map")
         assert len(test_app.app.state.tools_map) > 0
+
+    def test_get_mcp_browser_returns_info_json(self, test_app: TestClient):
+        """GET /mcp without Accept header returns JSON info, not a stream."""
+        response = test_app.get("/mcp")
+        assert response.status_code == 200
+        data = response.json()
+        assert data.get("type") == "MCP (Model Context Protocol) Server"
+        assert "transports" in data
+        assert "available_tools" in data
+
+    def test_get_mcp_browser_lists_tools(self, test_app: TestClient):
+        """GET /mcp info JSON lists the registered MCP tools."""
+        response = test_app.get("/mcp")
+        assert response.status_code == 200
+        data = response.json()
+        tools = data.get("available_tools", [])
+        assert isinstance(tools, list)
+        assert len(tools) > 0
+
+    def test_get_mcp_sse_accept_does_not_return_info_json(self, test_app: TestClient):
+        """GET /mcp with Accept: text/event-stream is routed to transport, not info JSON."""
+        # The SSE/Streamable transport handles this; we just verify it's not the browser info.
+        # Use stream=True so the client does not wait for a full response body.
+        with test_app.stream("GET", "/mcp", headers={"Accept": "text/event-stream"}) as resp:
+            ct = resp.headers.get("content-type", "")
+            # Must NOT be the plain JSON info response
+            assert "application/json" not in ct or resp.status_code != 200 or ct.startswith("text/event-stream")
+
+    def test_get_mcp_info_mentions_streamable_endpoints(self, test_app: TestClient):
+        """GET /mcp info JSON documents the Streamable HTTP endpoints when available."""
+        response = test_app.get("/mcp")
+        assert response.status_code == 200
+        data = response.json()
+        transports = data.get("transports", {})
+        # streamable_http key must be present (value depends on mcp version installed)
+        assert "streamable_http" in transports
 
 
 class TestMCPToolsWithEdgeCases:
