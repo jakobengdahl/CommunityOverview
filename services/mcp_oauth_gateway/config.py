@@ -51,8 +51,9 @@ GOOGLE_USERINFO_URL = "https://openidconnect.googleapis.com/v1/userinfo"
 # Authorization code TTL in seconds
 AUTH_CODE_TTL_SECONDS: int = 300  # 5 minutes
 
-# Access token TTL in seconds
-ACCESS_TOKEN_TTL_SECONDS: int = 1800  # 30 minutes
+# Access token TTL in seconds (60 days – lets SSE clients reconnect with the
+# same token after a Cloud Run scale-to-zero event without re-running OAuth)
+ACCESS_TOKEN_TTL_SECONDS: int = 60 * 24 * 3600  # 60 days
 
 # JWT algorithm
 JWT_ALGORITHM = "HS256"

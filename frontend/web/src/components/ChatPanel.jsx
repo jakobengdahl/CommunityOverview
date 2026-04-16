@@ -27,6 +27,7 @@ function ChatPanel() {
     clearSelectedGraphNodes,
     activeExperts,
     availableExperts,
+    showMinimap,
   } = useGraphStore();
 
   const { t, language } = useI18n();
@@ -424,7 +425,7 @@ function ChatPanel() {
 
   // Expanded state
   return (
-    <div className="chat-panel-floating">
+    <div className={`chat-panel-floating${!showMinimap ? ' minimap-hidden' : ''}`}>
       <div className="chat-header">
         <div className="chat-header-left" onClick={toggleChatPanel} style={{ cursor: 'pointer' }}>
           <ChatDotsFill size={16} />
