@@ -22,7 +22,7 @@
 #
 # Tags applied (see "Extract metadata" steps for full logic):
 #   sha-<commit>          immutable, used as the canonical artifact reference
-#   dev                   floating tag, latest successful build from dev branch
+#   dev                   floating tag, latest successful build from preview branch
 #   latest                floating tag, latest successful build from main branch
 #   v<semver>             applied only when a version tag is pushed
 # =============================================================================
@@ -31,10 +31,10 @@ name: CI
 
 on:
   push:
-    branches: [main, dev]
+    branches: [main, preview, dev]
     tags: ['v*']
   pull_request:
-    branches: [main, dev]
+    branches: [main, preview, dev]
 
 env:
   REGISTRY: ghcr.io
@@ -76,7 +76,7 @@ jobs:
     name: Build & Publish Images
     runs-on: ubuntu-latest
     needs: test
-    if: github.event_name == 'push'
+    if: github.event_name == 'push' && (github.ref == 'refs/heads/preview' || github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/tags/'))
 
     permissions:
       contents: read
@@ -95,12 +95,12 @@ jobs:
         uses: actions/checkout@v4
 
       # Determine release channel based on the ref that triggered this run.
-      # channel=dev  → pushed to dev branch
+      # channel=dev  → pushed to preview branch (deploys preview/dev env in infra)
       # channel=prod → pushed to main or a version tag
       - name: Determine release channel
         id: channel
         run: |
-          if [[ "${GITHUB_REF}" == "refs/heads/dev" ]]; then
+          if [[ "${GITHUB_REF}" == "refs/heads/preview" ]]; then
             echo "channel=dev" >> "$GITHUB_OUTPUT"
           else
             echo "channel=prod" >> "$GITHUB_OUTPUT"
@@ -127,8 +127,8 @@ jobs:
           tags: |
             # Immutable SHA tag – canonical artifact reference
             type=sha,prefix=sha-
-            # Floating branch tag: "dev" or "latest"
-            type=raw,value=dev,enable=${{ github.ref == 'refs/heads/dev' }}
+            # Floating branch tag: "dev" from preview or "latest" from main
+            type=raw,value=dev,enable=${{ github.ref == 'refs/heads/preview' }}
             type=raw,value=latest,enable=${{ github.ref == 'refs/heads/main' }}
             # Semver tags for version releases
             type=semver,pattern={{version}}
@@ -156,7 +156,7 @@ jobs:
           images: ${{ env.REGISTRY }}/${{ env.GATEWAY_IMAGE }}
           tags: |
             type=sha,prefix=sha-
-            type=raw,value=dev,enable=${{ github.ref == 'refs/heads/dev' }}
+            type=raw,value=dev,enable=${{ github.ref == 'refs/heads/preview' }}
             type=raw,value=latest,enable=${{ github.ref == 'refs/heads/main' }}
             type=semver,pattern={{version}}
             type=semver,pattern={{major}}.{{minor}}
@@ -211,7 +211,7 @@ jobs:
       INFRA_DISPATCH_TOKEN: ${{ secrets.INFRA_DISPATCH_TOKEN }}
     if: |
       needs.build.result == 'success' &&
-      (github.ref == 'refs/heads/dev' || github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/tags/'))
+      (github.ref == 'refs/heads/preview' || github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/tags/'))
 
     steps:
       - name: Skip if INFRA_DISPATCH_TOKEN not configured
