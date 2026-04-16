@@ -501,23 +501,47 @@ def create_app(
 
     # Logout endpoint - cloud-agnostic.
     # If LOGOUT_REDIRECT_URL is set, redirect there (e.g. an IAP / OAuth
-    # proxy sign-out URL). Otherwise, fall back to a local /logged-out page.
+    # proxy sign-out URL). Otherwise, choose a sensible default:
+    #   - mcp_basic_auth mode (IAP): clear IAP cookie via GCP endpoint
+    #   - auth_enabled mode (Basic Auth): return 401 to clear browser cache
+    #   - no auth: simple redirect to local logged-out page
     # This endpoint is exempt from auth middleware so it never loops.
-    logout_redirect_url = os.environ.get("LOGOUT_REDIRECT_URL", "/logged-out")
+    logout_redirect_url_env = os.environ.get("LOGOUT_REDIRECT_URL")
 
     @app.get("/auth/logout")
-    async def logout() -> RedirectResponse:
-        """Log the user out by redirecting to the configured target."""
-        return RedirectResponse(url=logout_redirect_url, status_code=302)
+    async def logout():
+        """Log the user out, clearing auth state appropriately."""
+        from starlette.responses import Response
 
-    # Fallback logged-out page, used when no external auth layer is present.
-    # Must not require auth — this page is where users land after logout.
-    @app.get("/logged-out")
-    async def logged_out():
-        """Simple standalone page shown after logout."""
-        from fastapi.responses import HTMLResponse
+        if logout_redirect_url_env:
+            return RedirectResponse(url=logout_redirect_url_env, status_code=302)
 
-        html = '''<!doctype html>
+        if config.mcp_basic_auth and not config.auth_enabled:
+            # Behind GCP IAP – the only way to clear the IAP session cookie
+            # is via the GCP-provided endpoint.
+            return RedirectResponse(
+                url="/_gcp_iap/clear_login_cookie", status_code=302
+            )
+
+        if config.auth_enabled:
+            # Basic Auth – the browser caches credentials and resends them
+            # automatically. Returning 401 forces the browser to drop its
+            # cached credentials. The response body is the logged-out page
+            # so the user sees it after dismissing the browser auth dialog
+            # (or immediately in programmatic clients).
+            from fastapi.responses import HTMLResponse
+
+            return HTMLResponse(
+                content=_LOGGED_OUT_HTML,
+                status_code=401,
+                headers={"WWW-Authenticate": 'Basic realm="Logged out"'},
+            )
+
+        return RedirectResponse(url="/logged-out", status_code=302)
+
+    # Standalone logged-out page HTML (shared between /logged-out and the
+    # 401 response in Basic Auth mode).
+    _LOGGED_OUT_HTML = '''<!doctype html>
 <html lang="en">
 <head>
   <meta charset="utf-8" />
@@ -586,7 +610,15 @@ def create_app(
 </body>
 </html>
 '''
-        return HTMLResponse(content=html)
+
+    # Fallback logged-out page, used when no external auth layer is present.
+    # Must not require auth — this page is where users land after logout.
+    @app.get("/logged-out")
+    async def logged_out():
+        """Simple standalone page shown after logout."""
+        from fastapi.responses import HTMLResponse
+
+        return HTMLResponse(content=_LOGGED_OUT_HTML)
 
     # API info endpoint
     @app.get("/info")
