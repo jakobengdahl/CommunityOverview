@@ -354,6 +354,7 @@ def create_app(
 
             path = scope.get("path", "")
             method = scope.get("method", "GET")
+            is_root = path in ("", "/")
 
             import logging
             mcp_logger = logging.getLogger("mcp.server")
@@ -365,7 +366,7 @@ def create_app(
             accept_header = headers.get(b"accept", b"").decode("utf-8", errors="ignore")
 
             # POST to the mount root (/mcp) → Streamable HTTP transport
-            if method == "POST" and path in ("", "/") and self.streamable_app:
+            if method == "POST" and is_root and self.streamable_app:
                 await self.streamable_app(scope, receive, send)
                 return
 
@@ -374,7 +375,17 @@ def create_app(
                 await self.streamable_app(scope, receive, send)
                 return
 
-            # GET with SSE accept or POST to sub-paths → legacy SSE app
+            # GET /mcp with Accept: text/event-stream → Streamable HTTP SSE channel
+            # (new spec: server opens SSE stream for server-initiated messages)
+            if method == "GET" and is_root and "text/event-stream" in accept_header:
+                if self.streamable_app:
+                    await self.streamable_app(scope, receive, send)
+                else:
+                    await self.sse_app(scope, receive, send)
+                return
+
+            # Sub-path requests with SSE accept or POST → legacy SSE transport
+            # (GET /mcp/sse, POST /mcp/messages/)
             if "text/event-stream" in accept_header or method == "POST":
                 await self.sse_app(scope, receive, send)
                 return
@@ -385,12 +396,16 @@ def create_app(
                     "endpoint": "/mcp/sse",
                     "type": "MCP (Model Context Protocol) Server",
                     "description": "This endpoint is for MCP clients, not direct browser access.",
-                    "usage": "Use an MCP-compatible client (like Claude Desktop or ChatGPT) to connect to this endpoint: /mcp/sse",
+                    "usage": "Use an MCP-compatible client (like Claude Desktop or ChatGPT) to connect to this endpoint.",
                     "protocol": "MCP supports SSE and Streamable HTTP transports.",
                     "transports": {
-                        "sse": "/mcp/sse",
+                        "sse_legacy": "/mcp/sse",
                         "streamable_http": "/mcp" if self.streamable_app else "not available",
                     },
+                    "streamable_http_endpoints": {
+                        "POST /mcp": "send JSON-RPC message; respond inline or as SSE stream",
+                        "GET /mcp": "open SSE stream for server-initiated messages (Accept: text/event-stream)",
+                    } if self.streamable_app else {},
                     "documentation": "https://modelcontextprotocol.io/",
                     "available_tools": list(tools_map.keys()),
                 })
