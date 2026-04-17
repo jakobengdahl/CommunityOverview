@@ -198,6 +198,23 @@ describe('graphStore', () => {
     });
   });
 
+  describe('edge actions', () => {
+    it('removes an edge by id', () => {
+      useGraphStore.setState({
+        edges: [
+          { id: 'edge-1', source: 'a', target: 'b', type: 'RELATES_TO' },
+          { id: 'edge-2', source: 'b', target: 'c', type: 'RELATES_TO' },
+        ],
+      });
+
+      useGraphStore.getState().removeEdge('edge-1');
+
+      expect(useGraphStore.getState().edges).toEqual([
+        { id: 'edge-2', source: 'b', target: 'c', type: 'RELATES_TO' },
+      ]);
+    });
+  });
+
   describe('getNodeTypeConfig', () => {
     it('returns null when schema not loaded', () => {
       const config = useGraphStore.getState().getNodeTypeConfig('Actor');

@@ -60,6 +60,7 @@ from .models import (
     ProposedNodesResult,
     AddNodesResult,
     DeleteNodesResult,
+    DeleteEdgesResult,
 )
 
 # Event system
@@ -93,6 +94,7 @@ __all__ = [
     "ProposedNodesResult",
     "AddNodesResult",
     "DeleteNodesResult",
+    "DeleteEdgesResult",
 
     # Event system
     "EventContext",

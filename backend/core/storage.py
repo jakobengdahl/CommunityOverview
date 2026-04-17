@@ -30,7 +30,7 @@ from rapidfuzz.distance import Levenshtein
 
 from .models import (
     Node, Edge, NodeType, RelationshipType,
-    SimilarNode, GraphStats, AddNodesResult, DeleteNodesResult
+    SimilarNode, GraphStats, AddNodesResult, DeleteNodesResult, DeleteEdgesResult
 )
 from .vector_store import VectorStore
 
@@ -1161,6 +1161,66 @@ class GraphStorage:
             )
 
             return True
+
+    def delete_edges(
+        self,
+        edge_ids: List[str],
+        event_context: Optional[EventContext] = None,
+    ) -> DeleteEdgesResult:
+        """Delete up to 50 edges in a single operation."""
+        with self._lock:
+            if len(edge_ids) > 50:
+                return DeleteEdgesResult(
+                    deleted_edge_ids=[],
+                    success=False,
+                    message="Max 50 edges can be deleted at a time."
+                )
+
+            deleted_edge_ids = []
+            edge_before_states: Dict[str, Dict[str, Any]] = {}
+
+            try:
+                for edge_id in edge_ids:
+                    edge = self.edges.get(edge_id)
+                    if edge is None:
+                        continue
+
+                    edge_before_states[edge_id] = edge.to_dict()
+
+                    try:
+                        self.graph.remove_edge(edge.source, edge.target, key=edge_id)
+                    except Exception:
+                        pass
+
+                    del self.edges[edge_id]
+                    deleted_edge_ids.append(edge_id)
+
+                self.save()
+
+                for edge_id in deleted_edge_ids:
+                    before_state = edge_before_states[edge_id]
+                    edge_type = before_state.get("type", "RELATES_TO")
+                    self._emit_event(
+                        event_type=EventType.EDGE_DELETE,
+                        entity_kind=EntityKind.EDGE,
+                        entity_id=edge_id,
+                        entity_type=edge_type,
+                        before=before_state,
+                        after=None,
+                        context=event_context,
+                    )
+
+                return DeleteEdgesResult(
+                    deleted_edge_ids=deleted_edge_ids,
+                    success=True,
+                    message=f"Deleted {len(deleted_edge_ids)} edges"
+                )
+            except Exception as e:
+                return DeleteEdgesResult(
+                    deleted_edge_ids=[],
+                    success=False,
+                    message=f"Error during edge deletion: {str(e)}"
+                )
 
     def add_edge(
         self,

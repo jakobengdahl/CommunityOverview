@@ -253,6 +253,13 @@ class MCPLoader:
                 },
                 "required": ["node_ids"],
             }),
+            ("delete_edges", "Delete edges from the graph (max 50 at a time)", {
+                "type": "object",
+                "properties": {
+                    "edge_ids": {"type": "array", "items": {"type": "string"}, "description": "Edge IDs to delete"},
+                },
+                "required": ["edge_ids"],
+            }),
             ("find_similar_nodes", "Find nodes with similar names (fuzzy match)", {
                 "type": "object",
                 "properties": {
@@ -516,7 +523,7 @@ class MCPLoader:
             return {"error": "Graph service not available"}
 
         # Add agent origin for event tracking
-        if agent_id and tool_name in ("add_nodes", "update_node", "delete_nodes"):
+        if agent_id and tool_name in ("add_nodes", "update_node", "delete_nodes", "delete_edges"):
             input_args["event_origin"] = f"agent:{agent_id}"
 
         # Ensure add_nodes always has both required args

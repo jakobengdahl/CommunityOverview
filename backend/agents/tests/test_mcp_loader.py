@@ -247,6 +247,30 @@ class TestToolExecutor:
 
         assert len(mock_service.update_calls) == 1
 
+    def test_executor_routes_delete_edges_to_graph_service(self, mock_service):
+        """Bulk edge deletion tool should route to GraphService.delete_edges."""
+        integrations = [
+            MCPIntegration(id="GRAPH", name="Graph API", transport=MCPTransport.HTTP, url="http://localhost:8000/mcp")
+        ]
+        loader = MCPLoader(integrations)
+
+        loader._tools_cache = {
+            "GRAPH__delete_edges": NamespacedTool(
+                integration_id="GRAPH",
+                original_name="delete_edges",
+                namespaced_name="GRAPH__delete_edges",
+                description="Delete edges",
+                input_schema={}
+            )
+        }
+
+        executor = loader.create_tool_executor(graph_service=mock_service)
+        result = executor("GRAPH__delete_edges", {"edge_ids": ["edge-1", "edge-2"]})
+
+        assert result["success"] is True
+        assert len(mock_service.delete_edges_calls) == 1
+        assert mock_service.delete_edges_calls[0]["edge_ids"] == ["edge-1", "edge-2"]
+
 
 class TestMCPLoaderLifecycle:
     """Tests for MCP loader connection lifecycle."""

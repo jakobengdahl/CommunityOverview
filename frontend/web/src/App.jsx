@@ -37,6 +37,7 @@ function App() {
     setEditingNode,
     closeEditingNode,
     removeNode,
+    removeEdge,
     presentation,
     setConfig,
     focusNodeId,
@@ -244,18 +245,17 @@ function App() {
   // Callback: Delete edge (from backend and visualization)
   const handleDeleteEdge = useCallback(async (edgeId) => {
     try {
-      await api.deleteEdge(edgeId);
-      const newEdges = edges.filter(e => e.id !== edgeId);
-      updateVisualization(nodes, newEdges);
+      const result = await api.deleteEdge(edgeId);
+      if (!result?.success) {
+        throw new Error('Could not delete edge');
+      }
+      removeEdge(edgeId);
       showNotification('success', 'Edge deleted');
     } catch (error) {
       console.error('Error deleting edge:', error);
-      // Still remove from visualization even if backend fails
-      const newEdges = edges.filter(e => e.id !== edgeId);
-      updateVisualization(nodes, newEdges);
-      showNotification('info', 'Edge removed from view');
+      showNotification('error', 'Could not delete edge');
     }
-  }, [nodes, edges, updateVisualization, showNotification]);
+  }, [removeEdge, showNotification]);
 
   // Callback: Edit edge - opens EditEdgeDialog
   const handleEditEdge = useCallback((edgeId, edgeData) => {
