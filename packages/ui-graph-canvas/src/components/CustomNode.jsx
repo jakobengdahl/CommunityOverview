@@ -1,4 +1,5 @@
-import { useState, memo } from 'react';
+import { useState, memo, useRef } from 'react';
+import { createPortal } from 'react-dom';
 import { Handle, Position } from 'reactflow';
 import './CustomNode.css';
 
@@ -19,6 +20,8 @@ import './CustomNode.css';
 function CustomNode({ data, id, selected }) {
   const [showButtons, setShowButtons] = useState(false);
   const [showTooltip, setShowTooltip] = useState(false);
+  const [tooltipPos, setTooltipPos] = useState(null);
+  const nodeRef = useRef(null);
 
   const handleExpand = (e) => {
     e.stopPropagation();
@@ -36,15 +39,24 @@ function CustomNode({ data, id, selected }) {
 
   return (
     <div
+      ref={nodeRef}
       className={`graph-custom-node ${data.isHighlighted ? 'highlighted' : ''} ${selected ? 'selected' : ''}`}
       style={{ borderColor: data.color }}
       onMouseEnter={() => {
         setShowButtons(true);
+        if (nodeRef.current) {
+          const rect = nodeRef.current.getBoundingClientRect();
+          setTooltipPos({
+            top: rect.bottom + 8,
+            left: rect.left + (rect.width / 2),
+          });
+        }
         setShowTooltip(true);
       }}
       onMouseLeave={() => {
         setShowButtons(false);
         setShowTooltip(false);
+        setTooltipPos(null);
       }}
     >
       <Handle type="target" position={Position.Top} />
@@ -83,8 +95,11 @@ function CustomNode({ data, id, selected }) {
         </>
       )}
 
-      {showTooltip && (data.description || data.communities?.length > 0) && (
-        <div className="graph-node-tooltip">
+      {showTooltip && tooltipPos && (data.description || data.communities?.length > 0) && createPortal(
+        <div
+          className="graph-node-tooltip"
+          style={{ top: `${tooltipPos.top}px`, left: `${tooltipPos.left}px`, zIndex: 99999 }}
+        >
           <div className="tooltip-header">
             <strong>{data.nodeType}:</strong> {data.label}
           </div>
@@ -98,7 +113,8 @@ function CustomNode({ data, id, selected }) {
               <strong>Communities:</strong> {data.communities.join(', ')}
             </div>
           )}
-        </div>
+        </div>,
+        document.body
       )}
 
       <Handle type="source" position={Position.Bottom} />
