@@ -37,6 +37,7 @@ from backend.ui import ChatService, DocumentService, create_ui_router
 from backend.agents import AgentRegistry, AgentsSettings
 from backend.federation import FederationManager, load_federation_config, summarize_federation_config
 from backend import config_loader
+from backend.language_policy import format_language_policy_for_prompt
 
 from .config import AppConfig
 
@@ -72,6 +73,8 @@ def _build_mcp_instructions() -> str:
     if presentation.get("prompt_prefix"):
         prompt_context = f"\nDOMAIN CONTEXT:\n{presentation['prompt_prefix']}\n"
 
+    language_policy_section = format_language_policy_for_prompt(presentation, external_agent=True)
+
     instructions = f"""You are a helpful knowledge agent for: {presentation.get('title', 'Knowledge Graph')}.
 {prompt_context}
 METADATA MODEL — Node Types available in this graph:
@@ -96,7 +99,9 @@ DATA MANAGEMENT:
 - ALWAYS check for existing nodes using 'find_similar_nodes' before creating new ones.
 - When adding nodes, use the correct type from the metadata model above.
 - Use 'get_subtypes' to find existing sub-classifications before adding new ones.
+- Follow the graph language policy below for any new or updated graph content.
 
+{language_policy_section}
 VISUALIZATION:
 - If the user asks to see the graph visually or mentions "widget", "canvas", or "visualize",
   provide them with the Widget URL (available via 'get_presentation').

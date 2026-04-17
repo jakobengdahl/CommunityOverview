@@ -53,7 +53,7 @@ function App() {
     showMinimap,
   } = useGraphStore();
 
-  const { t, setLanguage } = useI18n();
+  const { t, setLanguage, language } = useI18n();
 
   const [notification, setNotification] = useState(null);
   const [deleteDialog, setDeleteDialog] = useState(null);
@@ -93,7 +93,7 @@ function App() {
             setLanguage(presentationData.default_language);
           }
         }
-        setConfig(schemaData, presentationData, t);
+        setConfig(schemaData, presentationData, t, language);
         setStats(statsData);
       } catch (error) {
         console.error('Error loading configuration:', error);
@@ -101,7 +101,7 @@ function App() {
       }
     };
     loadConfig();
-  }, [setConfig, setStats, t, setLanguage]);
+  }, [setConfig, setStats, t, setLanguage, language]);
 
   const showNotification = useCallback((type, message) => {
     setNotification({ type, message });

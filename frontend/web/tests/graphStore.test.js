@@ -59,6 +59,13 @@ describe('graphStore', () => {
         prompt_prefix: 'Test prefix',
         prompt_suffix: 'Test suffix',
         default_language: 'en',
+        language_policy: {
+          mode: 'required',
+          primary_language: 'en',
+          allowed_languages: ['en'],
+          description_en: 'Graph content must be written in English.',
+          description_sv: 'Grafens innehåll ska skrivas på engelska.',
+        },
       };
 
       useGraphStore.getState().setPresentation(testPresentation);
@@ -67,8 +74,9 @@ describe('graphStore', () => {
 
       expect(presentation).toEqual(testPresentation);
       expect(configLoaded).toBe(true);
-      // Welcome message should contain introduction
+      // Welcome message should contain introduction and language policy guidance
       expect(chatMessages[0].content).toContain('Welcome to the test graph!');
+      expect(chatMessages[0].content).toContain('Graph content must be written in English.');
     });
 
     it('sets both config at once with setConfig', () => {
