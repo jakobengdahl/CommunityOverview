@@ -246,12 +246,14 @@ class TestMCPToolsWithEdgeCases:
                 }
             }
         )
-        # Should handle gracefully - either return error or success=False
-        assert response.status_code in [200, 400, 500]
+        # Should handle gracefully - either return validation error or auth rejection
+        assert response.status_code in [200, 400, 403, 500]
+        data = response.json()
         if response.status_code == 200:
-            data = response.json()
             # If 200, should indicate error in response
             assert data.get("success") is False or "error" in data
+        else:
+            assert "error" in data
 
     def test_delete_without_confirmation(self, test_app: TestClient):
         """Delete without confirmation returns appropriate message."""
@@ -263,5 +265,9 @@ class TestMCPToolsWithEdgeCases:
             }
         )
         data = response.json()
-        # Should indicate confirmation required
-        assert data.get("success") is False or "confirm" in str(data).lower()
+        # Should indicate confirmation required or auth requirement for mutating tools
+        assert (
+            data.get("success") is False
+            or "confirm" in str(data).lower()
+            or "requires authentication" in str(data).lower()
+        )

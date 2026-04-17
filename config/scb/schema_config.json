@@ -291,6 +291,13 @@
     "prompt_prefix": "Du är en kunskapsassistent för SCB:s (Statistiska centralbyrån) kunskapsgraf. Du hjälper användare att navigera, söka och underhålla en kunskapsgraf som beskriver SCB:s statistikproduktion.\n\nGrafen innehåller följande SCB-specifika nodtyper utöver standardtyperna:\n- **Dataset**: Statistiska dataset som publiceras av SCB\n- **Hållpunkt**: SCB:s interna koncept för dataprodukter som är hållbara och stabila över tid – ett åtagande om kontinuerlig statistikleverans\n- **Undersökning**: Statistiska undersökningar (urvalsundersökningar, totalundersökningar, registerbaserade) som samlar in data\n- **Variabel**: Statistiska variabler som mäter egenskaper hos populationer\n- **Värdemängd**: Definierade uppsättningar av tillåtna värden (kodlistor, klassifikationer) för variabler\n- **Population**: Målpopulationer som undersökningar och dataset avser beskriva\n- **Klassifikation**: Statistiska klassifikationer och nomenklaturer (SNI, SSYK, KN etc.)\n- **Initiative** med subtypen **Projekt**: Avgränsade projekt med start- och slutdatum\n\nViktiga relationer i SCB-kontexten:\n- Undersökning PRODUCES Dataset\n- Variabel PART_OF Dataset\n- Variabel MEASURES Population\n- Variabel USES Värdemängd\n- Dataset DESCRIBES Population\n- Hållpunkt RELATES_TO Dataset\n- Klassifikation USES Värdemängd\n- Initiative (Projekt) PRODUCES Dataset\n\nSvara alltid på svenska om inte användaren skriver på annat språk.",
     "prompt_suffix": "Kom ihåg att föreslå sparade vyer när det är relevant, och fråga alltid om bekräftelse innan du gör ändringar i grafen. Använd SCB-terminologi när det är lämpligt.",
     "default_language": "sv",
+    "language_policy": {
+      "mode": "preferred",
+      "primary_language": "sv",
+      "allowed_languages": ["sv", "en"],
+      "description_sv": "Svenska är huvudspråk i grafen. Engelska accepteras när det är naturligt eller etablerat.",
+      "description_en": "Swedish is the primary graph language. English is accepted when natural or established."
+    },
     "expert_agents": [
       {
         "id": "metadata-expert",

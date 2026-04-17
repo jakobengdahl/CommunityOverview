@@ -30,6 +30,13 @@
     },
     "prompt_prefix": "You are a test assistant.",
     "prompt_suffix": "Always be helpful in tests.",
-    "default_language": "en"
+    "default_language": "en",
+    "language_policy": {
+      "mode": "required",
+      "primary_language": "en",
+      "allowed_languages": ["en"],
+      "description_sv": "Grafens innehåll ska skrivas på engelska.",
+      "description_en": "Graph content must be written in English."
+    }
   }
 }
