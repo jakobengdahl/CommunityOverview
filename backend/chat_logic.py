@@ -5,6 +5,7 @@ from dotenv import load_dotenv
 import inspect
 from backend.llm_providers import create_provider, LLMProvider
 from backend import config_loader
+from backend.language_policy import format_language_policy_for_prompt
 
 # Load environment variables
 load_dotenv()
@@ -54,12 +55,14 @@ def _build_system_prompt() -> str:
     # Get custom prompt parts
     prompt_prefix = presentation.get("prompt_prefix", "")
     prompt_suffix = presentation.get("prompt_suffix", "")
+    language_policy_section = format_language_policy_for_prompt(presentation)
 
     # Build the full system prompt
     return _BASE_SYSTEM_PROMPT.format(
         prompt_prefix=prompt_prefix,
         node_types_section=node_types_section,
         relationship_types_section=rel_types_section,
+        language_policy_section=language_policy_section,
         prompt_suffix=prompt_suffix
     )
 
@@ -90,9 +93,10 @@ When user says "visualization", determine from context:
 
 LANGUAGE HANDLING:
 - Respond in the same language the user is using (Swedish, English, etc.)
-- The graph data is primarily in Swedish, so Swedish responses are often most appropriate
-- Technical terms and node types should remain in English for consistency
+- Technical terms and node types should remain in English for consistency when appropriate
+- Follow the graph language policy below for any new or updated graph content
 
+{language_policy_section}
 CRITICAL - API RATE LIMIT OPTIMIZATION:
 To avoid rate limit errors (429), follow these strict rules:
 1. MINIMIZE the number of API calls - combine operations whenever possible

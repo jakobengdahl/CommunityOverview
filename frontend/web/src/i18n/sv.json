@@ -1,6 +1,7 @@
 {
   "welcome": {
     "title": "Välkommen till Community Knowledge Graph!",
+    "language_policy_label": "Språkpolicy",
     "prompt": "Du kan ställa frågor som:",
     "examples": [
       "Vilka initiativ relaterar till NIS2?",
@@ -106,6 +107,9 @@
     "export_graph": "Exportera graf",
     "export_success": "Grafen exporterad",
     "export_error": "Kunde inte exportera grafen",
+    "language_section": "Språk",
+    "language_en": "English",
+    "language_sv": "Svenska",
     "logout": "Logga ut"
   },
   "experts": {

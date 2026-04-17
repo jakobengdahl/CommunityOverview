@@ -6,7 +6,7 @@ import { COLOR_MAP } from './FloatingToolbar';
 import './FloatingHeader.css';
 
 function FloatingHeader({ stats, title = 'Community Graph View', onExportGraph }) {
-  const { t } = useI18n();
+  const { t, language, setLanguage } = useI18n();
   const { showMinimap, setShowMinimap } = useGraphStore();
   const [menuOpen, setMenuOpen] = useState(false);
   const [dropdownLeft, setDropdownLeft] = useState(null);
@@ -92,6 +92,23 @@ function FloatingHeader({ stats, title = 'Community Graph View', onExportGraph }
                 <Map size={14} />
                 <span>{t('menu.show_minimap') || 'Show minimap'}</span>
                 <span className={`floating-header-toggle${showMinimap ? ' active' : ''}`} />
+              </button>
+
+              <div className="floating-header-section-divider" />
+              <div className="floating-header-section-title">{t('menu.language_section') || 'Language'}</div>
+              <button
+                className="floating-header-menu-item"
+                onClick={() => setLanguage('en')}
+              >
+                <span>{t('menu.language_en') || 'English'}</span>
+                <span className={`floating-header-toggle${language === 'en' ? ' active' : ''}`} />
+              </button>
+              <button
+                className="floating-header-menu-item"
+                onClick={() => setLanguage('sv')}
+              >
+                <span>{t('menu.language_sv') || 'Svenska'}</span>
+                <span className={`floating-header-toggle${language === 'sv' ? ' active' : ''}`} />
               </button>
 
               <div className="floating-header-section-divider" />
