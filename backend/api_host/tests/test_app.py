@@ -209,6 +209,14 @@ class TestNodeEndpoints:
         data = response.json()
         assert data["success"] is True
 
+    def test_delete_edge(self, test_app: TestClient):
+        """Delete edge endpoint works."""
+        response = test_app.delete("/api/edges/edge-1")
+        assert response.status_code == 200
+        data = response.json()
+        assert data["success"] is True
+        assert data["deleted_edge_id"] == "edge-1"
+
 
 class TestSimilarityEndpoints:
     """Tests for similarity search endpoints."""

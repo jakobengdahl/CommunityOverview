@@ -30,6 +30,7 @@ from .serializers import (
     serialize_edge, serialize_edges,
     serialize_similar_node, serialize_similar_nodes,
     serialize_graph_stats, serialize_add_result, serialize_delete_result,
+    serialize_delete_edges_result,
     serialize_to_json
 )
 
@@ -730,6 +731,25 @@ class GraphService:
             return {"success": False, "error": f"Edge with ID {edge_id} not found"}
 
         return {"success": True, "deleted_edge_id": edge_id}
+
+    def delete_edges(
+        self,
+        edge_ids: List[str],
+        event_origin: Optional[str] = None,
+        event_session_id: Optional[str] = None,
+        event_correlation_id: Optional[str] = None,
+    ) -> Dict[str, Any]:
+        """Delete up to 50 edges in a single operation."""
+        event_context = None
+        if event_origin or event_session_id or event_correlation_id:
+            event_context = EventContext(
+                event_origin=event_origin,
+                event_session_id=event_session_id,
+                event_correlation_id=event_correlation_id,
+            )
+
+        result = self._storage.delete_edges(edge_ids, event_context=event_context)
+        return serialize_delete_edges_result(result)
 
     # ==================== Statistics & Metadata ====================
 

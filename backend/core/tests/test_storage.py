@@ -189,6 +189,30 @@ class TestGraphStorageCRUD:
         # Node should still exist
         assert storage_with_data.get_node("actor-1") is not None
 
+    def test_delete_edge(self, storage_with_data):
+        """Test deleting a single edge."""
+        deleted = storage_with_data.delete_edge("edge-1")
+
+        assert deleted is True
+        assert "edge-1" not in storage_with_data.edges
+
+    def test_delete_edges_max_50(self, storage_with_data):
+        """Test that bulk edge deletion is limited to 50 edges."""
+        edge_ids = [f"edge-{i}" for i in range(60)]
+        result = storage_with_data.delete_edges(edge_ids)
+
+        assert result.success is False
+        assert "Max 50" in result.message
+
+    def test_delete_edges_bulk(self, storage_with_data):
+        """Test deleting multiple edges in one call."""
+        result = storage_with_data.delete_edges(["edge-1", "edge-2"])
+
+        assert result.success is True
+        assert set(result.deleted_edge_ids) == {"edge-1", "edge-2"}
+        assert "edge-1" not in storage_with_data.edges
+        assert "edge-2" not in storage_with_data.edges
+
     def test_delete_max_10_nodes(self, storage_with_data):
         """Test that max 10 nodes can be deleted at once"""
         node_ids = [f"node-{i}" for i in range(15)]

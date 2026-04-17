@@ -214,6 +214,11 @@ const useGraphStore = create((set, get) => ({
     });
   },
 
+  removeEdge: (edgeId) => {
+    const { edges } = get();
+    set({ edges: edges.filter(edge => edge.id !== edgeId) });
+  },
+
   clearVisualization: () => set({
     nodes: [],
     edges: [],

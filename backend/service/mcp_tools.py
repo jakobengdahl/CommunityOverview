@@ -257,6 +257,30 @@ def register_mcp_tools(mcp, service: GraphService) -> Dict[str, Callable]:
             event_correlation_id=event_correlation_id,
         )
 
+    @register_tool
+    def delete_edges(
+        edge_ids: List[str],
+        event_session_id: Optional[str] = None,
+        event_correlation_id: Optional[str] = None,
+    ) -> Dict[str, Any]:
+        """
+        Delete edges from the graph (max 50 at a time)
+
+        Args:
+            edge_ids: List of edge IDs to delete
+            event_session_id: Optional session ID for webhook loop prevention
+            event_correlation_id: Optional correlation ID for chaining events
+
+        Returns:
+            Dict with result (deleted_edge_ids, success, message)
+        """
+        return service.delete_edges(
+            edge_ids=edge_ids,
+            event_origin="mcp",
+            event_session_id=event_session_id,
+            event_correlation_id=event_correlation_id,
+        )
+
     # ==================== Statistics & Metadata Tools ====================
 
     @register_tool
