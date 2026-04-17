@@ -209,3 +209,65 @@ class TestNoAuthDisabled:
             assert resp.status_code != 401
         finally:
             os.unlink(path)
+
+
+class TestLogoutRoutes:
+    """Logout routes must be reachable without auth and behave
+    cloud-agnostically based on LOGOUT_REDIRECT_URL."""
+
+    def _make_client(self, **config_overrides) -> tuple:
+        config, path = _make_config(**config_overrides)
+        app = create_app(config)
+        return TestClient(app), path
+
+    def test_logout_exempt_from_auth_enabled(self):
+        """/auth/logout must be reachable without credentials when auth_enabled."""
+        client, path = self._make_client(
+            auth_enabled=True, auth_password="secret"
+        )
+        try:
+            resp = client.get("/auth/logout", follow_redirects=False)
+            assert resp.status_code == 302
+        finally:
+            os.unlink(path)
+
+    def test_logged_out_page_exempt_from_auth_enabled(self):
+        """/logged-out must render without credentials when auth_enabled."""
+        client, path = self._make_client(
+            auth_enabled=True, auth_password="secret"
+        )
+        try:
+            resp = client.get("/logged-out")
+            assert resp.status_code == 200
+            assert "logged out" in resp.text.lower()
+        finally:
+            os.unlink(path)
+
+    def test_logout_defaults_to_local_logged_out_page(self):
+        """Without LOGOUT_REDIRECT_URL, /auth/logout redirects to /logged-out."""
+        with patch.dict(os.environ, {}, clear=False):
+            os.environ.pop("LOGOUT_REDIRECT_URL", None)
+            client, path = self._make_client()
+            try:
+                resp = client.get("/auth/logout", follow_redirects=False)
+                assert resp.status_code == 302
+                assert resp.headers["location"] == "/logged-out"
+            finally:
+                os.unlink(path)
+
+    def test_logout_honors_env_redirect_url(self):
+        """When LOGOUT_REDIRECT_URL is set, /auth/logout redirects there."""
+        with patch.dict(
+            os.environ,
+            {"LOGOUT_REDIRECT_URL": "https://example.com/sign-out"},
+        ):
+            client, path = self._make_client()
+            try:
+                resp = client.get("/auth/logout", follow_redirects=False)
+                assert resp.status_code == 302
+                assert (
+                    resp.headers["location"]
+                    == "https://example.com/sign-out"
+                )
+            finally:
+                os.unlink(path)

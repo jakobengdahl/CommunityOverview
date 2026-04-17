@@ -1,12 +1,13 @@
 import { useState, useRef, useEffect } from 'react';
-import { List, Feather, Download } from 'react-bootstrap-icons';
+import { List, Feather, Download, Map, BoxArrowRight } from 'react-bootstrap-icons';
 import useGraphStore from '../store/graphStore';
 import { useI18n } from '../i18n';
 import { COLOR_MAP } from './FloatingToolbar';
 import './FloatingHeader.css';
 
 function FloatingHeader({ stats, title = 'Community Graph View', onExportGraph }) {
-  const { t } = useI18n();
+  const { t, language, setLanguage } = useI18n();
+  const { showMinimap, setShowMinimap } = useGraphStore();
   const [menuOpen, setMenuOpen] = useState(false);
   const [dropdownLeft, setDropdownLeft] = useState(null);
   const menuRef = useRef(null);
@@ -83,6 +84,34 @@ function FloatingHeader({ stats, title = 'Community Graph View', onExportGraph }
               )}
 
               <div className="floating-header-section-divider" />
+              <div className="floating-header-section-title">{t('menu.view_section') || 'View'}</div>
+              <button
+                className="floating-header-menu-item"
+                onClick={() => setShowMinimap(!showMinimap)}
+              >
+                <Map size={14} />
+                <span>{t('menu.show_minimap') || 'Show minimap'}</span>
+                <span className={`floating-header-toggle${showMinimap ? ' active' : ''}`} />
+              </button>
+
+              <div className="floating-header-section-divider" />
+              <div className="floating-header-section-title">{t('menu.language_section') || 'Language'}</div>
+              <button
+                className="floating-header-menu-item"
+                onClick={() => setLanguage('en')}
+              >
+                <span>{t('menu.language_en') || 'English'}</span>
+                <span className={`floating-header-toggle${language === 'en' ? ' active' : ''}`} />
+              </button>
+              <button
+                className="floating-header-menu-item"
+                onClick={() => setLanguage('sv')}
+              >
+                <span>{t('menu.language_sv') || 'Svenska'}</span>
+                <span className={`floating-header-toggle${language === 'sv' ? ' active' : ''}`} />
+              </button>
+
+              <div className="floating-header-section-divider" />
               <div className="floating-header-section-title">Admin</div>
               <button
                 className="floating-header-menu-item"
@@ -98,6 +127,21 @@ function FloatingHeader({ stats, title = 'Community Graph View', onExportGraph }
           ) : (
             <div className="floating-header-placeholder">Loading stats...</div>
           )}
+
+          {/* Logout is always shown — redirect is harmless regardless of
+              AUTH_ENABLED. Backend routes /auth/logout and /logged-out are
+              exempt from auth middleware so the user never gets stuck. */}
+          <div className="floating-header-section-divider" />
+          <button
+            className="floating-header-menu-item floating-header-menu-item-logout"
+            onClick={() => {
+              setMenuOpen(false);
+              window.location.href = '/auth/logout';
+            }}
+          >
+            <BoxArrowRight size={14} />
+            <span>{t('menu.logout')}</span>
+          </button>
         </div>
       )}
     </div>

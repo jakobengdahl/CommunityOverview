@@ -87,6 +87,15 @@ class ExpertAgentConfig(BaseModel):
     system_context: str = ""
 
 
+class LanguagePolicyConfig(BaseModel):
+    """Per-graph language policy for graph content."""
+    mode: str = "preferred"
+    primary_language: str = "en"
+    allowed_languages: List[str] = Field(default_factory=lambda: ["en", "sv"])
+    description_sv: str = "Engelska är huvudspråk i grafen. Svenska accepteras när det är naturligt eller etablerat."
+    description_en: str = "English is the primary graph language. Swedish is accepted when natural or established."
+
+
 class PresentationConfig(BaseModel):
     """Presentation configuration for UI and prompts."""
     title: str = "Community Knowledge Graph"
@@ -95,6 +104,7 @@ class PresentationConfig(BaseModel):
     prompt_prefix: str = ""
     prompt_suffix: str = ""
     default_language: str = "en"
+    language_policy: LanguagePolicyConfig = Field(default_factory=LanguagePolicyConfig)
     widget_url: str = ""  # URL template for the graph widget
     expert_agents: List[ExpertAgentConfig] = Field(default_factory=list)
 
@@ -280,6 +290,7 @@ def get_presentation() -> Dict[str, Any]:
         "prompt_prefix": pres.prompt_prefix,
         "prompt_suffix": pres.prompt_suffix,
         "default_language": pres.default_language,
+        "language_policy": pres.language_policy.dict(),
         "widget_url": pres.widget_url,
         "expert_agents": [agent.dict() for agent in pres.expert_agents]
     }

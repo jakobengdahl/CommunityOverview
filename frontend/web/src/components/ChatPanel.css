@@ -21,6 +21,12 @@
   animation: chatPanelOpen 0.25s ease-out;
 }
 
+/* When minimap is hidden the panel can extend further toward the bottom */
+.chat-panel-floating.minimap-hidden {
+  height: calc(100vh - 96px);
+  max-height: calc(100vh - 96px);
+}
+
 @keyframes chatPanelOpen {
   from {
     opacity: 0;

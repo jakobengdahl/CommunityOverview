@@ -37,6 +37,7 @@ from backend.ui import ChatService, DocumentService, create_ui_router
 from backend.agents import AgentRegistry, AgentsSettings
 from backend.federation import FederationManager, load_federation_config, summarize_federation_config
 from backend import config_loader
+from backend.language_policy import format_language_policy_for_prompt
 
 from .config import AppConfig
 
@@ -72,6 +73,8 @@ def _build_mcp_instructions() -> str:
     if presentation.get("prompt_prefix"):
         prompt_context = f"\nDOMAIN CONTEXT:\n{presentation['prompt_prefix']}\n"
 
+    language_policy_section = format_language_policy_for_prompt(presentation, external_agent=True)
+
     instructions = f"""You are a helpful knowledge agent for: {presentation.get('title', 'Knowledge Graph')}.
 {prompt_context}
 METADATA MODEL — Node Types available in this graph:
@@ -96,7 +99,9 @@ DATA MANAGEMENT:
 - ALWAYS check for existing nodes using 'find_similar_nodes' before creating new ones.
 - When adding nodes, use the correct type from the metadata model above.
 - Use 'get_subtypes' to find existing sub-classifications before adding new ones.
+- Follow the graph language policy below for any new or updated graph content.
 
+{language_policy_section}
 VISUALIZATION:
 - If the user asks to see the graph visually or mentions "widget", "canvas", or "visualize",
   provide them with the Widget URL (available via 'get_presentation').
@@ -143,8 +148,10 @@ def create_app(
             if request.method == "OPTIONS":
                 return await call_next(request)
 
-            # Allow health check and info without auth
-            if request.url.path in ["/health", "/info"]:
+            # Allow health check, info, and logout-related routes without auth.
+            # /auth/logout and /logged-out must be reachable without a valid
+            # session, otherwise the user ends up in an auth loop.
+            if request.url.path in ["/health", "/info", "/auth/logout", "/logged-out"]:
                 return await call_next(request)
 
             # In MCP-only mode, only require auth for MCP and execute_tool paths
@@ -352,6 +359,7 @@ def create_app(
 
             path = scope.get("path", "")
             method = scope.get("method", "GET")
+            is_root = path in ("", "/")
 
             import logging
             mcp_logger = logging.getLogger("mcp.server")
@@ -363,7 +371,7 @@ def create_app(
             accept_header = headers.get(b"accept", b"").decode("utf-8", errors="ignore")
 
             # POST to the mount root (/mcp) → Streamable HTTP transport
-            if method == "POST" and path in ("", "/") and self.streamable_app:
+            if method == "POST" and is_root and self.streamable_app:
                 await self.streamable_app(scope, receive, send)
                 return
 
@@ -372,7 +380,17 @@ def create_app(
                 await self.streamable_app(scope, receive, send)
                 return
 
-            # GET with SSE accept or POST to sub-paths → legacy SSE app
+            # GET /mcp with Accept: text/event-stream → Streamable HTTP SSE channel
+            # (new spec: server opens SSE stream for server-initiated messages)
+            if method == "GET" and is_root and "text/event-stream" in accept_header:
+                if self.streamable_app:
+                    await self.streamable_app(scope, receive, send)
+                else:
+                    await self.sse_app(scope, receive, send)
+                return
+
+            # Sub-path requests with SSE accept or POST → legacy SSE transport
+            # (GET /mcp/sse, POST /mcp/messages/)
             if "text/event-stream" in accept_header or method == "POST":
                 await self.sse_app(scope, receive, send)
                 return
@@ -383,12 +401,16 @@ def create_app(
                     "endpoint": "/mcp/sse",
                     "type": "MCP (Model Context Protocol) Server",
                     "description": "This endpoint is for MCP clients, not direct browser access.",
-                    "usage": "Use an MCP-compatible client (like Claude Desktop or ChatGPT) to connect to this endpoint: /mcp/sse",
+                    "usage": "Use an MCP-compatible client (like Claude Desktop or ChatGPT) to connect to this endpoint.",
                     "protocol": "MCP supports SSE and Streamable HTTP transports.",
                     "transports": {
-                        "sse": "/mcp/sse",
+                        "sse_legacy": "/mcp/sse",
                         "streamable_http": "/mcp" if self.streamable_app else "not available",
                     },
+                    "streamable_http_endpoints": {
+                        "POST /mcp": "send JSON-RPC message; respond inline or as SSE stream",
+                        "GET /mcp": "open SSE stream for server-initiated messages (Accept: text/event-stream)",
+                    } if self.streamable_app else {},
                     "documentation": "https://modelcontextprotocol.io/",
                     "available_tools": list(tools_map.keys()),
                 })
@@ -496,6 +518,95 @@ def create_app(
     async def root() -> RedirectResponse:
         """Redirect root to web application."""
         return RedirectResponse(url="/web/", status_code=302)
+
+    # Logout endpoint - cloud-agnostic.
+    # If LOGOUT_REDIRECT_URL is set, redirect there (e.g. an IAP / OAuth
+    # proxy sign-out URL). Otherwise, fall back to a local /logged-out page.
+    # This endpoint is exempt from auth middleware so it never loops.
+    logout_redirect_url = os.environ.get("LOGOUT_REDIRECT_URL", "/logged-out")
+
+    @app.get("/auth/logout")
+    async def logout() -> RedirectResponse:
+        """Log the user out by redirecting to the configured target."""
+        return RedirectResponse(url=logout_redirect_url, status_code=302)
+
+    # Fallback logged-out page, used when no external auth layer is present.
+    # Must not require auth — this page is where users land after logout.
+    @app.get("/logged-out")
+    async def logged_out():
+        """Simple standalone page shown after logout."""
+        from fastapi.responses import HTMLResponse
+
+        html = '''<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Logged out</title>
+  <link rel="icon" href="/favicon.svg" />
+  <style>
+    :root { color-scheme: dark; }
+    html, body {
+      margin: 0;
+      padding: 0;
+      height: 100%;
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto,
+        Helvetica, Arial, sans-serif;
+      background: #121212;
+      color: #eaeaea;
+    }
+    body {
+      display: flex;
+      align-items: center;
+      justify-content: center;
+    }
+    .logged-out-card {
+      background: rgba(26, 26, 26, 0.95);
+      border: 1px solid #333;
+      border-radius: 12px;
+      box-shadow: 0 8px 32px rgba(0, 0, 0, 0.5);
+      padding: 32px 40px;
+      max-width: 420px;
+      text-align: center;
+    }
+    .logged-out-card h1 {
+      margin: 0 0 12px 0;
+      font-size: 1.4rem;
+      font-weight: 600;
+      color: #fff;
+    }
+    .logged-out-card p {
+      margin: 0 0 20px 0;
+      color: #bbb;
+      font-size: 0.95rem;
+      line-height: 1.5;
+    }
+    .logged-out-card a {
+      display: inline-block;
+      padding: 10px 18px;
+      background: #646cff;
+      color: #fff;
+      text-decoration: none;
+      border-radius: 8px;
+      font-size: 0.9rem;
+      font-weight: 500;
+      transition: background 0.15s;
+    }
+    .logged-out-card a:hover {
+      background: #535bf2;
+    }
+  </style>
+</head>
+<body>
+  <div class="logged-out-card">
+    <h1>You have been logged out</h1>
+    <p>Your session has ended. You can return to the application using the link below.</p>
+    <a href="/">Back to start</a>
+  </div>
+</body>
+</html>
+'''
+        return HTMLResponse(content=html)
 
     # API info endpoint
     @app.get("/info")

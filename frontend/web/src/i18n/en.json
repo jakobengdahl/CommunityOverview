@@ -1,6 +1,7 @@
 {
   "welcome": {
     "title": "Welcome to Community Knowledge Graph!",
+    "language_policy_label": "Language policy",
     "prompt": "You can ask questions like:",
     "examples": [
       "What initiatives relate to NIS2?",
@@ -105,7 +106,11 @@
   "menu": {
     "export_graph": "Export graph",
     "export_success": "Graph exported",
-    "export_error": "Could not export graph"
+    "export_error": "Could not export graph",
+    "language_section": "Language",
+    "language_en": "English",
+    "language_sv": "Svenska",
+    "logout": "Log out"
   },
   "experts": {
     "title": "Expert Agents",

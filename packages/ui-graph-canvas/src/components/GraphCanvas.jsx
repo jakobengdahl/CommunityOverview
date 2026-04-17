@@ -86,6 +86,7 @@ function GraphCanvasInner({
   federationDepthLevels = null,
   federationDepthLabel = "Depth",
   federationDepthTooltip = "Depth levels are defined by installation configuration",
+  showMinimap = false,
 }) {
   const [loadedNodeCount, setLoadedNodeCount] = useState(INITIAL_LOAD_COUNT);
   const [nodeContextMenu, setNodeContextMenu] = useState(null);
@@ -763,13 +764,15 @@ function GraphCanvasInner({
         >
           <Background color="#333" gap={16} />
           <Controls />
-          <MiniMap
-            nodeColor={(node) => node.data?.color || '#9CA3AF'}
-            maskColor="rgba(0, 0, 0, 0.5)"
-            position="bottom-right"
-            pannable
-            zoomable
-          />
+          {showMinimap && (
+            <MiniMap
+              nodeColor={(node) => node.data?.color || '#9CA3AF'}
+              maskColor="rgba(0, 0, 0, 0.5)"
+              position="bottom-right"
+              pannable
+              zoomable
+            />
+          )}
         </ReactFlow>
 
         {depthLevels.length > 1 && (

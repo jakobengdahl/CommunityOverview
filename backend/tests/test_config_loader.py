@@ -79,6 +79,7 @@ class TestConfigLoader:
         assert "prompt_prefix" in presentation
         assert "prompt_suffix" in presentation
         assert "default_language" in presentation
+        assert "language_policy" in presentation
 
     def test_custom_presentation(self):
         """Test presentation from custom config."""
@@ -95,6 +96,9 @@ class TestConfigLoader:
         assert presentation["title"] == "Test Knowledge Graph"
         assert presentation["introduction"] == "This is a test instance."
         assert presentation["prompt_prefix"] == "You are a test assistant."
+        assert presentation["language_policy"]["mode"] == "required"
+        assert presentation["language_policy"]["primary_language"] == "en"
+        assert presentation["language_policy"]["allowed_languages"] == ["en"]
 
         del os.environ["SCHEMA_FILE"]
 

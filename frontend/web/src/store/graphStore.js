@@ -1,6 +1,17 @@
 import { create } from 'zustand';
 
 const FEDERATION_DEPTH_STORAGE_KEY = 'federation_depth';
+const SHOW_MINIMAP_STORAGE_KEY = 'show_minimap';
+
+function loadInitialShowMinimap() {
+  try {
+    const stored = window?.localStorage?.getItem(SHOW_MINIMAP_STORAGE_KEY);
+    if (stored !== null) return stored === 'true';
+  } catch {
+    // ignore storage errors and use default
+  }
+  return false;
+}
 
 function loadInitialFederationDepth() {
   try {
@@ -34,21 +45,39 @@ You can also upload documents (PDF, Word, text) to extract entities.
   id: 'welcome',
 };
 
+function getLanguagePolicyText(presentation, language = 'en', t) {
+  const policy = presentation?.language_policy;
+  if (!policy) return '';
+
+  const description = language === 'sv'
+    ? (policy.description_sv || policy.description_en)
+    : (policy.description_en || policy.description_sv);
+
+  if (!description) return '';
+
+  const label = t ? t('welcome.language_policy_label') : (language === 'sv' ? 'Språkpolicy' : 'Language policy');
+  return `**${label}:** ${description}`;
+}
+
 /**
  * Create a welcome message using the presentation config and i18n translations.
  * @param {Object} presentation - Presentation config from backend
  * @param {Function} t - Translation function from i18n (optional)
+ * @param {string} language - Active UI language (optional)
  */
-function createWelcomeMessage(presentation, t) {
+function createWelcomeMessage(presentation, t, language = 'en') {
   const intro = presentation?.introduction || '';
   const title = presentation?.title || '';
+  const languagePolicyText = getLanguagePolicyText(presentation, language, t);
 
   // If the introduction contains multiple paragraphs, treat it as a complete
   // welcome message and skip appending generic i18n examples/hints.
   if (intro && intro.includes('\n')) {
     return {
       role: 'assistant',
-      content: title ? `**${title}**\n\n${intro}` : intro,
+      content: title
+        ? `**${title}**\n\n${intro}${languagePolicyText ? `\n\n${languagePolicyText}` : ''}`
+        : `${intro}${languagePolicyText ? `\n\n${languagePolicyText}` : ''}`,
       timestamp: new Date(),
       id: 'welcome',
     };
@@ -67,7 +96,7 @@ function createWelcomeMessage(presentation, t) {
 
     return {
       role: 'assistant',
-      content: `${i18nTitle}\n\n${intro ? intro + '\n\n' : ''}${prompt}\n${exampleLines}\n\n${uploadHint}\n\n${privacyNotice}`,
+      content: `${i18nTitle}\n\n${intro ? intro + '\n\n' : ''}${languagePolicyText ? languagePolicyText + '\n\n' : ''}${prompt}\n${exampleLines}\n\n${uploadHint}\n\n${privacyNotice}`,
       timestamp: new Date(),
       id: 'welcome',
     };
@@ -76,7 +105,9 @@ function createWelcomeMessage(presentation, t) {
   // Fallback without i18n
   return {
     role: 'assistant',
-    content: intro ? `${DEFAULT_WELCOME_MESSAGE.content.split('\n')[0]}\n\n${intro}\n\n${DEFAULT_WELCOME_MESSAGE.content.split('\n').slice(2).join('\n')}` : DEFAULT_WELCOME_MESSAGE.content,
+    content: intro
+      ? `${DEFAULT_WELCOME_MESSAGE.content.split('\n')[0]}\n\n${intro}${languagePolicyText ? `\n\n${languagePolicyText}` : ''}\n\n${DEFAULT_WELCOME_MESSAGE.content.split('\n').slice(2).join('\n')}`
+      : `${DEFAULT_WELCOME_MESSAGE.content}${languagePolicyText ? `\n\n${languagePolicyText}` : ''}`,
     timestamp: new Date(),
     id: 'welcome',
   };
@@ -107,6 +138,7 @@ const useGraphStore = create((set, get) => ({
   focusNodeId: null, // Node ID to zoom/pan to
   pendingGroups: null, // Groups to restore from a saved view
   chatPanelOpen: true, // Chat panel expanded vs minimized
+  showMinimap: loadInitialShowMinimap(), // Minimap visibility (persisted)
 
   // Search state
   searchQuery: '',
@@ -233,6 +265,15 @@ const useGraphStore = create((set, get) => ({
     set({ federationDepth: normalized });
   },
 
+  setShowMinimap: (show) => {
+    try {
+      window?.localStorage?.setItem(SHOW_MINIMAP_STORAGE_KEY, String(show));
+    } catch {
+      // ignore storage errors
+    }
+    set({ showMinimap: show });
+  },
+
   setStats: (stats) => set({ stats }),
 
   setLoading: (isLoading) => set({ isLoading }),
@@ -242,9 +283,9 @@ const useGraphStore = create((set, get) => ({
   // Schema and presentation actions
   setSchema: (schema) => set({ schema }),
 
-  setPresentation: (presentation, t) => {
+  setPresentation: (presentation, t, language) => {
     // Update welcome message with new presentation
-    const welcomeMessage = createWelcomeMessage(presentation, t);
+    const welcomeMessage = createWelcomeMessage(presentation, t, language);
     const { chatMessages } = get();
 
     // Replace the welcome message if it's the first message
@@ -260,8 +301,8 @@ const useGraphStore = create((set, get) => ({
     });
   },
 
-  setConfig: (schema, presentation, t) => {
-    const welcomeMessage = createWelcomeMessage(presentation, t);
+  setConfig: (schema, presentation, t, language) => {
+    const welcomeMessage = createWelcomeMessage(presentation, t, language);
     set({
       schema,
       presentation,
