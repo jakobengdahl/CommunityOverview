@@ -88,11 +88,13 @@ Hosted operation will need cleaner boundaries between shared app config and tena
 - clearer rules for tenant-scoped versus shared config
 - fewer implicit single-tenant assumptions
 - easier external provisioning and validation
+- support for graph/workspace contexts within shared service instances, not just one deployed stack per graph
 
 **Suggested first slice**
 - document config layering rules
 - identify which existing config fields are tenant-specific
 - add validation seams instead of full tenant orchestration
+- separate tenant metadata from graph-selection and graph-access policy concerns
 
 **Potential files**
 - `backend/config_loader.py`
@@ -110,10 +112,12 @@ Hosted service layers will eventually need stronger actor attribution and access
 - request identity can be carried through write operations
 - mutation responses or event payloads can attribute actor identity in a generic form
 - the core stays auth-provider-agnostic
+- graph access can later be constrained by application-managed user membership and RBAC/policy checks inside shared hosting
 
 **Suggested first slice**
 - introduce a lightweight request actor abstraction
 - thread actor metadata into mutation paths where it can later feed audit logs or webhooks
+- define the seam where user directory / RBAC decisions can narrow graph scope for reads and writes
 
 ---
 
@@ -126,10 +130,12 @@ Hosted operation depends on reliable health, restore boundaries, and machine-rea
 - clearer readiness versus liveness behavior
 - better startup diagnostics for config and extension loading
 - improved export/import friendliness for support and restore workflows
+- a future-friendly path from file-based persistence to shared storage for hosted SaaS
 
 **Suggested first slice**
 - improve structured startup logging around config/runtime/capability loading
 - add generic integrity diagnostics where cheap to expose
+- identify the storage abstraction seams needed before a shared RBAC-aware storage backend is introduced
 
 ---
 

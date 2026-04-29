@@ -20,6 +20,21 @@ The core should evolve so that it can:
 3. expose stable extension points for optional service-layer or plugin-based capabilities
 4. keep the open source core useful even when no hosted or premium layer is present
 
+## Clarification: what tenant-aware hosted operation means here
+
+For the target SaaS model, tenant-aware operation should not imply one dedicated application stack per graph.
+
+The default target architecture is:
+- one shared application/service environment per deployment tier or region
+- multiple graphs or customer workspaces served by the same runtime instances
+- graph selection, search scope, rendering scope, and mutation scope controlled by application identity and authorization
+- isolation enforced through configuration, graph scoping, authorization, and data-layer controls
+
+This means the core should prepare for:
+- shared-hosting deployments where users gain access to one or more graphs through an application-managed user directory and authorization model
+- future storage backends that can support record-level or row-based access constraints for shared graph data
+- a separation between tenant context metadata and actual graph access decisions
+
 ---
 
 ## Design principles
@@ -90,11 +105,13 @@ Target outcomes:
 - clear separation between shared application settings and tenant-specific settings
 - safer loading of tenant-specific graph, schema, prompt, and auth-related configuration
 - easier automation of tenant provisioning outside the core
+- support for graph- or workspace-scoped configuration inside a shared hosted service, not only one-config-per-deployment assumptions
 
 Likely core changes:
 - stronger config layering rules
 - explicit tenant context propagation where needed
 - validation for tenant-scoped configuration inputs
+- boundaries between tenant metadata, graph selection, and authorization policy
 
 ### E. Authentication and authorization seams
 The core should make it easier to integrate stronger hosted access models later.
@@ -103,11 +120,13 @@ Target outcomes:
 - pluggable identity context for requests
 - clean boundaries between application roles and infrastructure access
 - ability to layer in stronger operator or tenant-admin models later
+- graph-scoped authorization decisions so shared service instances can restrict which graphs, nodes, and edges a user can access
 
 Likely core changes:
 - request identity abstraction
 - clearer role and permission evaluation seams
 - audit-friendly handling of actor identity in write operations
+- future-friendly interfaces between user directory, RBAC/policy checks, and graph access scope
 
 ### F. Operational hooks for backup, restore, and data lifecycle
 The core should provide generic mechanisms that make hosted backup and restore reliable.
@@ -116,11 +135,13 @@ Target outcomes:
 - predictable data export and import boundaries
 - well-defined graph/config persistence surfaces
 - supportable restore verification flows
+- a clear migration path away from file-based graph persistence when shared SaaS storage becomes necessary
 
 Likely core changes:
 - clearer data ownership boundaries between graph data, config, and generated state
 - documented import/export contracts
 - stable health and integrity checks around persisted state
+- storage abstractions that can later support shared persistence and record-level authorization constraints without rewriting the whole application
 
 ### G. Observability and operational introspection
 The core should be easier to operate in a hosted environment without changing its product shape.
