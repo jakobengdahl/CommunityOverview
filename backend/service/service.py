@@ -19,7 +19,7 @@ from backend.core import (
     GraphStorage, Node, Edge, NodeType, RelationshipType,
     SimilarNode, GraphStats, AddNodesResult, DeleteNodesResult, NODE_COLORS,
     get_node_type_names, get_relationship_type_names, get_node_color,
-    EventContext,
+    EventContext, EventAttribution, EventActorAttribution, EventScopeAttribution,
 )
 
 from backend import config_loader
@@ -116,6 +116,53 @@ class GraphService:
                 "source": decision.source,
             },
         }
+
+    def _build_mutation_attribution(self, *, target: str) -> Optional[EventAttribution]:
+        """Build generic actor/scope attribution for mutation results and events."""
+        context = build_graph_authorization_context(action=GRAPH_ACTION_MUTATE, target=target)
+        attribution = EventAttribution(
+            actor=EventActorAttribution(
+                actor_id=context.actor.get("actor_id", ""),
+                actor_type=context.actor.get("actor_type", ""),
+                is_authenticated=bool(context.actor.get("is_authenticated", False)),
+                auth_source=context.actor.get("auth_source", "anonymous"),
+                source=context.actor.get("source", "default"),
+            ),
+            scope=EventScopeAttribution(
+                workspace_id=context.scope.get("workspace_id", ""),
+                workspace_kind=context.scope.get("workspace_kind", ""),
+                graph_id=context.scope.get("graph_id", ""),
+                source=context.scope.get("source", "default"),
+            ),
+        )
+        return attribution if attribution.has_attribution() else None
+
+    def _build_event_context(
+        self,
+        *,
+        target: str,
+        event_origin: Optional[str] = None,
+        event_session_id: Optional[str] = None,
+        event_correlation_id: Optional[str] = None,
+    ) -> Optional[EventContext]:
+        """Build event context, enriching explicit event metadata with actor/scope attribution."""
+        attribution = self._build_mutation_attribution(target=target)
+        if not any((event_origin, event_session_id, event_correlation_id, attribution)):
+            return None
+
+        return EventContext(
+            event_origin=event_origin,
+            event_session_id=event_session_id,
+            event_correlation_id=event_correlation_id,
+            attribution=attribution,
+        )
+
+    @staticmethod
+    def _attach_mutation_attribution(response: Dict[str, Any], event_context: Optional[EventContext]) -> Dict[str, Any]:
+        """Attach audit-friendly attribution metadata to mutation responses when available."""
+        if event_context and event_context.attribution:
+            response["attribution"] = event_context.attribution.to_dict()
+        return response
 
     @property
     def storage(self) -> GraphStorage:
@@ -406,14 +453,12 @@ class GraphService:
                 "added_edge_ids": []
             }
 
-        # Create event context if any event parameters provided
-        event_context = None
-        if event_origin or event_session_id or event_correlation_id:
-            event_context = EventContext(
-                event_origin=event_origin,
-                event_session_id=event_session_id,
-                event_correlation_id=event_correlation_id,
-            )
+        event_context = self._build_event_context(
+            target="add_nodes",
+            event_origin=event_origin,
+            event_session_id=event_session_id,
+            event_correlation_id=event_correlation_id,
+        )
 
         result = self._storage.add_nodes(node_objects, edge_objects, event_context=event_context)
 
@@ -440,7 +485,7 @@ class GraphService:
             response["edges"] = serialize_edges(added_edges)
             response["action"] = "add_to_visualization"
 
-        return response
+        return self._attach_mutation_attribution(response, event_context)
 
     def adopt_federated_node(
         self,
@@ -549,13 +594,12 @@ class GraphService:
             },
         )
 
-        event_context = None
-        if event_origin or event_session_id or event_correlation_id:
-            event_context = EventContext(
-                event_origin=event_origin,
-                event_session_id=event_session_id,
-                event_correlation_id=event_correlation_id,
-            )
+        event_context = self._build_event_context(
+            target="adopt_federated_node",
+            event_origin=event_origin,
+            event_session_id=event_session_id,
+            event_correlation_id=event_correlation_id,
+        )
 
         nodes_to_add = [local_node]
         if self._storage.get_node(source_reference.id) is None:
@@ -566,7 +610,7 @@ class GraphService:
         if not result.success:
             return serialize_add_result(result)
 
-        return {
+        return self._attach_mutation_attribution({
             "success": True,
             "message": "Federated node adopted into local graph",
             "adopted_node": serialize_node(local_node),
@@ -575,7 +619,7 @@ class GraphService:
             "added_node_ids": result.added_node_ids,
             "added_edge_ids": result.added_edge_ids,
             "action": "add_to_visualization",
-        }
+        }, event_context)
 
     def update_node(
         self,
@@ -602,14 +646,12 @@ class GraphService:
         if denied:
             return denied
 
-        # Create event context if any event parameters provided
-        event_context = None
-        if event_origin or event_session_id or event_correlation_id:
-            event_context = EventContext(
-                event_origin=event_origin,
-                event_session_id=event_session_id,
-                event_correlation_id=event_correlation_id,
-            )
+        event_context = self._build_event_context(
+            target="update_node",
+            event_origin=event_origin,
+            event_session_id=event_session_id,
+            event_correlation_id=event_correlation_id,
+        )
 
         updated_node = self._storage.update_node(node_id, updates, event_context=event_context)
 
@@ -620,12 +662,12 @@ class GraphService:
             }
 
         # Return the updated node with action for frontend to refresh visualization
-        return {
+        return self._attach_mutation_attribution({
             "success": True,
             "node": serialize_node(updated_node),
             "nodes": [serialize_node(updated_node)],
             "action": "update_in_visualization"
-        }
+        }, event_context)
 
     def delete_nodes(
         self,
@@ -656,17 +698,15 @@ class GraphService:
             denied.setdefault("affected_edge_ids", [])
             return denied
 
-        # Create event context if any event parameters provided
-        event_context = None
-        if event_origin or event_session_id or event_correlation_id:
-            event_context = EventContext(
-                event_origin=event_origin,
-                event_session_id=event_session_id,
-                event_correlation_id=event_correlation_id,
-            )
+        event_context = self._build_event_context(
+            target="delete_nodes",
+            event_origin=event_origin,
+            event_session_id=event_session_id,
+            event_correlation_id=event_correlation_id,
+        )
 
         result = self._storage.delete_nodes(node_ids, confirmed, event_context=event_context)
-        return serialize_delete_result(result)
+        return self._attach_mutation_attribution(serialize_delete_result(result), event_context)
 
     # ==================== Edge CRUD Operations ====================
 
@@ -712,24 +752,23 @@ class GraphService:
         except Exception as e:
             return {"success": False, "message": f"Invalid edge data: {str(e)}"}
 
-        event_context = None
-        if event_origin or event_session_id or event_correlation_id:
-            event_context = EventContext(
-                event_origin=event_origin,
-                event_session_id=event_session_id,
-                event_correlation_id=event_correlation_id,
-            )
+        event_context = self._build_event_context(
+            target="add_edge",
+            event_origin=event_origin,
+            event_session_id=event_session_id,
+            event_correlation_id=event_correlation_id,
+        )
 
         edge_id = self._storage.add_edge(edge, event_context=event_context)
         if not edge_id:
             return {"success": False, "message": "Could not add edge (source or target not found)"}
 
-        return {
+        return self._attach_mutation_attribution({
             "success": True,
             "edge": serialize_edge(edge),
             "edges": [serialize_edge(edge)],
             "action": "add_to_visualization",
-        }
+        }, event_context)
 
     def update_edge(
         self,
@@ -756,23 +795,22 @@ class GraphService:
         if denied:
             return denied
 
-        event_context = None
-        if event_origin or event_session_id or event_correlation_id:
-            event_context = EventContext(
-                event_origin=event_origin,
-                event_session_id=event_session_id,
-                event_correlation_id=event_correlation_id,
-            )
+        event_context = self._build_event_context(
+            target="update_edge",
+            event_origin=event_origin,
+            event_session_id=event_session_id,
+            event_correlation_id=event_correlation_id,
+        )
 
         updated_edge = self._storage.update_edge(edge_id, updates, event_context=event_context)
 
         if not updated_edge:
             return {"success": False, "error": f"Edge with ID {edge_id} not found"}
 
-        return {
+        return self._attach_mutation_attribution({
             "success": True,
             "edge": serialize_edge(updated_edge),
-        }
+        }, event_context)
 
     def delete_edge(
         self,
@@ -797,20 +835,19 @@ class GraphService:
         if denied:
             return denied
 
-        event_context = None
-        if event_origin or event_session_id or event_correlation_id:
-            event_context = EventContext(
-                event_origin=event_origin,
-                event_session_id=event_session_id,
-                event_correlation_id=event_correlation_id,
-            )
+        event_context = self._build_event_context(
+            target="delete_edge",
+            event_origin=event_origin,
+            event_session_id=event_session_id,
+            event_correlation_id=event_correlation_id,
+        )
 
         deleted = self._storage.delete_edge(edge_id, event_context=event_context)
 
         if not deleted:
             return {"success": False, "error": f"Edge with ID {edge_id} not found"}
 
-        return {"success": True, "deleted_edge_id": edge_id}
+        return self._attach_mutation_attribution({"success": True, "deleted_edge_id": edge_id}, event_context)
 
     def delete_edges(
         self,
@@ -825,16 +862,15 @@ class GraphService:
             denied.setdefault("deleted_edge_ids", [])
             return denied
 
-        event_context = None
-        if event_origin or event_session_id or event_correlation_id:
-            event_context = EventContext(
-                event_origin=event_origin,
-                event_session_id=event_session_id,
-                event_correlation_id=event_correlation_id,
-            )
+        event_context = self._build_event_context(
+            target="delete_edges",
+            event_origin=event_origin,
+            event_session_id=event_session_id,
+            event_correlation_id=event_correlation_id,
+        )
 
         result = self._storage.delete_edges(edge_ids, event_context=event_context)
-        return serialize_delete_edges_result(result)
+        return self._attach_mutation_attribution(serialize_delete_edges_result(result), event_context)
 
     # ==================== Statistics & Metadata ====================
 
