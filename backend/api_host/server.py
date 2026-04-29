@@ -432,6 +432,7 @@ def create_app(
         "get_capabilities",
         "get_runtime_info",
         "get_tenant_context",
+        "get_config_context",
         "list_node_types",
         "list_relationship_types",
         "get_schema",

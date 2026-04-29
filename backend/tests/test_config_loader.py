@@ -409,10 +409,28 @@ class TestTenantContext:
     @pytest.fixture(autouse=True)
     def clean_env(self):
         """Ensure tenant context env vars are unset before and after each test."""
-        for var in ("COMMUNITYOVERVIEW_TENANT_ID", "COMMUNITYOVERVIEW_TENANT_NAME", "COMMUNITYOVERVIEW_ENVIRONMENT"):
+        for var in (
+            "COMMUNITYOVERVIEW_TENANT_ID",
+            "COMMUNITYOVERVIEW_TENANT_NAME",
+            "COMMUNITYOVERVIEW_ENVIRONMENT",
+            "COMMUNITYOVERVIEW_TENANT_CONFIG_DIR",
+            "SCHEMA_FILE",
+            "GRAPH_SCHEMA_CONFIG",
+            "FEDERATION_FILE",
+            "GRAPH_FEDERATION_CONFIG",
+        ):
             os.environ.pop(var, None)
         yield
-        for var in ("COMMUNITYOVERVIEW_TENANT_ID", "COMMUNITYOVERVIEW_TENANT_NAME", "COMMUNITYOVERVIEW_ENVIRONMENT"):
+        for var in (
+            "COMMUNITYOVERVIEW_TENANT_ID",
+            "COMMUNITYOVERVIEW_TENANT_NAME",
+            "COMMUNITYOVERVIEW_ENVIRONMENT",
+            "COMMUNITYOVERVIEW_TENANT_CONFIG_DIR",
+            "SCHEMA_FILE",
+            "GRAPH_SCHEMA_CONFIG",
+            "FEDERATION_FILE",
+            "GRAPH_FEDERATION_CONFIG",
+        ):
             os.environ.pop(var, None)
 
     def test_defaults_when_env_vars_unset(self):
@@ -479,3 +497,87 @@ class TestTenantContext:
         result = config_loader.get_tenant_context()
 
         assert set(result.keys()) == {"tenant_id", "tenant_name", "environment"}
+
+
+class TestConfigContext:
+    """Tests for tenant-aware config path layering introspection."""
+
+    @pytest.fixture(autouse=True)
+    def clean_env(self):
+        for var in (
+            "COMMUNITYOVERVIEW_TENANT_ID",
+            "COMMUNITYOVERVIEW_TENANT_NAME",
+            "COMMUNITYOVERVIEW_ENVIRONMENT",
+            "COMMUNITYOVERVIEW_TENANT_CONFIG_DIR",
+            "SCHEMA_FILE",
+            "GRAPH_SCHEMA_CONFIG",
+            "FEDERATION_FILE",
+            "GRAPH_FEDERATION_CONFIG",
+        ):
+            os.environ.pop(var, None)
+        yield
+        for var in (
+            "COMMUNITYOVERVIEW_TENANT_ID",
+            "COMMUNITYOVERVIEW_TENANT_NAME",
+            "COMMUNITYOVERVIEW_ENVIRONMENT",
+            "COMMUNITYOVERVIEW_TENANT_CONFIG_DIR",
+            "SCHEMA_FILE",
+            "GRAPH_SCHEMA_CONFIG",
+            "FEDERATION_FILE",
+            "GRAPH_FEDERATION_CONFIG",
+        ):
+            os.environ.pop(var, None)
+
+    def test_defaults_to_public_default_paths(self):
+        from backend import config_loader
+
+        result = config_loader.get_config_context()
+
+        assert result["tenant_config_dir_configured"] is False
+        assert result["schema_config_source"] == "default"
+        assert result["federation_config_source"] == "default"
+        assert "tenant_config_dir" not in result
+        assert "schema_config_path" not in result
+        assert "federation_config_path" not in result
+
+    def test_resolves_schema_and_federation_from_tenant_config_dir(self, tmp_path: Path):
+        from backend import config_loader
+
+        tenant_dir = tmp_path / "tenant-config"
+        tenant_dir.mkdir()
+        (tenant_dir / "schema_config.json").write_text("{}", encoding="utf-8")
+        (tenant_dir / "federation_config.json").write_text('{"federation": {}}', encoding="utf-8")
+
+        os.environ["COMMUNITYOVERVIEW_TENANT_CONFIG_DIR"] = str(tenant_dir)
+
+        result = config_loader.get_config_context()
+
+        assert result["tenant_config_dir_configured"] is True
+        assert result["schema_config_source"] == "tenant_config_dir"
+        assert result["federation_config_source"] == "tenant_config_dir"
+        assert "tenant_config_dir" not in result
+        assert "schema_config_path" not in result
+        assert "federation_config_path" not in result
+
+    def test_explicit_file_env_vars_override_tenant_config_dir(self, tmp_path: Path):
+        from backend import config_loader
+
+        tenant_dir = tmp_path / "tenant-config"
+        tenant_dir.mkdir()
+        explicit_schema = tmp_path / "explicit-schema.json"
+        explicit_federation = tmp_path / "explicit-federation.json"
+        explicit_schema.write_text("{}", encoding="utf-8")
+        explicit_federation.write_text('{"federation": {}}', encoding="utf-8")
+
+        os.environ["COMMUNITYOVERVIEW_TENANT_CONFIG_DIR"] = str(tenant_dir)
+        os.environ["SCHEMA_FILE"] = str(explicit_schema)
+        os.environ["FEDERATION_FILE"] = str(explicit_federation)
+
+        result = config_loader.get_config_context()
+
+        assert result["tenant_config_dir_configured"] is True
+        assert result["schema_config_source"] == "explicit_env"
+        assert result["federation_config_source"] == "explicit_env"
+        assert "tenant_config_dir" not in result
+        assert "schema_config_path" not in result
+        assert "federation_config_path" not in result
