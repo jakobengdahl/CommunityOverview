@@ -383,6 +383,24 @@ class TestExecuteToolEndpoint:
         )
         assert response.status_code == 403
 
+    def test_execute_tool_get_runtime_info(self, test_app: TestClient):
+        """Execute public runtime introspection tool directly."""
+        os.environ["COMMUNITYOVERVIEW_RUNTIME_MODE"] = "hosted"
+        os.environ["COMMUNITYOVERVIEW_ENABLED_EXTENSIONS"] = "federation,analytics"
+
+        response = test_app.post(
+            "/execute_tool",
+            json={
+                "tool_name": "get_runtime_info",
+                "arguments": {}
+            }
+        )
+        assert response.status_code == 200
+        assert response.json() == {
+            "runtime_mode": "hosted",
+            "enabled_extensions": ["federation", "analytics"],
+        }
+
     def test_execute_tool_no_name(self, test_app: TestClient):
         """Execute tool without name returns 400."""
         response = test_app.post(

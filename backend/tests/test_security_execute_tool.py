@@ -45,6 +45,22 @@ def test_unauthenticated_get_capabilities_safe_tool(unauthenticated_app):
     assert response.status_code == 200
     assert "capabilities" in response.json()
 
+
+def test_unauthenticated_get_runtime_info_safe_tool(unauthenticated_app, monkeypatch):
+    monkeypatch.setenv("COMMUNITYOVERVIEW_RUNTIME_MODE", "hosted")
+    monkeypatch.setenv("COMMUNITYOVERVIEW_ENABLED_EXTENSIONS", "federation,analytics")
+
+    client = TestClient(unauthenticated_app)
+    response = client.post("/execute_tool", json={
+        "tool_name": "get_runtime_info",
+        "arguments": {}
+    })
+    assert response.status_code == 200
+    assert response.json() == {
+        "runtime_mode": "hosted",
+        "enabled_extensions": ["federation", "analytics"],
+    }
+
 def test_unauthenticated_unsafe_tool_blocked(unauthenticated_app):
     client = TestClient(unauthenticated_app)
     # add_nodes is NOT in SAFE_TOOLS
