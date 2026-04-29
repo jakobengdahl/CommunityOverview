@@ -18,7 +18,7 @@ Usage:
 """
 
 from typing import List, Optional, Dict, Any
-from fastapi import APIRouter, HTTPException, Query, Body
+from fastapi import APIRouter, HTTPException, Query, Body, Request
 from pydantic import BaseModel, Field
 
 from .service import GraphService
@@ -335,6 +335,16 @@ def _register_metadata_endpoints(router: APIRouter, service: GraphService) -> No
     async def get_config_context() -> Dict[str, Any]:
         """Get the effective public config scope and non-sensitive source metadata."""
         return service.get_config_context()
+
+    @router.get("/request-actor")
+    async def get_request_actor(request: Request) -> Dict[str, Any]:
+        """Get the public request actor context derived from safe env/request inputs."""
+        return service.get_request_actor_info(headers=request.headers)
+
+    @router.get("/request-scope")
+    async def get_request_scope(request: Request) -> Dict[str, Any]:
+        """Get the public workspace/graph scope context derived from safe env/request inputs."""
+        return service.get_request_scope_info(headers=request.headers)
 
 
 def _register_views_endpoints(router: APIRouter, service: GraphService) -> None:

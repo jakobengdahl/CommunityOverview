@@ -872,6 +872,48 @@ class GraphService:
         """Get the effective public config scope and non-sensitive source metadata."""
         return config_loader.get_config_context()
 
+    def get_request_actor_info(
+        self,
+        *,
+        headers: Optional[Dict[str, Any]] = None,
+        actor_id: Optional[str] = None,
+        actor_type: Optional[str] = None,
+        auth_source: Optional[str] = None,
+    ) -> Dict[str, Any]:
+        """Get the public request actor context with optional request-safe overrides."""
+        return config_loader.get_request_actor_info() if not any([
+            headers,
+            actor_id,
+            actor_type,
+            auth_source,
+        ]) else config_loader.get_request_actor_context(
+            headers=headers,
+            actor_id=actor_id,
+            actor_type=actor_type,
+            auth_source=auth_source,
+        )
+
+    def get_request_scope_info(
+        self,
+        *,
+        headers: Optional[Dict[str, Any]] = None,
+        workspace_id: Optional[str] = None,
+        workspace_kind: Optional[str] = None,
+        graph_id: Optional[str] = None,
+    ) -> Dict[str, Any]:
+        """Get the public request scope context with optional request-safe overrides."""
+        return config_loader.get_request_scope_info() if not any([
+            headers,
+            workspace_id,
+            workspace_kind,
+            graph_id,
+        ]) else config_loader.get_request_scope_context(
+            headers=headers,
+            workspace_id=workspace_id,
+            workspace_kind=workspace_kind,
+            graph_id=graph_id,
+        )
+
     # ==================== Saved Views ====================
 
     def save_view(self, name: str) -> Dict[str, Any]:
