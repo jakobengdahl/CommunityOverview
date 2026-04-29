@@ -321,6 +321,11 @@ def _register_metadata_endpoints(router: APIRouter, service: GraphService) -> No
         """Get the public capability manifest for client discovery."""
         return service.get_capabilities()
 
+    @router.get("/runtime")
+    async def get_runtime_info() -> Dict[str, Any]:
+        """Get the public runtime metadata for deployment introspection."""
+        return service.get_runtime_info()
+
 
 def _register_views_endpoints(router: APIRouter, service: GraphService) -> None:
     @router.post("/views/save")

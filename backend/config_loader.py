@@ -104,6 +104,12 @@ class CapabilityConfig(BaseModel):
     enabled: bool = True
 
 
+class RuntimeMetadataConfig(BaseModel):
+    """Public runtime metadata exposed for deployment introspection."""
+    runtime_mode: str = "standalone"
+    enabled_extensions: List[str] = Field(default_factory=list)
+
+
 class PresentationConfig(BaseModel):
     """Presentation configuration for UI and prompts."""
     title: str = "Community Knowledge Graph"
@@ -122,6 +128,7 @@ class SchemaFileConfig(BaseModel):
     """Root configuration model for the schema file."""
     schema_: SchemaConfig = Field(alias="schema", default_factory=SchemaConfig)
     presentation: PresentationConfig = Field(default_factory=PresentationConfig)
+    runtime: RuntimeMetadataConfig = Field(default_factory=RuntimeMetadataConfig)
 
     class Config:
         populate_by_name = True
@@ -313,6 +320,48 @@ def get_capabilities() -> Dict[str, Any]:
         "capabilities": [
             capability.dict() for capability in loader.config.presentation.capabilities
         ]
+    }
+
+
+def _normalize_runtime_mode(runtime_mode: Optional[str]) -> str:
+    """Normalize runtime mode to a supported public value."""
+    normalized = (runtime_mode or "").strip().lower()
+    if normalized in {"standalone", "hosted"}:
+        return normalized
+    return "standalone"
+
+
+def _parse_enabled_extensions(raw_value: Optional[str]) -> List[str]:
+    """Parse comma-separated extension identifiers from environment input."""
+    if not raw_value:
+        return []
+
+    extensions: List[str] = []
+    for value in raw_value.split(","):
+        identifier = value.strip()
+        if identifier and identifier not in extensions:
+            extensions.append(identifier)
+    return extensions
+
+
+def get_runtime_info() -> Dict[str, Any]:
+    """Get the public runtime metadata for deployment introspection."""
+    loader = _get_loader()
+    runtime = loader.config.runtime
+
+    runtime_mode = _normalize_runtime_mode(runtime.runtime_mode)
+    env_runtime_mode = os.getenv("COMMUNITYOVERVIEW_RUNTIME_MODE")
+    if env_runtime_mode is not None:
+        runtime_mode = _normalize_runtime_mode(env_runtime_mode)
+
+    enabled_extensions = list(runtime.enabled_extensions)
+    env_enabled_extensions = os.getenv("COMMUNITYOVERVIEW_ENABLED_EXTENSIONS")
+    if env_enabled_extensions is not None:
+        enabled_extensions = _parse_enabled_extensions(env_enabled_extensions)
+
+    return {
+        "runtime_mode": runtime_mode,
+        "enabled_extensions": enabled_extensions,
     }
 
 

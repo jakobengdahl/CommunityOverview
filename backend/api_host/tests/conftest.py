@@ -27,6 +27,8 @@ def reset_config_loader():
     config_loader.reset_loader()
     yield
     os.environ.pop("SCHEMA_FILE", None)
+    os.environ.pop("COMMUNITYOVERVIEW_RUNTIME_MODE", None)
+    os.environ.pop("COMMUNITYOVERVIEW_ENABLED_EXTENSIONS", None)
     config_loader.reset_loader()
 
 

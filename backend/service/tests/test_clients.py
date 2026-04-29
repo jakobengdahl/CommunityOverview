@@ -28,6 +28,8 @@ def reset_config_loader():
     config_loader.reset_loader()
     yield
     os.environ.pop("SCHEMA_FILE", None)
+    os.environ.pop("COMMUNITYOVERVIEW_RUNTIME_MODE", None)
+    os.environ.pop("COMMUNITYOVERVIEW_ENABLED_EXTENSIONS", None)
     config_loader.reset_loader()
 
 
@@ -392,6 +394,19 @@ class TestMCPClient:
             ]
         }
 
+    def test_mcp_get_runtime_info(self, mcp_tools):
+        """Test MCP get_runtime_info tool."""
+        os.environ["COMMUNITYOVERVIEW_RUNTIME_MODE"] = "hosted"
+        os.environ["COMMUNITYOVERVIEW_ENABLED_EXTENSIONS"] = "federation,analytics"
+
+        tools_map, _ = mcp_tools
+        result = tools_map["get_runtime_info"]()
+
+        assert result == {
+            "runtime_mode": "hosted",
+            "enabled_extensions": ["federation", "analytics"],
+        }
+
     def test_mcp_list_relationship_types(self, mcp_tools):
         """Test MCP list_relationship_types tool."""
         tools_map, _ = mcp_tools
@@ -424,6 +439,7 @@ class TestMCPClient:
             "delete_nodes",
             "get_graph_stats",
             "get_capabilities",
+            "get_runtime_info",
             "list_node_types",
             "list_relationship_types",
             "save_view",
