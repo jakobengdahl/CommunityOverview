@@ -12,11 +12,23 @@ This ensures the service works correctly from the perspective of actual consumer
 import pytest
 import tempfile
 import os
+from pathlib import Path
 from typing import Dict, Any
 from unittest.mock import Mock, MagicMock
 
 from backend.core import GraphStorage, Node, NodeType
 from backend.service import GraphService, create_rest_router, register_mcp_tools
+
+
+@pytest.fixture(autouse=True)
+def reset_config_loader():
+    """Reset shared config loader state between tests."""
+    from backend import config_loader
+
+    config_loader.reset_loader()
+    yield
+    os.environ.pop("SCHEMA_FILE", None)
+    config_loader.reset_loader()
 
 
 # ==================== REST API Client Tests ====================
@@ -169,6 +181,33 @@ class TestRESTAPIClient:
         assert response.status_code == 200
         data = response.json()
         assert "similar_nodes" in data
+
+    def test_capabilities_endpoint(self, api_client):
+        """Test GET /api/graph/capabilities endpoint."""
+        test_config_path = str(Path(__file__).resolve().parents[3] / "config" / "test" / "schema_config.json")
+        os.environ["SCHEMA_FILE"] = test_config_path
+        from backend import config_loader
+        config_loader.reset_loader()
+
+        response = api_client.get("/api/graph/capabilities")
+        assert response.status_code == 200
+        data = response.json()
+        assert data == {
+            "capabilities": [
+                {
+                    "id": "graph_export",
+                    "name": "Graph export",
+                    "description": "Allows clients to export graph data for offline analysis.",
+                    "enabled": True,
+                },
+                {
+                    "id": "assistant_guidance",
+                    "name": "Assistant guidance",
+                    "description": "Provides configuration for guided assistant interactions.",
+                    "enabled": False,
+                },
+            ]
+        }
 
     def test_batch_similarity_endpoint(self, populated_api_client):
         """Test POST /api/graph/similar/batch endpoint."""
@@ -326,6 +365,33 @@ class TestMCPClient:
         types = [t["type"] for t in result["node_types"]]
         assert "Actor" in types
 
+    def test_mcp_get_capabilities(self, mcp_tools):
+        """Test MCP get_capabilities tool."""
+        test_config_path = str(Path(__file__).resolve().parents[3] / "config" / "test" / "schema_config.json")
+        os.environ["SCHEMA_FILE"] = test_config_path
+        from backend import config_loader
+        config_loader.reset_loader()
+
+        tools_map, _ = mcp_tools
+        result = tools_map["get_capabilities"]()
+
+        assert result == {
+            "capabilities": [
+                {
+                    "id": "graph_export",
+                    "name": "Graph export",
+                    "description": "Allows clients to export graph data for offline analysis.",
+                    "enabled": True,
+                },
+                {
+                    "id": "assistant_guidance",
+                    "name": "Assistant guidance",
+                    "description": "Provides configuration for guided assistant interactions.",
+                    "enabled": False,
+                },
+            ]
+        }
+
     def test_mcp_list_relationship_types(self, mcp_tools):
         """Test MCP list_relationship_types tool."""
         tools_map, _ = mcp_tools
@@ -357,6 +423,7 @@ class TestMCPClient:
             "update_node",
             "delete_nodes",
             "get_graph_stats",
+            "get_capabilities",
             "list_node_types",
             "list_relationship_types",
             "save_view",

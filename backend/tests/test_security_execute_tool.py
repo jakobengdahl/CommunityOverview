@@ -1,4 +1,5 @@
 import pytest
+import uuid
 from fastapi.testclient import TestClient
 from backend.api_host.server import create_app
 from backend.api_host.config import AppConfig
@@ -35,6 +36,15 @@ def test_unauthenticated_safe_tool(unauthenticated_app):
     assert response.status_code == 200
     assert "node_types" in response.json()
 
+def test_unauthenticated_get_capabilities_safe_tool(unauthenticated_app):
+    client = TestClient(unauthenticated_app)
+    response = client.post("/execute_tool", json={
+        "tool_name": "get_capabilities",
+        "arguments": {}
+    })
+    assert response.status_code == 200
+    assert "capabilities" in response.json()
+
 def test_unauthenticated_unsafe_tool_blocked(unauthenticated_app):
     client = TestClient(unauthenticated_app)
     # add_nodes is NOT in SAFE_TOOLS
@@ -52,11 +62,12 @@ def test_authenticated_unsafe_tool_allowed(authenticated_app):
     client = TestClient(authenticated_app)
     # Using correct credentials
     auth = ("admin", "password")
+    node_id = f"test-auth-{uuid.uuid4()}"
 
     response = client.post("/execute_tool", json={
         "tool_name": "add_nodes",
         "arguments": {
-            "nodes": [{"id": "test-auth", "type": "Actor", "name": "Test Auth"}],
+            "nodes": [{"id": node_id, "type": "Actor", "name": "Test Auth"}],
             "edges": []
         }
     }, auth=auth)
