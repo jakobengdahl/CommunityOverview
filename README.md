@@ -83,6 +83,7 @@ This system helps organizations avoid overlapping investments by making visible:
   DEPLOYMENT_GUIDE.md             # Deployment documentation
   FEDERATED_GRAPH_DESIGN.md       # Federated multi-graph architecture
   CORE_ENABLEMENT_HOSTED_SAAS.md  # Public core plan for hosted/SaaS-ready extension seams
+  CORE_ENABLEMENT_IMPLEMENTATION_PLAN.md # Concrete public implementation slices for hosted/SaaS readiness
 start-dev.sh                      # Development startup script
 LLM_PROVIDERS.md                  # LLM configuration guide
 ```
