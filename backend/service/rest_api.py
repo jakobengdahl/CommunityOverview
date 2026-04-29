@@ -305,10 +305,19 @@ def _register_edge_crud_endpoints(router: APIRouter, service: GraphService) -> N
         return result
 
     @router.delete("/edges/{edge_id}")
-    async def delete_edge(edge_id: str, request: Request) -> Dict[str, Any]:
+    async def delete_edge(
+        edge_id: str,
+        http_request: Request,
+        request: Optional[DeleteEdgeRequest] = Body(None),
+    ) -> Dict[str, Any]:
         """Delete a single edge."""
-        with use_request_authorization(headers=request.headers):
-            result = service.delete_edge(edge_id, event_origin="web-ui")
+        with use_request_authorization(headers=http_request.headers):
+            result = service.delete_edge(
+                edge_id,
+                event_origin=request.event_origin if request else None,
+                event_session_id=request.event_session_id if request else None,
+                event_correlation_id=request.event_correlation_id if request else None,
+            )
         _raise_for_access_denied(result)
         if not result.get("success", True):
             raise HTTPException(status_code=404, detail=result.get("error"))
