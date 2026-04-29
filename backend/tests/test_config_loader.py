@@ -99,6 +99,57 @@ class TestConfigLoader:
         assert presentation["language_policy"]["mode"] == "required"
         assert presentation["language_policy"]["primary_language"] == "en"
         assert presentation["language_policy"]["allowed_languages"] == ["en"]
+        assert presentation["capabilities"] == [
+            {
+                "id": "graph_export",
+                "name": "Graph export",
+                "description": "Allows clients to export graph data for offline analysis.",
+                "enabled": True,
+            },
+            {
+                "id": "assistant_guidance",
+                "name": "Assistant guidance",
+                "description": "Provides configuration for guided assistant interactions.",
+                "enabled": False,
+            },
+        ]
+
+        del os.environ["SCHEMA_FILE"]
+
+    def test_get_capabilities_defaults_to_empty_list(self):
+        """Test capability manifest defaults to an empty list when not configured."""
+        from backend import config_loader
+
+        capabilities = config_loader.get_capabilities()
+
+        assert capabilities == {"capabilities": []}
+
+    def test_get_capabilities_from_custom_config(self):
+        """Test capability manifest is loaded from custom config."""
+        from backend import config_loader
+
+        test_config_path = str(Path(__file__).parent.parent.parent / "config" / "test" / "schema_config.json")
+        os.environ["SCHEMA_FILE"] = test_config_path
+        config_loader.reset_loader()
+
+        capabilities = config_loader.get_capabilities()
+
+        assert capabilities == {
+            "capabilities": [
+                {
+                    "id": "graph_export",
+                    "name": "Graph export",
+                    "description": "Allows clients to export graph data for offline analysis.",
+                    "enabled": True,
+                },
+                {
+                    "id": "assistant_guidance",
+                    "name": "Assistant guidance",
+                    "description": "Provides configuration for guided assistant interactions.",
+                    "enabled": False,
+                },
+            ]
+        }
 
         del os.environ["SCHEMA_FILE"]
 
@@ -226,6 +277,9 @@ class TestSchemaIntegration:
 
             assert "title" in presentation
             assert "colors" in presentation
+
+            capabilities = service.get_capabilities()
+            assert capabilities == {"capabilities": []}
         finally:
             os.unlink(temp_path)
 

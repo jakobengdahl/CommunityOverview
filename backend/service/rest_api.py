@@ -316,6 +316,11 @@ def _register_metadata_endpoints(router: APIRouter, service: GraphService) -> No
         """Get the presentation configuration (colors, prompts, introduction text)."""
         return service.get_presentation()
 
+    @router.get("/capabilities")
+    async def get_capabilities() -> Dict[str, Any]:
+        """Get the public capability manifest for client discovery."""
+        return service.get_capabilities()
+
 
 def _register_views_endpoints(router: APIRouter, service: GraphService) -> None:
     @router.post("/views/save")

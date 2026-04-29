@@ -275,6 +275,21 @@ class TestToolExecutor:
 class TestMCPLoaderLifecycle:
     """Tests for MCP loader connection lifecycle."""
 
+    def test_connect_graph_includes_get_capabilities_tool(self):
+        """GRAPH discovery inventory includes get_capabilities."""
+        integration = MCPIntegration(
+            id="GRAPH",
+            name="Graph API",
+            transport=MCPTransport.HTTP,
+            url="http://localhost:8000/mcp"
+        )
+        loader = MCPLoader([integration])
+
+        tools = loader._get_graph_mcp_tools(integration)
+
+        tool_names = [tool.namespaced_name for tool in tools]
+        assert "GRAPH__get_capabilities" in tool_names
+
     def test_connect_all_returns_tool_map(self):
         """Test that connect_all returns a map of tools per integration."""
         integrations = [

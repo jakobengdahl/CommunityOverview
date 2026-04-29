@@ -96,6 +96,14 @@ class LanguagePolicyConfig(BaseModel):
     description_en: str = "English is the primary graph language. Swedish is accepted when natural or established."
 
 
+class CapabilityConfig(BaseModel):
+    """Public capability metadata exposed for client discovery."""
+    id: str
+    name: str
+    description: str = ""
+    enabled: bool = True
+
+
 class PresentationConfig(BaseModel):
     """Presentation configuration for UI and prompts."""
     title: str = "Community Knowledge Graph"
@@ -107,6 +115,7 @@ class PresentationConfig(BaseModel):
     language_policy: LanguagePolicyConfig = Field(default_factory=LanguagePolicyConfig)
     widget_url: str = ""  # URL template for the graph widget
     expert_agents: List[ExpertAgentConfig] = Field(default_factory=list)
+    capabilities: List[CapabilityConfig] = Field(default_factory=list)
 
 
 class SchemaFileConfig(BaseModel):
@@ -292,7 +301,18 @@ def get_presentation() -> Dict[str, Any]:
         "default_language": pres.default_language,
         "language_policy": pres.language_policy.dict(),
         "widget_url": pres.widget_url,
-        "expert_agents": [agent.dict() for agent in pres.expert_agents]
+        "expert_agents": [agent.dict() for agent in pres.expert_agents],
+        "capabilities": [capability.dict() for capability in pres.capabilities]
+    }
+
+
+def get_capabilities() -> Dict[str, Any]:
+    """Get the public capability manifest for client discovery."""
+    loader = _get_loader()
+    return {
+        "capabilities": [
+            capability.dict() for capability in loader.config.presentation.capabilities
+        ]
     }
 
 

@@ -19,6 +19,17 @@ from backend.api_host import create_app, AppConfig
 from backend.core import GraphStorage
 
 
+@pytest.fixture(autouse=True)
+def reset_config_loader():
+    """Reset shared config loader state between tests."""
+    from backend import config_loader
+
+    config_loader.reset_loader()
+    yield
+    os.environ.pop("SCHEMA_FILE", None)
+    config_loader.reset_loader()
+
+
 class MockSentenceTransformer:
     """Mock SentenceTransformer that generates deterministic embeddings."""
 
@@ -212,6 +223,8 @@ def app_config(temp_graph_file, temp_static_dirs) -> AppConfig:
         web_static_path=web_path,
         widget_static_path=widget_path,
         api_prefix="/api",
+        auth_enabled=False,
+        mcp_basic_auth=False,
     )
 
 

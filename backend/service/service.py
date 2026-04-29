@@ -856,6 +856,10 @@ class GraphService:
         """
         return config_loader.get_presentation()
 
+    def get_capabilities(self) -> Dict[str, Any]:
+        """Get the public capability manifest for client discovery."""
+        return config_loader.get_capabilities()
+
     # ==================== Saved Views ====================
 
     def save_view(self, name: str) -> Dict[str, Any]:

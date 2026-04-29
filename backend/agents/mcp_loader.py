@@ -274,6 +274,10 @@ class MCPLoader:
                 "type": "object",
                 "properties": {},
             }),
+            ("get_capabilities", "Get the capability manifest exposed to clients.", {
+                "type": "object",
+                "properties": {},
+            }),
         ]
 
         return [

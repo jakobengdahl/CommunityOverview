@@ -6,6 +6,8 @@ all REST API endpoints function correctly.
 """
 
 import pytest
+import os
+from pathlib import Path
 from fastapi.testclient import TestClient
 
 
@@ -292,6 +294,33 @@ class TestStatisticsEndpoints:
         type_values = [t["type"] for t in data["relationship_types"]]
         assert "IMPLEMENTS" in type_values
 
+    def test_get_capabilities(self, test_app: TestClient):
+        """Get capability manifest via REST."""
+        test_config_path = str(Path(__file__).resolve().parents[3] / "config" / "test" / "schema_config.json")
+        os.environ["SCHEMA_FILE"] = test_config_path
+        from backend import config_loader
+        config_loader.reset_loader()
+
+        response = test_app.get("/api/capabilities")
+        assert response.status_code == 200
+        data = response.json()
+        assert data == {
+            "capabilities": [
+                {
+                    "id": "graph_export",
+                    "name": "Graph export",
+                    "description": "Allows clients to export graph data for offline analysis.",
+                    "enabled": True,
+                },
+                {
+                    "id": "assistant_guidance",
+                    "name": "Assistant guidance",
+                    "description": "Provides configuration for guided assistant interactions.",
+                    "enabled": False,
+                },
+            ]
+        }
+
 
 class TestExportEndpoints:
     """Tests for export endpoints."""
@@ -331,7 +360,7 @@ class TestExecuteToolEndpoint:
         assert "nodes" in data
 
     def test_execute_tool_not_found(self, test_app: TestClient):
-        """Execute non-existent tool returns 404."""
+        """Execute non-safe unknown tool is blocked before tool lookup in unauthenticated mode."""
         response = test_app.post(
             "/execute_tool",
             json={
@@ -339,7 +368,7 @@ class TestExecuteToolEndpoint:
                 "arguments": {}
             }
         )
-        assert response.status_code == 404
+        assert response.status_code == 403
 
     def test_execute_tool_no_name(self, test_app: TestClient):
         """Execute tool without name returns 400."""

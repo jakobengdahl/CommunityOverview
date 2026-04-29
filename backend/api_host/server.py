@@ -429,6 +429,7 @@ def create_app(
         "find_similar_nodes",
         "find_similar_nodes_batch",
         "get_graph_stats",
+        "get_capabilities",
         "list_node_types",
         "list_relationship_types",
         "get_schema",
