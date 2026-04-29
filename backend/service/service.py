@@ -23,6 +23,13 @@ from backend.core import (
 )
 
 from backend import config_loader
+from backend.authorization import (
+    GRAPH_ACTION_MUTATE,
+    GRAPH_ACTION_READ,
+    DefaultGraphAuthorizationHook,
+    GraphAuthorizationHook,
+    build_graph_authorization_context,
+)
 from backend.federation import FederationManager
 
 from .serializers import (
@@ -73,7 +80,12 @@ class GraphService:
     requests from clients and LLMs through various protocols.
     """
 
-    def __init__(self, storage: GraphStorage, federation_manager: Optional[FederationManager] = None):
+    def __init__(
+        self,
+        storage: GraphStorage,
+        federation_manager: Optional[FederationManager] = None,
+        authorization_hook: Optional[GraphAuthorizationHook] = None,
+    ):
         """
         Initialize GraphService with a GraphStorage instance.
 
@@ -82,6 +94,28 @@ class GraphService:
         """
         self._storage = storage
         self._federation_manager = federation_manager
+        self._authorization_hook = authorization_hook or DefaultGraphAuthorizationHook()
+
+    def _authorize_graph_access(self, *, action: str, target: str) -> Optional[Dict[str, Any]]:
+        """Evaluate the configured authorization seam for graph reads and mutations."""
+        decision = self._authorization_hook.evaluate(
+            build_graph_authorization_context(action=action, target=target)
+        )
+        if decision.allowed:
+            return None
+
+        return {
+            "success": False,
+            "error": "Graph access denied",
+            "message": decision.reason or "Graph access denied.",
+            "error_code": "access_denied",
+            "authorization": {
+                "action": action,
+                "target": target,
+                "mode": decision.mode,
+                "source": decision.source,
+            },
+        }
 
     @property
     def storage(self) -> GraphStorage:
@@ -110,6 +144,10 @@ class GraphService:
         Returns:
             Dict with matching nodes, connecting edges, and search metadata
         """
+        denied = self._authorize_graph_access(action=GRAPH_ACTION_READ, target="search_graph")
+        if denied:
+            return denied
+
         # Log search request
         print(f"SEARCH: query='{query}' types={node_types} limit={limit}")
 
@@ -190,6 +228,10 @@ class GraphService:
         Returns:
             Dict with node data or error
         """
+        denied = self._authorize_graph_access(action=GRAPH_ACTION_READ, target="get_node_details")
+        if denied:
+            return denied
+
         node = self._storage.get_node(node_id)
 
         if not node:
@@ -220,6 +262,10 @@ class GraphService:
         Returns:
             Dict with nodes and edges
         """
+        denied = self._authorize_graph_access(action=GRAPH_ACTION_READ, target="get_related_nodes")
+        if denied:
+            return denied
+
         # Convert relationship_types to enum
         rel_filters = None
         if relationship_types:
@@ -342,6 +388,12 @@ class GraphService:
         Returns:
             Dict with result (added_node_ids, added_edge_ids, success, message)
         """
+        denied = self._authorize_graph_access(action=GRAPH_ACTION_MUTATE, target="add_nodes")
+        if denied:
+            denied.setdefault("added_node_ids", [])
+            denied.setdefault("added_edge_ids", [])
+            return denied
+
         # Convert dicts to Node and Edge objects
         try:
             node_objects = [Node(**n) for n in nodes]
@@ -401,6 +453,12 @@ class GraphService:
         event_correlation_id: Optional[str] = None,
     ) -> Dict[str, Any]:
         """Clone a federated cached node into the local graph and link lineage."""
+        denied = self._authorize_graph_access(action=GRAPH_ACTION_MUTATE, target="adopt_federated_node")
+        if denied:
+            denied.setdefault("added_node_ids", [])
+            denied.setdefault("added_edge_ids", [])
+            return denied
+
         if not self._federation_manager or not self._federation_manager.enabled:
             return {
                 "success": False,
@@ -540,6 +598,10 @@ class GraphService:
         Returns:
             Dict with updated node or error
         """
+        denied = self._authorize_graph_access(action=GRAPH_ACTION_MUTATE, target="update_node")
+        if denied:
+            return denied
+
         # Create event context if any event parameters provided
         event_context = None
         if event_origin or event_session_id or event_correlation_id:
@@ -588,6 +650,12 @@ class GraphService:
         Returns:
             Dict with result (deleted_node_ids, affected_edge_ids, success, message)
         """
+        denied = self._authorize_graph_access(action=GRAPH_ACTION_MUTATE, target="delete_nodes")
+        if denied:
+            denied.setdefault("deleted_node_ids", [])
+            denied.setdefault("affected_edge_ids", [])
+            return denied
+
         # Create event context if any event parameters provided
         event_context = None
         if event_origin or event_session_id or event_correlation_id:
@@ -627,6 +695,10 @@ class GraphService:
         Returns:
             Dict with added edge or error
         """
+        denied = self._authorize_graph_access(action=GRAPH_ACTION_MUTATE, target="add_edge")
+        if denied:
+            return denied
+
         from backend.core.models import Edge
 
         edge_data = {"source": source, "target": target}
@@ -680,6 +752,10 @@ class GraphService:
         Returns:
             Dict with updated edge or error
         """
+        denied = self._authorize_graph_access(action=GRAPH_ACTION_MUTATE, target="update_edge")
+        if denied:
+            return denied
+
         event_context = None
         if event_origin or event_session_id or event_correlation_id:
             event_context = EventContext(
@@ -717,6 +793,10 @@ class GraphService:
         Returns:
             Dict with success status
         """
+        denied = self._authorize_graph_access(action=GRAPH_ACTION_MUTATE, target="delete_edge")
+        if denied:
+            return denied
+
         event_context = None
         if event_origin or event_session_id or event_correlation_id:
             event_context = EventContext(
@@ -740,6 +820,11 @@ class GraphService:
         event_correlation_id: Optional[str] = None,
     ) -> Dict[str, Any]:
         """Delete up to 50 edges in a single operation."""
+        denied = self._authorize_graph_access(action=GRAPH_ACTION_MUTATE, target="delete_edges")
+        if denied:
+            denied.setdefault("deleted_edge_ids", [])
+            return denied
+
         event_context = None
         if event_origin or event_session_id or event_correlation_id:
             event_context = EventContext(
@@ -760,6 +845,10 @@ class GraphService:
         Returns:
             Dict with statistics (total_nodes, total_edges, nodes_by_type)
         """
+        denied = self._authorize_graph_access(action=GRAPH_ACTION_READ, target="get_graph_stats")
+        if denied:
+            return denied
+
         stats = serialize_graph_stats(self._storage.get_stats())
 
         local_graph_name = self._storage.get_graph_name()
@@ -949,6 +1038,10 @@ class GraphService:
         Returns:
             The nodes and edges to display with position data
         """
+        denied = self._authorize_graph_access(action=GRAPH_ACTION_READ, target="get_saved_view")
+        if denied:
+            return denied
+
         # Search for SavedView node with the given name
         results = self._storage.search_nodes(
             query=name,
@@ -1050,6 +1143,10 @@ class GraphService:
         Returns:
             List of all SavedView nodes with their names and summaries
         """
+        denied = self._authorize_graph_access(action=GRAPH_ACTION_READ, target="list_saved_views")
+        if denied:
+            return denied
+
         views = self._storage.search_nodes(
             query="",
             node_types=[NodeType.SAVED_VIEW, NodeType.VISUALIZATION_VIEW],
@@ -1087,6 +1184,10 @@ class GraphService:
         Returns:
             Complete graph data in JSON format
         """
+        denied = self._authorize_graph_access(action=GRAPH_ACTION_READ, target="export_graph")
+        if denied:
+            return denied
+
         all_nodes = serialize_nodes(list(self._storage.nodes.values()))
         all_edges = serialize_edges(list(self._storage.edges.values()))
 

@@ -25,9 +25,10 @@ from pathlib import Path
 from typing import Optional, Dict, Any, Callable
 
 from fastapi import FastAPI
+from fastapi.responses import JSONResponse, RedirectResponse, FileResponse
 from fastapi.staticfiles import StaticFiles
-from fastapi.responses import FileResponse, JSONResponse, RedirectResponse
 from fastapi.middleware.cors import CORSMiddleware
+from starlette.datastructures import Headers
 from starlette.requests import Request
 from mcp.server.fastmcp import FastMCP
 
@@ -37,6 +38,7 @@ from backend.ui import ChatService, DocumentService, create_ui_router
 from backend.agents import AgentRegistry, AgentsSettings
 from backend.federation import FederationManager, load_federation_config, summarize_federation_config
 from backend import config_loader
+from backend.authorization import use_request_authorization
 from backend.language_policy import format_language_policy_for_prompt
 
 from .config import AppConfig
@@ -107,6 +109,24 @@ VISUALIZATION:
   provide them with the Widget URL (available via 'get_presentation').
 """
     return instructions
+
+
+def _access_denied_json_response(result: Any) -> Optional[JSONResponse]:
+    if isinstance(result, dict) and result.get("error_code") == "access_denied":
+        return JSONResponse(result, status_code=403)
+    return None
+
+
+def _bind_request_authorization_to_asgi_app(asgi_app):
+    async def request_bound_app(scope, receive, send):
+        if scope.get("type") != "http":
+            await asgi_app(scope, receive, send)
+            return
+
+        with use_request_authorization(headers=Headers(scope=scope)):
+            await asgi_app(scope, receive, send)
+
+    return request_bound_app
 
 
 def create_app(
@@ -333,12 +353,12 @@ def create_app(
     # Two transports are supported:
     #   1. Legacy SSE  (GET /mcp/sse + POST /mcp/messages) – for older clients
     #   2. Streamable HTTP (POST /mcp) – for ChatGPT, Claude, and MCP spec ≥2025-03-26
-    mcp_sse_app = mcp.sse_app()
+    mcp_sse_app = _bind_request_authorization_to_asgi_app(mcp.sse_app())
 
     # Try to create Streamable HTTP app (requires mcp ≥ 1.8).
     # If the installed version doesn't support it, fall back to SSE-only.
     try:
-        mcp_streamable_app = mcp.streamable_http_app()
+        mcp_streamable_app = _bind_request_authorization_to_asgi_app(mcp.streamable_http_app())
         _has_streamable = True
     except (AttributeError, TypeError):
         mcp_streamable_app = None
@@ -469,7 +489,12 @@ def create_app(
                 return JSONResponse({"error": f"Tool {tool_name} not found"}, status_code=404)
 
             func = tools_map[tool_name]
-            result = func(**arguments)
+            with use_request_authorization(headers=request.headers):
+                result = func(**arguments)
+
+            access_denied_response = _access_denied_json_response(result)
+            if access_denied_response is not None:
+                return access_denied_response
 
             import json
             return JSONResponse(json.loads(json.dumps(result, default=json_serializer)))
@@ -480,10 +505,16 @@ def create_app(
 
     # Add export_graph endpoint (convenience route)
     @app.get("/export_graph")
-    async def export_graph_endpoint() -> JSONResponse:
+    async def export_graph_endpoint(request: Request) -> JSONResponse:
         """Export the entire graph (all nodes and edges)."""
         try:
-            result = graph_service.export_graph()
+            with use_request_authorization(headers=request.headers):
+                result = graph_service.export_graph()
+
+            access_denied_response = _access_denied_json_response(result)
+            if access_denied_response is not None:
+                return access_denied_response
+
             return JSONResponse(result)
         except Exception as e:
             import traceback
