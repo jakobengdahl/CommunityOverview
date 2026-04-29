@@ -16,6 +16,7 @@ def app_client(tmp_path, monkeypatch):
         "COMMUNITYOVERVIEW_WORKSPACE_ID",
         "COMMUNITYOVERVIEW_WORKSPACE_KIND",
         "COMMUNITYOVERVIEW_GRAPH_SCOPE_ID",
+        "COMMUNITYOVERVIEW_AUTHORIZATION_MODE",
     ):
         monkeypatch.delenv(var, raising=False)
 
@@ -128,3 +129,42 @@ class TestRequestContextMcpTools:
         result = client.get("/mcp").json()
         assert "get_request_actor" in result["available_tools"]
         assert "get_request_scope" in result["available_tools"]
+
+
+class TestAuthorizationHookRestAndMcp:
+    def test_rest_mutation_is_blocked_in_read_only_mode(self, app_client, monkeypatch):
+        monkeypatch.setenv("COMMUNITYOVERVIEW_AUTHORIZATION_MODE", "read-only")
+        client, _ = app_client
+
+        response = client.post("/api/nodes", json={
+            "nodes": [{"type": "Actor", "name": "Blocked via REST"}],
+            "edges": [],
+        })
+
+        assert response.status_code == 403
+        assert "mutations are disabled" in response.json()["detail"].lower()
+
+    def test_execute_tool_read_is_blocked_in_deny_all_mode(self, app_client, monkeypatch):
+        monkeypatch.setenv("COMMUNITYOVERVIEW_AUTHORIZATION_MODE", "deny-all")
+        client, _ = app_client
+
+        response = client.post("/execute_tool", json={
+            "tool_name": "search_graph",
+            "arguments": {
+                "query": "",
+                "limit": 5,
+            },
+        })
+
+        assert response.status_code == 403
+        assert response.json()["error_code"] == "access_denied"
+        assert response.json()["authorization"]["action"] == "read"
+
+    def test_rest_read_remains_permitted_in_read_only_mode(self, app_client, monkeypatch):
+        monkeypatch.setenv("COMMUNITYOVERVIEW_AUTHORIZATION_MODE", "read-only")
+        client, _ = app_client
+
+        response = client.post("/api/search", json={"query": "", "limit": 5})
+
+        assert response.status_code == 200
+        assert "nodes" in response.json()

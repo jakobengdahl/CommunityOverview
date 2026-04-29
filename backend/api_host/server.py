@@ -37,6 +37,7 @@ from backend.ui import ChatService, DocumentService, create_ui_router
 from backend.agents import AgentRegistry, AgentsSettings
 from backend.federation import FederationManager, load_federation_config, summarize_federation_config
 from backend import config_loader
+from backend.authorization import use_request_authorization
 from backend.language_policy import format_language_policy_for_prompt
 
 from .config import AppConfig
@@ -469,7 +470,11 @@ def create_app(
                 return JSONResponse({"error": f"Tool {tool_name} not found"}, status_code=404)
 
             func = tools_map[tool_name]
-            result = func(**arguments)
+            with use_request_authorization(headers=request.headers):
+                result = func(**arguments)
+
+            if isinstance(result, dict) and result.get("error_code") == "access_denied":
+                return JSONResponse(result, status_code=403)
 
             import json
             return JSONResponse(json.loads(json.dumps(result, default=json_serializer)))
