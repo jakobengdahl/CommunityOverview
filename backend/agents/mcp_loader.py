@@ -282,6 +282,10 @@ class MCPLoader:
                 "type": "object",
                 "properties": {},
             }),
+            ("get_tenant_context", "Get the tenant identifier, tenant name, and deployment environment exposed to clients.", {
+                "type": "object",
+                "properties": {},
+            }),
         ]
 
         return [

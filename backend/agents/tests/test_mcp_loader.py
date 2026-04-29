@@ -305,6 +305,27 @@ class TestMCPLoaderLifecycle:
         tool_names = [tool.namespaced_name for tool in tools]
         assert "GRAPH__get_runtime_info" in tool_names
 
+    def test_connect_graph_includes_get_tenant_context_tool(self):
+        """GRAPH discovery inventory includes get_tenant_context."""
+        integration = MCPIntegration(
+            id="GRAPH",
+            name="Graph API",
+            transport=MCPTransport.HTTP,
+            url="http://localhost:8000/mcp"
+        )
+        loader = MCPLoader([integration])
+
+        tools = loader._get_graph_mcp_tools(integration)
+
+        tool_names = [tool.namespaced_name for tool in tools]
+        assert "GRAPH__get_tenant_context" in tool_names
+
+        tenant_context_tool = next(
+            tool for tool in tools if tool.namespaced_name == "GRAPH__get_tenant_context"
+        )
+        assert tenant_context_tool.original_name == "get_tenant_context"
+        assert tenant_context_tool.input_schema == {"type": "object", "properties": {}}
+
     def test_connect_all_returns_tool_map(self):
         """Test that connect_all returns a map of tools per integration."""
         integrations = [
