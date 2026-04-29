@@ -286,6 +286,10 @@ class MCPLoader:
                 "type": "object",
                 "properties": {},
             }),
+            ("get_config_context", "Get the effective config scope and resolved public config paths exposed to clients.", {
+                "type": "object",
+                "properties": {},
+            }),
         ]
 
         return [

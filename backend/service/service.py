@@ -868,6 +868,10 @@ class GraphService:
         """Get the tenant/deployment context metadata."""
         return config_loader.get_tenant_context()
 
+    def get_config_context(self) -> Dict[str, Any]:
+        """Get the effective public config scope and resolved config paths."""
+        return config_loader.get_config_context()
+
     # ==================== Saved Views ====================
 
     def save_view(self, name: str) -> Dict[str, Any]:

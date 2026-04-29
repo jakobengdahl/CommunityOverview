@@ -14,8 +14,9 @@ defaulting to config/default/schema_config.json.
 import os
 import json
 from typing import Dict, List, Optional, Any
-from pathlib import Path
 from pydantic import BaseModel, Field, validator
+
+from backend.config_context import resolve_federation_config_path_info, resolve_schema_config_path_info
 
 # Default config path relative to project root
 DEFAULT_CONFIG_PATH = "config/default/schema_config.json"
@@ -161,25 +162,7 @@ class ConfigLoader:
 
     def _get_config_path(self) -> str:
         """Get the configuration file path."""
-        # Check environment variable first
-        env_path = os.getenv("SCHEMA_FILE") or os.getenv("GRAPH_SCHEMA_CONFIG")
-        if env_path:
-            return env_path
-
-        # Default path relative to the project root
-        # Find project root by looking for config directory
-        current = Path(__file__).parent.parent  # Go up from backend/
-        config_path = current / DEFAULT_CONFIG_PATH
-
-        if config_path.exists():
-            return str(config_path)
-
-        # Try current working directory
-        cwd_config = Path.cwd() / DEFAULT_CONFIG_PATH
-        if cwd_config.exists():
-            return str(cwd_config)
-
-        return str(config_path)  # Return default even if not exists
+        return resolve_schema_config_path_info(DEFAULT_CONFIG_PATH)["path"]
 
     def _load_config(self) -> None:
         """Load and validate the configuration file."""
@@ -380,6 +363,21 @@ def get_tenant_context() -> Dict[str, Any]:
         "tenant_id": os.getenv("COMMUNITYOVERVIEW_TENANT_ID", ""),
         "tenant_name": os.getenv("COMMUNITYOVERVIEW_TENANT_NAME", ""),
         "environment": os.getenv("COMMUNITYOVERVIEW_ENVIRONMENT", "local"),
+    }
+
+
+def get_config_context() -> Dict[str, Any]:
+    """Get the effective public config scope and resolved config paths."""
+    schema_context = resolve_schema_config_path_info(DEFAULT_CONFIG_PATH)
+    federation_context = resolve_federation_config_path_info("config/default/federation_config.json")
+
+    return {
+        **get_tenant_context(),
+        "tenant_config_dir": schema_context["tenant_config_dir"],
+        "schema_config_path": schema_context["path"],
+        "schema_config_source": schema_context["source"],
+        "federation_config_path": federation_context["path"],
+        "federation_config_source": federation_context["source"],
     }
 
 

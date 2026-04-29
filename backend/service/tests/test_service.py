@@ -405,6 +405,23 @@ class TestGraphServiceTenantContext:
         }
 
 
+class TestGraphServiceConfigContext:
+    """Tests for get_config_context via GraphService."""
+
+    def test_returns_effective_config_context(self, empty_service: GraphService, monkeypatch, tmp_path):
+        tenant_dir = tmp_path / "tenant-config"
+        tenant_dir.mkdir()
+        monkeypatch.setenv("COMMUNITYOVERVIEW_TENANT_CONFIG_DIR", str(tenant_dir))
+
+        result = empty_service.get_config_context()
+
+        assert result["tenant_config_dir"] == str(tenant_dir.resolve())
+        assert result["schema_config_source"] == "tenant_config_dir"
+        assert result["federation_config_source"] == "tenant_config_dir"
+        assert result["schema_config_path"] == str((tenant_dir / "schema_config.json").resolve())
+        assert result["federation_config_path"] == str((tenant_dir / "federation_config.json").resolve())
+
+
 class TestGraphServiceSerialization:
     """Tests for response serialization."""
 

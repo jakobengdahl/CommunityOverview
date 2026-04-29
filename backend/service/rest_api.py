@@ -331,6 +331,11 @@ def _register_metadata_endpoints(router: APIRouter, service: GraphService) -> No
         """Get the tenant/deployment context metadata."""
         return service.get_tenant_context()
 
+    @router.get("/config-context")
+    async def get_config_context() -> Dict[str, Any]:
+        """Get the effective public config scope and resolved config paths."""
+        return service.get_config_context()
+
 
 def _register_views_endpoints(router: APIRouter, service: GraphService) -> None:
     @router.post("/views/save")

@@ -407,6 +407,19 @@ class TestMCPClient:
             "enabled_extensions": ["federation", "analytics"],
         }
 
+    def test_mcp_get_config_context(self, mcp_tools, tmp_path):
+        """Test MCP get_config_context tool."""
+        tenant_dir = tmp_path / "tenant-config"
+        tenant_dir.mkdir()
+        os.environ["COMMUNITYOVERVIEW_TENANT_CONFIG_DIR"] = str(tenant_dir)
+
+        tools_map, _ = mcp_tools
+        result = tools_map["get_config_context"]()
+
+        assert result["tenant_config_dir"] == str(tenant_dir.resolve())
+        assert result["schema_config_source"] == "tenant_config_dir"
+        assert result["federation_config_source"] == "tenant_config_dir"
+
     def test_mcp_list_relationship_types(self, mcp_tools):
         """Test MCP list_relationship_types tool."""
         tools_map, _ = mcp_tools
@@ -440,6 +453,8 @@ class TestMCPClient:
             "get_graph_stats",
             "get_capabilities",
             "get_runtime_info",
+            "get_tenant_context",
+            "get_config_context",
             "list_node_types",
             "list_relationship_types",
             "save_view",
