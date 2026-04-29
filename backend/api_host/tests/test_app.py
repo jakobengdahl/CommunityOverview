@@ -219,6 +219,33 @@ class TestNodeEndpoints:
         assert data["success"] is True
         assert data["deleted_edge_id"] == "edge-1"
 
+    def test_delete_edge_propagates_event_metadata(self, test_app: TestClient):
+        """Delete edge endpoint propagates request event metadata into emitted events."""
+        captured_events = []
+        test_app.app.state.graph_storage.add_system_listener(captured_events.append)
+
+        response = test_app.request(
+            "DELETE",
+            "/api/edges/edge-1",
+            json={
+                "event_origin": "mcp",
+                "event_session_id": "session-123",
+                "event_correlation_id": "corr-456",
+            },
+        )
+
+        assert response.status_code == 200
+        data = response.json()
+        assert data["success"] is True
+        assert data["deleted_edge_id"] == "edge-1"
+
+        edge_delete_events = [event for event in captured_events if event.entity.id == "edge-1"]
+        assert len(edge_delete_events) == 1
+        event = edge_delete_events[0]
+        assert event.origin.event_origin == "mcp"
+        assert event.origin.event_session_id == "session-123"
+        assert event.origin.event_correlation_id == "corr-456"
+
 
 class TestSimilarityEndpoints:
     """Tests for similarity search endpoints."""

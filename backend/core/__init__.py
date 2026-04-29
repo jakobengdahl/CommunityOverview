@@ -64,7 +64,7 @@ from .models import (
 )
 
 # Event system
-from .events import EventContext, EventOrigin
+from .events import EventContext, EventOrigin, EventAttribution, EventActorAttribution, EventScopeAttribution
 
 __all__ = [
     # Core storage
@@ -99,6 +99,9 @@ __all__ = [
     # Event system
     "EventContext",
     "EventOrigin",
+    "EventAttribution",
+    "EventActorAttribution",
+    "EventScopeAttribution",
 ]
 
 __version__ = "1.0.0"
