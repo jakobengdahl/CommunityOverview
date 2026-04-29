@@ -366,8 +366,8 @@ def get_tenant_context() -> Dict[str, Any]:
     }
 
 
-def get_config_context() -> Dict[str, Any]:
-    """Get the effective public config scope and resolved config paths."""
+def _get_resolved_config_context() -> Dict[str, Any]:
+    """Get internal config resolution details, including resolved filesystem paths."""
     schema_context = resolve_schema_config_path_info(DEFAULT_CONFIG_PATH)
     federation_context = resolve_federation_config_path_info("config/default/federation_config.json")
 
@@ -378,6 +378,19 @@ def get_config_context() -> Dict[str, Any]:
         "schema_config_source": schema_context["source"],
         "federation_config_path": federation_context["path"],
         "federation_config_source": federation_context["source"],
+    }
+
+
+def get_config_context() -> Dict[str, Any]:
+    """Get the effective public config scope without exposing filesystem paths."""
+    resolved_context = _get_resolved_config_context()
+    return {
+        "tenant_id": resolved_context["tenant_id"],
+        "tenant_name": resolved_context["tenant_name"],
+        "environment": resolved_context["environment"],
+        "tenant_config_dir_configured": bool(resolved_context["tenant_config_dir"]),
+        "schema_config_source": resolved_context["schema_config_source"],
+        "federation_config_source": resolved_context["federation_config_source"],
     }
 
 

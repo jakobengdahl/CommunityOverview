@@ -415,11 +415,12 @@ class TestGraphServiceConfigContext:
 
         result = empty_service.get_config_context()
 
-        assert result["tenant_config_dir"] == str(tenant_dir.resolve())
+        assert result["tenant_config_dir_configured"] is True
         assert result["schema_config_source"] == "tenant_config_dir"
         assert result["federation_config_source"] == "tenant_config_dir"
-        assert result["schema_config_path"] == str((tenant_dir / "schema_config.json").resolve())
-        assert result["federation_config_path"] == str((tenant_dir / "federation_config.json").resolve())
+        assert "tenant_config_dir" not in result
+        assert "schema_config_path" not in result
+        assert "federation_config_path" not in result
 
 
 class TestGraphServiceSerialization:

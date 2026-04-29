@@ -333,7 +333,7 @@ def _register_metadata_endpoints(router: APIRouter, service: GraphService) -> No
 
     @router.get("/config-context")
     async def get_config_context() -> Dict[str, Any]:
-        """Get the effective public config scope and resolved config paths."""
+        """Get the effective public config scope and non-sensitive source metadata."""
         return service.get_config_context()
 
 

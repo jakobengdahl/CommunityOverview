@@ -377,7 +377,7 @@ def register_mcp_tools(mcp, service: GraphService) -> Dict[str, Callable]:
 
     @register_tool
     def get_config_context() -> Dict[str, Any]:
-        """Get the effective config scope and resolved public config paths."""
+        """Get the effective config scope and non-sensitive config source metadata."""
         return service.get_config_context()
 
     # ==================== Saved Views Tools ====================

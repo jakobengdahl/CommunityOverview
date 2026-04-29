@@ -869,7 +869,7 @@ class GraphService:
         return config_loader.get_tenant_context()
 
     def get_config_context(self) -> Dict[str, Any]:
-        """Get the effective public config scope and resolved config paths."""
+        """Get the effective public config scope and non-sensitive source metadata."""
         return config_loader.get_config_context()
 
     # ==================== Saved Views ====================

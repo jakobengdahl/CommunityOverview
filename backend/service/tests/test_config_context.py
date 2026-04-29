@@ -35,11 +35,12 @@ class TestConfigContextRestEndpoint:
 
         assert response.status_code == 200
         result = response.json()
-        assert result["tenant_config_dir"] == ""
+        assert result["tenant_config_dir_configured"] is False
         assert result["schema_config_source"] == "default"
         assert result["federation_config_source"] == "default"
-        assert result["schema_config_path"].endswith("config/default/schema_config.json")
-        assert result["federation_config_path"].endswith("config/default/federation_config.json")
+        assert "tenant_config_dir" not in result
+        assert "schema_config_path" not in result
+        assert "federation_config_path" not in result
 
     def test_resolves_paths_from_tenant_config_dir(self, tmp_path, monkeypatch):
         tenant_dir = tmp_path / "tenant-config"
@@ -54,11 +55,12 @@ class TestConfigContextRestEndpoint:
 
         result = client.get("/api/config-context").json()
 
-        assert result["tenant_config_dir"] == str(tenant_dir.resolve())
+        assert result["tenant_config_dir_configured"] is True
         assert result["schema_config_source"] == "tenant_config_dir"
         assert result["federation_config_source"] == "tenant_config_dir"
-        assert result["schema_config_path"] == str((tenant_dir / "schema_config.json").resolve())
-        assert result["federation_config_path"] == str((tenant_dir / "federation_config.json").resolve())
+        assert "tenant_config_dir" not in result
+        assert "schema_config_path" not in result
+        assert "federation_config_path" not in result
 
     def test_explicit_env_vars_override_tenant_config_dir(self, tmp_path, monkeypatch):
         tenant_dir = tmp_path / "tenant-config"
@@ -78,11 +80,12 @@ class TestConfigContextRestEndpoint:
 
         result = client.get("/api/config-context").json()
 
-        assert result["tenant_config_dir"] == str(tenant_dir.resolve())
+        assert result["tenant_config_dir_configured"] is True
         assert result["schema_config_source"] == "explicit_env"
         assert result["federation_config_source"] == "explicit_env"
-        assert result["schema_config_path"] == str(explicit_schema.resolve())
-        assert result["federation_config_path"] == str(explicit_federation.resolve())
+        assert "tenant_config_dir" not in result
+        assert "schema_config_path" not in result
+        assert "federation_config_path" not in result
 
 
 class TestConfigContextMcpTool:
@@ -97,8 +100,11 @@ class TestConfigContextMcpTool:
 
         assert response.status_code == 200
         result = response.json()
-        assert "schema_config_path" in result
-        assert "federation_config_path" in result
+        assert "schema_config_source" in result
+        assert "federation_config_source" in result
+        assert "tenant_config_dir" not in result
+        assert "schema_config_path" not in result
+        assert "federation_config_path" not in result
 
     def test_tool_appears_in_mcp_discovery_inventory(self, app_client):
         client, _ = app_client
