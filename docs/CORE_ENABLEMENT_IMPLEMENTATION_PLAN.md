@@ -2,128 +2,98 @@
 
 > **For Hermes:** Use Claude Code or another isolated coding agent to implement small slices from this plan, then perform independent review before merge.
 
-**Goal:** Define the first concrete implementation slices that make CommunityOverview more ready for hosted operation and future SaaS-only extensions without leaking private roadmap details into the public core.
+**Goal:** Define the next concrete implementation slices that make CommunityOverview more ready for hosted operation and future SaaS-only extensions without leaking private roadmap details into the public core.
 
-**Architecture:** The core should expose generic, opt-in seams rather than hard-coded hosted logic. The first slices should improve capability discovery and runtime-mode introspection so optional service layers can integrate cleanly through public contracts.
+**Architecture:** The core should expose generic, opt-in seams rather than hard-coded hosted logic. The current priority is to make identity, workspace scope, graph scope, and audit attribution pluggable without forcing a built-in SaaS account system into standalone deployments.
 
 **Tech Stack:** Python, FastAPI, Pydantic, existing `config_loader`, `GraphService`, REST router, MCP tool registration, pytest.
 
 ---
 
+## Current completed slices
+
+1. capability manifest and discovery
+2. runtime mode metadata and introspection
+3. tenant context metadata
+4. tenant-aware config layering with non-sensitive config-context introspection
+
+These slices establish the public runtime and configuration seams needed before identity-aware hosted integration.
+
+---
+
 ## Implementation priorities
 
-### Priority 1: Capability manifest and discovery
+### Priority 1: Request actor and scope foundation
 
-**Why this comes first**
-The core needs a generic way to describe optional capabilities without forcing them into the default execution path. This becomes the foundation for future hosted-only or SaaS-only integrations.
+**Why this comes next**
+The hosted SaaS layer will need to pass actor identity, workspace context, and graph context into the core while the standalone core must stay usable without any built-in hosted account system.
 
 **Target outcome**
-- the schema config can declare optional capabilities in a generic format
-- the backend exposes the resulting capability manifest through stable APIs
-- the frontend or external service layers can discover capability availability without relying on private assumptions
+- the core can expose a generic request actor context
+- the core can expose generic workspace and graph scope context
+- all outputs are safe for public introspection and contain no billing, account, or private SaaS logic
+- standalone defaults remain no-op and permissive
 
 **Scope**
-- add a generic capability model to configuration
-- expose a capability manifest through `config_loader`
-- expose it through `GraphService`
-- add a REST endpoint and MCP tool for capability discovery
-- add tests for default behavior, custom config behavior, and client access
+- introduce a lightweight request actor abstraction driven by environment-safe or request-safe inputs
+- introduce a workspace/graph scope abstraction that can later be populated by a SaaS gateway or service layer
+- expose a small public introspection surface through config/service/REST/MCP
+- add targeted tests for default behavior and override behavior
 
 **Likely files**
-- `backend/config_loader.py`
+- `backend/` helper module for actor/scope context
+- `backend/config_loader.py` or adjacent runtime/context module
 - `backend/service/service.py`
 - `backend/service/rest_api.py`
 - `backend/service/mcp_tools.py`
-- `backend/tests/test_config_loader.py`
-- `backend/service/tests/test_clients.py`
-- `config/test/schema_config.json`
+- `backend/agents/mcp_loader.py`
+- targeted pytest files in `backend/tests/`, `backend/service/tests/`, and `backend/agents/tests/`
 
 **Design constraints**
-- optional by default
-- safe no-op defaults when no capabilities are configured
-- generic names and descriptions only
-- no premium-specific identifiers required in public defaults
+- do not add a built-in user directory
+- do not make authentication mandatory for standalone mode
+- do not expose secrets, tokens, or private account metadata
+- keep the model generic enough for personal workspaces, team workspaces, and graph-scoped access later
 
 ---
 
-### Priority 2: Runtime mode metadata and introspection
+### Priority 2: Authorization hook seam
 
-**Why this comes second**
-Hosted and standalone deployments need a clean, public way to report how the application is running. This should be explicit and machine-readable instead of inferred from ad hoc environment assumptions.
-
-**Target outcome**
-- the core can report a generic runtime mode such as `standalone` or `hosted`
-- external automation can inspect the active runtime mode and enabled extension identifiers
-- hosted integrations can use this contract without the core depending on a proprietary control plane
-
-**Scope**
-- add runtime-mode metadata with environment-safe defaults
-- expose runtime information through `config_loader` or a dedicated runtime helper
-- expose it through `GraphService`
-- add a REST endpoint and MCP tool for runtime introspection
-- add tests for default behavior and environment override behavior
-
-**Likely files**
-- `backend/config_loader.py` or a new runtime helper module under `backend/`
-- `backend/service/service.py`
-- `backend/service/rest_api.py`
-- `backend/service/mcp_tools.py`
-- `backend/tests/test_config_loader.py`
-- `backend/service/tests/test_clients.py`
-
-**Design constraints**
-- default to `standalone`
-- avoid vendor-specific runtime semantics
-- keep the output descriptive but small
-- make extension reporting optional and generic
-
----
-
-### Priority 3: Tenant-aware configuration seams
-
-**Why this matters**
-Hosted operation will need cleaner boundaries between shared app config and tenant-specific configuration, but this should be introduced incrementally.
+**Why this follows actor and scope**
+Once actor and scope are explicit, the next step is to define where an external service layer can narrow graph access without baking SaaS policy into the core.
 
 **Target outcome**
-- clearer rules for tenant-scoped versus shared config
-- fewer implicit single-tenant assumptions
-- easier external provisioning and validation
-- support for graph/workspace contexts within shared service instances, not just one deployed stack per graph
+- the core can call a generic authorization hook for graph access decisions
+- default behavior remains permissive in standalone mode
+- hosted deployments can later replace or augment the default behavior
 
 **Suggested first slice**
-- document config layering rules
-- identify which existing config fields are tenant-specific
-- add validation seams instead of full tenant orchestration
-- separate tenant metadata from graph-selection and graph-access policy concerns
-
-**Potential files**
-- `backend/config_loader.py`
-- `docs/PROFILES.md`
-- selected tests around config loading
+- define a small authorization interface or evaluation seam
+- thread it into read and mutation paths where graph access will later matter
+- keep enforcement minimal until the seam is proven through tests and docs
 
 ---
 
-### Priority 4: Identity and audit seams
+### Priority 3: Actor attribution for writes and events
 
 **Why this matters**
-Hosted service layers will eventually need stronger actor attribution and access boundaries. The public core should prepare for this generically.
+Hosted service layers will need audit-friendly mutation attribution even before a full audit product exists.
 
 **Target outcome**
-- request identity can be carried through write operations
-- mutation responses or event payloads can attribute actor identity in a generic form
-- the core stays auth-provider-agnostic
-- graph access can later be constrained by application-managed user membership and RBAC/policy checks inside shared hosting
+- write operations can carry actor metadata in a generic form
+- event payloads or mutation metadata can include actor and scope information where safe
+- later audit logging can attach without rewriting core mutation paths
 
 **Suggested first slice**
-- introduce a lightweight request actor abstraction
-- thread actor metadata into mutation paths where it can later feed audit logs or webhooks
-- define the seam where user directory / RBAC decisions can narrow graph scope for reads and writes
+- add actor attribution fields to mutation context
+- expose them to event publication or mutation metadata surfaces where already available
+- add regression tests around no-op standalone defaults
 
 ---
 
-### Priority 5: Operability hooks
+### Priority 4: Operability hooks
 
-**Why this matters**
+**Why this remains important**
 Hosted operation depends on reliable health, restore boundaries, and machine-readable diagnostics.
 
 **Target outcome**
@@ -133,7 +103,7 @@ Hosted operation depends on reliable health, restore boundaries, and machine-rea
 - a future-friendly path from file-based persistence to shared storage for hosted SaaS
 
 **Suggested first slice**
-- improve structured startup logging around config/runtime/capability loading
+- improve structured startup logging around config/runtime/capability/context loading
 - add generic integrity diagnostics where cheap to expose
 - identify the storage abstraction seams needed before a shared RBAC-aware storage backend is introduced
 
@@ -141,19 +111,18 @@ Hosted operation depends on reliable health, restore boundaries, and machine-rea
 
 ## Recommended execution order
 
-1. implement capability manifest and discovery
-2. implement runtime mode metadata and introspection
-3. document and harden tenant-aware config seams
-4. introduce identity and audit seams
-5. improve operability hooks
+1. implement request actor and scope foundation
+2. implement authorization hook seam
+3. implement actor attribution for writes and events
+4. improve operability hooks
 
 ---
 
 ## Success criteria
 
 This plan is succeeding when:
-- optional capabilities can be discovered through public, generic contracts
-- runtime mode is explicit instead of implicit
-- hosted integrations can attach through stable APIs rather than patches
-- the application still behaves cleanly with no extra config in standalone mode
+- standalone deployments still work with no user directory or built-in auth requirement
+- hosted integrations can pass actor, workspace, and graph context through stable contracts
+- future authorization logic can attach without forking core
+- mutation flows can later emit audit-friendly metadata without invasive rewrites
 - public artifacts remain free of private SaaS roadmap detail

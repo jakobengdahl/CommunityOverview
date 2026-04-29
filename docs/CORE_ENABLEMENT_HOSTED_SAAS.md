@@ -20,18 +20,23 @@ The core should evolve so that it can:
 3. expose stable extension points for optional service-layer or plugin-based capabilities
 4. keep the open source core useful even when no hosted or premium layer is present
 
-## Clarification: what tenant-aware hosted operation means here
+## Clarification: standalone core versus hosted SaaS
+
+For standalone open-core operation, the baseline assumption remains:
+- one deployment normally serves one graph
+- the core does not require a built-in SaaS-style user directory or billing model
+- authentication can be handled externally by infrastructure or gateway controls such as IAP, reverse proxy auth, or equivalent perimeter patterns
 
 For the target SaaS model, tenant-aware operation should not imply one dedicated application stack per graph.
 
-The default target architecture is:
+The default target hosted architecture is:
 - one shared application/service environment per deployment tier or region
 - multiple graphs or customer workspaces served by the same runtime instances
 - graph selection, search scope, rendering scope, and mutation scope controlled by application identity and authorization
 - isolation enforced through configuration, graph scoping, authorization, and data-layer controls
 
 This means the core should prepare for:
-- shared-hosting deployments where users gain access to one or more graphs through an application-managed user directory and authorization model
+- shared-hosting deployments where a service layer manages users, teams, workspaces, and graph access outside the standalone core defaults
 - future storage backends that can support record-level or row-based access constraints for shared graph data
 - a separation between tenant context metadata and actual graph access decisions
 
@@ -121,9 +126,11 @@ Target outcomes:
 - clean boundaries between application roles and infrastructure access
 - ability to layer in stronger operator or tenant-admin models later
 - graph-scoped authorization decisions so shared service instances can restrict which graphs, nodes, and edges a user can access
+- workspace-aware graph selection that can work with personal workspaces and team workspaces managed by an external service layer
 
 Likely core changes:
 - request identity abstraction
+- request scope abstraction for workspace and graph context
 - clearer role and permission evaluation seams
 - audit-friendly handling of actor identity in write operations
 - future-friendly interfaces between user directory, RBAC/policy checks, and graph access scope
@@ -195,6 +202,7 @@ Focus:
 Focus:
 - request identity abstraction
 - actor attribution for writes
+- workspace and graph scope propagation
 - future-friendly authorization integration points
 
 ### Workstream 5: Operability hooks
@@ -224,7 +232,7 @@ Those belong outside the public core repository.
 2. introduce a capability registry with no-op defaults
 3. define extension loading contracts and failure behavior
 4. add tenant-aware configuration seams where core behavior currently assumes a single deployment context
-5. improve identity, audit, and mutation attribution surfaces
+5. improve identity, scope, audit, and mutation attribution surfaces
 6. harden observability, health, and persistence boundaries for hosted operation
 
 ---
