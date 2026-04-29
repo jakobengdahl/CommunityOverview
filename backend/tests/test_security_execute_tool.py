@@ -103,3 +103,54 @@ def test_authenticated_no_creds_blocked(authenticated_app):
     })
     # Should be blocked by middleware (401)
     assert response.status_code == 401
+
+
+def test_unauthenticated_get_tenant_context_safe_tool(unauthenticated_app):
+    """get_tenant_context is in SAFE_TOOLS and accessible without authentication."""
+    client = TestClient(unauthenticated_app)
+    response = client.post("/execute_tool", json={
+        "tool_name": "get_tenant_context",
+        "arguments": {}
+    })
+    assert response.status_code == 200
+    result = response.json()
+    assert "tenant_id" in result
+    assert "tenant_name" in result
+    assert "environment" in result
+
+
+def test_unauthenticated_get_tenant_context_default_values(unauthenticated_app, monkeypatch):
+    """get_tenant_context returns safe defaults when env vars are unset."""
+    monkeypatch.delenv("COMMUNITYOVERVIEW_TENANT_ID", raising=False)
+    monkeypatch.delenv("COMMUNITYOVERVIEW_TENANT_NAME", raising=False)
+    monkeypatch.delenv("COMMUNITYOVERVIEW_ENVIRONMENT", raising=False)
+
+    client = TestClient(unauthenticated_app)
+    response = client.post("/execute_tool", json={
+        "tool_name": "get_tenant_context",
+        "arguments": {}
+    })
+    assert response.status_code == 200
+    result = response.json()
+    assert result["tenant_id"] == ""
+    assert result["tenant_name"] == ""
+    assert result["environment"] == "local"
+
+
+def test_unauthenticated_get_tenant_context_env_override(unauthenticated_app, monkeypatch):
+    """get_tenant_context reflects env var overrides."""
+    monkeypatch.setenv("COMMUNITYOVERVIEW_TENANT_ID", "demo-tenant")
+    monkeypatch.setenv("COMMUNITYOVERVIEW_TENANT_NAME", "Demo Org")
+    monkeypatch.setenv("COMMUNITYOVERVIEW_ENVIRONMENT", "staging")
+
+    client = TestClient(unauthenticated_app)
+    response = client.post("/execute_tool", json={
+        "tool_name": "get_tenant_context",
+        "arguments": {}
+    })
+    assert response.status_code == 200
+    assert response.json() == {
+        "tenant_id": "demo-tenant",
+        "tenant_name": "Demo Org",
+        "environment": "staging",
+    }

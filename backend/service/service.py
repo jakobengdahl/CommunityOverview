@@ -864,6 +864,10 @@ class GraphService:
         """Get the public runtime metadata for deployment introspection."""
         return config_loader.get_runtime_info()
 
+    def get_tenant_context(self) -> Dict[str, Any]:
+        """Get the tenant/deployment context metadata."""
+        return config_loader.get_tenant_context()
+
     # ==================== Saved Views ====================
 
     def save_view(self, name: str) -> Dict[str, Any]:
