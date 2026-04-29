@@ -886,7 +886,7 @@ class GraphService:
             actor_id,
             actor_type,
             auth_source,
-        ]) else config_loader.get_request_actor_context(
+        ]) else config_loader.get_public_request_actor_context(
             headers=headers,
             actor_id=actor_id,
             actor_type=actor_type,
@@ -907,7 +907,7 @@ class GraphService:
             workspace_id,
             workspace_kind,
             graph_id,
-        ]) else config_loader.get_request_scope_context(
+        ]) else config_loader.get_public_request_scope_context(
             headers=headers,
             workspace_id=workspace_id,
             workspace_kind=workspace_kind,

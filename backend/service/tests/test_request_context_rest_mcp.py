@@ -30,10 +30,10 @@ class TestRequestActorRestEndpoint:
         client, _ = app_client
         result = client.get("/api/request-actor").json()
         assert result == {
-            "actor_id": "",
             "actor_type": "",
             "is_authenticated": False,
             "auth_source": "anonymous",
+            "has_actor": False,
             "source": "default",
         }
 
@@ -48,10 +48,10 @@ class TestRequestActorRestEndpoint:
             },
         ).json()
         assert result == {
-            "actor_id": "rest-actor",
             "actor_type": "member",
             "is_authenticated": True,
             "auth_source": "iap",
+            "has_actor": True,
             "source": "request",
         }
 
@@ -61,9 +61,9 @@ class TestRequestScopeRestEndpoint:
         client, _ = app_client
         result = client.get("/api/request-scope").json()
         assert result == {
-            "workspace_id": "",
             "workspace_kind": "",
-            "graph_id": "",
+            "has_workspace": False,
+            "has_graph": False,
             "source": "default",
         }
 
@@ -78,9 +78,9 @@ class TestRequestScopeRestEndpoint:
             },
         ).json()
         assert result == {
-            "workspace_id": "workspace-rest",
             "workspace_kind": "personal",
-            "graph_id": "graph-rest",
+            "has_workspace": True,
+            "has_graph": True,
             "source": "request",
         }
 
@@ -96,10 +96,10 @@ class TestRequestContextMcpTools:
         })
         assert response.status_code == 200
         assert response.json() == {
-            "actor_id": "mcp-actor",
             "actor_type": "member",
             "is_authenticated": True,
             "auth_source": "test",
+            "has_actor": True,
             "source": "override",
         }
 
@@ -117,9 +117,9 @@ class TestRequestContextMcpTools:
         })
         assert response.status_code == 200
         assert response.json() == {
-            "workspace_id": "workspace-mcp",
             "workspace_kind": "team",
-            "graph_id": "graph-mcp",
+            "has_workspace": True,
+            "has_graph": True,
             "source": "override",
         }
 

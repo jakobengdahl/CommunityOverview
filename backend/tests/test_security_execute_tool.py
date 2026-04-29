@@ -163,7 +163,8 @@ def test_unauthenticated_get_request_actor_safe_tool(unauthenticated_app):
         "arguments": {"actor_id": "safe-actor"}
     })
     assert response.status_code == 200
-    assert response.json()["actor_id"] == "safe-actor"
+    assert "actor_id" not in response.json()
+    assert response.json()["has_actor"] is True
     assert response.json()["source"] == "override"
 
 
@@ -174,6 +175,8 @@ def test_unauthenticated_get_request_scope_safe_tool(unauthenticated_app):
         "arguments": {"workspace_id": "safe-workspace", "graph_id": "safe-graph"}
     })
     assert response.status_code == 200
-    assert response.json()["workspace_id"] == "safe-workspace"
-    assert response.json()["graph_id"] == "safe-graph"
+    assert "workspace_id" not in response.json()
+    assert "graph_id" not in response.json()
+    assert response.json()["has_workspace"] is True
+    assert response.json()["has_graph"] is True
     assert response.json()["source"] == "override"

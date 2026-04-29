@@ -17,7 +17,12 @@ from typing import Dict, List, Optional, Any
 from pydantic import BaseModel, Field, validator
 
 from backend.config_context import resolve_federation_config_path_info, resolve_schema_config_path_info
-from backend.request_context import get_request_actor_context, get_request_scope_context
+from backend.request_context import (
+    get_public_request_actor_context,
+    get_public_request_scope_context,
+    get_request_actor_context,
+    get_request_scope_context,
+)
 
 # Default config path relative to project root
 DEFAULT_CONFIG_PATH = "config/default/schema_config.json"
@@ -397,12 +402,12 @@ def get_config_context() -> Dict[str, Any]:
 
 def get_request_actor_info() -> Dict[str, Any]:
     """Get the default public request actor context for this deployment."""
-    return get_request_actor_context()
+    return get_public_request_actor_context()
 
 
 def get_request_scope_info() -> Dict[str, Any]:
     """Get the default public request scope context for this deployment."""
-    return get_request_scope_context()
+    return get_public_request_scope_context()
 
 
 def get_node_type_names() -> List[str]:

@@ -13,10 +13,10 @@ class TestRequestActorService:
             monkeypatch.delenv(var, raising=False)
 
         assert empty_service.get_request_actor_info() == {
-            "actor_id": "",
             "actor_type": "",
             "is_authenticated": False,
             "auth_source": "anonymous",
+            "has_actor": False,
             "source": "default",
         }
 
@@ -26,6 +26,27 @@ class TestRequestActorService:
         monkeypatch.setenv("COMMUNITYOVERVIEW_AUTH_SOURCE", "gateway")
 
         result = empty_service.get_request_actor_info(headers={
+            "x-communityoverview-actor-id": "header-actor",
+            "x-communityoverview-actor-type": "member",
+            "x-communityoverview-auth-source": "proxy",
+        })
+
+        assert result == {
+            "actor_type": "member",
+            "is_authenticated": True,
+            "auth_source": "proxy",
+            "has_actor": True,
+            "source": "request",
+        }
+
+    def test_internal_seam_still_resolves_rich_actor_context(self, monkeypatch):
+        from backend.request_context import get_request_actor_context
+
+        monkeypatch.setenv("COMMUNITYOVERVIEW_ACTOR_ID", "env-actor")
+        monkeypatch.setenv("COMMUNITYOVERVIEW_ACTOR_TYPE", "service")
+        monkeypatch.setenv("COMMUNITYOVERVIEW_AUTH_SOURCE", "gateway")
+
+        result = get_request_actor_context(headers={
             "x-communityoverview-actor-id": "header-actor",
             "x-communityoverview-actor-type": "member",
             "x-communityoverview-auth-source": "proxy",
@@ -50,9 +71,9 @@ class TestRequestScopeService:
             monkeypatch.delenv(var, raising=False)
 
         assert empty_service.get_request_scope_info() == {
-            "workspace_id": "",
             "workspace_kind": "",
-            "graph_id": "",
+            "has_workspace": False,
+            "has_graph": False,
             "source": "default",
         }
 
@@ -62,6 +83,31 @@ class TestRequestScopeService:
         monkeypatch.setenv("COMMUNITYOVERVIEW_GRAPH_SCOPE_ID", "env-graph")
 
         result = empty_service.get_request_scope_info(
+            headers={
+                "x-communityoverview-workspace-id": "header-workspace",
+                "x-communityoverview-workspace-kind": "personal",
+                "x-communityoverview-graph-id": "header-graph",
+            },
+            workspace_id="override-workspace",
+            workspace_kind="sandbox",
+            graph_id="override-graph",
+        )
+
+        assert result == {
+            "workspace_kind": "sandbox",
+            "has_workspace": True,
+            "has_graph": True,
+            "source": "override",
+        }
+
+    def test_internal_seam_still_resolves_rich_scope_context(self, monkeypatch):
+        from backend.request_context import get_request_scope_context
+
+        monkeypatch.setenv("COMMUNITYOVERVIEW_WORKSPACE_ID", "env-workspace")
+        monkeypatch.setenv("COMMUNITYOVERVIEW_WORKSPACE_KIND", "team")
+        monkeypatch.setenv("COMMUNITYOVERVIEW_GRAPH_SCOPE_ID", "env-graph")
+
+        result = get_request_scope_context(
             headers={
                 "x-communityoverview-workspace-id": "header-workspace",
                 "x-communityoverview-workspace-kind": "personal",

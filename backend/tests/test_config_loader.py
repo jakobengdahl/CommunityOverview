@@ -207,10 +207,10 @@ class TestConfigLoader:
         from backend import config_loader
 
         assert config_loader.get_request_actor_info() == {
-            "actor_id": "",
             "actor_type": "",
             "is_authenticated": False,
             "auth_source": "anonymous",
+            "has_actor": False,
             "source": "default",
         }
 
@@ -223,10 +223,10 @@ class TestConfigLoader:
         os.environ["COMMUNITYOVERVIEW_AUTH_SOURCE"] = "gateway"
 
         assert config_loader.get_request_actor_info() == {
-            "actor_id": "env-actor",
             "actor_type": "member",
             "is_authenticated": True,
             "auth_source": "gateway",
+            "has_actor": True,
             "source": "environment",
         }
 
@@ -235,9 +235,9 @@ class TestConfigLoader:
         from backend import config_loader
 
         assert config_loader.get_request_scope_info() == {
-            "workspace_id": "",
             "workspace_kind": "",
-            "graph_id": "",
+            "has_workspace": False,
+            "has_graph": False,
             "source": "default",
         }
 
@@ -250,9 +250,9 @@ class TestConfigLoader:
         os.environ["COMMUNITYOVERVIEW_GRAPH_SCOPE_ID"] = "graph-env"
 
         assert config_loader.get_request_scope_info() == {
-            "workspace_id": "workspace-env",
             "workspace_kind": "personal",
-            "graph_id": "graph-env",
+            "has_workspace": True,
+            "has_graph": True,
             "source": "environment",
         }
 

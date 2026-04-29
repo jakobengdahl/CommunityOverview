@@ -36,14 +36,14 @@ def _source_from_values(*values: str, preferred: str) -> str:
     return preferred if any(values) else "default"
 
 
-def get_request_actor_context(
+def _resolve_request_actor_context(
     *,
     headers: Optional[Mapping[str, Any]] = None,
     actor_id: Optional[str] = None,
     actor_type: Optional[str] = None,
     auth_source: Optional[str] = None,
 ) -> Dict[str, Any]:
-    """Resolve safe request actor context from env and optional request inputs."""
+    """Resolve internal request actor context from env and optional request inputs."""
     normalized_headers = _coerce_headers(headers)
 
     env_actor_id = _clean_string(os.getenv(ACTOR_ID_ENV))
@@ -71,14 +71,53 @@ def get_request_actor_context(
     }
 
 
-def get_request_scope_context(
+def get_request_actor_context(
+    *,
+    headers: Optional[Mapping[str, Any]] = None,
+    actor_id: Optional[str] = None,
+    actor_type: Optional[str] = None,
+    auth_source: Optional[str] = None,
+) -> Dict[str, Any]:
+    """Resolve internal request actor context for future authz/audit seams."""
+    return _resolve_request_actor_context(
+        headers=headers,
+        actor_id=actor_id,
+        actor_type=actor_type,
+        auth_source=auth_source,
+    )
+
+
+def get_public_request_actor_context(
+    *,
+    headers: Optional[Mapping[str, Any]] = None,
+    actor_id: Optional[str] = None,
+    actor_type: Optional[str] = None,
+    auth_source: Optional[str] = None,
+) -> Dict[str, Any]:
+    """Resolve non-sensitive public request actor summary."""
+    resolved = _resolve_request_actor_context(
+        headers=headers,
+        actor_id=actor_id,
+        actor_type=actor_type,
+        auth_source=auth_source,
+    )
+    return {
+        "actor_type": resolved["actor_type"],
+        "is_authenticated": resolved["is_authenticated"],
+        "auth_source": resolved["auth_source"],
+        "has_actor": bool(resolved["actor_id"]),
+        "source": resolved["source"],
+    }
+
+
+def _resolve_request_scope_context(
     *,
     headers: Optional[Mapping[str, Any]] = None,
     workspace_id: Optional[str] = None,
     workspace_kind: Optional[str] = None,
     graph_id: Optional[str] = None,
 ) -> Dict[str, Any]:
-    """Resolve safe request scope context from env and optional request inputs."""
+    """Resolve internal request scope context from env and optional request inputs."""
     normalized_headers = _coerce_headers(headers)
 
     env_workspace_id = _clean_string(os.getenv(WORKSPACE_ID_ENV))
@@ -98,4 +137,42 @@ def get_request_scope_context(
         "workspace_kind": resolved_workspace_kind,
         "graph_id": resolved_graph_id,
         "source": source,
+    }
+
+
+def get_request_scope_context(
+    *,
+    headers: Optional[Mapping[str, Any]] = None,
+    workspace_id: Optional[str] = None,
+    workspace_kind: Optional[str] = None,
+    graph_id: Optional[str] = None,
+) -> Dict[str, Any]:
+    """Resolve internal request scope context for future authz/audit seams."""
+    return _resolve_request_scope_context(
+        headers=headers,
+        workspace_id=workspace_id,
+        workspace_kind=workspace_kind,
+        graph_id=graph_id,
+    )
+
+
+def get_public_request_scope_context(
+    *,
+    headers: Optional[Mapping[str, Any]] = None,
+    workspace_id: Optional[str] = None,
+    workspace_kind: Optional[str] = None,
+    graph_id: Optional[str] = None,
+) -> Dict[str, Any]:
+    """Resolve non-sensitive public request scope summary."""
+    resolved = _resolve_request_scope_context(
+        headers=headers,
+        workspace_id=workspace_id,
+        workspace_kind=workspace_kind,
+        graph_id=graph_id,
+    )
+    return {
+        "workspace_kind": resolved["workspace_kind"],
+        "has_workspace": bool(resolved["workspace_id"]),
+        "has_graph": bool(resolved["graph_id"]),
+        "source": resolved["source"],
     }
