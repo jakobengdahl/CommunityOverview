@@ -82,6 +82,7 @@ This system helps organizations avoid overlapping investments by making visible:
   PROFILES.md                     # Configuration profiles guide
   DEPLOYMENT_GUIDE.md             # Deployment documentation
   FEDERATED_GRAPH_DESIGN.md       # Federated multi-graph architecture
+  CORE_ENABLEMENT_HOSTED_SAAS.md  # Public core plan for hosted/SaaS-ready extension seams
 start-dev.sh                      # Development startup script
 LLM_PROVIDERS.md                  # LLM configuration guide
 ```
