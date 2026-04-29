@@ -860,6 +860,10 @@ class GraphService:
         """Get the public capability manifest for client discovery."""
         return config_loader.get_capabilities()
 
+    def get_runtime_info(self) -> Dict[str, Any]:
+        """Get the public runtime metadata for deployment introspection."""
+        return config_loader.get_runtime_info()
+
     # ==================== Saved Views ====================
 
     def save_view(self, name: str) -> Dict[str, Any]:

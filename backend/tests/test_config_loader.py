@@ -21,6 +21,9 @@ class TestConfigLoader:
         from backend import config_loader
         config_loader.reset_loader()
         yield
+        os.environ.pop("SCHEMA_FILE", None)
+        os.environ.pop("COMMUNITYOVERVIEW_RUNTIME_MODE", None)
+        os.environ.pop("COMMUNITYOVERVIEW_ENABLED_EXTENSIONS", None)
         config_loader.reset_loader()
 
     def test_load_default_config(self):
@@ -152,6 +155,46 @@ class TestConfigLoader:
         }
 
         del os.environ["SCHEMA_FILE"]
+
+    def test_get_runtime_info_defaults_to_standalone(self):
+        """Test runtime metadata defaults to standalone mode with no extensions."""
+        from backend import config_loader
+
+        runtime_info = config_loader.get_runtime_info()
+
+        assert runtime_info == {
+            "runtime_mode": "standalone",
+            "enabled_extensions": [],
+        }
+
+    def test_get_runtime_info_runtime_mode_env_override(self):
+        """Test runtime mode can be overridden through environment configuration."""
+        from backend import config_loader
+
+        os.environ["COMMUNITYOVERVIEW_RUNTIME_MODE"] = "hosted"
+        config_loader.reset_loader()
+
+        runtime_info = config_loader.get_runtime_info()
+
+        assert runtime_info == {
+            "runtime_mode": "hosted",
+            "enabled_extensions": [],
+        }
+
+    def test_get_runtime_info_enabled_extensions_env_override(self):
+        """Test enabled extensions can be overridden through environment configuration."""
+        from backend import config_loader
+
+        os.environ["COMMUNITYOVERVIEW_RUNTIME_MODE"] = "hosted"
+        os.environ["COMMUNITYOVERVIEW_ENABLED_EXTENSIONS"] = "federation, analytics , federation,"
+        config_loader.reset_loader()
+
+        runtime_info = config_loader.get_runtime_info()
+
+        assert runtime_info == {
+            "runtime_mode": "hosted",
+            "enabled_extensions": ["federation", "analytics"],
+        }
 
     def test_get_node_type_names(self):
         """Test getting list of node type names."""

@@ -358,6 +358,11 @@ def register_mcp_tools(mcp, service: GraphService) -> Dict[str, Callable]:
         """Get the public capability manifest for client discovery."""
         return service.get_capabilities()
 
+    @register_tool
+    def get_runtime_info() -> Dict[str, Any]:
+        """Get the public runtime metadata for deployment introspection."""
+        return service.get_runtime_info()
+
     # ==================== Saved Views Tools ====================
 
     @register_tool

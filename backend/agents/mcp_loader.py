@@ -278,6 +278,10 @@ class MCPLoader:
                 "type": "object",
                 "properties": {},
             }),
+            ("get_runtime_info", "Get the runtime mode and enabled extensions exposed to clients.", {
+                "type": "object",
+                "properties": {},
+            }),
         ]
 
         return [

@@ -321,6 +321,19 @@ class TestStatisticsEndpoints:
             ]
         }
 
+    def test_get_runtime_info(self, test_app: TestClient):
+        """Get runtime metadata via REST."""
+        os.environ["COMMUNITYOVERVIEW_RUNTIME_MODE"] = "hosted"
+        os.environ["COMMUNITYOVERVIEW_ENABLED_EXTENSIONS"] = "federation,analytics"
+
+        response = test_app.get("/api/runtime")
+        assert response.status_code == 200
+        data = response.json()
+        assert data == {
+            "runtime_mode": "hosted",
+            "enabled_extensions": ["federation", "analytics"],
+        }
+
 
 class TestExportEndpoints:
     """Tests for export endpoints."""
