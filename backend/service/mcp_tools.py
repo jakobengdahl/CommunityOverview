@@ -363,6 +363,18 @@ def register_mcp_tools(mcp, service: GraphService) -> Dict[str, Callable]:
         """Get the public runtime metadata for deployment introspection."""
         return service.get_runtime_info()
 
+    @register_tool
+    def get_tenant_context() -> Dict[str, Any]:
+        """Get the tenant/deployment context metadata.
+
+        Returns the tenant identifier, name, and deployment environment
+        for this CommunityOverview instance.
+
+        Returns:
+            Dict with tenant_id, tenant_name, and environment
+        """
+        return service.get_tenant_context()
+
     # ==================== Saved Views Tools ====================
 
     @register_tool

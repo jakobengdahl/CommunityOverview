@@ -401,3 +401,81 @@ class TestConfigWithAlternateFile:
 
         assert presentation["colors"]["CustomActor"] == "#FF0000"
         assert presentation["colors"]["TestNode"] == "#00FF00"
+
+
+class TestTenantContext:
+    """Tests for get_tenant_context() function."""
+
+    @pytest.fixture(autouse=True)
+    def clean_env(self):
+        """Ensure tenant context env vars are unset before and after each test."""
+        for var in ("COMMUNITYOVERVIEW_TENANT_ID", "COMMUNITYOVERVIEW_TENANT_NAME", "COMMUNITYOVERVIEW_ENVIRONMENT"):
+            os.environ.pop(var, None)
+        yield
+        for var in ("COMMUNITYOVERVIEW_TENANT_ID", "COMMUNITYOVERVIEW_TENANT_NAME", "COMMUNITYOVERVIEW_ENVIRONMENT"):
+            os.environ.pop(var, None)
+
+    def test_defaults_when_env_vars_unset(self):
+        """Tenant context returns safe standalone defaults when no env vars are set."""
+        from backend import config_loader
+
+        result = config_loader.get_tenant_context()
+
+        assert result == {
+            "tenant_id": "",
+            "tenant_name": "",
+            "environment": "local",
+        }
+
+    def test_tenant_id_env_override(self):
+        """COMMUNITYOVERVIEW_TENANT_ID overrides the tenant_id field."""
+        from backend import config_loader
+
+        os.environ["COMMUNITYOVERVIEW_TENANT_ID"] = "acme-corp"
+        result = config_loader.get_tenant_context()
+
+        assert result["tenant_id"] == "acme-corp"
+        assert result["tenant_name"] == ""
+        assert result["environment"] == "local"
+
+    def test_tenant_name_env_override(self):
+        """COMMUNITYOVERVIEW_TENANT_NAME overrides the tenant_name field."""
+        from backend import config_loader
+
+        os.environ["COMMUNITYOVERVIEW_TENANT_NAME"] = "Acme Corporation"
+        result = config_loader.get_tenant_context()
+
+        assert result["tenant_name"] == "Acme Corporation"
+
+    def test_environment_env_override(self):
+        """COMMUNITYOVERVIEW_ENVIRONMENT overrides the environment field."""
+        from backend import config_loader
+
+        os.environ["COMMUNITYOVERVIEW_ENVIRONMENT"] = "production"
+        result = config_loader.get_tenant_context()
+
+        assert result["environment"] == "production"
+
+    def test_all_fields_overridden(self):
+        """All three fields can be overridden simultaneously."""
+        from backend import config_loader
+
+        os.environ["COMMUNITYOVERVIEW_TENANT_ID"] = "t-123"
+        os.environ["COMMUNITYOVERVIEW_TENANT_NAME"] = "Test Tenant"
+        os.environ["COMMUNITYOVERVIEW_ENVIRONMENT"] = "staging"
+
+        result = config_loader.get_tenant_context()
+
+        assert result == {
+            "tenant_id": "t-123",
+            "tenant_name": "Test Tenant",
+            "environment": "staging",
+        }
+
+    def test_response_shape_has_exactly_three_keys(self):
+        """Response shape is exactly {tenant_id, tenant_name, environment}."""
+        from backend import config_loader
+
+        result = config_loader.get_tenant_context()
+
+        assert set(result.keys()) == {"tenant_id", "tenant_name", "environment"}

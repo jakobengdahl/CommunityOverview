@@ -365,6 +365,24 @@ def get_runtime_info() -> Dict[str, Any]:
     }
 
 
+def get_tenant_context() -> Dict[str, Any]:
+    """Get the tenant/deployment context metadata.
+
+    Values are read from environment variables with safe standalone defaults
+    when the variables are unset.
+
+    Env vars:
+        COMMUNITYOVERVIEW_TENANT_ID   - Unique tenant identifier
+        COMMUNITYOVERVIEW_TENANT_NAME - Human-readable tenant name
+        COMMUNITYOVERVIEW_ENVIRONMENT - Deployment environment (e.g. local, staging, production)
+    """
+    return {
+        "tenant_id": os.getenv("COMMUNITYOVERVIEW_TENANT_ID", ""),
+        "tenant_name": os.getenv("COMMUNITYOVERVIEW_TENANT_NAME", ""),
+        "environment": os.getenv("COMMUNITYOVERVIEW_ENVIRONMENT", "local"),
+    }
+
+
 def get_node_type_names() -> List[str]:
     """Get list of all node type names."""
     loader = _get_loader()

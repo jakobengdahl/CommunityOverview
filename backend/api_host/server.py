@@ -431,6 +431,7 @@ def create_app(
         "get_graph_stats",
         "get_capabilities",
         "get_runtime_info",
+        "get_tenant_context",
         "list_node_types",
         "list_relationship_types",
         "get_schema",

@@ -326,6 +326,11 @@ def _register_metadata_endpoints(router: APIRouter, service: GraphService) -> No
         """Get the public runtime metadata for deployment introspection."""
         return service.get_runtime_info()
 
+    @router.get("/tenant-context")
+    async def get_tenant_context() -> Dict[str, Any]:
+        """Get the tenant/deployment context metadata."""
+        return service.get_tenant_context()
+
 
 def _register_views_endpoints(router: APIRouter, service: GraphService) -> None:
     @router.post("/views/save")
