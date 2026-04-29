@@ -433,6 +433,8 @@ def create_app(
         "get_runtime_info",
         "get_tenant_context",
         "get_config_context",
+        "get_request_actor",
+        "get_request_scope",
         "list_node_types",
         "list_relationship_types",
         "get_schema",

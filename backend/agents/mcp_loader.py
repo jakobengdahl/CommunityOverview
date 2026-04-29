@@ -290,6 +290,22 @@ class MCPLoader:
                 "type": "object",
                 "properties": {},
             }),
+            ("get_request_actor", "Get the public request actor context. Safe optional overrides can simulate request identity inputs.", {
+                "type": "object",
+                "properties": {
+                    "actor_id": {"type": "string", "description": "Optional actor identifier override"},
+                    "actor_type": {"type": "string", "description": "Optional actor type override"},
+                    "auth_source": {"type": "string", "description": "Optional auth source override"},
+                },
+            }),
+            ("get_request_scope", "Get the public workspace and graph scope context. Safe optional overrides can simulate request scope inputs.", {
+                "type": "object",
+                "properties": {
+                    "workspace_id": {"type": "string", "description": "Optional workspace identifier override"},
+                    "workspace_kind": {"type": "string", "description": "Optional workspace kind override"},
+                    "graph_id": {"type": "string", "description": "Optional graph scope identifier override"},
+                },
+            }),
         ]
 
         return [

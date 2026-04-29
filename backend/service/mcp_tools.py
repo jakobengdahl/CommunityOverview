@@ -380,6 +380,32 @@ def register_mcp_tools(mcp, service: GraphService) -> Dict[str, Callable]:
         """Get the effective config scope and non-sensitive config source metadata."""
         return service.get_config_context()
 
+    @register_tool
+    def get_request_actor(
+        actor_id: Optional[str] = None,
+        actor_type: Optional[str] = None,
+        auth_source: Optional[str] = None,
+    ) -> Dict[str, Any]:
+        """Get the public request actor context with optional safe overrides."""
+        return service.get_request_actor_info(
+            actor_id=actor_id,
+            actor_type=actor_type,
+            auth_source=auth_source,
+        )
+
+    @register_tool
+    def get_request_scope(
+        workspace_id: Optional[str] = None,
+        workspace_kind: Optional[str] = None,
+        graph_id: Optional[str] = None,
+    ) -> Dict[str, Any]:
+        """Get the public workspace/graph scope context with optional safe overrides."""
+        return service.get_request_scope_info(
+            workspace_id=workspace_id,
+            workspace_kind=workspace_kind,
+            graph_id=graph_id,
+        )
+
     # ==================== Saved Views Tools ====================
 
     @register_tool

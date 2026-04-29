@@ -347,6 +347,38 @@ class TestMCPLoaderLifecycle:
         assert config_context_tool.original_name == "get_config_context"
         assert config_context_tool.input_schema == {"type": "object", "properties": {}}
 
+    def test_connect_graph_includes_get_request_actor_tool(self):
+        """GRAPH discovery inventory includes get_request_actor."""
+        integration = MCPIntegration(
+            id="GRAPH",
+            name="Graph API",
+            transport=MCPTransport.HTTP,
+            url="http://localhost:8000/mcp"
+        )
+        loader = MCPLoader([integration])
+
+        tools = loader._get_graph_mcp_tools(integration)
+
+        actor_tool = next(tool for tool in tools if tool.namespaced_name == "GRAPH__get_request_actor")
+        assert actor_tool.original_name == "get_request_actor"
+        assert set(actor_tool.input_schema["properties"].keys()) == {"actor_id", "actor_type", "auth_source"}
+
+    def test_connect_graph_includes_get_request_scope_tool(self):
+        """GRAPH discovery inventory includes get_request_scope."""
+        integration = MCPIntegration(
+            id="GRAPH",
+            name="Graph API",
+            transport=MCPTransport.HTTP,
+            url="http://localhost:8000/mcp"
+        )
+        loader = MCPLoader([integration])
+
+        tools = loader._get_graph_mcp_tools(integration)
+
+        scope_tool = next(tool for tool in tools if tool.namespaced_name == "GRAPH__get_request_scope")
+        assert scope_tool.original_name == "get_request_scope"
+        assert set(scope_tool.input_schema["properties"].keys()) == {"workspace_id", "workspace_kind", "graph_id"}
+
     def test_connect_all_returns_tool_map(self):
         """Test that connect_all returns a map of tools per integration."""
         integrations = [

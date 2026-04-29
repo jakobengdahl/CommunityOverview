@@ -24,6 +24,12 @@ class TestConfigLoader:
         os.environ.pop("SCHEMA_FILE", None)
         os.environ.pop("COMMUNITYOVERVIEW_RUNTIME_MODE", None)
         os.environ.pop("COMMUNITYOVERVIEW_ENABLED_EXTENSIONS", None)
+        os.environ.pop("COMMUNITYOVERVIEW_ACTOR_ID", None)
+        os.environ.pop("COMMUNITYOVERVIEW_ACTOR_TYPE", None)
+        os.environ.pop("COMMUNITYOVERVIEW_AUTH_SOURCE", None)
+        os.environ.pop("COMMUNITYOVERVIEW_WORKSPACE_ID", None)
+        os.environ.pop("COMMUNITYOVERVIEW_WORKSPACE_KIND", None)
+        os.environ.pop("COMMUNITYOVERVIEW_GRAPH_SCOPE_ID", None)
         config_loader.reset_loader()
 
     def test_load_default_config(self):
@@ -194,6 +200,60 @@ class TestConfigLoader:
         assert runtime_info == {
             "runtime_mode": "hosted",
             "enabled_extensions": ["federation", "analytics"],
+        }
+
+    def test_get_request_actor_info_defaults(self):
+        """Request actor defaults remain anonymous and standalone-safe."""
+        from backend import config_loader
+
+        assert config_loader.get_request_actor_info() == {
+            "actor_type": "",
+            "is_authenticated": False,
+            "auth_source": "anonymous",
+            "has_actor": False,
+            "source": "default",
+        }
+
+    def test_get_request_actor_info_env_override(self):
+        """Request actor context can be populated by safe environment inputs."""
+        from backend import config_loader
+
+        os.environ["COMMUNITYOVERVIEW_ACTOR_ID"] = "env-actor"
+        os.environ["COMMUNITYOVERVIEW_ACTOR_TYPE"] = "member"
+        os.environ["COMMUNITYOVERVIEW_AUTH_SOURCE"] = "gateway"
+
+        assert config_loader.get_request_actor_info() == {
+            "actor_type": "member",
+            "is_authenticated": True,
+            "auth_source": "gateway",
+            "has_actor": True,
+            "source": "environment",
+        }
+
+    def test_get_request_scope_info_defaults(self):
+        """Request scope defaults remain empty and standalone-safe."""
+        from backend import config_loader
+
+        assert config_loader.get_request_scope_info() == {
+            "workspace_kind": "",
+            "has_workspace": False,
+            "has_graph": False,
+            "source": "default",
+        }
+
+    def test_get_request_scope_info_env_override(self):
+        """Request scope context can be populated by safe environment inputs."""
+        from backend import config_loader
+
+        os.environ["COMMUNITYOVERVIEW_WORKSPACE_ID"] = "workspace-env"
+        os.environ["COMMUNITYOVERVIEW_WORKSPACE_KIND"] = "personal"
+        os.environ["COMMUNITYOVERVIEW_GRAPH_SCOPE_ID"] = "graph-env"
+
+        assert config_loader.get_request_scope_info() == {
+            "workspace_kind": "personal",
+            "has_workspace": True,
+            "has_graph": True,
+            "source": "environment",
         }
 
     def test_get_node_type_names(self):

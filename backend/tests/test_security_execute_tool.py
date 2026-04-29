@@ -154,3 +154,29 @@ def test_unauthenticated_get_tenant_context_env_override(unauthenticated_app, mo
         "tenant_name": "Demo Org",
         "environment": "staging",
     }
+
+
+def test_unauthenticated_get_request_actor_safe_tool(unauthenticated_app):
+    client = TestClient(unauthenticated_app)
+    response = client.post("/execute_tool", json={
+        "tool_name": "get_request_actor",
+        "arguments": {"actor_id": "safe-actor"}
+    })
+    assert response.status_code == 200
+    assert "actor_id" not in response.json()
+    assert response.json()["has_actor"] is True
+    assert response.json()["source"] == "override"
+
+
+def test_unauthenticated_get_request_scope_safe_tool(unauthenticated_app):
+    client = TestClient(unauthenticated_app)
+    response = client.post("/execute_tool", json={
+        "tool_name": "get_request_scope",
+        "arguments": {"workspace_id": "safe-workspace", "graph_id": "safe-graph"}
+    })
+    assert response.status_code == 200
+    assert "workspace_id" not in response.json()
+    assert "graph_id" not in response.json()
+    assert response.json()["has_workspace"] is True
+    assert response.json()["has_graph"] is True
+    assert response.json()["source"] == "override"
