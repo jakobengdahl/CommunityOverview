@@ -8,7 +8,10 @@ from fastapi.testclient import TestClient
 
 from backend.api_host import create_app
 from backend.api_host.config import AppConfig
-from backend.authorization import GraphAuthorizationContext, GraphAuthorizationDecision
+from backend.authorization import GraphAccessNarrowing, GraphAuthorizationContext, GraphAuthorizationDecision
+from backend.core import Edge, Node, NodeType
+from backend.federation.config import FederationFileConfig
+from backend.federation.manager import FederationManager
 
 
 @pytest.fixture
@@ -45,6 +48,90 @@ class CaptureAuthorizationHook:
             mode="test",
             source="test",
         )
+
+
+class SelectionAwareNarrowingHook:
+    def __init__(self):
+        self.seen_contexts = []
+
+    def evaluate(self, context: GraphAuthorizationContext) -> GraphAuthorizationDecision:
+        self.seen_contexts.append(context)
+        selected_graph_id = context.scope.get("graph_id", "")
+        workspace_id = context.scope.get("workspace_id", "")
+        if not selected_graph_id or not workspace_id:
+            return GraphAuthorizationDecision(allowed=True, mode="selection-aware", source="test")
+        return GraphAuthorizationDecision(
+            allowed=True,
+            mode="selection-aware",
+            source="test",
+            graph_access=GraphAccessNarrowing(
+                enabled=True,
+                allow_local_graph=False,
+                include_graph_ids=(selected_graph_id,),
+            ),
+        )
+
+
+def _install_multi_graph_fixture(app):
+    graph_service = app.state.graph_service
+    graph_service.storage.add_nodes(
+        [Node(id="local-1", type=NodeType.ACTOR, name="Local result")],
+        [],
+    )
+
+    graph_service.storage.add_nodes(
+        [
+            Node(
+                id="alpha-ref",
+                type=NodeType.ACTOR,
+                name="Alpha export",
+                metadata={"origin_graph_id": "graph-alpha", "is_federated_reference": True},
+            ),
+            Node(
+                id="beta-ref",
+                type=NodeType.ACTOR,
+                name="Beta export",
+                metadata={"origin_graph_id": "graph-beta", "is_federated_reference": True},
+            ),
+        ],
+        [Edge(source="alpha-ref", target="beta-ref", type="RELATES_TO")],
+    )
+
+    config = FederationFileConfig.model_validate({
+        "federation": {
+            "enabled": True,
+            "graphs": [
+                {
+                    "graph_id": "graph-alpha",
+                    "display_name": "Alpha",
+                    "enabled": True,
+                    "capabilities": {"allow_adopt": True},
+                    "endpoints": {"graph_json_url": "https://example.invalid/alpha.json"},
+                },
+                {
+                    "graph_id": "graph-beta",
+                    "display_name": "Beta",
+                    "enabled": True,
+                    "capabilities": {"allow_adopt": True},
+                    "endpoints": {"graph_json_url": "https://example.invalid/beta.json"},
+                },
+            ],
+        }
+    })
+    manager = FederationManager(config)
+    for graph, node_id, name in (
+        (config.federation.graphs[0], "remote-1", "Alpha result"),
+        (config.federation.graphs[1], "remote-2", "Beta result"),
+    ):
+        cache_nodes, _ = manager._build_cache(
+            graph,
+            [{"id": node_id, "type": "Actor", "name": name}],
+            [],
+        )
+        manager._cache[graph.graph_id].nodes = cache_nodes
+
+    graph_service._federation_manager = manager
+    graph_service._authorization_hook = SelectionAwareNarrowingHook()
 
 
 class TestRequestActorRestEndpoint:
@@ -268,6 +355,69 @@ class TestRequestContextMcpTools:
         assert context.scope["workspace_id"] == "workspace-mcp"
         assert context.scope["workspace_kind"] == "team"
         assert context.scope["graph_id"] == "graph-mcp"
+
+
+class TestAuthorizationNarrowingRestAndMcp:
+    def test_rest_search_is_narrowed_to_selected_graph(self, app_client):
+        client, app = app_client
+        _install_multi_graph_fixture(app)
+
+        response = client.post(
+            "/api/search",
+            headers={
+                "X-CommunityOverview-Workspace-Id": "workspace-rest",
+                "X-CommunityOverview-Workspace-Kind": "team",
+                "X-CommunityOverview-Graph-Id": "graph-beta",
+            },
+            json={"query": "result", "node_types": ["Actor"], "limit": 10},
+        )
+
+        assert response.status_code == 200
+        payload = response.json()
+        assert [node["name"] for node in payload["nodes"]] == ["Beta result"]
+        assert payload["federation"]["federated_nodes"] == 1
+
+    def test_execute_tool_search_is_narrowed_to_selected_graph(self, app_client):
+        client, app = app_client
+        _install_multi_graph_fixture(app)
+
+        response = client.post(
+            "/execute_tool",
+            headers={
+                "X-CommunityOverview-Workspace-Id": "workspace-mcp",
+                "X-CommunityOverview-Workspace-Kind": "team",
+                "X-CommunityOverview-Graph-Id": "graph-alpha",
+            },
+            json={
+                "tool_name": "search_graph",
+                "arguments": {"query": "result", "node_types": ["Actor"], "limit": 10},
+            },
+        )
+
+        assert response.status_code == 200
+        payload = response.json()
+        assert [node["name"] for node in payload["nodes"]] == ["Alpha result"]
+        assert payload["federation"]["federated_nodes"] == 1
+
+    def test_export_graph_is_narrowed_to_selected_graph(self, app_client):
+        client, app = app_client
+        _install_multi_graph_fixture(app)
+
+        response = client.get(
+            "/export_graph",
+            headers={
+                "X-CommunityOverview-Workspace-Id": "workspace-export",
+                "X-CommunityOverview-Workspace-Kind": "team",
+                "X-CommunityOverview-Graph-Id": "graph-alpha",
+            },
+        )
+
+        assert response.status_code == 200
+        payload = response.json()
+        assert [node["name"] for node in payload["nodes"]] == ["Alpha export"]
+        assert payload["edges"] == []
+        assert payload["total_nodes"] == 1
+        assert payload["total_edges"] == 0
 
 
 class TestAuthorizationHookRestAndMcp:
