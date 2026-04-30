@@ -388,6 +388,11 @@ def _register_metadata_endpoints(router: APIRouter, service: GraphService) -> No
         """Get the public workspace/graph scope context derived from safe env/request inputs."""
         return service.get_request_scope_info(headers=request.headers)
 
+    @router.get("/request-selection")
+    async def get_request_selection(request: Request) -> Dict[str, Any]:
+        """Get the public graph/workspace selection summary derived from safe env/request inputs."""
+        return service.get_request_graph_selection_info(headers=request.headers)
+
 
 def _register_views_endpoints(router: APIRouter, service: GraphService) -> None:
     @router.post("/views/save")

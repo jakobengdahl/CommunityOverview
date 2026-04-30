@@ -406,6 +406,19 @@ def register_mcp_tools(mcp, service: GraphService) -> Dict[str, Callable]:
             graph_id=graph_id,
         )
 
+    @register_tool
+    def get_request_selection(
+        workspace_id: Optional[str] = None,
+        workspace_kind: Optional[str] = None,
+        graph_id: Optional[str] = None,
+    ) -> Dict[str, Any]:
+        """Get the public graph/workspace selection summary with optional safe overrides."""
+        return service.get_request_graph_selection_info(
+            workspace_id=workspace_id,
+            workspace_kind=workspace_kind,
+            graph_id=graph_id,
+        )
+
     # ==================== Saved Views Tools ====================
 
     @register_tool

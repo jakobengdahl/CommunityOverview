@@ -306,6 +306,14 @@ class MCPLoader:
                     "graph_id": {"type": "string", "description": "Optional graph scope identifier override"},
                 },
             }),
+            ("get_request_selection", "Get the public graph/workspace selection summary. Safe optional overrides can simulate request selection inputs.", {
+                "type": "object",
+                "properties": {
+                    "workspace_id": {"type": "string", "description": "Optional workspace identifier override"},
+                    "workspace_kind": {"type": "string", "description": "Optional workspace kind override"},
+                    "graph_id": {"type": "string", "description": "Optional graph scope identifier override"},
+                },
+            }),
         ]
 
         return [

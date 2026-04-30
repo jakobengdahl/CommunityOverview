@@ -86,6 +86,9 @@ class TestRequestScopeRestEndpoint:
             "workspace_kind": "",
             "has_workspace": False,
             "has_graph": False,
+            "has_selection": False,
+            "selection_mode": "default",
+            "selection_source": "default",
             "source": "default",
         }
 
@@ -103,6 +106,44 @@ class TestRequestScopeRestEndpoint:
             "workspace_kind": "personal",
             "has_workspace": True,
             "has_graph": True,
+            "has_selection": True,
+            "selection_mode": "workspace_graph",
+            "selection_source": "request",
+            "source": "request",
+        }
+
+
+class TestRequestSelectionRestEndpoint:
+    def test_endpoint_returns_default_shape(self, app_client):
+        client, _ = app_client
+        result = client.get("/api/request-selection").json()
+        assert result == {
+            "workspace_kind": "",
+            "has_workspace": False,
+            "has_graph": False,
+            "has_selection": False,
+            "selection_mode": "default",
+            "selection_source": "default",
+            "source": "default",
+        }
+
+    def test_endpoint_reflects_request_headers(self, app_client):
+        client, _ = app_client
+        result = client.get(
+            "/api/request-selection",
+            headers={
+                "X-CommunityOverview-Workspace-Id": "workspace-rest",
+                "X-CommunityOverview-Workspace-Kind": "personal",
+                "X-CommunityOverview-Graph-Id": "graph-rest",
+            },
+        ).json()
+        assert result == {
+            "workspace_kind": "personal",
+            "has_workspace": True,
+            "has_graph": True,
+            "has_selection": True,
+            "selection_mode": "workspace_graph",
+            "selection_source": "request",
             "source": "request",
         }
 
@@ -142,6 +183,32 @@ class TestRequestContextMcpTools:
             "workspace_kind": "team",
             "has_workspace": True,
             "has_graph": True,
+            "has_selection": True,
+            "selection_mode": "workspace_graph",
+            "selection_source": "override",
+            "source": "override",
+        }
+
+    def test_selection_tool_is_registered_and_safe(self, app_client):
+        client, app = app_client
+        assert "get_request_selection" in app.state.tools_map
+
+        response = client.post("/execute_tool", json={
+            "tool_name": "get_request_selection",
+            "arguments": {
+                "workspace_id": "workspace-mcp",
+                "workspace_kind": "team",
+                "graph_id": "graph-mcp",
+            },
+        })
+        assert response.status_code == 200
+        assert response.json() == {
+            "workspace_kind": "team",
+            "has_workspace": True,
+            "has_graph": True,
+            "has_selection": True,
+            "selection_mode": "workspace_graph",
+            "selection_source": "override",
             "source": "override",
         }
 
@@ -150,6 +217,7 @@ class TestRequestContextMcpTools:
         result = client.get("/mcp").json()
         assert "get_request_actor" in result["available_tools"]
         assert "get_request_scope" in result["available_tools"]
+        assert "get_request_selection" in result["available_tools"]
 
     def test_mcp_transport_request_binds_request_authorization_headers(self, tmp_path, monkeypatch):
         for var in (

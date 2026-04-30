@@ -123,6 +123,7 @@ def _build_startup_diagnostics(
     tenant_context = config_loader.get_tenant_context()
     request_actor = config_loader.get_request_actor_info()
     request_scope = config_loader.get_request_scope_info()
+    request_selection = config_loader.get_request_graph_selection_info()
     capabilities = config_loader.get_capabilities()
     capability_summary = _count_enabled_capabilities(capabilities)
     graph_integrity = _collect_graph_integrity_diagnostics(graph_storage)
@@ -177,6 +178,7 @@ def _build_startup_diagnostics(
         "request_context_defaults": {
             "actor": request_actor,
             "scope": request_scope,
+            "selection": request_selection,
         },
         "capabilities": capability_summary,
         "checks": checks,
@@ -626,6 +628,7 @@ def create_app(
         "get_config_context",
         "get_request_actor",
         "get_request_scope",
+        "get_request_selection",
         "list_node_types",
         "list_relationship_types",
         "get_schema",
