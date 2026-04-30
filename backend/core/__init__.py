@@ -31,6 +31,7 @@ Usage:
 
 # Core storage
 from .storage import GraphStorage
+from .storage_backends import FileGraphPersistenceBackend, GraphPersistenceBackend
 
 # Vector store (for direct access if needed)
 from .vector_store import VectorStore
@@ -69,6 +70,8 @@ from .events import EventContext, EventOrigin, EventAttribution, EventActorAttri
 __all__ = [
     # Core storage
     "GraphStorage",
+    "GraphPersistenceBackend",
+    "FileGraphPersistenceBackend",
     "VectorStore",
 
     # Enums (legacy)
