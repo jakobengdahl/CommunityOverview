@@ -8,18 +8,23 @@ all REST API endpoints function correctly.
 import pytest
 import os
 from pathlib import Path
+from unittest.mock import patch
 from fastapi.testclient import TestClient
+
+from backend.api_host import create_app
 
 
 class TestHealthAndRoot:
     """Tests for health check and root endpoints."""
 
     def test_health_check(self, test_app: TestClient):
-        """Health endpoint returns healthy status."""
+        """Health endpoint returns liveness status."""
         response = test_app.get("/health")
         assert response.status_code == 200
         data = response.json()
         assert data["status"] == "healthy"
+        assert data["kind"] == "liveness"
+        assert data["readiness_endpoint"] == "/ready"
         assert "graph_nodes" in data
         assert "graph_edges" in data
 
@@ -39,6 +44,14 @@ class TestHealthAndRoot:
         assert "graph_stats" in data
         assert data["endpoints"]["api"] == "/api"
         assert data["endpoints"]["mcp"] == "/mcp"
+        assert data["endpoints"]["ready"] == "/ready"
+        assert data["endpoints"]["startup_diagnostics"] == "/diagnostics/startup"
+        assert data["operability"]["startup_status"] == "ready"
+        assert data["operability"]["capabilities"] == {
+            "configured": 0,
+            "enabled": 0,
+            "disabled": 0,
+        }
 
     def test_health_shows_graph_stats(self, test_app: TestClient):
         """Health endpoint shows correct graph statistics."""
@@ -46,6 +59,86 @@ class TestHealthAndRoot:
         data = response.json()
         assert data["graph_nodes"] == 3
         assert data["graph_edges"] == 2
+
+    def test_readiness_endpoint_exposes_structured_checks(self, test_app: TestClient):
+        """Readiness endpoint separates startup checks from liveness."""
+        response = test_app.get("/ready")
+        assert response.status_code == 200
+        data = response.json()
+        assert data["status"] == "ready"
+        assert data["kind"] == "readiness"
+        assert data["startup_diagnostics_endpoint"] == "/diagnostics/startup"
+        assert data["checks"]["config"]["status"] == "ok"
+        assert data["checks"]["graph_storage"]["graph_nodes"] == 3
+        assert data["checks"]["graph_storage"]["integrity"] == {
+            "status": "ok",
+            "node_count": 3,
+            "edge_count": 2,
+            "dangling_edge_count": 0,
+            "self_referencing_edge_count": 0,
+        }
+        assert data["checks"]["event_delivery"]["status"] == "ok"
+        assert data["warnings"] == []
+
+    def test_startup_diagnostics_endpoint_is_safe_and_structured(self, test_app: TestClient):
+        """Startup diagnostics expose safe summaries without filesystem path leakage."""
+        response = test_app.get("/diagnostics/startup")
+        assert response.status_code == 200
+        data = response.json()
+        assert data["status"] == "ready"
+        assert data["runtime"] == {
+            "runtime_mode": "standalone",
+            "enabled_extensions": [],
+        }
+        assert data["config_context"] == {
+            "tenant_id": "",
+            "tenant_name": "",
+            "environment": "local",
+            "tenant_config_dir_configured": False,
+            "schema_config_source": "default",
+            "federation_config_source": "default",
+        }
+        assert data["request_context_defaults"] == {
+            "actor": {
+                "actor_type": "",
+                "is_authenticated": False,
+                "auth_source": "anonymous",
+                "has_actor": False,
+                "source": "default",
+            },
+            "scope": {
+                "workspace_kind": "",
+                "has_workspace": False,
+                "has_graph": False,
+                "source": "default",
+            },
+        }
+        assert data["capabilities"] == {
+            "configured": 0,
+            "enabled": 0,
+            "disabled": 0,
+        }
+        assert "/root/" not in response.text
+
+    def test_create_app_logs_structured_startup_diagnostics(
+        self,
+        app_config,
+        mock_llm_provider,
+        caplog,
+    ):
+        """App startup emits structured diagnostics for operability tooling."""
+        with patch("chat_logic.create_provider", return_value=mock_llm_provider):
+            with patch.dict(os.environ, {"ANTHROPIC_API_KEY": "test-key"}):
+                with caplog.at_level("INFO"):
+                    app = create_app(app_config)
+
+        startup_logs = [
+            record.message for record in caplog.records if record.message.startswith("startup_diagnostics ")
+        ]
+        assert len(startup_logs) == 1
+        assert '"status": "ready"' in startup_logs[0]
+        assert '"dangling_edge_count": 0' in startup_logs[0]
+        assert app.state.startup_diagnostics["checks"]["graph_storage"]["integrity"]["status"] == "ok"
 
 
 class TestSearchEndpoints:

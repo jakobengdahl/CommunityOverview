@@ -19,6 +19,8 @@ Usage:
     app = create_app(config)
 """
 
+import json
+import logging
 import os
 import secrets
 from pathlib import Path
@@ -42,6 +44,132 @@ from backend.authorization import use_request_authorization
 from backend.language_policy import format_language_policy_for_prompt
 
 from .config import AppConfig
+
+
+logger = logging.getLogger(__name__)
+
+
+_PUBLIC_STARTUP_DIAGNOSTICS_PATH = "/diagnostics/startup"
+_PUBLIC_READINESS_PATH = "/ready"
+
+
+def _count_enabled_capabilities(capabilities: Dict[str, Any]) -> Dict[str, int]:
+    manifest = capabilities.get("capabilities", [])
+    return {
+        "configured": len(manifest),
+        "enabled": sum(1 for capability in manifest if capability.get("enabled", True)),
+        "disabled": sum(1 for capability in manifest if not capability.get("enabled", True)),
+    }
+
+
+def _collect_graph_integrity_diagnostics(graph_storage: GraphStorage) -> Dict[str, Any]:
+    dangling_edges = 0
+    self_referencing_edges = 0
+
+    for edge in graph_storage.edges.values():
+        source = getattr(edge, "source", None)
+        target = getattr(edge, "target", None)
+
+        if source == target:
+            self_referencing_edges += 1
+
+        if source not in graph_storage.nodes or target not in graph_storage.nodes:
+            dangling_edges += 1
+
+    return {
+        "status": "ok" if dangling_edges == 0 else "degraded",
+        "node_count": len(graph_storage.nodes),
+        "edge_count": len(graph_storage.edges),
+        "dangling_edge_count": dangling_edges,
+        "self_referencing_edge_count": self_referencing_edges,
+    }
+
+
+def _build_startup_diagnostics(
+    *,
+    config: AppConfig,
+    graph_storage: GraphStorage,
+    federation_summary: Dict[str, Any],
+    federation_manager: FederationManager,
+    agent_registry: AgentRegistry,
+) -> Dict[str, Any]:
+    runtime_info = config_loader.get_runtime_info()
+    config_context = config_loader.get_config_context()
+    tenant_context = config_loader.get_tenant_context()
+    request_actor = config_loader.get_request_actor_info()
+    request_scope = config_loader.get_request_scope_info()
+    capabilities = config_loader.get_capabilities()
+    capability_summary = _count_enabled_capabilities(capabilities)
+    graph_integrity = _collect_graph_integrity_diagnostics(graph_storage)
+    federation_runtime = federation_manager.get_status()
+    agent_status = agent_registry.get_all_status()
+
+    checks = {
+        "config": {
+            "status": "ok",
+            "schema_config_source": config_context["schema_config_source"],
+            "federation_config_source": config_context["federation_config_source"],
+            "tenant_config_dir_configured": config_context["tenant_config_dir_configured"],
+        },
+        "graph_storage": {
+            "status": "ok",
+            "graph_nodes": len(graph_storage.nodes),
+            "graph_edges": len(graph_storage.edges),
+            "integrity": graph_integrity,
+        },
+        "event_delivery": {
+            "status": "ok" if getattr(graph_storage, "_events_enabled", False) else "disabled",
+        },
+        "agents": {
+            "status": "ok" if agent_status["enabled"] else "disabled",
+            "enabled": agent_status["enabled"],
+            "worker_count": agent_status["worker_count"],
+            "subscription_count": agent_status["subscription_count"],
+            "configured_integrations": len(agent_status.get("mcp_integrations", [])),
+        },
+        "federation": {
+            "status": federation_runtime.get("status", "disabled" if not federation_summary.get("enabled") else "ok"),
+            "enabled": federation_summary.get("enabled", False),
+            "configured_graphs": federation_summary.get("configured_graphs", 0),
+            "active_graphs": federation_summary.get("active_graphs", 0),
+        },
+    }
+
+    blocking_failures = [
+        name for name, check in checks.items()
+        if name in {"config", "graph_storage"} and check.get("status") not in {"ok", "disabled"}
+    ]
+    readiness_status = "ready" if not blocking_failures else "not_ready"
+
+    diagnostics = {
+        "status": readiness_status,
+        "config_profile": config.config_profile,
+        "runtime": runtime_info,
+        "tenant_context": tenant_context,
+        "config_context": config_context,
+        "request_context_defaults": {
+            "actor": request_actor,
+            "scope": request_scope,
+        },
+        "capabilities": capability_summary,
+        "checks": checks,
+        "warnings": [],
+    }
+
+    if graph_integrity["status"] != "ok":
+        diagnostics["warnings"].append("graph_integrity_degraded")
+    federation_check_status = checks["federation"]["status"]
+    if federation_check_status not in {"ok", "disabled", "healthy"}:
+        diagnostics["warnings"].append("federation_runtime_degraded")
+
+    return diagnostics
+
+
+def _emit_startup_diagnostics_log(diagnostics: Dict[str, Any]) -> None:
+    logger.info(
+        "startup_diagnostics %s",
+        json.dumps(diagnostics, sort_keys=True),
+    )
 
 
 def _build_mcp_instructions() -> str:
@@ -168,10 +296,18 @@ def create_app(
             if request.method == "OPTIONS":
                 return await call_next(request)
 
-            # Allow health check, info, and logout-related routes without auth.
-            # /auth/logout and /logged-out must be reachable without a valid
-            # session, otherwise the user ends up in an auth loop.
-            if request.url.path in ["/health", "/info", "/auth/logout", "/logged-out"]:
+            # Allow public liveness/readiness/diagnostics and logout-related
+            # routes without auth. /auth/logout and /logged-out must be
+            # reachable without a valid session, otherwise the user ends up in
+            # an auth loop.
+            if request.url.path in [
+                "/health",
+                _PUBLIC_READINESS_PATH,
+                "/info",
+                _PUBLIC_STARTUP_DIAGNOSTICS_PATH,
+                "/auth/logout",
+                "/logged-out",
+            ]:
                 return await call_next(request)
 
             # In MCP-only mode, only require auth for MCP and execute_tool paths
@@ -313,6 +449,14 @@ def create_app(
     app.state.federation_config = federation_config
     app.state.federation_summary = federation_summary
     app.state.federation_manager = federation_manager
+    app.state.startup_diagnostics = _build_startup_diagnostics(
+        config=config,
+        graph_storage=graph_storage,
+        federation_summary=federation_summary,
+        federation_manager=federation_manager,
+        agent_registry=agent_registry,
+    )
+    _emit_startup_diagnostics_log(app.state.startup_diagnostics)
 
     # Create and mount REST API router
     rest_router = create_rest_router(graph_service)
@@ -539,16 +683,30 @@ def create_app(
     # Add health check endpoint
     @app.get("/health")
     async def health_check() -> Dict[str, Any]:
-        """Health check endpoint."""
+        """Liveness endpoint that confirms the host process is serving requests."""
         return {
             "status": "healthy",
+            "kind": "liveness",
             "graph_nodes": len(graph_storage.nodes),
             "graph_edges": len(graph_storage.edges),
-            "federation": {
-                **federation_summary,
-                "runtime": federation_manager.get_status(),
-            },
+            "readiness_endpoint": _PUBLIC_READINESS_PATH,
         }
+
+    @app.get(_PUBLIC_READINESS_PATH)
+    async def readiness_check() -> Dict[str, Any]:
+        """Readiness endpoint with safe startup and dependency diagnostics."""
+        return {
+            "status": app.state.startup_diagnostics["status"],
+            "kind": "readiness",
+            "checks": app.state.startup_diagnostics["checks"],
+            "warnings": app.state.startup_diagnostics["warnings"],
+            "startup_diagnostics_endpoint": _PUBLIC_STARTUP_DIAGNOSTICS_PATH,
+        }
+
+    @app.get(_PUBLIC_STARTUP_DIAGNOSTICS_PATH)
+    async def startup_diagnostics() -> Dict[str, Any]:
+        """Structured startup diagnostics safe for public operability introspection."""
+        return app.state.startup_diagnostics
 
     # Root endpoint - redirect to web app
     @app.get("/")
@@ -660,12 +818,20 @@ def create_app(
                 "web": "/web",
                 "widget": "/widget",
                 "health": "/health",
+                "ready": _PUBLIC_READINESS_PATH,
+                "startup_diagnostics": _PUBLIC_STARTUP_DIAGNOSTICS_PATH,
             },
             "graph_stats": {
                 "nodes": len(graph_storage.nodes),
                 "edges": len(graph_storage.edges),
             },
             "llm_provider": chat_service.provider_type,
+            "operability": {
+                "startup_status": app.state.startup_diagnostics["status"],
+                "warnings": app.state.startup_diagnostics["warnings"],
+                "capabilities": app.state.startup_diagnostics["capabilities"],
+                "config_context": app.state.startup_diagnostics["config_context"],
+            },
             "federation": {
                 **federation_summary,
                 "runtime": federation_manager.get_status(),

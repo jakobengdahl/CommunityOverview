@@ -29,6 +29,18 @@ def reset_config_loader():
     os.environ.pop("SCHEMA_FILE", None)
     os.environ.pop("COMMUNITYOVERVIEW_RUNTIME_MODE", None)
     os.environ.pop("COMMUNITYOVERVIEW_ENABLED_EXTENSIONS", None)
+    os.environ.pop("COMMUNITYOVERVIEW_TENANT_ID", None)
+    os.environ.pop("COMMUNITYOVERVIEW_TENANT_NAME", None)
+    os.environ.pop("COMMUNITYOVERVIEW_ENVIRONMENT", None)
+    os.environ.pop("COMMUNITYOVERVIEW_TENANT_CONFIG_DIR", None)
+    os.environ.pop("COMMUNITYOVERVIEW_ACTOR_ID", None)
+    os.environ.pop("COMMUNITYOVERVIEW_ACTOR_TYPE", None)
+    os.environ.pop("COMMUNITYOVERVIEW_AUTH_SOURCE", None)
+    os.environ.pop("COMMUNITYOVERVIEW_WORKSPACE_ID", None)
+    os.environ.pop("COMMUNITYOVERVIEW_WORKSPACE_KIND", None)
+    os.environ.pop("COMMUNITYOVERVIEW_GRAPH_SCOPE_ID", None)
+    os.environ.pop("FEDERATION_FILE", None)
+    os.environ.pop("GRAPH_FEDERATION_CONFIG", None)
     config_loader.reset_loader()
 
 
