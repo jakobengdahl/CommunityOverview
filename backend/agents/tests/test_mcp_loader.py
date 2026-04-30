@@ -379,6 +379,22 @@ class TestMCPLoaderLifecycle:
         assert scope_tool.original_name == "get_request_scope"
         assert set(scope_tool.input_schema["properties"].keys()) == {"workspace_id", "workspace_kind", "graph_id"}
 
+    def test_connect_graph_includes_get_request_selection_tool(self):
+        """GRAPH discovery inventory includes get_request_selection."""
+        integration = MCPIntegration(
+            id="GRAPH",
+            name="Graph API",
+            transport=MCPTransport.HTTP,
+            url="http://localhost:8000/mcp"
+        )
+        loader = MCPLoader([integration])
+
+        tools = loader._get_graph_mcp_tools(integration)
+
+        selection_tool = next(tool for tool in tools if tool.namespaced_name == "GRAPH__get_request_selection")
+        assert selection_tool.original_name == "get_request_selection"
+        assert set(selection_tool.input_schema["properties"].keys()) == {"workspace_id", "workspace_kind", "graph_id"}
+
     def test_connect_all_returns_tool_map(self):
         """Test that connect_all returns a map of tools per integration."""
         integrations = [

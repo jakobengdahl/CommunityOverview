@@ -238,6 +238,9 @@ class TestConfigLoader:
             "workspace_kind": "",
             "has_workspace": False,
             "has_graph": False,
+            "has_selection": False,
+            "selection_mode": "default",
+            "selection_source": "default",
             "source": "default",
         }
 
@@ -253,6 +256,27 @@ class TestConfigLoader:
             "workspace_kind": "personal",
             "has_workspace": True,
             "has_graph": True,
+            "has_selection": True,
+            "selection_mode": "workspace_graph",
+            "selection_source": "environment",
+            "source": "environment",
+        }
+
+    def test_get_request_graph_selection_info_matches_public_scope_summary(self):
+        """Selection summary reuses the same non-sensitive workspace/graph metadata."""
+        from backend import config_loader
+
+        os.environ["COMMUNITYOVERVIEW_WORKSPACE_ID"] = "workspace-env"
+        os.environ["COMMUNITYOVERVIEW_WORKSPACE_KIND"] = "personal"
+        os.environ["COMMUNITYOVERVIEW_GRAPH_SCOPE_ID"] = "graph-env"
+
+        assert config_loader.get_request_graph_selection_info() == {
+            "workspace_kind": "personal",
+            "has_workspace": True,
+            "has_graph": True,
+            "has_selection": True,
+            "selection_mode": "workspace_graph",
+            "selection_source": "environment",
             "source": "environment",
         }
 

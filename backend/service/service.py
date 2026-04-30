@@ -1039,6 +1039,27 @@ class GraphService:
             graph_id=graph_id,
         )
 
+    def get_request_graph_selection_info(
+        self,
+        *,
+        headers: Optional[Dict[str, Any]] = None,
+        workspace_id: Optional[str] = None,
+        workspace_kind: Optional[str] = None,
+        graph_id: Optional[str] = None,
+    ) -> Dict[str, Any]:
+        """Get the public graph/workspace selection summary with optional safe overrides."""
+        return config_loader.get_request_graph_selection_info() if not any([
+            headers,
+            workspace_id,
+            workspace_kind,
+            graph_id,
+        ]) else config_loader.get_public_request_graph_selection_context(
+            headers=headers,
+            workspace_id=workspace_id,
+            workspace_kind=workspace_kind,
+            graph_id=graph_id,
+        )
+
     # ==================== Saved Views ====================
 
     def save_view(self, name: str) -> Dict[str, Any]:

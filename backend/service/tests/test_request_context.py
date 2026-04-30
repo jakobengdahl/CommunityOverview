@@ -74,6 +74,9 @@ class TestRequestScopeService:
             "workspace_kind": "",
             "has_workspace": False,
             "has_graph": False,
+            "has_selection": False,
+            "selection_mode": "default",
+            "selection_source": "default",
             "source": "default",
         }
 
@@ -97,6 +100,9 @@ class TestRequestScopeService:
             "workspace_kind": "sandbox",
             "has_workspace": True,
             "has_graph": True,
+            "has_selection": True,
+            "selection_mode": "workspace_graph",
+            "selection_source": "override",
             "source": "override",
         }
 
@@ -123,4 +129,28 @@ class TestRequestScopeService:
             "workspace_kind": "sandbox",
             "graph_id": "override-graph",
             "source": "override",
+            "selection_source": "override",
+            "selection_mode": "workspace_graph",
+            "has_workspace": True,
+            "has_graph": True,
+            "has_selection": True,
         }
+
+    def test_graph_selection_seam_remains_non_sensitive_and_tracks_mode(self, monkeypatch):
+        from backend.request_context import get_public_request_graph_selection_context
+
+        monkeypatch.setenv("COMMUNITYOVERVIEW_WORKSPACE_KIND", "team")
+
+        result = get_public_request_graph_selection_context(graph_id="graph-only")
+
+        assert result == {
+            "workspace_kind": "team",
+            "has_workspace": False,
+            "has_graph": True,
+            "has_selection": True,
+            "selection_mode": "graph",
+            "selection_source": "override",
+            "source": "override",
+        }
+        assert "workspace_id" not in result
+        assert "graph_id" not in result

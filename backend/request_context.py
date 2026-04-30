@@ -36,6 +36,16 @@ def _source_from_values(*values: str, preferred: str) -> str:
     return preferred if any(values) else "default"
 
 
+def _build_selection_mode(*, workspace_selected: bool, graph_selected: bool) -> str:
+    if workspace_selected and graph_selected:
+        return "workspace_graph"
+    if workspace_selected:
+        return "workspace"
+    if graph_selected:
+        return "graph"
+    return "default"
+
+
 def _resolve_request_actor_context(
     *,
     headers: Optional[Mapping[str, Any]] = None,
@@ -132,11 +142,23 @@ def _resolve_request_scope_context(
     if source == "request" and not any(normalized_headers.get(name, "") for name in (WORKSPACE_ID_HEADER, WORKSPACE_KIND_HEADER, GRAPH_SCOPE_ID_HEADER)):
         source = _source_from_values(env_workspace_id, env_workspace_kind, env_graph_id, preferred="environment")
 
+    workspace_selected = bool(resolved_workspace_id)
+    graph_selected = bool(resolved_graph_id)
+    selection_mode = _build_selection_mode(
+        workspace_selected=workspace_selected,
+        graph_selected=graph_selected,
+    )
+
     return {
         "workspace_id": resolved_workspace_id,
         "workspace_kind": resolved_workspace_kind,
         "graph_id": resolved_graph_id,
         "source": source,
+        "selection_source": source,
+        "selection_mode": selection_mode,
+        "has_workspace": workspace_selected,
+        "has_graph": graph_selected,
+        "has_selection": workspace_selected or graph_selected,
     }
 
 
@@ -172,7 +194,42 @@ def get_public_request_scope_context(
     )
     return {
         "workspace_kind": resolved["workspace_kind"],
-        "has_workspace": bool(resolved["workspace_id"]),
-        "has_graph": bool(resolved["graph_id"]),
+        "has_workspace": resolved["has_workspace"],
+        "has_graph": resolved["has_graph"],
+        "has_selection": resolved["has_selection"],
+        "selection_mode": resolved["selection_mode"],
+        "selection_source": resolved["selection_source"],
         "source": resolved["source"],
     }
+
+
+def get_request_graph_selection_context(
+    *,
+    headers: Optional[Mapping[str, Any]] = None,
+    workspace_id: Optional[str] = None,
+    workspace_kind: Optional[str] = None,
+    graph_id: Optional[str] = None,
+) -> Dict[str, Any]:
+    """Resolve internal graph/workspace selection context for a request."""
+    return _resolve_request_scope_context(
+        headers=headers,
+        workspace_id=workspace_id,
+        workspace_kind=workspace_kind,
+        graph_id=graph_id,
+    )
+
+
+def get_public_request_graph_selection_context(
+    *,
+    headers: Optional[Mapping[str, Any]] = None,
+    workspace_id: Optional[str] = None,
+    workspace_kind: Optional[str] = None,
+    graph_id: Optional[str] = None,
+) -> Dict[str, Any]:
+    """Resolve a public, non-sensitive graph/workspace selection summary."""
+    return get_public_request_scope_context(
+        headers=headers,
+        workspace_id=workspace_id,
+        workspace_kind=workspace_kind,
+        graph_id=graph_id,
+    )

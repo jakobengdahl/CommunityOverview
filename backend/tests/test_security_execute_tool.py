@@ -168,6 +168,21 @@ def test_unauthenticated_get_request_actor_safe_tool(unauthenticated_app):
     assert response.json()["source"] == "override"
 
 
+def test_unauthenticated_get_request_selection_safe_tool(unauthenticated_app):
+    client = TestClient(unauthenticated_app)
+    response = client.post("/execute_tool", json={
+        "tool_name": "get_request_selection",
+        "arguments": {"workspace_id": "safe-workspace", "graph_id": "safe-graph"}
+    })
+    assert response.status_code == 200
+    result = response.json()
+    assert "workspace_id" not in result
+    assert "graph_id" not in result
+    assert result["has_selection"] is True
+    assert result["selection_mode"] == "workspace_graph"
+    assert result["selection_source"] == "override"
+
+
 def test_unauthenticated_get_request_scope_safe_tool(unauthenticated_app):
     client = TestClient(unauthenticated_app)
     response = client.post("/execute_tool", json={
