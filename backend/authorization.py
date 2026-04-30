@@ -5,7 +5,7 @@ from __future__ import annotations
 import os
 from contextlib import contextmanager
 from contextvars import ContextVar
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Any, Dict, Iterator, Mapping, Optional, Protocol
 
 from backend.request_context import get_request_actor_context, get_request_scope_context
@@ -31,6 +31,23 @@ def _clean_string(value: Optional[Any]) -> str:
 
 
 @dataclass(frozen=True)
+class GraphAccessNarrowing:
+    """Optional graph visibility narrowing for an otherwise allowed request."""
+
+    enabled: bool = False
+    allow_local_graph: bool = True
+    include_graph_ids: tuple[str, ...] = field(default_factory=tuple)
+
+    def matches(self, *, graph_id: str) -> bool:
+        normalized_graph_id = _clean_string(graph_id)
+        if not self.enabled:
+            return True
+        if not normalized_graph_id:
+            return self.allow_local_graph
+        return normalized_graph_id in self.include_graph_ids
+
+
+@dataclass(frozen=True)
 class GraphAuthorizationContext:
     """Normalized context for a graph authorization decision."""
 
@@ -49,6 +66,7 @@ class GraphAuthorizationDecision:
     reason: str = ""
     mode: str = AUTHORIZATION_MODE_PERMISSIVE
     source: str = "default"
+    graph_access: GraphAccessNarrowing = field(default_factory=GraphAccessNarrowing)
 
 
 class GraphAuthorizationHook(Protocol):
