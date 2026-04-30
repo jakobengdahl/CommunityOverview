@@ -191,6 +191,52 @@ class GraphService:
             sum(len(entry.nodes) for entry in self._federation_manager._cache.values()),
         )
 
+    def _build_export_boundary_summary(
+        self,
+        *,
+        target: str,
+        decision: GraphAuthorizationDecision,
+        visible_nodes: List[Node],
+        visible_edges: List[Edge],
+        total_nodes: int,
+        total_edges: int,
+    ) -> Dict[str, Any]:
+        """Build a public-safe export boundary summary for restore/admin workflows."""
+        request_context = build_graph_authorization_context(action=GRAPH_ACTION_READ, target=target)
+        selection_summary = self.get_request_graph_selection_info(
+            workspace_id=request_context.scope.get("workspace_id"),
+            workspace_kind=request_context.scope.get("workspace_kind"),
+            graph_id=request_context.scope.get("graph_id"),
+        )
+
+        narrowed = decision.graph_access.enabled
+        local_graph_included = decision.graph_access.matches(graph_id="")
+        included_graph_count = len(decision.graph_access.include_graph_ids)
+        scope_kind = selection_summary.get("workspace_kind") or (
+            "graph" if selection_summary.get("has_graph") else "standalone"
+        )
+
+        return {
+            "contract_version": "1.0",
+            "export_kind": "narrowed" if narrowed else "full",
+            "is_narrowed": narrowed,
+            "scope_kind": scope_kind,
+            "selection_mode": selection_summary.get("selection_mode", "default"),
+            "selection_source": selection_summary.get("selection_source", "default"),
+            "has_workspace_selection": selection_summary.get("has_workspace", False),
+            "has_graph_selection": selection_summary.get("has_graph", False),
+            "graph_scope": {
+                "local_graph_included": local_graph_included,
+                "included_graph_count": included_graph_count,
+            },
+            "counts": {
+                "nodes": len(visible_nodes),
+                "edges": len(visible_edges),
+                "omitted_nodes": max(total_nodes - len(visible_nodes), 0),
+                "omitted_edges": max(total_edges - len(visible_edges), 0),
+            },
+        }
+
     def _build_mutation_attribution(self, *, target: str) -> Optional[EventAttribution]:
         """Build generic actor/scope attribution for mutation results and events."""
         context = build_graph_authorization_context(action=GRAPH_ACTION_MUTATE, target=target)
@@ -1422,10 +1468,10 @@ class GraphService:
 
     def export_graph(self) -> Dict[str, Any]:
         """
-        Export the entire graph (all nodes and edges).
+        Export graph data through the request-bound read visibility contract.
 
         Returns:
-            Complete graph data in JSON format
+            Graph data plus a sanitized boundary summary for restore/admin workflows.
         """
         decision = self._evaluate_graph_access(action=GRAPH_ACTION_READ, target="export_graph")
         if not decision.allowed:
@@ -1435,13 +1481,23 @@ class GraphService:
                 decision=decision,
             )
 
+        source_nodes = self._storage.get_all_nodes()
+        source_edges = self._storage.get_all_edges()
         visible_nodes, visible_edges = self._filter_nodes_and_edges(
-            nodes=list(self._storage.nodes.values()),
-            edges=list(self._storage.edges.values()),
+            nodes=source_nodes,
+            edges=source_edges,
             graph_access=decision.graph_access,
         )
         all_nodes = serialize_nodes(visible_nodes)
         all_edges = serialize_edges(visible_edges)
+        export_boundary = self._build_export_boundary_summary(
+            target="export_graph",
+            decision=decision,
+            visible_nodes=visible_nodes,
+            visible_edges=visible_edges,
+            total_nodes=len(source_nodes),
+            total_edges=len(source_edges),
+        )
 
         return {
             "version": "1.0",
@@ -1449,5 +1505,6 @@ class GraphService:
             "nodes": all_nodes,
             "edges": all_edges,
             "total_nodes": len(all_nodes),
-            "total_edges": len(all_edges)
+            "total_edges": len(all_edges),
+            "export_boundary": export_boundary,
         }

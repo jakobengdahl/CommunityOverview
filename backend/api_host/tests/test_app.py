@@ -548,6 +548,26 @@ class TestExportEndpoints:
         assert "edges" in data
         assert len(data["nodes"]) == 3
         assert len(data["edges"]) == 2
+        assert data["export_boundary"] == {
+            "contract_version": "1.0",
+            "export_kind": "full",
+            "is_narrowed": False,
+            "scope_kind": "standalone",
+            "selection_mode": "default",
+            "selection_source": "default",
+            "has_workspace_selection": False,
+            "has_graph_selection": False,
+            "graph_scope": {
+                "local_graph_included": True,
+                "included_graph_count": 0,
+            },
+            "counts": {
+                "nodes": 3,
+                "edges": 2,
+                "omitted_nodes": 0,
+                "omitted_edges": 0,
+            },
+        }
 
     def test_export_graph_legacy_endpoint(self, test_app: TestClient):
         """Legacy export_graph endpoint works."""
@@ -555,6 +575,8 @@ class TestExportEndpoints:
         assert response.status_code == 200
         data = response.json()
         assert "nodes" in data
+        assert data["export_boundary"]["export_kind"] == "full"
+        assert data["export_boundary"]["selection_mode"] == "default"
 
 
 class TestExecuteToolEndpoint:
