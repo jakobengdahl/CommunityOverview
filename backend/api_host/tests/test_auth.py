@@ -71,3 +71,15 @@ def test_auth_not_required_on_info(auth_enabled_app):
     """Info endpoint should not require authentication."""
     response = auth_enabled_app.get("/info")
     assert response.status_code == 200
+
+
+def test_auth_not_required_on_ready(auth_enabled_app):
+    """Readiness endpoint should not require authentication."""
+    response = auth_enabled_app.get("/ready")
+    assert response.status_code == 200
+
+
+def test_auth_not_required_on_startup_diagnostics(auth_enabled_app):
+    """Startup diagnostics endpoint should not require authentication."""
+    response = auth_enabled_app.get("/diagnostics/startup")
+    assert response.status_code == 200
