@@ -85,6 +85,31 @@ def _collect_graph_integrity_diagnostics(graph_storage: GraphStorage) -> Dict[st
     }
 
 
+def _build_public_tenant_context(tenant_context: Dict[str, Any]) -> Dict[str, Any]:
+    """Summarize tenant configuration without exposing tenant identifiers."""
+    return {
+        "environment": tenant_context["environment"],
+        "tenant_id_configured": bool(tenant_context["tenant_id"]),
+        "tenant_name_configured": bool(tenant_context["tenant_name"]),
+        "tenant_context_configured": bool(
+            tenant_context["tenant_id"] or tenant_context["tenant_name"]
+        ),
+    }
+
+
+def _build_public_config_context(config_context: Dict[str, Any]) -> Dict[str, Any]:
+    """Summarize config resolution context without exposing tenant identifiers."""
+    return {
+        "environment": config_context["environment"],
+        "tenant_context_configured": bool(
+            config_context["tenant_id"] or config_context["tenant_name"]
+        ),
+        "tenant_config_dir_configured": config_context["tenant_config_dir_configured"],
+        "schema_config_source": config_context["schema_config_source"],
+        "federation_config_source": config_context["federation_config_source"],
+    }
+
+
 def _build_startup_diagnostics(
     *,
     config: AppConfig,
@@ -103,6 +128,8 @@ def _build_startup_diagnostics(
     graph_integrity = _collect_graph_integrity_diagnostics(graph_storage)
     federation_runtime = federation_manager.get_status()
     agent_status = agent_registry.get_all_status()
+    public_tenant_context = _build_public_tenant_context(tenant_context)
+    public_config_context = _build_public_config_context(config_context)
 
     checks = {
         "config": {
@@ -112,7 +139,7 @@ def _build_startup_diagnostics(
             "tenant_config_dir_configured": config_context["tenant_config_dir_configured"],
         },
         "graph_storage": {
-            "status": "ok",
+            "status": graph_integrity["status"],
             "graph_nodes": len(graph_storage.nodes),
             "graph_edges": len(graph_storage.edges),
             "integrity": graph_integrity,
@@ -145,8 +172,8 @@ def _build_startup_diagnostics(
         "status": readiness_status,
         "config_profile": config.config_profile,
         "runtime": runtime_info,
-        "tenant_context": tenant_context,
-        "config_context": config_context,
+        "tenant_context": public_tenant_context,
+        "config_context": public_config_context,
         "request_context_defaults": {
             "actor": request_actor,
             "scope": request_scope,

@@ -12,6 +12,7 @@ from unittest.mock import patch
 from fastapi.testclient import TestClient
 
 from backend.api_host import create_app
+from backend.core import GraphStorage
 
 
 class TestHealthAndRoot:
@@ -69,6 +70,7 @@ class TestHealthAndRoot:
         assert data["kind"] == "readiness"
         assert data["startup_diagnostics_endpoint"] == "/diagnostics/startup"
         assert data["checks"]["config"]["status"] == "ok"
+        assert data["checks"]["graph_storage"]["status"] == "ok"
         assert data["checks"]["graph_storage"]["graph_nodes"] == 3
         assert data["checks"]["graph_storage"]["integrity"] == {
             "status": "ok",
@@ -90,10 +92,15 @@ class TestHealthAndRoot:
             "runtime_mode": "standalone",
             "enabled_extensions": [],
         }
-        assert data["config_context"] == {
-            "tenant_id": "",
-            "tenant_name": "",
+        assert data["tenant_context"] == {
             "environment": "local",
+            "tenant_id_configured": False,
+            "tenant_name_configured": False,
+            "tenant_context_configured": False,
+        }
+        assert data["config_context"] == {
+            "environment": "local",
+            "tenant_context_configured": False,
             "tenant_config_dir_configured": False,
             "schema_config_source": "default",
             "federation_config_source": "default",
@@ -139,6 +146,80 @@ class TestHealthAndRoot:
         assert '"status": "ready"' in startup_logs[0]
         assert '"dangling_edge_count": 0' in startup_logs[0]
         assert app.state.startup_diagnostics["checks"]["graph_storage"]["integrity"]["status"] == "ok"
+
+    def test_public_operability_endpoints_do_not_expose_tenant_identifiers(
+        self,
+        app_config,
+        mock_llm_provider,
+        monkeypatch,
+    ):
+        """Public diagnostics redact raw tenant identifiers into safe booleans."""
+        monkeypatch.setenv("COMMUNITYOVERVIEW_TENANT_ID", "tenant-secret-123")
+        monkeypatch.setenv("COMMUNITYOVERVIEW_TENANT_NAME", "Highly Sensitive Tenant")
+        monkeypatch.setenv("COMMUNITYOVERVIEW_ENVIRONMENT", "staging")
+
+        with patch("chat_logic.create_provider", return_value=mock_llm_provider):
+            with patch.dict(os.environ, {"ANTHROPIC_API_KEY": "test-key"}):
+                client = TestClient(create_app(app_config))
+
+        startup_response = client.get("/diagnostics/startup")
+        assert startup_response.status_code == 200
+        startup_data = startup_response.json()
+        assert startup_data["tenant_context"] == {
+            "environment": "staging",
+            "tenant_id_configured": True,
+            "tenant_name_configured": True,
+            "tenant_context_configured": True,
+        }
+        assert startup_data["config_context"] == {
+            "environment": "staging",
+            "tenant_context_configured": True,
+            "tenant_config_dir_configured": False,
+            "schema_config_source": "default",
+            "federation_config_source": "default",
+        }
+        assert "tenant_id" not in startup_data["tenant_context"]
+        assert "tenant_name" not in startup_data["tenant_context"]
+        assert "tenant_id" not in startup_data["config_context"]
+        assert "tenant_name" not in startup_data["config_context"]
+        assert "tenant-secret-123" not in startup_response.text
+        assert "Highly Sensitive Tenant" not in startup_response.text
+
+        info_response = client.get("/info")
+        assert info_response.status_code == 200
+        info_data = info_response.json()
+        assert info_data["operability"]["config_context"] == startup_data["config_context"]
+        assert "tenant_id" not in info_data["operability"]["config_context"]
+        assert "tenant_name" not in info_data["operability"]["config_context"]
+        assert "tenant-secret-123" not in info_response.text
+        assert "Highly Sensitive Tenant" not in info_response.text
+
+    def test_readiness_reports_not_ready_when_graph_integrity_is_degraded(
+        self,
+        app_config,
+        mock_llm_provider,
+        tmp_path,
+    ):
+        """Readiness must fail when graph integrity is degraded."""
+        graph_path = tmp_path / "degraded-graph.json"
+        graph_path.write_text(
+            '{"nodes": [{"id": "node-1", "type": "Actor", "name": "Node 1", "communities": []}], '
+            '"edges": [{"id": "edge-1", "source": "node-1", "target": "missing-node", "type": "RELATES_TO"}]}'
+        )
+        degraded_graph_storage = GraphStorage(str(graph_path))
+
+        with patch("chat_logic.create_provider", return_value=mock_llm_provider):
+            with patch.dict(os.environ, {"ANTHROPIC_API_KEY": "test-key"}):
+                client = TestClient(create_app(app_config, graph_storage=degraded_graph_storage))
+
+        response = client.get("/ready")
+        assert response.status_code == 200
+        data = response.json()
+        assert data["status"] == "not_ready"
+        assert data["checks"]["graph_storage"]["status"] == "degraded"
+        assert data["checks"]["graph_storage"]["integrity"]["status"] == "degraded"
+        assert data["checks"]["graph_storage"]["integrity"]["dangling_edge_count"] == 1
+        assert "graph_integrity_degraded" in data["warnings"]
 
 
 class TestSearchEndpoints:
