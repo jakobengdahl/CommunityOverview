@@ -399,12 +399,13 @@ class TestAuthorizationNarrowingRestAndMcp:
         assert [node["name"] for node in payload["nodes"]] == ["Alpha result"]
         assert payload["federation"]["federated_nodes"] == 1
 
-    def test_export_graph_is_narrowed_to_selected_graph(self, app_client):
+    @pytest.mark.parametrize("path", ["/api/export", "/export_graph"])
+    def test_export_graph_is_narrowed_to_selected_graph(self, app_client, path):
         client, app = app_client
         _install_multi_graph_fixture(app)
 
         response = client.get(
-            "/export_graph",
+            path,
             headers={
                 "X-CommunityOverview-Workspace-Id": "workspace-export",
                 "X-CommunityOverview-Workspace-Kind": "team",
@@ -418,6 +419,28 @@ class TestAuthorizationNarrowingRestAndMcp:
         assert payload["edges"] == []
         assert payload["total_nodes"] == 1
         assert payload["total_edges"] == 0
+        assert payload["export_boundary"] == {
+            "contract_version": "1.0",
+            "export_kind": "narrowed",
+            "is_narrowed": True,
+            "scope_kind": "team",
+            "selection_mode": "workspace_graph",
+            "selection_source": "override",
+            "has_workspace_selection": True,
+            "has_graph_selection": True,
+            "graph_scope": {
+                "local_graph_included": False,
+                "included_graph_count": 1,
+            },
+            "counts": {
+                "nodes": 1,
+                "edges": 0,
+                "omitted_nodes": 2,
+                "omitted_edges": 1,
+            },
+        }
+        assert "workspace-export" not in str(payload["export_boundary"])
+        assert "graph-alpha" not in str(payload["export_boundary"])
 
 
 class TestAuthorizationHookRestAndMcp:
