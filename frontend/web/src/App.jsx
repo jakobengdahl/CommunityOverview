@@ -33,6 +33,8 @@ function App() {
     setHiddenNodeIds,
     stats,
     setStats,
+    llmAvailable,
+    setLlmAvailable,
     editingNode,
     setEditingNode,
     closeEditingNode,
@@ -77,14 +79,15 @@ function App() {
     }
   }, [federationDepth, maxFederationDepth, setFederationDepth]);
 
-  // Load schema, presentation, and stats on startup
+  // Load schema, presentation, stats and UI capabilities on startup
   useEffect(() => {
     const loadConfig = async () => {
       try {
-        const [schemaData, presentationData, statsData] = await Promise.all([
+        const [schemaData, presentationData, statsData, capabilitiesData] = await Promise.all([
           api.getSchema(),
           api.getPresentation(),
           api.getGraphStats(),
+          api.getUiCapabilities().catch(() => ({ llm_available: false })),
         ]);
         // Apply backend default language if no user override
         if (presentationData?.default_language) {
@@ -96,13 +99,15 @@ function App() {
         }
         setConfig(schemaData, presentationData, t, language);
         setStats(statsData);
+        setLlmAvailable(capabilitiesData.llm_available ?? false);
       } catch (error) {
         console.error('Error loading configuration:', error);
         api.getGraphStats().then(setStats).catch(console.error);
+        setLlmAvailable(false);
       }
     };
     loadConfig();
-  }, [setConfig, setStats, t, setLanguage, language]);
+  }, [setConfig, setStats, setLlmAvailable, t, setLanguage, language]);
 
   const showNotification = useCallback((type, message) => {
     setNotification({ type, message });
@@ -604,7 +609,7 @@ function App() {
         onSaveView={handleToolbarSaveView}
         onCreateGroup={handleToolbarCreateGroup}
       />
-      <ChatPanel />
+      {llmAvailable && <ChatPanel />}
 
       {createNodeType && (
         <CreateNodeDialog

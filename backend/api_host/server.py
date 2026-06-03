@@ -35,6 +35,7 @@ from starlette.requests import Request
 from mcp.server.fastmcp import FastMCP
 
 from backend.core import GraphStorage
+from backend.llm_providers import get_llm_availability
 from backend.service import GraphService, create_rest_router, register_mcp_tools, json_serializer
 from backend.ui import ChatService, DocumentService, create_ui_router
 from backend.agents import AgentRegistry, AgentsSettings
@@ -132,6 +133,8 @@ def _build_startup_diagnostics(
     public_tenant_context = _build_public_tenant_context(tenant_context)
     public_config_context = _build_public_config_context(config_context)
 
+    llm_availability = get_llm_availability()
+
     checks = {
         "config": {
             "status": "ok",
@@ -147,6 +150,11 @@ def _build_startup_diagnostics(
         },
         "event_delivery": {
             "status": "ok" if getattr(graph_storage, "_events_enabled", False) else "disabled",
+        },
+        "llm": {
+            "status": "ok" if llm_availability["available"] else "no_key",
+            "available": llm_availability["available"],
+            "provider": llm_availability["provider"],
         },
         "agents": {
             "status": "ok" if agent_status["enabled"] else "disabled",
@@ -837,6 +845,7 @@ def create_app(
     @app.get("/info")
     async def info() -> Dict[str, Any]:
         """API information endpoint."""
+        llm = get_llm_availability()
         return {
             "name": "Community Knowledge Graph",
             "version": "1.0.0",
@@ -856,6 +865,7 @@ def create_app(
                 "edges": len(graph_storage.edges),
             },
             "llm_provider": chat_service.provider_type,
+            "llm_available": llm["available"],
             "operability": {
                 "startup_status": app.state.startup_diagnostics["status"],
                 "warnings": app.state.startup_diagnostics["warnings"],

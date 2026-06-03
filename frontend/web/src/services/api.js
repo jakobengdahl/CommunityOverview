@@ -420,6 +420,15 @@ export async function getChatInfo() {
 }
 
 /**
+ * Get UI feature capabilities from the backend.
+ * Used during startup to decide which features to show.
+ * @returns {Promise<{llm_available: boolean, llm_provider: string}>}
+ */
+export async function getUiCapabilities() {
+  return apiFetch(`${UI_API_BASE}/capabilities`);
+}
+
+/**
  * Get supported file formats for upload
  * @returns {Promise<{formats: string[]}>}
  */
