@@ -213,8 +213,8 @@ fi
 source venv/bin/activate
 
 # Install Python dependencies
-echo "Installing Python dependencies..."
-pip install -q -r "$BACKEND_DIR/requirements.txt"
+echo "Installing Python dependencies (first run downloads ~750 MB for ML packages)..."
+pip install -r "$BACKEND_DIR/requirements.txt"
 
 echo -e "${GREEN}Python environment ready.${NC}"
 
