@@ -9,7 +9,6 @@ import json
 from pathlib import Path
 
 from backend.core import (
-    FileGraphPersistenceBackend,
     GraphStorage, Node, Edge, NodeType, RelationshipType
 )
 
@@ -50,30 +49,6 @@ def storage_with_data(temp_storage):
 
     temp_storage.add_nodes(nodes, edges)
     return temp_storage
-
-
-class InMemoryPersistenceBackend:
-    """Test backend used to verify GraphStorage persistence delegation."""
-
-    def __init__(self, initial_data=None, default_name="in-memory-graph"):
-        self.data = initial_data
-        self.default_name_value = default_name
-        self.load_calls = 0
-        self.save_calls = 0
-
-    def exists(self):
-        return self.data is not None
-
-    def load_graph_data(self):
-        self.load_calls += 1
-        return json.loads(json.dumps(self.data))
-
-    def save_graph_data(self, data):
-        self.save_calls += 1
-        self.data = json.loads(json.dumps(data))
-
-    def default_graph_name(self):
-        return self.default_name_value
 
 
 class TestGraphStorageInit:
@@ -213,30 +188,6 @@ class TestGraphStorageCRUD:
         assert "confirmed" in result.message.lower()
         # Node should still exist
         assert storage_with_data.get_node("actor-1") is not None
-
-    def test_delete_edge(self, storage_with_data):
-        """Test deleting a single edge."""
-        deleted = storage_with_data.delete_edge("edge-1")
-
-        assert deleted is True
-        assert "edge-1" not in storage_with_data.edges
-
-    def test_delete_edges_max_50(self, storage_with_data):
-        """Test that bulk edge deletion is limited to 50 edges."""
-        edge_ids = [f"edge-{i}" for i in range(60)]
-        result = storage_with_data.delete_edges(edge_ids)
-
-        assert result.success is False
-        assert "Max 50" in result.message
-
-    def test_delete_edges_bulk(self, storage_with_data):
-        """Test deleting multiple edges in one call."""
-        result = storage_with_data.delete_edges(["edge-1", "edge-2"])
-
-        assert result.success is True
-        assert set(result.deleted_edge_ids) == {"edge-1", "edge-2"}
-        assert "edge-1" not in storage_with_data.edges
-        assert "edge-2" not in storage_with_data.edges
 
     def test_delete_max_10_nodes(self, storage_with_data):
         """Test that max 10 nodes can be deleted at once"""
@@ -457,43 +408,6 @@ class TestGraphStorageSubtypes:
 
 class TestGraphStoragePersistence:
     """Tests for data persistence"""
-
-    def test_uses_file_backend_by_default(self, temp_storage):
-        """Standalone mode should still default to the file-backed adapter."""
-        assert isinstance(temp_storage._persistence_backend, FileGraphPersistenceBackend)
-        assert temp_storage._persistence_backend.json_path == temp_storage.json_path
-
-    def test_persistence_backend_can_be_injected(self):
-        """GraphStorage should delegate load/save through the persistence seam."""
-        backend = InMemoryPersistenceBackend(initial_data={
-            "nodes": [
-                {
-                    "id": "persist-backend-1",
-                    "type": NodeType.ACTOR.value,
-                    "name": "Injected Backend Node",
-                    "description": "Loaded via custom backend",
-                    "summary": "",
-                    "tags": [],
-                    "subtypes": [],
-                    "metadata": {},
-                }
-            ],
-            "edges": [],
-            "metadata": {"version": "1.0"},
-        })
-
-        storage = GraphStorage(persistence_backend=backend)
-
-        assert backend.load_calls == 1
-        assert storage.get_node("persist-backend-1") is not None
-        assert storage.get_graph_name() == "in-memory-graph"
-
-        storage.add_nodes([Node(id="persist-backend-2", type=NodeType.ACTOR, name="Saved Node")], [])
-
-        assert backend.save_calls >= 1
-        persisted_ids = {node["id"] for node in backend.data["nodes"]}
-        assert {"persist-backend-1", "persist-backend-2"}.issubset(persisted_ids)
-        assert backend.data["metadata"]["graph_name"] == "in-memory-graph"
 
     def test_save_and_reload(self, temp_storage):
         """Test that data persists across storage instances"""

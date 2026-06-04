@@ -302,10 +302,3 @@ class DeleteNodesResult(BaseModel):
     affected_edge_ids: List[str]  # Edges that were also removed
     success: bool
     message: str = ""
-
-
-class DeleteEdgesResult(BaseModel):
-    """Result from delete_edges operation"""
-    deleted_edge_ids: List[str]
-    success: bool
-    message: str = ""

@@ -165,17 +165,3 @@ Domain types can be freely modified, added, or removed in the schema configurati
 | `SCHEMA_FILE` | *(auto-resolved from profile)* | Alternative env var for schema path |
 
 When using `./start-dev.sh --profile <name>`, the `SCHEMA_FILE` variable is automatically set based on the profile's `schema_config.json` (with fallback to default).
-
-## Current state vs future hosted direction
-
-The current application still uses file-based graph persistence as the default runtime model. That remains appropriate for:
-- local development
-- standalone open source deployment
-- early hosted-readiness work where the focus is on seams, contracts, and operational hooks
-
-For the long-term shared SaaS architecture, the target is different:
-- multiple graphs or workspaces should eventually be served by shared application/service instances
-- user access to graphs should be controlled through application-managed identity and authorization
-- the storage layer should eventually support shared persistence with row-based or equivalent record-level access constraints
-
-That future storage direction is not implemented by this document. Its purpose here is only to clarify that file-based graph storage is a current implementation choice, not the intended final architecture for shared SaaS hosting.

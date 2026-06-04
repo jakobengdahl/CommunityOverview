@@ -18,10 +18,8 @@ Usage:
 """
 
 from typing import List, Optional, Dict, Any
-from fastapi import APIRouter, HTTPException, Query, Body, Request
+from fastapi import APIRouter, HTTPException, Query, Body
 from pydantic import BaseModel, Field
-
-from backend.authorization import use_request_authorization
 
 from .service import GraphService
 
@@ -130,33 +128,23 @@ class SaveViewRequest(BaseModel):
     name: str = Field(..., min_length=1, max_length=200, description="View name")
 
 
-def _raise_for_access_denied(result: Dict[str, Any]) -> None:
-    if result.get("error_code") == "access_denied":
-        raise HTTPException(status_code=403, detail=result.get("message") or result.get("error"))
-
-
 # ==================== Route Registration Helpers ====================
 
 def _register_search_endpoints(router: APIRouter, service: GraphService) -> None:
     @router.post("/search")
-    async def search_graph(request: SearchRequest, http_request: Request) -> Dict[str, Any]:
+    async def search_graph(request: SearchRequest) -> Dict[str, Any]:
         """Search for nodes in the graph based on text query."""
-        with use_request_authorization(headers=http_request.headers):
-            result = service.search_graph(
-                query=request.query,
-                node_types=request.node_types,
-                limit=request.limit,
-                federation_depth=request.federation_depth,
-            )
-        _raise_for_access_denied(result)
-        return result
+        return service.search_graph(
+            query=request.query,
+            node_types=request.node_types,
+            limit=request.limit,
+            federation_depth=request.federation_depth,
+        )
 
     @router.get("/nodes/{node_id}")
-    async def get_node_details(node_id: str, request: Request) -> Dict[str, Any]:
+    async def get_node_details(node_id: str) -> Dict[str, Any]:
         """Get complete information about a specific node."""
-        with use_request_authorization(headers=request.headers):
-            result = service.get_node_details(node_id)
-        _raise_for_access_denied(result)
+        result = service.get_node_details(node_id)
         if not result.get("success", True):
             raise HTTPException(status_code=404, detail=result.get("error"))
         return result
@@ -164,19 +152,15 @@ def _register_search_endpoints(router: APIRouter, service: GraphService) -> None
     @router.post("/nodes/{node_id}/related")
     async def get_related_nodes(
         node_id: str,
-        request: Request,
         relationship_types: Optional[List[str]] = Body(None),
         depth: int = Body(1, ge=1, le=5)
     ) -> Dict[str, Any]:
         """Get nodes connected to the given node."""
-        with use_request_authorization(headers=request.headers):
-            result = service.get_related_nodes(
-                node_id=node_id,
-                relationship_types=relationship_types,
-                depth=depth
-            )
-        _raise_for_access_denied(result)
-        return result
+        return service.get_related_nodes(
+            node_id=node_id,
+            relationship_types=relationship_types,
+            depth=depth
+        )
 
 
 def _register_similarity_endpoints(router: APIRouter, service: GraphService) -> None:
@@ -201,19 +185,17 @@ def _register_similarity_endpoints(router: APIRouter, service: GraphService) -> 
         )
 
     @router.post("/federation/adopt")
-    async def adopt_federated_node(request: AdoptFederatedNodeRequest, http_request: Request) -> Dict[str, Any]:
+    async def adopt_federated_node(request: AdoptFederatedNodeRequest) -> Dict[str, Any]:
         """Adopt (clone) a federated cached node into local graph."""
-        with use_request_authorization(headers=http_request.headers):
-            result = service.adopt_federated_node(
-                federated_node_id=request.federated_node_id,
-                local_name=request.local_name,
-                relationship_type=request.relationship_type,
-                create_new_copy=request.create_new_copy,
-                event_origin=request.event_origin,
-                event_session_id=request.event_session_id,
-                event_correlation_id=request.event_correlation_id,
-            )
-        _raise_for_access_denied(result)
+        result = service.adopt_federated_node(
+            federated_node_id=request.federated_node_id,
+            local_name=request.local_name,
+            relationship_type=request.relationship_type,
+            create_new_copy=request.create_new_copy,
+            event_origin=request.event_origin,
+            event_session_id=request.event_session_id,
+            event_correlation_id=request.event_correlation_id,
+        )
         if not result.get("success", True):
             raise HTTPException(status_code=400, detail=result.get("message", "Adoption failed"))
         return result
@@ -221,49 +203,43 @@ def _register_similarity_endpoints(router: APIRouter, service: GraphService) -> 
 
 def _register_node_crud_endpoints(router: APIRouter, service: GraphService) -> None:
     @router.post("/nodes")
-    async def add_nodes(request: AddNodesRequest, http_request: Request) -> Dict[str, Any]:
+    async def add_nodes(request: AddNodesRequest) -> Dict[str, Any]:
         """Add new nodes and edges to the graph."""
-        with use_request_authorization(headers=http_request.headers):
-            result = service.add_nodes(
-                nodes=request.nodes,
-                edges=request.edges,
-                event_origin=request.event_origin,
-                event_session_id=request.event_session_id,
-                event_correlation_id=request.event_correlation_id,
-            )
-        _raise_for_access_denied(result)
+        result = service.add_nodes(
+            nodes=request.nodes,
+            edges=request.edges,
+            event_origin=request.event_origin,
+            event_session_id=request.event_session_id,
+            event_correlation_id=request.event_correlation_id,
+        )
         if not result.get("success", True):
             raise HTTPException(status_code=400, detail=result.get("message"))
         return result
 
     @router.patch("/nodes/{node_id}")
-    async def update_node(node_id: str, request: UpdateNodeRequest, http_request: Request) -> Dict[str, Any]:
+    async def update_node(node_id: str, request: UpdateNodeRequest) -> Dict[str, Any]:
         """Update an existing node."""
-        with use_request_authorization(headers=http_request.headers):
-            result = service.update_node(
-                node_id,
-                request.updates,
-                event_origin=request.event_origin,
-                event_session_id=request.event_session_id,
-                event_correlation_id=request.event_correlation_id,
-            )
-        _raise_for_access_denied(result)
+        result = service.update_node(
+            node_id,
+            request.updates,
+            event_origin=request.event_origin,
+            event_session_id=request.event_session_id,
+            event_correlation_id=request.event_correlation_id,
+        )
         if not result.get("success", True):
             raise HTTPException(status_code=404, detail=result.get("error"))
         return result
 
     @router.delete("/nodes")
-    async def delete_nodes(request: DeleteNodesRequest, http_request: Request) -> Dict[str, Any]:
+    async def delete_nodes(request: DeleteNodesRequest) -> Dict[str, Any]:
         """Delete nodes from the graph (max 10 at a time)."""
-        with use_request_authorization(headers=http_request.headers):
-            result = service.delete_nodes(
-                node_ids=request.node_ids,
-                confirmed=request.confirmed,
-                event_origin=request.event_origin,
-                event_session_id=request.event_session_id,
-                event_correlation_id=request.event_correlation_id,
-            )
-        _raise_for_access_denied(result)
+        result = service.delete_nodes(
+            node_ids=request.node_ids,
+            confirmed=request.confirmed,
+            event_origin=request.event_origin,
+            event_session_id=request.event_session_id,
+            event_correlation_id=request.event_correlation_id,
+        )
         if not result.get("success", True):
             raise HTTPException(status_code=400, detail=result.get("message"))
         return result
@@ -271,54 +247,39 @@ def _register_node_crud_endpoints(router: APIRouter, service: GraphService) -> N
 
 def _register_edge_crud_endpoints(router: APIRouter, service: GraphService) -> None:
     @router.post("/edges")
-    async def add_edge(request: AddEdgeRequest, http_request: Request) -> Dict[str, Any]:
+    async def add_edge(request: AddEdgeRequest) -> Dict[str, Any]:
         """Add a single edge between existing nodes. Type is optional (defaults to RELATES_TO)."""
-        with use_request_authorization(headers=http_request.headers):
-            result = service.add_edge(
-                source=request.source,
-                target=request.target,
-                type=request.type,
-                label=request.label,
-                event_origin=request.event_origin,
-                event_session_id=request.event_session_id,
-                event_correlation_id=request.event_correlation_id,
-            )
-        _raise_for_access_denied(result)
+        result = service.add_edge(
+            source=request.source,
+            target=request.target,
+            type=request.type,
+            label=request.label,
+            event_origin=request.event_origin,
+            event_session_id=request.event_session_id,
+            event_correlation_id=request.event_correlation_id,
+        )
         if not result.get("success", True):
             raise HTTPException(status_code=400, detail=result.get("message"))
         return result
 
     @router.patch("/edges/{edge_id}")
-    async def update_edge(edge_id: str, request: UpdateEdgeRequest, http_request: Request) -> Dict[str, Any]:
+    async def update_edge(edge_id: str, request: UpdateEdgeRequest) -> Dict[str, Any]:
         """Update an existing edge (type, label, metadata)."""
-        with use_request_authorization(headers=http_request.headers):
-            result = service.update_edge(
-                edge_id,
-                request.updates,
-                event_origin=request.event_origin,
-                event_session_id=request.event_session_id,
-                event_correlation_id=request.event_correlation_id,
-            )
-        _raise_for_access_denied(result)
+        result = service.update_edge(
+            edge_id,
+            request.updates,
+            event_origin=request.event_origin,
+            event_session_id=request.event_session_id,
+            event_correlation_id=request.event_correlation_id,
+        )
         if not result.get("success", True):
             raise HTTPException(status_code=404, detail=result.get("error"))
         return result
 
     @router.delete("/edges/{edge_id}")
-    async def delete_edge(
-        edge_id: str,
-        http_request: Request,
-        request: Optional[DeleteEdgeRequest] = Body(None),
-    ) -> Dict[str, Any]:
+    async def delete_edge(edge_id: str) -> Dict[str, Any]:
         """Delete a single edge."""
-        with use_request_authorization(headers=http_request.headers):
-            result = service.delete_edge(
-                edge_id,
-                event_origin=request.event_origin if request else None,
-                event_session_id=request.event_session_id if request else None,
-                event_correlation_id=request.event_correlation_id if request else None,
-            )
-        _raise_for_access_denied(result)
+        result = service.delete_edge(edge_id, event_origin="web-ui")
         if not result.get("success", True):
             raise HTTPException(status_code=404, detail=result.get("error"))
         return result
@@ -326,12 +287,9 @@ def _register_edge_crud_endpoints(router: APIRouter, service: GraphService) -> N
 
 def _register_metadata_endpoints(router: APIRouter, service: GraphService) -> None:
     @router.get("/stats")
-    async def get_graph_stats(request: Request) -> Dict[str, Any]:
+    async def get_graph_stats() -> Dict[str, Any]:
         """Get statistics for the graph."""
-        with use_request_authorization(headers=request.headers):
-            result = service.get_graph_stats()
-        _raise_for_access_denied(result)
-        return result
+        return service.get_graph_stats()
 
     @router.get("/meta/node-types")
     async def list_node_types() -> Dict[str, Any]:
@@ -358,41 +316,6 @@ def _register_metadata_endpoints(router: APIRouter, service: GraphService) -> No
         """Get the presentation configuration (colors, prompts, introduction text)."""
         return service.get_presentation()
 
-    @router.get("/capabilities")
-    async def get_capabilities() -> Dict[str, Any]:
-        """Get the public capability manifest for client discovery."""
-        return service.get_capabilities()
-
-    @router.get("/runtime")
-    async def get_runtime_info() -> Dict[str, Any]:
-        """Get the public runtime metadata for deployment introspection."""
-        return service.get_runtime_info()
-
-    @router.get("/tenant-context")
-    async def get_tenant_context() -> Dict[str, Any]:
-        """Get the tenant/deployment context metadata."""
-        return service.get_tenant_context()
-
-    @router.get("/config-context")
-    async def get_config_context() -> Dict[str, Any]:
-        """Get the effective public config scope and non-sensitive source metadata."""
-        return service.get_config_context()
-
-    @router.get("/request-actor")
-    async def get_request_actor(request: Request) -> Dict[str, Any]:
-        """Get the public request actor context derived from safe env/request inputs."""
-        return service.get_request_actor_info(headers=request.headers)
-
-    @router.get("/request-scope")
-    async def get_request_scope(request: Request) -> Dict[str, Any]:
-        """Get the public workspace/graph scope context derived from safe env/request inputs."""
-        return service.get_request_scope_info(headers=request.headers)
-
-    @router.get("/request-selection")
-    async def get_request_selection(request: Request) -> Dict[str, Any]:
-        """Get the public graph/workspace selection summary derived from safe env/request inputs."""
-        return service.get_request_graph_selection_info(headers=request.headers)
-
 
 def _register_views_endpoints(router: APIRouter, service: GraphService) -> None:
     @router.post("/views/save")
@@ -401,32 +324,24 @@ def _register_views_endpoints(router: APIRouter, service: GraphService) -> None:
         return service.save_view(request.name)
 
     @router.get("/views/{name}")
-    async def get_saved_view(name: str, request: Request) -> Dict[str, Any]:
+    async def get_saved_view(name: str) -> Dict[str, Any]:
         """Get a saved view by name and load its content."""
-        with use_request_authorization(headers=request.headers):
-            result = service.get_saved_view(name)
-        _raise_for_access_denied(result)
+        result = service.get_saved_view(name)
         if not result.get("success", True):
             raise HTTPException(status_code=404, detail=result.get("error"))
         return result
 
     @router.get("/views")
-    async def list_saved_views(request: Request) -> Dict[str, Any]:
+    async def list_saved_views() -> Dict[str, Any]:
         """List all saved views."""
-        with use_request_authorization(headers=request.headers):
-            result = service.list_saved_views()
-        _raise_for_access_denied(result)
-        return result
+        return service.list_saved_views()
 
 
 def _register_export_endpoints(router: APIRouter, service: GraphService) -> None:
     @router.get("/export")
-    async def export_graph(request: Request) -> Dict[str, Any]:
+    async def export_graph() -> Dict[str, Any]:
         """Export the entire graph (all nodes and edges)."""
-        with use_request_authorization(headers=request.headers):
-            result = service.export_graph()
-        _raise_for_access_denied(result)
-        return result
+        return service.export_graph()
 
 
 # ==================== Router Factory ====================

@@ -2,20 +2,6 @@
 
 This project supports multiple LLM providers, allowing you to choose between Claude (Anthropic) and OpenAI (GPT-4) as your AI backend. The OpenAI provider also works with any OpenAI-compatible API, including self-hosted models (Ollama, vLLM), managed inference services (Azure OpenAI, Groq, Together AI), and proxies like OpenWebUI.
 
-## Running without LLM keys
-
-The application starts and runs fully without any LLM API keys configured. When no
-key is detected at startup:
-
-- The **MCP server** is available for external agents and tools (no key required).
-- The **graph REST API** is fully operational.
-- The **background agent workers** remain inactive (`AGENTS_ENABLED` defaults to `false`).
-- The built-in **AI chat assistant is hidden** in the web UI — the frontend queries
-  `GET /ui/capabilities` during startup and only renders the chat panel when
-  `llm_available: true` is returned.
-
-To enable AI features later, set the appropriate API key and restart the server.
-
 ## Supported Providers
 
 - **Claude** (Anthropic) - Uses Claude Sonnet 4.5

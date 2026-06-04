@@ -82,8 +82,6 @@ This system helps organizations avoid overlapping investments by making visible:
   PROFILES.md                     # Configuration profiles guide
   DEPLOYMENT_GUIDE.md             # Deployment documentation
   FEDERATED_GRAPH_DESIGN.md       # Federated multi-graph architecture
-  CORE_ENABLEMENT_HOSTED_SAAS.md  # Public core plan for hosted/SaaS-ready extension seams
-  CORE_ENABLEMENT_IMPLEMENTATION_PLAN.md # Concrete public implementation slices for hosted/SaaS readiness
 start-dev.sh                      # Development startup script
 LLM_PROVIDERS.md                  # LLM configuration guide
 ```
@@ -125,32 +123,6 @@ These are integral to core application functionality:
 - Profiles can define additional relationship types (e.g., MEASURES, DESCRIBES, USES, DERIVED_FROM)
 
 ## Quick Start
-
-### Running behind a reverse proxy
-
-The app works out of the box behind any path-stripping reverse proxy. The frontend automatically detects the proxy path prefix from the browser URL — no extra configuration is needed.
-
-**If Node.js is not pre-installed (managed cloud environments, sandboxes)**
-
-Install Node.js via nvm — no root access required:
-
-```bash
-curl -o- https://raw.githubusercontent.com/nvm-sh/nvm/v0.39.7/install.sh | bash
-source ~/.bashrc
-nvm install 20
-```
-
-Then start the app normally:
-
-```bash
-export ANTHROPIC_API_KEY=sk-ant-xxxxx  # or OPENAI_API_KEY
-./start-dev.sh
-```
-
-The app will be reachable at whatever URL your environment exposes for port 8000, e.g.:
-`https://<your-host>/proxy/8000/web/`
-
-> **Note:** Make sure port 8000 is publicly accessible in your environment's network or port settings.
 
 ### Development Mode (Recommended)
 
@@ -314,14 +286,6 @@ export LLM_PROVIDER=openai   # Force OpenAI
 ```
 
 See [LLM_PROVIDERS.md](./LLM_PROVIDERS.md) for detailed configuration.
-
-### Running without LLM keys
-
-The application starts and operates fully without any LLM API keys. When no key is
-configured the built-in AI chat assistant is hidden in the UI, and background agent
-workers remain inactive. The MCP server, graph API, and all read/write operations
-work normally. This allows teams to run the knowledge graph as a standalone data
-platform and add AI capabilities later by setting an API key and restarting.
 
 ## Authentication
 

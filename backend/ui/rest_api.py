@@ -296,24 +296,6 @@ def create_ui_router(
         except Exception as e:
             raise HTTPException(status_code=500, detail=str(e))
 
-    # ==================== Capabilities Endpoint ====================
-
-    @router.get("/capabilities")
-    async def get_ui_capabilities() -> Dict[str, Any]:
-        """
-        Return UI feature availability based on runtime configuration.
-
-        Called by the frontend during startup to decide which features to show.
-        Currently reports LLM availability so the chat panel can be hidden when
-        no API keys are configured.
-        """
-        from backend.llm_providers import get_llm_availability
-        llm = get_llm_availability()
-        return {
-            "llm_available": llm["available"],
-            "llm_provider": llm["provider"],
-        }
-
     # ==================== Info Endpoints ====================
 
     @router.get("/info")
