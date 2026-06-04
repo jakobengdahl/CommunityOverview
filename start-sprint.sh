@@ -139,65 +139,95 @@ echo -e "\n${YELLOW}[5/5] LLM configuration...${NC}"
 
 mkdir -p "$SPRINT_CONFIG_DIR"
 
-# Read a single value from the sprint .env file
-_get_saved() {
+# Priority: environment variable > saved .env value > default
+# Returns the highest-priority value available for a key.
+_resolve() {
     local key="$1"
-    [ -f "$SPRINT_ENV_FILE" ] || { echo ""; return; }
-    grep -E "^${key}=" "$SPRINT_ENV_FILE" 2>/dev/null | tail -1 \
-        | cut -d'=' -f2- | sed 's/^["'"'"']//;s/["'"'"']$//'
+    local default="$2"
+    # Check environment first
+    local env_val="${!key}"
+    if [ -n "$env_val" ]; then
+        echo "$env_val"
+        return
+    fi
+    # Fall back to saved .env file
+    if [ -f "$SPRINT_ENV_FILE" ]; then
+        local saved
+        saved=$(grep -E "^${key}=" "$SPRINT_ENV_FILE" 2>/dev/null | tail -1 \
+            | cut -d'=' -f2- | sed 's/^["'"'"']//;s/["'"'"']$//')
+        [ -n "$saved" ] && { echo "$saved"; return; }
+    fi
+    echo "$default"
 }
 
-# Prompt with current value shown; press Enter to keep
-_prompt() {
-    local label="$1"
-    local key="$2"
-    local default="$3"
-    local current
-    current=$(_get_saved "$key")
-    current="${current:-$default}"
+# If all required vars are already in the environment, skip the wizard entirely.
+if [ -n "$OPENAI_BASE_URL" ] && [ -n "$OPENAI_API_KEY" ]; then
+    echo -e "  ${GREEN}LLM config loaded from environment variables — skipping wizard.${NC}"
+    echo -e "  ${BLUE}Endpoint:${NC} $OPENAI_BASE_URL"
+    echo -e "  ${BLUE}Model:${NC}    ${OPENAI_MODEL:-gpt-4o}"
+    export LLM_PROVIDER=openai
+    export OPENAI_MODEL="${OPENAI_MODEL:-gpt-4o}"
+    export OPENAI_TOOL_CALLING="${OPENAI_TOOL_CALLING:-true}"
+else
+    # Prompt only for values not already in the environment.
+    # Shows saved .env value in brackets; press Enter to keep.
+    _prompt() {
+        local label="$1"
+        local key="$2"
+        local default="$3"
 
-    local display="$current"
-    if [[ "$key" == *KEY* ]] && [ -n "$current" ]; then
-        display="${current:0:8}...${current: -4}"
+        # Skip prompt if value is already set in environment
+        if [ -n "${!key}" ]; then
+            printf '%s' "${!key}"
+            return
+        fi
+
+        local current
+        current=$(_resolve "$key" "$default")
+
+        local display="$current"
+        if [[ "$key" == *KEY* ]] && [ -n "$current" ]; then
+            display="${current:0:8}...${current: -4}"
+        fi
+
+        if [ -n "$current" ]; then
+            printf "  %-36s ${CYAN}[%s]${NC}: " "$label" "$display"
+        else
+            printf "  %-36s: " "$label"
+        fi
+
+        read -r input
+        printf '%s' "${input:-$current}"
+    }
+
+    echo -e "  Configure the OpenAI-compatible LLM endpoint."
+    echo -e "  Press ${BOLD}Enter${NC} to keep the value shown in ${CYAN}[brackets]${NC}."
+    echo -e "  Values set as environment variables are used automatically.\n"
+
+    OPENAI_BASE_URL=$(_prompt "API base URL" "OPENAI_BASE_URL" "")
+    OPENAI_API_KEY=$(_prompt "API key / token" "OPENAI_API_KEY" "")
+    OPENAI_MODEL=$(_prompt "Model name" "OPENAI_MODEL" "gpt-4o")
+    OPENAI_TOOL_CALLING=$(_prompt "Tool calling enabled? (true/false)" "OPENAI_TOOL_CALLING" "true")
+
+    if [ -z "$OPENAI_BASE_URL" ]; then
+        echo -e "\n  ${YELLOW}Warning: No API base URL set. Chat will be unavailable.${NC}"
     fi
 
-    if [ -n "$current" ]; then
-        printf "  %-36s ${CYAN}[%s]${NC}: " "$label" "$display"
-    else
-        printf "  %-36s: " "$label"
-    fi
+    # Save only values that were not sourced from the environment,
+    # so the .env file doesn't shadow future environment variable updates.
+    {
+        echo "LLM_PROVIDER=openai"
+        [ -n "$OPENAI_BASE_URL" ]    && echo "OPENAI_BASE_URL=$OPENAI_BASE_URL"
+        [ -n "$OPENAI_API_KEY" ]     && echo "OPENAI_API_KEY=$OPENAI_API_KEY"
+        [ -n "$OPENAI_MODEL" ]       && echo "OPENAI_MODEL=$OPENAI_MODEL"
+        echo "OPENAI_TOOL_CALLING=$OPENAI_TOOL_CALLING"
+    } > "$SPRINT_ENV_FILE"
 
-    read -r input
-    printf '%s' "${input:-$current}"
-}
+    echo -e "\n  ${GREEN}Configuration saved to config/stockholmsprint/.env${NC}"
 
-echo -e "  Configure the OpenAI-compatible LLM endpoint."
-echo -e "  Press ${BOLD}Enter${NC} to keep the value shown in ${CYAN}[brackets]${NC}.\n"
-
-OPENAI_BASE_URL=$(_prompt "API base URL" "OPENAI_BASE_URL" "")
-OPENAI_API_KEY=$(_prompt "API key / token" "OPENAI_API_KEY" "")
-OPENAI_MODEL=$(_prompt "Model name" "OPENAI_MODEL" "gpt-4o")
-OPENAI_TOOL_CALLING=$(_prompt "Tool calling enabled? (true/false)" "OPENAI_TOOL_CALLING" "true")
-
-# Validate base URL
-if [ -z "$OPENAI_BASE_URL" ]; then
-    echo -e "\n  ${YELLOW}Warning: No API base URL set. Chat will be unavailable.${NC}"
+    export LLM_PROVIDER=openai
+    export OPENAI_BASE_URL OPENAI_API_KEY OPENAI_MODEL OPENAI_TOOL_CALLING
 fi
-
-# Write config
-{
-    echo "LLM_PROVIDER=openai"
-    [ -n "$OPENAI_BASE_URL" ]     && echo "OPENAI_BASE_URL=$OPENAI_BASE_URL"
-    [ -n "$OPENAI_API_KEY" ]      && echo "OPENAI_API_KEY=$OPENAI_API_KEY"
-    [ -n "$OPENAI_MODEL" ]        && echo "OPENAI_MODEL=$OPENAI_MODEL"
-    echo "OPENAI_TOOL_CALLING=$OPENAI_TOOL_CALLING"
-} > "$SPRINT_ENV_FILE"
-
-echo -e "\n  ${GREEN}Configuration saved to config/stockholmsprint/.env${NC}"
-
-# Load saved config into environment
-# shellcheck source=/dev/null
-source "$SPRINT_ENV_FILE"
 
 # =====================
 # Resolve profile config
