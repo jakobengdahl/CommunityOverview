@@ -126,24 +126,13 @@ These are integral to core application functionality:
 
 ## Quick Start
 
-### Running behind a reverse proxy (SSP Cloud, Onyxia, JupyterHub)
+### Running behind a reverse proxy
 
-If the app is served under a path prefix (e.g. `/proxy/8000/`) rather than at the root, set the `ROOT_PATH` environment variable before starting:
+The app works out of the box behind any path-stripping reverse proxy. The frontend automatically detects the proxy path prefix from the browser URL — no extra configuration is needed.
 
-```bash
-export ROOT_PATH=/proxy/8000
-./start-dev.sh
-```
+**If Node.js is not pre-installed (managed cloud environments, sandboxes)**
 
-Or pass it inline:
-
-```bash
-ROOT_PATH=/proxy/8000 ./start-dev.sh
-```
-
-**SSP Cloud / Onyxia — first-time setup:**
-
-Node.js is not pre-installed. Install it once via nvm (no root required):
+Install Node.js via nvm — no root access required:
 
 ```bash
 curl -o- https://raw.githubusercontent.com/nvm-sh/nvm/v0.39.7/install.sh | bash
@@ -151,18 +140,17 @@ source ~/.bashrc
 nvm install 20
 ```
 
-Then start the app:
+Then start the app normally:
 
 ```bash
-export ROOT_PATH=/proxy/8000   # adjust port if needed
 export ANTHROPIC_API_KEY=sk-ant-xxxxx  # or OPENAI_API_KEY
 ./start-dev.sh
 ```
 
-The app will be available at your Onyxia proxy URL, e.g.:
-`https://<your-instance>.user.lab.sspcloud.fr/proxy/8000/web/`
+The app will be reachable at whatever URL your environment exposes for port 8000, e.g.:
+`https://<your-host>/proxy/8000/web/`
 
-> **Note:** In SSP Cloud, make sure port 8000 is set to **Public** visibility in the service settings.
+> **Note:** Make sure port 8000 is publicly accessible in your environment's network or port settings.
 
 ### Development Mode (Recommended)
 
