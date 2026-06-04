@@ -297,10 +297,5 @@ fi
 # is inherited across exec, and uvicorn's reloader overrides it with its own
 # handler via signal.signal(), so Ctrl+C still works once the server is ready.
 trap '' INT
-UVICORN_EXTRA_ARGS=""
-if [ -n "$ROOT_PATH" ]; then
-    UVICORN_EXTRA_ARGS="--proxy-headers --root-path $ROOT_PATH"
-fi
-
 exec uvicorn backend.api_host.server:get_app --factory --reload --host 0.0.0.0 --port 8000 \
-    --reload-dir backend $UVICORN_EXTRA_ARGS
+    --reload-dir backend
