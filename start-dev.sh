@@ -178,6 +178,28 @@ fi
 export GRAPH_FILE="$ACTIVE_DATA"
 
 # =====================
+# Node.js Check
+# =====================
+if ! command -v node &> /dev/null; then
+    # Try loading nvm
+    export NVM_DIR="${NVM_DIR:-$HOME/.nvm}"
+    if [ -s "$NVM_DIR/nvm.sh" ]; then
+        \. "$NVM_DIR/nvm.sh"
+        nvm use --silent 2>/dev/null || nvm use default --silent 2>/dev/null
+    fi
+fi
+
+if ! command -v node &> /dev/null; then
+    echo -e "${RED}Error: Node.js is not installed or not in PATH.${NC}"
+    echo -e "Install it via nvm (no root required):"
+    echo -e "  curl -o- https://raw.githubusercontent.com/nvm-sh/nvm/v0.39.7/install.sh | bash"
+    echo -e "  source ~/.bashrc  # or ~/.zshrc"
+    echo -e "  nvm install 20"
+    echo -e "Then re-run this script."
+    exit 1
+fi
+
+# =====================
 # Python Environment
 # =====================
 echo -e "\n${YELLOW}[1/5] Setting up Python environment...${NC}"
