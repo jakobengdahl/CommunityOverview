@@ -297,6 +297,7 @@ def _bind_request_authorization_to_asgi_app(asgi_app):
 def create_app(
     config: Optional[AppConfig] = None,
     graph_storage: Optional[GraphStorage] = None,
+    root_path: str = "",
 ) -> FastAPI:
     """
     Create and configure the FastAPI application.
@@ -318,6 +319,7 @@ def create_app(
         title="Community Knowledge Graph",
         description="REST API and MCP server for community knowledge graph operations",
         version="1.0.0",
+        root_path=root_path,
     )
 
     # Add Basic Auth Middleware if enabled
@@ -750,7 +752,7 @@ def create_app(
     @app.get("/")
     async def root() -> RedirectResponse:
         """Redirect root to web application."""
-        return RedirectResponse(url="/web/", status_code=302)
+        return RedirectResponse(url=f"{root_path}/web/", status_code=302)
 
     # Logout endpoint - cloud-agnostic.
     # If LOGOUT_REDIRECT_URL is set, redirect there (e.g. an IAP / OAuth
@@ -948,6 +950,10 @@ def get_app() -> FastAPI:
     Factory function for uvicorn.
 
     Usage:
-        uvicorn app_host.server:get_app --factory
+        uvicorn backend.api_host.server:get_app --factory
+
+    Supports ROOT_PATH env var for reverse proxy / subpath deployments:
+        ROOT_PATH=/proxy/8000 uvicorn backend.api_host.server:get_app --factory --proxy-headers
     """
-    return create_app()
+    root_path = os.environ.get("ROOT_PATH", "")
+    return create_app(root_path=root_path)
