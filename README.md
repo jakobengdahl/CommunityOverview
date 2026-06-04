@@ -289,6 +289,14 @@ export LLM_PROVIDER=openai   # Force OpenAI
 
 See [LLM_PROVIDERS.md](./LLM_PROVIDERS.md) for detailed configuration.
 
+### Running without LLM keys
+
+The application starts and operates fully without any LLM API keys. When no key is
+configured the built-in AI chat assistant is hidden in the UI, and background agent
+workers remain inactive. The MCP server, graph API, and all read/write operations
+work normally. This allows teams to run the knowledge graph as a standalone data
+platform and add AI capabilities later by setting an API key and restarting.
+
 ## Authentication
 
 ### Full Basic Auth (all endpoints)

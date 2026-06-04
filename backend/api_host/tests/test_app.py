@@ -53,6 +53,33 @@ class TestHealthAndRoot:
             "enabled": 0,
             "disabled": 0,
         }
+        # llm_available is always present
+        assert "llm_available" in data
+        assert isinstance(data["llm_available"], bool)
+
+    def test_info_endpoint_llm_available_with_key(self, app_config):
+        """Info endpoint reports llm_available=True when API key is set."""
+        with patch.dict(os.environ, {"ANTHROPIC_API_KEY": "sk-ant-test", "LLM_PROVIDER": "claude"}):
+            from backend.api_host import create_app
+            with patch('chat_logic.create_provider'):
+                app = create_app(app_config)
+            client = TestClient(app)
+            response = client.get("/info")
+            assert response.status_code == 200
+            assert response.json()["llm_available"] is True
+
+    def test_info_endpoint_llm_not_available_without_key(self, app_config):
+        """Info endpoint reports llm_available=False when no API key is configured."""
+        env_patch = {"LLM_PROVIDER": "claude"}
+        with patch.dict(os.environ, env_patch):
+            os.environ.pop("ANTHROPIC_API_KEY", None)
+            os.environ.pop("OPENAI_API_KEY", None)
+            from backend.api_host import create_app
+            app = create_app(app_config)
+            client = TestClient(app)
+            response = client.get("/info")
+            assert response.status_code == 200
+            assert response.json()["llm_available"] is False
 
     def test_health_shows_graph_stats(self, test_app: TestClient):
         """Health endpoint shows correct graph statistics."""
@@ -631,3 +658,101 @@ class TestExecuteToolEndpoint:
             json={"arguments": {}}
         )
         assert response.status_code == 400
+
+
+class TestUiCapabilitiesEndpoint:
+    """Tests for the /ui/capabilities endpoint."""
+
+    def test_capabilities_returns_200(self, test_app: TestClient):
+        """/ui/capabilities endpoint is reachable and returns JSON."""
+        response = test_app.get("/ui/capabilities")
+        assert response.status_code == 200
+
+    def test_capabilities_has_required_fields(self, test_app: TestClient):
+        """/ui/capabilities always includes llm_available and llm_provider."""
+        response = test_app.get("/ui/capabilities")
+        data = response.json()
+        assert "llm_available" in data
+        assert "llm_provider" in data
+        assert isinstance(data["llm_available"], bool)
+        assert isinstance(data["llm_provider"], str)
+
+    def test_capabilities_llm_available_true_when_key_set(self, app_config):
+        """llm_available is True when ANTHROPIC_API_KEY is configured."""
+        with patch.dict(os.environ, {"ANTHROPIC_API_KEY": "sk-ant-test", "LLM_PROVIDER": "claude"}):
+            from backend.api_host import create_app
+            with patch('chat_logic.create_provider'):
+                app = create_app(app_config)
+            client = TestClient(app)
+            response = client.get("/ui/capabilities")
+            assert response.status_code == 200
+            assert response.json()["llm_available"] is True
+
+    def test_capabilities_llm_available_false_when_no_key(self, app_config):
+        """llm_available is False when no API key is configured."""
+        env_patch = {"LLM_PROVIDER": "claude"}
+        with patch.dict(os.environ, env_patch):
+            os.environ.pop("ANTHROPIC_API_KEY", None)
+            os.environ.pop("OPENAI_API_KEY", None)
+            from backend.api_host import create_app
+            app = create_app(app_config)
+            client = TestClient(app)
+            response = client.get("/ui/capabilities")
+            assert response.status_code == 200
+            assert response.json()["llm_available"] is False
+
+    def test_capabilities_llm_available_true_for_openai(self, app_config):
+        """llm_available is True when LLM_PROVIDER=openai and OPENAI_API_KEY is set."""
+        env_patch = {"LLM_PROVIDER": "openai", "OPENAI_API_KEY": "sk-test"}
+        with patch.dict(os.environ, env_patch):
+            os.environ.pop("ANTHROPIC_API_KEY", None)
+            from backend.api_host import create_app
+            with patch('chat_logic.create_provider'):
+                app = create_app(app_config)
+            client = TestClient(app)
+            response = client.get("/ui/capabilities")
+            assert response.status_code == 200
+            data = response.json()
+            assert data["llm_available"] is True
+            assert data["llm_provider"] == "openai"
+
+
+class TestStartupDiagnosticsLlmCheck:
+    """Tests for LLM availability in startup diagnostics."""
+
+    def test_startup_diagnostics_includes_llm_check(self, test_app: TestClient):
+        """Startup diagnostics include an 'llm' check entry."""
+        response = test_app.get("/diagnostics/startup")
+        assert response.status_code == 200
+        data = response.json()
+        assert "llm" in data["checks"]
+        llm_check = data["checks"]["llm"]
+        assert "status" in llm_check
+        assert "available" in llm_check
+        assert "provider" in llm_check
+
+    def test_startup_diagnostics_llm_status_ok_with_key(self, app_config):
+        """LLM check status is 'ok' when a key is configured."""
+        with patch.dict(os.environ, {"ANTHROPIC_API_KEY": "sk-ant-test", "LLM_PROVIDER": "claude"}):
+            from backend.api_host import create_app
+            with patch('chat_logic.create_provider'):
+                app = create_app(app_config)
+            client = TestClient(app)
+            response = client.get("/diagnostics/startup")
+            llm_check = response.json()["checks"]["llm"]
+            assert llm_check["status"] == "ok"
+            assert llm_check["available"] is True
+
+    def test_startup_diagnostics_llm_status_no_key_without_key(self, app_config):
+        """LLM check status is 'no_key' when no key is configured."""
+        env_patch = {"LLM_PROVIDER": "claude"}
+        with patch.dict(os.environ, env_patch):
+            os.environ.pop("ANTHROPIC_API_KEY", None)
+            os.environ.pop("OPENAI_API_KEY", None)
+            from backend.api_host import create_app
+            app = create_app(app_config)
+            client = TestClient(app)
+            response = client.get("/diagnostics/startup")
+            llm_check = response.json()["checks"]["llm"]
+            assert llm_check["status"] == "no_key"
+            assert llm_check["available"] is False
