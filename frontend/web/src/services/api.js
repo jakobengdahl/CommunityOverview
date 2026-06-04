@@ -4,13 +4,7 @@
  * Calls the backend endpoints exposed by app_host
  */
 
-function getPathRoot() {
-  const pathname = window.location.pathname;
-  const webIndex = pathname.lastIndexOf('/web/');
-  return webIndex !== -1 ? pathname.substring(0, webIndex) : '';
-}
-
-const API_BASE = getPathRoot() + '/api';
+const API_BASE = '/api';
 
 // ============================================================
 // Event Context / Session ID Management
@@ -337,7 +331,7 @@ export async function listSavedViews() {
  * @returns {Promise<Object>}
  */
 export async function executeTool(toolName, args) {
-  return apiFetch(getPathRoot() + '/execute_tool', {
+  return apiFetch('/execute_tool', {
     method: 'POST',
     body: JSON.stringify({
       tool_name: toolName,
@@ -350,7 +344,7 @@ export async function executeTool(toolName, args) {
 // UI Backend Chat API (/ui/*)
 // ============================================================
 
-const UI_API_BASE = getPathRoot() + '/ui';
+const UI_API_BASE = '/ui';
 
 /**
  * Send a chat message to the backend
@@ -426,15 +420,6 @@ export async function uploadFile(file, analyze = false) {
  */
 export async function getChatInfo() {
   return apiFetch(`${UI_API_BASE}/info`);
-}
-
-/**
- * Get UI feature capabilities from the backend.
- * Used during startup to decide which features to show.
- * @returns {Promise<{llm_available: boolean, llm_provider: string}>}
- */
-export async function getUiCapabilities() {
-  return apiFetch(`${UI_API_BASE}/capabilities`);
 }
 
 /**

@@ -3,7 +3,7 @@ LLM Provider abstraction layer for supporting multiple AI backends.
 Supports both Claude (Anthropic) and OpenAI APIs.
 """
 from abc import ABC, abstractmethod
-from typing import Any, Dict, List, Optional
+from typing import List, Dict, Any, Optional
 import json
 import os
 
@@ -267,37 +267,6 @@ class OpenAIProvider(LLMProvider):
             "content_filter": "end_turn"
         }
         return mapping.get(finish_reason, "end_turn")
-
-
-def get_llm_availability() -> Dict[str, Any]:
-    """
-    Inspect configured API keys and return whether an LLM provider is available.
-
-    No network calls are made; this only reads environment variables.
-
-    Returns:
-        Dict with keys:
-        - available (bool): True if the active provider has an API key configured
-        - provider (str): The active provider type ('claude' or 'openai')
-        - has_anthropic_key (bool)
-        - has_openai_key (bool)
-    """
-    provider_type = os.getenv("LLM_PROVIDER", "claude").lower()
-    anthropic_key = os.getenv("ANTHROPIC_API_KEY", "").strip()
-    openai_key = os.getenv("OPENAI_API_KEY", "").strip()
-
-    if provider_type == "openai":
-        available = bool(openai_key)
-    else:
-        # Default / explicit 'claude'
-        available = bool(anthropic_key)
-
-    return {
-        "available": available,
-        "provider": provider_type,
-        "has_anthropic_key": bool(anthropic_key),
-        "has_openai_key": bool(openai_key),
-    }
 
 
 def create_provider(api_key: str, provider_type: Optional[str] = None) -> LLMProvider:

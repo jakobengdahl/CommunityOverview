@@ -198,23 +198,6 @@ describe('graphStore', () => {
     });
   });
 
-  describe('edge actions', () => {
-    it('removes an edge by id', () => {
-      useGraphStore.setState({
-        edges: [
-          { id: 'edge-1', source: 'a', target: 'b', type: 'RELATES_TO' },
-          { id: 'edge-2', source: 'b', target: 'c', type: 'RELATES_TO' },
-        ],
-      });
-
-      useGraphStore.getState().removeEdge('edge-1');
-
-      expect(useGraphStore.getState().edges).toEqual([
-        { id: 'edge-2', source: 'b', target: 'c', type: 'RELATES_TO' },
-      ]);
-    });
-  });
-
   describe('getNodeTypeConfig', () => {
     it('returns null when schema not loaded', () => {
       const config = useGraphStore.getState().getNodeTypeConfig('Actor');
@@ -273,23 +256,6 @@ describe('graphStore', () => {
       expect(chatMessages).toHaveLength(1);
       expect(chatMessages[0].id).toBe('welcome');
       expect(chatMessages[0].content).toContain('Custom welcome!');
-    });
-  });
-
-  describe('LLM availability', () => {
-    it('initializes llmAvailable as null', () => {
-      useGraphStore.setState({ llmAvailable: null });
-      expect(useGraphStore.getState().llmAvailable).toBeNull();
-    });
-
-    it('setLlmAvailable sets llmAvailable to true', () => {
-      useGraphStore.getState().setLlmAvailable(true);
-      expect(useGraphStore.getState().llmAvailable).toBe(true);
-    });
-
-    it('setLlmAvailable sets llmAvailable to false', () => {
-      useGraphStore.getState().setLlmAvailable(false);
-      expect(useGraphStore.getState().llmAvailable).toBe(false);
     });
   });
 

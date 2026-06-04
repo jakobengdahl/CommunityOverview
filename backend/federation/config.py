@@ -7,11 +7,11 @@ Configuration is intentionally read-only at runtime and loaded from file/env.
 from __future__ import annotations
 
 import json
+import os
+from pathlib import Path
 from typing import Any, Dict, List, Optional, Literal
 
 from pydantic import BaseModel, Field, validator
-
-from backend.config_context import resolve_federation_config_path_info
 
 
 DEFAULT_FEDERATION_PATH = "config/default/federation_config.json"
@@ -126,14 +126,15 @@ class FederationFileConfig(BaseModel):
     federation: FederationSettings = Field(default_factory=FederationSettings)
 
 
-def resolve_federation_config_context() -> Dict[str, str]:
-    """Resolve federation config path and its public source metadata."""
-    return resolve_federation_config_path_info(DEFAULT_FEDERATION_PATH)
-
-
 def resolve_federation_config_path() -> str:
     """Resolve federation config path from environment or defaults."""
-    return resolve_federation_config_context()["path"]
+    env_path = os.getenv("FEDERATION_FILE") or os.getenv("GRAPH_FEDERATION_CONFIG")
+    if env_path:
+        return env_path
+
+    project_root = Path(__file__).parent.parent.parent
+    default_path = project_root / DEFAULT_FEDERATION_PATH
+    return str(default_path)
 
 
 def load_federation_config() -> FederationFileConfig:

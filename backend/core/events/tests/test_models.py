@@ -11,9 +11,6 @@ from backend.core.events.models import (
     EntityKind,
     EventContext,
     EventOrigin,
-    EventAttribution,
-    EventActorAttribution,
-    EventScopeAttribution,
     EntityData,
     DeliveryResult,
     DeliveryStatus,
@@ -55,21 +52,6 @@ class TestEventContext:
         assert d["event_origin"] == "mcp"
         assert d["event_session_id"] == "s1"
         assert d["event_correlation_id"] is None
-        assert d["attribution"] is None
-
-    def test_to_dict_includes_attribution(self):
-        """Test converting attribution-rich context to dict."""
-        ctx = EventContext(
-            event_origin="web-ui",
-            attribution=EventAttribution(
-                actor=EventActorAttribution(actor_id="member-1", actor_type="member", is_authenticated=True, auth_source="gateway", source="request"),
-                scope=EventScopeAttribution(workspace_id="workspace-1", workspace_kind="team", graph_id="graph-1", source="request"),
-            ),
-        )
-
-        d = ctx.to_dict()
-        assert d["attribution"]["actor"]["actor_id"] == "member-1"
-        assert d["attribution"]["scope"]["graph_id"] == "graph-1"
 
 
 class TestEventOrigin:
@@ -139,14 +121,7 @@ class TestEvent:
         """Test converting event to webhook payload format."""
         event = Event(
             event_type=EventType.NODE_UPDATE,
-            origin=EventContext(
-                event_origin="mcp",
-                event_session_id="s1",
-                attribution=EventAttribution(
-                    actor=EventActorAttribution(actor_id="member-1", actor_type="member", is_authenticated=True, auth_source="gateway", source="request"),
-                    scope=EventScopeAttribution(workspace_id="workspace-1", workspace_kind="team", graph_id="graph-1", source="request"),
-                ),
-            ),
+            origin=EventContext(event_origin="mcp", event_session_id="s1"),
             entity=EntityData(
                 kind=EntityKind.NODE,
                 id="node-1",
@@ -163,8 +138,6 @@ class TestEvent:
         assert payload["event_type"] == "node.update"
         assert "occurred_at" in payload
         assert payload["origin"]["event_origin"] == "mcp"
-        assert payload["origin"]["attribution"]["actor"]["actor_id"] == "member-1"
-        assert payload["origin"]["attribution"]["scope"]["graph_id"] == "graph-1"
         assert payload["entity"]["kind"] == "node"
         assert payload["entity"]["id"] == "node-1"
         assert payload["entity"]["data"]["before"]["name"] == "Old Name"

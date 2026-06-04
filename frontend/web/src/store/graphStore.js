@@ -169,9 +169,6 @@ const useGraphStore = create((set, get) => ({
   // Stats
   stats: null,
 
-  // LLM availability (null = not yet fetched, true/false = known)
-  llmAvailable: null,
-
   // Loading states
   isLoading: false,
   configLoaded: false,
@@ -229,11 +226,6 @@ const useGraphStore = create((set, get) => ({
       edges: Array.from(edgeMap.values()),
       highlightedNodeIds: actuallyNewNodeIds,
     });
-  },
-
-  removeEdge: (edgeId) => {
-    const { edges } = get();
-    set({ edges: edges.filter(edge => edge.id !== edgeId) });
   },
 
   clearVisualization: () => set({
@@ -306,8 +298,6 @@ const useGraphStore = create((set, get) => ({
   },
 
   setStats: (stats) => set({ stats }),
-
-  setLlmAvailable: (available) => set({ llmAvailable: available }),
 
   setLoading: (isLoading) => set({ isLoading }),
 
