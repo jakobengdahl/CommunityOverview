@@ -8,7 +8,7 @@ import json
 from datetime import datetime
 from typing import Any, Dict, List, Union
 
-from backend.core import Node, Edge, SimilarNode, GraphStats, AddNodesResult, DeleteNodesResult
+from backend.core import Node, Edge, SimilarNode, GraphStats, AddNodesResult, DeleteNodesResult, DeleteEdgesResult
 
 
 def json_serializer(obj: Any) -> Any:
@@ -82,4 +82,9 @@ def serialize_add_result(result: AddNodesResult) -> Dict[str, Any]:
 
 def serialize_delete_result(result: DeleteNodesResult) -> Dict[str, Any]:
     """Serialize DeleteNodesResult to a dictionary."""
+    return result.model_dump()
+
+
+def serialize_delete_edges_result(result: DeleteEdgesResult) -> Dict[str, Any]:
+    """Serialize DeleteEdgesResult to a dictionary."""
     return result.model_dump()

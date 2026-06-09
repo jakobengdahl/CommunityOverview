@@ -33,10 +33,13 @@ function App() {
     setHiddenNodeIds,
     stats,
     setStats,
+    llmAvailable,
+    setLlmAvailable,
     editingNode,
     setEditingNode,
     closeEditingNode,
     removeNode,
+    removeEdge,
     presentation,
     setConfig,
     focusNodeId,
@@ -76,14 +79,15 @@ function App() {
     }
   }, [federationDepth, maxFederationDepth, setFederationDepth]);
 
-  // Load schema, presentation, and stats on startup
+  // Load schema, presentation, stats and UI capabilities on startup
   useEffect(() => {
     const loadConfig = async () => {
       try {
-        const [schemaData, presentationData, statsData] = await Promise.all([
+        const [schemaData, presentationData, statsData, capabilitiesData] = await Promise.all([
           api.getSchema(),
           api.getPresentation(),
           api.getGraphStats(),
+          api.getUiCapabilities().catch(() => ({ llm_available: false })),
         ]);
         // Apply backend default language if no user override
         if (presentationData?.default_language) {
@@ -95,13 +99,15 @@ function App() {
         }
         setConfig(schemaData, presentationData, t, language);
         setStats(statsData);
+        setLlmAvailable(capabilitiesData.llm_available ?? false);
       } catch (error) {
         console.error('Error loading configuration:', error);
         api.getGraphStats().then(setStats).catch(console.error);
+        setLlmAvailable(false);
       }
     };
     loadConfig();
-  }, [setConfig, setStats, t, setLanguage, language]);
+  }, [setConfig, setStats, setLlmAvailable, t, setLanguage, language]);
 
   const showNotification = useCallback((type, message) => {
     setNotification({ type, message });
@@ -244,18 +250,17 @@ function App() {
   // Callback: Delete edge (from backend and visualization)
   const handleDeleteEdge = useCallback(async (edgeId) => {
     try {
-      await api.deleteEdge(edgeId);
-      const newEdges = edges.filter(e => e.id !== edgeId);
-      updateVisualization(nodes, newEdges);
+      const result = await api.deleteEdge(edgeId);
+      if (!result?.success) {
+        throw new Error('Could not delete edge');
+      }
+      removeEdge(edgeId);
       showNotification('success', 'Edge deleted');
     } catch (error) {
       console.error('Error deleting edge:', error);
-      // Still remove from visualization even if backend fails
-      const newEdges = edges.filter(e => e.id !== edgeId);
-      updateVisualization(nodes, newEdges);
-      showNotification('info', 'Edge removed from view');
+      showNotification('error', 'Could not delete edge');
     }
-  }, [nodes, edges, updateVisualization, showNotification]);
+  }, [removeEdge, showNotification]);
 
   // Callback: Edit edge - opens EditEdgeDialog
   const handleEditEdge = useCallback((edgeId, edgeData) => {
@@ -604,7 +609,7 @@ function App() {
         onSaveView={handleToolbarSaveView}
         onCreateGroup={handleToolbarCreateGroup}
       />
-      <ChatPanel />
+      {llmAvailable && <ChatPanel />}
 
       {createNodeType && (
         <CreateNodeDialog

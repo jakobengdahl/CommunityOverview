@@ -14,8 +14,17 @@ defaulting to config/default/schema_config.json.
 import os
 import json
 from typing import Dict, List, Optional, Any
-from pathlib import Path
 from pydantic import BaseModel, Field, validator
+
+from backend.config_context import resolve_federation_config_path_info, resolve_schema_config_path_info
+from backend.request_context import (
+    get_public_request_actor_context,
+    get_public_request_graph_selection_context,
+    get_public_request_scope_context,
+    get_request_actor_context,
+    get_request_graph_selection_context,
+    get_request_scope_context,
+)
 
 # Default config path relative to project root
 DEFAULT_CONFIG_PATH = "config/default/schema_config.json"
@@ -102,6 +111,20 @@ class LanguagePolicyConfig(BaseModel):
     description_en: str = "English is the primary graph language. Swedish is accepted when natural or established."
 
 
+class CapabilityConfig(BaseModel):
+    """Public capability metadata exposed for client discovery."""
+    id: str
+    name: str
+    description: str = ""
+    enabled: bool = True
+
+
+class RuntimeMetadataConfig(BaseModel):
+    """Public runtime metadata exposed for deployment introspection."""
+    runtime_mode: str = "standalone"
+    enabled_extensions: List[str] = Field(default_factory=list)
+
+
 class PresentationConfig(BaseModel):
     """Presentation configuration for UI and prompts."""
     title: str = "Community Knowledge Graph"
@@ -114,12 +137,14 @@ class PresentationConfig(BaseModel):
     widget_url: str = ""  # URL template for the graph widget
     expert_agents: List[ExpertAgentConfig] = Field(default_factory=list)
     skills_config: SkillsConfig = Field(default_factory=SkillsConfig)
+    capabilities: List[CapabilityConfig] = Field(default_factory=list)
 
 
 class SchemaFileConfig(BaseModel):
     """Root configuration model for the schema file."""
     schema_: SchemaConfig = Field(alias="schema", default_factory=SchemaConfig)
     presentation: PresentationConfig = Field(default_factory=PresentationConfig)
+    runtime: RuntimeMetadataConfig = Field(default_factory=RuntimeMetadataConfig)
 
     class Config:
         populate_by_name = True
@@ -152,25 +177,7 @@ class ConfigLoader:
 
     def _get_config_path(self) -> str:
         """Get the configuration file path."""
-        # Check environment variable first
-        env_path = os.getenv("SCHEMA_FILE") or os.getenv("GRAPH_SCHEMA_CONFIG")
-        if env_path:
-            return env_path
-
-        # Default path relative to the project root
-        # Find project root by looking for config directory
-        current = Path(__file__).parent.parent  # Go up from backend/
-        config_path = current / DEFAULT_CONFIG_PATH
-
-        if config_path.exists():
-            return str(config_path)
-
-        # Try current working directory
-        cwd_config = Path.cwd() / DEFAULT_CONFIG_PATH
-        if cwd_config.exists():
-            return str(cwd_config)
-
-        return str(config_path)  # Return default even if not exists
+        return resolve_schema_config_path_info(DEFAULT_CONFIG_PATH)["path"]
 
     def _load_config(self) -> None:
         """Load and validate the configuration file."""
@@ -299,8 +306,122 @@ def get_presentation() -> Dict[str, Any]:
         "default_language": pres.default_language,
         "language_policy": pres.language_policy.dict(),
         "widget_url": pres.widget_url,
-        "expert_agents": [agent.dict() for agent in pres.expert_agents]
+        "expert_agents": [agent.dict() for agent in pres.expert_agents],
+        "capabilities": [capability.dict() for capability in pres.capabilities]
     }
+
+
+def get_capabilities() -> Dict[str, Any]:
+    """Get the public capability manifest for client discovery."""
+    loader = _get_loader()
+    return {
+        "capabilities": [
+            capability.dict() for capability in loader.config.presentation.capabilities
+        ]
+    }
+
+
+def _normalize_runtime_mode(runtime_mode: Optional[str]) -> str:
+    """Normalize runtime mode to a supported public value."""
+    normalized = (runtime_mode or "").strip().lower()
+    if normalized in {"standalone", "hosted"}:
+        return normalized
+    return "standalone"
+
+
+def _parse_enabled_extensions(raw_value: Optional[str]) -> List[str]:
+    """Parse comma-separated extension identifiers from environment input."""
+    if not raw_value:
+        return []
+
+    extensions: List[str] = []
+    for value in raw_value.split(","):
+        identifier = value.strip()
+        if identifier and identifier not in extensions:
+            extensions.append(identifier)
+    return extensions
+
+
+def get_runtime_info() -> Dict[str, Any]:
+    """Get the public runtime metadata for deployment introspection."""
+    loader = _get_loader()
+    runtime = loader.config.runtime
+
+    runtime_mode = _normalize_runtime_mode(runtime.runtime_mode)
+    env_runtime_mode = os.getenv("COMMUNITYOVERVIEW_RUNTIME_MODE")
+    if env_runtime_mode is not None:
+        runtime_mode = _normalize_runtime_mode(env_runtime_mode)
+
+    enabled_extensions = list(runtime.enabled_extensions)
+    env_enabled_extensions = os.getenv("COMMUNITYOVERVIEW_ENABLED_EXTENSIONS")
+    if env_enabled_extensions is not None:
+        enabled_extensions = _parse_enabled_extensions(env_enabled_extensions)
+
+    return {
+        "runtime_mode": runtime_mode,
+        "enabled_extensions": enabled_extensions,
+    }
+
+
+def get_tenant_context() -> Dict[str, Any]:
+    """Get the tenant/deployment context metadata.
+
+    Values are read from environment variables with safe standalone defaults
+    when the variables are unset.
+
+    Env vars:
+        COMMUNITYOVERVIEW_TENANT_ID   - Unique tenant identifier
+        COMMUNITYOVERVIEW_TENANT_NAME - Human-readable tenant name
+        COMMUNITYOVERVIEW_ENVIRONMENT - Deployment environment (e.g. local, staging, production)
+    """
+    return {
+        "tenant_id": os.getenv("COMMUNITYOVERVIEW_TENANT_ID", ""),
+        "tenant_name": os.getenv("COMMUNITYOVERVIEW_TENANT_NAME", ""),
+        "environment": os.getenv("COMMUNITYOVERVIEW_ENVIRONMENT", "local"),
+    }
+
+
+def _get_resolved_config_context() -> Dict[str, Any]:
+    """Get internal config resolution details, including resolved filesystem paths."""
+    schema_context = resolve_schema_config_path_info(DEFAULT_CONFIG_PATH)
+    federation_context = resolve_federation_config_path_info("config/default/federation_config.json")
+
+    return {
+        **get_tenant_context(),
+        "tenant_config_dir": schema_context["tenant_config_dir"],
+        "schema_config_path": schema_context["path"],
+        "schema_config_source": schema_context["source"],
+        "federation_config_path": federation_context["path"],
+        "federation_config_source": federation_context["source"],
+    }
+
+
+def get_config_context() -> Dict[str, Any]:
+    """Get the effective public config scope without exposing filesystem paths."""
+    resolved_context = _get_resolved_config_context()
+    return {
+        "tenant_id": resolved_context["tenant_id"],
+        "tenant_name": resolved_context["tenant_name"],
+        "environment": resolved_context["environment"],
+        "tenant_config_dir_configured": bool(resolved_context["tenant_config_dir"]),
+        "schema_config_source": resolved_context["schema_config_source"],
+        "federation_config_source": resolved_context["federation_config_source"],
+    }
+
+
+def get_request_actor_info() -> Dict[str, Any]:
+    """Get the default public request actor context for this deployment."""
+    return get_public_request_actor_context()
+
+
+def get_request_scope_info() -> Dict[str, Any]:
+    """Get the default public request scope context for this deployment."""
+    return get_public_request_scope_context()
+
+
+def get_request_graph_selection_info() -> Dict[str, Any]:
+    """Get the default public graph/workspace selection summary for this deployment."""
+    return get_public_request_graph_selection_context()
 
 
 def get_node_type_names() -> List[str]:

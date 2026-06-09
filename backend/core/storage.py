@@ -17,10 +17,6 @@ Event System:
 - Event context (origin, session_id) enables loop prevention
 """
 
-import json
-import os
-import sys
-import tempfile
 import threading
 from typing import List, Dict, Optional, Any, TYPE_CHECKING, Callable
 from datetime import datetime
@@ -30,8 +26,9 @@ from rapidfuzz.distance import Levenshtein
 
 from .models import (
     Node, Edge, NodeType, RelationshipType,
-    SimilarNode, GraphStats, AddNodesResult, DeleteNodesResult
+    SimilarNode, GraphStats, AddNodesResult, DeleteNodesResult, DeleteEdgesResult
 )
+from .storage_backends import FileGraphPersistenceBackend, GraphPersistenceBackend
 from .vector_store import VectorStore
 
 # Event system imports
@@ -44,29 +41,6 @@ if TYPE_CHECKING:
     from .events.delivery import DeliveryWorker
 
 
-# Cross-platform file locking
-if sys.platform == 'win32':
-    import msvcrt
-
-    def _lock_file(f, exclusive=True):
-        """Acquire file lock on Windows."""
-        msvcrt.locking(f.fileno(), msvcrt.LK_NBLCK if exclusive else msvcrt.LK_LOCK, 1)
-
-    def _unlock_file(f):
-        """Release file lock on Windows."""
-        msvcrt.locking(f.fileno(), msvcrt.LK_UNLCK, 1)
-else:
-    import fcntl
-
-    def _lock_file(f, exclusive=True):
-        """Acquire file lock on Unix."""
-        fcntl.flock(f, fcntl.LOCK_EX if exclusive else fcntl.LOCK_SH)
-
-    def _unlock_file(f):
-        """Release file lock on Unix."""
-        fcntl.flock(f, fcntl.LOCK_UN)
-
-
 class GraphStorage:
     """
     Manages graph storage with NetworkX + JSON persistence.
@@ -77,16 +51,25 @@ class GraphStorage:
     - Writes are atomic (temp file + rename) to prevent corruption
     """
 
-    def __init__(self, json_path: str = "graph.json", embeddings_path: str = None):
+    def __init__(
+        self,
+        json_path: str = "graph.json",
+        embeddings_path: str = None,
+        persistence_backend: Optional[GraphPersistenceBackend] = None,
+    ):
         """
         Initialize GraphStorage.
 
         Args:
-            json_path: Path to the JSON file for graph persistence
+            json_path: Path to the JSON file for graph persistence when using the
+                default file-backed persistence backend.
             embeddings_path: Path to the embeddings pickle file (Legacy/Deprecated).
                            New implementation stores embeddings in graph.json directly.
+            persistence_backend: Optional persistence backend adapter. Defaults to
+                the file-backed JSON backend to preserve standalone behavior.
         """
-        self.json_path = Path(json_path)
+        self._persistence_backend = persistence_backend or FileGraphPersistenceBackend(json_path)
+        self.json_path = getattr(self._persistence_backend, "json_path", Path(json_path))
 
         # Thread lock for in-memory data structure protection
         # RLock allows same thread to acquire lock multiple times (reentrant)
@@ -110,7 +93,7 @@ class GraphStorage:
 
         self.graph_metadata: Dict[str, Any] = {
             "version": "1.0",
-            "graph_name": self.json_path.stem,
+            "graph_name": self._default_graph_name(),
         }
 
         # Event system (initialized lazily via setup_events())
@@ -120,6 +103,10 @@ class GraphStorage:
         self._system_listeners: List[Callable[[Event], None]] = []
 
         self.load()
+
+    def _default_graph_name(self) -> str:
+        """Return the backend-specific default graph name."""
+        return self._persistence_backend.default_graph_name()
 
     def _build_type_searchable_text(self) -> None:
         """Build a lookup of node type -> searchable text including localized labels."""
@@ -348,36 +335,30 @@ class GraphStorage:
 
     def load(self) -> None:
         """
-        Load graph from JSON file.
+        Load graph from the configured persistence backend.
 
-        Thread-safe: Uses lock for in-memory updates and file lock for reading.
+        Thread-safe: Uses lock for in-memory updates.
         """
         with self._lock:
-            if not self.json_path.exists():
+            if not self._persistence_backend.exists():
                 print(f"No graph file found at {self.json_path}, creating new empty graph")
                 self.save()
                 return
 
             try:
-                # Use file locking to prevent reading while another process writes
-                with open(self.json_path, 'r', encoding='utf-8') as f:
-                    _lock_file(f, exclusive=False)  # Shared lock for reading
-                    try:
-                        data = json.load(f)
-                    finally:
-                        _unlock_file(f)
+                data = self._persistence_backend.load_graph_data()
 
                 metadata = data.get('metadata') if isinstance(data, dict) else None
                 if isinstance(metadata, dict):
                     self.graph_metadata = {
                         "version": metadata.get("version", "1.0"),
-                        "graph_name": metadata.get("graph_name") or self.json_path.stem,
+                        "graph_name": metadata.get("graph_name") or self._default_graph_name(),
                         **{k: v for k, v in metadata.items() if k not in {"version", "graph_name"}},
                     }
                 else:
                     self.graph_metadata = {
                         "version": "1.0",
-                        "graph_name": self.json_path.stem,
+                        "graph_name": self._default_graph_name(),
                     }
 
                 # Clear existing data
@@ -419,11 +400,9 @@ class GraphStorage:
 
     def save(self) -> None:
         """
-        Save graph to JSON file.
+        Save graph through the configured persistence backend.
 
         Thread-safe: Uses lock for reading in-memory data.
-        Atomic: Writes to temp file first, then renames to prevent corruption.
-        File-locked: Uses OS-level locking to prevent concurrent writes.
         """
         with self._lock:
             data = {
@@ -432,46 +411,13 @@ class GraphStorage:
                 'metadata': {
                     **(self.graph_metadata or {}),
                     'version': (self.graph_metadata or {}).get('version', '1.0'),
-                    'graph_name': (self.graph_metadata or {}).get('graph_name', self.json_path.stem),
+                    'graph_name': (self.graph_metadata or {}).get('graph_name', self._default_graph_name()),
                     'last_updated': datetime.utcnow().isoformat()
                 }
             }
 
-            # Create directory if it doesn't exist
-            self.json_path.parent.mkdir(parents=True, exist_ok=True)
-
-            # Atomic write: write to temp file, then rename
-            # This prevents corruption if the process is killed mid-write
-            temp_fd, temp_path = tempfile.mkstemp(
-                suffix='.json',
-                prefix='graph_',
-                dir=self.json_path.parent
-            )
-
-            try:
-                with os.fdopen(temp_fd, 'w', encoding='utf-8') as f:
-                    _lock_file(f, exclusive=True)  # Exclusive lock for writing
-                    try:
-                        json.dump(data, f, indent=2, ensure_ascii=False)
-                        f.flush()
-                        os.fsync(f.fileno())  # Ensure data is written to disk
-                    finally:
-                        _unlock_file(f)
-
-                # Atomic rename (on most filesystems)
-                # On Windows, we need to remove the target first
-                if sys.platform == 'win32' and self.json_path.exists():
-                    os.replace(temp_path, self.json_path)
-                else:
-                    os.rename(temp_path, self.json_path)
-
-                print(f"Saved {len(self.nodes)} nodes and {len(self.edges)} edges to {self.json_path}")
-
-            except Exception as e:
-                # Clean up temp file on error
-                if os.path.exists(temp_path):
-                    os.unlink(temp_path)
-                raise e
+            self._persistence_backend.save_graph_data(data)
+            print(f"Saved {len(self.nodes)} nodes and {len(self.edges)} edges to {self.json_path}")
 
 
     def get_graph_name(self) -> str:
@@ -479,7 +425,7 @@ class GraphStorage:
         name = (self.graph_metadata or {}).get("graph_name")
         if isinstance(name, str) and name.strip():
             return name.strip()
-        return self.json_path.stem
+        return self._default_graph_name()
 
     def reload(self) -> None:
         """
@@ -1161,6 +1107,66 @@ class GraphStorage:
             )
 
             return True
+
+    def delete_edges(
+        self,
+        edge_ids: List[str],
+        event_context: Optional[EventContext] = None,
+    ) -> DeleteEdgesResult:
+        """Delete up to 50 edges in a single operation."""
+        with self._lock:
+            if len(edge_ids) > 50:
+                return DeleteEdgesResult(
+                    deleted_edge_ids=[],
+                    success=False,
+                    message="Max 50 edges can be deleted at a time."
+                )
+
+            deleted_edge_ids = []
+            edge_before_states: Dict[str, Dict[str, Any]] = {}
+
+            try:
+                for edge_id in edge_ids:
+                    edge = self.edges.get(edge_id)
+                    if edge is None:
+                        continue
+
+                    edge_before_states[edge_id] = edge.to_dict()
+
+                    try:
+                        self.graph.remove_edge(edge.source, edge.target, key=edge_id)
+                    except Exception:
+                        pass
+
+                    del self.edges[edge_id]
+                    deleted_edge_ids.append(edge_id)
+
+                self.save()
+
+                for edge_id in deleted_edge_ids:
+                    before_state = edge_before_states[edge_id]
+                    edge_type = before_state.get("type", "RELATES_TO")
+                    self._emit_event(
+                        event_type=EventType.EDGE_DELETE,
+                        entity_kind=EntityKind.EDGE,
+                        entity_id=edge_id,
+                        entity_type=edge_type,
+                        before=before_state,
+                        after=None,
+                        context=event_context,
+                    )
+
+                return DeleteEdgesResult(
+                    deleted_edge_ids=deleted_edge_ids,
+                    success=True,
+                    message=f"Deleted {len(deleted_edge_ids)} edges"
+                )
+            except Exception as e:
+                return DeleteEdgesResult(
+                    deleted_edge_ids=[],
+                    success=False,
+                    message=f"Error during edge deletion: {str(e)}"
+                )
 
     def add_edge(
         self,
