@@ -19,10 +19,13 @@ Usage:
     app = create_app(config)
 """
 
+import logging
 import os
 import secrets
 from pathlib import Path
 from typing import Optional, Dict, Any, Callable
+
+logger = logging.getLogger(__name__)
 
 from fastapi import FastAPI
 from fastapi.staticfiles import StaticFiles
@@ -301,6 +304,21 @@ def create_app(
     # Create UI Backend services (ChatService and DocumentService)
     chat_service = ChatService(graph_service)
     document_service = DocumentService()
+
+    # Load skills for expert agents that have skills_urls configured.
+    # Runs once synchronously at startup (a new event loop is created so this
+    # is safe regardless of whether the caller is inside an async context).
+    try:
+        from backend.config_loader import get_expert_agent_configs, get_skills_config
+        _expert_configs = get_expert_agent_configs()
+        if any(e.skills_urls for e in _expert_configs):
+            chat_service.load_expert_skills_sync(_expert_configs, get_skills_config())
+            logger.info(
+                "Expert agent skills loaded for %d expert(s) with skills_urls",
+                sum(1 for e in _expert_configs if e.skills_urls),
+            )
+    except Exception as _exc:
+        logger.warning("Expert agent skills startup load failed (non-fatal): %s", _exc)
 
     # Store chat service on app state for access in routes
     app.state.chat_service = chat_service

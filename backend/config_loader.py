@@ -350,3 +350,15 @@ def reset_loader() -> None:
     global _loader
     _loader = None
     ConfigLoader.reset_instance()
+
+
+def get_skills_config() -> SkillsConfig:
+    """Get the SkillsConfig from the presentation section."""
+    loader = _get_loader()
+    return loader.config.presentation.skills_config
+
+
+def get_expert_agent_configs() -> "List[ExpertAgentConfig]":
+    """Get the list of ExpertAgentConfig objects from the presentation section."""
+    loader = _get_loader()
+    return loader.config.presentation.expert_agents

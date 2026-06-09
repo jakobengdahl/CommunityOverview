@@ -245,3 +245,125 @@ class TestGraphServiceIntegration:
         # Verify the node was found (proving GraphService persisted it)
         tool_result = result.get("toolResult", {})
         assert tool_result.get("total", 0) >= 1 or "nodes" in tool_result
+
+
+# ---------------------------------------------------------------------------
+# Expert agent skills injection
+# ---------------------------------------------------------------------------
+
+class TestExpertAgentSkills:
+    """Tests for expert agent skills loading and context injection."""
+
+    def _make_expert(self, expert_id="legislation-expert", system_context="You are a legislation expert.", skills_urls=None):
+        """Return a minimal ExpertAgentConfig-like object (plain SimpleNamespace)."""
+        from types import SimpleNamespace
+        return SimpleNamespace(
+            id=expert_id,
+            system_context=system_context,
+            skills_urls=skills_urls or [],
+        )
+
+    @pytest.mark.asyncio
+    async def test_load_expert_skills_registers_context(self, graph_service):
+        """load_expert_skills() stores system_context per expert ID."""
+        from backend.ui import ChatService
+        from backend.skills.loader import SkillsConfig
+
+        with patch('backend.chat_logic.create_provider'), \
+             patch.dict(os.environ, {'ANTHROPIC_API_KEY': 'test-key'}):
+            service = ChatService(graph_service)
+
+        expert = self._make_expert(system_context="You are a legislation expert.")
+        await service.load_expert_skills([expert], SkillsConfig())
+
+        assert service._expert_contexts["legislation-expert"] == "You are a legislation expert."
+
+    @pytest.mark.asyncio
+    async def test_load_expert_skills_no_urls_stores_empty_list(self, graph_service):
+        """An expert with no skills_urls gets an empty skills list (not an error)."""
+        from backend.ui import ChatService
+        from backend.skills.loader import SkillsConfig
+
+        with patch('backend.chat_logic.create_provider'), \
+             patch.dict(os.environ, {'ANTHROPIC_API_KEY': 'test-key'}):
+            service = ChatService(graph_service)
+
+        expert = self._make_expert(skills_urls=[])
+        await service.load_expert_skills([expert], SkillsConfig())
+
+        assert service._expert_skills["legislation-expert"] == []
+
+    def test_build_expert_context_unknown_id_returns_none(self, graph_service):
+        """Unknown expert_agent_id must not raise — returns None."""
+        from backend.ui import ChatService
+
+        with patch('backend.chat_logic.create_provider'), \
+             patch.dict(os.environ, {'ANTHROPIC_API_KEY': 'test-key'}):
+            service = ChatService(graph_service)
+
+        assert service._build_expert_context("unknown-id") is None
+
+    def test_build_expert_context_with_context_only(self, graph_service):
+        """An expert with system_context but no skills returns just the context."""
+        from backend.ui import ChatService
+        from backend.skills.loader import SkillsConfig
+
+        with patch('backend.chat_logic.create_provider'), \
+             patch.dict(os.environ, {'ANTHROPIC_API_KEY': 'test-key'}):
+            service = ChatService(graph_service)
+
+        service._expert_contexts["leg"] = "You are a legislation expert."
+        service._expert_skills["leg"] = []
+
+        ctx = service._build_expert_context("leg")
+        assert ctx == "You are a legislation expert."
+
+    def test_build_expert_context_with_skills(self, graph_service):
+        """An expert with both context and skills returns a combined string."""
+        from backend.ui import ChatService
+        from backend.skills.loader import SkillDefinition
+
+        with patch('backend.chat_logic.create_provider'), \
+             patch.dict(os.environ, {'ANTHROPIC_API_KEY': 'test-key'}):
+            service = ChatService(graph_service)
+
+        skill = SkillDefinition(
+            id="s1", name="GDPR Skill", description="",
+            content="GDPR guidance.", source_url="http://x.com/SKILL.md"
+        )
+        service._expert_contexts["leg"] = "You are a legislation expert."
+        service._expert_skills["leg"] = [skill]
+
+        ctx = service._build_expert_context("leg")
+        assert "You are a legislation expert." in ctx
+        assert "GDPR Skill" in ctx
+        assert "GDPR guidance." in ctx
+
+    def test_process_message_passes_extra_context_to_processor(self, graph_service, mock_llm_provider):
+        """process_message() with expert_agent_id should pass extra_context to ChatProcessor."""
+        from backend.ui import ChatService
+
+        with patch('backend.chat_logic.create_provider', return_value=mock_llm_provider), \
+             patch.dict(os.environ, {'ANTHROPIC_API_KEY': 'test-key'}):
+            service = ChatService(graph_service)
+            service._processor.provider_type = "mock"
+            service._processor.default_api_key = "test-key"
+
+        service._expert_contexts["leg"] = "You are a legislation expert."
+        service._expert_skills["leg"] = []
+
+        # Capture the system_prompt actually passed to create_completion
+        received_prompts = []
+        original = mock_llm_provider.create_completion
+        def capture(*args, **kwargs):
+            received_prompts.append(kwargs.get("system_prompt", ""))
+            return original(*args, **kwargs)
+        mock_llm_provider.create_completion = capture
+
+        service.process_message(
+            messages=[{"role": "user", "content": "hello"}],
+            expert_agent_id="leg",
+        )
+
+        assert received_prompts, "create_completion was never called"
+        assert "You are a legislation expert." in received_prompts[0]
