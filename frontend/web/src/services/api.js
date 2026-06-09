@@ -366,6 +366,9 @@ export async function sendChatMessage(messages, documentContext = null, options 
   if (options.federationDepth) {
     body.federation_depth = options.federationDepth;
   }
+  if (options.expertAgentId) {
+    body.expert_agent_id = options.expertAgentId;
+  }
   return apiFetch(`${UI_API_BASE}/chat`, {
     method: 'POST',
     body: JSON.stringify(body),
