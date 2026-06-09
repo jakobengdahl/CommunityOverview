@@ -16,6 +16,7 @@ Security:
 - Failed fetches are logged and skipped without crashing
 """
 
+import html
 import re
 import json
 import logging
@@ -97,7 +98,8 @@ class SkillDefinition(BaseModel):
 
     def to_prompt_block(self) -> str:
         """Format skill for injection into an LLM system prompt."""
-        parts = [f'<skill name="{self.name}">']
+        safe_name = html.escape(self.name, quote=True)
+        parts = [f'<skill name="{safe_name}">']
         if self.when_to_use:
             parts.append(f"When to use: {self.when_to_use}")
             parts.append("")
@@ -210,16 +212,22 @@ class SkillsLoader:
         return skills
 
     def _classify_url(self, url: str) -> _UrlType:
-        """Determine what kind of URL this is."""
-        if "agentskills.io" in url and "/skills/" in url and not url.endswith("SKILL.md"):
+        """Determine what kind of URL this is.
+
+        Uses urlparse().hostname so that path-embedded domain strings
+        (e.g. evil.com/github.com/...) do not trigger the GITHUB_REPO path.
+        """
+        try:
+            parsed = urlparse(url)
+            hostname = parsed.hostname or ""
+        except Exception:
+            return _UrlType.DIRECT_FILE
+
+        if hostname == "agentskills.io" and "/skills/" in parsed.path and not url.endswith("SKILL.md"):
             return _UrlType.AGENTSKILLS_IO
-        if (
-            "github.com" in url
-            and "raw.githubusercontent.com" not in url
-            and not url.endswith(".md")
-        ):
-            parts = url.rstrip("/").split("github.com/")[-1].split("/")
-            if len(parts) <= 2:
+        if hostname == "github.com" and not url.endswith(".md"):
+            path_parts = parsed.path.strip("/").split("/")
+            if len(path_parts) <= 2:
                 return _UrlType.GITHUB_REPO
         return _UrlType.DIRECT_FILE
 
@@ -242,16 +250,26 @@ class SkillsLoader:
         raise ValueError(f"Domain not in trusted_domains allowlist: {url}")
 
     async def _fetch_text(self, url: str, headers: Optional[Dict[str, str]] = None) -> str:
-        """Fetch URL and return text, with size guard."""
+        """Fetch URL and return text, with size guard.
+
+        Checks Content-Length before buffering to avoid receiving a large
+        response body from a trusted domain before detecting the oversize.
+        """
         self._validate_domain(url)
+        max_bytes = self._config.max_skill_content_bytes
         async with httpx.AsyncClient(follow_redirects=True, timeout=15) as client:
             response = await client.get(url, headers=headers or {})
             response.raise_for_status()
-            content = response.text
-            if len(content.encode()) > self._config.max_skill_content_bytes:
+            # Reject early if the server advertises a content length that is too big
+            cl = response.headers.get("content-length")
+            if cl and int(cl) > max_bytes:
                 raise ValueError(
-                    f"Content from {url} exceeds max size "
-                    f"({self._config.max_skill_content_bytes} bytes)"
+                    f"Content from {url} exceeds max size ({max_bytes} bytes)"
+                )
+            content = response.text
+            if len(content.encode()) > max_bytes:
+                raise ValueError(
+                    f"Content from {url} exceeds max size ({max_bytes} bytes)"
                 )
             return content
 
@@ -378,7 +396,7 @@ class SkillsLoader:
             return None
 
         name = fm.get("name", "").strip()
-        description = fm.get("description", "").strip()
+        description = self._sanitize(fm.get("description", "").strip())
 
         if not name:
             logger.debug("Skipping skill in %s: missing required 'name' field", source_url)
