@@ -49,8 +49,9 @@ class TestChatServiceInit:
         with patch('backend.chat_logic.create_provider'):
             service = ChatService(graph_service)
 
-        # Verify tools are bound to graph_service methods
-        assert service._tools_map["search_graph"] == graph_service.search_graph
+        # search_graph is wrapped in _search_graph_tool (adds federation_depth support)
+        assert service._tools_map["search_graph"] == service._search_graph_tool
+        # Mutation tools are bound directly to graph_service methods
         assert service._tools_map["add_nodes"] == graph_service.add_nodes
         assert service._tools_map["update_node"] == graph_service.update_node
 

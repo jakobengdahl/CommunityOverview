@@ -388,12 +388,14 @@ class SkillsLoader:
         raw_meta = fm.get("metadata", {})
         extra = {str(k): str(v) for k, v in raw_meta.items()} if isinstance(raw_meta, dict) else {}
         skill_id = extra.get("id") or _make_id(name)
+        when_to_use_raw = fm.get("when-to-use") or fm.get("when_to_use")
+        when_to_use = self._sanitize(when_to_use_raw) if when_to_use_raw else None
         return SkillMetadata(
             id=skill_id,
             name=name,
             description=description,
             allowed_tools=allowed_tools,
-            when_to_use=fm.get("when-to-use") or fm.get("when_to_use"),
+            when_to_use=when_to_use,
             effort=fm.get("effort"),
             license=fm.get("license"),
             resources=resources,
@@ -671,13 +673,16 @@ class SkillsLoader:
             logger.warning("YAML parse error in %s: %s", source_url, exc)
             return None
 
-        name = fm.get("name", "").strip()
-        description = self._sanitize(fm.get("description", "").strip())
-
-        if not name:
+        raw_name = fm.get("name", "").strip()
+        if not raw_name:
             logger.debug("Skipping skill in %s: missing required 'name' field", source_url)
             return None
+        name = self._sanitize(raw_name)
+        if not name:
+            logger.warning("Skill '%s' from %s rejected: name contains injection pattern", raw_name, source_url)
+            return None
 
+        description = self._sanitize(fm.get("description", "").strip())
         if not description:
             logger.debug("Skill '%s' in %s has no description field", name, source_url)
 
@@ -704,13 +709,17 @@ class SkillsLoader:
             logger.debug("Skipping skill '%s': no content", name)
             return None
 
+        # Sanitize optional text fields injected into the system prompt
+        when_to_use_raw = fm.get("when-to-use") or fm.get("when_to_use")
+        when_to_use = self._sanitize(when_to_use_raw) if when_to_use_raw else None
+
         return SkillDefinition(
             id=skill_id,
             name=name,
             description=description,
             content=sanitized_body[:self._config.max_skill_body_chars],
             allowed_tools=allowed_tools,
-            when_to_use=fm.get("when-to-use") or fm.get("when_to_use"),
+            when_to_use=when_to_use,
             effort=fm.get("effort"),
             license=fm.get("license"),
             metadata=meta,
