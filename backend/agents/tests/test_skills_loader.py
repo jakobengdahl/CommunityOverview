@@ -228,6 +228,23 @@ class TestPromptBlock:
         block = skill.to_prompt_block()
         assert "Description: Desc here" in block
 
+    def test_allowed_tools_included(self):
+        skill = SkillDefinition(
+            id="s1", name="S", description="",
+            content="Content.", allowed_tools=["graph-query", "web-fetch"],
+            source_url="http://x.com/SKILL.md"
+        )
+        block = skill.to_prompt_block()
+        assert "Expected tools: graph-query, web-fetch" in block
+
+    def test_no_allowed_tools_omitted(self):
+        skill = SkillDefinition(
+            id="s1", name="S", description="",
+            content="Content.", source_url="http://x.com/SKILL.md"
+        )
+        block = skill.to_prompt_block()
+        assert "Expected tools" not in block
+
 
 # ---------------------------------------------------------------------------
 # Deduplication

@@ -106,6 +106,9 @@ class SkillDefinition(BaseModel):
         if self.description:
             parts.append(f"Description: {self.description}")
             parts.append("")
+        if self.allowed_tools:
+            parts.append(f"Expected tools: {', '.join(self.allowed_tools)}")
+            parts.append("")
         parts.append(self.content)
         parts.append("</skill>")
         return "\n".join(parts)

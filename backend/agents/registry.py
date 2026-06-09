@@ -331,12 +331,17 @@ class AgentRegistry:
         try:
             config = AgentConfig.from_node(node)
 
+            # Determine what action to take (and apply in-lock updates) while holding
+            # the lock, then perform start/stop actions outside it — _start_worker and
+            # _stop_worker each acquire the lock themselves, so we must not hold it here.
+            should_start = False
+            should_stop = False
+
             with self._lock:
                 existing_worker = self._workers.get(node_id)
 
                 if config.enabled:
                     if existing_worker:
-                        # Update existing worker
                         existing_worker.reload_config(config)
 
                         # Update subscription mapping
@@ -354,37 +359,32 @@ class AgentRegistry:
 
                         logger.info(f"Reloaded agent: {config.name}")
                     else:
-                        # Start new worker - ensure runtime is initialized
-                        self._lock.release()
-                        try:
-                            if self._ensure_initialized():
-                                if not self.settings.enabled:
-                                    self.settings.enabled = True
-                                    logger.info(
-                                        "Agent system auto-enabled "
-                                        "(agent enabled dynamically)"
-                                    )
-                                self._start_worker(config)
-                                logger.info(
-                                    f"Started worker for enabled agent: "
-                                    f"{config.name}"
-                                )
-                            else:
-                                logger.error(
-                                    f"Cannot start agent {config.name}: "
-                                    f"MCP initialization failed"
-                                )
-                        finally:
-                            self._lock.acquire()
+                        should_start = True
                 else:
                     if existing_worker:
-                        # Stop disabled worker
-                        self._lock.release()
-                        try:
-                            self._stop_worker(node_id)
-                            logger.info(f"Stopped worker for disabled agent: {config.name}")
-                        finally:
-                            self._lock.acquire()
+                        should_stop = True
+
+            if should_start:
+                if self._ensure_initialized():
+                    if not self.settings.enabled:
+                        self.settings.enabled = True
+                        logger.info(
+                            "Agent system auto-enabled "
+                            "(agent enabled dynamically)"
+                        )
+                    self._start_worker(config)
+                    logger.info(
+                        f"Started worker for enabled agent: "
+                        f"{config.name}"
+                    )
+                else:
+                    logger.error(
+                        f"Cannot start agent {config.name}: "
+                        f"MCP initialization failed"
+                    )
+            elif should_stop:
+                self._stop_worker(node_id)
+                logger.info(f"Stopped worker for disabled agent: {config.name}")
 
         except Exception as e:
             logger.error(f"Failed to handle agent update {node_id}: {e}")

@@ -100,6 +100,9 @@ class AgentWorker:
         # LLM client (created on demand)
         self._llm_client: Optional[LLMClient] = None
 
+        # Shared skills loader — created once, persists its internal cache across events
+        self._skills_loader: Optional[SkillsLoader] = None
+
         # Cached skills (loaded once per config, reset on reload_config)
         self._cached_skills: Optional[List[SkillDefinition]] = None
 
@@ -181,31 +184,56 @@ class AgentWorker:
         with self._lock:
             self.config = new_config
             self._llm_client = None
-            self._cached_skills = None  # Force skill reload on next event
+            self._skills_loader = None   # Reset so a fresh loader is created
+            self._cached_skills = None   # Force skill reload on next event
             logger.info(f"Agent {self.agent_id}: Configuration reloaded")
 
     def _load_skills(self) -> List[SkillDefinition]:
         """
-        Load skills from configured URLs and linked Skill graph nodes.
+        Load skills from configured URLs, local skills_dir, and linked Skill graph nodes.
 
         Called once on first event (or after reload_config) and the result
-        is cached for the lifetime of the current config. Uses a temporary
-        asyncio event loop since the worker thread has none.
+        is cached for the lifetime of the current config.
+
+        Creates a dedicated event loop (asyncio.new_event_loop) instead of
+        asyncio.run() so this is safe to call from threads that may already
+        have a running loop or nested calls.
         """
         import asyncio
 
         skills: List[SkillDefinition] = []
 
-        # Load from URL list
-        if self.config.skills_urls:
+        # Ensure shared loader exists (persists cache across _load_skills calls)
+        if self._skills_loader is None:
+            self._skills_loader = SkillsLoader(self._skills_config)
+
+        loop = asyncio.new_event_loop()
+        try:
+            # Load from URL list
+            if self.config.skills_urls:
+                try:
+                    url_skills = loop.run_until_complete(
+                        self._skills_loader.load_from_urls(self.config.skills_urls)
+                    )
+                    skills.extend(url_skills)
+                    logger.info(
+                        f"Agent {self.config.name}: Loaded {len(url_skills)} skill(s) from URLs"
+                    )
+                except Exception as exc:
+                    logger.warning(f"Agent {self.config.name}: Skills URL load failed: {exc}")
+
+            # Load from local skills directory (always attempted so skills_dir is honoured)
             try:
-                loader = SkillsLoader(self._skills_config)
-                skills = asyncio.run(loader.load_from_urls(self.config.skills_urls))
-                logger.info(
-                    f"Agent {self.config.name}: Loaded {len(skills)} skill(s) from URLs"
-                )
+                local_skills = loop.run_until_complete(self._skills_loader.load_from_dir())
+                if local_skills:
+                    skills.extend(local_skills)
+                    logger.info(
+                        f"Agent {self.config.name}: Loaded {len(local_skills)} skill(s) from local dir"
+                    )
             except Exception as exc:
-                logger.warning(f"Agent {self.config.name}: Skills URL load failed: {exc}")
+                logger.warning(f"Agent {self.config.name}: Local skills dir load failed: {exc}")
+        finally:
+            loop.close()
 
         # Load from linked Skill nodes in the graph
         if self.config.skill_node_ids and self._graph_storage:
