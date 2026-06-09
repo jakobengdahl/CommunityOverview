@@ -94,6 +94,12 @@ class ExpertAgentConfig(BaseModel):
     intro_sv: str = ""
     intro_en: str = ""
     system_context: str = ""
+    # URLs to SKILL.md files or GitHub repos.
+    # Loaded and injected into system_context at startup — wired in server.py (TODO: Phase 3).
+    skills_urls: List[str] = Field(default_factory=list)
+
+
+from backend.skills.loader import SkillsConfig  # noqa: F401 — re-exported for callers
 
 
 class LanguagePolicyConfig(BaseModel):
@@ -130,6 +136,7 @@ class PresentationConfig(BaseModel):
     language_policy: LanguagePolicyConfig = Field(default_factory=LanguagePolicyConfig)
     widget_url: str = ""  # URL template for the graph widget
     expert_agents: List[ExpertAgentConfig] = Field(default_factory=list)
+    skills_config: SkillsConfig = Field(default_factory=SkillsConfig)
     capabilities: List[CapabilityConfig] = Field(default_factory=list)
 
 
@@ -464,3 +471,15 @@ def reset_loader() -> None:
     global _loader
     _loader = None
     ConfigLoader.reset_instance()
+
+
+def get_skills_config() -> SkillsConfig:
+    """Get the SkillsConfig from the presentation section."""
+    loader = _get_loader()
+    return loader.config.presentation.skills_config
+
+
+def get_expert_agent_configs() -> "List[ExpertAgentConfig]":
+    """Get the list of ExpertAgentConfig objects from the presentation section."""
+    loader = _get_loader()
+    return loader.config.presentation.expert_agents
