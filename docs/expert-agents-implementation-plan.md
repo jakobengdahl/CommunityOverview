@@ -66,7 +66,7 @@ Grundläggande UI och konfiguration finns redan:
 
 ### 1.1 Ny config-struktur för experter
 
-Utöka `schema_config.json` med skills och MCP-verktyg per expert:
+Skills kopplas nu till experter via URL-listor. Formatet är `SKILL.md` (agentskills.io-standarden, superset av Claude Code). Vid appstart hämtar `SkillsLoader` varje URL och injicerar innehållet i expertens systemprompt.
 
 ```json
 {
@@ -82,7 +82,10 @@ Utöka `schema_config.json` med skills och MCP-verktyg per expert:
       "intro_en": "Hello! I'm...",
       "system_context": "You are an expert on...",
 
-      "skills": ["gsim-metadata", "classification-lookup"],
+      "skills_urls": [
+        "https://github.com/org/repo",
+        "https://raw.githubusercontent.com/org/repo/main/.agents/skills/gsim/SKILL.md"
+      ],
       "mcp_tools": ["graph-query", "sparql-endpoint"],
       "can_delegate_to": ["boa-expert"],
       "max_tool_calls_per_turn": 5
@@ -91,118 +94,119 @@ Utöka `schema_config.json` med skills och MCP-verktyg per expert:
 
   "skills_config": {
     "skills_dir": "config/scb/skills",
-    "allow_external_skills": false
-  },
-
-  "mcp_config": {
-    "servers": {
-      "graph-tools": {
-        "command": "python",
-        "args": ["-m", "backend.mcp.graph_server"],
-        "env": {}
-      }
-    },
-    "tool_permissions": {
-      "graph-query": { "read_only": true },
-      "sparql-endpoint": { "read_only": true, "timeout_ms": 5000 }
-    }
+    "allow_external_skills": true,
+    "trusted_domains": ["github.com", "raw.githubusercontent.com", "agentskills.io"],
+    "cache_ttl_seconds": 3600,
+    "max_skill_content_bytes": 50000
   }
 }
 ```
 
-### 1.2 Skill-definitioner på disk
+### 1.2 SKILL.md-format (agentskills.io + Claude Code)
 
-Varje skill är en mapp under `config/<profile>/skills/`:
+Skills-filer följer öppen standard: YAML frontmatter + Markdown body i en fil `SKILL.md`.
 
+```yaml
+---
+name: gsim-metadata
+description: "Expert knowledge on GSIM statistical metadata model"
+allowed-tools: "graph-query"
+when-to-use: "Activate when user asks about statistical metadata, GSIM, or DDI"
+metadata:
+  version: "1.0"
+  author: "SCB"
+---
+# GSIM Metadata Expert
+
+Du har djup kunskap om Generic Statistical Information Model (GSIM)...
 ```
-config/scb/skills/
-├── gsim-metadata/
-│   ├── skill.json          # Metadata + prompt-template
-│   └── examples.md         # Few-shot-exempel (valfritt)
-├── classification-lookup/
-│   ├── skill.json
-│   └── examples.md
-└── data-lifecycle/
-    └── skill.json
+
+Katalogstruktur i ett GitHub-repo (alla letade igenom automatiskt):
+```
+.agents/skills/         ← prioritet 1 (mest portabelt)
+.claude/skills/         ← prioritet 2 (Claude Code)
+.github/skills/         ← prioritet 3
+skills/                 ← prioritet 4 (enklast)
 ```
 
-`skill.json`-format:
+### 1.3 Skill-nodtyp i grafen
+
+Skill-noder lagrar dynamiskt tillagda skills och kan kopplas till Agent-noder via `USES_SKILL`-kanter. Metadata:
 
 ```json
 {
-  "id": "gsim-metadata",
-  "name": "GSIM Metadata",
-  "description": "Kunskap om GSIM-modellen och statistiska metadata",
-  "version": "1.0",
-  "prompt_template": "Du har djup kunskap om GSIM...\n\n{{examples}}",
-  "examples_file": "examples.md",
-  "tools_required": ["graph-query"],
-  "output_format": "markdown"
+  "source_url": "https://raw.githubusercontent.com/...",
+  "content": "# Skill content...",
+  "allowed_tools": ["graph-query"],
+  "when_to_use": "...",
+  "version": "1.0"
 }
 ```
 
-### Filer att ändra/skapa
+### Filer implementerade ✅
 
 | Fil | Åtgärd |
 |-----|--------|
-| `backend/config_loader.py` | Utöka `ExpertAgentConfig` med `skills`, `mcp_tools`, `can_delegate_to`, `max_tool_calls_per_turn` |
-| `backend/config_loader.py` | Lägg till `SkillsConfig` och `MCPConfig` Pydantic-modeller |
-| `config/scb/schema_config.json` | Utöka expert-definitioner med nya fält |
-| `config/scb/skills/` | Skapa skill-mappar och skill.json-filer |
+| `backend/config_loader.py` | `ExpertAgentConfig.skills_urls`, `SkillsConfig`, `PresentationConfig.skills_config` |
+| `backend/agents/config.py` | `AgentConfig.skills_urls`, `AgentConfig.skill_node_ids` |
+| `backend/agents/prompts.py` | `build_skills_section()`, `build_agent_system_prompt(skills=...)` |
+| `config/default/schema_config.json` | `Skill`-nodtyp + `USES_SKILL`-relation |
+| `backend/skills/__init__.py` | Package |
+| `backend/skills/loader.py` | `SkillsLoader` + `SkillDefinition` + cache |
 
 ---
 
-## Fas 2: Skill Registry (Backend)
+## Fas 2: SkillsLoader (implementerad ✅)
 
-### 2.1 SkillRegistry-klass
+### 2.1 SkillsLoader-klass
 
-Ny fil: `backend/skills/registry.py`
+Ny fil: `backend/skills/loader.py`
 
 ```python
-class SkillRegistry:
-    """Laddar och hanterar skill-definitioner."""
+class SkillsLoader:
+    """Hämtar och parsar SKILL.md-filer från externa URLs."""
 
-    def __init__(self, skills_dir: str, allow_external: bool = False):
-        self._skills: Dict[str, SkillDefinition] = {}
-        self._skills_dir = Path(skills_dir)
-        self._allow_external = allow_external
+    async def load_from_urls(self, urls: List[str]) -> List[SkillDefinition]:
+        """Laddar skills från en lista URL:er. Fel loggas och hoppas över."""
 
-    def load_skills(self) -> None:
-        """Skannar skills_dir och laddar alla skill.json."""
+    async def _load_github_repo(self, url: str) -> List[SkillDefinition]:
+        """Söker i .agents/skills/, .claude/skills/, .github/skills/, skills/"""
 
-    def get_skill(self, skill_id: str) -> SkillDefinition:
-        """Hämtar en specifik skill-definition."""
+    def _parse_skill_md(self, text: str, source_url: str) -> Optional[SkillDefinition]:
+        """Parsar YAML frontmatter + Markdown body."""
 
-    def build_prompt(self, skill_id: str) -> str:
-        """Bygger en komplett prompt från template + examples."""
-
-    def get_required_tools(self, skill_ids: List[str]) -> Set[str]:
-        """Returnerar alla MCP-verktyg som listan av skills kräver."""
-
-    def validate_skill(self, skill_def: dict) -> List[str]:
-        """Validerar en skill-definition, returnerar eventuella fel."""
+    def _sanitize(self, text: str) -> str:
+        """Injektionsskydd: avvisar injection-mönster, strippar HTML-taggar."""
 ```
+
+URL-typer som stöds:
+- **Direkt fil**: `https://raw.githubusercontent.com/.../SKILL.md`
+- **GitHub repo**: `https://github.com/owner/repo` → GitHub Contents API → SKILL.md-filer
+- **agentskills.io**: `https://agentskills.io/skills/...` → best-effort extraktion
 
 ### 2.2 SkillDefinition-modell
 
 ```python
 class SkillDefinition(BaseModel):
-    id: str
-    name: str
-    description: str
-    version: str
-    prompt_template: str
-    examples: Optional[str] = None
-    tools_required: List[str] = []
-    output_format: str = "markdown"
+    id: str                            # metadata.id eller auto-genererat från name
+    name: str                          # obligatoriskt SKILL.md-fält
+    description: str                   # obligatoriskt SKILL.md-fält
+    content: str                       # Markdown-body = prompt-texten
+    allowed_tools: List[str] = []      # från allowed-tools (space-separated)
+    when_to_use: Optional[str] = None  # Claude Code-extension
+    effort: Optional[str] = None       # Claude Code-extension
+    license: Optional[str] = None
+    metadata: Dict[str, str] = {}
+    source_url: str
+    loaded_at: datetime
 ```
 
-### Filer att skapa
+### Filer skapade
 
 | Fil | Syfte |
 |-----|-------|
 | `backend/skills/__init__.py` | Package |
-| `backend/skills/registry.py` | SkillRegistry + SkillDefinition |
+| `backend/skills/loader.py` | SkillsLoader + SkillDefinition + TTL-cache |
 
 ---
 
