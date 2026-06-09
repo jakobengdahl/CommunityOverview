@@ -59,10 +59,14 @@ class ChatService:
         self._processor = ChatProcessor(self._tools_map)
         self._current_federation_depth: Optional[int] = None
 
-        # Expert agent registry: id -> (system_context, loaded skills)
-        # Populated by load_expert_skills() or load_expert_skills_sync() at startup.
+        # Expert agent registry — populated by load_expert_skills() at startup.
         self._expert_contexts: Dict[str, str] = {}
-        self._expert_skills: Dict[str, List] = {}   # List[SkillDefinition]
+        # Stage 1: skill metadata (frontmatter only, no body content).
+        self._expert_skills: Dict[str, List] = {}       # List[SkillMetadata]
+        # Stage 2: full skill content, populated lazily on first _build_expert_context call.
+        self._expert_skills_full: Dict[str, List] = {}  # List[SkillDefinition]
+        # Shared SkillsLoader instance — holds the raw-text cache for Stage 1→2 promotion.
+        self._skills_loader = None
 
     def _build_tools_map(self) -> Dict[str, Callable]:
         """
@@ -117,11 +121,12 @@ class ChatService:
 
     async def load_expert_skills(self, experts: list, skills_config) -> None:
         """
-        Load skills for all expert agents that have skills_urls configured.
+        Stage 1: Load skill frontmatter for all configured expert agents.
 
-        Called once at startup.  Stores system_context and loaded skills per
-        expert ID so they can be injected on demand when a chat request
-        arrives with an expert_agent_id.
+        Called once at startup.  Fetches only YAML frontmatter (name,
+        description, when_to_use, allowed_tools, …) — no body content.
+        Full content (Stage 2) is loaded lazily on the first request that
+        activates the expert via _build_expert_context().
 
         Args:
             experts: List of ExpertAgentConfig objects
@@ -129,19 +134,21 @@ class ChatService:
         """
         from backend.skills.loader import SkillsLoader
 
-        loader = SkillsLoader(skills_config)
+        self._skills_loader = SkillsLoader(skills_config)
         for expert in experts:
             self._expert_contexts[expert.id] = expert.system_context
+            # Invalidate any previously cached full-skill content for this expert
+            self._expert_skills_full.pop(expert.id, None)
             if expert.skills_urls:
                 try:
-                    skills = await loader.load_from_urls(expert.skills_urls)
-                    self._expert_skills[expert.id] = skills
+                    metas = await self._skills_loader.load_metadata_from_urls(expert.skills_urls)
+                    self._expert_skills[expert.id] = metas
                     logger.info(
-                        "Expert %s: loaded %d skill(s) from %d URL(s)",
-                        expert.id, len(skills), len(expert.skills_urls),
+                        "Expert %s: loaded metadata for %d skill(s) from %d URL(s)",
+                        expert.id, len(metas), len(expert.skills_urls),
                     )
                 except Exception as exc:
-                    logger.warning("Expert %s: skills load failed: %s", expert.id, exc)
+                    logger.warning("Expert %s: skills metadata load failed: %s", expert.id, exc)
                     self._expert_skills[expert.id] = []
             else:
                 self._expert_skills[expert.id] = []
@@ -158,6 +165,12 @@ class ChatService:
         """
         Build the extra system context string for a given expert agent.
 
+        Implements Stage 2 of progressive loading: full skill content is
+        fetched lazily on the first call for a given expert and cached for
+        subsequent calls.  Concurrent calls may redundantly trigger Stage 2
+        loading, but both produce identical results and the last write wins
+        (acceptable under CPython's GIL).
+
         Returns None if the ID is unknown, or a combined string of:
           - expert's system_context (if set)
           - skills section (if skills were loaded for this expert)
@@ -173,11 +186,45 @@ class ChatService:
         if ctx:
             parts.append(ctx)
 
-        skills = self._expert_skills.get(expert_agent_id, [])
-        if skills:
-            parts.append(build_skills_section(skills))
+        items = self._expert_skills.get(expert_agent_id, [])
+        if items:
+            # Stage 2: promote SkillMetadata → SkillDefinition (with body content)
+            full_skills = self._expert_skills_full.get(expert_agent_id)
+            if full_skills is None:
+                if hasattr(items[0], 'content'):
+                    # Items are already SkillDefinition (e.g., set directly in tests)
+                    full_skills = items
+                elif self._skills_loader is not None:
+                    full_skills = self._load_full_skills_sync(expert_agent_id, items)
+                else:
+                    full_skills = []
+                self._expert_skills_full[expert_agent_id] = full_skills
+            if full_skills:
+                parts.append(build_skills_section(full_skills))
 
         return "\n\n".join(parts) if parts else None
+
+    def _load_full_skills_sync(self, expert_id: str, metadatas: List) -> List:
+        """Stage 2: synchronously load full skill body for SkillMetadata objects.
+
+        Uses the shared SkillsLoader's raw-text cache, so no additional
+        HTTP requests are needed for URLs already visited in Stage 1.
+        """
+        loop = asyncio.new_event_loop()
+        try:
+            full_skills = loop.run_until_complete(
+                self._skills_loader.load_full_skills(metadatas)
+            )
+            logger.info(
+                "Expert %s: loaded full content for %d skill(s) (Stage 2)",
+                expert_id, len(full_skills),
+            )
+            return full_skills
+        except Exception as exc:
+            logger.warning("Expert %s: Stage 2 skill loading failed: %s", expert_id, exc)
+            return []
+        finally:
+            loop.close()
 
     # ------------------------------------------------------------------
 

@@ -20,7 +20,7 @@ from .config import AgentConfig, AgentsSettings
 from .prompts import build_agent_system_prompt, build_event_user_message
 from .llm_client import LLMClient
 from .mcp_loader import MCPLoader
-from backend.skills.loader import SkillDefinition, SkillsConfig, SkillsLoader
+from backend.skills.loader import SkillDefinition, SkillMetadata, SkillsConfig, SkillsLoader
 
 logger = logging.getLogger(__name__)
 
@@ -214,11 +214,16 @@ class AgentWorker:
 
         loop = asyncio.new_event_loop()
         try:
-            # Load from URL list
+            # Stage 1 → Stage 2 progressive loading for URL-based skills.
+            # Metadata (frontmatter) is fetched first; raw text is cached by
+            # the loader so the Stage 2 full-content parse adds no HTTP round-trips.
             if self.config.skills_urls:
                 try:
+                    url_metas: List[SkillMetadata] = loop.run_until_complete(
+                        loader.load_metadata_from_urls(self.config.skills_urls)
+                    )
                     url_skills = loop.run_until_complete(
-                        loader.load_from_urls(self.config.skills_urls)
+                        loader.load_full_skills(url_metas)
                     )
                     for s in url_skills:
                         if s.id not in seen_ids:
@@ -230,9 +235,14 @@ class AgentWorker:
                 except Exception as exc:
                     logger.warning(f"Agent {self.config.name}: Skills URL load failed: {exc}")
 
-            # Load from local skills directory (always attempted so skills_dir is honoured)
+            # Stage 1 → Stage 2 for local skills directory
             try:
-                local_skills = loop.run_until_complete(loader.load_from_dir())
+                local_metas: List[SkillMetadata] = loop.run_until_complete(
+                    loader.load_metadata_from_dir()
+                )
+                local_skills = loop.run_until_complete(
+                    loader.load_full_skills(local_metas)
+                )
                 added = 0
                 for s in local_skills:
                     if s.id not in seen_ids:
