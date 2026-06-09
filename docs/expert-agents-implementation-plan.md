@@ -1,16 +1,16 @@
-# Implementeringsplan: Expert Agents med Skills och MCP-verktyg
+# Implementation Plan: Expert Agents with Skills and MCP Tools
 
-## Nuläge
+## Current State
 
-Grundläggande UI och konfiguration finns redan:
-- **Konfiguration**: `config/scb/schema_config.json` definierar experter med id, namn, färg, ikon, intro-text och system_context
-- **Frontend**: `ExpertAgentSelector.jsx` för val av expert, `ChatPanel.jsx` visar expertmeddelanden, Zustand-store håller state
-- **Backend**: `config_loader.py` validerar config, `/api/presentation` serverar den, `chat_service.py` hanterar LLM-anrop
-- **Saknas**: Faktisk expert-AI-logik, skills, MCP-integration, inter-agent-kommunikation, säkerhet
+Basic UI and configuration already exists:
+- **Configuration**: `config/scb/schema_config.json` defines experts with id, name, color, icon, intro text, and system_context
+- **Frontend**: `ExpertAgentSelector.jsx` for selecting experts, `ChatPanel.jsx` displays expert messages, Zustand store holds state
+- **Backend**: `config_loader.py` validates config, `/api/presentation` serves it, `chat_service.py` handles LLM calls
+- **Missing**: Actual expert AI logic, skills, MCP integration, inter-agent communication, security
 
 ---
 
-## Arkitekturöversikt
+## Architecture Overview
 
 ```
 ┌─────────────────────────────────────────────────────────┐
@@ -24,8 +24,8 @@ Grundläggande UI och konfiguration finns redan:
 │                            │                            │
 │  ┌─────────────────────────▼──────────────────────────┐ │
 │  │              ExpertOrchestrator                     │ │
-│  │  Tar emot meddelande → väljer rätt expert(er) →    │ │
-│  │  kör expert med skills+MCP → returnerar svar       │ │
+│  │  Receives message → selects expert(s) →            │ │
+│  │  runs expert with skills+MCP → returns response    │ │
 │  ├────────────────────────────────────────────────────┤ │
 │  │                                                    │ │
 │  │  ┌──────────┐  ┌──────────┐  ┌──────────────────┐ │ │
@@ -39,22 +39,22 @@ Grundläggande UI och konfiguration finns redan:
 │  ├───────┼──────────────┼────────────────┼────────────┤ │
 │  │       ▼              ▼                ▼            │ │
 │  │  ┌──────────────────────────────────────────────┐  │ │
-│  │  │           SkillRegistry                      │  │ │
-│  │  │  Laddar skill-definitioner från disk          │  │ │
-│  │  │  Mappar skill-id → prompt-template + tools    │  │ │
+│  │  │           SkillsLoader                       │  │ │
+│  │  │  Fetches SKILL.md from URLs at startup        │  │ │
+│  │  │  Maps skill content → prompt injection        │  │ │
 │  │  └──────────────────────────────────────────────┘  │ │
 │  │                                                    │ │
 │  │  ┌──────────────────────────────────────────────┐  │ │
 │  │  │           MCPToolRegistry                    │  │ │
-│  │  │  Hanterar MCP-servrar och verktyg            │  │ │
-│  │  │  Exponerar godkända verktyg till experter     │  │ │
+│  │  │  Manages MCP servers and tools               │  │ │
+│  │  │  Exposes permitted tools to experts           │  │ │
 │  │  └──────────────────────────────────────────────┘  │ │
 │  │                                                    │ │
 │  │  ┌──────────────────────────────────────────────┐  │ │
 │  │  │           MessageBus                         │  │ │
-│  │  │  Expert ↔ Expert kommunikation               │  │ │
-│  │  │  Expert ↔ Grafassistent koordinering         │  │ │
-│  │  │  Expert → Användare svar                     │  │ │
+│  │  │  Expert ↔ Expert communication               │  │ │
+│  │  │  Expert ↔ Graph assistant coordination       │  │ │
+│  │  │  Expert → User responses                     │  │ │
 │  │  └──────────────────────────────────────────────┘  │ │
 │  └────────────────────────────────────────────────────┘ │
 └─────────────────────────────────────────────────────────┘
@@ -62,20 +62,20 @@ Grundläggande UI och konfiguration finns redan:
 
 ---
 
-## Fas 1: Utökad konfiguration
+## Phase 1: Extended Configuration
 
-### 1.1 Ny config-struktur för experter
+### 1.1 New Config Structure for Experts
 
-Skills kopplas nu till experter via URL-listor. Formatet är `SKILL.md` (agentskills.io-standarden, superset av Claude Code). Vid appstart hämtar `SkillsLoader` varje URL och injicerar innehållet i expertens systemprompt.
+Skills are now linked to experts via URL lists. The format is `SKILL.md` (agentskills.io open standard, a superset of Claude Code). At app startup, `SkillsLoader` fetches each URL and injects the content into the expert's system prompt.
 
 ```json
 {
   "expert_agents": [
     {
       "id": "metadata-expert",
-      "name": "Metadataexpert",
+      "name": "Metadata Expert",
       "name_en": "Metadata Expert",
-      "specialty": "Statistiska metadata...",
+      "specialty": "Statistical metadata...",
       "color": "#14B8A6",
       "icon": "TagsFill",
       "intro_sv": "Hej! Jag är...",
@@ -102,9 +102,9 @@ Skills kopplas nu till experter via URL-listor. Formatet är `SKILL.md` (agentsk
 }
 ```
 
-### 1.2 SKILL.md-format (agentskills.io + Claude Code)
+### 1.2 SKILL.md Format (agentskills.io + Claude Code)
 
-Skills-filer följer öppen standard: YAML frontmatter + Markdown body i en fil `SKILL.md`.
+Skill files follow the open standard: YAML frontmatter + Markdown body in a file named `SKILL.md`.
 
 ```yaml
 ---
@@ -118,20 +118,20 @@ metadata:
 ---
 # GSIM Metadata Expert
 
-Du har djup kunskap om Generic Statistical Information Model (GSIM)...
+You have deep knowledge of the Generic Statistical Information Model (GSIM)...
 ```
 
-Katalogstruktur i ett GitHub-repo (alla letade igenom automatiskt):
+Directory structure in a GitHub repo (all searched automatically, in priority order):
 ```
-.agents/skills/         ← prioritet 1 (mest portabelt)
-.claude/skills/         ← prioritet 2 (Claude Code)
-.github/skills/         ← prioritet 3
-skills/                 ← prioritet 4 (enklast)
+.agents/skills/         ← priority 1 (most portable)
+.claude/skills/         ← priority 2 (Claude Code)
+.github/skills/         ← priority 3
+skills/                 ← priority 4 (simplest)
 ```
 
-### 1.3 Skill-nodtyp i grafen
+### 1.3 Skill Node Type in the Graph
 
-Skill-noder lagrar dynamiskt tillagda skills och kan kopplas till Agent-noder via `USES_SKILL`-kanter. Metadata:
+Skill nodes store dynamically added skills and can be linked to Agent nodes via `USES_SKILL` edges. Metadata structure:
 
 ```json
 {
@@ -143,82 +143,82 @@ Skill-noder lagrar dynamiskt tillagda skills och kan kopplas till Agent-noder vi
 }
 ```
 
-### Filer implementerade ✅
+### Files Implemented ✅
 
-| Fil | Åtgärd |
-|-----|--------|
+| File | Change |
+|------|--------|
 | `backend/config_loader.py` | `ExpertAgentConfig.skills_urls`, `SkillsConfig`, `PresentationConfig.skills_config` |
 | `backend/agents/config.py` | `AgentConfig.skills_urls`, `AgentConfig.skill_node_ids` |
 | `backend/agents/prompts.py` | `build_skills_section()`, `build_agent_system_prompt(skills=...)` |
-| `config/default/schema_config.json` | `Skill`-nodtyp + `USES_SKILL`-relation |
+| `config/default/schema_config.json` | `Skill` node type + `USES_SKILL` relationship |
 | `backend/skills/__init__.py` | Package |
-| `backend/skills/loader.py` | `SkillsLoader` + `SkillDefinition` + cache |
+| `backend/skills/loader.py` | `SkillsLoader` + `SkillDefinition` + TTL cache |
 
 ---
 
-## Fas 2: SkillsLoader (implementerad ✅)
+## Phase 2: SkillsLoader (implemented ✅)
 
-### 2.1 SkillsLoader-klass
+### 2.1 SkillsLoader Class
 
-Ny fil: `backend/skills/loader.py`
+New file: `backend/skills/loader.py`
 
 ```python
 class SkillsLoader:
-    """Hämtar och parsar SKILL.md-filer från externa URLs."""
+    """Fetches and parses SKILL.md files from remote URLs."""
 
     async def load_from_urls(self, urls: List[str]) -> List[SkillDefinition]:
-        """Laddar skills från en lista URL:er. Fel loggas och hoppas över."""
+        """Loads skills from a list of URLs. Failures are logged and skipped."""
 
     async def _load_github_repo(self, url: str) -> List[SkillDefinition]:
-        """Söker i .agents/skills/, .claude/skills/, .github/skills/, skills/"""
+        """Searches .agents/skills/, .claude/skills/, .github/skills/, skills/"""
 
     def _parse_skill_md(self, text: str, source_url: str) -> Optional[SkillDefinition]:
-        """Parsar YAML frontmatter + Markdown body."""
+        """Parses YAML frontmatter + Markdown body."""
 
     def _sanitize(self, text: str) -> str:
-        """Injektionsskydd: avvisar injection-mönster, strippar HTML-taggar."""
+        """Injection guard: rejects injection patterns, strips HTML tags."""
 ```
 
-URL-typer som stöds:
-- **Direkt fil**: `https://raw.githubusercontent.com/.../SKILL.md`
-- **GitHub repo**: `https://github.com/owner/repo` → GitHub Contents API → SKILL.md-filer
-- **agentskills.io**: `https://agentskills.io/skills/...` → best-effort extraktion
+Supported URL types:
+- **Direct file**: `https://raw.githubusercontent.com/.../SKILL.md`
+- **GitHub repo**: `https://github.com/owner/repo` → GitHub Contents API → SKILL.md files
+- **agentskills.io**: `https://agentskills.io/skills/...` → best-effort extraction
 
-### 2.2 SkillDefinition-modell
+### 2.2 SkillDefinition Model
 
 ```python
 class SkillDefinition(BaseModel):
-    id: str                            # metadata.id eller auto-genererat från name
-    name: str                          # obligatoriskt SKILL.md-fält
-    description: str                   # obligatoriskt SKILL.md-fält
-    content: str                       # Markdown-body = prompt-texten
-    allowed_tools: List[str] = []      # från allowed-tools (space-separated)
-    when_to_use: Optional[str] = None  # Claude Code-extension
-    effort: Optional[str] = None       # Claude Code-extension
+    id: str                            # metadata.id or auto-generated from name
+    name: str                          # required SKILL.md field
+    description: str                   # required SKILL.md field
+    content: str                       # Markdown body = the actual prompt text
+    allowed_tools: List[str] = []      # from allowed-tools (space-separated)
+    when_to_use: Optional[str] = None  # Claude Code extension
+    effort: Optional[str] = None       # Claude Code extension
     license: Optional[str] = None
     metadata: Dict[str, str] = {}
     source_url: str
     loaded_at: datetime
 ```
 
-### Filer skapade
+### Files Created
 
-| Fil | Syfte |
-|-----|-------|
+| File | Purpose |
+|------|---------|
 | `backend/skills/__init__.py` | Package |
-| `backend/skills/loader.py` | SkillsLoader + SkillDefinition + TTL-cache |
+| `backend/skills/loader.py` | SkillsLoader + SkillDefinition + TTL cache |
 
 ---
 
-## Fas 3: MCP Tool Registry (Backend)
+## Phase 3: MCP Tool Registry (Backend)
 
-### 3.1 MCPToolRegistry-klass
+### 3.1 MCPToolRegistry Class
 
-Ny fil: `backend/mcp/tool_registry.py`
+New file: `backend/mcp/tool_registry.py`
 
 ```python
 class MCPToolRegistry:
-    """Hanterar MCP-servrar och exponerar verktyg till experter."""
+    """Manages MCP servers and exposes tools to experts."""
 
     def __init__(self, mcp_config: dict):
         self._servers: Dict[str, MCPServerConnection] = {}
@@ -226,104 +226,104 @@ class MCPToolRegistry:
         self._available_tools: Dict[str, MCPTool] = {}
 
     async def initialize(self) -> None:
-        """Startar MCP-servrar och hämtar tillgängliga verktyg."""
+        """Starts MCP servers and discovers available tools."""
 
     def get_tools_for_expert(self, expert_id: str, allowed_tool_ids: List[str]) -> List[MCPTool]:
-        """Returnerar enbart de MCP-verktyg som experten får använda.
-        Filtrerar baserat på konfigurerad allowlist."""
+        """Returns only the MCP tools the expert is permitted to use.
+        Filters based on the configured allowlist."""
 
     async def execute_tool(self, tool_name: str, arguments: dict,
                            caller_expert_id: str) -> ToolResult:
-        """Kör ett MCP-verktyg med säkerhetskontroll.
-        Verifierar att anropande expert har rätt att använda verktyget."""
+        """Executes an MCP tool with security checks.
+        Verifies the calling expert has permission to use the tool."""
 
     def get_tool_schema(self, tool_name: str) -> dict:
-        """Returnerar JSON Schema för ett verktygs input."""
+        """Returns the JSON Schema for a tool's input."""
 ```
 
-### 3.2 Inbyggda grafverktyg som MCP
+### 3.2 Built-in Graph Tools as MCP
 
-Exponera befintliga grafoperationer (från `service.py`) som MCP-verktyg:
+Expose existing graph operations (from `service.py`) as MCP tools:
 
 ```python
 # backend/mcp/graph_tools.py
 GRAPH_TOOLS = [
     {
         "name": "graph-query",
-        "description": "Sök noder och relationer i kunskapsgrafen",
+        "description": "Search nodes and relationships in the knowledge graph",
         "input_schema": { ... },
         "handler": lambda args: graph_service.search_nodes(args["query"])
     },
     {
         "name": "graph-get-node",
-        "description": "Hämta en specifik nod med alla dess relationer",
+        "description": "Retrieve a specific node with all its relationships",
         "input_schema": { ... },
         "handler": lambda args: graph_service.get_node(args["id"])
     }
 ]
 ```
 
-### Filer att skapa
+### Files to Create
 
-| Fil | Syfte |
-|-----|-------|
+| File | Purpose |
+|------|---------|
 | `backend/mcp/__init__.py` | Package |
 | `backend/mcp/tool_registry.py` | MCPToolRegistry |
-| `backend/mcp/graph_tools.py` | Grafoperationer som MCP-verktyg |
+| `backend/mcp/graph_tools.py` | Graph operations as MCP tools |
 
 ---
 
-## Fas 4: ExpertOrchestrator (Backend, kärnlogik)
+## Phase 4: ExpertOrchestrator (Backend, Core Logic)
 
 ### 4.1 ExpertOrchestrator
 
-Ny fil: `backend/experts/orchestrator.py`
+New file: `backend/experts/orchestrator.py`
 
-Detta är det centrala lagret som koordinerar experternas AI-anrop.
+This is the central layer coordinating expert AI calls.
 
 ```python
 class ExpertOrchestrator:
-    """Koordinerar expert-agenter, deras skills och verktyg."""
+    """Coordinates expert agents, their skills and tools."""
 
-    def __init__(self, config: dict, skill_registry: SkillRegistry,
+    def __init__(self, config: dict, skill_loader: SkillsLoader,
                  mcp_registry: MCPToolRegistry, chat_service: ChatService):
         self._experts: Dict[str, ExpertInstance] = {}
-        self._skill_registry = skill_registry
+        self._skill_loader = skill_loader
         self._mcp_registry = mcp_registry
         self._chat_service = chat_service
         self._message_bus = MessageBus()
 
     def activate_expert(self, expert_id: str) -> None:
-        """Skapar en ExpertInstance med rätt skills och verktyg."""
+        """Creates an ExpertInstance with the correct skills and tools."""
 
     def deactivate_expert(self, expert_id: str) -> None:
-        """Tar bort en aktiv expert."""
+        """Removes an active expert."""
 
     async def handle_user_message(self, message: str,
                                    active_expert_ids: List[str],
                                    conversation_history: List[dict]) -> ExpertResponse:
         """
-        Huvudflöde:
-        1. Grafassistenten svarar först (befintlig chat_service)
-        2. Om aktiva experter finns → fråga vilka som bör svara
-        3. Kör relevanta experter (med deras skills+tools)
-        4. Samla ihop svar och returnera
+        Main flow:
+        1. Graph assistant responds first (existing chat_service)
+        2. If active experts exist → determine which should respond
+        3. Run relevant experts (with their skills+tools)
+        4. Collect all responses and return
         """
 
     async def _run_expert(self, expert: ExpertInstance,
                            message: str, context: dict) -> str:
-        """Kör en enskild expert med dess system_context + skills."""
+        """Runs a single expert with its system_context + skills."""
 
     async def _should_expert_respond(self, expert: ExpertInstance,
                                       message: str, assistant_response: str) -> bool:
-        """Snabb LLM-bedömning: ska denna expert tillföra något?"""
+        """Quick LLM classification: should this expert add value?"""
 ```
 
 ### 4.2 ExpertInstance
 
 ```python
 class ExpertInstance:
-    """Runtime-representation av en aktiv expert."""
+    """Runtime representation of an active expert."""
 
     def __init__(self, config: ExpertAgentConfig,
                  skills: List[SkillDefinition],
@@ -334,85 +334,85 @@ class ExpertInstance:
         self.conversation_memory: List[dict] = []
 
     def build_system_prompt(self) -> str:
-        """Bygger komplett system-prompt från config.system_context + skill-prompts."""
+        """Builds complete system prompt from config.system_context + skill prompts."""
 
     def get_tool_definitions(self) -> List[dict]:
-        """Returnerar verktygs-scheman för LLM tool_use."""
+        """Returns tool schemas for LLM tool_use."""
 ```
 
-### 4.3 Integrationsflöde
+### 4.3 Integration Flow
 
 ```
-Användare skickar meddelande
+User sends message
         │
         ▼
 ExpertOrchestrator.handle_user_message()
         │
-        ├──► Grafassistenten svarar (befintlig logik)
+        ├──► Graph assistant responds (existing logic)
         │         │
         │         ▼
-        ├──► För varje aktiv expert:
-        │       _should_expert_respond()? (snabb klassificering)
+        ├──► For each active expert:
+        │       _should_expert_respond()? (quick classification)
         │         │
-        │    ┌────┴─── ja ───┐
-        │    │                │
-        │    ▼                │
-        │  _run_expert()      │
-        │    │                │
-        │    ├─ Bygg system prompt (system_context + skills)
-        │    ├─ Ge tillgång till expertens MCP-verktyg
-        │    ├─ LLM-anrop med expertpersona
-        │    ├─ Hantera ev. tool_use (MCP-anrop)
-        │    └─ Returnera expert-svar
-        │                     │
-        │    ┌────────────────┘
+        │    ┌────┴─── yes ──┐
+        │    │               │
+        │    ▼               │
+        │  _run_expert()     │
+        │    │               │
+        │    ├─ Build system prompt (system_context + skills)
+        │    ├─ Grant access to expert's MCP tools
+        │    ├─ LLM call with expert persona
+        │    ├─ Handle tool_use calls (MCP)
+        │    └─ Return expert response
+        │                    │
+        │    ┌───────────────┘
         │    │
         │    ▼
-        └──► Sammanställ alla svar
+        └──► Aggregate all responses
                 │
                 ▼
-        Returnera till frontend
-        (grafassistent-svar + expert-svar med metadata)
+        Return to frontend
+        (graph assistant response + expert responses with metadata)
 ```
 
-### Filer att skapa/ändra
+### Files to Create/Modify
 
-| Fil | Åtgärd |
-|-----|--------|
+| File | Action |
+|------|--------|
 | `backend/experts/__init__.py` | Package |
 | `backend/experts/orchestrator.py` | ExpertOrchestrator |
 | `backend/experts/instance.py` | ExpertInstance |
-| `backend/ui/chat_service.py` | Integrera orchestrator i befintligt chatflöde |
-| `backend/ui/rest_api.py` | Utöka `POST /ui/chat` med expert-svar i response |
+| `backend/ui/chat_service.py` | Integrate orchestrator into existing chat flow |
+| `backend/ui/rest_api.py` | Extend `POST /ui/chat` with expert responses in response |
 
 ---
 
-## Fas 5: MessageBus (inter-agent-kommunikation)
+## Phase 5: MessageBus (Inter-Agent Communication)
 
-### 5.1 Strukturerad kommunikation
+### 5.1 Structured Communication
 
-Ny fil: `backend/experts/message_bus.py`
+New file: `backend/experts/message_bus.py`
 
 ```python
 class MessageBus:
-    """Hanterar strukturerad kommunikation mellan agenter."""
+    """Manages structured communication between agents."""
 
     def __init__(self):
         self._handlers: Dict[str, List[Callable]] = {}
         self._message_log: List[AgentMessage] = []
 
     def send(self, message: AgentMessage) -> None:
-        """Skicka ett meddelande från en agent till en annan."""
+        """Send a message from one agent to another."""
 
     def request(self, from_agent: str, to_agent: str,
                 question: str) -> AgentMessage:
-        """Synkron fråga från en expert till en annan."""
+        """Synchronous question from one expert to another."""
 
     def broadcast(self, from_agent: str, content: str) -> None:
-        """Skicka till alla aktiva agenter."""
+        """Send to all active agents."""
 
     def get_conversation_context(self, agent_id: str) -> List[AgentMessage]:
-        """Hämta relevant konversationshistorik för en agent."""
+        """Retrieve relevant conversation history for an agent."""
 
 
 class AgentMessage(BaseModel):
@@ -424,231 +424,227 @@ class AgentMessage(BaseModel):
     metadata: dict = {}
 ```
 
-### 5.2 Kommunikationstyper
+### 5.2 Message Types
 
-| Typ | Från → Till | Beskrivning |
-|-----|-------------|-------------|
-| `question` | Expert → Expert | Fråga en annan expert |
-| `answer` | Expert → Expert | Svar på fråga |
-| `info` | Expert → Användare | Informera användaren |
-| `delegation` | Expert → Expert | Delegera uppgift vidare |
-| `graph_query` | Expert → Grafassistent | Fråga om grafdata |
-| `graph_result` | Grafassistent → Expert | Resultat från graf |
+| Type | From → To | Description |
+|------|-----------|-------------|
+| `question` | Expert → Expert | Ask another expert |
+| `answer` | Expert → Expert | Reply to a question |
+| `info` | Expert → User | Inform the user |
+| `delegation` | Expert → Expert | Delegate a task |
+| `graph_query` | Expert → Graph assistant | Query graph data |
+| `graph_result` | Graph assistant → Expert | Result from graph |
 
-### 5.3 Delegering via `can_delegate_to`
+### 5.3 Delegation via `can_delegate_to`
 
-En expert kan delegera till en annan expert om den har det i sin config:
+An expert can delegate to another expert if configured:
 
 ```python
 async def handle_delegation(self, from_expert: ExpertInstance,
                              to_expert_id: str, task: str) -> str:
     if to_expert_id not in from_expert.config.can_delegate_to:
         raise PermissionError(f"{from_expert.config.id} cannot delegate to {to_expert_id}")
-    # Kör mottagande expert med delegeringsuppgiften
+    # Run receiving expert with the delegation task
 ```
 
-### Filer att skapa
+### Files to Create
 
-| Fil | Syfte |
-|-----|-------|
+| File | Purpose |
+|------|---------|
 | `backend/experts/message_bus.py` | MessageBus + AgentMessage |
 
 ---
 
-## Fas 6: Säkerhet
+## Phase 6: Security
 
-### 6.1 Säkerhetsprinciper
+### 6.1 Security Principles
 
-1. **Config-ägaren ansvarar** för att skills och MCP-servrar är betrodda
-2. **Defense-in-depth**: Även med betrodda skills behövs grundskydd
-3. **Least privilege**: Varje expert får bara de verktyg den behöver
+1. **Config owner is responsible** for ensuring skills and MCP servers are trusted
+2. **Defense-in-depth**: Even with trusted skills, baseline protections are required
+3. **Least privilege**: Each expert receives only the tools it needs
 
-### 6.2 Säkerhetslager
+### 6.2 Security Layers
 
 ```
 ┌─────────────────────────────────────────┐
-│ Lager 1: Config Validation              │
-│ - Schema-validering av skill.json       │
-│ - Kontroll att MCP-verktyg finns        │
-│ - Allowlist: expert ↔ verktyg-mappning  │
+│ Layer 1: Config Validation              │
+│ - Schema validation of skill content    │
+│ - Verify MCP tools exist                │
+│ - Allowlist: expert ↔ tool mapping      │
 ├─────────────────────────────────────────┤
-│ Lager 2: Runtime Tool Access Control    │
-│ - Expert kan bara anropa sina verktyg   │
-│ - read_only-flagga respekteras          │
+│ Layer 2: Runtime Tool Access Control    │
+│ - Expert can only call its own tools    │
+│ - read_only flag is enforced            │
 │ - max_tool_calls_per_turn limit         │
 ├─────────────────────────────────────────┤
-│ Lager 3: Output Sanitization            │
-│ - Experternas svar saniteras            │
-│ - Inga injektionsförsök vidarebefordras │
-│ - Svar märks med expert-id (spårbarhet) │
+│ Layer 3: Output Sanitization            │
+│ - Expert responses are sanitized        │
+│ - Injection attempts are not forwarded  │
+│ - Responses tagged with expert_id       │
 ├─────────────────────────────────────────┤
-│ Lager 4: Audit & Logging               │
-│ - Alla MCP-anrop loggas                 │
-│ - Expert-till-expert-meddelanden loggas │
-│ - Token-förbrukning per expert spåras   │
+│ Layer 4: Audit & Logging                │
+│ - All MCP calls are logged              │
+│ - Expert-to-expert messages are logged  │
+│ - Token usage tracked per expert        │
 └─────────────────────────────────────────┘
 ```
 
-### 6.3 Konkreta säkerhetsåtgärder
+### 6.3 Concrete Security Measures
+
+**SkillsLoader sanitization** (already implemented in `backend/skills/loader.py`):
+- Regex blocklist for known injection patterns
+- HTML/XML tag stripping
+- Maximum content size per skill (50 KB raw, 8 000 chars in prompt)
+- Trusted domains allowlist
 
 **Config Validation** (`backend/experts/security.py`):
 
 ```python
 class ExpertSecurityValidator:
     def validate_expert_config(self, expert: ExpertAgentConfig) -> List[str]:
-        """Kontrollerar att experten bara refererar till existerande skills/tools."""
+        """Checks that the expert only references existing skills/tools."""
 
     def validate_skill(self, skill: SkillDefinition) -> List[str]:
-        """Kontrollerar att skill-prompten inte innehåller farliga instruktioner."""
+        """Checks that the skill prompt does not contain dangerous instructions."""
 
     def validate_tool_access(self, expert_id: str, tool_name: str) -> bool:
-        """Kontrollerar att experten har rätt att använda verktyget."""
+        """Checks that the expert is permitted to use the tool."""
 ```
 
-**Runtime Guards** (i `ExpertOrchestrator`):
+**Runtime Guards** (in `ExpertOrchestrator`):
 
 ```python
-# Räknare per expert per turn
+# Counter per expert per turn
 if expert.tool_call_count >= expert.config.max_tool_calls_per_turn:
-    return "Expert har nått sin gräns för verktygningsanrop denna omgång."
+    return "Expert has reached its tool call limit for this turn."
 
-# Verktygs-allowlist
+# Tool allowlist
 if tool_name not in expert.allowed_tools:
     log.warning(f"Expert {expert.id} tried to call unauthorized tool {tool_name}")
     raise PermissionError(...)
 
-# Timeout per MCP-anrop
+# Timeout per MCP call
 result = await asyncio.wait_for(
     mcp_registry.execute_tool(tool_name, args, expert.id),
     timeout=tool_permissions[tool_name].timeout_ms / 1000
 )
 ```
 
-**Output Sanitization**:
+### Files to Create
 
-```python
-def sanitize_expert_output(response: str, expert_id: str) -> str:
-    """
-    - Strippa system-prompt-liknande instruktioner
-    - Märk svaret med expert_id för spårbarhet
-    - Begränsa svarslängd
-    """
-```
-
-### Filer att skapa
-
-| Fil | Syfte |
-|-----|-------|
-| `backend/experts/security.py` | ExpertSecurityValidator + sanitering |
+| File | Purpose |
+|------|---------|
+| `backend/experts/security.py` | ExpertSecurityValidator + output sanitization |
 
 ---
 
-## Fas 7: Frontend-uppdateringar
+## Phase 7: Frontend Updates
 
-### 7.1 Utöka API-response
+### 7.1 Extended API Response
 
 ```python
 # backend/ui/rest_api.py - POST /ui/chat response
 {
-    "content": "Grafassistentens svar...",
+    "content": "Graph assistant response...",
     "toolUsed": "search_nodes",
     "toolResult": {...},
     "expert_responses": [
         {
             "expert_id": "metadata-expert",
-            "expert_name": "Metadataexpert",
+            "expert_name": "Metadata Expert",
             "expert_color": "#14B8A6",
-            "content": "Jag vill tillägga att...",
+            "content": "I would like to add that...",
             "tools_used": ["graph-query"]
         }
     ]
 }
 ```
 
-### 7.2 Frontend-ändringar
+### 7.2 Frontend Changes
 
-| Fil | Ändring |
-|-----|---------|
-| `frontend/web/src/services/api.js` | Hantera `expert_responses` i svaret |
-| `frontend/web/src/store/graphStore.js` | Lägg till expert-svar som chatmeddelanden |
-| `frontend/web/src/components/ChatPanel.jsx` | Visa expert-svar med rätt stil (redan delvis klart) |
-| `frontend/web/src/components/ExpertAgentSelector.jsx` | Visa skills per expert (valfritt, fas 2) |
+| File | Change |
+|------|--------|
+| `frontend/web/src/services/api.js` | Handle `expert_responses` in the response |
+| `frontend/web/src/store/graphStore.js` | Add expert responses as chat messages |
+| `frontend/web/src/components/ChatPanel.jsx` | Display expert responses with correct styling (partially done) |
+| `frontend/web/src/components/ExpertAgentSelector.jsx` | Show skills per expert (optional, phase 2) |
 
-### 7.3 Meddelandeflöde i UI
+### 7.3 Message Flow in UI
 
 ```
-Användaren skriver: "Vad är SNI-koden för tillverkning?"
+User types: "What is the SNI code for manufacturing?"
     │
     ▼
-[Grafassistent]: "SNI-kod 10-33 täcker tillverkningsindustrin..."
+[Graph assistant]: "SNI codes 10-33 cover the manufacturing industry..."
     │
-    ▼  (om Metadataexpert är aktiv)
-[Metadataexpert 🟢]: "Jag kan tillägga att SNI 2007 bygger på
- NACE Rev.2 och att det finns undernivåer..."
+    ▼  (if Metadata Expert is active)
+[Metadata Expert 🟢]: "I would add that SNI 2007 is based on
+ NACE Rev.2 and there are sub-levels..."
 ```
 
 ---
 
-## Fas 8: Tester
+## Phase 8: Tests
 
-| Testfil | Testar |
-|---------|--------|
-| `tests/test_skill_registry.py` | Laddning, validering, prompt-byggning |
-| `tests/test_mcp_registry.py` | Verktygsregistrering, åtkomstkontroll |
-| `tests/test_orchestrator.py` | Expert-routing, multi-expert-svar |
-| `tests/test_message_bus.py` | Agent-kommunikation, delegering |
-| `tests/test_security.py` | Allowlist, rate-limiting, sanitering |
+| Test file | Tests |
+|-----------|-------|
+| `tests/test_skills_loader.py` | URL fetching, SKILL.md parsing, sanitization, GitHub repo discovery |
+| `tests/test_mcp_registry.py` | Tool registration, access control |
+| `tests/test_orchestrator.py` | Expert routing, multi-expert responses |
+| `tests/test_message_bus.py` | Agent communication, delegation |
+| `tests/test_security.py` | Allowlist, rate-limiting, sanitization |
 
 ---
 
-## Implementeringsordning
+## Implementation Order
 
 ```
-Fas 1: Konfiguration         ████░░░░░░░░  Grund
-  1.1 Utökad config-modell
-  1.2 Skill-filer på disk
+Phase 1: Configuration       ████░░░░░░░░  Foundation   ✅ Done
+  1.1 Extended config model
+  1.2 SKILL.md URL-based skills
+  1.3 Skill node type in graph
 
-Fas 2: Skill Registry        ██████░░░░░░  Kärna
-  2.1 SkillRegistry
+Phase 2: SkillsLoader        ██████░░░░░░  Core         ✅ Done
+  2.1 SkillsLoader
   2.2 SkillDefinition
 
-Fas 3: MCP Tool Registry     ████████░░░░  Kärna
+Phase 3: MCP Tool Registry   ████████░░░░  Core
   3.1 MCPToolRegistry
-  3.2 Grafverktyg som MCP
+  3.2 Graph tools as MCP
 
-Fas 4: ExpertOrchestrator     ██████████░░  Kärna
+Phase 4: ExpertOrchestrator  ██████████░░  Core
   4.1 ExpertOrchestrator
   4.2 ExpertInstance
-  4.3 Integration med ChatService
+  4.3 Integration with ChatService
 
-Fas 5: MessageBus             ████████████  Koordinering
-  5.1 AgentMessage-modell
-  5.2 Kommunikationsflöde
-  5.3 Delegering
+Phase 5: MessageBus          ████████████  Coordination
+  5.1 AgentMessage model
+  5.2 Communication flow
+  5.3 Delegation
 
-Fas 6: Säkerhet               ████████████  Parallellt med 3-5
-  6.1 Config-validering
-  6.2 Runtime-guards
-  6.3 Output-sanitering
-  6.4 Audit-loggning
+Phase 6: Security            ████████████  Parallel with 3-5
+  6.1 Config validation
+  6.2 Runtime guards
+  6.3 Output sanitization
+  6.4 Audit logging
 
-Fas 7: Frontend               ████████████  Integration
-  7.1 API-response-hantering
-  7.2 Expert-meddelanden i chatten
+Phase 7: Frontend            ████████████  Integration
+  7.1 API response handling
+  7.2 Expert messages in chat
 
-Fas 8: Tester                 ████████████  Löpande
+Phase 8: Tests               ████████████  Ongoing
 ```
 
-## Beroenden mellan faser
+## Phase Dependencies
 
 ```
-Fas 1 ──► Fas 2 ──► Fas 4 ──► Fas 7
-              │         ▲
-              │         │
-Fas 1 ──► Fas 3 ───────┘
-                        │
-              Fas 5 ────┘
+Phase 1 ──► Phase 2 ──► Phase 4 ──► Phase 7
+                │           ▲
+                │           │
+Phase 1 ──► Phase 3 ───────┘
+                            │
+                Phase 5 ────┘
 
-Fas 6 körs parallellt med Fas 3-5
-Fas 8 körs löpande
+Phase 6 runs in parallel with Phases 3-5
+Phase 8 runs continuously
 ```
