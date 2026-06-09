@@ -333,7 +333,8 @@ class TestExpertAgentSkills:
             content="GDPR guidance.", source_url="http://x.com/SKILL.md"
         )
         service._expert_contexts["leg"] = "You are a legislation expert."
-        service._expert_skills["leg"] = [skill]
+        # Full skills go in _expert_skills_full (populated by load_expert_skills at startup)
+        service._expert_skills_full["leg"] = [skill]
 
         ctx = service._build_expert_context("leg")
         assert "You are a legislation expert." in ctx

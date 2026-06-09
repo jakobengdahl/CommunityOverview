@@ -121,12 +121,20 @@ class ChatService:
 
     async def load_expert_skills(self, experts: list, skills_config) -> None:
         """
-        Stage 1: Load skill frontmatter for all configured expert agents.
+        Progressive skill loading (Stage 1 → Stage 2) for all configured expert agents.
 
-        Called once at startup.  Fetches only YAML frontmatter (name,
-        description, when_to_use, allowed_tools, …) — no body content.
-        Full content (Stage 2) is loaded lazily on the first request that
-        activates the expert via _build_expert_context().
+        Stage 1: fetches YAML frontmatter only (SkillMetadata), stored in
+        _expert_skills.  Stage 2: immediately promotes each set of metadata
+        to full SkillDefinition objects (with body content) using the shared
+        SkillsLoader text cache, so no additional HTTP round-trips are needed.
+        Full content is stored in _expert_skills_full and used by
+        _build_expert_context() at request time without any async work.
+
+        Both stages run in this async context, eliminating any need to spawn
+        a new event loop inside synchronous request handlers.
+
+        Clears all expert state before loading so that experts removed from
+        config are not retained across reloads.
 
         Args:
             experts: List of ExpertAgentConfig objects
@@ -134,24 +142,33 @@ class ChatService:
         """
         from backend.skills.loader import SkillsLoader
 
+        # Clear stale state from any previous load (handles config reload)
+        self._expert_contexts.clear()
+        self._expert_skills.clear()
+        self._expert_skills_full.clear()
+
         self._skills_loader = SkillsLoader(skills_config)
         for expert in experts:
             self._expert_contexts[expert.id] = expert.system_context
-            # Invalidate any previously cached full-skill content for this expert
-            self._expert_skills_full.pop(expert.id, None)
             if expert.skills_urls:
                 try:
+                    # Stage 1: frontmatter only (text cached for Stage 2)
                     metas = await self._skills_loader.load_metadata_from_urls(expert.skills_urls)
                     self._expert_skills[expert.id] = metas
+                    # Stage 2: full content — uses text cache, no extra HTTP requests
+                    full_skills = await self._skills_loader.load_full_skills(metas)
+                    self._expert_skills_full[expert.id] = full_skills
                     logger.info(
-                        "Expert %s: loaded metadata for %d skill(s) from %d URL(s)",
-                        expert.id, len(metas), len(expert.skills_urls),
+                        "Expert %s: loaded %d skill(s) from %d URL(s)",
+                        expert.id, len(full_skills), len(expert.skills_urls),
                     )
                 except Exception as exc:
-                    logger.warning("Expert %s: skills metadata load failed: %s", expert.id, exc)
+                    logger.warning("Expert %s: skills load failed: %s", expert.id, exc)
                     self._expert_skills[expert.id] = []
+                    self._expert_skills_full[expert.id] = []
             else:
                 self._expert_skills[expert.id] = []
+                self._expert_skills_full[expert.id] = []
 
     def load_expert_skills_sync(self, experts: list, skills_config) -> None:
         """Synchronous wrapper for startup use outside an async context."""
@@ -165,11 +182,8 @@ class ChatService:
         """
         Build the extra system context string for a given expert agent.
 
-        Implements Stage 2 of progressive loading: full skill content is
-        fetched lazily on the first call for a given expert and cached for
-        subsequent calls.  Concurrent calls may redundantly trigger Stage 2
-        loading, but both produce identical results and the last write wins
-        (acceptable under CPython's GIL).
+        Full skill content is pre-loaded by load_expert_skills() at startup
+        and stored in _expert_skills_full — this method is purely a read.
 
         Returns None if the ID is unknown, or a combined string of:
           - expert's system_context (if set)
@@ -180,51 +194,24 @@ class ChatService:
             return None
 
         from backend.agents.prompts import build_skills_section
+        from backend.skills.loader import SkillDefinition
 
         parts: List[str] = []
         ctx = self._expert_contexts.get(expert_agent_id, "")
         if ctx:
             parts.append(ctx)
 
-        items = self._expert_skills.get(expert_agent_id, [])
-        if items:
-            # Stage 2: promote SkillMetadata → SkillDefinition (with body content)
-            full_skills = self._expert_skills_full.get(expert_agent_id)
-            if full_skills is None:
-                if hasattr(items[0], 'content'):
-                    # Items are already SkillDefinition (e.g., set directly in tests)
-                    full_skills = items
-                elif self._skills_loader is not None:
-                    full_skills = self._load_full_skills_sync(expert_agent_id, items)
-                else:
-                    full_skills = []
-                self._expert_skills_full[expert_agent_id] = full_skills
-            if full_skills:
-                parts.append(build_skills_section(full_skills))
+        # Full skills pre-populated by load_expert_skills().
+        # Fall back to _expert_skills if items are already SkillDefinition
+        # (test-compat: tests may set _expert_skills directly).
+        full_skills = self._expert_skills_full.get(expert_agent_id)
+        if full_skills is None:
+            items = self._expert_skills.get(expert_agent_id, [])
+            full_skills = [s for s in items if isinstance(s, SkillDefinition)]
+        if full_skills:
+            parts.append(build_skills_section(full_skills))
 
         return "\n\n".join(parts) if parts else None
-
-    def _load_full_skills_sync(self, expert_id: str, metadatas: List) -> List:
-        """Stage 2: synchronously load full skill body for SkillMetadata objects.
-
-        Uses the shared SkillsLoader's raw-text cache, so no additional
-        HTTP requests are needed for URLs already visited in Stage 1.
-        """
-        loop = asyncio.new_event_loop()
-        try:
-            full_skills = loop.run_until_complete(
-                self._skills_loader.load_full_skills(metadatas)
-            )
-            logger.info(
-                "Expert %s: loaded full content for %d skill(s) (Stage 2)",
-                expert_id, len(full_skills),
-            )
-            return full_skills
-        except Exception as exc:
-            logger.warning("Expert %s: Stage 2 skill loading failed: %s", expert_id, exc)
-            return []
-        finally:
-            loop.close()
 
     # ------------------------------------------------------------------
 

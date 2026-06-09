@@ -343,7 +343,11 @@ class SkillsLoader:
         """
         text = text.strip()
         if not text.startswith("---"):
-            name = _name_from_url(source_url)
+            raw_name = _name_from_url(source_url)
+            name = self._sanitize(raw_name)
+            if not name:
+                logger.warning("Skill name from URL rejected by sanitizer: %s", source_url)
+                return None
             return SkillMetadata(
                 id=_make_id(name),
                 name=name,
@@ -360,9 +364,13 @@ class SkillsLoader:
         except Exception as exc:
             logger.warning("YAML parse error in %s: %s", source_url, exc)
             return None
-        name = fm.get("name", "").strip()
-        if not name:
+        raw_name = fm.get("name", "").strip()
+        if not raw_name:
             logger.debug("Skipping skill in %s: missing required 'name' field", source_url)
+            return None
+        name = self._sanitize(raw_name)
+        if not name:
+            logger.warning("Skill '%s' in %s rejected: name contains injection pattern", raw_name, source_url)
             return None
         description = self._sanitize(fm.get("description", "").strip())
         allowed_tools_raw = fm.get("allowed-tools", fm.get("allowed_tools", ""))
@@ -403,12 +411,21 @@ class SkillsLoader:
 
         Re-uses the raw-text cache populated during Stage 1, so no additional
         HTTP request is needed if the skill was already fetched as metadata.
+        Local file:// URIs also check the cache first (populated by load_metadata_from_dir).
         """
         source_url = metadata.source_url
-        if source_url.startswith("file:///"):
+        if source_url.startswith("file://"):
+            # Check text cache first (populated by load_metadata_from_dir)
+            cached = self._text_cache.get(source_url)
+            if cached:
+                text, loaded_at = cached
+                age = (datetime.now(timezone.utc) - loaded_at).total_seconds()
+                if age < self._config.cache_ttl_seconds:
+                    return self._parse_skill_md(text, source_url)
             try:
-                path = Path(source_url[7:])
+                path = Path(urlparse(source_url).path)
                 text = path.read_text(encoding="utf-8")
+                self._text_cache[source_url] = (text, datetime.now(timezone.utc))
                 return self._parse_skill_md(text, source_url)
             except Exception as exc:
                 logger.warning("Failed to load full skill from local path %s: %s", source_url, exc)
