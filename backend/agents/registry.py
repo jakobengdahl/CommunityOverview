@@ -15,6 +15,7 @@ from typing import Dict, Any, Optional, List, Callable, TYPE_CHECKING
 from .config import AgentConfig, AgentsSettings
 from .worker import AgentWorker, ProcessingResult
 from .mcp_loader import MCPLoader
+from backend.skills.loader import SkillsConfig
 
 if TYPE_CHECKING:
     from backend.core import GraphStorage
@@ -39,18 +40,21 @@ class AgentRegistry:
         settings: AgentsSettings,
         graph_storage: "GraphStorage",
         graph_service: "GraphService",
+        skills_config: Optional[SkillsConfig] = None,
     ):
         """
         Initialize the agent registry.
 
         Args:
             settings: Global agent settings
-            graph_storage: GraphStorage for reading agent nodes
+            graph_storage: GraphStorage for reading agent and skill nodes
             graph_service: GraphService for agent tool calls
+            skills_config: Configuration for the skills loading system
         """
         self.settings = settings
         self._storage = graph_storage
         self._service = graph_service
+        self._skills_config = skills_config or SkillsConfig()
 
         # Active workers
         self._workers: Dict[str, AgentWorker] = {}
@@ -189,6 +193,8 @@ class AgentRegistry:
                 mcp_loader=self._mcp_loader,
                 graph_service=self._service,
                 on_result=self._on_result,
+                skills_config=self._skills_config,
+                graph_storage=self._storage,
             )
             worker.start()
             self._workers[config.agent_id] = worker

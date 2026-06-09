@@ -20,6 +20,7 @@ from .config import AgentConfig, AgentsSettings
 from .prompts import build_agent_system_prompt, build_event_user_message
 from .llm_client import LLMClient
 from .mcp_loader import MCPLoader
+from backend.skills.loader import SkillDefinition, SkillsConfig, SkillsLoader
 
 logger = logging.getLogger(__name__)
 
@@ -65,6 +66,8 @@ class AgentWorker:
         mcp_loader: MCPLoader,
         graph_service: Optional[Any] = None,
         on_result: Optional[Callable[[ProcessingResult], None]] = None,
+        skills_config: Optional[SkillsConfig] = None,
+        graph_storage: Optional[Any] = None,
     ):
         """
         Initialize the agent worker.
@@ -73,14 +76,18 @@ class AgentWorker:
             config: Agent configuration
             settings: Global agent settings
             mcp_loader: MCP loader for tool access
-            graph_service: GraphService for graph operations
+            graph_service: GraphService for agent tool calls
             on_result: Optional callback for processing results
+            skills_config: SkillsConfig for the skills loader
+            graph_storage: GraphStorage for reading linked Skill nodes
         """
         self.config = config
         self.settings = settings
         self.mcp_loader = mcp_loader
         self.graph_service = graph_service
         self.on_result = on_result
+        self._skills_config = skills_config or SkillsConfig()
+        self._graph_storage = graph_storage
 
         # Event queue
         self._queue: queue.Queue[Optional[EventItem]] = queue.Queue()
@@ -92,6 +99,9 @@ class AgentWorker:
 
         # LLM client (created on demand)
         self._llm_client: Optional[LLMClient] = None
+
+        # Cached skills (loaded once per config, reset on reload_config)
+        self._cached_skills: Optional[List[SkillDefinition]] = None
 
         # Statistics
         self.events_processed = 0
@@ -170,9 +180,66 @@ class AgentWorker:
         """
         with self._lock:
             self.config = new_config
-            # Reset LLM client to pick up any changes
             self._llm_client = None
+            self._cached_skills = None  # Force skill reload on next event
             logger.info(f"Agent {self.agent_id}: Configuration reloaded")
+
+    def _load_skills(self) -> List[SkillDefinition]:
+        """
+        Load skills from configured URLs and linked Skill graph nodes.
+
+        Called once on first event (or after reload_config) and the result
+        is cached for the lifetime of the current config. Uses a temporary
+        asyncio event loop since the worker thread has none.
+        """
+        import asyncio
+
+        skills: List[SkillDefinition] = []
+
+        # Load from URL list
+        if self.config.skills_urls:
+            try:
+                loader = SkillsLoader(self._skills_config)
+                skills = asyncio.run(loader.load_from_urls(self.config.skills_urls))
+                logger.info(
+                    f"Agent {self.config.name}: Loaded {len(skills)} skill(s) from URLs"
+                )
+            except Exception as exc:
+                logger.warning(f"Agent {self.config.name}: Skills URL load failed: {exc}")
+
+        # Load from linked Skill nodes in the graph
+        if self.config.skill_node_ids and self._graph_storage:
+            for node_id in self.config.skill_node_ids:
+                try:
+                    node = self._graph_storage.get_node(node_id)
+                    if not node:
+                        logger.debug("Skill node %s not found in graph", node_id)
+                        continue
+                    node_type = node.type.value if hasattr(node.type, "value") else str(node.type)
+                    if node_type != "Skill":
+                        logger.warning("Node %s is type %s, expected Skill", node_id, node_type)
+                        continue
+                    meta = node.metadata or {}
+                    content = meta.get("content", "")
+                    if not content:
+                        logger.debug("Skill node %s has no content in metadata", node_id)
+                        continue
+                    skill = SkillDefinition(
+                        id=node.id,
+                        name=node.name,
+                        description=node.description or "",
+                        content=content[: self._skills_config.max_skill_body_chars],
+                        allowed_tools=meta.get("allowed_tools", []),
+                        when_to_use=meta.get("when_to_use"),
+                        effort=meta.get("effort"),
+                        source_url=meta.get("source_url", f"graph://skill/{node.id}"),
+                    )
+                    skills.append(skill)
+                    logger.debug("Loaded Skill node: %s", node.name)
+                except Exception as exc:
+                    logger.warning("Failed to load Skill node %s: %s", node_id, exc)
+
+        return skills
 
     def _process_loop(self) -> None:
         """Main processing loop."""
@@ -223,11 +290,16 @@ class AgentWorker:
                 except Exception as e:
                     logger.warning(f"Agent {self.config.name}: Could not load schema: {e}")
 
+            # Load skills lazily (once per config lifecycle)
+            if self._cached_skills is None:
+                self._cached_skills = self._load_skills()
+
             # Build system prompt
             system_prompt = build_agent_system_prompt(
                 task_prompt=self.config.prompts.task_prompt,
                 available_tools=tool_names,
                 schema=schema,
+                skills=self._cached_skills or None,
             )
 
             # Build user message with event

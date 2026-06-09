@@ -88,20 +88,10 @@ class ExpertAgentConfig(BaseModel):
     skills_urls: List[str] = Field(default_factory=list)  # URLs to SKILL.md files or GitHub repos
 
 
-class SkillsConfig(BaseModel):
-    """Configuration for the skills loading system."""
-    skills_dir: str = "config/default/skills"
-    allow_external_skills: bool = True
-    trusted_domains: List[str] = Field(default_factory=lambda: [
-        "github.com",
-        "raw.githubusercontent.com",
-        "agentskills.io",
-        "api.github.com",
-    ])
-    cache_ttl_seconds: int = 3600
-    max_skill_content_bytes: int = 50_000
-    max_skill_body_chars: int = 8_000
-    github_token: Optional[str] = None
+try:
+    from .skills.loader import SkillsConfig
+except ImportError:
+    from backend.skills.loader import SkillsConfig  # noqa: F401 — re-exported for callers
 
 
 class LanguagePolicyConfig(BaseModel):

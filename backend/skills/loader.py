@@ -6,9 +6,11 @@ Supports:
 - Claude Code extensions (when-to-use, allowed-tools, effort, etc.)
 - Direct file URLs (raw.githubusercontent.com or any raw SKILL.md URL)
 - GitHub repository URLs (auto-discovers skills in standard directories)
+- Local filesystem directory (skills_dir config option)
 
 Security:
 - Content is sanitized against prompt injection patterns
+- Dangerous HTML elements stripped; safe markup preserved
 - Domain allowlist configurable via SkillsConfig
 - Maximum content size enforced
 - Failed fetches are logged and skipped without crashing
@@ -36,7 +38,7 @@ GITHUB_SKILL_DIRS = [
     "skills",
 ]
 
-# Prompt injection patterns that cause a skill to be rejected
+# Prompt injection patterns — skills matching these are rejected outright
 _INJECTION_PATTERNS = [
     r"ignore\s+(all\s+)?previous\s+instructions",
     r"\bSYSTEM:\s",
@@ -47,9 +49,14 @@ _INJECTION_PATTERNS = [
 ]
 _INJECTION_RE = re.compile("|".join(_INJECTION_PATTERNS), re.IGNORECASE)
 
-# Maximum raw content size (bytes)
+# Dangerous HTML elements that may embed executable content or exfiltrate data
+_DANGEROUS_TAG_RE = re.compile(
+    r"<(script|iframe|style|form|link|object|embed|base|meta)[^>]*>.*?</\1>|"
+    r"<(script|iframe|style|form|link|object|embed|base|meta)[^>]*/?>",
+    re.IGNORECASE | re.DOTALL,
+)
+
 DEFAULT_MAX_CONTENT_BYTES = 50_000
-# Maximum prompt body length (characters) injected into LLM context
 DEFAULT_MAX_BODY_CHARS = 8_000
 
 
@@ -66,7 +73,7 @@ class SkillsConfig(BaseModel):
     cache_ttl_seconds: int = 3600
     max_skill_content_bytes: int = DEFAULT_MAX_CONTENT_BYTES
     max_skill_body_chars: int = DEFAULT_MAX_BODY_CHARS
-    github_token: Optional[str] = None  # For GitHub API rate-limit relief
+    github_token: Optional[str] = None
 
 
 class SkillDefinition(BaseModel):
@@ -79,8 +86,8 @@ class SkillDefinition(BaseModel):
     name: str
     description: str
     content: str                          # Markdown body — the actual prompt text
-    allowed_tools: List[str] = Field(default_factory=list)  # from allowed-tools field
-    when_to_use: Optional[str] = None     # Claude Code extension
+    allowed_tools: List[str] = Field(default_factory=list)
+    when_to_use: Optional[str] = None     # Claude Code / agentskills.io extension
     effort: Optional[str] = None          # Claude Code extension
     license: Optional[str] = None
     metadata: Dict[str, str] = Field(default_factory=dict)
@@ -92,6 +99,12 @@ class SkillDefinition(BaseModel):
         parts = [f'<skill name="{self.name}">']
         if self.when_to_use:
             parts.append(f"When to use: {self.when_to_use}")
+            parts.append("")
+        if self.effort:
+            parts.append(f"Effort level: {self.effort}")
+            parts.append("")
+        if self.description:
+            parts.append(f"Description: {self.description}")
             parts.append("")
         parts.append(self.content)
         parts.append("</skill>")
@@ -106,7 +119,7 @@ class _UrlType(str, Enum):
 
 class SkillsLoader:
     """
-    Loads SKILL.md skills from remote URLs.
+    Loads SKILL.md skills from remote URLs and local directories.
 
     Usage:
         loader = SkillsLoader(config)
@@ -115,31 +128,67 @@ class SkillsLoader:
 
     def __init__(self, config: Optional[SkillsConfig] = None):
         self._config = config or SkillsConfig()
+        # Cache: normalised_url -> (skills, loaded_at)
         self._cache: Dict[str, tuple[List[SkillDefinition], datetime]] = {}
 
     async def load_from_urls(self, urls: List[str]) -> List[SkillDefinition]:
         """
-        Load skills from a list of URLs.
+        Load skills from a list of URLs, with deduplication by skill ID.
 
         Failures are logged and skipped; the caller always gets a (possibly
         empty) list back.
         """
         results: List[SkillDefinition] = []
+        seen_ids: set = set()
+
         for url in urls:
             try:
                 skills = await self._load_single(url)
-                results.extend(skills)
+                for skill in skills:
+                    if skill.id not in seen_ids:
+                        seen_ids.add(skill.id)
+                        results.append(skill)
+                    else:
+                        logger.debug("Skipping duplicate skill id=%s from %s", skill.id, url)
                 logger.info("Loaded %d skill(s) from %s", len(skills), url)
             except Exception as exc:
                 logger.warning("Failed to load skills from %s: %s", url, exc)
+
+        return results
+
+    async def load_from_dir(self, skills_dir: Optional[str] = None) -> List[SkillDefinition]:
+        """
+        Load skills from a local directory of SKILL.md files.
+
+        Searches for SKILL.md files in <skills_dir>/<skill-name>/SKILL.md.
+        Falls back to the configured skills_dir if no path is given.
+        """
+        dir_path = Path(skills_dir or self._config.skills_dir)
+        if not dir_path.exists():
+            logger.debug("Skills directory does not exist: %s", dir_path)
+            return []
+
+        results: List[SkillDefinition] = []
+        for skill_md in sorted(dir_path.rglob("SKILL.md")):
+            try:
+                content = skill_md.read_text(encoding="utf-8")
+                source_url = skill_md.as_uri()
+                skill = self._parse_skill_md(content, source_url=source_url)
+                if skill:
+                    results.append(skill)
+                    logger.debug("Loaded local skill: %s", skill.name)
+            except Exception as exc:
+                logger.warning("Failed to load local skill %s: %s", skill_md, exc)
+
+        logger.info("Loaded %d local skill(s) from %s", len(results), dir_path)
         return results
 
     async def _load_single(self, url: str) -> List[SkillDefinition]:
         """Dispatch to the right loader based on URL type."""
-        url_type = self._classify_url(url)
+        cache_key = _normalise_url(url)
+        url_type = self._classify_url(cache_key)
 
-        # Cache check
-        cached = self._cache.get(url)
+        cached = self._cache.get(cache_key)
         if cached:
             skills, loaded_at = cached
             age = (datetime.now(timezone.utc) - loaded_at).total_seconds()
@@ -147,23 +196,26 @@ class SkillsLoader:
                 return skills
 
         if url_type == _UrlType.GITHUB_REPO:
-            skills = await self._load_github_repo(url)
+            skills = await self._load_github_repo(cache_key)
         elif url_type == _UrlType.AGENTSKILLS_IO:
-            skills = await self._load_agentskills_io(url)
+            skills = await self._load_agentskills_io(cache_key)
         else:
-            skills = await self._load_direct_file(url)
+            skills = await self._load_direct_file(cache_key)
 
-        self._cache[url] = (skills, datetime.now(timezone.utc))
+        self._cache[cache_key] = (skills, datetime.now(timezone.utc))
         return skills
 
     def _classify_url(self, url: str) -> _UrlType:
         """Determine what kind of URL this is."""
         if "agentskills.io" in url and "/skills/" in url and not url.endswith("SKILL.md"):
             return _UrlType.AGENTSKILLS_IO
-        if "github.com" in url and not url.endswith(".md") and "raw.githubusercontent.com" not in url:
-            # Plain github.com URL without a specific file path = repo
+        if (
+            "github.com" in url
+            and "raw.githubusercontent.com" not in url
+            and not url.endswith(".md")
+        ):
             parts = url.rstrip("/").split("github.com/")[-1].split("/")
-            if len(parts) <= 2:  # owner/repo only
+            if len(parts) <= 2:
                 return _UrlType.GITHUB_REPO
         return _UrlType.DIRECT_FILE
 
@@ -198,7 +250,6 @@ class SkillsLoader:
 
     async def _load_direct_file(self, url: str) -> List[SkillDefinition]:
         """Load a single SKILL.md file from a direct URL."""
-        # Convert github.com blob URLs to raw URLs
         url = _github_blob_to_raw(url)
         text = await self._fetch_text(url)
         skill = self._parse_skill_md(text, source_url=url)
@@ -248,27 +299,28 @@ class SkillsLoader:
         """
         Load a skill from agentskills.io.
 
-        Attempts the raw SKILL.md first; falls back to page scraping.
-        This is best-effort — if the site structure changes this may break.
+        Attempts the raw SKILL.md first via embedded GitHub links; falls
+        back to treating the page content itself as SKILL.md.
+        Best-effort — if the site structure changes this may break.
         """
-        # Try to find a raw SKILL.md link by looking at the page
         try:
             page = await self._fetch_text(url)
-            # Look for raw GitHub links embedded in the page
             raw_links = re.findall(
                 r'https://raw\.githubusercontent\.com/[^\s"\'<>]+SKILL\.md',
                 page,
             )
             skills: List[SkillDefinition] = []
             for raw_url in raw_links:
-                text = await self._fetch_text(raw_url)
-                skill = self._parse_skill_md(text, source_url=raw_url)
-                if skill:
-                    skills.append(skill)
+                try:
+                    text = await self._fetch_text(raw_url)
+                    skill = self._parse_skill_md(text, source_url=raw_url)
+                    if skill:
+                        skills.append(skill)
+                except Exception as exc:
+                    logger.warning("agentskills.io: failed to fetch raw link %s: %s", raw_url, exc)
             if skills:
                 return skills
 
-            # Fallback: try to extract skill content from the page directly
             skill = self._parse_skill_md(page, source_url=url)
             if skill:
                 return [skill]
@@ -285,8 +337,7 @@ class SkillsLoader:
         """
         text = text.strip()
         if not text.startswith("---"):
-            # No frontmatter — treat entire content as a plain skill body
-            # with auto-generated name from URL
+            # No frontmatter — treat entire content as plain skill body
             name = _name_from_url(source_url)
             sanitized = self._sanitize(text)
             if not sanitized:
@@ -299,7 +350,6 @@ class SkillsLoader:
                 source_url=source_url,
             )
 
-        # Split on first closing ---
         parts = text.split("---", 2)
         if len(parts) < 3:
             logger.debug("Malformed frontmatter in %s", source_url)
@@ -321,20 +371,30 @@ class SkillsLoader:
             logger.debug("Skipping skill in %s: missing required 'name' field", source_url)
             return None
 
-        # Parse allowed-tools (space-separated string)
-        allowed_tools_raw = fm.get("allowed-tools", "")
-        allowed_tools = allowed_tools_raw.split() if allowed_tools_raw else []
+        if not description:
+            logger.debug("Skill '%s' in %s has no description field", name, source_url)
 
-        # Parse metadata sub-map
+        # allowed-tools: spec says space-separated string; YAML may also produce a list
+        allowed_tools_raw = fm.get("allowed-tools", fm.get("allowed_tools", ""))
+        if isinstance(allowed_tools_raw, list):
+            allowed_tools = [str(t).strip() for t in allowed_tools_raw if t]
+        else:
+            allowed_tools = str(allowed_tools_raw).split() if allowed_tools_raw else []
+
         raw_meta = fm.get("metadata", {})
         meta = {str(k): str(v) for k, v in raw_meta.items()} if isinstance(raw_meta, dict) else {}
 
         skill_id = meta.get("id") or _make_id(name)
 
-        # Sanitize body
-        sanitized_body = self._sanitize(body)
+        body_stripped = body.strip()
+        sanitized_body = self._sanitize(body_stripped)
+        # Reject the entire skill if a non-empty body was wiped by the sanitizer
+        # (injection pattern detected — not just a skill with no body at all)
+        if body_stripped and not sanitized_body:
+            logger.warning("Skill '%s' from %s rejected: body contains injection pattern", name, source_url)
+            return None
         if not sanitized_body and not description:
-            logger.debug("Skipping skill '%s': empty content after sanitization", name)
+            logger.debug("Skipping skill '%s': no content", name)
             return None
 
         return SkillDefinition(
@@ -352,22 +412,28 @@ class SkillsLoader:
 
     def _sanitize(self, text: str) -> str:
         """
-        Basic prompt injection guard.
+        Prompt injection guard.
 
-        Rejects skills containing known injection patterns; strips
-        HTML-like tags to prevent XML injection in LLM context.
+        Rejects skills containing known injection patterns.
+        Strips only dangerous HTML elements (script, iframe, etc.) that
+        could embed executable content; safe markup is preserved so that
+        skill authors can use <example>, <code>, etc. in their content.
         """
         if _INJECTION_RE.search(text):
-            logger.warning("Skill content rejected: contains injection pattern")
+            logger.warning("Skill content rejected: contains prompt injection pattern")
             return ""
-        # Strip HTML/XML tags (keep content between them)
-        cleaned = re.sub(r"<[^>]+>", "", text)
+        cleaned = _DANGEROUS_TAG_RE.sub("", text)
         return cleaned.strip()
 
 
 # ---------------------------------------------------------------------------
 # Module-level helpers
 # ---------------------------------------------------------------------------
+
+def _normalise_url(url: str) -> str:
+    """Normalise a URL for use as a cache key (strip trailing slashes)."""
+    return url.rstrip("/")
+
 
 def _github_blob_to_raw(url: str) -> str:
     """Convert a github.com/blob/ URL to raw.githubusercontent.com."""
@@ -416,12 +482,10 @@ def _parse_yaml_simple(text: str) -> Dict[str, Any]:
     """
     Minimal YAML parser for SKILL.md frontmatter.
 
-    Handles the subset of YAML used in practice:
-    - Simple key: value pairs
-    - Nested key-value blocks (indented)
-    - Does NOT support lists, anchors, or multi-line scalars
-
-    Uses PyYAML when available; falls back to line-by-line parsing.
+    Uses PyYAML when available; falls back to line-by-line parsing for the
+    simple subset used in practice (scalar values and one-level nested maps).
+    PyYAML handles lists and complex types correctly; the fallback does not
+    support YAML list syntax.
     """
     try:
         import yaml
