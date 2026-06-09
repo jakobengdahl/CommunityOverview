@@ -202,10 +202,15 @@ class AgentWorker:
         import asyncio
 
         skills: List[SkillDefinition] = []
+        seen_ids: set = set()  # deduplication key across all three source types
 
-        # Ensure shared loader exists (persists cache across _load_skills calls)
-        if self._skills_loader is None:
-            self._skills_loader = SkillsLoader(self._skills_config)
+        # Get or create the shared loader under the worker lock to avoid a data
+        # race with reload_config(), which nulls self._skills_loader from a
+        # different thread while this method may be mid-execution.
+        with self._lock:
+            if self._skills_loader is None:
+                self._skills_loader = SkillsLoader(self._skills_config)
+            loader = self._skills_loader
 
         loop = asyncio.new_event_loop()
         try:
@@ -213,9 +218,12 @@ class AgentWorker:
             if self.config.skills_urls:
                 try:
                     url_skills = loop.run_until_complete(
-                        self._skills_loader.load_from_urls(self.config.skills_urls)
+                        loader.load_from_urls(self.config.skills_urls)
                     )
-                    skills.extend(url_skills)
+                    for s in url_skills:
+                        if s.id not in seen_ids:
+                            seen_ids.add(s.id)
+                            skills.append(s)
                     logger.info(
                         f"Agent {self.config.name}: Loaded {len(url_skills)} skill(s) from URLs"
                     )
@@ -224,11 +232,18 @@ class AgentWorker:
 
             # Load from local skills directory (always attempted so skills_dir is honoured)
             try:
-                local_skills = loop.run_until_complete(self._skills_loader.load_from_dir())
-                if local_skills:
-                    skills.extend(local_skills)
+                local_skills = loop.run_until_complete(loader.load_from_dir())
+                added = 0
+                for s in local_skills:
+                    if s.id not in seen_ids:
+                        seen_ids.add(s.id)
+                        skills.append(s)
+                        added += 1
+                    else:
+                        logger.debug("Skipping duplicate local skill id=%s", s.id)
+                if added:
                     logger.info(
-                        f"Agent {self.config.name}: Loaded {len(local_skills)} skill(s) from local dir"
+                        f"Agent {self.config.name}: Loaded {added} skill(s) from local dir"
                     )
             except Exception as exc:
                 logger.warning(f"Agent {self.config.name}: Local skills dir load failed: {exc}")
@@ -262,8 +277,12 @@ class AgentWorker:
                         effort=meta.get("effort"),
                         source_url=meta.get("source_url", f"graph://skill/{node.id}"),
                     )
-                    skills.append(skill)
-                    logger.debug("Loaded Skill node: %s", node.name)
+                    if skill.id not in seen_ids:
+                        seen_ids.add(skill.id)
+                        skills.append(skill)
+                        logger.debug("Loaded Skill node: %s", node.name)
+                    else:
+                        logger.debug("Skipping duplicate graph skill id=%s", skill.id)
                 except Exception as exc:
                     logger.warning("Failed to load Skill node %s: %s", node_id, exc)
 

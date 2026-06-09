@@ -85,13 +85,12 @@ class ExpertAgentConfig(BaseModel):
     intro_sv: str = ""
     intro_en: str = ""
     system_context: str = ""
-    skills_urls: List[str] = Field(default_factory=list)  # URLs to SKILL.md files or GitHub repos
+    # URLs to SKILL.md files or GitHub repos.
+    # Loaded and injected into system_context at startup — wired in server.py (TODO: Phase 3).
+    skills_urls: List[str] = Field(default_factory=list)
 
 
-try:
-    from .skills.loader import SkillsConfig
-except ImportError:
-    from backend.skills.loader import SkillsConfig  # noqa: F401 — re-exported for callers
+from backend.skills.loader import SkillsConfig  # noqa: F401 — re-exported for callers
 
 
 class LanguagePolicyConfig(BaseModel):

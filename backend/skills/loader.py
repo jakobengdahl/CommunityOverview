@@ -24,6 +24,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import List, Optional, Dict, Any
 from enum import Enum
+from urllib.parse import urlparse
 
 import httpx
 from pydantic import BaseModel, Field
@@ -223,11 +224,20 @@ class SkillsLoader:
         return _UrlType.DIRECT_FILE
 
     def _validate_domain(self, url: str) -> None:
-        """Raise ValueError if the domain is not trusted."""
+        """Raise ValueError if the domain is not trusted.
+
+        Matches on hostname only (not path or query) to prevent bypass via
+        paths like https://evil.com/github.com/... or subdomains like
+        raw.githubusercontent.com.evil.io.
+        """
         if not self._config.allow_external_skills:
             raise ValueError(f"External skills are disabled (url: {url})")
+        try:
+            hostname = urlparse(url).hostname or ""
+        except Exception:
+            raise ValueError(f"Cannot parse URL hostname: {url}")
         for domain in self._config.trusted_domains:
-            if domain in url:
+            if hostname == domain or hostname.endswith("." + domain):
                 return
         raise ValueError(f"Domain not in trusted_domains allowlist: {url}")
 

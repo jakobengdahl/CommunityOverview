@@ -369,3 +369,44 @@ class TestMakeId:
 
     def test_stable(self):
         assert _make_id("test") == _make_id("test")
+
+
+# ---------------------------------------------------------------------------
+# Domain validation (security)
+# ---------------------------------------------------------------------------
+
+class TestValidateDomain:
+    def _loader_with_domains(self, domains):
+        config = SkillsConfig(allow_external_skills=True, trusted_domains=domains)
+        return SkillsLoader(config)
+
+    def test_exact_domain_allowed(self):
+        loader = self._loader_with_domains(["github.com"])
+        loader._validate_domain("https://github.com/owner/repo/SKILL.md")  # must not raise
+
+    def test_subdomain_allowed(self):
+        loader = self._loader_with_domains(["githubusercontent.com"])
+        loader._validate_domain("https://raw.githubusercontent.com/owner/repo/HEAD/SKILL.md")
+
+    def test_path_spoofing_rejected(self):
+        """URL with trusted domain in path must NOT pass domain check."""
+        loader = self._loader_with_domains(["github.com"])
+        with pytest.raises(ValueError, match="allowlist"):
+            loader._validate_domain("https://evil.com/github.com/payload")
+
+    def test_subdomain_spoofing_rejected(self):
+        """Lookalike subdomain must NOT pass domain check."""
+        loader = self._loader_with_domains(["github.com"])
+        with pytest.raises(ValueError, match="allowlist"):
+            loader._validate_domain("https://not-github.com/repo/SKILL.md")
+
+    def test_untrusted_domain_rejected(self):
+        loader = self._loader_with_domains(["github.com"])
+        with pytest.raises(ValueError, match="allowlist"):
+            loader._validate_domain("https://malicious.io/evil/SKILL.md")
+
+    def test_external_skills_disabled(self):
+        config = SkillsConfig(allow_external_skills=False)
+        loader = SkillsLoader(config)
+        with pytest.raises(ValueError, match="disabled"):
+            loader._validate_domain("https://github.com/org/repo/SKILL.md")

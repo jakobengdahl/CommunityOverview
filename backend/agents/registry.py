@@ -59,6 +59,7 @@ class AgentRegistry:
         # Active workers
         self._workers: Dict[str, AgentWorker] = {}
         self._lock = threading.Lock()
+        self._init_lock = threading.Lock()  # serialises _ensure_initialized()
 
         # MCP loader (shared across agents)
         self._mcp_loader: Optional[MCPLoader] = None
@@ -96,19 +97,25 @@ class AgentRegistry:
         if self._mcp_loader is not None:
             return True
 
-        self._mcp_loader = MCPLoader(self.settings.mcp_integrations)
+        # Double-checked locking: serialise concurrent callers (e.g. two rapid
+        # handle_agent_updated() calls) so MCPLoader is only connected once.
+        with self._init_lock:
+            if self._mcp_loader is not None:
+                return True
 
-        try:
-            tool_results = self._mcp_loader.connect_all()
-            total_tools = sum(len(tools) for tools in tool_results.values())
-            logger.info(
-                f"MCP loader initialized: {total_tools} tools "
-                f"from {len(tool_results)} integrations"
-            )
-        except Exception as e:
-            logger.error(f"Failed to initialize MCP loader: {e}")
-            self._mcp_loader = None
-            return False
+            self._mcp_loader = MCPLoader(self.settings.mcp_integrations)
+
+            try:
+                tool_results = self._mcp_loader.connect_all()
+                total_tools = sum(len(tools) for tools in tool_results.values())
+                logger.info(
+                    f"MCP loader initialized: {total_tools} tools "
+                    f"from {len(tool_results)} integrations"
+                )
+            except Exception as e:
+                logger.error(f"Failed to initialize MCP loader: {e}")
+                self._mcp_loader = None
+                return False
 
         return True
 
