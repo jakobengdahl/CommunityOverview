@@ -1,0 +1,175 @@
+{
+  "schema": {
+    "node_types": {
+      "SavedView": {
+        "fields": ["name", "description", "summary", "metadata"],
+        "static": true,
+        "category": "system",
+        "description": "Saved graph view snapshots for quick navigation",
+        "color": "#6B7280",
+        "icon": "BookmarkFill"
+      },
+      "VisualizationView": {
+        "fields": ["name", "description", "summary", "metadata"],
+        "static": true,
+        "category": "system",
+        "description": "Saved graph view snapshots (legacy)",
+        "color": "#6B7280",
+        "icon": "BookmarkFill"
+      },
+      "EventSubscription": {
+        "fields": ["name", "description", "summary", "metadata"],
+        "static": false,
+        "category": "system",
+        "description": "Webhook subscription for graph mutation events",
+        "color": "#8B5CF6",
+        "icon": "BellFill"
+      },
+      "Agent": {
+        "fields": ["name", "description", "summary", "metadata"],
+        "static": false,
+        "category": "system",
+        "description": "AI agent configuration",
+        "color": "#EC4899",
+        "icon": "CpuFill"
+      },
+      "Actor": {
+        "fields": ["name", "description", "summary", "tags", "subtypes"],
+        "category": "domain",
+        "description": "Statistical offices, international organisations and other bodies involved in official statistics production",
+        "color": "#3B82F6",
+        "icon": "PersonFill"
+      },
+      "StatisticalProgramme": {
+        "fields": ["name", "description", "summary", "tags", "subtypes"],
+        "category": "domain",
+        "description": "Statistical programmes, surveys or coordinated statistical production activities (e.g. Labour Force Survey, Party Preference Survey)",
+        "color": "#10B981",
+        "icon": "ClipboardDataFill"
+      },
+      "DataSet": {
+        "fields": ["name", "description", "summary", "tags", "subtypes"],
+        "category": "domain",
+        "description": "Published statistical datasets or aggregated data tables produced by statistical programmes",
+        "color": "#06B6D4",
+        "icon": "DatabaseFill"
+      },
+      "DataStructure": {
+        "fields": ["name", "description", "summary", "tags", "subtypes"],
+        "category": "domain",
+        "description": "Data structures, schemas or dimensional models defining the layout of statistical datasets (identifiers, measures, attributes)",
+        "color": "#8B5CF6",
+        "icon": "Diagram3Fill"
+      },
+      "InstanceVariable": {
+        "fields": ["name", "description", "summary", "tags", "subtypes"],
+        "category": "domain",
+        "description": "Variables or dimensions observed in a dataset or data structure, with a defined role (identifier or measure)",
+        "color": "#14B8A6",
+        "icon": "Sliders"
+      },
+      "Concept": {
+        "fields": ["name", "description", "summary", "tags", "subtypes"],
+        "category": "domain",
+        "description": "Statistical concepts measured by variables (e.g. unemployment, region, age, vote share)",
+        "color": "#F97316",
+        "icon": "LightbulbFill"
+      },
+      "UnitType": {
+        "fields": ["name", "description", "summary", "tags", "subtypes"],
+        "category": "domain",
+        "description": "Units of observation such as persons, households, enterprises or regions",
+        "color": "#EF4444",
+        "icon": "PeopleFill"
+      },
+      "CodeList": {
+        "fields": ["name", "description", "summary", "tags", "subtypes"],
+        "category": "domain",
+        "description": "Controlled code lists, classifications or enumerations used by variables (e.g. sex codes, labour status codes, NUTS regions)",
+        "color": "#FBBF24",
+        "icon": "ListOl"
+      }
+    },
+    "relationship_types": {
+      "BELONGS_TO": {
+        "description": "Belongs to (actor belongs to network or system)"
+      },
+      "PART_OF": {
+        "description": "Part of (variable is part of a data structure, NSI is part of the ESS)"
+      },
+      "PRODUCES": {
+        "description": "Produces (statistical programme produces dataset, actor produces statistics)"
+      },
+      "HAS_STRUCTURE": {
+        "description": "Has structure (dataset has a defined data structure)"
+      },
+      "HAS_VARIABLE": {
+        "description": "Has variable (data structure contains an instance variable)"
+      },
+      "MEASURES": {
+        "description": "Measures (instance variable measures a concept)"
+      },
+      "OBSERVED_FOR": {
+        "description": "Observed for (instance variable is observed for a unit type)"
+      },
+      "USES_CODE_LIST": {
+        "description": "Uses code list (instance variable uses a code list for its values)"
+      },
+      "RELATES_TO": {
+        "description": "Relates to (general connection)"
+      }
+    }
+  },
+  "presentation": {
+    "title": "European Statistical System — Metadata Knowledge Graph",
+    "introduction": "Explore the metadata landscape of the European Statistical System (ESS). This graph maps statistical offices, programmes, datasets, data structures, variables, concepts, code lists and their relationships.\n\nTry asking:\n• \"Which NSIs are part of the ESS?\"\n• \"Show the data structure for the LFS dataset\"\n• \"What variables measure labour market status?\"\n• \"Which code lists are used in the Party Preference Survey?\"",
+    "colors": {
+      "Actor": "#3B82F6",
+      "StatisticalProgramme": "#10B981",
+      "DataSet": "#06B6D4",
+      "DataStructure": "#8B5CF6",
+      "InstanceVariable": "#14B8A6",
+      "Concept": "#F97316",
+      "UnitType": "#EF4444",
+      "CodeList": "#FBBF24",
+      "SavedView": "#6B7280",
+      "VisualizationView": "#6B7280",
+      "EventSubscription": "#8B5CF6",
+      "Agent": "#EC4899"
+    },
+    "prompt_prefix": "You are a knowledge agent for the European Statistical System (ESS) metadata knowledge graph. The graph contains statistical offices (NSIs), international statistical organisations, statistical programmes, datasets, data structures, instance variables, concepts, unit types and code lists.\n\nKey node types and their roles:\n- **Actor**: Statistical offices (NSIs) and international organisations (Eurostat, UNSD, OECD, IMF, ECB, BIS, World Bank, FAO, ILO, WHO)\n- **StatisticalProgramme**: Recurring statistical production activities (e.g. Labour Force Survey, Party Preference Survey)\n- **DataSet**: Published aggregate tables produced by statistical programmes\n- **DataStructure**: Dimensional layouts defining identifiers and measures for datasets\n- **InstanceVariable**: Concrete variables used in a data structure, with roles (identifier or measure)\n- **Concept**: Abstract statistical concepts that variables measure (e.g. Region, Sex, Labour market status)\n- **UnitType**: Units of observation (e.g. Person)\n- **CodeList**: Enumerated value sets used by coded variables (e.g. sex codes, NUTS regions, political party codes)\n\nKey relationships:\n- StatisticalProgramme PRODUCES DataSet\n- DataSet HAS_STRUCTURE DataStructure\n- DataStructure HAS_VARIABLE InstanceVariable\n- InstanceVariable MEASURES Concept\n- InstanceVariable OBSERVED_FOR UnitType\n- InstanceVariable USES_CODE_LIST CodeList\n- Actor PART_OF network/system",
+    "prompt_suffix": "Always suggest exploring related metadata when relevant (e.g. from a dataset, suggest looking at its structure and variables). Ask for confirmation before making changes to the graph.",
+    "default_language": "en",
+    "language_policy": {
+      "mode": "preferred",
+      "primary_language": "en",
+      "allowed_languages": ["en", "sv"],
+      "description_en": "English is the primary language. Swedish is accepted when natural or established.",
+      "description_sv": "Engelska är huvudspråk. Svenska accepteras när det är naturligt eller etablerat."
+    },
+    "expert_agents": [
+      {
+        "id": "metadata-expert",
+        "name": "Metadata Expert",
+        "name_en": "Metadata Expert",
+        "specialty": "Statistical metadata, GSIM, variables, concepts and code lists",
+        "specialty_en": "Statistical metadata, GSIM, variables, concepts and code lists",
+        "color": "#14B8A6",
+        "icon": "TagsFill",
+        "intro_en": "Hello! I'm the Metadata Expert. I can help with questions about statistical metadata, variable definitions, data structures, concepts, code lists and how these relate in the GSIM-aligned metadata model.",
+        "system_context": "You are an expert on statistical metadata. You have deep knowledge of GSIM (Generic Statistical Information Model), SDMX, variable definitions, data structures, concepts, code lists, and how metadata flows through the statistical production process."
+      },
+      {
+        "id": "ess-expert",
+        "name": "ESS Expert",
+        "name_en": "ESS Expert",
+        "specialty": "European Statistical System, NSIs and international cooperation",
+        "specialty_en": "European Statistical System, NSIs and international cooperation",
+        "color": "#3B82F6",
+        "icon": "GlobeFill",
+        "intro_en": "Hello! I'm the ESS Expert. I can help with questions about the European Statistical System, its member NSIs, Eurostat coordination, international statistical cooperation and the SDMX sponsor organisations.",
+        "system_context": "You are an expert on the European Statistical System (ESS). You know the roles of Eurostat, national statistical institutes, EEA partners, and international organisations (SDMX sponsors, UN agencies). You understand ESCoP, Regulation 223/2009, and how statistical cooperation works across borders."
+      }
+    ]
+  }
+}
