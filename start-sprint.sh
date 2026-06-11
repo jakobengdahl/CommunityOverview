@@ -116,13 +116,13 @@ fi
 # =====================
 mkdir -p "$DATA_DIR/active" "$DATA_DIR/examples"
 
-if [ ! -f "$ACTIVE_DATA" ]; then
-    PROFILE_GRAPH="$SPRINT_CONFIG_DIR/graph.json"
-    DEFAULT_EXAMPLE="$DATA_DIR/examples/default.json"
-    if [ -f "$PROFILE_GRAPH" ]; then
-        echo "  Loading sprint graph data..."
-        cp "$PROFILE_GRAPH" "$ACTIVE_DATA"
-    elif [ -f "$DEFAULT_EXAMPLE" ]; then
+PROFILE_GRAPH="$SPRINT_CONFIG_DIR/graph.json"
+DEFAULT_EXAMPLE="$DATA_DIR/examples/default.json"
+if [ -f "$PROFILE_GRAPH" ]; then
+    echo "  Loading sprint graph data..."
+    cp "$PROFILE_GRAPH" "$ACTIVE_DATA"
+elif [ ! -f "$ACTIVE_DATA" ]; then
+    if [ -f "$DEFAULT_EXAMPLE" ]; then
         echo "  Loading default example data..."
         cp "$DEFAULT_EXAMPLE" "$ACTIVE_DATA"
     else
