@@ -27,7 +27,7 @@ This system helps organizations avoid overlapping investments by making visible:
 - **Backend:** FastAPI + FastMCP (Python) with NetworkX + JSON
 - **AI:** Claude or OpenAI for natural language understanding and entity extraction
 - **Graph storage:** NetworkX in-memory + JSON persistence
-- **Similarity search:** sentence-transformers + Levenshtein distance
+- **Similarity search:** sentence-transformers + RapidFuzz
 
 ## Project Structure
 
