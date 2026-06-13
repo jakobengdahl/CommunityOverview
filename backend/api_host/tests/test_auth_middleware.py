@@ -105,6 +105,28 @@ class TestMcpBasicAuth:
         finally:
             os.unlink(path)
 
+    def test_mcp_basic_auth_allows_ready_without_creds(self):
+        """/ready always passes through."""
+        client, path = self._make_client(
+            mcp_basic_auth=True, auth_password="secret"
+        )
+        try:
+            resp = client.get("/ready")
+            assert resp.status_code == 200
+        finally:
+            os.unlink(path)
+
+    def test_mcp_basic_auth_allows_startup_diagnostics_without_creds(self):
+        """/diagnostics/startup always passes through."""
+        client, path = self._make_client(
+            mcp_basic_auth=True, auth_password="secret"
+        )
+        try:
+            resp = client.get("/diagnostics/startup")
+            assert resp.status_code == 200
+        finally:
+            os.unlink(path)
+
     def test_mcp_basic_auth_accepts_valid_creds_on_mcp(self):
         """MCP endpoint succeeds with correct credentials."""
         client, path = self._make_client(
@@ -170,6 +192,28 @@ class TestAuthEnabledTakesPrecedence:
         )
         try:
             resp = client.get("/health")
+            assert resp.status_code == 200
+        finally:
+            os.unlink(path)
+
+    def test_auth_enabled_allows_ready(self):
+        """/ready is always exempt."""
+        client, path = self._make_client(
+            auth_enabled=True, auth_password="secret"
+        )
+        try:
+            resp = client.get("/ready")
+            assert resp.status_code == 200
+        finally:
+            os.unlink(path)
+
+    def test_auth_enabled_allows_startup_diagnostics(self):
+        """/diagnostics/startup is always exempt."""
+        client, path = self._make_client(
+            auth_enabled=True, auth_password="secret"
+        )
+        try:
+            resp = client.get("/diagnostics/startup")
             assert resp.status_code == 200
         finally:
             os.unlink(path)
