@@ -33,6 +33,14 @@
         "color": "#EC4899",
         "icon": "CpuFill"
       },
+      "Skill": {
+        "fields": ["name", "description", "summary", "metadata"],
+        "static": false,
+        "category": "system",
+        "description": "Reusable AI skill definition (SKILL.md-compatible). metadata: {source_url, content, allowed_tools, when_to_use, version, effort}",
+        "color": "#8B5CF6",
+        "icon": "StarFill"
+      },
       "Actor": {
         "fields": ["name", "description", "summary", "tags", "subtypes"],
         "category": "domain",

@@ -22,6 +22,7 @@ import {
   ListOl,
   Diagram3Fill,
   QuestionCircleFill,
+  StarFill,
 } from 'react-bootstrap-icons';
 import useGraphStore from '../store/graphStore';
 import { useI18n } from '../i18n';
@@ -51,6 +52,7 @@ const ICON_REGISTRY = {
   ListOl,
   Diagram3Fill,
   QuestionCircleFill,
+  StarFill,
 };
 
 // Legacy fallback: maps node type name -> icon name (used when schema has no icon field)
@@ -103,7 +105,7 @@ const COLOR_MAP = {
 };
 
 // System types always shown at the bottom (not from schema)
-const SYSTEM_TYPES = ['Agent', 'EventSubscription', 'Group'];
+const SYSTEM_TYPES = ['Agent', 'EventSubscription', 'Skill', 'Group'];
 const VIEW_TYPES = ['SavedView'];
 
 // Fallback order when schema hasn't loaded yet
@@ -135,6 +137,7 @@ function FloatingToolbar({
   onCreateNode,
   onCreateAgent,
   onCreateSubscription,
+  onCreateSkill,
   onSaveView,
   onCreateGroup,
 }) {
@@ -174,6 +177,8 @@ function FloatingToolbar({
       onCreateAgent?.();
     } else if (nodeType === 'EventSubscription') {
       onCreateSubscription?.();
+    } else if (nodeType === 'Skill') {
+      onCreateSkill?.();
     } else if (nodeType === 'SavedView') {
       onSaveView?.();
     } else if (nodeType === 'Group') {

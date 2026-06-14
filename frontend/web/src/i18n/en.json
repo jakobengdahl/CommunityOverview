@@ -85,6 +85,8 @@
     "ignore_origins_hint": "For loop prevention: events from these origins are not sent",
     "cancel": "Cancel",
     "submit": "Create subscription",
+    "submit_edit": "Save changes",
+    "title_edit": "Edit webhook subscription",
     "validation_error": "Name and webhook URL are required",
     "webhook_description": "Webhook subscription: {name}",
     "webhook_summary": "Listening on {events} events"

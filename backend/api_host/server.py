@@ -916,6 +916,15 @@ def create_app(
         """Get available MCP integrations for agent configuration."""
         return agent_registry.get_available_mcp_integrations()
 
+    @app.get("/agents/skills")
+    async def agents_skills():
+        """List Skill nodes from the graph for agent configuration."""
+        nodes = graph_storage.search_nodes("", node_types=["Skill"], limit=200)
+        return [
+            {"id": n.id, "name": n.name, "description": n.description or ""}
+            for n in nodes
+        ]
+
     # Shutdown handler for graceful cleanup
     @app.on_event("shutdown")
     async def shutdown_event():

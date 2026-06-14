@@ -259,6 +259,20 @@ class ChatService:
         self._current_federation_depth = federation_depth
         try:
             extra_context = self._build_expert_context(expert_agent_id) if expert_agent_id else None
+            if expert_agent_id:
+                if extra_context:
+                    full = self._expert_skills_full.get(expert_agent_id)
+                    skill_count = len(full or self._expert_skills.get(expert_agent_id) or [])
+                    logger.info(
+                        "Chat request routed to expert '%s' (skills loaded: %d)",
+                        expert_agent_id, skill_count,
+                    )
+                else:
+                    logger.warning(
+                        "Chat request specified expert '%s' but no context built"
+                        " — expert may not be registered",
+                        expert_agent_id,
+                    )
             return self._processor.process_message(
                 messages=messages,
                 api_key=api_key,
