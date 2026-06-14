@@ -80,7 +80,11 @@ class AgentConfig:
     subscription_id: Optional[str] = None
     mcp_integration_ids: List[str] = field(default_factory=list)
     prompts: AgentPrompts = field(default_factory=AgentPrompts)
-    tool_allowlist: Optional[List[str]] = None  # Future: specific tool restrictions
+    tool_allowlist: Optional[List[str]] = None
+    # Skills: URLs to SKILL.md files or GitHub repos (loaded at runtime)
+    skills_urls: List[str] = field(default_factory=list)
+    # Skill node IDs in the graph (linked via USES_SKILL edges)
+    skill_node_ids: List[str] = field(default_factory=list)
 
     @classmethod
     def from_node(cls, node: Any) -> "AgentConfig":
@@ -108,6 +112,8 @@ class AgentConfig:
             mcp_integration_ids=metadata.get("mcp_integration_ids", []),
             prompts=AgentPrompts.from_dict(prompts_data),
             tool_allowlist=metadata.get("tool_allowlist"),
+            skills_urls=metadata.get("skills_urls", []),
+            skill_node_ids=metadata.get("skill_node_ids", []),
         )
 
     def to_dict(self) -> Dict[str, Any]:
@@ -120,6 +126,8 @@ class AgentConfig:
             "mcp_integration_ids": self.mcp_integration_ids,
             "prompts": {"task_prompt": self.prompts.task_prompt},
             "tool_allowlist": self.tool_allowlist,
+            "skills_urls": self.skills_urls,
+            "skill_node_ids": self.skill_node_ids,
         }
 
 

@@ -11,9 +11,11 @@ import './CreateSubscriptionDialog.css';
  * - filters: { target: { entity_kind, node_types }, operations, keywords }
  * - delivery: { webhook_url, ignore_origins, ignore_session_ids }
  */
-export default function CreateSubscriptionDialog({ onClose, onSave }) {
+export default function CreateSubscriptionDialog({ onClose, onSave, initialData }) {
   const schema = useGraphStore((state) => state.schema);
   const { t } = useI18n();
+
+  const isEditing = !!initialData;
 
   // Basic info
   const [name, setName] = useState('');
@@ -31,6 +33,29 @@ export default function CreateSubscriptionDialog({ onClose, onSave }) {
   // Delivery settings
   const [webhookUrl, setWebhookUrl] = useState('');
   const [ignoreOrigins, setIgnoreOrigins] = useState('');
+
+  // Populate form when editing an existing subscription
+  useEffect(() => {
+    if (!initialData) return;
+    setName(initialData.name || '');
+    setDescription(initialData.description || '');
+    const filters = initialData.metadata?.filters || {};
+    const delivery = initialData.metadata?.delivery || {};
+    if (filters.target?.node_types) setSelectedNodeTypes(filters.target.node_types);
+    if (filters.operations) {
+      setOperations({
+        create: filters.operations.includes('create'),
+        update: filters.operations.includes('update'),
+        delete: filters.operations.includes('delete'),
+      });
+    }
+    if (filters.keywords?.any) setKeywords(filters.keywords.any.join(', '));
+    const url = delivery.webhook_url || '';
+    setWebhookUrl(url.startsWith('internal://') ? '' : url);
+    if (delivery.ignore_origins) {
+      setIgnoreOrigins(delivery.ignore_origins.join(', '));
+    }
+  }, [initialData]);
 
   // Get available node types from schema
   const nodeTypes = schema?.node_types
@@ -57,42 +82,55 @@ export default function CreateSubscriptionDialog({ onClose, onSave }) {
       return;
     }
 
-    // Build the subscription node
     const activeOps = Object.entries(operations).filter(([_, v]) => v).map(([k]) => k).join(', ');
-    const subscriptionNode = {
-      id: crypto.randomUUID(),
-      name: name.trim(),
-      type: 'EventSubscription',
-      description: description.trim() || t('subscription_dialog.webhook_description', { name }),
-      summary: t('subscription_dialog.webhook_summary', { events: activeOps }),
-      metadata: {
-        filters: {
-          target: {
-            entity_kind: 'node',
-            node_types: selectedNodeTypes,
-          },
-          operations: Object.entries(operations).filter(([_, v]) => v).map(([k]) => k),
-          keywords: {
-            any: keywords.split(',').map(k => k.trim()).filter(k => k),
-          },
+    const metadata = {
+      ...(initialData?.metadata || {}),
+      filters: {
+        target: {
+          entity_kind: 'node',
+          node_types: selectedNodeTypes,
         },
-        delivery: {
-          webhook_url: webhookUrl.trim(),
-          ignore_origins: ignoreOrigins.split(',').map(o => o.trim()).filter(o => o),
-          ignore_session_ids: [],
+        operations: Object.entries(operations).filter(([_, v]) => v).map(([k]) => k),
+        keywords: {
+          any: keywords.split(',').map(k => k.trim()).filter(k => k),
         },
       },
-      communities: [],
+      delivery: {
+        ...(initialData?.metadata?.delivery || {}),
+        webhook_url: webhookUrl.trim(),
+        ignore_origins: ignoreOrigins.split(',').map(o => o.trim()).filter(o => o),
+        ignore_session_ids: initialData?.metadata?.delivery?.ignore_session_ids || [],
+      },
     };
 
-    onSave(subscriptionNode);
+    if (isEditing) {
+      onSave({
+        id: initialData.id,
+        updates: {
+          name: name.trim(),
+          description: description.trim() || t('subscription_dialog.webhook_description', { name }),
+          summary: t('subscription_dialog.webhook_summary', { events: activeOps }),
+          metadata,
+        },
+      });
+    } else {
+      onSave({
+        id: crypto.randomUUID(),
+        name: name.trim(),
+        type: 'EventSubscription',
+        description: description.trim() || t('subscription_dialog.webhook_description', { name }),
+        summary: t('subscription_dialog.webhook_summary', { events: activeOps }),
+        metadata,
+        communities: [],
+      });
+    }
     onClose();
   };
 
   return (
     <div className="dialog-overlay" onClick={onClose}>
       <div className="dialog-content subscription-dialog" onClick={e => e.stopPropagation()}>
-        <h2>{t('subscription_dialog.title')}</h2>
+        <h2>{isEditing ? t('subscription_dialog.title_edit', { defaultValue: 'Edit Webhook Subscription' }) : t('subscription_dialog.title')}</h2>
         <p className="dialog-description">
           {t('subscription_dialog.description')}
         </p>
@@ -220,7 +258,7 @@ export default function CreateSubscriptionDialog({ onClose, onSave }) {
               {t('subscription_dialog.cancel')}
             </button>
             <button type="submit" className="btn-primary">
-              {t('subscription_dialog.submit')}
+              {isEditing ? t('subscription_dialog.submit_edit', { defaultValue: 'Save Changes' }) : t('subscription_dialog.submit')}
             </button>
           </div>
         </form>

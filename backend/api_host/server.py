@@ -26,6 +26,8 @@ import secrets
 from pathlib import Path
 from typing import Optional, Dict, Any, Callable
 
+logger = logging.getLogger(__name__)
+
 from fastapi import FastAPI
 from fastapi.responses import JSONResponse, RedirectResponse, FileResponse
 from fastapi.staticfiles import StaticFiles
@@ -503,6 +505,21 @@ def create_app(
     chat_service = ChatService(graph_service)
     document_service = DocumentService()
 
+    # Load skills for expert agents that have skills_urls configured.
+    # Runs once synchronously at startup (a new event loop is created so this
+    # is safe regardless of whether the caller is inside an async context).
+    try:
+        from backend.config_loader import get_expert_agent_configs, get_skills_config
+        _expert_configs = get_expert_agent_configs()
+        if any(e.skills_urls for e in _expert_configs):
+            chat_service.load_expert_skills_sync(_expert_configs, get_skills_config())
+            logger.info(
+                "Expert agent skills loaded for %d expert(s) with skills_urls",
+                sum(1 for e in _expert_configs if e.skills_urls),
+            )
+    except Exception as _exc:
+        logger.warning("Expert agent skills startup load failed (non-fatal): %s", _exc)
+
     # Store chat service on app state for access in routes
     app.state.chat_service = chat_service
     app.state.document_service = document_service
@@ -898,6 +915,15 @@ def create_app(
     async def agents_integrations():
         """Get available MCP integrations for agent configuration."""
         return agent_registry.get_available_mcp_integrations()
+
+    @app.get("/agents/skills")
+    async def agents_skills():
+        """List Skill nodes from the graph for agent configuration."""
+        nodes = graph_storage.search_nodes("", node_types=["Skill"], limit=200)
+        return [
+            {"id": n.id, "name": n.name, "description": n.description or ""}
+            for n in nodes
+        ]
 
     # Shutdown handler for graceful cleanup
     @app.on_event("shutdown")

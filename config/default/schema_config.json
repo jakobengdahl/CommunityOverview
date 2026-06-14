@@ -49,9 +49,22 @@
         ],
         "static": false,
         "category": "system",
-        "description": "AI agent configuration (runtime not implemented). Links to EventSubscription via metadata.subscription_id. Agent config in metadata.agent (type, config)",
+        "description": "AI agent configuration. Links to EventSubscription via metadata.subscription_id. Agent config in metadata: enabled, subscription_id, mcp_integration_ids, prompts, skills_urls, skill_node_ids.",
         "color": "#EC4899",
         "icon": "CpuFill"
+      },
+      "Skill": {
+        "fields": [
+          "name",
+          "description",
+          "summary",
+          "metadata"
+        ],
+        "static": false,
+        "category": "system",
+        "description": "Reusable AI skill definition (SKILL.md-compatible). metadata: {source_url, content, allowed_tools, when_to_use, version, effort}. Can be linked to Agent nodes via USES_SKILL edges.",
+        "color": "#8B5CF6",
+        "icon": "StarFill"
       },
       "Actor": {
         "fields": [
@@ -243,6 +256,9 @@
       },
       "AIMS_FOR": {
         "description": "Aims for (initiative or actor aims for a goal)"
+      },
+      "USES_SKILL": {
+        "description": "Uses skill (agent uses a skill definition)"
       }
     }
   },
@@ -274,6 +290,14 @@
       "allowed_languages": ["en", "sv"],
       "description_sv": "Engelska är huvudspråk i grafen. Svenska accepteras när det är naturligt eller etablerat.",
       "description_en": "English is the primary graph language. Swedish is accepted when natural or established."
+    },
+    "skills_config": {
+      "skills_dir": "config/default/skills",
+      "allow_external_skills": true,
+      "trusted_domains": ["github.com", "raw.githubusercontent.com", "agentskills.io", "api.github.com"],
+      "cache_ttl_seconds": 3600,
+      "max_skill_content_bytes": 50000,
+      "max_skill_body_chars": 8000
     },
     "expert_agents": [
       {

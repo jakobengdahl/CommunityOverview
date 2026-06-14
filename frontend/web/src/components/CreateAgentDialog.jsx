@@ -26,6 +26,12 @@ export default function CreateAgentDialog({ onClose, onSave, initialData }) {
   const [selectedIntegrations, setSelectedIntegrations] = useState([]);
   const [loadingIntegrations, setLoadingIntegrations] = useState(true);
 
+  // Skills
+  const [availableSkillNodes, setAvailableSkillNodes] = useState([]);
+  const [selectedSkillNodeIds, setSelectedSkillNodeIds] = useState([]);
+  const [skillsUrls, setSkillsUrls] = useState(''); // comma-separated URLs
+  const [loadingSkills, setLoadingSkills] = useState(true);
+
   // Subscription settings (simplified - agent creates its own subscription)
   const [selectedNodeTypes, setSelectedNodeTypes] = useState([]);
   const [operations, setOperations] = useState({
@@ -51,6 +57,8 @@ export default function CreateAgentDialog({ onClose, onSave, initialData }) {
           setEnabled(agent.metadata.enabled ?? true);
           setTaskPrompt(agent.metadata.prompts?.task_prompt || '');
           setSelectedIntegrations(agent.metadata.mcp_integration_ids || []);
+          setSelectedSkillNodeIds(agent.metadata.skill_node_ids || []);
+          setSkillsUrls((agent.metadata.skills_urls || []).join(', '));
         }
         // Fallback to legacy nested "agent" structure
         else if (agent.metadata.agent) {
@@ -116,6 +124,23 @@ export default function CreateAgentDialog({ onClose, onSave, initialData }) {
     fetchIntegrations();
   }, [initialData]);
 
+  // Fetch available Skill nodes from the graph
+  useEffect(() => {
+    async function fetchSkillNodes() {
+      try {
+        const response = await fetch('/agents/skills');
+        if (response.ok) {
+          setAvailableSkillNodes(await response.json());
+        }
+      } catch (error) {
+        console.error('Failed to fetch Skill nodes:', error);
+      } finally {
+        setLoadingSkills(false);
+      }
+    }
+    fetchSkillNodes();
+  }, []);
+
   // Get available node types from schema
   const nodeTypes = schema?.node_types
     ? Object.keys(schema.node_types).filter(t => !['SavedView', 'VisualizationView', 'EventSubscription', 'Agent'].includes(t))
@@ -141,6 +166,14 @@ export default function CreateAgentDialog({ onClose, onSave, initialData }) {
     }
   };
 
+  const handleToggleSkillNode = (nodeId) => {
+    if (selectedSkillNodeIds.includes(nodeId)) {
+      setSelectedSkillNodeIds(selectedSkillNodeIds.filter(id => id !== nodeId));
+    } else {
+      setSelectedSkillNodeIds([...selectedSkillNodeIds, nodeId]);
+    }
+  };
+
   const handleSubmit = (e) => {
     e.preventDefault();
 
@@ -160,6 +193,8 @@ export default function CreateAgentDialog({ onClose, onSave, initialData }) {
       const agentId = initialData.agent.id;
       const subscriptionId = initialData.subscription?.id;
 
+      const parsedSkillsUrls = skillsUrls.split(',').map(u => u.trim()).filter(u => u);
+
       // Update Agent Node
       const agentUpdates = {
         name: name.trim(),
@@ -167,14 +202,14 @@ export default function CreateAgentDialog({ onClose, onSave, initialData }) {
         summary: `MCP agent with ${selectedIntegrations.length} integration(s)`,
         metadata: {
           ...initialData.agent.metadata,
-          subscription_id: subscriptionId, // Preserve or set ID
-          // New structure
+          subscription_id: subscriptionId,
           enabled: enabled,
           prompts: {
             task_prompt: taskPrompt.trim(),
           },
           mcp_integration_ids: selectedIntegrations,
-          // Remove legacy key if it exists to avoid confusion
+          skills_urls: parsedSkillsUrls,
+          skill_node_ids: selectedSkillNodeIds,
           agent: undefined,
         },
       };
@@ -245,6 +280,8 @@ export default function CreateAgentDialog({ onClose, onSave, initialData }) {
         },
       };
 
+      const parsedSkillsUrls = skillsUrls.split(',').map(u => u.trim()).filter(u => u);
+
       // Create the Agent node
       const agentNode = {
         id: agentId,
@@ -259,6 +296,8 @@ export default function CreateAgentDialog({ onClose, onSave, initialData }) {
             task_prompt: taskPrompt.trim(),
           },
           mcp_integration_ids: selectedIntegrations,
+          skills_urls: parsedSkillsUrls,
+          skill_node_ids: selectedSkillNodeIds,
         },
       };
 
@@ -380,6 +419,54 @@ When a new Initiative node is created:
                 ))}
               </div>
             )}
+          </div>
+
+          <div className="form-section">
+            <h3>Skills</h3>
+            <p style={{ margin: '0 0 0.75rem 0', color: '#888', fontSize: '0.85rem' }}>
+              Skills extend the agent with structured instructions loaded from SKILL.md files or Skill nodes in the graph.
+            </p>
+
+            <div className="form-group">
+              <label htmlFor="agent-skills-urls">Skills URLs (comma-separated)</label>
+              <input
+                id="agent-skills-urls"
+                type="text"
+                value={skillsUrls}
+                onChange={e => setSkillsUrls(e.target.value)}
+                placeholder="https://example.com/SKILL.md, https://github.com/org/repo"
+              />
+              <small>URLs to SKILL.md files or GitHub repos to load skills from at startup.</small>
+            </div>
+
+            <div className="form-group">
+              <label>Skill Nodes (from graph)</label>
+              {loadingSkills ? (
+                <p style={{ color: '#888', fontSize: '0.85rem' }}>Loading skill nodes...</p>
+              ) : availableSkillNodes.length === 0 ? (
+                <p style={{ color: '#888', fontSize: '0.85rem' }}>No Skill nodes found in the graph</p>
+              ) : (
+                <div className="checkbox-group">
+                  {availableSkillNodes.map(skill => (
+                    <label key={skill.id} className="checkbox-label" style={{ marginBottom: '0.5rem' }}>
+                      <input
+                        type="checkbox"
+                        checked={selectedSkillNodeIds.includes(skill.id)}
+                        onChange={() => handleToggleSkillNode(skill.id)}
+                      />
+                      <span>
+                        <strong>{skill.name}</strong>
+                        {skill.description && (
+                          <span style={{ color: '#888', marginLeft: '0.5rem' }}>
+                            — {skill.description}
+                          </span>
+                        )}
+                      </span>
+                    </label>
+                  ))}
+                </div>
+              )}
+            </div>
           </div>
 
           <div className="form-section">

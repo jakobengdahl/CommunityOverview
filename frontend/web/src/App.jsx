@@ -13,6 +13,7 @@ import InputDialog from './components/InputDialog';
 import ChatPanel from './components/ChatPanel';
 import CreateSubscriptionDialog from './components/CreateSubscriptionDialog';
 import CreateAgentDialog from './components/CreateAgentDialog';
+import CreateSkillDialog from './components/CreateSkillDialog';
 import EditEdgeDialog from './components/EditEdgeDialog';
 import NodeDetailDialog from './components/NodeDetailDialog';
 import * as api from './services/api';
@@ -62,8 +63,11 @@ function App() {
   const [deleteDialog, setDeleteDialog] = useState(null);
   const [saveViewDialog, setSaveViewDialog] = useState(null);
   const [showSubscriptionDialog, setShowSubscriptionDialog] = useState(false);
+  const [editingSubscriptionData, setEditingSubscriptionData] = useState(null);
   const [showAgentDialog, setShowAgentDialog] = useState(false);
   const [editingAgentData, setEditingAgentData] = useState(null);
+  const [showSkillDialog, setShowSkillDialog] = useState(false);
+  const [editingSkillData, setEditingSkillData] = useState(null);
   const [createNodeType, setCreateNodeType] = useState(null);
   const [createGroupSignal, setCreateGroupSignal] = useState(0);
   const [saveViewSignal, setSaveViewSignal] = useState(0);
@@ -224,6 +228,12 @@ function App() {
         console.error('Error preparing agent editor:', error);
         showNotification('error', 'Could not load agent details');
       }
+    } else if (nodeData.type === 'EventSubscription') {
+      setEditingSubscriptionData(nodeData);
+      setShowSubscriptionDialog(true);
+    } else if (nodeData.type === 'Skill') {
+      setEditingSkillData(nodeData);
+      setShowSkillDialog(true);
     } else {
       setEditingNode({ id: nodeId, data: nodeData });
     }
@@ -417,25 +427,58 @@ function App() {
     setShowAgentDialog(true);
   }, []);
 
+  // Callback: Create skill
+  const handleCreateSkill = useCallback(() => {
+    setEditingSkillData(null);
+    setShowSkillDialog(true);
+  }, []);
+
   // Save subscription node
-  const handleSaveSubscription = useCallback(async (subscriptionNode) => {
+  const handleSaveSubscription = useCallback(async (data) => {
     try {
-      const result = await api.addNodes([subscriptionNode], []);
-      console.log('Subscription created:', result);
-
-      if (result.added_node_ids && result.added_node_ids.length > 0) {
-        const nodeId = result.added_node_ids[0];
-        const nodeWithId = { ...subscriptionNode, id: nodeId };
-        addNodesToVisualization([nodeWithId], []);
-        console.log('Subscription added to visualization:', nodeId);
+      if (data.id && data.updates) {
+        // Update existing subscription
+        await api.updateNode(data.id, data.updates);
+        const newNodes = nodes.map(n => n.id === data.id ? { ...n, ...data.updates } : n);
+        updateVisualization(newNodes, edges);
+        setEditingSubscriptionData(null);
+        showNotification('success', t('notifications.subscription_created', { name: data.updates.name }));
+      } else {
+        // Create new subscription
+        const result = await api.addNodes([data], []);
+        if (result.added_node_ids && result.added_node_ids.length > 0) {
+          const nodeId = result.added_node_ids[0];
+          addNodesToVisualization([{ ...data, id: nodeId }], []);
+        }
+        showNotification('success', t('notifications.subscription_created', { name: data.name }));
       }
-
-      showNotification('success', t('notifications.subscription_created', { name: subscriptionNode.name }));
     } catch (error) {
-      console.error('Error creating subscription:', error);
+      console.error('Error saving subscription:', error);
       showNotification('error', t('notifications.subscription_error'));
     }
-  }, [addNodesToVisualization, showNotification]);
+  }, [addNodesToVisualization, nodes, edges, updateVisualization, showNotification]);
+
+  // Save skill node (create or update)
+  const handleSaveSkill = useCallback(async (data) => {
+    try {
+      if (data.id && data.updates) {
+        await api.updateNode(data.id, data.updates);
+        const newNodes = nodes.map(n => n.id === data.id ? { ...n, ...data.updates } : n);
+        updateVisualization(newNodes, edges);
+        setEditingSkillData(null);
+        showNotification('success', `Skill "${data.updates.name}" updated`);
+      } else {
+        const result = await api.addNodes([data], []);
+        if (result.added_node_ids?.length > 0) {
+          addNodesToVisualization([{ ...data, id: result.added_node_ids[0] }], []);
+        }
+        showNotification('success', `Skill "${data.name}" created`);
+      }
+    } catch (error) {
+      console.error('Error saving skill:', error);
+      showNotification('error', 'Could not save skill');
+    }
+  }, [addNodesToVisualization, nodes, edges, updateVisualization, showNotification]);
 
   // Save agent nodes (create or update)
   const handleSaveAgent = useCallback(async (data) => {
@@ -530,10 +573,12 @@ function App() {
       handleCreateAgent();
     } else if (nodeType === 'EventSubscription') {
       handleCreateSubscription();
+    } else if (nodeType === 'Skill') {
+      handleCreateSkill();
     } else {
       setCreateNodeType(nodeType);
     }
-  }, [handleCreateAgent, handleCreateSubscription]);
+  }, [handleCreateAgent, handleCreateSubscription, handleCreateSkill]);
 
   // Handle node update from edit dialog
   const handleNodeUpdate = useCallback(async (nodeId, updates) => {
@@ -606,6 +651,7 @@ function App() {
         onCreateNode={handleCreateNodeForType}
         onCreateAgent={handleCreateAgent}
         onCreateSubscription={handleCreateSubscription}
+        onCreateSkill={handleCreateSkill}
         onSaveView={handleToolbarSaveView}
         onCreateGroup={handleToolbarCreateGroup}
       />
@@ -689,8 +735,9 @@ function App() {
 
       {showSubscriptionDialog && (
         <CreateSubscriptionDialog
-          onClose={() => setShowSubscriptionDialog(false)}
+          onClose={() => { setShowSubscriptionDialog(false); setEditingSubscriptionData(null); }}
           onSave={handleSaveSubscription}
+          initialData={editingSubscriptionData}
         />
       )}
 
@@ -702,6 +749,14 @@ function App() {
           }}
           onSave={handleSaveAgent}
           initialData={editingAgentData}
+        />
+      )}
+
+      {showSkillDialog && (
+        <CreateSkillDialog
+          onClose={() => { setShowSkillDialog(false); setEditingSkillData(null); }}
+          onSave={handleSaveSkill}
+          initialData={editingSkillData}
         />
       )}
     </div>
