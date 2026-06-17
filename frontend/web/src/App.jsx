@@ -41,6 +41,7 @@ function App() {
     closeEditingNode,
     removeNode,
     removeEdge,
+    schema,
     presentation,
     setConfig,
     focusNodeId,
@@ -637,6 +638,7 @@ function App() {
           federationDepthLabel={t('federation.depth_label')}
           federationDepthTooltip={t('federation.depth_tooltip')}
           showMinimap={showMinimap}
+          schema={schema}
         />
       </div>
 

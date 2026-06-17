@@ -1,5 +1,10 @@
 import { useState, useEffect, useRef, useMemo } from 'react';
 import { ChatDotsFill, ChevronRight, ChevronLeft, XCircleFill, Robot } from 'react-bootstrap-icons';
+import ReactMarkdown from 'react-markdown';
+import remarkGfm from 'remark-gfm';
+import remarkMath from 'remark-math';
+import rehypeKatex from 'rehype-katex';
+import 'katex/dist/katex.min.css';
 import useGraphStore from '../store/graphStore';
 import { useI18n } from '../i18n';
 import * as api from '../services/api';
@@ -455,7 +460,14 @@ function ChatPanel() {
               </div>
             )}
             <div className="message-content">
-              {msg.content}
+              {msg.role === 'assistant' || msg.role === 'expert' ? (
+                <ReactMarkdown
+                  remarkPlugins={[remarkGfm, remarkMath]}
+                  rehypePlugins={[rehypeKatex]}
+                >
+                  {msg.content}
+                </ReactMarkdown>
+              ) : msg.content}
 
               {msg.role === 'user' && idx === chatMessages.length - 1 && isProcessing && (
                 <div className="message-loading">
