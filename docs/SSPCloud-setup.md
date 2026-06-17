@@ -56,3 +56,15 @@ Once the VS Code service is running:
    ```
    This script installs the required dependencies and starts the application.
 2. When the app is ready, VS Code will indicate that a URL has been opened on **port 8000**. Click the link or open the forwarded port to access the app in your browser.
+
+## Step 5 (optional): Connect to the graph via chatgpt, claude etc (MCP)
+
+Once you know the service is running, you have the option to connect to the graph using an external ai-assistant or agent such as chatgpt, claude och openclaw. To connect to the running graph service:
+
+1. Open SSPCloud and navigate to My Services where you will see your VS Code environment running.
+
+2. Click on Open and under the headline Service Access, you'll see a text like this: "You can connect to your custom port (8000) using this link". Copy the link.
+
+3. Open your ai-assistant and navigate to the settings where you can add MCP-servers (Customize -> Integration is claude, Settings -> Apps in ChatGPT).
+
+4. Add the MCP-server link you copied from SSPCloud but add "/mcp/sse" at the end. Name your integration such as "metadata-graph". Select No Auth for authentication and connect. The MCP-server on the graph should now be possible to interact with in your AI-assistant by asking questions such as: What statistical programs are there in the metadata-graph
