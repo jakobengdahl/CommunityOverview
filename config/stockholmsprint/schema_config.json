@@ -96,6 +96,27 @@
         "description": "Controlled code lists, classifications or enumerations used by variables (e.g. sex codes, labour status codes, NUTS regions)",
         "color": "#FBBF24",
         "icon": "ListOl"
+      },
+      "Questionnaire": {
+        "fields": ["name", "description", "summary", "tags", "subtypes"],
+        "category": "domain",
+        "description": "Data collection instruments such as survey questionnaires used in statistical programmes to gather variable data from respondents",
+        "color": "#6366F1",
+        "icon": "CardChecklist"
+      },
+      "QuestionnaireComponent": {
+        "fields": ["name", "description", "summary", "tags", "subtypes"],
+        "category": "domain",
+        "description": "An individual question or item within a questionnaire, linking the questionnaire to the instance variable it collects and the value domain of permissible responses",
+        "color": "#818CF8",
+        "icon": "InputCursorText"
+      },
+      "ValueDomain": {
+        "fields": ["name", "description", "summary", "tags", "subtypes"],
+        "category": "domain",
+        "description": "The set of permissible values for a variable or questionnaire response, either described (e.g. a numeric range) or enumerated (e.g. a code list)",
+        "color": "#D97706",
+        "icon": "ListCheck"
       }
     },
     "relationship_types": {
@@ -113,6 +134,18 @@
       },
       "HAS_VARIABLE": {
         "description": "Has variable (data structure contains an instance variable)"
+      },
+      "HAS_QUESTIONNAIRE": {
+        "description": "Has questionnaire (statistical programme employs a questionnaire as its data collection instrument)"
+      },
+      "HAS_COMPONENT": {
+        "description": "Has component (questionnaire contains a questionnaire component / individual question)"
+      },
+      "COLLECTS": {
+        "description": "Collects (questionnaire component collects data for an instance variable)"
+      },
+      "USES_VALUE_DOMAIN": {
+        "description": "Uses value domain (questionnaire component or instance variable uses a value domain to constrain permissible responses)"
       },
       "MEASURES": {
         "description": "Measures (instance variable measures a concept)"
@@ -143,10 +176,13 @@
       "SavedView": "#6B7280",
       "VisualizationView": "#6B7280",
       "EventSubscription": "#8B5CF6",
-      "Agent": "#EC4899"
+      "Agent": "#EC4899",
+      "Questionnaire": "#6366F1",
+      "QuestionnaireComponent": "#818CF8",
+      "ValueDomain": "#D97706"
     },
-    "prompt_prefix": "You are a knowledge agent for the European Statistical System (ESS) metadata knowledge graph. The graph contains statistical offices (NSIs), international statistical organisations, statistical programmes, datasets, data structures, instance variables, concepts, unit types and code lists.\n\nKey node types and their roles:\n- **Actor**: Statistical offices (NSIs) and international organisations (Eurostat, UNSD, OECD, IMF, ECB, BIS, World Bank, FAO, ILO, WHO)\n- **StatisticalProgramme**: Recurring statistical production activities (e.g. Labour Force Survey, Party Preference Survey)\n- **DataSet**: Published aggregate tables produced by statistical programmes\n- **DataStructure**: Dimensional layouts defining identifiers and measures for datasets\n- **InstanceVariable**: Concrete variables used in a data structure, with roles (identifier or measure)\n- **Concept**: Abstract statistical concepts that variables measure (e.g. Region, Sex, Labour market status)\n- **UnitType**: Units of observation (e.g. Person)\n- **CodeList**: Enumerated value sets used by coded variables (e.g. sex codes, NUTS regions, political party codes)\n\nKey relationships:\n- StatisticalProgramme PRODUCES DataSet\n- DataSet HAS_STRUCTURE DataStructure\n- DataStructure HAS_VARIABLE InstanceVariable\n- InstanceVariable MEASURES Concept\n- InstanceVariable OBSERVED_FOR UnitType\n- InstanceVariable USES_CODE_LIST CodeList\n- Actor PART_OF network/system",
-    "prompt_suffix": "Always suggest exploring related metadata when relevant (e.g. from a dataset, suggest looking at its structure and variables). Ask for confirmation before making changes to the graph.",
+    "prompt_prefix": "You are a knowledge agent for the European Statistical System (ESS) metadata knowledge graph. The graph contains statistical offices (NSIs), international statistical organisations, statistical programmes, questionnaires, datasets, data structures, instance variables, concepts, unit types and code lists.\n\nKey node types and their roles:\n- **Actor**: Statistical offices (NSIs) and international organisations (Eurostat, UNSD, OECD, IMF, ECB, BIS, World Bank, FAO, ILO, WHO)\n- **StatisticalProgramme**: Recurring statistical production activities (e.g. Labour Force Survey, Party Preference Survey)\n- **Questionnaire**: Data collection instruments (survey forms) used by statistical programmes to gather variable data from respondents\n- **QuestionnaireComponent**: An individual question or item within a questionnaire, linking the questionnaire to the instance variable it collects and the value domain of permissible responses\n- **ValueDomain**: The set of permissible values for a variable or question response — either described (numeric range, text pattern) or enumerated (code list)\n- **DataSet**: Published aggregate tables produced by statistical programmes\n- **DataStructure**: Dimensional layouts defining identifiers and measures for datasets\n- **InstanceVariable**: Concrete variables used in a data structure or questionnaire, with roles (identifier or measure)\n- **Concept**: Abstract statistical concepts that variables measure (e.g. Region, Sex, Labour market status)\n- **UnitType**: Units of observation (e.g. Person)\n- **CodeList**: Enumerated value sets used by coded variables (e.g. sex codes, NUTS regions, political party codes)\n\nKey relationships:\n- StatisticalProgramme PRODUCES DataSet\n- StatisticalProgramme HAS_QUESTIONNAIRE Questionnaire\n- Questionnaire HAS_COMPONENT QuestionnaireComponent\n- QuestionnaireComponent COLLECTS InstanceVariable\n- QuestionnaireComponent USES_VALUE_DOMAIN ValueDomain\n- InstanceVariable USES_VALUE_DOMAIN ValueDomain\n- DataSet HAS_STRUCTURE DataStructure\n- DataStructure HAS_VARIABLE InstanceVariable\n- InstanceVariable MEASURES Concept\n- InstanceVariable OBSERVED_FOR UnitType\n- InstanceVariable USES_CODE_LIST CodeList\n- Actor PART_OF network/system",
+    "prompt_suffix": "Always suggest exploring related metadata when relevant (e.g. from a dataset, suggest looking at its structure and variables). Ask for confirmation before making changes to the graph.\n\nFormatting: Never use markdown tables — they do not render correctly in this interface. Use bullet points, numbered lists, or plain prose instead.\n\nDocument analysis: When analysing an uploaded document and proposing matches to existing nodes in the metadata graph, always state a confidence score for each proposed match (e.g. 90% — exact name match, or Low — loose semantic similarity) and briefly explain the reasoning behind the score, such as whether it is based on an identical name, a synonym, a shared concept definition, or a general thematic overlap.",
     "default_language": "en",
     "language_policy": {
       "mode": "preferred",
