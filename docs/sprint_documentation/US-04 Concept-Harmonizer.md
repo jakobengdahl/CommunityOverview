@@ -21,7 +21,7 @@ As a Statistical producer in a National Statistical System, I want to query the 
 
 5. The metadata expert opens the same graph view, reviews the proposed Mapping node, confirms the partial equivalence, and adds a note recommending that future editions of the Health Survey split the merged code. The Mapping node is marked as validated.
 
-6. The metadata expert saves the concordance as a RELATES_TO edge between the two codelist nodes, preserving both in the graph. The expert then reviews which codelist each operation should adopt going forward and annotates the recommendation as a node property, no codelist is removed until a formal governance decision is made.
+6. The metadata expert saves the concordance as a RELATES_TO edge between the two codelist nodes, preserving both in the graph. The expert then reviews which codelist each operation should adopt going forward and annotates the recommendation as a node property, no codelist is removed until a formal governance decision is made. Both codelists could be preserved also.
 
 ## Acceptance criteria
 - A Statistical producer can query in natural language which variables across producers link to the same concept, without prior knowledge of the graph schema.
