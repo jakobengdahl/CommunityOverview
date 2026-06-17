@@ -18,22 +18,19 @@ As a statistical producer, I want to upload a document related to a statistical 
 
 3 - Each candidate concept is matched against the metadata graph structure and content — Represented Variables, Concepts, Value Domains — using semantic search, returning a confidence score per match.
 
-4 - If there are existing nodes in the metadata graph that the AI-assistant has identified, these are presented in the visualisation together with guidance from the ai-assistant on possible ways to add the relevant identified nodes from the document and how to connect these to the existing metadata nodes in the graph. 
+4 - If there are existing nodes in the metadata graph that the AI-assistant has identified, these are presented in the visualisation together with guidance from the ai-assistant on possible ways to add the relevant identified nodes from the document so that they are compliant with the (GSIM-based) metadata model. 
 
-5 - The statistical producer can navigate and dive  an unmatched node and the AI assistant generates a draft definition following GSIM structure.
+5 - The statistical producer can navigate and dive deeper into the nodes matched by the ai-assistant and see what connections to pre-existing nodes that were identified.
 
-6 - The analyst clicks a matched node and the AI assistant explains the match rationale and highlights attribute differences between the document description and the graph entry.
+6 - The statistical producer can highlight one or more matched nodes and ask the AI assistant to explain details about match rationale etc.
 
-7 - The analyst can adjust a confidence threshold slider to filter out weak matches and focus on confirmed reuse or confirmed gaps.
+7 - The statistical producer can give instructions to the ai-assistant on which identified new nodes and connections that should be added or give more general instructions such as "add everything matched with a high confidence score".
 
 ## Acceptance criteria
 
 - The upload component accepts at minimum PDF and DOCX formats.
-- Extracted concepts are grouped in the graph by document section.
-- Each edge between a document concept and a graph entity carries a visible confidence indicator.
-- Isolated nodes (unmatched) are visually distinct from matched nodes.
-- Clicking any node triggers an AI assistant explanation inline, without leaving the graph view.
-- The confidence filter updates the graph in real time.
+- Extracted concepts are described by the ai-assistant with information about confidence regarding matches.
+- Clicking any node allows the user to ask questions to the AI assistant specifically about these.
 
 ## Open questions for prototype validation
 
