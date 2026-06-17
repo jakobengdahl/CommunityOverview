@@ -2,12 +2,12 @@
 
 | Attribute | Value |
 | :--- | :--- |
-| **Skill** | AI-assisted concept mapping + codelist harmonization + impact analysis |
-| **Actor** | Harmonization coordinator, Statistical producer, Metadata expert, Eurostat liaison |
+| **Skill** | AI-assisted variables and codelists mapping |
+| **Actor** | Statistical producer, Metadata expert|
 | **Status** | Ready for Development |
 
 ## User story
-As a harmonization coordinator in a National Statistical System, I want to query the metadata graph to identify variables that measure the same real-world concept across different producers, compare the codelists and definitions they use, detect divergences, and obtain AI-assisted proposals for concept mappings or convergence paths, so that I can drive harmonization efforts without having to manually cross-reference methodology documents from each institution.
+As a Statistical producer in a National Statistical System, I want to query the metadata graph to identify variables that measure the same real-world concept across different producers, compare the codelists and definitions they use, detect divergences, and obtain AI-assisted proposals for concept mappings or convergence paths, so that I can drive harmonization efforts without having to manually cross-reference methodology documents from each institution.
 
 ## Scenario steps
 
@@ -24,7 +24,7 @@ As a harmonization coordinator in a National Statistical System, I want to query
 6. The metadata expert saves the concordance as a RELATES_TO edge between the two codelist nodes, preserving both in the graph. The expert then reviews which codelist each operation should adopt going forward and annotates the recommendation as a node property, no codelist is removed until a formal governance decision is made.
 
 ## Acceptance criteria
-- A coordinator can query in natural language which variables across producers link to the same concept, without prior knowledge of the graph schema.
+- A Statistical producer can query in natural language which variables across producers link to the same concept, without prior knowledge of the graph schema.
 - The system surfaces divergences in codelist references for the same concept node automatically, without requiring manual comparison.
 - The AI can propose concordance mappings between two codelists covering the same domain, presented as candidate Mapping nodes pending expert review.
 - An impact query on a classification change returns the full downstream list of affected variables, operations, datasets and indicators.
