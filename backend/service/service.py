@@ -609,9 +609,25 @@ class GraphService:
             denied.setdefault("added_edge_ids", [])
             return denied
 
-        # Convert dicts to Node and Edge objects
+        # Convert dicts to Node and Edge objects.
+        # Any key not in the Node model is a schema-defined extra field — fold it into metadata
+        # so it is persisted without requiring model changes.
+        _NODE_MODEL_FIELDS = {
+            'id', 'type', 'name', 'description', 'summary',
+            'tags', 'subtypes', 'metadata', 'embedding', 'created_at', 'updated_at',
+        }
         try:
-            node_objects = [Node(**n) for n in nodes]
+            node_objects = []
+            for n in nodes:
+                node_dict = dict(n)
+                extra = {k: v for k, v in node_dict.items() if k not in _NODE_MODEL_FIELDS}
+                if extra:
+                    meta = dict(node_dict.get('metadata') or {})
+                    meta.update(extra)
+                    node_dict['metadata'] = meta
+                    for k in extra:
+                        node_dict.pop(k)
+                node_objects.append(Node(**node_dict))
             edge_objects = [Edge(**e) for e in edges]
         except Exception as e:
             return {

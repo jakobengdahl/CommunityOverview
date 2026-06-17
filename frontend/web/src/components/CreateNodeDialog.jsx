@@ -4,15 +4,8 @@ import * as api from '../services/api';
 import SubtypeInput from './SubtypeInput';
 import './CreateNodeDialog.css';
 
-// Fields that certain node types have beyond the basic set
-const TYPE_EXTRA_FIELDS = {
-  Initiative: ['start_date', 'end_date'],
-  Resource: ['identifier'],
-  Legislation: ['effective_date'],
-  Goal: ['target_date'],
-  Event: ['start_date', 'end_date'],
-  Data: ['identifier'],
-};
+// Fields always shown via dedicated form controls — never repeated as extra fields
+const BASE_FIELDS = new Set(['name', 'description', 'summary', 'tags', 'subtypes', 'metadata']);
 
 const FIELD_LABELS = {
   start_date: 'Start date',
@@ -20,12 +13,20 @@ const FIELD_LABELS = {
   effective_date: 'Effective date',
   target_date: 'Target date',
   identifier: 'Resource link (URL)',
+  repo: 'Repository URL',
 };
 
+function formatFieldLabel(field) {
+  return FIELD_LABELS[field] || field.replace(/_/g, ' ').replace(/\b\w/g, c => c.toUpperCase());
+}
+
 function CreateNodeDialog({ nodeType, onClose, onSave }) {
-  const { getNodeColor } = useGraphStore();
+  const { getNodeColor, schema } = useGraphStore();
   const color = getNodeColor(nodeType);
-  const extraFields = TYPE_EXTRA_FIELDS[nodeType] || [];
+
+  // Extra fields are whatever the schema lists beyond the base set
+  const schemaFields = schema?.node_types?.[nodeType]?.fields || [];
+  const extraFields = schemaFields.filter(f => !BASE_FIELDS.has(f));
 
   const [formData, setFormData] = useState({
     name: '',
@@ -179,16 +180,17 @@ function CreateNodeDialog({ nodeType, onClose, onSave }) {
           {extraFields.map(field => {
             const isDateField = field.includes('date');
             const useDateTime = isDateField && nodeType === 'Event';
+            const label = formatFieldLabel(field);
             return (
               <div className="form-group" key={field}>
-                <label htmlFor={`create-${field}`}>{FIELD_LABELS[field] || field}</label>
+                <label htmlFor={`create-${field}`}>{label}</label>
                 <input
                   type={useDateTime ? 'datetime-local' : isDateField ? 'date' : 'text'}
                   id={`create-${field}`}
                   name={field}
-                  value={formData[field]}
+                  value={formData[field] ?? ''}
                   onChange={handleChange}
-                  placeholder={isDateField ? '' : `Enter ${FIELD_LABELS[field] || field}...`}
+                  placeholder={isDateField ? '' : `Enter ${label.toLowerCase()}...`}
                 />
               </div>
             );

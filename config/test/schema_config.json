@@ -10,6 +10,22 @@
         "fields": ["name", "summary"],
         "description": "Test node type",
         "color": "#00FF00"
+      },
+      "Questionnaire": {
+        "fields": ["name", "description", "summary", "tags", "subtypes"],
+        "category": "domain",
+        "description": "Questionnaire or survey form",
+        "color": "#7C3AED",
+        "icon": "ClipboardCheckFill",
+        "context_menu": [
+          {
+            "label": "Open in Questionnaire-system",
+            "action": {
+              "type": "open_url",
+              "url": "https://questionnaire-system.com/questionnairename/{name}"
+            }
+          }
+        ]
       }
     },
     "relationship_types": {

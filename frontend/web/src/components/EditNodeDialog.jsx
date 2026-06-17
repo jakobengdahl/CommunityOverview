@@ -4,6 +4,21 @@ import * as api from '../services/api';
 import SubtypeInput from './SubtypeInput';
 import './EditNodeDialog.css';
 
+const BASE_FIELDS = new Set(['name', 'description', 'summary', 'tags', 'subtypes', 'metadata']);
+
+const FIELD_LABELS = {
+  start_date: 'Start date',
+  end_date: 'End date',
+  effective_date: 'Effective date',
+  target_date: 'Target date',
+  identifier: 'Resource link (URL)',
+  repo: 'Repository URL',
+};
+
+function formatFieldLabel(field) {
+  return FIELD_LABELS[field] || field.replace(/_/g, ' ').replace(/\b\w/g, c => c.toUpperCase());
+}
+
 // Default node types as fallback if schema not loaded
 const DEFAULT_NODE_TYPES = [
   { type: 'Actor', description: 'Government agencies, organizations' },
@@ -19,7 +34,7 @@ const DEFAULT_NODE_TYPES = [
 ];
 
 function EditNodeDialog({ node, onClose, onSave }) {
-  const { getNodeTypes, getNodeColor } = useGraphStore();
+  const { getNodeTypes, getNodeColor, schema } = useGraphStore();
   const [formData, setFormData] = useState({
     name: '',
     type: '',
@@ -30,6 +45,10 @@ function EditNodeDialog({ node, onClose, onSave }) {
   const [subtypes, setSubtypes] = useState([]);
   const [existingSubtypes, setExistingSubtypes] = useState([]);
 
+  // Extra fields driven by the schema for the current node type
+  const schemaFields = schema?.node_types?.[formData.type]?.fields || [];
+  const extraFields = schemaFields.filter(f => !BASE_FIELDS.has(f));
+
   // Get node types from schema or use defaults
   const nodeTypes = getNodeTypes();
   const availableTypes = nodeTypes.length > 0
@@ -38,16 +57,24 @@ function EditNodeDialog({ node, onClose, onSave }) {
 
   useEffect(() => {
     if (node?.data) {
+      const nodeType = node.data.type || '';
+      const sf = schema?.node_types?.[nodeType]?.fields || [];
+      const ef = sf.filter(f => !BASE_FIELDS.has(f));
+      // Extra fields are stored in node.metadata by the backend
+      const extraData = Object.fromEntries(
+        ef.map(f => [f, node.data.metadata?.[f] ?? node.data[f] ?? ''])
+      );
       setFormData({
         name: node.data.name || '',
-        type: node.data.type || '',
+        type: nodeType,
         description: node.data.description || '',
         summary: node.data.summary || '',
         tags: (node.data.tags || []).join(', '),
+        ...extraData,
       });
       setSubtypes(node.data.subtypes || []);
     }
-  }, [node]);
+  }, [node, schema]);
 
   // Fetch existing subtypes when node type changes
   useEffect(() => {
@@ -67,6 +94,7 @@ function EditNodeDialog({ node, onClose, onSave }) {
 
   const handleSubmit = (e) => {
     e.preventDefault();
+    const extraData = Object.fromEntries(extraFields.map(f => [f, formData[f] ?? '']));
     onSave({
       name: formData.name,
       type: formData.type,
@@ -74,6 +102,7 @@ function EditNodeDialog({ node, onClose, onSave }) {
       summary: formData.summary,
       tags: formData.tags.split(',').map(t => t.trim()).filter(Boolean),
       subtypes,
+      ...extraData,
     });
   };
 
@@ -170,6 +199,25 @@ function EditNodeDialog({ node, onClose, onSave }) {
               placeholder="tag1, tag2, tag3"
             />
           </div>
+
+          {extraFields.map(field => {
+            const isDateField = field.includes('date');
+            const useDateTime = isDateField && formData.type === 'Event';
+            const label = formatFieldLabel(field);
+            return (
+              <div className="form-group" key={field}>
+                <label htmlFor={`edit-${field}`}>{label}</label>
+                <input
+                  type={useDateTime ? 'datetime-local' : isDateField ? 'date' : 'text'}
+                  id={`edit-${field}`}
+                  name={field}
+                  value={formData[field] ?? ''}
+                  onChange={handleChange}
+                  placeholder={isDateField ? '' : `Enter ${label.toLowerCase()}...`}
+                />
+              </div>
+            );
+          })}
 
           <div className="form-actions">
             <button type="button" className="secondary" onClick={onClose}>
