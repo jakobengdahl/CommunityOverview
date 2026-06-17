@@ -35,7 +35,7 @@ This guide explains how to get started with the Community Overview graph app in 
 
 Use this pre-configured link to launch a VS Code Python service with all settings applied:
 
-<https://datalab.sspcloud.fr/launcher/ide/vscode-python?name=stockholmsprint-graph&version=2.5.6&s3=default&vault.secret=«stockholmsecrets»&git.repository=«https%3A%2F%2Fgithub.com%2Fjakobengdahl%2FCommunityOverview%2F»&git.branch=«stockholmsprint»&userPreferences.aiAssistant.enabled=false&autoLaunch=true>
+<https://datalab.sspcloud.fr/launcher/ide/vscode-python?name=stockholmsprint-graph&version=2.5.6&s3=default&vault.secret=«stockholmsecrets»&git.repository=«https%3A%2F%2Fgithub.com%2FAIML4OS%2FWP12_MetadataGraph%2F»&git.branch=«stockholmsprint»&networking.user.enabled=true&networking.user.ports[0]=8000&autoLaunch=true>
 
 ### Option B: Manual Setup
 
@@ -52,7 +52,7 @@ Once the VS Code service is running:
 
 1. Open a terminal in VS Code and run:
    ```bash
-   ./CommunityOverview/start-sprint.sh
+   ./WP12_MetadataGraph/start-sprint.sh
    ```
    This script installs the required dependencies and starts the application.
 2. When the app is ready, VS Code will indicate that a URL has been opened on **port 8000**. Click the link or open the forwarded port to access the app in your browser.
