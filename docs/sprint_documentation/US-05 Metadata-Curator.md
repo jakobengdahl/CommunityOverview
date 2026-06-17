@@ -13,15 +13,17 @@ As a metadata curator, I want to load a domain knowledge skill — such as a Pop
 
 2.	The domain girl expert creates a skill specifying when to use and the content. Content could be rules and language terms specific to the domain.
 
-3.	The skill content is injected into the LLM context, making it the active reference frame for all subsequent curation guidance in the session.
+3.	The skill content is selected by creating an agent that makes use of the skill.
 
-4.	The curator clicks a node and the LLM evaluates it against the loaded skill — flagging where the artefact's definition, classification, or attribute values diverge from the domain conventions encoded in the skill.
+4.	The skill is ativated in the graph assistant.
 
-5.	For each flagged issue the LLM explains the divergence in plain language, citing the relevant convention from the skill as the basis for the suggestion.
+5.	The curator clicks a node and the LLM evaluates it against the loaded skill — flagging where the artefact's definition, classification, or attribute values diverge from the domain conventions encoded in the skill.
 
-6.	Where the loaded skill contains example artefacts or templates, the LLM can propose a reformulation of the node under review modelled on those examples.
+6.	For each flagged issue the LLM explains the divergence in plain language, citing the relevant convention from the skill as the basis for the suggestion.
 
-7.	The curator accepts, modifies, or dismisses each suggestion, and the graph reflects the updated node state.
+7.	Where the loaded skill contains example artefacts or templates, the LLM can propose a reformulation of the node under review modelled on those examples.
+
+8.	The curator accepts, modifies, or dismisses each suggestion, and the graph reflects the updated node state.
 
 ## Acceptance criteria
 - A skill can be loaded as an md file and its content is demonstrably active in the LLM responses for that session.
