@@ -530,8 +530,11 @@ Satisfies the final acceptance criterion.
 
 # Workstream 7 — API & MCP Integration
 
+To be done
+
 # Workstream 8 — Frontend Harmonization View
 
+To be done
 
 # Verification
 
@@ -599,6 +602,9 @@ based on mapping approvals.
 
 ### 7. Automated tests
 
+To be done
+ 
+---
 
 Coverage:
 
