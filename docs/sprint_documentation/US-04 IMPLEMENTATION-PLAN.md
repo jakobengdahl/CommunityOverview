@@ -266,120 +266,45 @@ Used by both UI and chat.
 
 ---
 
-# Workstream 3 — Codelist Divergence Analysis
+## Workstream 3 — AI-Assisted Concordance Generation
 
-## New comparison service
+### Objective
 
-```text
-backend/service/codelist_comparison.py
-```
+Enable an LLM to analyse variables, concepts, definitions and codelists across statistical producers and generate candidate concordance mappings that support harmonization activities.
 
-Responsibilities:
+This workstream implements scenario steps 3 and 4.
 
-### Compare two codelists
-
-Input:
-
-```python
-source_codelist
-target_codelist
-```
-
-Output:
-
-```python
-{
-  "aligned_codes": [],
-  "missing_codes": [],
-  "merged_codes": [],
-  "split_codes": [],
-  "divergence_score": ...
-}
-```
-
----
-
-## Divergence detection rules
-
-### Exact match
-
-```text
-ILO code 1
-↔
-National code 1
-```
-
-Status:
-
-```text
-aligned
-```
-
-### Many-to-one
-
-```text
-ILO 2
-ILO 3
-→ National 2
-```
-
-Status:
-
-```text
-partial
-```
-
-### Missing category
-
-Status:
-
-```text
-divergent
-```
-
-The rules remain deterministic and testable.
-
----
-
-# Workstream 4 — AI Mapping Generation
-
-## LLM-assisted concordance generation
-
-New module:
+### New service module
 
 ```text
 backend/service/mapping_generator.py
 ```
 
-Uses:
-
-```python
-create_provider()
-```
-
-from:
-
-```text
-backend/llm_providers.py
-```
-
-### Prompt inputs
-
-Provide:
+The module reuses the existing LLM abstraction (`create_provider`) and receives:
 
 * Concept definition
+* Variable definitions
 * Source codelist
 * Target codelist
-* Variable definitions
+* Existing metadata context
 
-Ask for:
+### LLM Mapping Generation
 
-* equivalences
-* partial equivalences
-* missing mappings
-* methodological warnings
+The prompt asks the model to:
 
-### Output structure
+* Identify exact equivalences
+* Identify partial equivalences
+* Detect merged categories
+* Detect split categories
+* Detect unmapped categories
+* Explain methodological implications
+* Suggest convergence recommendations
+
+Example prompt:
+
+> Compare these two statistical classifications and propose a concordance table. Identify exact equivalences, partial equivalences, merged categories, split categories and unmapped categories. Explain any methodological implications and recommend possible harmonization actions.
+
+### Mapping Output Structure
 
 ```json
 {
@@ -387,94 +312,159 @@ Ask for:
     {
       "source_code": "2",
       "target_code": "2",
-      "confidence": 0.92,
-      "equivalence": "partial"
+      "equivalence": "partial",
+      "confidence": 0.91,
+      "reason": "Target category merges unemployed and inactive persons."
     }
-  ]
+  ],
+  "summary": "...",
+  "recommendations": [...]
 }
 ```
 
----
+### Candidate Mapping Creation
 
-## Create candidate Mapping node
+The generated concordance is persisted as a Mapping node:
 
-Generated mappings are persisted as:
-
-```text
-Mapping node
+```json
+{
+  "type": "Mapping",
+  "status": "candidate",
+  "created_by": "llm"
+}
 ```
 
-with status:
+The graph displays the Mapping node between both codelists for expert review.
+
+### Tools
+
+```python
+generate_mapping()
+```
+
+### Acceptance Verification
+
+* User selects two codelists.
+* LLM generates a concordance proposal.
+* A candidate Mapping node appears in the graph.
+* Partial equivalences and methodological warnings are clearly identified.
+
+---
+
+## Workstream 4 — Expert Review, Validation & Harmonization Persistence
+
+### Objective
+
+Allow metadata experts to review AI-generated concordances, validate or reject them, record governance decisions, and persist approved harmonization information in the graph.
+
+This workstream implements scenario steps 5 and 6.
+
+### Mapping Lifecycle
+
+Supported statuses:
 
 ```text
 candidate
+reviewed
+validated
+rejected
 ```
 
-No automatic approval.
+### Review Workflow
 
----
+```text
+LLM
+ ↓
+Mapping (candidate)
+ ↓
+Metadata Expert Review
+ ↓
+Validated Mapping
+ ↓
+RELATES_TO relationship persisted
+```
 
-# Workstream 5 — Harmonization Workflow
-
-## Expert validation
+### Expert Actions
 
 New GraphService operations:
 
 ```python
+review_mapping(mapping_id)
 validate_mapping(mapping_id)
 reject_mapping(mapping_id)
 ```
 
-### Validation metadata
+### Review Metadata
 
-When approved:
+Validated mappings store governance information:
 
 ```json
 {
   "status": "validated",
-  "validated_by": "...",
-  "validated_date": "...",
-  "authority_reference": "..."
+  "reviewed_by": "...",
+  "review_date": "...",
+  "authority_reference": "...",
+  "review_note": "...",
+  "recommended_action": "Split merged category in future survey editions"
 }
 ```
 
-### Save concordance
+### Concordance Persistence
 
-Upon approval:
+After validation:
 
-Create:
+1. Mapping node remains in the graph for provenance.
+2. A RELATES_TO relationship is created between both codelists.
+3. Recommendations are stored as metadata.
+4. No codelist is removed.
+5. Both classifications remain queryable.
+
+### Harmonization Status
+
+The system derives the Concept harmonization status from approved mappings.
+
+Possible values:
 
 ```text
-CodeList
-  ← MAPS_TO →
-CodeList
+aligned
+partial
+divergent
 ```
 
-and preserve:
+Rules:
 
-```text
-Mapping node
+* aligned → all mappings are exact.
+* partial → at least one approved partial equivalence exists.
+* divergent → no approved mappings or major unresolved divergences remain.
+
+### API Endpoints
+
+```http
+POST /api/harmonization/validate
+POST /api/harmonization/reject
+GET  /api/harmonization/status
 ```
 
-for provenance.
+### Tools
 
-No codelists are removed.
-
-### Recommendations
-
-Metadata expert may add:
-
-```json
-{
-  "recommended_for_future_use": true
-}
+```python
+validate_mapping()
+reject_mapping()
+get_harmonization_summary()
 ```
 
-to codelists or operations.
+### Acceptance Verification
 
----
+* Expert reviews candidate Mapping.
+* Expert adds governance notes.
+* Mapping is validated.
+* RELATES_TO relationship is created.
+* Provenance information is preserved.
+* Harmonization status updates automatically.
+* Both codelists remain available in the graph.
 
-# Workstream 6 — Harmonization Status Engine
+
+# Workstream 5 — Harmonization Status Engine
 
 New module:
 
@@ -528,11 +518,11 @@ Satisfies the final acceptance criterion.
 
 ---
 
-# Workstream 7 — API & MCP Integration
+# Workstream 6 — API & MCP Integration
 
 To be done
 
-# Workstream 8 — Frontend Harmonization View
+# Workstream 7 — Frontend Harmonization View
 
 To be done
 
