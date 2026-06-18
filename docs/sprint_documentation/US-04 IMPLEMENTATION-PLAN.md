@@ -437,14 +437,6 @@ Rules:
 * partial → at least one approved partial equivalence exists.
 * divergent → no approved mappings or major unresolved divergences remain.
 
-### API Endpoints
-
-```http
-POST /api/harmonization/validate
-POST /api/harmonization/reject
-GET  /api/harmonization/status
-```
-
 ### Tools
 
 ```python
