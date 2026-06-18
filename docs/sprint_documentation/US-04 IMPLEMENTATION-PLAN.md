@@ -1,5 +1,7 @@
 # US-04 — Concept Harmonization & Cross-System Mapping: Implementation Plan
 
+| **Status** | Ready for Development |
+
 ## Context
 
 US-04 (`docs/sprint_documentation/US-04 Concept-Harmonizer.md`) introduces a harmonization workflow on top of the existing WP12 Metadata Graph prototype.
