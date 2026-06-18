@@ -2,7 +2,7 @@
 | Attribute | Value |
 | :--- | :--- |
 | **Skill** | group	Domain knowledge base + GSIM conformance + metadata completeness |
-| **Actor** | Metadata Curator, Domain girl expert |
+| **Actor** | Metadata Curator, Domain expert |
 | **Status** | Draft |
 
 ## User story
@@ -11,7 +11,7 @@ As a metadata curator, I want to load a domain knowledge skill — such as a Pop
 ## Scenario steps
 1.	The curator selects one or more metadata artefacts in the graph — a Variable, a Concept System, or a subgraph grouping — as the scope for the curation session.
 
-2.	The domain girl expert creates a skill specifying when to use and the content. Content could be rules and language terms specific to the domain.
+2.	The domain expert creates a skill specifying when to use and the content. Content could be rules and language terms specific to the domain.
 
 3.	The skill content is selected by creating an agent that makes use of the skill.
 
