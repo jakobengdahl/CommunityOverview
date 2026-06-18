@@ -23,6 +23,8 @@ function CustomNode({ data, id, selected }) {
   const [tooltipPos, setTooltipPos] = useState(null);
   const nodeRef = useRef(null);
 
+  const isSkill = data.nodeType === 'Skill';
+
   const handleExpand = (e) => {
     e.stopPropagation();
     if (data.onExpand) {
@@ -40,7 +42,7 @@ function CustomNode({ data, id, selected }) {
   return (
     <div
       ref={nodeRef}
-      className={`graph-custom-node ${data.isHighlighted ? 'highlighted' : ''} ${selected ? 'selected' : ''}`}
+      className={`graph-custom-node ${data.isHighlighted ? 'highlighted' : ''} ${selected ? 'selected' : ''} ${isSkill ? 'skill-node' : ''}`}
       style={{ borderColor: data.color }}
       onMouseEnter={() => {
         setShowButtons(true);
@@ -62,6 +64,7 @@ function CustomNode({ data, id, selected }) {
       <Handle type="target" position={Position.Top} />
 
       <div className="graph-node-header" style={{ backgroundColor: data.color }}>
+        {isSkill && <span className="skill-node-badge" title="Skill — select and ask the AI to apply these instructions">★</span>}
         <span className="graph-node-type">{data.nodeType}</span>
       </div>
 
