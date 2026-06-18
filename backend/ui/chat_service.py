@@ -232,6 +232,7 @@ class ChatService:
         provider: Optional[str] = None,
         federation_depth: Optional[int] = None,
         expert_agent_id: Optional[str] = None,
+        skills_context: Optional[str] = None,
     ) -> Dict[str, Any]:
         """
         Process a chat message and return the response.
@@ -249,6 +250,10 @@ class ChatService:
             expert_agent_id: Optional expert agent ID — when provided, the
                 agent's system_context and skills are prepended to the system
                 prompt for this request.
+            skills_context: Optional temporary skill instructions built from
+                Skill nodes the user selected in the visualization. Injected
+                as extra system context for this single request only; it is
+                NOT persisted in conversation history.
 
         Returns:
             Dict with:
@@ -273,6 +278,16 @@ class ChatService:
                         " — expert may not be registered",
                         expert_agent_id,
                     )
+            # Merge Skill-node instructions (from frontend selection) into extra_context.
+            # skills_context is active for this single request only and is NOT stored
+            # in conversation history, so the persona doesn't bleed into later turns.
+            if skills_context:
+                extra_context = (
+                    f"{extra_context}\n\n{skills_context}"
+                    if extra_context
+                    else skills_context
+                )
+
             return self._processor.process_message(
                 messages=messages,
                 api_key=api_key,

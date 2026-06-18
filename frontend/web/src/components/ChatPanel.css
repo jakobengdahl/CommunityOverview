@@ -341,6 +341,58 @@
   color: #EF4444;
 }
 
+/* Skill-node indicator — shown when Skill nodes are in the selection */
+.skill-nodes-indicator {
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  flex-wrap: wrap;
+}
+
+/* Separator between skill banner and regular node chips (only when both exist) */
+.skill-nodes-indicator.has-regular-nodes {
+  padding-bottom: 4px;
+  border-bottom: 1px solid rgba(251, 191, 36, 0.2);
+  margin-bottom: 2px;
+}
+
+.skill-nodes-icon {
+  color: #FBBF24;
+  flex-shrink: 0;
+}
+
+.skill-nodes-label {
+  font-size: 0.7rem;
+  font-weight: 600;
+  color: #FBBF24;
+  white-space: nowrap;
+}
+
+.skill-node-chip {
+  display: inline-flex;
+  align-items: center;
+  font-size: 0.7rem;
+  color: #1a1a1a;
+  background: #FBBF24;
+  padding: 1px 7px;
+  border-radius: 10px;
+  font-weight: 600;
+  white-space: nowrap;
+}
+
+.message-skill-tag {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  font-size: 0.68rem;
+  color: #FBBF24;
+  background: rgba(251, 191, 36, 0.1);
+  border: 1px solid rgba(251, 191, 36, 0.3);
+  border-radius: 8px;
+  padding: 2px 7px;
+  margin-top: 4px;
+}
+
 /* File indicator */
 .file-indicator {
   display: flex;
