@@ -15,8 +15,15 @@ import './ChatPanel.css';
 /** Max characters of node context to include with a message to the LLM */
 const MAX_SELECTION_CONTEXT_CHARS = 6000;
 
-/** Returns true when a graph node is of type "Skill". */
-const isSkillNode = (node) => (node.nodeType || node.type) === 'Skill';
+/** Returns true when a graph node is of type "Skill".
+ *  Checks all known locations for the type string to be resilient against
+ *  different node-object shapes (plain data object, raw React-Flow node, etc.).
+ */
+const isSkillNode = (node) =>
+  node.nodeType === 'Skill' ||
+  node.type === 'Skill' ||
+  node.data?.nodeType === 'Skill' ||
+  node.data?.type === 'Skill';
 
 function ChatPanel() {
   const {

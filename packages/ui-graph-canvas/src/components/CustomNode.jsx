@@ -23,7 +23,7 @@ function CustomNode({ data, id, selected }) {
   const [tooltipPos, setTooltipPos] = useState(null);
   const nodeRef = useRef(null);
 
-  const isSkill = data.nodeType === 'Skill';
+  const isSkill = data.nodeType === 'Skill' || data.type === 'Skill';
 
   const handleExpand = (e) => {
     e.stopPropagation();
