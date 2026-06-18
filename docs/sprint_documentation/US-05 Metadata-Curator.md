@@ -2,7 +2,7 @@
 | Attribute | Value |
 | :--- | :--- |
 | **Skill** | group	Domain knowledge base + GSIM conformance + metadata completeness |
-| **Actor** | Metadata Curator, Domain girl expert |
+| **Actor** | Metadata Curator, Domain expert |
 | **Status** | Draft |
 
 ## User story
