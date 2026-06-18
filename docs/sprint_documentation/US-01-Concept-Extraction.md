@@ -19,25 +19,23 @@ As a statistical producer, I want to upload a questionnaire or statistical docum
 
 ## User Scenario
 
-## User Flow
-
-### 1. Upload and Analysis
+1. Upload and Analysis
 
 The statistical producer uploads a questionnaire or other statistical documentation in PDF or Word format. The AI assistant analyses the document and extracts candidate metadata elements, such as concepts, variables, value domains, question groups, and units of observation.
 
-### 2. Metadata Matching
+2. Metadata Matching
 
 The AI assistant compares the extracted elements with the existing metadata graph and identifies relevant matches, related structures, and potential reuse opportunities. Suggested matches are accompanied by confidence scores and explanations.
 
-### 3. Visual Exploration and Explanation
+3. Visual Exploration and Explanation
 
 The identified matches are presented in an interactive graph where the statistical producer can explore related metadata structures, inspect relationships between existing and newly identified elements, and ask the AI assistant questions about the suggested matches and their rationale.
 
-### 4. Integration Guidance
+4. Integration Guidance
 
 Based on the identified matches and graph patterns, the AI assistant suggests how the extracted concepts and structures could be represented in the metadata graph, including opportunities to reuse existing metadata and recommendations for new nodes or relationships where needed.
 
-### 5. Review and Confirmation
+5. Review and Confirmation
 
 The statistical producer reviews the proposed mappings and integration suggestions and instructs the AI assistant which metadata elements and relationships should be added, modified, or ignored before integration into the metadata system.
 
