@@ -42,25 +42,25 @@ The statistical producer reviews the proposed mappings and integration suggestio
 
 ## Acceptance Criteria
 
-### Document Analysis
+Document Analysis
 
 - PDF and DOCX documents can be uploaded.
 - Concepts, variables, value domains, and question groups are extracted from the document.
 - The origin of extracted content is retained.
 
-### Metadata Matching
+Metadata Matching
 
 - Extracted elements are matched against the metadata graph.
 - Suggested matches include confidence scores and explanations.
 - The user can inspect why a match was proposed.
 
-### Graph Exploration
+Graph Exploration
 
 - Matching nodes and relationships are visualised in the graph.
 - Users can navigate from suggested matches to related existing metadata.
 - Users can select nodes and ask follow-up questions.
 
-### Metadata Integration Support
+Metadata Integration Support
 
 - The AI assistant suggests how new content can be integrated into the existing metadata model.
 - Suggestions distinguish between reused metadata and newly proposed metadata.
