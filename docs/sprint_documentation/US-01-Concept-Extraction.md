@@ -2,46 +2,78 @@
 
 | Attribute | Value |
 | :--- | :--- |
-| **Skill** | Document parsing + semantic search over the metadata graph |
-| **Actor** | Statistical Analyst |
+| **Skill** | Document parsing and analysis + metadata graph matching |
+| **Actor** | Statistical Producer / Statistical Analyst |
 | **Status** | Work in Progress |
+
+## Buisness Value
+When developing a new survey or introducing new questions, statistical producers typically begin by drafting questionnaires and supporting documentation. At a later stage, these concepts, variables, value domains, and relationships must be documented and integrated into the organisation's metadata system.
+
+This process can be time-consuming because it requires identifying whether similar concepts, variables, or structures already exist in the metadata repository and determining how new content should be aligned with the existing metadata model.
+
+By analysing questionnaire documents and comparing their content to the existing metadata graph, the AI assistant can help statistical producers identify reusable structures, discover relevant metadata, and understand how new content could be integrated into the metadata system. This reduces manual effort and supports more consistent metadata documentation.
 
 ## User story
 
-As a statistical producer, I want to upload a document related to a statistical product and explore the extracted concepts and their graph matches through an interactive graph, so that I can visually identify reuse opportunities and definition gaps before formalising and adding new metadata to the graph.
+As a statistical producer, I want to upload a questionnaire or statistical documentation and identify concepts, variables, and structures that match existing metadata, with support from an interactive graph and an AI assistant, so that I can reuse existing metadata where appropriate and efficiently integrate new content into the metadata system in a way that is consistent with the organisation's metadata model (e.g. GSIM-based).
 
-## Scenario steps
+## User Scenario
 
-1- The statistical producer uploads a PDF or Word document (e.g., a survey questionnaire or technical report) through the document upload component in the ai-assistent.
+## User Flow
 
-2 - The AI assistant parses the document and extracts candidate concepts, preserving their section of origin (e.g., "Variables", "Unit of observation").
+### 1. Upload and Analysis
 
-3 - Each candidate concept is matched against the metadata graph structure and content — Represented Variables, Concepts, Value Domains — using semantic search, returning a confidence score per match.
+The statistical producer uploads a questionnaire or other statistical documentation in PDF or Word format. The AI assistant analyses the document and extracts candidate metadata elements, such as concepts, variables, value domains, question groups, and units of observation.
 
-4 - If there are existing nodes in the metadata graph that the AI-assistant has identified, these are presented in the visualisation together with guidance from the ai-assistant on possible ways to add the relevant identified nodes from the document so that they are compliant with the (GSIM-based) metadata model. 
+### 2. Metadata Matching
 
-5 - The statistical producer can navigate and dive deeper into the nodes matched by the ai-assistant and see what connections to pre-existing nodes that were identified.
+The AI assistant compares the extracted elements with the existing metadata graph and identifies relevant matches, related structures, and potential reuse opportunities. Suggested matches are accompanied by confidence scores and explanations.
 
-6 - The statistical producer can highlight one or more matched nodes and ask the AI assistant to explain details about match rationale etc.
+### 3. Visual Exploration and Explanation
 
-7 - The statistical producer can give instructions to the ai-assistant on which identified new nodes and connections that should be added or give more general instructions such as "add everything matched with a high confidence score".
+The identified matches are presented in an interactive graph where the statistical producer can explore related metadata structures, inspect relationships between existing and newly identified elements, and ask the AI assistant questions about the suggested matches and their rationale.
 
-## Acceptance criteria
+### 4. Integration Guidance
 
-- The upload component accepts at minimum PDF and DOCX formats.
-- Extracted concepts are described by the ai-assistant with information about confidence regarding matches.
-- Clicking any node allows the user to ask questions to the AI assistant specifically about these.
+Based on the identified matches and graph patterns, the AI assistant suggests how the extracted concepts and structures could be represented in the metadata graph, including opportunities to reuse existing metadata and recommendations for new nodes or relationships where needed.
 
-## Open questions for prototype validation
+### 5. Review and Confirmation
 
-- Does the current upload component pass document content to the AI assistant context, or only the filename?
-- Is the metadata graph accessible as a searchable store (vector or keyword) at runtime, or is it embedded in the AI assistant prompt as static context?
-- Does the graph component support cluster grouping, or only flat node-edge layout?
-- Can edge weight or style be varied dynamically based on a numeric score?
+The statistical producer reviews the proposed mappings and integration suggestions and instructs the AI assistant which metadata elements and relationships should be added, modified, or ignored before integration into the metadata system.
 
-## Prototype Validation Scenario (Test Exercise)
 
-The purpose of this test is to evaluate how well the AI assistant can identify and suggest reusable structures based on an existing example in the metadata graph.
+## Acceptance Criteria
+
+### Document Analysis
+
+- PDF and DOCX documents can be uploaded.
+- Concepts, variables, value domains, and question groups are extracted from the document.
+- The origin of extracted content is retained.
+
+### Metadata Matching
+
+- Extracted elements are matched against the metadata graph.
+- Suggested matches include confidence scores and explanations.
+- The user can inspect why a match was proposed.
+
+### Graph Exploration
+
+- Matching nodes and relationships are visualised in the graph.
+- Users can navigate from suggested matches to related existing metadata.
+- Users can select nodes and ask follow-up questions.
+
+### Metadata Integration Support
+
+- The AI assistant suggests how new content can be integrated into the existing metadata model.
+- Suggestions distinguish between reused metadata and newly proposed metadata.
+- The user remains in control of which additions are accepted.
+
+
+## Prototype Validation Scenario
+
+### Objective
+
+Evaluate whether the AI assistant can identify reusable metadata structures from questionnaire documents and suggest how they can be integrated into an existing metadata graph.
 
 ### Steps
 
@@ -52,25 +84,28 @@ The purpose of this test is to evaluate how well the AI assistant can identify a
 3. Expand the graph to display the following structure:
 QUESTIONNAIRE → QUESTIONNAIRE COMPONENT → INSTANCE VARIABLE → VALUE DOMAIN
 
-4. Select and highlight one group of related questions in the graph.  
-This will serve as a **reference pattern** for the next step.
+4. Select and highlight a related group of questions as a reference pattern. 
 
 5. Upload the document:
 *Swedish Labour Force Survey (LFS) – Questionnaire* (https://www.scb.se/contentassets/c12fd0d28d604529b2b4ffc2eb742fbe/lfs_questionnaire_240312.pdf)
 
 6. Ask the AI assistant:
-> "Find another group of questions in the uploaded document based on the highlighted one and suggest how it can be added to the graph."
+  > Find another group of questions in the uploaded document that resembles the selected pattern and suggest how it should be represented in the metadata graph.
+
 
 ### Expected Outcome
-- The AI assistant identifies a **similar group of questions** from the uploaded document  
-- The identified group is mapped to:
-- Relevant concepts  
-- Instance variables  
-- Value domains  
-- The AI assistant suggests how the new group can be added to the graph structure  
-- The AI assistant provides an explanation of the **matching rationale**
+
+The AI assistant:
+
+- Identifies a structurally similar question group.
+- Maps relevant concepts, variables, and value domains.
+- Suggests how the structure could be represented in the metadata graph.
+- Explains the rationale behind the suggested mapping.
 
 ### Evaluation Criteria
-- Does the AI correctly identify **structurally similar question groups**?  
-- Are the suggested mappings **aligned with the metadata graph model**?  
-- Is the explanation **clear, relevant, and useful** for a statistical analyst?  
+
+- Does the AI identify structurally similar question groups?
+- Are the suggested mappings consistent with the metadata model?
+- Are reuse opportunities correctly identified?
+- Is the explanation understandable and useful for a statistical producer?
+- Does the proposed structure support efficient metadata documentation?
