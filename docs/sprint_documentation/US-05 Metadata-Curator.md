@@ -19,20 +19,16 @@ As a metadata curator, I want to load a domain knowledge skill — such as a Pop
 
 5.	The curator clicks a node and the LLM evaluates it against the loaded skill — flagging where the artefact's definition, classification, or attribute values diverge from the domain conventions encoded in the skill.
 
-6.	For each flagged issue the LLM explains the divergence in plain language, citing the relevant convention from the skill as the basis for the suggestion.
-
-7.	Where the loaded skill contains example artefacts or templates, the LLM can propose a reformulation of the node under review modelled on those examples.
-
-8.	The curator accepts, modifies, or dismisses each suggestion, and the graph reflects the updated node state.
+6.	The curator accepts, modifies, or dismisses each suggestion, and the graph reflects the updated node state.
 
 ## Acceptance criteria
-- A skill can be loaded as an md file and its content is demonstrably active in the LLM responses for that session.
+- An agent can be activated in the experts menu.
 - LLM curation guidance explicitly references the loaded skill's conventions rather than producing generic metadata advice.
 -	Multiple skills can be active simultaneously without the LLM conflating their guidance.
 - The curator can identify which skill is the source of each suggestion.
 - Node state updates from accepted suggestions are reflected in the graph within the session.
 
 ## Open questions for prototype validation
-- How are skills stored and passed to the LLM — as files injected into the system prompt, as retrieval chunks, or as static context blocks?
-- Is there a skill catalogue UI in the prototype, or would skill selection require a manual configuration step outside the interface?
-- Does the prototype support multiple skills active simultaneously in the same LLM context, and is there a context length constraint that limits how many can be loaded at once?
+- Can skills be used directly instead of through an agent?
+- Is there a skill/expertise catalogue UI in the prototype, or would skill selection require a manual configuration step outside the interface?
+- Does the prototype support multiple skills/expertise aresas active simultaneously in the same LLM context, and is there a context length constraint that limits how many can be loaded at once?
