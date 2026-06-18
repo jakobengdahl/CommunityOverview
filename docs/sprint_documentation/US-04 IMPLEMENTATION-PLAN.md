@@ -1,6 +1,6 @@
 # US-04 — Concept Harmonization & Cross-System Mapping: Implementation Plan
 
-| **Status** | Ready for Development |
+| **Status** | Draft |
 
 ## Context
 
