@@ -38,3 +38,39 @@ As a statistical producer, I want to upload a document related to a statistical 
 - Is the metadata graph accessible as a searchable store (vector or keyword) at runtime, or is it embedded in the AI assistant prompt as static context?
 - Does the graph component support cluster grouping, or only flat node-edge layout?
 - Can edge weight or style be varied dynamically based on a numeric score?
+
+## Prototype Validation Scenario (Test Exercise)
+
+The purpose of this test is to evaluate how well the AI assistant can identify and suggest reusable structures based on an existing example in the metadata graph.
+
+### Steps
+
+1. Use the base dataset available under: config/stockholmsprint/
+2. Search for:
+**"Labour Force Surveys (LFS)"** in `STATISTICALPROGRAMME`.
+
+3. Expand the graph to display the following structure:
+QUESTIONNAIRE → QUESTIONNAIRE COMPONENT → INSTANCE VARIABLE → VALUE DOMAIN
+
+4. Select and highlight one group of related questions in the graph.  
+This will serve as a **reference pattern** for the next step.
+
+5. Upload the document:
+*Swedish Labour Force Survey (LFS) – Questionnaire* (https://www.scb.se/contentassets/c12fd0d28d604529b2b4ffc2eb742fbe/lfs_questionnaire_240312.pdf)
+
+6. Ask the AI assistant:
+> "Find another group of questions in the uploaded document based on the highlighted one and suggest how it can be added to the graph."
+
+### Expected Outcome
+- The AI assistant identifies a **similar group of questions** from the uploaded document  
+- The identified group is mapped to:
+- Relevant concepts  
+- Instance variables  
+- Value domains  
+- The AI assistant suggests how the new group can be added to the graph structure  
+- The AI assistant provides an explanation of the **matching rationale**
+
+### Evaluation Criteria
+- Does the AI correctly identify **structurally similar question groups**?  
+- Are the suggested mappings **aligned with the metadata graph model**?  
+- Is the explanation **clear, relevant, and useful** for a statistical analyst?  
