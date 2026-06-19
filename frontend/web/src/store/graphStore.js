@@ -162,6 +162,10 @@ const useGraphStore = create((set, get) => ({
     isExecutingAction: false,
   },
 
+  // Guide-driven UI control (set by guide actions, consumed by components)
+  guideChatInput: null,    // { text, animated, auto_send } — fills chat textarea
+  guideSearchInput: null,  // { text, animated } — fills search bar
+
   // Stats
   stats: null,
 
@@ -526,6 +530,12 @@ const useGraphStore = create((set, get) => ({
   setGuideExecutingAction: (isExecuting) => {
     set((state) => ({ guide: { ...state.guide, isExecutingAction: isExecuting } }));
   },
+
+  // Guide-driven UI fill actions
+  setGuideChatInput: (payload) => set({ guideChatInput: payload }),
+  clearGuideChatInput: () => set({ guideChatInput: null }),
+  setGuideSearchInput: (payload) => set({ guideSearchInput: payload }),
+  clearGuideSearchInput: () => set({ guideSearchInput: null }),
 
   // Delete node from visualization
   removeNode: (nodeId) => {

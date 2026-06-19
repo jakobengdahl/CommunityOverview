@@ -32,6 +32,8 @@ function ChatPanel() {
     showMinimap,
     presentation,
     startGuide,
+    guideChatInput,
+    clearGuideChatInput,
   } = useGraphStore();
 
   const { t, language } = useI18n();
@@ -60,6 +62,31 @@ function ChatPanel() {
       return () => clearTimeout(timer);
     }
   }, [error]);
+
+  // Guide: animate typing into chat input
+  useEffect(() => {
+    if (!guideChatInput) return;
+    const { text, animated, auto_send } = guideChatInput;
+    clearGuideChatInput();
+
+    if (!animated) {
+      setInputValue(text);
+      if (auto_send) setTimeout(() => handleSend(), 0);
+      return;
+    }
+
+    let i = 0;
+    setInputValue('');
+    const interval = setInterval(() => {
+      i++;
+      setInputValue(text.slice(0, i));
+      if (i >= text.length) {
+        clearInterval(interval);
+        if (auto_send) setTimeout(() => handleSend(), 300);
+      }
+    }, 30);
+    return () => clearInterval(interval);
+  }, [guideChatInput]); // eslint-disable-line react-hooks/exhaustive-deps
 
   const filterCommunityNodes = (nodeList) => {
     return nodeList.filter(n =>

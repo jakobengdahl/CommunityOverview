@@ -113,7 +113,7 @@ class LanguagePolicyConfig(BaseModel):
 
 class GuideStepConfig(BaseModel):
     """A single step in an interactive guide."""
-    type: str = "tooltip"  # tooltip | input | search_nodes | add_node | focus_node | clear
+    type: str = "tooltip"  # tooltip | input | <action-type>
     target: str = "center"  # toolbar | chat | search | header | canvas | center
     target_position: str = "auto"  # auto | left | right | above | below
     text: str = ""
@@ -125,11 +125,24 @@ class GuideStepConfig(BaseModel):
     input_placeholder_sv: str = ""
     store_as: str = ""  # key to store collected input under
     # For action steps
-    action: str = ""  # search_nodes | add_node | focus_node | clear_visualization
+    action: str = ""  # explicit override; defaults to 'type' when type is actionable
+    # Node actions (create_node, update_node, delete_node, show_node_detail, focus_node)
     node_type: str = ""
-    query: str = ""
     node_id: str = ""
     node_data: Dict[str, Any] = Field(default_factory=dict)
+    # Search / fill actions
+    query: str = ""
+    fill_text: str = ""  # alias for query in fill_chat_input / fill_search_input
+    animated: bool = True  # animate typing for fill_* actions
+    auto_send: bool = False  # auto-send after fill_chat_input animation
+    # Edge actions (create_edge, delete_edge)
+    source_id: str = ""
+    target_id: str = ""
+    edge_id: str = ""
+    edge_type: str = ""
+    edge_label: str = ""
+    # Saved view action
+    view_name: str = ""
 
 
 class GuideConfig(BaseModel):
