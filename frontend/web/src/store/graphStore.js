@@ -498,6 +498,8 @@ const useGraphStore = create((set, get) => ({
       userInputs: {},
       isExecutingAction: false,
     },
+    guideChatInput: null,
+    guideSearchInput: null,
   }),
 
   advanceGuide: () => {
@@ -515,6 +517,8 @@ const useGraphStore = create((set, get) => ({
             userInputs: {},
             isExecutingAction: false,
           },
+          guideChatInput: null,
+          guideSearchInput: null,
         };
       }
       return { guide: { ...guide, currentStepIndex: nextIndex, isExecutingAction: false } };

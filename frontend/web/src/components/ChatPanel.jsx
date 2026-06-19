@@ -47,6 +47,7 @@ function ChatPanel() {
 
   const messagesEndRef = useRef(null);
   const fileInputRef = useRef(null);
+  const handleSendRef = useRef(null);
 
   const scrollToBottom = () => {
     messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' });
@@ -71,7 +72,7 @@ function ChatPanel() {
 
     if (!animated) {
       setInputValue(text);
-      if (auto_send) setTimeout(() => handleSend(), 0);
+      if (auto_send) setTimeout(() => handleSendRef.current?.(), 0);
       return;
     }
 
@@ -82,7 +83,7 @@ function ChatPanel() {
       setInputValue(text.slice(0, i));
       if (i >= text.length) {
         clearInterval(interval);
-        if (auto_send) setTimeout(() => handleSend(), 300);
+        if (auto_send) setTimeout(() => handleSendRef.current?.(), 300);
       }
     }, 30);
     return () => clearInterval(interval);
@@ -243,6 +244,10 @@ function ChatPanel() {
       setIsProcessing(false);
     }
   };
+
+  // Keep ref current so the guide animation can call the latest handleSend after animation
+  // completes, picking up the fully-typed inputValue rather than a stale closure.
+  handleSendRef.current = handleSend;
 
   const handleKeyPress = (e) => {
     if (e.key === 'Enter' && !e.shiftKey) {

@@ -144,16 +144,18 @@ function GuideOverlay() {
         } else if (action === 'update_node') {
           const nodeId = currentStep.node_id;
           const updates = currentStep.node_data || {};
-          if (!cancelled && nodeId) {
+          if (nodeId && !cancelled) {
             await api.updateNode(nodeId, updates);
-            const s = useGraphStore.getState();
-            const updatedNodes = s.nodes.map(n => n.id === nodeId ? { ...n, ...updates } : n);
-            s.updateVisualization(updatedNodes, s.edges);
+            if (!cancelled) {
+              const s = useGraphStore.getState();
+              const updatedNodes = s.nodes.map(n => n.id === nodeId ? { ...n, ...updates } : n);
+              s.updateVisualization(updatedNodes, s.edges);
+            }
           }
 
         } else if (action === 'delete_node') {
           const nodeId = currentStep.node_id;
-          if (nodeId) {
+          if (nodeId && !cancelled) {
             await api.deleteNodes([nodeId], true);
             if (!cancelled) useGraphStore.getState().removeNode(nodeId);
           }
@@ -188,18 +190,20 @@ function GuideOverlay() {
         // ── Saved view ───────────────────────────────────────────────────
         } else if (action === 'load_saved_view') {
           const nameOrId = currentStep.view_name || currentStep.node_id;
-          if (nameOrId) {
+          if (nameOrId && !cancelled) {
             const result = await api.searchGraph(nameOrId, { nodeTypes: ['SavedView'], limit: 10 });
             const viewNode = result.nodes?.find(n => n.id === nameOrId || n.name === nameOrId);
             if (!cancelled && viewNode) {
               const nodeIds = viewNode.metadata?.node_ids || [];
               if (nodeIds.length > 0) {
-                const s = useGraphStore.getState();
-                s.clearVisualization();
                 const details = await Promise.all(nodeIds.map(id => api.getNodeDetails(id).catch(() => null)));
                 const loadedNodes = details.filter(d => d?.success).map(d => d.node);
                 const savedEdges = viewNode.metadata?.edges || [];
-                if (!cancelled) s.addNodesToVisualization(loadedNodes, savedEdges);
+                if (!cancelled) {
+                  const s = useGraphStore.getState();
+                  s.clearVisualization();
+                  s.addNodesToVisualization(loadedNodes, savedEdges);
+                }
               }
             }
           }
