@@ -162,7 +162,7 @@ function GuideOverlay() {
 
         } else if (action === 'show_node_detail') {
           const nodeId = currentStep.node_id;
-          if (nodeId) {
+          if (nodeId && !cancelled) {
             const result = await api.getNodeDetails(nodeId);
             if (!cancelled && result.success) {
               useGraphStore.getState().setDetailNode({ id: nodeId, data: result.node });
@@ -182,7 +182,7 @@ function GuideOverlay() {
 
         } else if (action === 'delete_edge') {
           const edgeId = currentStep.edge_id;
-          if (edgeId) {
+          if (edgeId && !cancelled) {
             await api.deleteEdge(edgeId);
             if (!cancelled) useGraphStore.getState().removeEdge(edgeId);
           }
