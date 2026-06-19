@@ -16,6 +16,7 @@ import CreateSkillDialog from './components/CreateSkillDialog';
 import CreateAgentDialog from './components/CreateAgentDialog';
 import EditEdgeDialog from './components/EditEdgeDialog';
 import NodeDetailDialog from './components/NodeDetailDialog';
+import GuideOverlay from './components/GuideOverlay';
 import * as api from './services/api';
 import './App.css';
 
@@ -57,6 +58,7 @@ function App() {
     setFederationDepth,
     showMinimap,
     nodeMarks,
+    startGuide,
   } = useGraphStore();
 
   const { t, setLanguage, language } = useI18n();
@@ -105,6 +107,13 @@ function App() {
         setConfig(schemaData, presentationData, t, language);
         setStats(statsData);
         setLlmAvailable(capabilitiesData.llm_available ?? false);
+
+        // Trigger guide from URL param ?guide=<id>
+        const urlGuideId = new URLSearchParams(window.location.search).get('guide');
+        if (urlGuideId && presentationData?.guides?.length > 0) {
+          const guide = presentationData.guides.find(g => g.id === urlGuideId);
+          if (guide) startGuide(guide);
+        }
       } catch (error) {
         console.error('Error loading configuration:', error);
         api.getGraphStats().then(setStats).catch(console.error);
@@ -112,7 +121,7 @@ function App() {
       }
     };
     loadConfig();
-  }, [setConfig, setStats, setLlmAvailable, t, setLanguage, language]);
+  }, [setConfig, setStats, setLlmAvailable, t, setLanguage, language, startGuide]);
 
   const showNotification = useCallback((type, message) => {
     setNotification({ type, message });
@@ -603,7 +612,7 @@ function App() {
 
   return (
     <div className="app">
-      <div className="app-canvas">
+      <div className="app-canvas" id="guide-target-canvas">
         <GraphCanvas
           nodes={nodes}
           edges={edges}
@@ -766,6 +775,8 @@ function App() {
           initialData={editingAgentData}
         />
       )}
+
+      <GuideOverlay />
     </div>
   );
 }

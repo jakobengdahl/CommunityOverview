@@ -225,7 +225,7 @@ function FloatingSearch() {
   };
 
   return (
-    <div className="floating-search" ref={containerRef}>
+    <div className="floating-search" id="guide-target-search" ref={containerRef}>
       <div className="floating-search-bar">
         <Search size={18} className="floating-search-icon" />
         <input

@@ -121,5 +121,13 @@
     "depth_tooltip": "Djupnivåer styrs av installationens konfiguration",
     "depth_indicator": "Djup {current}/{max}",
     "depth_indicator_tooltip": "Aktuell federerad söknivå och högsta tillåtna nivå"
+  },
+  "guide": {
+    "title": "Guide",
+    "next": "Nästa",
+    "close": "Stäng",
+    "cancel": "Avbryt guide",
+    "loading": "Laddar...",
+    "step_counter": "Steg {current} av {total}"
   }
 }

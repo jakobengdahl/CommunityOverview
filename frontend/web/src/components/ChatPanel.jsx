@@ -30,6 +30,8 @@ function ChatPanel() {
     activeExperts,
     availableExperts,
     showMinimap,
+    presentation,
+    startGuide,
   } = useGraphStore();
 
   const { t, language } = useI18n();
@@ -168,6 +170,14 @@ function ChatPanel() {
         }
         else if (toolResult.action === 'mark_nodes') {
           useGraphStore.getState().setNodeMarks(toolResult.marks || []);
+        }
+        else if (toolResult.action === 'start_guide') {
+          const guideId = toolResult.guide_id;
+          const guides = useGraphStore.getState().presentation?.guides || [];
+          const guide = guides.find(g => g.id === guideId);
+          if (guide) {
+            startGuide(guide);
+          }
         }
         else if (toolResult.nodes && toolResult.nodes.length > 0) {
           const filteredNodes = filterCommunityNodes(toolResult.nodes);
@@ -430,7 +440,7 @@ function ChatPanel() {
 
   // Expanded state
   return (
-    <div className={`chat-panel-floating${!showMinimap ? ' minimap-hidden' : ''}`}>
+    <div className={`chat-panel-floating${!showMinimap ? ' minimap-hidden' : ''}`} id="guide-target-chat">
       <div className="chat-header">
         <div className="chat-header-left" onClick={toggleChatPanel} style={{ cursor: 'pointer' }}>
           <ChatDotsFill size={16} />

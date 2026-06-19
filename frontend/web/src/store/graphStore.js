@@ -153,6 +153,15 @@ const useGraphStore = create((set, get) => ({
   availableExperts: [],   // All expert agents from config
   activeExperts: [],      // Currently active expert agent IDs
 
+  // Interactive guide state
+  guide: {
+    isActive: false,
+    activeGuide: null,
+    currentStepIndex: 0,
+    userInputs: {},
+    isExecutingAction: false,
+  },
+
   // Stats
   stats: null,
 
@@ -465,6 +474,57 @@ const useGraphStore = create((set, get) => ({
   // Chat panel actions
   toggleChatPanel: () => set(state => ({ chatPanelOpen: !state.chatPanelOpen })),
   setChatPanelOpen: (open) => set({ chatPanelOpen: open }),
+
+  // Guide actions
+  startGuide: (guideDefinition) => set({
+    guide: {
+      isActive: true,
+      activeGuide: guideDefinition,
+      currentStepIndex: 0,
+      userInputs: {},
+      isExecutingAction: false,
+    },
+  }),
+
+  stopGuide: () => set({
+    guide: {
+      isActive: false,
+      activeGuide: null,
+      currentStepIndex: 0,
+      userInputs: {},
+      isExecutingAction: false,
+    },
+  }),
+
+  advanceGuide: () => {
+    const { guide } = get();
+    if (!guide.isActive || !guide.activeGuide) return;
+    const nextIndex = guide.currentStepIndex + 1;
+    const totalSteps = guide.activeGuide.steps?.length || 0;
+    if (nextIndex >= totalSteps) {
+      set({
+        guide: {
+          isActive: false,
+          activeGuide: null,
+          currentStepIndex: 0,
+          userInputs: {},
+          isExecutingAction: false,
+        },
+      });
+    } else {
+      set({ guide: { ...guide, currentStepIndex: nextIndex, isExecutingAction: false } });
+    }
+  },
+
+  setGuideStepInput: (key, value) => {
+    const { guide } = get();
+    set({ guide: { ...guide, userInputs: { ...guide.userInputs, [key]: value } } });
+  },
+
+  setGuideExecutingAction: (isExecuting) => {
+    const { guide } = get();
+    set({ guide: { ...guide, isExecutingAction: isExecuting } });
+  },
 
   // Delete node from visualization
   removeNode: (nodeId) => {
