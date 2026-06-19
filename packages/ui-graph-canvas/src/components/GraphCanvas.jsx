@@ -105,6 +105,7 @@ function GraphCanvasInner({
   federationDepthTooltip = "Depth levels are defined by installation configuration",
   showMinimap = false,
   schema = null,
+  onContextMenuAction = null,
 }) {
   const [loadedNodeCount, setLoadedNodeCount] = useState(INITIAL_LOAD_COUNT);
   const [nodeContextMenu, setNodeContextMenu] = useState(null);
@@ -890,6 +891,18 @@ function GraphCanvasInner({
                     setNodeContextMenu(null);
                   }}>
                     {item.icon ? `${item.icon} ` : '🔗 '}{item.label}
+                  </button>
+                );
+              }
+              if (item.action.type === 'callback') {
+                const actionName = item.action.name;
+                if (!actionName || !onContextMenuAction) return null;
+                return (
+                  <button key={idx} onClick={() => {
+                    onContextMenuAction(actionName, nodeContextMenu.node.id, nodeData);
+                    setNodeContextMenu(null);
+                  }}>
+                    {item.icon ? `${item.icon} ` : '⚡ '}{item.label}
                   </button>
                 );
               }

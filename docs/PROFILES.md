@@ -116,6 +116,8 @@ Each node type has the following fields:
 | `color` | No | Hex color code for UI display. Defaults to `#9CA3AF` (gray) |
 | `icon` | No | Bootstrap Icon name for the toolbar (e.g. `"DatabaseFill"`, `"PeopleFill"`) |
 | `static` | No | If `true`, nodes of this type cannot be created via the chat. Used for system types |
+| `ui_form` | No | Specialized creation dialog. `"skill"` opens the SKILL.md-compatible form |
+| `context_menu` | No | Array of extra items for the right-click context menu (see below) |
 
 **Available icon names** (from [Bootstrap Icons](https://icons.getbootstrap.com/)):
 
@@ -143,6 +145,34 @@ Each node type has the following fields:
 | `FolderFill` | 📁 | Groups, folders |
 
 To add support for additional icons, add the import to `frontend/web/src/components/FloatingToolbar.jsx` in the `ICON_REGISTRY` object.
+
+#### Context menu items
+
+You can add custom right-click menu items per node type using `context_menu`. Each item has a `label`, an optional `icon` (emoji), and an `action`:
+
+```json
+{
+  "MyNodeType": {
+    "context_menu": [
+      {
+        "label": "Open in tool",
+        "icon": "🔗",
+        "action": { "type": "open_url", "url": "https://example.com/{identifier}" }
+      },
+      {
+        "label": "Run analysis",
+        "icon": "⚡",
+        "action": { "type": "callback", "name": "run_analysis" }
+      }
+    ]
+  }
+}
+```
+
+| Action type | Description |
+|-------------|-------------|
+| `open_url` | Opens a URL in a new tab. Use `{field}` in the URL to substitute node field values. |
+| `callback` | Fires `onContextMenuAction(name, nodeId, nodeData)` in `App.jsx`. Wire new actions there. |
 
 ### 4. Define relationship types
 
@@ -186,6 +216,39 @@ The presentation section controls the UI and AI behavior:
 | `prompt_prefix` | Injected at the start of the AI system prompt |
 | `prompt_suffix` | Appended to the AI system prompt |
 | `default_language` | Default UI language (`"en"` or `"sv"`) |
+| `skills_config` | Skills loader settings (see below) |
+
+#### Skills configuration
+
+Place SKILL.md files in a profile-specific directory and set `skills_config.skills_dir` to load them automatically:
+
+```json
+{
+  "presentation": {
+    "skills_config": {
+      "skills_dir": "config/my-profile/skills"
+    }
+  }
+}
+```
+
+Structure your skills directory as `skills/<skill-name>/SKILL.md`. Each SKILL.md uses YAML frontmatter:
+
+```markdown
+---
+name: My Skill
+description: Short description.
+when-to-use: Use when the user asks to do X.
+allowed-tools: search_graph get_related_nodes add_nodes
+effort: low
+version: "1.0"
+---
+
+## Steps
+1. ...
+```
+
+Skills are injected into the AI agent's system prompt when the session starts.
 
 ### 6. Add environment variables (optional)
 

@@ -12,6 +12,7 @@ import ConfirmDialog from './components/ConfirmDialog';
 import InputDialog from './components/InputDialog';
 import ChatPanel from './components/ChatPanel';
 import CreateSubscriptionDialog from './components/CreateSubscriptionDialog';
+import CreateSkillDialog from './components/CreateSkillDialog';
 import CreateAgentDialog from './components/CreateAgentDialog';
 import EditEdgeDialog from './components/EditEdgeDialog';
 import NodeDetailDialog from './components/NodeDetailDialog';
@@ -72,6 +73,8 @@ function App() {
   const [isSavingView, setIsSavingView] = useState(false);
   const [editingEdge, setEditingEdge] = useState(null);
   const [llmAvailable, setLlmAvailable] = useState(true); // optimistic default
+  const [skillDialogType, setSkillDialogType] = useState(null);
+  const [editingSkillData, setEditingSkillData] = useState(null);
 
   const federationDepthLevels = (stats?.federation?.selectable_depth_levels || [1]).filter(v => Number.isInteger(v) && v >= 1);
   const maxFederationDepth = Math.max(1, ...federationDepthLevels, stats?.federation?.max_selectable_depth || 1);
@@ -228,10 +231,13 @@ function App() {
         console.error('Error preparing agent editor:', error);
         showNotification('error', 'Could not load agent details');
       }
+    } else if (schema?.node_types?.[nodeData.type]?.ui_form === 'skill') {
+      setEditingSkillData(nodeData);
+      setSkillDialogType(nodeData.type);
     } else {
       setEditingNode({ id: nodeId, data: nodeData });
     }
-  }, [setEditingNode, showNotification]);
+  }, [schema, setEditingNode, setEditingSkillData, setSkillDialogType, showNotification]);
 
   // Callback: Hide node
   const handleHide = useCallback((nodeId) => {
@@ -492,14 +498,48 @@ function App() {
 
   // Callback: Create node from toolbar
   const handleCreateNodeForType = useCallback((nodeType) => {
-    setCreateNodeType(nodeType);
-  }, []);
+    if (schema?.node_types?.[nodeType]?.ui_form === 'skill') {
+      setEditingSkillData(null);
+      setSkillDialogType(nodeType);
+    } else {
+      setCreateNodeType(nodeType);
+    }
+  }, [schema]);
 
   // Handle created node from CreateNodeDialog
   const handleNodeCreated = useCallback((createdNode) => {
     addNodesToVisualization([createdNode], []);
     showNotification('success', `${createdNode.type} "${createdNode.name}" created`);
   }, [addNodesToVisualization, showNotification]);
+
+  // Callback: Save a skill node (create or update)
+  const handleSaveSkill = useCallback(async (skillData) => {
+    try {
+      if ('id' in skillData) {
+        const { id, updates } = skillData;
+        await api.updateNode(id, updates);
+        const newNodes = nodes.map(n => n.id === id ? { ...n, ...updates } : n);
+        updateVisualization(newNodes, edges);
+        showNotification('success', 'Skill updated');
+      } else {
+        const result = await api.addNodes([skillData], []);
+        if (result.added_node_ids?.length > 0) {
+          const nodeWithId = { ...skillData, id: result.added_node_ids[0] };
+          addNodesToVisualization([nodeWithId], []);
+        }
+        showNotification('success', `${skillData.type} "${skillData.name}" created`);
+      }
+    } catch (error) {
+      console.error('Error saving skill:', error);
+      showNotification('error', 'Could not save skill');
+    }
+  }, [nodes, edges, updateVisualization, addNodesToVisualization, showNotification]);
+
+  // Callback: Context menu action triggered from schema-defined callback items
+  const handleContextMenuAction = useCallback((actionName, nodeId, nodeData) => {
+    // Dispatch named actions. Add new cases here as features are implemented.
+    showNotification('info', `Action: ${actionName}`);
+  }, [showNotification]);
 
   // Toolbar save view: signal GraphCanvas to collect positions and trigger dialog
   const handleToolbarSaveView = useCallback(() => {
@@ -534,10 +574,13 @@ function App() {
       handleCreateAgent();
     } else if (nodeType === 'EventSubscription') {
       handleCreateSubscription();
+    } else if (schema?.node_types?.[nodeType]?.ui_form === 'skill') {
+      setEditingSkillData(null);
+      setSkillDialogType(nodeType);
     } else {
       setCreateNodeType(nodeType);
     }
-  }, [handleCreateAgent, handleCreateSubscription]);
+  }, [handleCreateAgent, handleCreateSubscription, schema]);
 
   // Handle node update from edit dialog
   const handleNodeUpdate = useCallback(async (nodeId, updates) => {
@@ -598,6 +641,7 @@ function App() {
           federationDepthTooltip={t('federation.depth_tooltip')}
           showMinimap={showMinimap}
           schema={schema}
+          onContextMenuAction={handleContextMenuAction}
         />
       </div>
 
@@ -697,6 +741,15 @@ function App() {
         <CreateSubscriptionDialog
           onClose={() => setShowSubscriptionDialog(false)}
           onSave={handleSaveSubscription}
+        />
+      )}
+
+      {skillDialogType && (
+        <CreateSkillDialog
+          nodeType={skillDialogType}
+          initialData={editingSkillData}
+          onClose={() => { setSkillDialogType(null); setEditingSkillData(null); }}
+          onSave={handleSaveSkill}
         />
       )}
 
