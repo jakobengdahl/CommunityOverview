@@ -54,6 +54,7 @@ function App() {
     federationDepth,
     setFederationDepth,
     showMinimap,
+    nodeMarks,
   } = useGraphStore();
 
   const { t, setLanguage, language } = useI18n();
@@ -560,6 +561,7 @@ function App() {
           highlightedNodeIds={highlightedNodeIds}
           hiddenNodeIds={hiddenNodeIds}
           hiddenEdgeIds={hiddenEdgeIds}
+          nodeMarks={nodeMarks}
           clearGroupsFlag={clearGroupsFlag}
           onExpand={handleExpand}
           onEdit={handleEdit}

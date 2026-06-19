@@ -53,6 +53,7 @@ function GraphCanvasInner({
   highlightedNodeIds = [],
   hiddenNodeIds = [],
   hiddenEdgeIds = [],
+  nodeMarks = {},
   clearGroupsFlag = false,
   onExpand,
   onEdit,
@@ -170,20 +171,26 @@ function GraphCanvasInner({
   const reactFlowNodes = useMemo(() => {
     const hasSavedPositions = nodesToRender.some(n => n._savedPosition);
 
-    const nodesWithoutPosition = nodesToRender.map(node => ({
-      id: node.id,
-      type: 'custom',
-      data: {
-        ...node,
-        label: node.name,
-        summary: node.summary || node.description?.slice(0, 100),
-        nodeType: node.type,
-        color: getNodeColor(node.type),
-        onExpand: onExpand ? () => onExpand(node.id, node) : null,
-        onEdit: onEdit ? () => onEdit(node.id, node) : null,
-      },
-      position: node._savedPosition || { x: 0, y: 0 },
-    }));
+    const nodesWithoutPosition = nodesToRender.map(node => {
+      const mark = nodeMarks[node.id];
+      return {
+        id: node.id,
+        type: 'custom',
+        data: {
+          ...node,
+          label: node.name,
+          summary: node.summary || node.description?.slice(0, 100),
+          nodeType: node.type,
+          color: getNodeColor(node.type),
+          isHighlighted: highlightedNodeIds.includes(node.id),
+          markColor: mark?.color ?? null,
+          markLabel: mark?.label ?? null,
+          onExpand: onExpand ? () => onExpand(node.id, node) : null,
+          onEdit: onEdit ? () => onEdit(node.id, node) : null,
+        },
+        position: node._savedPosition || { x: 0, y: 0 },
+      };
+    });
 
     if (nodesWithoutPosition.length === 0) {
       return nodesWithoutPosition;
@@ -194,7 +201,7 @@ function GraphCanvasInner({
     }
 
     return applyLayout(nodesWithoutPosition, reactFlowEdges, layoutType);
-  }, [nodesToRender, reactFlowEdges, layoutType, onExpand, onEdit]);
+  }, [nodesToRender, reactFlowEdges, layoutType, onExpand, onEdit, highlightedNodeIds, nodeMarks]);
 
   const [nodes, setNodes, onNodesChange] = useNodesState(reactFlowNodes);
   const [edges, setEdges, onEdgesChange] = useEdgesState(reactFlowEdges);
@@ -698,6 +705,17 @@ function GraphCanvasInner({
     group: GroupNode,
   }), []);
 
+  const marksLegend = useMemo(() => {
+    const seen = new Map();
+    for (const mark of Object.values(nodeMarks)) {
+      const key = `${mark.color}::${mark.label || ''}`;
+      if (!seen.has(key)) {
+        seen.set(key, { color: mark.color, label: mark.label || '' });
+      }
+    }
+    return Array.from(seen.values());
+  }, [nodeMarks]);
+
   const edgeTypes = useMemo(() => ({
     floating: SimpleFloatingEdge,
   }), []);
@@ -774,6 +792,17 @@ function GraphCanvasInner({
             />
           )}
         </ReactFlow>
+
+        {marksLegend.length > 0 && (
+          <div className="graph-marks-legend">
+            {marksLegend.map((entry, i) => (
+              <div key={i} className="graph-marks-legend-entry">
+                <span className="graph-marks-legend-dot" style={{ backgroundColor: entry.color }} />
+                {entry.label && <span className="graph-marks-legend-label">{entry.label}</span>}
+              </div>
+            ))}
+          </div>
+        )}
 
         {depthLevels.length > 1 && (
           <div className="federation-depth-control" aria-label="Federated search depth selector">

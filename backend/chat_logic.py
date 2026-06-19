@@ -343,6 +343,16 @@ TOOL USAGE GUIDELINES:
 - list_saved_views: For listing all available saved views in the database
 - get_schema: For getting the complete schema configuration
 - get_presentation: For getting UI presentation settings
+- mark_nodes: For applying visual color annotations to nodes currently in the visualization (session-only, does not change the database). Call with empty marks array to clear all marks.
+
+WORKFLOW FOR MARKING NODES:
+Use mark_nodes to annotate nodes in the current visualization with colors and labels:
+1. Choose a meaningful color (e.g. '#EF4444' red, '#F97316' orange, '#FBBF24' yellow, '#10B981' green)
+2. Provide a short label that describes the mark's meaning in context
+3. Marked nodes show a color badge and the labels appear in an on-canvas legend
+4. Marks are session-only — they never persist to the database
+5. Call mark_nodes with an empty array to remove all marks
+6. Example: to show analysis results, mark critical nodes red, medium-priority orange, reviewed green
 
 EFFICIENCY TIP: When extracting multiple entities from a document, ALWAYS use find_similar_nodes_batch()
 instead of calling find_similar_nodes() in a loop. This reduces API calls from N to 1.
@@ -739,6 +749,38 @@ class ChatProcessor:
                 }
             },
             {
+                "name": "mark_nodes",
+                "description": "Apply a visual color annotation to specific nodes currently in the visualization. Marks are session-only overlays — they do NOT modify the graph database. Use any CSS color string and provide an optional label that describes what the color means. Marks appear as a colored badge on the node and are listed in a legend. Call with an empty 'marks' array to clear all marks. Useful for: highlighting findings, indicating priority, showing analysis results, categorizing nodes visually, etc.",
+                "input_schema": {
+                    "type": "object",
+                    "properties": {
+                        "marks": {
+                            "type": "array",
+                            "description": "Nodes to mark. Pass an empty array to clear all marks.",
+                            "items": {
+                                "type": "object",
+                                "properties": {
+                                    "node_id": {
+                                        "type": "string",
+                                        "description": "ID of the node to mark"
+                                    },
+                                    "color": {
+                                        "type": "string",
+                                        "description": "CSS color (e.g. '#EF4444' red, '#F97316' orange, '#FBBF24' yellow, '#10B981' green, '#3B82F6' blue)"
+                                    },
+                                    "label": {
+                                        "type": "string",
+                                        "description": "Short label shown in the legend (e.g. 'High priority', 'Needs review', 'Confirmed')"
+                                    }
+                                },
+                                "required": ["node_id", "color"]
+                            }
+                        }
+                    },
+                    "required": ["marks"]
+                }
+            },
+            {
                 "name": "get_schema",
                 "description": "Get the complete schema configuration including all node types with their fields, colors, and descriptions, as well as all relationship types.",
                 "input_schema": {
@@ -879,6 +921,13 @@ class ChatProcessor:
                     "action": "clear_visualization",
                     "success": True,
                     "message": "Visualization cleared"
+                }
+
+            # Special case for mark_nodes - signals frontend to apply color overlays
+            elif tool_name == "mark_nodes":
+                tool_result = {
+                    "action": "mark_nodes",
+                    "marks": tool_input.get("marks", [])
                 }
 
             elif tool_name in self.tools_map:

@@ -164,6 +164,9 @@ function ChatPanel() {
             updateVisualization([...mergedNodes, ...newNodes], currentEdges);
           }
         }
+        else if (toolResult.action === 'mark_nodes') {
+          useGraphStore.getState().setNodeMarks(toolResult.marks || []);
+        }
         else if (toolResult.nodes && toolResult.nodes.length > 0) {
           const filteredNodes = filterCommunityNodes(toolResult.nodes);
           updateVisualization(filteredNodes, toolResult.edges || []);
