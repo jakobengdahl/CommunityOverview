@@ -10,12 +10,13 @@ config/
     schema_config.json       # Node types, relationships, presentation
     federation_config.json   # Federation topology
     .env.example             # Template for profile-specific env vars
-  esam/                      # Example domain profile
-    schema_config.json       # ESAM-specific node types
-    .env                     # ESAM-specific secrets (git-ignored)
-    graph.json               # ESAM seed graph data
+  stat-metadata/             # European Statistical System metadata profile
+    schema_config.json       # ESS-focused node types (NSIs, programmes, datasets, variables…)
+    graph.json               # ESS seed graph data
+  scb/                       # Statistics Sweden (SCB) profile
+    schema_config.json       # SCB-specific node types
   test/                      # Test profile
-    schema_config.json       # Test-specific schema
+    schema_config.json       # Minimal config for testing
   profile-utils.sh           # Shared helpers (sourced by start scripts)
 ```
 
@@ -47,10 +48,14 @@ Environment variables already set by the caller are never overridden.
 ### Single Instance
 
 ```bash
-./start-dev.sh                          # Uses config/default/
-./start-dev.sh --profile esam           # Uses config/esam/ with fallback
-./start-dev.sh --profile esam --lang sv # Profile + language override
+./start-dev.sh                                    # Uses config/default/
+./start-dev.sh --profile stat-metadata            # ESS metadata profile
+./start-dev.sh --profile stat-metadata --lang en  # Profile + language override
+./start-dev.sh --profile scb --lang sv            # SCB profile in Swedish
 ```
+
+For cloud environments (e.g. SSPCloud), use `start-sprint.sh` which auto-installs
+dependencies and loads the `stat-metadata` profile. See [docs/SSPCloud-setup.md](../docs/SSPCloud-setup.md).
 
 ### Federated (Multi-Profile)
 

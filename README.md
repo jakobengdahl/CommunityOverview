@@ -55,6 +55,9 @@ This system helps organizations avoid overlapping investments by making visible:
     schema_config.json            # Node types, relationships, presentation
     federation_config.json        # Federation graph connections
     .env.example                  # Environment variable template
+  /stat-metadata                  # European Statistical System metadata profile
+    schema_config.json            # ESS node types (NSIs, programmes, variables…)
+    graph.json                    # ESS seed data
   /scb                            # SCB (Statistics Sweden) demo profile
     schema_config.json            # Statistical metadata model
   /test                           # Test profile
@@ -107,7 +110,7 @@ The default profile includes these domain types:
 - **Data** (cyan) - Datasets, registers, APIs, data sources
 - **Risk** (red) - Identified risks, threats, or vulnerabilities
 
-Other profiles can add domain-specific types. For example, the SCB profile adds: Dataset, Hållpunkt, Undersökning, Variabel, Värdemängd, Population, Klassifikation.
+Other profiles can add domain-specific types. For example, the **stat-metadata** profile adds: StatisticalProgramme, DataSet, DataStructure, InstanceVariable, Concept, UnitType, CodeList, Questionnaire, ProductionSolution, SubjectField. The **scb** profile adds: Dataset, Hållpunkt, Undersökning, Variabel, Värdemängd, Population, Klassifikation.
 
 All domain nodes support **subtypes** for finer sub-classification within each node type (e.g., an Actor can be tagged as "Government agency", "Municipality", "Steering group"). Subtypes are optional, stored as a list, and the UI provides autocomplete with case normalization based on existing subtypes in the graph.
 
@@ -165,13 +168,14 @@ export ANTHROPIC_API_KEY=sk-ant-xxxxx # For Claude
 ./start-dev.sh
 
 # Start with a specific profile
-./start-dev.sh --profile scb
+./start-dev.sh --profile stat-metadata   # European Statistical System
+./start-dev.sh --profile scb             # Statistics Sweden
 
 # Start with Swedish UI
 ./start-dev.sh --lang sv
 
 # Combine profile, language, and data
-./start-dev.sh --profile scb --lang sv --data data/examples/default.json
+./start-dev.sh --profile stat-metadata --lang en
 
 # Start with data from a URL
 ./start-dev.sh --data https://example.github.io/data/graph.json
@@ -231,14 +235,19 @@ The language setting affects the UI labels, chat placeholders, notifications, an
 Profiles allow you to run the application with different metadata models, node types, and AI prompts. Each profile is a directory under `config/` that can override the default configuration.
 
 ```bash
-# Start with the SCB (Statistics Sweden) profile
-./start-dev.sh --profile scb
+# Start with a specific profile
+./start-dev.sh --profile stat-metadata   # ESS statistical metadata (recommended for ESS use)
+./start-dev.sh --profile scb             # Statistics Sweden (Swedish language)
 
 # Profiles available out of the box:
-#   default  - General community knowledge graph
-#   scb      - Statistical metadata model (Dataset, Undersökning, Variabel, etc.)
-#   test     - Minimal config for testing
+#   default        - General community knowledge graph
+#   stat-metadata  - European Statistical System metadata (NSIs, programmes, datasets, variables)
+#   scb            - Statistics Sweden (Dataset, Undersökning, Variabel, etc.)
+#   test           - Minimal config for testing
 ```
+
+For cloud environments (SSPCloud), run `./start-sprint.sh` — it auto-installs all dependencies
+and loads the `stat-metadata` profile. See [docs/SSPCloud-setup.md](./docs/SSPCloud-setup.md).
 
 Each profile can contain:
 - `schema_config.json` — Node types, relationships, colors, icons, and AI prompts

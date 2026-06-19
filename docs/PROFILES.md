@@ -11,7 +11,10 @@ config/
     federation_config.json    # Federation topology
     .env.example              # Template for environment variables
     .env                      # Secrets (git-ignored)
-  scb/                        # Example: SCB (Statistics Sweden) profile
+  stat-metadata/              # European Statistical System metadata profile
+    schema_config.json        # ESS node types (NSIs, programmes, datasets, variables…)
+    graph.json                # ESS seed data
+  scb/                        # SCB (Statistics Sweden) profile
     schema_config.json        # Custom metadata model
     .env                      # Profile-specific secrets (git-ignored)
   test/                       # Test profile
