@@ -22,6 +22,7 @@ function App() {
   const {
     nodes,
     edges,
+    schema,
     highlightedNodeIds,
     hiddenNodeIds,
     hiddenEdgeIds,
@@ -70,6 +71,7 @@ function App() {
   const [saveViewSignal, setSaveViewSignal] = useState(0);
   const [isSavingView, setIsSavingView] = useState(false);
   const [editingEdge, setEditingEdge] = useState(null);
+  const [llmAvailable, setLlmAvailable] = useState(true); // optimistic default
 
   const federationDepthLevels = (stats?.federation?.selectable_depth_levels || [1]).filter(v => Number.isInteger(v) && v >= 1);
   const maxFederationDepth = Math.max(1, ...federationDepthLevels, stats?.federation?.max_selectable_depth || 1);
@@ -90,6 +92,7 @@ function App() {
           api.getGraphStats(),
           api.getUiCapabilities().catch(() => ({ llm_available: false })),
         ]);
+        setLlmAvailable(capabilitiesData.llm_available ?? true);
         // Apply backend default language if no user override
         if (presentationData?.default_language) {
           const urlLang = new URLSearchParams(window.location.search).get('lang');
@@ -594,6 +597,7 @@ function App() {
           federationDepthLabel={t('federation.depth_label')}
           federationDepthTooltip={t('federation.depth_tooltip')}
           showMinimap={showMinimap}
+          schema={schema}
         />
       </div>
 

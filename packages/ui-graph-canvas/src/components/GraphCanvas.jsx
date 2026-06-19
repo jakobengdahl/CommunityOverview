@@ -21,6 +21,22 @@ import { getNodeColor, LAZY_LOAD_THRESHOLD, INITIAL_LOAD_COUNT, DEFAULT_EDGE_STY
 import './GraphCanvas.css';
 
 /**
+ * Build a URL from a template string, substituting {field} or [field] tokens
+ * with URI-encoded values from the node's data object. Returns null if the
+ * template is not a valid http/https URL after substitution.
+ */
+function buildContextMenuUrl(urlTemplate, nodeData) {
+  if (typeof urlTemplate !== 'string') return null;
+  const trimmed = urlTemplate.trim();
+  if (!/^https?:\/\//i.test(trimmed)) return null;
+  return trimmed.replace(/\{(\w+)\}|\[(\w+)\]/g, (_match, curlyKey, bracketKey) => {
+    const key = curlyKey || bracketKey;
+    const value = nodeData[key] ?? '';
+    return encodeURIComponent(String(value));
+  });
+}
+
+/**
  * Ensure parent (group) nodes appear before their children in the array.
  * ReactFlow requires this ordering for parent-child relationships to work.
  * Groups are placed first so they render behind regular nodes in the DOM,
@@ -88,6 +104,7 @@ function GraphCanvasInner({
   federationDepthLabel = "Depth",
   federationDepthTooltip = "Depth levels are defined by installation configuration",
   showMinimap = false,
+  schema = null,
 }) {
   const [loadedNodeCount, setLoadedNodeCount] = useState(INITIAL_LOAD_COUNT);
   const [nodeContextMenu, setNodeContextMenu] = useState(null);
@@ -857,6 +874,35 @@ function GraphCanvasInner({
               🔍 Expandera
             </button>
           )}
+          {(() => {
+            const nodeType = nodeContextMenu.node.data?.nodeType || nodeContextMenu.node.data?.type;
+            const customItems = schema?.node_types?.[nodeType]?.context_menu;
+            if (!Array.isArray(customItems) || customItems.length === 0) return null;
+            const nodeData = nodeContextMenu.node.data || {};
+            const items = customItems.map((item, idx) => {
+              if (!item?.label || !item?.action) return null;
+              if (item.action.type === 'open_url') {
+                const url = buildContextMenuUrl(item.action.url, nodeData);
+                if (!url) return null;
+                return (
+                  <button key={idx} onClick={() => {
+                    window.open(url, '_blank', 'noopener,noreferrer');
+                    setNodeContextMenu(null);
+                  }}>
+                    {item.icon ? `${item.icon} ` : '🔗 '}{item.label}
+                  </button>
+                );
+              }
+              return null;
+            }).filter(Boolean);
+            if (items.length === 0) return null;
+            return (
+              <>
+                {items}
+                <div className="context-menu-separator"></div>
+              </>
+            );
+          })()}
           {onDelete && (
             <>
               <div className="context-menu-separator"></div>
