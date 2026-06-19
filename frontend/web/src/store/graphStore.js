@@ -129,6 +129,7 @@ const useGraphStore = create((set, get) => ({
   highlightedNodeIds: [],
   hiddenNodeIds: [],
   hiddenEdgeIds: [],
+  nodeMarks: {},
   selectedNodeId: null,
   selectedGraphNodes: [], // Nodes selected in the graph canvas (full node data)
   editingNode: null,
@@ -228,12 +229,21 @@ const useGraphStore = create((set, get) => ({
     highlightedNodeIds: [],
     hiddenNodeIds: [],
     hiddenEdgeIds: [],
+    nodeMarks: {},
     pendingGroups: null,
   }),
 
   setPendingGroups: (groups) => set({ pendingGroups: groups }),
 
   setHighlightedNodeIds: (ids) => set({ highlightedNodeIds: ids }),
+
+  setNodeMarks: (marks) => {
+    const marksMap = {};
+    (marks || []).forEach(m => { marksMap[m.node_id] = { color: m.color, label: m.label || '' }; });
+    set({ nodeMarks: marksMap });
+  },
+
+  clearNodeMarks: () => set({ nodeMarks: {} }),
 
   toggleNodeVisibility: (nodeId) => {
     const { hiddenNodeIds } = get();

@@ -21,6 +21,7 @@ import {
   Sliders,
   ListOl,
   Diagram3Fill,
+  StarFill,
   QuestionCircleFill,
 } from 'react-bootstrap-icons';
 import useGraphStore from '../store/graphStore';
@@ -50,6 +51,7 @@ const ICON_REGISTRY = {
   Sliders,
   ListOl,
   Diagram3Fill,
+  StarFill,
   QuestionCircleFill,
 };
 

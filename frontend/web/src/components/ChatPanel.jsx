@@ -1,4 +1,6 @@
 import { useState, useEffect, useRef, useMemo } from 'react';
+import ReactMarkdown from 'react-markdown';
+import remarkGfm from 'remark-gfm';
 import { ChatDotsFill, ChevronRight, ChevronLeft, XCircleFill, Robot } from 'react-bootstrap-icons';
 import useGraphStore from '../store/graphStore';
 import { useI18n } from '../i18n';
@@ -163,6 +165,9 @@ function ChatPanel() {
             );
             updateVisualization([...mergedNodes, ...newNodes], currentEdges);
           }
+        }
+        else if (toolResult.action === 'mark_nodes') {
+          useGraphStore.getState().setNodeMarks(toolResult.marks || []);
         }
         else if (toolResult.nodes && toolResult.nodes.length > 0) {
           const filteredNodes = filterCommunityNodes(toolResult.nodes);
@@ -455,7 +460,9 @@ function ChatPanel() {
               </div>
             )}
             <div className="message-content">
-              {msg.content}
+              {(msg.role === 'assistant' || msg.role === 'expert') ? (
+                <ReactMarkdown remarkPlugins={[remarkGfm]}>{msg.content}</ReactMarkdown>
+              ) : msg.content}
 
               {msg.role === 'user' && idx === chatMessages.length - 1 && isProcessing && (
                 <div className="message-loading">

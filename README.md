@@ -18,6 +18,10 @@ This system helps organizations avoid overlapping investments by making visible:
 - **Document Upload:** Upload PDF, Word, or text documents for automatic entity extraction
 - **Interactive Visualization:** React Flow graph with drag-and-drop, zoom, and pan
 - **Node Proposals:** LLM suggests entities with duplicate detection, user confirms before adding
+- **Node Marking:** AI assistant can annotate nodes with colors and labels (e.g. highlight by priority or impact) — session-only, never persisted
+- **AI Skills:** Profile-configurable SKILL.md instructions injected into the agent's system prompt; ships with generic impact analysis; ESS profile adds GSIM lineage and change-impact skills
+- **Skill Node Type:** Create and manage SKILL.md-compatible skill definitions directly in the graph using a dedicated form
+- **Schema-driven Context Menu:** Add custom right-click actions per node type via `schema_config.json` — open URLs with node field substitution or fire named callbacks
 - **ChatGPT Widget:** Embeddable widget for use in ChatGPT or other interfaces
 - **Save Views:** Create and share custom graph views
 - **Data Management:** Example datasets with easy loading from files or URLs
@@ -27,7 +31,7 @@ This system helps organizations avoid overlapping investments by making visible:
 - **Backend:** FastAPI + FastMCP (Python) with NetworkX + JSON
 - **AI:** Claude or OpenAI for natural language understanding and entity extraction
 - **Graph storage:** NetworkX in-memory + JSON persistence
-- **Similarity search:** sentence-transformers + Levenshtein distance
+- **Similarity search:** sentence-transformers + RapidFuzz
 
 ## Project Structure
 
@@ -50,11 +54,21 @@ This system helps organizations avoid overlapping investments by making visible:
     rest_api.py                   # Chat REST endpoints
   llm_providers.py                # LLM provider abstraction
   chat_logic.py                   # Chat processing logic
+  /skills                         # Skills loader system
+    loader.py                     # SkillsLoader — fetches/parses SKILL.md files
 /config                           # Configuration profiles
   /default                        # Default profile (base, always required)
     schema_config.json            # Node types, relationships, presentation
     federation_config.json        # Federation graph connections
     .env.example                  # Environment variable template
+    /skills                       # Skills loaded for all profiles (fallback)
+      /impact-analysis            # Generic graph dependency impact analysis
+  /stat-metadata                  # European Statistical System metadata profile
+    schema_config.json            # ESS node types (NSIs, programmes, variables…)
+    graph.json                    # ESS seed data
+    /skills                       # ESS-specific skills (loaded in addition to default)
+      /graph-analysis             # Generic graph pattern analysis
+      /gsim-lineage-impact        # GSIM lineage tracing and change impact assessment
   /scb                            # SCB (Statistics Sweden) demo profile
     schema_config.json            # Statistical metadata model
   /test                           # Test profile
@@ -107,7 +121,7 @@ The default profile includes these domain types:
 - **Data** (cyan) - Datasets, registers, APIs, data sources
 - **Risk** (red) - Identified risks, threats, or vulnerabilities
 
-Other profiles can add domain-specific types. For example, the SCB profile adds: Dataset, Hållpunkt, Undersökning, Variabel, Värdemängd, Population, Klassifikation.
+Other profiles can add domain-specific types. For example, the **stat-metadata** profile adds: StatisticalProgramme, DataSet, DataStructure, InstanceVariable, Concept, UnitType, CodeList, Questionnaire, ProductionSolution, SubjectField. The **scb** profile adds: Dataset, Hållpunkt, Undersökning, Variabel, Värdemängd, Population, Klassifikation.
 
 All domain nodes support **subtypes** for finer sub-classification within each node type (e.g., an Actor can be tagged as "Government agency", "Municipality", "Steering group"). Subtypes are optional, stored as a list, and the UI provides autocomplete with case normalization based on existing subtypes in the graph.
 
@@ -118,6 +132,7 @@ These are integral to core application functionality:
 - **SavedView / VisualizationView** (gray) - Saved graph view snapshots
 - **EventSubscription** (violet) - Webhook subscriptions for graph mutation events
 - **Agent** (pink) - AI agent configurations (runtime not implemented)
+- **Skill** (violet) - SKILL.md-compatible agent skill definitions stored in the graph; uses a specialized creation form
 - **Groups** - Visual grouping of nodes in the canvas
 
 ### Relationships
@@ -165,13 +180,14 @@ export ANTHROPIC_API_KEY=sk-ant-xxxxx # For Claude
 ./start-dev.sh
 
 # Start with a specific profile
-./start-dev.sh --profile scb
+./start-dev.sh --profile stat-metadata   # European Statistical System
+./start-dev.sh --profile scb             # Statistics Sweden
 
 # Start with Swedish UI
 ./start-dev.sh --lang sv
 
 # Combine profile, language, and data
-./start-dev.sh --profile scb --lang sv --data data/examples/default.json
+./start-dev.sh --profile stat-metadata --lang en
 
 # Start with data from a URL
 ./start-dev.sh --data https://example.github.io/data/graph.json
@@ -231,14 +247,19 @@ The language setting affects the UI labels, chat placeholders, notifications, an
 Profiles allow you to run the application with different metadata models, node types, and AI prompts. Each profile is a directory under `config/` that can override the default configuration.
 
 ```bash
-# Start with the SCB (Statistics Sweden) profile
-./start-dev.sh --profile scb
+# Start with a specific profile
+./start-dev.sh --profile stat-metadata   # ESS statistical metadata (recommended for ESS use)
+./start-dev.sh --profile scb             # Statistics Sweden (Swedish language)
 
 # Profiles available out of the box:
-#   default  - General community knowledge graph
-#   scb      - Statistical metadata model (Dataset, Undersökning, Variabel, etc.)
-#   test     - Minimal config for testing
+#   default        - General community knowledge graph
+#   stat-metadata  - European Statistical System metadata (NSIs, programmes, datasets, variables)
+#   scb            - Statistics Sweden (Dataset, Undersökning, Variabel, etc.)
+#   test           - Minimal config for testing
 ```
+
+For cloud environments (SSPCloud), run `./start-sprint.sh` — it auto-installs all dependencies
+and loads the `stat-metadata` profile. See [docs/SSPCloud-setup.md](./docs/SSPCloud-setup.md).
 
 Each profile can contain:
 - `schema_config.json` — Node types, relationships, colors, icons, and AI prompts
