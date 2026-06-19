@@ -18,6 +18,10 @@ This system helps organizations avoid overlapping investments by making visible:
 - **Document Upload:** Upload PDF, Word, or text documents for automatic entity extraction
 - **Interactive Visualization:** React Flow graph with drag-and-drop, zoom, and pan
 - **Node Proposals:** LLM suggests entities with duplicate detection, user confirms before adding
+- **Node Marking:** AI assistant can annotate nodes with colors and labels (e.g. highlight by priority or impact) — session-only, never persisted
+- **AI Skills:** Profile-configurable SKILL.md instructions injected into the agent's system prompt; ships with generic impact analysis; ESS profile adds GSIM lineage and change-impact skills
+- **Skill Node Type:** Create and manage SKILL.md-compatible skill definitions directly in the graph using a dedicated form
+- **Schema-driven Context Menu:** Add custom right-click actions per node type via `schema_config.json` — open URLs with node field substitution or fire named callbacks
 - **ChatGPT Widget:** Embeddable widget for use in ChatGPT or other interfaces
 - **Save Views:** Create and share custom graph views
 - **Data Management:** Example datasets with easy loading from files or URLs
@@ -50,14 +54,21 @@ This system helps organizations avoid overlapping investments by making visible:
     rest_api.py                   # Chat REST endpoints
   llm_providers.py                # LLM provider abstraction
   chat_logic.py                   # Chat processing logic
+  /skills                         # Skills loader system
+    loader.py                     # SkillsLoader — fetches/parses SKILL.md files
 /config                           # Configuration profiles
   /default                        # Default profile (base, always required)
     schema_config.json            # Node types, relationships, presentation
     federation_config.json        # Federation graph connections
     .env.example                  # Environment variable template
+    /skills                       # Skills loaded for all profiles (fallback)
+      /impact-analysis            # Generic graph dependency impact analysis
   /stat-metadata                  # European Statistical System metadata profile
     schema_config.json            # ESS node types (NSIs, programmes, variables…)
     graph.json                    # ESS seed data
+    /skills                       # ESS-specific skills (loaded in addition to default)
+      /graph-analysis             # Generic graph pattern analysis
+      /gsim-lineage-impact        # GSIM lineage tracing and change impact assessment
   /scb                            # SCB (Statistics Sweden) demo profile
     schema_config.json            # Statistical metadata model
   /test                           # Test profile
@@ -121,6 +132,7 @@ These are integral to core application functionality:
 - **SavedView / VisualizationView** (gray) - Saved graph view snapshots
 - **EventSubscription** (violet) - Webhook subscriptions for graph mutation events
 - **Agent** (pink) - AI agent configurations (runtime not implemented)
+- **Skill** (violet) - SKILL.md-compatible agent skill definitions stored in the graph; uses a specialized creation form
 - **Groups** - Visual grouping of nodes in the canvas
 
 ### Relationships

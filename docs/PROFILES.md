@@ -11,9 +11,17 @@ config/
     federation_config.json    # Federation topology
     .env.example              # Template for environment variables
     .env                      # Secrets (git-ignored)
+    skills/                   # Skills loaded for all profiles (fallback)
+      impact-analysis/        # Generic graph dependency impact analysis
+        SKILL.md
   stat-metadata/              # European Statistical System metadata profile
     schema_config.json        # ESS node types (NSIs, programmes, datasets, variables…)
     graph.json                # ESS seed data
+    skills/                   # ESS-specific skills (supplement default skills)
+      graph-analysis/         # Generic graph pattern analysis
+        SKILL.md
+      gsim-lineage-impact/    # GSIM lineage tracing and change impact assessment
+        SKILL.md
   scb/                        # SCB (Statistics Sweden) profile
     schema_config.json        # Custom metadata model
     .env                      # Profile-specific secrets (git-ignored)
@@ -220,7 +228,9 @@ The presentation section controls the UI and AI behavior:
 
 #### Skills configuration
 
-Place SKILL.md files in a profile-specific directory and set `skills_config.skills_dir` to load them automatically:
+Skills are SKILL.md-format instructions injected into the AI agent's system prompt at startup. They tell the agent *how* to perform specific tasks.
+
+**Default skills** live in `config/default/skills/` and are always loaded (for every profile). **Profile skills** are loaded in addition when that profile is active. Set `skills_config.skills_dir` in the profile's `schema_config.json` to point to the profile's skills directory:
 
 ```json
 {
@@ -232,12 +242,12 @@ Place SKILL.md files in a profile-specific directory and set `skills_config.skil
 }
 ```
 
-Structure your skills directory as `skills/<skill-name>/SKILL.md`. Each SKILL.md uses YAML frontmatter:
+Structure the directory as `skills/<skill-name>/SKILL.md`. Each file uses YAML frontmatter + Markdown body:
 
 ```markdown
 ---
 name: My Skill
-description: Short description.
+description: Short description of what this skill does.
 when-to-use: Use when the user asks to do X.
 allowed-tools: search_graph get_related_nodes add_nodes
 effort: low
@@ -246,9 +256,60 @@ version: "1.0"
 
 ## Steps
 1. ...
+
+## Output format
+...
 ```
 
-Skills are injected into the AI agent's system prompt when the session starts.
+| Frontmatter field | Description |
+|-------------------|-------------|
+| `name` | Required. Human-readable skill name |
+| `description` | Short summary shown in skill listings |
+| `when-to-use` | Instructs the AI when to activate this skill |
+| `allowed-tools` | Space-separated list of tool names the skill may use |
+| `effort` | `low`, `medium`, or `high` — indicates task complexity |
+| `version` | Version string for tracking changes |
+
+**Full `skills_config` options:**
+
+```json
+{
+  "skills_config": {
+    "skills_dir": "config/my-profile/skills",
+    "allow_external_skills": true,
+    "trusted_domains": ["github.com", "raw.githubusercontent.com", "agentskills.io"],
+    "cache_ttl_seconds": 3600,
+    "max_skill_content_bytes": 50000,
+    "max_skill_body_chars": 8000
+  }
+}
+```
+
+Skills can also be loaded from external URLs via `skills_urls` on expert agent configs, or fetched from GitHub repos by pointing to the repo URL.
+
+**Shipped skills:**
+
+| Skill | Profile | Description |
+|-------|---------|-------------|
+| Impact Analysis | default (all profiles) | Traces which nodes depend on a given node and assesses what would be affected by a change. Uses standard graph tools only. |
+| Graph Analysis | stat-metadata | Analyses graph patterns, clusters, hub nodes, and non-obvious connections. |
+| GSIM Lineage & Change Impact | stat-metadata | Traces data lineage through the GSIM metadata chain and assesses impact of classification/code list version changes. Uses `get_lineage`, `assess_change_impact`, `get_impact_report`. |
+
+#### Skill node type and creation form
+
+Any schema node type with `"ui_form": "skill"` uses the SKILL.md-compatible creation dialog instead of the generic node form. The dialog provides fields for name, description, when-to-use, content (Markdown body), source URL, allowed tools, version, and effort.
+
+```json
+{
+  "Skill": {
+    "ui_form": "skill",
+    "category": "system",
+    "fields": ["name", "description", "summary", "metadata"]
+  }
+}
+```
+
+Skills created this way are stored in the graph as nodes. Agent workers automatically discover linked Skill nodes and include their content in the system prompt.
 
 ### 6. Add environment variables (optional)
 

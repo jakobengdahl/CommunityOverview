@@ -10,9 +10,14 @@ config/
     schema_config.json       # Node types, relationships, presentation
     federation_config.json   # Federation topology
     .env.example             # Template for profile-specific env vars
+    skills/                  # Skills loaded for ALL profiles (fallback)
+      impact-analysis/SKILL.md   # Generic graph dependency impact analysis
   stat-metadata/             # European Statistical System metadata profile
     schema_config.json       # ESS-focused node types (NSIs, programmes, datasets, variables…)
     graph.json               # ESS seed graph data
+    skills/                  # ESS-specific skills (loaded in addition to default)
+      graph-analysis/SKILL.md        # Graph pattern analysis
+      gsim-lineage-impact/SKILL.md   # GSIM lineage and classification change impact
   scb/                       # Statistics Sweden (SCB) profile
     schema_config.json       # SCB-specific node types
   test/                      # Test profile
@@ -35,13 +40,14 @@ Environment variables already set by the caller are never overridden.
 
 ### Recognized Files
 
-| File | Purpose |
-|------|---------|
-| `schema_config.json` | Node types, relationship types, colors, prompts |
+| File/Dir | Purpose |
+|----------|---------|
+| `schema_config.json` | Node types, relationship types, colors, prompts, skills config |
 | `federation_config.json` | Federation topology and sync settings |
 | `.env` | Secrets: API keys, auth passwords (git-ignored) |
 | `.env.example` | Documents expected env vars (tracked) |
 | `graph.json` | Seed graph data for initial setup |
+| `skills/<name>/SKILL.md` | Agent skill instructions injected into the AI system prompt |
 
 ## Usage
 
@@ -88,9 +94,17 @@ cp config/default/.env.example config/myprofile/.env
 # 5. Optionally add seed graph data
 # ... create or copy config/myprofile/graph.json ...
 
-# 6. Run with your profile
+# 6. Optionally add profile-specific skills
+mkdir -p config/myprofile/skills/my-skill
+# ... create config/myprofile/skills/my-skill/SKILL.md ...
+# Set skills_config.skills_dir in schema_config.json:
+#   "skills_config": { "skills_dir": "config/myprofile/skills" }
+
+# 7. Run with your profile
 ./start-dev.sh --profile myprofile
 ```
+
+Skills in `config/default/skills/` are always loaded. Profile skills are loaded in addition when that profile is active. See [docs/PROFILES.md](../docs/PROFILES.md) for the SKILL.md format and full skills configuration reference.
 
 ## Environment Variable Override
 
