@@ -7,6 +7,8 @@ effort: high
 version: "1.0"
 ---
 
+> **Note:** This skill requires profile-specific backend tools (`get_lineage`, `assess_change_impact`, `get_impact_report`) that are not part of the standard tool set. It will only function correctly when those tools are registered for the active profile.
+
 ## Context
 
 You work on the ESS GSIM metadata knowledge graph. The relevant node types for lineage and impact analysis are:

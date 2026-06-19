@@ -72,7 +72,6 @@ function App() {
   const [saveViewSignal, setSaveViewSignal] = useState(0);
   const [isSavingView, setIsSavingView] = useState(false);
   const [editingEdge, setEditingEdge] = useState(null);
-  const [llmAvailable, setLlmAvailable] = useState(true); // optimistic default
   const [skillDialogType, setSkillDialogType] = useState(null);
   const [editingSkillData, setEditingSkillData] = useState(null);
 
@@ -95,7 +94,6 @@ function App() {
           api.getGraphStats(),
           api.getUiCapabilities().catch(() => ({ llm_available: false })),
         ]);
-        setLlmAvailable(capabilitiesData.llm_available ?? true);
         // Apply backend default language if no user override
         if (presentationData?.default_language) {
           const urlLang = new URLSearchParams(window.location.search).get('lang');
@@ -537,8 +535,13 @@ function App() {
 
   // Callback: Context menu action triggered from schema-defined callback items
   const handleContextMenuAction = useCallback((actionName, nodeId, nodeData) => {
-    // Dispatch named actions. Add new cases here as features are implemented.
-    showNotification('info', `Action: ${actionName}`);
+    // Dispatch named callback actions from schema context_menu entries.
+    // Add cases here as new callback-type actions are implemented.
+    switch (actionName) {
+      default:
+        console.warn(`[handleContextMenuAction] Unhandled action: "${actionName}". Wire it up in App.jsx.`);
+        showNotification('info', `Action: ${actionName}`);
+    }
   }, [showNotification]);
 
   // Toolbar save view: signal GraphCanvas to collect positions and trigger dialog

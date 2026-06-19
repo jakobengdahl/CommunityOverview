@@ -128,9 +128,10 @@
         "context_menu": [
           {
             "label": "Open in SSPCloud",
+            "icon": "🚀",
             "action": {
               "type": "open_url",
-              "url": "https://datalab.sspcloud.fr/launcher/ide/vscode-python?name=vscode-python&version=2.5.7&s3=default&git.repository=«{repo}»&autoLaunch=true"
+              "url": "https://datalab.sspcloud.fr/launcher/ide/vscode-python?name=vscode-python&version=2.5.7&s3=default&git.repository={repo}&autoLaunch=true"
             }
           }
         ]
