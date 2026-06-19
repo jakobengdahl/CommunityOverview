@@ -177,6 +177,8 @@ function ChatPanel() {
           const guide = guides.find(g => g.id === guideId);
           if (guide) {
             startGuide(guide);
+          } else {
+            console.warn(`[ChatPanel] start_guide: guide "${guideId}" not found in presentation config`);
           }
         }
         else if (toolResult.nodes && toolResult.nodes.length > 0) {

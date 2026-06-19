@@ -6,7 +6,7 @@
   position: fixed;
   inset: 0;
   background: rgba(0, 0, 0, 0.18);
-  z-index: 1400;
+  z-index: 2100; /* above existing dialogs (z-index 2000) */
   pointer-events: none; /* Let clicks through so user can still interact */
   animation: guide-fade-in 0.25s ease;
 }
@@ -18,7 +18,7 @@
   border: 1px solid #4a4a6a;
   border-radius: 12px;
   box-shadow: 0 8px 32px rgba(0, 0, 0, 0.55), 0 0 0 1px rgba(100, 108, 255, 0.3);
-  z-index: 1500;
+  z-index: 2200; /* above backdrop (2100) and existing dialogs (2000) */
   display: flex;
   flex-direction: column;
   gap: 0;

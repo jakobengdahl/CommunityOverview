@@ -497,33 +497,34 @@ const useGraphStore = create((set, get) => ({
   }),
 
   advanceGuide: () => {
-    const { guide } = get();
-    if (!guide.isActive || !guide.activeGuide) return;
-    const nextIndex = guide.currentStepIndex + 1;
-    const totalSteps = guide.activeGuide.steps?.length || 0;
-    if (nextIndex >= totalSteps) {
-      set({
-        guide: {
-          isActive: false,
-          activeGuide: null,
-          currentStepIndex: 0,
-          userInputs: {},
-          isExecutingAction: false,
-        },
-      });
-    } else {
-      set({ guide: { ...guide, currentStepIndex: nextIndex, isExecutingAction: false } });
-    }
+    set((state) => {
+      const { guide } = state;
+      if (!guide.isActive || !guide.activeGuide) return state;
+      const nextIndex = guide.currentStepIndex + 1;
+      const totalSteps = guide.activeGuide.steps?.length || 0;
+      if (nextIndex >= totalSteps) {
+        return {
+          guide: {
+            isActive: false,
+            activeGuide: null,
+            currentStepIndex: 0,
+            userInputs: {},
+            isExecutingAction: false,
+          },
+        };
+      }
+      return { guide: { ...guide, currentStepIndex: nextIndex, isExecutingAction: false } };
+    });
   },
 
   setGuideStepInput: (key, value) => {
-    const { guide } = get();
-    set({ guide: { ...guide, userInputs: { ...guide.userInputs, [key]: value } } });
+    set((state) => ({
+      guide: { ...state.guide, userInputs: { ...state.guide.userInputs, [key]: value } },
+    }));
   },
 
   setGuideExecutingAction: (isExecuting) => {
-    const { guide } = get();
-    set({ guide: { ...guide, isExecutingAction: isExecuting } });
+    set((state) => ({ guide: { ...state.guide, isExecutingAction: isExecuting } }));
   },
 
   // Delete node from visualization

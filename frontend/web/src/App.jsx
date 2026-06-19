@@ -1,4 +1,4 @@
-import { useState, useCallback, useEffect } from 'react';
+import { useState, useCallback, useEffect, useRef } from 'react';
 import { GraphCanvas } from '@community-graph/ui-graph-canvas';
 import '@community-graph/ui-graph-canvas/styles';
 import useGraphStore from './store/graphStore';
@@ -63,6 +63,7 @@ function App() {
 
   const { t, setLanguage, language } = useI18n();
 
+  const urlGuideStartedRef = useRef(false);
   const [notification, setNotification] = useState(null);
   const [deleteDialog, setDeleteDialog] = useState(null);
   const [saveViewDialog, setSaveViewDialog] = useState(null);
@@ -86,7 +87,7 @@ function App() {
     }
   }, [federationDepth, maxFederationDepth, setFederationDepth]);
 
-  // Load schema, presentation, stats and UI capabilities on startup
+  // Load schema, presentation, stats and UI capabilities on startup (runs once)
   useEffect(() => {
     const loadConfig = async () => {
       try {
@@ -107,13 +108,6 @@ function App() {
         setConfig(schemaData, presentationData, t, language);
         setStats(statsData);
         setLlmAvailable(capabilitiesData.llm_available ?? false);
-
-        // Trigger guide from URL param ?guide=<id>
-        const urlGuideId = new URLSearchParams(window.location.search).get('guide');
-        if (urlGuideId && presentationData?.guides?.length > 0) {
-          const guide = presentationData.guides.find(g => g.id === urlGuideId);
-          if (guide) startGuide(guide);
-        }
       } catch (error) {
         console.error('Error loading configuration:', error);
         api.getGraphStats().then(setStats).catch(console.error);
@@ -121,7 +115,19 @@ function App() {
       }
     };
     loadConfig();
-  }, [setConfig, setStats, setLlmAvailable, t, setLanguage, language, startGuide]);
+  }, [setConfig, setStats, setLlmAvailable, t, setLanguage, language]); // eslint-disable-line react-hooks/exhaustive-deps
+
+  // Trigger guide from URL param ?guide=<id> — fires once when presentation first becomes available
+  useEffect(() => {
+    if (!presentation?.guides?.length || urlGuideStartedRef.current) return;
+    const urlGuideId = new URLSearchParams(window.location.search).get('guide');
+    if (!urlGuideId) return;
+    const guide = presentation.guides.find(g => g.id === urlGuideId);
+    if (guide) {
+      urlGuideStartedRef.current = true;
+      startGuide(guide);
+    }
+  }, [presentation, startGuide]);
 
   const showNotification = useCallback((type, message) => {
     setNotification({ type, message });

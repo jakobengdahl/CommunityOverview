@@ -7,6 +7,8 @@ import './GuideOverlay.css';
 
 const TOOLTIP_WIDTH = 340;
 const TOOLTIP_MARGIN = 16;
+// Conservative minimum height estimate used for below/above placement checks.
+const TOOLTIP_MIN_HEIGHT = 180;
 
 function getTooltipPlacement(targetEl) {
   if (!targetEl) return { style: { top: '50%', left: '50%', transform: 'translate(-50%, -50%)' }, arrow: 'none' };
@@ -20,10 +22,10 @@ function getTooltipPlacement(targetEl) {
   const spaceBelow = winH - rect.bottom;
   const spaceAbove = rect.top;
 
-  const clampTop = (top, h = 180) => Math.max(TOOLTIP_MARGIN, Math.min(top, winH - h - TOOLTIP_MARGIN));
+  const clampTop = (top) => Math.max(TOOLTIP_MARGIN, Math.min(top, winH - TOOLTIP_MIN_HEIGHT - TOOLTIP_MARGIN));
   const clampLeft = (left) => Math.max(TOOLTIP_MARGIN, Math.min(left, winW - TOOLTIP_WIDTH - TOOLTIP_MARGIN));
 
-  // Prefer left (most toolbars are on the right side)
+  // Prefer left (most toolbars are on the right side of the screen)
   if (spaceLeft > TOOLTIP_WIDTH + TOOLTIP_MARGIN) {
     return {
       style: { top: clampTop(rect.top), left: rect.left - TOOLTIP_WIDTH - TOOLTIP_MARGIN },
@@ -36,38 +38,26 @@ function getTooltipPlacement(targetEl) {
       arrow: 'left',
     };
   }
-  if (spaceBelow > TOOLTIP_MARGIN + 60) {
+  if (spaceBelow > TOOLTIP_MIN_HEIGHT + TOOLTIP_MARGIN) {
     return {
       style: { top: rect.bottom + TOOLTIP_MARGIN, left: clampLeft(rect.left + rect.width / 2 - TOOLTIP_WIDTH / 2) },
       arrow: 'top',
     };
   }
-  if (spaceAbove > TOOLTIP_MARGIN + 60) {
+  if (spaceAbove > TOOLTIP_MIN_HEIGHT + TOOLTIP_MARGIN) {
     return {
       style: { top: rect.top - TOOLTIP_MARGIN - 10, left: clampLeft(rect.left + rect.width / 2 - TOOLTIP_WIDTH / 2), transform: 'translateY(-100%)' },
       arrow: 'bottom',
     };
   }
-  // Fallback center
+  // Fallback: center on screen
   return { style: { top: '50%', left: '50%', transform: 'translate(-50%, -50%)' }, arrow: 'none' };
 }
 
 function GuideOverlay() {
-  const {
-    guide,
-    advanceGuide,
-    stopGuide,
-    setGuideStepInput,
-    setGuideExecutingAction,
-    nodes,
-    edges,
-    addNodesToVisualization,
-    updateVisualization,
-    clearVisualization,
-    setFocusNodeId,
-  } = useGraphStore();
-
+  const { guide, advanceGuide, stopGuide, setGuideStepInput } = useGraphStore();
   const { t, language } = useI18n();
+
   const [placement, setPlacement] = useState({ style: {}, arrow: 'none' });
   const [inputValue, setInputValue] = useState('');
   const [actionError, setActionError] = useState(null);
@@ -84,7 +74,7 @@ function GuideOverlay() {
   const inputLabel = language === 'sv' && currentStep?.input_label_sv ? currentStep.input_label_sv : (currentStep?.input_label || '');
   const inputPlaceholder = language === 'sv' && currentStep?.input_placeholder_sv ? currentStep.input_placeholder_sv : (currentStep?.input_placeholder || '');
 
-  // Resolve and position tooltip whenever step changes
+  // Reposition tooltip whenever step changes
   useEffect(() => {
     if (!isActive || !currentStep) return;
 
@@ -96,7 +86,14 @@ function GuideOverlay() {
 
     const el = document.getElementById('guide-target-' + target);
     setPlacement(getTooltipPlacement(el));
-  }, [isActive, currentStep, currentStepIndex]);
+  }, [isActive, currentStepIndex]);
+
+  // Focus the tooltip div on each step so keyboard navigation (Escape, Enter) works
+  useEffect(() => {
+    if (!isActive || !currentStep) return;
+    if (currentStep.type === 'input') return; // input field grabs focus instead
+    tooltipRef.current?.focus();
+  }, [isActive, currentStepIndex, currentStep]);
 
   // Reset input value when step changes
   useEffect(() => {
@@ -104,26 +101,31 @@ function GuideOverlay() {
     setActionError(null);
   }, [currentStepIndex]);
 
-  // Focus input when an input step is shown
+  // Focus the text input when an input step is shown
   useEffect(() => {
-    if (currentStep?.type === 'input' && inputRef.current) {
-      setTimeout(() => inputRef.current?.focus(), 50);
-    }
-  }, [currentStep]);
+    if (!isActive || currentStep?.type !== 'input') return;
+    const timer = setTimeout(() => inputRef.current?.focus(), 50);
+    return () => clearTimeout(timer);
+  }, [isActive, currentStep?.type, currentStepIndex]);
 
-  // Execute action steps
+  // Execute action steps — reads live store state to avoid stale-closure bugs;
+  // uses a cancelled flag so in-flight async ops don't write to store after
+  // the guide is cancelled or the step changes.
   useEffect(() => {
     if (!isActive || !currentStep) return;
-    // Only run for steps that have an action field (not pure tooltip/input types)
-    const actionableTypes = ['search_nodes', 'add_node', 'focus_node', 'clear_visualization'];
-    const isActionStep = currentStep.action || actionableTypes.includes(currentStep.type);
-    if (!isActionStep) return;
 
-    const action = currentStep.action || currentStep.type;
+    const actionableTypes = ['search_nodes', 'add_node', 'focus_node', 'clear_visualization', 'clear'];
+    const action = currentStep.action || (actionableTypes.includes(currentStep.type) ? currentStep.type : null);
+    if (!action) return;
+
+    let cancelled = false;
 
     const executeAction = async () => {
-      setGuideExecutingAction(true);
+      // Read actions from live store state (not closure) to avoid stale refs
+      const store = useGraphStore.getState();
+      store.setGuideExecutingAction(true);
       setActionError(null);
+
       try {
         if (action === 'search_nodes') {
           const query = currentStep.query || '';
@@ -132,40 +134,40 @@ function GuideOverlay() {
             nodeTypes: nodeType ? [nodeType] : undefined,
             limit: 30,
           });
-          if (result.nodes && result.nodes.length > 0) {
-            const currentNodes = useGraphStore.getState().nodes;
-            const currentEdges = useGraphStore.getState().edges;
-            const allEdges = [...currentEdges, ...(result.edges || [])];
-            const positioned = positionNewNodes(result.nodes, currentNodes, allEdges);
-            addNodesToVisualization(positioned, result.edges || []);
+          if (!cancelled && result.nodes && result.nodes.length > 0) {
+            const s = useGraphStore.getState();
+            const allEdges = [...s.edges, ...(result.edges || [])];
+            const positioned = positionNewNodes(result.nodes, s.nodes, allEdges);
+            s.addNodesToVisualization(positioned, result.edges || []);
           }
-        } else if (action === 'clear_visualization') {
-          clearVisualization();
+        } else if (action === 'clear_visualization' || action === 'clear') {
+          if (!cancelled) useGraphStore.getState().clearVisualization();
         } else if (action === 'focus_node') {
           const nodeId = currentStep.node_id || currentStep.nodeId;
-          if (nodeId) setFocusNodeId(nodeId);
+          if (!cancelled && nodeId) useGraphStore.getState().setFocusNodeId(nodeId);
         } else if (action === 'add_node') {
           const nodeData = currentStep.node_data || currentStep.nodeData;
           if (nodeData) {
             const result = await api.addNodes([nodeData], []);
-            if (result.added_node_ids?.length > 0) {
+            if (!cancelled && result.added_node_ids?.length > 0) {
               const nodeWithId = { ...nodeData, id: result.added_node_ids[0] };
-              const currentNodes = useGraphStore.getState().nodes;
-              const currentEdges = useGraphStore.getState().edges;
-              addNodesToVisualization(positionNewNodes([nodeWithId], currentNodes, currentEdges), []);
+              const s = useGraphStore.getState();
+              s.addNodesToVisualization(positionNewNodes([nodeWithId], s.nodes, s.edges), []);
             }
           }
         }
       } catch (err) {
         console.error('[GuideOverlay] Action error:', err);
-        setActionError(err.message);
+        if (!cancelled) setActionError(err.message);
       } finally {
-        setGuideExecutingAction(false);
+        if (!cancelled) useGraphStore.getState().setGuideExecutingAction(false);
       }
     };
 
     executeAction();
-  }, [currentStepIndex]); // re-run when step index changes — intentionally not including all deps
+
+    return () => { cancelled = true; };
+  }, [currentStepIndex, isActive]); // eslint-disable-line react-hooks/exhaustive-deps
 
   const handleNext = useCallback(() => {
     if (currentStep?.type === 'input' && currentStep.store_as) {
@@ -198,6 +200,7 @@ function GuideOverlay() {
         role="dialog"
         aria-modal="false"
         aria-label={guideName || t('guide.title')}
+        tabIndex={-1}
         onKeyDown={handleKeyDown}
       >
         <div className="guide-header">
