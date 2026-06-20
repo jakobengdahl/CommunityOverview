@@ -244,7 +244,6 @@ class FederationManager:
         match_all = query_lower in {"", "*"}
 
         matched_nodes: List[Node] = []
-        matched_node_ids: set[str] = set()
         matched_edges: List[Edge] = []
 
         with self._lock:
@@ -269,12 +268,12 @@ class FederationManager:
 
                 if not match_all:
                     tags_text = " ".join(node.tags) if node.tags else ""
-                    searchable_text = f"{node.name} {node.description} {node.summary} {tags_text}".lower()
+                    subtypes_text = " ".join(node.subtypes) if node.subtypes else ""
+                    searchable_text = f"{node.name} {node.description} {node.summary} {tags_text} {subtypes_text}".lower()
                     if query_lower not in searchable_text:
                         continue
 
                 matched_nodes.append(node)
-                matched_node_ids.add(node.id)
 
         if not match_all:
             matched_nodes.sort(
