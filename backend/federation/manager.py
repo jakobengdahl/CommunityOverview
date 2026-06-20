@@ -186,6 +186,53 @@ class FederationManager:
             return min(global_depth, graph_cfg.max_depth_override)
         return global_depth
 
+    @staticmethod
+    def _score_node_match(node: Node, query_lower: str) -> int:
+        """Score how well a federated node matches a query. Higher = better match.
+
+        Uses the same tier structure as GraphStorage._score_node_match: large
+        primary scores for name matches (300 000–500 000) prevent secondary
+        signals from bleeding across name-match tiers.
+        """
+        score = 0
+        name_lower = (node.name or "").lower()
+
+        # Primary tier — name matching
+        if name_lower == query_lower:
+            score += 500_000
+        elif name_lower.startswith(query_lower):
+            score += 400_000
+        elif query_lower in name_lower:
+            score += 300_000
+
+        # Secondary — type matching (type name only; federation cache has no localized labels)
+        type_name_lower = str(node.type).lower()
+        if type_name_lower == query_lower:
+            score += 700
+        elif type_name_lower.startswith(query_lower):
+            score += 650
+        elif query_lower in type_name_lower:
+            score += 600
+
+        # Secondary — tag matching
+        if node.tags:
+            tags_lower = [t.lower() for t in node.tags]
+            if query_lower in tags_lower:
+                score += 500
+            elif any(query_lower in t for t in tags_lower):
+                score += 450
+
+        # Secondary — subtype matching
+        if node.subtypes:
+            if any(query_lower in s.lower() for s in node.subtypes):
+                score += 400
+
+        # Secondary — description / summary matching (lowest)
+        if query_lower in (node.description or "").lower() or query_lower in (node.summary or "").lower():
+            score += 200
+
+        return score
+
     def search_nodes(
         self,
         query: str,
@@ -197,7 +244,6 @@ class FederationManager:
         match_all = query_lower in {"", "*"}
 
         matched_nodes: List[Node] = []
-        matched_node_ids: set[str] = set()
         matched_edges: List[Edge] = []
 
         with self._lock:
@@ -222,17 +268,21 @@ class FederationManager:
 
                 if not match_all:
                     tags_text = " ".join(node.tags) if node.tags else ""
-                    searchable_text = f"{node.name} {node.description} {node.summary} {tags_text}".lower()
+                    subtypes_text = " ".join(node.subtypes) if node.subtypes else ""
+                    searchable_text = f"{node.name} {node.description} {node.summary} {tags_text} {subtypes_text}".lower()
                     if query_lower not in searchable_text:
                         continue
 
                 matched_nodes.append(node)
-                matched_node_ids.add(node.id)
-                if len(matched_nodes) >= limit:
-                    break
 
-            if len(matched_nodes) >= limit:
-                break
+        if not match_all:
+            matched_nodes.sort(
+                key=lambda n: self._score_node_match(n, query_lower),
+                reverse=True,
+            )
+
+        matched_nodes = matched_nodes[:limit]
+        matched_node_ids = {n.id for n in matched_nodes}
 
         if matched_node_ids:
             for cache in caches:
@@ -241,7 +291,7 @@ class FederationManager:
                         matched_edges.append(edge)
 
         return {
-            "nodes": matched_nodes[:limit],
+            "nodes": matched_nodes,
             "edges": matched_edges,
         }
 

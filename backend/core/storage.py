@@ -435,6 +435,55 @@ class GraphStorage:
         """
         self.load()
 
+    def _score_node_match(self, node: "Node", query_lower: str) -> int:
+        """Score how well a node matches a query. Higher = better match.
+
+        Name matches use large base values (300 000–500 000) so that any
+        name-tier match always outranks secondary signals (type/tags/description)
+        regardless of how many secondary signals accumulate.  Secondary signals
+        use values up to ~1 850, well below the 100 000-point gap between tiers.
+        """
+        score = 0
+        name_lower = (node.name or "").lower()
+
+        # Primary tier — name matching (large gaps prevent secondary signal bleed-through)
+        if name_lower == query_lower:
+            score += 500_000
+        elif name_lower.startswith(query_lower):
+            score += 400_000
+        elif query_lower in name_lower:
+            score += 300_000
+
+        # Secondary — type matching (including localized labels)
+        type_key = str(node.type)
+        type_name_lower = type_key.lower()
+        type_text = self._type_searchable_text.get(type_key, type_name_lower)
+        if type_name_lower == query_lower:
+            score += 700
+        elif type_name_lower.startswith(query_lower):
+            score += 650
+        elif query_lower in type_text:
+            score += 600
+
+        # Secondary — tag matching
+        if node.tags:
+            tags_lower = [t.lower() for t in node.tags]
+            if query_lower in tags_lower:
+                score += 500
+            elif any(query_lower in t for t in tags_lower):
+                score += 450
+
+        # Secondary — subtype matching
+        if node.subtypes:
+            if any(query_lower in s.lower() for s in node.subtypes):
+                score += 400
+
+        # Secondary — description / summary matching (lowest)
+        if query_lower in (node.description or "").lower() or query_lower in (node.summary or "").lower():
+            score += 200
+
+        return score
+
     def search_nodes(
         self,
         query: str,
@@ -442,8 +491,10 @@ class GraphStorage:
         limit: int = 50
     ) -> List[Node]:
         """
-        Search nodes based on text query
-        Matches against name, description, summary, and tags.
+        Search nodes based on text query.
+        Matches against name, description, summary, tags, subtypes, and node type (including
+        localized labels). Results are ranked so that name matches rank above type matches,
+        which rank above description/tag matches.
         Empty query or '*' returns all nodes (subject to filtering and limit).
         """
         query_lower = query.lower().strip()
@@ -457,7 +508,6 @@ class GraphStorage:
             if node_types and node.type not in node_types:
                 continue
 
-            # Text matching including tags (if not matching all)
             if not match_all:
                 searchable_text = self._searchable_text_cache.get(node.id)
                 if searchable_text is None:
@@ -470,10 +520,10 @@ class GraphStorage:
 
             results.append(node)
 
-            if len(results) >= limit:
-                break
+        if not match_all:
+            results.sort(key=lambda n: self._score_node_match(n, query_lower), reverse=True)
 
-        return results
+        return results[:limit]
 
     def get_node(self, node_id: str) -> Optional[Node]:
         """Get a specific node"""
