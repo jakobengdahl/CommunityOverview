@@ -202,8 +202,114 @@ Export APIs enforce authorization boundaries.
 
 ---
 
+## 17. Interactive Guide System — #138
+
+Step-by-step guides triggered via URL parameter or AI assistant. Tooltips position near named UI elements; action steps run automatically before showing the tooltip.
+
+### 17a. URL trigger
+
+| # | Step | Expected | Status |
+|---|------|----------|--------|
+| 17a.1 | Open app with `?guide=first_intro` in URL | Guide starts automatically after config loads; tooltip appears near header | ⬜ |
+| 17a.2 | Open app with `?guide=actions_demo` | Actions demo guide starts | ⬜ |
+| 17a.3 | Open app with `?guide=nonexistent` | No guide starts; app loads normally | ⬜ |
+| 17a.4 | Switch language (sv/en) while URL has `?guide=first_intro` | Guide does NOT restart on language change (one-shot guard) | ⬜ |
+
+### 17b. Navigation and keyboard
+
+| # | Step | Expected | Status |
+|---|------|----------|--------|
+| 17b.1 | Click "Next" through all steps of `first_intro` | Progress dots advance; tooltip repositions to correct UI target each step | ⬜ |
+| 17b.2 | Press **Enter** on a non-input step | Same as clicking Next | ⬜ |
+| 17b.3 | Press **Escape** at any step | Guide cancels immediately; backdrop disappears | ⬜ |
+| 17b.4 | Click "Cancel" button | Guide stops; UI returns to normal | ⬜ |
+| 17b.5 | Reach last step | "Next" button changes to "Close"; clicking closes guide | ⬜ |
+
+### 17c. Tooltip positioning
+
+| # | Step | Expected | Status |
+|---|------|----------|--------|
+| 17c.1 | Step targeting `header` | Tooltip appears below/beside the header element with correct arrow | ⬜ |
+| 17c.2 | Step targeting `search` | Tooltip appears near search bar | ⬜ |
+| 17c.3 | Step targeting `toolbar` | Tooltip appears to the left of the toolbar | ⬜ |
+| 17c.4 | Step targeting `chat` | Tooltip appears near chat panel | ⬜ |
+| 17c.5 | Step targeting `canvas` | Tooltip appears near the graph canvas | ⬜ |
+| 17c.6 | Step targeting `center` (e.g. input step) | Tooltip centered on screen | ⬜ |
+| 17c.7 | Resize browser window during guide | Tooltip stays within viewport bounds | ⬜ |
+
+### 17d. Input step
+
+| # | Step | Expected | Status |
+|---|------|----------|--------|
+| 17d.1 | Reach the input step in `first_intro` | Input field is visible and auto-focused | ⬜ |
+| 17d.2 | Type text and press Enter | Input captured; guide advances | ⬜ |
+| 17d.3 | Leave input empty and click Next | Guide still advances (no required-field block) | ⬜ |
+
+### 17e. Action steps — search & visualization
+
+| # | Step | Expected | Status |
+|---|------|----------|--------|
+| 17e.1 | `search_nodes` step (Actor in `first_intro` step 4) | Actor nodes load into canvas; spinner shown during load | ⬜ |
+| 17e.2 | `clear_visualization` step | Canvas clears; spinner visible briefly | ⬜ |
+| 17e.3 | `focus_node` step (if configured) | Graph pans/zooms to the specified node | ⬜ |
+
+### 17f. Action steps — chat and search fill (actions_demo guide)
+
+| # | Step | Expected | Status |
+|---|------|----------|--------|
+| 17f.1 | `fill_search_input` step | Text animates character-by-character into search bar; debounce search triggers | ⬜ |
+| 17f.2 | `fill_chat_input` step | Text animates into chat textarea | ⬜ |
+| 17f.3 | `fill_chat_input` with `auto_send: true` | After animation completes, message is sent automatically with the typed text | ⬜ |
+| 17f.4 | `minimize_chat` step | Chat panel collapses | ⬜ |
+| 17f.5 | `maximize_chat` step | Chat panel re-opens | ⬜ |
+| 17f.6 | `toggle_chat` step | Chat panel toggles state | ⬜ |
+
+### 17g. Action steps — node and edge CRUD
+
+| # | Step | Expected | Status |
+|---|------|----------|--------|
+| 17g.1 | `create_node` step | Node created in backend; appears in visualization | ⬜ |
+| 17g.2 | `update_node` step | Node updated in backend; visualization reflects change | ⬜ |
+| 17g.3 | `delete_node` step | Node deleted from backend; removed from visualization | ⬜ |
+| 17g.4 | `show_node_detail` step | Node detail panel opens with correct node | ⬜ |
+| 17g.5 | `create_edge` step | Edge created in backend; appears in graph | ⬜ |
+| 17g.6 | `delete_edge` step | Edge deleted from backend; removed from graph | ⬜ |
+
+### 17h. Cancellation safety
+
+| # | Step | Expected | Status |
+|---|------|----------|--------|
+| 17h.1 | Cancel guide during a running `search_nodes` action (click Cancel while spinner is visible) | Spinner disappears; no nodes added after cancel; no JS error | ⬜ |
+| 17h.2 | Rapidly click Next through two consecutive action steps | No duplicate API calls; store not left in inconsistent state | ⬜ |
+| 17h.3 | Cancel guide during `fill_chat_input` animation | Animation stops; `guideChatInput` cleared; chat textarea not further modified | ⬜ |
+
+### 17i. AI assistant trigger
+
+| # | Step | Expected | Status |
+|---|------|----------|--------|
+| 17i.1 | Ask AI: "Start the first_intro guide" (requires backend tool returning `start_guide` action) | Guide starts from step 1 | ⬜ |
+| 17i.2 | Ask AI to start a non-existent guide ID | No guide starts; AI shows error or fallback message | ⬜ |
+
+### 17j. Backdrop and accessibility
+
+| # | Step | Expected | Status |
+|---|------|----------|--------|
+| 17j.1 | While guide is active, click on the graph canvas behind the backdrop | Click passes through; graph responds (backdrop is non-blocking) | ⬜ |
+| 17j.2 | While guide is active, use search bar | Search still works while guide tooltip is visible | ⬜ |
+| 17j.3 | Screen reader / tab navigation | Guide tooltip is focusable; ARIA role="dialog" present | ⬜ |
+
+### 17k. i18n
+
+| # | Step | Expected | Status |
+|---|------|----------|--------|
+| 17k.1 | Start guide with language set to Swedish | Tooltip text, button labels, and guide name appear in Swedish | ⬜ |
+| 17k.2 | Switch language mid-guide | Tooltip text updates to new language for current step | ⬜ |
+
+---
+
 ## Notes
 
 - Tests marked ⬜ are not yet executed.
 - Add new feature sections here as more features land on `dev` before the next preview release.
 - For backend seam features (#123–#129): these are hook/extension points that may require integration tests rather than manual UI testing; verify via API calls or unit test suite (`pytest`).
+- Guide system example guides: `?guide=first_intro` and `?guide=actions_demo` (both defined in `config/default/schema_config.json`).
