@@ -188,43 +188,48 @@ class FederationManager:
 
     @staticmethod
     def _score_node_match(node: Node, query_lower: str) -> int:
-        """Score how well a federated node matches a query. Higher = better match."""
+        """Score how well a federated node matches a query. Higher = better match.
+
+        Uses the same tier structure as GraphStorage._score_node_match: large
+        primary scores for name matches (300 000–500 000) prevent secondary
+        signals from bleeding across name-match tiers.
+        """
         score = 0
         name_lower = (node.name or "").lower()
 
-        # Name matching (highest priority)
+        # Primary tier — name matching
         if name_lower == query_lower:
-            score += 100
+            score += 500_000
         elif name_lower.startswith(query_lower):
-            score += 90
+            score += 400_000
         elif query_lower in name_lower:
-            score += 80
+            score += 300_000
 
-        # Type matching (type name only; federation cache has no localized labels)
+        # Secondary — type matching (type name only; federation cache has no localized labels)
         type_name_lower = str(node.type).lower()
         if type_name_lower == query_lower:
-            score += 70
+            score += 700
         elif type_name_lower.startswith(query_lower):
-            score += 65
+            score += 650
         elif query_lower in type_name_lower:
-            score += 60
+            score += 600
 
-        # Tag matching
+        # Secondary — tag matching
         if node.tags:
             tags_lower = [t.lower() for t in node.tags]
             if query_lower in tags_lower:
-                score += 50
+                score += 500
             elif any(query_lower in t for t in tags_lower):
-                score += 45
+                score += 450
 
-        # Subtype matching
+        # Secondary — subtype matching
         if node.subtypes:
             if any(query_lower in s.lower() for s in node.subtypes):
-                score += 40
+                score += 400
 
-        # Description / summary matching (lowest priority)
+        # Secondary — description / summary matching (lowest)
         if query_lower in (node.description or "").lower() or query_lower in (node.summary or "").lower():
-            score += 20
+            score += 200
 
         return score
 

@@ -304,10 +304,10 @@ class TestSearchRanking:
         assert results[0].id == "exact"
 
     def test_score_node_match_exact_name(self, ranking_storage):
-        """_score_node_match returns max score for exact name match."""
+        """_score_node_match returns the highest primary-tier score for an exact name match."""
         node = ranking_storage.nodes["exact"]
         score = ranking_storage._score_node_match(node, "esam")
-        assert score >= 100
+        assert score >= 500_000
 
     def test_score_node_match_prefix_less_than_exact(self, ranking_storage):
         exact_node = ranking_storage.nodes["exact"]
@@ -315,6 +315,34 @@ class TestSearchRanking:
         exact_score = ranking_storage._score_node_match(exact_node, "esam")
         prefix_score = ranking_storage._score_node_match(prefix_node, "esam")
         assert exact_score > prefix_score
+
+    def test_exact_name_beats_prefix_plus_description(self, temp_storage):
+        """Exact name match must rank above prefix+description even though additive scores
+        would have exceeded 100 in the old single-band scheme (90+20=110 vs 100)."""
+        nodes = [
+            Node(id="exact", type=NodeType.THEME, name="esam",
+                 description="unrelated"),
+            # prefix + description hit — would score 110 with old scheme, should still lose
+            Node(id="prefix-desc", type=NodeType.THEME, name="esam collaboration",
+                 description="part of the esam network"),
+        ]
+        temp_storage.add_nodes(nodes, [])
+        results = temp_storage.search_nodes("esam")
+        assert results[0].id == "exact"
+
+    def test_exact_name_beats_multi_secondary_match(self, temp_storage):
+        """Exact name match must rank above a node with no name match but many
+        secondary hits (type + tags + description)."""
+        nodes = [
+            Node(id="exact", type=NodeType.ACTOR, name="esam",
+                 description="unrelated"),
+            Node(id="multi", type=NodeType.THEME, name="Nordic collaboration",
+                 description="part of the esam network", tags=["esam"],
+                 subtypes=["esam working group"]),
+        ]
+        temp_storage.add_nodes(nodes, [])
+        results = temp_storage.search_nodes("esam")
+        assert results[0].id == "exact"
 
 
 class TestGraphStorageRelated:
