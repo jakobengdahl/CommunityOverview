@@ -111,6 +111,48 @@ class LanguagePolicyConfig(BaseModel):
     description_en: str = "English is the primary graph language. Swedish is accepted when natural or established."
 
 
+class GuideStepConfig(BaseModel):
+    """A single step in an interactive guide."""
+    type: str = "tooltip"  # tooltip | input | <action-type>
+    target: str = "center"  # toolbar | chat | search | header | canvas | center
+    target_position: str = "auto"  # auto | left | right | above | below
+    text: str = ""
+    text_sv: str = ""
+    # For input steps
+    input_label: str = ""
+    input_label_sv: str = ""
+    input_placeholder: str = ""
+    input_placeholder_sv: str = ""
+    store_as: str = ""  # key to store collected input under
+    # For action steps
+    action: str = ""  # explicit override; defaults to 'type' when type is actionable
+    # Node actions (create_node, update_node, delete_node, show_node_detail, focus_node)
+    node_type: str = ""
+    node_id: str = ""
+    node_data: Dict[str, Any] = Field(default_factory=dict)
+    # Search / fill actions
+    query: str = ""
+    fill_text: str = ""  # alias for query in fill_chat_input / fill_search_input
+    animated: bool = True  # animate typing for fill_* actions
+    auto_send: bool = False  # auto-send after fill_chat_input animation
+    # Edge actions (create_edge, delete_edge)
+    source_id: str = ""
+    target_id: str = ""
+    edge_id: str = ""
+    edge_type: str = ""
+    edge_label: str = ""
+    # Saved view action
+    view_name: str = ""
+
+
+class GuideConfig(BaseModel):
+    """An interactive guide definition."""
+    id: str
+    name: str = ""
+    name_sv: str = ""
+    steps: List[GuideStepConfig] = Field(default_factory=list)
+
+
 class CapabilityConfig(BaseModel):
     """Public capability metadata exposed for client discovery."""
     id: str
@@ -138,6 +180,7 @@ class PresentationConfig(BaseModel):
     expert_agents: List[ExpertAgentConfig] = Field(default_factory=list)
     skills_config: SkillsConfig = Field(default_factory=SkillsConfig)
     capabilities: List[CapabilityConfig] = Field(default_factory=list)
+    guides: List[GuideConfig] = Field(default_factory=list)
 
 
 class SchemaFileConfig(BaseModel):
@@ -307,7 +350,8 @@ def get_presentation() -> Dict[str, Any]:
         "language_policy": pres.language_policy.dict(),
         "widget_url": pres.widget_url,
         "expert_agents": [agent.dict() for agent in pres.expert_agents],
-        "capabilities": [capability.dict() for capability in pres.capabilities]
+        "capabilities": [capability.dict() for capability in pres.capabilities],
+        "guides": [guide.dict() for guide in pres.guides],
     }
 
 

@@ -1,4 +1,4 @@
-import { useState, useCallback, useEffect } from 'react';
+import { useState, useCallback, useEffect, useRef } from 'react';
 import { GraphCanvas } from '@community-graph/ui-graph-canvas';
 import '@community-graph/ui-graph-canvas/styles';
 import useGraphStore from './store/graphStore';
@@ -16,6 +16,7 @@ import CreateSkillDialog from './components/CreateSkillDialog';
 import CreateAgentDialog from './components/CreateAgentDialog';
 import EditEdgeDialog from './components/EditEdgeDialog';
 import NodeDetailDialog from './components/NodeDetailDialog';
+import GuideOverlay from './components/GuideOverlay';
 import * as api from './services/api';
 import './App.css';
 
@@ -57,10 +58,12 @@ function App() {
     setFederationDepth,
     showMinimap,
     nodeMarks,
+    startGuide,
   } = useGraphStore();
 
   const { t, setLanguage, language } = useI18n();
 
+  const urlGuideStartedRef = useRef(false);
   const [notification, setNotification] = useState(null);
   const [deleteDialog, setDeleteDialog] = useState(null);
   const [saveViewDialog, setSaveViewDialog] = useState(null);
@@ -84,7 +87,7 @@ function App() {
     }
   }, [federationDepth, maxFederationDepth, setFederationDepth]);
 
-  // Load schema, presentation, stats and UI capabilities on startup
+  // Load schema, presentation, stats and UI capabilities on startup (runs once)
   useEffect(() => {
     const loadConfig = async () => {
       try {
@@ -112,7 +115,19 @@ function App() {
       }
     };
     loadConfig();
-  }, [setConfig, setStats, setLlmAvailable, t, setLanguage, language]);
+  }, [setConfig, setStats, setLlmAvailable, t, setLanguage, language]); // eslint-disable-line react-hooks/exhaustive-deps
+
+  // Trigger guide from URL param ?guide=<id> — fires once when presentation first becomes available
+  useEffect(() => {
+    if (!presentation?.guides?.length || urlGuideStartedRef.current) return;
+    const urlGuideId = new URLSearchParams(window.location.search).get('guide');
+    if (!urlGuideId) return;
+    const guide = presentation.guides.find(g => g.id === urlGuideId);
+    if (guide) {
+      urlGuideStartedRef.current = true;
+      startGuide(guide);
+    }
+  }, [presentation, startGuide]);
 
   const showNotification = useCallback((type, message) => {
     setNotification({ type, message });
@@ -603,7 +618,7 @@ function App() {
 
   return (
     <div className="app">
-      <div className="app-canvas">
+      <div className="app-canvas" id="guide-target-canvas">
         <GraphCanvas
           nodes={nodes}
           edges={edges}
@@ -766,6 +781,8 @@ function App() {
           initialData={editingAgentData}
         />
       )}
+
+      <GuideOverlay />
     </div>
   );
 }

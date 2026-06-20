@@ -219,7 +219,7 @@ function FloatingToolbar({
 
   return (
     <>
-      <div className="floating-toolbar">
+      <div className="floating-toolbar" id="guide-target-toolbar">
         {toolbarOrder.map((nodeType, index) => {
           if (nodeType === null) {
             return <div key={`sep-${index}`} className="floating-toolbar-separator" />;

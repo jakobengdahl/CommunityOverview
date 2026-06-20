@@ -348,6 +348,126 @@
         "intro_en": "Hello! I'm the Collaboration Expert. I can analyze collaborations between actors, identify synergies and suggest new connections in the network.",
         "system_context": "You are a collaboration and network analysis expert. Focus on actor relationships, synergies, and partnership opportunities."
       }
+    ],
+    "guides": [
+      {
+        "id": "first_intro",
+        "name": "Introduction to the Knowledge Graph",
+        "name_sv": "Introduktion till kunskapsgrafen",
+        "steps": [
+          {
+            "type": "tooltip",
+            "target": "header",
+            "target_position": "below",
+            "text": "Welcome! This knowledge graph helps you explore and manage connections between organizations, initiatives, legislation, and resources. Let's take a quick tour of the interface.",
+            "text_sv": "Välkommen! Den här kunskapsgrafen hjälper dig att utforska och hantera kopplingar mellan organisationer, initiativ, lagstiftning och resurser. Låt oss ta en snabb rundtur."
+          },
+          {
+            "type": "tooltip",
+            "target": "search",
+            "target_position": "below",
+            "text": "Use the search bar to find nodes in the graph. Type a name or keyword and matching nodes will appear in a dropdown. Select a result to focus on it in the visualization.",
+            "text_sv": "Använd sökfältet för att hitta noder i grafen. Skriv ett namn eller ett nyckelord och matchande noder visas i en lista. Välj ett resultat för att fokusera på det i visualiseringen."
+          },
+          {
+            "type": "tooltip",
+            "target": "toolbar",
+            "target_position": "left",
+            "text": "The toolbar on the right lets you create new nodes by clicking or dragging icons onto the canvas. Each icon represents a different type of entity — actors, initiatives, legislation, and more.",
+            "text_sv": "Verktygsfältet till höger låter dig skapa nya noder genom att klicka eller dra ikoner till arbetsytan. Varje ikon representerar en typ av entitet — aktörer, initiativ, lagstiftning med mera."
+          },
+          {
+            "type": "search_nodes",
+            "target": "canvas",
+            "target_position": "auto",
+            "text": "Here are the actors currently in the graph. You can double-click any node to see its details, right-click for more options, or drag to rearrange the layout.",
+            "text_sv": "Här är de aktörer som för närvarande finns i grafen. Du kan dubbelklicka på en nod för att se detaljer, högerklicka för fler alternativ eller dra för att ändra layouten.",
+            "action": "search_nodes",
+            "node_type": "Actor",
+            "query": ""
+          },
+          {
+            "type": "tooltip",
+            "target": "chat",
+            "target_position": "left",
+            "text": "The AI assistant can help you explore, query, and manage the graph using natural language. Try asking it to show all initiatives, find connections between actors, or add new nodes.",
+            "text_sv": "AI-assistenten kan hjälpa dig att utforska, söka i och hantera grafen med naturligt språk. Prova att be den visa alla initiativ, hitta kopplingar mellan aktörer eller lägga till nya noder."
+          },
+          {
+            "type": "input",
+            "target": "center",
+            "text": "You're all set! What topic would you like to explore first? Your answer will be used to search the graph.",
+            "text_sv": "Du är redo! Vilket ämne vill du utforska först? Ditt svar används för att söka i grafen.",
+            "input_label": "Topic to explore",
+            "input_label_sv": "Ämne att utforska",
+            "input_placeholder": "e.g. NIS2, AI strategy, digitalization...",
+            "input_placeholder_sv": "t.ex. NIS2, AI-strategi, digitalisering...",
+            "store_as": "firstTopic"
+          }
+        ]
+      },
+      {
+        "id": "actions_demo",
+        "name": "Interactive Actions Demo",
+        "name_sv": "Demo av interaktiva åtgärder",
+        "steps": [
+          {
+            "type": "tooltip",
+            "target": "chat",
+            "text": "This demo shows how guides can automate actions on your behalf. First, let's collapse the AI assistant panel to give the graph more space.",
+            "text_sv": "Den här demon visar hur guider kan automatisera åtgärder åt dig. Låt oss börja med att minimera AI-assistentpanelen för att ge grafen mer plats."
+          },
+          {
+            "type": "minimize_chat",
+            "target": "canvas",
+            "text": "The AI assistant panel is now minimized. The guide can also re-open it when needed.",
+            "text_sv": "AI-assistentpanelen är nu minimerad. Guiden kan även öppna den igen vid behov."
+          },
+          {
+            "type": "fill_search_input",
+            "target": "search",
+            "text": "Watch the search bar — the guide can type into it automatically to demonstrate a search.",
+            "text_sv": "Titta på sökfältet — guiden kan skriva i det automatiskt för att visa en sökning.",
+            "query": "NIS2",
+            "animated": true
+          },
+          {
+            "type": "maximize_chat",
+            "target": "chat",
+            "text": "Good. Now the guide re-opens the AI assistant so you can interact with it.",
+            "text_sv": "Bra. Nu öppnar guiden AI-assistenten igen så du kan interagera med den."
+          },
+          {
+            "type": "fill_chat_input",
+            "target": "chat",
+            "text": "The guide can also pre-fill the chat input with a question — useful for teaching users what to ask the AI.",
+            "text_sv": "Guiden kan även fylla i chattrutan med en fråga — användbart för att visa användare vad de kan fråga AI:n.",
+            "fill_text": "Show me all initiatives related to NIS2",
+            "animated": true,
+            "auto_send": false
+          },
+          {
+            "type": "clear_visualization",
+            "target": "canvas",
+            "text": "The guide cleared the visualization canvas. Next, it will load some nodes from the graph.",
+            "text_sv": "Guiden rensade visualiseringsytan. Nu kommer den att läsa in några noder från grafen."
+          },
+          {
+            "type": "search_nodes",
+            "target": "canvas",
+            "text": "Actors have been loaded into the visualization. The guide can search for any node type and display results automatically.",
+            "text_sv": "Aktörer har laddats in i visualiseringen. Guiden kan söka efter valfri nodtyp och visa resultaten automatiskt.",
+            "node_type": "Actor",
+            "query": ""
+          },
+          {
+            "type": "tooltip",
+            "target": "center",
+            "text": "That concludes the actions demo! You've seen how guides can control the chat panel, fill inputs with animated typing, clear the canvas, and load nodes — all automatically.",
+            "text_sv": "Det var aktionsdemon! Du har sett hur guider kan styra chattanelen, fylla i inmatningsfält med animerad text, rensa arbetsytan och läsa in noder — helt automatiskt."
+          }
+        ]
+      }
     ]
   }
 }
