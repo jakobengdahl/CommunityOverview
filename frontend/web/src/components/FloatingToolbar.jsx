@@ -21,6 +21,7 @@ import {
   Sliders,
   ListOl,
   Diagram3Fill,
+  StarFill,
   QuestionCircleFill,
 } from 'react-bootstrap-icons';
 import useGraphStore from '../store/graphStore';
@@ -50,6 +51,7 @@ const ICON_REGISTRY = {
   Sliders,
   ListOl,
   Diagram3Fill,
+  StarFill,
   QuestionCircleFill,
 };
 
@@ -217,7 +219,7 @@ function FloatingToolbar({
 
   return (
     <>
-      <div className="floating-toolbar">
+      <div className="floating-toolbar" id="guide-target-toolbar">
         {toolbarOrder.map((nodeType, index) => {
           if (nodeType === null) {
             return <div key={`sep-${index}`} className="floating-toolbar-separator" />;

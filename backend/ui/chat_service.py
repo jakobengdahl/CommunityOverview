@@ -5,12 +5,15 @@ This module provides chat functionality by:
 - Using ChatProcessor for LLM interactions
 - Routing tool calls through GraphService (not direct graph access)
 - Supporting multiple LLM providers (OpenAI, Claude)
+- Loading and injecting skills for expert agents (Phase 3)
 
 All graph mutations MUST go through GraphService to ensure
 consistency and proper validation.
 """
 
 from typing import List, Dict, Any, Optional, Callable
+import asyncio
+import logging
 import os
 import json
 import inspect
@@ -19,6 +22,8 @@ from datetime import datetime
 from backend.chat_logic import ChatProcessor
 from backend.llm_providers import create_provider, LLMProvider
 from backend.service import GraphService
+
+logger = logging.getLogger(__name__)
 
 
 class ChatService:
@@ -53,6 +58,15 @@ class ChatService:
         # Create the underlying ChatProcessor with our tools map
         self._processor = ChatProcessor(self._tools_map)
         self._current_federation_depth: Optional[int] = None
+
+        # Expert agent registry — populated by load_expert_skills() at startup.
+        self._expert_contexts: Dict[str, str] = {}
+        # Stage 1: skill metadata (frontmatter only, no body content).
+        self._expert_skills: Dict[str, List] = {}       # List[SkillMetadata]
+        # Stage 2: full skill content, populated lazily on first _build_expert_context call.
+        self._expert_skills_full: Dict[str, List] = {}  # List[SkillDefinition]
+        # Shared SkillsLoader instance — holds the raw-text cache for Stage 1→2 promotion.
+        self._skills_loader = None
 
     def _build_tools_map(self) -> Dict[str, Callable]:
         """
@@ -101,6 +115,106 @@ class ChatService:
             federation_depth=effective_depth,
         )
 
+    # ------------------------------------------------------------------
+    # Expert agent skills loading
+    # ------------------------------------------------------------------
+
+    async def load_expert_skills(self, experts: list, skills_config) -> None:
+        """
+        Progressive skill loading (Stage 1 → Stage 2) for all configured expert agents.
+
+        Stage 1: fetches YAML frontmatter only (SkillMetadata), stored in
+        _expert_skills.  Stage 2: immediately promotes each set of metadata
+        to full SkillDefinition objects (with body content) using the shared
+        SkillsLoader text cache, so no additional HTTP round-trips are needed.
+        Full content is stored in _expert_skills_full and used by
+        _build_expert_context() at request time without any async work.
+
+        Both stages run in this async context, eliminating any need to spawn
+        a new event loop inside synchronous request handlers.
+
+        Clears all expert state before loading so that experts removed from
+        config are not retained across reloads.
+
+        Args:
+            experts: List of ExpertAgentConfig objects
+            skills_config: SkillsConfig to use for the loader
+        """
+        from backend.skills.loader import SkillsLoader
+
+        # Clear stale state from any previous load (handles config reload)
+        self._expert_contexts.clear()
+        self._expert_skills.clear()
+        self._expert_skills_full.clear()
+
+        self._skills_loader = SkillsLoader(skills_config)
+        for expert in experts:
+            self._expert_contexts[expert.id] = expert.system_context
+            if expert.skills_urls:
+                try:
+                    # Stage 1: frontmatter only (text cached for Stage 2)
+                    metas = await self._skills_loader.load_metadata_from_urls(expert.skills_urls)
+                    self._expert_skills[expert.id] = metas
+                    # Stage 2: full content — uses text cache, no extra HTTP requests
+                    full_skills = await self._skills_loader.load_full_skills(metas)
+                    self._expert_skills_full[expert.id] = full_skills
+                    logger.info(
+                        "Expert %s: loaded %d skill(s) from %d URL(s)",
+                        expert.id, len(full_skills), len(expert.skills_urls),
+                    )
+                except Exception as exc:
+                    logger.warning("Expert %s: skills load failed: %s", expert.id, exc)
+                    self._expert_skills[expert.id] = []
+                    self._expert_skills_full[expert.id] = []
+            else:
+                self._expert_skills[expert.id] = []
+                self._expert_skills_full[expert.id] = []
+
+    def load_expert_skills_sync(self, experts: list, skills_config) -> None:
+        """Synchronous wrapper for startup use outside an async context."""
+        loop = asyncio.new_event_loop()
+        try:
+            loop.run_until_complete(self.load_expert_skills(experts, skills_config))
+        finally:
+            loop.close()
+
+    def _build_expert_context(self, expert_agent_id: str) -> Optional[str]:
+        """
+        Build the extra system context string for a given expert agent.
+
+        Full skill content is pre-loaded by load_expert_skills() at startup
+        and stored in _expert_skills_full — this method is purely a read.
+
+        Returns None if the ID is unknown, or a combined string of:
+          - expert's system_context (if set)
+          - skills section (if skills were loaded for this expert)
+        """
+        if expert_agent_id not in self._expert_contexts:
+            logger.debug("Unknown expert_agent_id: %s", expert_agent_id)
+            return None
+
+        from backend.agents.prompts import build_skills_section
+        from backend.skills.loader import SkillDefinition
+
+        parts: List[str] = []
+        ctx = self._expert_contexts.get(expert_agent_id, "")
+        if ctx:
+            parts.append(ctx)
+
+        # Full skills pre-populated by load_expert_skills().
+        # Fall back to _expert_skills if items are already SkillDefinition
+        # (test-compat: tests may set _expert_skills directly).
+        full_skills = self._expert_skills_full.get(expert_agent_id)
+        if full_skills is None:
+            items = self._expert_skills.get(expert_agent_id, [])
+            full_skills = [s for s in items if isinstance(s, SkillDefinition)]
+        if full_skills:
+            parts.append(build_skills_section(full_skills))
+
+        return "\n\n".join(parts) if parts else None
+
+    # ------------------------------------------------------------------
+
     @property
     def graph_service(self) -> GraphService:
         """Access the underlying GraphService."""
@@ -116,7 +230,8 @@ class ChatService:
         messages: List[Dict[str, Any]],
         api_key: Optional[str] = None,
         provider: Optional[str] = None,
-        federation_depth: Optional[int] = None
+        federation_depth: Optional[int] = None,
+        expert_agent_id: Optional[str] = None,
     ) -> Dict[str, Any]:
         """
         Process a chat message and return the response.
@@ -130,6 +245,10 @@ class ChatService:
             messages: Conversation history as a list of message dicts
             api_key: Optional API key override (uses env var if not provided)
             provider: Optional provider override ('claude' or 'openai')
+            federation_depth: Optional federated search depth override
+            expert_agent_id: Optional expert agent ID — when provided, the
+                agent's system_context and skills are prepended to the system
+                prompt for this request.
 
         Returns:
             Dict with:
@@ -139,10 +258,12 @@ class ChatService:
         """
         self._current_federation_depth = federation_depth
         try:
+            extra_context = self._build_expert_context(expert_agent_id) if expert_agent_id else None
             return self._processor.process_message(
                 messages=messages,
                 api_key=api_key,
-                provider=provider
+                provider=provider,
+                extra_context=extra_context,
             )
         finally:
             self._current_federation_depth = None
@@ -154,7 +275,8 @@ class ChatService:
         api_key: Optional[str] = None,
         provider: Optional[str] = None,
         document_context: Optional[str] = None,
-        federation_depth: Optional[int] = None
+        federation_depth: Optional[int] = None,
+        expert_agent_id: Optional[str] = None,
     ) -> Dict[str, Any]:
         """
         Process a chat request with optional document context.
@@ -197,7 +319,8 @@ User's question: {user_message}"""
             messages=messages,
             api_key=api_key,
             provider=provider,
-            federation_depth=federation_depth
+            federation_depth=federation_depth,
+            expert_agent_id=expert_agent_id,
         )
 
     def get_system_info(self) -> Dict[str, Any]:

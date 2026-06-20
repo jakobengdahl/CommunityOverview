@@ -18,6 +18,28 @@
   box-shadow: 0 0 12px rgba(100, 108, 255, 0.4);
 }
 
+.graph-node-mark-badge {
+  position: absolute;
+  top: -6px;
+  right: -6px;
+  width: 14px;
+  height: 14px;
+  border-radius: 50%;
+  border: 2px solid #1a1a1a;
+  z-index: 5;
+}
+
+.graph-node-tooltip .tooltip-mark-label {
+  font-size: 0.8rem;
+  font-weight: 600;
+  color: #fff;
+  margin-bottom: 0.5rem;
+  padding: 0.25rem 0.5rem;
+  border-left: 3px solid;
+  background: rgba(255, 255, 255, 0.08);
+  border-radius: 0 4px 4px 0;
+}
+
 .graph-custom-node.selected {
   box-shadow: 0 0 0 3px rgba(100, 108, 255, 0.7), 0 0 16px rgba(100, 108, 255, 0.3);
 }

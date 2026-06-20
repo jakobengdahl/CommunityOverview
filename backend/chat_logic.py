@@ -343,6 +343,16 @@ TOOL USAGE GUIDELINES:
 - list_saved_views: For listing all available saved views in the database
 - get_schema: For getting the complete schema configuration
 - get_presentation: For getting UI presentation settings
+- mark_nodes: For applying visual color annotations to nodes currently in the visualization (session-only, does not change the database). Call with empty marks array to clear all marks.
+
+WORKFLOW FOR MARKING NODES:
+Use mark_nodes to annotate nodes in the current visualization with colors and labels:
+1. Choose a meaningful color (e.g. '#EF4444' red, '#F97316' orange, '#FBBF24' yellow, '#10B981' green)
+2. Provide a short label that describes the mark's meaning in context
+3. Marked nodes show a color badge and the labels appear in an on-canvas legend
+4. Marks are session-only — they never persist to the database
+5. Call mark_nodes with an empty array to remove all marks
+6. Example: to show analysis results, mark critical nodes red, medium-priority orange, reviewed green
 
 EFFICIENCY TIP: When extracting multiple entities from a document, ALWAYS use find_similar_nodes_batch()
 instead of calling find_similar_nodes() in a loop. This reduces API calls from N to 1.
@@ -739,6 +749,38 @@ class ChatProcessor:
                 }
             },
             {
+                "name": "mark_nodes",
+                "description": "Apply a visual color annotation to specific nodes currently in the visualization. Marks are session-only overlays — they do NOT modify the graph database. Use any CSS color string and provide an optional label that describes what the color means. Marks appear as a colored badge on the node and are listed in a legend. Call with an empty 'marks' array to clear all marks. Useful for: highlighting findings, indicating priority, showing analysis results, categorizing nodes visually, etc.",
+                "input_schema": {
+                    "type": "object",
+                    "properties": {
+                        "marks": {
+                            "type": "array",
+                            "description": "Nodes to mark. Pass an empty array to clear all marks.",
+                            "items": {
+                                "type": "object",
+                                "properties": {
+                                    "node_id": {
+                                        "type": "string",
+                                        "description": "ID of the node to mark"
+                                    },
+                                    "color": {
+                                        "type": "string",
+                                        "description": "CSS color (e.g. '#EF4444' red, '#F97316' orange, '#FBBF24' yellow, '#10B981' green, '#3B82F6' blue)"
+                                    },
+                                    "label": {
+                                        "type": "string",
+                                        "description": "Short label shown in the legend (e.g. 'High priority', 'Needs review', 'Confirmed')"
+                                    }
+                                },
+                                "required": ["node_id", "color"]
+                            }
+                        }
+                    },
+                    "required": ["marks"]
+                }
+            },
+            {
                 "name": "get_schema",
                 "description": "Get the complete schema configuration including all node types with their fields, colors, and descriptions, as well as all relationship types.",
                 "input_schema": {
@@ -756,7 +798,7 @@ class ChatProcessor:
             }
         ]
 
-    def process_message(self, messages: List[Dict], api_key: str = None, provider: str = None) -> Dict:
+    def process_message(self, messages: List[Dict], api_key: str = None, provider: str = None, extra_context: str = None) -> Dict:
         """
         Process a message history, call LLM, handle tools, return final response.
 
@@ -764,6 +806,8 @@ class ChatProcessor:
             messages: Conversation history
             api_key: Optional API key to use instead of default
             provider: Optional provider override ('claude' or 'openai')
+            extra_context: Optional extra system context prepended to the base
+                system prompt (e.g. expert agent persona + skills).
         """
         try:
             # Use provided provider or fall back to configured provider
@@ -783,17 +827,23 @@ class ChatProcessor:
             # Create provider with the appropriate key
             llm_provider = create_provider(key_to_use, provider_to_use)
 
+            # Build per-request system prompt (extra_context prepended so the
+            # expert persona / skills are the first thing the model sees)
+            active_system_prompt = (
+                f"{extra_context}\n\n{self.system_prompt}" if extra_context else self.system_prompt
+            )
+
             # First call to LLM
             response = llm_provider.create_completion(
                 messages=messages,
-                system_prompt=self.system_prompt,
+                system_prompt=active_system_prompt,
                 tools=self.tool_definitions,
                 max_tokens=4096
             )
 
             # Check if tool use
             if response.stop_reason == "tool_use":
-                return self._handle_tool_use(messages, response, llm_provider)
+                return self._handle_tool_use(messages, response, llm_provider, system_prompt=active_system_prompt)
 
             # Just text response
             # Extract text from content blocks
@@ -823,12 +873,13 @@ class ChatProcessor:
                 "toolResult": None
             }
 
-    def _handle_tool_use(self, messages: List[Dict], response, provider: LLMProvider, accumulated_nodes=None, accumulated_edges=None) -> Dict:
+    def _handle_tool_use(self, messages: List[Dict], response, provider: LLMProvider, accumulated_nodes=None, accumulated_edges=None, system_prompt: str = None) -> Dict:
         """Handle tool use with support for tool chaining and result aggregation"""
         if accumulated_nodes is None:
             accumulated_nodes = []
         if accumulated_edges is None:
             accumulated_edges = []
+        active_system_prompt = system_prompt if system_prompt is not None else self.system_prompt
 
         # Find ALL tool_use blocks (LLM can request multiple tools in parallel)
         tool_uses = [block for block in response.content if isinstance(block, dict) and block.get("type") == "tool_use"]
@@ -870,6 +921,13 @@ class ChatProcessor:
                     "action": "clear_visualization",
                     "success": True,
                     "message": "Visualization cleared"
+                }
+
+            # Special case for mark_nodes - signals frontend to apply color overlays
+            elif tool_name == "mark_nodes":
+                tool_result = {
+                    "action": "mark_nodes",
+                    "marks": tool_input.get("marks", [])
                 }
 
             elif tool_name in self.tools_map:
@@ -932,7 +990,7 @@ class ChatProcessor:
 
         final_response = provider.create_completion(
             messages=messages,
-            system_prompt=self.system_prompt,
+            system_prompt=active_system_prompt,
             tools=self.tool_definitions,
             max_tokens=4096
         )
@@ -940,7 +998,7 @@ class ChatProcessor:
         # Check if LLM wants to use another tool (tool chaining)
         if final_response.stop_reason == "tool_use":
             # LLM wants to use another tool - continue recursively with accumulated data
-            return self._handle_tool_use(messages, final_response, provider, accumulated_nodes, accumulated_edges)
+            return self._handle_tool_use(messages, final_response, provider, accumulated_nodes, accumulated_edges, system_prompt=active_system_prompt)
 
         # Extract text from response (handle multiple text blocks)
         final_text = ""

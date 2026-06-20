@@ -15,6 +15,7 @@ from typing import Dict, Any, Optional, List, Callable, TYPE_CHECKING
 from .config import AgentConfig, AgentsSettings
 from .worker import AgentWorker, ProcessingResult
 from .mcp_loader import MCPLoader
+from backend.skills.loader import SkillsConfig
 
 if TYPE_CHECKING:
     from backend.core import GraphStorage
@@ -39,22 +40,26 @@ class AgentRegistry:
         settings: AgentsSettings,
         graph_storage: "GraphStorage",
         graph_service: "GraphService",
+        skills_config: Optional[SkillsConfig] = None,
     ):
         """
         Initialize the agent registry.
 
         Args:
             settings: Global agent settings
-            graph_storage: GraphStorage for reading agent nodes
+            graph_storage: GraphStorage for reading agent and skill nodes
             graph_service: GraphService for agent tool calls
+            skills_config: Configuration for the skills loading system
         """
         self.settings = settings
         self._storage = graph_storage
         self._service = graph_service
+        self._skills_config = skills_config or SkillsConfig()
 
         # Active workers
         self._workers: Dict[str, AgentWorker] = {}
         self._lock = threading.Lock()
+        self._init_lock = threading.Lock()  # serialises _ensure_initialized()
 
         # MCP loader (shared across agents)
         self._mcp_loader: Optional[MCPLoader] = None
@@ -92,19 +97,25 @@ class AgentRegistry:
         if self._mcp_loader is not None:
             return True
 
-        self._mcp_loader = MCPLoader(self.settings.mcp_integrations)
+        # Double-checked locking: serialise concurrent callers (e.g. two rapid
+        # handle_agent_updated() calls) so MCPLoader is only connected once.
+        with self._init_lock:
+            if self._mcp_loader is not None:
+                return True
 
-        try:
-            tool_results = self._mcp_loader.connect_all()
-            total_tools = sum(len(tools) for tools in tool_results.values())
-            logger.info(
-                f"MCP loader initialized: {total_tools} tools "
-                f"from {len(tool_results)} integrations"
-            )
-        except Exception as e:
-            logger.error(f"Failed to initialize MCP loader: {e}")
-            self._mcp_loader = None
-            return False
+            self._mcp_loader = MCPLoader(self.settings.mcp_integrations)
+
+            try:
+                tool_results = self._mcp_loader.connect_all()
+                total_tools = sum(len(tools) for tools in tool_results.values())
+                logger.info(
+                    f"MCP loader initialized: {total_tools} tools "
+                    f"from {len(tool_results)} integrations"
+                )
+            except Exception as e:
+                logger.error(f"Failed to initialize MCP loader: {e}")
+                self._mcp_loader = None
+                return False
 
         return True
 
@@ -189,6 +200,8 @@ class AgentRegistry:
                 mcp_loader=self._mcp_loader,
                 graph_service=self._service,
                 on_result=self._on_result,
+                skills_config=self._skills_config,
+                graph_storage=self._storage,
             )
             worker.start()
             self._workers[config.agent_id] = worker
@@ -325,12 +338,17 @@ class AgentRegistry:
         try:
             config = AgentConfig.from_node(node)
 
+            # Determine what action to take (and apply in-lock updates) while holding
+            # the lock, then perform start/stop actions outside it — _start_worker and
+            # _stop_worker each acquire the lock themselves, so we must not hold it here.
+            should_start = False
+            should_stop = False
+
             with self._lock:
                 existing_worker = self._workers.get(node_id)
 
                 if config.enabled:
                     if existing_worker:
-                        # Update existing worker
                         existing_worker.reload_config(config)
 
                         # Update subscription mapping
@@ -348,37 +366,32 @@ class AgentRegistry:
 
                         logger.info(f"Reloaded agent: {config.name}")
                     else:
-                        # Start new worker - ensure runtime is initialized
-                        self._lock.release()
-                        try:
-                            if self._ensure_initialized():
-                                if not self.settings.enabled:
-                                    self.settings.enabled = True
-                                    logger.info(
-                                        "Agent system auto-enabled "
-                                        "(agent enabled dynamically)"
-                                    )
-                                self._start_worker(config)
-                                logger.info(
-                                    f"Started worker for enabled agent: "
-                                    f"{config.name}"
-                                )
-                            else:
-                                logger.error(
-                                    f"Cannot start agent {config.name}: "
-                                    f"MCP initialization failed"
-                                )
-                        finally:
-                            self._lock.acquire()
+                        should_start = True
                 else:
                     if existing_worker:
-                        # Stop disabled worker
-                        self._lock.release()
-                        try:
-                            self._stop_worker(node_id)
-                            logger.info(f"Stopped worker for disabled agent: {config.name}")
-                        finally:
-                            self._lock.acquire()
+                        should_stop = True
+
+            if should_start:
+                if self._ensure_initialized():
+                    if not self.settings.enabled:
+                        self.settings.enabled = True
+                        logger.info(
+                            "Agent system auto-enabled "
+                            "(agent enabled dynamically)"
+                        )
+                    self._start_worker(config)
+                    logger.info(
+                        f"Started worker for enabled agent: "
+                        f"{config.name}"
+                    )
+                else:
+                    logger.error(
+                        f"Cannot start agent {config.name}: "
+                        f"MCP initialization failed"
+                    )
+            elif should_stop:
+                self._stop_worker(node_id)
+                logger.info(f"Stopped worker for disabled agent: {config.name}")
 
         except Exception as e:
             logger.error(f"Failed to handle agent update {node_id}: {e}")
