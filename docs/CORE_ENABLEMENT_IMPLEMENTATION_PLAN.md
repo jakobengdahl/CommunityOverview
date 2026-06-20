@@ -1,10 +1,12 @@
 # Core Enablement Implementation Plan
 
-> **For Hermes:** Use Claude Code or another isolated coding agent to implement small slices from this plan, then perform independent review before merge.
+**Goal:** Define the first concrete implementation slices that make CommunityOverview more ready for embedded deployment and optional extensions, without introducing product-specific assumptions into the public core.
 
-**Goal:** Define the first concrete implementation slices that make CommunityOverview more ready for hosted operation and future SaaS-only extensions without leaking private roadmap details into the public core.
+**Architecture:** The core should expose generic, opt-in seams rather than hard-coded integration logic. The first slices should improve capability discovery and runtime-mode introspection so optional extension layers can integrate cleanly through public contracts.
 
-**Architecture:** The core should expose generic, opt-in seams rather than hard-coded hosted logic. The first slices should improve capability discovery and runtime-mode introspection so optional service layers can integrate cleanly through public contracts.
+**Related documents:**
+- [CORE_RUNTIME_AND_EXTENSION_ENABLEMENT.md](./CORE_RUNTIME_AND_EXTENSION_ENABLEMENT.md) — broader runtime and extension enablement context
+- [PLUGIN_RUNTIME_CORE_ENABLEMENT.md](./PLUGIN_RUNTIME_CORE_ENABLEMENT.md) — detailed plugin runtime requirements (manifest parsing, scope enforcement, API versioning, hook registry, migration runner, testability, failure behavior)
 
 **Tech Stack:** Python, FastAPI, Pydantic, existing `config_loader`, `GraphService`, REST router, MCP tool registration, pytest.
 
@@ -15,12 +17,12 @@
 ### Priority 1: Capability manifest and discovery
 
 **Why this comes first**
-The core needs a generic way to describe optional capabilities without forcing them into the default execution path. This becomes the foundation for future hosted-only or SaaS-only integrations.
+The core needs a generic way to describe optional capabilities without forcing them into the default execution path. This becomes the foundation for future external or optional integrations.
 
 **Target outcome**
 - the schema config can declare optional capabilities in a generic format
 - the backend exposes the resulting capability manifest through stable APIs
-- the frontend or external service layers can discover capability availability without relying on private assumptions
+- the frontend or external systems can discover capability availability without relying on private assumptions
 
 **Scope**
 - add a generic capability model to configuration
@@ -42,19 +44,19 @@ The core needs a generic way to describe optional capabilities without forcing t
 - optional by default
 - safe no-op defaults when no capabilities are configured
 - generic names and descriptions only
-- no premium-specific identifiers required in public defaults
+- no distribution-specific identifiers required in public defaults
 
 ---
 
 ### Priority 2: Runtime mode metadata and introspection
 
 **Why this comes second**
-Hosted and standalone deployments need a clean, public way to report how the application is running. This should be explicit and machine-readable instead of inferred from ad hoc environment assumptions.
+Different deployments need a clean, public way to report how the application is running. This should be explicit and machine-readable instead of inferred from ad hoc environment assumptions.
 
 **Target outcome**
-- the core can report a generic runtime mode such as `standalone` or `hosted`
+- the core can report a generic runtime mode such as `standalone` or `extended`
 - external automation can inspect the active runtime mode and enabled extension identifiers
-- hosted integrations can use this contract without the core depending on a proprietary control plane
+- embedding systems can use this contract without the core depending on a proprietary control plane
 
 **Scope**
 - add runtime-mode metadata with environment-safe defaults
@@ -79,20 +81,20 @@ Hosted and standalone deployments need a clean, public way to report how the app
 
 ---
 
-### Priority 3: Tenant-aware configuration seams
+### Priority 3: Multi-context configuration seams
 
 **Why this matters**
-Hosted operation will need cleaner boundaries between shared app config and tenant-specific configuration, but this should be introduced incrementally.
+Embedded or extended deployments may need cleaner boundaries between shared app config and context-specific configuration, but this should be introduced incrementally.
 
 **Target outcome**
-- clearer rules for tenant-scoped versus shared config
-- fewer implicit single-tenant assumptions
+- clearer rules for context-scoped versus shared config
+- fewer implicit single-deployment assumptions
 - easier external provisioning and validation
 
 **Suggested first slice**
 - document config layering rules
-- identify which existing config fields are tenant-specific
-- add validation seams instead of full tenant orchestration
+- identify which existing config fields are context-specific
+- add validation seams instead of full context orchestration
 
 **Potential files**
 - `backend/config_loader.py`
@@ -104,7 +106,7 @@ Hosted operation will need cleaner boundaries between shared app config and tena
 ### Priority 4: Identity and audit seams
 
 **Why this matters**
-Hosted service layers will eventually need stronger actor attribution and access boundaries. The public core should prepare for this generically.
+Embedding systems may eventually need stronger actor attribution and access boundaries. The public core should prepare for this generically.
 
 **Target outcome**
 - request identity can be carried through write operations
@@ -120,7 +122,7 @@ Hosted service layers will eventually need stronger actor attribution and access
 ### Priority 5: Operability hooks
 
 **Why this matters**
-Hosted operation depends on reliable health, restore boundaries, and machine-readable diagnostics.
+Reliable health signals, restore boundaries, and machine-readable diagnostics matter across all deployment types.
 
 **Target outcome**
 - clearer readiness versus liveness behavior
@@ -137,9 +139,21 @@ Hosted operation depends on reliable health, restore boundaries, and machine-rea
 
 1. implement capability manifest and discovery
 2. implement runtime mode metadata and introspection
-3. document and harden tenant-aware config seams
+3. document and harden multi-context config seams
 4. introduce identity and audit seams
 5. improve operability hooks
+
+---
+
+## Public boundary
+
+This implementation plan covers only generic core infrastructure. It does not include:
+- distribution strategy or packaging policy
+- business-specific review or approval policy
+- revenue or business-system integration
+- implementation details of any external system that embeds or extends the core
+
+Those concerns belong outside the public core repository. The slices here create the seams; external layers may build on those seams, but their logic must not flow back into the public core.
 
 ---
 
@@ -148,6 +162,7 @@ Hosted operation depends on reliable health, restore boundaries, and machine-rea
 This plan is succeeding when:
 - optional capabilities can be discovered through public, generic contracts
 - runtime mode is explicit instead of implicit
-- hosted integrations can attach through stable APIs rather than patches
+- extension integrations can attach through stable APIs rather than patches
 - the application still behaves cleanly with no extra config in standalone mode
-- public artifacts remain free of private SaaS roadmap detail
+- public artifacts remain free of product-specific roadmap detail
+- the plugin runtime requirements in [PLUGIN_RUNTIME_CORE_ENABLEMENT.md](./PLUGIN_RUNTIME_CORE_ENABLEMENT.md) can be implemented incrementally on top of the foundation built here

@@ -1,13 +1,15 @@
-# Core Enablement Plan for Hosted and SaaS Integration
+# Core Runtime and Extension Enablement
 
 ## Purpose
 
 This document defines the **public core-side enablement plan** for running CommunityOverview as:
 - a standalone open source application
-- a hosted service operated by a service team
-- a base platform that can later accept optional SaaS-only extensions without forking the core
+- a platform embedded within or extended by other systems, including commercial ones
+- a base that can accept optional extensions without forking the core
 
-This document deliberately focuses on **general technical enablement**. It does **not** define private premium features, commercial packaging, or hosted-service-specific business logic.
+This document focuses on **general technical enablement**. It does **not** define distribution strategy, packaging policy, or product-specific business logic. Those decisions belong outside the public core repository.
+
+For the more detailed plugin-specific runtime work (manifest parsing, scope enforcement, API versioning, hook registry, migration runner, testability), see [PLUGIN_RUNTIME_CORE_ENABLEMENT.md](./PLUGIN_RUNTIME_CORE_ENABLEMENT.md).
 
 ---
 
@@ -16,28 +18,28 @@ This document deliberately focuses on **general technical enablement**. It does 
 The core should evolve so that it can:
 
 1. run cleanly in standalone mode with minimal required infrastructure
-2. support tenant-aware hosted operation through explicit configuration and lifecycle seams
-3. expose stable extension points for optional service-layer or plugin-based capabilities
-4. keep the open source core useful even when no hosted or premium layer is present
+2. support multi-deployment operation through explicit configuration and lifecycle seams
+3. expose stable extension points for optional or external capabilities
+4. remain useful even when no external or embedding layer is present
 
 ---
 
 ## Design principles
 
 ### 1. Standalone-first
-The default application must remain runnable without private control planes, proprietary dependencies, or SaaS-only services.
+The default application must remain runnable without external control planes, proprietary dependencies, or distribution-specific services.
 
 ### 2. Explicit extension points
-If hosted or future SaaS capabilities need to integrate with the core, they should do so through documented hooks, interfaces, events, APIs, or configuration contracts.
+If embedding systems or future extensions need to integrate with the core, they should do so through documented hooks, interfaces, events, APIs, or configuration contracts.
 
-### 3. No private roadmap leakage
-The core may expose generic enablement for hosted operation and plugins, but it must not contain private feature planning or premium-only product assumptions.
+### 3. No product-roadmap leakage
+The core may expose generic enablement for embedded operation and plugins, but it must not contain product-specific feature planning or distribution-specific assumptions.
 
 ### 4. Safe defaults
 New extension mechanisms must default to disabled or no-op behavior unless explicitly configured.
 
 ### 5. Replaceable integrations
-Hosted or future SaaS layers should be attachable without making the core permanently dependent on a single control plane or vendor-specific service.
+External or embedding layers should be attachable without making the core permanently dependent on a single control plane or vendor-specific service.
 
 ---
 
@@ -48,11 +50,11 @@ The core should support multiple runtime modes through configuration rather than
 
 Target outcomes:
 - a clean standalone mode
-- a hosted-service mode with additional operational configuration
+- an embedded or extended deployment mode with additional operational configuration
 - the ability to enable optional extensions per deployment profile
 
 Likely core changes:
-- clearer separation between runtime config, tenant config, and environment config
+- clearer separation between runtime config, context config, and environment config
 - explicit startup configuration for enabled capabilities
 - environment-safe defaults when optional services are absent
 
@@ -74,7 +76,7 @@ The core should expose a minimal, documented way to attach additional behavior.
 
 Target outcomes:
 - extensions can add behavior without patching core internals
-- future SaaS-only features can remain external to the core repository
+- future optional features (whether internal, community, or provided by an embedding system) can remain external to the core repository
 - core behavior remains testable with extensions disabled
 
 Likely core changes:
@@ -83,26 +85,28 @@ Likely core changes:
 - optional frontend capability exposure through presentation or config payloads
 - documented contracts for extension loading and failure handling
 
-### D. Tenant-aware configuration boundaries
-The core should be able to operate with per-tenant settings in hosted scenarios without assuming a specific SaaS architecture.
+The full plugin-runtime elaboration of this section — covering manifest parsing, scope enforcement, API versioning, namespace hooks, migration hooks, runtime introspection, failure behavior, and testability — is specified in [PLUGIN_RUNTIME_CORE_ENABLEMENT.md](./PLUGIN_RUNTIME_CORE_ENABLEMENT.md). Distribution and business policy are explicitly out of scope for both documents.
+
+### D. Multi-context configuration boundaries
+The core should be able to operate with per-context settings in multi-deployment scenarios without assuming a specific architecture.
 
 Target outcomes:
-- clear separation between shared application settings and tenant-specific settings
-- safer loading of tenant-specific graph, schema, prompt, and auth-related configuration
-- easier automation of tenant provisioning outside the core
+- clear separation between shared application settings and context-specific settings
+- safer loading of context-specific graph, schema, prompt, and auth-related configuration
+- easier automation of context provisioning outside the core
 
 Likely core changes:
 - stronger config layering rules
-- explicit tenant context propagation where needed
-- validation for tenant-scoped configuration inputs
+- explicit context propagation where needed
+- validation for context-scoped configuration inputs
 
 ### E. Authentication and authorization seams
-The core should make it easier to integrate stronger hosted access models later.
+The core should make it easier to integrate stronger access models for embedding systems.
 
 Target outcomes:
 - pluggable identity context for requests
 - clean boundaries between application roles and infrastructure access
-- ability to layer in stronger operator or tenant-admin models later
+- ability to layer in stronger operator or admin models later
 
 Likely core changes:
 - request identity abstraction
@@ -110,7 +114,7 @@ Likely core changes:
 - audit-friendly handling of actor identity in write operations
 
 ### F. Operational hooks for backup, restore, and data lifecycle
-The core should provide generic mechanisms that make hosted backup and restore reliable.
+The core should provide generic mechanisms that make backup and restore reliable across deployment types.
 
 Target outcomes:
 - predictable data export and import boundaries
@@ -123,7 +127,7 @@ Likely core changes:
 - stable health and integrity checks around persisted state
 
 ### G. Observability and operational introspection
-The core should be easier to operate in a hosted environment without changing its product shape.
+The core should be easier to operate in any deployment environment without changing its product shape.
 
 Target outcomes:
 - health checks that reflect real readiness
@@ -136,13 +140,13 @@ Likely core changes:
 - explicit readiness versus liveness signals
 - instrumentation hooks for extension-managed behavior
 
-### H. API and event surfaces for service-layer integration
-The core should expose generic mechanisms that a hosted service layer can build on.
+### H. API and event surfaces for external integration
+The core should expose generic mechanisms that embedding systems or automation layers can build on.
 
 Target outcomes:
-- stable APIs for tenant setup, status inspection, and lifecycle automation where appropriate
+- stable APIs for setup, status inspection, and lifecycle automation where appropriate
 - event hooks for important graph or config mutations
-- minimal coupling between the core runtime and external service orchestration
+- minimal coupling between the core runtime and external orchestration
 
 Likely core changes:
 - clearer admin-safe API boundaries
@@ -155,8 +159,8 @@ Likely core changes:
 
 ### Workstream 1: Runtime modes and configuration layering
 Focus:
-- standalone versus hosted-compatible runtime behavior
-- separation of shared, environment, and tenant-specific config
+- standalone versus extended-deployment runtime behavior
+- separation of shared, environment, and context-specific config
 
 ### Workstream 2: Capability registry and extension contracts
 Focus:
@@ -164,11 +168,11 @@ Focus:
 - extension discovery and safe defaults
 - frontend and backend capability exposure
 
-### Workstream 3: Tenant-aware seams
+### Workstream 3: Multi-context configuration seams
 Focus:
-- tenant context propagation
-- tenant-safe config validation
-- tenant-specific data loading boundaries
+- context propagation
+- context-safe config validation
+- context-specific data loading boundaries
 
 ### Workstream 4: Auth, identity, and audit seams
 Focus:
@@ -187,13 +191,12 @@ Focus:
 ## Explicitly not part of this public plan
 
 This document does not define:
-- private premium features
-- commercial packaging or edition strategy
-- hosted-service business workflows outside generic technical contracts
-- internal service-team operating procedures
+- distribution strategy or packaging policy
+- business workflows specific to any external system building on the core
+- internal operating procedures for any downstream distribution team
 - proprietary control-plane implementation details
 
-Those belong outside the public core repository.
+The public core may expose generic seams that external or embedding systems can build on, but it must not encode downstream business assumptions in those seams.
 
 ---
 
@@ -202,9 +205,9 @@ Those belong outside the public core repository.
 1. document runtime modes and configuration boundaries
 2. introduce a capability registry with no-op defaults
 3. define extension loading contracts and failure behavior
-4. add tenant-aware configuration seams where core behavior currently assumes a single deployment context
+4. add multi-context configuration seams where core behavior currently assumes a single deployment context
 5. improve identity, audit, and mutation attribution surfaces
-6. harden observability, health, and persistence boundaries for hosted operation
+6. harden observability, health, and persistence boundaries for embedded operation
 
 ---
 
@@ -212,7 +215,7 @@ Those belong outside the public core repository.
 
 The core enablement work is succeeding when:
 - the application still runs cleanly as a standalone open source deployment
-- hosted operation can be layered on without forking the core
+- embedded or extended operation can be layered on without forking the core
 - optional capabilities can be enabled or disabled through stable contracts
-- future SaaS-only features can integrate through documented seams instead of invasive patches
+- future optional extensions can integrate through documented seams instead of invasive patches
 - public documentation stays generic and technically grounded
