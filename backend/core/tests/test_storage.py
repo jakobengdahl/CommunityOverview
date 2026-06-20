@@ -344,6 +344,32 @@ class TestSearchRanking:
         results = temp_storage.search_nodes("esam")
         assert results[0].id == "exact"
 
+    def test_subtype_match_ranks_above_description_only(self, temp_storage):
+        """A subtype hit (400 pts) should rank above a description-only hit (200 pts)."""
+        nodes = [
+            Node(id="subtype", type=NodeType.INITIATIVE, name="Unrelated name",
+                 description="unrelated", subtypes=["esam working group"]),
+            Node(id="desc", type=NodeType.ACTOR, name="Another unrelated name",
+                 description="part of the esam network"),
+        ]
+        temp_storage.add_nodes(nodes, [])
+        results = temp_storage.search_nodes("esam")
+        ids = [n.id for n in results]
+        assert ids.index("subtype") < ids.index("desc")
+
+    def test_tag_exact_match_ranks_above_tag_substring(self, temp_storage):
+        """An exact tag match (500 pts) should rank above a partial tag match (450 pts)."""
+        nodes = [
+            Node(id="exact-tag", type=NodeType.THEME, name="Unrelated name",
+                 description="unrelated", tags=["esam"]),
+            Node(id="partial-tag", type=NodeType.THEME, name="Another unrelated name",
+                 description="unrelated", tags=["nordic-esam-initiative"]),
+        ]
+        temp_storage.add_nodes(nodes, [])
+        results = temp_storage.search_nodes("esam")
+        ids = [n.id for n in results]
+        assert ids.index("exact-tag") < ids.index("partial-tag")
+
 
 class TestGraphStorageRelated:
     """Tests for get_related_nodes"""
