@@ -186,6 +186,48 @@ class FederationManager:
             return min(global_depth, graph_cfg.max_depth_override)
         return global_depth
 
+    @staticmethod
+    def _score_node_match(node: Node, query_lower: str) -> int:
+        """Score how well a federated node matches a query. Higher = better match."""
+        score = 0
+        name_lower = (node.name or "").lower()
+
+        # Name matching (highest priority)
+        if name_lower == query_lower:
+            score += 100
+        elif name_lower.startswith(query_lower):
+            score += 90
+        elif query_lower in name_lower:
+            score += 80
+
+        # Type matching (type name only; federation cache has no localized labels)
+        type_name_lower = str(node.type).lower()
+        if type_name_lower == query_lower:
+            score += 70
+        elif type_name_lower.startswith(query_lower):
+            score += 65
+        elif query_lower in type_name_lower:
+            score += 60
+
+        # Tag matching
+        if node.tags:
+            tags_lower = [t.lower() for t in node.tags]
+            if query_lower in tags_lower:
+                score += 50
+            elif any(query_lower in t for t in tags_lower):
+                score += 45
+
+        # Subtype matching
+        if node.subtypes:
+            if any(query_lower in s.lower() for s in node.subtypes):
+                score += 40
+
+        # Description / summary matching (lowest priority)
+        if query_lower in (node.description or "").lower() or query_lower in (node.summary or "").lower():
+            score += 20
+
+        return score
+
     def search_nodes(
         self,
         query: str,
@@ -228,11 +270,15 @@ class FederationManager:
 
                 matched_nodes.append(node)
                 matched_node_ids.add(node.id)
-                if len(matched_nodes) >= limit:
-                    break
 
-            if len(matched_nodes) >= limit:
-                break
+        if not match_all:
+            matched_nodes.sort(
+                key=lambda n: self._score_node_match(n, query_lower),
+                reverse=True,
+            )
+
+        matched_nodes = matched_nodes[:limit]
+        matched_node_ids = {n.id for n in matched_nodes}
 
         if matched_node_ids:
             for cache in caches:
@@ -241,7 +287,7 @@ class FederationManager:
                         matched_edges.append(edge)
 
         return {
-            "nodes": matched_nodes[:limit],
+            "nodes": matched_nodes,
             "edges": matched_edges,
         }
 

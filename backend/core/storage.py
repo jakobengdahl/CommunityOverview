@@ -489,6 +489,49 @@ class GraphStorage:
         """
         self.load()
 
+    def _score_node_match(self, node: "Node", query_lower: str) -> int:
+        """Score how well a node matches a query. Higher = better match."""
+        score = 0
+        name_lower = (node.name or "").lower()
+
+        # Name matching (highest priority)
+        if name_lower == query_lower:
+            score += 100
+        elif name_lower.startswith(query_lower):
+            score += 90
+        elif query_lower in name_lower:
+            score += 80
+
+        # Type matching (including localized labels)
+        type_key = str(node.type)
+        type_name_lower = type_key.lower()
+        type_text = self._type_searchable_text.get(type_key, type_name_lower)
+        if type_name_lower == query_lower:
+            score += 70
+        elif type_name_lower.startswith(query_lower):
+            score += 65
+        elif query_lower in type_text:
+            score += 60
+
+        # Tag matching
+        if node.tags:
+            tags_lower = [t.lower() for t in node.tags]
+            if query_lower in tags_lower:
+                score += 50
+            elif any(query_lower in t for t in tags_lower):
+                score += 45
+
+        # Subtype matching
+        if node.subtypes:
+            if any(query_lower in s.lower() for s in node.subtypes):
+                score += 40
+
+        # Description / summary matching (lowest priority)
+        if query_lower in (node.description or "").lower() or query_lower in (node.summary or "").lower():
+            score += 20
+
+        return score
+
     def search_nodes(
         self,
         query: str,
@@ -496,8 +539,10 @@ class GraphStorage:
         limit: int = 50
     ) -> List[Node]:
         """
-        Search nodes based on text query
-        Matches against name, description, summary, and tags.
+        Search nodes based on text query.
+        Matches against name, description, summary, tags, subtypes, and node type (including
+        localized labels). Results are ranked so that name matches rank above type matches,
+        which rank above description/tag matches.
         Empty query or '*' returns all nodes (subject to filtering and limit).
         """
         query_lower = query.lower().strip()
@@ -511,7 +556,6 @@ class GraphStorage:
             if node_types and node.type not in node_types:
                 continue
 
-            # Text matching including tags (if not matching all)
             if not match_all:
                 searchable_text = self._searchable_text_cache.get(node.id)
                 if searchable_text is None:
@@ -524,10 +568,10 @@ class GraphStorage:
 
             results.append(node)
 
-            if len(results) >= limit:
-                break
+        if not match_all:
+            results.sort(key=lambda n: self._score_node_match(n, query_lower), reverse=True)
 
-        return results
+        return results[:limit]
 
     def get_node(self, node_id: str) -> Optional[Node]:
         """Get a specific node"""
