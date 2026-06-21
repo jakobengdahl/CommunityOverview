@@ -30,6 +30,27 @@
     },
     "prompt_prefix": "You are a test assistant.",
     "prompt_suffix": "Always be helpful in tests.",
-    "default_language": "en"
+    "default_language": "en",
+    "language_policy": {
+      "mode": "required",
+      "primary_language": "en",
+      "allowed_languages": ["en"],
+      "description_sv": "Grafens innehåll ska skrivas på engelska.",
+      "description_en": "Graph content must be written in English."
+    },
+    "capabilities": [
+      {
+        "id": "graph_export",
+        "name": "Graph export",
+        "description": "Allows clients to export graph data for offline analysis.",
+        "enabled": true
+      },
+      {
+        "id": "assistant_guidance",
+        "name": "Assistant guidance",
+        "description": "Provides configuration for guided assistant interactions.",
+        "enabled": false
+      }
+    ]
   }
 }

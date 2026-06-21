@@ -1,7 +1,8 @@
-import { useState, useCallback, useEffect } from 'react';
+import { useState, useCallback, useEffect, useRef } from 'react';
 import { GraphCanvas } from '@community-graph/ui-graph-canvas';
 import '@community-graph/ui-graph-canvas/styles';
 import useGraphStore from './store/graphStore';
+import { useI18n } from './i18n';
 import FloatingHeader from './components/FloatingHeader';
 import FloatingToolbar from './components/FloatingToolbar';
 import FloatingSearch from './components/FloatingSearch';
@@ -11,7 +12,11 @@ import ConfirmDialog from './components/ConfirmDialog';
 import InputDialog from './components/InputDialog';
 import ChatPanel from './components/ChatPanel';
 import CreateSubscriptionDialog from './components/CreateSubscriptionDialog';
+import CreateSkillDialog from './components/CreateSkillDialog';
 import CreateAgentDialog from './components/CreateAgentDialog';
+import EditEdgeDialog from './components/EditEdgeDialog';
+import NodeDetailDialog from './components/NodeDetailDialog';
+import GuideOverlay from './components/GuideOverlay';
 import * as api from './services/api';
 import './App.css';
 
@@ -19,6 +24,7 @@ function App() {
   const {
     nodes,
     edges,
+    schema,
     highlightedNodeIds,
     hiddenNodeIds,
     hiddenEdgeIds,
@@ -30,18 +36,34 @@ function App() {
     setHiddenNodeIds,
     stats,
     setStats,
+    llmAvailable,
+    setLlmAvailable,
     editingNode,
     setEditingNode,
     closeEditingNode,
     removeNode,
+    removeEdge,
     presentation,
     setConfig,
     focusNodeId,
     clearFocusNode,
     pendingGroups,
     setPendingGroups,
+    setSelectedGraphNodes,
+    setDetailNode,
+    detailNode,
+    closeDetailNode,
+    clearVisualization,
+    federationDepth,
+    setFederationDepth,
+    showMinimap,
+    nodeMarks,
+    startGuide,
   } = useGraphStore();
 
+  const { t, setLanguage, language } = useI18n();
+
+  const urlGuideStartedRef = useRef(false);
   const [notification, setNotification] = useState(null);
   const [deleteDialog, setDeleteDialog] = useState(null);
   const [saveViewDialog, setSaveViewDialog] = useState(null);
@@ -52,42 +74,142 @@ function App() {
   const [createGroupSignal, setCreateGroupSignal] = useState(0);
   const [saveViewSignal, setSaveViewSignal] = useState(0);
   const [isSavingView, setIsSavingView] = useState(false);
+  const [editingEdge, setEditingEdge] = useState(null);
+  const [skillDialogType, setSkillDialogType] = useState(null);
+  const [editingSkillData, setEditingSkillData] = useState(null);
 
-  // Load schema, presentation, and stats on startup
+  const federationDepthLevels = (stats?.federation?.selectable_depth_levels || [1]).filter(v => Number.isInteger(v) && v >= 1);
+  const maxFederationDepth = Math.max(1, ...federationDepthLevels, stats?.federation?.max_selectable_depth || 1);
+
+  useEffect(() => {
+    if (federationDepth > maxFederationDepth) {
+      setFederationDepth(maxFederationDepth);
+    }
+  }, [federationDepth, maxFederationDepth, setFederationDepth]);
+
+  // Load schema, presentation, stats and UI capabilities on startup (runs once)
   useEffect(() => {
     const loadConfig = async () => {
       try {
-        const [schemaData, presentationData, statsData] = await Promise.all([
+        const [schemaData, presentationData, statsData, capabilitiesData] = await Promise.all([
           api.getSchema(),
           api.getPresentation(),
           api.getGraphStats(),
+          api.getUiCapabilities().catch(() => ({ llm_available: false })),
         ]);
-        setConfig(schemaData, presentationData);
+        // Apply backend default language if no user override
+        if (presentationData?.default_language) {
+          const urlLang = new URLSearchParams(window.location.search).get('lang');
+          const storedLang = localStorage.getItem('app_language');
+          if (!urlLang && !storedLang) {
+            setLanguage(presentationData.default_language);
+          }
+        }
+        setConfig(schemaData, presentationData, t, language);
         setStats(statsData);
+        setLlmAvailable(capabilitiesData.llm_available ?? false);
       } catch (error) {
         console.error('Error loading configuration:', error);
         api.getGraphStats().then(setStats).catch(console.error);
+        setLlmAvailable(false);
       }
     };
     loadConfig();
-  }, [setConfig, setStats]);
+  }, [setConfig, setStats, setLlmAvailable, t, setLanguage, language]); // eslint-disable-line react-hooks/exhaustive-deps
+
+  // Trigger guide from URL param ?guide=<id> — fires once when presentation first becomes available
+  useEffect(() => {
+    if (!presentation?.guides?.length || urlGuideStartedRef.current) return;
+    const urlGuideId = new URLSearchParams(window.location.search).get('guide');
+    if (!urlGuideId) return;
+    const guide = presentation.guides.find(g => g.id === urlGuideId);
+    if (guide) {
+      urlGuideStartedRef.current = true;
+      startGuide(guide);
+    }
+  }, [presentation, startGuide]);
 
   const showNotification = useCallback((type, message) => {
     setNotification({ type, message });
     setTimeout(() => setNotification(null), 3000);
   }, []);
 
+  // Callback: Selection changed in GraphCanvas
+  const handleSelectionChange = useCallback((selectedNodes) => {
+    // Store full node data for the selected nodes
+    const selectedWithData = selectedNodes
+      .filter(n => n.type !== 'group')
+      .map(n => {
+        // n.data contains the full node info from the backend
+        return n.data || n;
+      });
+    setSelectedGraphNodes(selectedWithData);
+  }, [setSelectedGraphNodes]);
+
+  // Callback: Double-click on node
+  const handleNodeDoubleClick = useCallback(async (nodeId, nodeData) => {
+    // If it's a SavedView, load it directly
+    if (nodeData.type === 'SavedView' || nodeData.nodeType === 'SavedView') {
+      try {
+        const nodeIds = nodeData.metadata?.node_ids || [];
+        const positions = nodeData.metadata?.positions || {};
+        const savedEdges = nodeData.metadata?.edges || [];
+        const savedGroups = nodeData.metadata?.groups || [];
+        const savedParentIds = nodeData.metadata?.parentIds || {};
+        if (nodeIds.length > 0) {
+          clearVisualization();
+          const details = await Promise.all(
+            nodeIds.map(id => api.getNodeDetails(id).catch(() => null))
+          );
+          const loadedNodes = details.filter(d => d?.success).map(d => {
+            const n = d.node;
+            if (positions[n.id]) {
+              return { ...n, _savedPosition: positions[n.id] };
+            }
+            return n;
+          });
+          if (loadedNodes.length > 0) {
+            let edgesToLoad = savedEdges.length > 0 ? savedEdges : [];
+            if (edgesToLoad.length === 0) {
+              const loadedIds = new Set(loadedNodes.map(n => n.id));
+              const savedEdgeIds = new Set(nodeData.metadata?.edge_ids || []);
+              for (const d of details) {
+                if (d?.edges) {
+                  const relevant = d.edges.filter(
+                    e => loadedIds.has(e.source) && loadedIds.has(e.target) &&
+                      (savedEdgeIds.size === 0 || savedEdgeIds.has(e.id))
+                  );
+                  edgesToLoad.push(...relevant);
+                }
+              }
+            }
+            const edgeMap = new Map(edgesToLoad.map(e => [e.id, e]));
+            addNodesToVisualization(loadedNodes, Array.from(edgeMap.values()));
+            if (savedGroups.length > 0) {
+              setPendingGroups({ groups: savedGroups, parentIds: savedParentIds });
+            }
+          }
+        }
+        showNotification('info', `Loaded saved view: ${nodeData.name || nodeData.label}`);
+      } catch (err) {
+        console.error('Error loading saved view:', err);
+        showNotification('error', 'Could not load saved view');
+      }
+      return;
+    }
+
+    // For other nodes, show detail dialog
+    setDetailNode({ id: nodeId, data: nodeData });
+  }, [clearVisualization, addNodesToVisualization, setPendingGroups, setDetailNode, showNotification]);
+
   // Callback: Expand node to show related nodes
   const handleExpand = useCallback(async (nodeId, nodeData) => {
     try {
       const result = await api.getRelatedNodes(nodeId, { depth: 1 });
       if (result.nodes && result.nodes.length > 0) {
-        const filteredNodes = result.nodes.filter(n =>
-          n.type !== 'Community' && n.data?.type !== 'Community'
-        );
         const existingIds = new Set(nodes.map(n => n.id));
-        const newCount = filteredNodes.filter(n => !existingIds.has(n.id)).length;
-        addNodesToVisualization(filteredNodes, result.edges || []);
+        const newCount = result.nodes.filter(n => !existingIds.has(n.id)).length;
+        addNodesToVisualization(result.nodes, result.edges || []);
         if (newCount > 0) {
           showNotification('success', `Added ${newCount} new node${newCount !== 1 ? 's' : ''}`);
         } else {
@@ -122,10 +244,13 @@ function App() {
         console.error('Error preparing agent editor:', error);
         showNotification('error', 'Could not load agent details');
       }
+    } else if (schema?.node_types?.[nodeData.type]?.ui_form === 'skill') {
+      setEditingSkillData(nodeData);
+      setSkillDialogType(nodeData.type);
     } else {
       setEditingNode({ id: nodeId, data: nodeData });
     }
-  }, [setEditingNode, showNotification]);
+  }, [schema, setEditingNode, setEditingSkillData, setSkillDialogType, showNotification]);
 
   // Callback: Hide node
   const handleHide = useCallback((nodeId) => {
@@ -145,25 +270,65 @@ function App() {
     showNotification('info', 'Edge hidden');
   }, [toggleEdgeVisibility, showNotification]);
 
-  // Callback: Delete edge
+  // Callback: Delete edge (from backend and visualization)
   const handleDeleteEdge = useCallback(async (edgeId) => {
     try {
-      // Remove from visualization (edges don't have a separate delete API typically)
-      const newEdges = edges.filter(e => e.id !== edgeId);
-      updateVisualization(nodes, newEdges);
-      showNotification('success', 'Edge removed');
+      const result = await api.deleteEdge(edgeId);
+      if (!result?.success) {
+        throw new Error('Could not delete edge');
+      }
+      removeEdge(edgeId);
+      showNotification('success', 'Edge deleted');
     } catch (error) {
       console.error('Error deleting edge:', error);
       showNotification('error', 'Could not delete edge');
     }
-  }, [nodes, edges, updateVisualization, showNotification]);
+  }, [removeEdge, showNotification]);
+
+  // Callback: Edit edge - opens EditEdgeDialog
+  const handleEditEdge = useCallback((edgeId, edgeData) => {
+    const edge = edges.find(e => e.id === edgeId);
+    if (edge) {
+      setEditingEdge({ ...edge, ...edgeData });
+    }
+  }, [edges]);
+
+  // Callback: Save edge updates from EditEdgeDialog
+  const handleEdgeUpdate = useCallback(async (updates) => {
+    if (!editingEdge) return;
+    try {
+      await api.updateEdge(editingEdge.id, updates);
+      const newEdges = edges.map(e =>
+        e.id === editingEdge.id ? { ...e, ...updates } : e
+      );
+      updateVisualization(nodes, newEdges);
+      setEditingEdge(null);
+      showNotification('success', 'Edge updated');
+    } catch (error) {
+      console.error('Error updating edge:', error);
+      showNotification('error', 'Could not update edge');
+    }
+  }, [editingEdge, nodes, edges, updateVisualization, showNotification]);
+
+  // Callback: Connect nodes (from drag-connect in canvas)
+  const handleConnect = useCallback(async (params) => {
+    try {
+      const result = await api.addEdge(params.source, params.target);
+      if (result.success && result.edge) {
+        addNodesToVisualization([], [result.edge]);
+      }
+    } catch (error) {
+      console.error('Error creating edge:', error);
+      showNotification('error', 'Could not create connection');
+    }
+  }, [addNodesToVisualization, showNotification]);
 
   // Callback: Show only selected nodes (hide all others)
   const handleShowOnly = useCallback((nodeIds) => {
     const keepSet = new Set(nodeIds);
     const idsToHide = nodes.filter(n => !keepSet.has(n.id)).map(n => n.id);
     setHiddenNodeIds(idsToHide);
-    showNotification('info', `Visar ${nodeIds.length} noder`);
+    showNotification('info', t('notifications.showing_nodes', { count: nodeIds.length }));
   }, [nodes, setHiddenNodeIds, showNotification]);
 
   // Callback: Delete node - shows dialog
@@ -241,6 +406,11 @@ function App() {
         metadata: {
           node_ids: saveViewDialog.viewData.nodes.map(n => n.id),
           positions: Object.fromEntries(saveViewDialog.viewData.nodes.map(n => [n.id, n.position])),
+          parentIds: Object.fromEntries(
+            saveViewDialog.viewData.nodes
+              .filter(n => n.parentId)
+              .map(n => [n.id, n.parentId])
+          ),
           edge_ids: (saveViewDialog.viewData.edges || []).map(e => e.id),
           edges: saveViewDialog.viewData.edges || [],
           groups: saveViewDialog.viewData.groups,
@@ -283,10 +453,10 @@ function App() {
         console.log('Subscription added to visualization:', nodeId);
       }
 
-      showNotification('success', `Prenumeration "${subscriptionNode.name}" skapad`);
+      showNotification('success', t('notifications.subscription_created', { name: subscriptionNode.name }));
     } catch (error) {
       console.error('Error creating subscription:', error);
-      showNotification('error', 'Kunde inte skapa prenumeration');
+      showNotification('error', t('notifications.subscription_error'));
     }
   }, [addNodesToVisualization, showNotification]);
 
@@ -341,8 +511,13 @@ function App() {
 
   // Callback: Create node from toolbar
   const handleCreateNodeForType = useCallback((nodeType) => {
-    setCreateNodeType(nodeType);
-  }, []);
+    if (schema?.node_types?.[nodeType]?.ui_form === 'skill') {
+      setEditingSkillData(null);
+      setSkillDialogType(nodeType);
+    } else {
+      setCreateNodeType(nodeType);
+    }
+  }, [schema]);
 
   // Handle created node from CreateNodeDialog
   const handleNodeCreated = useCallback((createdNode) => {
@@ -350,10 +525,66 @@ function App() {
     showNotification('success', `${createdNode.type} "${createdNode.name}" created`);
   }, [addNodesToVisualization, showNotification]);
 
+  // Callback: Save a skill node (create or update)
+  const handleSaveSkill = useCallback(async (skillData) => {
+    try {
+      if ('id' in skillData) {
+        const { id, updates } = skillData;
+        await api.updateNode(id, updates);
+        const newNodes = nodes.map(n => n.id === id ? { ...n, ...updates } : n);
+        updateVisualization(newNodes, edges);
+        showNotification('success', 'Skill updated');
+      } else {
+        const result = await api.addNodes([skillData], []);
+        if (result.added_node_ids?.length > 0) {
+          const nodeWithId = { ...skillData, id: result.added_node_ids[0] };
+          addNodesToVisualization([nodeWithId], []);
+        }
+        showNotification('success', `${skillData.type} "${skillData.name}" created`);
+      }
+    } catch (error) {
+      console.error('Error saving skill:', error);
+      showNotification('error', 'Could not save skill');
+    }
+  }, [nodes, edges, updateVisualization, addNodesToVisualization, showNotification]);
+
+  // Callback: Context menu action triggered from schema-defined callback items
+  const handleContextMenuAction = useCallback((actionName, nodeId, nodeData) => {
+    // Dispatch named callback actions from schema context_menu entries.
+    // Add cases here as new callback-type actions are implemented.
+    switch (actionName) {
+      default:
+        console.warn(`[handleContextMenuAction] Unhandled action: "${actionName}". Wire it up in App.jsx.`);
+        showNotification('info', `Action: ${actionName}`);
+    }
+  }, [showNotification]);
+
   // Toolbar save view: signal GraphCanvas to collect positions and trigger dialog
   const handleToolbarSaveView = useCallback(() => {
     setSaveViewSignal(prev => prev + 1);
   }, []);
+
+  // Export full graph from backend API
+  const handleExportGraph = useCallback(async () => {
+    try {
+      const data = await api.exportGraph();
+
+      const blob = new Blob([JSON.stringify(data, null, 2)], { type: 'application/json' });
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement('a');
+      a.href = url;
+      a.download = `graph-export-${new Date().toISOString().slice(0, 10)}.json`;
+      document.body.appendChild(a);
+      a.click();
+      document.body.removeChild(a);
+      URL.revokeObjectURL(url);
+
+      showNotification('success', t('menu.export_success'));
+    } catch (error) {
+      console.error('Error exporting graph:', error);
+      showNotification('error', t('menu.export_error'));
+    }
+  }, [showNotification, t]);
 
   // Handle drop from toolbar onto canvas
   const handleDropCreateNode = useCallback((nodeType, position) => {
@@ -361,10 +592,13 @@ function App() {
       handleCreateAgent();
     } else if (nodeType === 'EventSubscription') {
       handleCreateSubscription();
+    } else if (schema?.node_types?.[nodeType]?.ui_form === 'skill') {
+      setEditingSkillData(null);
+      setSkillDialogType(nodeType);
     } else {
       setCreateNodeType(nodeType);
     }
-  }, [handleCreateAgent, handleCreateSubscription]);
+  }, [handleCreateAgent, handleCreateSubscription, schema]);
 
   // Handle node update from edit dialog
   const handleNodeUpdate = useCallback(async (nodeId, updates) => {
@@ -384,13 +618,14 @@ function App() {
 
   return (
     <div className="app">
-      <div className="app-canvas">
+      <div className="app-canvas" id="guide-target-canvas">
         <GraphCanvas
           nodes={nodes}
           edges={edges}
           highlightedNodeIds={highlightedNodeIds}
           hiddenNodeIds={hiddenNodeIds}
           hiddenEdgeIds={hiddenEdgeIds}
+          nodeMarks={nodeMarks}
           clearGroupsFlag={clearGroupsFlag}
           onExpand={handleExpand}
           onEdit={handleEdit}
@@ -400,22 +635,40 @@ function App() {
           onHideMultiple={handleHideMultiple}
           onHideEdge={handleHideEdge}
           onDeleteEdge={handleDeleteEdge}
+          onEditEdge={handleEditEdge}
+          onConnect={handleConnect}
           onCreateGroup={handleCreateGroup}
           onSaveView={handleSaveView}
           onCreateSubscription={handleCreateSubscription}
           onCreateAgent={handleCreateAgent}
           onDropCreateNode={handleDropCreateNode}
           onShowOnly={handleShowOnly}
+          onSelectionChange={handleSelectionChange}
+          onNodeDoubleClick={handleNodeDoubleClick}
           focusNodeId={focusNodeId}
           onFocusComplete={clearFocusNode}
           createGroupSignal={createGroupSignal}
           saveViewSignal={saveViewSignal}
           groupsToRestore={pendingGroups}
           onGroupsRestored={() => setPendingGroups(null)}
+          federationDepth={federationDepth}
+          onFederationDepthChange={setFederationDepth}
+          maxFederationDepth={maxFederationDepth}
+          federationDepthLevels={federationDepthLevels}
+          federationDepthLabel={t('federation.depth_label')}
+          federationDepthTooltip={t('federation.depth_tooltip')}
+          showMinimap={showMinimap}
+          schema={schema}
+          onContextMenuAction={handleContextMenuAction}
         />
       </div>
 
-      <FloatingHeader stats={stats} />
+      <FloatingHeader stats={stats} onExportGraph={handleExportGraph} />
+      {maxFederationDepth > 1 && (
+        <div className="app-a11y-depth-live" aria-live="polite" aria-atomic="true">
+          {t('federation.depth_indicator', { current: federationDepth, max: maxFederationDepth })}
+        </div>
+      )}
       <FloatingSearch />
       <FloatingToolbar
         onCreateNode={handleCreateNodeForType}
@@ -424,7 +677,7 @@ function App() {
         onSaveView={handleToolbarSaveView}
         onCreateGroup={handleToolbarCreateGroup}
       />
-      <ChatPanel />
+      {llmAvailable && <ChatPanel />}
 
       {createNodeType && (
         <CreateNodeDialog
@@ -439,6 +692,30 @@ function App() {
           node={editingNode}
           onClose={closeEditingNode}
           onSave={(updates) => handleNodeUpdate(editingNode.id, updates)}
+        />
+      )}
+
+      {detailNode && (
+        <NodeDetailDialog
+          node={detailNode}
+          onClose={closeDetailNode}
+          onEdit={(nodeId, nodeData) => {
+            closeDetailNode();
+            handleEdit(nodeId, nodeData);
+          }}
+        />
+      )}
+
+      {editingEdge && (
+        <EditEdgeDialog
+          edge={editingEdge}
+          nodes={nodes}
+          onClose={() => setEditingEdge(null)}
+          onSave={handleEdgeUpdate}
+          onDelete={(edgeId) => {
+            handleDeleteEdge(edgeId);
+            setEditingEdge(null);
+          }}
         />
       )}
 
@@ -485,6 +762,15 @@ function App() {
         />
       )}
 
+      {skillDialogType && (
+        <CreateSkillDialog
+          nodeType={skillDialogType}
+          initialData={editingSkillData}
+          onClose={() => { setSkillDialogType(null); setEditingSkillData(null); }}
+          onSave={handleSaveSkill}
+        />
+      )}
+
       {showAgentDialog && (
         <CreateAgentDialog
           onClose={() => {
@@ -495,6 +781,8 @@ function App() {
           initialData={editingAgentData}
         />
       )}
+
+      <GuideOverlay />
     </div>
   );
 }

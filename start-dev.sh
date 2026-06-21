@@ -3,10 +3,24 @@
 # Start Development Environment
 # This script sets up and starts all services needed to run the full application.
 #
+# Usage:
+#   ./start-dev.sh [OPTIONS]
+#
+# Options:
+#   --profile <name>    Use a configuration profile (default: "default")
+#   --data <path|url>   Load graph data from a file path or URL (overwrites active data)
+#   --lang <en|sv>      Set the application language (default: en)
+#
+# Profiles:
+#   Profiles are directories under config/ (e.g. config/esam/, config/default/).
+#   Each can contain: schema_config.json, federation_config.json, .env, graph.json.
+#   Missing files fall back to config/default/.
+#
 # Environment Variables:
-#   GRAPH_SCHEMA_CONFIG - Path to custom schema configuration file (default: config/schema_config.json)
-#   GRAPH_FILE - Path to graph data file (default: graph.json)
+#   SCHEMA_FILE - Path to custom schema configuration file
+#   GRAPH_FILE - Path to graph data file (default: data/active/graph.json)
 #   LLM_PROVIDER - LLM provider to use: "openai" or "claude" (auto-detected from API keys if not set)
+#   APP_LANGUAGE - Application language: "en" or "sv" (default: en)
 #
 
 set -e
@@ -18,22 +32,171 @@ YELLOW='\033[1;33m'
 BLUE='\033[0;34m'
 NC='\033[0m' # No Color
 
+# Get the directory where the script is located
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+BACKEND_DIR="$SCRIPT_DIR/backend"
+DATA_DIR="$SCRIPT_DIR/data"
+ACTIVE_DATA="$DATA_DIR/active/graph.json"
+DEFAULT_EXAMPLE="$DATA_DIR/examples/default.json"
+
+cd "$SCRIPT_DIR"
+
+# Source shared profile utilities
+source "$SCRIPT_DIR/config/profile-utils.sh"
+
+# =====================
+# Parse Arguments
+# =====================
+DATA_SOURCE=""
+LANG_OVERRIDE=""
+PROFILE_NAME="default"
+
+while [[ $# -gt 0 ]]; do
+    case $1 in
+        --profile)
+            PROFILE_NAME="$2"
+            shift 2
+            ;;
+        --data)
+            DATA_SOURCE="$2"
+            shift 2
+            ;;
+        --lang)
+            LANG_OVERRIDE="$2"
+            shift 2
+            ;;
+        *)
+            echo -e "${RED}Unknown option: $1${NC}"
+            echo "Usage: ./start-dev.sh [--profile <name>] [--data <path|url>] [--lang <en|sv>]"
+            exit 1
+            ;;
+    esac
+done
+
 echo -e "${BLUE}========================================${NC}"
 echo -e "${BLUE}  Community Knowledge Graph - Dev Start${NC}"
 echo -e "${BLUE}========================================${NC}"
 
-# Get the directory where the script is located
-SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-BACKEND_DIR="$SCRIPT_DIR/backend"
-
-cd "$SCRIPT_DIR"
-
 # =====================
-# Configuration
+# Profile Resolution
 # =====================
+validate_profile "$PROFILE_NAME"
+PROFILE_DIR="$CONFIG_BASE_DIR/$PROFILE_NAME"
+
+echo -e "  ${BLUE}Profile:${NC}     $PROFILE_NAME"
+
+# Source .env files with fallback chain: profile → default → root
+apply_profile_env "$PROFILE_NAME"
+
+# Resolve schema config: env var takes precedence, then profile fallback
 if [ -n "$GRAPH_SCHEMA_CONFIG" ]; then
-    echo -e "${YELLOW}Using custom schema config: $GRAPH_SCHEMA_CONFIG${NC}"
     export SCHEMA_FILE="$GRAPH_SCHEMA_CONFIG"
+elif [ -z "$SCHEMA_FILE" ]; then
+    RESOLVED_SCHEMA=$(resolve_config "$PROFILE_NAME" "schema_config.json")
+    if [ -n "$RESOLVED_SCHEMA" ]; then
+        export SCHEMA_FILE="$RESOLVED_SCHEMA"
+    fi
+fi
+
+# Resolve federation config: env var takes precedence, then profile fallback
+if [ -z "$FEDERATION_FILE" ] && [ -z "$GRAPH_FEDERATION_CONFIG" ]; then
+    RESOLVED_FEDERATION=$(resolve_config "$PROFILE_NAME" "federation_config.json")
+    if [ -n "$RESOLVED_FEDERATION" ]; then
+        export FEDERATION_FILE="$RESOLVED_FEDERATION"
+    fi
+elif [ -n "$GRAPH_FEDERATION_CONFIG" ]; then
+    export FEDERATION_FILE="$GRAPH_FEDERATION_CONFIG"
+fi
+
+# Export profile name for backend /info endpoint
+export CONFIG_PROFILE="$PROFILE_NAME"
+
+# =====================
+# Language Configuration
+# =====================
+if [ -n "$LANG_OVERRIDE" ]; then
+    export APP_LANGUAGE="$LANG_OVERRIDE"
+    echo -e "${YELLOW}Language set to: $APP_LANGUAGE${NC}"
+elif [ -z "$APP_LANGUAGE" ]; then
+    export APP_LANGUAGE="en"
+fi
+
+# =====================
+# Data Management
+# =====================
+echo -e "\n${YELLOW}[0/5] Setting up graph data...${NC}"
+
+mkdir -p "$DATA_DIR/active"
+mkdir -p "$DATA_DIR/examples"
+
+if [ -n "$DATA_SOURCE" ]; then
+    # Data source specified - load from path or URL
+    if [[ "$DATA_SOURCE" =~ ^https?:// ]]; then
+        echo -e "Downloading graph data from: ${BLUE}$DATA_SOURCE${NC}"
+        if command -v curl &> /dev/null; then
+            curl -sL "$DATA_SOURCE" -o "$ACTIVE_DATA"
+        elif command -v wget &> /dev/null; then
+            wget -q "$DATA_SOURCE" -O "$ACTIVE_DATA"
+        else
+            echo -e "${RED}Error: curl or wget required to download data from URL${NC}"
+            exit 1
+        fi
+        echo -e "${GREEN}Graph data downloaded to $ACTIVE_DATA${NC}"
+    else
+        # Resolve relative paths
+        if [[ ! "$DATA_SOURCE" = /* ]]; then
+            DATA_SOURCE="$SCRIPT_DIR/$DATA_SOURCE"
+        fi
+        if [ ! -f "$DATA_SOURCE" ]; then
+            echo -e "${RED}Error: Data file not found: $DATA_SOURCE${NC}"
+            exit 1
+        fi
+        echo -e "Copying graph data from: ${BLUE}$DATA_SOURCE${NC}"
+        cp "$DATA_SOURCE" "$ACTIVE_DATA"
+        echo -e "${GREEN}Graph data copied to $ACTIVE_DATA${NC}"
+    fi
+elif [ ! -f "$ACTIVE_DATA" ]; then
+    # No active data and no source specified - try profile graph.json, then default example
+    PROFILE_GRAPH=$(resolve_config "$PROFILE_NAME" "graph.json")
+    if [ -n "$PROFILE_GRAPH" ]; then
+        echo -e "Loading graph data from profile: ${BLUE}$PROFILE_GRAPH${NC}"
+        cp "$PROFILE_GRAPH" "$ACTIVE_DATA"
+        echo -e "${GREEN}Profile graph data loaded.${NC}"
+    elif [ -f "$DEFAULT_EXAMPLE" ]; then
+        echo -e "No active graph data found. Copying default example data..."
+        cp "$DEFAULT_EXAMPLE" "$ACTIVE_DATA"
+        echo -e "${GREEN}Default example data loaded.${NC}"
+    else
+        echo -e "${YELLOW}No example data found. Starting with empty graph.${NC}"
+        echo '{"nodes": [], "edges": [], "metadata": {"version": "1.0"}}' > "$ACTIVE_DATA"
+    fi
+else
+    echo -e "${GREEN}Using existing active graph data.${NC}"
+fi
+
+# Set GRAPH_FILE to point to active data
+export GRAPH_FILE="$ACTIVE_DATA"
+
+# =====================
+# Node.js Check
+# =====================
+if ! command -v node &> /dev/null; then
+    # Try loading nvm
+    export NVM_DIR="${NVM_DIR:-$HOME/.nvm}"
+    if [ -s "$NVM_DIR/nvm.sh" ]; then
+        \. "$NVM_DIR/nvm.sh"
+        nvm use --silent 2>/dev/null || nvm use default --silent 2>/dev/null
+    fi
+fi
+
+if ! command -v node &> /dev/null; then
+    echo -e "${RED}Error: Node.js is not installed or not in PATH.${NC}"
+    echo -e "Install it via nvm (no root required):"
+    echo -e "  curl -o- https://raw.githubusercontent.com/nvm-sh/nvm/v0.39.7/install.sh | bash"
+    echo -e "  source ~/.bashrc  # or ~/.zshrc"
+    echo -e "  nvm install 20"
+    echo -e "Then re-run this script."
+    exit 1
 fi
 
 # =====================
@@ -102,11 +265,19 @@ echo -e "  ${BLUE}MCP:${NC}         http://localhost:8000/mcp"
 echo -e "  ${BLUE}Health:${NC}      http://localhost:8000/health"
 echo ""
 echo -e "${GREEN}  Configuration:${NC}"
+echo -e "  ${BLUE}Profile:${NC}     $PROFILE_NAME"
 if [ -n "$SCHEMA_FILE" ]; then
     echo -e "  ${BLUE}Schema:${NC}      $SCHEMA_FILE"
 else
-    echo -e "  ${BLUE}Schema:${NC}      config/schema_config.json (default)"
+    echo -e "  ${BLUE}Schema:${NC}      config/default/schema_config.json (default)"
 fi
+if [ -n "$FEDERATION_FILE" ]; then
+    echo -e "  ${BLUE}Federation:${NC}  $FEDERATION_FILE"
+fi
+echo -e "  ${BLUE}Graph data:${NC}  $GRAPH_FILE"
+echo -e "  ${BLUE}Language:${NC}    $APP_LANGUAGE"
+echo ""
+echo -e "  ${YELLOW}Language can also be set via URL: http://localhost:8000/web/?lang=sv${NC}"
 echo ""
 echo -e "Press Ctrl+C to stop the server."
 echo -e "${GREEN}========================================${NC}"
@@ -120,4 +291,11 @@ if [ -n "$CODESPACE_NAME" ]; then
     echo -e "${YELLOW}NOTE: Ensure port 8000 is set to Public visibility in the Ports tab.${NC}"
 fi
 
-exec uvicorn backend.api_host.server:get_app --factory --reload --host 0.0.0.0 --port 8000
+# Ignore SIGINT until uvicorn registers its own signal handlers.
+# In Codespace terminals, a spurious SIGINT is delivered during process startup
+# which kills the server before it finishes initializing. The ignored disposition
+# is inherited across exec, and uvicorn's reloader overrides it with its own
+# handler via signal.signal(), so Ctrl+C still works once the server is ready.
+trap '' INT
+exec uvicorn backend.api_host.server:get_app --factory --reload --host 0.0.0.0 --port 8000 \
+    --reload-dir backend

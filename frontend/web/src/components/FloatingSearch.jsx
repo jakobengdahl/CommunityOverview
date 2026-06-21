@@ -4,8 +4,10 @@ import useGraphStore from '../store/graphStore';
 import { ICON_MAP, COLOR_MAP } from './FloatingToolbar';
 import * as api from '../services/api';
 import './FloatingSearch.css';
+import { useI18n } from '../i18n';
 
 function FloatingSearch() {
+  const { t, language } = useI18n();
   const {
     nodes: vizNodes,
     hiddenNodeIds,
@@ -13,6 +15,11 @@ function FloatingSearch() {
     clearVisualization,
     setFocusNodeId,
     setPendingGroups,
+    federationDepth,
+    stats,
+    schema,
+    guideSearchInput,
+    clearGuideSearchInput,
   } = useGraphStore();
 
   const [query, setQuery] = useState('');
@@ -23,6 +30,32 @@ function FloatingSearch() {
   const inputRef = useRef(null);
   const containerRef = useRef(null);
   const debounceRef = useRef(null);
+
+  const getTypeLabel = useCallback((nodeType) => {
+    const labels = schema?.node_types?.[nodeType]?.labels;
+    if (labels && language && labels[language]) {
+      return labels[language];
+    }
+    return nodeType;
+  }, [schema, language]);
+
+  const graphDisplayNames = stats?.federation?.graph_display_names || {};
+  const showGraphPrefix = Boolean(stats?.federation?.search_has_multiple_graphs);
+  const effectiveMaxDepth = Math.max(1, stats?.federation?.max_selectable_depth || 1);
+
+  const getResultLabel = useCallback((node) => {
+    if (!showGraphPrefix) {
+      return node.name;
+    }
+
+    const originGraphId = node.metadata?.origin_graph_id;
+    const originGraphName = node.metadata?.origin_graph_name
+      || (originGraphId ? graphDisplayNames[originGraphId] : null)
+      || graphDisplayNames.local
+      || 'Local';
+
+    return `${originGraphName}: ${node.name}`;
+  }, [graphDisplayNames, showGraphPrefix]);
 
   // Debounced search
   useEffect(() => {
@@ -36,7 +69,7 @@ function FloatingSearch() {
     debounceRef.current = setTimeout(async () => {
       setIsLoading(true);
       try {
-        const result = await api.searchGraph(query, { limit: 10 });
+        const result = await api.searchGraph(query, { limit: 10, federationDepth });
         const nodes = (result.nodes || []).filter(
           n => n.type !== 'Community' && n.type !== 'VisualizationView'
         );
@@ -52,7 +85,7 @@ function FloatingSearch() {
     }, 300);
 
     return () => clearTimeout(debounceRef.current);
-  }, [query]);
+  }, [query, federationDepth]);
 
   // Click outside to close
   useEffect(() => {
@@ -79,6 +112,27 @@ function FloatingSearch() {
     return () => document.removeEventListener('keydown', handleGlobalKey);
   }, []);
 
+  // Guide: animate typing into search input
+  useEffect(() => {
+    if (!guideSearchInput) return;
+    const { text, animated } = guideSearchInput;
+    clearGuideSearchInput();
+
+    if (!animated) {
+      setQuery(text);
+      return;
+    }
+
+    let i = 0;
+    setQuery('');
+    const interval = setInterval(() => {
+      i++;
+      setQuery(text.slice(0, i));
+      if (i >= text.length) clearInterval(interval);
+    }, 30);
+    return () => clearInterval(interval);
+  }, [guideSearchInput]); // eslint-disable-line react-hooks/exhaustive-deps
+
   const selectResult = useCallback(async (node) => {
     // SavedView: clear canvas and load the saved view's nodes with positions and edges
     if (node.type === 'SavedView') {
@@ -88,6 +142,7 @@ function FloatingSearch() {
         const savedEdges = node.metadata?.edges || [];
         const savedEdgeIds = new Set(node.metadata?.edge_ids || []);
         const savedGroups = node.metadata?.groups || [];
+        const savedParentIds = node.metadata?.parentIds || {};
         if (nodeIds.length > 0) {
           clearVisualization();
           const details = await Promise.all(
@@ -123,7 +178,7 @@ function FloatingSearch() {
 
             // Restore groups if any were saved
             if (savedGroups.length > 0) {
-              setPendingGroups(savedGroups);
+              setPendingGroups({ groups: savedGroups, parentIds: savedParentIds });
             }
           }
         }
@@ -193,7 +248,7 @@ function FloatingSearch() {
   };
 
   return (
-    <div className="floating-search" ref={containerRef}>
+    <div className="floating-search" id="guide-target-search" ref={containerRef}>
       <div className="floating-search-bar">
         <Search size={18} className="floating-search-icon" />
         <input
@@ -210,6 +265,11 @@ function FloatingSearch() {
         />
         {isLoading && <div className="floating-search-spinner" />}
       </div>
+      {effectiveMaxDepth > 1 && (
+        <div className="floating-search-depth-indicator" title={t('federation.depth_indicator_tooltip')}>
+          {t('federation.depth_indicator', { current: federationDepth, max: effectiveMaxDepth })}
+        </div>
+      )}
 
       {showDropdown && results.length > 0 && (
         <div className="floating-search-dropdown">
@@ -230,12 +290,12 @@ function FloatingSearch() {
                   style={{ backgroundColor: color }}
                 />
                 {Icon && <Icon size={14} style={{ color, flexShrink: 0 }} />}
-                <span className="floating-search-result-name">{node.name}</span>
+                <span className="floating-search-result-name">{getResultLabel(node)}</span>
                 <span
                   className="floating-search-result-type"
                   style={{ color }}
                 >
-                  {node.type}
+                  {getTypeLabel(node.type)}
                 </span>
                 {isInViz && (
                   <span className="floating-search-result-badge">in view</span>

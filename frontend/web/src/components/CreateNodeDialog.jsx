@@ -1,29 +1,21 @@
 import { useState, useEffect } from 'react';
 import useGraphStore from '../store/graphStore';
 import * as api from '../services/api';
+import SubtypeInput from './SubtypeInput';
 import './CreateNodeDialog.css';
 
-// Fields that certain node types have beyond the basic set
-const TYPE_EXTRA_FIELDS = {
-  Initiative: ['start_date', 'end_date'],
-  Resource: ['identifier'],
-  Legislation: ['effective_date'],
-  Goal: ['target_date'],
-  Event: ['start_date', 'end_date'],
-};
+// Fields always rendered explicitly — never shown as extra schema fields
+const BASE_FIELDS = new Set(['name', 'description', 'summary', 'tags', 'subtypes', 'type', 'id', 'metadata']);
 
-const FIELD_LABELS = {
-  start_date: 'Start date',
-  end_date: 'End date',
-  effective_date: 'Effective date',
-  target_date: 'Target date',
-  identifier: 'Länk till underlag (URL)',
-};
+function formatFieldLabel(field) {
+  return field.replace(/_/g, ' ').replace(/\b\w/g, c => c.toUpperCase());
+}
 
 function CreateNodeDialog({ nodeType, onClose, onSave }) {
-  const { getNodeColor } = useGraphStore();
+  const { getNodeColor, getNodeTypeConfig } = useGraphStore();
   const color = getNodeColor(nodeType);
-  const extraFields = TYPE_EXTRA_FIELDS[nodeType] || [];
+  const typeConfig = getNodeTypeConfig(nodeType);
+  const extraFields = (typeConfig?.fields || []).filter(f => !BASE_FIELDS.has(f));
 
   const [formData, setFormData] = useState({
     name: '',
@@ -32,8 +24,19 @@ function CreateNodeDialog({ nodeType, onClose, onSave }) {
     tags: '',
     ...Object.fromEntries(extraFields.map(f => [f, ''])),
   });
+  const [subtypes, setSubtypes] = useState([]);
+  const [existingSubtypes, setExistingSubtypes] = useState([]);
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState(null);
+
+  // Fetch existing subtypes for this node type
+  useEffect(() => {
+    api.getSubtypes(nodeType)
+      .then(data => {
+        setExistingSubtypes(data.subtypes?.[nodeType] || []);
+      })
+      .catch(() => {});
+  }, [nodeType]);
 
   const handleChange = (e) => {
     const { name, value } = e.target;
@@ -55,6 +58,10 @@ function CreateNodeDialog({ nodeType, onClose, onSave }) {
         summary: formData.summary.trim(),
         tags: formData.tags.split(',').map(t => t.trim()).filter(Boolean),
       };
+
+      if (subtypes.length > 0) {
+        node.subtypes = subtypes;
+      }
 
       // Add extra fields if they have values
       for (const field of extraFields) {
@@ -115,6 +122,14 @@ function CreateNodeDialog({ nodeType, onClose, onSave }) {
           </div>
 
           <div className="form-group">
+            <SubtypeInput
+              value={subtypes}
+              onChange={setSubtypes}
+              existingSubtypes={existingSubtypes}
+            />
+          </div>
+
+          <div className="form-group">
             <label htmlFor="create-description">Description</label>
             <textarea
               id="create-description"
@@ -134,8 +149,8 @@ function CreateNodeDialog({ nodeType, onClose, onSave }) {
               name="summary"
               value={formData.summary}
               onChange={handleChange}
-              placeholder="Short summary (max 100 chars)..."
-              maxLength={100}
+              placeholder="Short summary (max 300 chars)..."
+              maxLength={300}
             />
           </div>
 
@@ -154,16 +169,17 @@ function CreateNodeDialog({ nodeType, onClose, onSave }) {
           {extraFields.map(field => {
             const isDateField = field.includes('date');
             const useDateTime = isDateField && nodeType === 'Event';
+            const label = formatFieldLabel(field);
             return (
               <div className="form-group" key={field}>
-                <label htmlFor={`create-${field}`}>{FIELD_LABELS[field] || field}</label>
+                <label htmlFor={`create-${field}`}>{label}</label>
                 <input
                   type={useDateTime ? 'datetime-local' : isDateField ? 'date' : 'text'}
                   id={`create-${field}`}
                   name={field}
-                  value={formData[field]}
+                  value={formData[field] || ''}
                   onChange={handleChange}
-                  placeholder={isDateField ? '' : `Enter ${FIELD_LABELS[field] || field}...`}
+                  placeholder={isDateField ? '' : `Enter ${label.toLowerCase()}...`}
                 />
               </div>
             );

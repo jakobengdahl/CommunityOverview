@@ -5,6 +5,25 @@ It is safe to commit and expose publicly — it contains no secrets.
 
 ---
 
+## Feature Planning & Routing
+
+When Jakob wants to think through a feature, discuss it naturally — he does not
+need to name files, systems, or workflows explicitly.
+
+**Routing rules (apply silently):**
+
+- **Belongs in this repo** — feature clearly fits the public open-source core →
+  plan and implement here.
+- **Broader scope** — feature spans more than this repo → keep changes in this
+  repo limited to what genuinely belongs here; do not make assumptions about
+  systems or context beyond the public codebase.
+- **Follow-up execution slices for this repo** → scope work to what belongs here;
+  do not require Jakob to cite external file paths or document names.
+
+All repo-managed content (docs, comments, PR bodies) remains in English.
+
+---
+
 ## Branch & Environment Strategy
 
 ```
@@ -178,6 +197,13 @@ Address every finding that is a real bug or a meaningful gap. Then spawn another
 review subagent (briefing it on what changed between rounds). Repeat until the
 review comes back with no actionable findings.
 
+Typical issues caught in review:
+- Additive scoring / ranking bugs that only appear with combined signals
+- Inconsistency between parallel implementations (e.g. local vs. federation paths)
+- Dead code introduced by refactoring
+- Pre-filter/scorer mismatches (filter excludes nodes the scorer would reward)
+- Secrets or debug artifacts accidentally staged
+
 ### 9. Resolve branch divergence
 
 If `dev` has advanced while your branch is in the review loop, bring the branch
@@ -189,6 +215,9 @@ git merge origin/dev      # merge, not rebase — avoid rewriting shared history
 pytest backend/ -q        # re-run full suite after merge
 git push
 ```
+
+Resolve conflicts by understanding both sides — never blindly accept all-incoming
+or all-outgoing changes.
 
 ### 10. Mark PR Ready — definition of done
 
@@ -209,6 +238,8 @@ Remove draft status only when **all** of the following are true:
 - **Do not write tests for things that cannot fail** — trust framework guarantees.
 - **Do write tests for the exact scenario that motivated a change.** If a bug
   existed, add a regression test that would have caught it.
+- **Score / ranking logic**: always add tests that cover cross-tier scenarios
+  (can secondary signals beat a stronger primary signal?), not just happy-path order.
 - Tests are documentation. The test name should describe the invariant, not the steps.
 
 ---

@@ -46,7 +46,8 @@ def register_mcp_tools(mcp, service: GraphService) -> Dict[str, Callable]:
         query: str,
         node_types: Optional[List[str]] = None,
         limit: int = 50,
-        action: Optional[str] = None
+        action: Optional[str] = None,
+        federation_depth: Optional[int] = None
     ) -> Dict[str, Any]:
         """
         Search for nodes in the graph based on text query
@@ -64,7 +65,8 @@ def register_mcp_tools(mcp, service: GraphService) -> Dict[str, Callable]:
             query=query,
             node_types=node_types,
             limit=limit,
-            action=action
+            action=action,
+            federation_depth=federation_depth
         )
 
     @register_tool
@@ -173,9 +175,18 @@ def register_mcp_tools(mcp, service: GraphService) -> Dict[str, Callable]:
         """
         Add new nodes and edges to the graph
 
+        Field limits for nodes:
+          - name: required, 1-200 characters
+          - description: optional, max 2000 characters
+          - summary: optional, max 300 characters (short text for visualization)
+          - tags: optional list of strings
+          - subtypes: optional list of strings for sub-classification within the node type
+
+        Edge type is optional. If omitted, it defaults to "RELATES_TO".
+
         Args:
             nodes: List of node objects to add
-            edges: List of edge objects to add
+            edges: List of edge objects (source, target, type). Type is optional.
             event_session_id: Optional session ID for webhook loop prevention
             event_correlation_id: Optional correlation ID for chaining events
 
@@ -246,6 +257,30 @@ def register_mcp_tools(mcp, service: GraphService) -> Dict[str, Callable]:
             event_correlation_id=event_correlation_id,
         )
 
+    @register_tool
+    def delete_edges(
+        edge_ids: List[str],
+        event_session_id: Optional[str] = None,
+        event_correlation_id: Optional[str] = None,
+    ) -> Dict[str, Any]:
+        """
+        Delete edges from the graph (max 50 at a time)
+
+        Args:
+            edge_ids: List of edge IDs to delete
+            event_session_id: Optional session ID for webhook loop prevention
+            event_correlation_id: Optional correlation ID for chaining events
+
+        Returns:
+            Dict with result (deleted_edge_ids, success, message)
+        """
+        return service.delete_edges(
+            edge_ids=edge_ids,
+            event_origin="mcp",
+            event_session_id=event_session_id,
+            event_correlation_id=event_correlation_id,
+        )
+
     # ==================== Statistics & Metadata Tools ====================
 
     @register_tool
@@ -267,6 +302,20 @@ def register_mcp_tools(mcp, service: GraphService) -> Dict[str, Callable]:
             Dict with node types and their color coding
         """
         return service.list_node_types()
+
+    @register_tool
+    def get_subtypes(node_type: Optional[str] = None) -> Dict[str, Any]:
+        """
+        Get existing subtypes used in the graph, grouped by node type.
+        Use this to suggest consistent subtypes when adding or updating nodes.
+
+        Args:
+            node_type: Optional filter for a specific node type (e.g. 'Actor')
+
+        Returns:
+            Dict with subtypes grouped by node type
+        """
+        return service.get_subtypes(node_type)
 
     @register_tool
     def list_relationship_types() -> Dict[str, Any]:
@@ -303,6 +352,72 @@ def register_mcp_tools(mcp, service: GraphService) -> Dict[str, Callable]:
             Dict with title, introduction, colors, prompt_prefix, prompt_suffix
         """
         return service.get_presentation()
+
+    @register_tool
+    def get_capabilities() -> Dict[str, Any]:
+        """Get the public capability manifest for client discovery."""
+        return service.get_capabilities()
+
+    @register_tool
+    def get_runtime_info() -> Dict[str, Any]:
+        """Get the public runtime metadata for deployment introspection."""
+        return service.get_runtime_info()
+
+    @register_tool
+    def get_tenant_context() -> Dict[str, Any]:
+        """Get the tenant/deployment context metadata.
+
+        Returns the tenant identifier, name, and deployment environment
+        for this CommunityOverview instance.
+
+        Returns:
+            Dict with tenant_id, tenant_name, and environment
+        """
+        return service.get_tenant_context()
+
+    @register_tool
+    def get_config_context() -> Dict[str, Any]:
+        """Get the effective config scope and non-sensitive config source metadata."""
+        return service.get_config_context()
+
+    @register_tool
+    def get_request_actor(
+        actor_id: Optional[str] = None,
+        actor_type: Optional[str] = None,
+        auth_source: Optional[str] = None,
+    ) -> Dict[str, Any]:
+        """Get the public request actor context with optional safe overrides."""
+        return service.get_request_actor_info(
+            actor_id=actor_id,
+            actor_type=actor_type,
+            auth_source=auth_source,
+        )
+
+    @register_tool
+    def get_request_scope(
+        workspace_id: Optional[str] = None,
+        workspace_kind: Optional[str] = None,
+        graph_id: Optional[str] = None,
+    ) -> Dict[str, Any]:
+        """Get the public workspace/graph scope context with optional safe overrides."""
+        return service.get_request_scope_info(
+            workspace_id=workspace_id,
+            workspace_kind=workspace_kind,
+            graph_id=graph_id,
+        )
+
+    @register_tool
+    def get_request_selection(
+        workspace_id: Optional[str] = None,
+        workspace_kind: Optional[str] = None,
+        graph_id: Optional[str] = None,
+    ) -> Dict[str, Any]:
+        """Get the public graph/workspace selection summary with optional safe overrides."""
+        return service.get_request_graph_selection_info(
+            workspace_id=workspace_id,
+            workspace_kind=workspace_kind,
+            graph_id=graph_id,
+        )
 
     # ==================== Saved Views Tools ====================
 

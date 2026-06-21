@@ -4,7 +4,13 @@
  * Calls the backend endpoints exposed by app_host
  */
 
-const API_BASE = '/api';
+function getPathRoot() {
+  const pathname = window.location.pathname;
+  const webIndex = pathname.lastIndexOf('/web/');
+  return webIndex !== -1 ? pathname.substring(0, webIndex) : '';
+}
+
+const API_BASE = getPathRoot() + '/api';
 
 // ============================================================
 // Event Context / Session ID Management
@@ -83,6 +89,7 @@ export async function searchGraph(query, options = {}) {
       node_types: options.nodeTypes,
       communities: options.communities,
       limit: options.limit || 50,
+      federation_depth: options.federationDepth,
     }),
   });
 }
@@ -184,6 +191,55 @@ export async function deleteNodes(nodeIds, confirmed = false) {
 }
 
 /**
+ * Add a single edge between existing nodes
+ * @param {string} source - Source node ID
+ * @param {string} target - Target node ID
+ * @param {Object} options - Edge options (type, label)
+ * @returns {Promise<{success: boolean, edge: Object}>}
+ */
+export async function addEdge(source, target, options = {}) {
+  return apiFetch(`${API_BASE}/edges`, {
+    method: 'POST',
+    body: JSON.stringify({
+      source,
+      target,
+      type: options.type || null,
+      label: options.label || null,
+      event_origin: getEventOrigin(),
+      event_session_id: getEventSessionId(),
+    }),
+  });
+}
+
+/**
+ * Update an existing edge
+ * @param {string} edgeId - Edge ID
+ * @param {Object} updates - Fields to update (type, label, metadata)
+ * @returns {Promise<{success: boolean, edge: Object}>}
+ */
+export async function updateEdge(edgeId, updates) {
+  return apiFetch(`${API_BASE}/edges/${encodeURIComponent(edgeId)}`, {
+    method: 'PATCH',
+    body: JSON.stringify({
+      updates,
+      event_origin: getEventOrigin(),
+      event_session_id: getEventSessionId(),
+    }),
+  });
+}
+
+/**
+ * Delete a single edge
+ * @param {string} edgeId - Edge ID
+ * @returns {Promise<{success: boolean}>}
+ */
+export async function deleteEdge(edgeId) {
+  return apiFetch(`${API_BASE}/edges/${encodeURIComponent(edgeId)}`, {
+    method: 'DELETE',
+  });
+}
+
+/**
  * Get graph statistics
  * @param {Array} communities - Optional community filter
  * @returns {Promise<{total_nodes: number, total_edges: number, ...}>}
@@ -201,6 +257,16 @@ export async function getGraphStats(communities = null) {
  */
 export async function getNodeTypes() {
   return apiFetch(`${API_BASE}/meta/node-types`);
+}
+
+/**
+ * Get existing subtypes grouped by node type
+ * @param {string} [nodeType] - Optional filter by node type
+ * @returns {Promise<{subtypes: Object}>}
+ */
+export async function getSubtypes(nodeType) {
+  const params = nodeType ? `?node_type=${encodeURIComponent(nodeType)}` : '';
+  return apiFetch(`${API_BASE}/meta/subtypes${params}`);
 }
 
 /**
@@ -271,7 +337,7 @@ export async function listSavedViews() {
  * @returns {Promise<Object>}
  */
 export async function executeTool(toolName, args) {
-  return apiFetch('/execute_tool', {
+  return apiFetch(getPathRoot() + '/execute_tool', {
     method: 'POST',
     body: JSON.stringify({
       tool_name: toolName,
@@ -284,7 +350,7 @@ export async function executeTool(toolName, args) {
 // UI Backend Chat API (/ui/*)
 // ============================================================
 
-const UI_API_BASE = '/ui';
+const UI_API_BASE = getPathRoot() + '/ui';
 
 /**
  * Send a chat message to the backend
@@ -292,10 +358,16 @@ const UI_API_BASE = '/ui';
  * @param {string} documentContext - Optional document text to include
  * @returns {Promise<{content: string, toolUsed: string|null, toolResult: Object|null}>}
  */
-export async function sendChatMessage(messages, documentContext = null) {
+export async function sendChatMessage(messages, documentContext = null, options = {}) {
   const body = { messages };
   if (documentContext) {
     body.document_context = documentContext;
+  }
+  if (options.federationDepth) {
+    body.federation_depth = options.federationDepth;
+  }
+  if (options.expertAgentId) {
+    body.expert_agent_id = options.expertAgentId;
   }
   return apiFetch(`${UI_API_BASE}/chat`, {
     method: 'POST',
@@ -309,10 +381,13 @@ export async function sendChatMessage(messages, documentContext = null) {
  * @param {string} documentContext - Optional document text
  * @returns {Promise<{content: string, toolUsed: string|null, toolResult: Object|null}>}
  */
-export async function sendSimpleChatMessage(message, documentContext = null) {
+export async function sendSimpleChatMessage(message, documentContext = null, options = {}) {
   const body = { message };
   if (documentContext) {
     body.document_context = documentContext;
+  }
+  if (options.federationDepth) {
+    body.federation_depth = options.federationDepth;
   }
   return apiFetch(`${UI_API_BASE}/chat/simple`, {
     method: 'POST',
@@ -351,6 +426,15 @@ export async function uploadFile(file, analyze = false) {
  */
 export async function getChatInfo() {
   return apiFetch(`${UI_API_BASE}/info`);
+}
+
+/**
+ * Get UI feature capabilities from the backend.
+ * Used during startup to decide which features to show.
+ * @returns {Promise<{llm_available: boolean, llm_provider: string}>}
+ */
+export async function getUiCapabilities() {
+  return apiFetch(`${UI_API_BASE}/capabilities`);
 }
 
 /**

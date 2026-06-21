@@ -253,6 +253,13 @@ class MCPLoader:
                 },
                 "required": ["node_ids"],
             }),
+            ("delete_edges", "Delete edges from the graph (max 50 at a time)", {
+                "type": "object",
+                "properties": {
+                    "edge_ids": {"type": "array", "items": {"type": "string"}, "description": "Edge IDs to delete"},
+                },
+                "required": ["edge_ids"],
+            }),
             ("find_similar_nodes", "Find nodes with similar names (fuzzy match)", {
                 "type": "object",
                 "properties": {
@@ -266,6 +273,46 @@ class MCPLoader:
             ("get_graph_stats", "Get graph statistics (node counts, etc.)", {
                 "type": "object",
                 "properties": {},
+            }),
+            ("get_capabilities", "Get the capability manifest exposed to clients.", {
+                "type": "object",
+                "properties": {},
+            }),
+            ("get_runtime_info", "Get the runtime mode and enabled extensions exposed to clients.", {
+                "type": "object",
+                "properties": {},
+            }),
+            ("get_tenant_context", "Get the tenant identifier, tenant name, and deployment environment exposed to clients.", {
+                "type": "object",
+                "properties": {},
+            }),
+            ("get_config_context", "Get the effective config scope and non-sensitive config source metadata exposed to clients.", {
+                "type": "object",
+                "properties": {},
+            }),
+            ("get_request_actor", "Get the public request actor context. Safe optional overrides can simulate request identity inputs.", {
+                "type": "object",
+                "properties": {
+                    "actor_id": {"type": "string", "description": "Optional actor identifier override"},
+                    "actor_type": {"type": "string", "description": "Optional actor type override"},
+                    "auth_source": {"type": "string", "description": "Optional auth source override"},
+                },
+            }),
+            ("get_request_scope", "Get the public workspace and graph scope context. Safe optional overrides can simulate request scope inputs.", {
+                "type": "object",
+                "properties": {
+                    "workspace_id": {"type": "string", "description": "Optional workspace identifier override"},
+                    "workspace_kind": {"type": "string", "description": "Optional workspace kind override"},
+                    "graph_id": {"type": "string", "description": "Optional graph scope identifier override"},
+                },
+            }),
+            ("get_request_selection", "Get the public graph/workspace selection summary. Safe optional overrides can simulate request selection inputs.", {
+                "type": "object",
+                "properties": {
+                    "workspace_id": {"type": "string", "description": "Optional workspace identifier override"},
+                    "workspace_kind": {"type": "string", "description": "Optional workspace kind override"},
+                    "graph_id": {"type": "string", "description": "Optional graph scope identifier override"},
+                },
             }),
         ]
 
@@ -516,7 +563,7 @@ class MCPLoader:
             return {"error": "Graph service not available"}
 
         # Add agent origin for event tracking
-        if agent_id and tool_name in ("add_nodes", "update_node", "delete_nodes"):
+        if agent_id and tool_name in ("add_nodes", "update_node", "delete_nodes", "delete_edges"):
             input_args["event_origin"] = f"agent:{agent_id}"
 
         # Ensure add_nodes always has both required args
@@ -587,7 +634,7 @@ class MCPLoader:
 
         # Security: ensure path is within workspace
         full_path = os.path.normpath(os.path.join(base_path, path))
-        if not full_path.startswith(base_path):
+        if os.path.commonpath([base_path, full_path]) != base_path:
             return {"error": "Path must be within agent workspace"}
 
         try:

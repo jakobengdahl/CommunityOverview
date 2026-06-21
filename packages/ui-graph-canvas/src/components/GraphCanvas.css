@@ -237,3 +237,117 @@
     box-shadow: 0 4px 12px rgba(0, 0, 0, 0.1);
   }
 }
+
+.federation-depth-control {
+  position: absolute;
+  right: 224px;
+  bottom: 18px;
+  z-index: 6;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 8px;
+  padding: 8px;
+  border-radius: 10px;
+  border: 1px solid rgba(255, 255, 255, 0.18);
+  background: rgba(24, 24, 24, 0.82);
+  backdrop-filter: blur(2px);
+}
+
+.federation-depth-label {
+  font-size: 11px;
+  color: #a8b0ff;
+  font-weight: 600;
+  letter-spacing: 0.03em;
+  text-transform: uppercase;
+}
+
+.federation-depth-levels {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.federation-depth-level {
+  width: 28px;
+  height: 28px;
+  border-radius: 6px;
+  border: 1px solid #4b5563;
+  background: #1f2937;
+  color: #d1d5db;
+  cursor: pointer;
+  font-size: 13px;
+  font-weight: 600;
+}
+
+.federation-depth-level:hover {
+  border-color: #818cf8;
+  color: #f5f3ff;
+}
+
+.federation-depth-level.active {
+  border-color: #6366f1;
+  background: #4f46e5;
+  color: #ffffff;
+}
+
+
+@media (max-width: 1200px) {
+  .federation-depth-control {
+    right: 12px;
+    bottom: 196px;
+  }
+}
+
+.graph-marks-legend {
+  position: absolute;
+  top: 10px;
+  left: 10px;
+  z-index: 6;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  padding: 8px 10px;
+  border-radius: 8px;
+  border: 1px solid rgba(255, 255, 255, 0.15);
+  background: rgba(24, 24, 24, 0.88);
+  backdrop-filter: blur(2px);
+  pointer-events: none;
+}
+
+.graph-marks-legend-entry {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+}
+
+.graph-marks-legend-dot {
+  width: 10px;
+  height: 10px;
+  border-radius: 50%;
+  flex-shrink: 0;
+  border: 1px solid rgba(255, 255, 255, 0.25);
+}
+
+.graph-marks-legend-label {
+  font-size: 11px;
+  color: #d1d5db;
+  font-weight: 500;
+  letter-spacing: 0.02em;
+  white-space: nowrap;
+}
+
+@media (prefers-color-scheme: light) {
+  .graph-marks-legend {
+    background: rgba(255, 255, 255, 0.92);
+    border-color: rgba(0, 0, 0, 0.12);
+  }
+
+  .graph-marks-legend-label {
+    color: #374151;
+  }
+
+  .graph-marks-legend-dot {
+    border-color: rgba(0, 0, 0, 0.2);
+  }
+}

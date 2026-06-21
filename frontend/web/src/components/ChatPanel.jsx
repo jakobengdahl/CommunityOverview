@@ -1,9 +1,16 @@
-import { useState, useEffect, useRef } from 'react';
-import { ChatDotsFill, ChevronRight, ChevronLeft } from 'react-bootstrap-icons';
+import { useState, useEffect, useRef, useMemo } from 'react';
+import ReactMarkdown from 'react-markdown';
+import remarkGfm from 'remark-gfm';
+import { ChatDotsFill, ChevronRight, ChevronLeft, XCircleFill, Robot } from 'react-bootstrap-icons';
 import useGraphStore from '../store/graphStore';
+import { useI18n } from '../i18n';
 import * as api from '../services/api';
-import { positionNewNodes } from '@community-graph/ui-graph-canvas';
+import { positionNewNodes, getNodeColor } from '@community-graph/ui-graph-canvas';
+import ExpertAgentSelector from './ExpertAgentSelector';
 import './ChatPanel.css';
+
+/** Max characters of node context to include with a message to the LLM */
+const MAX_SELECTION_CONTEXT_CHARS = 6000;
 
 function ChatPanel() {
   const {
@@ -16,7 +23,21 @@ function ChatPanel() {
     clearVisualization,
     chatPanelOpen,
     toggleChatPanel,
+    selectedGraphNodes,
+    federationDepth,
+    stats,
+    clearSelectedGraphNodes,
+    activeExperts,
+    availableExperts,
+    showMinimap,
+    presentation,
+    startGuide,
+    guideChatInput,
+    clearGuideChatInput,
   } = useGraphStore();
+
+  const { t, language } = useI18n();
+  const effectiveMaxDepth = Math.max(1, stats?.federation?.max_selectable_depth || 1);
 
   const [inputValue, setInputValue] = useState('');
   const [isProcessing, setIsProcessing] = useState(false);
@@ -26,6 +47,7 @@ function ChatPanel() {
 
   const messagesEndRef = useRef(null);
   const fileInputRef = useRef(null);
+  const handleSendRef = useRef(null);
 
   const scrollToBottom = () => {
     messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' });
@@ -42,6 +64,31 @@ function ChatPanel() {
     }
   }, [error]);
 
+  // Guide: animate typing into chat input
+  useEffect(() => {
+    if (!guideChatInput) return;
+    const { text, animated, auto_send } = guideChatInput;
+    clearGuideChatInput();
+
+    if (!animated) {
+      setInputValue(text);
+      if (auto_send) setTimeout(() => handleSendRef.current?.(), 0);
+      return;
+    }
+
+    let i = 0;
+    setInputValue('');
+    const interval = setInterval(() => {
+      i++;
+      setInputValue(text.slice(0, i));
+      if (i >= text.length) {
+        clearInterval(interval);
+        if (auto_send) setTimeout(() => handleSendRef.current?.(), 300);
+      }
+    }, 30);
+    return () => clearInterval(interval);
+  }, [guideChatInput]); // eslint-disable-line react-hooks/exhaustive-deps
+
   const filterCommunityNodes = (nodeList) => {
     return nodeList.filter(n =>
       n.type !== 'Community' && n.data?.type !== 'Community'
@@ -54,18 +101,26 @@ function ChatPanel() {
     let messageContent = inputValue.trim();
 
     if (uploadedFile) {
-      const fileContext = `\n\n[Uppladdad fil: ${uploadedFile.filename}]\n\nInnehåll:\n${uploadedFile.text}`;
+      const fileContext = t('chat.file_context', { filename: uploadedFile.filename, text: uploadedFile.text });
       messageContent = messageContent
         ? messageContent + fileContext
-        : `Analysera följande dokument:\n${fileContext}`;
+        : t('chat.analyze_document', { fileContext });
     }
+
+    // Append selected node context for the LLM (not shown in chat bubble)
+    const selectionContext = buildSelectionContext();
+    const messageForLLM = selectionContext
+      ? messageContent + selectionContext
+      : messageContent;
 
     const userMessage = {
       role: 'user',
-      content: messageContent,
+      content: messageContent, // Show only the user's text in chat
       timestamp: new Date(),
       hasFile: !!uploadedFile,
       filename: uploadedFile?.filename,
+      hasSelection: selectedGraphNodes.length > 0,
+      selectionCount: selectedGraphNodes.length,
     };
     addChatMessage(userMessage);
     setInputValue('');
@@ -78,9 +133,9 @@ function ChatPanel() {
         .filter(m => m.role !== 'system' && m.id !== 'welcome')
         .map(m => ({ role: m.role, content: m.content }));
 
-      conversationMessages.push({ role: 'user', content: messageContent });
+      conversationMessages.push({ role: 'user', content: messageForLLM });
 
-      const response = await api.sendChatMessage(conversationMessages);
+      const response = await api.sendChatMessage(conversationMessages, null, { federationDepth, expertAgentId: activeExperts.length > 0 ? activeExperts[activeExperts.length - 1] : undefined });
 
       console.log('[ChatPanel] Response:', response);
 
@@ -94,8 +149,8 @@ function ChatPanel() {
           const viewNode = {
             name: viewName,
             type: 'SavedView',
-            description: `Sparad vy: ${viewName}`,
-            summary: `Innehåller ${currentNodes.length} noder`,
+            description: t('notifications.saved_view_description', { name: viewName }),
+            summary: t('notifications.saved_view_summary', { count: currentNodes.length }),
             metadata: {
               node_ids: currentNodes.map(n => n.id),
             },
@@ -141,6 +196,19 @@ function ChatPanel() {
             updateVisualization([...mergedNodes, ...newNodes], currentEdges);
           }
         }
+        else if (toolResult.action === 'mark_nodes') {
+          useGraphStore.getState().setNodeMarks(toolResult.marks || []);
+        }
+        else if (toolResult.action === 'start_guide') {
+          const guideId = toolResult.guide_id;
+          const guides = useGraphStore.getState().presentation?.guides || [];
+          const guide = guides.find(g => g.id === guideId);
+          if (guide) {
+            startGuide(guide);
+          } else {
+            console.warn(`[ChatPanel] start_guide: guide "${guideId}" not found in presentation config`);
+          }
+        }
         else if (toolResult.nodes && toolResult.nodes.length > 0) {
           const filteredNodes = filterCommunityNodes(toolResult.nodes);
           updateVisualization(filteredNodes, toolResult.edges || []);
@@ -168,7 +236,7 @@ function ChatPanel() {
       console.error('[ChatPanel] Error:', err);
       addChatMessage({
         role: 'assistant',
-        content: `Fel: ${err.message}`,
+        content: t('chat.error_prefix', { message: err.message }),
         timestamp: new Date(),
       });
       setError(err.message);
@@ -176,6 +244,10 @@ function ChatPanel() {
       setIsProcessing(false);
     }
   };
+
+  // Keep ref current so the guide animation can call the latest handleSend after animation
+  // completes, picking up the fully-typed inputValue rather than a stale closure.
+  handleSendRef.current = handleSend;
 
   const handleKeyPress = (e) => {
     if (e.key === 'Enter' && !e.shiftKey) {
@@ -199,11 +271,11 @@ function ChatPanel() {
           text: result.text,
         });
       } else {
-        setError('Kunde inte extrahera text från filen.');
+        setError(t('chat.extract_error'));
       }
     } catch (err) {
       console.error('[ChatPanel] Upload error:', err);
-      setError(`Uppladdning misslyckades: ${err.message}`);
+      setError(t('chat.upload_error', { message: err.message }));
     } finally {
       setIsUploading(false);
       if (fileInputRef.current) {
@@ -220,7 +292,7 @@ function ChatPanel() {
   };
 
   const handleApproveProposal = async (proposal) => {
-    const msg = `Ja, lägg till noden "${proposal.node.name}"`;
+    const msg = t('chat.approve_node', { name: proposal.node.name });
     addChatMessage({ role: 'user', content: msg, timestamp: new Date() });
     setIsProcessing(true);
 
@@ -230,7 +302,7 @@ function ChatPanel() {
         .map(m => ({ role: m.role, content: m.content }));
       conversationMessages.push({ role: 'user', content: msg });
 
-      const response = await api.sendChatMessage(conversationMessages);
+      const response = await api.sendChatMessage(conversationMessages, null, { federationDepth, expertAgentId: activeExperts.length > 0 ? activeExperts[activeExperts.length - 1] : undefined });
 
       if (response.toolResult?.nodes) {
         const filteredNodes = filterCommunityNodes(response.toolResult.nodes);
@@ -249,7 +321,7 @@ function ChatPanel() {
     } catch (err) {
       addChatMessage({
         role: 'assistant',
-        content: `Fel: ${err.message}`,
+        content: t('chat.error_prefix', { message: err.message }),
         timestamp: new Date(),
       });
     } finally {
@@ -258,7 +330,7 @@ function ChatPanel() {
   };
 
   const handleRejectProposal = async (proposal) => {
-    const msg = 'Nej, lägg inte till noden.';
+    const msg = t('chat.reject_node');
     addChatMessage({ role: 'user', content: msg, timestamp: new Date() });
     setIsProcessing(true);
 
@@ -268,7 +340,7 @@ function ChatPanel() {
         .map(m => ({ role: m.role, content: m.content }));
       conversationMessages.push({ role: 'user', content: msg });
 
-      const response = await api.sendChatMessage(conversationMessages);
+      const response = await api.sendChatMessage(conversationMessages, null, { federationDepth, expertAgentId: activeExperts.length > 0 ? activeExperts[activeExperts.length - 1] : undefined });
       addChatMessage({
         role: 'assistant',
         content: response.content,
@@ -282,7 +354,7 @@ function ChatPanel() {
   };
 
   const handleConfirmDelete = async (deleteConfirmation) => {
-    const msg = 'Ja, ta bort noderna.';
+    const msg = t('chat.confirm_delete');
     addChatMessage({ role: 'user', content: msg, timestamp: new Date() });
     setIsProcessing(true);
 
@@ -292,7 +364,7 @@ function ChatPanel() {
         .map(m => ({ role: m.role, content: m.content }));
       conversationMessages.push({ role: 'user', content: msg });
 
-      const response = await api.sendChatMessage(conversationMessages);
+      const response = await api.sendChatMessage(conversationMessages, null, { federationDepth, expertAgentId: activeExperts.length > 0 ? activeExperts[activeExperts.length - 1] : undefined });
 
       if (deleteConfirmation.node_ids) {
         const deletedIds = new Set(deleteConfirmation.node_ids);
@@ -310,7 +382,7 @@ function ChatPanel() {
     } catch (err) {
       addChatMessage({
         role: 'assistant',
-        content: `Fel: ${err.message}`,
+        content: t('chat.error_prefix', { message: err.message }),
         timestamp: new Date(),
       });
     } finally {
@@ -321,15 +393,73 @@ function ChatPanel() {
   const handleCancelDelete = () => {
     addChatMessage({
       role: 'assistant',
-      content: 'Borttagning avbruten.',
+      content: t('chat.delete_cancelled'),
       timestamp: new Date(),
     });
+  };
+
+  // Summarize selected nodes by type for display
+  const selectionSummary = useMemo(() => {
+    if (!selectedGraphNodes || selectedGraphNodes.length === 0) return null;
+    const byType = {};
+    for (const node of selectedGraphNodes) {
+      const type = node.type || node.nodeType || 'Unknown';
+      if (!byType[type]) byType[type] = [];
+      byType[type].push(node);
+    }
+    return {
+      total: selectedGraphNodes.length,
+      byType,
+      types: Object.entries(byType).map(([type, nodes]) => ({
+        type,
+        count: nodes.length,
+        color: getNodeColor(type),
+        names: nodes.map(n => n.name || n.label || '?').slice(0, 3),
+      })),
+    };
+  }, [selectedGraphNodes]);
+
+  // Build context string for selected nodes to send to LLM
+  const buildSelectionContext = () => {
+    if (!selectedGraphNodes || selectedGraphNodes.length === 0) return '';
+
+    let context = '\n\n[Selected nodes in the visualization:]\n';
+    let charCount = context.length;
+
+    for (const node of selectedGraphNodes) {
+      const type = node.type || node.nodeType || 'Unknown';
+      const name = node.name || node.label || '?';
+      const id = node.id || '';
+      const desc = node.description || '';
+      const summary = node.summary || '';
+      const tags = (node.tags || []).join(', ');
+      const identifier = node.identifier || node.metadata?.identifier || '';
+
+      let nodeStr = `- ${type}: "${name}" (ID: ${id})`;
+      if (summary) nodeStr += `\n  Summary: ${summary}`;
+      if (desc) nodeStr += `\n  Description: ${desc}`;
+      if (tags) nodeStr += `\n  Tags: ${tags}`;
+      if (identifier) nodeStr += `\n  Identifier/URL: ${identifier}`;
+      nodeStr += '\n';
+
+      if (charCount + nodeStr.length > MAX_SELECTION_CONTEXT_CHARS) {
+        const remaining = selectedGraphNodes.length - selectedGraphNodes.indexOf(node);
+        context += `\n(... and ${remaining} more selected nodes, truncated for brevity. Use get_node_details with the IDs above to get more information.)\n`;
+        break;
+      }
+
+      context += nodeStr;
+      charCount += nodeStr.length;
+    }
+
+    return context;
   };
 
   const formatTime = (timestamp) => {
     if (!timestamp) return '';
     const date = new Date(timestamp);
-    return date.toLocaleTimeString('sv-SE', { hour: '2-digit', minute: '2-digit' });
+    const locale = language === 'sv' ? 'sv-SE' : 'en-US';
+    return date.toLocaleTimeString(locale, { hour: '2-digit', minute: '2-digit' });
   };
 
   // Minimized state
@@ -344,11 +474,16 @@ function ChatPanel() {
 
   // Expanded state
   return (
-    <div className="chat-panel-floating">
+    <div className={`chat-panel-floating${!showMinimap ? ' minimap-hidden' : ''}`} id="guide-target-chat">
       <div className="chat-header">
         <div className="chat-header-left" onClick={toggleChatPanel} style={{ cursor: 'pointer' }}>
           <ChatDotsFill size={16} />
           <h3>Graph assistant</h3>
+          {effectiveMaxDepth > 1 && (
+            <span className="chat-depth-indicator" title={t('federation.depth_indicator_tooltip')}>
+              {t('federation.depth_indicator', { current: federationDepth, max: effectiveMaxDepth })}
+            </span>
+          )}
         </div>
         <button className="chat-collapse-button" onClick={toggleChatPanel} title="Minimize">
           <ChevronRight size={18} />
@@ -356,10 +491,22 @@ function ChatPanel() {
       </div>
 
       <div className="chat-messages">
-        {chatMessages.map((msg, idx) => (
-          <div key={msg.id || idx} className={`chat-message ${msg.role}`}>
+        {chatMessages.filter(m => !m.expertJoinNotification).map((msg, idx) => (
+          <div
+            key={msg.id || idx}
+            className={`chat-message ${msg.role}${msg.role === 'expert' ? ' expert-message' : ''}${msg.isSystemEvent ? ' expert-system-event' : ''}`}
+            style={msg.role === 'expert' ? { '--expert-color': msg.expertColor || '#9CA3AF' } : undefined}
+          >
+            {msg.role === 'expert' && !msg.isSystemEvent && (
+              <div className="expert-message-header">
+                <Robot size={11} style={{ color: msg.expertColor }} />
+                <span className="expert-message-name" style={{ color: msg.expertColor }}>{msg.expertName}</span>
+              </div>
+            )}
             <div className="message-content">
-              {msg.content}
+              {(msg.role === 'assistant' || msg.role === 'expert') ? (
+                <ReactMarkdown remarkPlugins={[remarkGfm]}>{msg.content}</ReactMarkdown>
+              ) : msg.content}
 
               {msg.role === 'user' && idx === chatMessages.length - 1 && isProcessing && (
                 <div className="message-loading">
@@ -368,17 +515,17 @@ function ChatPanel() {
                     <span></span>
                     <span></span>
                   </div>
-                  <span className="loading-text">Bearbetar...</span>
+                  <span className="loading-text">{t('chat.processing')}</span>
                 </div>
               )}
 
               {msg.proposal && (
                 <div className="proposal-card">
-                  <h4>Föreslaget tillägg:</h4>
+                  <h4>{t('proposal.title')}</h4>
                   <div className="proposal-details">
-                    <p><strong>Typ:</strong> {msg.proposal.node.type}</p>
-                    <p><strong>Namn:</strong> {msg.proposal.node.name}</p>
-                    <p><strong>Beskrivning:</strong> {msg.proposal.node.description}</p>
+                    <p><strong>{t('proposal.type')}</strong> {msg.proposal.node.type}</p>
+                    <p><strong>{t('proposal.name')}</strong> {msg.proposal.node.name}</p>
+                    <p><strong>{t('proposal.description')}</strong> {msg.proposal.node.description}</p>
                     {msg.proposal.node.communities?.length > 0 && (
                       <p><strong>Communities:</strong> {msg.proposal.node.communities.join(', ')}</p>
                     )}
@@ -386,7 +533,7 @@ function ChatPanel() {
 
                   {msg.proposal.similar_nodes?.length > 0 && (
                     <div className="similar-nodes-warning">
-                      <p><strong>Liknande noder hittades:</strong></p>
+                      <p><strong>{t('proposal.similar_found')}</strong></p>
                       <ul>
                         {msg.proposal.similar_nodes.map((sim, i) => (
                           <li key={i}>
@@ -403,14 +550,14 @@ function ChatPanel() {
                       onClick={() => handleApproveProposal(msg.proposal)}
                       disabled={isProcessing}
                     >
-                      Godkänn
+                      {t('proposal.approve')}
                     </button>
                     <button
                       className="reject-button"
                       onClick={() => handleRejectProposal(msg.proposal)}
                       disabled={isProcessing}
                     >
-                      Avvisa
+                      {t('proposal.reject')}
                     </button>
                   </div>
                 </div>
@@ -418,19 +565,19 @@ function ChatPanel() {
 
               {msg.deleteConfirmation && (
                 <div className="delete-card">
-                  <h4>Bekräfta borttagning:</h4>
+                  <h4>{t('delete_confirmation.title')}</h4>
                   <div className="proposal-details">
-                    <p><strong>Noder att ta bort:</strong></p>
+                    <p><strong>{t('delete_confirmation.nodes_to_delete')}</strong></p>
                     <ul>
                       {msg.deleteConfirmation.nodes_to_delete?.map((node, i) => (
                         <li key={i}>{node.name} ({node.type})</li>
                       ))}
                     </ul>
-                    <p><strong>Påverkade relationer:</strong> {msg.deleteConfirmation.affected_edges?.length || 0}</p>
+                    <p><strong>{t('delete_confirmation.affected_edges')}</strong> {msg.deleteConfirmation.affected_edges?.length || 0}</p>
                   </div>
 
                   <div className="similar-nodes-warning">
-                    <p><strong>Varning:</strong> Denna åtgärd kan inte ångras!</p>
+                    <p><strong>{t('delete_confirmation.warning')}</strong></p>
                   </div>
 
                   <div className="proposal-actions">
@@ -439,14 +586,14 @@ function ChatPanel() {
                       onClick={() => handleConfirmDelete(msg.deleteConfirmation)}
                       disabled={isProcessing}
                     >
-                      Bekräfta borttagning
+                      {t('delete_confirmation.confirm')}
                     </button>
                     <button
                       className="approve-button"
                       onClick={handleCancelDelete}
                       disabled={isProcessing}
                     >
-                      Avbryt
+                      {t('delete_confirmation.cancel')}
                     </button>
                   </div>
                 </div>
@@ -467,6 +614,31 @@ function ChatPanel() {
       )}
 
       <div className="chat-input-container">
+        {selectionSummary && (
+          <div className="selection-indicator">
+            <div className="selection-indicator-content">
+              <span className="selection-indicator-label">
+                {t('chat.selected_nodes', { count: selectionSummary.total })}
+              </span>
+              <div className="selection-indicator-types">
+                {selectionSummary.types.map(({ type, count, color, names }) => (
+                  <span key={type} className="selection-type-chip" title={names.join(', ')}>
+                    <span className="selection-type-dot" style={{ backgroundColor: color }} />
+                    {type} ({count})
+                  </span>
+                ))}
+              </div>
+            </div>
+            <button
+              className="selection-clear-button"
+              onClick={clearSelectedGraphNodes}
+              title={t('chat.clear_selection')}
+            >
+              <XCircleFill size={14} />
+            </button>
+          </div>
+        )}
+
         {uploadedFile && (
           <div className="file-indicator">
             <div className="file-info">
@@ -477,7 +649,7 @@ function ChatPanel() {
             <button
               className="remove-file-button"
               onClick={handleRemoveFile}
-              title="Ta bort fil"
+              title={t('chat.remove_file')}
             >
               &times;
             </button>
@@ -490,13 +662,35 @@ function ChatPanel() {
           onChange={(e) => setInputValue(e.target.value)}
           onKeyPress={handleKeyPress}
           placeholder={uploadedFile
-            ? "Beskriv vad du vill göra med dokumentet..."
-            : "Ställ en fråga eller begär en åtgärd..."}
+            ? t('chat.placeholder_with_file')
+            : selectionSummary
+              ? t('chat.placeholder_with_selection')
+              : t('chat.placeholder')}
           rows={3}
           disabled={isProcessing}
         />
 
+        {activeExperts.length > 0 && (
+          <div className="active-experts-indicator">
+            <Robot size={11} className="active-experts-icon" />
+            <span className="active-experts-label">
+              {activeExperts.map(id => {
+                const agent = availableExperts.find(a => a.id === id);
+                if (!agent) return null;
+                const name = language === 'sv' ? agent.name : (agent.name_en || agent.name);
+                return (
+                  <span key={id} className="active-expert-chip" style={{ borderColor: agent.color }}>
+                    <span className="active-expert-dot" style={{ backgroundColor: agent.color }} />
+                    {name}
+                  </span>
+                );
+              })}
+            </span>
+          </div>
+        )}
+
         <div className="button-row">
+          <ExpertAgentSelector />
           <input
             type="file"
             ref={fileInputRef}
@@ -508,16 +702,16 @@ function ChatPanel() {
             className="chat-upload-button"
             onClick={() => fileInputRef.current?.click()}
             disabled={isUploading || isProcessing}
-            title="Ladda upp dokument (PDF, Word, Text)"
+            title={t('chat.upload_tooltip')}
           >
-            {isUploading ? 'Laddar...' : 'Ladda upp'}
+            {isUploading ? t('chat.uploading') : t('chat.upload')}
           </button>
           <button
             className="chat-send-button"
             onClick={handleSend}
             disabled={(!inputValue.trim() && !uploadedFile) || isProcessing}
           >
-            {isProcessing ? 'Bearbetar...' : 'Skicka'}
+            {isProcessing ? t('chat.processing') : t('chat.send')}
           </button>
         </div>
       </div>
