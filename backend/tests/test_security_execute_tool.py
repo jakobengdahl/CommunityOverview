@@ -27,6 +27,16 @@ def authenticated_app():
     )
     return create_app(config=config)
 
+@pytest.fixture
+def auth_enabled_no_password_app():
+    """auth_enabled=True but no password configured — middleware not installed."""
+    config = AppConfig(
+        auth_enabled=True,
+        auth_password=None,
+        graph_file="test_graph_no_pw.json"
+    )
+    return create_app(config=config)
+
 def test_unauthenticated_safe_tool(unauthenticated_app):
     client = TestClient(unauthenticated_app)
     response = client.post("/execute_tool", json={
@@ -103,6 +113,20 @@ def test_authenticated_no_creds_blocked(authenticated_app):
     })
     # Should be blocked by middleware (401)
     assert response.status_code == 401
+
+def test_auth_enabled_without_password_blocks_unsafe_tools(auth_enabled_no_password_app):
+    """When auth_enabled=True but no password is set, the middleware is not installed.
+    Unsafe tools must still be blocked — the endpoint-level SAFE_TOOLS check covers this."""
+    client = TestClient(auth_enabled_no_password_app)
+    response = client.post("/execute_tool", json={
+        "tool_name": "add_nodes",
+        "arguments": {
+            "nodes": [{"id": "test-nopw", "type": "Actor", "name": "Test"}],
+            "edges": []
+        }
+    })
+    assert response.status_code == 403
+    assert "requires authentication" in response.json()["error"]
 
 
 def test_unauthenticated_get_tenant_context_safe_tool(unauthenticated_app):
