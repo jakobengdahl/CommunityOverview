@@ -1,10 +1,12 @@
 # Core Enablement Implementation Plan
 
-> **For Hermes:** Use Claude Code or another isolated coding agent to implement small slices from this plan, then perform independent review before merge.
+**Goal:** Define the first concrete implementation slices that make CommunityOverview more ready for embedded deployment and optional extensions, without introducing product-specific assumptions into the public core.
 
-**Goal:** Define the next concrete implementation slices that make CommunityOverview more ready for hosted operation and future SaaS-only extensions without leaking private roadmap details into the public core.
+**Architecture:** The core should expose generic, opt-in seams rather than hard-coded integration logic. The current priorities are to make identity, workspace scope, graph scope, and audit attribution pluggable without forcing built-in assumptions into standalone deployments, and to improve capability discovery and runtime-mode introspection so optional extension layers can integrate cleanly through public contracts.
 
-**Architecture:** The core should expose generic, opt-in seams rather than hard-coded hosted logic. The current priority is to make identity, workspace scope, graph scope, and audit attribution pluggable without forcing a built-in SaaS account system into standalone deployments.
+**Related documents:**
+- [CORE_RUNTIME_AND_EXTENSION_ENABLEMENT.md](./CORE_RUNTIME_AND_EXTENSION_ENABLEMENT.md) — broader runtime and extension enablement context
+- [PLUGIN_RUNTIME_CORE_ENABLEMENT.md](./PLUGIN_RUNTIME_CORE_ENABLEMENT.md) — detailed plugin runtime requirements (manifest parsing, scope enforcement, API versioning, hook registry, migration runner, testability, failure behavior)
 
 **Tech Stack:** Python, FastAPI, Pydantic, existing `config_loader`, `GraphService`, REST router, MCP tool registration, pytest.
 
@@ -25,13 +27,13 @@ These slices establish the public runtime and configuration seams needed before 
 
 ### Priority 1: Request actor and scope foundation
 
-**Why this comes next**
-The hosted SaaS layer will need to pass actor identity, workspace context, and graph context into the core while the standalone core must stay usable without any built-in hosted account system.
+**Why this comes first**
+External or embedding deployment layers will need to pass actor identity, workspace context, and graph context into the core, while the standalone core must remain usable without any built-in account system. Establishing this generic foundation enables all subsequent authorization and attribution work.
 
 **Target outcome**
 - the core can expose a generic request actor context
 - the core can expose generic workspace and graph scope context
-- all outputs are safe for public introspection and contain no billing, account, or private SaaS logic
+- all outputs are safe for public introspection and contain no service-specific or private logic
 - standalone defaults remain no-op and permissive
 
 **Scope**
@@ -53,19 +55,20 @@ The hosted SaaS layer will need to pass actor identity, workspace context, and g
 - do not add a built-in user directory
 - do not make authentication mandatory for standalone mode
 - do not expose secrets, tokens, or private account metadata
-- keep the model generic enough for personal workspaces, team workspaces, and graph-scoped access later
+- keep the model generic enough for personal workspaces, team workspaces, and graph-scoped access
+- generic names and descriptions only; no distribution-specific identifiers in public defaults
 
 ---
 
 ### Priority 2: Authorization hook seam
 
 **Why this follows actor and scope**
-Once actor and scope are explicit, the next step is to define where an external service layer can narrow graph access without baking SaaS policy into the core.
+Once actor and scope are explicit, the next step is to define where an external or embedding layer can narrow graph access without baking proprietary policy into the core.
 
 **Target outcome**
 - the core can call a generic authorization hook for graph access decisions
 - default behavior remains permissive in standalone mode
-- hosted deployments can later replace or augment the default behavior
+- external deployment layers can replace or augment the default behavior
 
 **Suggested first slice**
 - define a small authorization interface or evaluation seam
@@ -77,7 +80,7 @@ Once actor and scope are explicit, the next step is to define where an external 
 ### Priority 3: Actor attribution for writes and events
 
 **Why this matters**
-Hosted service layers will need audit-friendly mutation attribution even before a full audit product exists.
+Embedding systems and extended deployment layers need audit-friendly mutation attribution. The public core should prepare for this generically without requiring a full audit subsystem.
 
 **Target outcome**
 - write operations can carry actor metadata in a generic form
@@ -93,8 +96,8 @@ Hosted service layers will need audit-friendly mutation attribution even before 
 
 ### Priority 4: Operability hooks
 
-**Why this remains important**
-Hosted operation depends on reliable health, restore boundaries, and machine-readable diagnostics.
+**Why this matters**
+Reliable health signals, restore boundaries, and machine-readable diagnostics matter across all deployment types.
 
 **Target outcome**
 - clearer readiness versus liveness behavior
@@ -118,11 +121,27 @@ Hosted operation depends on reliable health, restore boundaries, and machine-rea
 
 ---
 
+## Public boundary
+
+This implementation plan covers only generic core infrastructure. It does not include:
+- distribution strategy or packaging policy
+- business-specific review or approval policy
+- revenue or business-system integration
+- implementation details of any external system that embeds or extends the core
+
+Those concerns belong outside the public core repository. The slices here create the seams; external layers may build on those seams, but their logic must not flow back into the public core.
+
+---
+
 ## Success criteria
 
 This plan is succeeding when:
-- standalone deployments still work with no user directory or built-in auth requirement
-- hosted integrations can pass actor, workspace, and graph context through stable contracts
+- optional capabilities can be discovered through public, generic contracts
+- runtime mode is explicit instead of implicit
+- standalone deployments still work with no built-in user directory or mandatory auth requirement
+- external deployment layers can pass actor, workspace, and graph context through stable contracts
 - future authorization logic can attach without forking core
 - mutation flows can later emit audit-friendly metadata without invasive rewrites
-- public artifacts remain free of private SaaS roadmap detail
+- extension integrations can attach through stable APIs rather than patches
+- public artifacts remain free of private roadmap or product-specific detail
+- the plugin runtime requirements in [PLUGIN_RUNTIME_CORE_ENABLEMENT.md](./PLUGIN_RUNTIME_CORE_ENABLEMENT.md) can be implemented incrementally on top of the foundation built here
