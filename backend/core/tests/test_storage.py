@@ -49,6 +49,7 @@ def storage_with_data(temp_storage):
     ]
 
     temp_storage.add_nodes(nodes, edges)
+    temp_storage.flush()  # Wait for async save so tests that reload from disk see all data
     return temp_storage
 
 
@@ -640,6 +641,7 @@ class TestGraphStoragePersistence:
         assert storage.get_graph_name() == "in-memory-graph"
 
         storage.add_nodes([Node(id="persist-backend-2", type=NodeType.ACTOR, name="Saved Node")], [])
+        storage.flush()  # Wait for async save before reading backend state
 
         assert backend.save_calls >= 1
         persisted_ids = {node["id"] for node in backend.data["nodes"]}
@@ -651,6 +653,9 @@ class TestGraphStoragePersistence:
         # Add data
         node = Node(id="persist-1", type=NodeType.ACTOR, name="Persistent Node")
         temp_storage.add_nodes([node], [])
+
+        # Flush pending async saves before reloading from disk
+        temp_storage.flush()
 
         # Get path before closing
         json_path = str(temp_storage.json_path)
@@ -760,6 +765,9 @@ class TestGraphStorageConcurrency:
         for node_id in added_ids:
             assert temp_storage.get_node(node_id) is not None, \
                 f"Node {node_id} was added but not found in storage"
+
+        # Flush all pending async saves before reloading from disk
+        temp_storage.flush()
 
         # Verify persistence - reload and check
         json_path = str(temp_storage.json_path)
@@ -930,8 +938,9 @@ class TestGraphStorageConcurrency:
         def save_worker(thread_id):
             try:
                 for i in range(saves_per_thread):
-                    # Force a save
-                    temp_storage.save()
+                    # Force a save and wait for the background write to complete
+                    # before reading the file — save() is async.
+                    temp_storage.save().result()
 
                     # Immediately try to read and parse the JSON file
                     try:
@@ -983,9 +992,10 @@ class TestGraphStorageConcurrency:
         errors = []
         lock = threading.Lock()
 
-        # Add initial data
+        # Add initial data and flush so the file is on disk before reader threads start
         node = Node(id="reload-test", type=NodeType.ACTOR, name="Reload Test")
         temp_storage.add_nodes([node], [])
+        temp_storage.flush()
 
         def writer_thread(thread_id):
             try:

@@ -18,6 +18,7 @@ Event System:
 """
 
 import threading
+from concurrent.futures import Future, ThreadPoolExecutor
 from typing import List, Dict, Optional, Any, TYPE_CHECKING, Callable
 from datetime import datetime
 import networkx as nx
@@ -74,6 +75,10 @@ class GraphStorage:
         # Thread lock for in-memory data structure protection
         # RLock allows same thread to acquire lock multiple times (reentrant)
         self._lock = threading.RLock()
+
+        # Executor for background I/O operations (saving to disk)
+        # Using max_workers=1 to ensure sequential writes
+        self._io_executor = ThreadPoolExecutor(max_workers=1)
 
         # We initialize VectorStore without a storage path as it now holds state in memory
         # and relies on GraphStorage for persistence via graph.json
@@ -196,13 +201,16 @@ class GraphStorage:
             self._event_dispatcher.set_agent_delivery_callback(callback)
 
     def shutdown_events(self) -> None:
-        """Shutdown the event system gracefully."""
+        """Shutdown the event system and I/O executor gracefully."""
         if self._delivery_worker:
             self._delivery_worker.stop(wait=True)
             self._delivery_worker = None
 
         self._event_dispatcher = None
         self._events_enabled = False
+
+        # Shut down I/O executor and wait for pending saves
+        self._io_executor.shutdown(wait=True)
 
     def _emit_event(
         self,
@@ -342,7 +350,9 @@ class GraphStorage:
         with self._lock:
             if not self._persistence_backend.exists():
                 print(f"No graph file found at {self.json_path}, creating new empty graph")
-                self.save()
+                # Wait for the initial file write to complete so callers can
+                # immediately open the file (e.g. creating a second storage instance).
+                self.save().result()
                 return
 
             try:
@@ -398,9 +408,14 @@ class GraphStorage:
                 print(f"Error loading graph: {e}")
                 raise
 
-    def save(self) -> None:
+    def save(self) -> "Future[None]":
         """
         Save graph through the configured persistence backend.
+
+        Captures graph state while holding the lock, then offloads the actual
+        file I/O to a background thread to prevent blocking the event loop.
+        Returns the Future representing the background write — callers that
+        must know when the write completes can call .result() on it.
 
         Thread-safe: Uses lock for reading in-memory data.
         """
@@ -415,10 +430,41 @@ class GraphStorage:
                     'last_updated': datetime.utcnow().isoformat()
                 }
             }
+            node_count = len(self.nodes)
+            edge_count = len(self.edges)
 
+        # Offload blocking I/O to background thread to avoid blocking event loop.
+        # Returns the Future so callers that must wait (e.g. load()) can call .result().
+        return self._io_executor.submit(self._do_save_to_disk, data, node_count, edge_count)
+
+    def _do_save_to_disk(self, data: Dict[str, Any], node_count: int, edge_count: int) -> None:
+        """
+        Internal method: delegate serialized graph data to the persistence backend.
+        Runs in the background executor so file I/O doesn't block the event loop.
+
+        Exceptions are intentionally re-raised so the ThreadPoolExecutor stores
+        them in the returned Future. Callers that call .result() (e.g. load())
+        will then receive the exception rather than a silent no-op.
+        """
+        try:
             self._persistence_backend.save_graph_data(data)
-            print(f"Saved {len(self.nodes)} nodes and {len(self.edges)} edges to {self.json_path}")
+            print(f"Saved {node_count} nodes and {edge_count} edges to {self.json_path}")
+        except Exception as e:
+            print(f"Error saving graph to disk: {e}")
+            raise
 
+    def flush(self) -> None:
+        """
+        Wait for any pending background save operations to complete.
+
+        Useful in tests and in code that reloads from disk immediately
+        after mutating the graph.
+
+        Correctness relies on max_workers=1 (FIFO task ordering). The no-op
+        submitted here will only run after all previously submitted saves.
+        """
+        # Submit a no-op sentinel and block until it runs — drains the queue.
+        self._io_executor.submit(lambda: None).result()
 
     def get_graph_name(self) -> str:
         """Return configured graph name from graph metadata."""
