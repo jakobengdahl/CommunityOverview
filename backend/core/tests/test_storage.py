@@ -584,6 +584,27 @@ class TestGraphStorageSubtypes:
         assert len(results) == 1
         assert results[0].id == "search-sub-1"
 
+    def test_get_stats_with_string_typed_nodes_does_not_crash(self, temp_storage):
+        """get_stats must not crash when nodes have string types (e.g. EventSubscription).
+
+        Config-defined node types such as EventSubscription and Agent are stored
+        as plain strings rather than NodeType enum members.  Before the fix,
+        calling node.type.value on a string raised AttributeError.
+        """
+        nodes = [
+            Node(id="sub-1", type="EventSubscription", name="My Subscription"),
+            Node(id="agent-1", type="Agent", name="My Agent"),
+            Node(id="actor-1", type=NodeType.ACTOR, name="An Actor"),
+        ]
+        temp_storage.add_nodes(nodes, [])
+
+        stats = temp_storage.get_stats()
+
+        assert stats.total_nodes == 3
+        assert stats.nodes_by_type.get("EventSubscription") == 1
+        assert stats.nodes_by_type.get("Agent") == 1
+        assert stats.nodes_by_type.get("Actor") == 1
+
 
 class TestGraphStoragePersistence:
     """Tests for data persistence"""

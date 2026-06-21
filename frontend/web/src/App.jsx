@@ -458,7 +458,7 @@ function App() {
       console.error('Error creating subscription:', error);
       showNotification('error', t('notifications.subscription_error'));
     }
-  }, [addNodesToVisualization, showNotification]);
+  }, [addNodesToVisualization, showNotification, t]);
 
   // Save agent nodes (create or update)
   const handleSaveAgent = useCallback(async (data) => {
@@ -557,7 +557,7 @@ function App() {
         console.warn(`[handleContextMenuAction] Unhandled action: "${actionName}". Wire it up in App.jsx.`);
         showNotification('info', `Action: ${actionName}`);
     }
-  }, [showNotification]);
+  }, [addNodesToVisualization, showNotification]);
 
   // Toolbar save view: signal GraphCanvas to collect positions and trigger dialog
   const handleToolbarSaveView = useCallback(() => {
