@@ -4,11 +4,20 @@ import * as api from '../services/api';
 import SubtypeInput from './SubtypeInput';
 import './CreateNodeDialog.css';
 
-// Fields always rendered explicitly — never shown as extra schema fields
-const BASE_FIELDS = new Set(['name', 'description', 'summary', 'tags', 'subtypes', 'type', 'id', 'metadata']);
+// Fields always shown via dedicated form controls — never repeated as extra fields
+const BASE_FIELDS = new Set(['name', 'description', 'summary', 'tags', 'subtypes', 'metadata']);
+
+const FIELD_LABELS = {
+  start_date: 'Start date',
+  end_date: 'End date',
+  effective_date: 'Effective date',
+  target_date: 'Target date',
+  identifier: 'Resource link (URL)',
+  repo: 'Repository URL',
+};
 
 function formatFieldLabel(field) {
-  return field.replace(/_/g, ' ').replace(/\b\w/g, c => c.toUpperCase());
+  return FIELD_LABELS[field] || field.replace(/_/g, ' ').replace(/\b\w/g, c => c.toUpperCase());
 }
 
 function CreateNodeDialog({ nodeType, onClose, onSave }) {

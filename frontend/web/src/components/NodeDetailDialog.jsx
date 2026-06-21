@@ -3,13 +3,48 @@ import useGraphStore from '../store/graphStore';
 import { useI18n } from '../i18n';
 import './NodeDetailDialog.css';
 
+const BASE_FIELDS = new Set(['name', 'description', 'summary', 'tags', 'subtypes', 'metadata', 'identifier']);
+
+const FIELD_LABELS = {
+  identifier: 'Resource link (URL)',
+  repo: 'Repository URL',
+  start_date: 'Start date',
+  end_date: 'End date',
+  effective_date: 'Effective date',
+  target_date: 'Target date',
+};
+
+function formatFieldLabel(field) {
+  return FIELD_LABELS[field] || field.replace(/_/g, ' ').replace(/\b\w/g, c => c.toUpperCase());
+}
+
+function asUrl(value) {
+  if (typeof value !== 'string') return null;
+  if (value.startsWith('http://') || value.startsWith('https://')) return value;
+  if (value.startsWith('www.')) return `https://${value}`;
+  return null;
+}
+
 function NodeDetailDialog({ node, onClose, onEdit }) {
-  const { getNodeColor } = useGraphStore();
+  const { getNodeColor, schema } = useGraphStore();
   const { t } = useI18n();
 
   const data = node?.data || {};
   const nodeType = data.type || data.nodeType || '';
   const color = getNodeColor(nodeType);
+
+  // Schema-defined extra fields for this node type (stored in metadata by backend)
+  const schemaFields = schema?.node_types?.[nodeType]?.fields || [];
+  const extraFieldNames = schemaFields.filter(f => !BASE_FIELDS.has(f));
+  const extraFields = extraFieldNames
+    .map(f => ({ key: f, value: data.metadata?.[f] ?? data[f] ?? null }))
+    .filter(({ value }) => value !== null && value !== '');
+
+  // Keys from metadata that are NOT schema extra fields (raw system metadata)
+  const extraFieldSet = new Set(extraFieldNames);
+  const rawMetadataEntries = Object.entries(data.metadata || {})
+    .filter(([k]) => !extraFieldSet.has(k) &&
+      !['identifier', 'node_ids', 'positions', 'edge_ids', 'edges', 'groups'].includes(k));
 
   // Collect links from metadata or identifier field
   const identifier = data.identifier || data.metadata?.identifier || '';
@@ -94,13 +129,27 @@ function NodeDetailDialog({ node, onClose, onEdit }) {
             </div>
           )}
 
-          {data.metadata && Object.keys(data.metadata).length > 0 && (
+          {extraFields.map(({ key, value }) => {
+            const url = asUrl(value);
+            return (
+              <div key={key} className="node-detail-section">
+                <label>{formatFieldLabel(key)}</label>
+                {url ? (
+                  <a href={url} target="_blank" rel="noopener noreferrer" className="node-detail-link">
+                    {value}
+                  </a>
+                ) : (
+                  <p className="node-detail-text">{String(value)}</p>
+                )}
+              </div>
+            );
+          })}
+
+          {rawMetadataEntries.length > 0 && (
             <div className="node-detail-section">
               <label>{t('detail.metadata')}</label>
               <div className="node-detail-metadata">
-                {Object.entries(data.metadata)
-                  .filter(([key]) => key !== 'identifier' && key !== 'node_ids' && key !== 'positions' && key !== 'edge_ids' && key !== 'edges' && key !== 'groups')
-                  .map(([key, value]) => (
+                {rawMetadataEntries.map(([key, value]) => (
                     <div key={key} className="node-detail-meta-item">
                       <span className="node-detail-meta-key">{key}:</span>
                       <span className="node-detail-meta-value">

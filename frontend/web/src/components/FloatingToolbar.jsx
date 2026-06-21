@@ -23,6 +23,12 @@ import {
   Diagram3Fill,
   StarFill,
   QuestionCircleFill,
+  CardChecklist,
+  InputCursorText,
+  ListCheck,
+  LightbulbFill,
+  GearFill,
+  CollectionFill,
 } from 'react-bootstrap-icons';
 import useGraphStore from '../store/graphStore';
 import { useI18n } from '../i18n';
@@ -53,6 +59,12 @@ const ICON_REGISTRY = {
   Diagram3Fill,
   StarFill,
   QuestionCircleFill,
+  CardChecklist,
+  InputCursorText,
+  ListCheck,
+  LightbulbFill,
+  GearFill,
+  CollectionFill,
 };
 
 // Legacy fallback: maps node type name -> icon name (used when schema has no icon field)

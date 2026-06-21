@@ -34,6 +34,13 @@ class ChatRequest(BaseModel):
     provider: Optional[str] = Field(None, description="Optional provider: 'claude' or 'openai'")
     federation_depth: Optional[int] = Field(None, ge=1, le=9, description="Optional federated search depth")
     expert_agent_id: Optional[str] = Field(None, description="Optional expert agent ID — injects the agent's persona and skills into the system prompt")
+    skills_context: Optional[str] = Field(
+        None,
+        description=(
+            "Temporary skill instructions from Skill nodes selected in the visualization"
+            " — injected as extra system context for this request only"
+        ),
+    )
 
 
 class SimpleChatRequest(BaseModel):
@@ -122,6 +129,7 @@ def create_ui_router(
                 provider=request.provider,
                 federation_depth=request.federation_depth,
                 expert_agent_id=request.expert_agent_id,
+                skills_context=request.skills_context,
             )
 
             return ChatResponse(
