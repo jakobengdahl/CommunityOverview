@@ -5,6 +5,25 @@ It is safe to commit and expose publicly — it contains no secrets.
 
 ---
 
+## Feature Planning & Routing
+
+When Jakob wants to think through a feature, discuss it naturally — he does not
+need to name files, systems, or workflows explicitly.
+
+**Routing rules (apply silently):**
+
+- **Belongs in this repo** — feature clearly fits the public open-source core →
+  plan and implement here.
+- **Broader scope** — feature spans more than this repo → keep changes in this
+  repo limited to what genuinely belongs here; do not make assumptions about
+  systems or context beyond the public codebase.
+- **Follow-up execution slices for this repo** → scope work to what belongs here;
+  do not require Jakob to cite external file paths or document names.
+
+All repo-managed content (docs, comments, PR bodies) remains in English.
+
+---
+
 ## Branch & Environment Strategy
 
 ```
