@@ -22,6 +22,10 @@ def temp_storage():
         embeddings_path = os.path.join(tmpdir, "test_embeddings.pkl")
         storage = GraphStorage(json_path=json_path, embeddings_path=embeddings_path)
         yield storage
+        # Drain the background ThreadPoolExecutor before the TemporaryDirectory
+        # context manager removes tmpdir — otherwise the executor's in-flight
+        # write of test_graph.json races with directory deletion (OSError ENOTEMPTY).
+        storage.flush()
 
 
 @pytest.fixture
