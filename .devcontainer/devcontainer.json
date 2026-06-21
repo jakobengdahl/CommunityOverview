@@ -19,11 +19,12 @@
         "editor.defaultFormatter": "esbenp.prettier-vscode",
         "[python]": {
           "editor.defaultFormatter": "ms-python.black-formatter"
-        }
+        },
+        "python.terminal.activateEnvironment": false
       }
     }
   },
-  "forwardPorts": [5173, 8000],
+  "forwardPorts": [5173, 8000, 8001],
   "portsAttributes": {
     "5173": {
       "label": "Frontend Dev Server",
@@ -31,6 +32,10 @@
     },
     "8000": {
       "label": "Backend Server",
+      "onAutoForward": "notify"
+    },
+    "8001": {
+      "label": "Federated Graph B",
       "onAutoForward": "notify"
     }
   },

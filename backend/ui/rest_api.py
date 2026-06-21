@@ -32,6 +32,8 @@ class ChatRequest(BaseModel):
     messages: List[ChatMessage] = Field(..., description="Conversation history")
     api_key: Optional[str] = Field(None, description="Optional API key override")
     provider: Optional[str] = Field(None, description="Optional provider: 'claude' or 'openai'")
+    federation_depth: Optional[int] = Field(None, ge=1, le=9, description="Optional federated search depth")
+    expert_agent_id: Optional[str] = Field(None, description="Optional expert agent ID — injects the agent's persona and skills into the system prompt")
 
 
 class SimpleChatRequest(BaseModel):
@@ -40,6 +42,8 @@ class SimpleChatRequest(BaseModel):
     conversation_id: Optional[str] = Field(None, description="Optional conversation ID for context")
     api_key: Optional[str] = Field(None, description="Optional API key override")
     provider: Optional[str] = Field(None, description="Optional provider: 'claude' or 'openai'")
+    federation_depth: Optional[int] = Field(None, ge=1, le=9, description="Optional federated search depth")
+    expert_agent_id: Optional[str] = Field(None, description="Optional expert agent ID")
 
 
 class ChatResponse(BaseModel):
@@ -67,6 +71,7 @@ class ProposeNodesRequest(BaseModel):
     communities: Optional[List[str]] = Field(None, description="Optional communities to associate with nodes")
     api_key: Optional[str] = Field(None, description="Optional API key override")
     provider: Optional[str] = Field(None, description="Optional provider: 'claude' or 'openai'")
+    federation_depth: Optional[int] = Field(None, ge=1, le=9, description="Optional federated search depth")
 
 
 # ==================== Router Factory ====================
@@ -114,7 +119,9 @@ def create_ui_router(
             result = chat_service.process_message(
                 messages=messages,
                 api_key=request.api_key,
-                provider=request.provider
+                provider=request.provider,
+                federation_depth=request.federation_depth,
+                expert_agent_id=request.expert_agent_id,
             )
 
             return ChatResponse(
@@ -143,7 +150,9 @@ def create_ui_router(
             result = chat_service.process_chat_request(
                 user_message=request.message,
                 api_key=request.api_key,
-                provider=request.provider
+                provider=request.provider,
+                federation_depth=request.federation_depth,
+                expert_agent_id=request.expert_agent_id,
             )
 
             return ChatResponse(
@@ -179,7 +188,8 @@ def create_ui_router(
                 node_type=request.node_type,
                 communities=request.communities,
                 api_key=request.api_key,
-                provider=request.provider
+                provider=request.provider,
+                federation_depth=request.federation_depth
             )
             return result
         except Exception as e:
@@ -289,6 +299,24 @@ def create_ui_router(
 
         except Exception as e:
             raise HTTPException(status_code=500, detail=str(e))
+
+    # ==================== Capabilities Endpoint ====================
+
+    @router.get("/capabilities")
+    async def get_ui_capabilities() -> Dict[str, Any]:
+        """
+        Return UI feature availability based on runtime configuration.
+
+        Called by the frontend during startup to decide which features to show.
+        Currently reports LLM availability so the chat panel can be hidden when
+        no API keys are configured.
+        """
+        from backend.llm_providers import get_llm_availability
+        llm = get_llm_availability()
+        return {
+            "llm_available": llm["available"],
+            "llm_provider": llm["provider"],
+        }
 
     # ==================== Info Endpoints ====================
 

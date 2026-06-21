@@ -152,3 +152,17 @@
   background: #444;
   border-radius: 3px;
 }
+
+
+.floating-search-depth-indicator {
+  margin-top: 6px;
+  font-size: 11px;
+  color: #aab4ff;
+  background: rgba(20, 20, 28, 0.85);
+  border: 1px solid rgba(129, 140, 248, 0.35);
+  border-radius: 999px;
+  padding: 3px 8px;
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+}

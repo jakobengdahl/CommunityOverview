@@ -17,22 +17,19 @@ Event System:
 - Event context (origin, session_id) enables loop prevention
 """
 
-import json
-import os
-import sys
-import tempfile
 import threading
 from concurrent.futures import ThreadPoolExecutor
 from typing import List, Dict, Optional, Any, TYPE_CHECKING, Callable
 from datetime import datetime
 import networkx as nx
 from pathlib import Path
-import Levenshtein
+from rapidfuzz.distance import Levenshtein
 
 from .models import (
     Node, Edge, NodeType, RelationshipType,
-    SimilarNode, GraphStats, AddNodesResult, DeleteNodesResult
+    SimilarNode, GraphStats, AddNodesResult, DeleteNodesResult, DeleteEdgesResult
 )
+from .storage_backends import FileGraphPersistenceBackend, GraphPersistenceBackend
 from .vector_store import VectorStore
 
 # Event system imports
@@ -45,29 +42,6 @@ if TYPE_CHECKING:
     from .events.delivery import DeliveryWorker
 
 
-# Cross-platform file locking
-if sys.platform == 'win32':
-    import msvcrt
-
-    def _lock_file(f, exclusive=True):
-        """Acquire file lock on Windows."""
-        msvcrt.locking(f.fileno(), msvcrt.LK_NBLCK if exclusive else msvcrt.LK_LOCK, 1)
-
-    def _unlock_file(f):
-        """Release file lock on Windows."""
-        msvcrt.locking(f.fileno(), msvcrt.LK_UNLCK, 1)
-else:
-    import fcntl
-
-    def _lock_file(f, exclusive=True):
-        """Acquire file lock on Unix."""
-        fcntl.flock(f, fcntl.LOCK_EX if exclusive else fcntl.LOCK_SH)
-
-    def _unlock_file(f):
-        """Release file lock on Unix."""
-        fcntl.flock(f, fcntl.LOCK_UN)
-
-
 class GraphStorage:
     """
     Manages graph storage with NetworkX + JSON persistence.
@@ -78,16 +52,25 @@ class GraphStorage:
     - Writes are atomic (temp file + rename) to prevent corruption
     """
 
-    def __init__(self, json_path: str = "graph.json", embeddings_path: str = None):
+    def __init__(
+        self,
+        json_path: str = "graph.json",
+        embeddings_path: str = None,
+        persistence_backend: Optional[GraphPersistenceBackend] = None,
+    ):
         """
         Initialize GraphStorage.
 
         Args:
-            json_path: Path to the JSON file for graph persistence
+            json_path: Path to the JSON file for graph persistence when using the
+                default file-backed persistence backend.
             embeddings_path: Path to the embeddings pickle file (Legacy/Deprecated).
                            New implementation stores embeddings in graph.json directly.
+            persistence_backend: Optional persistence backend adapter. Defaults to
+                the file-backed JSON backend to preserve standalone behavior.
         """
-        self.json_path = Path(json_path)
+        self._persistence_backend = persistence_backend or FileGraphPersistenceBackend(json_path)
+        self.json_path = getattr(self._persistence_backend, "json_path", Path(json_path))
 
         # Thread lock for in-memory data structure protection
         # RLock allows same thread to acquire lock multiple times (reentrant)
@@ -106,6 +89,18 @@ class GraphStorage:
         self.nodes: Dict[str, Node] = {}  # node_id -> Node
         self.edges: Dict[str, Edge] = {}  # edge_id -> Edge
 
+        # Cache for searchable text to speed up search_nodes
+        self._searchable_text_cache: Dict[str, str] = {}
+
+        # Cache: node_type_key -> "typeName label1 label2 ..." (lowercased)
+        self._type_searchable_text: Dict[str, str] = {}
+        self._build_type_searchable_text()
+
+        self.graph_metadata: Dict[str, Any] = {
+            "version": "1.0",
+            "graph_name": self._default_graph_name(),
+        }
+
         # Event system (initialized lazily via setup_events())
         self._event_dispatcher: Optional["EventDispatcher"] = None
         self._delivery_worker: Optional["DeliveryWorker"] = None
@@ -113,6 +108,30 @@ class GraphStorage:
         self._system_listeners: List[Callable[[Event], None]] = []
 
         self.load()
+
+    def _default_graph_name(self) -> str:
+        """Return the backend-specific default graph name."""
+        return self._persistence_backend.default_graph_name()
+
+    def _build_type_searchable_text(self) -> None:
+        """Build a lookup of node type -> searchable text including localized labels."""
+        try:
+            from backend.config_loader import get_schema
+            schema = get_schema()
+            for type_name, type_config in schema.get("node_types", {}).items():
+                labels = type_config.get("labels", {})
+                label_values = " ".join(labels.values()) if labels else ""
+                self._type_searchable_text[type_name] = f"{type_name} {label_values}".lower().strip()
+        except Exception:
+            # Config not available; type matching will use type name only
+            pass
+
+    def _build_searchable_text(self, node: "Node") -> str:
+        """Build searchable text for a node, including type name and localized labels."""
+        tags_text = " ".join(node.tags) if hasattr(node, 'tags') and node.tags else ""
+        subtypes_text = " ".join(node.subtypes) if hasattr(node, 'subtypes') and node.subtypes else ""
+        type_text = self._type_searchable_text.get(str(node.type), str(node.type).lower())
+        return f"{node.name} {node.description} {node.summary} {tags_text} {subtypes_text} {type_text}".lower()
 
     def add_system_listener(self, listener: Callable[["Event"], None]) -> None:
         """
@@ -256,37 +275,116 @@ class GraphStorage:
         except Exception as e:
             print(f"Warning: Failed to dispatch event: {e}")
 
+
+    def emit_federated_node_event(
+        self,
+        operation: str,
+        node_before: Optional[Node] = None,
+        node_after: Optional[Node] = None,
+        event_origin: str = "federation-sync",
+    ) -> None:
+        """Emit an event for federated cache changes so subscriptions can react."""
+        operation_map = {
+            "create": EventType.NODE_CREATE,
+            "update": EventType.NODE_UPDATE,
+            "delete": EventType.NODE_DELETE,
+        }
+        event_type = operation_map.get(operation)
+        if event_type is None:
+            return
+
+        entity_node = node_after or node_before
+        if entity_node is None:
+            return
+
+        context = EventContext(event_origin=event_origin)
+        self._emit_event(
+            event_type=event_type,
+            entity_kind=EntityKind.NODE,
+            entity_id=entity_node.id,
+            entity_type=entity_node.type_str,
+            before=node_before.to_dict() if node_before else None,
+            after=node_after.to_dict() if node_after else None,
+            context=context,
+        )
+
+
+    def emit_federated_edge_event(
+        self,
+        operation: str,
+        edge_before: Optional[Edge] = None,
+        edge_after: Optional[Edge] = None,
+        event_origin: str = "federation-sync",
+    ) -> None:
+        """Emit an event for federated cache edge changes."""
+        operation_map = {
+            "create": EventType.EDGE_CREATE,
+            "update": EventType.EDGE_UPDATE if hasattr(EventType, "EDGE_UPDATE") else EventType.EDGE_CREATE,
+            "delete": EventType.EDGE_DELETE,
+        }
+        event_type = operation_map.get(operation)
+        if event_type is None:
+            return
+
+        entity_edge = edge_after or edge_before
+        if entity_edge is None:
+            return
+
+        context = EventContext(event_origin=event_origin)
+        self._emit_event(
+            event_type=event_type,
+            entity_kind=EntityKind.EDGE,
+            entity_id=entity_edge.id,
+            entity_type=entity_edge.type_str,
+            before=edge_before.to_dict() if edge_before else None,
+            after=edge_after.to_dict() if edge_after else None,
+            context=context,
+        )
+
     def load(self) -> None:
         """
-        Load graph from JSON file.
+        Load graph from the configured persistence backend.
 
-        Thread-safe: Uses lock for in-memory updates and file lock for reading.
+        Thread-safe: Uses lock for in-memory updates.
         """
         with self._lock:
-            if not self.json_path.exists():
+            if not self._persistence_backend.exists():
                 print(f"No graph file found at {self.json_path}, creating new empty graph")
                 self.save()
                 return
 
             try:
-                # Use file locking to prevent reading while another process writes
-                with open(self.json_path, 'r', encoding='utf-8') as f:
-                    _lock_file(f, exclusive=False)  # Shared lock for reading
-                    try:
-                        data = json.load(f)
-                    finally:
-                        _unlock_file(f)
+                data = self._persistence_backend.load_graph_data()
+
+                metadata = data.get('metadata') if isinstance(data, dict) else None
+                if isinstance(metadata, dict):
+                    self.graph_metadata = {
+                        "version": metadata.get("version", "1.0"),
+                        "graph_name": metadata.get("graph_name") or self._default_graph_name(),
+                        **{k: v for k, v in metadata.items() if k not in {"version", "graph_name"}},
+                    }
+                else:
+                    self.graph_metadata = {
+                        "version": "1.0",
+                        "graph_name": self._default_graph_name(),
+                    }
 
                 # Clear existing data
                 self.nodes.clear()
                 self.edges.clear()
                 self.graph.clear()
 
+                # Clear searchable text cache
+                self._searchable_text_cache.clear()
+
                 # Load nodes
                 for node_data in data.get('nodes', []):
                     node = Node.from_dict(node_data)
                     self.nodes[node.id] = node
                     self.graph.add_node(node.id, data=node)
+
+                    # Precompute searchable text
+                    self._searchable_text_cache[node.id] = self._build_searchable_text(node)
 
                 # Load edges
                 for edge_data in data.get('edges', []):
@@ -310,22 +408,22 @@ class GraphStorage:
 
     def save(self) -> None:
         """
-        Save graph to JSON file.
+        Save graph through the configured persistence backend.
 
         This method captures the graph state while holding the lock,
         then offloads the actual file I/O to a background thread to
         prevent blocking the event loop in async applications.
 
         Thread-safe: Uses lock for reading in-memory data.
-        Atomic: Writes to temp file first, then renames to prevent corruption.
-        File-locked: Uses OS-level locking to prevent concurrent writes.
         """
         with self._lock:
             data = {
                 'nodes': [node.to_dict() for node in self.nodes.values()],
                 'edges': [edge.to_dict() for edge in self.edges.values()],
                 'metadata': {
-                    'version': '1.0',
+                    **(self.graph_metadata or {}),
+                    'version': (self.graph_metadata or {}).get('version', '1.0'),
+                    'graph_name': (self.graph_metadata or {}).get('graph_name', self._default_graph_name()),
                     'last_updated': datetime.utcnow().isoformat()
                 }
             }
@@ -333,56 +431,26 @@ class GraphStorage:
             edge_count = len(self.edges)
 
         # Offload blocking I/O to background thread to avoid blocking event loop
-        self._io_executor.submit(
-            self._do_save_to_disk,
-            data,
-            node_count,
-            edge_count
-        )
+        self._io_executor.submit(self._do_save_to_disk, data, node_count, edge_count)
 
     def _do_save_to_disk(self, data: Dict[str, Any], node_count: int, edge_count: int) -> None:
         """
-        Internal method to handle the actual file I/O.
-        Atomic: Writes to temp file first, then renames to prevent corruption.
-        File-locked: Uses OS-level locking to prevent concurrent writes.
+        Internal method: delegate serialized graph data to the persistence backend.
+        Runs in the background executor so file I/O doesn't block the event loop.
         """
-        # Create directory if it doesn't exist
-        self.json_path.parent.mkdir(parents=True, exist_ok=True)
-
-        # Atomic write: write to temp file, then rename
-        # This prevents corruption if the process is killed mid-write
-        temp_fd, temp_path = tempfile.mkstemp(
-            suffix='.json',
-            prefix='graph_',
-            dir=self.json_path.parent
-        )
-
         try:
-            with os.fdopen(temp_fd, 'w', encoding='utf-8') as f:
-                _lock_file(f, exclusive=True)  # Exclusive lock for writing
-                try:
-                    json.dump(data, f, indent=2, ensure_ascii=False)
-                    f.flush()
-                    os.fsync(f.fileno())  # Ensure data is written to disk
-                finally:
-                    _unlock_file(f)
-
-            # Atomic rename (on most filesystems)
-            # On Windows, we need to remove the target first
-            if sys.platform == 'win32' and self.json_path.exists():
-                os.replace(temp_path, self.json_path)
-            else:
-                os.rename(temp_path, self.json_path)
-
+            self._persistence_backend.save_graph_data(data)
             print(f"Saved {node_count} nodes and {edge_count} edges to {self.json_path}")
-
         except Exception as e:
-            # Clean up temp file on error
-            if os.path.exists(temp_path):
-                os.unlink(temp_path)
             print(f"Error saving graph to disk: {e}")
-            # Note: We don't reraise here as it's running in a background thread,
-            # but we logged the error.
+            # Don't reraise — running in background thread; caller cannot observe it.
+
+    def get_graph_name(self) -> str:
+        """Return configured graph name from graph metadata."""
+        name = (self.graph_metadata or {}).get("graph_name")
+        if isinstance(name, str) and name.strip():
+            return name.strip()
+        return self._default_graph_name()
 
     def reload(self) -> None:
         """
@@ -392,6 +460,55 @@ class GraphStorage:
         """
         self.load()
 
+    def _score_node_match(self, node: "Node", query_lower: str) -> int:
+        """Score how well a node matches a query. Higher = better match.
+
+        Name matches use large base values (300 000–500 000) so that any
+        name-tier match always outranks secondary signals (type/tags/description)
+        regardless of how many secondary signals accumulate.  Secondary signals
+        use values up to ~1 850, well below the 100 000-point gap between tiers.
+        """
+        score = 0
+        name_lower = (node.name or "").lower()
+
+        # Primary tier — name matching (large gaps prevent secondary signal bleed-through)
+        if name_lower == query_lower:
+            score += 500_000
+        elif name_lower.startswith(query_lower):
+            score += 400_000
+        elif query_lower in name_lower:
+            score += 300_000
+
+        # Secondary — type matching (including localized labels)
+        type_key = str(node.type)
+        type_name_lower = type_key.lower()
+        type_text = self._type_searchable_text.get(type_key, type_name_lower)
+        if type_name_lower == query_lower:
+            score += 700
+        elif type_name_lower.startswith(query_lower):
+            score += 650
+        elif query_lower in type_text:
+            score += 600
+
+        # Secondary — tag matching
+        if node.tags:
+            tags_lower = [t.lower() for t in node.tags]
+            if query_lower in tags_lower:
+                score += 500
+            elif any(query_lower in t for t in tags_lower):
+                score += 450
+
+        # Secondary — subtype matching
+        if node.subtypes:
+            if any(query_lower in s.lower() for s in node.subtypes):
+                score += 400
+
+        # Secondary — description / summary matching (lowest)
+        if query_lower in (node.description or "").lower() or query_lower in (node.summary or "").lower():
+            score += 200
+
+        return score
+
     def search_nodes(
         self,
         query: str,
@@ -399,8 +516,10 @@ class GraphStorage:
         limit: int = 50
     ) -> List[Node]:
         """
-        Search nodes based on text query
-        Matches against name, description, summary, and tags.
+        Search nodes based on text query.
+        Matches against name, description, summary, tags, subtypes, and node type (including
+        localized labels). Results are ranked so that name matches rank above type matches,
+        which rank above description/tag matches.
         Empty query or '*' returns all nodes (subject to filtering and limit).
         """
         query_lower = query.lower().strip()
@@ -414,20 +533,22 @@ class GraphStorage:
             if node_types and node.type not in node_types:
                 continue
 
-            # Text matching including tags (if not matching all)
             if not match_all:
-                tags_text = " ".join(node.tags) if hasattr(node, 'tags') and node.tags else ""
-                subtypes_text = " ".join(node.subtypes) if hasattr(node, 'subtypes') and node.subtypes else ""
-                searchable_text = f"{node.name} {node.description} {node.summary} {tags_text} {subtypes_text}".lower()
+                searchable_text = self._searchable_text_cache.get(node.id)
+                if searchable_text is None:
+                    # Fallback just in case cache wasn't populated
+                    searchable_text = self._build_searchable_text(node)
+                    self._searchable_text_cache[node.id] = searchable_text
+
                 if query_lower not in searchable_text:
                     continue
 
             results.append(node)
 
-            if len(results) >= limit:
-                break
+        if not match_all:
+            results.sort(key=lambda n: self._score_node_match(n, query_lower), reverse=True)
 
-        return results
+        return results[:limit]
 
     def get_node(self, node_id: str) -> Optional[Node]:
         """Get a specific node"""
@@ -624,6 +745,9 @@ class GraphStorage:
                     added_node_ids.append(node.id)
                     nodes_to_embed.append(node)
 
+                    # Precompute searchable text
+                    self._searchable_text_cache[node.id] = self._build_searchable_text(node)
+
                 # Generate embeddings for new nodes (non-blocking)
                 if nodes_to_embed:
                     try:
@@ -765,6 +889,9 @@ class GraphStorage:
             # Update in graph
             self.graph.nodes[node_id]['data'] = node
 
+            # Update searchable text cache
+            self._searchable_text_cache[node.id] = self._build_searchable_text(node)
+
             # Update embedding if text fields or tags changed (non-blocking)
             if any(k in updates for k in ['name', 'description', 'summary', 'tags']):
                 try:
@@ -858,6 +985,7 @@ class GraphStorage:
                     # Remove node
                     self.graph.remove_node(node_id)
                     del self.nodes[node_id]
+                    self._searchable_text_cache.pop(node_id, None)
                     deleted_node_ids.append(node_id)
 
                 # Remove embeddings
@@ -1055,6 +1183,66 @@ class GraphStorage:
 
             return True
 
+    def delete_edges(
+        self,
+        edge_ids: List[str],
+        event_context: Optional[EventContext] = None,
+    ) -> DeleteEdgesResult:
+        """Delete up to 50 edges in a single operation."""
+        with self._lock:
+            if len(edge_ids) > 50:
+                return DeleteEdgesResult(
+                    deleted_edge_ids=[],
+                    success=False,
+                    message="Max 50 edges can be deleted at a time."
+                )
+
+            deleted_edge_ids = []
+            edge_before_states: Dict[str, Dict[str, Any]] = {}
+
+            try:
+                for edge_id in edge_ids:
+                    edge = self.edges.get(edge_id)
+                    if edge is None:
+                        continue
+
+                    edge_before_states[edge_id] = edge.to_dict()
+
+                    try:
+                        self.graph.remove_edge(edge.source, edge.target, key=edge_id)
+                    except Exception:
+                        pass
+
+                    del self.edges[edge_id]
+                    deleted_edge_ids.append(edge_id)
+
+                self.save()
+
+                for edge_id in deleted_edge_ids:
+                    before_state = edge_before_states[edge_id]
+                    edge_type = before_state.get("type", "RELATES_TO")
+                    self._emit_event(
+                        event_type=EventType.EDGE_DELETE,
+                        entity_kind=EntityKind.EDGE,
+                        entity_id=edge_id,
+                        entity_type=edge_type,
+                        before=before_state,
+                        after=None,
+                        context=event_context,
+                    )
+
+                return DeleteEdgesResult(
+                    deleted_edge_ids=deleted_edge_ids,
+                    success=True,
+                    message=f"Deleted {len(deleted_edge_ids)} edges"
+                )
+            except Exception as e:
+                return DeleteEdgesResult(
+                    deleted_edge_ids=[],
+                    success=False,
+                    message=f"Error during edge deletion: {str(e)}"
+                )
+
     def add_edge(
         self,
         edge: Edge,
@@ -1111,3 +1299,27 @@ class GraphStorage:
             )
 
             return edge.id
+
+    def get_incident_edges(self, node_ids: List[str]) -> List[Edge]:
+        """
+        Get all edges connected to any of the given nodes (incoming or outgoing).
+        More efficient than iterating through all edges.
+        """
+        collected_edges = {}
+
+        for node_id in node_ids:
+            if node_id not in self.nodes:
+                continue
+
+            if node_id in self.graph:
+                # Outgoing edges
+                for _, _, _, edge_data in self.graph.out_edges(node_id, keys=True, data=True):
+                    edge = edge_data['data']
+                    collected_edges[edge.id] = edge
+
+                # Incoming edges
+                for _, _, _, edge_data in self.graph.in_edges(node_id, keys=True, data=True):
+                    edge = edge_data['data']
+                    collected_edges[edge.id] = edge
+
+        return list(collected_edges.values())

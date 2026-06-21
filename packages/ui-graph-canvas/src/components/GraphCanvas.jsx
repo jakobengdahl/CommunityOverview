@@ -21,6 +21,22 @@ import { getNodeColor, LAZY_LOAD_THRESHOLD, INITIAL_LOAD_COUNT, DEFAULT_EDGE_STY
 import './GraphCanvas.css';
 
 /**
+ * Build a URL from a template string, substituting {field} or [field] tokens
+ * with URI-encoded values from the node's data object. Returns null if the
+ * template is not a valid http/https URL after substitution.
+ */
+function buildContextMenuUrl(urlTemplate, nodeData) {
+  if (typeof urlTemplate !== 'string') return null;
+  const trimmed = urlTemplate.trim();
+  if (!/^https?:\/\//i.test(trimmed)) return null;
+  return trimmed.replace(/\{(\w+)\}|\[(\w+)\]/g, (_match, curlyKey, bracketKey) => {
+    const key = curlyKey || bracketKey;
+    const value = nodeData[key] ?? '';
+    return encodeURIComponent(String(value));
+  });
+}
+
+/**
  * Ensure parent (group) nodes appear before their children in the array.
  * ReactFlow requires this ordering for parent-child relationships to work.
  * Groups are placed first so they render behind regular nodes in the DOM,
@@ -53,6 +69,7 @@ function GraphCanvasInner({
   highlightedNodeIds = [],
   hiddenNodeIds = [],
   hiddenEdgeIds = [],
+  nodeMarks = {},
   clearGroupsFlag = false,
   onExpand,
   onEdit,
@@ -80,6 +97,15 @@ function GraphCanvasInner({
   saveViewSignal = 0,
   groupsToRestore = null,
   onGroupsRestored,
+  federationDepth = 1,
+  onFederationDepthChange,
+  maxFederationDepth = 4,
+  federationDepthLevels = null,
+  federationDepthLabel = "Depth",
+  federationDepthTooltip = "Depth levels are defined by installation configuration",
+  showMinimap = false,
+  schema = null,
+  onContextMenuAction = null,
 }) {
   const [loadedNodeCount, setLoadedNodeCount] = useState(INITIAL_LOAD_COUNT);
   const [nodeContextMenu, setNodeContextMenu] = useState(null);
@@ -92,6 +118,19 @@ function GraphCanvasInner({
   const rightDragStart = useRef({ x: 0, y: 0, time: null });
   const mouseDownPos = useRef(null);
   const { screenToFlowPosition, setCenter, getNodes: getFlowNodes } = useReactFlow();
+
+  const depthLevels = useMemo(() => {
+    if (Array.isArray(federationDepthLevels) && federationDepthLevels.length > 0) {
+      const normalized = federationDepthLevels
+        .map((value) => Number(value))
+        .filter((value) => Number.isInteger(value) && value >= 1)
+        .sort((a, b) => a - b);
+      return Array.from(new Set(normalized));
+    }
+
+    const max = Math.max(1, maxFederationDepth || 1);
+    return Array.from({ length: max }, (_, index) => index + 1);
+  }, [federationDepthLevels, maxFederationDepth]);
 
   // Track selected nodes and edges
   useOnSelectionChange({
@@ -150,20 +189,26 @@ function GraphCanvasInner({
   const reactFlowNodes = useMemo(() => {
     const hasSavedPositions = nodesToRender.some(n => n._savedPosition);
 
-    const nodesWithoutPosition = nodesToRender.map(node => ({
-      id: node.id,
-      type: 'custom',
-      data: {
-        ...node,
-        label: node.name,
-        summary: node.summary || node.description?.slice(0, 100),
-        nodeType: node.type,
-        color: getNodeColor(node.type),
-        onExpand: onExpand ? () => onExpand(node.id, node) : null,
-        onEdit: onEdit ? () => onEdit(node.id, node) : null,
-      },
-      position: node._savedPosition || { x: 0, y: 0 },
-    }));
+    const nodesWithoutPosition = nodesToRender.map(node => {
+      const mark = nodeMarks[node.id];
+      return {
+        id: node.id,
+        type: 'custom',
+        data: {
+          ...node,
+          label: node.name,
+          summary: node.summary || node.description?.slice(0, 100),
+          nodeType: node.type,
+          color: getNodeColor(node.type),
+          isHighlighted: highlightedNodeIds.includes(node.id),
+          markColor: mark?.color ?? null,
+          markLabel: mark?.label ?? null,
+          onExpand: onExpand ? () => onExpand(node.id, node) : null,
+          onEdit: onEdit ? () => onEdit(node.id, node) : null,
+        },
+        position: node._savedPosition || { x: 0, y: 0 },
+      };
+    });
 
     if (nodesWithoutPosition.length === 0) {
       return nodesWithoutPosition;
@@ -174,7 +219,7 @@ function GraphCanvasInner({
     }
 
     return applyLayout(nodesWithoutPosition, reactFlowEdges, layoutType);
-  }, [nodesToRender, reactFlowEdges, layoutType, onExpand, onEdit]);
+  }, [nodesToRender, reactFlowEdges, layoutType, onExpand, onEdit, highlightedNodeIds, nodeMarks]);
 
   const [nodes, setNodes, onNodesChange] = useNodesState(reactFlowNodes);
   const [edges, setEdges, onEdgesChange] = useEdgesState(reactFlowEdges);
@@ -623,16 +668,33 @@ function GraphCanvasInner({
 
   // Restore groups from a saved view
   useEffect(() => {
-    if (groupsToRestore && groupsToRestore.length > 0) {
-      const groupNodes = groupsToRestore.map(g => ({
+    // Support both legacy array format and new object format with parentIds
+    const groups = Array.isArray(groupsToRestore)
+      ? groupsToRestore
+      : groupsToRestore?.groups;
+    const parentIds = Array.isArray(groupsToRestore)
+      ? {}
+      : (groupsToRestore?.parentIds || {});
+
+    if (groups && groups.length > 0) {
+      const groupNodes = groups.map(g => ({
         id: g.id,
         type: 'group',
         position: g.position,
         data: { label: g.label || 'Group', description: '', color: g.color || '#646cff' },
         style: g.style || { width: 300, height: 200 },
       }));
+      const groupIdSet = new Set(groups.map(g => g.id));
       setNodes((nds) => {
-        const nonGroups = nds.filter(n => n.type !== 'group' && !n.id.startsWith('group-'));
+        const nonGroups = nds
+          .filter(n => n.type !== 'group' && !n.id.startsWith('group-'))
+          .map(n => {
+            const savedParent = parentIds[n.id];
+            if (savedParent && groupIdSet.has(savedParent)) {
+              return { ...n, parentId: savedParent };
+            }
+            return n;
+          });
         return reorderNodesForParentChild([...nonGroups, ...groupNodes]);
       });
       onGroupsRestored?.();
@@ -660,6 +722,17 @@ function GraphCanvasInner({
     custom: CustomNode,
     group: GroupNode,
   }), []);
+
+  const marksLegend = useMemo(() => {
+    const seen = new Map();
+    for (const mark of Object.values(nodeMarks)) {
+      const key = `${mark.color}::${mark.label || ''}`;
+      if (!seen.has(key)) {
+        seen.set(key, { color: mark.color, label: mark.label || '' });
+      }
+    }
+    return Array.from(seen.values());
+  }, [nodeMarks]);
 
   const edgeTypes = useMemo(() => ({
     floating: SimpleFloatingEdge,
@@ -714,7 +787,6 @@ function GraphCanvasInner({
           fitViewOptions={{ padding: 0.2, duration: 800 }}
           minZoom={0.1}
           maxZoom={2}
-          attributionPosition="bottom-right"
           defaultEdgeOptions={{ animated: true, style: { strokeWidth: 2 } }}
           panOnDrag={[0, 2]}
           selectionOnDrag={true}
@@ -724,17 +796,54 @@ function GraphCanvasInner({
           multiSelectionKeyCode={['Shift', 'Meta', 'Control']}
           edgesUpdatable={false}
           onMoveStart={closeAllMenus}
+          proOptions={{ hideAttribution: true }}
         >
           <Background color="#333" gap={16} />
           <Controls />
-          <MiniMap
-            nodeColor={(node) => node.data?.color || '#9CA3AF'}
-            maskColor="rgba(0, 0, 0, 0.5)"
-            position="bottom-right"
-            pannable
-            zoomable
-          />
+          {showMinimap && (
+            <MiniMap
+              nodeColor={(node) => node.data?.color || '#9CA3AF'}
+              maskColor="rgba(0, 0, 0, 0.5)"
+              position="bottom-right"
+              pannable
+              zoomable
+            />
+          )}
         </ReactFlow>
+
+        {marksLegend.length > 0 && (
+          <div className="graph-marks-legend">
+            {marksLegend.map((entry, i) => (
+              <div key={i} className="graph-marks-legend-entry">
+                <span className="graph-marks-legend-dot" style={{ backgroundColor: entry.color }} />
+                {entry.label && <span className="graph-marks-legend-label">{entry.label}</span>}
+              </div>
+            ))}
+          </div>
+        )}
+
+        {depthLevels.length > 1 && (
+          <div className="federation-depth-control" aria-label="Federated search depth selector">
+            <span className="federation-depth-label" title={federationDepthTooltip}>{federationDepthLabel}</span>
+            <div className="federation-depth-levels" role="group" aria-label="Federation depth levels">
+              {depthLevels.map((level) => {
+                const isActive = level === federationDepth;
+                return (
+                  <button
+                    key={level}
+                    type="button"
+                    className={`federation-depth-level${isActive ? ' active' : ''}`}
+                    onClick={() => onFederationDepthChange && onFederationDepthChange(level)}
+                    aria-pressed={isActive}
+                    title={`Search depth ${level}`}
+                  >
+                    {level}
+                  </button>
+                );
+              })}
+            </div>
+          </div>
+        )}
       </div>
 
       {nodeContextMenu && (
@@ -766,6 +875,47 @@ function GraphCanvasInner({
               🔍 Expandera
             </button>
           )}
+          {(() => {
+            const nodeType = nodeContextMenu.node.data?.nodeType || nodeContextMenu.node.data?.type;
+            const customItems = schema?.node_types?.[nodeType]?.context_menu;
+            if (!Array.isArray(customItems) || customItems.length === 0) return null;
+            const nodeData = nodeContextMenu.node.data || {};
+            const items = customItems.map((item, idx) => {
+              if (!item?.label || !item?.action) return null;
+              if (item.action.type === 'open_url') {
+                const url = buildContextMenuUrl(item.action.url, nodeData);
+                if (!url) return null;
+                return (
+                  <button key={idx} onClick={() => {
+                    window.open(url, '_blank', 'noopener,noreferrer');
+                    setNodeContextMenu(null);
+                  }}>
+                    {item.icon ? `${item.icon} ` : '🔗 '}{item.label}
+                  </button>
+                );
+              }
+              if (item.action.type === 'callback') {
+                const actionName = item.action.name;
+                if (!actionName || !onContextMenuAction) return null;
+                return (
+                  <button key={idx} onClick={() => {
+                    onContextMenuAction(actionName, nodeContextMenu.node.id, nodeData);
+                    setNodeContextMenu(null);
+                  }}>
+                    {item.icon ? `${item.icon} ` : '⚡ '}{item.label}
+                  </button>
+                );
+              }
+              return null;
+            }).filter(Boolean);
+            if (items.length === 0) return null;
+            return (
+              <>
+                {items}
+                <div className="context-menu-separator"></div>
+              </>
+            );
+          })()}
           {onDelete && (
             <>
               <div className="context-menu-separator"></div>

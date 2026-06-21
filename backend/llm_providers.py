@@ -3,7 +3,7 @@ LLM Provider abstraction layer for supporting multiple AI backends.
 Supports both Claude (Anthropic) and OpenAI APIs.
 """
 from abc import ABC, abstractmethod
-from typing import List, Dict, Any, Optional
+from typing import Any, Dict, List, Optional
 import json
 import os
 
@@ -94,12 +94,14 @@ class ClaudeProvider(LLMProvider):
 
 
 class OpenAIProvider(LLMProvider):
-    """OpenAI provider"""
+    """OpenAI provider — also works with any OpenAI-compatible API (Ollama, vLLM, Azure OpenAI, etc.)"""
 
     def __init__(self, api_key: str):
         from openai import OpenAI
-        self.client = OpenAI(api_key=api_key)
+        base_url = os.getenv("OPENAI_BASE_URL")  # None = use SDK default (api.openai.com)
+        self.client = OpenAI(api_key=api_key, base_url=base_url)
         self.model = os.getenv("OPENAI_MODEL", "gpt-4o")
+        self._tool_calling = os.getenv("OPENAI_TOOL_CALLING", "true").lower() != "false"
 
     def create_completion(
         self,
@@ -113,8 +115,8 @@ class OpenAIProvider(LLMProvider):
         # Convert messages to OpenAI format
         openai_messages = self._convert_messages_to_openai(messages, system_prompt)
 
-        # Format tools for OpenAI
-        openai_tools = self.format_tool_definitions(tools)
+        # Format tools for OpenAI (skip if tool calling is disabled for this endpoint)
+        openai_tools = self.format_tool_definitions(tools) if self._tool_calling else []
 
         response = self.client.chat.completions.create(
             model=self.model,
@@ -267,6 +269,37 @@ class OpenAIProvider(LLMProvider):
         return mapping.get(finish_reason, "end_turn")
 
 
+def get_llm_availability() -> Dict[str, Any]:
+    """
+    Inspect configured API keys and return whether an LLM provider is available.
+
+    No network calls are made; this only reads environment variables.
+
+    Returns:
+        Dict with keys:
+        - available (bool): True if the active provider has an API key configured
+        - provider (str): The active provider type ('claude' or 'openai')
+        - has_anthropic_key (bool)
+        - has_openai_key (bool)
+    """
+    provider_type = os.getenv("LLM_PROVIDER", "claude").lower()
+    anthropic_key = os.getenv("ANTHROPIC_API_KEY", "").strip()
+    openai_key = os.getenv("OPENAI_API_KEY", "").strip()
+
+    if provider_type == "openai":
+        available = bool(openai_key)
+    else:
+        # Default / explicit 'claude'
+        available = bool(anthropic_key)
+
+    return {
+        "available": available,
+        "provider": provider_type,
+        "has_anthropic_key": bool(anthropic_key),
+        "has_openai_key": bool(openai_key),
+    }
+
+
 def create_provider(api_key: str, provider_type: Optional[str] = None) -> LLMProvider:
     """
     Factory function to create the appropriate LLM provider.
@@ -277,6 +310,9 @@ def create_provider(api_key: str, provider_type: Optional[str] = None) -> LLMPro
 
     Returns:
         LLMProvider instance
+
+    OpenAI-compatible APIs (Ollama, vLLM, Azure OpenAI, etc.) use provider_type='openai'
+    with the OPENAI_BASE_URL env var pointing at the custom endpoint.
     """
     if provider_type is None:
         provider_type = os.getenv("LLM_PROVIDER", "claude").lower()
