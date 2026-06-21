@@ -90,6 +90,36 @@ class TestDeliveryWorker:
         finally:
             worker.stop(wait=True)
 
+    @patch('backend.core.events.delivery.socket.gethostbyname')
+    def test_ssrf_blocked_never_retried(self, mock_gethostbyname):
+        """SSRF-blocked deliveries must be dropped immediately with no retries.
+
+        A private IP will not become public on a subsequent attempt, so retrying
+        would be wasteful and could slow down legitimate event processing.
+        """
+        mock_gethostbyname.return_value = "10.0.0.1"
+
+        results = []
+        worker = DeliveryWorker(
+            max_attempts=3,  # Default — SSRF must still produce exactly 1 DROPPED result
+            backoff_times=[0.05, 0.05, 0.05],
+            on_result=lambda r: results.append(r),
+        )
+        worker.start()
+
+        try:
+            event = create_test_event()
+            worker.enqueue(event, "http://internal.corp/hook")
+
+            time.sleep(0.5)
+
+            # Exactly one result — no RETRYING callbacks, no second attempt
+            assert len(results) == 1
+            assert results[0].status == DeliveryStatus.DROPPED
+            assert "Blocked attempt" in results[0].error_message
+        finally:
+            worker.stop(wait=True)
+
     def test_worker_starts_and_stops(self):
         """Test that worker can start and stop cleanly."""
         worker = DeliveryWorker()

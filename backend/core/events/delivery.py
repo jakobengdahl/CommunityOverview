@@ -191,12 +191,27 @@ class DeliveryWorker:
         attempt = item.attempt
 
         try:
-            # Validate URL to prevent SSRF
+            # Validate URL to prevent SSRF — drop immediately, never retry.
+            # A private/reserved IP will not become public on a subsequent attempt.
             if not is_safe_url(webhook_url):
-                self._handle_failure(
-                    item,
-                    error_message="Blocked attempt to send webhook to restricted IP address",
+                error_message = "Blocked attempt to send webhook to restricted IP address"
+                logger.error(
+                    f"SSRF blocked: event {event.event_id} to {webhook_url}. {error_message}"
                 )
+                if self._on_result:
+                    result = DeliveryResult(
+                        event_id=event.event_id,
+                        subscription_id=event.subscription.id if event.subscription else "",
+                        webhook_url=webhook_url,
+                        status=DeliveryStatus.DROPPED,
+                        attempt=attempt,
+                        max_attempts=self._max_attempts,
+                        error_message=error_message,
+                    )
+                    try:
+                        self._on_result(result)
+                    except Exception as e:
+                        logger.error(f"Error in result callback: {e}")
                 return
 
             # Prepare payload
