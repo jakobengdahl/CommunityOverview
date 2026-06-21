@@ -22,6 +22,7 @@ from .models import (
     SubscriptionInfo,
     TargetFilters,
     KeywordFilters,
+    FederationFilters,
 )
 
 if TYPE_CHECKING:
@@ -38,31 +39,49 @@ class EventDispatcher:
     1. Loads EventSubscription nodes from the graph
     2. Filters events based on subscription configuration
     3. Applies loop prevention rules
-    4. Calls the delivery callback for matched events
+    4. Routes events to agents or webhooks based on subscription type
     """
 
     def __init__(
         self,
         storage: "GraphStorage",
-        on_deliver: Optional[Callable[[Event, str], None]] = None
+        on_deliver: Optional[Callable[[Event, str], None]] = None,
+        on_agent_deliver: Optional[Callable[[Event, str], bool]] = None,
     ):
         """
         Initialize the dispatcher.
 
         Args:
             storage: GraphStorage instance to load subscriptions from
-            on_deliver: Callback when an event should be delivered.
+            on_deliver: Callback for webhook delivery.
                        Called with (event, webhook_url).
+            on_agent_deliver: Callback for agent delivery.
+                             Called with (event, subscription_id).
+                             Returns True if handled by agent, False otherwise.
         """
         self._storage = storage
         self._on_deliver = on_deliver
+        self._on_agent_deliver = on_agent_deliver
         self._subscriptions_cache: Optional[List[Dict[str, Any]]] = None
         self._cache_time: Optional[datetime] = None
         self._cache_ttl_seconds = 30  # Refresh cache every 30 seconds
 
     def set_delivery_callback(self, callback: Callable[[Event, str], None]) -> None:
-        """Set the delivery callback."""
+        """Set the webhook delivery callback."""
         self._on_deliver = callback
+
+    def set_agent_delivery_callback(
+        self,
+        callback: Callable[[Event, str], bool],
+    ) -> None:
+        """
+        Set the agent delivery callback.
+
+        Args:
+            callback: Function that receives (event, subscription_id) and
+                     returns True if handled by an agent, False otherwise.
+        """
+        self._on_agent_deliver = callback
 
     def _load_subscriptions(self) -> List[Dict[str, Any]]:
         """
@@ -114,6 +133,7 @@ class EventDispatcher:
         self._subscriptions_cache = subscriptions
         self._cache_time = now
 
+        print(f"EVENT: Loaded {len(subscriptions)} EventSubscription(s)")
         logger.debug(f"Loaded {len(subscriptions)} EventSubscription(s)")
         return subscriptions
 
@@ -131,10 +151,18 @@ class EventDispatcher:
             any=keywords_data.get("any", [])
         )
 
+        federation_data = data.get("federation", {})
+        federation = FederationFilters(
+            scope=federation_data.get("scope", "local_only"),
+            include_graph_ids=federation_data.get("include_graph_ids", []),
+            max_distance=federation_data.get("max_distance"),
+        )
+
         return SubscriptionFilters(
             target=target,
             operations=data.get("operations", ["create", "update", "delete"]),
             keywords=keywords,
+            federation=federation,
         )
 
     def _parse_delivery(self, data: Dict[str, Any]) -> SubscriptionDelivery:
@@ -167,8 +195,12 @@ class EventDispatcher:
         subscriptions = self._load_subscriptions()
         dispatch_count = 0
 
+        print(f"EVENT: Dispatching to {len(subscriptions)} subscription(s), event type: {event.event_type.value}")
+
         for sub in subscriptions:
-            if self._matches(event, sub):
+            matches = self._matches(event, sub)
+            print(f"EVENT: Subscription '{sub['name']}' matches={matches}")
+            if matches:
                 # Check loop prevention
                 if self._should_block(event, sub["delivery"]):
                     logger.debug(
@@ -184,18 +216,50 @@ class EventDispatcher:
                     name=sub["name"],
                 )
 
-                # Deliver
-                try:
-                    self._on_deliver(event_copy, sub["delivery"].webhook_url)
-                    dispatch_count += 1
-                    logger.info(
-                        f"Dispatched event {event.event_id} ({event.event_type.value}) "
-                        f"to subscription {sub['name']}"
-                    )
-                except Exception as e:
-                    logger.error(
-                        f"Error dispatching event {event.event_id} to {sub['name']}: {e}"
-                    )
+                # Try agent delivery first
+                handled_by_agent = False
+                if self._on_agent_deliver:
+                    try:
+                        handled_by_agent = self._on_agent_deliver(
+                            event_copy, sub["id"]
+                        )
+                        if handled_by_agent:
+                            dispatch_count += 1
+                            print(f"EVENT: Routed to agent for subscription '{sub['name']}'")
+                            logger.info(
+                                f"Routed event {event.event_id} to agent "
+                                f"via subscription {sub['name']}"
+                            )
+                    except Exception as e:
+                        logger.error(
+                            f"Error routing event {event.event_id} to agent: {e}"
+                        )
+
+                # Fall back to webhook delivery if not handled by agent
+                if not handled_by_agent and self._on_deliver:
+                    webhook_url = sub["delivery"].webhook_url
+
+                    # Prevent delivering internal agent URLs to external webhook handler
+                    # This happens if the agent system is disabled or the agent failed to handle it
+                    if webhook_url and webhook_url.startswith("internal://"):
+                        logger.warning(
+                            f"Event {event.event_id} matched subscription '{sub['name']}' "
+                            f"pointing to internal agent {webhook_url}, but agent did not handle it "
+                            f"(Agent system disabled? Agent not running?). Skipping webhook delivery."
+                        )
+                        continue
+
+                    try:
+                        self._on_deliver(event_copy, webhook_url)
+                        dispatch_count += 1
+                        logger.info(
+                            f"Dispatched event {event.event_id} ({event.event_type.value}) "
+                            f"to webhook for subscription {sub['name']}"
+                        )
+                    except Exception as e:
+                        logger.error(
+                            f"Error dispatching event {event.event_id} to {sub['name']}: {e}"
+                        )
 
         return dispatch_count
 
@@ -238,6 +302,10 @@ class EventDispatcher:
             if not self._matches_keywords(event, filters.keywords.any):
                 return False
 
+        # Match federation scope/settings
+        if not self._matches_federation(event, filters.federation):
+            return False
+
         return True
 
     def _matches_keywords(self, event: Event, keywords: List[str]) -> bool:
@@ -270,6 +338,38 @@ class EventDispatcher:
             if keyword.lower() in searchable_text:
                 return True
 
+        return False
+
+
+    def _matches_federation(self, event: Event, federation: FederationFilters) -> bool:
+        """Check federation-scoped filters for local/federated event selection."""
+        entity_data = event.entity.after or event.entity.before or {}
+        metadata = entity_data.get("metadata", {}) if isinstance(entity_data, dict) else {}
+
+        origin_graph_id = metadata.get("origin_graph_id")
+        federation_distance = metadata.get("federation_distance")
+
+        is_federated = origin_graph_id is not None and federation_distance is not None
+
+        # Default behavior: local only (backward compatible)
+        if federation.scope == "local_only":
+            return not is_federated
+
+        if federation.scope == "local_and_federated":
+            if federation.include_graph_ids and is_federated:
+                if origin_graph_id not in federation.include_graph_ids:
+                    return False
+
+            if federation.max_distance is not None and is_federated:
+                try:
+                    if int(federation_distance) > int(federation.max_distance):
+                        return False
+                except Exception:
+                    return False
+
+            return True
+
+        # Unknown scope: reject
         return False
 
     def _should_block(self, event: Event, delivery: SubscriptionDelivery) -> bool:

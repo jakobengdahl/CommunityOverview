@@ -37,6 +37,10 @@ class AppConfig:
     auth_enabled: bool = field(default_factory=lambda: os.getenv("AUTH_ENABLED", "false").lower() == "true")
     auth_username: str = field(default_factory=lambda: os.getenv("AUTH_USERNAME", "admin"))
     auth_password: Optional[str] = field(default_factory=lambda: os.getenv("AUTH_PASSWORD"))
+    mcp_basic_auth: bool = field(default_factory=lambda: os.getenv("MCP_BASIC_AUTH", "false").lower() == "true")
+
+    # Profile configuration
+    config_profile: str = field(default_factory=lambda: os.getenv("CONFIG_PROFILE", "default"))
 
     def __post_init__(self):
         """Resolve default static paths relative to this package."""
@@ -59,7 +63,13 @@ class AppConfig:
         """Get resolved path to graph file."""
         graph_path = Path(self.graph_file)
         if not graph_path.is_absolute():
-            # Resolve relative to backend directory
-            backend_dir = Path(__file__).parent.parent
-            graph_path = backend_dir / self.graph_file
+            # Try resolving relative to project root first (for data/active/graph.json)
+            project_root = Path(__file__).parent.parent.parent
+            candidate = project_root / self.graph_file
+            if candidate.exists() or "data/" in self.graph_file:
+                graph_path = candidate
+            else:
+                # Fall back to resolving relative to backend directory
+                backend_dir = Path(__file__).parent.parent
+                graph_path = backend_dir / self.graph_file
         return graph_path

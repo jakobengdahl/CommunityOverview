@@ -5,8 +5,11 @@ Handles generating, storing, and searching embeddings for nodes.
 This module is part of graph_core - the core graph storage layer.
 It uses sentence-transformers with CPU-only PyTorch for lightweight embeddings.
 
-Note: ML dependencies (numpy, sentence-transformers, sklearn) are lazily imported
-to allow the package to load even when they are not installed.
+Required dependencies (see backend/requirements.txt):
+  numpy, sentence-transformers, scikit-learn, torch (CPU)
+
+Imports are deferred (lazy) to speed up initial module load, but the
+packages MUST be installed in the environment.
 """
 
 import pickle
@@ -73,8 +76,25 @@ class VectorStore:
             self.model = SentenceTransformer(self.model_name)
             print("Model loaded.")
 
+    def preload_model(self):
+        """
+        Preload the embedding model in a background thread.
+        Call at startup to avoid slow first request.
+        """
+        import threading
+
+        def _load():
+            try:
+                self._load_model()
+                print(f"Embedding model '{self.model_name}' preloaded in background.")
+            except Exception as e:
+                print(f"Warning: Background model preload failed: {e}")
+
+        t = threading.Thread(target=_load, name="embedding-preload", daemon=True)
+        t.start()
+
     def rebuild_index(self, nodes: List[Node]):
-        """Rebuild the search index from a list of nodes"""
+        """Rebuild the search index from a list of nodes."""
         np = _ensure_numpy()
         self.embeddings = {}
 

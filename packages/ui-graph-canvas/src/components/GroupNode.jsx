@@ -1,4 +1,5 @@
 import { memo, useState, useRef, useEffect } from 'react';
+import { createPortal } from 'react-dom';
 import { NodeResizer, useReactFlow } from 'reactflow';
 import './GroupNode.css';
 
@@ -17,6 +18,7 @@ function GroupNode({ id, data, selected }) {
   const [contextMenu, setContextMenu] = useState(null);
   const inputRef = useRef(null);
   const groupRef = useRef(null);
+  const contextMenuRef = useRef(null);
   const { setNodes } = useReactFlow();
 
   useEffect(() => {
@@ -29,14 +31,30 @@ function GroupNode({ id, data, selected }) {
   useEffect(() => {
     if (!contextMenu) return;
 
-    const handleGlobalClick = (e) => {
-      if (groupRef.current && !groupRef.current.contains(e.target)) {
-        setContextMenu(null);
-      }
+    const handleDismiss = (e) => {
+      // Don't close if clicking inside the context menu itself (portal)
+      if (contextMenuRef.current && contextMenuRef.current.contains(e.target)) return;
+      setContextMenu(null);
     };
 
-    document.addEventListener('mousedown', handleGlobalClick);
-    return () => document.removeEventListener('mousedown', handleGlobalClick);
+    const handleKeyDown = (e) => {
+      if (e.key === 'Escape') setContextMenu(null);
+    };
+
+    // Use setTimeout so the opening right-click doesn't immediately close the menu.
+    // Listen in capture phase so the event is caught before any child element
+    // can call stopPropagation (e.g. ReactFlow pane overlays).
+    const timer = setTimeout(() => {
+      document.addEventListener('mousedown', handleDismiss, true);
+      document.addEventListener('contextmenu', handleDismiss, true);
+      document.addEventListener('keydown', handleKeyDown, true);
+    }, 0);
+    return () => {
+      clearTimeout(timer);
+      document.removeEventListener('mousedown', handleDismiss, true);
+      document.removeEventListener('contextmenu', handleDismiss, true);
+      document.removeEventListener('keydown', handleKeyDown, true);
+    };
   }, [contextMenu]);
 
   const handleDoubleClick = (e) => {
@@ -92,7 +110,8 @@ function GroupNode({ id, data, selected }) {
     setContextMenu(null);
   };
 
-  const handleDeleteGroup = () => {
+  // Un-parent children and remove the group node from the canvas
+  const removeGroupKeepChildren = () => {
     setNodes((nds) => {
       const children = nds.filter(n => n.parentId === id);
       const groupNode = nds.find(n => n.id === id);
@@ -113,6 +132,15 @@ function GroupNode({ id, data, selected }) {
           return updated || n;
         });
     });
+  };
+
+  const handleHideGroup = () => {
+    removeGroupKeepChildren();
+    setContextMenu(null);
+  };
+
+  const handleDeleteGroup = () => {
+    removeGroupKeepChildren();
   };
 
   const colors = ['#646cff', '#10B981', '#F97316', '#EF4444', '#A855F7', '#3B82F6'];
@@ -167,8 +195,9 @@ function GroupNode({ id, data, selected }) {
         )}
       </div>
 
-      {contextMenu && (
+      {contextMenu && createPortal(
         <div
+          ref={contextMenuRef}
           className="graph-group-context-menu"
           style={{ left: contextMenu.x, top: contextMenu.y }}
         >
@@ -183,10 +212,14 @@ function GroupNode({ id, data, selected }) {
               />
             ))}
           </div>
+          <button className="context-menu-action" onClick={handleHideGroup}>
+            👁️ Hide Group
+          </button>
           <button className="context-menu-delete" onClick={handleDeleteGroup}>
             🗑️ Delete Group
           </button>
-        </div>
+        </div>,
+        document.body
       )}
     </>
   );

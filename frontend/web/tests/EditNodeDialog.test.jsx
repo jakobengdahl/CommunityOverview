@@ -43,7 +43,7 @@ describe('EditNodeDialog', () => {
         />
       );
 
-      expect(screen.getByText('Edit Node')).toBeInTheDocument();
+      expect(screen.getByText('Edit Actor')).toBeInTheDocument();
     });
 
     it('populates form with node data', () => {
@@ -239,7 +239,7 @@ describe('EditNodeDialog', () => {
         />
       );
 
-      fireEvent.click(screen.getByText('x'));
+      fireEvent.click(screen.getByText('×'));
       expect(mockOnClose).toHaveBeenCalled();
     });
 

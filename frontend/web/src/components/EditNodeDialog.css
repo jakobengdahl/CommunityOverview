@@ -8,7 +8,7 @@
   display: flex;
   align-items: center;
   justify-content: center;
-  z-index: 1000;
+  z-index: 2000;
 }
 
 .edit-dialog {
@@ -16,7 +16,7 @@
   border: 1px solid #444;
   border-radius: 12px;
   width: 90%;
-  max-width: 500px;
+  max-width: 480px;
   max-height: 90vh;
   overflow-y: auto;
 }
@@ -29,21 +29,36 @@
   border-bottom: 1px solid #444;
 }
 
+.edit-dialog-header-title {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+
+.edit-dialog-type-dot {
+  width: 12px;
+  height: 12px;
+  border-radius: 50%;
+  flex-shrink: 0;
+}
+
 .edit-dialog-header h2 {
   margin: 0;
   font-size: 1.1rem;
+  color: #fff;
 }
 
-.close-button {
+.edit-dialog .close-button {
   background: transparent;
   border: none;
   color: #888;
   font-size: 24px;
   line-height: 1;
   padding: 0;
+  cursor: pointer;
 }
 
-.close-button:hover {
+.edit-dialog .close-button:hover {
   color: #ddd;
 }
 
@@ -51,11 +66,11 @@
   padding: 20px;
 }
 
-.form-group {
+.edit-dialog .form-group {
   margin-bottom: 16px;
 }
 
-.form-group label {
+.edit-dialog .form-group label {
   display: block;
   margin-bottom: 6px;
   font-size: 0.9rem;
@@ -63,9 +78,9 @@
   color: #bbb;
 }
 
-.form-group input,
-.form-group select,
-.form-group textarea {
+.edit-dialog .form-group input,
+.edit-dialog .form-group select,
+.edit-dialog .form-group textarea {
   width: 100%;
   padding: 10px 12px;
   background: #333;
@@ -73,21 +88,23 @@
   border-radius: 6px;
   color: #ddd;
   font-size: 14px;
+  font-family: inherit;
+  box-sizing: border-box;
 }
 
-.form-group input:focus,
-.form-group select:focus,
-.form-group textarea:focus {
+.edit-dialog .form-group input:focus,
+.edit-dialog .form-group select:focus,
+.edit-dialog .form-group textarea:focus {
   outline: none;
   border-color: #646cff;
 }
 
-.form-group textarea {
+.edit-dialog .form-group textarea {
   resize: vertical;
-  min-height: 80px;
+  min-height: 60px;
 }
 
-.form-actions {
+.edit-dialog .form-actions {
   display: flex;
   justify-content: flex-end;
   gap: 12px;
@@ -96,75 +113,32 @@
   margin-top: 8px;
 }
 
-.form-actions button {
+.edit-dialog .form-actions button {
   padding: 10px 20px;
   border-radius: 6px;
   font-size: 14px;
   font-weight: 500;
+  cursor: pointer;
 }
 
-.form-actions button.primary {
+.edit-dialog .form-actions button.primary {
   background: #646cff;
   color: white;
   border: none;
+  transition: opacity 0.15s;
 }
 
-.form-actions button.primary:hover {
-  background: #535bf2;
+.edit-dialog .form-actions button.primary:hover {
+  opacity: 0.85;
 }
 
-.form-actions button.secondary {
+.edit-dialog .form-actions button.secondary {
   background: transparent;
   color: #888;
   border: 1px solid #444;
 }
 
-.form-actions button.secondary:hover {
+.edit-dialog .form-actions button.secondary:hover {
   background: #333;
   color: #ddd;
-}
-
-@media (prefers-color-scheme: light) {
-  .edit-dialog-overlay {
-    background: rgba(0, 0, 0, 0.5);
-  }
-
-  .edit-dialog {
-    background: white;
-    border-color: #ddd;
-  }
-
-  .edit-dialog-header {
-    border-color: #ddd;
-  }
-
-  .edit-dialog-header h2 {
-    color: #333;
-  }
-
-  .form-group label {
-    color: #555;
-  }
-
-  .form-group input,
-  .form-group select,
-  .form-group textarea {
-    background: #fafafa;
-    border-color: #ddd;
-    color: #333;
-  }
-
-  .form-actions {
-    border-color: #ddd;
-  }
-
-  .form-actions button.secondary {
-    border-color: #ddd;
-    color: #666;
-  }
-
-  .form-actions button.secondary:hover {
-    background: #f5f5f5;
-    color: #333;
-  }
 }

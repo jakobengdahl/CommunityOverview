@@ -5,6 +5,7 @@ from dotenv import load_dotenv
 import inspect
 from backend.llm_providers import create_provider, LLMProvider
 from backend import config_loader
+from backend.language_policy import format_language_policy_for_prompt
 
 # Load environment variables
 load_dotenv()
@@ -33,7 +34,8 @@ def _build_system_prompt() -> str:
         color_names = {
             "#3B82F6": "blue", "#A855F7": "purple", "#10B981": "green",
             "#F97316": "orange", "#FBBF24": "yellow", "#EF4444": "red",
-            "#14B8A6": "teal", "#6B7280": "gray"
+            "#14B8A6": "teal", "#6366F1": "indigo", "#D946EF": "fuchsia",
+            "#6B7280": "gray"
         }
         color_name = color_names.get(color, "")
         node_types_section += f"- {type_name} ({color_name}): {desc}\n"
@@ -53,12 +55,14 @@ def _build_system_prompt() -> str:
     # Get custom prompt parts
     prompt_prefix = presentation.get("prompt_prefix", "")
     prompt_suffix = presentation.get("prompt_suffix", "")
+    language_policy_section = format_language_policy_for_prompt(presentation)
 
     # Build the full system prompt
     return _BASE_SYSTEM_PROMPT.format(
         prompt_prefix=prompt_prefix,
         node_types_section=node_types_section,
         relationship_types_section=rel_types_section,
+        language_policy_section=language_policy_section,
         prompt_suffix=prompt_suffix
     )
 
@@ -89,9 +93,10 @@ When user says "visualization", determine from context:
 
 LANGUAGE HANDLING:
 - Respond in the same language the user is using (Swedish, English, etc.)
-- The graph data is primarily in Swedish, so Swedish responses are often most appropriate
-- Technical terms and node types should remain in English for consistency
+- Technical terms and node types should remain in English for consistency when appropriate
+- Follow the graph language policy below for any new or updated graph content
 
+{language_policy_section}
 CRITICAL - API RATE LIMIT OPTIMIZATION:
 To avoid rate limit errors (429), follow these strict rules:
 1. MINIMIZE the number of API calls - combine operations whenever possible
@@ -109,6 +114,31 @@ Example WRONG flow (7-8 API calls - causes rate limits):
 
 {node_types_section}
 {relationship_types_section}
+FIELD LIMITS:
+- name: required, 1-200 characters
+- description: optional, max 2000 characters
+- summary: optional, max 300 characters (short text for visualization labels)
+- tags: optional list of strings
+- subtypes: optional list of strings for sub-classification within a node type
+
+SUBTYPES SYSTEM:
+Nodes can have subtypes for finer categorization within their node type:
+- Subtypes are comma-separated classifications (e.g., an Actor can have subtypes ["Government agency", "Regulatory body"])
+- Each node type has its own set of subtypes (Actor subtypes differ from Initiative subtypes)
+- When adding/updating nodes, prefer EXISTING subtypes from the graph to maintain consistency
+- Use get_subtypes tool to see which subtypes already exist for a given node type
+- Case normalization: always match existing casing (e.g., if "Government agency" exists, don't use "government agency")
+- Example subtypes:
+  * Actor: "Government agency", "Municipality", "International organisation", "Steering group", "Industry body"
+  * Initiative: "Research project", "Pilot program", "Working group", "Standards development"
+  * Risk: "Cybersecurity", "Compliance", "Operational", "Strategic"
+  * Data: "Open data", "Register", "API", "Statistics"
+
+EDGE TYPE:
+Edge type is OPTIONAL when creating edges. If omitted, the edge defaults to "RELATES_TO" (a general connection).
+Use a specific relationship type from the list above only when the nature of the connection is clear.
+When unsure, it is perfectly fine to create an edge without a type.
+
 TAGS SYSTEM:
 All nodes can have tags for better categorization and searchability:
 - Tags are comma-separated keywords (e.g., "AI, Maskininlarning, Oppen kallkod")
@@ -136,7 +166,7 @@ SECURITY RULES:
 1. ALWAYS warn if the user tries to store personal data (names, email, phone numbers)
 2. For deletion: Maximum 10 nodes at once, ALWAYS require double confirmation
 3. Show affected connections before deletion
-4. Filter results based on user's active communities when relevant
+4. Filter results appropriately based on the user's query
 
 CRITICAL - "LAGG TILL" vs "VISA" DISTINCTION:
 These are TWO DIFFERENT operations - understand the user's intent:
@@ -175,7 +205,7 @@ When user asks to search the graph database using phrases like:
 - English: "in the database", "in the graph", "in the network"
 
 Process:
-1. Use search_graph() with appropriate query and filters (node_types, communities)
+1. Use search_graph() with appropriate query and filters (node_types)
 2. If abbreviation search returns few results, try the full organization name
 3. If user wants to explore connections, use get_related_nodes()
 4. Present results clearly with node types and summaries
@@ -197,8 +227,7 @@ WORKFLOW FOR ADDING NODES:
    - Common themes in the community
 4. WAIT for explicit user approval (Swedish: "ja", "godkann"; English: "yes", "approve")
 5. ONLY THEN run add_nodes() with confirmed nodes, edges, and suggested tags
-6. Link nodes to user's active communities automatically
-7. Respond with confirmation - all in ONE final response
+6. Respond with confirmation - all in ONE final response
 
 WORKFLOW FOR EDITING NODES:
 1. User can edit nodes via the GUI edit button OR by asking you
@@ -292,6 +321,12 @@ VISUALIZATION DISPLAY BEHAVIOR:
    - "Visa/Show X" (without "saved view") = SEARCH for X and display results
    - "Add nodes" / "Show related nodes" = ADD to current visualization
 
+AGENT NODES:
+The graph contains Agent nodes (type "Agent") that represent AI agents configured to process events.
+When a user asks about agents (e.g., "Visa alla agenter", "Vilka agenter finns?", "Show all agents"):
+- Use search_graph(query="", node_types=["Agent"]) to find all Agent nodes
+- Present the agents with their names and descriptions
+
 TOOL USAGE GUIDELINES:
 - search_graph: For text-based searches, exploring themes, finding specific nodes
 - get_related_nodes: For expanding from a known node, exploring connections
@@ -299,7 +334,7 @@ TOOL USAGE GUIDELINES:
 - find_similar_nodes: For checking ONE node for duplicates
 - find_similar_nodes_batch: For checking MULTIPLE nodes at once - ALWAYS use this when extracting from documents
 - add_nodes: Only after user approval, with proper validation
-- update_node: For editing existing nodes (name, description, summary, communities)
+- update_node: For editing existing nodes (name, description, summary, tags)
 - delete_nodes: CAREFUL - max 10 nodes, requires confirmation=True
 - list_node_types: When user asks about available types
 - get_graph_stats: For overview of graph size and composition
@@ -308,6 +343,16 @@ TOOL USAGE GUIDELINES:
 - list_saved_views: For listing all available saved views in the database
 - get_schema: For getting the complete schema configuration
 - get_presentation: For getting UI presentation settings
+- mark_nodes: For applying visual color annotations to nodes currently in the visualization (session-only, does not change the database). Call with empty marks array to clear all marks.
+
+WORKFLOW FOR MARKING NODES:
+Use mark_nodes to annotate nodes in the current visualization with colors and labels:
+1. Choose a meaningful color (e.g. '#EF4444' red, '#F97316' orange, '#FBBF24' yellow, '#10B981' green)
+2. Provide a short label that describes the mark's meaning in context
+3. Marked nodes show a color badge and the labels appear in an on-canvas legend
+4. Marks are session-only — they never persist to the database
+5. Call mark_nodes with an empty array to remove all marks
+6. Example: to show analysis results, mark critical nodes red, medium-priority orange, reviewed green
 
 EFFICIENCY TIP: When extracting multiple entities from a document, ALWAYS use find_similar_nodes_batch()
 instead of calling find_similar_nodes() in a loop. This reduces API calls from N to 1.
@@ -445,12 +490,7 @@ class ChatProcessor:
                         "node_types": {
                             "type": "array",
                             "items": {"type": "string"},
-                            "description": "Optional: Filter by node types (Actor, Initiative, Legislation, etc.)"
-                        },
-                        "communities": {
-                            "type": "array",
-                            "items": {"type": "string"},
-                            "description": "Optional: Filter by communities"
+                            "description": "Optional: Filter by node types (Actor, Initiative, Legislation, Goal, Event, etc.)"
                         },
                         "limit": {
                             "type": "integer",
@@ -548,7 +588,7 @@ class ChatProcessor:
             },
             {
                 "name": "add_nodes",
-                "description": "Add new nodes and edges to the graph. Use this AFTER user confirmation.",
+                "description": "Add new nodes and edges to the graph. Use this AFTER user confirmation. Node field limits: name 1-200 chars, description max 2000 chars, summary max 300 chars. Edge type is optional (defaults to RELATES_TO).",
                 "input_schema": {
                     "type": "object",
                     "properties": {
@@ -557,11 +597,12 @@ class ChatProcessor:
                             "items": {
                                 "type": "object",
                                 "properties": {
-                                    "type": {"type": "string"},
-                                    "name": {"type": "string"},
-                                    "description": {"type": "string"},
-                                    "summary": {"type": "string"},
-                                    "communities": {"type": "array", "items": {"type": "string"}}
+                                    "type": {"type": "string", "description": "Node type (required)"},
+                                    "name": {"type": "string", "description": "Node name (required, 1-200 chars)"},
+                                    "description": {"type": "string", "description": "Description (optional, max 2000 chars)"},
+                                    "summary": {"type": "string", "description": "Short summary for visualization (optional, max 300 chars)"},
+                                    "tags": {"type": "array", "items": {"type": "string"}, "description": "Tags for categorization"},
+                                    "subtypes": {"type": "array", "items": {"type": "string"}, "description": "Sub-classifications within the node type (optional, use existing subtypes when possible)"}
                                 }
                             }
                         },
@@ -570,9 +611,9 @@ class ChatProcessor:
                             "items": {
                                 "type": "object",
                                 "properties": {
-                                    "source": {"type": "string"},
-                                    "target": {"type": "string"},
-                                    "type": {"type": "string"}
+                                    "source": {"type": "string", "description": "Source node ID or name"},
+                                    "target": {"type": "string", "description": "Target node ID or name"},
+                                    "type": {"type": "string", "description": "Relationship type (optional, defaults to RELATES_TO)"}
                                 }
                             }
                         }
@@ -651,6 +692,19 @@ class ChatProcessor:
                 }
             },
             {
+                "name": "get_subtypes",
+                "description": "Get existing subtypes used in the graph, grouped by node type. Use this to suggest consistent subtypes when adding or updating nodes.",
+                "input_schema": {
+                    "type": "object",
+                    "properties": {
+                        "node_type": {
+                            "type": "string",
+                            "description": "Optional: filter subtypes for a specific node type (e.g. 'Actor')"
+                        }
+                    }
+                }
+            },
+            {
                 "name": "save_view",
                 "description": "Save the current visualization state as a saved view. Use this when the user wants to save what they see now.",
                 "input_schema": {
@@ -695,6 +749,38 @@ class ChatProcessor:
                 }
             },
             {
+                "name": "mark_nodes",
+                "description": "Apply a visual color annotation to specific nodes currently in the visualization. Marks are session-only overlays — they do NOT modify the graph database. Use any CSS color string and provide an optional label that describes what the color means. Marks appear as a colored badge on the node and are listed in a legend. Call with an empty 'marks' array to clear all marks. Useful for: highlighting findings, indicating priority, showing analysis results, categorizing nodes visually, etc.",
+                "input_schema": {
+                    "type": "object",
+                    "properties": {
+                        "marks": {
+                            "type": "array",
+                            "description": "Nodes to mark. Pass an empty array to clear all marks.",
+                            "items": {
+                                "type": "object",
+                                "properties": {
+                                    "node_id": {
+                                        "type": "string",
+                                        "description": "ID of the node to mark"
+                                    },
+                                    "color": {
+                                        "type": "string",
+                                        "description": "CSS color (e.g. '#EF4444' red, '#F97316' orange, '#FBBF24' yellow, '#10B981' green, '#3B82F6' blue)"
+                                    },
+                                    "label": {
+                                        "type": "string",
+                                        "description": "Short label shown in the legend (e.g. 'High priority', 'Needs review', 'Confirmed')"
+                                    }
+                                },
+                                "required": ["node_id", "color"]
+                            }
+                        }
+                    },
+                    "required": ["marks"]
+                }
+            },
+            {
                 "name": "get_schema",
                 "description": "Get the complete schema configuration including all node types with their fields, colors, and descriptions, as well as all relationship types.",
                 "input_schema": {
@@ -712,7 +798,7 @@ class ChatProcessor:
             }
         ]
 
-    def process_message(self, messages: List[Dict], api_key: str = None, provider: str = None) -> Dict:
+    def process_message(self, messages: List[Dict], api_key: str = None, provider: str = None, extra_context: str = None) -> Dict:
         """
         Process a message history, call LLM, handle tools, return final response.
 
@@ -720,6 +806,8 @@ class ChatProcessor:
             messages: Conversation history
             api_key: Optional API key to use instead of default
             provider: Optional provider override ('claude' or 'openai')
+            extra_context: Optional extra system context prepended to the base
+                system prompt (e.g. expert agent persona + skills).
         """
         try:
             # Use provided provider or fall back to configured provider
@@ -739,17 +827,23 @@ class ChatProcessor:
             # Create provider with the appropriate key
             llm_provider = create_provider(key_to_use, provider_to_use)
 
+            # Build per-request system prompt (extra_context prepended so the
+            # expert persona / skills are the first thing the model sees)
+            active_system_prompt = (
+                f"{extra_context}\n\n{self.system_prompt}" if extra_context else self.system_prompt
+            )
+
             # First call to LLM
             response = llm_provider.create_completion(
                 messages=messages,
-                system_prompt=self.system_prompt,
+                system_prompt=active_system_prompt,
                 tools=self.tool_definitions,
                 max_tokens=4096
             )
 
             # Check if tool use
             if response.stop_reason == "tool_use":
-                return self._handle_tool_use(messages, response, llm_provider)
+                return self._handle_tool_use(messages, response, llm_provider, system_prompt=active_system_prompt)
 
             # Just text response
             # Extract text from content blocks
@@ -770,8 +864,8 @@ class ChatProcessor:
 
             # Provide user-friendly message for rate limits
             if "rate_limit" in error_msg.lower() or "429" in error_msg:
-                error_msg = ("⚠️ API rate limit uppnådd. Detta händer när många noder bearbetas samtidigt. "
-                            "Försök igen om ~60 sekunder, eller be om färre noder åt gången (5-10 st).")
+                error_msg = ("API rate limit reached. This happens when many nodes are processed simultaneously. "
+                            "Try again in ~60 seconds, or request fewer nodes at a time (5-10).")
 
             return {
                 "content": error_msg,
@@ -779,12 +873,13 @@ class ChatProcessor:
                 "toolResult": None
             }
 
-    def _handle_tool_use(self, messages: List[Dict], response, provider: LLMProvider, accumulated_nodes=None, accumulated_edges=None) -> Dict:
+    def _handle_tool_use(self, messages: List[Dict], response, provider: LLMProvider, accumulated_nodes=None, accumulated_edges=None, system_prompt: str = None) -> Dict:
         """Handle tool use with support for tool chaining and result aggregation"""
         if accumulated_nodes is None:
             accumulated_nodes = []
         if accumulated_edges is None:
             accumulated_edges = []
+        active_system_prompt = system_prompt if system_prompt is not None else self.system_prompt
 
         # Find ALL tool_use blocks (LLM can request multiple tools in parallel)
         tool_uses = [block for block in response.content if isinstance(block, dict) and block.get("type") == "tool_use"]
@@ -826,6 +921,13 @@ class ChatProcessor:
                     "action": "clear_visualization",
                     "success": True,
                     "message": "Visualization cleared"
+                }
+
+            # Special case for mark_nodes - signals frontend to apply color overlays
+            elif tool_name == "mark_nodes":
+                tool_result = {
+                    "action": "mark_nodes",
+                    "marks": tool_input.get("marks", [])
                 }
 
             elif tool_name in self.tools_map:
@@ -888,7 +990,7 @@ class ChatProcessor:
 
         final_response = provider.create_completion(
             messages=messages,
-            system_prompt=self.system_prompt,
+            system_prompt=active_system_prompt,
             tools=self.tool_definitions,
             max_tokens=4096
         )
@@ -896,7 +998,7 @@ class ChatProcessor:
         # Check if LLM wants to use another tool (tool chaining)
         if final_response.stop_reason == "tool_use":
             # LLM wants to use another tool - continue recursively with accumulated data
-            return self._handle_tool_use(messages, final_response, provider, accumulated_nodes, accumulated_edges)
+            return self._handle_tool_use(messages, final_response, provider, accumulated_nodes, accumulated_edges, system_prompt=active_system_prompt)
 
         # Extract text from response (handle multiple text blocks)
         final_text = ""

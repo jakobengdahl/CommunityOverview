@@ -1,0 +1,156 @@
+.create-node-overlay {
+  position: fixed;
+  top: 0;
+  left: 0;
+  right: 0;
+  bottom: 0;
+  background: rgba(0, 0, 0, 0.7);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  z-index: 2000;
+}
+
+.create-node-dialog {
+  background: #2a2a2a;
+  border: 1px solid #444;
+  border-radius: 12px;
+  width: 90%;
+  max-width: 480px;
+  max-height: 90vh;
+  overflow-y: auto;
+}
+
+.create-node-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  padding: 16px 20px;
+  border-bottom: 1px solid #444;
+}
+
+.create-node-header-title {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+
+.create-node-type-dot {
+  width: 12px;
+  height: 12px;
+  border-radius: 50%;
+  flex-shrink: 0;
+}
+
+.create-node-header h2 {
+  margin: 0;
+  font-size: 1.1rem;
+  color: #fff;
+}
+
+.create-node-dialog .close-button {
+  background: transparent;
+  border: none;
+  color: #888;
+  font-size: 24px;
+  line-height: 1;
+  padding: 0;
+  cursor: pointer;
+}
+
+.create-node-dialog .close-button:hover {
+  color: #ddd;
+}
+
+.create-node-dialog form {
+  padding: 20px;
+}
+
+.create-node-dialog .form-group {
+  margin-bottom: 16px;
+}
+
+.create-node-dialog .form-group label {
+  display: block;
+  margin-bottom: 6px;
+  font-size: 0.9rem;
+  font-weight: 500;
+  color: #bbb;
+}
+
+.create-node-dialog .form-group input,
+.create-node-dialog .form-group textarea {
+  width: 100%;
+  padding: 10px 12px;
+  background: #333;
+  border: 1px solid #444;
+  border-radius: 6px;
+  color: #ddd;
+  font-size: 14px;
+  font-family: inherit;
+  box-sizing: border-box;
+}
+
+.create-node-dialog .form-group input:focus,
+.create-node-dialog .form-group textarea:focus {
+  outline: none;
+  border-color: #646cff;
+}
+
+.create-node-dialog .form-group textarea {
+  resize: vertical;
+  min-height: 60px;
+}
+
+.create-node-error {
+  padding: 8px 12px;
+  background: rgba(239, 68, 68, 0.1);
+  border-left: 3px solid #EF4444;
+  border-radius: 4px;
+  color: #EF4444;
+  font-size: 0.85rem;
+  margin-bottom: 16px;
+}
+
+.create-node-dialog .form-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 12px;
+  padding-top: 16px;
+  border-top: 1px solid #444;
+  margin-top: 8px;
+}
+
+.create-node-dialog .form-actions button {
+  padding: 10px 20px;
+  border-radius: 6px;
+  font-size: 14px;
+  font-weight: 500;
+  cursor: pointer;
+}
+
+.create-node-dialog .form-actions button.primary {
+  color: white;
+  border: none;
+  transition: opacity 0.15s;
+}
+
+.create-node-dialog .form-actions button.primary:hover:not(:disabled) {
+  opacity: 0.85;
+}
+
+.create-node-dialog .form-actions button.primary:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
+.create-node-dialog .form-actions button.secondary {
+  background: transparent;
+  color: #888;
+  border: 1px solid #444;
+}
+
+.create-node-dialog .form-actions button.secondary:hover {
+  background: #333;
+  color: #ddd;
+}

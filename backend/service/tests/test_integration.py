@@ -152,9 +152,9 @@ class TestGraphServiceIntegration:
         # Add data
         service.add_nodes(
             nodes=[
-                {"type": "Actor", "name": "Actor 1", "communities": ["C1"]},
-                {"type": "Actor", "name": "Actor 2", "communities": ["C1"]},
-                {"type": "Initiative", "name": "Initiative 1", "communities": ["C1"]}
+                {"type": "Actor", "name": "Actor 1"},
+                {"type": "Actor", "name": "Actor 2"},
+                {"type": "Initiative", "name": "Initiative 1"}
             ],
             edges=[]
         )

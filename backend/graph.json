@@ -6,9 +6,6 @@
       "name": "eSam",
       "description": "En svensk samverkansorganisation för offentlig sektor",
       "summary": "Samverkan för digital förvaltning",
-      "communities": [
-        "eSam"
-      ],
       "tags": [
         "digitalisering",
         "e-förvaltning",
@@ -26,9 +23,6 @@
       "name": "eSam",
       "description": "eSam är en medlemsfinansierad förening för organisationer i offentlig sektor i Sverige som arbetar med digitalisering och e-förvaltning.",
       "summary": "Samverkansorganisation för digital förvaltning",
-      "communities": [
-        "eSam"
-      ],
       "tags": [
         "samverkansorganisation",
         "digitalisering",
@@ -50,9 +44,6 @@
       "name": "Sida",
       "description": "Styrelsen för internationellt utvecklingssamarbete (Sida) är en svensk myndighet som arbetar på uppdrag av riksdagen och regeringen för att minska fattigdomen i världen.",
       "summary": "Myndighet för internationellt utvecklingssamarbete och bistånd",
-      "communities": [
-        "eSam"
-      ],
       "tags": [
         "myndighet",
         "utvecklingssamarbete",
@@ -74,7 +65,6 @@
       "name": "BIS",
       "description": "Bank for International Settlements (BIS) är en internationell finansiell organisation som ägs av centralbanker och som verkar för internationellt monetärt och finansiellt samarbete.",
       "summary": "Internationell finansiell organisation som bistår centralbanker",
-      "communities": [],
       "tags": [
         "international organisation",
         "centralbank",
@@ -97,7 +87,6 @@
       "name": "Generative AI for Official Statistics",
       "description": "Ett projekt som fokuserar på användningen av generativ AI inom officiell statistik, involverande 13 statistiska kontor, centralbanker och akademiska institutioner.",
       "summary": "Generativ AI och officiell statistik workshop i Genève, 14 maj 2025",
-      "communities": [],
       "tags": [
         "AI",
         "generativ AI",
@@ -124,7 +113,6 @@
       "name": "HLG-MOS Project",
       "description": "High-Level Group for the Modernisation of Official Statistics projekt som organiserar workshops om generativ AI och officiell statistik.",
       "summary": "Fokus på styrning, tekniska kapitel och organisatorisk kapacitet",
-      "communities": [],
       "tags": [
         "statistik",
         "modernisering",
@@ -150,7 +138,6 @@
       "name": "UNECE",
       "description": "United Nations Economic Commission for Europe (UNECE) är en av FN:s fem regionala ekonomiska kommissioner som arbetar med ekonomiskt samarbete i Europa.",
       "summary": "FN:s ekonomiska kommission för Europa",
-      "communities": [],
       "tags": [
         "international organisation",
         "FN",
@@ -174,9 +161,6 @@
       "name": "Arbetsförmedlingen",
       "description": "Förvaltningsmyndighet för arbetsmarknadspolitiska frågor och ansvarar för den arbetsmarknadspolitiska verksamheten.",
       "summary": "",
-      "communities": [
-        "eSam"
-      ],
       "tags": [
         "arbetsmarknad",
         "förvaltning",
@@ -193,9 +177,6 @@
       "name": "Arbetsmiljöverket",
       "description": "Säkerställer att arbetsmiljö- och arbetstidslagstiftning följs genom föreskrifter, inspektioner och information.",
       "summary": "",
-      "communities": [
-        "eSam"
-      ],
       "tags": [
         "arbetsmiljö",
         "inspektion",
@@ -212,9 +193,6 @@
       "name": "Bolagsverket",
       "description": "Registrerar företag och ändringar, tar emot årsredovisningar samt hanterar bland annat företagsinteckningar och vissa likvidationsärenden.",
       "summary": "",
-      "communities": [
-        "eSam"
-      ],
       "tags": [
         "företag",
         "registrering",
@@ -231,9 +209,6 @@
       "name": "Boverket",
       "description": "Nationell myndighet för samhällsplanering, byggande och boende samt frågor om byggd miljö och fysisk planering.",
       "summary": "",
-      "communities": [
-        "eSam"
-      ],
       "tags": [
         "samhällsplanering",
         "byggande",
@@ -250,9 +225,6 @@
       "name": "Centrala studiestödsnämnden (CSN)",
       "description": "Beslutar om och betalar ut studiestöd, hanterar återbetalning av lån och administrerar körkortslån.",
       "summary": "",
-      "communities": [
-        "eSam"
-      ],
       "tags": [
         "utbildning",
         "studiestöd",
@@ -269,9 +241,6 @@
       "name": "Domstolsverket",
       "description": "Central förvaltningsmyndighet för domstolarna samt arrende- och hyresnämnderna och Rättshjälpsmyndigheten.",
       "summary": "",
-      "communities": [
-        "eSam"
-      ],
       "tags": [
         "domstol",
         "rättshjälp",
@@ -288,9 +257,6 @@
       "name": "E-hälsomyndigheten",
       "description": "Ansvarar för nationell infrastruktur och tjänster för e-hälsa, bland annat e-recept och informationsförsörjning inom läkemedelsområdet.",
       "summary": "",
-      "communities": [
-        "eSam"
-      ],
       "tags": [
         "e-hälsa",
         "infrastruktur",
@@ -307,9 +273,6 @@
       "name": "Finansinspektionen",
       "description": "Utövar tillsyn över finansmarknaden och finansiella företag för stabilitet samt konsument- och investerarskydd.",
       "summary": "",
-      "communities": [
-        "eSam"
-      ],
       "tags": [
         "tillsyn",
         "finansmarknad",
@@ -326,9 +289,6 @@
       "name": "Folkhälsomyndigheten",
       "description": "Utvecklar och stödjer arbetet för bättre folkhälsa samt samordnar och följer upp smittskydd och epidemiologisk kunskap.",
       "summary": "",
-      "communities": [
-        "eSam"
-      ],
       "tags": [
         "folkhälsa",
         "smittskydd",
@@ -345,9 +305,6 @@
       "name": "Försäkringskassan",
       "description": "Administrerar stora delar av socialförsäkringen och handlägger och betalar ut ersättningar och bidrag enligt regelverken.",
       "summary": "",
-      "communities": [
-        "eSam"
-      ],
       "tags": [
         "socialförsäkring",
         "ersättningar",
@@ -364,7 +321,6 @@
       "name": "Havs- och vattenmyndigheten",
       "description": "Ansvarar för förvaltning av havs- och vattenmiljö samt genomför och samordnar arbete inom vattenförvaltning och fiskefrågor.",
       "summary": "",
-      "communities": [],
       "tags": [
         "vattenmiljö",
         "förvaltning",
@@ -381,7 +337,6 @@
       "name": "Inspektionen för vård och omsorg (IVO)",
       "description": "Utövar tillsyn över hälso- och sjukvård och socialtjänst samt prövar vissa tillstånd och hanterar klagomål.",
       "summary": "",
-      "communities": [],
       "tags": [
         "tillsyn",
         "vård",
@@ -398,7 +353,6 @@
       "name": "Jordbruksverket",
       "description": "Central myndighet för jordbruk, landsbygd och djurhållning, inklusive genomförande av delar av EU:s jordbrukspolitik.",
       "summary": "",
-      "communities": [],
       "tags": [
         "jordbruk",
         "landsbygd",
@@ -415,7 +369,6 @@
       "name": "Kemikalieinspektionen",
       "description": "Ansvarar för regler, prövning och tillsyn som ska minska risker med kemikalier och bekämpningsmedel.",
       "summary": "",
-      "communities": [],
       "tags": [
         "kemikalier",
         "tillsyn",
@@ -432,7 +385,6 @@
       "name": "Kronofogden",
       "description": "Verkställer skulder genom indrivning och utmätning, hanterar skuldsanering och arbetar mot överskuldsättning.",
       "summary": "",
-      "communities": [],
       "tags": [
         "indrivning",
         "skuldsanering",
@@ -449,7 +401,6 @@
       "name": "Kustbevakningen",
       "description": "Bedriver sjöövervakning och brottsbekämpning till sjöss samt genomför miljöräddningstjänst och vissa kontrolluppgifter.",
       "summary": "",
-      "communities": [],
       "tags": [
         "sjöövervakning",
         "brottsbekämpning",
@@ -466,7 +417,6 @@
       "name": "Lantmäteriet",
       "description": "Ansvarar för fastighetsindelning och fastighetsinformation samt producerar och tillhandahåller geodata och kartor.",
       "summary": "",
-      "communities": [],
       "tags": [
         "fastighetsindelning",
         "geodata",
@@ -483,7 +433,6 @@
       "name": "Livsmedelsverket",
       "description": "Arbetar för säkra livsmedel och bra dricksvatten samt ger vägledning och stöd till kontroll och nutrition.",
       "summary": "",
-      "communities": [],
       "tags": [
         "livsmedelssäkerhet",
         "dricksvatten",
@@ -500,7 +449,6 @@
       "name": "Läkemedelsverket",
       "description": "Ansvarar för reglering och tillsyn inom läkemedelsområdet för att säkerställa kvalitet, effekt och säker användning.",
       "summary": "",
-      "communities": [],
       "tags": [
         "läkemedel",
         "tillsyn",
@@ -517,9 +465,6 @@
       "name": "Länsstyrelserna",
       "description": "Statlig regional förvaltning som ska få nationella mål att få genomslag i länen med hänsyn till regionala förutsättningar.",
       "summary": "",
-      "communities": [
-        "eSam"
-      ],
       "tags": [
         "regional förvaltning",
         "nationella mål",
@@ -536,9 +481,6 @@
       "name": "Migrationsverket",
       "description": "Prövar bland annat asyl och andra uppehållstillstånd samt ansvarar för mottagande och återvändandearbete enligt uppdrag.",
       "summary": "",
-      "communities": [
-        "eSam"
-      ],
       "tags": [
         "asyl",
         "uppehållstillstånd",
@@ -555,9 +497,6 @@
       "name": "Naturvårdsverket",
       "description": "Central myndighet för miljö och naturvård, inklusive arbete med miljömål, klimat, avfall och tillsynsvägledning.",
       "summary": "",
-      "communities": [
-        "eSam"
-      ],
       "tags": [
         "miljö",
         "naturvård",
@@ -574,9 +513,6 @@
       "name": "Pensionsmyndigheten",
       "description": "Administrerar den allmänna pensionen genom att informera, besluta och betala ut pension samt ta fram prognoser.",
       "summary": "",
-      "communities": [
-        "eSam"
-      ],
       "tags": [
         "pension",
         "förvaltning",
@@ -593,9 +529,6 @@
       "name": "Riksantikvarieämbetet",
       "description": "Nationell myndighet för kulturarv och kulturmiljöfrågor med stöd, samordning och kunskapsuppbyggnad.",
       "summary": "",
-      "communities": [
-        "eSam"
-      ],
       "tags": [
         "kulturarv",
         "kulturmiljö",
@@ -612,9 +545,6 @@
       "name": "Riksarkivet",
       "description": "Statlig arkivmyndighet som bevarar arkiv samt utövar tillsyn och ger stöd i arkivfrågor.",
       "summary": "",
-      "communities": [
-        "eSam"
-      ],
       "tags": [
         "arkiv",
         "tillsyn",
@@ -631,7 +561,6 @@
       "name": "Rättsmedicinalverket (RMV)",
       "description": "Central myndighet för rättspsykiatrisk, rättskemisk, rättsmedicinsk och rättsgenetisk verksamhet.",
       "summary": "",
-      "communities": [],
       "tags": [
         "rättspsykiatri",
         "rättskemi",
@@ -649,9 +578,6 @@
       "name": "Skatteverket",
       "description": "Ansvarar bland annat för skatter, socialavgifter, folkbokföring och vissa borgenärsuppgifter.",
       "summary": "",
-      "communities": [
-        "eSam"
-      ],
       "tags": [
         "skatter",
         "folkbokföring",
@@ -668,7 +594,6 @@
       "name": "Skolverket",
       "description": "Främjar likvärdig utbildning av god kvalitet, utvecklar styrdokument och prov samt ger stöd till skolutveckling och hanterar statsbidrag.",
       "summary": "",
-      "communities": [],
       "tags": [
         "utbildning",
         "styrdokument",
@@ -685,7 +610,6 @@
       "name": "Statens institutionsstyrelse (SiS)",
       "description": "Bedriver tvångsvård och behandling för ungdomar och vuxna med missbruksproblematik, med mål att stärka förutsättningar för ett fungerande liv.",
       "summary": "",
-      "communities": [],
       "tags": [
         "tvångsvård",
         "behandling",
@@ -702,7 +626,6 @@
       "name": "Statens servicecenter",
       "description": "Samordnar statlig administration genom stödtjänster (lön, ekonomi, e-handel) och tillhandahåller lokal statlig service via servicekontor.",
       "summary": "",
-      "communities": [],
       "tags": [
         "administration",
         "stödtjänster",
@@ -719,7 +642,6 @@
       "name": "Statens tjänstepensionsverk (SPV)",
       "description": "Administrerar statlig tjänstepension, beräknar premier och levererar prognoser och statistik.",
       "summary": "",
-      "communities": [],
       "tags": [
         "pension",
         "administration",
@@ -736,9 +658,6 @@
       "name": "Statens veterinärmedicinska anstalt (SVA)",
       "description": "Veterinärmedicinskt expert- och serviceorgan som främjar djurs och människors hälsa genom diagnostik, forskning, beredskap och rådgivning.",
       "summary": "",
-      "communities": [
-        "eSam"
-      ],
       "tags": [
         "veterinärmedicin",
         "diagnostik",
@@ -755,9 +674,6 @@
       "name": "Statistiska centralbyrån (SCB)",
       "description": "Ansvarar för officiell statistik och samordnar det statliga statistiksystemet samt överlämnande av statistik till internationella organisationer.",
       "summary": "",
-      "communities": [
-        "eSam"
-      ],
       "tags": [
         "statistik",
         "samordning",
@@ -774,7 +690,6 @@
       "name": "Statskontoret",
       "description": "Analyserar och utvärderar statlig verksamhet och förvaltning för att bidra till effektivitet och förbättrad styrning.",
       "summary": "",
-      "communities": [],
       "tags": [
         "analys",
         "utvärdering",
@@ -791,7 +706,6 @@
       "name": "Tillväxtverket",
       "description": "Arbetar för fler och växande företag samt hållbart och konkurrenskraftigt näringsliv i hela landet.",
       "summary": "",
-      "communities": [],
       "tags": [
         "tillväxt",
         "företag",
@@ -808,7 +722,6 @@
       "name": "Trafikverket",
       "description": "Ansvarar för långsiktig infrastrukturplanering samt planering, byggande, drift och underhåll av statliga vägar och järnvägar.",
       "summary": "",
-      "communities": [],
       "tags": [
         "infrastruktur",
         "vägar",
@@ -825,7 +738,6 @@
       "name": "Transportstyrelsen",
       "description": "Ansvarar för regelgivning, tillsyn, tillstånd och register inom transportområdet för alla trafikslag.",
       "summary": "",
-      "communities": [],
       "tags": [
         "transporter",
         "regelgivning",
@@ -842,9 +754,6 @@
       "name": "Tullverket",
       "description": "Fastställer och tar ut tullar och vissa skatter samt kontrollerar varutrafik till och från utlandet så att regler följs.",
       "summary": "",
-      "communities": [
-        "eSam"
-      ],
       "tags": [
         "tullar",
         "skatter",
@@ -861,9 +770,6 @@
       "name": "Universitets- och högskolerådet (UHR)",
       "description": "Informerar om högskolestudier, ansvarar för högskoleprovet och samordnar antagning samt bedömer utländska utbildningar.",
       "summary": "",
-      "communities": [
-        "eSam"
-      ],
       "tags": [
         "högskolestudier",
         "antagning",
@@ -880,9 +786,6 @@
       "name": "Utbetalningsmyndigheten",
       "description": "Förebygger, förhindrar och upptäcker felaktiga utbetalningar från välfärdssystemet via systemövergripande analyser och transaktionskonto.",
       "summary": "",
-      "communities": [
-        "eSam"
-      ],
       "tags": [
         "utbetalningar",
         "välfärdssystem",
@@ -899,9 +802,6 @@
       "name": "AI-Ready Dissemination: Optimizing Statistical Products for Third-Party AI Consumption",
       "description": "Optimizing the accessibility and usability of official statistical data for AI systems. The project includes work packages on AI-ready data dissemination, quality frameworks, technical approaches, and communication strategies.",
       "summary": "Project proposal focusing on making official statistics AI-ready for better data consumption by AI.",
-      "communities": [
-        "eSam"
-      ],
       "tags": [
         "AI",
         "officiell statistik",
@@ -920,9 +820,6 @@
       "name": "AI-Ready Dissemination: Optimizing Statistical Products for Third-Party AI Consumption",
       "description": "Optimizing the accessibility and usability of official statistical data for AI systems. The project includes work packages on AI-ready data dissemination, quality frameworks, technical approaches, and communication strategies.",
       "summary": "Project proposal focusing on making official statistics AI-ready for better data consumption by AI.",
-      "communities": [
-        "eSam"
-      ],
       "tags": [
         "AI",
         "officiell statistik",
@@ -941,7 +838,6 @@
       "name": "Statistics Canada",
       "description": "",
       "summary": "",
-      "communities": [],
       "tags": [],
       "metadata": {},
       "embedding": null,
@@ -954,7 +850,6 @@
       "name": "CSO Ireland",
       "description": "",
       "summary": "",
-      "communities": [],
       "tags": [],
       "metadata": {},
       "embedding": null,
@@ -967,7 +862,6 @@
       "name": "Istat",
       "description": "",
       "summary": "",
-      "communities": [],
       "tags": [],
       "metadata": {},
       "embedding": null,
@@ -980,7 +874,6 @@
       "name": "Statistics Netherlands",
       "description": "",
       "summary": "",
-      "communities": [],
       "tags": [],
       "metadata": {},
       "embedding": null,
@@ -993,7 +886,6 @@
       "name": "Statistics New Zealand",
       "description": "",
       "summary": "",
-      "communities": [],
       "tags": [],
       "metadata": {},
       "embedding": null,
@@ -1006,7 +898,6 @@
       "name": "INEGI",
       "description": "",
       "summary": "",
-      "communities": [],
       "tags": [],
       "metadata": {},
       "embedding": null,
@@ -1019,7 +910,6 @@
       "name": "INSEE",
       "description": "",
       "summary": "",
-      "communities": [],
       "tags": [],
       "metadata": {},
       "embedding": null,
@@ -1032,7 +922,6 @@
       "name": "SORS",
       "description": "",
       "summary": "",
-      "communities": [],
       "tags": [],
       "metadata": {},
       "embedding": null,
@@ -1045,7 +934,6 @@
       "name": "Statistics Centre Abu Dhabi",
       "description": "",
       "summary": "",
-      "communities": [],
       "tags": [],
       "metadata": {},
       "embedding": null,
@@ -1058,7 +946,6 @@
       "name": "Statistics Finland",
       "description": "",
       "summary": "",
-      "communities": [],
       "tags": [],
       "metadata": {},
       "embedding": null,
@@ -1071,7 +958,6 @@
       "name": "Switzerland FSO",
       "description": "",
       "summary": "",
-      "communities": [],
       "tags": [],
       "metadata": {},
       "embedding": null,
@@ -1084,7 +970,6 @@
       "name": "Eurostat",
       "description": "",
       "summary": "",
-      "communities": [],
       "tags": [],
       "metadata": {},
       "embedding": null,
@@ -1097,7 +982,6 @@
       "name": "OECD",
       "description": "",
       "summary": "",
-      "communities": [],
       "tags": [],
       "metadata": {},
       "embedding": null,
@@ -1110,7 +994,6 @@
       "name": "Blue-Skies Thinking Network",
       "description": "",
       "summary": "",
-      "communities": [],
       "tags": [],
       "metadata": {},
       "embedding": null,
@@ -1123,7 +1006,6 @@
       "name": "United Nations Statistical Commission",
       "description": "",
       "summary": "",
-      "communities": [],
       "tags": [],
       "metadata": {},
       "embedding": null,
@@ -1136,7 +1018,6 @@
       "name": "OECD/PARIS21 Artificial Intelligence for Official Statistics Task Team",
       "description": "",
       "summary": "",
-      "communities": [],
       "tags": [],
       "metadata": {},
       "embedding": null,
@@ -1149,7 +1030,6 @@
       "name": "Artificial Intelligence and Machine Learning for Official Statistics",
       "description": "Ett projekt inriktat på tillämpningen av AI och maskininlärning inom officiell statistik. Mer information finns på https://cros.ec.europa.eu/dashboard/aiml4os",
       "summary": "",
-      "communities": [],
       "tags": [
         "AI",
         "maskininlärning",
@@ -1168,7 +1048,6 @@
       "name": "Internationella ai-projekt",
       "description": "Saved view: Internationella ai-projekt",
       "summary": "Contains 20 nodes",
-      "communities": [],
       "tags": [],
       "metadata": {
         "node_ids": [
@@ -1290,7 +1169,6 @@
       "name": "AI-verkstaden",
       "description": "AI-verkstaden är ett initiativ som stödjer organisationer i att förstå, testa och införa artificiell intelligens i praktiken. Fokus ligger på lärande, experiment, samverkan och ansvarsfull användning av AI.",
       "summary": "Praktiskt AI-initiativ för lärande, test och införande av AI i organisationer.",
-      "communities": [],
       "tags": [
         "AI",
         "innovation",
@@ -1696,7 +1574,6 @@
       "name": "Näringsliv",
       "description": "Företag och branschorganisationer som utvecklar eller använder AI-lösningar.",
       "summary": "Privata aktörer",
-      "communities": [],
       "tags": [
         "industry"
       ],
@@ -1711,7 +1588,6 @@
       "name": "Akademi",
       "description": "Universitet och forskningsinstitut som bedriver forskning och utbildning inom AI.",
       "summary": "Forskning och utbildning",
-      "communities": [],
       "tags": [
         "academia"
       ],
@@ -1726,9 +1602,6 @@
       "name": "Vägledning e-legitimation och e-underskrift 1_1 2018",
       "description": "Möjligheten att kunna identifiera användare av e-tjänster på ett säkert sätt och att kontrollera att elektroniskt underskrivna handlingar är äkta, är en viktig grundfunktion. E-legitimering och e-underskrift är därför en nödvändig del av den grundläggande infrastrukturen för såväl e-förvaltningen som för kommersiella aktörer.\n\nKälla: https://www.esamverka.se/publikationer.html (direkt fil-länk saknas i underlaget).",
       "summary": "Vägledning om e-legitimation och e-underskrift (2018).",
-      "communities": [
-        "eSam"
-      ],
       "tags": [
         "e-legitimation",
         "e-underskrift",
@@ -1751,9 +1624,6 @@
       "name": "Digitalisera rätt - en praktisk juridisk vägledning, 2019",
       "description": "Stöd vid införande av digital hantering av information i verksamhets-, och stödsystem så att de används samordnat på ett rättsenligt sätt.\n\nKälla: https://www.esamverka.se/publikationer.html (direkt fil-länk saknas i underlaget).",
       "summary": "Praktisk juridisk vägledning för rättsenlig digitalisering (2019).",
-      "communities": [
-        "eSam"
-      ],
       "tags": [
         "juridik",
         "digitalisering",
@@ -1775,9 +1645,6 @@
       "name": "Eget utrymme hos myndighet - en vägledning 2016",
       "description": "Vägledning om \"eget utrymme\" hos myndighet och tillhörande frågor kopplat till digital infrastruktur.\n\nKälla: https://www.esamverka.se/publikationer.html (direkt fil-länk saknas i underlaget).",
       "summary": "Vägledning om eget utrymme hos myndighet (2016).",
-      "communities": [
-        "eSam"
-      ],
       "tags": [
         "eget utrymme",
         "digital infrastruktur",
@@ -1798,9 +1665,6 @@
       "name": "Vägledning för verksamhetsutveckling inom e-förvaltningen 3.0 2018",
       "description": "Förklaring av juridiska frågor vid utveckling av e-tjänster. Rättsliga bedömningar för kombination av teknik och juridik på ett rättsenligt och lämpligt sätt.\n\nKälla: https://www.esamverka.se/publikationer.html (direkt fil-länk saknas i underlaget).",
       "summary": "Vägledning för verksamhetsutveckling inom e-förvaltningen (version 3.0, 2018).",
-      "communities": [
-        "eSam"
-      ],
       "tags": [
         "verksamhetsutveckling",
         "e-förvaltning",
@@ -1824,9 +1688,6 @@
       "name": "Vägledning Lagringsytor 2021",
       "description": "Ett stöd för att på ett rättsenligt sätt utveckla och införa lagringsytor och tillhörande infrastruktur.\n\nKälla: https://www.esamverka.se/publikationer.html (direkt fil-länk saknas i underlaget).",
       "summary": "Vägledning för rättsenlig utveckling och införande av lagringsytor (2021).",
-      "communities": [
-        "eSam"
-      ],
       "tags": [
         "lagringsytor",
         "infrastruktur",
@@ -1848,9 +1709,6 @@
       "name": "Vägledning Eget utrymme hos myndighet 2021",
       "description": "Vägledningen rör frågor om eget utrymme och tillhörande digital infrastruktur. Se även Vägledning lagringsytor 2021 — infrastruktur för it-drift och samverkan.\n\nKälla: https://www.esamverka.se/publikationer.html (direkt fil-länk saknas i underlaget).",
       "summary": "Uppdaterad vägledning om eget utrymme hos myndighet (2021).",
-      "communities": [
-        "eSam"
-      ],
       "tags": [
         "eget utrymme",
         "digital infrastruktur",
@@ -1872,9 +1730,6 @@
       "name": "Vägledning programvarulicensiering 2021",
       "description": "Om licensavtalets nyckelregleringar, även angränsande områden som underhåll, support, källkodsdeponering och licensrevision.\n\nKälla: https://www.esamverka.se/publikationer.html (direkt fil-länk saknas i underlaget).",
       "summary": "Vägledning om programvarulicensiering och licensavtal (2021).",
-      "communities": [
-        "eSam"
-      ],
       "tags": [
         "programvarulicensiering",
         "licensavtal",
@@ -1898,9 +1753,6 @@
       "name": "ES2022-01 Vägledning Pseudonymisering av personuppgifter",
       "description": "Ökad säkerhet för intern personuppgiftsbehandling, i relationen till externa samt ökad möjlighet att utbyta information mellan aktörer.\n\nKälla: https://www.esamverka.se/publikationer.html (direkt fil-länk saknas i underlaget).",
       "summary": "Vägledning om pseudonymisering av personuppgifter (ES2022-01).",
-      "communities": [
-        "eSam"
-      ],
       "tags": [
         "pseudonymisering",
         "personuppgifter",
@@ -1925,9 +1777,6 @@
       "name": "Elektroniskt informationsutbyte - en vägledning för utlämnande i elektronisk form",
       "description": "När myndigheter ska införa tjänster för att lämna ut uppgifter automatiserat, utan att detta leder till s.k. direktåtkomst, behöver ett antal frågor övervägas.\n\nKälla: https://www.esamverka.se/publikationer.html (direkt fil-länk saknas i underlaget).",
       "summary": "Vägledning för utlämnande i elektronisk form utan direktåtkomst.",
-      "communities": [
-        "eSam"
-      ],
       "tags": [
         "informationsutbyte",
         "utlämnande",
@@ -1950,9 +1799,6 @@
       "name": "Analysverktyg och eget utrymme 200303",
       "description": "I PM:n tas upp vad som kan göras inom ramen för eget utrymme och vad som faller utanför. Avslutar med fem praktiska exempel på vad som är tillåtet och vad som inte är det.\n\nKälla: https://www.esamverka.se/publikationer.html (direkt fil-länk saknas i underlaget).",
       "summary": "PM om analysverktyg inom ramen för eget utrymme (2020).",
-      "communities": [
-        "eSam"
-      ],
       "tags": [
         "analysverktyg",
         "eget utrymme",
@@ -1974,9 +1820,6 @@
       "name": "Rättsligt uttalande för sekretess enligt 40 kap 5§ OSL_2016",
       "description": "Rättsligt uttalande kopplat till sekretess enligt 40 kap. 5 § OSL.\n\nKälla: https://www.esamverka.se/publikationer.html (direkt fil-länk saknas i underlaget).",
       "summary": "Rättsligt uttalande om sekretess enligt 40 kap 5§ OSL (2016).",
-      "communities": [
-        "eSam"
-      ],
       "tags": [
         "sekretess",
         "OSL",
@@ -1997,9 +1840,6 @@
       "name": "Rättsligt uttalande inkommandetidpunkten_2017",
       "description": "Rättsligt uttalande om inkommandetidpunkten för elektroniska handlingar.\n\nKälla: https://www.esamverka.se/publikationer.html (direkt fil-länk saknas i underlaget).",
       "summary": "Rättsligt uttalande om inkommandetidpunkten (2017).",
-      "communities": [
-        "eSam"
-      ],
       "tags": [
         "inkommandetidpunkt",
         "elektroniska handlingar",
@@ -2020,9 +1860,6 @@
       "name": "Rättsligt uttalande art 22, autobeslut_2018",
       "description": "Rättsligt uttalande kopplat till artikel 22 (automatiserade beslut).\n\nKälla: https://www.esamverka.se/publikationer.html (direkt fil-länk saknas i underlaget).",
       "summary": "Rättsligt uttalande om art. 22 och automatiserade beslut (2018).",
-      "communities": [
-        "eSam"
-      ],
       "tags": [
         "artikel 22",
         "automatiserade beslut",
@@ -2044,9 +1881,6 @@
       "name": "Rättsligt uttalande Missbruk av e-leg 2017",
       "description": "Rättsligt uttalande om missbruk av e-legitimation.\n\nKälla: https://www.esamverka.se/publikationer.html (direkt fil-länk saknas i underlaget).",
       "summary": "Rättsligt uttalande om missbruk av e-leg (2017).",
-      "communities": [
-        "eSam"
-      ],
       "tags": [
         "e-legitimation",
         "missbruk",
@@ -2067,9 +1901,6 @@
       "name": "Rättsligt uttalande Eget utrymme 2017",
       "description": "Rättsligt uttalande kopplat till eget utrymme hos myndighet.\n\nKälla: https://www.esamverka.se/publikationer.html (direkt fil-länk saknas i underlaget).",
       "summary": "Rättsligt uttalande om eget utrymme (2017).",
-      "communities": [
-        "eSam"
-      ],
       "tags": [
         "eget utrymme",
         "rättsligt uttalande"
@@ -2089,9 +1920,6 @@
       "name": "PM inkommande handlingar, 2017",
       "description": "Resonemang kring tolkningssvårigheter avseende när en elektronisk handling anses ha inkommit till myndigheten.\n\nKälla: https://www.esamverka.se/publikationer.html (direkt fil-länk saknas i underlaget).",
       "summary": "PM om när elektroniska handlingar anses inkomna (2017).",
-      "communities": [
-        "eSam"
-      ],
       "tags": [
         "inkommande handlingar",
         "elektroniska handlingar",
@@ -2112,9 +1940,6 @@
       "name": "PM Eget utrymme, 2017",
       "description": "Resonemang kring juridisk bedömning av eget utrymme vilket senare ledde till uppdatering av tidigare utgivna vägledningar.\n\nKälla: https://www.esamverka.se/publikationer.html (direkt fil-länk saknas i underlaget).",
       "summary": "PM om juridisk bedömning av eget utrymme (2017).",
-      "communities": [
-        "eSam"
-      ],
       "tags": [
         "eget utrymme",
         "PM",
@@ -2135,9 +1960,6 @@
       "name": "ES2022-06 En modern registerförfattning",
       "description": "Förslag till utformning av modernare registerförfattningar som stödjer digitaliseringen med bibehållet integritetsskydd.\n\nKälla: https://www.esamverka.se/publikationer.html (direkt fil-länk saknas i underlaget).",
       "summary": "Promemoria: modern registerförfattning (ES2022-06).",
-      "communities": [
-        "eSam"
-      ],
       "tags": [
         "registerförfattning",
         "digitalisering",
@@ -2161,9 +1983,6 @@
       "name": "ES2023-2 Stordataanalyser och datasjöar - begrepp och rättsliga förutsättningar",
       "description": "Rättsliga förutsättningar, möjligheter och utmaningar för myndigheter som vill arbeta med stordataanalyser och datasjöar.\n\nKälla: https://www.esamverka.se/publikationer.html (direkt fil-länk saknas i underlaget).",
       "summary": "Promemoria om stordataanalyser och datasjöar (ES2023-2).",
-      "communities": [
-        "eSam"
-      ],
       "tags": [
         "stordataanalyser",
         "datasjöar",
@@ -2187,9 +2006,6 @@
       "name": "Digitaliserbar lagstiftning",
       "description": "Exempel på lagstiftning med utmaningar för digitalisering. Exempel på när digitalisering av rättsregler har kunnat genomföras.\n\nKälla: https://www.esamverka.se/publikationer.html (direkt fil-länk saknas i underlaget).",
       "summary": "Promemoria om digitaliserbar lagstiftning (2023).",
-      "communities": [
-        "eSam"
-      ],
       "tags": [
         "lagstiftning",
         "digitalisering",
@@ -2212,9 +2028,6 @@
       "name": "Skyddade personuppgifter - myndigheters hantering",
       "description": "Promemorian ger praktiskt stöd och konkreta tips vid myndigheters hantering av skyddade personuppgifter.\n\nKälla: https://www.esamverka.se/publikationer.html (direkt fil-länk saknas i underlaget).",
       "summary": "Promemoria om hantering av skyddade personuppgifter (2023).",
-      "communities": [
-        "eSam"
-      ],
       "tags": [
         "skyddade personuppgifter",
         "integritet",
@@ -2237,9 +2050,6 @@
       "name": "Checklista - Rättsliga förutsättningar i utvecklingsinsatser 2.0 2019",
       "description": "Övergripande juridiska frågeställningar vid samverkan kring e-förvaltningsinsatser samt vägledning till var det finns stöd i arbetet.\n\nKälla: https://www.esamverka.se/publikationer.html (direkt fil-länk saknas i underlaget).",
       "summary": "Checklista för rättsliga förutsättningar i utvecklingsinsatser (2.0, 2019).",
-      "communities": [
-        "eSam"
-      ],
       "tags": [
         "checklista",
         "juridik",
@@ -2262,9 +2072,6 @@
       "name": "Juridik vid användning av AI",
       "description": "Beskrivning av rättsliga frågor som särskilt behöver beaktas vid användning av AI.\n\nDirekt PDF: https://www.esamverka.se/download/18.2191f2561817fd04d7c4fe78/1656583943622/ES2022-08%20Checklista%20Juridik%20vid%20anv%C3%A4ndning%20av%20AI.pdf\n\nKälla: https://www.esamverka.se/publikationer.html",
       "summary": "Checklista om juridik vid användning av AI (ES2022-08).",
-      "communities": [
-        "eSam"
-      ],
       "tags": [
         "AI",
         "juridik",
@@ -2289,9 +2096,6 @@
       "name": "Vägledning it-avtal 2020",
       "description": "En överblick över it-avtalsområdet och en orientering över vanligt förekommande it-avtal.\n\nKälla: https://www.esamverka.se/publikationer.html (direkt fil-länk saknas i underlaget).",
       "summary": "Vägledning om it-avtal (2020).",
-      "communities": [
-        "eSam"
-      ],
       "tags": [
         "it-avtal",
         "avtal",
@@ -2313,9 +2117,6 @@
       "name": "Vägledning e-legitimation och e-underskrift 1_1 2018",
       "description": "Möjligheten att kunna identifiera användare av e-tjänster på ett säkert sätt och att kontrollera att elektroniskt underskrivna handlingar är äkta, är en viktig grundfunktion. E-legitimering och e-underskrift är därför en nödvändig del av den grundläggande infrastrukturen för såväl e-förvaltningen som för kommersiella aktörer.\n\nKälla: https://www.esamverka.se/publikationer.html (direkt fil-länk saknas i underlaget).",
       "summary": "Vägledning om e-legitimation och e-underskrift (2018).",
-      "communities": [
-        "eSam"
-      ],
       "tags": [
         "e-legitimation",
         "e-underskrift",
@@ -2338,9 +2139,6 @@
       "name": "Digitalisera rätt - en praktisk juridisk vägledning, 2019",
       "description": "Stöd vid införande av digital hantering av information i verksamhets-, och stödsystem så att de används samordnat på ett rättsenligt sätt.\n\nKälla: https://www.esamverka.se/publikationer.html (direkt fil-länk saknas i underlaget).",
       "summary": "Praktisk juridisk vägledning för rättsenlig digitalisering (2019).",
-      "communities": [
-        "eSam"
-      ],
       "tags": [
         "juridik",
         "digitalisering",
@@ -2362,9 +2160,6 @@
       "name": "Eget utrymme hos myndighet - en vägledning 2016",
       "description": "Vägledning om \"eget utrymme\" hos myndighet och tillhörande frågor kopplat till digital infrastruktur.\n\nKälla: https://www.esamverka.se/publikationer.html (direkt fil-länk saknas i underlaget).",
       "summary": "Vägledning om eget utrymme hos myndighet (2016).",
-      "communities": [
-        "eSam"
-      ],
       "tags": [
         "eget utrymme",
         "digital infrastruktur",
@@ -2385,9 +2180,6 @@
       "name": "Vägledning för verksamhetsutveckling inom e-förvaltningen 3.0 2018",
       "description": "Förklaring av juridiska frågor vid utveckling av e-tjänster. Rättsliga bedömningar för kombination av teknik och juridik på ett rättsenligt och lämpligt sätt.\n\nKälla: https://www.esamverka.se/publikationer.html (direkt fil-länk saknas i underlaget).",
       "summary": "Vägledning för verksamhetsutveckling inom e-förvaltningen (version 3.0, 2018).",
-      "communities": [
-        "eSam"
-      ],
       "tags": [
         "verksamhetsutveckling",
         "e-förvaltning",
@@ -2411,9 +2203,6 @@
       "name": "Vägledning Lagringsytor 2021",
       "description": "Ett stöd för att på ett rättsenligt sätt utveckla och införa lagringsytor och tillhörande infrastruktur.\n\nKälla: https://www.esamverka.se/publikationer.html (direkt fil-länk saknas i underlaget).",
       "summary": "Vägledning för rättsenlig utveckling och införande av lagringsytor (2021).",
-      "communities": [
-        "eSam"
-      ],
       "tags": [
         "lagringsytor",
         "infrastruktur",
@@ -2436,9 +2225,6 @@
       "name": "Vägledning Eget utrymme hos myndighet 2021",
       "description": "Vägledningen rör frågor om eget utrymme och tillhörande digital infrastruktur. Se även Vägledning lagringsytor 2021 — infrastruktur för it-drift och samverkan.\n\nKälla: https://www.esamverka.se/publikationer.html (direkt fil-länk saknas i underlaget).",
       "summary": "Uppdaterad vägledning om eget utrymme hos myndighet (2021).",
-      "communities": [
-        "eSam"
-      ],
       "tags": [
         "eget utrymme",
         "digital infrastruktur",
@@ -2460,9 +2246,6 @@
       "name": "Vägledning programvarulicensiering 2021",
       "description": "Om licensavtalets nyckelregleringar, även angränsande områden som underhåll, support, källkodsdeponering och licensrevision.\n\nKälla: https://www.esamverka.se/publikationer.html (direkt fil-länk saknas i underlaget).",
       "summary": "Vägledning om programvarulicensiering och licensavtal (2021).",
-      "communities": [
-        "eSam"
-      ],
       "tags": [
         "programvarulicensiering",
         "licensavtal",
@@ -2486,9 +2269,6 @@
       "name": "ES2022-01 Vägledning Pseudonymisering av personuppgifter",
       "description": "Ökad säkerhet för intern personuppgiftsbehandling, i relationen till externa samt ökad möjlighet att utbyta information mellan aktörer.\n\nKälla: https://www.esamverka.se/publikationer.html (direkt fil-länk saknas i underlaget).",
       "summary": "Vägledning om pseudonymisering av personuppgifter (ES2022-01).",
-      "communities": [
-        "eSam"
-      ],
       "tags": [
         "pseudonymisering",
         "personuppgifter",
@@ -2513,9 +2293,6 @@
       "name": "Elektroniskt informationsutbyte - en vägledning för utlämnande i elektronisk form",
       "description": "När myndigheter ska införa tjänster för att lämna ut uppgifter automatiserat, utan att detta leder till s.k. direktåtkomst, behöver ett antal frågor övervägas.\n\nKälla: https://www.esamverka.se/publikationer.html (direkt fil-länk saknas i underlaget).",
       "summary": "Vägledning för utlämnande i elektronisk form utan direktåtkomst (2016).",
-      "communities": [
-        "eSam"
-      ],
       "tags": [
         "informationsutbyte",
         "utlämnande",
@@ -2538,9 +2315,6 @@
       "name": "Analysverktyg och eget utrymme 200303",
       "description": "I PM:n tas upp vad som kan göras inom ramen för eget utrymme och vad som faller utanför. Avslutar med fem praktiska exempel på vad som är tillåtet och vad som inte är det.\n\nKälla: https://www.esamverka.se/publikationer.html (direkt fil-länk saknas i underlaget).",
       "summary": "PM om analysverktyg inom ramen för eget utrymme (2020).",
-      "communities": [
-        "eSam"
-      ],
       "tags": [
         "analysverktyg",
         "eget utrymme",
@@ -2562,9 +2336,6 @@
       "name": "Rättsligt uttalande för sekretess enligt 40 kap 5§ OSL_2016",
       "description": "Rättsligt uttalande kopplat till sekretess enligt 40 kap. 5 § OSL.\n\nKälla: https://www.esamverka.se/publikationer.html (direkt fil-länk saknas i underlaget).",
       "summary": "Rättsligt uttalande om sekretess enligt 40 kap 5§ OSL (2016).",
-      "communities": [
-        "eSam"
-      ],
       "tags": [
         "sekretess",
         "OSL",
@@ -2585,9 +2356,6 @@
       "name": "Rättsligt uttalande inkommandetidpunkten_2017",
       "description": "Rättsligt uttalande om inkommandetidpunkten för elektroniska handlingar.\n\nKälla: https://www.esamverka.se/publikationer.html (direkt fil-länk saknas i underlaget).",
       "summary": "Rättsligt uttalande om inkommandetidpunkten (2017).",
-      "communities": [
-        "eSam"
-      ],
       "tags": [
         "inkommandetidpunkt",
         "elektroniska handlingar",
@@ -2608,9 +2376,6 @@
       "name": "Rättsligt uttalande art 22, autobeslut_2018",
       "description": "Rättsligt uttalande kopplat till artikel 22 (automatiserade beslut).\n\nKälla: https://www.esamverka.se/publikationer.html (direkt fil-länk saknas i underlaget).",
       "summary": "Rättsligt uttalande om art. 22 och automatiserade beslut (2018).",
-      "communities": [
-        "eSam"
-      ],
       "tags": [
         "artikel 22",
         "automatiserade beslut",
@@ -2632,9 +2397,6 @@
       "name": "Rättsligt uttalande Missbruk av e-leg 2017",
       "description": "Rättsligt uttalande om missbruk av e-legitimation.\n\nKälla: https://www.esamverka.se/publikationer.html (direkt fil-länk saknas i underlaget).",
       "summary": "Rättsligt uttalande om missbruk av e-leg (2017).",
-      "communities": [
-        "eSam"
-      ],
       "tags": [
         "e-legitimation",
         "missbruk",
@@ -2655,9 +2417,6 @@
       "name": "Rättsligt uttalande Eget utrymme 2017",
       "description": "Rättsligt uttalande kopplat till eget utrymme hos myndighet.\n\nKälla: https://www.esamverka.se/publikationer.html (direkt fil-länk saknas i underlaget).",
       "summary": "Rättsligt uttalande om eget utrymme (2017).",
-      "communities": [
-        "eSam"
-      ],
       "tags": [
         "eget utrymme",
         "rättsligt uttalande"
@@ -2677,9 +2436,6 @@
       "name": "PM inkommande handlingar, 2017",
       "description": "Resonemang kring tolkningssvårigheter avseende när en elektronisk handling anses ha inkommit till myndigheten.\n\nKälla: https://www.esamverka.se/publikationer.html (direkt fil-länk saknas i underlaget).",
       "summary": "PM om när elektroniska handlingar anses inkomna (2017).",
-      "communities": [
-        "eSam"
-      ],
       "tags": [
         "inkommande handlingar",
         "elektroniska handlingar",
@@ -2700,9 +2456,6 @@
       "name": "PM Eget utrymme, 2017",
       "description": "Resonemang kring juridisk bedömning av eget utrymme vilket senare ledde till uppdatering av tidigare utgivna vägledningar.\n\nKälla: https://www.esamverka.se/publikationer.html (direkt fil-länk saknas i underlaget).",
       "summary": "PM om juridisk bedömning av eget utrymme (2017).",
-      "communities": [
-        "eSam"
-      ],
       "tags": [
         "eget utrymme",
         "PM",
@@ -2723,9 +2476,6 @@
       "name": "ES2022-06 En modern registerförfattning",
       "description": "Förslag till utformning av modernare registerförfattningar som stödjer digitaliseringen med bibehållet integritetsskydd.\n\nKälla: https://www.esamverka.se/publikationer.html (direkt fil-länk saknas i underlaget).",
       "summary": "Promemoria: modern registerförfattning (ES2022-06).",
-      "communities": [
-        "eSam"
-      ],
       "tags": [
         "registerförfattning",
         "digitalisering",
@@ -2749,9 +2499,6 @@
       "name": "ES2023-2 Stordataanalyser och datasjöar - begrepp och rättsliga förutsättningar",
       "description": "Rättsliga förutsättningar, möjligheter och utmaningar för myndigheter som vill arbeta med stordataanalyser och datasjöar.\n\nKälla: https://www.esamverka.se/publikationer.html (direkt fil-länk saknas i underlaget).",
       "summary": "Promemoria om stordataanalyser och datasjöar (ES2023-2).",
-      "communities": [
-        "eSam"
-      ],
       "tags": [
         "stordataanalyser",
         "datasjöar",
@@ -2775,9 +2522,6 @@
       "name": "Digitaliserbar lagstiftning",
       "description": "Exempel på lagstiftning med utmaningar för digitalisering. Exempel på när digitalisering av rättsregler har kunnat genomföras.\n\nKälla: https://www.esamverka.se/publikationer.html (direkt fil-länk saknas i underlaget).",
       "summary": "Promemoria om digitaliserbar lagstiftning (2023).",
-      "communities": [
-        "eSam"
-      ],
       "tags": [
         "lagstiftning",
         "digitalisering",
@@ -2800,9 +2544,6 @@
       "name": "Skyddade personuppgifter - myndigheters hantering",
       "description": "Promemorian ger praktiskt stöd och konkreta tips vid myndigheters hantering av skyddade personuppgifter.\n\nKälla: https://www.esamverka.se/publikationer.html (direkt fil-länk saknas i underlaget).",
       "summary": "Promemoria om hantering av skyddade personuppgifter (2023).",
-      "communities": [
-        "eSam"
-      ],
       "tags": [
         "skyddade personuppgifter",
         "integritet",
@@ -2825,9 +2566,6 @@
       "name": "Checklista - Rättsliga förutsättningar i utvecklingsinsatser 2.0 2019",
       "description": "Övergripande juridiska frågeställningar vid samverkan kring e-förvaltningsinsatser samt vägledning till var det finns stöd i arbetet.\n\nKälla: https://www.esamverka.se/publikationer.html (direkt fil-länk saknas i underlaget).",
       "summary": "Checklista för rättsliga förutsättningar i utvecklingsinsatser (2.0, 2019).",
-      "communities": [
-        "eSam"
-      ],
       "tags": [
         "checklista",
         "juridik",
@@ -2850,9 +2588,6 @@
       "name": "Juridik vid användning av AI",
       "description": "Beskrivning av rättsliga frågor som särskilt behöver beaktas vid användning av AI.\n\nKälla: https://www.esamverka.se/publikationer.html (direkt fil-länk saknas i underlaget).",
       "summary": "Checklista om juridik vid användning av AI (ES2022-08).",
-      "communities": [
-        "eSam"
-      ],
       "tags": [
         "AI",
         "juridik",
@@ -2875,9 +2610,6 @@
       "name": "Vägledning it-avtal 2020",
       "description": "En överblick över it-avtalsområdet och en orientering över vanligt förekommande it-avtal.\n\nKälla: https://www.esamverka.se/publikationer.html (direkt fil-länk saknas i underlaget).",
       "summary": "Vägledning om it-avtal (2020).",
-      "communities": [
-        "eSam"
-      ],
       "tags": [
         "it-avtal",
         "avtal",
@@ -2899,9 +2631,6 @@
       "name": "Kommentar Allmänna villkor it-konsulttjänster 2021",
       "description": "Underlättar användningen av och förklarar vissa regleringar i eSams allmänna villkor för it-konsulttjänster samt hur avtalsvillkoret är tänkt att användas.",
       "summary": "Kommentar som underlättar användningen av eSams allmänna villkor för it-konsulttjänster.",
-      "communities": [
-        "eSam"
-      ],
       "tags": [
         "it-avtal",
         "it-konsulttjänster",
@@ -2922,9 +2651,6 @@
       "name": "Kommentarer till Allmänna villkor för it-support 2021",
       "description": "Underlättar användningen av avtalsvillkoret, förklarar vissa regleringar och hur villkoren för it-support är tänkta att användas.",
       "summary": "Kommentar till eSams allmänna villkor för it-support.",
-      "communities": [
-        "eSam"
-      ],
       "tags": [
         "it-avtal",
         "it-support",
@@ -2945,9 +2671,6 @@
       "name": "Kommentar Allmänna villkor it-projekt och agila it-projekt 2021",
       "description": "Underlättar användningen av avtalsvillkoren och förklarar vissa regleringar för både traditionella och agila it-projekt.",
       "summary": "Kommentar till eSams allmänna villkor för it-projekt och agila it-projekt.",
-      "communities": [
-        "eSam"
-      ],
       "tags": [
         "it-avtal",
         "it-projekt",
@@ -2969,9 +2692,6 @@
       "name": "Kommentar till eSams huvudavtalsmallar 2022",
       "description": "Tar upp huvudavtalens nyckelregleringar och behov av kompletteringar för att underlätta användningen av eSams huvudavtalsmallar.",
       "summary": "Kommentar som förklarar eSams huvudavtalsmallar.",
-      "communities": [
-        "eSam"
-      ],
       "tags": [
         "it-avtal",
         "huvudavtal",
@@ -2992,9 +2712,6 @@
       "name": "eSams Allmänna villkor för it-konsulttjänster 2023",
       "description": "Tillämpas vid upphandling och kontraktering av it-konsulttjänster, till exempel systemutveckling, it-säkerhet och programmering.",
       "summary": "Allmänna villkor för upphandling och kontraktering av it-konsulttjänster.",
-      "communities": [
-        "eSam"
-      ],
       "tags": [
         "it-avtal",
         "it-konsulttjänster",
@@ -3017,9 +2734,6 @@
       "name": "eSams Allmänna villkor för it-support 2023",
       "description": "Tillämpas på avtal där leverantören tillhandahåller it-supporttjänster för programvara, appar, system och viss hårdvara.",
       "summary": "Allmänna villkor för it-supporttjänster.",
-      "communities": [
-        "eSam"
-      ],
       "tags": [
         "it-avtal",
         "it-support",
@@ -3042,9 +2756,6 @@
       "name": "221122 Huvudavtalmall it-drift 2022",
       "description": "Mallen kan användas när myndigheten saknar en huvudavtalsmall eller när myndighetens mall inte passar för ändamålet.\n\nKälla: https://www.esamverka.se/publikationer.html",
       "summary": "Huvudavtalsmall för it-drift (2022).",
-      "communities": [
-        "eSam"
-      ],
       "tags": [
         "it-avtal",
         "huvudavtal",
@@ -3069,9 +2780,6 @@
       "name": "Huvudavtalsmall agila it-projekt 2022",
       "description": "Används när myndigheten saknar huvudavtalsmall eller myndighetens mall inte passar för ändamålet.\n\nKälla: https://www.esamverka.se/publikationer.html",
       "summary": "Huvudavtalsmall för agila it-projekt (2022).",
-      "communities": [
-        "eSam"
-      ],
       "tags": [
         "it-avtal",
         "huvudavtal",
@@ -3096,9 +2804,6 @@
       "name": "Huvudavtalsmall it-konsulttjänster 2022",
       "description": "Mallen kan användas när myndigheten saknar huvudavtalsmall, eller när myndighetens mall inte passar för ändamålet.\n\nKälla: https://www.esamverka.se/publikationer.html",
       "summary": "Huvudavtalsmall för it-konsulttjänster (2022).",
-      "communities": [
-        "eSam"
-      ],
       "tags": [
         "it-avtal",
         "huvudavtal",
@@ -3123,9 +2828,6 @@
       "name": "Huvudavtalsmall it-projekt 2022",
       "description": "Används när myndigheten saknar huvudavtalsmall eller myndighetens mall inte passar för ändamålet.\n\nKälla: https://www.esamverka.se/publikationer.html",
       "summary": "Huvudavtalsmall för it-projekt (2022).",
-      "communities": [
-        "eSam"
-      ],
       "tags": [
         "it-avtal",
         "huvudavtal",
@@ -3150,9 +2852,6 @@
       "name": "Huvudavtalsmall it-support 2022",
       "description": "Används när myndigheten saknar en huvudavtalsmall eller myndighetens mall inte passar för ändamålet.\n\nKälla: https://www.esamverka.se/publikationer.html",
       "summary": "Huvudavtalsmall för it-support (2022).",
-      "communities": [
-        "eSam"
-      ],
       "tags": [
         "it-avtal",
         "huvudavtal",
@@ -3177,9 +2876,6 @@
       "name": "Kommentar Allmänna villkor för it-drift 2023",
       "description": "Underlätta användningen av avtalsvillkoret genom att förklara vissa regleringar och hur avtalsvillkoret är tänkt att användas.\n\nKälla: https://www.esamverka.se/publikationer.html",
       "summary": "Kommentar till eSams allmänna villkor för it-drift (2023).",
-      "communities": [
-        "eSam"
-      ],
       "tags": [
         "it-avtal",
         "it-drift",
@@ -3203,9 +2899,6 @@
       "name": "eSams Allmänna villkor för it-konsulttjänster 2023",
       "description": "Tillämpas vid upphandling och kontraktering av it-konsulttjänster för t.ex. systemutveckling, it-säkerhet eller programmering.\n\nKälla: https://www.esamverka.se/publikationer.html",
       "summary": "Allmänna villkor för it-konsulttjänster (2023).",
-      "communities": [
-        "eSam"
-      ],
       "tags": [
         "it-avtal",
         "it-konsulttjänster",
@@ -3229,9 +2922,6 @@
       "name": "eSams Allmänna villkor för it-drift 2023",
       "description": "Tillämpas på avtal där leverantören tillhandahåller it-drifttjänster och närliggande infrastrukturtjänster (t.ex. serverdrift, databasdrift, backup och lagring).\n\nKälla: https://www.esamverka.se/publikationer.html",
       "summary": "Allmänna villkor för it-drift (2023).",
-      "communities": [
-        "eSam"
-      ],
       "tags": [
         "it-avtal",
         "it-drift",
@@ -3255,9 +2945,6 @@
       "name": "eSams allmänna villkor för agila it-projekt 2023",
       "description": "Används när leverantören med agil projektmetod ska utveckla ny, alternativt förändra eller integrera befintlig programvara i ett it-projekt.\n\nKälla: https://www.esamverka.se/publikationer.html",
       "summary": "Allmänna villkor för agila it-projekt (2023).",
-      "communities": [
-        "eSam"
-      ],
       "tags": [
         "it-avtal",
         "agila it-projekt",
@@ -3281,9 +2968,6 @@
       "name": "eSams Allmänna villkor för it-projekt 2023",
       "description": "Används när leverantören med traditionell projektmetod ska tillhandahålla ett visst resultat enligt avtalad tidplan och ersättning.\n\nKälla: https://www.esamverka.se/publikationer.html",
       "summary": "Allmänna villkor för it-projekt (2023).",
-      "communities": [
-        "eSam"
-      ],
       "tags": [
         "it-avtal",
         "it-projekt",
@@ -3307,9 +2991,6 @@
       "name": "Alt ensidig sekretess - Allmänna villkor för agila it-projekt 2023",
       "description": "Alternativ skrivning om sekretess (avsnitt 19) med ensidig avtalssekretess.\n\nKälla: https://www.esamverka.se/publikationer.html",
       "summary": "Alternativ sekretessklausul (ensidig avtalssekretess) för agila it-projekt.",
-      "communities": [
-        "eSam"
-      ],
       "tags": [
         "it-avtal",
         "agila it-projekt",
@@ -3335,9 +3016,6 @@
       "name": "Alt ensidig sekretess - eSams Allmänna villkor för it-projekt 2023",
       "description": "Alternativ skrivning om sekretess (avsnitt 19) med ensidig avtalssekretess.\n\nKälla: https://www.esamverka.se/publikationer.html",
       "summary": "Alternativ sekretessklausul (ensidig avtalssekretess) för it-projekt.",
-      "communities": [
-        "eSam"
-      ],
       "tags": [
         "it-avtal",
         "it-projekt",
@@ -3363,9 +3041,6 @@
       "name": "Alt ensidig sekretess - eSams Allmänna villkor för it-drift 2023",
       "description": "Alternativ skrivning om sekretess (avsnitt 20) med ensidig avtalssekretess.\n\nKälla: https://www.esamverka.se/publikationer.html",
       "summary": "Alternativ sekretessklausul (ensidig avtalssekretess) för it-drift.",
-      "communities": [
-        "eSam"
-      ],
       "tags": [
         "it-avtal",
         "it-drift",
@@ -3391,9 +3066,6 @@
       "name": "Alt ensidig sekretess - eSams Allmänna villkor för it-support 2023",
       "description": "Alternativ skrivning om sekretess (avsnitt 19) med ensidig avtalssekretess.\n\nKälla: https://www.esamverka.se/publikationer.html",
       "summary": "Alternativ sekretessklausul (ensidig avtalssekretess) för it-support.",
-      "communities": [
-        "eSam"
-      ],
       "tags": [
         "it-avtal",
         "it-support",
@@ -3419,9 +3091,6 @@
       "name": "Alt ensidig sekretess - eSams Allmänna villkor för it-konsulttjänster 2023",
       "description": "Alternativ skrivning om sekretess (avsnitt 17) med ensidig avtalssekretess.\n\nKälla: https://www.esamverka.se/publikationer.html",
       "summary": "Alternativ sekretessklausul (ensidig avtalssekretess) för it-konsulttjänster.",
-      "communities": [
-        "eSam"
-      ],
       "tags": [
         "it-avtal",
         "it-konsulttjänster",
@@ -3447,9 +3116,6 @@
       "name": "Vidareutnyttjande och tillgängliggörande av data 1.0 2021",
       "description": "En lägesbeskrivning och omvärldsbevakning från 2021.\n\nKälla: https://www.esamverka.se/publikationer.html",
       "summary": "Lägesbeskrivning och omvärldsbevakning om vidareutnyttjande/tillgängliggörande av data (2021).",
-      "communities": [
-        "eSam"
-      ],
       "tags": [
         "rapport",
         "data",
@@ -3475,9 +3141,6 @@
       "name": "Delrapport AI-regulatorisk sandlåda - en första iteration (ES2024-14)",
       "description": "Inom eSam har Bolagsverket, Skatteverket och Arbetsförmedlingen tillsammans med Integritetsskyddsmyndigheten startat ett initiativ med att genomföra en pilot av en AI-regulatorisk sandlåda. Syftet är att ta reda på hur AI-regulatoriska sandlådor bör inrättas och fungera i Sverige och vilka förutsättningar som krävs.\n\nKälla: https://www.esamverka.se/publikationer.html",
       "summary": "Delrapport om AI-regulatorisk sandlåda – första iterationen (ES2024-14).",
-      "communities": [
-        "eSam"
-      ],
       "tags": [
         "rapport",
         "AI",
@@ -3503,9 +3166,6 @@
       "name": "ES2024-18 Delrapport AI-regulatorisk sandlåda - den andra iterationen",
       "description": "Delrapport (andra iterationen) inom arbetet med AI-regulatorisk sandlåda.\n\nKälla: https://www.esamverka.se/publikationer.html",
       "summary": "Delrapport om AI-regulatorisk sandlåda – andra iterationen (ES2024-18).",
-      "communities": [
-        "eSam"
-      ],
       "tags": [
         "rapport",
         "AI",
@@ -3530,9 +3190,6 @@
       "name": "Digitalt bevarande av data - problemområden (ES2025-01)",
       "description": "Myndigheters förmåga till exempelvis datadrivna analyser och informationsstyrning hänger på att data bevaras på ett hållbart sätt. För organisationer som hanterar stora mängder information är detta högaktuellt.\n\nKälla: https://www.esamverka.se/publikationer.html",
       "summary": "Rapport om digitalt bevarande av data – problemområden (ES2025-01).",
-      "communities": [
-        "eSam"
-      ],
       "tags": [
         "rapport",
         "data",
@@ -3558,9 +3215,6 @@
       "name": "Delrapport AI-regulatorisk sandlåda – tredje iterationen",
       "description": "I den tredje iterationen av piloten för AI-regulatorisk sandlåda har arbetsgruppen analyserat ett system som är tänkt att stödja skattebrottsutredare i brottsutredningar.\n\nDirekt PDF: https://www.esamverka.se/download/18.29c7ec891975d4083ec7d/1749632805660/ES2025-09%20AI-regulatorisk%20sandl%C3%A5da%20tredje%20iterationen%20m%20bilagor.pdf",
       "summary": "Tredje iterationen av AI-regulatorisk sandlåda.",
-      "communities": [
-        "eSam"
-      ],
       "tags": [
         "AI",
         "regulatorisk sandlåda",
@@ -3584,9 +3238,6 @@
       "name": "Allmänna handlingar i AI-utveckling",
       "description": "Analys av när informationsmängder som uppstår vid AI-utveckling, såsom källkod samt tränings- och valideringsdata, kan utgöra allmänna handlingar enligt svensk rätt.\n\nDirekt PDF: https://www.esamverka.se/download/18.2c1061191975d5b3870ef6/1750145864554/ES2025-11.pdf",
       "summary": "Allmänna handlingar vid AI-utveckling.",
-      "communities": [
-        "eSam"
-      ],
       "tags": [
         "AI",
         "allmänna handlingar",
@@ -3610,9 +3261,6 @@
       "name": "Digitalt bevarande av data – kravställning",
       "description": "Rapport om hur myndigheter behöver styra och hantera data och information för långsiktigt digitalt bevarande.\n\nKälla: https://www.esamverka.se/publikationer/juridik/2025-08-18-es-2025-12-digitalt-bevarande-av-data---kravstallning.html",
       "summary": "Kravställning för digitalt bevarande.",
-      "communities": [
-        "eSam"
-      ],
       "tags": [
         "data",
         "digitalt bevarande",
@@ -3636,9 +3284,6 @@
       "name": "ES2025-11 Allmänna handlingar i AI-utveckling",
       "description": "God ordning i hanteringen av myndigheternas information vid AI-utveckling och analys av när nya allmänna handlingar uppstår.",
       "summary": "Analys av allmänna handlingar vid AI-utveckling.",
-      "communities": [
-        "eSam"
-      ],
       "tags": [
         "AI",
         "juridik",
@@ -3663,9 +3308,6 @@
       "name": "ES2025-12 Digitalt bevarande av data – kravkatalog",
       "description": "Kompletterande kravkatalog till arbetet om digitalt bevarande av data inom offentlig sektor.",
       "summary": "Kravkatalog för digitalt bevarande av data.",
-      "communities": [
-        "eSam"
-      ],
       "tags": [
         "data",
         "digitalt bevarande",
@@ -3689,9 +3331,6 @@
       "name": "ES2023-09 Promemoria Digitaliserbar lagstiftning",
       "description": "Exempel på lagstiftning med särskilda utmaningar och möjligheter kopplade till digitalisering.",
       "summary": "Promemoria om digitaliserbar lagstiftning.",
-      "communities": [
-        "eSam"
-      ],
       "tags": [
         "juridik",
         "lagstiftning",
@@ -3716,9 +3355,6 @@
       "name": "ES2022-06 Promemoria En modern registerförfattning",
       "description": "Förslag till modernare registerförfattningar som stödjer digitalisering med bibehållet integritetsskydd.",
       "summary": "Promemoria om modern registerförfattning.",
-      "communities": [
-        "eSam"
-      ],
       "tags": [
         "juridik",
         "register",
@@ -3743,9 +3379,6 @@
       "name": "Expertgrupp säkerhet – rapport 1.0",
       "description": "Förslag att permanenta en expertgrupp för säkerhetsområdet inom digitaliseringsarbetet.",
       "summary": "Rapport om expertgrupp säkerhet.",
-      "communities": [
-        "eSam"
-      ],
       "tags": [
         "säkerhet",
         "styrning",
@@ -3768,9 +3401,6 @@
       "name": "Organisering för säkerhet 1.0",
       "description": "Råd kring hur säkerhetsarbetet kan organiseras i myndigheter.",
       "summary": "Råd om organisering för säkerhet.",
-      "communities": [
-        "eSam"
-      ],
       "tags": [
         "säkerhet",
         "organisation",
@@ -3793,9 +3423,6 @@
       "name": "Teknik och molntjänster 1.0",
       "description": "Översikt av tekniska och juridiska frågor kring användning av molntjänster.",
       "summary": "Promemoria om teknik och molntjänster.",
-      "communities": [
-        "eSam"
-      ],
       "tags": [
         "molntjänster",
         "teknik",
@@ -3818,9 +3445,6 @@
       "name": "ES2022-05 Tekniska förutsättningar i molntjänster",
       "description": "Övergripande beskrivning av krav på tekniska förutsättningar i molntjänster.",
       "summary": "Tekniska krav i molntjänster.",
-      "communities": [
-        "eSam"
-      ],
       "tags": [
         "molntjänster",
         "säkerhet",
@@ -3844,9 +3468,6 @@
       "name": "Säkerheten i mobila informationssystem 1.0",
       "description": "Analys av säkerhetsaspekter i mobila informationssystem.",
       "summary": "Promemoria om säkerhet i mobila informationssystem.",
-      "communities": [
-        "eSam"
-      ],
       "tags": [
         "mobilitet",
         "säkerhet",
@@ -3869,9 +3490,6 @@
       "name": "ES2023-10 Adekvansbeslut och ny sekretessbrytande bestämmelse",
       "description": "Analys av EU–USA-adecvansbeslutet och ny sekretessbrytande bestämmelse från 1 juli 2023.",
       "summary": "Promemoria om adekvansbeslut.",
-      "communities": [
-        "eSam"
-      ],
       "tags": [
         "dataskydd",
         "sekretess",
@@ -3895,9 +3513,6 @@
       "name": "ES2024-16 Vägledning ransomware",
       "description": "Stöd för myndigheter att stärka sin förmåga att förebygga och hantera ransomware-attacker.",
       "summary": "Vägledning om ransomware.",
-      "communities": [
-        "eSam"
-      ],
       "tags": [
         "cybersäkerhet",
         "ransomware",
@@ -3921,9 +3536,6 @@
       "name": "ES2025-05 Ledningens förberedelser inför ny säkerhetslagstiftning",
       "description": "Stöd framtaget av eSams arbetsgrupp för NIS2- och CER-direktiven.",
       "summary": "Stöd till ledningar inför ny säkerhetslagstiftning.",
-      "communities": [
-        "eSam"
-      ],
       "tags": [
         "säkerhet",
         "ledning",
@@ -3947,9 +3559,6 @@
       "name": "Ledningens förberedelser inför ny säkerhetslagstiftning 2025",
       "description": "Stöd framtaget av eSams arbetsgrupp för NIS2 och CER-direktiven för att underlätta implementering och effektivt resursutnyttjande.\n\nKälla: https://www.esamverka.se/publikationer.html",
       "summary": "Stöd till ledningen inför ny säkerhetslagstiftning.",
-      "communities": [
-        "eSam"
-      ],
       "tags": [
         "säkerhet",
         "NIS2",
@@ -3975,9 +3584,6 @@
       "name": "Rekommendation AI-baserade stödverktyg vid kodutveckling",
       "description": "Rekommendation/råd om användning av AI-baserade stödverktyg vid kodutveckling.\n\nKälla: https://www.esamverka.se/publikationer.html",
       "summary": "Rekommendation om AI-stöd vid kodutveckling.",
-      "communities": [
-        "eSam"
-      ],
       "tags": [
         "AI",
         "kodutveckling",
@@ -4003,9 +3609,6 @@
       "name": "Radarbild 2025 - rapport och stödmaterial",
       "description": "Sammanställning av väsentliga initiativ nationellt och inom EU som påverkar myndigheters digitalisering, inklusive stödmaterial (bilagor).\n\nKälla: https://www.esamverka.se/publikationer.html",
       "summary": "Radarbild över initiativ som påverkar digitalisering.",
-      "communities": [
-        "eSam"
-      ],
       "tags": [
         "radarbild",
         "styrning",
@@ -4031,9 +3634,6 @@
       "name": "ES2025-19 Radarbilden - initiativ som påverkar myndigheternas digitalisering",
       "description": "Rapport (ingress enligt publikationslistan) om initiativ som påverkar myndigheternas digitalisering.\n\nKälla: https://www.esamverka.se/publikationer.html",
       "summary": "Radarbilden: initiativ som påverkar digitalisering.",
-      "communities": [
-        "eSam"
-      ],
       "tags": [
         "radarbild",
         "digitalisering",
@@ -4058,9 +3658,6 @@
       "name": "ES2025-20 Gemensamt federationsprotokoll för chatt i offentlig sektor",
       "description": "Rapport om gemensamt federationsprotokoll för chatt i offentlig sektor och dess betydelse för interoperabilitet, säkerhet och digital suveränitet.\n\nKälla: https://www.esamverka.se/publikationer.html",
       "summary": "Gemensamt federationsprotokoll för chatt i offentlig sektor.",
-      "communities": [
-        "eSam"
-      ],
       "tags": [
         "chat",
         "federation",
@@ -4087,9 +3684,6 @@
       "name": "Nationella Dataområden",
       "description": "Rapport om hur nationella dataområden kan stärka en datadriven förvaltning, stödja EU-standardisering och interoperabilitet samt effektivare nyttjande av data.\n\nKälla: https://www.esamverka.se/publikationer.html",
       "summary": "Rapport om etablering av nationella dataområden.",
-      "communities": [
-        "eSam"
-      ],
       "tags": [
         "dataområden",
         "datadriven förvaltning",
@@ -4115,9 +3709,6 @@
       "name": "AI-regulatorisk sandlåda, fjärde iterationen",
       "description": "Rapport om fjärde iterationen i piloten för AI-regulatorisk sandlåda, inklusive analys av riskvärdering och praktisk hantering av dokumentationskrav.\n\nKälla: https://www.esamverka.se/publikationer.html",
       "summary": "Fjärde iterationen av AI-regulatorisk sandlåda.",
-      "communities": [
-        "eSam"
-      ],
       "tags": [
         "AI",
         "regulatorisk sandlåda",
@@ -4142,9 +3733,6 @@
       "name": "Uppdatering kring adekvansbeslutet i en turbulent tid",
       "description": "Promemoria om adekvansbeslutet från juni 2023 och kvarstående risker kring utländska myndigheters åtkomst till uppgifter via extraterritoriell lagstiftning.\n\nKälla: https://www.esamverka.se/publikationer.html",
       "summary": "Uppdatering om EU–USA-adevkans och risker.",
-      "communities": [
-        "eSam"
-      ],
       "tags": [
         "adevkansbeslut",
         "EU-USA",
@@ -4170,9 +3758,6 @@
       "name": "Tekniska förutsättningar i molntjänster",
       "description": "Promemoria med övergripande beskrivning av krav på tekniska förutsättningar i molntjänster.\n\nKälla: https://www.esamverka.se/publikationer.html",
       "summary": "Övergripande krav på tekniska molnförutsättningar.",
-      "communities": [
-        "eSam"
-      ],
       "tags": [
         "molntjänster",
         "tekniska krav",
@@ -4197,9 +3782,6 @@
       "name": "Att analysera molntjänster - några utgångspunkter",
       "description": "Promemoria med överblick av kritiska frågor vid anskaffning eller utkontraktering av molntjänster.\n\nKälla: https://www.esamverka.se/publikationer.html",
       "summary": "Utgångspunkter vid analys av molntjänster.",
-      "communities": [
-        "eSam"
-      ],
       "tags": [
         "molntjänster",
         "anskaffning",
@@ -4225,9 +3807,6 @@
       "name": "Vägledning arkitekturstyrning",
       "description": "Vägledning för att etablera organisation och arbetssätt så att arkitekturstyrning blir en del av organisationens utvecklingsprocess.\n\nKälla: https://www.esamverka.se/publikationer.html",
       "summary": "Stöd för att etablera arkitekturstyrning.",
-      "communities": [
-        "eSam"
-      ],
       "tags": [
         "arkitekturstyrning",
         "styrning",
@@ -4252,9 +3831,6 @@
       "name": "Ledningens förberedelser inför ny säkerhetslagstiftning 2025",
       "description": "Stöd framtaget av eSams arbetsgrupp för NIS2 och CER-direktiven för att underlätta implementering och effektivt resursutnyttjande.\n\nKälla: https://www.esamverka.se/publikationer.html",
       "summary": "Stöd till ledningen inför ny säkerhetslagstiftning.",
-      "communities": [
-        "eSam"
-      ],
       "tags": [
         "säkerhet",
         "NIS2",
@@ -4280,9 +3856,6 @@
       "name": "Rekommendation AI-baserade stödverktyg vid kodutveckling",
       "description": "Rekommendation/råd om användning av AI-baserade stödverktyg vid kodutveckling.\n\nKälla: https://www.esamverka.se/publikationer.html",
       "summary": "Rekommendation om AI-stöd vid kodutveckling.",
-      "communities": [
-        "eSam"
-      ],
       "tags": [
         "AI",
         "kodutveckling",
@@ -4308,9 +3881,6 @@
       "name": "Radarbild 2025 - rapport och stödmaterial",
       "description": "Sammanställning av väsentliga initiativ nationellt och inom EU som påverkar myndigheters digitalisering, inklusive stödmaterial (bilagor).\n\nKälla: https://www.esamverka.se/publikationer.html",
       "summary": "Radarbild över initiativ som påverkar digitalisering.",
-      "communities": [
-        "eSam"
-      ],
       "tags": [
         "radarbild",
         "styrning",
@@ -4336,9 +3906,6 @@
       "name": "ES2025-19 Radarbilden - initiativ som påverkar myndigheternas digitalisering",
       "description": "Rapport (ingress enligt publikationslistan) om initiativ som påverkar myndigheternas digitalisering.\n\nKälla: https://www.esamverka.se/publikationer.html",
       "summary": "Radarbilden: initiativ som påverkar digitalisering.",
-      "communities": [
-        "eSam"
-      ],
       "tags": [
         "radarbild",
         "digitalisering",
@@ -4363,9 +3930,6 @@
       "name": "ES2025-20 Gemensamt federationsprotokoll för chatt i offentlig sektor",
       "description": "Rapport om gemensamt federationsprotokoll för chatt i offentlig sektor och dess betydelse för interoperabilitet, säkerhet och digital suveränitet.\n\nKälla: https://www.esamverka.se/publikationer.html",
       "summary": "Federationsprotokoll för chatt i offentlig sektor.",
-      "communities": [
-        "eSam"
-      ],
       "tags": [
         "chat",
         "federation",
@@ -4392,9 +3956,6 @@
       "name": "Nationella Dataområden",
       "description": "Rapport om hur nationella dataområden kan stärka en datadriven förvaltning, stödja EU-standardisering och interoperabilitet samt effektivare nyttjande av data.\n\nKälla: https://www.esamverka.se/publikationer.html",
       "summary": "Etablering av nationella dataområden.",
-      "communities": [
-        "eSam"
-      ],
       "tags": [
         "dataområden",
         "datadriven förvaltning",
@@ -4420,9 +3981,6 @@
       "name": "AI-regulatorisk sandlåda, fjärde iterationen",
       "description": "Rapport om fjärde iterationen i piloten för AI-regulatorisk sandlåda, inklusive analys av riskvärdering och hantering av dokumentationskrav.\n\nKälla: https://www.esamverka.se/publikationer.html",
       "summary": "Fjärde iterationen av AI-regulatorisk sandlåda.",
-      "communities": [
-        "eSam"
-      ],
       "tags": [
         "AI",
         "regulatorisk sandlåda",
@@ -4447,9 +4005,6 @@
       "name": "Uppdatering kring adekvansbeslutet i en turbulent tid",
       "description": "Promemoria om adekvansbeslutet från juni 2023 och kvarstående risker kring utländska myndigheters åtkomst till uppgifter via extraterritoriell lagstiftning.\n\nKälla: https://www.esamverka.se/publikationer.html",
       "summary": "Promemoria om EU–USA-adevkans och risker.",
-      "communities": [
-        "eSam"
-      ],
       "tags": [
         "adevkansbeslut",
         "EU-USA",
@@ -4475,9 +4030,6 @@
       "name": "Tekniska förutsättningar i molntjänster",
       "description": "Promemoria med övergripande beskrivning av krav på tekniska förutsättningar i molntjänster.\n\nKälla: https://www.esamverka.se/publikationer.html",
       "summary": "Övergripande tekniska krav i molntjänster.",
-      "communities": [
-        "eSam"
-      ],
       "tags": [
         "molntjänster",
         "tekniska krav",
@@ -4502,9 +4054,6 @@
       "name": "Att analysera molntjänster - några utgångspunkter",
       "description": "Promemoria med överblick av kritiska frågor vid anskaffning eller utkontraktering av molntjänster.\n\nKälla: https://www.esamverka.se/publikationer.html",
       "summary": "Utgångspunkter vid analys av molntjänster.",
-      "communities": [
-        "eSam"
-      ],
       "tags": [
         "molntjänster",
         "anskaffning",
@@ -4530,9 +4079,6 @@
       "name": "Vägledning arkitekturstyrning",
       "description": "Vägledning för att etablera organisation och arbetssätt så att arkitekturstyrning blir en del av organisationens utvecklingsprocess.\n\nKälla: https://www.esamverka.se/publikationer.html",
       "summary": "Stöd för att etablera arkitekturstyrning.",
-      "communities": [
-        "eSam"
-      ],
       "tags": [
         "arkitekturstyrning",
         "styrning",
@@ -4557,9 +4103,6 @@
       "name": "Radarbild 2025 – bilaga 1",
       "description": "Bilaga med fullständig sammanställning av initiativ som ingår i Radarbild 2025.",
       "summary": "Sammanställning av samtliga initiativ i Radarbild 2025.",
-      "communities": [
-        "eSam"
-      ],
       "tags": [
         "radarbild",
         "styrning",
@@ -4584,9 +4127,6 @@
       "name": "Radarbilden USA 2025",
       "description": "Analys av USA-relaterade händelser och initiativ med påverkan på svensk offentlig digitalisering.",
       "summary": "USA-relaterade initiativ som påverkar svensk digitalisering.",
-      "communities": [
-        "eSam"
-      ],
       "tags": [
         "radarbild",
         "USA",
@@ -4610,9 +4150,6 @@
       "name": "Verksamhetsberättelse 2024–25",
       "description": "Sammanfattar eSams arbete, samverkan och resultat under verksamhetsåret 2024–25.",
       "summary": "eSams verksamhetsberättelse för 2024–25.",
-      "communities": [
-        "eSam"
-      ],
       "tags": [
         "verksamhetsberättelse"
       ],
@@ -4634,9 +4171,6 @@
       "name": "Vägledning E-legitimation och E-underskrift 1.1",
       "description": "Vägledning som beskriver juridiska, tekniska och administrativa aspekter av e-legitimation och e-underskrift.",
       "summary": "Vägledning om e-legitimation och e-underskrift.",
-      "communities": [
-        "eSam"
-      ],
       "tags": [
         "e-legitimation",
         "e-underskrift",
@@ -4659,9 +4193,6 @@
       "name": "Vägledning Bedömning och utveckling av chattbotar",
       "description": "Vägledning för hur myndigheter bör hantera införande och utveckling av chattbotar.",
       "summary": "Stöd för införande och utveckling av chattbotar.",
-      "communities": [
-        "eSam"
-      ],
       "tags": [
         "chattbot",
         "AI",
@@ -4685,9 +4216,6 @@
       "name": "Vägledning Designprinciper och krav för eget utrymme",
       "description": "Stöd för utformning av e-tjänster och eget utrymme på ett rättssäkert sätt.",
       "summary": "Designprinciper för eget utrymme i e-tjänster.",
-      "communities": [
-        "eSam"
-      ],
       "tags": [
         "eget utrymme",
         "design",
@@ -4711,9 +4239,6 @@
       "name": "Vägledning Innovation i en myndighet",
       "description": "Vägledning som förtydligar vad innovation i en myndighet innebär och hur förmågan kan stärkas.",
       "summary": "Stöd för att stärka innovationsförmåga.",
-      "communities": [
-        "eSam"
-      ],
       "tags": [
         "innovation",
         "vägledning"
@@ -4736,9 +4261,6 @@
       "name": "Vägledning Pseudonymisering av personuppgifter",
       "description": "Scenarier, rättsliga förutsättningar och exempel på lösningar för pseudonymisering.",
       "summary": "Rättsliga och tekniska förutsättningar för pseudonymisering.",
-      "communities": [
-        "eSam"
-      ],
       "tags": [
         "pseudonymisering",
         "dataskydd",
@@ -4762,9 +4284,6 @@
       "name": "Roadmap för myndigheters datahantering",
       "description": "Stöd för proaktiv planering av myndigheters datahantering i EU- och nationellt perspektiv.",
       "summary": "Roadmap för framtida datahantering.",
-      "communities": [
-        "eSam"
-      ],
       "tags": [
         "data",
         "roadmap",
@@ -4788,9 +4307,6 @@
       "name": "Mina Data v1.0",
       "description": "Rapport som etablerar konceptet Mina Data som grund för vidare utveckling.",
       "summary": "Personcentrerad informationshantering.",
-      "communities": [
-        "eSam"
-      ],
       "tags": [
         "Mina Data",
         "informationshantering"
@@ -4812,9 +4328,6 @@
       "name": "Rapport – En effektiv informationsförsörjning",
       "description": "Förslag och krav för ändamålsenlig informationsförsörjning i offentlig sektor.",
       "summary": "Krav på informationstillgångar i offentlig sektor.",
-      "communities": [
-        "eSam"
-      ],
       "tags": [
         "informationsförsörjning",
         "rapport"
@@ -4836,9 +4349,6 @@
       "name": "Rapport – Samverkan kring tillämpad AI",
       "description": "Olika perspektiv på införskaffning och användning av AI, inklusive juridik och organisatorisk mognad.",
       "summary": "Samverkan och mognad kring tillämpad AI.",
-      "communities": [
-        "eSam"
-      ],
       "tags": [
         "AI",
         "samverkan",
@@ -4862,9 +4372,6 @@
       "name": "Rapport AI – Utvecklingsprocessen och data",
       "description": "Exempel på AI/ML-utvecklingsprocesser samt roller och för- och nackdelar vid användning av dessa processer.\n\nDirekt PDF: https://www.esamverka.se/download/18.2dd7967a18d1ce21a754049/1705654566213/ES2024-01%20Rapport%20AI%20-%20Utvecklingsprocessen%20och%20data.pdf\n\nKälla: https://www.esamverka.se/publikationer.html",
       "summary": "AI-utvecklingsprocesser och data.",
-      "communities": [
-        "eSam"
-      ],
       "tags": [
         "AI",
         "utvecklingsprocess",
@@ -4888,9 +4395,6 @@
       "name": "Vägledning Innovation i en myndighet",
       "description": "Förtydligar vad en innovativ myndighet är och stödjer eSams medlemmar att stärka organisationens förmåga att vara innovativ.\n\nKälla: https://www.esamverka.se/publikationer.html",
       "summary": "Vägledning som stödjer myndigheter att stärka innovationsförmåga.",
-      "communities": [
-        "eSam"
-      ],
       "tags": [
         "innovation",
         "vägledning"
@@ -4914,9 +4418,6 @@
       "name": "Vägledning Innovation i en myndighet",
       "description": "Förtydligar vad en innovativ myndighet är och stödjer eSams medlemmar att stärka organisationens förmåga att vara innovativ.\n\nKälla: https://www.esamverka.se/publikationer.html",
       "summary": "Vägledning som stödjer myndigheter att stärka innovationsförmåga.",
-      "communities": [
-        "eSam"
-      ],
       "tags": [
         "innovation",
         "vägledning",
@@ -4941,9 +4442,6 @@
       "name": "Vägledning Innovation i en myndighet",
       "description": "Förtydligar vad en innovativ myndighet är och stödjer eSams medlemmar att stärka organisationens förmåga att vara innovativ.\n\nKälla: https://www.esamverka.se/publikationer.html",
       "summary": "Vägledning som stödjer myndigheter att stärka innovationsförmåga.",
-      "communities": [
-        "eSam"
-      ],
       "tags": [
         "innovation",
         "vägledning",
@@ -4968,9 +4466,6 @@
       "name": "Rapport AI – Utvecklingsprocessen och data",
       "description": "Exempel på utvecklingsprocesser för AI/ML samt för- och nackdelar, inklusive rollbeskrivningar.\n\nDirekt PDF: https://www.esamverka.se/download/18.2dd7967a18d1ce21a754049/1705654566213/ES2024-01%20Rapport%20AI%20-%20Utvecklingsprocessen%20och%20data.pdf",
       "summary": "Utvecklingsprocesser för AI/ML, roller och avvägningar.",
-      "communities": [
-        "eSam"
-      ],
       "tags": [
         "AI",
         "utvecklingsprocess",
@@ -4995,9 +4490,6 @@
       "name": "Datadriven automatisering mellan kommuner och myndigheter",
       "description": "Arbete för att identifiera konkreta dataflöden mellan kommuner och myndigheter som kan automatiseras.\n\nKälla: https://www.esamverka.se/publikationer.html",
       "summary": "Identifierar automatiserbara dataflöden.",
-      "communities": [
-        "eSam"
-      ],
       "tags": [
         "data",
         "automatisering",
@@ -5022,9 +4514,6 @@
       "name": "Stärkt förmåga till AI i samverkan",
       "description": "Gemensamma labb-, utvecklings-, delnings- och tillhandahållandeförmågor för att stärka AI-utveckling.\n\nDirekt PDF: https://www.esamverka.se/download/18.494db7261900c5885b41e93/1718717466677/ES2024-08%20Rapport%20St%C3%A4rkt%20f%C3%B6rm%C3%A5ga%20till%20AI%20i%20samverkan.pdf",
       "summary": "Gemensamma AI-förmågor i samverkan.",
-      "communities": [
-        "eSam"
-      ],
       "tags": [
         "AI",
         "samverkan",
@@ -5048,9 +4537,6 @@
       "name": "Referensarkitektur datahantering",
       "description": "Stöd för effektiv och säker tillgång till data inom och mellan organisationer.\n\nPublikationssida: https://www.esamverka.se/publikationer/arkitektur/2025-04-15-referensarkitektur-datahantering.html",
       "summary": "Referensarkitektur för säker dataåtkomst och delning.",
-      "communities": [
-        "eSam"
-      ],
       "tags": [
         "arkitektur",
         "datahantering",
@@ -5074,9 +4560,6 @@
       "name": "Beskrivning av datakatalog",
       "description": "Stöd för katalogisering och sökbarhet bland dataprodukter.\n\nPublikationssida: https://www.esamverka.se/publikationer/arkitektur/2025-04-15-beskrivning-av-datakatalog.html",
       "summary": "Stöd för katalogisering av dataprodukter.",
-      "communities": [
-        "eSam"
-      ],
       "tags": [
         "datakatalog",
         "data",
@@ -5100,9 +4583,6 @@
       "name": "Dataprodukt och dataproduktspecifikation",
       "description": "Stöd och vägledning för konceptet data som produkt samt dokumentation av dataprodukter.\n\nPublikationssida: https://www.esamverka.se/publikationer/arkitektur/2025-04-15-dataprodukt-och-dataproduktspecifikation.html",
       "summary": "Vägledning för data som produkt.",
-      "communities": [
-        "eSam"
-      ],
       "tags": [
         "dataprodukt",
         "data",
@@ -5126,9 +4606,6 @@
       "name": "Delning och användning av öppen källkod",
       "description": "Medlemmars erfarenheter av att använda och dela öppen källkod.\n\nKälla: https://www.esamverka.se/publikationer.html",
       "summary": "Erfarenheter av öppen källkod.",
-      "communities": [
-        "eSam"
-      ],
       "tags": [
         "öppen källkod",
         "råd"
@@ -5151,9 +4628,6 @@
       "name": "Råd: Intern kommunikation om användande av AI-baserade chattbotar",
       "description": "Stöd och inspiration till internkommunikation vid användning av externa chattbotar.\n\nKälla: https://www.esamverka.se/publikationer.html",
       "summary": "Stöd för intern kommunikation om chattbotar.",
-      "communities": [
-        "eSam"
-      ],
       "tags": [
         "AI",
         "chattbotar",
@@ -5178,9 +4652,6 @@
       "name": "Råd: Praktisk användning av vägledning för innovation",
       "description": "Praktiskt stöd för att stärka organisationers innovationsförmåga.\n\nKälla: https://www.esamverka.se/publikationer.html",
       "summary": "Praktiskt innovationsstöd.",
-      "communities": [
-        "eSam"
-      ],
       "tags": [
         "innovation",
         "råd"
@@ -5203,9 +4674,6 @@
       "name": "Råd: Säkrare extern överföring av information",
       "description": "Stöd för säkrare uppkopplingar och kompetensutveckling.\n\nKälla: https://www.esamverka.se/publikationer.html",
       "summary": "Säkrare serverkonfigurationer.",
-      "communities": [
-        "eSam"
-      ],
       "tags": [
         "säkerhet",
         "överföring",
@@ -5228,9 +4696,6 @@
       "name": "AI-labb för anpassningsbara AI-assistenter",
       "description": "Myndigheters erfarenheter från AI-labb för anpassningsbara assistenter.\n\nKälla: https://www.esamverka.se/publikationer.html",
       "summary": "Labb för lärande och användning av AI.",
-      "communities": [
-        "eSam"
-      ],
       "tags": [
         "AI",
         "labb",
@@ -5254,9 +4719,6 @@
       "name": "Metod för utveckling i samverkan 1.1",
       "description": "Metodstöd för utveckling i samverkan.\n\nKälla: https://www.esamverka.se/publikationer.html",
       "summary": "Metodstöd för samverkan.",
-      "communities": [
-        "eSam"
-      ],
       "tags": [
         "samverkan",
         "metod",
@@ -5279,9 +4741,6 @@
       "name": "Vägledning Digital Samverkan 4.1",
       "description": "Vägledning och fördjupningar kring digital samverkan.\n\nKälla: https://www.esamverka.se/publikationer.html",
       "summary": "Vägledning för digital samverkan.",
-      "communities": [
-        "eSam"
-      ],
       "tags": [
         "digital samverkan",
         "vägledning"
@@ -5303,9 +4762,6 @@
       "name": "Mall för informations- och datastrategi",
       "description": "Mall som vägleder myndigheter i informations- och datastrategi.\n\nKälla: https://www.esamverka.se/publikationer.html",
       "summary": "Strategimall för datadriven omställning.",
-      "communities": [
-        "eSam"
-      ],
       "tags": [
         "datastrategi",
         "rapport"
@@ -5328,9 +4784,6 @@
       "name": "Nationella Dataområden",
       "description": "Stärker datadriven förvaltning och interoperabilitet.\n\nKälla: https://www.esamverka.se/publikationer.html",
       "summary": "Etablering av nationella dataområden.",
-      "communities": [
-        "eSam"
-      ],
       "tags": [
         "dataområden",
         "interoperabilitet",
@@ -5354,9 +4807,6 @@
       "name": "AI-regulatorisk sandlåda – fjärde iterationen",
       "description": "Analys av riskvärdering och dokumentationskrav enligt AI-förordningen.\n\nKälla: https://www.esamverka.se/publikationer.html",
       "summary": "Fjärde iterationen av AI-sandlådan.",
-      "communities": [
-        "eSam"
-      ],
       "tags": [
         "AI",
         "regulatorisk sandlåda",
@@ -5380,9 +4830,6 @@
       "name": "Vägledning Utkontraktering – sekretess och dataskydd",
       "description": "Stöd för överväganden kring sekretess och dataskydd vid utkontraktering.\n\nKälla: https://www.esamverka.se/publikationer.html",
       "summary": "Juridiskt stöd vid utkontraktering.",
-      "communities": [
-        "eSam"
-      ],
       "tags": [
         "juridik",
         "dataskydd",
@@ -5406,9 +4853,6 @@
       "name": "Att analysera molntjänster – några utgångspunkter",
       "description": "Överblick av kritiska frågor vid anskaffning eller utkontraktering av molntjänster.\n\nKälla: https://www.esamverka.se/publikationer.html",
       "summary": "Analysstöd för molntjänster.",
-      "communities": [
-        "eSam"
-      ],
       "tags": [
         "molntjänster",
         "analys",
@@ -5432,9 +4876,6 @@
       "name": "Gemensamt federationsprotokoll för chatt i offentlig sektor",
       "description": "Gemensamt öppet federationsprotokoll för säker och interoperabel chatt.\n\nKälla: https://www.esamverka.se/publikationer.html",
       "summary": "Federerat chattprotokoll för offentlig sektor.",
-      "communities": [
-        "eSam"
-      ],
       "tags": [
         "chat",
         "federation",
@@ -5459,7 +4900,6 @@
       "name": "eSam",
       "description": "eSam är en medlemsfinansierad förening för organisationer i offentlig sektor i Sverige som arbetar med digitalisering och e-förvaltning.",
       "summary": "Samverkansorganisation för digital förvaltning",
-      "communities": [],
       "tags": [
         "samverkansorganisation",
         "digitalisering",
@@ -5862,7 +5302,6 @@
       "name": "Riksarkivet",
       "description": "Statlig arkivmyndighet som bevarar arkiv samt utövar tillsyn och ger stöd i arkivfrågor.",
       "summary": "",
-      "communities": [],
       "tags": [
         "arkiv",
         "tillsyn",
@@ -6264,7 +5703,6 @@
       "name": "Pensionsmyndigheten",
       "description": "Administrerar den allmänna pensionen genom att informera, besluta och betala ut pension samt ta fram prognoser.",
       "summary": "",
-      "communities": [],
       "tags": [
         "pension",
         "förvaltning",
@@ -6666,7 +6104,6 @@
       "name": "Rättsmedicinalverket (RMV)",
       "description": "Central myndighet för rättspsykiatrisk, rättskemisk, rättsmedicinsk och rättsgenetisk verksamhet.",
       "summary": "",
-      "communities": [],
       "tags": [
         "rättspsykiatri",
         "rättskemi",
@@ -7069,7 +6506,6 @@
       "name": "Boverket",
       "description": "Nationell myndighet för samhällsplanering, byggande och boende samt frågor om byggd miljö och fysisk planering.",
       "summary": "",
-      "communities": [],
       "tags": [
         "samhällsplanering",
         "byggande",
@@ -7471,7 +6907,6 @@
       "name": "Jordbruksverket",
       "description": "Central myndighet för jordbruk, landsbygd och djurhållning, inklusive genomförande av delar av EU:s jordbrukspolitik.",
       "summary": "",
-      "communities": [],
       "tags": [
         "jordbruk",
         "landsbygd",
@@ -7873,7 +7308,6 @@
       "name": "Arbetsmiljöverket",
       "description": "Säkerställer att arbetsmiljö- och arbetstidslagstiftning följs genom föreskrifter, inspektioner och information.",
       "summary": "",
-      "communities": [],
       "tags": [
         "arbetsmiljö",
         "inspektion",
@@ -8275,7 +7709,6 @@
       "name": "Riksantikvarieämbetet",
       "description": "Nationell myndighet för kulturarv och kulturmiljöfrågor med stöd, samordning och kunskapsuppbyggnad.",
       "summary": "",
-      "communities": [],
       "tags": [
         "kulturarv",
         "kulturmiljö",
@@ -8677,7 +8110,6 @@
       "name": "Migrationsverket",
       "description": "Prövar bland annat asyl och andra uppehållstillstånd samt ansvarar för mottagande och återvändandearbete enligt uppdrag.",
       "summary": "",
-      "communities": [],
       "tags": [
         "asyl",
         "uppehållstillstånd",
@@ -9079,7 +8511,6 @@
       "name": "Tillväxtverket",
       "description": "Arbetar för fler och växande företag samt hållbart och konkurrenskraftigt näringsliv i hela landet.",
       "summary": "",
-      "communities": [],
       "tags": [
         "tillväxt",
         "företag",
@@ -9481,7 +8912,6 @@
       "name": "Skatteverket",
       "description": "Ansvarar bland annat för skatter, socialavgifter, folkbokföring och vissa borgenärsuppgifter.",
       "summary": "",
-      "communities": [],
       "tags": [
         "skatter",
         "folkbokföring",
@@ -9883,7 +9313,6 @@
       "name": "Inspektionen för vård och omsorg (IVO)",
       "description": "Utövar tillsyn över hälso- och sjukvård och socialtjänst samt prövar vissa tillstånd och hanterar klagomål.",
       "summary": "",
-      "communities": [],
       "tags": [
         "tillsyn",
         "vård",
@@ -10285,7 +9714,6 @@
       "name": "Lantmäteriet",
       "description": "Ansvarar för fastighetsindelning och fastighetsinformation samt producerar och tillhandahåller geodata och kartor.",
       "summary": "",
-      "communities": [],
       "tags": [
         "fastighetsindelning",
         "geodata",
@@ -10687,7 +10115,6 @@
       "name": "Utbetalningsmyndigheten",
       "description": "Förebygger, förhindrar och upptäcker felaktiga utbetalningar från välfärdssystemet via systemövergripande analyser och transaktionskonto.",
       "summary": "",
-      "communities": [],
       "tags": [
         "utbetalningar",
         "välfärdssystem",
@@ -11089,7 +10516,6 @@
       "name": "Skolverket",
       "description": "Främjar likvärdig utbildning av god kvalitet, utvecklar styrdokument och prov samt ger stöd till skolutveckling och hanterar statsbidrag.",
       "summary": "",
-      "communities": [],
       "tags": [
         "utbildning",
         "styrdokument",
@@ -11491,7 +10917,6 @@
       "name": "Statens servicecenter",
       "description": "Samordnar statlig administration genom stödtjänster (lön, ekonomi, e-handel) och tillhandahåller lokal statlig service via servicekontor.",
       "summary": "",
-      "communities": [],
       "tags": [
         "administration",
         "stödtjänster",
@@ -11893,7 +11318,6 @@
       "name": "Länsstyrelserna",
       "description": "Statlig regional förvaltning som ska få nationella mål att få genomslag i länen med hänsyn till regionala förutsättningar.",
       "summary": "",
-      "communities": [],
       "tags": [
         "regional förvaltning",
         "nationella mål",
@@ -12295,7 +11719,6 @@
       "name": "Trafikverket",
       "description": "Ansvarar för långsiktig infrastrukturplanering samt planering, byggande, drift och underhåll av statliga vägar och järnvägar.",
       "summary": "",
-      "communities": [],
       "tags": [
         "infrastruktur",
         "vägar",
@@ -12697,7 +12120,6 @@
       "name": "Kronofogden",
       "description": "Verkställer skulder genom indrivning och utmätning, hanterar skuldsanering och arbetar mot överskuldsättning.",
       "summary": "",
-      "communities": [],
       "tags": [
         "indrivning",
         "skuldsanering",
@@ -13099,7 +12521,6 @@
       "name": "Kemikalieinspektionen",
       "description": "Ansvarar för regler, prövning och tillsyn som ska minska risker med kemikalier och bekämpningsmedel.",
       "summary": "",
-      "communities": [],
       "tags": [
         "kemikalier",
         "tillsyn",
@@ -13501,7 +12922,6 @@
       "name": "Transportstyrelsen",
       "description": "Ansvarar för regelgivning, tillsyn, tillstånd och register inom transportområdet för alla trafikslag.",
       "summary": "",
-      "communities": [],
       "tags": [
         "transporter",
         "regelgivning",
@@ -13903,7 +13323,6 @@
       "name": "Arbetsförmedlingen",
       "description": "Förvaltningsmyndighet för arbetsmarknadspolitiska frågor och ansvarar för den arbetsmarknadspolitiska verksamheten.",
       "summary": "",
-      "communities": [],
       "tags": [
         "arbetsmarknad",
         "förvaltning",
@@ -14305,7 +13724,6 @@
       "name": "Livsmedelsverket",
       "description": "Arbetar för säkra livsmedel och bra dricksvatten samt ger vägledning och stöd till kontroll och nutrition.",
       "summary": "",
-      "communities": [],
       "tags": [
         "livsmedelssäkerhet",
         "dricksvatten",
@@ -14707,7 +14125,6 @@
       "name": "Statens tjänstepensionsverk (SPV)",
       "description": "Administrerar statlig tjänstepension, beräknar premier och levererar prognoser och statistik.",
       "summary": "",
-      "communities": [],
       "tags": [
         "pension",
         "administration",
@@ -15109,7 +14526,6 @@
       "name": "Bolagsverket",
       "description": "Registrerar företag och ändringar, tar emot årsredovisningar samt hanterar bland annat företagsinteckningar och vissa likvidationsärenden.",
       "summary": "",
-      "communities": [],
       "tags": [
         "företag",
         "registrering",
@@ -15511,7 +14927,6 @@
       "name": "Centrala studiestödsnämnden (CSN)",
       "description": "Beslutar om och betalar ut studiestöd, hanterar återbetalning av lån och administrerar körkortslån.",
       "summary": "",
-      "communities": [],
       "tags": [
         "utbildning",
         "studiestöd",
@@ -15913,7 +15328,6 @@
       "name": "Statens veterinärmedicinska anstalt (SVA)",
       "description": "Veterinärmedicinskt expert- och serviceorgan som främjar djurs och människors hälsa genom diagnostik, forskning, beredskap och rådgivning.",
       "summary": "",
-      "communities": [],
       "tags": [
         "veterinärmedicin",
         "diagnostik",
@@ -16315,7 +15729,6 @@
       "name": "Tullverket",
       "description": "Fastställer och tar ut tullar och vissa skatter samt kontrollerar varutrafik till och från utlandet så att regler följs.",
       "summary": "",
-      "communities": [],
       "tags": [
         "tullar",
         "skatter",
@@ -16717,7 +16130,6 @@
       "name": "Domstolsverket",
       "description": "Central förvaltningsmyndighet för domstolarna samt arrende- och hyresnämnderna och Rättshjälpsmyndigheten.",
       "summary": "",
-      "communities": [],
       "tags": [
         "domstol",
         "rättshjälp",
@@ -17119,7 +16531,6 @@
       "name": "Statskontoret",
       "description": "Analyserar och utvärderar statlig verksamhet och förvaltning för att bidra till effektivitet och förbättrad styrning.",
       "summary": "",
-      "communities": [],
       "tags": [
         "analys",
         "utvärdering",
@@ -17521,7 +16932,6 @@
       "name": "Havs- och vattenmyndigheten",
       "description": "Ansvarar för förvaltning av havs- och vattenmiljö samt genomför och samordnar arbete inom vattenförvaltning och fiskefrågor.",
       "summary": "",
-      "communities": [],
       "tags": [
         "vattenmiljö",
         "förvaltning",
@@ -17923,7 +17333,6 @@
       "name": "Naturvårdsverket",
       "description": "Central myndighet för miljö och naturvård, inklusive arbete med miljömål, klimat, avfall och tillsynsvägledning.",
       "summary": "",
-      "communities": [],
       "tags": [
         "miljö",
         "naturvård",
@@ -18325,7 +17734,6 @@
       "name": "Kustbevakningen",
       "description": "Bedriver sjöövervakning och brottsbekämpning till sjöss samt genomför miljöräddningstjänst och vissa kontrolluppgifter.",
       "summary": "",
-      "communities": [],
       "tags": [
         "sjöövervakning",
         "brottsbekämpning",
@@ -18727,7 +18135,6 @@
       "name": "Sida",
       "description": "Styrelsen för internationellt utvecklingssamarbete (Sida) är en svensk myndighet som arbetar på uppdrag av riksdagen och regeringen för att minska fattigdomen i världen.",
       "summary": "",
-      "communities": [],
       "tags": [
         "myndighet",
         "utvecklingssamarbete",
@@ -19125,414 +18532,11 @@
       "updated_at": "2026-02-05T07:48:45.934907"
     },
     {
-      "id": "06431729-091c-4c7c-b6cc-2c117c1ea6f0",
-      "type": "Actor",
-      "name": "Statistiska centralbyrån (SCB)",
-      "description": "Ansvarar för officiell statistik och samordnar det statliga statistiksystemet samt överlämnande av statistik till internationella organisationer.",
-      "summary": "",
-      "communities": [],
-      "tags": [
-        "statistik",
-        "samordning",
-        "datahantering"
-      ],
-      "metadata": {},
-      "embedding": [
-        -0.057062868028879166,
-        0.013240393251180649,
-        -0.14152704179286957,
-        -0.045454204082489014,
-        -0.0458693690598011,
-        0.03202208876609802,
-        0.008266626857221127,
-        0.09148705750703812,
-        -0.04579877853393555,
-        0.06240951642394066,
-        0.03826206922531128,
-        0.0018491073278710246,
-        0.022896362468600273,
-        0.0051894402131438255,
-        -0.013577109202742577,
-        -0.05335930362343788,
-        -0.04723989591002464,
-        -0.006808453239500523,
-        0.02893788181245327,
-        -0.03899766504764557,
-        -0.048383329063653946,
-        -0.01201164722442627,
-        -0.051416605710983276,
-        -0.009120441041886806,
-        0.10456682741641998,
-        0.021008914336562157,
-        0.021431293338537216,
-        -0.07813605666160583,
-        -0.016535822302103043,
-        -0.007139870896935463,
-        -0.018616998568177223,
-        0.061431270092725754,
-        0.0788457989692688,
-        0.024656936526298523,
-        0.0017291541444137692,
-        -0.07926468551158905,
-        -0.05441146343946457,
-        0.03722742199897766,
-        0.05250677466392517,
-        0.07332019507884979,
-        -0.03785206004977226,
-        -0.008190453052520752,
-        -0.0390373095870018,
-        -0.0656796544790268,
-        -0.0681823119521141,
-        0.036929722875356674,
-        -0.04213344305753708,
-        0.020214026793837547,
-        -0.040729500353336334,
-        0.044472914189100266,
-        -0.10983524471521378,
-        -0.054822370409965515,
-        0.03892398253083229,
-        0.04277382791042328,
-        0.04625451937317848,
-        -0.07597847282886505,
-        0.010716388933360577,
-        -0.09254784882068634,
-        -0.046028442680835724,
-        -0.027268070727586746,
-        0.01807813160121441,
-        0.022441620007157326,
-        -0.02881760708987713,
-        0.015963047742843628,
-        0.08615168929100037,
-        0.027005886659026146,
-        -0.022186478599905968,
-        0.07865060120820999,
-        -0.045795097947120667,
-        -0.08969029039144516,
-        0.01788143627345562,
-        -0.05173710361123085,
-        -0.09584394097328186,
-        0.07927752286195755,
-        -0.02995322458446026,
-        -0.021057279780507088,
-        -0.08667527139186859,
-        0.02191571146249771,
-        0.07865920662879944,
-        -0.13006846606731415,
-        0.018671482801437378,
-        -0.009532073512673378,
-        -0.05881110951304436,
-        0.09142757952213287,
-        0.025277860462665558,
-        -0.0006479315925389528,
-        -0.022532710805535316,
-        0.03333909064531326,
-        0.013423790223896503,
-        -0.002223767340183258,
-        0.056805115193128586,
-        0.08500999957323074,
-        -0.018316440284252167,
-        -0.019003473222255707,
-        -0.037566203624010086,
-        0.012072167359292507,
-        -0.0967593789100647,
-        0.01906954124569893,
-        0.018530720844864845,
-        0.03907167539000511,
-        0.0406045988202095,
-        0.006809646263718605,
-        -0.009703218005597591,
-        -0.04012899473309517,
-        -0.08879464864730835,
-        -0.10313615202903748,
-        0.04960477352142334,
-        -0.047757480293512344,
-        0.0011401374358683825,
-        0.01534249633550644,
-        -0.04989233613014221,
-        -0.05394762009382248,
-        -0.1082226037979126,
-        -0.1123943030834198,
-        -0.017299097031354904,
-        -0.01759076490998268,
-        -0.055838532745838165,
-        0.11722946912050247,
-        -0.04964388161897659,
-        -0.045252490788698196,
-        0.042072273790836334,
-        0.07077964395284653,
-        -0.04932485893368721,
-        0.023587729781866074,
-        0.11668162792921066,
-        0.06735794246196747,
-        -0.020993361249566078,
-        1.1983573486037964e-32,
-        -0.046614885330200195,
-        -0.05478901043534279,
-        0.014469337649643421,
-        0.020586049184203148,
-        -0.05422636866569519,
-        0.006595283281058073,
-        -0.08138278126716614,
-        -0.046790122985839844,
-        0.048793282359838486,
-        0.00948276650160551,
-        -0.018455294892191887,
-        0.08301404118537903,
-        0.018061211332678795,
-        -0.07376250624656677,
-        0.07745563983917236,
-        0.04100443422794342,
-        0.030904579907655716,
-        -0.0030986976344138384,
-        -0.008675968274474144,
-        0.029060373082756996,
-        0.023078296333551407,
-        0.01695849746465683,
-        0.046829525381326675,
-        -0.005967200268059969,
-        0.03033456578850746,
-        -0.04310493543744087,
-        0.011530469171702862,
-        -0.05251176282763481,
-        -0.0013020120095461607,
-        0.05656423419713974,
-        0.1044616550207138,
-        0.020133914425969124,
-        -0.0489271804690361,
-        0.010856134817004204,
-        -0.020943203940987587,
-        -0.09534872323274612,
-        -0.0033019811380654573,
-        -0.05978017300367355,
-        -0.008762993849813938,
-        -0.010954047553241253,
-        -0.03918084502220154,
-        0.009335431270301342,
-        0.005198019091039896,
-        0.01996336504817009,
-        0.016211818903684616,
-        0.0558696910738945,
-        0.04487602040171623,
-        0.04330987483263016,
-        0.11105725914239883,
-        -0.025480620563030243,
-        -0.048241857439279556,
-        -0.014372192323207855,
-        0.0499575175344944,
-        0.0412786602973938,
-        0.022176289930939674,
-        0.06423112004995346,
-        -0.019553035497665405,
-        -0.03485747426748276,
-        0.002239168854430318,
-        -0.00338436895981431,
-        -0.08729376643896103,
-        0.01283823512494564,
-        -0.014268745668232441,
-        -0.06019347533583641,
-        -0.006133119110018015,
-        -0.03456198051571846,
-        -0.021653490141034126,
-        -0.007289867848157883,
-        0.11150751262903214,
-        -0.0300860907882452,
-        0.027710363268852234,
-        -0.0007583688711747527,
-        -0.06798696517944336,
-        0.11523152142763138,
-        -0.046030398458242416,
-        0.03585738316178322,
-        0.007887329906225204,
-        0.10545967519283295,
-        -0.0911220982670784,
-        -0.03199249878525734,
-        -0.09246254712343216,
-        0.00822177343070507,
-        0.03636273741722107,
-        -0.06617517024278641,
-        0.08508871495723724,
-        0.04562560096383095,
-        0.008162320591509342,
-        -0.03842293843626976,
-        -0.005319796036928892,
-        0.054488345980644226,
-        0.0012439406709745526,
-        0.021410521119832993,
-        -0.07314340770244598,
-        0.085056833922863,
-        -0.02417420782148838,
-        -1.2958432257009995e-32,
-        -0.12066074460744858,
-        0.043197669088840485,
-        -0.044888243079185486,
-        0.026510009542107582,
-        0.028240446001291275,
-        0.028698567301034927,
-        -0.05014030262827873,
-        -0.09608627110719681,
-        0.03795427456498146,
-        0.046375054866075516,
-        -0.07349225133657455,
-        -0.07029063254594803,
-        0.03503799811005592,
-        -0.04788460582494736,
-        0.04727421700954437,
-        0.016055922955274582,
-        0.04488874971866608,
-        0.022840645164251328,
-        -0.09229391068220139,
-        -0.019765153527259827,
-        0.005559624172747135,
-        -0.003915500361472368,
-        0.04403271526098251,
-        -0.03457928076386452,
-        0.05109276622533798,
-        0.011367427185177803,
-        -0.04424755275249481,
-        -0.002329818671569228,
-        0.02231587842106819,
-        -0.02379063330590725,
-        -0.007177346386015415,
-        -0.07615818083286285,
-        -0.0667390525341034,
-        0.015303078107535839,
-        -0.09732349961996078,
-        -0.04826362803578377,
-        0.06959490478038788,
-        0.019344696775078773,
-        -0.06926266849040985,
-        0.08405668288469315,
-        0.03854605183005333,
-        0.03501492366194725,
-        -0.034688182175159454,
-        -0.03695913031697273,
-        -0.006382188759744167,
-        -0.057509828358888626,
-        -0.02108701691031456,
-        0.019962988793849945,
-        -0.026687033474445343,
-        -0.10450887680053711,
-        0.0202714204788208,
-        0.03868211805820465,
-        0.05151641368865967,
-        6.255258631426841e-05,
-        0.03930866718292236,
-        0.06625036150217056,
-        0.01904761604964733,
-        -0.015271557494997978,
-        -0.043713487684726715,
-        -0.0008308077813126147,
-        0.08803536742925644,
-        -0.000546399038285017,
-        0.015711050480604172,
-        0.07327277213335037,
-        0.02372400276362896,
-        -0.01397097110748291,
-        0.050439879298210144,
-        -0.06095440313220024,
-        0.04038068279623985,
-        -0.029605988413095474,
-        0.0358763225376606,
-        -0.06029849871993065,
-        -0.020607367157936096,
-        -0.024467943236231804,
-        -0.014418346807360649,
-        0.032338351011276245,
-        -0.0847945287823677,
-        0.02223549410700798,
-        -0.026299593970179558,
-        0.015598011203110218,
-        -0.027912776917219162,
-        -0.05066975951194763,
-        -0.006924191489815712,
-        -0.026978151872754097,
-        0.044062547385692596,
-        -0.06109940633177757,
-        0.09038861095905304,
-        -0.05912671983242035,
-        0.03182436525821686,
-        0.002076734323054552,
-        -0.08018455654382706,
-        0.03784031793475151,
-        -0.034975484013557434,
-        0.020195676013827324,
-        -0.005958352237939835,
-        -4.4325595638383675e-08,
-        -0.017345435917377472,
-        -0.0922694057226181,
-        0.04699543118476868,
-        0.06779272109270096,
-        0.09007403254508972,
-        -0.06449771672487259,
-        -0.06918183714151382,
-        -0.006312317680567503,
-        -0.03456532210111618,
-        0.05495307222008705,
-        -0.013612999580800533,
-        -0.03445446118712425,
-        -0.013601209968328476,
-        -0.01924857497215271,
-        0.0013005832443013787,
-        -0.00858354289084673,
-        0.04163087159395218,
-        0.060285355895757675,
-        -0.027278432622551918,
-        0.009802553802728653,
-        0.12587912380695343,
-        -0.04295031353831291,
-        -0.09418261796236038,
-        0.0065189264714717865,
-        -0.016740158200263977,
-        0.009166287258267403,
-        -0.018419958651065826,
-        0.010139178484678268,
-        0.08566881716251373,
-        -0.016078142449259758,
-        0.026782646775245667,
-        0.018240908160805702,
-        0.09580107778310776,
-        -0.06071425601840019,
-        -0.0025322020519524813,
-        0.05923169106245041,
-        0.04678177088499069,
-        0.04865938797593117,
-        0.05696100741624832,
-        -0.014980118721723557,
-        -0.008728140965104103,
-        0.016257960349321365,
-        0.006940873339772224,
-        0.09611689299345016,
-        0.04830236732959747,
-        -0.051071930676698685,
-        -0.05988113582134247,
-        0.031679507344961166,
-        0.03148530051112175,
-        -0.06890430301427841,
-        0.03152856230735779,
-        -0.03637468442320824,
-        0.011190691031515598,
-        0.09545387327671051,
-        0.0422603078186512,
-        0.021333305165171623,
-        0.05284079909324646,
-        -0.0010912875877693295,
-        -0.09102489054203033,
-        0.012905075214803219,
-        -0.015080606564879417,
-        -0.01874886080622673,
-        -0.0916801318526268,
-        0.05935344472527504
-      ],
-      "created_at": "2026-02-05T07:48:45.934918",
-      "updated_at": "2026-02-05T07:48:45.934918"
-    },
-    {
       "id": "8da3d2ec-37a8-49b9-aa73-8227b3a8f2ac",
       "type": "Actor",
       "name": "Universitets- och högskolerådet (UHR)",
       "description": "Informerar om högskolestudier, ansvarar för högskoleprovet och samordnar antagning samt bedömer utländska utbildningar.",
       "summary": "",
-      "communities": [],
       "tags": [
         "högskolestudier",
         "antagning",
@@ -19934,7 +18938,6 @@
       "name": "Statens institutionsstyrelse (SiS)",
       "description": "Bedriver tvångsvård och behandling för ungdomar och vuxna med missbruksproblematik, med mål att stärka förutsättningar för ett fungerande liv.",
       "summary": "",
-      "communities": [],
       "tags": [
         "tvångsvård",
         "behandling",
@@ -20336,7 +19339,6 @@
       "name": "esam översikt",
       "description": "Saved view: esam översikt",
       "summary": "Contains 120 nodes",
-      "communities": [],
       "tags": [],
       "metadata": {
         "node_ids": [
@@ -21340,7 +20342,6 @@
       "name": "Aktuella rapporter om ai och data",
       "description": "Saved view: Aktuella rapporter om ai och data",
       "summary": "Contains 9 nodes",
-      "communities": [],
       "tags": [],
       "metadata": {
         "node_ids": [
@@ -21816,9 +20817,6 @@
       "name": "Dag för stärkt AI-förmåga",
       "description": "Kompetens- och samverkansinsats inom eSam för att stärka offentlig sektors AI-förmåga genom erfarenhetsutbyte, exempel och gemensamt lärande.",
       "summary": "Återkommande kunskaps- och samverkansdag om AI.",
-      "communities": [
-        "eSam"
-      ],
       "tags": [
         "AI",
         "kompetens",
@@ -22223,9 +21221,6 @@
       "name": "Prompt engineering i offentlig sektor",
       "description": "Initiativ som fokuserar på praktisk och ansvarsfull användning av prompt engineering vid användning av generativa AI-verktyg i offentlig sektor.",
       "summary": "Vägledning och erfarenhetsutbyte kring prompt engineering.",
-      "communities": [
-        "eSam"
-      ],
       "tags": [
         "AI",
         "prompt engineering",
@@ -22629,9 +21624,6 @@
       "name": "Datahantering i AI-assistenter",
       "description": "Arbete med hur information och data får användas, lagras och skyddas vid användning av AI-assistenter inom myndigheter.",
       "summary": "Data-, juridik- och säkerhetsfrågor kopplade till AI-assistenter.",
-      "communities": [
-        "eSam"
-      ],
       "tags": [
         "AI",
         "datahantering",
@@ -23035,9 +22027,6 @@
       "name": "AI-assistenter i myndigheter – erfarenhetsutbyte",
       "description": "Samverkansinitiativ för erfarenhetsutbyte kring införande och användning av AI-assistenter i offentlig sektor.",
       "summary": "Erfarenhetsutbyte om AI-assistenter.",
-      "communities": [
-        "eSam"
-      ],
       "tags": [
         "AI",
         "AI-assistenter",
@@ -23442,9 +22431,6 @@
       "name": "Juridisk tolkning av AI-förordningen",
       "description": "Gemensamt arbete för att tolka och tillämpa EU:s AI-förordning i offentlig verksamhet.",
       "summary": "Praktisk tillämpning av AI Act.",
-      "communities": [
-        "eSam"
-      ],
       "tags": [
         "AI",
         "lagstiftning",
@@ -23849,9 +22835,6 @@
       "name": "Säker användning av generativ AI",
       "description": "Vägledning och stöd kring säker och ansvarsfull användning av generativa AI-verktyg i myndigheter.",
       "summary": "Säker generativ AI.",
-      "communities": [
-        "eSam"
-      ],
       "tags": [
         "AI",
         "säkerhet",
@@ -24256,9 +23239,6 @@
       "name": "Kompetenslyft AI, data och juridik",
       "description": "Kompetenshöjande insatser som kombinerar AI, datahantering och juridiska perspektiv.",
       "summary": "Tvärdisciplinärt AI-kompetenslyft.",
-      "communities": [
-        "eSam"
-      ],
       "tags": [
         "AI",
         "kompetens",
@@ -24664,9 +23644,6 @@
       "name": "Hackaton 2026",
       "description": "Ett hackathon-event organiserat av eSam med fokus på innovation och samarbete.",
       "summary": "Hackathon event för teknologi och samarbete, planerat för år 2026.",
-      "communities": [
-        "eSam"
-      ],
       "tags": [
         "hackathon",
         "innovation",
@@ -25070,7 +24047,6 @@
       "name": "eSam",
       "description": "eSamverkansprogrammet, en samarbetsorganisation för digitalisering av offentlig sektor.",
       "summary": "",
-      "communities": [],
       "tags": [
         "eSam",
         "digitalisering",
@@ -25473,9 +24449,6 @@
       "name": "Mina Ombud (Användning av gemensam infrastruktur)",
       "description": "Öka användningen av digital infrastruktur och byggblock. Ge stöd och samordna för att möjliggöra anslutning till Mina ombud privatpersoner.",
       "summary": "",
-      "communities": [
-        "eSam"
-      ],
       "tags": [],
       "metadata": {},
       "embedding": [
@@ -25873,9 +24846,6 @@
       "name": "Digitalt bevarande av data",
       "description": "Identifiera behov av styrning och vägledning vid bevarande och gallring av allmänna handlingar som uppstår i digitala processer.",
       "summary": "",
-      "communities": [
-        "eSam"
-      ],
       "tags": [],
       "metadata": {},
       "embedding": [
@@ -26273,9 +25243,6 @@
       "name": "Referensarkitektur för data",
       "description": "Den befintliga referensarkitekturen kompletteras med olika komponenter.",
       "summary": "",
-      "communities": [
-        "eSam"
-      ],
       "tags": [],
       "metadata": {},
       "embedding": [
@@ -26673,9 +25640,6 @@
       "name": "Utbyte av modeller för AI-utveckling (Leakpro)",
       "description": "Stöd till medlemmarnas arbete med AI och analys av risker för dataläckage vid modellutbyte eller federerad inlärning.",
       "summary": "",
-      "communities": [
-        "eSam"
-      ],
       "tags": [],
       "metadata": {},
       "embedding": [
@@ -27073,9 +26037,6 @@
       "name": "AI-regulatorisk sandlåda",
       "description": "Pilot för att förbereda myndigheter på AI-förordningens krav i samverkan med IMY.",
       "summary": "",
-      "communities": [
-        "eSam"
-      ],
       "tags": [],
       "metadata": {},
       "embedding": [
@@ -27473,9 +26434,6 @@
       "name": "Samverkan om molntjänster",
       "description": "Samverkan kring användning av molntjänster med hänsyn till digital suveränitet och lämplighet.",
       "summary": "",
-      "communities": [
-        "eSam"
-      ],
       "tags": [],
       "metadata": {},
       "embedding": [
@@ -27873,9 +26831,6 @@
       "name": "dSam 4",
       "description": "Möjliggöra användning av digitala samarbetsverktyg över organisationsgränser.",
       "summary": "",
-      "communities": [
-        "eSam"
-      ],
       "tags": [],
       "metadata": {},
       "embedding": [
@@ -28273,9 +27228,6 @@
       "name": "Strategisk säkerhet",
       "description": "Stärka den övergripande förståelsen för säkerhetsarbete på en myndighet genom gemensam guide och metod.",
       "summary": "",
-      "communities": [
-        "eSam"
-      ],
       "tags": [],
       "metadata": {},
       "embedding": [
@@ -28673,9 +27625,6 @@
       "name": "Kontinuitet och plan B",
       "description": "Ledningsövningar och analys av säkerhetsfrågor kopplat till digital suveränitet och incidenthantering.",
       "summary": "",
-      "communities": [
-        "eSam"
-      ],
       "tags": [],
       "metadata": {},
       "embedding": [
@@ -29073,9 +28022,6 @@
       "name": "Desinformation",
       "description": "Stärka kompetensen att upptäcka och stävja desinformation samt förbättra samverkan.",
       "summary": "",
-      "communities": [
-        "eSam"
-      ],
       "tags": [],
       "metadata": {},
       "embedding": [
@@ -29473,9 +28419,6 @@
       "name": "Kontinuitet och att ha en ”plan B”",
       "description": "Förvaltning av ledningsövning och it-kontinuitetsspel. Analysera säkerhetsfrågor kopplat till ”plan B” (digital suveränitet): hur ska myndigheter bäst komma tillbaka efter katastrof? Råd på effektiv incidenthantering.",
       "summary": "Kontinuitet, övningar och plan B för återhämtning/incidenthantering.",
-      "communities": [
-        "eSam"
-      ],
       "tags": [
         "kontinuitet",
         "incidenthantering",
@@ -29881,9 +28824,6 @@
       "name": "Säkerhetskultur: mäta säkerhet",
       "description": "Höja grundnivån av säkerhetskultur hos medlemsmyndigheterna genom att mäta säkerhet och mognad, i samverkan med MCF.",
       "summary": "",
-      "communities": [
-        "eSam"
-      ],
       "tags": [],
       "metadata": {
         "source": "Aktivitetsportfölj 2025–2026",
@@ -30284,9 +29224,6 @@
       "name": "Säkerhetskultur: säker utveckling",
       "description": "Höja grundnivån av säkerhetskultur genom vägledning för säker utveckling, inklusive metod, verktyg och säker API-gateway.",
       "summary": "",
-      "communities": [
-        "eSam"
-      ],
       "tags": [],
       "metadata": {
         "source": "Aktivitetsportfölj 2025–2026",
@@ -30687,9 +29624,6 @@
       "name": "Cybersäkerhet: guide, metod och annat stöd",
       "description": "Stärka kompetens och skapa stöd för förebyggande cybersäkerhetsarbete. Resulterar i rapporter och säkerhetsrekommendationer.",
       "summary": "",
-      "communities": [
-        "eSam"
-      ],
       "tags": [],
       "metadata": {
         "source": "Aktivitetsportfölj 2025–2026",
@@ -31090,9 +30024,6 @@
       "name": "Omvärldsanalyser och öka anpassningsförmågan med hjälp av AI",
       "description": "Skapa gemensam förmåga att analysera omvärldsförändringar som påverkar digitaliseringsarbetet, med pilot för AI-baserad omvärldsanalys.",
       "summary": "",
-      "communities": [
-        "eSam"
-      ],
       "tags": [],
       "metadata": {
         "source": "Aktivitetsportfölj 2025–2026",
@@ -31493,9 +30424,6 @@
       "name": "Erfarenhetsutbyte och omvärldsbevakning: Radarbild",
       "description": "Uppdatera sammanställning av policyinitiativ som påverkar myndigheternas digitaliseringsarbete och stärka anpassningsförmågan.",
       "summary": "",
-      "communities": [
-        "eSam"
-      ],
       "tags": [],
       "metadata": {
         "source": "Aktivitetsportfölj 2025–2026",
@@ -31896,9 +30824,6 @@
       "name": "Erfarenhetsutbyte och omvärldsbevakning: Införande NIS2 CER",
       "description": "Förberedelse för kommande säkerhetslagstiftningar genom gemensamt införandearbete av NIS2 och CER, inklusive tolkningar och tips.",
       "summary": "",
-      "communities": [
-        "eSam"
-      ],
       "tags": [],
       "metadata": {
         "source": "Aktivitetsportfölj 2025–2026",
@@ -32299,9 +31224,6 @@
       "name": "Renare avfall",
       "description": "Minska brottsligheten inom avfallshanteringen genom effektivare tillsyn och bättre dataunderlag för analyser.",
       "summary": "",
-      "communities": [
-        "eSam"
-      ],
       "tags": [],
       "metadata": {
         "source": "Aktivitetsportfölj 2025–2026",
@@ -32702,9 +31624,6 @@
       "name": "Vägledning för arkitekturstyrning",
       "description": "Stödja medlemmarnas etablering av arkitekturstyrning genom vägledning och gemensamma arbetssätt.",
       "summary": "",
-      "communities": [
-        "eSam"
-      ],
       "tags": [],
       "metadata": {
         "source": "Aktivitetsportfölj 2025–2026",
@@ -33105,9 +32024,6 @@
       "name": "Arkitekturgemenskap mellan eSams medlemmar",
       "description": "Skapa struktur, arbetssätt och teknik för samarbete kring arkitekturfrågor mellan eSams medlemmar.",
       "summary": "",
-      "communities": [
-        "eSam"
-      ],
       "tags": [],
       "metadata": {
         "source": "Aktivitetsportfölj 2025–2026",
@@ -33508,9 +32424,6 @@
       "name": "Säker AI",
       "description": "Stärka kompetensen för att arbeta säkert med AI genom analys och beskrivning av relevanta säkerhetsfrågor samt rapport med goda exempel.",
       "summary": "",
-      "communities": [
-        "eSam"
-      ],
       "tags": [],
       "metadata": {
         "source": "Aktivitetsportfölj 2025–2026",
@@ -33911,9 +32824,6 @@
       "name": "Verksamhetsarkitektur – gemensamma stödförmågor",
       "description": "Ökad förmåga till samverkan kring stödförmågor genom gemensam modell och vägledning för hur man arbetar med förmågor inom en myndighet.",
       "summary": "",
-      "communities": [
-        "eSam"
-      ],
       "tags": [],
       "metadata": {
         "source": "Aktivitetsportfölj 2025–2026",
@@ -34314,9 +33224,6 @@
       "name": "Målarkitektur datadriven automatisering kommuner och myndigheter",
       "description": "Ta fram en målarkitektur för uppgiftsinsamling från kommuner till myndigheter i samverkan med Digg, SKR, Inera och Sambruk.",
       "summary": "",
-      "communities": [
-        "eSam"
-      ],
       "tags": [],
       "metadata": {
         "source": "Aktivitetsportfölj 2025–2026",
@@ -34717,9 +33624,6 @@
       "name": "AI-tillämpning: Verktyg för tolkning",
       "description": "Genomförandeinitiativ där AI används som stöd eller ersättning för tolkverksamhet, baserat på tidigare piloter.",
       "summary": "",
-      "communities": [
-        "eSam"
-      ],
       "tags": [],
       "metadata": {
         "source": "Aktivitetsportfölj 2025–2026",
@@ -35120,9 +34024,6 @@
       "name": "Mina ärenden",
       "description": "Informationsmöten och erfarenhetsutbyte kring Mina ärenden.",
       "summary": "",
-      "communities": [
-        "eSam"
-      ],
       "tags": [],
       "metadata": {
         "source": "Aktivitetsportfölj 2025–2026",
@@ -35523,9 +34424,6 @@
       "name": "Säker Digital kommunikation (Användning av gemensam infrastruktur)",
       "description": "Öka användningen av gemensam digital infrastruktur och byggblock genom stöd och samordning.",
       "summary": "",
-      "communities": [
-        "eSam"
-      ],
       "tags": [],
       "metadata": {
         "source": "Aktivitetsportfölj 2025–2026",
@@ -35926,9 +34824,6 @@
       "name": "Allmänna handlingar vid användning av generativ AI",
       "description": "Analysera uppkomst och hantering av allmänna handlingar vid användning av generativ AI.",
       "summary": "",
-      "communities": [
-        "eSam"
-      ],
       "tags": [],
       "metadata": {
         "source": "Aktivitetsportfölj 2025–2026",
@@ -36329,9 +35224,6 @@
       "name": "AI-kodstöd utveckling",
       "description": "Undersöka möjligheter till AI-baserat programmeringsstöd som kan driftsättas i kontrollerade miljöer.",
       "summary": "",
-      "communities": [
-        "eSam"
-      ],
       "tags": [],
       "metadata": {
         "source": "Aktivitetsportfölj 2025–2026",
@@ -36732,9 +35624,6 @@
       "name": "AI-event med näringslivet",
       "description": "Arrangera AI-event tillsammans med näringslivet för erfarenhetsutbyte och samverkan.",
       "summary": "",
-      "communities": [
-        "eSam"
-      ],
       "tags": [],
       "metadata": {
         "source": "Aktivitetsportfölj 2025–2026",
@@ -37135,9 +36024,6 @@
       "name": "Prompt engineering",
       "description": "Hur man skriver effektiva och säkra promptar samt hur AI-modeller och promptar kan förvaltas och skyddas.",
       "summary": "",
-      "communities": [
-        "eSam"
-      ],
       "tags": [],
       "metadata": {
         "source": "Aktivitetsportfölj 2025–2026",
@@ -37538,9 +36424,6 @@
       "name": "Hantering av data för att den ska kunna användas i AI-assistenter",
       "description": "Hur data inom organisationen hanteras för att möjliggöra användning i AI-assistenter och andra AI-tillämpningar.",
       "summary": "",
-      "communities": [
-        "eSam"
-      ],
       "tags": [],
       "metadata": {
         "source": "Aktivitetsportfölj 2025–2026",
@@ -37941,9 +36824,6 @@
       "name": "Verksamhetsarkitektur – gemensamma stödförmågor",
       "description": "Ökad förmåga till samverkan kring stödförmågor genom gemensam modell och vägledning för hur man arbetar med förmågor inom en myndighet.",
       "summary": "",
-      "communities": [
-        "eSam"
-      ],
       "tags": [],
       "metadata": {
         "source": "Aktivitetsportfölj 2025–2026",
@@ -38344,9 +37224,6 @@
       "name": "Målarkitektur datadriven automatisering kommuner och myndigheter",
       "description": "Ta fram en målarkitektur för uppgiftsinsamling från kommuner till myndigheter i samverkan med Digg, SKR, Inera och Sambruk.",
       "summary": "",
-      "communities": [
-        "eSam"
-      ],
       "tags": [],
       "metadata": {
         "source": "Aktivitetsportfölj 2025–2026",
@@ -38747,9 +37624,6 @@
       "name": "AI-tillämpning: Verktyg för tolkning",
       "description": "Genomförandeinitiativ där AI används som stöd eller ersättning för tolkverksamhet, baserat på tidigare piloter.",
       "summary": "",
-      "communities": [
-        "eSam"
-      ],
       "tags": [],
       "metadata": {
         "source": "Aktivitetsportfölj 2025–2026",
@@ -39150,9 +38024,6 @@
       "name": "Mina ärenden",
       "description": "Informationsmöten och erfarenhetsutbyte kring Mina ärenden.",
       "summary": "",
-      "communities": [
-        "eSam"
-      ],
       "tags": [],
       "metadata": {
         "source": "Aktivitetsportfölj 2025–2026",
@@ -39553,9 +38424,6 @@
       "name": "Säker Digital kommunikation (Användning av gemensam infrastruktur)",
       "description": "Öka användningen av gemensam digital infrastruktur och byggblock genom stöd och samordning.",
       "summary": "",
-      "communities": [
-        "eSam"
-      ],
       "tags": [],
       "metadata": {
         "source": "Aktivitetsportfölj 2025–2026",
@@ -39956,9 +38824,6 @@
       "name": "Allmänna handlingar vid användning av generativ AI",
       "description": "Analysera uppkomst och hantering av allmänna handlingar vid användning av generativ AI.",
       "summary": "",
-      "communities": [
-        "eSam"
-      ],
       "tags": [],
       "metadata": {
         "source": "Aktivitetsportfölj 2025–2026",
@@ -40359,9 +39224,6 @@
       "name": "AI-kodstöd utveckling",
       "description": "Undersöka möjligheter till AI-baserat programmeringsstöd som kan driftsättas i kontrollerade miljöer.",
       "summary": "",
-      "communities": [
-        "eSam"
-      ],
       "tags": [],
       "metadata": {
         "source": "Aktivitetsportfölj 2025–2026",
@@ -40762,9 +39624,6 @@
       "name": "AI-event med näringslivet",
       "description": "Arrangera AI-event tillsammans med näringslivet för erfarenhetsutbyte och samverkan.",
       "summary": "",
-      "communities": [
-        "eSam"
-      ],
       "tags": [],
       "metadata": {
         "source": "Aktivitetsportfölj 2025–2026",
@@ -41165,9 +40024,6 @@
       "name": "Prompt engineering",
       "description": "Hur man skriver effektiva och säkra promptar samt hur AI-modeller och promptar kan förvaltas och skyddas.",
       "summary": "",
-      "communities": [
-        "eSam"
-      ],
       "tags": [],
       "metadata": {
         "source": "Aktivitetsportfölj 2025–2026",
@@ -41568,9 +40424,6 @@
       "name": "Hantering av data för att den ska kunna användas i AI-assistenter",
       "description": "Hur data inom organisationen hanteras för att möjliggöra användning i AI-assistenter och andra AI-tillämpningar.",
       "summary": "",
-      "communities": [
-        "eSam"
-      ],
       "tags": [],
       "metadata": {
         "source": "Aktivitetsportfölj 2025–2026",
@@ -41971,9 +40824,6 @@
       "name": "Temamöten och specifika arbetsgrupper för erfarenhetsutbyten",
       "description": "Kompetenshöjning, erfarenhetsutbyte och nätverkande genom temamöten och specifika arbetsgrupper.",
       "summary": "",
-      "communities": [
-        "eSam"
-      ],
       "tags": [],
       "metadata": {
         "source": "Aktivitetsportfölj 2025–2026",
@@ -42374,9 +41224,6 @@
       "name": "Maskning av dokument med stöd av AI",
       "description": "Test av AI-baserad tjänst för maskning av dokument i labbmiljö, med erfarenhetssammanställning inför eventuell vidareutveckling.",
       "summary": "",
-      "communities": [
-        "eSam"
-      ],
       "tags": [],
       "metadata": {
         "source": "Aktivitetsportfölj 2025–2026",
@@ -42777,9 +41624,6 @@
       "name": "AI-tjänster inom kommunikationsverksamheterna",
       "description": "AI-stöd för klarspråk och tillgänglighetsanpassning inom kommunikationsverksamheter, inklusive analys av gemensamma behov och återanvändbara lösningar.",
       "summary": "",
-      "communities": [
-        "eSam"
-      ],
       "tags": [],
       "metadata": {
         "source": "Aktivitetsportfölj 2025–2026",
@@ -43180,9 +42024,6 @@
       "name": "Inkommen handling",
       "description": "Uppdatering av eSams vägledande dokument om inkomna handlingar med anledning av ny praxis.",
       "summary": "",
-      "communities": [
-        "eSam"
-      ],
       "tags": [],
       "metadata": {
         "source": "Aktivitetsportfölj 2025–2026",
@@ -43583,9 +42424,6 @@
       "name": "Säkerhet och offentlighetsprincipen",
       "description": "Analys av massuttag av allmänna handlingar ur ett säkerhetsperspektiv, inklusive koppling till kartläggning och AI-utveckling.",
       "summary": "",
-      "communities": [
-        "eSam"
-      ],
       "tags": [],
       "metadata": {
         "source": "Aktivitetsportfölj 2025–2026",
@@ -43986,9 +42824,6 @@
       "name": "Rättsinformationstjänster",
       "description": "Analys av hur rättsinformation kan tillhandahållas på alternativa sätt för att öka tillgänglighet och minska beroenden.",
       "summary": "",
-      "communities": [
-        "eSam"
-      ],
       "tags": [],
       "metadata": {
         "source": "Aktivitetsportfölj 2025–2026",
@@ -44389,9 +43224,6 @@
       "name": "Upphovsrätt och rättighetsmärkning",
       "description": "Analys av upphovsrätts- och rättighetsmärkningfrågor, särskilt kopplat till AI och licensnyttjande.",
       "summary": "",
-      "communities": [
-        "eSam"
-      ],
       "tags": [],
       "metadata": {
         "source": "Aktivitetsportfölj 2025–2026",
@@ -44792,9 +43624,6 @@
       "name": "Säkerhetsfrågor kopplat till jobbutrustning utanför myndigheten",
       "description": "Rekommendationer för säker hantering av jobbutrustning utanför myndighetens IT-miljö, t.ex. arbete hemma eller utomlands.",
       "summary": "",
-      "communities": [
-        "eSam"
-      ],
       "tags": [],
       "metadata": {
         "source": "Aktivitetsportfölj 2025–2026",
@@ -45195,9 +44024,6 @@
       "name": "Stora språkmodeller",
       "description": "Stöd vid användning av stora språkmodeller, inklusive kvalitet, användningsområden, finjustering och lokal drift.",
       "summary": "",
-      "communities": [
-        "eSam"
-      ],
       "tags": [],
       "metadata": {
         "source": "Aktivitetsportfölj 2025–2026",
@@ -45598,9 +44424,6 @@
       "name": "Aggregera data",
       "description": "Stöd för hur myndigheter ska bedöma och hantera aggregering av informationsmängder, inklusive workshops och best practice.",
       "summary": "",
-      "communities": [
-        "eSam"
-      ],
       "tags": [],
       "metadata": {
         "source": "Aktivitetsportfölj 2025–2026",
@@ -46001,9 +44824,6 @@
       "name": "AI-labb transkribering",
       "description": "Genomföra AI-labb för transkriberingstjänst.",
       "summary": "",
-      "communities": [
-        "eSam"
-      ],
       "tags": [],
       "metadata": {
         "source": "Aktivitetsportfölj 2025–2026",
@@ -46404,9 +45224,6 @@
       "name": "Hackaton 2026",
       "description": "Hackaton med fokus på digitalisering, innovation och samverkan.",
       "summary": "",
-      "communities": [
-        "eSam"
-      ],
       "tags": [],
       "metadata": {
         "source": "Aktivitetsportfölj 2025–2026",

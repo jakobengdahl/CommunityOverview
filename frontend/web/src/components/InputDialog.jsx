@@ -11,6 +11,7 @@ function InputDialog({
   defaultValue = '',
   confirmText = 'Save',
   cancelText = 'Cancel',
+  isLoading = false,
   onConfirm,
   onCancel,
 }) {
@@ -25,15 +26,15 @@ function InputDialog({
 
   // Handle keyboard events
   const handleKeyDown = (e) => {
-    if (e.key === 'Escape') {
+    if (e.key === 'Escape' && !isLoading) {
       onCancel();
-    } else if (e.key === 'Enter' && value.trim()) {
+    } else if (e.key === 'Enter' && value.trim() && !isLoading) {
       onConfirm(value.trim());
     }
   };
 
   const handleSubmit = () => {
-    if (value.trim()) {
+    if (value.trim() && !isLoading) {
       onConfirm(value.trim());
     }
   };
@@ -58,6 +59,7 @@ function InputDialog({
             value={value}
             onChange={(e) => setValue(e.target.value)}
             placeholder={placeholder}
+            disabled={isLoading}
           />
         </div>
 
@@ -65,15 +67,16 @@ function InputDialog({
           <button
             className="input-dialog-button cancel"
             onClick={onCancel}
+            disabled={isLoading}
           >
             {cancelText}
           </button>
           <button
             className="input-dialog-button primary"
             onClick={handleSubmit}
-            disabled={!value.trim()}
+            disabled={!value.trim() || isLoading}
           >
-            {confirmText}
+            {isLoading ? 'Sparar...' : confirmText}
           </button>
         </div>
       </div>

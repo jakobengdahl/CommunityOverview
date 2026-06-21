@@ -6,7 +6,7 @@ Tests the business logic layer in isolation.
 
 import pytest
 from backend.service import GraphService
-from backend.core import NodeType, RelationshipType
+from backend.core import Node, Edge, NodeType, RelationshipType
 
 
 class TestGraphServiceSearch:
@@ -31,17 +31,11 @@ class TestGraphServiceSearch:
         assert result["total"] >= 1
         assert all(n["type"] == "Actor" for n in result["nodes"])
 
-    def test_search_graph_with_community_filter(self, populated_service: GraphService):
-        """Test filtering search by community."""
-        result = populated_service.search_graph(
-            query="",
-            communities=["eSam"]
-        )
+    def test_search_graph_returns_all_with_empty_query(self, populated_service: GraphService):
+        """Test that empty query returns all nodes."""
+        result = populated_service.search_graph(query="")
 
         assert result["total"] >= 1
-        # All returned nodes should be in eSam
-        for node in result["nodes"]:
-            assert "eSam" in node.get("communities", [])
 
     def test_search_graph_returns_edges(self, populated_service: GraphService):
         """Test that search returns connecting edges."""
@@ -230,6 +224,47 @@ class TestGraphServiceCRUD:
         assert result["success"] is False
         assert "Max 10" in result["message"]
 
+    def test_delete_edge(self, empty_service: GraphService):
+        """Test deleting a single edge."""
+        empty_service.add_nodes(
+            nodes=[
+                {"id": "actor-1", "type": "Actor", "name": "Actor 1"},
+                {"id": "init-1", "type": "Initiative", "name": "Initiative 1"},
+            ],
+            edges=[{"id": "edge-1", "source": "actor-1", "target": "init-1", "type": "RELATES_TO"}],
+        )
+
+        result = empty_service.delete_edge("edge-1")
+
+        assert result["success"] is True
+        assert result["deleted_edge_id"] == "edge-1"
+
+    def test_delete_edges_bulk(self, empty_service: GraphService):
+        """Test deleting multiple edges."""
+        empty_service.add_nodes(
+            nodes=[
+                {"id": "actor-1", "type": "Actor", "name": "Actor 1"},
+                {"id": "init-1", "type": "Initiative", "name": "Initiative 1"},
+                {"id": "res-1", "type": "Resource", "name": "Resource 1"},
+            ],
+            edges=[
+                {"id": "edge-1", "source": "actor-1", "target": "init-1", "type": "RELATES_TO"},
+                {"id": "edge-2", "source": "init-1", "target": "res-1", "type": "RELATES_TO"},
+            ],
+        )
+
+        result = empty_service.delete_edges(["edge-1", "edge-2"])
+
+        assert result["success"] is True
+        assert set(result["deleted_edge_ids"]) == {"edge-1", "edge-2"}
+
+    def test_delete_edges_max_limit(self, empty_service: GraphService):
+        """Test that edge deletion is limited to 50 edges."""
+        result = empty_service.delete_edges([f"edge-{i}" for i in range(60)])
+
+        assert result["success"] is False
+        assert "Max 50" in result["message"]
+
 
 class TestGraphServiceStatistics:
     """Tests for statistics and metadata operations."""
@@ -244,12 +279,12 @@ class TestGraphServiceStatistics:
         assert result["total_nodes"] == 5
         assert result["total_edges"] == 4
 
-    def test_get_graph_stats_with_community_filter(self, populated_service: GraphService):
-        """Test getting stats filtered by community."""
-        result = populated_service.get_graph_stats(communities=["eSam"])
+    def test_get_graph_stats_has_type_counts(self, populated_service: GraphService):
+        """Test that stats include node counts by type."""
+        result = populated_service.get_graph_stats()
 
-        # Should only count nodes in eSam
-        assert result["total_nodes"] == 4  # All except community-1 which has no community
+        assert "Actor" in result["nodes_by_type"]
+        assert result["nodes_by_type"]["Actor"] == 2
 
     def test_list_node_types(self, empty_service: GraphService):
         """Test listing node types."""
@@ -333,6 +368,59 @@ class TestGraphServiceExport:
         node_names = [n["name"] for n in result["nodes"]]
         assert "Skatteverket" in node_names
         assert "Digital First" in node_names
+
+
+class TestGraphServiceTenantContext:
+    """Tests for get_tenant_context via GraphService."""
+
+    def test_returns_expected_shape(self, empty_service: GraphService):
+        """get_tenant_context returns all three required keys."""
+        result = empty_service.get_tenant_context()
+        assert set(result.keys()) == {"tenant_id", "tenant_name", "environment"}
+
+    def test_defaults_when_env_unset(self, empty_service: GraphService, monkeypatch):
+        """Safe defaults are returned when no env vars are set."""
+        monkeypatch.delenv("COMMUNITYOVERVIEW_TENANT_ID", raising=False)
+        monkeypatch.delenv("COMMUNITYOVERVIEW_TENANT_NAME", raising=False)
+        monkeypatch.delenv("COMMUNITYOVERVIEW_ENVIRONMENT", raising=False)
+
+        result = empty_service.get_tenant_context()
+
+        assert result["tenant_id"] == ""
+        assert result["tenant_name"] == ""
+        assert result["environment"] == "local"
+
+    def test_env_vars_override_defaults(self, empty_service: GraphService, monkeypatch):
+        """Env vars override the defaults."""
+        monkeypatch.setenv("COMMUNITYOVERVIEW_TENANT_ID", "org-42")
+        monkeypatch.setenv("COMMUNITYOVERVIEW_TENANT_NAME", "Org 42")
+        monkeypatch.setenv("COMMUNITYOVERVIEW_ENVIRONMENT", "production")
+
+        result = empty_service.get_tenant_context()
+
+        assert result == {
+            "tenant_id": "org-42",
+            "tenant_name": "Org 42",
+            "environment": "production",
+        }
+
+
+class TestGraphServiceConfigContext:
+    """Tests for get_config_context via GraphService."""
+
+    def test_returns_effective_config_context(self, empty_service: GraphService, monkeypatch, tmp_path):
+        tenant_dir = tmp_path / "tenant-config"
+        tenant_dir.mkdir()
+        monkeypatch.setenv("COMMUNITYOVERVIEW_TENANT_CONFIG_DIR", str(tenant_dir))
+
+        result = empty_service.get_config_context()
+
+        assert result["tenant_config_dir_configured"] is True
+        assert result["schema_config_source"] == "tenant_config_dir"
+        assert result["federation_config_source"] == "tenant_config_dir"
+        assert "tenant_config_dir" not in result
+        assert "schema_config_path" not in result
+        assert "federation_config_path" not in result
 
 
 class TestGraphServiceSerialization:

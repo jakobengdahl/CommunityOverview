@@ -1,20 +1,25 @@
 import { useState, useEffect } from 'react';
 import useGraphStore from '../store/graphStore';
+import * as api from '../services/api';
+import SubtypeInput from './SubtypeInput';
 import './EditNodeDialog.css';
 
 // Default node types as fallback if schema not loaded
 const DEFAULT_NODE_TYPES = [
   { type: 'Actor', description: 'Government agencies, organizations' },
-  { type: 'Community', description: 'Communities' },
   { type: 'Initiative', description: 'Projects, programs' },
   { type: 'Capability', description: 'Capabilities, skills' },
   { type: 'Resource', description: 'Reports, software, tools' },
   { type: 'Legislation', description: 'Laws, directives' },
   { type: 'Theme', description: 'Themes, strategies' },
+  { type: 'Goal', description: 'Strategic objectives, targets' },
+  { type: 'Event', description: 'Conferences, workshops, milestones' },
+  { type: 'Data', description: 'Datasets, registers, APIs' },
+  { type: 'Risk', description: 'Risks, threats, vulnerabilities' },
 ];
 
 function EditNodeDialog({ node, onClose, onSave }) {
-  const { getNodeTypes } = useGraphStore();
+  const { getNodeTypes, getNodeColor } = useGraphStore();
   const [formData, setFormData] = useState({
     name: '',
     type: '',
@@ -22,6 +27,8 @@ function EditNodeDialog({ node, onClose, onSave }) {
     summary: '',
     tags: '',
   });
+  const [subtypes, setSubtypes] = useState([]);
+  const [existingSubtypes, setExistingSubtypes] = useState([]);
 
   // Get node types from schema or use defaults
   const nodeTypes = getNodeTypes();
@@ -38,8 +45,20 @@ function EditNodeDialog({ node, onClose, onSave }) {
         summary: node.data.summary || '',
         tags: (node.data.tags || []).join(', '),
       });
+      setSubtypes(node.data.subtypes || []);
     }
   }, [node]);
+
+  // Fetch existing subtypes when node type changes
+  useEffect(() => {
+    if (formData.type) {
+      api.getSubtypes(formData.type)
+        .then(data => {
+          setExistingSubtypes(data.subtypes?.[formData.type] || []);
+        })
+        .catch(() => {});
+    }
+  }, [formData.type]);
 
   const handleChange = (e) => {
     const { name, value } = e.target;
@@ -54,15 +73,28 @@ function EditNodeDialog({ node, onClose, onSave }) {
       description: formData.description,
       summary: formData.summary,
       tags: formData.tags.split(',').map(t => t.trim()).filter(Boolean),
+      subtypes,
     });
   };
+
+  useEffect(() => {
+    const handleEsc = (e) => { if (e.key === 'Escape') onClose(); };
+    document.addEventListener('keydown', handleEsc);
+    return () => document.removeEventListener('keydown', handleEsc);
+  }, [onClose]);
 
   return (
     <div className="edit-dialog-overlay" onClick={onClose}>
       <div className="edit-dialog" onClick={e => e.stopPropagation()}>
         <header className="edit-dialog-header">
-          <h2>Edit Node</h2>
-          <button className="close-button" onClick={onClose}>x</button>
+          <div className="edit-dialog-header-title">
+            <span
+              className="edit-dialog-type-dot"
+              style={{ backgroundColor: getNodeColor(formData.type) }}
+            />
+            <h2>Edit {formData.type || 'Node'}</h2>
+          </div>
+          <button className="close-button" onClick={onClose}>×</button>
         </header>
 
         <form onSubmit={handleSubmit}>
@@ -94,6 +126,14 @@ function EditNodeDialog({ node, onClose, onSave }) {
                 </option>
               ))}
             </select>
+          </div>
+
+          <div className="form-group">
+            <SubtypeInput
+              value={subtypes}
+              onChange={setSubtypes}
+              existingSubtypes={existingSubtypes}
+            />
           </div>
 
           <div className="form-group">
