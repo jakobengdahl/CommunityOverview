@@ -1,9 +1,10 @@
 import { useState, useEffect, useRef, useMemo } from 'react';
-import { ChatDotsFill, ChevronRight, ChevronLeft, XCircleFill } from 'react-bootstrap-icons';
+import { ChatDotsFill, ChevronRight, ChevronLeft, XCircleFill, Robot } from 'react-bootstrap-icons';
 import useGraphStore from '../store/graphStore';
 import { useI18n } from '../i18n';
 import * as api from '../services/api';
 import { positionNewNodes, getNodeColor } from '@community-graph/ui-graph-canvas';
+import ExpertAgentSelector from './ExpertAgentSelector';
 import './ChatPanel.css';
 
 /** Max characters of node context to include with a message to the LLM */
@@ -21,10 +22,16 @@ function ChatPanel() {
     chatPanelOpen,
     toggleChatPanel,
     selectedGraphNodes,
+    federationDepth,
+    stats,
     clearSelectedGraphNodes,
+    activeExperts,
+    availableExperts,
+    showMinimap,
   } = useGraphStore();
 
   const { t, language } = useI18n();
+  const effectiveMaxDepth = Math.max(1, stats?.federation?.max_selectable_depth || 1);
 
   const [inputValue, setInputValue] = useState('');
   const [isProcessing, setIsProcessing] = useState(false);
@@ -96,7 +103,7 @@ function ChatPanel() {
 
       conversationMessages.push({ role: 'user', content: messageForLLM });
 
-      const response = await api.sendChatMessage(conversationMessages);
+      const response = await api.sendChatMessage(conversationMessages, null, { federationDepth });
 
       console.log('[ChatPanel] Response:', response);
 
@@ -119,7 +126,7 @@ function ChatPanel() {
           };
 
           try {
-            await api.executeTool('add_nodes', { nodes: [viewNode], edges: [] });
+            await api.addNodes([viewNode], []);
           } catch (err) {
             console.error('[ChatPanel] Failed to save view:', err);
           }
@@ -246,7 +253,7 @@ function ChatPanel() {
         .map(m => ({ role: m.role, content: m.content }));
       conversationMessages.push({ role: 'user', content: msg });
 
-      const response = await api.sendChatMessage(conversationMessages);
+      const response = await api.sendChatMessage(conversationMessages, null, { federationDepth });
 
       if (response.toolResult?.nodes) {
         const filteredNodes = filterCommunityNodes(response.toolResult.nodes);
@@ -284,7 +291,7 @@ function ChatPanel() {
         .map(m => ({ role: m.role, content: m.content }));
       conversationMessages.push({ role: 'user', content: msg });
 
-      const response = await api.sendChatMessage(conversationMessages);
+      const response = await api.sendChatMessage(conversationMessages, null, { federationDepth });
       addChatMessage({
         role: 'assistant',
         content: response.content,
@@ -308,7 +315,7 @@ function ChatPanel() {
         .map(m => ({ role: m.role, content: m.content }));
       conversationMessages.push({ role: 'user', content: msg });
 
-      const response = await api.sendChatMessage(conversationMessages);
+      const response = await api.sendChatMessage(conversationMessages, null, { federationDepth });
 
       if (deleteConfirmation.node_ids) {
         const deletedIds = new Set(deleteConfirmation.node_ids);
@@ -418,11 +425,16 @@ function ChatPanel() {
 
   // Expanded state
   return (
-    <div className="chat-panel-floating">
+    <div className={`chat-panel-floating${!showMinimap ? ' minimap-hidden' : ''}`}>
       <div className="chat-header">
         <div className="chat-header-left" onClick={toggleChatPanel} style={{ cursor: 'pointer' }}>
           <ChatDotsFill size={16} />
           <h3>Graph assistant</h3>
+          {effectiveMaxDepth > 1 && (
+            <span className="chat-depth-indicator" title={t('federation.depth_indicator_tooltip')}>
+              {t('federation.depth_indicator', { current: federationDepth, max: effectiveMaxDepth })}
+            </span>
+          )}
         </div>
         <button className="chat-collapse-button" onClick={toggleChatPanel} title="Minimize">
           <ChevronRight size={18} />
@@ -430,8 +442,18 @@ function ChatPanel() {
       </div>
 
       <div className="chat-messages">
-        {chatMessages.map((msg, idx) => (
-          <div key={msg.id || idx} className={`chat-message ${msg.role}`}>
+        {chatMessages.filter(m => !m.expertJoinNotification).map((msg, idx) => (
+          <div
+            key={msg.id || idx}
+            className={`chat-message ${msg.role}${msg.role === 'expert' ? ' expert-message' : ''}${msg.isSystemEvent ? ' expert-system-event' : ''}`}
+            style={msg.role === 'expert' ? { '--expert-color': msg.expertColor || '#9CA3AF' } : undefined}
+          >
+            {msg.role === 'expert' && !msg.isSystemEvent && (
+              <div className="expert-message-header">
+                <Robot size={11} style={{ color: msg.expertColor }} />
+                <span className="expert-message-name" style={{ color: msg.expertColor }}>{msg.expertName}</span>
+              </div>
+            )}
             <div className="message-content">
               {msg.content}
 
@@ -597,7 +619,27 @@ function ChatPanel() {
           disabled={isProcessing}
         />
 
+        {activeExperts.length > 0 && (
+          <div className="active-experts-indicator">
+            <Robot size={11} className="active-experts-icon" />
+            <span className="active-experts-label">
+              {activeExperts.map(id => {
+                const agent = availableExperts.find(a => a.id === id);
+                if (!agent) return null;
+                const name = language === 'sv' ? agent.name : (agent.name_en || agent.name);
+                return (
+                  <span key={id} className="active-expert-chip" style={{ borderColor: agent.color }}>
+                    <span className="active-expert-dot" style={{ backgroundColor: agent.color }} />
+                    {name}
+                  </span>
+                );
+              })}
+            </span>
+          </div>
+        )}
+
         <div className="button-row">
+          <ExpertAgentSelector />
           <input
             type="file"
             ref={fileInputRef}

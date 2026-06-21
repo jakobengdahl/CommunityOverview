@@ -8,7 +8,7 @@ The configuration defines:
 - Presentation settings (colors, prompts, introduction text)
 
 The config file path can be set via SCHEMA_FILE environment variable,
-defaulting to config/schema_config.json.
+defaulting to config/default/schema_config.json.
 """
 
 import os
@@ -18,7 +18,7 @@ from pathlib import Path
 from pydantic import BaseModel, Field, validator
 
 # Default config path relative to project root
-DEFAULT_CONFIG_PATH = "config/schema_config.json"
+DEFAULT_CONFIG_PATH = "config/default/schema_config.json"
 
 # Static node types that must always exist
 STATIC_NODE_TYPES = {
@@ -44,6 +44,8 @@ class NodeTypeConfig(BaseModel):
     category: str = "domain"  # "domain" = configurable, "system" = foundational
     description: str = ""
     color: str = "#9CA3AF"  # Default gray
+    icon: str = ""  # Bootstrap Icon name (e.g. "PersonFill", "DatabaseFill")
+    labels: Dict[str, str] = Field(default_factory=dict)  # Localized names, e.g. {"sv": "Mål"}
 
 
 class RelationshipTypeConfig(BaseModel):
@@ -71,6 +73,29 @@ class SchemaConfig(BaseModel):
         return v
 
 
+class ExpertAgentConfig(BaseModel):
+    """Configuration for an expert agent available in the chat."""
+    id: str
+    name: str
+    name_en: str = ""
+    specialty: str = ""
+    specialty_en: str = ""
+    color: str = "#9CA3AF"
+    icon: str = "CpuFill"
+    intro_sv: str = ""
+    intro_en: str = ""
+    system_context: str = ""
+
+
+class LanguagePolicyConfig(BaseModel):
+    """Per-graph language policy for graph content."""
+    mode: str = "preferred"
+    primary_language: str = "en"
+    allowed_languages: List[str] = Field(default_factory=lambda: ["en", "sv"])
+    description_sv: str = "Engelska är huvudspråk i grafen. Svenska accepteras när det är naturligt eller etablerat."
+    description_en: str = "English is the primary graph language. Swedish is accepted when natural or established."
+
+
 class PresentationConfig(BaseModel):
     """Presentation configuration for UI and prompts."""
     title: str = "Community Knowledge Graph"
@@ -79,7 +104,9 @@ class PresentationConfig(BaseModel):
     prompt_prefix: str = ""
     prompt_suffix: str = ""
     default_language: str = "en"
+    language_policy: LanguagePolicyConfig = Field(default_factory=LanguagePolicyConfig)
     widget_url: str = ""  # URL template for the graph widget
+    expert_agents: List[ExpertAgentConfig] = Field(default_factory=list)
 
 
 class SchemaFileConfig(BaseModel):
@@ -219,7 +246,9 @@ def get_schema() -> Dict[str, Any]:
                 "static": cfg.static,
                 "category": cfg.category,
                 "description": cfg.description,
-                "color": cfg.color
+                "color": cfg.color,
+                "icon": cfg.icon,
+                "labels": cfg.labels
             }
             for name, cfg in schema.node_types.items()
         },
@@ -261,7 +290,9 @@ def get_presentation() -> Dict[str, Any]:
         "prompt_prefix": pres.prompt_prefix,
         "prompt_suffix": pres.prompt_suffix,
         "default_language": pres.default_language,
-        "widget_url": pres.widget_url
+        "language_policy": pres.language_policy.dict(),
+        "widget_url": pres.widget_url,
+        "expert_agents": [agent.dict() for agent in pres.expert_agents]
     }
 
 

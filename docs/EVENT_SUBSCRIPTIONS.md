@@ -58,6 +58,11 @@ Configuration is stored in the EventSubscription node's `metadata` field:
     "operations": ["create", "update"],
     "keywords": {
       "any": ["AI", "digitalisering"]
+    },
+    "federation": {
+      "scope": "local_only",
+      "include_graph_ids": [],
+      "max_distance": null
     }
   },
   "delivery": {
@@ -76,6 +81,9 @@ Configuration is stored in the EventSubscription node's `metadata` field:
 | `target.node_types` | Array of node types to match (empty = all) |
 | `operations` | Array of operations: "create", "update", "delete" |
 | `keywords.any` | Match if any keyword appears in name/description/summary/tags |
+| `federation.scope` | `local_only` (default) or `local_and_federated` |
+| `federation.include_graph_ids` | Optional allow-list for federated source graph IDs |
+| `federation.max_distance` | Optional max federation distance for federated events |
 
 ### Delivery Options
 
@@ -263,3 +271,25 @@ The following are planned but not implemented:
 - Persistent event queue with durability guarantees
 - Advanced filtering with query expressions
 - Event replay and debugging tools
+
+### Federated Event Matching
+
+By default, subscriptions are **local-only** for backward compatibility.
+
+To include federated changes in subscriptions, set:
+
+```json
+{
+  "filters": {
+    "federation": {
+      "scope": "local_and_federated",
+      "include_graph_ids": ["esam-main"],
+      "max_distance": 1
+    }
+  }
+}
+```
+
+When omitted, `scope` defaults to `local_only`.
+
+Federated cache updates emitted by the sync engine use `origin.event_origin = "federation-sync"` for both node and edge events.

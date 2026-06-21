@@ -46,7 +46,8 @@ def register_mcp_tools(mcp, service: GraphService) -> Dict[str, Callable]:
         query: str,
         node_types: Optional[List[str]] = None,
         limit: int = 50,
-        action: Optional[str] = None
+        action: Optional[str] = None,
+        federation_depth: Optional[int] = None
     ) -> Dict[str, Any]:
         """
         Search for nodes in the graph based on text query
@@ -64,7 +65,8 @@ def register_mcp_tools(mcp, service: GraphService) -> Dict[str, Callable]:
             query=query,
             node_types=node_types,
             limit=limit,
-            action=action
+            action=action,
+            federation_depth=federation_depth
         )
 
     @register_tool

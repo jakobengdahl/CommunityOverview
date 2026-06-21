@@ -237,3 +237,64 @@
     box-shadow: 0 4px 12px rgba(0, 0, 0, 0.1);
   }
 }
+
+.federation-depth-control {
+  position: absolute;
+  right: 224px;
+  bottom: 18px;
+  z-index: 6;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 8px;
+  padding: 8px;
+  border-radius: 10px;
+  border: 1px solid rgba(255, 255, 255, 0.18);
+  background: rgba(24, 24, 24, 0.82);
+  backdrop-filter: blur(2px);
+}
+
+.federation-depth-label {
+  font-size: 11px;
+  color: #a8b0ff;
+  font-weight: 600;
+  letter-spacing: 0.03em;
+  text-transform: uppercase;
+}
+
+.federation-depth-levels {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.federation-depth-level {
+  width: 28px;
+  height: 28px;
+  border-radius: 6px;
+  border: 1px solid #4b5563;
+  background: #1f2937;
+  color: #d1d5db;
+  cursor: pointer;
+  font-size: 13px;
+  font-weight: 600;
+}
+
+.federation-depth-level:hover {
+  border-color: #818cf8;
+  color: #f5f3ff;
+}
+
+.federation-depth-level.active {
+  border-color: #6366f1;
+  background: #4f46e5;
+  color: #ffffff;
+}
+
+
+@media (max-width: 1200px) {
+  .federation-depth-control {
+    right: 12px;
+    bottom: 196px;
+  }
+}

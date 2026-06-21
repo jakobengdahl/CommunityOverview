@@ -31,6 +31,7 @@ class SearchRequest(BaseModel):
     query: str = Field(..., description="Search text")
     node_types: Optional[List[str]] = Field(None, description="Filter by node types")
     limit: int = Field(50, ge=1, le=500, description="Max results")
+    federation_depth: Optional[int] = Field(None, ge=1, le=9, description="Optional federated search depth")
 
 
 class RelatedNodesRequest(BaseModel):
@@ -111,35 +112,33 @@ class DeleteEdgeRequest(BaseModel):
     event_correlation_id: Optional[str] = Field(None, description="Correlation ID for chaining events")
 
 
+
+class AdoptFederatedNodeRequest(BaseModel):
+    """Request model for adopting a federated cached node into local graph."""
+    federated_node_id: str = Field(..., description="Federated cached node ID")
+    local_name: Optional[str] = Field(None, description="Optional local name override")
+    relationship_type: str = Field("ADOPTED_FROM", description="Lineage relation type")
+    create_new_copy: bool = Field(False, description="Create a new local copy even if already adopted")
+    event_origin: Optional[str] = Field(None, description="Source of mutation")
+    event_session_id: Optional[str] = Field(None, description="Session ID for loop prevention")
+    event_correlation_id: Optional[str] = Field(None, description="Correlation ID for chaining events")
+
 class SaveViewRequest(BaseModel):
     """Request model for saving a view."""
     name: str = Field(..., min_length=1, max_length=200, description="View name")
 
 
-# ==================== Router Factory ====================
+# ==================== Route Registration Helpers ====================
 
-def create_rest_router(service: GraphService, prefix: str = "") -> APIRouter:
-    """
-    Create a FastAPI router with all graph operation endpoints.
-
-    Args:
-        service: GraphService instance to use for operations
-        prefix: Optional URL prefix for all routes
-
-    Returns:
-        Configured APIRouter
-    """
-    router = APIRouter(prefix=prefix, tags=["graph"])
-
-    # ==================== Search Endpoints ====================
-
+def _register_search_endpoints(router: APIRouter, service: GraphService) -> None:
     @router.post("/search")
     async def search_graph(request: SearchRequest) -> Dict[str, Any]:
         """Search for nodes in the graph based on text query."""
         return service.search_graph(
             query=request.query,
             node_types=request.node_types,
-            limit=request.limit
+            limit=request.limit,
+            federation_depth=request.federation_depth,
         )
 
     @router.get("/nodes/{node_id}")
@@ -163,8 +162,8 @@ def create_rest_router(service: GraphService, prefix: str = "") -> APIRouter:
             depth=depth
         )
 
-    # ==================== Similarity Endpoints ====================
 
+def _register_similarity_endpoints(router: APIRouter, service: GraphService) -> None:
     @router.post("/similar")
     async def find_similar_nodes(request: SimilarNodesRequest) -> Dict[str, Any]:
         """Find similar nodes based on name (for duplicate detection)."""
@@ -185,8 +184,24 @@ def create_rest_router(service: GraphService, prefix: str = "") -> APIRouter:
             limit=request.limit
         )
 
-    # ==================== CRUD Endpoints ====================
+    @router.post("/federation/adopt")
+    async def adopt_federated_node(request: AdoptFederatedNodeRequest) -> Dict[str, Any]:
+        """Adopt (clone) a federated cached node into local graph."""
+        result = service.adopt_federated_node(
+            federated_node_id=request.federated_node_id,
+            local_name=request.local_name,
+            relationship_type=request.relationship_type,
+            create_new_copy=request.create_new_copy,
+            event_origin=request.event_origin,
+            event_session_id=request.event_session_id,
+            event_correlation_id=request.event_correlation_id,
+        )
+        if not result.get("success", True):
+            raise HTTPException(status_code=400, detail=result.get("message", "Adoption failed"))
+        return result
 
+
+def _register_node_crud_endpoints(router: APIRouter, service: GraphService) -> None:
     @router.post("/nodes")
     async def add_nodes(request: AddNodesRequest) -> Dict[str, Any]:
         """Add new nodes and edges to the graph."""
@@ -229,8 +244,8 @@ def create_rest_router(service: GraphService, prefix: str = "") -> APIRouter:
             raise HTTPException(status_code=400, detail=result.get("message"))
         return result
 
-    # ==================== Edge CRUD Endpoints ====================
 
+def _register_edge_crud_endpoints(router: APIRouter, service: GraphService) -> None:
     @router.post("/edges")
     async def add_edge(request: AddEdgeRequest) -> Dict[str, Any]:
         """Add a single edge between existing nodes. Type is optional (defaults to RELATES_TO)."""
@@ -269,8 +284,8 @@ def create_rest_router(service: GraphService, prefix: str = "") -> APIRouter:
             raise HTTPException(status_code=404, detail=result.get("error"))
         return result
 
-    # ==================== Statistics & Metadata Endpoints ====================
 
+def _register_metadata_endpoints(router: APIRouter, service: GraphService) -> None:
     @router.get("/stats")
     async def get_graph_stats() -> Dict[str, Any]:
         """Get statistics for the graph."""
@@ -301,8 +316,8 @@ def create_rest_router(service: GraphService, prefix: str = "") -> APIRouter:
         """Get the presentation configuration (colors, prompts, introduction text)."""
         return service.get_presentation()
 
-    # ==================== Saved Views Endpoints ====================
 
+def _register_views_endpoints(router: APIRouter, service: GraphService) -> None:
     @router.post("/views/save")
     async def save_view(request: SaveViewRequest) -> Dict[str, Any]:
         """Signal intent to save the current view state."""
@@ -321,11 +336,35 @@ def create_rest_router(service: GraphService, prefix: str = "") -> APIRouter:
         """List all saved views."""
         return service.list_saved_views()
 
-    # ==================== Export Endpoint ====================
 
+def _register_export_endpoints(router: APIRouter, service: GraphService) -> None:
     @router.get("/export")
     async def export_graph() -> Dict[str, Any]:
         """Export the entire graph (all nodes and edges)."""
         return service.export_graph()
+
+
+# ==================== Router Factory ====================
+
+def create_rest_router(service: GraphService, prefix: str = "") -> APIRouter:
+    """
+    Create a FastAPI router with all graph operation endpoints.
+
+    Args:
+        service: GraphService instance to use for operations
+        prefix: Optional URL prefix for all routes
+
+    Returns:
+        Configured APIRouter
+    """
+    router = APIRouter(prefix=prefix, tags=["graph"])
+
+    _register_search_endpoints(router, service)
+    _register_similarity_endpoints(router, service)
+    _register_node_crud_endpoints(router, service)
+    _register_edge_crud_endpoints(router, service)
+    _register_metadata_endpoints(router, service)
+    _register_views_endpoints(router, service)
+    _register_export_endpoints(router, service)
 
     return router

@@ -38,6 +38,10 @@ class AppConfig:
     auth_username: str = field(default_factory=lambda: os.getenv("AUTH_USERNAME", "admin"))
     auth_password: Optional[str] = field(default_factory=lambda: os.getenv("AUTH_PASSWORD"))
     cors_allowed_origins: list[str] = field(default_factory=lambda: os.getenv("CORS_ALLOWED_ORIGINS", "*").split(","))
+    mcp_basic_auth: bool = field(default_factory=lambda: os.getenv("MCP_BASIC_AUTH", "false").lower() == "true")
+
+    # Profile configuration
+    config_profile: str = field(default_factory=lambda: os.getenv("CONFIG_PROFILE", "default"))
 
     def __post_init__(self):
         """Resolve default static paths relative to this package."""

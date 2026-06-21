@@ -48,9 +48,12 @@ function App() {
     detailNode,
     closeDetailNode,
     clearVisualization,
+    federationDepth,
+    setFederationDepth,
+    showMinimap,
   } = useGraphStore();
 
-  const { t, setLanguage } = useI18n();
+  const { t, setLanguage, language } = useI18n();
 
   const [notification, setNotification] = useState(null);
   const [deleteDialog, setDeleteDialog] = useState(null);
@@ -63,6 +66,15 @@ function App() {
   const [saveViewSignal, setSaveViewSignal] = useState(0);
   const [isSavingView, setIsSavingView] = useState(false);
   const [editingEdge, setEditingEdge] = useState(null);
+
+  const federationDepthLevels = (stats?.federation?.selectable_depth_levels || [1]).filter(v => Number.isInteger(v) && v >= 1);
+  const maxFederationDepth = Math.max(1, ...federationDepthLevels, stats?.federation?.max_selectable_depth || 1);
+
+  useEffect(() => {
+    if (federationDepth > maxFederationDepth) {
+      setFederationDepth(maxFederationDepth);
+    }
+  }, [federationDepth, maxFederationDepth, setFederationDepth]);
 
   // Load schema, presentation, and stats on startup
   useEffect(() => {
@@ -81,7 +93,7 @@ function App() {
             setLanguage(presentationData.default_language);
           }
         }
-        setConfig(schemaData, presentationData, t);
+        setConfig(schemaData, presentationData, t, language);
         setStats(statsData);
       } catch (error) {
         console.error('Error loading configuration:', error);
@@ -89,7 +101,7 @@ function App() {
       }
     };
     loadConfig();
-  }, [setConfig, setStats, t, setLanguage]);
+  }, [setConfig, setStats, t, setLanguage, language]);
 
   const showNotification = useCallback((type, message) => {
     setNotification({ type, message });
@@ -117,6 +129,7 @@ function App() {
         const positions = nodeData.metadata?.positions || {};
         const savedEdges = nodeData.metadata?.edges || [];
         const savedGroups = nodeData.metadata?.groups || [];
+        const savedParentIds = nodeData.metadata?.parentIds || {};
         if (nodeIds.length > 0) {
           clearVisualization();
           const details = await Promise.all(
@@ -147,7 +160,7 @@ function App() {
             const edgeMap = new Map(edgesToLoad.map(e => [e.id, e]));
             addNodesToVisualization(loadedNodes, Array.from(edgeMap.values()));
             if (savedGroups.length > 0) {
-              setPendingGroups(savedGroups);
+              setPendingGroups({ groups: savedGroups, parentIds: savedParentIds });
             }
           }
         }
@@ -365,6 +378,11 @@ function App() {
         metadata: {
           node_ids: saveViewDialog.viewData.nodes.map(n => n.id),
           positions: Object.fromEntries(saveViewDialog.viewData.nodes.map(n => [n.id, n.position])),
+          parentIds: Object.fromEntries(
+            saveViewDialog.viewData.nodes
+              .filter(n => n.parentId)
+              .map(n => [n.id, n.parentId])
+          ),
           edge_ids: (saveViewDialog.viewData.edges || []).map(e => e.id),
           edges: saveViewDialog.viewData.edges || [],
           groups: saveViewDialog.viewData.groups,
@@ -479,6 +497,28 @@ function App() {
     setSaveViewSignal(prev => prev + 1);
   }, []);
 
+  // Export full graph from backend API
+  const handleExportGraph = useCallback(async () => {
+    try {
+      const data = await api.exportGraph();
+
+      const blob = new Blob([JSON.stringify(data, null, 2)], { type: 'application/json' });
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement('a');
+      a.href = url;
+      a.download = `graph-export-${new Date().toISOString().slice(0, 10)}.json`;
+      document.body.appendChild(a);
+      a.click();
+      document.body.removeChild(a);
+      URL.revokeObjectURL(url);
+
+      showNotification('success', t('menu.export_success'));
+    } catch (error) {
+      console.error('Error exporting graph:', error);
+      showNotification('error', t('menu.export_error'));
+    }
+  }, [showNotification, t]);
+
   // Handle drop from toolbar onto canvas
   const handleDropCreateNode = useCallback((nodeType, position) => {
     if (nodeType === 'Agent') {
@@ -540,10 +580,22 @@ function App() {
           saveViewSignal={saveViewSignal}
           groupsToRestore={pendingGroups}
           onGroupsRestored={() => setPendingGroups(null)}
+          federationDepth={federationDepth}
+          onFederationDepthChange={setFederationDepth}
+          maxFederationDepth={maxFederationDepth}
+          federationDepthLevels={federationDepthLevels}
+          federationDepthLabel={t('federation.depth_label')}
+          federationDepthTooltip={t('federation.depth_tooltip')}
+          showMinimap={showMinimap}
         />
       </div>
 
-      <FloatingHeader stats={stats} />
+      <FloatingHeader stats={stats} onExportGraph={handleExportGraph} />
+      {maxFederationDepth > 1 && (
+        <div className="app-a11y-depth-live" aria-live="polite" aria-atomic="true">
+          {t('federation.depth_indicator', { current: federationDepth, max: maxFederationDepth })}
+        </div>
+      )}
       <FloatingSearch />
       <FloatingToolbar
         onCreateNode={handleCreateNodeForType}

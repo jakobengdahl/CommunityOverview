@@ -587,7 +587,7 @@ class MCPLoader:
 
         # Security: ensure path is within workspace
         full_path = os.path.normpath(os.path.join(base_path, path))
-        if not full_path.startswith(base_path):
+        if os.path.commonpath([base_path, full_path]) != base_path:
             return {"error": "Path must be within agent workspace"}
 
         try:

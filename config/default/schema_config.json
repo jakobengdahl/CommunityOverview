@@ -11,7 +11,8 @@
         "static": true,
         "category": "system",
         "description": "Saved graph view snapshots for quick navigation",
-        "color": "#6B7280"
+        "color": "#6B7280",
+        "icon": "BookmarkFill"
       },
       "VisualizationView": {
         "fields": [
@@ -23,7 +24,8 @@
         "static": true,
         "category": "system",
         "description": "Saved graph view snapshots (legacy)",
-        "color": "#6B7280"
+        "color": "#6B7280",
+        "icon": "BookmarkFill"
       },
       "EventSubscription": {
         "fields": [
@@ -32,10 +34,11 @@
           "summary",
           "metadata"
         ],
-        "static": true,
+        "static": false,
         "category": "system",
         "description": "Webhook subscription for graph mutation events. Configuration stored in metadata: filters (entity_kind, node_types, operations, keywords) and delivery (webhook_url, ignore_origins, ignore_session_ids)",
-        "color": "#8B5CF6"
+        "color": "#8B5CF6",
+        "icon": "BellFill"
       },
       "Agent": {
         "fields": [
@@ -44,10 +47,11 @@
           "summary",
           "metadata"
         ],
-        "static": true,
+        "static": false,
         "category": "system",
         "description": "AI agent configuration (runtime not implemented). Links to EventSubscription via metadata.subscription_id. Agent config in metadata.agent (type, config)",
-        "color": "#EC4899"
+        "color": "#EC4899",
+        "icon": "CpuFill"
       },
       "Actor": {
         "fields": [
@@ -59,7 +63,11 @@
         ],
         "category": "domain",
         "description": "Government agencies, organizations, individuals responsible for initiatives",
-        "color": "#3B82F6"
+        "color": "#3B82F6",
+        "icon": "PersonFill",
+        "labels": {
+          "sv": "Aktör"
+        }
       },
       "Initiative": {
         "fields": [
@@ -73,7 +81,11 @@
         ],
         "category": "domain",
         "description": "Projects, programs, collaborative activities",
-        "color": "#10B981"
+        "color": "#10B981",
+        "icon": "RocketTakeoffFill",
+        "labels": {
+          "sv": "Initiativ"
+        }
       },
       "Capability": {
         "fields": [
@@ -85,7 +97,11 @@
         ],
         "category": "domain",
         "description": "Capabilities, competencies, skills needed/provided",
-        "color": "#F97316"
+        "color": "#F97316",
+        "icon": "LightningFill",
+        "labels": {
+          "sv": "Förmåga"
+        }
       },
       "Resource": {
         "fields": [
@@ -98,7 +114,11 @@
         ],
         "category": "domain",
         "description": "Outputs such as reports, software, tools, datasets. Field 'identifier' follows Dublin Core (dc:identifier) for URLs/URIs.",
-        "color": "#FBBF24"
+        "color": "#FBBF24",
+        "icon": "FileEarmarkTextFill",
+        "labels": {
+          "sv": "Resurs"
+        }
       },
       "Legislation": {
         "fields": [
@@ -111,7 +131,11 @@
         ],
         "category": "domain",
         "description": "Laws, directives (NIS2, GDPR, etc.)",
-        "color": "#EF4444"
+        "color": "#EF4444",
+        "icon": "ShieldFillCheck",
+        "labels": {
+          "sv": "Lagstiftning"
+        }
       },
       "Theme": {
         "fields": [
@@ -123,7 +147,11 @@
         ],
         "category": "domain",
         "description": "Themes like AI strategies, data strategies, digitalization",
-        "color": "#14B8A6"
+        "color": "#14B8A6",
+        "icon": "TagsFill",
+        "labels": {
+          "sv": "Tema"
+        }
       },
       "Goal": {
         "fields": [
@@ -136,7 +164,11 @@
         ],
         "category": "domain",
         "description": "Strategic objectives and targets for digitalization efforts",
-        "color": "#6366F1"
+        "color": "#6366F1",
+        "icon": "TrophyFill",
+        "labels": {
+          "sv": "Mål"
+        }
       },
       "Event": {
         "fields": [
@@ -150,7 +182,11 @@
         ],
         "category": "domain",
         "description": "A non-persistent, time-based occurrence (aligned with dc:Event). Conferences, workshops, decisions, milestones.",
-        "color": "#D946EF"
+        "color": "#D946EF",
+        "icon": "CalendarEventFill",
+        "labels": {
+          "sv": "Händelse"
+        }
       },
       "Data": {
         "fields": [
@@ -163,7 +199,11 @@
         ],
         "category": "domain",
         "description": "Datasets, registers, APIs, or other data sources. Field 'identifier' follows Dublin Core (dc:identifier) for URLs/URIs.",
-        "color": "#06B6D4"
+        "color": "#06B6D4",
+        "icon": "DatabaseFill",
+        "labels": {
+          "sv": "Data"
+        }
       },
       "Risk": {
         "fields": [
@@ -175,7 +215,11 @@
         ],
         "category": "domain",
         "description": "Identified risks, threats, or vulnerabilities relevant to initiatives, legislation, or capabilities",
-        "color": "#DC2626"
+        "color": "#DC2626",
+        "icon": "ExclamationTriangleFill",
+        "labels": {
+          "sv": "Risk"
+        }
       }
     },
     "relationship_types": {
@@ -223,6 +267,63 @@
     },
     "prompt_prefix": "You are a knowledge agent that helps users navigate and maintain a knowledge graph for community collaboration on public digitalization.",
     "prompt_suffix": "Remember to suggest saved views when relevant, and always ask for confirmation before making changes to the graph.",
-    "default_language": "en"
+    "default_language": "en",
+    "language_policy": {
+      "mode": "preferred",
+      "primary_language": "en",
+      "allowed_languages": ["en", "sv"],
+      "description_sv": "Engelska är huvudspråk i grafen. Svenska accepteras när det är naturligt eller etablerat.",
+      "description_en": "English is the primary graph language. Swedish is accepted when natural or established."
+    },
+    "expert_agents": [
+      {
+        "id": "legislation-expert",
+        "name": "Lagexpert",
+        "name_en": "Legislation Expert",
+        "specialty": "Lagstiftning, direktiv och regelefterlevnad",
+        "specialty_en": "Legislation, directives and regulatory compliance",
+        "color": "#EF4444",
+        "icon": "ShieldFillCheck",
+        "intro_sv": "Hej! Jag är Lagexperten. Jag kan hjälpa er med frågor kring lagstiftning, direktiv som NIS2 och GDPR, samt regelefterlevnad kopplat till digitaliseringsinitiativ.",
+        "intro_en": "Hello! I'm the Legislation Expert. I can help with questions about legislation, directives such as NIS2 and GDPR, and regulatory compliance related to digitalization initiatives.",
+        "system_context": "You are a legislation and regulatory compliance expert. Focus on laws, directives, and compliance aspects."
+      },
+      {
+        "id": "data-expert",
+        "name": "Dataexpert",
+        "name_en": "Data Expert",
+        "specialty": "Datakällor, API:er och datahantering",
+        "specialty_en": "Data sources, APIs and data management",
+        "color": "#06B6D4",
+        "icon": "DatabaseFill",
+        "intro_sv": "Hej! Jag är Dataexperten. Jag har kunskap om datakällor, register, API:er och datahanteringsstrategier inom offentlig digitalisering.",
+        "intro_en": "Hello! I'm the Data Expert. I have knowledge about data sources, registries, APIs and data management strategies in public digitalization.",
+        "system_context": "You are a data management expert. Focus on datasets, APIs, registries, and data strategies."
+      },
+      {
+        "id": "strategy-expert",
+        "name": "Strategiexpert",
+        "name_en": "Strategy Expert",
+        "specialty": "Digitaliseringsstrategi och målstyrning",
+        "specialty_en": "Digitalization strategy and goal management",
+        "color": "#6366F1",
+        "icon": "TrophyFill",
+        "intro_sv": "Hej! Jag är Strategiexperten. Jag kan bidra med perspektiv på digitaliseringsstrategier, mål och hur initiativ kopplas till övergripande strategiska ramverk.",
+        "intro_en": "Hello! I'm the Strategy Expert. I can contribute perspectives on digitalization strategies, goals and how initiatives connect to overarching strategic frameworks.",
+        "system_context": "You are a strategy and goal management expert. Focus on strategic objectives, digitalization strategies, and initiative alignment."
+      },
+      {
+        "id": "collaboration-expert",
+        "name": "Samverkansexpert",
+        "name_en": "Collaboration Expert",
+        "specialty": "Aktörssamverkan och nätverksanalys",
+        "specialty_en": "Actor collaboration and network analysis",
+        "color": "#3B82F6",
+        "icon": "PeopleFill",
+        "intro_sv": "Hej! Jag är Samverkansexperten. Jag kan analysera samarbeten mellan aktörer, identifiera synergier och föreslå nya kopplingar i nätverket.",
+        "intro_en": "Hello! I'm the Collaboration Expert. I can analyze collaborations between actors, identify synergies and suggest new connections in the network.",
+        "system_context": "You are a collaboration and network analysis expert. Focus on actor relationships, synergies, and partnership opportunities."
+      }
+    ]
   }
 }

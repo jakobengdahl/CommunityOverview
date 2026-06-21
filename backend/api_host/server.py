@@ -20,6 +20,7 @@ Usage:
 """
 
 import os
+import secrets
 from pathlib import Path
 from typing import Optional, Dict, Any, Callable
 
@@ -34,8 +35,78 @@ from backend.core import GraphStorage
 from backend.service import GraphService, create_rest_router, register_mcp_tools, json_serializer
 from backend.ui import ChatService, DocumentService, create_ui_router
 from backend.agents import AgentRegistry, AgentsSettings
+from backend.federation import FederationManager, load_federation_config, summarize_federation_config
+from backend import config_loader
+from backend.language_policy import format_language_policy_for_prompt
 
 from .config import AppConfig
+
+
+def _build_mcp_instructions() -> str:
+    """Build MCP instructions dynamically from the loaded schema configuration."""
+    schema = config_loader.get_schema()
+    presentation = config_loader.get_presentation()
+    node_types = schema.get("node_types", {})
+    relationship_types = schema.get("relationship_types", {})
+
+    # Build node type descriptions
+    domain_lines = []
+    system_lines = []
+    for name, cfg in node_types.items():
+        category = cfg.get("category", "domain")
+        desc = cfg.get("description", "")
+        entry = f"  - {name}: {desc}" if desc else f"  - {name}"
+        if category == "system":
+            system_lines.append(entry)
+        else:
+            domain_lines.append(entry)
+
+    # Build relationship type descriptions
+    rel_lines = []
+    for name, cfg in relationship_types.items():
+        desc = cfg.get("description", "")
+        entry = f"  - {name}: {desc}" if desc else f"  - {name}"
+        rel_lines.append(entry)
+
+    # Include prompt_prefix if configured (contains domain-specific context)
+    prompt_context = ""
+    if presentation.get("prompt_prefix"):
+        prompt_context = f"\nDOMAIN CONTEXT:\n{presentation['prompt_prefix']}\n"
+
+    language_policy_section = format_language_policy_for_prompt(presentation, external_agent=True)
+
+    instructions = f"""You are a helpful knowledge agent for: {presentation.get('title', 'Knowledge Graph')}.
+{prompt_context}
+METADATA MODEL — Node Types available in this graph:
+
+Domain types (the core concepts users work with):
+{chr(10).join(domain_lines)}
+
+System types (infrastructure, not usually queried directly):
+{chr(10).join(system_lines)}
+
+Relationship types:
+{chr(10).join(rel_lines)}
+
+SEARCH STRATEGY:
+- Start with broad search terms (e.g., "AI" instead of "AI projects in Sweden").
+- If a search yields no results, try broader terms or synonyms.
+- An empty query or "*" returns a list of nodes (limited by 'limit').
+- Use the node_types parameter to filter by type (e.g., node_types=["Klassifikation"]).
+- When users ask about a concept that matches a node type name, search for that type.
+
+DATA MANAGEMENT:
+- ALWAYS check for existing nodes using 'find_similar_nodes' before creating new ones.
+- When adding nodes, use the correct type from the metadata model above.
+- Use 'get_subtypes' to find existing sub-classifications before adding new ones.
+- Follow the graph language policy below for any new or updated graph content.
+
+{language_policy_section}
+VISUALIZATION:
+- If the user asks to see the graph visually or mentions "widget", "canvas", or "visualize",
+  provide them with the Widget URL (available via 'get_presentation').
+"""
+    return instructions
 
 
 def create_app(
@@ -65,7 +136,11 @@ def create_app(
     )
 
     # Add Basic Auth Middleware if enabled
-    if config.auth_enabled and config.auth_password:
+    # Two modes:
+    #   1. auth_enabled=True: Basic Auth on ALL endpoints (except /health, /info)
+    #   2. mcp_basic_auth=True: Basic Auth ONLY on /mcp and /execute_tool endpoints
+    #      (for deployments where the rest is protected by Cloud Run/IAP)
+    if config.auth_password and (config.auth_enabled or config.mcp_basic_auth):
         import base64
 
         @app.middleware("http")
@@ -73,9 +148,17 @@ def create_app(
             if request.method == "OPTIONS":
                 return await call_next(request)
 
-            # Allow health check and info without auth
-            if request.url.path in ["/health", "/info"]:
+            # Allow health check, info, and logout-related routes without auth.
+            # /auth/logout and /logged-out must be reachable without a valid
+            # session, otherwise the user ends up in an auth loop.
+            if request.url.path in ["/health", "/info", "/auth/logout", "/logged-out"]:
                 return await call_next(request)
+
+            # In MCP-only mode, only require auth for MCP and execute_tool paths
+            if config.mcp_basic_auth and not config.auth_enabled:
+                path = request.url.path
+                if not (path.startswith("/mcp") or path.startswith("/execute_tool")):
+                    return await call_next(request)
 
             # Check for Authorization header
             auth_header = request.headers.get("Authorization")
@@ -94,7 +177,14 @@ def create_app(
                 decoded = base64.b64decode(credentials).decode("utf-8")
                 username, _, password = decoded.partition(":")
 
-                if username != config.auth_username or password != config.auth_password:
+                is_correct_username = secrets.compare_digest(
+                    username, config.auth_username
+                )
+                is_correct_password = secrets.compare_digest(
+                    password, config.auth_password or ""
+                )
+
+                if not (is_correct_username and is_correct_password):
                     raise ValueError
             except (ValueError, Exception):
                 return JSONResponse(
@@ -118,16 +208,45 @@ def create_app(
         allow_headers=["*"],  # Allow all headers
     )
 
+    federation_config = load_federation_config()
+    federation_summary = summarize_federation_config(federation_config)
+
     # Initialize graph storage if not provided
     if graph_storage is None:
         graph_path = config.get_graph_path()
         graph_storage = GraphStorage(str(graph_path))
 
+    def _on_federated_node_event(operation, before_node, after_node):
+        graph_storage.emit_federated_node_event(
+            operation=operation,
+            node_before=before_node,
+            node_after=after_node,
+            event_origin="federation-sync",
+        )
+
+    def _on_federated_edge_event(operation, before_edge, after_edge):
+        graph_storage.emit_federated_edge_event(
+            operation=operation,
+            edge_before=before_edge,
+            edge_after=after_edge,
+            event_origin="federation-sync",
+        )
+
+    federation_manager = FederationManager(
+        federation_config,
+        on_node_event=_on_federated_node_event,
+        on_edge_event=_on_federated_edge_event,
+    )
+
     # Initialize event system for webhook delivery
     graph_storage.setup_events(enabled=True)
 
     # Initialize GraphService
-    graph_service = GraphService(graph_storage)
+    graph_service = GraphService(graph_storage, federation_manager=federation_manager)
+
+    # Run federation startup sync (best effort, never blocks startup on failures)
+    federation_manager.sync_on_startup()
+    federation_manager.start()
 
     # Initialize Agent Registry for background agent workers
     agent_settings = AgentsSettings.from_env()
@@ -175,6 +294,9 @@ def create_app(
     app.state.graph_storage = graph_storage
     app.state.agent_registry = agent_registry
     app.state.config = config
+    app.state.federation_config = federation_config
+    app.state.federation_summary = federation_summary
+    app.state.federation_manager = federation_manager
 
     # Create and mount REST API router
     rest_router = create_rest_router(graph_service)
@@ -192,95 +314,132 @@ def create_app(
     ui_router = create_ui_router(chat_service, document_service)
     app.include_router(ui_router, prefix="/ui")
 
-    # Initialize FastMCP and register tools
-    # We add custom instructions to guide the LLM on how to use the tools effectively.
-    instructions = """
-    You are a helpful knowledge agent assisting users with the Community Knowledge Graph.
+    # Initialize FastMCP with dynamic instructions built from schema configuration
+    instructions = _build_mcp_instructions()
 
-    SEARCH STRATEGY:
-    - Start with broad search terms (e.g., "AI" instead of "AI projects in Sweden").
-    - If a search yields no results, try broader terms or synonyms.
-    - An empty query or "*" returns a list of nodes (limited by 'limit').
-
-    DATA MANAGEMENT:
-    - ALWAYS check for existing nodes/actors using 'find_similar_nodes' before creating new ones.
-    - Avoid creating generic actor nodes like "Universities" or "Research Institutes". Be specific.
-    - When adding initiatives, try to link them to existing actors and communities.
-
-    VISUALIZATION:
-    - If the user asks to see the graph visually or mentions "widget", "canvas", or "visualize",
-      provide them with the Widget URL (available via 'get_presentation').
-      Normally this URL is: https://{host}/widget/
-    """
-
-    mcp = FastMCP(config.mcp_name, instructions=instructions)
+    mcp = FastMCP(
+        config.mcp_name,
+        instructions=instructions,
+        # Disable DNS rebinding protection: the default host="127.0.0.1"
+        # auto-enables it, which rejects any Host header that isn't localhost.
+        # In production (Cloud Run) the Host header is the public URL, so
+        # requests get a 421 "Invalid Host header". Authentication is handled
+        # by the gateway / Cloud Run IAP, so this check is not needed.
+        host="0.0.0.0",
+    )
     tools_map = register_mcp_tools(mcp, graph_service)
 
     # Store MCP instance and tools map on app state
     app.state.mcp = mcp
     app.state.tools_map = tools_map
 
-    # Mount MCP HTTP endpoint
-    # Use sse_app to provide standard /sse and /messages endpoints
-    mcp_app = mcp.sse_app()
+    # Mount MCP HTTP endpoints.
+    # Two transports are supported:
+    #   1. Legacy SSE  (GET /mcp/sse + POST /mcp/messages) – for older clients
+    #   2. Streamable HTTP (POST /mcp) – for ChatGPT, Claude, and MCP spec ≥2025-03-26
+    mcp_sse_app = mcp.sse_app()
 
-    # Add a middleware to handle browser requests to /mcp
-    # The MCP endpoint expects MCP protocol requests (GET with Accept: text/event-stream for SSE),
-    # not regular browser GET requests which would hang waiting for SSE.
-    # We use a pure ASGI middleware class to avoid BaseHTTPMiddleware limitations with streaming responses.
-    class MCPBrowserHandlerMiddleware:
-        def __init__(self, app):
-            self.app = app
+    # Try to create Streamable HTTP app (requires mcp ≥ 1.8).
+    # If the installed version doesn't support it, fall back to SSE-only.
+    try:
+        mcp_streamable_app = mcp.streamable_http_app()
+        _has_streamable = True
+    except (AttributeError, TypeError):
+        mcp_streamable_app = None
+        _has_streamable = False
+
+    # Wrap the MCP apps with a handler for browser requests.
+    # Regular browser GETs would otherwise hang waiting for SSE.
+    # This ASGI middleware routes requests to the correct transport.
+    class MCPBrowserHandler:
+        def __init__(self, sse_app, streamable_app=None):
+            self.sse_app = sse_app
+            self.streamable_app = streamable_app
 
         async def __call__(self, scope, receive, send):
             if scope["type"] != "http":
-                await self.app(scope, receive, send)
+                await self.sse_app(scope, receive, send)
                 return
 
             path = scope.get("path", "")
             method = scope.get("method", "GET")
+            is_root = path in ("", "/")
 
-            # Simple request logging for MCP endpoints
-            if path.startswith("/mcp"):
-                import logging
-                # Use a standard logger instead of uvicorn.access to avoid formatting errors
-                # uvicorn.access expects specific args (client, method, path, etc.)
-                logger = logging.getLogger("mcp.server")
-                if not logger.handlers:
-                    logging.basicConfig()
-                logger.info(f"MCP Request: {method} {path}")
+            import logging
+            mcp_logger = logging.getLogger("mcp.server")
+            if not mcp_logger.handlers:
+                logging.basicConfig()
+            mcp_logger.info(f"MCP Request: {method} /mcp{path}")
 
-            # Only intercept specific paths if needed, here we check startswith /mcp
-            # Note: scope['path'] does not include root_path, but here we assume standard mounting
-            if path.startswith("/mcp"):
-                headers = dict(scope.get("headers", []))
-                # Headers are bytes
-                accept_header = headers.get(b"accept", b"").decode("utf-8", errors="ignore")
+            headers = dict(scope.get("headers", []))
+            accept_header = headers.get(b"accept", b"").decode("utf-8", errors="ignore")
 
-                # If client expects SSE or is POST request, let it through to MCP app
-                if "text/event-stream" in accept_header or method == "POST":
-                    await self.app(scope, receive, send)
-                    return
+            # POST to the mount root (/mcp) → Streamable HTTP transport
+            if method == "POST" and is_root and self.streamable_app:
+                await self.streamable_app(scope, receive, send)
+                return
 
-                # For regular browser GET requests, return helpful info
-                if method == "GET":
-                    response = JSONResponse({
-                        "endpoint": "/mcp/sse",
-                        "type": "MCP (Model Context Protocol) Server",
-                        "description": "This endpoint is for MCP clients, not direct browser access.",
-                        "usage": "Use an MCP-compatible client (like Claude Desktop or ChatGPT) to connect to this endpoint: /mcp/sse",
-                        "protocol": "MCP uses Server-Sent Events (SSE) for streaming communication.",
-                        "documentation": "https://modelcontextprotocol.io/",
-                        "available_tools": list(tools_map.keys()),
-                    })
-                    await response(scope, receive, send)
-                    return
+            # DELETE for session termination (Streamable HTTP)
+            if method == "DELETE" and self.streamable_app:
+                await self.streamable_app(scope, receive, send)
+                return
 
-            await self.app(scope, receive, send)
+            # GET /mcp with Accept: text/event-stream → Streamable HTTP SSE channel
+            # (new spec: server opens SSE stream for server-initiated messages)
+            if method == "GET" and is_root and "text/event-stream" in accept_header:
+                if self.streamable_app:
+                    await self.streamable_app(scope, receive, send)
+                else:
+                    await self.sse_app(scope, receive, send)
+                return
 
-    app.add_middleware(MCPBrowserHandlerMiddleware)
+            # Sub-path requests with SSE accept or POST → legacy SSE transport
+            # (GET /mcp/sse, POST /mcp/messages/)
+            if "text/event-stream" in accept_header or method == "POST":
+                await self.sse_app(scope, receive, send)
+                return
 
-    app.mount("/mcp", mcp_app)
+            # Regular browser GET → return helpful info
+            if method == "GET":
+                response = JSONResponse({
+                    "endpoint": "/mcp/sse",
+                    "type": "MCP (Model Context Protocol) Server",
+                    "description": "This endpoint is for MCP clients, not direct browser access.",
+                    "usage": "Use an MCP-compatible client (like Claude Desktop or ChatGPT) to connect to this endpoint.",
+                    "protocol": "MCP supports SSE and Streamable HTTP transports.",
+                    "transports": {
+                        "sse_legacy": "/mcp/sse",
+                        "streamable_http": "/mcp" if self.streamable_app else "not available",
+                    },
+                    "streamable_http_endpoints": {
+                        "POST /mcp": "send JSON-RPC message; respond inline or as SSE stream",
+                        "GET /mcp": "open SSE stream for server-initiated messages (Accept: text/event-stream)",
+                    } if self.streamable_app else {},
+                    "documentation": "https://modelcontextprotocol.io/",
+                    "available_tools": list(tools_map.keys()),
+                })
+                await response(scope, receive, send)
+                return
+
+            await self.sse_app(scope, receive, send)
+
+    app.mount("/mcp", MCPBrowserHandler(mcp_sse_app, mcp_streamable_app))
+
+    # Define safe tools for unauthenticated access
+    SAFE_TOOLS = {
+        "search_graph",
+        "get_node_details",
+        "get_related_nodes",
+        "find_similar_nodes",
+        "find_similar_nodes_batch",
+        "get_graph_stats",
+        "list_node_types",
+        "list_relationship_types",
+        "get_schema",
+        "get_presentation",
+        "list_saved_views",
+        "get_saved_view",
+    }
 
     # Add execute_tool endpoint for direct tool execution
     @app.post("/execute_tool")
@@ -293,6 +452,16 @@ def create_app(
 
             if not tool_name:
                 return JSONResponse({"error": "No tool_name provided"}, status_code=400)
+
+            # Security Check: Enforce authentication for unsafe tools
+            # If auth is enabled, middleware handles it (we only reach here if auth passed).
+            # If auth is disabled (config.auth_enabled is False), we must restrict access.
+            if not config.auth_enabled:
+                if tool_name not in SAFE_TOOLS:
+                    return JSONResponse(
+                        {"error": f"Tool '{tool_name}' requires authentication. Please enable AUTH_ENABLED or use a safe tool."},
+                        status_code=403
+                    )
 
             if tool_name not in tools_map:
                 return JSONResponse({"error": f"Tool {tool_name} not found"}, status_code=404)
@@ -319,6 +488,18 @@ def create_app(
             error_trace = traceback.format_exc()
             return JSONResponse({"error": str(e), "traceback": error_trace}, status_code=500)
 
+    # Serve favicon/graph-icon from web static path to prevent 404 noise
+    _favicon_path = Path(config.web_static_path) / "graph-icon.svg"
+
+    @app.get("/graph-icon.svg")
+    @app.get("/favicon.svg")
+    @app.get("/favicon.ico")
+    @app.get("/favicon.png")
+    async def favicon():
+        if _favicon_path.exists():
+            return FileResponse(str(_favicon_path), media_type="image/svg+xml")
+        return JSONResponse(status_code=204, content=None)
+
     # Mount static files for web app
     _mount_static_files(app, config)
 
@@ -330,6 +511,10 @@ def create_app(
             "status": "healthy",
             "graph_nodes": len(graph_storage.nodes),
             "graph_edges": len(graph_storage.edges),
+            "federation": {
+                **federation_summary,
+                "runtime": federation_manager.get_status(),
+            },
         }
 
     # Root endpoint - redirect to web app
@@ -338,6 +523,95 @@ def create_app(
         """Redirect root to web application."""
         return RedirectResponse(url="/web/", status_code=302)
 
+    # Logout endpoint - cloud-agnostic.
+    # If LOGOUT_REDIRECT_URL is set, redirect there (e.g. an IAP / OAuth
+    # proxy sign-out URL). Otherwise, fall back to a local /logged-out page.
+    # This endpoint is exempt from auth middleware so it never loops.
+    logout_redirect_url = os.environ.get("LOGOUT_REDIRECT_URL", "/logged-out")
+
+    @app.get("/auth/logout")
+    async def logout() -> RedirectResponse:
+        """Log the user out by redirecting to the configured target."""
+        return RedirectResponse(url=logout_redirect_url, status_code=302)
+
+    # Fallback logged-out page, used when no external auth layer is present.
+    # Must not require auth — this page is where users land after logout.
+    @app.get("/logged-out")
+    async def logged_out():
+        """Simple standalone page shown after logout."""
+        from fastapi.responses import HTMLResponse
+
+        html = '''<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Logged out</title>
+  <link rel="icon" href="/favicon.svg" />
+  <style>
+    :root { color-scheme: dark; }
+    html, body {
+      margin: 0;
+      padding: 0;
+      height: 100%;
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto,
+        Helvetica, Arial, sans-serif;
+      background: #121212;
+      color: #eaeaea;
+    }
+    body {
+      display: flex;
+      align-items: center;
+      justify-content: center;
+    }
+    .logged-out-card {
+      background: rgba(26, 26, 26, 0.95);
+      border: 1px solid #333;
+      border-radius: 12px;
+      box-shadow: 0 8px 32px rgba(0, 0, 0, 0.5);
+      padding: 32px 40px;
+      max-width: 420px;
+      text-align: center;
+    }
+    .logged-out-card h1 {
+      margin: 0 0 12px 0;
+      font-size: 1.4rem;
+      font-weight: 600;
+      color: #fff;
+    }
+    .logged-out-card p {
+      margin: 0 0 20px 0;
+      color: #bbb;
+      font-size: 0.95rem;
+      line-height: 1.5;
+    }
+    .logged-out-card a {
+      display: inline-block;
+      padding: 10px 18px;
+      background: #646cff;
+      color: #fff;
+      text-decoration: none;
+      border-radius: 8px;
+      font-size: 0.9rem;
+      font-weight: 500;
+      transition: background 0.15s;
+    }
+    .logged-out-card a:hover {
+      background: #535bf2;
+    }
+  </style>
+</head>
+<body>
+  <div class="logged-out-card">
+    <h1>You have been logged out</h1>
+    <p>Your session has ended. You can return to the application using the link below.</p>
+    <a href="/">Back to start</a>
+  </div>
+</body>
+</html>
+'''
+        return HTMLResponse(content=html)
+
     # API info endpoint
     @app.get("/info")
     async def info() -> Dict[str, Any]:
@@ -345,6 +619,7 @@ def create_app(
         return {
             "name": "Community Knowledge Graph",
             "version": "1.0.0",
+            "config_profile": config.config_profile,
             "endpoints": {
                 "api": config.api_prefix,
                 "ui": "/ui",
@@ -357,8 +632,22 @@ def create_app(
                 "nodes": len(graph_storage.nodes),
                 "edges": len(graph_storage.edges),
             },
-            "llm_provider": chat_service.provider_type
+            "llm_provider": chat_service.provider_type,
+            "federation": {
+                **federation_summary,
+                "runtime": federation_manager.get_status(),
+            },
         }
+
+    @app.get("/federation/status")
+    async def federation_status() -> Dict[str, Any]:
+        """Get federation cache and connectivity status."""
+        return federation_manager.get_status()
+
+    @app.post("/federation/sync")
+    async def federation_sync() -> Dict[str, Any]:
+        """Trigger best-effort sync for all enabled federated graph sources."""
+        return await federation_manager.sync_all()
 
     # Agent system endpoints
     @app.get("/agents/status")
@@ -375,6 +664,7 @@ def create_app(
     @app.on_event("shutdown")
     async def shutdown_event():
         """Gracefully shutdown agent registry and event system."""
+        federation_manager.stop()
         agent_registry.stop()
         graph_storage.shutdown_events()
 

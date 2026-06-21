@@ -3,8 +3,8 @@
   left: 16px;
   top: 80px;
   z-index: 100;
-  display: flex;
-  flex-direction: column;
+  display: grid;
+  grid-template-columns: 1fr 1fr;
   gap: 2px;
   padding: 6px;
   background: rgba(26, 26, 26, 0.92);
@@ -37,6 +37,7 @@
 }
 
 .floating-toolbar-separator {
+  grid-column: 1 / -1;
   height: 1px;
   background: #333;
   margin: 4px 2px;

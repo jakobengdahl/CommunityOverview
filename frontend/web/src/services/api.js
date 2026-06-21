@@ -83,6 +83,7 @@ export async function searchGraph(query, options = {}) {
       node_types: options.nodeTypes,
       communities: options.communities,
       limit: options.limit || 50,
+      federation_depth: options.federationDepth,
     }),
   });
 }
@@ -351,10 +352,13 @@ const UI_API_BASE = '/ui';
  * @param {string} documentContext - Optional document text to include
  * @returns {Promise<{content: string, toolUsed: string|null, toolResult: Object|null}>}
  */
-export async function sendChatMessage(messages, documentContext = null) {
+export async function sendChatMessage(messages, documentContext = null, options = {}) {
   const body = { messages };
   if (documentContext) {
     body.document_context = documentContext;
+  }
+  if (options.federationDepth) {
+    body.federation_depth = options.federationDepth;
   }
   return apiFetch(`${UI_API_BASE}/chat`, {
     method: 'POST',
@@ -368,10 +372,13 @@ export async function sendChatMessage(messages, documentContext = null) {
  * @param {string} documentContext - Optional document text
  * @returns {Promise<{content: string, toolUsed: string|null, toolResult: Object|null}>}
  */
-export async function sendSimpleChatMessage(message, documentContext = null) {
+export async function sendSimpleChatMessage(message, documentContext = null, options = {}) {
   const body = { message };
   if (documentContext) {
     body.document_context = documentContext;
+  }
+  if (options.federationDepth) {
+    body.federation_depth = options.federationDepth;
   }
   return apiFetch(`${UI_API_BASE}/chat/simple`, {
     method: 'POST',

@@ -80,6 +80,13 @@ function GraphCanvasInner({
   saveViewSignal = 0,
   groupsToRestore = null,
   onGroupsRestored,
+  federationDepth = 1,
+  onFederationDepthChange,
+  maxFederationDepth = 4,
+  federationDepthLevels = null,
+  federationDepthLabel = "Depth",
+  federationDepthTooltip = "Depth levels are defined by installation configuration",
+  showMinimap = false,
 }) {
   const [loadedNodeCount, setLoadedNodeCount] = useState(INITIAL_LOAD_COUNT);
   const [nodeContextMenu, setNodeContextMenu] = useState(null);
@@ -92,6 +99,19 @@ function GraphCanvasInner({
   const rightDragStart = useRef({ x: 0, y: 0, time: null });
   const mouseDownPos = useRef(null);
   const { screenToFlowPosition, setCenter, getNodes: getFlowNodes } = useReactFlow();
+
+  const depthLevels = useMemo(() => {
+    if (Array.isArray(federationDepthLevels) && federationDepthLevels.length > 0) {
+      const normalized = federationDepthLevels
+        .map((value) => Number(value))
+        .filter((value) => Number.isInteger(value) && value >= 1)
+        .sort((a, b) => a - b);
+      return Array.from(new Set(normalized));
+    }
+
+    const max = Math.max(1, maxFederationDepth || 1);
+    return Array.from({ length: max }, (_, index) => index + 1);
+  }, [federationDepthLevels, maxFederationDepth]);
 
   // Track selected nodes and edges
   useOnSelectionChange({
@@ -623,16 +643,33 @@ function GraphCanvasInner({
 
   // Restore groups from a saved view
   useEffect(() => {
-    if (groupsToRestore && groupsToRestore.length > 0) {
-      const groupNodes = groupsToRestore.map(g => ({
+    // Support both legacy array format and new object format with parentIds
+    const groups = Array.isArray(groupsToRestore)
+      ? groupsToRestore
+      : groupsToRestore?.groups;
+    const parentIds = Array.isArray(groupsToRestore)
+      ? {}
+      : (groupsToRestore?.parentIds || {});
+
+    if (groups && groups.length > 0) {
+      const groupNodes = groups.map(g => ({
         id: g.id,
         type: 'group',
         position: g.position,
         data: { label: g.label || 'Group', description: '', color: g.color || '#646cff' },
         style: g.style || { width: 300, height: 200 },
       }));
+      const groupIdSet = new Set(groups.map(g => g.id));
       setNodes((nds) => {
-        const nonGroups = nds.filter(n => n.type !== 'group' && !n.id.startsWith('group-'));
+        const nonGroups = nds
+          .filter(n => n.type !== 'group' && !n.id.startsWith('group-'))
+          .map(n => {
+            const savedParent = parentIds[n.id];
+            if (savedParent && groupIdSet.has(savedParent)) {
+              return { ...n, parentId: savedParent };
+            }
+            return n;
+          });
         return reorderNodesForParentChild([...nonGroups, ...groupNodes]);
       });
       onGroupsRestored?.();
@@ -714,7 +751,6 @@ function GraphCanvasInner({
           fitViewOptions={{ padding: 0.2, duration: 800 }}
           minZoom={0.1}
           maxZoom={2}
-          attributionPosition="bottom-right"
           defaultEdgeOptions={{ animated: true, style: { strokeWidth: 2 } }}
           panOnDrag={[0, 2]}
           selectionOnDrag={true}
@@ -724,17 +760,43 @@ function GraphCanvasInner({
           multiSelectionKeyCode={['Shift', 'Meta', 'Control']}
           edgesUpdatable={false}
           onMoveStart={closeAllMenus}
+          proOptions={{ hideAttribution: true }}
         >
           <Background color="#333" gap={16} />
           <Controls />
-          <MiniMap
-            nodeColor={(node) => node.data?.color || '#9CA3AF'}
-            maskColor="rgba(0, 0, 0, 0.5)"
-            position="bottom-right"
-            pannable
-            zoomable
-          />
+          {showMinimap && (
+            <MiniMap
+              nodeColor={(node) => node.data?.color || '#9CA3AF'}
+              maskColor="rgba(0, 0, 0, 0.5)"
+              position="bottom-right"
+              pannable
+              zoomable
+            />
+          )}
         </ReactFlow>
+
+        {depthLevels.length > 1 && (
+          <div className="federation-depth-control" aria-label="Federated search depth selector">
+            <span className="federation-depth-label" title={federationDepthTooltip}>{federationDepthLabel}</span>
+            <div className="federation-depth-levels" role="group" aria-label="Federation depth levels">
+              {depthLevels.map((level) => {
+                const isActive = level === federationDepth;
+                return (
+                  <button
+                    key={level}
+                    type="button"
+                    className={`federation-depth-level${isActive ? ' active' : ''}`}
+                    onClick={() => onFederationDepthChange && onFederationDepthChange(level)}
+                    aria-pressed={isActive}
+                    title={`Search depth ${level}`}
+                  >
+                    {level}
+                  </button>
+                );
+              })}
+            </div>
+          </div>
+        )}
       </div>
 
       {nodeContextMenu && (

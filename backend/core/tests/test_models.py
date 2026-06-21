@@ -124,6 +124,21 @@ class TestNode:
         assert node.type == NodeType.ACTOR
         assert isinstance(node.created_at, datetime)
 
+    def test_node_from_dict_accepts_zulu_timestamps(self):
+        """Test creating node from dictionary with UTC Z suffix timestamps."""
+        data = {
+            'id': 'test-id',
+            'type': 'Actor',
+            'name': 'Test Actor',
+            'created_at': '2024-01-01T00:00:00Z',
+            'updated_at': '2024-01-01T00:00:00Z'
+        }
+
+        node = Node.from_dict(data)
+
+        assert node.created_at.isoformat().startswith('2024-01-01T00:00:00')
+        assert node.updated_at.isoformat().startswith('2024-01-01T00:00:00')
+
     def test_node_get_color(self):
         """Test getting node color"""
         node = Node(type=NodeType.ACTOR, name="Test")
@@ -246,6 +261,20 @@ class TestEdge:
 
         assert edge.id == 'edge-1'
         assert edge.type == RelationshipType.RELATES_TO
+
+    def test_edge_from_dict_accepts_zulu_timestamp(self):
+        """Test creating edge from dictionary with UTC Z suffix timestamp."""
+        data = {
+            'id': 'edge-1',
+            'source': 'node-1',
+            'target': 'node-2',
+            'type': 'RELATES_TO',
+            'created_at': '2024-01-01T00:00:00Z'
+        }
+
+        edge = Edge.from_dict(data)
+
+        assert edge.created_at.isoformat().startswith('2024-01-01T00:00:00')
 
 
 class TestSimilarNode:

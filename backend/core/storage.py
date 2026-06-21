@@ -26,7 +26,7 @@ from typing import List, Dict, Optional, Any, TYPE_CHECKING, Callable
 from datetime import datetime
 import networkx as nx
 from pathlib import Path
-import Levenshtein
+from rapidfuzz.distance import Levenshtein
 
 from .models import (
     Node, Edge, NodeType, RelationshipType,
@@ -101,6 +101,18 @@ class GraphStorage:
         self.nodes: Dict[str, Node] = {}  # node_id -> Node
         self.edges: Dict[str, Edge] = {}  # edge_id -> Edge
 
+        # Cache for searchable text to speed up search_nodes
+        self._searchable_text_cache: Dict[str, str] = {}
+
+        # Cache: node_type_key -> "typeName label1 label2 ..." (lowercased)
+        self._type_searchable_text: Dict[str, str] = {}
+        self._build_type_searchable_text()
+
+        self.graph_metadata: Dict[str, Any] = {
+            "version": "1.0",
+            "graph_name": self.json_path.stem,
+        }
+
         # Event system (initialized lazily via setup_events())
         self._event_dispatcher: Optional["EventDispatcher"] = None
         self._delivery_worker: Optional["DeliveryWorker"] = None
@@ -108,6 +120,26 @@ class GraphStorage:
         self._system_listeners: List[Callable[[Event], None]] = []
 
         self.load()
+
+    def _build_type_searchable_text(self) -> None:
+        """Build a lookup of node type -> searchable text including localized labels."""
+        try:
+            from backend.config_loader import get_schema
+            schema = get_schema()
+            for type_name, type_config in schema.get("node_types", {}).items():
+                labels = type_config.get("labels", {})
+                label_values = " ".join(labels.values()) if labels else ""
+                self._type_searchable_text[type_name] = f"{type_name} {label_values}".lower().strip()
+        except Exception:
+            # Config not available; type matching will use type name only
+            pass
+
+    def _build_searchable_text(self, node: "Node") -> str:
+        """Build searchable text for a node, including type name and localized labels."""
+        tags_text = " ".join(node.tags) if hasattr(node, 'tags') and node.tags else ""
+        subtypes_text = " ".join(node.subtypes) if hasattr(node, 'subtypes') and node.subtypes else ""
+        type_text = self._type_searchable_text.get(str(node.type), str(node.type).lower())
+        return f"{node.name} {node.description} {node.summary} {tags_text} {subtypes_text} {type_text}".lower()
 
     def add_system_listener(self, listener: Callable[["Event"], None]) -> None:
         """
@@ -248,6 +280,72 @@ class GraphStorage:
         except Exception as e:
             print(f"Warning: Failed to dispatch event: {e}")
 
+
+    def emit_federated_node_event(
+        self,
+        operation: str,
+        node_before: Optional[Node] = None,
+        node_after: Optional[Node] = None,
+        event_origin: str = "federation-sync",
+    ) -> None:
+        """Emit an event for federated cache changes so subscriptions can react."""
+        operation_map = {
+            "create": EventType.NODE_CREATE,
+            "update": EventType.NODE_UPDATE,
+            "delete": EventType.NODE_DELETE,
+        }
+        event_type = operation_map.get(operation)
+        if event_type is None:
+            return
+
+        entity_node = node_after or node_before
+        if entity_node is None:
+            return
+
+        context = EventContext(event_origin=event_origin)
+        self._emit_event(
+            event_type=event_type,
+            entity_kind=EntityKind.NODE,
+            entity_id=entity_node.id,
+            entity_type=entity_node.type_str,
+            before=node_before.to_dict() if node_before else None,
+            after=node_after.to_dict() if node_after else None,
+            context=context,
+        )
+
+
+    def emit_federated_edge_event(
+        self,
+        operation: str,
+        edge_before: Optional[Edge] = None,
+        edge_after: Optional[Edge] = None,
+        event_origin: str = "federation-sync",
+    ) -> None:
+        """Emit an event for federated cache edge changes."""
+        operation_map = {
+            "create": EventType.EDGE_CREATE,
+            "update": EventType.EDGE_UPDATE if hasattr(EventType, "EDGE_UPDATE") else EventType.EDGE_CREATE,
+            "delete": EventType.EDGE_DELETE,
+        }
+        event_type = operation_map.get(operation)
+        if event_type is None:
+            return
+
+        entity_edge = edge_after or edge_before
+        if entity_edge is None:
+            return
+
+        context = EventContext(event_origin=event_origin)
+        self._emit_event(
+            event_type=event_type,
+            entity_kind=EntityKind.EDGE,
+            entity_id=entity_edge.id,
+            entity_type=entity_edge.type_str,
+            before=edge_before.to_dict() if edge_before else None,
+            after=edge_after.to_dict() if edge_after else None,
+            context=context,
+        )
+
     def load(self) -> None:
         """
         Load graph from JSON file.
@@ -269,16 +367,35 @@ class GraphStorage:
                     finally:
                         _unlock_file(f)
 
+                metadata = data.get('metadata') if isinstance(data, dict) else None
+                if isinstance(metadata, dict):
+                    self.graph_metadata = {
+                        "version": metadata.get("version", "1.0"),
+                        "graph_name": metadata.get("graph_name") or self.json_path.stem,
+                        **{k: v for k, v in metadata.items() if k not in {"version", "graph_name"}},
+                    }
+                else:
+                    self.graph_metadata = {
+                        "version": "1.0",
+                        "graph_name": self.json_path.stem,
+                    }
+
                 # Clear existing data
                 self.nodes.clear()
                 self.edges.clear()
                 self.graph.clear()
+
+                # Clear searchable text cache
+                self._searchable_text_cache.clear()
 
                 # Load nodes
                 for node_data in data.get('nodes', []):
                     node = Node.from_dict(node_data)
                     self.nodes[node.id] = node
                     self.graph.add_node(node.id, data=node)
+
+                    # Precompute searchable text
+                    self._searchable_text_cache[node.id] = self._build_searchable_text(node)
 
                 # Load edges
                 for edge_data in data.get('edges', []):
@@ -313,7 +430,9 @@ class GraphStorage:
                 'nodes': [node.to_dict() for node in self.nodes.values()],
                 'edges': [edge.to_dict() for edge in self.edges.values()],
                 'metadata': {
-                    'version': '1.0',
+                    **(self.graph_metadata or {}),
+                    'version': (self.graph_metadata or {}).get('version', '1.0'),
+                    'graph_name': (self.graph_metadata or {}).get('graph_name', self.json_path.stem),
                     'last_updated': datetime.utcnow().isoformat()
                 }
             }
@@ -354,6 +473,14 @@ class GraphStorage:
                     os.unlink(temp_path)
                 raise e
 
+
+    def get_graph_name(self) -> str:
+        """Return configured graph name from graph metadata."""
+        name = (self.graph_metadata or {}).get("graph_name")
+        if isinstance(name, str) and name.strip():
+            return name.strip()
+        return self.json_path.stem
+
     def reload(self) -> None:
         """
         Reload graph from disk, discarding any in-memory changes.
@@ -386,9 +513,12 @@ class GraphStorage:
 
             # Text matching including tags (if not matching all)
             if not match_all:
-                tags_text = " ".join(node.tags) if hasattr(node, 'tags') and node.tags else ""
-                subtypes_text = " ".join(node.subtypes) if hasattr(node, 'subtypes') and node.subtypes else ""
-                searchable_text = f"{node.name} {node.description} {node.summary} {tags_text} {subtypes_text}".lower()
+                searchable_text = self._searchable_text_cache.get(node.id)
+                if searchable_text is None:
+                    # Fallback just in case cache wasn't populated
+                    searchable_text = self._build_searchable_text(node)
+                    self._searchable_text_cache[node.id] = searchable_text
+
                 if query_lower not in searchable_text:
                     continue
 
@@ -594,6 +724,9 @@ class GraphStorage:
                     added_node_ids.append(node.id)
                     nodes_to_embed.append(node)
 
+                    # Precompute searchable text
+                    self._searchable_text_cache[node.id] = self._build_searchable_text(node)
+
                 # Generate embeddings for new nodes (non-blocking)
                 if nodes_to_embed:
                     try:
@@ -735,6 +868,9 @@ class GraphStorage:
             # Update in graph
             self.graph.nodes[node_id]['data'] = node
 
+            # Update searchable text cache
+            self._searchable_text_cache[node.id] = self._build_searchable_text(node)
+
             # Update embedding if text fields or tags changed (non-blocking)
             if any(k in updates for k in ['name', 'description', 'summary', 'tags']):
                 try:
@@ -828,6 +964,7 @@ class GraphStorage:
                     # Remove node
                     self.graph.remove_node(node_id)
                     del self.nodes[node_id]
+                    self._searchable_text_cache.pop(node_id, None)
                     deleted_node_ids.append(node_id)
 
                 # Remove embeddings
@@ -1081,3 +1218,27 @@ class GraphStorage:
             )
 
             return edge.id
+
+    def get_incident_edges(self, node_ids: List[str]) -> List[Edge]:
+        """
+        Get all edges connected to any of the given nodes (incoming or outgoing).
+        More efficient than iterating through all edges.
+        """
+        collected_edges = {}
+
+        for node_id in node_ids:
+            if node_id not in self.nodes:
+                continue
+
+            if node_id in self.graph:
+                # Outgoing edges
+                for _, _, _, edge_data in self.graph.out_edges(node_id, keys=True, data=True):
+                    edge = edge_data['data']
+                    collected_edges[edge.id] = edge
+
+                # Incoming edges
+                for _, _, _, edge_data in self.graph.in_edges(node_id, keys=True, data=True):
+                    edge = edge_data['data']
+                    collected_edges[edge.id] = edge
+
+        return list(collected_edges.values())

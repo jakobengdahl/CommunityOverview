@@ -537,7 +537,7 @@ services:
       # === Data & Storage ===
       - GRAPH_FILE=/data/graph.json
       - EMBEDDINGS_FILE=/data/embeddings.pkl
-      - SCHEMA_FILE=/app/config/schema_config.json
+      - SCHEMA_FILE=/app/config/default/schema_config.json
 
       # === LLM Provider ===
       - LLM_PROVIDER=${LLM_PROVIDER:-claude}
@@ -595,7 +595,7 @@ AUTH_PASSWORD=change-this-password
 # === Data Paths ===
 # Använd default /data/ i Docker
 # GRAPH_FILE=/data/graph.json
-# SCHEMA_FILE=/app/config/schema_config.json
+# SCHEMA_FILE=/app/config/default/schema_config.json
 
 # === Optional ===
 # MCP_NAME=community-knowledge-graph

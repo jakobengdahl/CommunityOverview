@@ -1,25 +1,15 @@
 import { useState, useRef, useEffect } from 'react';
-import { List, Feather } from 'react-bootstrap-icons';
+import { List, Feather, Download, Map, BoxArrowRight } from 'react-bootstrap-icons';
 import useGraphStore from '../store/graphStore';
+import { useI18n } from '../i18n';
+import { COLOR_MAP } from './FloatingToolbar';
 import './FloatingHeader.css';
 
-const NODE_TYPE_COLORS = {
-  Actor: '#3B82F6',
-  Community: '#A855F7',
-  Initiative: '#10B981',
-  Capability: '#F97316',
-  Resource: '#FBBF24',
-  Legislation: '#EF4444',
-  Theme: '#14B8A6',
-  Goal: '#6366F1',
-  Event: '#D946EF',
-  Agent: '#EC4899',
-  EventSubscription: '#8B5CF6',
-  SavedView: '#6B7280',
-};
-
-function FloatingHeader({ stats, title = 'Community Graph View' }) {
+function FloatingHeader({ stats, title = 'Community Graph View', onExportGraph }) {
+  const { t, language, setLanguage } = useI18n();
+  const { showMinimap, setShowMinimap } = useGraphStore();
   const [menuOpen, setMenuOpen] = useState(false);
+  const [dropdownLeft, setDropdownLeft] = useState(null);
   const menuRef = useRef(null);
 
   useEffect(() => {
@@ -33,6 +23,17 @@ function FloatingHeader({ stats, title = 'Community Graph View' }) {
       document.addEventListener('mousedown', handleClickOutside, true);
     }
     return () => document.removeEventListener('mousedown', handleClickOutside, true);
+  }, [menuOpen]);
+
+  // Calculate dropdown left position to avoid overlapping the toolbar
+  useEffect(() => {
+    if (menuOpen) {
+      const toolbar = document.querySelector('.floating-toolbar');
+      if (toolbar) {
+        const rect = toolbar.getBoundingClientRect();
+        setDropdownLeft(rect.right + 8);
+      }
+    }
   }, [menuOpen]);
 
   return (
@@ -50,7 +51,7 @@ function FloatingHeader({ stats, title = 'Community Graph View' }) {
       </div>
 
       {menuOpen && (
-        <div className="floating-header-dropdown">
+        <div className="floating-header-dropdown" style={dropdownLeft ? { left: dropdownLeft } : undefined}>
           {stats ? (
             <>
               <div className="floating-header-stats-summary">
@@ -73,7 +74,7 @@ function FloatingHeader({ stats, title = 'Community Graph View' }) {
                       <div key={type} className="floating-header-type-row">
                         <span
                           className="floating-header-type-dot"
-                          style={{ backgroundColor: NODE_TYPE_COLORS[type] || '#9CA3AF' }}
+                          style={{ backgroundColor: COLOR_MAP[type] || '#9CA3AF' }}
                         />
                         <span className="floating-header-type-name">{type}</span>
                         <span className="floating-header-type-count">{count}</span>
@@ -83,12 +84,64 @@ function FloatingHeader({ stats, title = 'Community Graph View' }) {
               )}
 
               <div className="floating-header-section-divider" />
+              <div className="floating-header-section-title">{t('menu.view_section') || 'View'}</div>
+              <button
+                className="floating-header-menu-item"
+                onClick={() => setShowMinimap(!showMinimap)}
+              >
+                <Map size={14} />
+                <span>{t('menu.show_minimap') || 'Show minimap'}</span>
+                <span className={`floating-header-toggle${showMinimap ? ' active' : ''}`} />
+              </button>
+
+              <div className="floating-header-section-divider" />
+              <div className="floating-header-section-title">{t('menu.language_section') || 'Language'}</div>
+              <button
+                className="floating-header-menu-item"
+                onClick={() => setLanguage('en')}
+              >
+                <span>{t('menu.language_en') || 'English'}</span>
+                <span className={`floating-header-toggle${language === 'en' ? ' active' : ''}`} />
+              </button>
+              <button
+                className="floating-header-menu-item"
+                onClick={() => setLanguage('sv')}
+              >
+                <span>{t('menu.language_sv') || 'Svenska'}</span>
+                <span className={`floating-header-toggle${language === 'sv' ? ' active' : ''}`} />
+              </button>
+
+              <div className="floating-header-section-divider" />
               <div className="floating-header-section-title">Admin</div>
-              <div className="floating-header-placeholder">More options coming soon</div>
+              <button
+                className="floating-header-menu-item"
+                onClick={() => {
+                  onExportGraph?.();
+                  setMenuOpen(false);
+                }}
+              >
+                <Download size={14} />
+                <span>{t('menu.export_graph')}</span>
+              </button>
             </>
           ) : (
             <div className="floating-header-placeholder">Loading stats...</div>
           )}
+
+          {/* Logout is always shown — redirect is harmless regardless of
+              AUTH_ENABLED. Backend routes /auth/logout and /logged-out are
+              exempt from auth middleware so the user never gets stuck. */}
+          <div className="floating-header-section-divider" />
+          <button
+            className="floating-header-menu-item floating-header-menu-item-logout"
+            onClick={() => {
+              setMenuOpen(false);
+              window.location.href = '/auth/logout';
+            }}
+          >
+            <BoxArrowRight size={14} />
+            <span>{t('menu.logout')}</span>
+          </button>
         </div>
       )}
     </div>

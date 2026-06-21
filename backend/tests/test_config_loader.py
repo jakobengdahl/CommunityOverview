@@ -45,7 +45,7 @@ class TestConfigLoader:
         from backend import config_loader
 
         # Set custom config path
-        test_config_path = str(Path(__file__).parent.parent.parent / "config" / "test_schema_config.json")
+        test_config_path = str(Path(__file__).parent.parent.parent / "config" / "test" / "schema_config.json")
         os.environ["SCHEMA_FILE"] = test_config_path
 
         # Reset and reload
@@ -79,13 +79,14 @@ class TestConfigLoader:
         assert "prompt_prefix" in presentation
         assert "prompt_suffix" in presentation
         assert "default_language" in presentation
+        assert "language_policy" in presentation
 
     def test_custom_presentation(self):
         """Test presentation from custom config."""
         from backend import config_loader
 
         # Set custom config path
-        test_config_path = str(Path(__file__).parent.parent.parent / "config" / "test_schema_config.json")
+        test_config_path = str(Path(__file__).parent.parent.parent / "config" / "test" / "schema_config.json")
         os.environ["SCHEMA_FILE"] = test_config_path
 
         config_loader.reset_loader()
@@ -95,6 +96,9 @@ class TestConfigLoader:
         assert presentation["title"] == "Test Knowledge Graph"
         assert presentation["introduction"] == "This is a test instance."
         assert presentation["prompt_prefix"] == "You are a test assistant."
+        assert presentation["language_policy"]["mode"] == "required"
+        assert presentation["language_policy"]["primary_language"] == "en"
+        assert presentation["language_policy"]["allowed_languages"] == ["en"]
 
         del os.environ["SCHEMA_FILE"]
 
@@ -186,6 +190,7 @@ class TestSchemaIntegration:
 
     def test_models_use_schema_types(self):
         """Test that models module uses schema for type validation."""
+        pytest.importorskip("networkx")
         from backend.core import models
 
         # Get valid node types
@@ -197,6 +202,7 @@ class TestSchemaIntegration:
 
     def test_service_returns_schema(self):
         """Test that GraphService returns schema correctly."""
+        pytest.importorskip("networkx")
         import tempfile
         from backend.core import GraphStorage
         from backend.service import GraphService
@@ -225,6 +231,7 @@ class TestSchemaIntegration:
 
     def test_list_node_types_uses_config(self):
         """Test that list_node_types returns config-based types."""
+        pytest.importorskip("networkx")
         import tempfile
         from backend.core import GraphStorage
         from backend.service import GraphService
@@ -270,7 +277,7 @@ class TestConfigWithAlternateFile:
         from backend import config_loader
 
         # Use test config with extra types
-        test_config_path = str(Path(__file__).parent.parent.parent / "config" / "test_schema_config.json")
+        test_config_path = str(Path(__file__).parent.parent.parent / "config" / "test" / "schema_config.json")
         os.environ["SCHEMA_FILE"] = test_config_path
         config_loader.reset_loader()
 
@@ -289,7 +296,7 @@ class TestConfigWithAlternateFile:
         """Test that presentation colors are loaded from custom config."""
         from backend import config_loader
 
-        test_config_path = str(Path(__file__).parent.parent.parent / "config" / "test_schema_config.json")
+        test_config_path = str(Path(__file__).parent.parent.parent / "config" / "test" / "schema_config.json")
         os.environ["SCHEMA_FILE"] = test_config_path
         config_loader.reset_loader()
 

@@ -207,6 +207,23 @@ class TargetFilters(BaseModel):
     )
 
 
+
+
+class FederationFilters(BaseModel):
+    """Federation scope filters for subscription matching."""
+    scope: str = Field(
+        default="local_only",
+        description="local_only or local_and_federated"
+    )
+    include_graph_ids: List[str] = Field(
+        default_factory=list,
+        description="Optional allow-list of origin graph IDs"
+    )
+    max_distance: Optional[int] = Field(
+        default=None,
+        description="Optional max federation distance"
+    )
+
 class SubscriptionFilters(BaseModel):
     """
     Filter configuration for an EventSubscription.
@@ -218,6 +235,7 @@ class SubscriptionFilters(BaseModel):
         description="Which operations to match (create, update, delete)"
     )
     keywords: KeywordFilters = Field(default_factory=KeywordFilters)
+    federation: FederationFilters = Field(default_factory=FederationFilters)
 
 
 class SubscriptionDelivery(BaseModel):
