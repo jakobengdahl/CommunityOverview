@@ -226,5 +226,37 @@ class TestAuthModuleRedirectUri(unittest.TestCase):
         assert token is None
 
 
+class TestCorsConfiguration(unittest.TestCase):
+    """Tests that CORS credentials are disabled when allow_origins is wildcard."""
+
+    def test_wildcard_origins_disables_credentials(self):
+        """When CORS_ALLOWED_ORIGINS is '*', allow_credentials must be False."""
+        with patch.dict(os.environ, {"CORS_ALLOWED_ORIGINS": "*"}):
+            import importlib
+            import config as cfg
+            importlib.reload(cfg)
+            allow_credentials = "*" not in cfg.CORS_ALLOWED_ORIGINS
+        self.assertFalse(allow_credentials)
+
+    def test_specific_origins_enables_credentials(self):
+        """When CORS_ALLOWED_ORIGINS lists specific origins, allow_credentials is True."""
+        with patch.dict(os.environ, {"CORS_ALLOWED_ORIGINS": "https://app.example.com,https://other.example.com"}):
+            import importlib
+            import config as cfg
+            importlib.reload(cfg)
+            allow_credentials = "*" not in cfg.CORS_ALLOWED_ORIGINS
+        self.assertTrue(allow_credentials)
+        self.assertEqual(cfg.CORS_ALLOWED_ORIGINS, ["https://app.example.com", "https://other.example.com"])
+
+    def test_default_cors_origins_is_wildcard(self):
+        """Without CORS_ALLOWED_ORIGINS set, the default is ['*']."""
+        env = {k: v for k, v in os.environ.items() if k != "CORS_ALLOWED_ORIGINS"}
+        with patch.dict(os.environ, env, clear=True):
+            import importlib
+            import config as cfg
+            importlib.reload(cfg)
+        self.assertEqual(cfg.CORS_ALLOWED_ORIGINS, ["*"])
+
+
 if __name__ == "__main__":
     unittest.main()
