@@ -67,6 +67,7 @@ def create_app(
     # Add Basic Auth Middleware if enabled
     if config.auth_enabled and config.auth_password:
         import base64
+        import secrets
 
         @app.middleware("http")
         async def basic_auth_middleware(request: Request, call_next):
@@ -94,7 +95,9 @@ def create_app(
                 decoded = base64.b64decode(credentials).decode("utf-8")
                 username, _, password = decoded.partition(":")
 
-                if username != config.auth_username or password != config.auth_password:
+                is_correct_username = secrets.compare_digest(username, config.auth_username)
+                is_correct_password = secrets.compare_digest(password, config.auth_password or "")
+                if not (is_correct_username and is_correct_password):
                     raise ValueError
             except (ValueError, Exception):
                 return JSONResponse(
@@ -306,10 +309,12 @@ def create_app(
             if not tool_name:
                 return JSONResponse({"error": "No tool_name provided"}, status_code=400)
 
-            # Security Check: Enforce authentication for unsafe tools
-            # If auth is enabled, middleware handles it (we only reach here if auth passed).
-            # If auth is disabled (config.auth_enabled is False), we must restrict access.
-            if not config.auth_enabled:
+            # Security Check: Enforce authentication for unsafe tools.
+            # The BasicAuth middleware only activates when both auth_enabled=True AND
+            # auth_password is set. Mirror that condition exactly so a misconfigured
+            # deployment (auth_enabled=True but no password) still gets SAFE_TOOLS enforcement.
+            auth_middleware_active = config.auth_enabled and bool(config.auth_password)
+            if not auth_middleware_active:
                 if tool_name not in SAFE_TOOLS:
                     return JSONResponse(
                         {"error": f"Tool '{tool_name}' requires authentication. Please enable AUTH_ENABLED or use a safe tool."},
