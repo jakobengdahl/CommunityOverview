@@ -370,6 +370,59 @@ class TestGraphServiceExport:
         assert "Digital First" in node_names
 
 
+class TestGraphServiceTenantContext:
+    """Tests for get_tenant_context via GraphService."""
+
+    def test_returns_expected_shape(self, empty_service: GraphService):
+        """get_tenant_context returns all three required keys."""
+        result = empty_service.get_tenant_context()
+        assert set(result.keys()) == {"tenant_id", "tenant_name", "environment"}
+
+    def test_defaults_when_env_unset(self, empty_service: GraphService, monkeypatch):
+        """Safe defaults are returned when no env vars are set."""
+        monkeypatch.delenv("COMMUNITYOVERVIEW_TENANT_ID", raising=False)
+        monkeypatch.delenv("COMMUNITYOVERVIEW_TENANT_NAME", raising=False)
+        monkeypatch.delenv("COMMUNITYOVERVIEW_ENVIRONMENT", raising=False)
+
+        result = empty_service.get_tenant_context()
+
+        assert result["tenant_id"] == ""
+        assert result["tenant_name"] == ""
+        assert result["environment"] == "local"
+
+    def test_env_vars_override_defaults(self, empty_service: GraphService, monkeypatch):
+        """Env vars override the defaults."""
+        monkeypatch.setenv("COMMUNITYOVERVIEW_TENANT_ID", "org-42")
+        monkeypatch.setenv("COMMUNITYOVERVIEW_TENANT_NAME", "Org 42")
+        monkeypatch.setenv("COMMUNITYOVERVIEW_ENVIRONMENT", "production")
+
+        result = empty_service.get_tenant_context()
+
+        assert result == {
+            "tenant_id": "org-42",
+            "tenant_name": "Org 42",
+            "environment": "production",
+        }
+
+
+class TestGraphServiceConfigContext:
+    """Tests for get_config_context via GraphService."""
+
+    def test_returns_effective_config_context(self, empty_service: GraphService, monkeypatch, tmp_path):
+        tenant_dir = tmp_path / "tenant-config"
+        tenant_dir.mkdir()
+        monkeypatch.setenv("COMMUNITYOVERVIEW_TENANT_CONFIG_DIR", str(tenant_dir))
+
+        result = empty_service.get_config_context()
+
+        assert result["tenant_config_dir_configured"] is True
+        assert result["schema_config_source"] == "tenant_config_dir"
+        assert result["federation_config_source"] == "tenant_config_dir"
+        assert "tenant_config_dir" not in result
+        assert "schema_config_path" not in result
+        assert "federation_config_path" not in result
+
+
 class TestGraphServiceSerialization:
     """Tests for response serialization."""
 

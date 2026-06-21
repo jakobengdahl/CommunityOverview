@@ -22,6 +22,26 @@ The core should evolve so that it can:
 3. expose stable extension points for optional or external capabilities
 4. remain useful even when no external or embedding layer is present
 
+## Clarification: standalone core versus hosted SaaS
+
+For standalone open-core operation, the baseline assumption remains:
+- one deployment normally serves one graph
+- the core does not require a built-in SaaS-style user directory or billing model
+- authentication can be handled externally by infrastructure or gateway controls such as IAP, reverse proxy auth, or equivalent perimeter patterns
+
+For the target SaaS model, tenant-aware operation should not imply one dedicated application stack per graph.
+
+The default target hosted architecture is:
+- one shared application/service environment per deployment tier or region
+- multiple graphs or customer workspaces served by the same runtime instances
+- graph selection, search scope, rendering scope, and mutation scope controlled by application identity and authorization
+- isolation enforced through configuration, graph scoping, authorization, and data-layer controls
+
+This means the core should prepare for:
+- shared-hosting deployments where a service layer manages users, teams, workspaces, and graph access outside the standalone core defaults
+- future storage backends that can support record-level or row-based access constraints for shared graph data
+- a separation between tenant context metadata and actual graph access decisions
+
 ---
 
 ## Design principles
@@ -91,14 +111,16 @@ The full plugin-runtime elaboration of this section — covering manifest parsin
 The core should be able to operate with per-context settings in multi-deployment scenarios without assuming a specific architecture.
 
 Target outcomes:
-- clear separation between shared application settings and context-specific settings
+- clear separation between shared application settings and per-context settings
 - safer loading of context-specific graph, schema, prompt, and auth-related configuration
 - easier automation of context provisioning outside the core
+- support for graph- or workspace-scoped configuration inside a shared hosted service, not only one-config-per-deployment assumptions
 
 Likely core changes:
 - stronger config layering rules
 - explicit context propagation where needed
 - validation for context-scoped configuration inputs
+- boundaries between context metadata, graph selection, and authorization policy
 
 ### E. Authentication and authorization seams
 The core should make it easier to integrate stronger access models for embedding systems.
@@ -107,11 +129,15 @@ Target outcomes:
 - pluggable identity context for requests
 - clean boundaries between application roles and infrastructure access
 - ability to layer in stronger operator or admin models later
+- graph-scoped authorization decisions so shared service instances can restrict which graphs, nodes, and edges a user can access
+- workspace-aware graph selection that can work with personal workspaces and team workspaces managed by an external service layer
 
 Likely core changes:
 - request identity abstraction
+- request scope abstraction for workspace and graph context
 - clearer role and permission evaluation seams
 - audit-friendly handling of actor identity in write operations
+- future-friendly interfaces between user directory, RBAC/policy checks, and graph access scope
 
 ### F. Operational hooks for backup, restore, and data lifecycle
 The core should provide generic mechanisms that make backup and restore reliable across deployment types.
@@ -120,11 +146,13 @@ Target outcomes:
 - predictable data export and import boundaries
 - well-defined graph/config persistence surfaces
 - supportable restore verification flows
+- a clear migration path away from file-based graph persistence when shared SaaS storage becomes necessary
 
 Likely core changes:
 - clearer data ownership boundaries between graph data, config, and generated state
 - documented import/export contracts
 - stable health and integrity checks around persisted state
+- storage abstractions that can later support shared persistence and record-level authorization constraints without rewriting the whole application
 
 ### G. Observability and operational introspection
 The core should be easier to operate in any deployment environment without changing its product shape.
@@ -178,6 +206,7 @@ Focus:
 Focus:
 - request identity abstraction
 - actor attribution for writes
+- workspace and graph scope propagation
 - future-friendly authorization integration points
 
 ### Workstream 5: Operability hooks
@@ -205,9 +234,9 @@ The public core may expose generic seams that external or embedding systems can 
 1. document runtime modes and configuration boundaries
 2. introduce a capability registry with no-op defaults
 3. define extension loading contracts and failure behavior
-4. add multi-context configuration seams where core behavior currently assumes a single deployment context
-5. improve identity, audit, and mutation attribution surfaces
-6. harden observability, health, and persistence boundaries for embedded operation
+4. add per-context configuration seams where core behavior currently assumes a single deployment context
+5. improve identity, scope, audit, and mutation attribution surfaces
+6. harden observability, health, and persistence boundaries for embedded and hosted operation
 
 ---
 

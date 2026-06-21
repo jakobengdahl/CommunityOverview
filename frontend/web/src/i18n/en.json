@@ -121,5 +121,13 @@
     "depth_tooltip": "Depth levels are defined by installation configuration",
     "depth_indicator": "Depth {current}/{max}",
     "depth_indicator_tooltip": "Current federated search depth and maximum allowed depth"
+  },
+  "guide": {
+    "title": "Guide",
+    "next": "Next",
+    "close": "Close",
+    "cancel": "Cancel guide",
+    "loading": "Loading...",
+    "step_counter": "Step {current} of {total}"
   }
 }

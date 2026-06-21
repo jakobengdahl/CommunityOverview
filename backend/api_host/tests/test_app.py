@@ -6,18 +6,26 @@ all REST API endpoints function correctly.
 """
 
 import pytest
+import os
+from pathlib import Path
+from unittest.mock import patch
 from fastapi.testclient import TestClient
+
+from backend.api_host import create_app
+from backend.core import GraphStorage
 
 
 class TestHealthAndRoot:
     """Tests for health check and root endpoints."""
 
     def test_health_check(self, test_app: TestClient):
-        """Health endpoint returns healthy status."""
+        """Health endpoint returns liveness status."""
         response = test_app.get("/health")
         assert response.status_code == 200
         data = response.json()
         assert data["status"] == "healthy"
+        assert data["kind"] == "liveness"
+        assert data["readiness_endpoint"] == "/ready"
         assert "graph_nodes" in data
         assert "graph_edges" in data
 
@@ -37,6 +45,41 @@ class TestHealthAndRoot:
         assert "graph_stats" in data
         assert data["endpoints"]["api"] == "/api"
         assert data["endpoints"]["mcp"] == "/mcp"
+        assert data["endpoints"]["ready"] == "/ready"
+        assert data["endpoints"]["startup_diagnostics"] == "/diagnostics/startup"
+        assert data["operability"]["startup_status"] == "ready"
+        assert data["operability"]["capabilities"] == {
+            "configured": 0,
+            "enabled": 0,
+            "disabled": 0,
+        }
+        # llm_available is always present
+        assert "llm_available" in data
+        assert isinstance(data["llm_available"], bool)
+
+    def test_info_endpoint_llm_available_with_key(self, app_config):
+        """Info endpoint reports llm_available=True when API key is set."""
+        with patch.dict(os.environ, {"ANTHROPIC_API_KEY": "sk-ant-test", "LLM_PROVIDER": "claude"}):
+            from backend.api_host import create_app
+            with patch('chat_logic.create_provider'):
+                app = create_app(app_config)
+            client = TestClient(app)
+            response = client.get("/info")
+            assert response.status_code == 200
+            assert response.json()["llm_available"] is True
+
+    def test_info_endpoint_llm_not_available_without_key(self, app_config):
+        """Info endpoint reports llm_available=False when no API key is configured."""
+        env_patch = {"LLM_PROVIDER": "claude"}
+        with patch.dict(os.environ, env_patch):
+            os.environ.pop("ANTHROPIC_API_KEY", None)
+            os.environ.pop("OPENAI_API_KEY", None)
+            from backend.api_host import create_app
+            app = create_app(app_config)
+            client = TestClient(app)
+            response = client.get("/info")
+            assert response.status_code == 200
+            assert response.json()["llm_available"] is False
 
     def test_health_shows_graph_stats(self, test_app: TestClient):
         """Health endpoint shows correct graph statistics."""
@@ -44,6 +87,166 @@ class TestHealthAndRoot:
         data = response.json()
         assert data["graph_nodes"] == 3
         assert data["graph_edges"] == 2
+
+    def test_readiness_endpoint_exposes_structured_checks(self, test_app: TestClient):
+        """Readiness endpoint separates startup checks from liveness."""
+        response = test_app.get("/ready")
+        assert response.status_code == 200
+        data = response.json()
+        assert data["status"] == "ready"
+        assert data["kind"] == "readiness"
+        assert data["startup_diagnostics_endpoint"] == "/diagnostics/startup"
+        assert data["checks"]["config"]["status"] == "ok"
+        assert data["checks"]["graph_storage"]["status"] == "ok"
+        assert data["checks"]["graph_storage"]["graph_nodes"] == 3
+        assert data["checks"]["graph_storage"]["integrity"] == {
+            "status": "ok",
+            "node_count": 3,
+            "edge_count": 2,
+            "dangling_edge_count": 0,
+            "self_referencing_edge_count": 0,
+        }
+        assert data["checks"]["event_delivery"]["status"] == "ok"
+        assert data["warnings"] == []
+
+    def test_startup_diagnostics_endpoint_is_safe_and_structured(self, test_app: TestClient):
+        """Startup diagnostics expose safe summaries without filesystem path leakage."""
+        response = test_app.get("/diagnostics/startup")
+        assert response.status_code == 200
+        data = response.json()
+        assert data["status"] == "ready"
+        assert data["runtime"] == {
+            "runtime_mode": "standalone",
+            "enabled_extensions": [],
+        }
+        assert data["tenant_context"] == {
+            "environment": "local",
+            "tenant_id_configured": False,
+            "tenant_name_configured": False,
+            "tenant_context_configured": False,
+        }
+        assert data["config_context"] == {
+            "environment": "local",
+            "tenant_context_configured": False,
+            "tenant_config_dir_configured": False,
+            "schema_config_source": "default",
+            "federation_config_source": "default",
+        }
+        assert data["request_context_defaults"] == {
+            "actor": {
+                "actor_type": "",
+                "is_authenticated": False,
+                "auth_source": "anonymous",
+                "has_actor": False,
+                "source": "default",
+            },
+            "scope": {
+                "workspace_kind": "",
+                "has_workspace": False,
+                "has_graph": False,
+                "source": "default",
+            },
+        }
+        assert data["capabilities"] == {
+            "configured": 0,
+            "enabled": 0,
+            "disabled": 0,
+        }
+        assert "/root/" not in response.text
+
+    def test_create_app_logs_structured_startup_diagnostics(
+        self,
+        app_config,
+        mock_llm_provider,
+        caplog,
+    ):
+        """App startup emits structured diagnostics for operability tooling."""
+        with patch("chat_logic.create_provider", return_value=mock_llm_provider):
+            with patch.dict(os.environ, {"ANTHROPIC_API_KEY": "test-key"}):
+                with caplog.at_level("INFO"):
+                    app = create_app(app_config)
+
+        startup_logs = [
+            record.message for record in caplog.records if record.message.startswith("startup_diagnostics ")
+        ]
+        assert len(startup_logs) == 1
+        assert '"status": "ready"' in startup_logs[0]
+        assert '"dangling_edge_count": 0' in startup_logs[0]
+        assert app.state.startup_diagnostics["checks"]["graph_storage"]["integrity"]["status"] == "ok"
+
+    def test_public_operability_endpoints_do_not_expose_tenant_identifiers(
+        self,
+        app_config,
+        mock_llm_provider,
+        monkeypatch,
+    ):
+        """Public diagnostics redact raw tenant identifiers into safe booleans."""
+        monkeypatch.setenv("COMMUNITYOVERVIEW_TENANT_ID", "tenant-secret-123")
+        monkeypatch.setenv("COMMUNITYOVERVIEW_TENANT_NAME", "Highly Sensitive Tenant")
+        monkeypatch.setenv("COMMUNITYOVERVIEW_ENVIRONMENT", "staging")
+
+        with patch("chat_logic.create_provider", return_value=mock_llm_provider):
+            with patch.dict(os.environ, {"ANTHROPIC_API_KEY": "test-key"}):
+                client = TestClient(create_app(app_config))
+
+        startup_response = client.get("/diagnostics/startup")
+        assert startup_response.status_code == 200
+        startup_data = startup_response.json()
+        assert startup_data["tenant_context"] == {
+            "environment": "staging",
+            "tenant_id_configured": True,
+            "tenant_name_configured": True,
+            "tenant_context_configured": True,
+        }
+        assert startup_data["config_context"] == {
+            "environment": "staging",
+            "tenant_context_configured": True,
+            "tenant_config_dir_configured": False,
+            "schema_config_source": "default",
+            "federation_config_source": "default",
+        }
+        assert "tenant_id" not in startup_data["tenant_context"]
+        assert "tenant_name" not in startup_data["tenant_context"]
+        assert "tenant_id" not in startup_data["config_context"]
+        assert "tenant_name" not in startup_data["config_context"]
+        assert "tenant-secret-123" not in startup_response.text
+        assert "Highly Sensitive Tenant" not in startup_response.text
+
+        info_response = client.get("/info")
+        assert info_response.status_code == 200
+        info_data = info_response.json()
+        assert info_data["operability"]["config_context"] == startup_data["config_context"]
+        assert "tenant_id" not in info_data["operability"]["config_context"]
+        assert "tenant_name" not in info_data["operability"]["config_context"]
+        assert "tenant-secret-123" not in info_response.text
+        assert "Highly Sensitive Tenant" not in info_response.text
+
+    def test_readiness_reports_not_ready_when_graph_integrity_is_degraded(
+        self,
+        app_config,
+        mock_llm_provider,
+        tmp_path,
+    ):
+        """Readiness must fail when graph integrity is degraded."""
+        graph_path = tmp_path / "degraded-graph.json"
+        graph_path.write_text(
+            '{"nodes": [{"id": "node-1", "type": "Actor", "name": "Node 1", "communities": []}], '
+            '"edges": [{"id": "edge-1", "source": "node-1", "target": "missing-node", "type": "RELATES_TO"}]}'
+        )
+        degraded_graph_storage = GraphStorage(str(graph_path))
+
+        with patch("chat_logic.create_provider", return_value=mock_llm_provider):
+            with patch.dict(os.environ, {"ANTHROPIC_API_KEY": "test-key"}):
+                client = TestClient(create_app(app_config, graph_storage=degraded_graph_storage))
+
+        response = client.get("/ready")
+        assert response.status_code == 200
+        data = response.json()
+        assert data["status"] == "not_ready"
+        assert data["checks"]["graph_storage"]["status"] == "degraded"
+        assert data["checks"]["graph_storage"]["integrity"]["status"] == "degraded"
+        assert data["checks"]["graph_storage"]["integrity"]["dangling_edge_count"] == 1
+        assert "graph_integrity_degraded" in data["warnings"]
 
 
 class TestSearchEndpoints:
@@ -217,6 +420,33 @@ class TestNodeEndpoints:
         assert data["success"] is True
         assert data["deleted_edge_id"] == "edge-1"
 
+    def test_delete_edge_propagates_event_metadata(self, test_app: TestClient):
+        """Delete edge endpoint propagates request event metadata into emitted events."""
+        captured_events = []
+        test_app.app.state.graph_storage.add_system_listener(captured_events.append)
+
+        response = test_app.request(
+            "DELETE",
+            "/api/edges/edge-1",
+            json={
+                "event_origin": "mcp",
+                "event_session_id": "session-123",
+                "event_correlation_id": "corr-456",
+            },
+        )
+
+        assert response.status_code == 200
+        data = response.json()
+        assert data["success"] is True
+        assert data["deleted_edge_id"] == "edge-1"
+
+        edge_delete_events = [event for event in captured_events if event.entity.id == "edge-1"]
+        assert len(edge_delete_events) == 1
+        event = edge_delete_events[0]
+        assert event.origin.event_origin == "mcp"
+        assert event.origin.event_session_id == "session-123"
+        assert event.origin.event_correlation_id == "corr-456"
+
 
 class TestSimilarityEndpoints:
     """Tests for similarity search endpoints."""
@@ -292,6 +522,46 @@ class TestStatisticsEndpoints:
         type_values = [t["type"] for t in data["relationship_types"]]
         assert "IMPLEMENTS" in type_values
 
+    def test_get_capabilities(self, test_app: TestClient):
+        """Get capability manifest via REST."""
+        test_config_path = str(Path(__file__).resolve().parents[3] / "config" / "test" / "schema_config.json")
+        os.environ["SCHEMA_FILE"] = test_config_path
+        from backend import config_loader
+        config_loader.reset_loader()
+
+        response = test_app.get("/api/capabilities")
+        assert response.status_code == 200
+        data = response.json()
+        assert data == {
+            "capabilities": [
+                {
+                    "id": "graph_export",
+                    "name": "Graph export",
+                    "description": "Allows clients to export graph data for offline analysis.",
+                    "enabled": True,
+                },
+                {
+                    "id": "assistant_guidance",
+                    "name": "Assistant guidance",
+                    "description": "Provides configuration for guided assistant interactions.",
+                    "enabled": False,
+                },
+            ]
+        }
+
+    def test_get_runtime_info(self, test_app: TestClient):
+        """Get runtime metadata via REST."""
+        os.environ["COMMUNITYOVERVIEW_RUNTIME_MODE"] = "hosted"
+        os.environ["COMMUNITYOVERVIEW_ENABLED_EXTENSIONS"] = "federation,analytics"
+
+        response = test_app.get("/api/runtime")
+        assert response.status_code == 200
+        data = response.json()
+        assert data == {
+            "runtime_mode": "hosted",
+            "enabled_extensions": ["federation", "analytics"],
+        }
+
 
 class TestExportEndpoints:
     """Tests for export endpoints."""
@@ -305,6 +575,26 @@ class TestExportEndpoints:
         assert "edges" in data
         assert len(data["nodes"]) == 3
         assert len(data["edges"]) == 2
+        assert data["export_boundary"] == {
+            "contract_version": "1.0",
+            "export_kind": "full",
+            "is_narrowed": False,
+            "scope_kind": "standalone",
+            "selection_mode": "default",
+            "selection_source": "default",
+            "has_workspace_selection": False,
+            "has_graph_selection": False,
+            "graph_scope": {
+                "local_graph_included": True,
+                "included_graph_count": 0,
+            },
+            "counts": {
+                "nodes": 3,
+                "edges": 2,
+                "omitted_nodes": 0,
+                "omitted_edges": 0,
+            },
+        }
 
     def test_export_graph_legacy_endpoint(self, test_app: TestClient):
         """Legacy export_graph endpoint works."""
@@ -312,6 +602,8 @@ class TestExportEndpoints:
         assert response.status_code == 200
         data = response.json()
         assert "nodes" in data
+        assert data["export_boundary"]["export_kind"] == "full"
+        assert data["export_boundary"]["selection_mode"] == "default"
 
 
 class TestExecuteToolEndpoint:
@@ -331,7 +623,7 @@ class TestExecuteToolEndpoint:
         assert "nodes" in data
 
     def test_execute_tool_not_found(self, test_app: TestClient):
-        """Execute non-existent tool returns 404."""
+        """Execute non-safe unknown tool is blocked before tool lookup in unauthenticated mode."""
         response = test_app.post(
             "/execute_tool",
             json={
@@ -339,7 +631,25 @@ class TestExecuteToolEndpoint:
                 "arguments": {}
             }
         )
-        assert response.status_code == 404
+        assert response.status_code == 403
+
+    def test_execute_tool_get_runtime_info(self, test_app: TestClient):
+        """Execute public runtime introspection tool directly."""
+        os.environ["COMMUNITYOVERVIEW_RUNTIME_MODE"] = "hosted"
+        os.environ["COMMUNITYOVERVIEW_ENABLED_EXTENSIONS"] = "federation,analytics"
+
+        response = test_app.post(
+            "/execute_tool",
+            json={
+                "tool_name": "get_runtime_info",
+                "arguments": {}
+            }
+        )
+        assert response.status_code == 200
+        assert response.json() == {
+            "runtime_mode": "hosted",
+            "enabled_extensions": ["federation", "analytics"],
+        }
 
     def test_execute_tool_no_name(self, test_app: TestClient):
         """Execute tool without name returns 400."""
@@ -348,3 +658,101 @@ class TestExecuteToolEndpoint:
             json={"arguments": {}}
         )
         assert response.status_code == 400
+
+
+class TestUiCapabilitiesEndpoint:
+    """Tests for the /ui/capabilities endpoint."""
+
+    def test_capabilities_returns_200(self, test_app: TestClient):
+        """/ui/capabilities endpoint is reachable and returns JSON."""
+        response = test_app.get("/ui/capabilities")
+        assert response.status_code == 200
+
+    def test_capabilities_has_required_fields(self, test_app: TestClient):
+        """/ui/capabilities always includes llm_available and llm_provider."""
+        response = test_app.get("/ui/capabilities")
+        data = response.json()
+        assert "llm_available" in data
+        assert "llm_provider" in data
+        assert isinstance(data["llm_available"], bool)
+        assert isinstance(data["llm_provider"], str)
+
+    def test_capabilities_llm_available_true_when_key_set(self, app_config):
+        """llm_available is True when ANTHROPIC_API_KEY is configured."""
+        with patch.dict(os.environ, {"ANTHROPIC_API_KEY": "sk-ant-test", "LLM_PROVIDER": "claude"}):
+            from backend.api_host import create_app
+            with patch('chat_logic.create_provider'):
+                app = create_app(app_config)
+            client = TestClient(app)
+            response = client.get("/ui/capabilities")
+            assert response.status_code == 200
+            assert response.json()["llm_available"] is True
+
+    def test_capabilities_llm_available_false_when_no_key(self, app_config):
+        """llm_available is False when no API key is configured."""
+        env_patch = {"LLM_PROVIDER": "claude"}
+        with patch.dict(os.environ, env_patch):
+            os.environ.pop("ANTHROPIC_API_KEY", None)
+            os.environ.pop("OPENAI_API_KEY", None)
+            from backend.api_host import create_app
+            app = create_app(app_config)
+            client = TestClient(app)
+            response = client.get("/ui/capabilities")
+            assert response.status_code == 200
+            assert response.json()["llm_available"] is False
+
+    def test_capabilities_llm_available_true_for_openai(self, app_config):
+        """llm_available is True when LLM_PROVIDER=openai and OPENAI_API_KEY is set."""
+        env_patch = {"LLM_PROVIDER": "openai", "OPENAI_API_KEY": "sk-test"}
+        with patch.dict(os.environ, env_patch):
+            os.environ.pop("ANTHROPIC_API_KEY", None)
+            from backend.api_host import create_app
+            with patch('chat_logic.create_provider'):
+                app = create_app(app_config)
+            client = TestClient(app)
+            response = client.get("/ui/capabilities")
+            assert response.status_code == 200
+            data = response.json()
+            assert data["llm_available"] is True
+            assert data["llm_provider"] == "openai"
+
+
+class TestStartupDiagnosticsLlmCheck:
+    """Tests for LLM availability in startup diagnostics."""
+
+    def test_startup_diagnostics_includes_llm_check(self, test_app: TestClient):
+        """Startup diagnostics include an 'llm' check entry."""
+        response = test_app.get("/diagnostics/startup")
+        assert response.status_code == 200
+        data = response.json()
+        assert "llm" in data["checks"]
+        llm_check = data["checks"]["llm"]
+        assert "status" in llm_check
+        assert "available" in llm_check
+        assert "provider" in llm_check
+
+    def test_startup_diagnostics_llm_status_ok_with_key(self, app_config):
+        """LLM check status is 'ok' when a key is configured."""
+        with patch.dict(os.environ, {"ANTHROPIC_API_KEY": "sk-ant-test", "LLM_PROVIDER": "claude"}):
+            from backend.api_host import create_app
+            with patch('chat_logic.create_provider'):
+                app = create_app(app_config)
+            client = TestClient(app)
+            response = client.get("/diagnostics/startup")
+            llm_check = response.json()["checks"]["llm"]
+            assert llm_check["status"] == "ok"
+            assert llm_check["available"] is True
+
+    def test_startup_diagnostics_llm_status_no_key_without_key(self, app_config):
+        """LLM check status is 'no_key' when no key is configured."""
+        env_patch = {"LLM_PROVIDER": "claude"}
+        with patch.dict(os.environ, env_patch):
+            os.environ.pop("ANTHROPIC_API_KEY", None)
+            os.environ.pop("OPENAI_API_KEY", None)
+            from backend.api_host import create_app
+            app = create_app(app_config)
+            client = TestClient(app)
+            response = client.get("/diagnostics/startup")
+            llm_check = response.json()["checks"]["llm"]
+            assert llm_check["status"] == "no_key"
+            assert llm_check["available"] is False
