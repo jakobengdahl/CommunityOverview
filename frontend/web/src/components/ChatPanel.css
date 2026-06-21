@@ -186,10 +186,24 @@
 }
 
 .message-content {
-  white-space: pre-wrap;
   word-wrap: break-word;
   line-height: 1.5;
   font-size: 0.85rem;
+}
+
+/* Markdown rendered inside assistant/expert bubbles */
+.message-content p { margin: 0 0 0.4em; }
+.message-content p:last-child { margin-bottom: 0; }
+.message-content ul, .message-content ol { margin: 0.2em 0 0.4em 1.2em; padding: 0; }
+.message-content li { margin-bottom: 0.15em; }
+.message-content strong { font-weight: 600; }
+.message-content code { background: rgba(255,255,255,0.1); border-radius: 3px; padding: 0.1em 0.3em; font-size: 0.8em; }
+.message-content pre { background: rgba(0,0,0,0.3); border-radius: 6px; padding: 0.6em 0.8em; overflow-x: auto; margin: 0.4em 0; }
+.message-content pre code { background: none; padding: 0; }
+
+/* User messages still use plain pre-wrap */
+.chat-message.user .message-content {
+  white-space: pre-wrap;
 }
 
 .message-timestamp {
@@ -325,6 +339,58 @@
 
 .selection-clear-button:hover {
   color: #EF4444;
+}
+
+/* Skill-node indicator — shown when Skill nodes are in the selection */
+.skill-nodes-indicator {
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  flex-wrap: wrap;
+}
+
+/* Separator between skill banner and regular node chips (only when both exist) */
+.skill-nodes-indicator.has-regular-nodes {
+  padding-bottom: 4px;
+  border-bottom: 1px solid rgba(251, 191, 36, 0.2);
+  margin-bottom: 2px;
+}
+
+.skill-nodes-icon {
+  color: #FBBF24;
+  flex-shrink: 0;
+}
+
+.skill-nodes-label {
+  font-size: 0.7rem;
+  font-weight: 600;
+  color: #FBBF24;
+  white-space: nowrap;
+}
+
+.skill-node-chip {
+  display: inline-flex;
+  align-items: center;
+  font-size: 0.7rem;
+  color: #1a1a1a;
+  background: #FBBF24;
+  padding: 1px 7px;
+  border-radius: 10px;
+  font-weight: 600;
+  white-space: nowrap;
+}
+
+.message-skill-tag {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  font-size: 0.68rem;
+  color: #FBBF24;
+  background: rgba(251, 191, 36, 0.1);
+  border: 1px solid rgba(251, 191, 36, 0.3);
+  border-radius: 8px;
+  padding: 2px 7px;
+  margin-top: 4px;
 }
 
 /* File indicator */

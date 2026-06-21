@@ -23,6 +23,8 @@ function CustomNode({ data, id, selected }) {
   const [tooltipPos, setTooltipPos] = useState(null);
   const nodeRef = useRef(null);
 
+  const isSkill = data.nodeType === 'Skill' || data.type === 'Skill';
+
   const handleExpand = (e) => {
     e.stopPropagation();
     if (data.onExpand) {
@@ -40,7 +42,7 @@ function CustomNode({ data, id, selected }) {
   return (
     <div
       ref={nodeRef}
-      className={`graph-custom-node ${data.isHighlighted ? 'highlighted' : ''} ${selected ? 'selected' : ''} ${data.markColor ? 'marked' : ''}`}
+      className={`graph-custom-node ${data.isHighlighted ? 'highlighted' : ''} ${selected ? 'selected' : ''} ${data.markColor ? 'marked' : ''} ${isSkill ? 'skill-node' : ''}`}
       style={{
         borderColor: data.markColor || data.color,
         boxShadow: data.markColor ? `0 0 0 2px ${data.markColor}66, 0 2px 8px rgba(0,0,0,0.3)` : undefined,
@@ -73,6 +75,7 @@ function CustomNode({ data, id, selected }) {
       )}
 
       <div className="graph-node-header" style={{ backgroundColor: data.color }}>
+        {isSkill && <span className="skill-node-badge" title="Skill — select and ask the AI to apply these instructions">★</span>}
         <span className="graph-node-type">{data.nodeType}</span>
       </div>
 

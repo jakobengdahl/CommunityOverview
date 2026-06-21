@@ -58,6 +58,7 @@ class NodeTypeConfig(BaseModel):
     color: str = "#9CA3AF"  # Default gray
     icon: str = ""  # Bootstrap Icon name (e.g. "PersonFill", "DatabaseFill")
     labels: Dict[str, str] = Field(default_factory=dict)  # Localized names, e.g. {"sv": "Mål"}
+    context_menu: List[Dict[str, Any]] = Field(default_factory=list)  # Extra right-click menu items
 
 
 class RelationshipTypeConfig(BaseModel):
@@ -308,7 +309,8 @@ def get_schema() -> Dict[str, Any]:
                 "description": cfg.description,
                 "color": cfg.color,
                 "icon": cfg.icon,
-                "labels": cfg.labels
+                "labels": cfg.labels,
+                "context_menu": cfg.context_menu
             }
             for name, cfg in schema.node_types.items()
         },

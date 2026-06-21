@@ -901,9 +901,17 @@ class GraphStorage:
 
             # Update allowed fields
             allowed_fields = {'name', 'description', 'summary', 'tags', 'subtypes', 'metadata'}
+            reserved_fields = {'id', 'type', 'embedding', 'created_at', 'updated_at'}
             for key, value in updates.items():
                 if key in allowed_fields:
                     setattr(node, key, value)
+            # Fold schema-defined extra fields (anything outside the base model) into metadata
+            extra = {k: v for k, v in updates.items()
+                     if k not in allowed_fields and k not in reserved_fields}
+            if extra:
+                meta = dict(node.metadata or {})
+                meta.update(extra)
+                node.metadata = meta
 
             node.updated_at = datetime.utcnow()
 

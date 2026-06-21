@@ -369,6 +369,9 @@ export async function sendChatMessage(messages, documentContext = null, options 
   if (options.expertAgentId) {
     body.expert_agent_id = options.expertAgentId;
   }
+  if (options.skillsContext) {
+    body.skills_context = options.skillsContext;
+  }
   return apiFetch(`${UI_API_BASE}/chat`, {
     method: 'POST',
     body: JSON.stringify(body),
