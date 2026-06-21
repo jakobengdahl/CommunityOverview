@@ -1,0 +1,21 @@
+{
+  "nodes": [
+    {
+      "id": "test-auth",
+      "type": "Actor",
+      "name": "Test Auth",
+      "description": "",
+      "summary": "",
+      "tags": [],
+      "metadata": {},
+      "embedding": null,
+      "created_at": "2026-06-21T08:37:41.935746",
+      "updated_at": "2026-06-21T08:37:41.935750"
+    }
+  ],
+  "edges": [],
+  "metadata": {
+    "version": "1.0",
+    "last_updated": "2026-06-21T08:37:46.562574"
+  }
+}
