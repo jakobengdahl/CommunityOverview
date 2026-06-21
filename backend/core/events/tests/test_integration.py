@@ -1,4 +1,3 @@
-from unittest.mock import patch
 """
 Integration tests for the event system with a real webhook server.
 
@@ -8,6 +7,7 @@ These tests verify the complete flow:
 3. Verify the webhook receives the correct events
 """
 
+from unittest.mock import patch
 import json
 import time
 import threading

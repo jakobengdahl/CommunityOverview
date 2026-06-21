@@ -34,10 +34,32 @@ DEFAULT_BACKOFF_TIMES = [0.5, 2.0, 5.0]  # Seconds between retries
 DEFAULT_TIMEOUT = 10  # HTTP request timeout in seconds
 
 
+# RFC 6598 Carrier-Grade NAT range. Python's ipaddress module does not classify
+# 100.64.0.0/10 as private, but it is used for internal infrastructure in many
+# cloud and ISP environments and must be blocked.
+_RFC6598_CGNAT = ipaddress.ip_network("100.64.0.0/10")
+
+
+def _is_safe_ip(ip: ipaddress.IPv4Address | ipaddress.IPv6Address) -> bool:
+    """Return True if the IP is publicly routable (not private/internal)."""
+    if ip.version == 4 and ip in _RFC6598_CGNAT:
+        return False
+    return not (
+        ip.is_private
+        or ip.is_loopback
+        or ip.is_link_local
+        or ip.is_multicast
+        or ip.is_reserved
+    )
+
+
 def is_safe_url(url: str) -> bool:
     """
     Validates a URL to prevent SSRF attacks.
-    Ensures scheme is HTTP/HTTPS and IP is not private/reserved.
+
+    Ensures the scheme is http or https and that every IP address the hostname
+    resolves to (IPv4 and IPv6) is publicly routable.  All resolved addresses
+    must pass; a single internal address causes rejection (fail-closed).
     """
     try:
         parsed = urllib.parse.urlparse(url)
@@ -48,22 +70,23 @@ def is_safe_url(url: str) -> bool:
         if not hostname:
             return False
 
-        # Resolve hostname to IP
-        ip_str = socket.gethostbyname(hostname)
-        ip = ipaddress.ip_address(ip_str)
-
-        # Check for reserved or internal IP ranges
-        if (
-            ip.is_private
-            or ip.is_loopback
-            or ip.is_link_local
-            or ip.is_multicast
-            or ip.is_reserved
-        ):
+        # Resolve hostname — getaddrinfo returns both A and AAAA records.
+        # We check every resolved address so that a hostname that has both a
+        # public IPv4 and an internal IPv6 (or vice-versa) is still rejected.
+        addr_infos = socket.getaddrinfo(hostname, None)
+        if not addr_infos:
             return False
 
+        for addr_info in addr_infos:
+            ip_str = addr_info[4][0]
+            # Strip the zone ID that may appear in IPv6 link-local addresses
+            ip_str = ip_str.split('%')[0]
+            ip = ipaddress.ip_address(ip_str)
+            if not _is_safe_ip(ip):
+                return False
+
         return True
-    except (ValueError, socket.gaierror, Exception) as e:
+    except (ValueError, socket.gaierror, OSError, Exception) as e:
         logger.warning(f"URL validation failed for {url}: {e}")
         return False
 
