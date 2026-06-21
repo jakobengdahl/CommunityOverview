@@ -31,7 +31,7 @@ services:
       # === Data & Storage ===
       - GRAPH_FILE=/data/graph.json
       - EMBEDDINGS_FILE=${EMBEDDINGS_FILE:-}
-      - SCHEMA_FILE=/app/config/schema_config.json
+      - SCHEMA_FILE=/app/config/default/schema_config.json
 
       # === LLM Provider ===
       - LLM_PROVIDER=${LLM_PROVIDER:-claude}

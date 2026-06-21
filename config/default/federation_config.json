@@ -1,0 +1,12 @@
+{
+  "federation": {
+    "enabled": false,
+    "max_traversal_depth": 0,
+    "default_timeout_ms": 1200,
+    "allow_live_remote_enrichment": false,
+    "graphs": [],
+    "depth_levels": [
+      1
+    ]
+  }
+}

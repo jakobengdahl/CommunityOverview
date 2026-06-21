@@ -29,6 +29,14 @@ def _get_config_loader():
     return _config_loader
 
 
+def _parse_datetime(value: Any) -> Any:
+    """Parse ISO datetime strings, including UTC Z suffix, from graph JSON."""
+    if isinstance(value, str):
+        normalized = value[:-1] + '+00:00' if value.endswith('Z') else value
+        return datetime.fromisoformat(normalized)
+    return value
+
+
 def get_node_type_names() -> List[str]:
     """Get list of valid node type names from config."""
     return _get_config_loader().get_node_type_names()
@@ -190,9 +198,9 @@ class Node(BaseModel):
     def from_dict(cls, data: dict) -> 'Node':
         """Create from dict (JSON)"""
         if isinstance(data.get('created_at'), str):
-            data['created_at'] = datetime.fromisoformat(data['created_at'])
+            data['created_at'] = _parse_datetime(data['created_at'])
         if isinstance(data.get('updated_at'), str):
-            data['updated_at'] = datetime.fromisoformat(data['updated_at'])
+            data['updated_at'] = _parse_datetime(data['updated_at'])
         return cls(**data)
 
     def get_color(self) -> str:
@@ -246,7 +254,7 @@ class Edge(BaseModel):
     @classmethod
     def from_dict(cls, data: dict) -> 'Edge':
         if isinstance(data.get('created_at'), str):
-            data['created_at'] = datetime.fromisoformat(data['created_at'])
+            data['created_at'] = _parse_datetime(data['created_at'])
         # Handle legacy data without label field
         if 'label' not in data:
             data['label'] = ""
@@ -292,5 +300,12 @@ class DeleteNodesResult(BaseModel):
     """Result from delete_nodes operation"""
     deleted_node_ids: List[str]
     affected_edge_ids: List[str]  # Edges that were also removed
+    success: bool
+    message: str = ""
+
+
+class DeleteEdgesResult(BaseModel):
+    """Result from delete_edges operation"""
+    deleted_edge_ids: List[str]
     success: bool
     message: str = ""

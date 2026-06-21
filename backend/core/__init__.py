@@ -31,6 +31,7 @@ Usage:
 
 # Core storage
 from .storage import GraphStorage
+from .storage_backends import FileGraphPersistenceBackend, GraphPersistenceBackend
 
 # Vector store (for direct access if needed)
 from .vector_store import VectorStore
@@ -60,14 +61,17 @@ from .models import (
     ProposedNodesResult,
     AddNodesResult,
     DeleteNodesResult,
+    DeleteEdgesResult,
 )
 
 # Event system
-from .events import EventContext, EventOrigin
+from .events import EventContext, EventOrigin, EventAttribution, EventActorAttribution, EventScopeAttribution
 
 __all__ = [
     # Core storage
     "GraphStorage",
+    "GraphPersistenceBackend",
+    "FileGraphPersistenceBackend",
     "VectorStore",
 
     # Enums (legacy)
@@ -93,10 +97,14 @@ __all__ = [
     "ProposedNodesResult",
     "AddNodesResult",
     "DeleteNodesResult",
+    "DeleteEdgesResult",
 
     # Event system
     "EventContext",
     "EventOrigin",
+    "EventAttribution",
+    "EventActorAttribution",
+    "EventScopeAttribution",
 ]
 
 __version__ = "1.0.0"

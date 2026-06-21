@@ -1,4 +1,4 @@
-import { useState, useCallback, useEffect } from 'react';
+import { useState, useCallback, useEffect, useRef } from 'react';
 import { GraphCanvas } from '@community-graph/ui-graph-canvas';
 import '@community-graph/ui-graph-canvas/styles';
 import useGraphStore from './store/graphStore';
@@ -12,9 +12,11 @@ import ConfirmDialog from './components/ConfirmDialog';
 import InputDialog from './components/InputDialog';
 import ChatPanel from './components/ChatPanel';
 import CreateSubscriptionDialog from './components/CreateSubscriptionDialog';
+import CreateSkillDialog from './components/CreateSkillDialog';
 import CreateAgentDialog from './components/CreateAgentDialog';
 import EditEdgeDialog from './components/EditEdgeDialog';
 import NodeDetailDialog from './components/NodeDetailDialog';
+import GuideOverlay from './components/GuideOverlay';
 import * as api from './services/api';
 import './App.css';
 
@@ -22,6 +24,7 @@ function App() {
   const {
     nodes,
     edges,
+    schema,
     highlightedNodeIds,
     hiddenNodeIds,
     hiddenEdgeIds,
@@ -33,10 +36,13 @@ function App() {
     setHiddenNodeIds,
     stats,
     setStats,
+    llmAvailable,
+    setLlmAvailable,
     editingNode,
     setEditingNode,
     closeEditingNode,
     removeNode,
+    removeEdge,
     presentation,
     setConfig,
     focusNodeId,
@@ -48,10 +54,16 @@ function App() {
     detailNode,
     closeDetailNode,
     clearVisualization,
+    federationDepth,
+    setFederationDepth,
+    showMinimap,
+    nodeMarks,
+    startGuide,
   } = useGraphStore();
 
-  const { t, setLanguage } = useI18n();
+  const { t, setLanguage, language } = useI18n();
 
+  const urlGuideStartedRef = useRef(false);
   const [notification, setNotification] = useState(null);
   const [deleteDialog, setDeleteDialog] = useState(null);
   const [saveViewDialog, setSaveViewDialog] = useState(null);
@@ -63,15 +75,27 @@ function App() {
   const [saveViewSignal, setSaveViewSignal] = useState(0);
   const [isSavingView, setIsSavingView] = useState(false);
   const [editingEdge, setEditingEdge] = useState(null);
+  const [skillDialogType, setSkillDialogType] = useState(null);
+  const [editingSkillData, setEditingSkillData] = useState(null);
 
-  // Load schema, presentation, and stats on startup
+  const federationDepthLevels = (stats?.federation?.selectable_depth_levels || [1]).filter(v => Number.isInteger(v) && v >= 1);
+  const maxFederationDepth = Math.max(1, ...federationDepthLevels, stats?.federation?.max_selectable_depth || 1);
+
+  useEffect(() => {
+    if (federationDepth > maxFederationDepth) {
+      setFederationDepth(maxFederationDepth);
+    }
+  }, [federationDepth, maxFederationDepth, setFederationDepth]);
+
+  // Load schema, presentation, stats and UI capabilities on startup (runs once)
   useEffect(() => {
     const loadConfig = async () => {
       try {
-        const [schemaData, presentationData, statsData] = await Promise.all([
+        const [schemaData, presentationData, statsData, capabilitiesData] = await Promise.all([
           api.getSchema(),
           api.getPresentation(),
           api.getGraphStats(),
+          api.getUiCapabilities().catch(() => ({ llm_available: false })),
         ]);
         // Apply backend default language if no user override
         if (presentationData?.default_language) {
@@ -81,15 +105,29 @@ function App() {
             setLanguage(presentationData.default_language);
           }
         }
-        setConfig(schemaData, presentationData, t);
+        setConfig(schemaData, presentationData, t, language);
         setStats(statsData);
+        setLlmAvailable(capabilitiesData.llm_available ?? false);
       } catch (error) {
         console.error('Error loading configuration:', error);
         api.getGraphStats().then(setStats).catch(console.error);
+        setLlmAvailable(false);
       }
     };
     loadConfig();
-  }, [setConfig, setStats, t, setLanguage]);
+  }, [setConfig, setStats, setLlmAvailable, t, setLanguage, language]); // eslint-disable-line react-hooks/exhaustive-deps
+
+  // Trigger guide from URL param ?guide=<id> — fires once when presentation first becomes available
+  useEffect(() => {
+    if (!presentation?.guides?.length || urlGuideStartedRef.current) return;
+    const urlGuideId = new URLSearchParams(window.location.search).get('guide');
+    if (!urlGuideId) return;
+    const guide = presentation.guides.find(g => g.id === urlGuideId);
+    if (guide) {
+      urlGuideStartedRef.current = true;
+      startGuide(guide);
+    }
+  }, [presentation, startGuide]);
 
   const showNotification = useCallback((type, message) => {
     setNotification({ type, message });
@@ -117,6 +155,7 @@ function App() {
         const positions = nodeData.metadata?.positions || {};
         const savedEdges = nodeData.metadata?.edges || [];
         const savedGroups = nodeData.metadata?.groups || [];
+        const savedParentIds = nodeData.metadata?.parentIds || {};
         if (nodeIds.length > 0) {
           clearVisualization();
           const details = await Promise.all(
@@ -147,7 +186,7 @@ function App() {
             const edgeMap = new Map(edgesToLoad.map(e => [e.id, e]));
             addNodesToVisualization(loadedNodes, Array.from(edgeMap.values()));
             if (savedGroups.length > 0) {
-              setPendingGroups(savedGroups);
+              setPendingGroups({ groups: savedGroups, parentIds: savedParentIds });
             }
           }
         }
@@ -205,10 +244,13 @@ function App() {
         console.error('Error preparing agent editor:', error);
         showNotification('error', 'Could not load agent details');
       }
+    } else if (schema?.node_types?.[nodeData.type]?.ui_form === 'skill') {
+      setEditingSkillData(nodeData);
+      setSkillDialogType(nodeData.type);
     } else {
       setEditingNode({ id: nodeId, data: nodeData });
     }
-  }, [setEditingNode, showNotification]);
+  }, [schema, setEditingNode, setEditingSkillData, setSkillDialogType, showNotification]);
 
   // Callback: Hide node
   const handleHide = useCallback((nodeId) => {
@@ -231,18 +273,17 @@ function App() {
   // Callback: Delete edge (from backend and visualization)
   const handleDeleteEdge = useCallback(async (edgeId) => {
     try {
-      await api.deleteEdge(edgeId);
-      const newEdges = edges.filter(e => e.id !== edgeId);
-      updateVisualization(nodes, newEdges);
+      const result = await api.deleteEdge(edgeId);
+      if (!result?.success) {
+        throw new Error('Could not delete edge');
+      }
+      removeEdge(edgeId);
       showNotification('success', 'Edge deleted');
     } catch (error) {
       console.error('Error deleting edge:', error);
-      // Still remove from visualization even if backend fails
-      const newEdges = edges.filter(e => e.id !== edgeId);
-      updateVisualization(nodes, newEdges);
-      showNotification('info', 'Edge removed from view');
+      showNotification('error', 'Could not delete edge');
     }
-  }, [nodes, edges, updateVisualization, showNotification]);
+  }, [removeEdge, showNotification]);
 
   // Callback: Edit edge - opens EditEdgeDialog
   const handleEditEdge = useCallback((edgeId, edgeData) => {
@@ -365,6 +406,11 @@ function App() {
         metadata: {
           node_ids: saveViewDialog.viewData.nodes.map(n => n.id),
           positions: Object.fromEntries(saveViewDialog.viewData.nodes.map(n => [n.id, n.position])),
+          parentIds: Object.fromEntries(
+            saveViewDialog.viewData.nodes
+              .filter(n => n.parentId)
+              .map(n => [n.id, n.parentId])
+          ),
           edge_ids: (saveViewDialog.viewData.edges || []).map(e => e.id),
           edges: saveViewDialog.viewData.edges || [],
           groups: saveViewDialog.viewData.groups,
@@ -412,7 +458,7 @@ function App() {
       console.error('Error creating subscription:', error);
       showNotification('error', t('notifications.subscription_error'));
     }
-  }, [addNodesToVisualization, showNotification]);
+  }, [addNodesToVisualization, showNotification, t]);
 
   // Save agent nodes (create or update)
   const handleSaveAgent = useCallback(async (data) => {
@@ -465,8 +511,13 @@ function App() {
 
   // Callback: Create node from toolbar
   const handleCreateNodeForType = useCallback((nodeType) => {
-    setCreateNodeType(nodeType);
-  }, []);
+    if (schema?.node_types?.[nodeType]?.ui_form === 'skill') {
+      setEditingSkillData(null);
+      setSkillDialogType(nodeType);
+    } else {
+      setCreateNodeType(nodeType);
+    }
+  }, [schema]);
 
   // Handle created node from CreateNodeDialog
   const handleNodeCreated = useCallback((createdNode) => {
@@ -474,10 +525,66 @@ function App() {
     showNotification('success', `${createdNode.type} "${createdNode.name}" created`);
   }, [addNodesToVisualization, showNotification]);
 
+  // Callback: Save a skill node (create or update)
+  const handleSaveSkill = useCallback(async (skillData) => {
+    try {
+      if ('id' in skillData) {
+        const { id, updates } = skillData;
+        await api.updateNode(id, updates);
+        const newNodes = nodes.map(n => n.id === id ? { ...n, ...updates } : n);
+        updateVisualization(newNodes, edges);
+        showNotification('success', 'Skill updated');
+      } else {
+        const result = await api.addNodes([skillData], []);
+        if (result.added_node_ids?.length > 0) {
+          const nodeWithId = { ...skillData, id: result.added_node_ids[0] };
+          addNodesToVisualization([nodeWithId], []);
+        }
+        showNotification('success', `${skillData.type} "${skillData.name}" created`);
+      }
+    } catch (error) {
+      console.error('Error saving skill:', error);
+      showNotification('error', 'Could not save skill');
+    }
+  }, [nodes, edges, updateVisualization, addNodesToVisualization, showNotification]);
+
+  // Callback: Context menu action triggered from schema-defined callback items
+  const handleContextMenuAction = useCallback((actionName, nodeId, nodeData) => {
+    // Dispatch named callback actions from schema context_menu entries.
+    // Add cases here as new callback-type actions are implemented.
+    switch (actionName) {
+      default:
+        console.warn(`[handleContextMenuAction] Unhandled action: "${actionName}". Wire it up in App.jsx.`);
+        showNotification('info', `Action: ${actionName}`);
+    }
+  }, [addNodesToVisualization, showNotification]);
+
   // Toolbar save view: signal GraphCanvas to collect positions and trigger dialog
   const handleToolbarSaveView = useCallback(() => {
     setSaveViewSignal(prev => prev + 1);
   }, []);
+
+  // Export full graph from backend API
+  const handleExportGraph = useCallback(async () => {
+    try {
+      const data = await api.exportGraph();
+
+      const blob = new Blob([JSON.stringify(data, null, 2)], { type: 'application/json' });
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement('a');
+      a.href = url;
+      a.download = `graph-export-${new Date().toISOString().slice(0, 10)}.json`;
+      document.body.appendChild(a);
+      a.click();
+      document.body.removeChild(a);
+      URL.revokeObjectURL(url);
+
+      showNotification('success', t('menu.export_success'));
+    } catch (error) {
+      console.error('Error exporting graph:', error);
+      showNotification('error', t('menu.export_error'));
+    }
+  }, [showNotification, t]);
 
   // Handle drop from toolbar onto canvas
   const handleDropCreateNode = useCallback((nodeType, position) => {
@@ -485,10 +592,13 @@ function App() {
       handleCreateAgent();
     } else if (nodeType === 'EventSubscription') {
       handleCreateSubscription();
+    } else if (schema?.node_types?.[nodeType]?.ui_form === 'skill') {
+      setEditingSkillData(null);
+      setSkillDialogType(nodeType);
     } else {
       setCreateNodeType(nodeType);
     }
-  }, [handleCreateAgent, handleCreateSubscription]);
+  }, [handleCreateAgent, handleCreateSubscription, schema]);
 
   // Handle node update from edit dialog
   const handleNodeUpdate = useCallback(async (nodeId, updates) => {
@@ -508,13 +618,14 @@ function App() {
 
   return (
     <div className="app">
-      <div className="app-canvas">
+      <div className="app-canvas" id="guide-target-canvas">
         <GraphCanvas
           nodes={nodes}
           edges={edges}
           highlightedNodeIds={highlightedNodeIds}
           hiddenNodeIds={hiddenNodeIds}
           hiddenEdgeIds={hiddenEdgeIds}
+          nodeMarks={nodeMarks}
           clearGroupsFlag={clearGroupsFlag}
           onExpand={handleExpand}
           onEdit={handleEdit}
@@ -540,10 +651,24 @@ function App() {
           saveViewSignal={saveViewSignal}
           groupsToRestore={pendingGroups}
           onGroupsRestored={() => setPendingGroups(null)}
+          federationDepth={federationDepth}
+          onFederationDepthChange={setFederationDepth}
+          maxFederationDepth={maxFederationDepth}
+          federationDepthLevels={federationDepthLevels}
+          federationDepthLabel={t('federation.depth_label')}
+          federationDepthTooltip={t('federation.depth_tooltip')}
+          showMinimap={showMinimap}
+          schema={schema}
+          onContextMenuAction={handleContextMenuAction}
         />
       </div>
 
-      <FloatingHeader stats={stats} />
+      <FloatingHeader stats={stats} onExportGraph={handleExportGraph} />
+      {maxFederationDepth > 1 && (
+        <div className="app-a11y-depth-live" aria-live="polite" aria-atomic="true">
+          {t('federation.depth_indicator', { current: federationDepth, max: maxFederationDepth })}
+        </div>
+      )}
       <FloatingSearch />
       <FloatingToolbar
         onCreateNode={handleCreateNodeForType}
@@ -552,7 +677,7 @@ function App() {
         onSaveView={handleToolbarSaveView}
         onCreateGroup={handleToolbarCreateGroup}
       />
-      <ChatPanel />
+      {llmAvailable && <ChatPanel />}
 
       {createNodeType && (
         <CreateNodeDialog
@@ -637,6 +762,15 @@ function App() {
         />
       )}
 
+      {skillDialogType && (
+        <CreateSkillDialog
+          nodeType={skillDialogType}
+          initialData={editingSkillData}
+          onClose={() => { setSkillDialogType(null); setEditingSkillData(null); }}
+          onSave={handleSaveSkill}
+        />
+      )}
+
       {showAgentDialog && (
         <CreateAgentDialog
           onClose={() => {
@@ -647,6 +781,8 @@ function App() {
           initialData={editingAgentData}
         />
       )}
+
+      <GuideOverlay />
     </div>
   );
 }
