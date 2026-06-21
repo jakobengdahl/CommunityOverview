@@ -12,6 +12,7 @@ Key design principles:
 - Schema and presentation config are loaded from config_loader
 """
 
+import logging
 from typing import List, Optional, Dict, Any
 from datetime import datetime
 from collections import Counter
@@ -34,6 +35,9 @@ from backend.authorization import (
     build_graph_authorization_context,
 )
 from backend.federation import FederationManager
+
+# Initialize logger
+logger = logging.getLogger(__name__)
 
 from .serializers import (
     serialize_node, serialize_nodes,
@@ -320,7 +324,7 @@ class GraphService:
             )
 
         # Log search request
-        print(f"SEARCH: query='{query}' types={node_types} limit={limit}")
+        logger.info(f"SEARCH: query='{query}' types={node_types} limit={limit}")
 
         # Convert node_types to NodeType enum or keep as string for dynamic types
         type_filters = None
@@ -337,7 +341,7 @@ class GraphService:
             node for node in local_results
             if self._is_node_visible(node, decision.graph_access)
         ][:limit]
-        print(f"SEARCH: Found {len(visible_local_results)} visible local results")
+        logger.info(f"SEARCH: Found {len(visible_local_results)} visible local results")
 
         # Get node IDs for edge filtering
         result_node_ids = set(node.id for node in visible_local_results)
