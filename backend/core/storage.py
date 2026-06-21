@@ -350,7 +350,9 @@ class GraphStorage:
         with self._lock:
             if not self._persistence_backend.exists():
                 print(f"No graph file found at {self.json_path}, creating new empty graph")
-                self.save()
+                # Wait for the initial file write to complete so callers can
+                # immediately open the file (e.g. creating a second storage instance).
+                self.save().result()
                 return
 
             try:
@@ -410,9 +412,8 @@ class GraphStorage:
         """
         Save graph through the configured persistence backend.
 
-        This method captures the graph state while holding the lock,
-        then offloads the actual file I/O to a background thread to
-        prevent blocking the event loop in async applications.
+        Captures graph state while holding the lock, then offloads the actual
+        file I/O to a background thread to prevent blocking the event loop.
 
         Thread-safe: Uses lock for reading in-memory data.
         """
@@ -430,8 +431,9 @@ class GraphStorage:
             node_count = len(self.nodes)
             edge_count = len(self.edges)
 
-        # Offload blocking I/O to background thread to avoid blocking event loop
-        self._io_executor.submit(self._do_save_to_disk, data, node_count, edge_count)
+        # Offload blocking I/O to background thread to avoid blocking event loop.
+        # Returns the Future so callers that must wait (e.g. load()) can call .result().
+        return self._io_executor.submit(self._do_save_to_disk, data, node_count, edge_count)
 
     def _do_save_to_disk(self, data: Dict[str, Any], node_count: int, edge_count: int) -> None:
         """
@@ -444,6 +446,16 @@ class GraphStorage:
         except Exception as e:
             print(f"Error saving graph to disk: {e}")
             # Don't reraise — running in background thread; caller cannot observe it.
+
+    def flush(self) -> None:
+        """
+        Wait for any pending background save operations to complete.
+
+        Useful in tests and in code that reloads from disk immediately
+        after mutating the graph.
+        """
+        # Submit a no-op and block until it runs — this drains the executor queue.
+        self._io_executor.submit(lambda: None).result()
 
     def get_graph_name(self) -> str:
         """Return configured graph name from graph metadata."""

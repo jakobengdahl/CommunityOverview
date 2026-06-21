@@ -49,6 +49,7 @@ def storage_with_data(temp_storage):
     ]
 
     temp_storage.add_nodes(nodes, edges)
+    temp_storage.flush()  # Wait for async save so tests that reload from disk see all data
     return temp_storage
 
 
@@ -652,6 +653,9 @@ class TestGraphStoragePersistence:
         node = Node(id="persist-1", type=NodeType.ACTOR, name="Persistent Node")
         temp_storage.add_nodes([node], [])
 
+        # Flush pending async saves before reloading from disk
+        temp_storage.flush()
+
         # Get path before closing
         json_path = str(temp_storage.json_path)
 
@@ -760,6 +764,9 @@ class TestGraphStorageConcurrency:
         for node_id in added_ids:
             assert temp_storage.get_node(node_id) is not None, \
                 f"Node {node_id} was added but not found in storage"
+
+        # Flush all pending async saves before reloading from disk
+        temp_storage.flush()
 
         # Verify persistence - reload and check
         json_path = str(temp_storage.json_path)
