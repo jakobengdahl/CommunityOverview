@@ -18,7 +18,7 @@ Event System:
 """
 
 import threading
-from concurrent.futures import ThreadPoolExecutor
+from concurrent.futures import Future, ThreadPoolExecutor
 from typing import List, Dict, Optional, Any, TYPE_CHECKING, Callable
 from datetime import datetime
 import networkx as nx
@@ -408,12 +408,14 @@ class GraphStorage:
                 print(f"Error loading graph: {e}")
                 raise
 
-    def save(self) -> None:
+    def save(self) -> "Future[None]":
         """
         Save graph through the configured persistence backend.
 
         Captures graph state while holding the lock, then offloads the actual
         file I/O to a background thread to prevent blocking the event loop.
+        Returns the Future representing the background write — callers that
+        must know when the write completes can call .result() on it.
 
         Thread-safe: Uses lock for reading in-memory data.
         """

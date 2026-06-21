@@ -641,6 +641,7 @@ class TestGraphStoragePersistence:
         assert storage.get_graph_name() == "in-memory-graph"
 
         storage.add_nodes([Node(id="persist-backend-2", type=NodeType.ACTOR, name="Saved Node")], [])
+        storage.flush()  # Wait for async save before reading backend state
 
         assert backend.save_calls >= 1
         persisted_ids = {node["id"] for node in backend.data["nodes"]}
@@ -991,9 +992,10 @@ class TestGraphStorageConcurrency:
         errors = []
         lock = threading.Lock()
 
-        # Add initial data
+        # Add initial data and flush so the file is on disk before reader threads start
         node = Node(id="reload-test", type=NodeType.ACTOR, name="Reload Test")
         temp_storage.add_nodes([node], [])
+        temp_storage.flush()
 
         def writer_thread(thread_id):
             try:
