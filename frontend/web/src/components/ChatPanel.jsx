@@ -1,4 +1,6 @@
 import { useState, useEffect, useRef, useMemo } from 'react';
+import ReactMarkdown from 'react-markdown';
+import remarkGfm from 'remark-gfm';
 import { ChatDotsFill, ChevronRight, ChevronLeft, XCircleFill, Robot } from 'react-bootstrap-icons';
 import useGraphStore from '../store/graphStore';
 import { useI18n } from '../i18n';
@@ -28,6 +30,10 @@ function ChatPanel() {
     activeExperts,
     availableExperts,
     showMinimap,
+    presentation,
+    startGuide,
+    guideChatInput,
+    clearGuideChatInput,
   } = useGraphStore();
 
   const { t, language } = useI18n();
@@ -41,6 +47,7 @@ function ChatPanel() {
 
   const messagesEndRef = useRef(null);
   const fileInputRef = useRef(null);
+  const handleSendRef = useRef(null);
 
   const scrollToBottom = () => {
     messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' });
@@ -56,6 +63,31 @@ function ChatPanel() {
       return () => clearTimeout(timer);
     }
   }, [error]);
+
+  // Guide: animate typing into chat input
+  useEffect(() => {
+    if (!guideChatInput) return;
+    const { text, animated, auto_send } = guideChatInput;
+    clearGuideChatInput();
+
+    if (!animated) {
+      setInputValue(text);
+      if (auto_send) setTimeout(() => handleSendRef.current?.(), 0);
+      return;
+    }
+
+    let i = 0;
+    setInputValue('');
+    const interval = setInterval(() => {
+      i++;
+      setInputValue(text.slice(0, i));
+      if (i >= text.length) {
+        clearInterval(interval);
+        if (auto_send) setTimeout(() => handleSendRef.current?.(), 300);
+      }
+    }, 30);
+    return () => clearInterval(interval);
+  }, [guideChatInput]); // eslint-disable-line react-hooks/exhaustive-deps
 
   const filterCommunityNodes = (nodeList) => {
     return nodeList.filter(n =>
@@ -103,7 +135,7 @@ function ChatPanel() {
 
       conversationMessages.push({ role: 'user', content: messageForLLM });
 
-      const response = await api.sendChatMessage(conversationMessages, null, { federationDepth });
+      const response = await api.sendChatMessage(conversationMessages, null, { federationDepth, expertAgentId: activeExperts.length > 0 ? activeExperts[activeExperts.length - 1] : undefined });
 
       console.log('[ChatPanel] Response:', response);
 
@@ -164,6 +196,19 @@ function ChatPanel() {
             updateVisualization([...mergedNodes, ...newNodes], currentEdges);
           }
         }
+        else if (toolResult.action === 'mark_nodes') {
+          useGraphStore.getState().setNodeMarks(toolResult.marks || []);
+        }
+        else if (toolResult.action === 'start_guide') {
+          const guideId = toolResult.guide_id;
+          const guides = useGraphStore.getState().presentation?.guides || [];
+          const guide = guides.find(g => g.id === guideId);
+          if (guide) {
+            startGuide(guide);
+          } else {
+            console.warn(`[ChatPanel] start_guide: guide "${guideId}" not found in presentation config`);
+          }
+        }
         else if (toolResult.nodes && toolResult.nodes.length > 0) {
           const filteredNodes = filterCommunityNodes(toolResult.nodes);
           updateVisualization(filteredNodes, toolResult.edges || []);
@@ -199,6 +244,10 @@ function ChatPanel() {
       setIsProcessing(false);
     }
   };
+
+  // Keep ref current so the guide animation can call the latest handleSend after animation
+  // completes, picking up the fully-typed inputValue rather than a stale closure.
+  handleSendRef.current = handleSend;
 
   const handleKeyPress = (e) => {
     if (e.key === 'Enter' && !e.shiftKey) {
@@ -253,7 +302,7 @@ function ChatPanel() {
         .map(m => ({ role: m.role, content: m.content }));
       conversationMessages.push({ role: 'user', content: msg });
 
-      const response = await api.sendChatMessage(conversationMessages, null, { federationDepth });
+      const response = await api.sendChatMessage(conversationMessages, null, { federationDepth, expertAgentId: activeExperts.length > 0 ? activeExperts[activeExperts.length - 1] : undefined });
 
       if (response.toolResult?.nodes) {
         const filteredNodes = filterCommunityNodes(response.toolResult.nodes);
@@ -291,7 +340,7 @@ function ChatPanel() {
         .map(m => ({ role: m.role, content: m.content }));
       conversationMessages.push({ role: 'user', content: msg });
 
-      const response = await api.sendChatMessage(conversationMessages, null, { federationDepth });
+      const response = await api.sendChatMessage(conversationMessages, null, { federationDepth, expertAgentId: activeExperts.length > 0 ? activeExperts[activeExperts.length - 1] : undefined });
       addChatMessage({
         role: 'assistant',
         content: response.content,
@@ -315,7 +364,7 @@ function ChatPanel() {
         .map(m => ({ role: m.role, content: m.content }));
       conversationMessages.push({ role: 'user', content: msg });
 
-      const response = await api.sendChatMessage(conversationMessages, null, { federationDepth });
+      const response = await api.sendChatMessage(conversationMessages, null, { federationDepth, expertAgentId: activeExperts.length > 0 ? activeExperts[activeExperts.length - 1] : undefined });
 
       if (deleteConfirmation.node_ids) {
         const deletedIds = new Set(deleteConfirmation.node_ids);
@@ -425,7 +474,7 @@ function ChatPanel() {
 
   // Expanded state
   return (
-    <div className={`chat-panel-floating${!showMinimap ? ' minimap-hidden' : ''}`}>
+    <div className={`chat-panel-floating${!showMinimap ? ' minimap-hidden' : ''}`} id="guide-target-chat">
       <div className="chat-header">
         <div className="chat-header-left" onClick={toggleChatPanel} style={{ cursor: 'pointer' }}>
           <ChatDotsFill size={16} />
@@ -455,7 +504,9 @@ function ChatPanel() {
               </div>
             )}
             <div className="message-content">
-              {msg.content}
+              {(msg.role === 'assistant' || msg.role === 'expert') ? (
+                <ReactMarkdown remarkPlugins={[remarkGfm]}>{msg.content}</ReactMarkdown>
+              ) : msg.content}
 
               {msg.role === 'user' && idx === chatMessages.length - 1 && isProcessing && (
                 <div className="message-loading">

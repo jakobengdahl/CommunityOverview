@@ -18,6 +18,8 @@ function FloatingSearch() {
     federationDepth,
     stats,
     schema,
+    guideSearchInput,
+    clearGuideSearchInput,
   } = useGraphStore();
 
   const [query, setQuery] = useState('');
@@ -109,6 +111,27 @@ function FloatingSearch() {
     document.addEventListener('keydown', handleGlobalKey);
     return () => document.removeEventListener('keydown', handleGlobalKey);
   }, []);
+
+  // Guide: animate typing into search input
+  useEffect(() => {
+    if (!guideSearchInput) return;
+    const { text, animated } = guideSearchInput;
+    clearGuideSearchInput();
+
+    if (!animated) {
+      setQuery(text);
+      return;
+    }
+
+    let i = 0;
+    setQuery('');
+    const interval = setInterval(() => {
+      i++;
+      setQuery(text.slice(0, i));
+      if (i >= text.length) clearInterval(interval);
+    }, 30);
+    return () => clearInterval(interval);
+  }, [guideSearchInput]); // eslint-disable-line react-hooks/exhaustive-deps
 
   const selectResult = useCallback(async (node) => {
     // SavedView: clear canvas and load the saved view's nodes with positions and edges
@@ -225,7 +248,7 @@ function FloatingSearch() {
   };
 
   return (
-    <div className="floating-search" ref={containerRef}>
+    <div className="floating-search" id="guide-target-search" ref={containerRef}>
       <div className="floating-search-bar">
         <Search size={18} className="floating-search-icon" />
         <input

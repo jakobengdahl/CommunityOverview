@@ -52,6 +52,66 @@ class EventOrigin:
         return None
 
 
+class EventActorAttribution(BaseModel):
+    """Generic actor attribution for mutation and event metadata."""
+
+    actor_id: str = Field(default="", description="Generic actor identifier when available")
+    actor_type: str = Field(default="", description="Generic actor type when available")
+    is_authenticated: bool = Field(default=False)
+    auth_source: str = Field(default="anonymous")
+    source: str = Field(default="default", description="Where the attribution inputs came from")
+
+    def to_dict(self) -> Dict[str, Any]:
+        return {
+            "actor_id": self.actor_id,
+            "actor_type": self.actor_type,
+            "is_authenticated": self.is_authenticated,
+            "auth_source": self.auth_source,
+            "source": self.source,
+        }
+
+
+class EventScopeAttribution(BaseModel):
+    """Generic scope attribution for mutation and event metadata."""
+
+    workspace_id: str = Field(default="")
+    workspace_kind: str = Field(default="")
+    graph_id: str = Field(default="")
+    source: str = Field(default="default", description="Where the scope inputs came from")
+
+    def to_dict(self) -> Dict[str, Any]:
+        return {
+            "workspace_id": self.workspace_id,
+            "workspace_kind": self.workspace_kind,
+            "graph_id": self.graph_id,
+            "source": self.source,
+        }
+
+
+class EventAttribution(BaseModel):
+    """Audit-friendly attribution envelope for writes and events."""
+
+    actor: EventActorAttribution = Field(default_factory=EventActorAttribution)
+    scope: EventScopeAttribution = Field(default_factory=EventScopeAttribution)
+
+    def has_attribution(self) -> bool:
+        return any(
+            (
+                self.actor.actor_id,
+                self.actor.actor_type,
+                self.scope.workspace_id,
+                self.scope.workspace_kind,
+                self.scope.graph_id,
+            )
+        )
+
+    def to_dict(self) -> Dict[str, Any]:
+        return {
+            "actor": self.actor.to_dict(),
+            "scope": self.scope.to_dict(),
+        }
+
+
 class EventContext(BaseModel):
     """
     Context for event tracking and loop prevention.
@@ -71,6 +131,10 @@ class EventContext(BaseModel):
         None,
         description="Correlation ID for chaining related events"
     )
+    attribution: Optional[EventAttribution] = Field(
+        None,
+        description="Generic actor and scope attribution for audit-friendly mutation tracking",
+    )
 
     def to_dict(self) -> Dict[str, Any]:
         """Convert to dict for JSON serialization."""
@@ -78,6 +142,7 @@ class EventContext(BaseModel):
             "event_origin": self.event_origin,
             "event_session_id": self.event_session_id,
             "event_correlation_id": self.event_correlation_id,
+            "attribution": self.attribution.to_dict() if self.attribution else None,
         }
 
 

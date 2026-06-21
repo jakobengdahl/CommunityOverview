@@ -129,6 +129,7 @@ const useGraphStore = create((set, get) => ({
   highlightedNodeIds: [],
   hiddenNodeIds: [],
   hiddenEdgeIds: [],
+  nodeMarks: {},
   selectedNodeId: null,
   selectedGraphNodes: [], // Nodes selected in the graph canvas (full node data)
   editingNode: null,
@@ -152,8 +153,24 @@ const useGraphStore = create((set, get) => ({
   availableExperts: [],   // All expert agents from config
   activeExperts: [],      // Currently active expert agent IDs
 
+  // Interactive guide state
+  guide: {
+    isActive: false,
+    activeGuide: null,
+    currentStepIndex: 0,
+    userInputs: {},
+    isExecutingAction: false,
+  },
+
+  // Guide-driven UI control (set by guide actions, consumed by components)
+  guideChatInput: null,    // { text, animated, auto_send } — fills chat textarea
+  guideSearchInput: null,  // { text, animated } — fills search bar
+
   // Stats
   stats: null,
+
+  // LLM availability (null = not yet fetched, true/false = known)
+  llmAvailable: null,
 
   // Loading states
   isLoading: false,
@@ -214,18 +231,32 @@ const useGraphStore = create((set, get) => ({
     });
   },
 
+  removeEdge: (edgeId) => {
+    const { edges } = get();
+    set({ edges: edges.filter(edge => edge.id !== edgeId) });
+  },
+
   clearVisualization: () => set({
     nodes: [],
     edges: [],
     highlightedNodeIds: [],
     hiddenNodeIds: [],
     hiddenEdgeIds: [],
+    nodeMarks: {},
     pendingGroups: null,
   }),
 
   setPendingGroups: (groups) => set({ pendingGroups: groups }),
 
   setHighlightedNodeIds: (ids) => set({ highlightedNodeIds: ids }),
+
+  setNodeMarks: (marks) => {
+    const marksMap = {};
+    (marks || []).forEach(m => { marksMap[m.node_id] = { color: m.color, label: m.label || '' }; });
+    set({ nodeMarks: marksMap });
+  },
+
+  clearNodeMarks: () => set({ nodeMarks: {} }),
 
   toggleNodeVisibility: (nodeId) => {
     const { hiddenNodeIds } = get();
@@ -275,6 +306,8 @@ const useGraphStore = create((set, get) => ({
   },
 
   setStats: (stats) => set({ stats }),
+
+  setLlmAvailable: (available) => set({ llmAvailable: available }),
 
   setLoading: (isLoading) => set({ isLoading }),
 
@@ -445,6 +478,68 @@ const useGraphStore = create((set, get) => ({
   // Chat panel actions
   toggleChatPanel: () => set(state => ({ chatPanelOpen: !state.chatPanelOpen })),
   setChatPanelOpen: (open) => set({ chatPanelOpen: open }),
+
+  // Guide actions
+  startGuide: (guideDefinition) => set({
+    guide: {
+      isActive: true,
+      activeGuide: guideDefinition,
+      currentStepIndex: 0,
+      userInputs: {},
+      isExecutingAction: false,
+    },
+  }),
+
+  stopGuide: () => set({
+    guide: {
+      isActive: false,
+      activeGuide: null,
+      currentStepIndex: 0,
+      userInputs: {},
+      isExecutingAction: false,
+    },
+    guideChatInput: null,
+    guideSearchInput: null,
+  }),
+
+  advanceGuide: () => {
+    set((state) => {
+      const { guide } = state;
+      if (!guide.isActive || !guide.activeGuide) return state;
+      const nextIndex = guide.currentStepIndex + 1;
+      const totalSteps = guide.activeGuide.steps?.length || 0;
+      if (nextIndex >= totalSteps) {
+        return {
+          guide: {
+            isActive: false,
+            activeGuide: null,
+            currentStepIndex: 0,
+            userInputs: {},
+            isExecutingAction: false,
+          },
+          guideChatInput: null,
+          guideSearchInput: null,
+        };
+      }
+      return { guide: { ...guide, currentStepIndex: nextIndex, isExecutingAction: false } };
+    });
+  },
+
+  setGuideStepInput: (key, value) => {
+    set((state) => ({
+      guide: { ...state.guide, userInputs: { ...state.guide.userInputs, [key]: value } },
+    }));
+  },
+
+  setGuideExecutingAction: (isExecuting) => {
+    set((state) => ({ guide: { ...state.guide, isExecutingAction: isExecuting } }));
+  },
+
+  // Guide-driven UI fill actions
+  setGuideChatInput: (payload) => set({ guideChatInput: payload }),
+  clearGuideChatInput: () => set({ guideChatInput: null }),
+  setGuideSearchInput: (payload) => set({ guideSearchInput: payload }),
+  clearGuideSearchInput: () => set({ guideSearchInput: null }),
 
   // Delete node from visualization
   removeNode: (nodeId) => {
