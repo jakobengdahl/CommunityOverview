@@ -439,13 +439,17 @@ class GraphStorage:
         """
         Internal method: delegate serialized graph data to the persistence backend.
         Runs in the background executor so file I/O doesn't block the event loop.
+
+        Exceptions are intentionally re-raised so the ThreadPoolExecutor stores
+        them in the returned Future. Callers that call .result() (e.g. load())
+        will then receive the exception rather than a silent no-op.
         """
         try:
             self._persistence_backend.save_graph_data(data)
             print(f"Saved {node_count} nodes and {edge_count} edges to {self.json_path}")
         except Exception as e:
             print(f"Error saving graph to disk: {e}")
-            # Don't reraise — running in background thread; caller cannot observe it.
+            raise
 
     def flush(self) -> None:
         """
@@ -453,8 +457,11 @@ class GraphStorage:
 
         Useful in tests and in code that reloads from disk immediately
         after mutating the graph.
+
+        Correctness relies on max_workers=1 (FIFO task ordering). The no-op
+        submitted here will only run after all previously submitted saves.
         """
-        # Submit a no-op and block until it runs — this drains the executor queue.
+        # Submit a no-op sentinel and block until it runs — drains the queue.
         self._io_executor.submit(lambda: None).result()
 
     def get_graph_name(self) -> str:

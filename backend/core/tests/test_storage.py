@@ -937,8 +937,9 @@ class TestGraphStorageConcurrency:
         def save_worker(thread_id):
             try:
                 for i in range(saves_per_thread):
-                    # Force a save
-                    temp_storage.save()
+                    # Force a save and wait for the background write to complete
+                    # before reading the file — save() is async.
+                    temp_storage.save().result()
 
                     # Immediately try to read and parse the JSON file
                     try:
