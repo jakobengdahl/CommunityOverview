@@ -34148,6 +34148,16 @@
       },
       "created_at": "2026-06-18T09:31:44.072086",
       "updated_at": "2026-06-18T09:31:44.072098"
+    },
+    {
+      "id": "8ab3ecb8-ef8b-475d-a9f7-ed27da584efd",
+      "type": "Initiative",
+      "name": "WP12 Stockholm sprint",
+      "description": "Initiative for the WP12 Stockholm sprint, connected to SCB as an actor involved in the sprint.",
+      "summary": "",
+      "tags": [],
+      "subtypes": [],
+      "metadata": {}
     }
   ],
   "edges": [
@@ -36787,6 +36797,15 @@
       "label": "",
       "metadata": {},
       "created_at": "2026-06-18T09:29:58.246988"
+    },
+    {
+      "id": "6e8d2843-68ba-43a3-a73f-890dc770e7f3",
+      "source": "6c84c44f-ca52-43a4-8842-9cfcf4bbcd96",
+      "target": "8ab3ecb8-ef8b-475d-a9f7-ed27da584efd",
+      "type": "RELATES_TO",
+      "label": "",
+      "metadata": {},
+      "created_at": "2026-06-18T08:06:25.423967"
     }
   ]
 }
