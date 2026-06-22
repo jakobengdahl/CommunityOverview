@@ -52,9 +52,10 @@ Once the VS Code service is running:
 
 1. Open a terminal in VS Code and run:
    ```bash
-   ./CommunityOverview/start-sprint.sh
+   cd CommunityOverview
+   ./start-dev.sh --profile stat-metadata
    ```
-   This script installs the required dependencies, loads the **stat-metadata** profile (European Statistical System schema), and starts the application.
+   This installs the required dependencies, loads the **stat-metadata** profile (European Statistical System schema), and starts the application.
 
 2. When the app is ready, VS Code will indicate that a URL has been opened on **port 8000**. Click the link or open the forwarded port to access the app in your browser.
 

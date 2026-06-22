@@ -85,6 +85,8 @@
     "ignore_origins_hint": "For loop prevention: events from these origins are not sent",
     "cancel": "Cancel",
     "submit": "Create subscription",
+    "submit_edit": "Save changes",
+    "title_edit": "Edit webhook subscription",
     "validation_error": "Name and webhook URL are required",
     "webhook_description": "Webhook subscription: {name}",
     "webhook_summary": "Listening on {events} events"
@@ -99,7 +101,9 @@
   "notifications": {
     "showing_nodes": "Showing {count} nodes",
     "subscription_created": "Subscription \"{name}\" created",
+    "subscription_updated": "Subscription \"{name}\" updated",
     "subscription_error": "Could not create subscription",
+    "subscription_update_error": "Could not update subscription",
     "saved_view_description": "Saved view: {name}",
     "saved_view_summary": "Contains {count} nodes"
   },
