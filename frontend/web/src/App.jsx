@@ -476,7 +476,7 @@ function App() {
         const newNodes = nodes.map(n => n.id === data.id ? { ...n, ...data.updates } : n);
         updateVisualization(newNodes, edges);
         setEditingSubscriptionData(null);
-        showNotification('success', t('notifications.subscription_created', { name: data.updates.name }));
+        showNotification('success', t('notifications.subscription_updated', { name: data.updates.name }));
       } else {
         const result = await api.addNodes([data], []);
         if (result.added_node_ids?.length > 0) {
@@ -486,7 +486,7 @@ function App() {
       }
     } catch (error) {
       console.error('Error saving subscription:', error);
-      showNotification('error', t('notifications.subscription_error'));
+      showNotification('error', data?.updates ? t('notifications.subscription_update_error') : t('notifications.subscription_error'));
     }
   }, [addNodesToVisualization, nodes, edges, updateVisualization, showNotification, t]);
 

@@ -101,7 +101,9 @@
   "notifications": {
     "showing_nodes": "Showing {count} nodes",
     "subscription_created": "Subscription \"{name}\" created",
+    "subscription_updated": "Subscription \"{name}\" updated",
     "subscription_error": "Could not create subscription",
+    "subscription_update_error": "Could not update subscription",
     "saved_view_description": "Saved view: {name}",
     "saved_view_summary": "Contains {count} nodes"
   },

@@ -101,7 +101,9 @@
   "notifications": {
     "showing_nodes": "Visar {count} noder",
     "subscription_created": "Prenumeration \"{name}\" skapad",
+    "subscription_updated": "Prenumeration \"{name}\" uppdaterad",
     "subscription_error": "Kunde inte skapa prenumeration",
+    "subscription_update_error": "Kunde inte uppdatera prenumeration",
     "saved_view_description": "Sparad vy: {name}",
     "saved_view_summary": "Innehåller {count} noder"
   },
