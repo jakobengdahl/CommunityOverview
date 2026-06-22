@@ -34158,6 +34158,353 @@
       "tags": [],
       "subtypes": [],
       "metadata": {}
+    },
+    {
+      "id": "programme-lfs",
+      "type": "StatisticalProgramme",
+      "name": "Labour Force Survey (LFS)",
+      "description": "Recurring household survey that collects data on employment, unemployment and economic activity of the population.",
+      "summary": "Household survey on employment and economic activity",
+      "tags": [
+        "lfs",
+        "labour-market",
+        "survey"
+      ],
+      "subtypes": [],
+      "metadata": {},
+      "embedding": null,
+      "created_at": "2026-06-18T09:00:00.000000",
+      "updated_at": "2026-06-18T09:00:00.000000"
+    },
+    {
+      "id": "ds-input",
+      "type": "DataSet",
+      "name": "LFS raw microdata",
+      "description": "Anonymised micro-level survey responses from the Labour Force Survey, before any coding, weighting or aggregation. This is the input to the production process chain.",
+      "summary": "Raw anonymised LFS survey microdata (input)",
+      "tags": [
+        "lfs",
+        "microdata",
+        "input",
+        "raw"
+      ],
+      "subtypes": [
+        "Input Data Set"
+      ],
+      "metadata": {
+        "role": "input"
+      },
+      "embedding": null,
+      "created_at": "2026-06-18T09:00:00.000000",
+      "updated_at": "2026-06-18T09:00:00.000000"
+    },
+    {
+      "id": "step-code-aggregate",
+      "type": "ProcessStep",
+      "name": "Code economic activity and aggregate",
+      "description": "Process step that codes each respondent's economic activity using the NACE classification, applies survey weights, and aggregates the microdata into the published employment-by-activity table.",
+      "summary": "Codes activity with NACE, weights and aggregates to the output table",
+      "tags": [
+        "lfs",
+        "nace",
+        "coding",
+        "weighting",
+        "aggregation",
+        "process-step"
+      ],
+      "subtypes": [
+        "Aggregation"
+      ],
+      "metadata": {
+        "classification_applied": [
+          "NACE Rev. 2 (economic activity)"
+        ],
+        "transformation": "NACE coding of economic activity, calibrated weighting, and aggregation to region x sex x activity cells.",
+        "methodological_notes": "Weights calibrated to population register totals; small cells suppressed for disclosure control."
+      },
+      "embedding": null,
+      "created_at": "2026-06-18T09:00:00.000000",
+      "updated_at": "2026-06-18T09:00:00.000000"
+    },
+    {
+      "id": "ds-employment",
+      "type": "DataSet",
+      "name": "Employment by economic activity and region",
+      "description": "Published table of employed persons broken down by economic activity (NACE), region and sex. This is the output data set of the production chain.",
+      "summary": "Published table: employed persons by activity, region and sex",
+      "tags": [
+        "lfs",
+        "employment",
+        "nace",
+        "published"
+      ],
+      "subtypes": [
+        "Output Data Set"
+      ],
+      "metadata": {},
+      "embedding": null,
+      "created_at": "2026-06-18T09:00:00.000000",
+      "updated_at": "2026-06-18T09:00:00.000000"
+    },
+    {
+      "id": "struct-employment",
+      "type": "DataStructure",
+      "name": "Employment table structure",
+      "description": "Dimensional structure of the employment-by-activity table: identifier dimensions (economic activity, region, sex) and the measure (employed persons).",
+      "summary": "Structure of the employment-by-activity table",
+      "tags": [
+        "lfs",
+        "data-structure"
+      ],
+      "subtypes": [],
+      "metadata": {},
+      "embedding": null,
+      "created_at": "2026-06-18T09:00:00.000000",
+      "updated_at": "2026-06-18T09:00:00.000000"
+    },
+    {
+      "id": "var-economic-activity",
+      "type": "InstanceVariable",
+      "name": "economic_activity",
+      "description": "Economic activity of the respondent's job/local unit, coded using the NACE classification. A coded identifier dimension of the employment table.",
+      "summary": "Economic activity dimension (NACE-coded identifier)",
+      "tags": [
+        "nace",
+        "economic-activity",
+        "identifier"
+      ],
+      "subtypes": [
+        "Identifier"
+      ],
+      "metadata": {
+        "role": "identifier"
+      },
+      "embedding": null,
+      "created_at": "2026-06-18T09:00:00.000000",
+      "updated_at": "2026-06-18T09:00:00.000000"
+    },
+    {
+      "id": "var-region",
+      "type": "InstanceVariable",
+      "name": "region",
+      "description": "Region of residence, coded using the NUTS regional classification. A coded identifier dimension.",
+      "summary": "Region dimension (NUTS-coded identifier)",
+      "tags": [
+        "region",
+        "nuts",
+        "identifier"
+      ],
+      "subtypes": [
+        "Identifier"
+      ],
+      "metadata": {
+        "role": "identifier"
+      },
+      "embedding": null,
+      "created_at": "2026-06-18T09:00:00.000000",
+      "updated_at": "2026-06-18T09:00:00.000000"
+    },
+    {
+      "id": "var-sex",
+      "type": "InstanceVariable",
+      "name": "sex",
+      "description": "Sex of the respondent, coded using the sex code list. A coded identifier dimension.",
+      "summary": "Sex dimension (coded identifier)",
+      "tags": [
+        "sex",
+        "identifier"
+      ],
+      "subtypes": [
+        "Identifier"
+      ],
+      "metadata": {
+        "role": "identifier"
+      },
+      "embedding": null,
+      "created_at": "2026-06-18T09:00:00.000000",
+      "updated_at": "2026-06-18T09:00:00.000000"
+    },
+    {
+      "id": "var-employed",
+      "type": "InstanceVariable",
+      "name": "employed_persons",
+      "description": "Number of employed persons in each cell. The measure of the employment table.",
+      "summary": "Employed persons (measure)",
+      "tags": [
+        "employment",
+        "measure"
+      ],
+      "subtypes": [
+        "Measure"
+      ],
+      "metadata": {
+        "role": "measure"
+      },
+      "embedding": null,
+      "created_at": "2026-06-18T09:00:00.000000",
+      "updated_at": "2026-06-18T09:00:00.000000"
+    },
+    {
+      "id": "cl-nace",
+      "type": "CodeList",
+      "name": "NACE Rev. 2",
+      "description": "Statistical Classification of Economic Activities in the European Community (NACE). Used to code economic activity. The target of the change-impact scenario.",
+      "summary": "NACE Rev. 2 economic-activity classification",
+      "tags": [
+        "classification",
+        "nace",
+        "economic-activity",
+        "statistical-classification"
+      ],
+      "subtypes": [
+        "Statistical Classification"
+      ],
+      "metadata": {
+        "version": "Rev. 2",
+        "is_classification": true,
+        "maintenance_agency": "Eurostat",
+        "codes": [
+          {
+            "code": "A",
+            "label": "Agriculture, forestry and fishing"
+          },
+          {
+            "code": "C",
+            "label": "Manufacturing"
+          },
+          {
+            "code": "F",
+            "label": "Construction"
+          },
+          {
+            "code": "G",
+            "label": "Wholesale and retail trade"
+          },
+          {
+            "code": "O",
+            "label": "Public administration and defence"
+          }
+        ]
+      },
+      "embedding": null,
+      "created_at": "2026-06-18T09:00:00.000000",
+      "updated_at": "2026-06-18T09:00:00.000000"
+    },
+    {
+      "id": "cl-region",
+      "type": "CodeList",
+      "name": "NUTS regions",
+      "description": "Nomenclature of territorial units for statistics (NUTS), used to code region.",
+      "summary": "NUTS regional classification",
+      "tags": [
+        "classification",
+        "nuts",
+        "region"
+      ],
+      "subtypes": [
+        "Statistical Classification"
+      ],
+      "metadata": {
+        "version": "2024",
+        "is_classification": true,
+        "codes": [
+          {
+            "code": "SE11",
+            "label": "Stockholm"
+          },
+          {
+            "code": "SE23",
+            "label": "Västsverige"
+          }
+        ]
+      },
+      "embedding": null,
+      "created_at": "2026-06-18T09:00:00.000000",
+      "updated_at": "2026-06-18T09:00:00.000000"
+    },
+    {
+      "id": "cl-sex",
+      "type": "CodeList",
+      "name": "Sex codes",
+      "description": "Code list for sex.",
+      "summary": "Sex code list",
+      "tags": [
+        "code-list",
+        "sex"
+      ],
+      "subtypes": [
+        "Enumerated Code List"
+      ],
+      "metadata": {
+        "version": "1.0",
+        "codes": [
+          {
+            "code": "1",
+            "label": "Male"
+          },
+          {
+            "code": "2",
+            "label": "Female"
+          }
+        ]
+      },
+      "embedding": null,
+      "created_at": "2026-06-18T09:00:00.000000",
+      "updated_at": "2026-06-18T09:00:00.000000"
+    },
+    {
+      "id": "ds-activity-summary",
+      "type": "DataSet",
+      "name": "Economic activity coding notes",
+      "description": "Supplementary data set giving a descriptive textual note for each economic activity. It references NACE only as a descriptive label, not as a structural dimension.",
+      "summary": "Descriptive notes per economic activity",
+      "tags": [
+        "nace",
+        "documentation"
+      ],
+      "subtypes": [
+        "Output Data Set"
+      ],
+      "metadata": {},
+      "embedding": null,
+      "created_at": "2026-06-18T09:00:00.000000",
+      "updated_at": "2026-06-18T09:00:00.000000"
+    },
+    {
+      "id": "struct-activity-summary",
+      "type": "DataStructure",
+      "name": "Activity notes structure",
+      "description": "Structure of the activity coding notes data set.",
+      "summary": "Structure of the activity coding notes",
+      "tags": [
+        "data-structure"
+      ],
+      "subtypes": [],
+      "metadata": {},
+      "embedding": null,
+      "created_at": "2026-06-18T09:00:00.000000",
+      "updated_at": "2026-06-18T09:00:00.000000"
+    },
+    {
+      "id": "var-activity-label",
+      "type": "InstanceVariable",
+      "name": "activity_label",
+      "description": "Free-text descriptive label for an economic activity, annotated from the NACE classification. A descriptive attribute, not an identifier dimension.",
+      "summary": "Activity label (descriptive attribute, NACE-annotated)",
+      "tags": [
+        "nace",
+        "label",
+        "attribute"
+      ],
+      "subtypes": [
+        "Attribute"
+      ],
+      "metadata": {
+        "role": "attribute"
+      },
+      "embedding": null,
+      "created_at": "2026-06-18T09:00:00.000000",
+      "updated_at": "2026-06-18T09:00:00.000000"
     }
   ],
   "edges": [
@@ -36806,6 +37153,132 @@
       "label": "",
       "metadata": {},
       "created_at": "2026-06-18T08:06:25.423967"
+    },
+    {
+      "id": "e-prog-produces",
+      "source": "programme-lfs",
+      "target": "ds-employment",
+      "type": "PRODUCES",
+      "label": "",
+      "metadata": {},
+      "created_at": "2026-06-18T09:00:00.000000"
+    },
+    {
+      "id": "e-input-to-step",
+      "source": "ds-input",
+      "target": "step-code-aggregate",
+      "type": "INPUT_TO",
+      "label": "",
+      "metadata": {},
+      "created_at": "2026-06-18T09:00:00.000000"
+    },
+    {
+      "id": "e-step-output",
+      "source": "step-code-aggregate",
+      "target": "ds-employment",
+      "type": "PRODUCES_OUTPUT",
+      "label": "",
+      "metadata": {},
+      "created_at": "2026-06-18T09:00:00.000000"
+    },
+    {
+      "id": "e-ds-struct",
+      "source": "ds-employment",
+      "target": "struct-employment",
+      "type": "HAS_STRUCTURE",
+      "label": "",
+      "metadata": {},
+      "created_at": "2026-06-18T09:00:00.000000"
+    },
+    {
+      "id": "e-struct-act",
+      "source": "struct-employment",
+      "target": "var-economic-activity",
+      "type": "HAS_VARIABLE",
+      "label": "",
+      "metadata": {},
+      "created_at": "2026-06-18T09:00:00.000000"
+    },
+    {
+      "id": "e-struct-region",
+      "source": "struct-employment",
+      "target": "var-region",
+      "type": "HAS_VARIABLE",
+      "label": "",
+      "metadata": {},
+      "created_at": "2026-06-18T09:00:00.000000"
+    },
+    {
+      "id": "e-struct-sex",
+      "source": "struct-employment",
+      "target": "var-sex",
+      "type": "HAS_VARIABLE",
+      "label": "",
+      "metadata": {},
+      "created_at": "2026-06-18T09:00:00.000000"
+    },
+    {
+      "id": "e-struct-emp",
+      "source": "struct-employment",
+      "target": "var-employed",
+      "type": "HAS_VARIABLE",
+      "label": "",
+      "metadata": {},
+      "created_at": "2026-06-18T09:00:00.000000"
+    },
+    {
+      "id": "e-act-nace",
+      "source": "var-economic-activity",
+      "target": "cl-nace",
+      "type": "USES_CODE_LIST",
+      "label": "",
+      "metadata": {},
+      "created_at": "2026-06-18T09:00:00.000000"
+    },
+    {
+      "id": "e-region-cl",
+      "source": "var-region",
+      "target": "cl-region",
+      "type": "USES_CODE_LIST",
+      "label": "",
+      "metadata": {},
+      "created_at": "2026-06-18T09:00:00.000000"
+    },
+    {
+      "id": "e-sex-cl",
+      "source": "var-sex",
+      "target": "cl-sex",
+      "type": "USES_CODE_LIST",
+      "label": "",
+      "metadata": {},
+      "created_at": "2026-06-18T09:00:00.000000"
+    },
+    {
+      "id": "e-summary-struct",
+      "source": "ds-activity-summary",
+      "target": "struct-activity-summary",
+      "type": "HAS_STRUCTURE",
+      "label": "",
+      "metadata": {},
+      "created_at": "2026-06-18T09:00:00.000000"
+    },
+    {
+      "id": "e-summary-var",
+      "source": "struct-activity-summary",
+      "target": "var-activity-label",
+      "type": "HAS_VARIABLE",
+      "label": "",
+      "metadata": {},
+      "created_at": "2026-06-18T09:00:00.000000"
+    },
+    {
+      "id": "e-label-nace",
+      "source": "var-activity-label",
+      "target": "cl-nace",
+      "type": "USES_CODE_LIST",
+      "label": "",
+      "metadata": {},
+      "created_at": "2026-06-18T09:00:00.000000"
     }
   ]
 }
