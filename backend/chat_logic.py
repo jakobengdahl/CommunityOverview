@@ -333,7 +333,7 @@ When a user asks about agents (e.g., "Visa alla agenter", "Vilka agenter finns?"
 
 TOOL USAGE GUIDELINES:
 - search_graph: For text-based searches, exploring themes, finding specific nodes
-- get_related_nodes: For expanding from a known node, exploring connections
+- get_related_nodes: For expanding from a known node, exploring connections, or traversing lineage/provenance chains by specifying relationship_types (e.g. production-step relationships in a data pipeline)
 - get_node_details: For detailed information about a specific node
 - find_similar_nodes: For checking ONE node for duplicates
 - find_similar_nodes_batch: For checking MULTIPLE nodes at once - ALWAYS use this when extracting from documents
@@ -357,6 +357,16 @@ Use mark_nodes to annotate nodes in the current visualization with colors and la
 4. Marks are session-only — they never persist to the database
 5. Call mark_nodes with an empty array to remove all marks
 6. Example: to show analysis results, mark critical nodes red, medium-priority orange, reviewed green
+
+WORKFLOW FOR LINEAGE AND IMPACT TRAVERSAL:
+To answer questions like "what downstream steps use this dataset?" or "what is affected if this changes?":
+1. Call get_schema to discover available relationship types for the current schema
+2. Call get_related_nodes with relevant relationship_types and depth=2 (or deeper) to traverse the chain
+3. Optionally repeat from a different direction (upstream vs downstream) using the inverse relationship types
+4. Visualize results with mark_nodes: e.g. source node green, intermediate steps orange, leaf outputs red
+5. Summarize the traversal path in plain language, not just a list of nodes
+Example: upstream data quality question — find input datasets → process steps → output datasets using the
+appropriate relationship chain, then mark each tier a distinct color so the user sees the full dependency tree.
 
 EFFICIENCY TIP: When extracting multiple entities from a document, ALWAYS use find_similar_nodes_batch()
 instead of calling find_similar_nodes() in a loop. This reduces API calls from N to 1.

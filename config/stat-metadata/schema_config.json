@@ -2,7 +2,12 @@
   "schema": {
     "node_types": {
       "SavedView": {
-        "fields": ["name", "description", "summary", "metadata"],
+        "fields": [
+          "name",
+          "description",
+          "summary",
+          "metadata"
+        ],
         "static": true,
         "category": "system",
         "description": "Saved graph view snapshots for quick navigation",
@@ -10,7 +15,12 @@
         "icon": "BookmarkFill"
       },
       "VisualizationView": {
-        "fields": ["name", "description", "summary", "metadata"],
+        "fields": [
+          "name",
+          "description",
+          "summary",
+          "metadata"
+        ],
         "static": true,
         "category": "system",
         "description": "Saved graph view snapshots (legacy)",
@@ -18,7 +28,12 @@
         "icon": "BookmarkFill"
       },
       "EventSubscription": {
-        "fields": ["name", "description", "summary", "metadata"],
+        "fields": [
+          "name",
+          "description",
+          "summary",
+          "metadata"
+        ],
         "static": false,
         "category": "system",
         "description": "Webhook subscription for graph mutation events",
@@ -26,7 +41,12 @@
         "icon": "BellFill"
       },
       "Agent": {
-        "fields": ["name", "description", "summary", "metadata"],
+        "fields": [
+          "name",
+          "description",
+          "summary",
+          "metadata"
+        ],
         "static": false,
         "category": "system",
         "description": "AI agent configuration",
@@ -34,7 +54,12 @@
         "icon": "CpuFill"
       },
       "Skill": {
-        "fields": ["name", "description", "summary", "metadata"],
+        "fields": [
+          "name",
+          "description",
+          "summary",
+          "metadata"
+        ],
         "static": false,
         "category": "system",
         "ui_form": "skill",
@@ -43,84 +68,157 @@
         "icon": "StarFill"
       },
       "Actor": {
-        "fields": ["name", "description", "summary", "tags", "subtypes"],
+        "fields": [
+          "name",
+          "description",
+          "summary",
+          "tags",
+          "subtypes"
+        ],
         "category": "domain",
         "description": "Statistical offices, international organisations and other bodies involved in official statistics production",
         "color": "#3B82F6",
         "icon": "PersonFill"
       },
       "StatisticalProgramme": {
-        "fields": ["name", "description", "summary", "tags", "subtypes"],
+        "fields": [
+          "name",
+          "description",
+          "summary",
+          "tags",
+          "subtypes"
+        ],
         "category": "domain",
         "description": "Statistical programmes, surveys or coordinated statistical production activities (e.g. Labour Force Survey, Party Preference Survey)",
         "color": "#10B981",
         "icon": "ClipboardDataFill"
       },
       "DataSet": {
-        "fields": ["name", "description", "summary", "tags", "subtypes"],
+        "fields": [
+          "name",
+          "description",
+          "summary",
+          "tags",
+          "subtypes"
+        ],
         "category": "domain",
         "description": "Published statistical datasets or aggregated data tables produced by statistical programmes",
         "color": "#06B6D4",
         "icon": "DatabaseFill"
       },
       "DataStructure": {
-        "fields": ["name", "description", "summary", "tags", "subtypes"],
+        "fields": [
+          "name",
+          "description",
+          "summary",
+          "tags",
+          "subtypes"
+        ],
         "category": "domain",
         "description": "Data structures, schemas or dimensional models defining the layout of statistical datasets (identifiers, measures, attributes)",
         "color": "#8B5CF6",
         "icon": "Diagram3Fill"
       },
       "InstanceVariable": {
-        "fields": ["name", "description", "summary", "tags", "subtypes"],
+        "fields": [
+          "name",
+          "description",
+          "summary",
+          "tags",
+          "subtypes"
+        ],
         "category": "domain",
         "description": "Variables or dimensions observed in a dataset or data structure, with a defined role (identifier or measure)",
         "color": "#14B8A6",
         "icon": "Sliders"
       },
       "Concept": {
-        "fields": ["name", "description", "summary", "tags", "subtypes"],
+        "fields": [
+          "name",
+          "description",
+          "summary",
+          "tags",
+          "subtypes"
+        ],
         "category": "domain",
         "description": "Statistical concepts measured by variables (e.g. unemployment, region, age, vote share)",
         "color": "#F97316",
         "icon": "LightbulbFill"
       },
       "UnitType": {
-        "fields": ["name", "description", "summary", "tags", "subtypes"],
+        "fields": [
+          "name",
+          "description",
+          "summary",
+          "tags",
+          "subtypes"
+        ],
         "category": "domain",
         "description": "Units of observation such as persons, households, enterprises or regions",
         "color": "#EF4444",
         "icon": "PeopleFill"
       },
       "CodeList": {
-        "fields": ["name", "description", "summary", "tags", "subtypes"],
+        "fields": [
+          "name",
+          "description",
+          "summary",
+          "tags",
+          "subtypes"
+        ],
         "category": "domain",
         "description": "Controlled code lists, classifications or enumerations used by variables (e.g. sex codes, labour status codes, NUTS regions)",
         "color": "#FBBF24",
         "icon": "ListOl"
       },
       "Questionnaire": {
-        "fields": ["name", "description", "summary", "tags", "subtypes"],
+        "fields": [
+          "name",
+          "description",
+          "summary",
+          "tags",
+          "subtypes"
+        ],
         "category": "domain",
         "description": "Data collection instruments such as survey questionnaires used in statistical programmes to gather variable data from respondents",
         "color": "#6366F1",
         "icon": "CardChecklist"
       },
       "QuestionnaireComponent": {
-        "fields": ["name", "description", "summary", "tags", "subtypes"],
+        "fields": [
+          "name",
+          "description",
+          "summary",
+          "tags",
+          "subtypes"
+        ],
         "category": "domain",
         "description": "An individual question or item within a questionnaire, linking the questionnaire to the instance variable it collects and the value domain of permissible responses",
         "color": "#818CF8",
         "icon": "InputCursorText"
       },
       "ValueDomain": {
-        "fields": ["name", "description", "summary", "tags", "subtypes"],
+        "fields": [
+          "name",
+          "description",
+          "summary",
+          "tags",
+          "subtypes"
+        ],
         "category": "domain",
         "description": "The set of permissible values for a variable or questionnaire response, either described (e.g. a numeric range) or enumerated (e.g. a code list)",
         "color": "#D97706",
         "icon": "ListCheck"
       },
       "ProductionSolution": {
-        "fields": ["name", "description", "summary", "tags", "subtypes", "repo"],
+        "fields": [
+          "name",
+          "description",
+          "summary",
+          "tags",
+          "subtypes",
+          "repo"
+        ],
         "category": "domain",
         "description": "A technical production system or tool that processes data from statistical programmes to produce datasets (e.g. a pipeline, application or service hosted in a git repository)",
         "color": "#7C3AED",
@@ -137,11 +235,48 @@
         ]
       },
       "SubjectField": {
-        "fields": ["name", "description", "summary", "tags", "subtypes"],
+        "fields": [
+          "name",
+          "description",
+          "summary",
+          "tags",
+          "subtypes"
+        ],
         "category": "domain",
         "description": "A thematic subject field or statistical domain classifying statistical programmes (e.g. Labour market, Prices, Population, Agriculture, National accounts)",
         "color": "#84CC16",
         "icon": "CollectionFill"
+      },
+      "Initiative": {
+        "fields": [
+          "name",
+          "description",
+          "summary",
+          "tags",
+          "subtypes",
+          "start_date",
+          "end_date"
+        ],
+        "category": "domain",
+        "description": "Projects, programs, collaborative activities",
+        "color": "#10B981",
+        "icon": "RocketTakeoffFill",
+        "labels": {
+          "sv": "Initiativ"
+        }
+      },
+      "ProcessStep": {
+        "fields": [
+          "name",
+          "description",
+          "summary",
+          "tags",
+          "subtypes"
+        ],
+        "category": "domain",
+        "description": "A methodological process step in a statistical production chain that transforms input datasets into an output dataset (e.g. coding, weighting, aggregation). metadata may carry: {classification_applied, transformation, methodological_notes}",
+        "color": "#0EA5E9",
+        "icon": "GearFill"
       }
     },
     "relationship_types": {
@@ -186,6 +321,12 @@
       },
       "USES": {
         "description": "Uses (production solution uses a statistical programme as its processing basis)"
+      },
+      "INPUT_TO": {
+        "description": "Input to (an input dataset feeds into a process step in the production chain). Source = input dataset, target = process step."
+      },
+      "PRODUCES_OUTPUT": {
+        "description": "Produces output (a process step produces an output dataset). Source = process step, target = output dataset."
       }
     }
   },
@@ -209,7 +350,9 @@
       "QuestionnaireComponent": "#818CF8",
       "ValueDomain": "#D97706",
       "ProductionSolution": "#7C3AED",
-      "SubjectField": "#84CC16"
+      "SubjectField": "#84CC16",
+      "Initiative": "#10B981",
+      "ProcessStep": "#0EA5E9"
     },
     "prompt_prefix": "You are a knowledge agent for the European Statistical System (ESS) metadata knowledge graph. The graph contains statistical offices (NSIs), international statistical organisations, statistical programmes, questionnaires, datasets, data structures, instance variables, concepts, unit types and code lists.\n\nKey node types and their roles:\n- **Actor**: Statistical offices (NSIs) and international organisations (Eurostat, UNSD, OECD, IMF, ECB, BIS, World Bank, FAO, ILO, WHO)\n- **StatisticalProgramme**: Recurring statistical production activities (e.g. Labour Force Survey, Party Preference Survey)\n- **Questionnaire**: Data collection instruments (survey forms) used by statistical programmes to gather variable data from respondents\n- **QuestionnaireComponent**: An individual question or item within a questionnaire, linking the questionnaire to the instance variable it collects and the value domain of permissible responses\n- **ValueDomain**: The set of permissible values for a variable or question response — either described (numeric range, text pattern) or enumerated (code list)\n- **DataSet**: Published aggregate tables produced by statistical programmes\n- **DataStructure**: Dimensional layouts defining identifiers and measures for datasets\n- **InstanceVariable**: Concrete variables used in a data structure or questionnaire, with roles (identifier or measure)\n- **Concept**: Abstract statistical concepts that variables measure (e.g. Region, Sex, Labour market status)\n- **UnitType**: Units of observation (e.g. Person)\n- **CodeList**: Enumerated value sets used by coded variables (e.g. sex codes, NUTS regions, political party codes)\n- **ProductionSolution**: A technical system, tool or application (with a git repository) that processes data from a statistical programme to produce a dataset. Has a `repo` field with the git repository URL.\n- **SubjectField**: A thematic subject field or statistical domain (e.g. Labour market, Prices, Population, Agriculture, National accounts) that classifies statistical programmes.\n\nKey relationships:\n- StatisticalProgramme PRODUCES DataSet\n- StatisticalProgramme BELONGS_TO SubjectField\n- StatisticalProgramme RELATES_TO StatisticalProgramme (e.g. related surveys, successor/predecessor programmes)\n- StatisticalProgramme PART_OF StatisticalProgramme (e.g. a sub-programme is part of a larger programme)\n- ProductionSolution USES StatisticalProgramme\n- ProductionSolution PRODUCES DataSet\n- StatisticalProgramme HAS_QUESTIONNAIRE Questionnaire\n- Questionnaire HAS_COMPONENT QuestionnaireComponent\n- QuestionnaireComponent COLLECTS InstanceVariable\n- QuestionnaireComponent USES_VALUE_DOMAIN ValueDomain\n- InstanceVariable USES_VALUE_DOMAIN ValueDomain\n- DataSet HAS_STRUCTURE DataStructure\n- DataStructure HAS_VARIABLE InstanceVariable\n- InstanceVariable MEASURES Concept\n- InstanceVariable OBSERVED_FOR UnitType\n- InstanceVariable USES_CODE_LIST CodeList\n- Actor PART_OF network/system",
     "prompt_suffix": "Always suggest exploring related metadata when relevant (e.g. from a dataset, suggest looking at its structure and variables). Ask for confirmation before making changes to the graph.\n\nFormatting: Never use markdown tables — they do not render correctly in this interface. Use bullet points, numbered lists, or plain prose instead.\n\nDocument analysis: When analysing an uploaded document and proposing matches to existing nodes in the metadata graph, always state a confidence score for each proposed match (e.g. 90% — exact name match, or Low — loose semantic similarity) and briefly explain the reasoning behind the score, such as whether it is based on an identical name, a synonym, a shared concept definition, or a general thematic overlap.",
@@ -217,7 +360,10 @@
     "language_policy": {
       "mode": "preferred",
       "primary_language": "en",
-      "allowed_languages": ["en", "sv"],
+      "allowed_languages": [
+        "en",
+        "sv"
+      ],
       "description_en": "English is the primary language. Swedish is accepted when natural or established.",
       "description_sv": "Engelska är huvudspråk. Svenska accepteras när det är naturligt eller etablerat."
     },
