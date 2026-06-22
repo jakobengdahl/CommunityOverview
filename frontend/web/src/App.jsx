@@ -69,6 +69,7 @@ function App() {
   const [deleteDialog, setDeleteDialog] = useState(null);
   const [saveViewDialog, setSaveViewDialog] = useState(null);
   const [showSubscriptionDialog, setShowSubscriptionDialog] = useState(false);
+  const [editingSubscriptionData, setEditingSubscriptionData] = useState(null);
   const [showAgentDialog, setShowAgentDialog] = useState(false);
   const [editingAgentData, setEditingAgentData] = useState(null);
   const [createNodeType, setCreateNodeType] = useState(null);
@@ -268,6 +269,9 @@ function App() {
         console.error('Error preparing agent editor:', error);
         showNotification('error', 'Could not load agent details');
       }
+    } else if (nodeData.type === 'EventSubscription') {
+      setEditingSubscriptionData(nodeData);
+      setShowSubscriptionDialog(true);
     } else if (schema?.node_types?.[nodeData.type]?.ui_form === 'skill') {
       setEditingSkillData(nodeData);
       setSkillDialogType(nodeData.type);
@@ -465,24 +469,26 @@ function App() {
   }, []);
 
   // Save subscription node
-  const handleSaveSubscription = useCallback(async (subscriptionNode) => {
+  const handleSaveSubscription = useCallback(async (data) => {
     try {
-      const result = await api.addNodes([subscriptionNode], []);
-      console.log('Subscription created:', result);
-
-      if (result.added_node_ids && result.added_node_ids.length > 0) {
-        const nodeId = result.added_node_ids[0];
-        const nodeWithId = { ...subscriptionNode, id: nodeId };
-        addNodesToVisualization([nodeWithId], []);
-        console.log('Subscription added to visualization:', nodeId);
+      if (data.id && data.updates) {
+        await api.updateNode(data.id, data.updates);
+        const newNodes = nodes.map(n => n.id === data.id ? { ...n, ...data.updates } : n);
+        updateVisualization(newNodes, edges);
+        setEditingSubscriptionData(null);
+        showNotification('success', t('notifications.subscription_created', { name: data.updates.name }));
+      } else {
+        const result = await api.addNodes([data], []);
+        if (result.added_node_ids?.length > 0) {
+          addNodesToVisualization([{ ...data, id: result.added_node_ids[0] }], []);
+        }
+        showNotification('success', t('notifications.subscription_created', { name: data.name }));
       }
-
-      showNotification('success', t('notifications.subscription_created', { name: subscriptionNode.name }));
     } catch (error) {
-      console.error('Error creating subscription:', error);
+      console.error('Error saving subscription:', error);
       showNotification('error', t('notifications.subscription_error'));
     }
-  }, [addNodesToVisualization, showNotification, t]);
+  }, [addNodesToVisualization, nodes, edges, updateVisualization, showNotification, t]);
 
   // Save agent nodes (create or update)
   const handleSaveAgent = useCallback(async (data) => {
@@ -781,8 +787,9 @@ function App() {
 
       {showSubscriptionDialog && (
         <CreateSubscriptionDialog
-          onClose={() => setShowSubscriptionDialog(false)}
+          onClose={() => { setShowSubscriptionDialog(false); setEditingSubscriptionData(null); }}
           onSave={handleSaveSubscription}
+          initialData={editingSubscriptionData}
         />
       )}
 
