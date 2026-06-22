@@ -64,6 +64,7 @@ function App() {
   const { t, setLanguage, language } = useI18n();
 
   const urlGuideStartedRef = useRef(false);
+  const urlViewLoadedRef = useRef(false);
   const [notification, setNotification] = useState(null);
   const [deleteDialog, setDeleteDialog] = useState(null);
   const [saveViewDialog, setSaveViewDialog] = useState(null);
@@ -128,6 +129,29 @@ function App() {
       startGuide(guide);
     }
   }, [presentation, startGuide]);
+
+  // Load saved view from URL param ?view=<name> — fires once after stats confirm backend is ready
+  useEffect(() => {
+    if (!stats || urlViewLoadedRef.current) return;
+    const urlViewName = new URLSearchParams(window.location.search).get('view');
+    if (!urlViewName) return;
+    urlViewLoadedRef.current = true;
+    (async () => {
+      try {
+        const result = await api.getSavedView(urlViewName);
+        if (!result?.success || !result.nodes?.length) return;
+        const positioned = result.nodes.map(n =>
+          result.positions?.[n.id] ? { ...n, _savedPosition: result.positions[n.id] } : n
+        );
+        clearVisualization();
+        addNodesToVisualization(positioned, result.edges || []);
+        if (result.hidden_node_ids?.length) setHiddenNodeIds(result.hidden_node_ids);
+        if (result.groups?.length) setPendingGroups({ groups: result.groups, parentIds: result.parentIds || {} });
+      } catch (err) {
+        console.error('[App] Failed to load view from URL:', err);
+      }
+    })();
+  }, [stats, clearVisualization, addNodesToVisualization, setHiddenNodeIds, setPendingGroups]);
 
   const showNotification = useCallback((type, message) => {
     setNotification({ type, message });
