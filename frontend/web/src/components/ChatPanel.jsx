@@ -8,7 +8,7 @@ import 'katex/dist/katex.min.css';
 import useGraphStore from '../store/graphStore';
 import { useI18n } from '../i18n';
 import * as api from '../services/api';
-import { positionNewNodes, getNodeColor } from '@community-graph/ui-graph-canvas';
+import { positionNewNodes } from '@community-graph/ui-graph-canvas';
 import ExpertAgentSelector from './ExpertAgentSelector';
 import './ChatPanel.css';
 
@@ -47,6 +47,7 @@ function ChatPanel() {
     startGuide,
     guideChatInput,
     clearGuideChatInput,
+    getNodeColor,
   } = useGraphStore();
 
   const { t, language } = useI18n();

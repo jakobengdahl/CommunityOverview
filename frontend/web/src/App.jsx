@@ -59,6 +59,7 @@ function App() {
     showMinimap,
     nodeMarks,
     startGuide,
+    getNodeColor,
   } = useGraphStore();
 
   const { t, setLanguage, language } = useI18n();
@@ -690,6 +691,7 @@ function App() {
           showMinimap={showMinimap}
           schema={schema}
           onContextMenuAction={handleContextMenuAction}
+          nodeColorResolver={getNodeColor}
         />
       </div>
 
