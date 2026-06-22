@@ -702,7 +702,6 @@ class TestGraphStorageEdgeHelpers:
         assert len(edges) == 3
 
 
-
 class TestGraphStorageConcurrency:
     """Tests for concurrent access safety.
 
