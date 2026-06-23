@@ -14,13 +14,20 @@ import ChatPanel from './components/ChatPanel';
 import CreateSubscriptionDialog from './components/CreateSubscriptionDialog';
 import CreateSkillDialog from './components/CreateSkillDialog';
 import CreateAgentDialog from './components/CreateAgentDialog';
+import CreateActiveKnowledgeCollectionDialog from './components/CreateActiveKnowledgeCollectionDialog';
+import CollectKioskView from './components/CollectKioskView';
 import EditEdgeDialog from './components/EditEdgeDialog';
 import NodeDetailDialog from './components/NodeDetailDialog';
 import GuideOverlay from './components/GuideOverlay';
 import * as api from './services/api';
 import './App.css';
 
+const _urlParams = new URLSearchParams(window.location.search);
+const _collectShortName = _urlParams.get('collect');
+const _akcShortName = _urlParams.get('akc');
+
 function App() {
+  const akcShortName = _akcShortName;
   const {
     nodes,
     edges,
@@ -80,6 +87,10 @@ function App() {
   const [editingEdge, setEditingEdge] = useState(null);
   const [skillDialogType, setSkillDialogType] = useState(null);
   const [editingSkillData, setEditingSkillData] = useState(null);
+  const [showAKCDialog, setShowAKCDialog] = useState(false);
+  const [editingAKCData, setEditingAKCData] = useState(null);
+  const [akcIntroShown, setAkcIntroShown] = useState(false);
+  const [akcConfig, setAkcConfig] = useState(null);
 
   const federationDepthLevels = (stats?.federation?.selectable_depth_levels || [1]).filter(v => Number.isInteger(v) && v >= 1);
   const maxFederationDepth = Math.max(1, ...federationDepthLevels, stats?.federation?.max_selectable_depth || 1);
@@ -119,6 +130,13 @@ function App() {
     };
     loadConfig();
   }, [setConfig, setStats, setLlmAvailable, t, setLanguage, language]); // eslint-disable-line react-hooks/exhaustive-deps
+
+  useEffect(() => {
+    if (!akcShortName) return;
+    api.getCollectConfig(akcShortName)
+      .then(data => setAkcConfig(data))
+      .catch(err => console.error('[App] Failed to load AKC config:', err));
+  }, [akcShortName]);
 
   // Trigger guide from URL param ?guide=<id> — fires once when presentation first becomes available
   useEffect(() => {
@@ -273,6 +291,9 @@ function App() {
     } else if (nodeData.type === 'EventSubscription') {
       setEditingSubscriptionData(nodeData);
       setShowSubscriptionDialog(true);
+    } else if (nodeData.type === 'ActiveKnowledgeCollection') {
+      setEditingAKCData({ node: nodeData });
+      setShowAKCDialog(true);
     } else if (schema?.node_types?.[nodeData.type]?.ui_form === 'skill') {
       setEditingSkillData(nodeData);
       setSkillDialogType(nodeData.type);
@@ -579,6 +600,33 @@ function App() {
     }
   }, [nodes, edges, updateVisualization, addNodesToVisualization, showNotification]);
 
+  const handleCreateAKC = useCallback(() => {
+    setEditingAKCData(null);
+    setShowAKCDialog(true);
+  }, []);
+
+  const handleSaveAKC = useCallback(async (nodeData) => {
+    try {
+      if (nodeData.id) {
+        const { id, ...updates } = nodeData;
+        await api.updateNode(id, updates);
+        const newNodes = nodes.map(n => n.id === id ? { ...n, ...updates } : n);
+        updateVisualization(newNodes, edges);
+        showNotification('success', 'Knowledge collection updated');
+      } else {
+        const result = await api.addNodes([nodeData], []);
+        if (result.added_node_ids && result.added_node_ids.length > 0) {
+          const withId = { ...nodeData, id: result.added_node_ids[0] };
+          addNodesToVisualization([withId], []);
+        }
+        showNotification('success', `Collection "${nodeData.name}" created`);
+      }
+    } catch (error) {
+      console.error('Error saving AKC:', error);
+      showNotification('error', 'Could not save knowledge collection');
+    }
+  }, [nodes, edges, addNodesToVisualization, updateVisualization, showNotification]);
+
   // Callback: Context menu action triggered from schema-defined callback items
   const handleContextMenuAction = useCallback((actionName, nodeId, nodeData) => {
     // Dispatch named callback actions from schema context_menu entries.
@@ -623,13 +671,15 @@ function App() {
       handleCreateAgent();
     } else if (nodeType === 'EventSubscription') {
       handleCreateSubscription();
+    } else if (nodeType === 'ActiveKnowledgeCollection') {
+      handleCreateAKC();
     } else if (schema?.node_types?.[nodeType]?.ui_form === 'skill') {
       setEditingSkillData(null);
       setSkillDialogType(nodeType);
     } else {
       setCreateNodeType(nodeType);
     }
-  }, [handleCreateAgent, handleCreateSubscription, schema]);
+  }, [handleCreateAgent, handleCreateSubscription, handleCreateAKC, schema]);
 
   // Handle node update from edit dialog
   const handleNodeUpdate = useCallback(async (nodeId, updates) => {
@@ -708,8 +758,9 @@ function App() {
         onCreateSubscription={handleCreateSubscription}
         onSaveView={handleToolbarSaveView}
         onCreateGroup={handleToolbarCreateGroup}
+        onCreateActiveKnowledgeCollection={handleCreateAKC}
       />
-      {llmAvailable && <ChatPanel />}
+      {llmAvailable && <ChatPanel collectionShortName={akcShortName || undefined} />}
 
       {createNodeType && (
         <CreateNodeDialog
@@ -815,9 +866,74 @@ function App() {
         />
       )}
 
+      {showAKCDialog && (
+        <CreateActiveKnowledgeCollectionDialog
+          onClose={() => {
+            setShowAKCDialog(false);
+            setEditingAKCData(null);
+          }}
+          onSave={handleSaveAKC}
+          initialData={editingAKCData}
+        />
+      )}
+
+      {akcShortName && akcConfig && !akcIntroShown && (
+        <div
+          style={{
+            position: 'fixed',
+            inset: 0,
+            background: 'rgba(0,0,0,0.82)',
+            display: 'flex',
+            alignItems: 'center',
+            justifyContent: 'center',
+            zIndex: 3000,
+          }}
+        >
+          <div
+            style={{
+              background: '#1a1a1a',
+              border: '1px solid #2e2e2e',
+              borderRadius: '16px',
+              boxShadow: '0 12px 48px rgba(0,0,0,0.6)',
+              padding: '2.5rem 3rem',
+              maxWidth: '520px',
+              width: '90%',
+              textAlign: 'center',
+            }}
+          >
+            <h2 style={{ margin: '0 0 1rem 0', color: '#fff' }}>Knowledge Collection</h2>
+            <p style={{ color: '#bbb', fontSize: '0.95rem', lineHeight: 1.65, marginBottom: '1.5rem' }}>
+              The AI assistant has been pre-loaded with special collection instructions.
+            </p>
+            <button
+              onClick={() => setAkcIntroShown(true)}
+              style={{
+                padding: '0.7rem 2rem',
+                background: '#F59E0B',
+                color: '#000',
+                border: 'none',
+                borderRadius: '8px',
+                fontSize: '0.95rem',
+                fontWeight: 600,
+                cursor: 'pointer',
+              }}
+            >
+              Open Graph
+            </button>
+          </div>
+        </div>
+      )}
+
       <GuideOverlay />
     </div>
   );
 }
 
-export default App;
+function AppRoot() {
+  if (_collectShortName) {
+    return <CollectKioskView shortName={_collectShortName} />;
+  }
+  return <App />;
+}
+
+export default AppRoot;

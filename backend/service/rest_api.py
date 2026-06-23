@@ -18,7 +18,7 @@ Usage:
 """
 
 from typing import List, Optional, Dict, Any
-from fastapi import APIRouter, HTTPException, Query, Body, Request
+from fastapi import APIRouter, HTTPException, Query, Body, Request, Path
 from pydantic import BaseModel, Field
 
 from backend.authorization import use_request_authorization
@@ -451,5 +451,41 @@ def create_rest_router(service: GraphService, prefix: str = "") -> APIRouter:
     _register_metadata_endpoints(router, service)
     _register_views_endpoints(router, service)
     _register_export_endpoints(router, service)
+
+    @router.get("/collect/{short_name}")
+    async def get_collect_config(
+        short_name: str = Path(..., pattern=r'^[a-z0-9][a-z0-9-]{0,98}[a-z0-9]$|^[a-z0-9]$')
+    ) -> Dict[str, Any]:
+        """Get Active Knowledge Collection public config by short name.
+
+        The AI prompt is intentionally excluded to prevent exposure of
+        operator-configured instructions. The prompt is resolved server-side
+        when the chat endpoint receives collection_short_name.
+        """
+        try:
+            result = service.search_graph(
+                query="",
+                node_types=["ActiveKnowledgeCollection"],
+                limit=500
+            )
+            nodes = result.get("nodes", [])
+            for node in nodes:
+                metadata = node.get("metadata") or {}
+                if metadata.get("short_name") == short_name:
+                    return {
+                        "found": True,
+                        "name": node.get("name", ""),
+                        "short_name": short_name,
+                        "introduction_text": metadata.get("introduction_text", ""),
+                        "node_type_permissions": metadata.get("node_type_permissions", {}),
+                    }
+            raise HTTPException(
+                status_code=404,
+                detail=f"No Active Knowledge Collection found with short_name '{short_name}'"
+            )
+        except HTTPException:
+            raise
+        except Exception as e:
+            raise HTTPException(status_code=500, detail=str(e))
 
     return router
