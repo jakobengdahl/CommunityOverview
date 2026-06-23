@@ -106,6 +106,7 @@ function GraphCanvasInner({
   showMinimap = false,
   schema = null,
   onContextMenuAction = null,
+  nodeColorResolver = null,
 }) {
   const [loadedNodeCount, setLoadedNodeCount] = useState(INITIAL_LOAD_COUNT);
   const [nodeContextMenu, setNodeContextMenu] = useState(null);
@@ -199,7 +200,7 @@ function GraphCanvasInner({
           label: node.name,
           summary: node.summary || node.description?.slice(0, 100),
           nodeType: node.type,
-          color: getNodeColor(node.type),
+          color: (nodeColorResolver || getNodeColor)(node.type),
           isHighlighted: highlightedNodeIds.includes(node.id),
           markColor: mark?.color ?? null,
           markLabel: mark?.label ?? null,
