@@ -3,12 +3,24 @@ import { render, screen, fireEvent } from '@testing-library/react';
 import { GraphCanvas } from '../src/index';
 
 vi.mock('reactflow', () => {
-  const MockReactFlow = ({ children, nodes }) => (
+  const MockReactFlow = ({ children, nodes, edges, onEdgeContextMenu }) => (
     <div data-testid="react-flow" className="react-flow">
       <div data-testid="nodes">
         {nodes?.map((node) => (
           <div key={node.id} data-testid={`node-${node.id}`}>
             {node.data?.label}
+          </div>
+        ))}
+      </div>
+      <div data-testid="edges">
+        {edges?.map((edge) => (
+          <div
+            key={edge.id}
+            data-testid={`edge-${edge.id}`}
+            className="react-flow__edge"
+            onContextMenu={(event) => onEdgeContextMenu?.(event, edge)}
+          >
+            {edge.label || edge.type}
           </div>
         ))}
       </div>
@@ -107,5 +119,22 @@ describe('GraphCanvas', () => {
 
     fireEvent.click(screen.getByRole('button', { name: '3' }));
     expect(onFederationDepthChange).toHaveBeenCalledWith(3);
+  });
+
+  it('calls onDeleteEdge from edge context menu when delete is clicked', () => {
+    const onDeleteEdge = vi.fn();
+
+    render(
+      <GraphCanvas
+        nodes={sampleNodes}
+        edges={sampleEdges}
+        onDeleteEdge={onDeleteEdge}
+      />
+    );
+
+    fireEvent.contextMenu(screen.getByTestId('edge-edge-1'));
+    fireEvent.click(screen.getByRole('button', { name: /ta bort/i }));
+
+    expect(onDeleteEdge).toHaveBeenCalledWith('edge-1');
   });
 });
