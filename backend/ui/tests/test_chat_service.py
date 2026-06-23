@@ -352,21 +352,21 @@ class TestExpertAgentSkills:
             service._processor.provider_type = "mock"
             service._processor.default_api_key = "test-key"
 
-        service._expert_contexts["leg"] = "You are a legislation expert."
-        service._expert_skills["leg"] = []
+            service._expert_contexts["leg"] = "You are a legislation expert."
+            service._expert_skills["leg"] = []
 
-        # Capture the system_prompt actually passed to create_completion
-        received_prompts = []
-        original = mock_llm_provider.create_completion
-        def capture(*args, **kwargs):
-            received_prompts.append(kwargs.get("system_prompt", ""))
-            return original(*args, **kwargs)
-        mock_llm_provider.create_completion = capture
+            # Capture the system_prompt actually passed to create_completion
+            received_prompts = []
+            original = mock_llm_provider.create_completion
+            def capture(*args, **kwargs):
+                received_prompts.append(kwargs.get("system_prompt", ""))
+                return original(*args, **kwargs)
+            mock_llm_provider.create_completion = capture
 
-        service.process_message(
-            messages=[{"role": "user", "content": "hello"}],
-            expert_agent_id="leg",
-        )
+            service.process_message(
+                messages=[{"role": "user", "content": "hello"}],
+                expert_agent_id="leg",
+            )
 
         assert received_prompts, "create_completion was never called"
         assert "You are a legislation expert." in received_prompts[0]

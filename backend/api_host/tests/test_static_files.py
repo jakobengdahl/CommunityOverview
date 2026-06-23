@@ -171,6 +171,10 @@ class TestStaticFilesNotBuilt:
         assert "not built" in data["error"].lower()
 
 
+@pytest.mark.skipif(
+    not (Path(__file__).parent.parent.parent / "apps" / "web" / "dist" / "index.html").exists(),
+    reason="Frontend dist not built"
+)
 class TestStaticFilesWithRealPaths:
     """Tests using the actual static file paths in apps directory."""
 

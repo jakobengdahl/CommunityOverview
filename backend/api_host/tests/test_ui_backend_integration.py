@@ -26,13 +26,12 @@ class TestUIBackendMounting:
         assert "provider" in data
         assert "available_tools" in data
 
-    def test_root_includes_ui_endpoint(self, test_app_with_mock):
-        """Root endpoint should list /ui endpoint."""
+    def test_root_redirects_to_web(self, test_app_with_mock):
+        """Root endpoint should redirect to /web/."""
         client, _ = test_app_with_mock
-        response = client.get("/")
-        assert response.status_code == 200
-        data = response.json()
-        assert "/ui" in data["endpoints"]["ui"]
+        response = client.get("/", follow_redirects=False)
+        assert response.status_code == 302
+        assert response.headers["location"] == "/web/"
 
     def test_supported_formats_endpoint(self, test_app_with_mock):
         """Supported formats endpoint should work."""
@@ -298,21 +297,18 @@ class TestGraphServiceSharing:
         assert data["success"]
         assert data["node"]["name"] == "Chat to REST"
 
-    def test_mcp_and_chat_share_graph(self, test_app_with_mock):
-        """MCP execute_tool and Chat should share the same GraphService."""
+    def test_rest_api_and_chat_share_graph(self, test_app_with_mock):
+        """REST API and Chat should share the same GraphService."""
         client, mock_llm = test_app_with_mock
-        # Add node via execute_tool (MCP)
-        response = client.post("/execute_tool", json={
-            "tool_name": "add_nodes",
-            "arguments": {
-                "nodes": [{
-                    "id": "mcp-to-chat-node",
-                    "name": "MCP to Chat",
-                    "type": "Resource",
-                    "description": "Added via MCP"
-                }],
-                "edges": []
-            }
+        # Add node via REST API
+        response = client.post("/api/nodes", json={
+            "nodes": [{
+                "id": "mcp-to-chat-node",
+                "name": "MCP to Chat",
+                "type": "Resource",
+                "description": "Added via REST"
+            }],
+            "edges": []
         })
         assert response.status_code == 200
 

@@ -47,6 +47,9 @@ class TestGraphServiceIntegration:
             edges=[]
         )
 
+        # Wait for background save to complete
+        storage1.save().result()
+
         # Create service 2 with same storage path
         storage2 = GraphStorage(json_path=json_path, embeddings_path=embeddings_path)
         service2 = GraphService(storage2)
@@ -118,7 +121,7 @@ class TestGraphServiceIntegration:
             nodes=[
                 {"id": "n1", "type": "Actor", "name": "Actor"},
                 {"id": "n2", "type": "Initiative", "name": "Initiative"},
-                {"id": "n3", "type": "Community", "name": "Community"}
+                {"id": "n3", "type": "Capability", "name": "Capability"}
             ],
             edges=[
                 {"source": "n1", "target": "n2", "type": "BELONGS_TO"},
@@ -164,7 +167,6 @@ class TestGraphServiceIntegration:
         assert stats["total_nodes"] == 3
         assert stats["nodes_by_type"]["Actor"] == 2
         assert stats["nodes_by_type"]["Initiative"] == 1
-        assert stats["nodes_by_community"]["C1"] == 3
 
 
 class TestGraphCoreCompatibility:
@@ -196,16 +198,16 @@ class TestGraphCoreCompatibility:
         edge = list(empty_service.storage.edges.values())[0]
         assert edge.type == RelationshipType.BELONGS_TO
 
-    def test_pydantic_model_validation(self, empty_service):
-        """Test that Pydantic validation is applied to input data."""
-        # Invalid node type should fail
+    def test_dynamic_node_type_accepted(self, empty_service):
+        """Test that dynamic node types are accepted."""
         result = empty_service.add_nodes(
-            nodes=[{"type": "InvalidType", "name": "Test"}],
+            nodes=[{"type": "CustomType", "name": "Test"}],
             edges=[]
         )
-        assert result["success"] is False
+        assert result["success"] is True
 
-        # Empty name should fail
+    def test_empty_name_rejected(self, empty_service):
+        """Test that empty name is rejected."""
         result = empty_service.add_nodes(
             nodes=[{"type": "Actor", "name": ""}],
             edges=[]

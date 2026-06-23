@@ -250,7 +250,7 @@ def test_app(app_config, mock_llm_provider) -> TestClient:
     For tests that need to configure the mock LLM, use test_app_with_mock.
     """
     # Patch LLM provider BEFORE creating app
-    with patch('chat_logic.create_provider', return_value=mock_llm_provider):
+    with patch('backend.chat_logic.create_provider', return_value=mock_llm_provider):
         with patch.dict(os.environ, {'ANTHROPIC_API_KEY': 'test-key'}):
             app = create_app(app_config)
             # Update the chat service to use our mock
@@ -266,7 +266,7 @@ def test_app_with_mock(app_config, mock_llm_provider):
     Returns a tuple of (TestClient, mock_llm_provider) for tests that need to configure the mock.
     """
     # Patch LLM provider BEFORE creating app
-    with patch('chat_logic.create_provider', return_value=mock_llm_provider):
+    with patch('backend.chat_logic.create_provider', return_value=mock_llm_provider):
         with patch.dict(os.environ, {'ANTHROPIC_API_KEY': 'test-key'}):
             app = create_app(app_config)
             # Update the chat service to use our mock

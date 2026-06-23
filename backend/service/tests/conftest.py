@@ -73,7 +73,7 @@ def mock_embedding_model():
 @pytest.fixture
 def temp_dir() -> Generator[str, None, None]:
     """Create a temporary directory for test files."""
-    with tempfile.TemporaryDirectory() as tmpdir:
+    with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as tmpdir:
         yield tmpdir
 
 
@@ -121,7 +121,7 @@ def sample_nodes() -> list:
         ),
         Node(
             id="community-1",
-            type=NodeType.COMMUNITY,
+            type=NodeType.CAPABILITY,
             name="eSam",
             description="eGovernment collaboration community",
             summary="eGov community"

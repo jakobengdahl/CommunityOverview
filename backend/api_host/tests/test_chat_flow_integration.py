@@ -105,11 +105,11 @@ class TestChatFlowIntegration:
         assert result.get("toolUsed") == "add_nodes"
         tool_result = result.get("toolResult")
         assert tool_result is not None
-        assert tool_result.get("success")
-        assert len(tool_result.get("added_node_ids", [])) == 1
+        assert "nodes" in tool_result
+        assert len(tool_result["nodes"]) == 1
 
         # Step 2: Verify node exists via REST API
-        added_node_id = tool_result["added_node_ids"][0]
+        added_node_id = tool_result["nodes"][0]["id"]
         response = client.get(f"/api/nodes/{added_node_id}")
         assert response.status_code == 200
         node_data = response.json()
@@ -164,7 +164,7 @@ class TestChatFlowIntegration:
         assert response.status_code == 200
         result = response.json()
         assert result.get("toolUsed") == "update_node"
-        assert result.get("toolResult", {}).get("success")
+        assert "nodes" in result.get("toolResult", {})
 
         # Verify update via REST
         response = client.get(f"/api/nodes/{node_id}")
@@ -424,7 +424,7 @@ class TestChatFlowIntegration:
                 "messages": [{"role": "user", "content": "Add a Chat Created Node"}]
             }
         )
-        chat_node_id = response.json()["toolResult"]["added_node_ids"][0]
+        chat_node_id = response.json()["toolResult"]["nodes"][0]["id"]
 
         # Should be findable via REST
         response = client.post("/api/search", json={"query": "Chat Created"})
