@@ -61,7 +61,7 @@ class TestHealthAndRoot:
         """Info endpoint reports llm_available=True when API key is set."""
         with patch.dict(os.environ, {"ANTHROPIC_API_KEY": "sk-ant-test", "LLM_PROVIDER": "claude"}):
             from backend.api_host import create_app
-            with patch('chat_logic.create_provider'):
+            with patch('backend.chat_logic.create_provider'):
                 app = create_app(app_config)
             client = TestClient(app)
             response = client.get("/info")
@@ -144,6 +144,18 @@ class TestHealthAndRoot:
                 "workspace_kind": "",
                 "has_workspace": False,
                 "has_graph": False,
+                "has_selection": False,
+                "selection_mode": "default",
+                "selection_source": "default",
+                "source": "default",
+            },
+            "selection": {
+                "workspace_kind": "",
+                "has_workspace": False,
+                "has_graph": False,
+                "has_selection": False,
+                "selection_mode": "default",
+                "selection_source": "default",
                 "source": "default",
             },
         }
@@ -161,7 +173,7 @@ class TestHealthAndRoot:
         caplog,
     ):
         """App startup emits structured diagnostics for operability tooling."""
-        with patch("chat_logic.create_provider", return_value=mock_llm_provider):
+        with patch("backend.chat_logic.create_provider", return_value=mock_llm_provider):
             with patch.dict(os.environ, {"ANTHROPIC_API_KEY": "test-key"}):
                 with caplog.at_level("INFO"):
                     app = create_app(app_config)
@@ -185,7 +197,7 @@ class TestHealthAndRoot:
         monkeypatch.setenv("COMMUNITYOVERVIEW_TENANT_NAME", "Highly Sensitive Tenant")
         monkeypatch.setenv("COMMUNITYOVERVIEW_ENVIRONMENT", "staging")
 
-        with patch("chat_logic.create_provider", return_value=mock_llm_provider):
+        with patch("backend.chat_logic.create_provider", return_value=mock_llm_provider):
             with patch.dict(os.environ, {"ANTHROPIC_API_KEY": "test-key"}):
                 client = TestClient(create_app(app_config))
 
@@ -235,7 +247,7 @@ class TestHealthAndRoot:
         )
         degraded_graph_storage = GraphStorage(str(graph_path))
 
-        with patch("chat_logic.create_provider", return_value=mock_llm_provider):
+        with patch("backend.chat_logic.create_provider", return_value=mock_llm_provider):
             with patch.dict(os.environ, {"ANTHROPIC_API_KEY": "test-key"}):
                 client = TestClient(create_app(app_config, graph_storage=degraded_graph_storage))
 
@@ -271,16 +283,16 @@ class TestSearchEndpoints:
         for node in data["nodes"]:
             assert node["type"] == "Actor"
 
-    def test_search_graph_with_community_filter(self, test_app: TestClient):
-        """Search with community filter."""
+    def test_search_graph_with_type_and_limit(self, test_app: TestClient):
+        """Search with type filter and limit."""
         response = test_app.post(
             "/api/search",
-            json={"query": "test", "communities": ["TestCommunity"]}
+            json={"query": "test", "node_types": ["Actor"], "limit": 10}
         )
         assert response.status_code == 200
         data = response.json()
         for node in data["nodes"]:
-            assert "TestCommunity" in node.get("communities", [])
+            assert node["type"] == "Actor"
 
     def test_search_graph_with_limit(self, test_app: TestClient):
         """Search respects limit parameter."""
@@ -496,12 +508,13 @@ class TestStatisticsEndpoints:
         assert data["total_nodes"] == 3
         assert data["total_edges"] == 2
 
-    def test_get_graph_stats_with_community_filter(self, test_app: TestClient):
-        """Get stats filtered by community."""
-        response = test_app.get("/api/stats?communities=TestCommunity")
+    def test_get_graph_stats_has_type_counts(self, test_app: TestClient):
+        """Stats include node counts by type."""
+        response = test_app.get("/api/stats")
         assert response.status_code == 200
         data = response.json()
-        assert data["total_nodes"] == 2  # Only nodes in TestCommunity
+        assert "nodes_by_type" in data
+        assert data["nodes_by_type"]["Actor"] == 1
 
     def test_list_node_types(self, test_app: TestClient):
         """List available node types."""
@@ -681,7 +694,7 @@ class TestUiCapabilitiesEndpoint:
         """llm_available is True when ANTHROPIC_API_KEY is configured."""
         with patch.dict(os.environ, {"ANTHROPIC_API_KEY": "sk-ant-test", "LLM_PROVIDER": "claude"}):
             from backend.api_host import create_app
-            with patch('chat_logic.create_provider'):
+            with patch('backend.chat_logic.create_provider'):
                 app = create_app(app_config)
             client = TestClient(app)
             response = client.get("/ui/capabilities")
@@ -707,7 +720,7 @@ class TestUiCapabilitiesEndpoint:
         with patch.dict(os.environ, env_patch):
             os.environ.pop("ANTHROPIC_API_KEY", None)
             from backend.api_host import create_app
-            with patch('chat_logic.create_provider'):
+            with patch('backend.chat_logic.create_provider'):
                 app = create_app(app_config)
             client = TestClient(app)
             response = client.get("/ui/capabilities")
@@ -735,7 +748,7 @@ class TestStartupDiagnosticsLlmCheck:
         """LLM check status is 'ok' when a key is configured."""
         with patch.dict(os.environ, {"ANTHROPIC_API_KEY": "sk-ant-test", "LLM_PROVIDER": "claude"}):
             from backend.api_host import create_app
-            with patch('chat_logic.create_provider'):
+            with patch('backend.chat_logic.create_provider'):
                 app = create_app(app_config)
             client = TestClient(app)
             response = client.get("/diagnostics/startup")
