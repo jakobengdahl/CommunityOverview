@@ -96,7 +96,7 @@ export default function CreateActiveKnowledgeCollectionDialog({ onClose, onSave,
     }));
   };
 
-  const isShortNameValid = (value) => /^[a-z0-9-]+$/.test(value) && value.length > 0;
+  const isShortNameValid = (value) => /^[a-z0-9]([a-z0-9-]{0,98}[a-z0-9])?$/.test(value);
 
   const kioskUrl = shortName ? `${window.location.origin}/collect/${shortName}` : '';
   const fullAppUrl = shortName ? `${window.location.origin}/web/?akc=${shortName}` : '';

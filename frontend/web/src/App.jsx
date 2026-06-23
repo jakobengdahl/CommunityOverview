@@ -877,7 +877,7 @@ function App() {
         />
       )}
 
-      {akcShortName && !akcIntroShown && (
+      {akcShortName && akcConfig && !akcIntroShown && (
         <div
           style={{
             position: 'fixed',

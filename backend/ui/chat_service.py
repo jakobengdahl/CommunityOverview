@@ -254,7 +254,7 @@ class ChatService:
                         )
                     return "\n".join(lines)
         except Exception:
-            pass
+            logger.warning("Failed to resolve AKC short_name %r", short_name, exc_info=True)
         return None
 
     def process_message(
@@ -265,7 +265,6 @@ class ChatService:
         federation_depth: Optional[int] = None,
         expert_agent_id: Optional[str] = None,
         skills_context: Optional[str] = None,
-        system_prompt_prefix: Optional[str] = None,
         collection_short_name: Optional[str] = None,
     ) -> Dict[str, Any]:
         """
@@ -295,10 +294,7 @@ class ChatService:
             - toolUsed: Name of the last tool used (if any)
             - toolResult: Result from the tool (if any)
         """
-        if collection_short_name:
-            effective_prefix = self._build_collection_prefix(collection_short_name)
-        else:
-            effective_prefix = system_prompt_prefix
+        effective_prefix = self._build_collection_prefix(collection_short_name) if collection_short_name else None
 
         self._current_federation_depth = federation_depth
         try:
