@@ -28,7 +28,7 @@ from typing import Optional, Dict, Any, Callable
 
 logger = logging.getLogger(__name__)
 
-from fastapi import FastAPI
+from fastapi import FastAPI, Path as FastAPIPath
 from fastapi.responses import JSONResponse, RedirectResponse, FileResponse
 from fastapi.staticfiles import StaticFiles
 from fastapi.middleware.cors import CORSMiddleware
@@ -740,6 +740,20 @@ def create_app(
         if _favicon_path.exists():
             return FileResponse(str(_favicon_path), media_type="image/svg+xml")
         return JSONResponse(status_code=204, content=None)
+
+    @app.get("/collect/{short_name}")
+    @app.get("/collect/{short_name}/")
+    async def collect_redirect(
+        short_name: str = FastAPIPath(..., pattern=r'^[a-z0-9][a-z0-9-]{0,98}[a-z0-9]$|^[a-z0-9]$')
+    ) -> RedirectResponse:
+        """Redirect collect kiosk URL to the web app in collect mode."""
+        from urllib.parse import quote
+        return RedirectResponse(url=f"/web/?collect={quote(short_name, safe='')}", status_code=302)
+
+    @app.get("/collect")
+    async def collect_root_redirect() -> RedirectResponse:
+        """Redirect bare collect URL to web app."""
+        return RedirectResponse(url="/web/", status_code=302)
 
     # Mount static files for web app
     _mount_static_files(app, config)

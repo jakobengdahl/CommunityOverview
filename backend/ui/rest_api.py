@@ -41,6 +41,8 @@ class ChatRequest(BaseModel):
             " — injected as extra system context for this request only"
         ),
     )
+    system_prompt_prefix: Optional[str] = Field(None, max_length=8000, description="Optional system prompt prefix (max 8000 chars)")
+    collection_short_name: Optional[str] = Field(None, pattern=r'^[a-z0-9][a-z0-9-]{0,98}[a-z0-9]$|^[a-z0-9]$', description="AKC short name — server resolves prompt server-side (preferred over system_prompt_prefix)")
 
 
 class SimpleChatRequest(BaseModel):
@@ -130,6 +132,8 @@ def create_ui_router(
                 federation_depth=request.federation_depth,
                 expert_agent_id=request.expert_agent_id,
                 skills_context=request.skills_context,
+                system_prompt_prefix=request.system_prompt_prefix,
+                collection_short_name=request.collection_short_name,
             )
 
             return ChatResponse(

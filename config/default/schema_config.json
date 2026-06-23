@@ -66,6 +66,14 @@
         "color": "#8B5CF6",
         "icon": "StarFill"
       },
+      "ActiveKnowledgeCollection": {
+        "fields": ["name", "description", "summary", "tags"],
+        "static": false,
+        "category": "system",
+        "description": "Active knowledge collection configuration - enables structured data gathering through a special AI-assistant kiosk.",
+        "color": "#F59E0B",
+        "icon": "FunnelFill"
+      },
       "Actor": {
         "fields": [
           "name",
@@ -279,7 +287,8 @@
       "SavedView": "#6B7280",
       "VisualizationView": "#6B7280",
       "EventSubscription": "#8B5CF6",
-      "Agent": "#EC4899"
+      "Agent": "#EC4899",
+      "ActiveKnowledgeCollection": "#F59E0B"
     },
     "prompt_prefix": "You are a knowledge agent that helps users navigate and maintain a knowledge graph for community collaboration on public digitalization.",
     "prompt_suffix": "Remember to suggest saved views when relevant, and always ask for confirmation before making changes to the graph.",

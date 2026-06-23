@@ -29,6 +29,7 @@ import {
   LightbulbFill,
   GearFill,
   CollectionFill,
+  FunnelFill,
 } from 'react-bootstrap-icons';
 import useGraphStore from '../store/graphStore';
 import { useI18n } from '../i18n';
@@ -65,6 +66,7 @@ const ICON_REGISTRY = {
   LightbulbFill,
   GearFill,
   CollectionFill,
+  FunnelFill,
 };
 
 // Legacy fallback: maps node type name -> icon name (used when schema has no icon field)
@@ -86,6 +88,7 @@ const LEGACY_ICON_MAP = {
   'Variabel': 'Sliders',
   'Population': 'PeopleFill',
   'Klassifikation': 'Diagram3Fill',
+  ActiveKnowledgeCollection: 'FunnelFill',
   Agent: 'CpuFill',
   EventSubscription: 'BellFill',
   SavedView: 'BookmarkFill',
@@ -110,6 +113,7 @@ const COLOR_MAP = {
   'Variabel': '#14B8A6',
   'Population': '#EF4444',
   'Klassifikation': '#84CC16',
+  ActiveKnowledgeCollection: '#F59E0B',
   Agent: '#EC4899',
   EventSubscription: '#8B5CF6',
   SavedView: '#6B7280',
@@ -117,7 +121,7 @@ const COLOR_MAP = {
 };
 
 // System types always shown at the bottom (not from schema)
-const SYSTEM_TYPES = ['Agent', 'EventSubscription', 'Group'];
+const SYSTEM_TYPES = ['Agent', 'EventSubscription', 'ActiveKnowledgeCollection', 'Group'];
 const VIEW_TYPES = ['SavedView'];
 
 // Fallback order when schema hasn't loaded yet
@@ -151,6 +155,7 @@ function FloatingToolbar({
   onCreateSubscription,
   onSaveView,
   onCreateGroup,
+  onCreateActiveKnowledgeCollection,
 }) {
   const { t } = useI18n();
   const [hoveredType, setHoveredType] = useState(null);
@@ -192,6 +197,8 @@ function FloatingToolbar({
       onSaveView?.();
     } else if (nodeType === 'Group') {
       onCreateGroup?.();
+    } else if (nodeType === 'ActiveKnowledgeCollection') {
+      onCreateActiveKnowledgeCollection?.();
     } else {
       onCreateNode?.(nodeType);
     }

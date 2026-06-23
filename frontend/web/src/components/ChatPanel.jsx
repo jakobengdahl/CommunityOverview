@@ -25,7 +25,7 @@ const isSkillNode = (node) =>
   node.data?.nodeType === 'Skill' ||
   node.data?.type === 'Skill';
 
-function ChatPanel() {
+function ChatPanel({ collectionShortName }) {
   const {
     chatMessages,
     addChatMessage,
@@ -158,6 +158,7 @@ function ChatPanel() {
         federationDepth,
         expertAgentId: activeExperts.length > 0 ? activeExperts[activeExperts.length - 1] : undefined,
         skillsContext: skillsContext || undefined,
+        collectionShortName,
       });
 
       console.log('[ChatPanel] Response:', response);
@@ -325,7 +326,7 @@ function ChatPanel() {
         .map(m => ({ role: m.role, content: m.content }));
       conversationMessages.push({ role: 'user', content: msg });
 
-      const response = await api.sendChatMessage(conversationMessages, null, { federationDepth, expertAgentId: activeExperts.length > 0 ? activeExperts[activeExperts.length - 1] : undefined });
+      const response = await api.sendChatMessage(conversationMessages, null, { federationDepth, expertAgentId: activeExperts.length > 0 ? activeExperts[activeExperts.length - 1] : undefined, collectionShortName });
 
       if (response.toolResult?.nodes) {
         const filteredNodes = filterCommunityNodes(response.toolResult.nodes);
@@ -363,7 +364,7 @@ function ChatPanel() {
         .map(m => ({ role: m.role, content: m.content }));
       conversationMessages.push({ role: 'user', content: msg });
 
-      const response = await api.sendChatMessage(conversationMessages, null, { federationDepth, expertAgentId: activeExperts.length > 0 ? activeExperts[activeExperts.length - 1] : undefined });
+      const response = await api.sendChatMessage(conversationMessages, null, { federationDepth, expertAgentId: activeExperts.length > 0 ? activeExperts[activeExperts.length - 1] : undefined, collectionShortName });
       addChatMessage({
         role: 'assistant',
         content: response.content,
@@ -387,7 +388,7 @@ function ChatPanel() {
         .map(m => ({ role: m.role, content: m.content }));
       conversationMessages.push({ role: 'user', content: msg });
 
-      const response = await api.sendChatMessage(conversationMessages, null, { federationDepth, expertAgentId: activeExperts.length > 0 ? activeExperts[activeExperts.length - 1] : undefined });
+      const response = await api.sendChatMessage(conversationMessages, null, { federationDepth, expertAgentId: activeExperts.length > 0 ? activeExperts[activeExperts.length - 1] : undefined, collectionShortName });
 
       if (deleteConfirmation.node_ids) {
         const deletedIds = new Set(deleteConfirmation.node_ids);
