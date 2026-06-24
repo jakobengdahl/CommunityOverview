@@ -683,12 +683,10 @@ def create_app(
                 return JSONResponse({"error": "No tool_name provided"}, status_code=400)
 
             # Security Check: Enforce authentication for unsafe tools.
-            # The BasicAuth middleware only activates when auth_password is set AND at least
-            # one auth mode (auth_enabled or mcp_basic_auth) is on. Mirror that condition
-            # exactly so a misconfigured deployment (auth enabled but no password set, or
-            # neither auth mode on) still gets SAFE_TOOLS enforcement.
-            auth_middleware_active = bool(config.auth_password) and (config.auth_enabled or config.mcp_basic_auth)
-            if not auth_middleware_active:
+            # _auth_active (computed above) is the canonical condition for whether the
+            # auth middleware is active. Use it here so bearer-only deployments are
+            # also covered (no password required).
+            if not _auth_active:
                 if tool_name not in SAFE_TOOLS:
                     return JSONResponse(
                         {"error": f"Tool '{tool_name}' requires authentication. Please enable AUTH_ENABLED or use a safe tool."},
