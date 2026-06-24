@@ -812,7 +812,7 @@ class ChatProcessor:
             }
         ]
 
-    def process_message(self, messages: List[Dict], api_key: str = None, provider: str = None, extra_context: str = None) -> Dict:
+    def process_message(self, messages: List[Dict], api_key: str = None, provider: str = None, extra_context: str = None, skills_override: str = None) -> Dict:
         """
         Process a message history, call LLM, handle tools, return final response.
 
@@ -820,8 +820,10 @@ class ChatProcessor:
             messages: Conversation history
             api_key: Optional API key to use instead of default
             provider: Optional provider override ('claude' or 'openai')
-            extra_context: Optional extra system context prepended to the base
-                system prompt (e.g. expert agent persona + skills).
+            extra_context: Optional context prepended before the base system prompt
+                (expert agent persona — should be established before base instructions).
+            skills_override: Optional user-selected skill instructions appended
+                AFTER the base system prompt for recency precedence over defaults.
         """
         try:
             # Use provided provider or fall back to configured provider
@@ -841,11 +843,15 @@ class ChatProcessor:
             # Create provider with the appropriate key
             llm_provider = create_provider(key_to_use, provider_to_use)
 
-            # Build per-request system prompt (extra_context prepended so the
-            # expert persona / skills are the first thing the model sees)
+            # Build per-request system prompt:
+            # 1. expert persona (extra_context) comes first — establishes who the model is
+            # 2. base system prompt in the middle — tools, schema, behaviors
+            # 3. skill overrides (skills_override) come last — recency precedence for behavioral overrides
             active_system_prompt = (
                 f"{extra_context}\n\n{self.system_prompt}" if extra_context else self.system_prompt
             )
+            if skills_override:
+                active_system_prompt = f"{active_system_prompt}\n\n{skills_override}"
 
             # First call to LLM
             response = llm_provider.create_completion(

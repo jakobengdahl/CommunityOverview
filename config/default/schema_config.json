@@ -62,6 +62,7 @@
         ],
         "static": false,
         "category": "system",
+        "ui_form": "skill",
         "description": "Reusable AI skill definition (SKILL.md-compatible). metadata: {source_url, content, allowed_tools, when_to_use, version, effort}. Can be linked to Agent nodes via USES_SKILL edges.",
         "color": "#8B5CF6",
         "icon": "StarFill"

@@ -88,6 +88,25 @@ echo -e "  ${BLUE}Profile:${NC}     $PROFILE_NAME"
 # Source .env files with fallback chain: profile → default → root
 apply_profile_env "$PROFILE_NAME"
 
+# Auto-detect LLM provider when not explicitly configured.
+# In SSPCloud (and similar environments), OPENAI_API_KEY + OPENAI_BASE_URL are
+# injected via Vault secrets but LLM_PROVIDER is not set. Without this, the
+# backend defaults to the Claude provider and reports LLM as unavailable.
+if [ -z "$LLM_PROVIDER" ]; then
+    if [ -n "$OPENAI_API_KEY" ] && [ -n "$OPENAI_BASE_URL" ]; then
+        export LLM_PROVIDER=openai
+        echo -e "  ${BLUE}LLM:${NC}         openai (auto-detected from OPENAI_BASE_URL)"
+    elif [ -n "$OPENAI_API_KEY" ]; then
+        export LLM_PROVIDER=openai
+        echo -e "  ${BLUE}LLM:${NC}         openai (auto-detected from OPENAI_API_KEY)"
+    elif [ -n "$ANTHROPIC_API_KEY" ]; then
+        export LLM_PROVIDER=claude
+        echo -e "  ${BLUE}LLM:${NC}         claude (auto-detected from ANTHROPIC_API_KEY)"
+    else
+        echo -e "  ${YELLOW}LLM:${NC}         not configured — AI assistant will be unavailable"
+    fi
+fi
+
 # Resolve schema config: env var takes precedence, then profile fallback
 if [ -n "$GRAPH_SCHEMA_CONFIG" ]; then
     export SCHEMA_FILE="$GRAPH_SCHEMA_CONFIG"
@@ -180,14 +199,12 @@ export GRAPH_FILE="$ACTIVE_DATA"
 # =====================
 # Node.js Check
 # =====================
-if ! command -v node &> /dev/null; then
-    # Try loading nvm
-    export NVM_DIR="${NVM_DIR:-$HOME/.nvm}"
-    if [ -s "$NVM_DIR/nvm.sh" ]; then
-        \. "$NVM_DIR/nvm.sh"
-        nvm use --silent 2>/dev/null || nvm use default --silent 2>/dev/null
-    fi
-fi
+
+# Always source nvm first so nvm-managed node versions are in PATH.
+# In environments like SSPCloud, node is managed via nvm but not in PATH
+# until nvm is sourced.
+export NVM_DIR="${NVM_DIR:-$HOME/.nvm}"
+[ -s "$NVM_DIR/nvm.sh" ] && \. "$NVM_DIR/nvm.sh"
 
 if ! command -v node &> /dev/null; then
     echo -e "${RED}Error: Node.js is not installed or not in PATH.${NC}"
