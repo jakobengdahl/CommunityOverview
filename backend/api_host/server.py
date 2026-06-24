@@ -375,10 +375,12 @@ def create_app(
                         raise ValueError("invalid bearer token")
 
                 elif scheme.lower() == "basic":
+                    if not config.auth_password:
+                        raise ValueError("basic auth not configured")
                     decoded = base64.b64decode(credentials).decode("utf-8")
                     username, _, password = decoded.partition(":")
                     ok_user = secrets.compare_digest(username, config.auth_username)
-                    ok_pass = secrets.compare_digest(password, config.auth_password or "")
+                    ok_pass = secrets.compare_digest(password, config.auth_password)
                     if not (ok_user and ok_pass):
                         raise ValueError("invalid basic credentials")
 
