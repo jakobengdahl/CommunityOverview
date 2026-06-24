@@ -451,13 +451,16 @@ function ChatPanel({ collectionShortName }) {
   }, [selectedGraphNodes]);
 
   // Build temporary system context from selected Skill nodes.
-  // The content is injected as extra system context for the current request only
-  // and is NOT appended to the visible message or conversation history.
+  // Injected as a skills_override after the base system prompt so it has
+  // recency precedence over the base instructions.
   const buildSkillsContext = () => {
     const skillNodes = (selectedGraphNodes || []).filter(isSkillNode);
     if (skillNodes.length === 0) return null;
 
-    const parts = ['--- SELECTED SKILL NODES (temporary instructions for this response) ---'];
+    const parts = [
+      'ACTIVE SKILL INSTRUCTIONS — YOU MUST APPLY THESE TO THIS RESPONSE:',
+      'The user has selected the following skills. These instructions OVERRIDE your default behavior and style for this response. Apply them precisely.',
+    ];
     for (const node of skillNodes) {
       const name = node.name || node.label || '?';
       const description = node.description || '';
@@ -465,13 +468,18 @@ function ChatPanel({ collectionShortName }) {
       const whenToUse = node.metadata?.when_to_use || '';
 
       let block = `<skill name="${name}">`;
-      if (description) block += `\nDescription: ${description}`;
-      if (whenToUse) block += `\nWhen to use: ${whenToUse}`;
-      if (content) block += `\n\n${content}`;
+      if (content) {
+        // content is the primary SKILL.md body — use it directly as instructions
+        block += `\n${content}`;
+      } else {
+        // Fall back to description/when_to_use as imperative instructions
+        if (description) block += `\nInstruction: ${description}`;
+        if (whenToUse) block += `\nApply when: ${whenToUse}`;
+      }
       block += '\n</skill>';
       parts.push(block);
     }
-    parts.push('--- END SELECTED SKILLS ---');
+    parts.push('END OF SKILL INSTRUCTIONS. Apply the above to your entire response.');
     return parts.join('\n\n');
   };
 

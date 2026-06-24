@@ -322,24 +322,26 @@ def create_app(
         version="1.0.0",
     )
 
-    # Add Basic Auth Middleware if enabled
-    # Two modes:
-    #   1. auth_enabled=True: Basic Auth on ALL endpoints (except /health, /info)
-    #   2. mcp_basic_auth=True: Basic Auth ONLY on /mcp and /execute_tool endpoints
-    #      (for deployments where the rest is protected by Cloud Run/IAP)
-    if config.auth_password and (config.auth_enabled or config.mcp_basic_auth):
+    # Add Auth Middleware if enabled.
+    # Supports two schemes on all guarded endpoints:
+    #   - Basic <base64(user:pass)>  — for browsers and MCP clients that support Basic
+    #   - Bearer <token>             — for MCP clients / API consumers (AUTH_BEARER_TOKEN)
+    #
+    # Two activation modes:
+    #   1. auth_enabled=True: auth on ALL endpoints (except /health, /info, etc.)
+    #   2. mcp_basic_auth=True: auth ONLY on /mcp and /execute_tool endpoints
+    _auth_active = (config.auth_password and (config.auth_enabled or config.mcp_basic_auth)) or \
+                   (config.auth_bearer_token and (config.auth_enabled or config.mcp_basic_auth))
+    if _auth_active:
         import base64
         import secrets
 
         @app.middleware("http")
-        async def basic_auth_middleware(request: Request, call_next):
+        async def auth_middleware(request: Request, call_next):
             if request.method == "OPTIONS":
                 return await call_next(request)
 
-            # Allow public liveness/readiness/diagnostics and logout-related
-            # routes without auth. /auth/logout and /logged-out must be
-            # reachable without a valid session, otherwise the user ends up in
-            # an auth loop.
+            # Public routes — always bypass auth
             if request.url.path in [
                 "/health",
                 _PUBLIC_READINESS_PATH,
@@ -356,38 +358,38 @@ def create_app(
                 if not (path.startswith("/mcp") or path.startswith("/execute_tool")):
                     return await call_next(request)
 
-            # Check for Authorization header
             auth_header = request.headers.get("Authorization")
             if not auth_header:
                 return JSONResponse(
                     status_code=401,
                     content={"detail": "Authentication required"},
-                    headers={"WWW-Authenticate": "Basic"},
+                    headers={"WWW-Authenticate": 'Basic realm="Community Knowledge Graph"'},
                 )
 
             try:
-                scheme, credentials = auth_header.split()
-                if scheme.lower() != 'basic':
-                    raise ValueError
+                scheme, credentials = auth_header.split(" ", 1)
 
-                decoded = base64.b64decode(credentials).decode("utf-8")
-                username, _, password = decoded.partition(":")
+                if scheme.lower() == "bearer":
+                    token = config.auth_bearer_token or ""
+                    if not token or not secrets.compare_digest(credentials.strip(), token):
+                        raise ValueError("invalid bearer token")
 
-                is_correct_username = secrets.compare_digest(
-                    username, config.auth_username
-                )
-                is_correct_password = secrets.compare_digest(
-                    password, config.auth_password or ""
-                )
+                elif scheme.lower() == "basic":
+                    decoded = base64.b64decode(credentials).decode("utf-8")
+                    username, _, password = decoded.partition(":")
+                    ok_user = secrets.compare_digest(username, config.auth_username)
+                    ok_pass = secrets.compare_digest(password, config.auth_password or "")
+                    if not (ok_user and ok_pass):
+                        raise ValueError("invalid basic credentials")
 
+                else:
+                    raise ValueError(f"unsupported scheme: {scheme}")
 
-                if not (is_correct_username and is_correct_password):
-                    raise ValueError
-            except (ValueError, Exception):
+            except Exception:
                 return JSONResponse(
                     status_code=401,
                     content={"detail": "Invalid credentials"},
-                    headers={"WWW-Authenticate": "Basic"},
+                    headers={"WWW-Authenticate": 'Basic realm="Community Knowledge Graph"'},
                 )
 
             return await call_next(request)

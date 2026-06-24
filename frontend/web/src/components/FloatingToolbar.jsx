@@ -121,7 +121,7 @@ const COLOR_MAP = {
 };
 
 // System types always shown at the bottom (not from schema)
-const SYSTEM_TYPES = ['Agent', 'EventSubscription', 'ActiveKnowledgeCollection', 'Group'];
+const SYSTEM_TYPES = ['Agent', 'Skill', 'EventSubscription', 'ActiveKnowledgeCollection', 'Group'];
 const VIEW_TYPES = ['SavedView'];
 
 // Fallback order when schema hasn't loaded yet

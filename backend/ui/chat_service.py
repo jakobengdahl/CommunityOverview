@@ -304,17 +304,15 @@ class ChatService:
             else:
                 extra_context = effective_prefix or expert_context
 
-            if skills_context:
-                extra_context = (
-                    f"{extra_context}\n\n{skills_context}"
-                    if extra_context
-                    else skills_context
-                )
+            # skills_context is passed separately as skills_override so it lands
+            # AFTER the base system prompt (recency precedence for behavioral overrides).
+            # extra_context (expert persona) stays BEFORE the base prompt.
             return self._processor.process_message(
                 messages=messages,
                 api_key=api_key,
                 provider=provider,
                 extra_context=extra_context,
+                skills_override=skills_context or None,
             )
         finally:
             self._current_federation_depth = None
