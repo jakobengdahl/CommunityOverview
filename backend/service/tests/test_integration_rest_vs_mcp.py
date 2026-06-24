@@ -32,7 +32,7 @@ from backend.api_host.config import AppConfig
 @pytest.fixture
 def temp_dir():
     """Create a temporary directory for test files."""
-    with tempfile.TemporaryDirectory() as tmpdir:
+    with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as tmpdir:
         yield tmpdir
 
 
@@ -135,7 +135,7 @@ class TestRestVsMcpParity:
         nodes = [
             {"id": "center", "type": "Actor", "name": "Center Node"},
             {"id": "neighbor1", "type": "Initiative", "name": "Neighbor One"},
-            {"id": "neighbor2", "type": "Community", "name": "Neighbor Two"},
+            {"id": "neighbor2", "type": "Capability", "name": "Neighbor Two"},
         ]
         edges = [
             {"source": "center", "target": "neighbor1", "type": "BELONGS_TO"},
@@ -176,7 +176,7 @@ class TestRestVsMcpParity:
         dual_envs["mcp_tools"]["add_nodes"](nodes=members, edges=[])
 
         # Now create the community and edges
-        community = {"id": "comm1", "type": "Community", "name": "Test Community", "description": "A test community"}
+        community = {"id": "comm1", "type": "Capability", "name": "Test Community", "description": "A test community"}
         comm_edges = [
             {"source": "member1", "target": "comm1", "type": "PART_OF"},
             {"source": "member2", "target": "comm1", "type": "PART_OF"},
@@ -196,8 +196,8 @@ class TestRestVsMcpParity:
         # Verify both have the community
         rest_comm = dual_envs["rest_storage"].nodes.get("comm1")
         mcp_comm = dual_envs["mcp_storage"].nodes.get("comm1")
-        assert rest_comm is not None and rest_comm.type == NodeType.COMMUNITY
-        assert mcp_comm is not None and mcp_comm.type == NodeType.COMMUNITY
+        assert rest_comm is not None and rest_comm.type == NodeType.CAPABILITY
+        assert mcp_comm is not None and mcp_comm.type == NodeType.CAPABILITY
 
         # Verify edges exist
         assert len(dual_envs["rest_storage"].edges) == 2
@@ -338,7 +338,7 @@ class TestFullSequence:
         assert rest_details.json()["node"]["description"] == "Updated by MCP"
 
         # Step 7: Create a community via MCP
-        community = {"id": "community-1", "type": "Community", "name": "Agency Community"}
+        community = {"id": "community-1", "type": "Capability", "name": "Agency Community"}
         comm_edges = [
             {"source": "org-1", "target": "community-1", "type": "PART_OF"},
             {"source": "org-2", "target": "community-1", "type": "PART_OF"},
@@ -487,7 +487,7 @@ class TestCommunitiesAsNodes:
         # Create community with membership edges
         community = {
             "id": "test-community",
-            "type": "Community",
+            "type": "Capability",
             "name": "Test Community",
             "description": "A test community",
         }
@@ -502,7 +502,7 @@ class TestCommunitiesAsNodes:
         # Verify it's a regular node
         community_node = ctx["storage"].nodes.get("test-community")
         assert community_node is not None
-        assert community_node.type == NodeType.COMMUNITY
+        assert community_node.type == NodeType.CAPABILITY
 
         # Verify we can get related nodes (members)
         related = ctx["client"].post("/api/nodes/test-community/related", json={"depth": 1})
@@ -516,7 +516,7 @@ class TestCommunitiesAsNodes:
 
         # Setup
         members = [{"id": "gm1", "type": "Actor", "name": "Community Member"}]
-        community = {"id": "del-community", "type": "Community", "name": "Community To Delete"}
+        community = {"id": "del-community", "type": "Capability", "name": "Community To Delete"}
         edges = [{"source": "gm1", "target": "del-community", "type": "PART_OF"}]
 
         ctx["client"].post("/api/nodes", json={"nodes": members + [community], "edges": edges})

@@ -9,6 +9,7 @@ import pytest
 from backend.federation.config import (
     FederationFileConfig,
     load_federation_config,
+    resolve_federation_config_context,
     resolve_federation_config_path,
     summarize_federation_config,
 )
@@ -18,11 +19,17 @@ from backend.federation.config import (
 def reset_env():
     old_federation_file = os.environ.pop("FEDERATION_FILE", None)
     old_graph_fed = os.environ.pop("GRAPH_FEDERATION_CONFIG", None)
+    old_tenant_config_dir = os.environ.pop("COMMUNITYOVERVIEW_TENANT_CONFIG_DIR", None)
     yield
+    os.environ.pop("FEDERATION_FILE", None)
+    os.environ.pop("GRAPH_FEDERATION_CONFIG", None)
+    os.environ.pop("COMMUNITYOVERVIEW_TENANT_CONFIG_DIR", None)
     if old_federation_file is not None:
         os.environ["FEDERATION_FILE"] = old_federation_file
     if old_graph_fed is not None:
         os.environ["GRAPH_FEDERATION_CONFIG"] = old_graph_fed
+    if old_tenant_config_dir is not None:
+        os.environ["COMMUNITYOVERVIEW_TENANT_CONFIG_DIR"] = old_tenant_config_dir
 
 
 def test_missing_config_disables_federation(tmp_path: Path):
@@ -110,6 +117,34 @@ def test_summary_contains_graph_metadata():
 def test_resolve_path_uses_env_override():
     os.environ["FEDERATION_FILE"] = "/tmp/fed.json"
     assert resolve_federation_config_path() == "/tmp/fed.json"
+
+
+def test_resolve_path_uses_tenant_config_dir(tmp_path: Path):
+    tenant_dir = tmp_path / "tenant-config"
+    tenant_dir.mkdir()
+
+    os.environ["COMMUNITYOVERVIEW_TENANT_CONFIG_DIR"] = str(tenant_dir)
+
+    context = resolve_federation_config_context()
+
+    assert context["source"] == "tenant_config_dir"
+    assert context["tenant_config_dir"] == str(tenant_dir.resolve())
+    assert context["path"] == str((tenant_dir / "federation_config.json").resolve())
+
+
+def test_explicit_env_override_beats_tenant_config_dir(tmp_path: Path):
+    tenant_dir = tmp_path / "tenant-config"
+    tenant_dir.mkdir()
+    explicit_path = tmp_path / "override.json"
+
+    os.environ["COMMUNITYOVERVIEW_TENANT_CONFIG_DIR"] = str(tenant_dir)
+    os.environ["FEDERATION_FILE"] = str(explicit_path)
+
+    context = resolve_federation_config_context()
+
+    assert context["source"] == "explicit_env"
+    assert context["tenant_config_dir"] == str(tenant_dir.resolve())
+    assert context["path"] == str(explicit_path.resolve())
 
 
 def test_config_with_depth_levels(tmp_path):

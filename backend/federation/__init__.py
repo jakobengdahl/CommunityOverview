@@ -5,6 +5,7 @@ from .config import (
     FederationSettings,
     FederationGraphConfig,
     load_federation_config,
+    resolve_federation_config_context,
     resolve_federation_config_path,
     summarize_federation_config,
 )
@@ -15,6 +16,7 @@ __all__ = [
     "FederationSettings",
     "FederationGraphConfig",
     "load_federation_config",
+    "resolve_federation_config_context",
     "resolve_federation_config_path",
     "summarize_federation_config",
 ]

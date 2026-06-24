@@ -1,11 +1,15 @@
 from typing import List, Dict, Any, Callable
 import os
 import json
+import logging
 from dotenv import load_dotenv
 import inspect
 from backend.llm_providers import create_provider, LLMProvider
 from backend import config_loader
 from backend.language_policy import format_language_policy_for_prompt
+
+# Initialize logger
+logger = logging.getLogger(__name__)
 
 # Load environment variables
 load_dotenv()
@@ -329,7 +333,7 @@ When a user asks about agents (e.g., "Visa alla agenter", "Vilka agenter finns?"
 
 TOOL USAGE GUIDELINES:
 - search_graph: For text-based searches, exploring themes, finding specific nodes
-- get_related_nodes: For expanding from a known node, exploring connections
+- get_related_nodes: For expanding from a known node, exploring connections, or traversing lineage/provenance chains by specifying relationship_types (e.g. production-step relationships in a data pipeline)
 - get_node_details: For detailed information about a specific node
 - find_similar_nodes: For checking ONE node for duplicates
 - find_similar_nodes_batch: For checking MULTIPLE nodes at once - ALWAYS use this when extracting from documents
@@ -343,6 +347,26 @@ TOOL USAGE GUIDELINES:
 - list_saved_views: For listing all available saved views in the database
 - get_schema: For getting the complete schema configuration
 - get_presentation: For getting UI presentation settings
+- mark_nodes: For applying visual color annotations to nodes currently in the visualization (session-only, does not change the database). Call with empty marks array to clear all marks.
+
+WORKFLOW FOR MARKING NODES:
+Use mark_nodes to annotate nodes in the current visualization with colors and labels:
+1. Choose a meaningful color (e.g. '#EF4444' red, '#F97316' orange, '#FBBF24' yellow, '#10B981' green)
+2. Provide a short label that describes the mark's meaning in context
+3. Marked nodes show a color badge and the labels appear in an on-canvas legend
+4. Marks are session-only — they never persist to the database
+5. Call mark_nodes with an empty array to remove all marks
+6. Example: to show analysis results, mark critical nodes red, medium-priority orange, reviewed green
+
+WORKFLOW FOR LINEAGE AND IMPACT TRAVERSAL:
+To answer questions like "what downstream steps use this dataset?" or "what is affected if this changes?":
+1. Call get_schema to discover available relationship types for the current schema
+2. Call get_related_nodes with relevant relationship_types and depth=2 (or deeper) to traverse the chain
+3. Optionally repeat from a different direction (upstream vs downstream) using the inverse relationship types
+4. Visualize results with mark_nodes: e.g. source node green, intermediate steps orange, leaf outputs red
+5. Summarize the traversal path in plain language, not just a list of nodes
+Example: upstream data quality question — find input datasets → process steps → output datasets using the
+appropriate relationship chain, then mark each tier a distinct color so the user sees the full dependency tree.
 
 EFFICIENCY TIP: When extracting multiple entities from a document, ALWAYS use find_similar_nodes_batch()
 instead of calling find_similar_nodes() in a loop. This reduces API calls from N to 1.
@@ -405,21 +429,21 @@ class ChatProcessor:
         # Set default API key based on detected provider
         if self.provider_type == "openai":
             self.default_api_key = os.getenv("OPENAI_API_KEY")
-            print(f"Using OpenAI provider (LLM_PROVIDER={self.provider_type})")
+            logger.info(f"Using OpenAI provider (LLM_PROVIDER={self.provider_type})")
             if not self.default_api_key:
-                print("Warning: OPENAI_API_KEY not found in environment variables")
+                logger.warning("OPENAI_API_KEY not found in environment variables")
         else:  # claude
             self.default_api_key = os.getenv("ANTHROPIC_API_KEY")
-            print(f"Using Claude provider (LLM_PROVIDER={self.provider_type})")
+            logger.info(f"Using Claude provider (LLM_PROVIDER={self.provider_type})")
             if not self.default_api_key:
-                print("Warning: ANTHROPIC_API_KEY not found in environment variables")
+                logger.warning("ANTHROPIC_API_KEY not found in environment variables")
 
         self.tools_map = tools_map
         self.tool_definitions = self._generate_tool_definitions()
 
         # Build system prompt dynamically from configuration
         self.system_prompt = _build_system_prompt()
-        print(f"Loaded system prompt from schema configuration")
+        logger.info(f"Loaded system prompt from schema configuration")
 
     def _detect_provider(self) -> str:
         """
@@ -435,10 +459,10 @@ class ChatProcessor:
         if explicit_provider:
             provider = explicit_provider.lower()
             if provider in ["claude", "openai"]:
-                print(f"Provider explicitly set via LLM_PROVIDER: {provider}")
+                logger.info(f"Provider explicitly set via LLM_PROVIDER: {provider}")
                 return provider
             else:
-                print(f"Warning: Invalid LLM_PROVIDER value '{explicit_provider}', falling back to auto-detection")
+                logger.warning(f"Invalid LLM_PROVIDER value '{explicit_provider}', falling back to auto-detection")
 
         # Auto-detect based on available API keys
         has_openai = bool(os.getenv("OPENAI_API_KEY"))
@@ -446,17 +470,17 @@ class ChatProcessor:
 
         if has_openai and has_claude:
             # Both keys available - prefer OpenAI (more cost-effective)
-            print("Both API keys found, auto-selecting OpenAI (more cost-effective)")
+            logger.info("Both API keys found, auto-selecting OpenAI (more cost-effective)")
             return "openai"
         elif has_openai:
-            print("OPENAI_API_KEY found, auto-selecting OpenAI provider")
+            logger.info("OPENAI_API_KEY found, auto-selecting OpenAI provider")
             return "openai"
         elif has_claude:
-            print("ANTHROPIC_API_KEY found, auto-selecting Claude provider")
+            logger.info("ANTHROPIC_API_KEY found, auto-selecting Claude provider")
             return "claude"
         else:
             # No keys found, default to claude
-            print("No API keys found in environment, defaulting to Claude")
+            logger.info("No API keys found in environment, defaulting to Claude")
             return "claude"
 
 
@@ -739,6 +763,38 @@ class ChatProcessor:
                 }
             },
             {
+                "name": "mark_nodes",
+                "description": "Apply a visual color annotation to specific nodes currently in the visualization. Marks are session-only overlays — they do NOT modify the graph database. Use any CSS color string and provide an optional label that describes what the color means. Marks appear as a colored badge on the node and are listed in a legend. Call with an empty 'marks' array to clear all marks. Useful for: highlighting findings, indicating priority, showing analysis results, categorizing nodes visually, etc.",
+                "input_schema": {
+                    "type": "object",
+                    "properties": {
+                        "marks": {
+                            "type": "array",
+                            "description": "Nodes to mark. Pass an empty array to clear all marks.",
+                            "items": {
+                                "type": "object",
+                                "properties": {
+                                    "node_id": {
+                                        "type": "string",
+                                        "description": "ID of the node to mark"
+                                    },
+                                    "color": {
+                                        "type": "string",
+                                        "description": "CSS color (e.g. '#EF4444' red, '#F97316' orange, '#FBBF24' yellow, '#10B981' green, '#3B82F6' blue)"
+                                    },
+                                    "label": {
+                                        "type": "string",
+                                        "description": "Short label shown in the legend (e.g. 'High priority', 'Needs review', 'Confirmed')"
+                                    }
+                                },
+                                "required": ["node_id", "color"]
+                            }
+                        }
+                    },
+                    "required": ["marks"]
+                }
+            },
+            {
                 "name": "get_schema",
                 "description": "Get the complete schema configuration including all node types with their fields, colors, and descriptions, as well as all relationship types.",
                 "input_schema": {
@@ -756,7 +812,7 @@ class ChatProcessor:
             }
         ]
 
-    def process_message(self, messages: List[Dict], api_key: str = None, provider: str = None) -> Dict:
+    def process_message(self, messages: List[Dict], api_key: str = None, provider: str = None, extra_context: str = None, skills_override: str = None) -> Dict:
         """
         Process a message history, call LLM, handle tools, return final response.
 
@@ -764,6 +820,10 @@ class ChatProcessor:
             messages: Conversation history
             api_key: Optional API key to use instead of default
             provider: Optional provider override ('claude' or 'openai')
+            extra_context: Optional context prepended before the base system prompt
+                (expert agent persona — should be established before base instructions).
+            skills_override: Optional user-selected skill instructions appended
+                AFTER the base system prompt for recency precedence over defaults.
         """
         try:
             # Use provided provider or fall back to configured provider
@@ -783,17 +843,27 @@ class ChatProcessor:
             # Create provider with the appropriate key
             llm_provider = create_provider(key_to_use, provider_to_use)
 
+            # Build per-request system prompt:
+            # 1. expert persona (extra_context) comes first — establishes who the model is
+            # 2. base system prompt in the middle — tools, schema, behaviors
+            # 3. skill overrides (skills_override) come last — recency precedence for behavioral overrides
+            active_system_prompt = (
+                f"{extra_context}\n\n{self.system_prompt}" if extra_context else self.system_prompt
+            )
+            if skills_override:
+                active_system_prompt = f"{active_system_prompt}\n\n{skills_override}"
+
             # First call to LLM
             response = llm_provider.create_completion(
                 messages=messages,
-                system_prompt=self.system_prompt,
+                system_prompt=active_system_prompt,
                 tools=self.tool_definitions,
                 max_tokens=4096
             )
 
             # Check if tool use
             if response.stop_reason == "tool_use":
-                return self._handle_tool_use(messages, response, llm_provider)
+                return self._handle_tool_use(messages, response, llm_provider, system_prompt=active_system_prompt)
 
             # Just text response
             # Extract text from content blocks
@@ -809,7 +879,7 @@ class ChatProcessor:
             }
 
         except Exception as e:
-            print(f"Error in process_message: {e}")
+            logger.error(f"Error in process_message: {e}")
             error_msg = str(e)
 
             # Provide user-friendly message for rate limits
@@ -823,12 +893,13 @@ class ChatProcessor:
                 "toolResult": None
             }
 
-    def _handle_tool_use(self, messages: List[Dict], response, provider: LLMProvider, accumulated_nodes=None, accumulated_edges=None) -> Dict:
+    def _handle_tool_use(self, messages: List[Dict], response, provider: LLMProvider, accumulated_nodes=None, accumulated_edges=None, system_prompt: str = None) -> Dict:
         """Handle tool use with support for tool chaining and result aggregation"""
         if accumulated_nodes is None:
             accumulated_nodes = []
         if accumulated_edges is None:
             accumulated_edges = []
+        active_system_prompt = system_prompt if system_prompt is not None else self.system_prompt
 
         # Find ALL tool_use blocks (LLM can request multiple tools in parallel)
         tool_uses = [block for block in response.content if isinstance(block, dict) and block.get("type") == "tool_use"]
@@ -851,7 +922,7 @@ class ChatProcessor:
             tool_id = tool_use.get("id")
             last_tool_name = tool_name
 
-            print(f"Executing tool: {tool_name} with input: {tool_input}")
+            logger.info(f"Executing tool: {tool_name} with input: {tool_input}")
 
             # Execute the tool
             tool_result = None
@@ -870,6 +941,13 @@ class ChatProcessor:
                     "action": "clear_visualization",
                     "success": True,
                     "message": "Visualization cleared"
+                }
+
+            # Special case for mark_nodes - signals frontend to apply color overlays
+            elif tool_name == "mark_nodes":
+                tool_result = {
+                    "action": "mark_nodes",
+                    "marks": tool_input.get("marks", [])
                 }
 
             elif tool_name in self.tools_map:
@@ -932,7 +1010,7 @@ class ChatProcessor:
 
         final_response = provider.create_completion(
             messages=messages,
-            system_prompt=self.system_prompt,
+            system_prompt=active_system_prompt,
             tools=self.tool_definitions,
             max_tokens=4096
         )
@@ -940,7 +1018,7 @@ class ChatProcessor:
         # Check if LLM wants to use another tool (tool chaining)
         if final_response.stop_reason == "tool_use":
             # LLM wants to use another tool - continue recursively with accumulated data
-            return self._handle_tool_use(messages, final_response, provider, accumulated_nodes, accumulated_edges)
+            return self._handle_tool_use(messages, final_response, provider, accumulated_nodes, accumulated_edges, system_prompt=active_system_prompt)
 
         # Extract text from response (handle multiple text blocks)
         final_text = ""

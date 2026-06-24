@@ -85,6 +85,8 @@
     "ignore_origins_hint": "För loopskydd: events från dessa origins skickas inte",
     "cancel": "Avbryt",
     "submit": "Skapa prenumeration",
+    "submit_edit": "Spara ändringar",
+    "title_edit": "Redigera webhook-prenumeration",
     "validation_error": "Namn och webhook-URL krävs",
     "webhook_description": "Webhook-prenumeration: {name}",
     "webhook_summary": "Lyssnar på {events} events"
@@ -99,7 +101,9 @@
   "notifications": {
     "showing_nodes": "Visar {count} noder",
     "subscription_created": "Prenumeration \"{name}\" skapad",
+    "subscription_updated": "Prenumeration \"{name}\" uppdaterad",
     "subscription_error": "Kunde inte skapa prenumeration",
+    "subscription_update_error": "Kunde inte uppdatera prenumeration",
     "saved_view_description": "Sparad vy: {name}",
     "saved_view_summary": "Innehåller {count} noder"
   },
@@ -121,5 +125,13 @@
     "depth_tooltip": "Djupnivåer styrs av installationens konfiguration",
     "depth_indicator": "Djup {current}/{max}",
     "depth_indicator_tooltip": "Aktuell federerad söknivå och högsta tillåtna nivå"
+  },
+  "guide": {
+    "title": "Guide",
+    "next": "Nästa",
+    "close": "Stäng",
+    "cancel": "Avbryt guide",
+    "loading": "Laddar...",
+    "step_counter": "Steg {current} av {total}"
   }
 }

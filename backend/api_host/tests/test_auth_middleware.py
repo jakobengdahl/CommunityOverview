@@ -105,6 +105,28 @@ class TestMcpBasicAuth:
         finally:
             os.unlink(path)
 
+    def test_mcp_basic_auth_allows_ready_without_creds(self):
+        """/ready always passes through."""
+        client, path = self._make_client(
+            mcp_basic_auth=True, auth_password="secret"
+        )
+        try:
+            resp = client.get("/ready")
+            assert resp.status_code == 200
+        finally:
+            os.unlink(path)
+
+    def test_mcp_basic_auth_allows_startup_diagnostics_without_creds(self):
+        """/diagnostics/startup always passes through."""
+        client, path = self._make_client(
+            mcp_basic_auth=True, auth_password="secret"
+        )
+        try:
+            resp = client.get("/diagnostics/startup")
+            assert resp.status_code == 200
+        finally:
+            os.unlink(path)
+
     def test_mcp_basic_auth_accepts_valid_creds_on_mcp(self):
         """MCP endpoint succeeds with correct credentials."""
         client, path = self._make_client(
@@ -174,6 +196,28 @@ class TestAuthEnabledTakesPrecedence:
         finally:
             os.unlink(path)
 
+    def test_auth_enabled_allows_ready(self):
+        """/ready is always exempt."""
+        client, path = self._make_client(
+            auth_enabled=True, auth_password="secret"
+        )
+        try:
+            resp = client.get("/ready")
+            assert resp.status_code == 200
+        finally:
+            os.unlink(path)
+
+    def test_auth_enabled_allows_startup_diagnostics(self):
+        """/diagnostics/startup is always exempt."""
+        client, path = self._make_client(
+            auth_enabled=True, auth_password="secret"
+        )
+        try:
+            resp = client.get("/diagnostics/startup")
+            assert resp.status_code == 200
+        finally:
+            os.unlink(path)
+
     def test_auth_enabled_with_mcp_basic_auth_still_blocks_api(self):
         """auth_enabled takes precedence over mcp_basic_auth."""
         client, path = self._make_client(
@@ -213,7 +257,7 @@ class TestNoAuthDisabled:
 
 class TestLogoutRoutes:
     """Logout routes must be reachable without auth and behave
-    cloud-agnostically based on LOGOUT_REDIRECT_URL."""
+    cloud-agnostically based on auth mode and LOGOUT_REDIRECT_URL."""
 
     def _make_client(self, **config_overrides) -> tuple:
         config, path = _make_config(**config_overrides)
@@ -221,15 +265,20 @@ class TestLogoutRoutes:
         return TestClient(app), path
 
     def test_logout_exempt_from_auth_enabled(self):
-        """/auth/logout must be reachable without credentials when auth_enabled."""
-        client, path = self._make_client(
-            auth_enabled=True, auth_password="secret"
-        )
-        try:
-            resp = client.get("/auth/logout", follow_redirects=False)
-            assert resp.status_code == 302
-        finally:
-            os.unlink(path)
+        """/auth/logout must be reachable without credentials when auth_enabled.
+        Returns 401 (not 403) to clear browser's cached Basic Auth credentials."""
+        with patch.dict(os.environ, {}, clear=False):
+            os.environ.pop("LOGOUT_REDIRECT_URL", None)
+            client, path = self._make_client(
+                auth_enabled=True, auth_password="secret"
+            )
+            try:
+                resp = client.get("/auth/logout", follow_redirects=False)
+                assert resp.status_code == 401
+                assert "logged out" in resp.text.lower()
+                assert "WWW-Authenticate" in resp.headers
+            finally:
+                os.unlink(path)
 
     def test_logged_out_page_exempt_from_auth_enabled(self):
         """/logged-out must render without credentials when auth_enabled."""
@@ -244,7 +293,7 @@ class TestLogoutRoutes:
             os.unlink(path)
 
     def test_logout_defaults_to_local_logged_out_page(self):
-        """Without LOGOUT_REDIRECT_URL, /auth/logout redirects to /logged-out."""
+        """Without LOGOUT_REDIRECT_URL and no auth, /auth/logout redirects to /logged-out."""
         with patch.dict(os.environ, {}, clear=False):
             os.environ.pop("LOGOUT_REDIRECT_URL", None)
             client, path = self._make_client()
@@ -252,6 +301,24 @@ class TestLogoutRoutes:
                 resp = client.get("/auth/logout", follow_redirects=False)
                 assert resp.status_code == 302
                 assert resp.headers["location"] == "/logged-out"
+            finally:
+                os.unlink(path)
+
+    def test_logout_iap_mode_redirects_to_clear_cookie(self):
+        """In mcp_basic_auth (IAP) mode, /auth/logout redirects to
+        /_gcp_iap/clear_login_cookie to properly end the IAP session."""
+        with patch.dict(os.environ, {}, clear=False):
+            os.environ.pop("LOGOUT_REDIRECT_URL", None)
+            client, path = self._make_client(
+                mcp_basic_auth=True, auth_password="secret"
+            )
+            try:
+                resp = client.get("/auth/logout", follow_redirects=False)
+                assert resp.status_code == 302
+                assert (
+                    resp.headers["location"]
+                    == "/_gcp_iap/clear_login_cookie"
+                )
             finally:
                 os.unlink(path)
 
@@ -268,6 +335,44 @@ class TestLogoutRoutes:
                 assert (
                     resp.headers["location"]
                     == "https://example.com/sign-out"
+                )
+            finally:
+                os.unlink(path)
+
+    def test_logout_env_overrides_iap_default(self):
+        """LOGOUT_REDIRECT_URL takes precedence over the IAP default."""
+        with patch.dict(
+            os.environ,
+            {"LOGOUT_REDIRECT_URL": "https://custom.example.com/bye"},
+        ):
+            client, path = self._make_client(
+                mcp_basic_auth=True, auth_password="secret"
+            )
+            try:
+                resp = client.get("/auth/logout", follow_redirects=False)
+                assert resp.status_code == 302
+                assert (
+                    resp.headers["location"]
+                    == "https://custom.example.com/bye"
+                )
+            finally:
+                os.unlink(path)
+
+    def test_logout_env_overrides_basic_auth_default(self):
+        """LOGOUT_REDIRECT_URL takes precedence over the 401 Basic Auth behavior."""
+        with patch.dict(
+            os.environ,
+            {"LOGOUT_REDIRECT_URL": "https://custom.example.com/bye"},
+        ):
+            client, path = self._make_client(
+                auth_enabled=True, auth_password="secret"
+            )
+            try:
+                resp = client.get("/auth/logout", follow_redirects=False)
+                assert resp.status_code == 302
+                assert (
+                    resp.headers["location"]
+                    == "https://custom.example.com/bye"
                 )
             finally:
                 os.unlink(path)

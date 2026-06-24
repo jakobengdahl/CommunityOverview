@@ -1,4 +1,4 @@
-import { useState, useCallback, useEffect } from 'react';
+import { useState, useCallback, useEffect, useRef } from 'react';
 import { GraphCanvas } from '@community-graph/ui-graph-canvas';
 import '@community-graph/ui-graph-canvas/styles';
 import useGraphStore from './store/graphStore';
@@ -12,16 +12,26 @@ import ConfirmDialog from './components/ConfirmDialog';
 import InputDialog from './components/InputDialog';
 import ChatPanel from './components/ChatPanel';
 import CreateSubscriptionDialog from './components/CreateSubscriptionDialog';
+import CreateSkillDialog from './components/CreateSkillDialog';
 import CreateAgentDialog from './components/CreateAgentDialog';
+import CreateActiveKnowledgeCollectionDialog from './components/CreateActiveKnowledgeCollectionDialog';
+import CollectKioskView from './components/CollectKioskView';
 import EditEdgeDialog from './components/EditEdgeDialog';
 import NodeDetailDialog from './components/NodeDetailDialog';
+import GuideOverlay from './components/GuideOverlay';
 import * as api from './services/api';
 import './App.css';
 
+const _urlParams = new URLSearchParams(window.location.search);
+const _collectShortName = _urlParams.get('collect');
+const _akcShortName = _urlParams.get('akc');
+
 function App() {
+  const akcShortName = _akcShortName;
   const {
     nodes,
     edges,
+    schema,
     highlightedNodeIds,
     hiddenNodeIds,
     hiddenEdgeIds,
@@ -33,10 +43,13 @@ function App() {
     setHiddenNodeIds,
     stats,
     setStats,
+    llmAvailable,
+    setLlmAvailable,
     editingNode,
     setEditingNode,
     closeEditingNode,
     removeNode,
+    removeEdge,
     presentation,
     setConfig,
     focusNodeId,
@@ -51,14 +64,20 @@ function App() {
     federationDepth,
     setFederationDepth,
     showMinimap,
+    nodeMarks,
+    startGuide,
+    getNodeColor,
   } = useGraphStore();
 
   const { t, setLanguage, language } = useI18n();
 
+  const urlGuideStartedRef = useRef(false);
+  const urlViewLoadedRef = useRef(false);
   const [notification, setNotification] = useState(null);
   const [deleteDialog, setDeleteDialog] = useState(null);
   const [saveViewDialog, setSaveViewDialog] = useState(null);
   const [showSubscriptionDialog, setShowSubscriptionDialog] = useState(false);
+  const [editingSubscriptionData, setEditingSubscriptionData] = useState(null);
   const [showAgentDialog, setShowAgentDialog] = useState(false);
   const [editingAgentData, setEditingAgentData] = useState(null);
   const [createNodeType, setCreateNodeType] = useState(null);
@@ -66,6 +85,12 @@ function App() {
   const [saveViewSignal, setSaveViewSignal] = useState(0);
   const [isSavingView, setIsSavingView] = useState(false);
   const [editingEdge, setEditingEdge] = useState(null);
+  const [skillDialogType, setSkillDialogType] = useState(null);
+  const [editingSkillData, setEditingSkillData] = useState(null);
+  const [showAKCDialog, setShowAKCDialog] = useState(false);
+  const [editingAKCData, setEditingAKCData] = useState(null);
+  const [akcIntroShown, setAkcIntroShown] = useState(false);
+  const [akcConfig, setAkcConfig] = useState(null);
 
   const federationDepthLevels = (stats?.federation?.selectable_depth_levels || [1]).filter(v => Number.isInteger(v) && v >= 1);
   const maxFederationDepth = Math.max(1, ...federationDepthLevels, stats?.federation?.max_selectable_depth || 1);
@@ -76,14 +101,15 @@ function App() {
     }
   }, [federationDepth, maxFederationDepth, setFederationDepth]);
 
-  // Load schema, presentation, and stats on startup
+  // Load schema, presentation, stats and UI capabilities on startup (runs once)
   useEffect(() => {
     const loadConfig = async () => {
       try {
-        const [schemaData, presentationData, statsData] = await Promise.all([
+        const [schemaData, presentationData, statsData, capabilitiesData] = await Promise.all([
           api.getSchema(),
           api.getPresentation(),
           api.getGraphStats(),
+          api.getUiCapabilities().catch(() => ({ llm_available: false })),
         ]);
         // Apply backend default language if no user override
         if (presentationData?.default_language) {
@@ -95,13 +121,57 @@ function App() {
         }
         setConfig(schemaData, presentationData, t, language);
         setStats(statsData);
+        setLlmAvailable(capabilitiesData.llm_available ?? false);
       } catch (error) {
         console.error('Error loading configuration:', error);
         api.getGraphStats().then(setStats).catch(console.error);
+        setLlmAvailable(false);
       }
     };
     loadConfig();
-  }, [setConfig, setStats, t, setLanguage, language]);
+  }, [setConfig, setStats, setLlmAvailable, t, setLanguage, language]); // eslint-disable-line react-hooks/exhaustive-deps
+
+  useEffect(() => {
+    if (!akcShortName) return;
+    api.getCollectConfig(akcShortName)
+      .then(data => setAkcConfig(data))
+      .catch(err => console.error('[App] Failed to load AKC config:', err));
+  }, [akcShortName]);
+
+  // Trigger guide from URL param ?guide=<id> — fires once when presentation first becomes available
+  useEffect(() => {
+    if (!presentation?.guides?.length || urlGuideStartedRef.current) return;
+    const urlGuideId = new URLSearchParams(window.location.search).get('guide');
+    if (!urlGuideId) return;
+    const guide = presentation.guides.find(g => g.id === urlGuideId);
+    if (guide) {
+      urlGuideStartedRef.current = true;
+      startGuide(guide);
+    }
+  }, [presentation, startGuide]);
+
+  // Load saved view from URL param ?view=<name> — fires once after stats confirm backend is ready
+  useEffect(() => {
+    if (!stats || urlViewLoadedRef.current) return;
+    const urlViewName = new URLSearchParams(window.location.search).get('view');
+    if (!urlViewName) return;
+    urlViewLoadedRef.current = true;
+    (async () => {
+      try {
+        const result = await api.getSavedView(urlViewName);
+        if (!result?.success || !result.nodes?.length) return;
+        const positioned = result.nodes.map(n =>
+          result.positions?.[n.id] ? { ...n, _savedPosition: result.positions[n.id] } : n
+        );
+        clearVisualization();
+        addNodesToVisualization(positioned, result.edges || []);
+        if (result.hidden_node_ids?.length) setHiddenNodeIds(result.hidden_node_ids);
+        if (result.groups?.length) setPendingGroups({ groups: result.groups, parentIds: result.parentIds || {} });
+      } catch (err) {
+        console.error('[App] Failed to load view from URL:', err);
+      }
+    })();
+  }, [stats, clearVisualization, addNodesToVisualization, setHiddenNodeIds, setPendingGroups]);
 
   const showNotification = useCallback((type, message) => {
     setNotification({ type, message });
@@ -218,10 +288,19 @@ function App() {
         console.error('Error preparing agent editor:', error);
         showNotification('error', 'Could not load agent details');
       }
+    } else if (nodeData.type === 'EventSubscription') {
+      setEditingSubscriptionData(nodeData);
+      setShowSubscriptionDialog(true);
+    } else if (nodeData.type === 'ActiveKnowledgeCollection') {
+      setEditingAKCData({ node: nodeData });
+      setShowAKCDialog(true);
+    } else if (schema?.node_types?.[nodeData.type]?.ui_form === 'skill') {
+      setEditingSkillData(nodeData);
+      setSkillDialogType(nodeData.type);
     } else {
       setEditingNode({ id: nodeId, data: nodeData });
     }
-  }, [setEditingNode, showNotification]);
+  }, [schema, setEditingNode, setEditingSkillData, setSkillDialogType, showNotification]);
 
   // Callback: Hide node
   const handleHide = useCallback((nodeId) => {
@@ -244,18 +323,17 @@ function App() {
   // Callback: Delete edge (from backend and visualization)
   const handleDeleteEdge = useCallback(async (edgeId) => {
     try {
-      await api.deleteEdge(edgeId);
-      const newEdges = edges.filter(e => e.id !== edgeId);
-      updateVisualization(nodes, newEdges);
+      const result = await api.deleteEdge(edgeId);
+      if (!result?.success) {
+        throw new Error('Could not delete edge');
+      }
+      removeEdge(edgeId);
       showNotification('success', 'Edge deleted');
     } catch (error) {
       console.error('Error deleting edge:', error);
-      // Still remove from visualization even if backend fails
-      const newEdges = edges.filter(e => e.id !== edgeId);
-      updateVisualization(nodes, newEdges);
-      showNotification('info', 'Edge removed from view');
+      showNotification('error', 'Could not delete edge');
     }
-  }, [nodes, edges, updateVisualization, showNotification]);
+  }, [removeEdge, showNotification]);
 
   // Callback: Edit edge - opens EditEdgeDialog
   const handleEditEdge = useCallback((edgeId, edgeData) => {
@@ -413,24 +491,26 @@ function App() {
   }, []);
 
   // Save subscription node
-  const handleSaveSubscription = useCallback(async (subscriptionNode) => {
+  const handleSaveSubscription = useCallback(async (data) => {
     try {
-      const result = await api.addNodes([subscriptionNode], []);
-      console.log('Subscription created:', result);
-
-      if (result.added_node_ids && result.added_node_ids.length > 0) {
-        const nodeId = result.added_node_ids[0];
-        const nodeWithId = { ...subscriptionNode, id: nodeId };
-        addNodesToVisualization([nodeWithId], []);
-        console.log('Subscription added to visualization:', nodeId);
+      if (data.id && data.updates) {
+        await api.updateNode(data.id, data.updates);
+        const newNodes = nodes.map(n => n.id === data.id ? { ...n, ...data.updates } : n);
+        updateVisualization(newNodes, edges);
+        setEditingSubscriptionData(null);
+        showNotification('success', t('notifications.subscription_updated', { name: data.updates.name }));
+      } else {
+        const result = await api.addNodes([data], []);
+        if (result.added_node_ids?.length > 0) {
+          addNodesToVisualization([{ ...data, id: result.added_node_ids[0] }], []);
+        }
+        showNotification('success', t('notifications.subscription_created', { name: data.name }));
       }
-
-      showNotification('success', t('notifications.subscription_created', { name: subscriptionNode.name }));
     } catch (error) {
-      console.error('Error creating subscription:', error);
-      showNotification('error', t('notifications.subscription_error'));
+      console.error('Error saving subscription:', error);
+      showNotification('error', data?.updates ? t('notifications.subscription_update_error') : t('notifications.subscription_error'));
     }
-  }, [addNodesToVisualization, showNotification]);
+  }, [addNodesToVisualization, nodes, edges, updateVisualization, showNotification, t]);
 
   // Save agent nodes (create or update)
   const handleSaveAgent = useCallback(async (data) => {
@@ -483,13 +563,79 @@ function App() {
 
   // Callback: Create node from toolbar
   const handleCreateNodeForType = useCallback((nodeType) => {
-    setCreateNodeType(nodeType);
-  }, []);
+    if (schema?.node_types?.[nodeType]?.ui_form === 'skill') {
+      setEditingSkillData(null);
+      setSkillDialogType(nodeType);
+    } else {
+      setCreateNodeType(nodeType);
+    }
+  }, [schema]);
 
   // Handle created node from CreateNodeDialog
   const handleNodeCreated = useCallback((createdNode) => {
     addNodesToVisualization([createdNode], []);
     showNotification('success', `${createdNode.type} "${createdNode.name}" created`);
+  }, [addNodesToVisualization, showNotification]);
+
+  // Callback: Save a skill node (create or update)
+  const handleSaveSkill = useCallback(async (skillData) => {
+    try {
+      if ('id' in skillData) {
+        const { id, updates } = skillData;
+        await api.updateNode(id, updates);
+        const newNodes = nodes.map(n => n.id === id ? { ...n, ...updates } : n);
+        updateVisualization(newNodes, edges);
+        showNotification('success', 'Skill updated');
+      } else {
+        const result = await api.addNodes([skillData], []);
+        if (result.added_node_ids?.length > 0) {
+          const nodeWithId = { ...skillData, id: result.added_node_ids[0] };
+          addNodesToVisualization([nodeWithId], []);
+        }
+        showNotification('success', `${skillData.type} "${skillData.name}" created`);
+      }
+    } catch (error) {
+      console.error('Error saving skill:', error);
+      showNotification('error', 'Could not save skill');
+    }
+  }, [nodes, edges, updateVisualization, addNodesToVisualization, showNotification]);
+
+  const handleCreateAKC = useCallback(() => {
+    setEditingAKCData(null);
+    setShowAKCDialog(true);
+  }, []);
+
+  const handleSaveAKC = useCallback(async (nodeData) => {
+    try {
+      if (nodeData.id) {
+        const { id, ...updates } = nodeData;
+        await api.updateNode(id, updates);
+        const newNodes = nodes.map(n => n.id === id ? { ...n, ...updates } : n);
+        updateVisualization(newNodes, edges);
+        showNotification('success', 'Knowledge collection updated');
+      } else {
+        const result = await api.addNodes([nodeData], []);
+        if (result.added_node_ids && result.added_node_ids.length > 0) {
+          const withId = { ...nodeData, id: result.added_node_ids[0] };
+          addNodesToVisualization([withId], []);
+        }
+        showNotification('success', `Collection "${nodeData.name}" created`);
+      }
+    } catch (error) {
+      console.error('Error saving AKC:', error);
+      showNotification('error', 'Could not save knowledge collection');
+    }
+  }, [nodes, edges, addNodesToVisualization, updateVisualization, showNotification]);
+
+  // Callback: Context menu action triggered from schema-defined callback items
+  const handleContextMenuAction = useCallback((actionName, nodeId, nodeData) => {
+    // Dispatch named callback actions from schema context_menu entries.
+    // Add cases here as new callback-type actions are implemented.
+    switch (actionName) {
+      default:
+        console.warn(`[handleContextMenuAction] Unhandled action: "${actionName}". Wire it up in App.jsx.`);
+        showNotification('info', `Action: ${actionName}`);
+    }
   }, [addNodesToVisualization, showNotification]);
 
   // Toolbar save view: signal GraphCanvas to collect positions and trigger dialog
@@ -525,10 +671,15 @@ function App() {
       handleCreateAgent();
     } else if (nodeType === 'EventSubscription') {
       handleCreateSubscription();
+    } else if (nodeType === 'ActiveKnowledgeCollection') {
+      handleCreateAKC();
+    } else if (schema?.node_types?.[nodeType]?.ui_form === 'skill') {
+      setEditingSkillData(null);
+      setSkillDialogType(nodeType);
     } else {
       setCreateNodeType(nodeType);
     }
-  }, [handleCreateAgent, handleCreateSubscription]);
+  }, [handleCreateAgent, handleCreateSubscription, handleCreateAKC, schema]);
 
   // Handle node update from edit dialog
   const handleNodeUpdate = useCallback(async (nodeId, updates) => {
@@ -548,13 +699,14 @@ function App() {
 
   return (
     <div className="app">
-      <div className="app-canvas">
+      <div className="app-canvas" id="guide-target-canvas">
         <GraphCanvas
           nodes={nodes}
           edges={edges}
           highlightedNodeIds={highlightedNodeIds}
           hiddenNodeIds={hiddenNodeIds}
           hiddenEdgeIds={hiddenEdgeIds}
+          nodeMarks={nodeMarks}
           clearGroupsFlag={clearGroupsFlag}
           onExpand={handleExpand}
           onEdit={handleEdit}
@@ -587,6 +739,9 @@ function App() {
           federationDepthLabel={t('federation.depth_label')}
           federationDepthTooltip={t('federation.depth_tooltip')}
           showMinimap={showMinimap}
+          schema={schema}
+          onContextMenuAction={handleContextMenuAction}
+          nodeColorResolver={getNodeColor}
         />
       </div>
 
@@ -603,8 +758,9 @@ function App() {
         onCreateSubscription={handleCreateSubscription}
         onSaveView={handleToolbarSaveView}
         onCreateGroup={handleToolbarCreateGroup}
+        onCreateActiveKnowledgeCollection={handleCreateAKC}
       />
-      <ChatPanel />
+      {llmAvailable && <ChatPanel collectionShortName={akcShortName || undefined} />}
 
       {createNodeType && (
         <CreateNodeDialog
@@ -684,8 +840,18 @@ function App() {
 
       {showSubscriptionDialog && (
         <CreateSubscriptionDialog
-          onClose={() => setShowSubscriptionDialog(false)}
+          onClose={() => { setShowSubscriptionDialog(false); setEditingSubscriptionData(null); }}
           onSave={handleSaveSubscription}
+          initialData={editingSubscriptionData}
+        />
+      )}
+
+      {skillDialogType && (
+        <CreateSkillDialog
+          nodeType={skillDialogType}
+          initialData={editingSkillData}
+          onClose={() => { setSkillDialogType(null); setEditingSkillData(null); }}
+          onSave={handleSaveSkill}
         />
       )}
 
@@ -699,8 +865,75 @@ function App() {
           initialData={editingAgentData}
         />
       )}
+
+      {showAKCDialog && (
+        <CreateActiveKnowledgeCollectionDialog
+          onClose={() => {
+            setShowAKCDialog(false);
+            setEditingAKCData(null);
+          }}
+          onSave={handleSaveAKC}
+          initialData={editingAKCData}
+        />
+      )}
+
+      {akcShortName && akcConfig && !akcIntroShown && (
+        <div
+          style={{
+            position: 'fixed',
+            inset: 0,
+            background: 'rgba(0,0,0,0.82)',
+            display: 'flex',
+            alignItems: 'center',
+            justifyContent: 'center',
+            zIndex: 3000,
+          }}
+        >
+          <div
+            style={{
+              background: '#1a1a1a',
+              border: '1px solid #2e2e2e',
+              borderRadius: '16px',
+              boxShadow: '0 12px 48px rgba(0,0,0,0.6)',
+              padding: '2.5rem 3rem',
+              maxWidth: '520px',
+              width: '90%',
+              textAlign: 'center',
+            }}
+          >
+            <h2 style={{ margin: '0 0 1rem 0', color: '#fff' }}>Knowledge Collection</h2>
+            <p style={{ color: '#bbb', fontSize: '0.95rem', lineHeight: 1.65, marginBottom: '1.5rem' }}>
+              The AI assistant has been pre-loaded with special collection instructions.
+            </p>
+            <button
+              onClick={() => setAkcIntroShown(true)}
+              style={{
+                padding: '0.7rem 2rem',
+                background: '#F59E0B',
+                color: '#000',
+                border: 'none',
+                borderRadius: '8px',
+                fontSize: '0.95rem',
+                fontWeight: 600,
+                cursor: 'pointer',
+              }}
+            >
+              Open Graph
+            </button>
+          </div>
+        </div>
+      )}
+
+      <GuideOverlay />
     </div>
   );
 }
 
-export default App;
+function AppRoot() {
+  if (_collectShortName) {
+    return <CollectKioskView shortName={_collectShortName} />;
+  }
+  return <App />;
+}
+
+export default AppRoot;

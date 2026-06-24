@@ -1,16 +1,31 @@
 import { useState, useEffect, useRef, useMemo } from 'react';
-import { ChatDotsFill, ChevronRight, ChevronLeft, XCircleFill, Robot } from 'react-bootstrap-icons';
+import { ChatDotsFill, ChevronRight, ChevronLeft, XCircleFill, Robot, Mortarboard } from 'react-bootstrap-icons';
+import ReactMarkdown from 'react-markdown';
+import remarkGfm from 'remark-gfm';
+import remarkMath from 'remark-math';
+import rehypeKatex from 'rehype-katex';
+import 'katex/dist/katex.min.css';
 import useGraphStore from '../store/graphStore';
 import { useI18n } from '../i18n';
 import * as api from '../services/api';
-import { positionNewNodes, getNodeColor } from '@community-graph/ui-graph-canvas';
+import { positionNewNodes } from '@community-graph/ui-graph-canvas';
 import ExpertAgentSelector from './ExpertAgentSelector';
 import './ChatPanel.css';
 
 /** Max characters of node context to include with a message to the LLM */
 const MAX_SELECTION_CONTEXT_CHARS = 6000;
 
-function ChatPanel() {
+/** Returns true when a graph node is of type "Skill".
+ *  Checks all known locations for the type string to be resilient against
+ *  different node-object shapes (plain data object, raw React-Flow node, etc.).
+ */
+const isSkillNode = (node) =>
+  node.nodeType === 'Skill' ||
+  node.type === 'Skill' ||
+  node.data?.nodeType === 'Skill' ||
+  node.data?.type === 'Skill';
+
+function ChatPanel({ collectionShortName }) {
   const {
     chatMessages,
     addChatMessage,
@@ -28,6 +43,11 @@ function ChatPanel() {
     activeExperts,
     availableExperts,
     showMinimap,
+    presentation,
+    startGuide,
+    guideChatInput,
+    clearGuideChatInput,
+    getNodeColor,
   } = useGraphStore();
 
   const { t, language } = useI18n();
@@ -41,6 +61,7 @@ function ChatPanel() {
 
   const messagesEndRef = useRef(null);
   const fileInputRef = useRef(null);
+  const handleSendRef = useRef(null);
 
   const scrollToBottom = () => {
     messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' });
@@ -56,6 +77,31 @@ function ChatPanel() {
       return () => clearTimeout(timer);
     }
   }, [error]);
+
+  // Guide: animate typing into chat input
+  useEffect(() => {
+    if (!guideChatInput) return;
+    const { text, animated, auto_send } = guideChatInput;
+    clearGuideChatInput();
+
+    if (!animated) {
+      setInputValue(text);
+      if (auto_send) setTimeout(() => handleSendRef.current?.(), 0);
+      return;
+    }
+
+    let i = 0;
+    setInputValue('');
+    const interval = setInterval(() => {
+      i++;
+      setInputValue(text.slice(0, i));
+      if (i >= text.length) {
+        clearInterval(interval);
+        if (auto_send) setTimeout(() => handleSendRef.current?.(), 300);
+      }
+    }, 30);
+    return () => clearInterval(interval);
+  }, [guideChatInput]); // eslint-disable-line react-hooks/exhaustive-deps
 
   const filterCommunityNodes = (nodeList) => {
     return nodeList.filter(n =>
@@ -75,12 +121,15 @@ function ChatPanel() {
         : t('chat.analyze_document', { fileContext });
     }
 
-    // Append selected node context for the LLM (not shown in chat bubble)
+    // Extract Skill-node instructions (sent as system context, not shown in chat)
+    const skillsContext = buildSkillsContext();
+    // Append regular selected-node context to the user message (not shown in chat bubble)
     const selectionContext = buildSelectionContext();
     const messageForLLM = selectionContext
       ? messageContent + selectionContext
       : messageContent;
 
+    const activeSkillNodes = (selectedGraphNodes || []).filter(isSkillNode);
     const userMessage = {
       role: 'user',
       content: messageContent, // Show only the user's text in chat
@@ -89,6 +138,8 @@ function ChatPanel() {
       filename: uploadedFile?.filename,
       hasSelection: selectedGraphNodes.length > 0,
       selectionCount: selectedGraphNodes.length,
+      activeSkillCount: activeSkillNodes.length,
+      activeSkillNames: activeSkillNodes.map(n => n.name || n.label || '?'),
     };
     addChatMessage(userMessage);
     setInputValue('');
@@ -103,7 +154,12 @@ function ChatPanel() {
 
       conversationMessages.push({ role: 'user', content: messageForLLM });
 
-      const response = await api.sendChatMessage(conversationMessages, null, { federationDepth });
+      const response = await api.sendChatMessage(conversationMessages, null, {
+        federationDepth,
+        expertAgentId: activeExperts.length > 0 ? activeExperts[activeExperts.length - 1] : undefined,
+        skillsContext: skillsContext || undefined,
+        collectionShortName,
+      });
 
       console.log('[ChatPanel] Response:', response);
 
@@ -164,6 +220,19 @@ function ChatPanel() {
             updateVisualization([...mergedNodes, ...newNodes], currentEdges);
           }
         }
+        else if (toolResult.action === 'mark_nodes') {
+          useGraphStore.getState().setNodeMarks(toolResult.marks || []);
+        }
+        else if (toolResult.action === 'start_guide') {
+          const guideId = toolResult.guide_id;
+          const guides = useGraphStore.getState().presentation?.guides || [];
+          const guide = guides.find(g => g.id === guideId);
+          if (guide) {
+            startGuide(guide);
+          } else {
+            console.warn(`[ChatPanel] start_guide: guide "${guideId}" not found in presentation config`);
+          }
+        }
         else if (toolResult.nodes && toolResult.nodes.length > 0) {
           const filteredNodes = filterCommunityNodes(toolResult.nodes);
           updateVisualization(filteredNodes, toolResult.edges || []);
@@ -199,6 +268,10 @@ function ChatPanel() {
       setIsProcessing(false);
     }
   };
+
+  // Keep ref current so the guide animation can call the latest handleSend after animation
+  // completes, picking up the fully-typed inputValue rather than a stale closure.
+  handleSendRef.current = handleSend;
 
   const handleKeyPress = (e) => {
     if (e.key === 'Enter' && !e.shiftKey) {
@@ -253,7 +326,7 @@ function ChatPanel() {
         .map(m => ({ role: m.role, content: m.content }));
       conversationMessages.push({ role: 'user', content: msg });
 
-      const response = await api.sendChatMessage(conversationMessages, null, { federationDepth });
+      const response = await api.sendChatMessage(conversationMessages, null, { federationDepth, expertAgentId: activeExperts.length > 0 ? activeExperts[activeExperts.length - 1] : undefined, collectionShortName });
 
       if (response.toolResult?.nodes) {
         const filteredNodes = filterCommunityNodes(response.toolResult.nodes);
@@ -291,7 +364,7 @@ function ChatPanel() {
         .map(m => ({ role: m.role, content: m.content }));
       conversationMessages.push({ role: 'user', content: msg });
 
-      const response = await api.sendChatMessage(conversationMessages, null, { federationDepth });
+      const response = await api.sendChatMessage(conversationMessages, null, { federationDepth, expertAgentId: activeExperts.length > 0 ? activeExperts[activeExperts.length - 1] : undefined, collectionShortName });
       addChatMessage({
         role: 'assistant',
         content: response.content,
@@ -315,7 +388,7 @@ function ChatPanel() {
         .map(m => ({ role: m.role, content: m.content }));
       conversationMessages.push({ role: 'user', content: msg });
 
-      const response = await api.sendChatMessage(conversationMessages, null, { federationDepth });
+      const response = await api.sendChatMessage(conversationMessages, null, { federationDepth, expertAgentId: activeExperts.length > 0 ? activeExperts[activeExperts.length - 1] : undefined, collectionShortName });
 
       if (deleteConfirmation.node_ids) {
         const deletedIds = new Set(deleteConfirmation.node_ids);
@@ -349,18 +422,25 @@ function ChatPanel() {
     });
   };
 
-  // Summarize selected nodes by type for display
+  // Summarize selected nodes — skill nodes and regular nodes are split so the UI
+  // can show skill nodes as active "persona" chips separate from the node-type chips.
   const selectionSummary = useMemo(() => {
     if (!selectedGraphNodes || selectedGraphNodes.length === 0) return null;
+
+    const skillNodes = selectedGraphNodes.filter(isSkillNode);
+    const regularNodes = selectedGraphNodes.filter(n => !isSkillNode(n));
+
     const byType = {};
-    for (const node of selectedGraphNodes) {
+    for (const node of regularNodes) {
       const type = node.type || node.nodeType || 'Unknown';
       if (!byType[type]) byType[type] = [];
       byType[type].push(node);
     }
+
     return {
       total: selectedGraphNodes.length,
-      byType,
+      skillNodes: skillNodes.map(n => ({ id: n.id, name: n.name || n.label || '?' })),
+      regularCount: regularNodes.length,
       types: Object.entries(byType).map(([type, nodes]) => ({
         type,
         count: nodes.length,
@@ -370,14 +450,48 @@ function ChatPanel() {
     };
   }, [selectedGraphNodes]);
 
-  // Build context string for selected nodes to send to LLM
+  // Build temporary system context from selected Skill nodes.
+  // Injected as a skills_override after the base system prompt so it has
+  // recency precedence over the base instructions.
+  const buildSkillsContext = () => {
+    const skillNodes = (selectedGraphNodes || []).filter(isSkillNode);
+    if (skillNodes.length === 0) return null;
+
+    const parts = [
+      'ACTIVE SKILL INSTRUCTIONS — YOU MUST APPLY THESE TO THIS RESPONSE:',
+      'The user has selected the following skills. These instructions OVERRIDE your default behavior and style for this response. Apply them precisely.',
+    ];
+    for (const node of skillNodes) {
+      const name = node.name || node.label || '?';
+      const description = node.description || '';
+      const content = node.metadata?.content || '';
+      const whenToUse = node.metadata?.when_to_use || '';
+
+      let block = `<skill name="${name}">`;
+      if (content) {
+        // content is the primary SKILL.md body — use it directly as instructions
+        block += `\n${content}`;
+      } else {
+        // Fall back to description/when_to_use as imperative instructions
+        if (description) block += `\nInstruction: ${description}`;
+        if (whenToUse) block += `\nApply when: ${whenToUse}`;
+      }
+      block += '\n</skill>';
+      parts.push(block);
+    }
+    parts.push('END OF SKILL INSTRUCTIONS. Apply the above to your entire response.');
+    return parts.join('\n\n');
+  };
+
+  // Build context string for selected non-Skill nodes to append to the user message.
   const buildSelectionContext = () => {
-    if (!selectedGraphNodes || selectedGraphNodes.length === 0) return '';
+    const regularNodes = (selectedGraphNodes || []).filter(n => !isSkillNode(n));
+    if (regularNodes.length === 0) return '';
 
     let context = '\n\n[Selected nodes in the visualization:]\n';
     let charCount = context.length;
 
-    for (const node of selectedGraphNodes) {
+    for (const node of regularNodes) {
       const type = node.type || node.nodeType || 'Unknown';
       const name = node.name || node.label || '?';
       const id = node.id || '';
@@ -394,7 +508,7 @@ function ChatPanel() {
       nodeStr += '\n';
 
       if (charCount + nodeStr.length > MAX_SELECTION_CONTEXT_CHARS) {
-        const remaining = selectedGraphNodes.length - selectedGraphNodes.indexOf(node);
+        const remaining = regularNodes.length - regularNodes.indexOf(node);
         context += `\n(... and ${remaining} more selected nodes, truncated for brevity. Use get_node_details with the IDs above to get more information.)\n`;
         break;
       }
@@ -425,7 +539,7 @@ function ChatPanel() {
 
   // Expanded state
   return (
-    <div className={`chat-panel-floating${!showMinimap ? ' minimap-hidden' : ''}`}>
+    <div className={`chat-panel-floating${!showMinimap ? ' minimap-hidden' : ''}`} id="guide-target-chat">
       <div className="chat-header">
         <div className="chat-header-left" onClick={toggleChatPanel} style={{ cursor: 'pointer' }}>
           <ChatDotsFill size={16} />
@@ -455,7 +569,21 @@ function ChatPanel() {
               </div>
             )}
             <div className="message-content">
-              {msg.content}
+              {(msg.role === 'assistant' || msg.role === 'expert') ? (
+                <ReactMarkdown
+                  remarkPlugins={[remarkGfm, remarkMath]}
+                  rehypePlugins={[rehypeKatex]}
+                >
+                  {msg.content}
+                </ReactMarkdown>
+              ) : msg.content}
+
+              {msg.role === 'user' && msg.activeSkillCount > 0 && (
+                <div className="message-skill-tag">
+                  <Mortarboard size={10} />
+                  {msg.activeSkillNames.join(', ')}
+                </div>
+              )}
 
               {msg.role === 'user' && idx === chatMessages.length - 1 && isProcessing && (
                 <div className="message-loading">
@@ -566,17 +694,32 @@ function ChatPanel() {
         {selectionSummary && (
           <div className="selection-indicator">
             <div className="selection-indicator-content">
-              <span className="selection-indicator-label">
-                {t('chat.selected_nodes', { count: selectionSummary.total })}
-              </span>
-              <div className="selection-indicator-types">
-                {selectionSummary.types.map(({ type, count, color, names }) => (
-                  <span key={type} className="selection-type-chip" title={names.join(', ')}>
-                    <span className="selection-type-dot" style={{ backgroundColor: color }} />
-                    {type} ({count})
+              {selectionSummary.skillNodes.length > 0 && (
+                <div className={`skill-nodes-indicator${selectionSummary.regularCount > 0 ? ' has-regular-nodes' : ''}`}>
+                  <Mortarboard size={11} className="skill-nodes-icon" />
+                  <span className="skill-nodes-label">Skills active:</span>
+                  {selectionSummary.skillNodes.map(skill => (
+                    <span key={skill.id} className="skill-node-chip">
+                      {skill.name}
+                    </span>
+                  ))}
+                </div>
+              )}
+              {selectionSummary.regularCount > 0 && (
+                <>
+                  <span className="selection-indicator-label">
+                    {t('chat.selected_nodes', { count: selectionSummary.regularCount })}
                   </span>
-                ))}
-              </div>
+                  <div className="selection-indicator-types">
+                    {selectionSummary.types.map(({ type, count, color, names }) => (
+                      <span key={type} className="selection-type-chip" title={names.join(', ')}>
+                        <span className="selection-type-dot" style={{ backgroundColor: color }} />
+                        {type} ({count})
+                      </span>
+                    ))}
+                  </div>
+                </>
+              )}
             </div>
             <button
               className="selection-clear-button"
@@ -612,9 +755,11 @@ function ChatPanel() {
           onKeyPress={handleKeyPress}
           placeholder={uploadedFile
             ? t('chat.placeholder_with_file')
-            : selectionSummary
-              ? t('chat.placeholder_with_selection')
-              : t('chat.placeholder')}
+            : selectionSummary?.skillNodes?.length > 0
+              ? `Skill${selectionSummary.skillNodes.length > 1 ? 's' : ''} active: ${selectionSummary.skillNodes.map(s => s.name).join(', ')} — ask a question...`
+              : selectionSummary
+                ? t('chat.placeholder_with_selection')
+                : t('chat.placeholder')}
           rows={3}
           disabled={isProcessing}
         />

@@ -37,7 +37,7 @@ function FloatingHeader({ stats, title = 'Community Graph View', onExportGraph }
   }, [menuOpen]);
 
   return (
-    <div className="floating-header" ref={menuRef}>
+    <div className="floating-header" id="guide-target-header" ref={menuRef}>
       <div className="floating-header-bar">
         <Feather size={18} className="floating-header-app-icon" />
         <button

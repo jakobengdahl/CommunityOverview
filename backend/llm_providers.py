@@ -3,7 +3,7 @@ LLM Provider abstraction layer for supporting multiple AI backends.
 Supports both Claude (Anthropic) and OpenAI APIs.
 """
 from abc import ABC, abstractmethod
-from typing import List, Dict, Any, Optional
+from typing import Any, Dict, List, Optional
 import json
 import os
 
@@ -267,6 +267,46 @@ class OpenAIProvider(LLMProvider):
             "content_filter": "end_turn"
         }
         return mapping.get(finish_reason, "end_turn")
+
+
+def get_llm_availability() -> Dict[str, Any]:
+    """
+    Inspect configured API keys and return whether an LLM provider is available.
+
+    No network calls are made; this only reads environment variables.
+
+    Provider resolution order (mirrors chat_logic.py):
+      1. LLM_PROVIDER env var if explicitly set
+      2. Auto-detect: prefer openai if OPENAI_API_KEY is present, else claude
+
+    Returns:
+        Dict with keys:
+        - available (bool): True if the active provider has an API key configured
+        - provider (str): The active provider type ('claude' or 'openai')
+        - has_anthropic_key (bool)
+        - has_openai_key (bool)
+    """
+    explicit_provider = os.getenv("LLM_PROVIDER", "").strip().lower()
+    anthropic_key = os.getenv("ANTHROPIC_API_KEY", "").strip()
+    openai_key = os.getenv("OPENAI_API_KEY", "").strip()
+
+    if explicit_provider in ("openai", "claude"):
+        provider_type = explicit_provider
+    else:
+        # Auto-detect: prefer OpenAI when its key is present (e.g. SSPCloud)
+        provider_type = "openai" if openai_key else "claude"
+
+    if provider_type == "openai":
+        available = bool(openai_key)
+    else:
+        available = bool(anthropic_key)
+
+    return {
+        "available": available,
+        "provider": provider_type,
+        "has_anthropic_key": bool(anthropic_key),
+        "has_openai_key": bool(openai_key),
+    }
 
 
 def create_provider(api_key: str, provider_type: Optional[str] = None) -> LLMProvider:

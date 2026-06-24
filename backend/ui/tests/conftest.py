@@ -96,7 +96,7 @@ class MockSentenceTransformer:
 @pytest.fixture(autouse=True)
 def mock_embedding_model():
     """Mock the embedding model to avoid network calls."""
-    import graph_core.vector_store as vs
+    import backend.core.vector_store as vs
     original_ensure = vs._ensure_sentence_transformers
 
     def mock_ensure():
@@ -152,7 +152,7 @@ def chat_service(graph_service, mock_llm_provider):
     but the GraphService is real (in-memory).
     """
     # Patch BEFORE creating ChatService so ChatProcessor uses mock
-    with patch('chat_logic.create_provider', return_value=mock_llm_provider):
+    with patch('backend.chat_logic.create_provider', return_value=mock_llm_provider):
         with patch.dict(os.environ, {'ANTHROPIC_API_KEY': 'test-key'}):
             service = ChatService(graph_service)
             service._processor.provider_type = "mock"
@@ -220,7 +220,7 @@ def fastapi_test_client(graph_service, mock_llm_provider):
     from fastapi.testclient import TestClient
 
     # Patch BEFORE creating ChatService
-    with patch('chat_logic.create_provider', return_value=mock_llm_provider):
+    with patch('backend.chat_logic.create_provider', return_value=mock_llm_provider):
         with patch.dict(os.environ, {'ANTHROPIC_API_KEY': 'test-key'}):
             app = FastAPI()
 

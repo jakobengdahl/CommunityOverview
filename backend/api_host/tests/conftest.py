@@ -19,6 +19,31 @@ from backend.api_host import create_app, AppConfig
 from backend.core import GraphStorage
 
 
+@pytest.fixture(autouse=True)
+def reset_config_loader():
+    """Reset shared config loader state between tests."""
+    from backend import config_loader
+
+    config_loader.reset_loader()
+    yield
+    os.environ.pop("SCHEMA_FILE", None)
+    os.environ.pop("COMMUNITYOVERVIEW_RUNTIME_MODE", None)
+    os.environ.pop("COMMUNITYOVERVIEW_ENABLED_EXTENSIONS", None)
+    os.environ.pop("COMMUNITYOVERVIEW_TENANT_ID", None)
+    os.environ.pop("COMMUNITYOVERVIEW_TENANT_NAME", None)
+    os.environ.pop("COMMUNITYOVERVIEW_ENVIRONMENT", None)
+    os.environ.pop("COMMUNITYOVERVIEW_TENANT_CONFIG_DIR", None)
+    os.environ.pop("COMMUNITYOVERVIEW_ACTOR_ID", None)
+    os.environ.pop("COMMUNITYOVERVIEW_ACTOR_TYPE", None)
+    os.environ.pop("COMMUNITYOVERVIEW_AUTH_SOURCE", None)
+    os.environ.pop("COMMUNITYOVERVIEW_WORKSPACE_ID", None)
+    os.environ.pop("COMMUNITYOVERVIEW_WORKSPACE_KIND", None)
+    os.environ.pop("COMMUNITYOVERVIEW_GRAPH_SCOPE_ID", None)
+    os.environ.pop("FEDERATION_FILE", None)
+    os.environ.pop("GRAPH_FEDERATION_CONFIG", None)
+    config_loader.reset_loader()
+
+
 class MockSentenceTransformer:
     """Mock SentenceTransformer that generates deterministic embeddings."""
 
@@ -212,6 +237,8 @@ def app_config(temp_graph_file, temp_static_dirs) -> AppConfig:
         web_static_path=web_path,
         widget_static_path=widget_path,
         api_prefix="/api",
+        auth_enabled=False,
+        mcp_basic_auth=False,
     )
 
 
@@ -223,7 +250,7 @@ def test_app(app_config, mock_llm_provider) -> TestClient:
     For tests that need to configure the mock LLM, use test_app_with_mock.
     """
     # Patch LLM provider BEFORE creating app
-    with patch('chat_logic.create_provider', return_value=mock_llm_provider):
+    with patch('backend.chat_logic.create_provider', return_value=mock_llm_provider):
         with patch.dict(os.environ, {'ANTHROPIC_API_KEY': 'test-key'}):
             app = create_app(app_config)
             # Update the chat service to use our mock
@@ -239,7 +266,7 @@ def test_app_with_mock(app_config, mock_llm_provider):
     Returns a tuple of (TestClient, mock_llm_provider) for tests that need to configure the mock.
     """
     # Patch LLM provider BEFORE creating app
-    with patch('chat_logic.create_provider', return_value=mock_llm_provider):
+    with patch('backend.chat_logic.create_provider', return_value=mock_llm_provider):
         with patch.dict(os.environ, {'ANTHROPIC_API_KEY': 'test-key'}):
             app = create_app(app_config)
             # Update the chat service to use our mock
