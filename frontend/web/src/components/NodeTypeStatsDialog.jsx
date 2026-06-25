@@ -10,9 +10,14 @@ function NodeTypeStatsDialog({ nodesByType, onClose }) {
     dialogRef.current?.focus();
   }, []);
 
-  const handleKeyDown = (e) => {
-    if (e.key === 'Escape') onClose();
-  };
+  // Document-level listener so Escape works even after focus leaves the dialog.
+  useEffect(() => {
+    const handle = (e) => {
+      if (e.key === 'Escape' || e.key === 'Enter') onClose();
+    };
+    document.addEventListener('keydown', handle);
+    return () => document.removeEventListener('keydown', handle);
+  }, [onClose]);
 
   const sorted = Object.entries(nodesByType).sort(([, a], [, b]) => b - a);
 
@@ -25,7 +30,6 @@ function NodeTypeStatsDialog({ nodesByType, onClose }) {
         aria-modal="true"
         aria-labelledby="nts-dialog-title"
         onClick={(e) => e.stopPropagation()}
-        onKeyDown={handleKeyDown}
         tabIndex={-1}
       >
         <div className="nts-dialog-header">

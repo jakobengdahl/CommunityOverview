@@ -1,10 +1,13 @@
 import { useState, useRef, useEffect } from 'react';
+import { createPortal } from 'react-dom';
 import { List, Feather, Download, Map, BoxArrowRight } from 'react-bootstrap-icons';
 import useGraphStore from '../store/graphStore';
 import { useI18n } from '../i18n';
 import { COLOR_MAP } from './FloatingToolbar';
 import NodeTypeStatsDialog from './NodeTypeStatsDialog';
 import './FloatingHeader.css';
+
+const MAX_INLINE_TYPES = 5;
 
 function FloatingHeader({ stats, title = 'Community Graph View', onExportGraph }) {
   const { t, language, setLanguage } = useI18n();
@@ -52,11 +55,12 @@ function FloatingHeader({ stats, title = 'Community Graph View', onExportGraph }
         <span className="floating-header-title">{title}</span>
       </div>
 
-      {statsDialogOpen && stats?.nodes_by_type && (
+      {statsDialogOpen && stats?.nodes_by_type && createPortal(
         <NodeTypeStatsDialog
           nodesByType={stats.nodes_by_type}
           onClose={() => setStatsDialogOpen(false)}
-        />
+        />,
+        document.body
       )}
 
       {menuOpen && (
@@ -78,7 +82,7 @@ function FloatingHeader({ stats, title = 'Community Graph View', onExportGraph }
                 <div className="floating-header-type-list">
                   <div className="floating-header-type-list-header">
                     <span className="floating-header-section-title">Nodes by type</span>
-                    {Object.keys(stats.nodes_by_type).length > 5 && (
+                    {Object.keys(stats.nodes_by_type).length > MAX_INLINE_TYPES && (
                       <button
                         className="floating-header-type-details-btn"
                         aria-haspopup="dialog"
@@ -91,7 +95,7 @@ function FloatingHeader({ stats, title = 'Community Graph View', onExportGraph }
                   </div>
                   {Object.entries(stats.nodes_by_type)
                     .sort(([, a], [, b]) => b - a)
-                    .slice(0, 5)
+                    .slice(0, MAX_INLINE_TYPES)
                     .map(([type, count]) => (
                       <div key={type} className="floating-header-type-row">
                         <span
