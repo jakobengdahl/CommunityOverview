@@ -260,8 +260,8 @@ class TestGraphServiceCRUD:
         assert set(result["deleted_edge_ids"]) == {"edge-1", "edge-2"}
 
     def test_delete_edges_max_limit(self, empty_service: GraphService):
-        """Test that edge deletion is limited to 50 edges."""
-        result = empty_service.delete_edges([f"edge-{i}" for i in range(60)])
+        """Test that edge deletion is limited to 50 edges (confirmed=True to reach limit check)."""
+        result = empty_service.delete_edges([f"edge-{i}" for i in range(60)], confirmed=True)
 
         assert result["success"] is False
         assert "Max 50" in result["message"]

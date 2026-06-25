@@ -1217,15 +1217,8 @@ class GraphStorage:
         edge_ids: List[str],
         event_context: Optional[EventContext] = None,
     ) -> DeleteEdgesResult:
-        """Delete up to 50 edges in a single operation."""
+        """Delete edges by ID. Limit enforcement is the caller's responsibility."""
         with self._lock:
-            if len(edge_ids) > 50:
-                return DeleteEdgesResult(
-                    deleted_edge_ids=[],
-                    success=False,
-                    message="Max 50 edges can be deleted at a time."
-                )
-
             deleted_edge_ids = []
             edge_before_states: Dict[str, Dict[str, Any]] = {}
 
