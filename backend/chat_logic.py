@@ -340,6 +340,7 @@ TOOL USAGE GUIDELINES:
 - add_nodes: Only after user approval, with proper validation
 - update_node: For editing existing nodes (name, description, summary, tags)
 - delete_nodes: CAREFUL - max 10 nodes, requires confirmation=True
+- delete_edges: CAREFUL - max 50 edges, requires confirmation=True
 - list_node_types: When user asks about available types
 - get_graph_stats: For overview of graph size and composition
 - save_view: For saving current visualization state as a saved view
@@ -695,6 +696,26 @@ class ChatProcessor:
                         }
                     },
                     "required": ["node_ids"]
+                }
+            },
+            {
+                "name": "delete_edges",
+                "description": "Delete edges from the graph.",
+                "input_schema": {
+                    "type": "object",
+                    "properties": {
+                        "edge_ids": {
+                            "type": "array",
+                            "items": {"type": "string"},
+                            "description": "List of edge IDs to delete (max 50)"
+                        },
+                        "confirmed": {
+                            "type": "boolean",
+                            "description": "Must be True to execute deletion",
+                            "default": False
+                        }
+                    },
+                    "required": ["edge_ids"]
                 }
             },
             {

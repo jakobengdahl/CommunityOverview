@@ -87,6 +87,7 @@ class ChatService:
             "add_nodes": self._graph_service.add_nodes,
             "update_node": self._graph_service.update_node,
             "delete_nodes": self._graph_service.delete_nodes,
+            "delete_edges": self._graph_service.delete_edges,
             "list_node_types": self._graph_service.list_node_types,
             "get_subtypes": self._graph_service.get_subtypes,
             "get_graph_stats": self._graph_service.get_graph_stats,
