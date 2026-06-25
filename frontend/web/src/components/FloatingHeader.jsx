@@ -81,6 +81,8 @@ function FloatingHeader({ stats, title = 'Community Graph View', onExportGraph }
                     {Object.keys(stats.nodes_by_type).length > 5 && (
                       <button
                         className="floating-header-type-details-btn"
+                        aria-haspopup="dialog"
+                        aria-label="Show all node types"
                         onClick={() => { setStatsDialogOpen(true); setMenuOpen(false); }}
                       >
                         Details

@@ -21,12 +21,15 @@ function NodeTypeStatsDialog({ nodesByType, onClose }) {
       <div
         ref={dialogRef}
         className="nts-dialog"
+        role="dialog"
+        aria-modal="true"
+        aria-labelledby="nts-dialog-title"
         onClick={(e) => e.stopPropagation()}
         onKeyDown={handleKeyDown}
         tabIndex={-1}
       >
         <div className="nts-dialog-header">
-          <span className="nts-dialog-title">Nodes by type</span>
+          <span id="nts-dialog-title" className="nts-dialog-title">Nodes by type</span>
           <button className="nts-dialog-close" onClick={onClose} aria-label="Close">
             <XLg size={14} />
           </button>
