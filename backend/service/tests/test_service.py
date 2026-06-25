@@ -266,6 +266,16 @@ class TestGraphServiceCRUD:
         assert result["success"] is False
         assert "Max 50" in result["message"]
 
+    def test_delete_edges_limit_checked_before_confirmation(self, empty_service: GraphService):
+        """Max-limit error must take precedence over the confirmation prompt."""
+        # confirmed=False — before the fix, this returned the confirmation error.
+        result = empty_service.delete_edges([f"edge-{i}" for i in range(60)], confirmed=False)
+
+        assert result["success"] is False
+        assert "Max 50" in result["message"], (
+            f"Expected limit error but got: {result['message']!r}"
+        )
+
 
 class TestGraphServiceStatistics:
     """Tests for statistics and metadata operations."""
