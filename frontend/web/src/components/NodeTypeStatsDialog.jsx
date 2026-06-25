@@ -13,7 +13,7 @@ function NodeTypeStatsDialog({ nodesByType, onClose }) {
   // Document-level listener so Escape works even after focus leaves the dialog.
   useEffect(() => {
     const handle = (e) => {
-      if (e.key === 'Escape' || e.key === 'Enter') onClose();
+      if (e.key === 'Escape') onClose();
     };
     document.addEventListener('keydown', handle);
     return () => document.removeEventListener('keydown', handle);
