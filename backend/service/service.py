@@ -1060,15 +1060,23 @@ class GraphService:
     def delete_edges(
         self,
         edge_ids: List[str],
+        confirmed: bool = False,
         event_origin: Optional[str] = None,
         event_session_id: Optional[str] = None,
         event_correlation_id: Optional[str] = None,
     ) -> Dict[str, Any]:
-        """Delete up to 50 edges in a single operation."""
+        """Delete up to 50 edges in a single operation. Requires confirmed=True."""
         denied = self._authorize_graph_access(action=GRAPH_ACTION_MUTATE, target="delete_edges")
         if denied:
             denied.setdefault("deleted_edge_ids", [])
             return denied
+
+        if not confirmed:
+            return {
+                "deleted_edge_ids": [],
+                "success": False,
+                "message": "Deletion requires confirmed=True. Please confirm before proceeding.",
+            }
 
         event_context = self._build_event_context(
             target="delete_edges",
