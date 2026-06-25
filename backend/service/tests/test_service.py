@@ -254,7 +254,7 @@ class TestGraphServiceCRUD:
             ],
         )
 
-        result = empty_service.delete_edges(["edge-1", "edge-2"])
+        result = empty_service.delete_edges(["edge-1", "edge-2"], confirmed=True)
 
         assert result["success"] is True
         assert set(result["deleted_edge_ids"]) == {"edge-1", "edge-2"}
