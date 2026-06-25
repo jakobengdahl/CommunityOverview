@@ -40,6 +40,13 @@ class AppConfig:
     auth_bearer_token: Optional[str] = field(default_factory=lambda: os.getenv("AUTH_BEARER_TOKEN"))
     cors_allowed_origins: list[str] = field(default_factory=lambda: [o.strip() for o in os.getenv("CORS_ALLOWED_ORIGINS", "*").split(",")])
     mcp_basic_auth: bool = field(default_factory=lambda: os.getenv("MCP_BASIC_AUTH", "false").lower() == "true")
+    # When set to False, /mcp and /execute_tool bypass auth even if auth_enabled=True.
+    # When None (default / env var absent), MCP follows auth_enabled — no behaviour change.
+    mcp_auth_enabled: Optional[bool] = field(
+        default_factory=lambda: (
+            None if (_v := os.getenv("MCP_AUTH_ENABLED")) is None else _v.lower() == "true"
+        )
+    )
 
     # Profile configuration
     config_profile: str = field(default_factory=lambda: os.getenv("CONFIG_PROFILE", "default"))
