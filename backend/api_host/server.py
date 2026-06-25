@@ -352,6 +352,13 @@ def create_app(
             ]:
                 return await call_next(request)
 
+            # MCP_AUTH_ENABLED=false: MCP endpoints bypass auth regardless of auth_enabled.
+            # Unset (None) → MCP follows auth_enabled (backwards compatible).
+            if config.mcp_auth_enabled is False:
+                path = request.url.path
+                if path.startswith("/mcp") or path.startswith("/execute_tool"):
+                    return await call_next(request)
+
             # In MCP-only mode, only require auth for MCP and execute_tool paths
             if config.mcp_basic_auth and not config.auth_enabled:
                 path = request.url.path
