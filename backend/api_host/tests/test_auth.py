@@ -179,8 +179,35 @@ def test_mcp_auth_disabled_web_still_requires_auth(mcp_auth_disabled_app):
 
 def test_mcp_auth_disabled_mcp_open(mcp_auth_disabled_app):
     """MCP endpoint does not require auth when mcp_auth_enabled=False."""
-    response = mcp_auth_disabled_app.get("/mcp")
+    # /execute_tool is a plain @app.post route — easier to reach than the ASGI-mounted /mcp.
+    # Without auth it normally returns 401; with mcp_auth_enabled=False it passes through
+    # to the handler, which returns 422 (missing required fields) or similar — never 401.
+    response = mcp_auth_disabled_app.post("/execute_tool", json={})
     assert response.status_code != 401
+
+
+def test_mcp_auth_disabled_execute_tool_open(mcp_auth_disabled_app):
+    """/execute_tool bypass is exercised independently of /mcp."""
+    response = mcp_auth_disabled_app.post("/execute_tool", json={"tool_name": "get_graph_stats"})
+    assert response.status_code != 401
+
+
+def test_mcp_auth_explicit_true_follows_auth_enabled(temp_graph_file, temp_static_dirs):
+    """mcp_auth_enabled=True (explicit) enforces auth on MCP — same as default None."""
+    web_path, widget_path = temp_static_dirs
+    config = AppConfig(
+        graph_file=temp_graph_file,
+        web_static_path=web_path,
+        widget_static_path=widget_path,
+        auth_enabled=True,
+        auth_username="admin",
+        auth_password="secretpassword",
+        mcp_auth_enabled=True,
+    )
+    app = create_app(config)
+    client = TestClient(app)
+    response = client.post("/execute_tool", json={"tool_name": "get_graph_stats"})
+    assert response.status_code == 401
 
 
 def test_mcp_auth_default_none_follows_auth_enabled(temp_graph_file, temp_static_dirs):
@@ -197,5 +224,5 @@ def test_mcp_auth_default_none_follows_auth_enabled(temp_graph_file, temp_static
     )
     app = create_app(config)
     client = TestClient(app)
-    response = client.get("/mcp")
+    response = client.post("/execute_tool", json={"tool_name": "get_graph_stats"})
     assert response.status_code == 401

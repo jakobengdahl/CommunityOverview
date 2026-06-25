@@ -352,7 +352,8 @@ def create_app(
             ]:
                 return await call_next(request)
 
-            # MCP_AUTH_ENABLED=false: MCP endpoints bypass auth regardless of auth_enabled.
+            # MCP_AUTH_ENABLED=false: MCP endpoints bypass auth regardless of auth_enabled
+            # or mcp_basic_auth — this takes precedence over both.
             # Unset (None) → MCP follows auth_enabled (backwards compatible).
             if config.mcp_auth_enabled is False:
                 path = request.url.path
