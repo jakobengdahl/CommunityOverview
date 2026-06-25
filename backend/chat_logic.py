@@ -30,8 +30,8 @@ def _build_system_prompt() -> str:
     # Build node types section from config
     node_types_section = "METAMODEL - Node Types:\n"
     for type_name, type_config in schema.get("node_types", {}).items():
-        if type_config.get("static"):
-            continue  # Skip static types like SavedView in the main list
+        if type_config.get("category") == "system":
+            continue  # Skip system types in the main domain list
         color = type_config.get("color", "#9CA3AF")
         desc = type_config.get("description", "")
         # Map color to name for readability
@@ -44,9 +44,9 @@ def _build_system_prompt() -> str:
         color_name = color_names.get(color, "")
         node_types_section += f"- {type_name} ({color_name}): {desc}\n"
 
-    # Add static types at the end
+    # Add system types at the end
     for type_name, type_config in schema.get("node_types", {}).items():
-        if type_config.get("static"):
+        if type_config.get("category") == "system":
             desc = type_config.get("description", "")
             node_types_section += f"- {type_name} (gray): {desc}\n"
 

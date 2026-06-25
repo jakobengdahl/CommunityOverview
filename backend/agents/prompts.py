@@ -60,7 +60,7 @@ def build_schema_context(schema: Dict[str, Any]) -> str:
     if node_types:
         lines.append("\nNode types (use ONLY these exact type names):")
         for type_name, type_config in node_types.items():
-            if type_config.get("static"):
+            if type_config.get("category") == "system":
                 continue  # Skip system types
             desc = type_config.get("description", "")
             fields = type_config.get("fields", [])

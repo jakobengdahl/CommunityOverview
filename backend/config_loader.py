@@ -317,22 +317,27 @@ class ConfigLoader:
 
     def _strip_system_types_from_config(self) -> None:
         """Remove any system node types found in the loaded config (backward compat)."""
-        system_names = set(SYSTEM_NODE_TYPES.keys())
-        removed = [
-            name for name in list(self._config.schema_.node_types.keys())
-            if name in system_names
-        ]
-        for name in removed:
+        to_remove = set(self._config.schema_.node_types.keys()) & set(SYSTEM_NODE_TYPES.keys())
+        for name in to_remove:
             del self._config.schema_.node_types[name]
-        if removed:
-            logger.info(
-                "System node types removed from config (now managed by code): %s",
-                removed,
+        if to_remove:
+            logger.warning(
+                "System node types found in schema_config.json and removed "
+                "(they are now managed by code — remove them from your config file): %s",
+                sorted(to_remove),
             )
 
     def _apply_system_types(self) -> None:
         """Inject system node types from code, respecting system.disabled_node_types."""
         disabled = set(self._config.system.disabled_node_types)
+        unknown = disabled - set(SYSTEM_NODE_TYPES.keys())
+        if unknown:
+            logger.warning(
+                "system.disabled_node_types contains unrecognised names (typo?): %s. "
+                "Valid names: %s",
+                sorted(unknown),
+                sorted(SYSTEM_NODE_TYPES.keys()),
+            )
         for type_name, type_config in SYSTEM_NODE_TYPES.items():
             if type_name in disabled:
                 logger.info("System node type '%s' disabled via system.disabled_node_types", type_name)
