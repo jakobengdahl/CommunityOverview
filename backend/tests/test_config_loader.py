@@ -42,12 +42,98 @@ class TestConfigLoader:
         assert "node_types" in schema
         assert "relationship_types" in schema
 
-        # Check that static types are present
-        assert "SavedView" in schema["node_types"]
-        assert "VisualizationView" in schema["node_types"]
+        # All six system node types must be present regardless of config file content
+        for system_type in config_loader.SYSTEM_NODE_TYPES:
+            assert system_type in schema["node_types"], f"System type '{system_type}' missing from schema"
+            assert schema["node_types"][system_type]["static"] is True
+            assert schema["node_types"][system_type]["category"] == "system"
 
-        # Check that SavedView is marked as static
-        assert schema["node_types"]["SavedView"]["static"] is True
+    def test_all_system_node_types_injected_from_code(self):
+        """System node types must come from code, not from config."""
+        from backend import config_loader
+
+        schema = config_loader.get_schema()
+        for type_name, type_config in config_loader.SYSTEM_NODE_TYPES.items():
+            assert type_name in schema["node_types"]
+            loaded = schema["node_types"][type_name]
+            assert loaded["color"] == type_config["color"]
+            assert loaded["icon"] == type_config["icon"]
+
+    def test_system_node_types_in_config_are_stripped_not_doubled(self, tmp_path):
+        """System node types defined in a config file must not produce duplicates."""
+        import json
+        from backend import config_loader
+
+        config_with_system_types = {
+            "schema": {
+                "node_types": {
+                    "SavedView": {
+                        "fields": ["name"],
+                        "static": True,
+                        "category": "system",
+                        "description": "old description",
+                        "color": "#FFFFFF",
+                        "icon": "OldIcon",
+                    },
+                    "Agent": {
+                        "fields": ["name"],
+                        "static": False,
+                        "category": "system",
+                        "description": "old agent",
+                        "color": "#FFFFFF",
+                        "icon": "OldIcon",
+                    },
+                    "MyDomain": {
+                        "fields": ["name", "description"],
+                        "category": "domain",
+                        "description": "A domain type",
+                        "color": "#123456",
+                    },
+                }
+            }
+        }
+        config_file = tmp_path / "schema_config.json"
+        config_file.write_text(json.dumps(config_with_system_types), encoding="utf-8")
+        os.environ["SCHEMA_FILE"] = str(config_file)
+        config_loader.reset_loader()
+
+        schema = config_loader.get_schema()
+
+        # Domain type must be present
+        assert "MyDomain" in schema["node_types"]
+        # System types must come from code, not from the stale config entries
+        assert schema["node_types"]["SavedView"]["color"] == config_loader.SYSTEM_NODE_TYPES["SavedView"]["color"]
+        assert schema["node_types"]["Agent"]["color"] == config_loader.SYSTEM_NODE_TYPES["Agent"]["color"]
+        # No duplicates — each type appears exactly once
+        type_names = list(schema["node_types"].keys())
+        assert type_names.count("SavedView") == 1
+        assert type_names.count("Agent") == 1
+
+        del os.environ["SCHEMA_FILE"]
+
+    def test_disabled_system_node_type_is_excluded(self, tmp_path):
+        """A system node type listed in system.disabled_node_types must not appear in schema."""
+        import json
+        from backend import config_loader
+
+        config = {
+            "system": {"disabled_node_types": ["Agent", "Skill"]},
+            "schema": {"node_types": {}},
+        }
+        config_file = tmp_path / "schema_config.json"
+        config_file.write_text(json.dumps(config), encoding="utf-8")
+        os.environ["SCHEMA_FILE"] = str(config_file)
+        config_loader.reset_loader()
+
+        schema = config_loader.get_schema()
+
+        assert "Agent" not in schema["node_types"]
+        assert "Skill" not in schema["node_types"]
+        # Other system types must still be present
+        assert "SavedView" in schema["node_types"]
+        assert "EventSubscription" in schema["node_types"]
+
+        del os.environ["SCHEMA_FILE"]
 
     def test_load_custom_config(self):
         """Test loading a custom configuration file."""

@@ -32,20 +32,74 @@ logger = logging.getLogger(__name__)
 # Default config path relative to project root
 DEFAULT_CONFIG_PATH = "config/default/schema_config.json"
 
-# Static node types that must always exist
-STATIC_NODE_TYPES = {
+# System node types managed entirely by code.
+# These are injected at startup and must never be defined in schema_config.json.
+# Use system.disabled_node_types in schema_config.json to opt out of individual types.
+SYSTEM_NODE_TYPES = {
     "SavedView": {
         "fields": ["name", "description", "summary", "metadata"],
         "static": True,
+        "category": "system",
         "description": "Saved graph view snapshots for quick navigation",
-        "color": "#6B7280"
+        "color": "#6B7280",
+        "icon": "BookmarkFill",
     },
     "VisualizationView": {
         "fields": ["name", "description", "summary", "metadata"],
         "static": True,
+        "category": "system",
         "description": "Saved graph view snapshots (legacy)",
-        "color": "#6B7280"
-    }
+        "color": "#6B7280",
+        "icon": "BookmarkFill",
+    },
+    "EventSubscription": {
+        "fields": ["name", "description", "summary", "metadata"],
+        "static": True,
+        "category": "system",
+        "description": (
+            "Webhook subscription for graph mutation events. "
+            "Configuration stored in metadata: filters (entity_kind, node_types, "
+            "operations, keywords) and delivery (webhook_url, ignore_origins, ignore_session_ids)"
+        ),
+        "color": "#8B5CF6",
+        "icon": "BellFill",
+    },
+    "Agent": {
+        "fields": ["name", "description", "summary", "metadata"],
+        "static": True,
+        "category": "system",
+        "description": (
+            "AI agent configuration. Links to EventSubscription via metadata.subscription_id. "
+            "Agent config in metadata: enabled, subscription_id, mcp_integration_ids, "
+            "prompts, skills_urls, skill_node_ids."
+        ),
+        "color": "#EC4899",
+        "icon": "CpuFill",
+    },
+    "Skill": {
+        "fields": ["name", "description", "summary", "metadata"],
+        "static": True,
+        "category": "system",
+        "ui_form": "skill",
+        "description": (
+            "Reusable AI skill definition (SKILL.md-compatible). "
+            "metadata: {source_url, content, allowed_tools, when_to_use, version, effort}. "
+            "Can be linked to Agent nodes via USES_SKILL edges."
+        ),
+        "color": "#8B5CF6",
+        "icon": "StarFill",
+    },
+    "ActiveKnowledgeCollection": {
+        "fields": ["name", "description", "summary", "tags"],
+        "static": True,
+        "category": "system",
+        "description": (
+            "Active knowledge collection configuration - enables structured data gathering "
+            "through a special AI-assistant kiosk."
+        ),
+        "color": "#F59E0B",
+        "icon": "FunnelFill",
+    },
 }
 
 
@@ -188,11 +242,17 @@ class PresentationConfig(BaseModel):
     guides: List[GuideConfig] = Field(default_factory=list)
 
 
+class SystemConfig(BaseModel):
+    """System-level toggles for built-in node types managed by code."""
+    disabled_node_types: List[str] = Field(default_factory=list)
+
+
 class SchemaFileConfig(BaseModel):
     """Root configuration model for the schema file."""
     schema_: SchemaConfig = Field(alias="schema", default_factory=SchemaConfig)
     presentation: PresentationConfig = Field(default_factory=PresentationConfig)
     runtime: RuntimeMetadataConfig = Field(default_factory=RuntimeMetadataConfig)
+    system: SystemConfig = Field(default_factory=SystemConfig)
 
     class Config:
         populate_by_name = True
@@ -250,17 +310,34 @@ class ConfigLoader:
             logger.warning(f"Error loading config: {e}, using defaults")
             self._config = SchemaFileConfig()
 
-        # Ensure static node types are present
-        self._ensure_static_types()
+        # Strip system node types that may be defined in the config file (backward compat).
+        # System types are now managed entirely in code via SYSTEM_NODE_TYPES.
+        self._strip_system_types_from_config()
+        self._apply_system_types()
 
-    def _ensure_static_types(self) -> None:
-        """Ensure that static node types (SavedView, etc.) are always present."""
-        for type_name, type_config in STATIC_NODE_TYPES.items():
-            if type_name not in self._config.schema_.node_types:
-                self._config.schema_.node_types[type_name] = NodeTypeConfig(**type_config)
-            else:
-                # Mark as static even if defined in config
-                self._config.schema_.node_types[type_name].static = True
+    def _strip_system_types_from_config(self) -> None:
+        """Remove any system node types found in the loaded config (backward compat)."""
+        system_names = set(SYSTEM_NODE_TYPES.keys())
+        removed = [
+            name for name in list(self._config.schema_.node_types.keys())
+            if name in system_names
+        ]
+        for name in removed:
+            del self._config.schema_.node_types[name]
+        if removed:
+            logger.info(
+                "System node types removed from config (now managed by code): %s",
+                removed,
+            )
+
+    def _apply_system_types(self) -> None:
+        """Inject system node types from code, respecting system.disabled_node_types."""
+        disabled = set(self._config.system.disabled_node_types)
+        for type_name, type_config in SYSTEM_NODE_TYPES.items():
+            if type_name in disabled:
+                logger.info("System node type '%s' disabled via system.disabled_node_types", type_name)
+                continue
+            self._config.schema_.node_types[type_name] = NodeTypeConfig(**type_config)
 
     def reload(self) -> None:
         """Reload the configuration from disk."""

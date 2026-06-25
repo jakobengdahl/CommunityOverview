@@ -1,80 +1,6 @@
 {
   "schema": {
     "node_types": {
-      "SavedView": {
-        "fields": [
-          "name",
-          "description",
-          "summary",
-          "metadata"
-        ],
-        "static": true,
-        "category": "system",
-        "description": "Saved graph view snapshots for quick navigation",
-        "color": "#6B7280",
-        "icon": "BookmarkFill"
-      },
-      "VisualizationView": {
-        "fields": [
-          "name",
-          "description",
-          "summary",
-          "metadata"
-        ],
-        "static": true,
-        "category": "system",
-        "description": "Saved graph view snapshots (legacy)",
-        "color": "#6B7280",
-        "icon": "BookmarkFill"
-      },
-      "EventSubscription": {
-        "fields": [
-          "name",
-          "description",
-          "summary",
-          "metadata"
-        ],
-        "static": false,
-        "category": "system",
-        "description": "Webhook subscription for graph mutation events. Configuration stored in metadata: filters (entity_kind, node_types, operations, keywords) and delivery (webhook_url, ignore_origins, ignore_session_ids)",
-        "color": "#8B5CF6",
-        "icon": "BellFill"
-      },
-      "Agent": {
-        "fields": [
-          "name",
-          "description",
-          "summary",
-          "metadata"
-        ],
-        "static": false,
-        "category": "system",
-        "description": "AI agent configuration. Links to EventSubscription via metadata.subscription_id. Agent config in metadata: enabled, subscription_id, mcp_integration_ids, prompts, skills_urls, skill_node_ids.",
-        "color": "#EC4899",
-        "icon": "CpuFill"
-      },
-      "Skill": {
-        "fields": [
-          "name",
-          "description",
-          "summary",
-          "metadata"
-        ],
-        "static": false,
-        "category": "system",
-        "ui_form": "skill",
-        "description": "Reusable AI skill definition (SKILL.md-compatible). metadata: {source_url, content, allowed_tools, when_to_use, version, effort}. Can be linked to Agent nodes via USES_SKILL edges.",
-        "color": "#8B5CF6",
-        "icon": "StarFill"
-      },
-      "ActiveKnowledgeCollection": {
-        "fields": ["name", "description", "summary", "tags"],
-        "static": false,
-        "category": "system",
-        "description": "Active knowledge collection configuration - enables structured data gathering through a special AI-assistant kiosk.",
-        "color": "#F59E0B",
-        "icon": "FunnelFill"
-      },
       "Actor": {
         "fields": [
           "name",
@@ -284,12 +210,7 @@
       "Goal": "#6366F1",
       "Event": "#D946EF",
       "Data": "#06B6D4",
-      "Risk": "#DC2626",
-      "SavedView": "#6B7280",
-      "VisualizationView": "#6B7280",
-      "EventSubscription": "#8B5CF6",
-      "Agent": "#EC4899",
-      "ActiveKnowledgeCollection": "#F59E0B"
+      "Risk": "#DC2626"
     },
     "prompt_prefix": "You are a knowledge agent that helps users navigate and maintain a knowledge graph for community collaboration on public digitalization.",
     "prompt_suffix": "Remember to suggest saved views when relevant, and always ask for confirmation before making changes to the graph.",
