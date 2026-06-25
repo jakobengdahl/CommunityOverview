@@ -226,14 +226,6 @@ class TestGraphStorageCRUD:
         assert deleted is True
         assert "edge-1" not in storage_with_data.edges
 
-    def test_delete_edges_max_50(self, storage_with_data):
-        """Test that bulk edge deletion is limited to 50 edges."""
-        edge_ids = [f"edge-{i}" for i in range(60)]
-        result = storage_with_data.delete_edges(edge_ids)
-
-        assert result.success is False
-        assert "Max 50" in result.message
-
     def test_delete_edges_bulk(self, storage_with_data):
         """Test deleting multiple edges in one call."""
         result = storage_with_data.delete_edges(["edge-1", "edge-2"])
