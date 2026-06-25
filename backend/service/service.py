@@ -1071,6 +1071,13 @@ class GraphService:
             denied.setdefault("deleted_edge_ids", [])
             return denied
 
+        if len(edge_ids) > 50:
+            return {
+                "deleted_edge_ids": [],
+                "success": False,
+                "message": "Max 50 edges can be deleted at a time.",
+            }
+
         if not confirmed:
             return {
                 "deleted_edge_ids": [],
