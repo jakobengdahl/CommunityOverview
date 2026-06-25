@@ -3,6 +3,7 @@ import { List, Feather, Download, Map, BoxArrowRight } from 'react-bootstrap-ico
 import useGraphStore from '../store/graphStore';
 import { useI18n } from '../i18n';
 import { COLOR_MAP } from './FloatingToolbar';
+import NodeTypeStatsDialog from './NodeTypeStatsDialog';
 import './FloatingHeader.css';
 
 function FloatingHeader({ stats, title = 'Community Graph View', onExportGraph }) {
@@ -10,6 +11,7 @@ function FloatingHeader({ stats, title = 'Community Graph View', onExportGraph }
   const { showMinimap, setShowMinimap } = useGraphStore();
   const [menuOpen, setMenuOpen] = useState(false);
   const [dropdownLeft, setDropdownLeft] = useState(null);
+  const [statsDialogOpen, setStatsDialogOpen] = useState(false);
   const menuRef = useRef(null);
 
   useEffect(() => {
@@ -50,6 +52,13 @@ function FloatingHeader({ stats, title = 'Community Graph View', onExportGraph }
         <span className="floating-header-title">{title}</span>
       </div>
 
+      {statsDialogOpen && stats?.nodes_by_type && (
+        <NodeTypeStatsDialog
+          nodesByType={stats.nodes_by_type}
+          onClose={() => setStatsDialogOpen(false)}
+        />
+      )}
+
       {menuOpen && (
         <div className="floating-header-dropdown" style={dropdownLeft ? { left: dropdownLeft } : undefined}>
           {stats ? (
@@ -67,9 +76,20 @@ function FloatingHeader({ stats, title = 'Community Graph View', onExportGraph }
 
               {stats.nodes_by_type && Object.keys(stats.nodes_by_type).length > 0 && (
                 <div className="floating-header-type-list">
-                  <div className="floating-header-section-title">Nodes by type</div>
+                  <div className="floating-header-type-list-header">
+                    <span className="floating-header-section-title">Nodes by type</span>
+                    {Object.keys(stats.nodes_by_type).length > 5 && (
+                      <button
+                        className="floating-header-type-details-btn"
+                        onClick={() => { setStatsDialogOpen(true); setMenuOpen(false); }}
+                      >
+                        Details
+                      </button>
+                    )}
+                  </div>
                   {Object.entries(stats.nodes_by_type)
                     .sort(([, a], [, b]) => b - a)
+                    .slice(0, 5)
                     .map(([type, count]) => (
                       <div key={type} className="floating-header-type-row">
                         <span

@@ -124,6 +124,33 @@
   padding-top: 10px;
 }
 
+.floating-header-type-list-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin-bottom: 8px;
+}
+
+.floating-header-type-list-header .floating-header-section-title {
+  margin-bottom: 0;
+}
+
+.floating-header-type-details-btn {
+  background: transparent;
+  border: 1px solid #444;
+  border-radius: 4px;
+  color: #888;
+  font-size: 0.7rem;
+  padding: 2px 8px;
+  cursor: pointer;
+  transition: color 0.15s, border-color 0.15s;
+}
+
+.floating-header-type-details-btn:hover {
+  color: #ccc;
+  border-color: #666;
+}
+
 .floating-header-type-row {
   display: flex;
   align-items: center;
