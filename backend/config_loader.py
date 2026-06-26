@@ -15,7 +15,7 @@ import os
 import json
 import logging
 from typing import Dict, List, Optional, Any
-from pydantic import BaseModel, Field, validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 from backend.config_context import resolve_federation_config_path_info, resolve_schema_config_path_info
 from backend.request_context import (
@@ -32,20 +32,74 @@ logger = logging.getLogger(__name__)
 # Default config path relative to project root
 DEFAULT_CONFIG_PATH = "config/default/schema_config.json"
 
-# Static node types that must always exist
-STATIC_NODE_TYPES = {
+# System node types managed entirely by code.
+# These are injected at startup and must never be defined in schema_config.json.
+# Use system.disabled_node_types in schema_config.json to opt out of individual types.
+SYSTEM_NODE_TYPES = {
     "SavedView": {
         "fields": ["name", "description", "summary", "metadata"],
         "static": True,
+        "category": "system",
         "description": "Saved graph view snapshots for quick navigation",
-        "color": "#6B7280"
+        "color": "#6B7280",
+        "icon": "BookmarkFill",
     },
     "VisualizationView": {
         "fields": ["name", "description", "summary", "metadata"],
         "static": True,
+        "category": "system",
         "description": "Saved graph view snapshots (legacy)",
-        "color": "#6B7280"
-    }
+        "color": "#6B7280",
+        "icon": "BookmarkFill",
+    },
+    "EventSubscription": {
+        "fields": ["name", "description", "summary", "metadata"],
+        "static": True,
+        "category": "system",
+        "description": (
+            "Webhook subscription for graph mutation events. "
+            "Configuration stored in metadata: filters (entity_kind, node_types, "
+            "operations, keywords) and delivery (webhook_url, ignore_origins, ignore_session_ids)"
+        ),
+        "color": "#8B5CF6",
+        "icon": "BellFill",
+    },
+    "Agent": {
+        "fields": ["name", "description", "summary", "metadata"],
+        "static": True,
+        "category": "system",
+        "description": (
+            "AI agent configuration. Links to EventSubscription via metadata.subscription_id. "
+            "Agent config in metadata: enabled, subscription_id, mcp_integration_ids, "
+            "prompts, skills_urls, skill_node_ids."
+        ),
+        "color": "#EC4899",
+        "icon": "CpuFill",
+    },
+    "Skill": {
+        "fields": ["name", "description", "summary", "metadata"],
+        "static": True,
+        "category": "system",
+        "ui_form": "skill",
+        "description": (
+            "Reusable AI skill definition (SKILL.md-compatible). "
+            "metadata: {source_url, content, allowed_tools, when_to_use, version, effort}. "
+            "Can be linked to Agent nodes via USES_SKILL edges."
+        ),
+        "color": "#8B5CF6",
+        "icon": "StarFill",
+    },
+    "ActiveKnowledgeCollection": {
+        "fields": ["name", "description", "summary", "tags"],
+        "static": True,
+        "category": "system",
+        "description": (
+            "Active knowledge collection configuration - enables structured data gathering "
+            "through a special AI-assistant kiosk."
+        ),
+        "color": "#F59E0B",
+        "icon": "FunnelFill",
+    },
 }
 
 
@@ -72,14 +126,16 @@ class SchemaConfig(BaseModel):
     node_types: Dict[str, NodeTypeConfig] = Field(default_factory=dict)
     relationship_types: Dict[str, RelationshipTypeConfig] = Field(default_factory=dict)
 
-    @validator('node_types', pre=True)
+    @field_validator('node_types', mode='before')
+    @classmethod
     def convert_node_types(cls, v):
         """Convert raw dict values to NodeTypeConfig."""
         if isinstance(v, dict):
             return {k: NodeTypeConfig(**val) if isinstance(val, dict) else val for k, val in v.items()}
         return v
 
-    @validator('relationship_types', pre=True)
+    @field_validator('relationship_types', mode='before')
+    @classmethod
     def convert_relationship_types(cls, v):
         """Convert raw dict values to RelationshipTypeConfig."""
         if isinstance(v, dict):
@@ -188,14 +244,19 @@ class PresentationConfig(BaseModel):
     guides: List[GuideConfig] = Field(default_factory=list)
 
 
+class SystemConfig(BaseModel):
+    """System-level toggles for built-in node types managed by code."""
+    disabled_node_types: List[str] = Field(default_factory=list)
+
+
 class SchemaFileConfig(BaseModel):
     """Root configuration model for the schema file."""
     schema_: SchemaConfig = Field(alias="schema", default_factory=SchemaConfig)
     presentation: PresentationConfig = Field(default_factory=PresentationConfig)
     runtime: RuntimeMetadataConfig = Field(default_factory=RuntimeMetadataConfig)
+    system: SystemConfig = Field(default_factory=SystemConfig)
 
-    class Config:
-        populate_by_name = True
+    model_config = ConfigDict(populate_by_name=True)
 
 
 class ConfigLoader:
@@ -250,17 +311,39 @@ class ConfigLoader:
             logger.warning(f"Error loading config: {e}, using defaults")
             self._config = SchemaFileConfig()
 
-        # Ensure static node types are present
-        self._ensure_static_types()
+        # Strip system node types that may be defined in the config file (backward compat).
+        # System types are now managed entirely in code via SYSTEM_NODE_TYPES.
+        self._strip_system_types_from_config()
+        self._apply_system_types()
 
-    def _ensure_static_types(self) -> None:
-        """Ensure that static node types (SavedView, etc.) are always present."""
-        for type_name, type_config in STATIC_NODE_TYPES.items():
-            if type_name not in self._config.schema_.node_types:
-                self._config.schema_.node_types[type_name] = NodeTypeConfig(**type_config)
-            else:
-                # Mark as static even if defined in config
-                self._config.schema_.node_types[type_name].static = True
+    def _strip_system_types_from_config(self) -> None:
+        """Remove any system node types found in the loaded config (backward compat)."""
+        to_remove = set(self._config.schema_.node_types.keys()) & set(SYSTEM_NODE_TYPES.keys())
+        for name in to_remove:
+            del self._config.schema_.node_types[name]
+        if to_remove:
+            logger.warning(
+                "System node types found in schema_config.json and removed "
+                "(they are now managed by code — remove them from your config file): %s",
+                sorted(to_remove),
+            )
+
+    def _apply_system_types(self) -> None:
+        """Inject system node types from code, respecting system.disabled_node_types."""
+        disabled = set(self._config.system.disabled_node_types)
+        unknown = disabled - set(SYSTEM_NODE_TYPES.keys())
+        if unknown:
+            logger.warning(
+                "system.disabled_node_types contains unrecognised names (typo?): %s. "
+                "Valid names: %s",
+                sorted(unknown),
+                sorted(SYSTEM_NODE_TYPES.keys()),
+            )
+        for type_name, type_config in SYSTEM_NODE_TYPES.items():
+            if type_name in disabled:
+                logger.info("System node type '%s' disabled via system.disabled_node_types", type_name)
+                continue
+            self._config.schema_.node_types[type_name] = NodeTypeConfig(**type_config)
 
     def reload(self) -> None:
         """Reload the configuration from disk."""
@@ -354,11 +437,11 @@ def get_presentation() -> Dict[str, Any]:
         "prompt_prefix": pres.prompt_prefix,
         "prompt_suffix": pres.prompt_suffix,
         "default_language": pres.default_language,
-        "language_policy": pres.language_policy.dict(),
+        "language_policy": pres.language_policy.model_dump(),
         "widget_url": pres.widget_url,
-        "expert_agents": [agent.dict() for agent in pres.expert_agents],
-        "capabilities": [capability.dict() for capability in pres.capabilities],
-        "guides": [guide.dict() for guide in pres.guides],
+        "expert_agents": [agent.model_dump() for agent in pres.expert_agents],
+        "capabilities": [capability.model_dump() for capability in pres.capabilities],
+        "guides": [guide.model_dump() for guide in pres.guides],
     }
 
 
@@ -367,7 +450,7 @@ def get_capabilities() -> Dict[str, Any]:
     loader = _get_loader()
     return {
         "capabilities": [
-            capability.dict() for capability in loader.config.presentation.capabilities
+            capability.model_dump() for capability in loader.config.presentation.capabilities
         ]
     }
 

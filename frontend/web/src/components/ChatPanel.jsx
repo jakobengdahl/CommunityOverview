@@ -159,6 +159,8 @@ function ChatPanel({ collectionShortName }) {
         expertAgentId: activeExperts.length > 0 ? activeExperts[activeExperts.length - 1] : undefined,
         skillsContext: skillsContext || undefined,
         collectionShortName,
+        visibleNodeIds: nodes.map(n => n.id),
+        selectedNodeIds: selectedGraphNodes.map(n => n.id),
       });
 
       console.log('[ChatPanel] Response:', response);

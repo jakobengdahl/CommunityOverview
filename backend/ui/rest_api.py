@@ -12,7 +12,7 @@ This module does NOT create graph objects directly.
 from typing import List, Dict, Any, Optional
 from fastapi import APIRouter, UploadFile, File, Form, HTTPException, Depends, Request
 from fastapi.responses import JSONResponse
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator
 import json
 
 from .chat_service import ChatService
@@ -42,6 +42,25 @@ class ChatRequest(BaseModel):
         ),
     )
     collection_short_name: Optional[str] = Field(None, pattern=r'^[a-z0-9][a-z0-9-]{0,98}[a-z0-9]$|^[a-z0-9]$', description="AKC short name — server resolves prompt server-side")
+    visible_node_ids: Optional[List[str]] = Field(
+        None,
+        description="IDs of nodes currently displayed in the browser canvas",
+    )
+    selected_node_ids: Optional[List[str]] = Field(
+        None,
+        description="IDs of nodes the user has selected in the canvas",
+    )
+
+    @field_validator("visible_node_ids", "selected_node_ids", mode="before")
+    @classmethod
+    def _validate_node_id_list(cls, v: object) -> object:
+        if v is None:
+            return v
+        if not isinstance(v, list):
+            raise ValueError("must be a list")
+        # Cap list size, reject non-strings, cap per-item length
+        v = v[:5000]
+        return [item[:256] for item in v if isinstance(item, str)]
 
 
 class SimpleChatRequest(BaseModel):
@@ -132,6 +151,8 @@ def create_ui_router(
                 expert_agent_id=request.expert_agent_id,
                 skills_context=request.skills_context,
                 collection_short_name=request.collection_short_name,
+                visible_node_ids=request.visible_node_ids,
+                selected_node_ids=request.selected_node_ids,
             )
 
             return ChatResponse(

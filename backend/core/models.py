@@ -12,7 +12,7 @@ See backend/config_loader.py for configuration loading.
 from enum import Enum
 from typing import Optional, List, Dict, Any, Union
 from datetime import datetime
-from pydantic import BaseModel, Field, validator
+from pydantic import BaseModel, Field, field_validator
 import uuid
 
 
@@ -161,12 +161,9 @@ class Node(BaseModel):
     created_at: datetime = Field(default_factory=datetime.utcnow)
     updated_at: datetime = Field(default_factory=datetime.utcnow)
 
-    class Config:
-        json_encoders = {
-            datetime: lambda v: v.isoformat()
-        }
 
-    @validator('type', pre=True)
+    @field_validator('type', mode='before')
+    @classmethod
     def validate_type(cls, v):
         """Validate and normalize node type. Accepts any string for forward/backward compatibility."""
         if isinstance(v, NodeType):
@@ -213,17 +210,14 @@ class Edge(BaseModel):
     id: str = Field(default_factory=lambda: str(uuid.uuid4()))
     source: str  # Node ID
     target: str  # Node ID
-    type: Union[RelationshipType, str] = Field(default="RELATES_TO")  # Optional, defaults to general connection
+    type: Union[RelationshipType, str] = Field(default=RelationshipType.RELATES_TO)  # Optional, defaults to general connection
     label: str = Field(default="")  # Optional free-text label for the connection
     metadata: Dict[str, Any] = Field(default_factory=dict)
     created_at: datetime = Field(default_factory=datetime.utcnow)
 
-    class Config:
-        json_encoders = {
-            datetime: lambda v: v.isoformat()
-        }
 
-    @validator('type', pre=True, always=True)
+    @field_validator('type', mode='before')
+    @classmethod
     def validate_type(cls, v):
         """Validate and normalize relationship type. Defaults to RELATES_TO if empty/None."""
         if v is None or v == "":
@@ -275,10 +269,6 @@ class GraphStats(BaseModel):
     nodes_by_type: Dict[str, int]
     last_updated: datetime
 
-    class Config:
-        json_encoders = {
-            datetime: lambda v: v.isoformat()
-        }
 
 
 class ProposedNodesResult(BaseModel):

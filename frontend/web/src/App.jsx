@@ -1,5 +1,5 @@
 import { useState, useCallback, useEffect, useRef } from 'react';
-import { GraphCanvas } from '@community-graph/ui-graph-canvas';
+import { GraphCanvas, positionNewNodes } from '@community-graph/ui-graph-canvas';
 import '@community-graph/ui-graph-canvas/styles';
 import useGraphStore from './store/graphStore';
 import { useI18n } from './i18n';
@@ -25,6 +25,10 @@ import './App.css';
 const _urlParams = new URLSearchParams(window.location.search);
 const _collectShortName = _urlParams.get('collect');
 const _akcShortName = _urlParams.get('akc');
+
+// Visualization session ID — generated once per page load, used to connect
+// external AI clients to this browser window via MCP.
+const _vizSessionId = api.generateVisualizationSessionId();
 
 function App() {
   const akcShortName = _akcShortName;
@@ -100,6 +104,66 @@ function App() {
       setFederationDepth(maxFederationDepth);
     }
   }, [federationDepth, maxFederationDepth, setFederationDepth]);
+
+  // ── Visualization session: SSE connection ──────────────────────────────
+  // Opens a persistent SSE stream so external AI clients can push
+  // visualization commands to this browser window via MCP.
+  useEffect(() => {
+    const evtSource = new EventSource(api.getVisualizationStreamUrl(_vizSessionId));
+    evtSource.onmessage = (e) => {
+      try {
+        const cmd = JSON.parse(e.data);
+        if (cmd.type === 'ping' || cmd.type === 'connected') return;
+        if (cmd.type !== 'tool_result' || !cmd.result) return;
+
+        const toolResult = cmd.result;
+        const { nodes: currentNodes, edges: currentEdges,
+                addNodesToVisualization: addNodes,
+                updateVisualization: updateViz,
+                clearVisualization: clearViz } = useGraphStore.getState();
+
+        const filtered = (toolResult.nodes || []).filter(n =>
+          n.type !== 'Community' && n.data?.type !== 'Community'
+        );
+
+        if (toolResult.action === 'add_to_visualization') {
+          if (filtered.length > 0) {
+            const allEdges = [...currentEdges, ...(toolResult.edges || [])];
+            const positioned = positionNewNodes(filtered, currentNodes, allEdges);
+            addNodes(positioned, toolResult.edges || []);
+          }
+        } else if (toolResult.action === 'load_visualization' || toolResult.action === 'clear_visualization') {
+          clearViz();
+          if (filtered.length > 0) {
+            updateViz(filtered, toolResult.edges || []);
+          }
+        } else if (filtered.length > 0) {
+          updateViz(filtered, toolResult.edges || []);
+        }
+      } catch (err) {
+        console.error('[Session SSE] parse error:', err);
+      }
+    };
+    evtSource.onerror = () => {
+      // Browser auto-reconnects on SSE errors; no manual retry needed.
+    };
+    return () => evtSource.close();
+  }, []); // eslint-disable-line react-hooks/exhaustive-deps
+
+  // ── Visualization session: canvas state upload ─────────────────────────
+  // Uploads the current visible node list so MCP tools can query it.
+  const _sessionUploadTimer = useRef(null);
+  useEffect(() => {
+    if (_sessionUploadTimer.current) clearTimeout(_sessionUploadTimer.current);
+    _sessionUploadTimer.current = setTimeout(() => {
+      const state = useGraphStore.getState();
+      api.updateSessionState(_vizSessionId, {
+        visible_node_ids: state.nodes.map(n => n.id),
+        selected_node_ids: (state.selectedGraphNodes || []).map(n => n.id),
+        node_count: state.nodes.length,
+      }).catch(() => {});
+    }, 1000);
+  }, [nodes]); // eslint-disable-line react-hooks/exhaustive-deps
 
   // Load schema, presentation, stats and UI capabilities on startup (runs once)
   useEffect(() => {
@@ -745,7 +809,7 @@ function App() {
         />
       </div>
 
-      <FloatingHeader stats={stats} onExportGraph={handleExportGraph} />
+      <FloatingHeader stats={stats} onExportGraph={handleExportGraph} sessionId={_vizSessionId} />
       {maxFederationDepth > 1 && (
         <div className="app-a11y-depth-live" aria-live="polite" aria-atomic="true">
           {t('federation.depth_indicator', { current: federationDepth, max: maxFederationDepth })}

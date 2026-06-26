@@ -1,15 +1,20 @@
 import { useState, useRef, useEffect } from 'react';
+import { createPortal } from 'react-dom';
 import { List, Feather, Download, Map, BoxArrowRight } from 'react-bootstrap-icons';
 import useGraphStore from '../store/graphStore';
 import { useI18n } from '../i18n';
 import { COLOR_MAP } from './FloatingToolbar';
+import NodeTypeStatsDialog from './NodeTypeStatsDialog';
 import './FloatingHeader.css';
 
-function FloatingHeader({ stats, title = 'Community Graph View', onExportGraph }) {
+const MAX_INLINE_TYPES = 5;
+
+function FloatingHeader({ stats, title = 'Community Graph View', onExportGraph, sessionId }) {
   const { t, language, setLanguage } = useI18n();
   const { showMinimap, setShowMinimap } = useGraphStore();
   const [menuOpen, setMenuOpen] = useState(false);
   const [dropdownLeft, setDropdownLeft] = useState(null);
+  const [statsDialogOpen, setStatsDialogOpen] = useState(false);
   const menuRef = useRef(null);
 
   useEffect(() => {
@@ -48,7 +53,20 @@ function FloatingHeader({ stats, title = 'Community Graph View', onExportGraph }
           <List size={20} />
         </button>
         <span className="floating-header-title">{title}</span>
+        {sessionId && (
+          <span className="floating-header-session-id" title="Session ID — share with an external AI to connect it to this window">
+            {sessionId}
+          </span>
+        )}
       </div>
+
+      {statsDialogOpen && stats?.nodes_by_type && createPortal(
+        <NodeTypeStatsDialog
+          nodesByType={stats.nodes_by_type}
+          onClose={() => setStatsDialogOpen(false)}
+        />,
+        document.body
+      )}
 
       {menuOpen && (
         <div className="floating-header-dropdown" style={dropdownLeft ? { left: dropdownLeft } : undefined}>
@@ -67,9 +85,22 @@ function FloatingHeader({ stats, title = 'Community Graph View', onExportGraph }
 
               {stats.nodes_by_type && Object.keys(stats.nodes_by_type).length > 0 && (
                 <div className="floating-header-type-list">
-                  <div className="floating-header-section-title">Nodes by type</div>
+                  <div className="floating-header-type-list-header">
+                    <span className="floating-header-section-title">Nodes by type</span>
+                    {Object.keys(stats.nodes_by_type).length > MAX_INLINE_TYPES && (
+                      <button
+                        className="floating-header-type-details-btn"
+                        aria-haspopup="dialog"
+                        aria-label="Show all node types"
+                        onClick={() => { setStatsDialogOpen(true); setMenuOpen(false); }}
+                      >
+                        Details
+                      </button>
+                    )}
+                  </div>
                   {Object.entries(stats.nodes_by_type)
                     .sort(([, a], [, b]) => b - a)
+                    .slice(0, MAX_INLINE_TYPES)
                     .map(([type, count]) => (
                       <div key={type} className="floating-header-type-row">
                         <span
