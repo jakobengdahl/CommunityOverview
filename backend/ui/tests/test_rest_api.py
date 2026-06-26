@@ -302,8 +302,8 @@ class TestGraphServiceRouting:
 class TestVisualizationContextEndpoint:
     """Tests for visible_node_ids / selected_node_ids in /ui/chat."""
 
-    def test_chat_accepts_visible_node_ids(self, fastapi_test_client):
-        """POST /ui/chat should accept visible_node_ids without error."""
+    def test_chat_visible_node_ids_reach_system_prompt(self, fastapi_test_client):
+        """visible_node_ids should appear in the system prompt seen by the LLM."""
         client, mock_llm, _ = fastapi_test_client
 
         mock_llm.mock_tool_calls = []
@@ -316,7 +316,11 @@ class TestVisualizationContextEndpoint:
         })
 
         assert response.status_code == 200
-        assert "content" in response.json()
+        assert mock_llm.received_system_prompts, "LLM was never called"
+        prompt = mock_llm.received_system_prompts[0]
+        assert "CURRENT VISUALIZATION STATE" in prompt
+        assert "node-a" in prompt
+        assert "Nodes currently displayed: 2" in prompt
 
     def test_chat_without_canvas_fields_still_works(self, fastapi_test_client):
         """POST /ui/chat without canvas fields should remain backwards-compatible."""

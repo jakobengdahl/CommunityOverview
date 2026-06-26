@@ -12,7 +12,7 @@ This module does NOT create graph objects directly.
 from typing import List, Dict, Any, Optional
 from fastapi import APIRouter, UploadFile, File, Form, HTTPException, Depends, Request
 from fastapi.responses import JSONResponse
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator
 import json
 
 from .chat_service import ChatService
@@ -50,6 +50,17 @@ class ChatRequest(BaseModel):
         None,
         description="IDs of nodes the user has selected in the canvas",
     )
+
+    @field_validator("visible_node_ids", "selected_node_ids", mode="before")
+    @classmethod
+    def _validate_node_id_list(cls, v: object) -> object:
+        if v is None:
+            return v
+        if not isinstance(v, list):
+            raise ValueError("must be a list")
+        # Cap list size and per-item length to prevent prompt bloat/injection
+        v = v[:5000]
+        return [str(item)[:256] for item in v]
 
 
 class SimpleChatRequest(BaseModel):

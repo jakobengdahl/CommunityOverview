@@ -33,6 +33,7 @@ class MockLLMProvider:
         self.mock_text_response: str = "Mock response from LLM"
         self.call_count = 0
         self.received_messages: List[List[Dict]] = []
+        self.received_system_prompts: List[str] = []
 
     def create_completion(
         self,
@@ -43,6 +44,7 @@ class MockLLMProvider:
     ) -> LLMResponse:
         """Return mock response with optional tool calls."""
         self.received_messages.append(messages)
+        self.received_system_prompts.append(system_prompt)
         self.call_count += 1
 
         # First call returns tool calls, subsequent calls return text

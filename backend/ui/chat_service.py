@@ -259,6 +259,15 @@ class ChatService:
         return None
 
     @staticmethod
+    def _sanitize_id(node_id: str) -> str:
+        """Truncate at first control character to prevent prompt injection via node IDs."""
+        for ch in ('\n', '\r', '\x00'):
+            pos = node_id.find(ch)
+            if pos != -1:
+                node_id = node_id[:pos]
+        return node_id
+
+    @staticmethod
     def _format_visualization_context(
         visible_node_ids: Optional[List[str]],
         selected_node_ids: Optional[List[str]],
@@ -266,26 +275,28 @@ class ChatService:
         """
         Build a concise system-prompt snippet describing the current canvas state.
 
-        Keeps the node-ID list short (capped at 100) so long graphs don't bloat
-        the prompt. Returns None when no canvas data is provided.
+        Returns None when visible_node_ids is not provided (unknown canvas state).
+        A visible list of [] means the canvas is explicitly empty, which is useful
+        context. Caps printed IDs at 100 to avoid bloating the prompt.
         """
-        if visible_node_ids is None and selected_node_ids is None:
+        if visible_node_ids is None:
             return None
 
-        visible = visible_node_ids or []
-        selected = selected_node_ids or []
-
         id_cap = 100
+        visible = [ChatService._sanitize_id(i) for i in visible_node_ids]
+        selected = [ChatService._sanitize_id(i) for i in (selected_node_ids or [])]
+
         if len(visible) <= id_cap:
             id_part = f"Node IDs: [{', '.join(visible)}]" if visible else "Node IDs: []"
         else:
             id_part = f"Node IDs: (omitted — {len(visible)} nodes visible)"
 
-        selected_part = (
-            f"Selected nodes: {len(selected)} ({', '.join(selected[:id_cap])})"
-            if selected
-            else "Selected nodes: none"
-        )
+        if not selected:
+            selected_part = "Selected nodes: none"
+        elif len(selected) <= id_cap:
+            selected_part = f"Selected nodes: {len(selected)} ({', '.join(selected)})"
+        else:
+            selected_part = f"Selected nodes: {len(selected)} (omitted — too many)"
 
         return (
             "CURRENT VISUALIZATION STATE:\n"
