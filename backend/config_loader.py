@@ -15,7 +15,7 @@ import os
 import json
 import logging
 from typing import Dict, List, Optional, Any
-from pydantic import BaseModel, Field, validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 from backend.config_context import resolve_federation_config_path_info, resolve_schema_config_path_info
 from backend.request_context import (
@@ -126,14 +126,16 @@ class SchemaConfig(BaseModel):
     node_types: Dict[str, NodeTypeConfig] = Field(default_factory=dict)
     relationship_types: Dict[str, RelationshipTypeConfig] = Field(default_factory=dict)
 
-    @validator('node_types', pre=True)
+    @field_validator('node_types', mode='before')
+    @classmethod
     def convert_node_types(cls, v):
         """Convert raw dict values to NodeTypeConfig."""
         if isinstance(v, dict):
             return {k: NodeTypeConfig(**val) if isinstance(val, dict) else val for k, val in v.items()}
         return v
 
-    @validator('relationship_types', pre=True)
+    @field_validator('relationship_types', mode='before')
+    @classmethod
     def convert_relationship_types(cls, v):
         """Convert raw dict values to RelationshipTypeConfig."""
         if isinstance(v, dict):
@@ -254,8 +256,7 @@ class SchemaFileConfig(BaseModel):
     runtime: RuntimeMetadataConfig = Field(default_factory=RuntimeMetadataConfig)
     system: SystemConfig = Field(default_factory=SystemConfig)
 
-    class Config:
-        populate_by_name = True
+    model_config = ConfigDict(populate_by_name=True)
 
 
 class ConfigLoader:
@@ -436,11 +437,11 @@ def get_presentation() -> Dict[str, Any]:
         "prompt_prefix": pres.prompt_prefix,
         "prompt_suffix": pres.prompt_suffix,
         "default_language": pres.default_language,
-        "language_policy": pres.language_policy.dict(),
+        "language_policy": pres.language_policy.model_dump(),
         "widget_url": pres.widget_url,
-        "expert_agents": [agent.dict() for agent in pres.expert_agents],
-        "capabilities": [capability.dict() for capability in pres.capabilities],
-        "guides": [guide.dict() for guide in pres.guides],
+        "expert_agents": [agent.model_dump() for agent in pres.expert_agents],
+        "capabilities": [capability.model_dump() for capability in pres.capabilities],
+        "guides": [guide.model_dump() for guide in pres.guides],
     }
 
 
@@ -449,7 +450,7 @@ def get_capabilities() -> Dict[str, Any]:
     loader = _get_loader()
     return {
         "capabilities": [
-            capability.dict() for capability in loader.config.presentation.capabilities
+            capability.model_dump() for capability in loader.config.presentation.capabilities
         ]
     }
 
