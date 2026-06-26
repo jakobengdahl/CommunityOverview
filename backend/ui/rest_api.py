@@ -42,6 +42,14 @@ class ChatRequest(BaseModel):
         ),
     )
     collection_short_name: Optional[str] = Field(None, pattern=r'^[a-z0-9][a-z0-9-]{0,98}[a-z0-9]$|^[a-z0-9]$', description="AKC short name — server resolves prompt server-side")
+    visible_node_ids: Optional[List[str]] = Field(
+        None,
+        description="IDs of nodes currently displayed in the browser canvas",
+    )
+    selected_node_ids: Optional[List[str]] = Field(
+        None,
+        description="IDs of nodes the user has selected in the canvas",
+    )
 
 
 class SimpleChatRequest(BaseModel):
@@ -132,6 +140,8 @@ def create_ui_router(
                 expert_agent_id=request.expert_agent_id,
                 skills_context=request.skills_context,
                 collection_short_name=request.collection_short_name,
+                visible_node_ids=request.visible_node_ids,
+                selected_node_ids=request.selected_node_ids,
             )
 
             return ChatResponse(

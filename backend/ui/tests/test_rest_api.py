@@ -297,3 +297,36 @@ class TestGraphServiceRouting:
         # Verify deletion via GraphService
         result = graph_service.get_node_details("delete-test-1")
         assert not result["success"]
+
+
+class TestVisualizationContextEndpoint:
+    """Tests for visible_node_ids / selected_node_ids in /ui/chat."""
+
+    def test_chat_accepts_visible_node_ids(self, fastapi_test_client):
+        """POST /ui/chat should accept visible_node_ids without error."""
+        client, mock_llm, _ = fastapi_test_client
+
+        mock_llm.mock_tool_calls = []
+        mock_llm.mock_text_response = "I can see those nodes."
+
+        response = client.post("/ui/chat", json={
+            "messages": [{"role": "user", "content": "what do I see?"}],
+            "visible_node_ids": ["node-a", "node-b"],
+            "selected_node_ids": [],
+        })
+
+        assert response.status_code == 200
+        assert "content" in response.json()
+
+    def test_chat_without_canvas_fields_still_works(self, fastapi_test_client):
+        """POST /ui/chat without canvas fields should remain backwards-compatible."""
+        client, mock_llm, _ = fastapi_test_client
+
+        mock_llm.mock_tool_calls = []
+        mock_llm.mock_text_response = "Sure!"
+
+        response = client.post("/ui/chat", json={
+            "messages": [{"role": "user", "content": "hello"}],
+        })
+
+        assert response.status_code == 200

@@ -370,3 +370,80 @@ class TestExpertAgentSkills:
 
         assert received_prompts, "create_completion was never called"
         assert "You are a legislation expert." in received_prompts[0]
+
+
+class TestVisualizationContext:
+    """Tests for the visualization canvas state injected into chat requests."""
+
+    def test_format_visualization_context_empty_canvas(self):
+        """Empty visible list should report 0 nodes."""
+        from backend.ui import ChatService
+
+        result = ChatService._format_visualization_context([], [])
+
+        assert result is not None
+        assert "Nodes currently displayed: 0" in result
+        assert "Selected nodes: none" in result
+
+    def test_format_visualization_context_with_nodes(self):
+        """Visible node IDs should appear in the context snippet."""
+        from backend.ui import ChatService
+
+        result = ChatService._format_visualization_context(
+            ["node-1", "node-2", "node-3"], ["node-1"]
+        )
+
+        assert "Nodes currently displayed: 3" in result
+        assert "node-1" in result
+        assert "node-2" in result
+        assert "Selected nodes: 1" in result
+
+    def test_format_visualization_context_none_inputs(self):
+        """Both None inputs should return None (no canvas data sent)."""
+        from backend.ui import ChatService
+
+        result = ChatService._format_visualization_context(None, None)
+
+        assert result is None
+
+    def test_format_visualization_context_caps_large_id_list(self):
+        """Node ID list exceeding 100 entries should be omitted with a count note."""
+        from backend.ui import ChatService
+
+        large_list = [f"node-{i}" for i in range(150)]
+        result = ChatService._format_visualization_context(large_list, [])
+
+        assert "Nodes currently displayed: 150" in result
+        assert "omitted" in result
+        assert "node-0" not in result
+
+    def test_visualization_context_injected_into_system_prompt(
+        self, graph_service, mock_llm_provider
+    ):
+        """process_message() with canvas state should inject it into the system prompt."""
+        from backend.ui import ChatService
+
+        with patch('backend.chat_logic.create_provider', return_value=mock_llm_provider), \
+             patch.dict(os.environ, {'ANTHROPIC_API_KEY': 'test-key'}):
+            service = ChatService(graph_service)
+            service._processor.provider_type = "mock"
+            service._processor.default_api_key = "test-key"
+
+            received_prompts = []
+            original = mock_llm_provider.create_completion
+            def capture(*args, **kwargs):
+                received_prompts.append(kwargs.get("system_prompt", ""))
+                return original(*args, **kwargs)
+            mock_llm_provider.create_completion = capture
+
+            service.process_message(
+                messages=[{"role": "user", "content": "what do I see?"}],
+                visible_node_ids=["abc", "def"],
+                selected_node_ids=[],
+            )
+
+        assert received_prompts, "create_completion was never called"
+        prompt = received_prompts[0]
+        assert "CURRENT VISUALIZATION STATE" in prompt
+        assert "Nodes currently displayed: 2" in prompt
+        assert "abc" in prompt

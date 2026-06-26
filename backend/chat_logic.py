@@ -833,7 +833,7 @@ class ChatProcessor:
             }
         ]
 
-    def process_message(self, messages: List[Dict], api_key: str = None, provider: str = None, extra_context: str = None, skills_override: str = None) -> Dict:
+    def process_message(self, messages: List[Dict], api_key: str = None, provider: str = None, extra_context: str = None, skills_override: str = None, visualization_context: str = None) -> Dict:
         """
         Process a message history, call LLM, handle tools, return final response.
 
@@ -845,6 +845,9 @@ class ChatProcessor:
                 (expert agent persona — should be established before base instructions).
             skills_override: Optional user-selected skill instructions appended
                 AFTER the base system prompt for recency precedence over defaults.
+            visualization_context: Optional snapshot of the browser's current canvas state
+                (visible node IDs, selected nodes). Appended last so it is the freshest
+                context and helps the AI decide between add vs. replace actions.
         """
         try:
             # Use provided provider or fall back to configured provider
@@ -867,12 +870,15 @@ class ChatProcessor:
             # Build per-request system prompt:
             # 1. expert persona (extra_context) comes first — establishes who the model is
             # 2. base system prompt in the middle — tools, schema, behaviors
-            # 3. skill overrides (skills_override) come last — recency precedence for behavioral overrides
+            # 3. skill overrides (skills_override) — recency precedence for behavioral overrides
+            # 4. visualization_context comes last — most immediate situational snapshot
             active_system_prompt = (
                 f"{extra_context}\n\n{self.system_prompt}" if extra_context else self.system_prompt
             )
             if skills_override:
                 active_system_prompt = f"{active_system_prompt}\n\n{skills_override}"
+            if visualization_context:
+                active_system_prompt = f"{active_system_prompt}\n\n{visualization_context}"
 
             # First call to LLM
             response = llm_provider.create_completion(

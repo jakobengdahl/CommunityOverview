@@ -375,6 +375,12 @@ export async function sendChatMessage(messages, documentContext = null, options 
   if (options.collectionShortName) {
     body.collection_short_name = options.collectionShortName;
   }
+  if (Array.isArray(options.visibleNodeIds)) {
+    body.visible_node_ids = options.visibleNodeIds;
+  }
+  if (Array.isArray(options.selectedNodeIds)) {
+    body.selected_node_ids = options.selectedNodeIds;
+  }
   return apiFetch(`${UI_API_BASE}/chat`, {
     method: 'POST',
     body: JSON.stringify(body),
