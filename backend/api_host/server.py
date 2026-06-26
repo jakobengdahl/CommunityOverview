@@ -1082,7 +1082,6 @@ def create_app(
         federation_manager.stop()
         agent_registry.stop()
         graph_storage.shutdown_events()
-        session_registry.cleanup_stale()
 
     return app
 

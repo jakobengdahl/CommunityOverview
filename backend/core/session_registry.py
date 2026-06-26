@@ -153,17 +153,22 @@ class SessionRegistry:
 
         The generator runs until the caller stops iterating (e.g. the HTTP
         connection closes and the StreamingResponse is cancelled).
+
+        Re-looks up the queue on each iteration so that a TTL eviction followed
+        by a browser state re-upload (which re-creates the session) doesn't leave
+        this generator blocked on an orphaned queue.
         """
-        queue = self.get_or_create(session_id)
+        self.get_or_create(session_id)
         while True:
-            # Wait with a keepalive timeout so the SSE connection stays alive
-            # even when no commands arrive.
+            # Re-anchor to the current session entry in case it was evicted and
+            # re-created since the previous iteration.
+            if session_id not in self._sessions:
+                self.get_or_create(session_id)
+            queue = self._sessions[session_id]["queue"]
             try:
                 command = await asyncio.wait_for(queue.get(), timeout=25.0)
                 yield command
             except asyncio.TimeoutError:
-                # Yield a keepalive sentinel; the SSE endpoint formats it as
-                # an SSE comment so browsers ignore it.
                 yield {"type": "ping"}
 
     # ------------------------------------------------------------------
