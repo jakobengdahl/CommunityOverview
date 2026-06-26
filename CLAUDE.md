@@ -65,7 +65,7 @@ This is the only legitimate exception to the "PRs target dev" rule.
 - Add features beyond what the task requires. If you discover a related bug or
   improvement, note it in the PR body and stop — never fix it in the same branch.
 - Skip the review loop for non-trivial changes.
-- Merge PRs — that decision belongs to the project owner.
+- Merge PRs against `main` or `preview` — those gates belong to the project owner.
 - Stage debug artifacts: `print()` statements, `breakpoint()`, `pdb.set_trace()`,
   hardcoded test credentials, or generated data files left in source paths.
 - Stage files that are not source code and larger than ~50 KB without explicit
@@ -167,7 +167,7 @@ keys. See `backend/ui/tests/` for existing mock patterns.
 git push -u origin claude/<short-description>
 ```
 
-Open a **draft** PR targeting `dev`. Include in the PR body:
+Open a PR targeting `dev` using `gh pr create` (token at `~/.gh_token`, load with `GH_TOKEN=$(cat ~/.gh_token)`). Include in the PR body:
 - A short summary of what changed and why.
 - What was explicitly *not* changed (scope).
 - Test plan: which tests cover this, and how to verify manually.
@@ -219,9 +219,19 @@ git push
 Resolve conflicts by understanding both sides — never blindly accept all-incoming
 or all-outgoing changes.
 
-### 10. Mark PR Ready — definition of done
+### 10. Merge to dev — definition of done
 
-Remove draft status only when **all** of the following are true:
+When the review loop is clean, merge the PR to `dev` autonomously:
+
+```bash
+GH_TOKEN=$(cat ~/.gh_token) gh pr merge <number> \
+  --repo jakobengdahl/CommunityOverview \
+  --squash \
+  --subject "<feat|fix|...>: <title> (#<number>)" \
+  --delete-branch
+```
+
+Merge only when **all** of the following are true:
 
 - [ ] All tests pass locally (`pytest backend/ -q`)
 - [ ] CI is green on the PR (not red, not pending)
