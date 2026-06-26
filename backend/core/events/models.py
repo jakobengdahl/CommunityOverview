@@ -189,10 +189,6 @@ class Event(BaseModel):
     # Subscription info (filled in when dispatching)
     subscription: Optional[SubscriptionInfo] = None
 
-    class Config:
-        json_encoders = {
-            datetime: lambda v: v.isoformat()
-        }
 
     def to_webhook_payload(self) -> Dict[str, Any]:
         """Convert to the webhook payload format."""
@@ -240,10 +236,6 @@ class DeliveryResult(BaseModel):
     error_message: Optional[str] = None
     delivered_at: Optional[datetime] = None
 
-    class Config:
-        json_encoders = {
-            datetime: lambda v: v.isoformat()
-        }
 
 
 # Subscription configuration models (stored in EventSubscription node metadata)
