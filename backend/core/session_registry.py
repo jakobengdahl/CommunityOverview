@@ -15,6 +15,16 @@ they must not call queue.put() directly.  Instead they call
 push_command_sync(), which uses loop.call_soon_threadsafe().  The loop
 reference is injected at startup via set_event_loop() once the asyncio
 event loop is known.
+
+Single-consumer design (V1 known limitation)
+--------------------------------------------
+Each session holds one queue.  If two SSE connections open for the same
+session (e.g. a very fast page reload where the old connection hasn't
+been torn down yet), pushed commands are split between them.  In
+practice this window is sub-second and both connections belong to the
+same browser tab, so messages landing on the closing connection are
+silently dropped.  A fan-out design (per-consumer queues + broadcast)
+would eliminate the split but is deferred to a future iteration.
 """
 
 import asyncio

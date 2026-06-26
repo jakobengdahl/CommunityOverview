@@ -562,8 +562,17 @@ def create_app(
     app.state.session_registry = session_registry
 
     @app.on_event("startup")
-    async def _inject_event_loop():
+    async def _session_registry_startup():
         session_registry.set_event_loop(asyncio.get_running_loop())
+
+        async def _periodic_cleanup():
+            while True:
+                await asyncio.sleep(300)  # 5-minute eviction cycle
+                evicted = session_registry.cleanup_stale()
+                if evicted:
+                    logger.debug("session_registry: evicted %d stale sessions", evicted)
+
+        app.state.session_cleanup_task = asyncio.create_task(_periodic_cleanup())
 
     # ==================== Visualization Session Endpoints ====================
 
@@ -1068,6 +1077,8 @@ def create_app(
     @app.on_event("shutdown")
     async def shutdown_event():
         """Gracefully shutdown agent registry and event system."""
+        if hasattr(app.state, "session_cleanup_task"):
+            app.state.session_cleanup_task.cancel()
         federation_manager.stop()
         agent_registry.stop()
         graph_storage.shutdown_events()
