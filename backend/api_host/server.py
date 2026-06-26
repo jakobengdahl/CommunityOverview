@@ -299,6 +299,10 @@ def _bind_request_authorization_to_asgi_app(asgi_app):
     return request_bound_app
 
 
+_SESSION_STATE_MAX_BYTES = 256 * 1024  # 256 KB — enough for 5000 node IDs
+_SESSION_MAX_COUNT = 10_000  # cap auto-created sessions to limit unauthenticated DoS
+
+
 def create_app(
     config: Optional[AppConfig] = None,
     graph_storage: Optional[GraphStorage] = None,
@@ -576,9 +580,6 @@ def create_app(
 
     # ==================== Visualization Session Endpoints ====================
 
-    _SESSION_STATE_MAX_BYTES = 256 * 1024  # 256 KB — enough for 5000 node IDs
-    _SESSION_MAX_COUNT = 10_000  # cap auto-created sessions to limit unauthenticated DoS
-
     @app.patch("/sessions/{session_id}/state")
     async def update_session_state(session_id: str, request: Request) -> JSONResponse:
         """Browser uploads its current canvas state so MCP tools can query it."""
@@ -603,10 +604,15 @@ def create_app(
         return JSONResponse({"ok": True})
 
     @app.get("/sessions/{session_id}/stream")
-    async def session_stream(session_id: str, request: Request) -> StreamingResponse:
+    async def session_stream(session_id: str, request: Request):
         """SSE stream — browser connects here to receive visualization commands."""
         if not session_registry.is_valid_session_id(session_id):
             return JSONResponse({"error": "invalid session_id format"}, status_code=400)
+        if (
+            session_id not in session_registry._sessions
+            and session_registry.session_count >= _SESSION_MAX_COUNT
+        ):
+            return JSONResponse({"error": "too many sessions"}, status_code=503)
 
         async def event_generator():
             yield f"data: {json.dumps({'type': 'connected', 'session_id': session_id})}\n\n"

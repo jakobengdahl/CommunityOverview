@@ -167,8 +167,12 @@ class SessionRegistry:
             queue = self._sessions[session_id]["queue"]
             try:
                 command = await asyncio.wait_for(queue.get(), timeout=25.0)
+                self._touch(session_id)
                 yield command
             except asyncio.TimeoutError:
+                # Keep the session alive while the SSE connection is open,
+                # even when the canvas hasn't changed (no state uploads).
+                self._touch(session_id)
                 yield {"type": "ping"}
 
     # ------------------------------------------------------------------

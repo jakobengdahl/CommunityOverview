@@ -231,3 +231,29 @@ class TestVisualizationSessionIdPush:
             f"/sessions/{session_id}/state", json=large_payload
         )
         assert response.status_code == 413
+
+    def test_session_count_cap_returns_503(self, test_app: TestClient):
+        """PATCH /state must return 503 when the session registry is full."""
+        registry = test_app.app.state.session_registry
+        # Fill registry to the cap with dummy entries (bypassing the normal path
+        # so we don't need 10 000 HTTP requests).
+        from backend.api_host.server import _SESSION_MAX_COUNT
+
+        original = dict(registry._sessions)
+        try:
+            for i in range(_SESSION_MAX_COUNT - len(registry._sessions)):
+                fake_id = f"{i:04d}-{i:04d}"
+                registry._sessions[fake_id] = {
+                    "queue": __import__("asyncio").Queue(),
+                    "state": {},
+                    "created_at": 0,
+                    "last_seen": 0,
+                }
+            assert registry.session_count >= _SESSION_MAX_COUNT
+
+            # A new session ID that is not already in the registry
+            response = test_app.patch("/sessions/8888-9999/state", json={})
+            assert response.status_code == 503
+        finally:
+            registry._sessions.clear()
+            registry._sessions.update(original)
