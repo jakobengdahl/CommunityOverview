@@ -9,12 +9,15 @@ tool pushes a command to the queue the browser receives it immediately.
 
 Thread-safety notes
 -------------------
-asyncio.Queue is not thread-safe across threads.  MCP tools run in a
-thread pool (FastMCP wraps sync functions with asyncio.to_thread), so
-they must not call queue.put() directly.  Instead they call
-push_command_sync(), which uses loop.call_soon_threadsafe().  The loop
-reference is injected at startup via set_event_loop() once the asyncio
-event loop is known.
+asyncio.Queue is not thread-safe across threads.  FastMCP calls sync
+tools directly from the event loop thread (not via asyncio.to_thread),
+so asyncio.get_running_loop() always succeeds inside push_command_sync
+and the call_soon fast path is taken in normal operation.
+
+The call_soon_threadsafe fallback path exists as a safety net for
+callers that genuinely run in a separate thread (e.g. background workers
+or future framework changes).  In that case the loop reference injected
+at startup via set_event_loop() is used instead.
 
 Single-consumer design (V1 known limitation)
 --------------------------------------------
@@ -108,12 +111,10 @@ class SessionRegistry:
     def push_command_sync(self, session_id: str, command: Dict[str, Any]) -> bool:
         """Push *command* to the session queue from a synchronous context.
 
-        Works in two modes:
-        - Called from within the asyncio event loop thread (e.g. an ``async def``
-          FastAPI endpoint): uses ``call_soon`` on the running loop directly.
-        - Called from a thread-pool worker (FastMCP sync tool via
-          ``asyncio.to_thread``): uses ``call_soon_threadsafe`` on the stored loop
-          reference injected at startup via ``set_event_loop()``.
+        FastMCP calls sync tools from the event loop thread, so
+        asyncio.get_running_loop() normally succeeds (fast path).  The
+        call_soon_threadsafe fallback handles callers that genuinely run in a
+        separate OS thread and need cross-thread delivery.
 
         Returns True if the command was enqueued, False if the session is unknown
         or no event loop is reachable.

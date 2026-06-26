@@ -126,6 +126,34 @@ class TestPushCommandSync:
         assert cmd == {"type": "hello", "value": 42}
 
 
+    @pytest.mark.asyncio
+    async def test_push_delivers_via_threadsafe_path(self):
+        """call_soon_threadsafe fallback: push from a real OS thread."""
+        reg = SessionRegistry()
+        loop = asyncio.get_running_loop()
+        reg.set_event_loop(loop)
+        queue = reg.get_or_create("1234-5678")
+
+        delivered = asyncio.Event()
+        thread_result = {}
+
+        def _thread_push():
+            # Running outside the event loop: get_running_loop() will raise
+            # RuntimeError, triggering the call_soon_threadsafe path.
+            ok = reg.push_command_sync("1234-5678", {"type": "from-thread"})
+            thread_result["ok"] = ok
+            loop.call_soon_threadsafe(delivered.set)
+
+        thread = __import__("threading").Thread(target=_thread_push)
+        thread.start()
+        await asyncio.wait_for(delivered.wait(), timeout=2.0)
+        thread.join()
+
+        assert thread_result["ok"] is True
+        assert not queue.empty()
+        assert queue.get_nowait() == {"type": "from-thread"}
+
+
 class TestPushCommandAsync:
     """push_command (async variant)."""
 
