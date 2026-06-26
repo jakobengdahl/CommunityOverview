@@ -9,7 +9,7 @@ import './FloatingHeader.css';
 
 const MAX_INLINE_TYPES = 5;
 
-function FloatingHeader({ stats, title = 'Community Graph View', onExportGraph }) {
+function FloatingHeader({ stats, title = 'Community Graph View', onExportGraph, sessionId }) {
   const { t, language, setLanguage } = useI18n();
   const { showMinimap, setShowMinimap } = useGraphStore();
   const [menuOpen, setMenuOpen] = useState(false);
@@ -53,6 +53,11 @@ function FloatingHeader({ stats, title = 'Community Graph View', onExportGraph }
           <List size={20} />
         </button>
         <span className="floating-header-title">{title}</span>
+        {sessionId && (
+          <span className="floating-header-session-id" title="Session ID — share with an external AI to connect it to this window">
+            {sessionId}
+          </span>
+        )}
       </div>
 
       {statsDialogOpen && stats?.nodes_by_type && createPortal(
