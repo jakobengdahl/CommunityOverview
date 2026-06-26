@@ -96,19 +96,35 @@ class SessionRegistry:
     # ------------------------------------------------------------------
 
     def push_command_sync(self, session_id: str, command: Dict[str, Any]) -> bool:
-        """Push *command* to the session queue from a synchronous (thread-pool) context.
+        """Push *command* to the session queue from a synchronous context.
+
+        Works in two modes:
+        - Called from within the asyncio event loop thread (e.g. an ``async def``
+          FastAPI endpoint): uses ``call_soon`` on the running loop directly.
+        - Called from a thread-pool worker (FastMCP sync tool via
+          ``asyncio.to_thread``): uses ``call_soon_threadsafe`` on the stored loop
+          reference injected at startup via ``set_event_loop()``.
 
         Returns True if the command was enqueued, False if the session is unknown
-        or the event loop is unavailable.
+        or no event loop is reachable.
         """
         if session_id not in self._sessions:
             return False
-        if self._loop is None or not self._loop.is_running():
-            return False
         queue = self._sessions[session_id]["queue"]
-        self._loop.call_soon_threadsafe(queue.put_nowait, command)
-        self._touch(session_id)
-        return True
+        try:
+            # Fast path: already running inside the event loop thread.
+            loop = asyncio.get_running_loop()
+            loop.call_soon(queue.put_nowait, command)
+            self._touch(session_id)
+            return True
+        except RuntimeError:
+            # Not in async context — use the stored loop reference for
+            # thread-safe delivery from a thread-pool worker.
+            if self._loop is None or not self._loop.is_running():
+                return False
+            self._loop.call_soon_threadsafe(queue.put_nowait, command)
+            self._touch(session_id)
+            return True
 
     async def push_command(self, session_id: str, command: Dict[str, Any]) -> bool:
         """Push *command* from an async context.  Returns False if session unknown."""

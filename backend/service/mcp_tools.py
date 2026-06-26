@@ -571,12 +571,20 @@ def _push_to_session(
     tool_name: str,
     result: Dict[str, Any],
 ) -> None:
-    """Push *result* to a browser session queue if *session_id* is set."""
+    """Push *result* to a browser session queue if *session_id* is set.
+
+    When the result has nodes but no explicit *action*, defaults to
+    "add_to_visualization" so external AI tools add to the canvas rather
+    than silently replacing it.
+    """
     if not session_id or not session_registry:
         return
     if not session_registry.is_valid_session_id(session_id):
         return
+    command_result = dict(result)
+    if "action" not in command_result and command_result.get("nodes"):
+        command_result["action"] = "add_to_visualization"
     session_registry.push_command_sync(
         session_id,
-        {"type": "tool_result", "tool": tool_name, "result": result},
+        {"type": "tool_result", "tool": tool_name, "result": command_result},
     )

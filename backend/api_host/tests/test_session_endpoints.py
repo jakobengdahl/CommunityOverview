@@ -7,13 +7,7 @@ Covers:
 - Invalid session ID rejection
 """
 
-import pytest
-import json
-import os
-from unittest.mock import patch
-
 from fastapi.testclient import TestClient
-from backend.api_host import create_app, AppConfig
 
 
 class TestSessionStateEndpoint:
@@ -78,7 +72,10 @@ class TestConnectToVisualizationSession:
 
     def test_returns_connected_for_active_session(self, test_app: TestClient):
         session_id = "5678-1234"
-        test_app.patch(f"/sessions/{session_id}/state", json={"visible_node_ids": ["n1"], "node_count": 1})
+        test_app.patch(
+            f"/sessions/{session_id}/state",
+            json={"visible_node_ids": ["n1"], "node_count": 1},
+        )
 
         response = test_app.post(
             "/execute_tool",
@@ -143,3 +140,94 @@ class TestGetVisualizationSessionState:
         assert data["session_id"] == session_id
         assert data["visible_node_ids"] == ["node-1", "node-2"]
         assert data["selected_node_ids"] == ["node-1"]
+
+
+class TestVisualizationSessionIdPush:
+    """MCP tools push result to session queue when visualization_session_id is set."""
+
+    def test_search_graph_with_session_id_enqueues_command(self, test_app: TestClient):
+        """search_graph should push to the session when visualization_session_id is set."""
+        session_id = "7777-8888"
+        test_app.patch(f"/sessions/{session_id}/state", json={"visible_node_ids": []})
+
+        response = test_app.post(
+            "/execute_tool",
+            json={
+                "tool_name": "search_graph",
+                "arguments": {
+                    "query": "test",
+                    "action": "add_to_visualization",
+                    "visualization_session_id": session_id,
+                },
+            },
+        )
+        assert response.status_code == 200
+
+        # The session queue should have received a command
+        registry = test_app.app.state.session_registry
+        assert not registry._sessions[session_id]["queue"].empty()
+        cmd = registry._sessions[session_id]["queue"].get_nowait()
+        assert cmd["type"] == "tool_result"
+        assert cmd["tool"] == "search_graph"
+
+    def test_get_related_nodes_with_session_id_enqueues_command(
+        self, test_app: TestClient
+    ):
+        """get_related_nodes with visualization_session_id should push an additive command."""
+        session_id = "4444-5555"
+        test_app.patch(f"/sessions/{session_id}/state", json={"visible_node_ids": []})
+
+        response = test_app.post(
+            "/execute_tool",
+            json={
+                "tool_name": "get_related_nodes",
+                "arguments": {
+                    "node_id": "node-1",
+                    "visualization_session_id": session_id,
+                },
+            },
+        )
+        assert response.status_code == 200
+
+        # Enqueued command should have action=add_to_visualization (injected by default)
+        registry = test_app.app.state.session_registry
+        assert not registry._sessions[session_id]["queue"].empty()
+        cmd = registry._sessions[session_id]["queue"].get_nowait()
+        assert cmd["type"] == "tool_result"
+        assert cmd["tool"] == "get_related_nodes"
+        # Default action must be additive (not replace)
+        assert cmd["result"].get("action") == "add_to_visualization"
+
+    def test_get_saved_view_with_session_id_enqueues_command(self, test_app: TestClient):
+        """get_saved_view with visualization_session_id should push to the session."""
+        session_id = "6666-7777"
+        test_app.patch(f"/sessions/{session_id}/state", json={"visible_node_ids": []})
+
+        response = test_app.post(
+            "/execute_tool",
+            json={
+                "tool_name": "get_saved_view",
+                "arguments": {
+                    "name": "nonexistent-view",
+                    "visualization_session_id": session_id,
+                },
+            },
+        )
+        assert response.status_code == 200
+
+        # The session queue receives a command regardless of whether the view exists
+        registry = test_app.app.state.session_registry
+        assert not registry._sessions[session_id]["queue"].empty()
+        cmd = registry._sessions[session_id]["queue"].get_nowait()
+        assert cmd["type"] == "tool_result"
+        assert cmd["tool"] == "get_saved_view"
+
+    def test_session_state_body_size_limit(self, test_app: TestClient):
+        """PATCH /sessions/{id}/state should reject oversized bodies."""
+        session_id = "1111-9999"
+        # ~390 KB of JSON — above the 256 KB cap (50k items ≈ 195 KB, 100k ≈ 390 KB)
+        large_payload = {"visible_node_ids": ["x"] * 100000}
+        response = test_app.patch(
+            f"/sessions/{session_id}/state", json=large_payload
+        )
+        assert response.status_code == 413

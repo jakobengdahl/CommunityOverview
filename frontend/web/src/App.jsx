@@ -109,7 +109,7 @@ function App() {
   // Opens a persistent SSE stream so external AI clients can push
   // visualization commands to this browser window via MCP.
   useEffect(() => {
-    const evtSource = new EventSource(`/sessions/${_vizSessionId}/stream`);
+    const evtSource = new EventSource(api.getVisualizationStreamUrl(_vizSessionId));
     evtSource.onmessage = (e) => {
       try {
         const cmd = JSON.parse(e.data);

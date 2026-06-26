@@ -355,6 +355,12 @@ def create_app(
             ]:
                 return await call_next(request)
 
+            # Visualization session endpoints are secured by the session ID itself
+            # (CSPRNG, 100M-combination address space).  The browser's EventSource
+            # cannot send Authorization headers, so these routes must bypass auth.
+            if request.url.path.startswith("/sessions/"):
+                return await call_next(request)
+
             # MCP_AUTH_ENABLED=false: MCP endpoints bypass auth regardless of auth_enabled
             # or mcp_basic_auth — this takes precedence over both.
             # Unset (None) → MCP follows auth_enabled (backwards compatible).
@@ -561,13 +567,18 @@ def create_app(
 
     # ==================== Visualization Session Endpoints ====================
 
+    _SESSION_STATE_MAX_BYTES = 256 * 1024  # 256 KB — enough for 5000 node IDs
+
     @app.patch("/sessions/{session_id}/state")
     async def update_session_state(session_id: str, request: Request) -> JSONResponse:
         """Browser uploads its current canvas state so MCP tools can query it."""
         if not session_registry.is_valid_session_id(session_id):
             return JSONResponse({"error": "invalid session_id format"}, status_code=400)
+        body = await request.body()
+        if len(body) > _SESSION_STATE_MAX_BYTES:
+            return JSONResponse({"error": "state body too large"}, status_code=413)
         try:
-            state = await request.json()
+            state = json.loads(body)
         except Exception:
             return JSONResponse({"error": "invalid JSON body"}, status_code=400)
         if not isinstance(state, dict):

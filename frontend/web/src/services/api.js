@@ -4,7 +4,7 @@
  * Calls the backend endpoints exposed by app_host
  */
 
-function getPathRoot() {
+export function getPathRoot() {
   const pathname = window.location.pathname;
   const webIndex = pathname.lastIndexOf('/web/');
   return webIndex !== -1 ? pathname.substring(0, webIndex) : '';
@@ -482,12 +482,6 @@ export async function getCollectConfig(shortName) {
 // Visualization Session
 // ============================================================
 
-const _PATH_ROOT = (() => {
-  const pathname = window.location.pathname;
-  const webIndex = pathname.lastIndexOf('/web/');
-  return webIndex !== -1 ? pathname.substring(0, webIndex) : '';
-})();
-
 /**
  * Generate a cryptographically-random visualization session ID.
  * Format: "DDDD-DDDD" (two groups of four decimal digits).
@@ -501,6 +495,18 @@ export function generateVisualizationSessionId() {
 }
 
 /**
+ * Return the SSE stream URL for a visualization session.
+ * Uses the same path-root prefix as all other API calls so sub-path
+ * deployments (e.g. /tenant1/web/) work correctly.
+ *
+ * @param {string} sessionId
+ * @returns {string}
+ */
+export function getVisualizationStreamUrl(sessionId) {
+  return `${getPathRoot()}/sessions/${encodeURIComponent(sessionId)}/stream`;
+}
+
+/**
  * Upload the current canvas state to the backend session registry.
  * Called on connect and whenever the visible node list changes.
  *
@@ -509,7 +515,7 @@ export function generateVisualizationSessionId() {
  * @returns {Promise<{ok: boolean}>}
  */
 export async function updateSessionState(sessionId, state) {
-  return apiFetch(`${_PATH_ROOT}/sessions/${encodeURIComponent(sessionId)}/state`, {
+  return apiFetch(`${getPathRoot()}/sessions/${encodeURIComponent(sessionId)}/state`, {
     method: 'PATCH',
     body: JSON.stringify(state),
   });
