@@ -577,6 +577,7 @@ def create_app(
     # ==================== Visualization Session Endpoints ====================
 
     _SESSION_STATE_MAX_BYTES = 256 * 1024  # 256 KB — enough for 5000 node IDs
+    _SESSION_MAX_COUNT = 10_000  # cap auto-created sessions to limit unauthenticated DoS
 
     @app.patch("/sessions/{session_id}/state")
     async def update_session_state(session_id: str, request: Request) -> JSONResponse:
@@ -593,7 +594,10 @@ def create_app(
         if not isinstance(state, dict):
             return JSONResponse({"error": "body must be a JSON object"}, status_code=400)
         if not session_registry.update_state(session_id, state):
-            # Session not yet open: auto-create so state arrives before the SSE stream
+            # Session not yet open: auto-create so state arrives before the SSE stream.
+            # Guard with a count cap to prevent unauthenticated session-space exhaustion.
+            if session_registry.session_count >= _SESSION_MAX_COUNT:
+                return JSONResponse({"error": "too many sessions"}, status_code=503)
             session_registry.get_or_create(session_id)
             session_registry.update_state(session_id, state)
         return JSONResponse({"ok": True})

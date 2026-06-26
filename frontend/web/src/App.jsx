@@ -137,7 +137,7 @@ function App() {
           if (filtered.length > 0) {
             updateViz(filtered, toolResult.edges || []);
           }
-        } else if (toolResult.nodes?.length > 0) {
+        } else if (filtered.length > 0) {
           updateViz(filtered, toolResult.edges || []);
         }
       } catch (err) {

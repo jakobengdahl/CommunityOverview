@@ -244,7 +244,7 @@ class TestAuthEnabledTakesPrecedence:
         )
         try:
             resp = client.patch("/sessions/1234-5678/state", json={})
-            assert resp.status_code != 401
+            assert resp.status_code == 200
         finally:
             os.unlink(path)
 
