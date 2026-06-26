@@ -58,9 +58,9 @@ class ChatRequest(BaseModel):
             return v
         if not isinstance(v, list):
             raise ValueError("must be a list")
-        # Cap list size and per-item length to prevent prompt bloat/injection
+        # Cap list size, reject non-strings, cap per-item length
         v = v[:5000]
-        return [str(item)[:256] for item in v]
+        return [item[:256] for item in v if isinstance(item, str)]
 
 
 class SimpleChatRequest(BaseModel):

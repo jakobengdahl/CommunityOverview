@@ -73,6 +73,7 @@ class MockLLMProvider:
         self.mock_text_response = "Mock response from LLM"
         self.call_count = 0
         self.received_messages = []
+        self.received_system_prompts = []
 
 
 class MockSentenceTransformer:
