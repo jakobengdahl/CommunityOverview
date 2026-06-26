@@ -477,3 +477,40 @@ export async function proposeNodesFromText(text, options = {}) {
 export async function getCollectConfig(shortName) {
   return apiFetch(`${API_BASE}/collect/${encodeURIComponent(shortName)}`);
 }
+
+// ============================================================
+// Visualization Session
+// ============================================================
+
+const _PATH_ROOT = (() => {
+  const pathname = window.location.pathname;
+  const webIndex = pathname.lastIndexOf('/web/');
+  return webIndex !== -1 ? pathname.substring(0, webIndex) : '';
+})();
+
+/**
+ * Generate a cryptographically-random visualization session ID.
+ * Format: "DDDD-DDDD" (two groups of four decimal digits).
+ * @returns {string}
+ */
+export function generateVisualizationSessionId() {
+  const buf = crypto.getRandomValues(new Uint16Array(2));
+  const a = String(buf[0] % 10000).padStart(4, '0');
+  const b = String(buf[1] % 10000).padStart(4, '0');
+  return `${a}-${b}`;
+}
+
+/**
+ * Upload the current canvas state to the backend session registry.
+ * Called on connect and whenever the visible node list changes.
+ *
+ * @param {string} sessionId - Visualization session ID
+ * @param {{visible_node_ids: string[], selected_node_ids: string[], node_count: number}} state
+ * @returns {Promise<{ok: boolean}>}
+ */
+export async function updateSessionState(sessionId, state) {
+  return apiFetch(`${_PATH_ROOT}/sessions/${encodeURIComponent(sessionId)}/state`, {
+    method: 'PATCH',
+    body: JSON.stringify(state),
+  });
+}

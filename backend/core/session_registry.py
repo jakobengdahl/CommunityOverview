@@ -1,0 +1,157 @@
+"""
+Visualization Session Registry.
+
+Manages short-lived browser sessions that external AI clients can push
+visualization commands to via MCP.  Each session is identified by a
+short ID generated in the browser (e.g. "8244-1742") and backed by an
+asyncio.Queue.  The browser holds an SSE connection open; when an MCP
+tool pushes a command to the queue the browser receives it immediately.
+
+Thread-safety notes
+-------------------
+asyncio.Queue is not thread-safe across threads.  MCP tools run in a
+thread pool (FastMCP wraps sync functions with asyncio.to_thread), so
+they must not call queue.put() directly.  Instead they call
+push_command_sync(), which uses loop.call_soon_threadsafe().  The loop
+reference is injected at startup via set_event_loop() once the asyncio
+event loop is known.
+"""
+
+import asyncio
+import time
+import re
+from typing import Dict, Any, Optional, AsyncIterator
+
+SESSION_ID_RE = re.compile(r'^\d{4}-\d{4}$')
+_SESSION_TTL = 3600  # seconds — sessions not updated for this long are evicted
+
+
+class SessionRegistry:
+    """In-memory registry of active browser visualization sessions."""
+
+    def __init__(self) -> None:
+        self._sessions: Dict[str, dict] = {}
+        self._loop: Optional[asyncio.AbstractEventLoop] = None
+
+    # ------------------------------------------------------------------
+    # Event-loop injection
+    # ------------------------------------------------------------------
+
+    def set_event_loop(self, loop: asyncio.AbstractEventLoop) -> None:
+        """Store a reference to the running event loop for thread-safe pushes."""
+        self._loop = loop
+
+    # ------------------------------------------------------------------
+    # Validation
+    # ------------------------------------------------------------------
+
+    @staticmethod
+    def is_valid_session_id(session_id: str) -> bool:
+        return bool(SESSION_ID_RE.match(session_id))
+
+    # ------------------------------------------------------------------
+    # Session lifecycle
+    # ------------------------------------------------------------------
+
+    def get_or_create(self, session_id: str) -> asyncio.Queue:
+        """Return the existing queue for *session_id*, creating the session if new."""
+        if session_id not in self._sessions:
+            self._sessions[session_id] = {
+                "queue": asyncio.Queue(),
+                "state": {},
+                "created_at": time.monotonic(),
+                "last_seen": time.monotonic(),
+            }
+        return self._sessions[session_id]["queue"]
+
+    def _touch(self, session_id: str) -> None:
+        if session_id in self._sessions:
+            self._sessions[session_id]["last_seen"] = time.monotonic()
+
+    def session_exists(self, session_id: str) -> bool:
+        return session_id in self._sessions
+
+    # ------------------------------------------------------------------
+    # State management
+    # ------------------------------------------------------------------
+
+    def update_state(self, session_id: str, state: Dict[str, Any]) -> bool:
+        """Persist the browser's current canvas state.  Returns False if session unknown."""
+        if session_id not in self._sessions:
+            return False
+        self._sessions[session_id]["state"] = state
+        self._touch(session_id)
+        return True
+
+    def get_state(self, session_id: str) -> Optional[Dict[str, Any]]:
+        """Return the last known canvas state, or None if the session does not exist."""
+        entry = self._sessions.get(session_id)
+        if entry is None:
+            return None
+        self._touch(session_id)
+        return entry["state"]
+
+    # ------------------------------------------------------------------
+    # Command delivery
+    # ------------------------------------------------------------------
+
+    def push_command_sync(self, session_id: str, command: Dict[str, Any]) -> bool:
+        """Push *command* to the session queue from a synchronous (thread-pool) context.
+
+        Returns True if the command was enqueued, False if the session is unknown
+        or the event loop is unavailable.
+        """
+        if session_id not in self._sessions:
+            return False
+        if self._loop is None or not self._loop.is_running():
+            return False
+        queue = self._sessions[session_id]["queue"]
+        self._loop.call_soon_threadsafe(queue.put_nowait, command)
+        self._touch(session_id)
+        return True
+
+    async def push_command(self, session_id: str, command: Dict[str, Any]) -> bool:
+        """Push *command* from an async context.  Returns False if session unknown."""
+        if session_id not in self._sessions:
+            return False
+        await self._sessions[session_id]["queue"].put(command)
+        self._touch(session_id)
+        return True
+
+    # ------------------------------------------------------------------
+    # SSE streaming
+    # ------------------------------------------------------------------
+
+    async def stream(self, session_id: str) -> AsyncIterator[Dict[str, Any]]:
+        """Async generator that yields commands from the session queue indefinitely.
+
+        The generator runs until the caller stops iterating (e.g. the HTTP
+        connection closes and the StreamingResponse is cancelled).
+        """
+        queue = self.get_or_create(session_id)
+        while True:
+            # Wait with a keepalive timeout so the SSE connection stays alive
+            # even when no commands arrive.
+            try:
+                command = await asyncio.wait_for(queue.get(), timeout=25.0)
+                yield command
+            except asyncio.TimeoutError:
+                # Yield a keepalive sentinel; the SSE endpoint formats it as
+                # an SSE comment so browsers ignore it.
+                yield {"type": "ping"}
+
+    # ------------------------------------------------------------------
+    # Maintenance
+    # ------------------------------------------------------------------
+
+    def cleanup_stale(self) -> int:
+        """Remove sessions not updated within SESSION_TTL seconds.  Returns eviction count."""
+        cutoff = time.monotonic() - _SESSION_TTL
+        stale = [sid for sid, entry in self._sessions.items() if entry["last_seen"] < cutoff]
+        for sid in stale:
+            del self._sessions[sid]
+        return len(stale)
+
+    @property
+    def session_count(self) -> int:
+        return len(self._sessions)
