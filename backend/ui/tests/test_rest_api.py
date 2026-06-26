@@ -323,7 +323,7 @@ class TestVisualizationContextEndpoint:
         assert "Nodes currently displayed: 2" in prompt
 
     def test_chat_without_canvas_fields_still_works(self, fastapi_test_client):
-        """POST /ui/chat without canvas fields should remain backwards-compatible."""
+        """POST /ui/chat without canvas fields should not inject the state block."""
         client, mock_llm, _ = fastapi_test_client
 
         mock_llm.mock_tool_calls = []
@@ -334,3 +334,5 @@ class TestVisualizationContextEndpoint:
         })
 
         assert response.status_code == 200
+        assert mock_llm.received_system_prompts, "LLM was never called"
+        assert "CURRENT VISUALIZATION STATE" not in mock_llm.received_system_prompts[0]

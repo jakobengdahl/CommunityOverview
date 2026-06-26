@@ -260,9 +260,9 @@ class ChatService:
 
     @staticmethod
     def _sanitize_id(node_id: str) -> str:
-        """Truncate at first C0 control character to prevent prompt injection via node IDs."""
+        """Truncate at first C0/DEL control character to prevent prompt injection via node IDs."""
         for i, ch in enumerate(node_id):
-            if ch < '\x20':
+            if ch < '\x20' or ch == '\x7f':
                 return node_id[:i]
         return node_id
 
