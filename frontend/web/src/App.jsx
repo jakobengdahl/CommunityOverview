@@ -77,6 +77,7 @@ function App() {
 
   const urlGuideStartedRef = useRef(false);
   const urlViewLoadedRef = useRef(false);
+  const latestViewport = useRef(null);
   const [notification, setNotification] = useState(null);
   const [deleteDialog, setDeleteDialog] = useState(null);
   const [saveViewDialog, setSaveViewDialog] = useState(null);
@@ -129,7 +130,12 @@ function App() {
         if (toolResult.action === 'add_to_visualization') {
           if (filtered.length > 0) {
             const allEdges = [...currentEdges, ...(toolResult.edges || [])];
-            const positioned = positionNewNodes(filtered, currentNodes, allEdges);
+            const vp = latestViewport.current;
+            const viewportCenter = vp ? {
+              x: (window.innerWidth / 2 - vp.x) / vp.zoom,
+              y: (window.innerHeight / 2 - vp.y) / vp.zoom,
+            } : null;
+            const positioned = positionNewNodes(filtered, currentNodes, allEdges, { viewportCenter });
             addNodes(positioned, toolResult.edges || []);
           }
         } else if (toolResult.action === 'load_visualization' || toolResult.action === 'clear_visualization') {
@@ -806,6 +812,7 @@ function App() {
           schema={schema}
           onContextMenuAction={handleContextMenuAction}
           nodeColorResolver={getNodeColor}
+          onViewportChange={(vp) => { latestViewport.current = vp; }}
         />
       </div>
 
