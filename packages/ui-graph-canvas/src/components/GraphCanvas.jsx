@@ -107,6 +107,7 @@ function GraphCanvasInner({
   schema = null,
   onContextMenuAction = null,
   nodeColorResolver = null,
+  onViewportChange = null,
 }) {
   const [loadedNodeCount, setLoadedNodeCount] = useState(INITIAL_LOAD_COUNT);
   const [nodeContextMenu, setNodeContextMenu] = useState(null);
@@ -118,7 +119,7 @@ function GraphCanvasInner({
   const reactFlowWrapper = useRef(null);
   const rightDragStart = useRef({ x: 0, y: 0, time: null });
   const mouseDownPos = useRef(null);
-  const { screenToFlowPosition, setCenter, getNodes: getFlowNodes } = useReactFlow();
+  const { screenToFlowPosition, setCenter, getNodes: getFlowNodes, getViewport } = useReactFlow();
 
   const depthLevels = useMemo(() => {
     if (Array.isArray(federationDepthLevels) && federationDepthLevels.length > 0) {
@@ -703,6 +704,13 @@ function GraphCanvasInner({
   }, [groupsToRestore, setNodes, onGroupsRestored]);
 
   // Focus on a specific node when focusNodeId changes
+  // Report initial viewport after fitView animation settles
+  useEffect(() => {
+    if (!onViewportChange) return;
+    const timer = setTimeout(() => onViewportChange(getViewport()), 900);
+    return () => clearTimeout(timer);
+  }, []); // eslint-disable-line react-hooks/exhaustive-deps
+
   useEffect(() => {
     if (!focusNodeId) return;
     const targetNode = nodes.find(n => n.id === focusNodeId);
@@ -797,6 +805,7 @@ function GraphCanvasInner({
           multiSelectionKeyCode={['Shift', 'Meta', 'Control']}
           edgesUpdatable={false}
           onMoveStart={closeAllMenus}
+          onMove={onViewportChange ? (_event, vp) => onViewportChange(vp) : undefined}
           proOptions={{ hideAttribution: true }}
         >
           <Background color="#333" gap={16} />
