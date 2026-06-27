@@ -337,7 +337,7 @@ function hierarchicalLayout(nodes, crossTypeEdges, nodeTypeMap, origin) {
 
   // Compute horizontal span needed per parent
   function parentHSpan(parentNode) {
-    const children = childrenOf.get(parentNode.id) || [];
+    const children = [...new Set(childrenOf.get(parentNode.id) || [])];
     if (children.length === 0) return PARENT_MIN_HSPAN;
     if (children.length <= CHILD_GRID_THRESHOLD) {
       return Math.max(children.length * CHILD_HSPACING, PARENT_MIN_HSPAN);
@@ -360,7 +360,7 @@ function hierarchicalLayout(nodes, crossTypeEdges, nodeTypeMap, origin) {
 
     positioned.push({ ...parent, position: { x: parentX, y: parentY } });
 
-    const children = (childrenOf.get(parent.id) || [])
+    const children = [...new Set(childrenOf.get(parent.id) || [])]
       .map(id => nodes.find(n => n.id === id))
       .filter(Boolean);
 
