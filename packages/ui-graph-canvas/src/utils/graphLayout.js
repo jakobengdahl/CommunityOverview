@@ -351,6 +351,7 @@ function hierarchicalLayout(nodes, crossTypeEdges, nodeTypeMap, origin) {
   let curX = origin.x - totalWidth / 2;
 
   const positioned = [];
+  const placedIds = new Set();
 
   for (let i = 0; i < parentNodes.length; i++) {
     const parent = parentNodes[i];
@@ -359,10 +360,13 @@ function hierarchicalLayout(nodes, crossTypeEdges, nodeTypeMap, origin) {
     const parentY = origin.y;
 
     positioned.push({ ...parent, position: { x: parentX, y: parentY } });
+    placedIds.add(parent.id);
 
+    // Skip children already placed under a previous parent (multi-parent edges)
     const children = [...new Set(childrenOf.get(parent.id) || [])]
       .map(id => nodes.find(n => n.id === id))
-      .filter(Boolean);
+      .filter(Boolean)
+      .filter(child => !placedIds.has(child.id));
 
     if (children.length > 0) {
       const cols = children.length <= CHILD_GRID_THRESHOLD
@@ -378,6 +382,7 @@ function hierarchicalLayout(nodes, crossTypeEdges, nodeTypeMap, origin) {
             y: parentY + CHILD_VOFFSET + Math.floor(j / cols) * CHILD_VSPACING,
           },
         });
+        placedIds.add(child.id);
       });
     }
 
@@ -385,7 +390,6 @@ function hierarchicalLayout(nodes, crossTypeEdges, nodeTypeMap, origin) {
   }
 
   // Any nodes not yet placed (orphans from non-root, non-child types)
-  const placedIds = new Set(positioned.map(n => n.id));
   const orphans = nodes.filter(n => !placedIds.has(n.id));
   if (orphans.length > 0) {
     const orphanOrigin = { x: origin.x, y: origin.y + CHILD_VOFFSET * 3 };
