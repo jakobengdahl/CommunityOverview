@@ -2,14 +2,11 @@
 Tests for time-based agent scheduler.
 """
 
-import threading
-import time
+import unittest.mock
 from datetime import datetime
 from typing import Any, Dict, List
 from unittest.mock import MagicMock
 from zoneinfo import ZoneInfo
-
-import pytest
 
 from backend.agents.config import AgentConfig, AgentSchedule, AgentPrompts
 from backend.agents.scheduler import AgentScheduler, _build_payload
@@ -193,50 +190,22 @@ class TestAgentSchedulerRegistration:
 
 class TestAgentSchedulerFiring:
 
-    def _scheduler_with_agent(
-        self,
-        weekday: int,
-        hour: int,
-        minute: int,
-        tz: str = "UTC",
-    ):
-        """Helper: build a scheduler with one registered agent."""
-        scheduler = AgentScheduler()
-        sched = AgentSchedule(day_of_week=weekday, hour=hour, minute=minute, timezone=tz)
-        config = make_config(schedule=sched)
-        worker = make_worker()
-        scheduler.register("agent-1", config, worker)
-        return scheduler, worker
-
     def test_fires_when_time_matches(self):
         """Fires the worker when current time matches the schedule."""
-        # Monday = weekday 0 in Python datetime
-        tz = ZoneInfo("UTC")
-        # Find the next Monday 10:00 UTC (or just freeze time manually)
-        # We'll mock _check_and_fire by controlling `datetime.now` in the scheduler.
         scheduler = AgentScheduler()
         sched = AgentSchedule(day_of_week=0, hour=10, minute=30, timezone="UTC")
         config = make_config(schedule=sched)
         worker = make_worker()
         scheduler.register("agent-1", config, worker)
 
-        # Patch datetime.now in the scheduler to return a Monday at 10:30
-        monday_1030 = datetime(2026, 6, 29, 10, 30, 0, tzinfo=ZoneInfo("UTC"))  # 2026-06-29 is a Monday
-        assert monday_1030.weekday() == 0  # confirm it's Monday
+        # 2026-06-29 is a Monday
+        monday_1030 = datetime(2026, 6, 29, 10, 30, 0, tzinfo=ZoneInfo("UTC"))
+        assert monday_1030.weekday() == 0
 
-        import backend.agents.scheduler as sched_module
-        original_now = datetime.now
-
-        fired = []
-
-        def fake_now(tz_arg=None):
-            if tz_arg is not None:
-                return monday_1030.astimezone(tz_arg)
-            return monday_1030
-
-        import unittest.mock
         with unittest.mock.patch("backend.agents.scheduler.datetime") as mock_dt:
-            mock_dt.now.side_effect = fake_now
+            mock_dt.now.side_effect = lambda tz_arg=None: (
+                monday_1030.astimezone(tz_arg) if tz_arg else monday_1030
+            )
             scheduler._check_and_fire()
 
         assert len(worker.enqueued) == 1
@@ -252,13 +221,11 @@ class TestAgentSchedulerFiring:
         worker = make_worker()
         scheduler.register("agent-1", config, worker)
 
-        # Use a Tuesday 10:30 — wrong day
+        # Tuesday 10:30 — right time, wrong day
         tuesday_1030 = datetime(2026, 6, 30, 10, 30, 0, tzinfo=ZoneInfo("UTC"))
         assert tuesday_1030.weekday() == 1
 
-        import unittest.mock
         with unittest.mock.patch("backend.agents.scheduler.datetime") as mock_dt:
-            mock_dt.now.return_value = tuesday_1030.astimezone(ZoneInfo("UTC"))
             mock_dt.now.side_effect = lambda tz_arg=None: (
                 tuesday_1030.astimezone(tz_arg) if tz_arg else tuesday_1030
             )
@@ -275,7 +242,6 @@ class TestAgentSchedulerFiring:
 
         monday_1030 = datetime(2026, 6, 29, 10, 30, 0, tzinfo=ZoneInfo("UTC"))
 
-        import unittest.mock
         with unittest.mock.patch("backend.agents.scheduler.datetime") as mock_dt:
             mock_dt.now.side_effect = lambda tz_arg=None: (
                 monday_1030.astimezone(tz_arg) if tz_arg else monday_1030
@@ -285,7 +251,8 @@ class TestAgentSchedulerFiring:
 
         assert len(worker.enqueued) == 1  # fired only once
 
-    def test_fires_again_in_next_minute_if_minute_changes(self):
+    def test_does_not_fire_on_non_matching_minute(self):
+        """Scheduler fires once at the scheduled minute then stays quiet that hour."""
         scheduler = AgentScheduler()
         sched = AgentSchedule(day_of_week=0, hour=10, minute=30, timezone="UTC")
         config = make_config(schedule=sched)
@@ -293,10 +260,8 @@ class TestAgentSchedulerFiring:
         scheduler.register("agent-1", config, worker)
 
         monday_1030 = datetime(2026, 6, 29, 10, 30, 0, tzinfo=ZoneInfo("UTC"))
-        # same day, same hour but minute=31 — should NOT fire
         monday_1031 = datetime(2026, 6, 29, 10, 31, 0, tzinfo=ZoneInfo("UTC"))
 
-        import unittest.mock
         with unittest.mock.patch("backend.agents.scheduler.datetime") as mock_dt:
             mock_dt.now.side_effect = lambda tz_arg=None: (
                 monday_1030.astimezone(tz_arg) if tz_arg else monday_1030
@@ -309,9 +274,37 @@ class TestAgentSchedulerFiring:
             mock_dt.now.side_effect = lambda tz_arg=None: (
                 monday_1031.astimezone(tz_arg) if tz_arg else monday_1031
             )
-            scheduler._check_and_fire()  # different minute, no match
+            scheduler._check_and_fire()
 
-        assert len(worker.enqueued) == 1  # still 1
+        assert len(worker.enqueued) == 1  # minute=31 does not match
+
+    def test_fires_again_following_week(self):
+        """Deduplication key is date-specific, so the agent re-fires the next Monday."""
+        scheduler = AgentScheduler()
+        sched = AgentSchedule(day_of_week=0, hour=10, minute=30, timezone="UTC")
+        config = make_config(schedule=sched)
+        worker = make_worker()
+        scheduler.register("agent-1", config, worker)
+
+        monday_week1 = datetime(2026, 6, 29, 10, 30, 0, tzinfo=ZoneInfo("UTC"))
+        monday_week2 = datetime(2026, 7, 6, 10, 30, 0, tzinfo=ZoneInfo("UTC"))
+        assert monday_week1.weekday() == monday_week2.weekday() == 0
+
+        with unittest.mock.patch("backend.agents.scheduler.datetime") as mock_dt:
+            mock_dt.now.side_effect = lambda tz_arg=None: (
+                monday_week1.astimezone(tz_arg) if tz_arg else monday_week1
+            )
+            scheduler._check_and_fire()
+
+        assert len(worker.enqueued) == 1
+
+        with unittest.mock.patch("backend.agents.scheduler.datetime") as mock_dt:
+            mock_dt.now.side_effect = lambda tz_arg=None: (
+                monday_week2.astimezone(tz_arg) if tz_arg else monday_week2
+            )
+            scheduler._check_and_fire()
+
+        assert len(worker.enqueued) == 2  # fires again the following Monday
 
     def test_unregister_prevents_firing(self):
         scheduler = AgentScheduler()
@@ -323,7 +316,6 @@ class TestAgentSchedulerFiring:
 
         monday_1030 = datetime(2026, 6, 29, 10, 30, 0, tzinfo=ZoneInfo("UTC"))
 
-        import unittest.mock
         with unittest.mock.patch("backend.agents.scheduler.datetime") as mock_dt:
             mock_dt.now.side_effect = lambda tz_arg=None: (
                 monday_1030.astimezone(tz_arg) if tz_arg else monday_1030
@@ -341,7 +333,6 @@ class TestAgentSchedulerFiring:
 
         monday_1030_utc = datetime(2026, 6, 29, 10, 30, 0, tzinfo=ZoneInfo("UTC"))
 
-        import unittest.mock
         with unittest.mock.patch("backend.agents.scheduler.datetime") as mock_dt:
             mock_dt.now.side_effect = lambda tz_arg=None: (
                 monday_1030_utc.astimezone(tz_arg) if tz_arg and str(tz_arg) != "Invalid/Zone"

@@ -7,7 +7,6 @@ Complements the event-subscription trigger path.
 
 import logging
 import threading
-import time
 import uuid
 from datetime import datetime, timezone
 from typing import Dict, Optional, Tuple, TYPE_CHECKING
@@ -41,6 +40,7 @@ class AgentScheduler:
         self._lock = threading.Lock()
         self._thread: Optional[threading.Thread] = None
         self._running = False
+        self._stop_event = threading.Event()
 
     # ------------------------------------------------------------------
     # Registration
@@ -72,9 +72,10 @@ class AgentScheduler:
     # ------------------------------------------------------------------
 
     def start(self) -> None:
-        """Start the background thread."""
+        """Start the background thread.  Idempotent: no-op if already running."""
         if self._running:
             return
+        self._stop_event.clear()
         self._running = True
         self._thread = threading.Thread(
             target=self._run,
@@ -85,8 +86,9 @@ class AgentScheduler:
         logger.info("Agent scheduler started (check interval: %ds)", _CHECK_INTERVAL)
 
     def stop(self, timeout: float = 5.0) -> None:
-        """Stop the background thread."""
+        """Stop the background thread, waking it immediately via the stop event."""
         self._running = False
+        self._stop_event.set()
         if self._thread:
             self._thread.join(timeout=timeout)
         logger.info("Agent scheduler stopped")
@@ -101,7 +103,8 @@ class AgentScheduler:
                 self._check_and_fire()
             except Exception as exc:
                 logger.error("Scheduler error: %s", exc)
-            time.sleep(_CHECK_INTERVAL)
+            # Use event.wait instead of sleep so stop() can wake the thread early
+            self._stop_event.wait(_CHECK_INTERVAL)
 
     def _check_and_fire(self) -> None:
         """Check all registered agents and fire those whose schedule matches now."""

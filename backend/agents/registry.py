@@ -152,7 +152,6 @@ class AgentRegistry:
                 except Exception as e:
                     logger.error(f"Failed to start agent {agent_config.name}: {e}")
 
-        self._scheduler.start()
         logger.info(f"Agent registry started: {started_count} agent worker(s) running")
 
     def stop(self) -> None:
@@ -223,6 +222,7 @@ class AgentRegistry:
 
         if worker is not None:
             self._scheduler.register(config.agent_id, config, worker)
+            self._scheduler.start()  # idempotent; covers dynamic-agent creation path
 
     def _stop_worker(self, agent_id: str) -> None:
         """Stop a worker for an agent."""
