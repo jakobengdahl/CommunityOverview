@@ -523,6 +523,20 @@ class TestMakeEnforcedTools:
         assert result["success"] is False
         assert "not permitted" in result["error"]
 
+    def test_delete_nodes_reports_both_unknown_and_forbidden_in_one_error(
+        self, graph_service, mock_llm_provider, sample_nodes
+    ):
+        # sample_nodes adds test-actor-1 (Actor, delete:False per ACTOR_ONLY_PERMS)
+        # "nonexistent-id" is not in the graph at all
+        service = self._make_service(graph_service, mock_llm_provider)
+        tools = service._make_enforced_tools(ACTOR_ONLY_PERMS)
+        result = tools["delete_nodes"](
+            node_ids=["nonexistent-id", "test-actor-1"], confirmed=True
+        )
+        assert result["success"] is False
+        assert "nonexistent-id" in result["error"]
+        assert "test-actor-1" in result["error"]
+
     def test_delete_edges_always_blocked_in_collection_mode(self, graph_service, mock_llm_provider):
         service = self._make_service(graph_service, mock_llm_provider)
         tools = service._make_enforced_tools(ACTOR_ONLY_PERMS)

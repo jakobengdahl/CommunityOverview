@@ -53,7 +53,6 @@ function CollectKioskView({ shortName }) {
 
   // Auto-trigger AI opening message when the intro overlay is dismissed.
   // kickstartFiredRef prevents the effect from running twice under React StrictMode.
-  // The ref is reset in cleanup so a future "restart" (introShown → false → true) works.
   useEffect(() => {
     if (!introShown || !config || kickstartFiredRef.current) return;
     kickstartFiredRef.current = true;
@@ -91,8 +90,6 @@ function CollectKioskView({ shortName }) {
         setIsProcessing(false);
         setTimeout(() => textareaRef.current?.focus(), 100);
       });
-
-    return () => { kickstartFiredRef.current = false; };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [introShown]);
 
@@ -103,10 +100,10 @@ function CollectKioskView({ shortName }) {
     const userText = inputValue.trim();
 
     // Capture history synchronously before state updates to avoid stale-closure issues.
-    // Hidden messages (e.g. the [COLLECTION_START] kickstart) are kept in history for
-    // context but filtered here so the sentinel never re-triggers the INITIALIZATION prompt.
+    // Hidden messages (e.g. the [COLLECTION_START] kickstart) must stay in the API history
+    // so the conversation starts with a user turn as required by the Anthropic API.
     const conversationHistory = [
-      ...messages.filter(m => !m.hidden).map(m => ({ role: m.role, content: m.content })),
+      ...messages.map(m => ({ role: m.role, content: m.content })),
       { role: 'user', content: userText },
     ];
 

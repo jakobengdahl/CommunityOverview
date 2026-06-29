@@ -265,12 +265,14 @@ class ChatService:
                             allowed = [op for op in ("create", "update", "delete") if ops.get(op)]
                             if allowed:
                                 lines.append(f"- {node_type}: {', '.join(allowed)}")
-                        lines.append("")
-                        lines.append(
-                            "IMPORTANT: Only perform operations that are explicitly listed as "
-                            "permitted above. Do not create, update, or delete node types that "
-                            "are not listed, or perform operations not permitted for a given type."
-                        )
+                    else:
+                        lines.append("PERMITTED OPERATIONS: none — do not create, update, or delete any nodes.")
+                    lines.append("")
+                    lines.append(
+                        "IMPORTANT: Only perform operations that are explicitly listed as "
+                        "permitted above. Do not create, update, or delete node types that "
+                        "are not listed, or perform operations not permitted for a given type."
+                    )
 
                     lines.append("")
                     lines.append(
@@ -293,7 +295,6 @@ class ChatService:
                 )
         except Exception:
             logger.warning("Failed to resolve AKC short_name %r", short_name, exc_info=True)
-        self._collection_cache[short_name] = (None, None)
         return None, None
 
     def _make_enforced_tools(self, perms: dict) -> dict:
@@ -318,7 +319,10 @@ class ChatService:
                 return None
 
         def add_nodes_enforced(nodes, edges=None, **kwargs):
-            untyped = [i for i, n in enumerate(nodes) if not n.get("type") or not isinstance(n.get("type"), str)]
+            untyped = [
+                i for i, n in enumerate(nodes)
+                if not isinstance(n.get("type"), str) or not n.get("type")
+            ]
             if untyped:
                 return {
                     "success": False,
@@ -377,7 +381,10 @@ class ChatService:
                     f"deletion not permitted in this collection: {', '.join(forbidden_ids)}"
                 )
             if errors:
-                return {"success": False, "error": "Cannot delete node(s) — " + "; ".join(errors) + "."}
+                return {
+                    "success": False,
+                    "error": "Cannot delete node(s) — " + "; ".join(errors) + ".",
+                }
             return base_delete(node_ids=node_ids, confirmed=confirmed, **kwargs)
 
         def delete_edges_enforced(edge_ids, confirmed=False, **kwargs):
