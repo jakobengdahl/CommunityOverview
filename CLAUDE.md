@@ -63,7 +63,11 @@ This is the only legitimate exception to the "PRs target dev" rule.
 - Open a PR against `main` or `preview` (except hotfixes, see above).
 - Push directly to `dev`, `preview`, or `main`.
 - Add features beyond what the task requires. If you discover a related bug or
-  improvement, note it in the PR body and stop — never fix it in the same branch.
+  improvement, log it in `SMALL_FIXES.md` (see below) and stop — never fix it
+  in the same branch.
+- Fix pre-existing bugs in the active branch. Pre-existing means: the problem
+  existed before you started working, or is in code you did not change. Log it
+  in `SMALL_FIXES.md` with file, line, and context, then continue.
 - Skip the review loop for non-trivial changes.
 - Merge PRs against `main` or `preview` — those gates belong to the project owner.
 - Stage debug artifacts: `print()` statements, `breakpoint()`, `pdb.set_trace()`,
@@ -149,6 +153,31 @@ tests in `backend/ui/tests/` and `backend/api_host/tests/` for the pattern.
 
 **Tests that need LLM calls:** mock the LLM provider rather than using real API
 keys. See `backend/ui/tests/` for existing mock patterns.
+
+### 5b. Capture Pre-existing Issues
+
+During Explore, Test, and Review, you will sometimes discover problems that are
+clearly pre-existing: failing tests you didn't touch, inconsistencies between
+parallel code paths, dead code, stale TODO comments, or obvious bugs outside
+your change radius.
+
+**Do not fix them now.** Instead, append an entry to `SMALL_FIXES.md` in the
+repo root:
+
+```markdown
+### [YYYY-MM-DD] Short description
+- **File(s):** `path/to/file.py:line`
+- **Context:** Discovered during <branch-name>
+- **Issue:** What the problem is and why it matters
+- **Effort:** XS | S | M
+```
+
+Use XS for a single-line fix, S for up to ~30 lines / one file, M for
+multi-file or logic-heavy changes. Commit the updated `SMALL_FIXES.md` as part
+of your final commit on the branch (or as a standalone `chore:` commit).
+
+At end of session, sweep any notes from conversation context into `SMALL_FIXES.md`
+before closing. The goal: nothing is lost between sessions.
 
 ### 6. Commit
 
@@ -251,6 +280,57 @@ Merge only when **all** of the following are true:
 - **Score / ranking logic**: always add tests that cover cross-tier scenarios
   (can secondary signals beat a stronger primary signal?), not just happy-path order.
 - Tests are documentation. The test name should describe the invariant, not the steps.
+
+---
+
+## Small-Fix Sessions
+
+A small-fix session is started by the instruction **"kör small-fix-sessionen"**
+(or equivalent). Its only goal is to drain items from `SMALL_FIXES.md`.
+
+### Entry checklist before starting
+
+- Pull latest `dev`.
+- Read `SMALL_FIXES.md` in full.
+- Confirm no items are already addressed by recent commits (check `git log --oneline origin/dev -20`).
+
+### Batch selection
+
+Group items by locality (same file or module) and combined effort. A good batch:
+
+- Total effort ≤ ~M (several XS/S items, or one M item).
+- Items that touch overlapping files go in the **same** batch — one branch,
+  one PR, one review loop.
+- Items that touch unrelated areas go in **separate** batches → separate
+  branches, separate PRs, merged independently.
+
+Pick the highest-value batch first. If uncertain, ask Jakob before starting.
+
+### Execution per batch
+
+Follow the full Standard Development Workflow (steps 1–10), with these additions:
+
+1. **Branch name:** `fix/small-fixes-<YYYY-MM-DD>` or `fix/small-fixes-<topic>`
+   if the batch has a clear theme.
+2. **After Implement:** re-run the test suite for every file touched. If a new
+   test failure appears that is unrelated to your batch, log it in `SMALL_FIXES.md`
+   and do not fix it here.
+3. **PR body:** list each `SMALL_FIXES.md` entry being resolved. Note items
+   explicitly **not** addressed.
+4. **Review loop:** spawn the review subagent as described in step 8. Because
+   these are small, isolated fixes the loop typically converges in one round —
+   but repeat until clean, same as any other PR.
+5. **After merge:** remove the resolved entries from `SMALL_FIXES.md`, commit
+   the update directly on `dev` via a standalone `chore: update small-fixes backlog`
+   commit (no separate branch needed for the file update).
+6. If time and context permit, move on to the next batch in the same session.
+   Otherwise stop — the backlog is in `SMALL_FIXES.md` for next time.
+
+### What never belongs in a small-fix batch
+
+- New features, even small ones.
+- Refactors that change public API or data model.
+- Anything that requires a design decision — surface it to Jakob instead.
 
 ---
 
