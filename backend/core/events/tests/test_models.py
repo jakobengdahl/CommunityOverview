@@ -3,7 +3,7 @@ Tests for event system models.
 """
 
 import pytest
-from datetime import datetime
+from datetime import datetime, timezone
 
 from backend.core.events.models import (
     Event,
@@ -184,7 +184,7 @@ class TestDeliveryResult:
             attempt=1,
             max_attempts=3,
             status_code=200,
-            delivered_at=datetime.utcnow(),
+            delivered_at=datetime.now(timezone.utc),
         )
 
         assert result.status == DeliveryStatus.SUCCESS

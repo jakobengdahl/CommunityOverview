@@ -54,14 +54,16 @@ class MockSentenceTransformer:
 
     def encode(self, texts, convert_to_numpy=True, show_progress_bar=False):
         """Generate mock embeddings based on text hash."""
-        if isinstance(texts, str):
+        is_single = isinstance(texts, str)
+        if is_single:
             texts = [texts]
         embeddings = []
         for text in texts:
             self._np.random.seed(abs(hash(text)) % (2**32))
             embedding = self._np.random.rand(384).astype(self._np.float32)
             embeddings.append(embedding)
-        return self._np.array(embeddings)
+        result = self._np.array(embeddings)
+        return result[0] if is_single else result
 
 
 @pytest.fixture(autouse=True)

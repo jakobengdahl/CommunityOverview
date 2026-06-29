@@ -7,7 +7,7 @@ and the configuration for subscriptions/delivery.
 
 from enum import Enum
 from typing import Optional, List, Dict, Any
-from datetime import datetime
+from datetime import datetime, timezone
 from pydantic import BaseModel, Field
 import uuid
 
@@ -178,7 +178,7 @@ class Event(BaseModel):
     """
     event_id: str = Field(default_factory=lambda: str(uuid.uuid4()))
     event_type: EventType
-    occurred_at: datetime = Field(default_factory=datetime.utcnow)
+    occurred_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
 
     # Origin context
     origin: EventContext

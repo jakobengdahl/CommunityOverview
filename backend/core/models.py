@@ -11,7 +11,7 @@ See backend/config_loader.py for configuration loading.
 
 from enum import Enum
 from typing import Optional, List, Dict, Any, Union
-from datetime import datetime
+from datetime import datetime, timezone
 from pydantic import BaseModel, Field, field_validator
 import uuid
 
@@ -158,8 +158,8 @@ class Node(BaseModel):
     subtypes: List[str] = Field(default_factory=list)  # Sub-classifications within the node type
     metadata: Dict[str, Any] = Field(default_factory=dict)
     embedding: Optional[List[float]] = None  # For future vector search
-    created_at: datetime = Field(default_factory=datetime.utcnow)
-    updated_at: datetime = Field(default_factory=datetime.utcnow)
+    created_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
+    updated_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
 
 
     @field_validator('type', mode='before')
@@ -213,7 +213,7 @@ class Edge(BaseModel):
     type: Union[RelationshipType, str] = Field(default=RelationshipType.RELATES_TO)  # Optional, defaults to general connection
     label: str = Field(default="")  # Optional free-text label for the connection
     metadata: Dict[str, Any] = Field(default_factory=dict)
-    created_at: datetime = Field(default_factory=datetime.utcnow)
+    created_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
 
 
     @field_validator('type', mode='before')

@@ -27,7 +27,7 @@ from typing import List, Optional, Dict, Any
 from enum import Enum
 from urllib.parse import urlparse
 
-import httpx
+import httpx2 as httpx
 from pydantic import BaseModel, Field
 
 logger = logging.getLogger(__name__)

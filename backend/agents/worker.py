@@ -12,7 +12,7 @@ import logging
 import queue
 import threading
 import time
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import Dict, Any, Optional, List, Callable
 from dataclasses import dataclass, field
 
@@ -30,7 +30,7 @@ class EventItem:
     """An event queued for processing."""
     event_id: str
     payload: Dict[str, Any]
-    enqueued_at: datetime = field(default_factory=datetime.utcnow)
+    enqueued_at: datetime = field(default_factory=lambda: datetime.now(timezone.utc))
 
 
 @dataclass
@@ -388,7 +388,7 @@ class AgentWorker:
             )
 
             self.events_processed += 1
-            self.last_event_at = datetime.utcnow()
+            self.last_event_at = datetime.now(timezone.utc)
 
             logger.info(
                 f"Agent {self.config.name}: Event {event_id} processed - "

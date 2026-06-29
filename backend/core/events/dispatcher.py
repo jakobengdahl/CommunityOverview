@@ -10,7 +10,7 @@ Responsibilities:
 
 import logging
 from typing import List, Dict, Any, Optional, Callable, TYPE_CHECKING
-from datetime import datetime
+from datetime import datetime, timezone
 
 from .models import (
     Event,
@@ -90,7 +90,7 @@ class EventDispatcher:
         Returns list of subscription configs with id, name, filters, and delivery.
         """
         # Check cache
-        now = datetime.utcnow()
+        now = datetime.now(timezone.utc)
         if (
             self._subscriptions_cache is not None
             and self._cache_time is not None
