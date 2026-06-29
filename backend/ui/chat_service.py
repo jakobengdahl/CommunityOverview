@@ -58,6 +58,9 @@ class ChatService:
         # Create the underlying ChatProcessor with our tools map
         self._processor = ChatProcessor(self._tools_map)
         self._current_federation_depth: Optional[int] = None
+        # Cache for resolved AKC configs — avoids repeated 500-node scans within a session.
+        # Keyed by short_name; value is (prefix, perms) tuple from _resolve_collection.
+        self._collection_cache: Dict[str, tuple] = {}
 
         # Expert agent registry — populated by load_expert_skills() at startup.
         self._expert_contexts: Dict[str, str] = {}
@@ -229,9 +232,12 @@ class ChatService:
     def _resolve_collection(self, short_name: str) -> tuple:
         """Resolve an AKC short_name → (system_prompt_prefix, permissions_dict).
 
-        Returns (None, {}) when the collection is not found or an error occurs.
+        Returns (None, None) when the collection is not found or an error occurs.
         permissions_dict maps node_type → {"create": bool, "update": bool, "delete": bool}.
+        Results are cached on this instance to avoid repeated 500-node scans per message.
         """
+        if short_name in self._collection_cache:
+            return self._collection_cache[short_name]
         try:
             result = self._graph_service.search_graph(
                 query="", node_types=["ActiveKnowledgeCollection"], limit=500
@@ -274,7 +280,9 @@ class ChatService:
                         "Do not mention or repeat '[COLLECTION_START]' in your response."
                     )
 
-                    return "\n".join(lines), perms
+                    result_tuple = ("\n".join(lines), perms)
+                    self._collection_cache[short_name] = result_tuple
+                    return result_tuple
 
             if not found:
                 logger.warning(
@@ -284,7 +292,7 @@ class ChatService:
                 )
         except Exception:
             logger.warning("Failed to resolve AKC short_name %r", short_name, exc_info=True)
-        return None, {}
+        return None, None
 
     def _make_enforced_tools(self, perms: dict) -> dict:
         """Return a tools_map overlay that enforces node_type_permissions at call time."""
@@ -335,7 +343,14 @@ class ChatService:
 
         def update_node_enforced(node_id, updates, **kwargs):
             node_type = _get_node_type(node_id)
-            if node_type and not perms.get(node_type, {}).get("update"):
+            if node_type is None:
+                # Fail-closed: if we cannot determine the node type, deny the operation.
+                # The base call would also return "not found", but the error below is clearer.
+                return {
+                    "success": False,
+                    "error": "Cannot update node: node not found or type could not be determined.",
+                }
+            if not perms.get(node_type, {}).get("update"):
                 return {
                     "success": False,
                     "error": f"Updating {node_type} nodes is not permitted in this collection.",
@@ -344,10 +359,21 @@ class ChatService:
 
         def delete_nodes_enforced(node_ids, confirmed=False, **kwargs):
             forbidden_ids = []
+            unknown_ids = []
             for nid in node_ids:
                 node_type = _get_node_type(nid)
-                if node_type and not perms.get(node_type, {}).get("delete"):
+                if node_type is None:
+                    unknown_ids.append(nid)
+                elif not perms.get(node_type, {}).get("delete"):
                     forbidden_ids.append(nid)
+            if unknown_ids:
+                return {
+                    "success": False,
+                    "error": (
+                        f"Cannot delete node(s): not found or type undetermined: "
+                        f"{', '.join(unknown_ids)}."
+                    ),
+                }
             if forbidden_ids:
                 return {
                     "success": False,
@@ -415,7 +441,7 @@ class ChatService:
         effective_prefix, collection_perms = (
             self._resolve_collection(collection_short_name)
             if collection_short_name
-            else (None, {})
+            else (None, None)
         )
 
         self._current_federation_depth = federation_depth
@@ -426,7 +452,14 @@ class ChatService:
             else:
                 extra_context = effective_prefix or expert_context
 
-            tools_override = self._make_enforced_tools(collection_perms) if collection_perms else None
+            # collection_perms is None when no collection is active; {} means a collection
+            # was found but has no node_type_permissions configured — enforce even then
+            # so the enforced tool wrappers (e.g. delete_edges block) apply regardless.
+            tools_override = (
+                self._make_enforced_tools(collection_perms)
+                if collection_perms is not None
+                else None
+            )
 
             # skills_context is passed separately as skills_override so it lands
             # AFTER the base system prompt (recency precedence for behavioral overrides).

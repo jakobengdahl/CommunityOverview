@@ -53,9 +53,11 @@ function CollectKioskView({ shortName }) {
 
   // Auto-trigger AI opening message when the intro overlay is dismissed.
   // kickstartFiredRef prevents the effect from running twice under React StrictMode.
+  // The ref is reset in cleanup so a future "restart" (introShown → false → true) works.
   useEffect(() => {
     if (!introShown || !config || kickstartFiredRef.current) return;
     kickstartFiredRef.current = true;
+    return () => { kickstartFiredRef.current = false; };
 
     const kickstartMsg = { role: 'user', content: '[COLLECTION_START]' };
     setMessages([{
@@ -99,9 +101,11 @@ function CollectKioskView({ shortName }) {
 
     const userText = inputValue.trim();
 
-    // Capture history synchronously before state updates to avoid stale-closure issues
+    // Capture history synchronously before state updates to avoid stale-closure issues.
+    // Hidden messages (e.g. the [COLLECTION_START] kickstart) are kept in history for
+    // context but filtered here so the sentinel never re-triggers the INITIALIZATION prompt.
     const conversationHistory = [
-      ...messages.map(m => ({ role: m.role, content: m.content })),
+      ...messages.filter(m => !m.hidden).map(m => ({ role: m.role, content: m.content })),
       { role: 'user', content: userText },
     ];
 

@@ -432,7 +432,8 @@ class TestResolveCollection:
             prefix, perms = service._resolve_collection("missing")
 
         assert prefix is None
-        assert perms == {}
+        # None = no collection found; distinct from {} = found but no permissions configured
+        assert perms is None
 
     def test_guards_against_null_permission_entries(self, graph_service, mock_llm_provider):
         from backend.ui import ChatService
@@ -441,7 +442,10 @@ class TestResolveCollection:
              patch.dict(os.environ, {"ANTHROPIC_API_KEY": "test-key"}):
             service = ChatService(graph_service)
 
-        null_perms = {"Actor": None, "Initiative": {"create": True, "update": False, "delete": False}}
+        null_perms = {
+            "Actor": None,
+            "Initiative": {"create": True, "update": False, "delete": False},
+        }
         akc_node = _make_akc_node("null-coll", null_perms)
         with patch.object(
             service._graph_service, "search_graph",
@@ -491,7 +495,9 @@ class TestMakeEnforcedTools:
         assert result["success"] is False
         assert "missing" in result["error"]
 
-    def test_update_node_blocks_non_permitted_type(self, graph_service, mock_llm_provider, sample_nodes):
+    def test_update_node_blocks_non_permitted_type(
+        self, graph_service, mock_llm_provider, sample_nodes
+    ):
         # sample_nodes adds test-initiative-1 (type Initiative, update:False)
         service = self._make_service(graph_service, mock_llm_provider)
         tools = service._make_enforced_tools(ACTOR_ONLY_PERMS)
@@ -499,14 +505,18 @@ class TestMakeEnforcedTools:
         assert result["success"] is False
         assert "Initiative" in result["error"]
 
-    def test_update_node_allows_permitted_type(self, graph_service, mock_llm_provider, sample_nodes):
+    def test_update_node_allows_permitted_type(
+        self, graph_service, mock_llm_provider, sample_nodes
+    ):
         # sample_nodes adds test-actor-1 (type Actor, update:True)
         service = self._make_service(graph_service, mock_llm_provider)
         tools = service._make_enforced_tools(ACTOR_ONLY_PERMS)
         result = tools["update_node"]("test-actor-1", {"description": "Updated"})
         assert result.get("success") is not False
 
-    def test_delete_nodes_blocks_when_type_has_delete_false(self, graph_service, mock_llm_provider, sample_nodes):
+    def test_delete_nodes_blocks_when_type_has_delete_false(
+        self, graph_service, mock_llm_provider, sample_nodes
+    ):
         service = self._make_service(graph_service, mock_llm_provider)
         tools = service._make_enforced_tools(ACTOR_ONLY_PERMS)
         result = tools["delete_nodes"](node_ids=["test-actor-1"], confirmed=True)
@@ -557,4 +567,6 @@ class TestMakeEnforcedTools:
         # The Initiative node must NOT have been created in the graph.
         # Use the real search_graph (patch is now exited).
         result = graph_service.search_graph(query="KPI")
-        assert result["total"] == 0, "Forbidden node type was created despite permission enforcement"
+        assert result["total"] == 0, (
+            "Forbidden node type was created despite permission enforcement"
+        )
