@@ -57,7 +57,6 @@ function CollectKioskView({ shortName }) {
   useEffect(() => {
     if (!introShown || !config || kickstartFiredRef.current) return;
     kickstartFiredRef.current = true;
-    return () => { kickstartFiredRef.current = false; };
 
     const kickstartMsg = { role: 'user', content: '[COLLECTION_START]' };
     setMessages([{
@@ -92,6 +91,8 @@ function CollectKioskView({ shortName }) {
         setIsProcessing(false);
         setTimeout(() => textareaRef.current?.focus(), 100);
       });
+
+    return () => { kickstartFiredRef.current = false; };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [introShown]);
 

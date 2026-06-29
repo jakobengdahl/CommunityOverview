@@ -17,6 +17,7 @@ import logging
 import os
 import json
 import inspect
+import re
 from datetime import datetime
 
 from backend.chat_logic import ChatProcessor
@@ -292,6 +293,7 @@ class ChatService:
                 )
         except Exception:
             logger.warning("Failed to resolve AKC short_name %r", short_name, exc_info=True)
+        self._collection_cache[short_name] = (None, None)
         return None, None
 
     def _make_enforced_tools(self, perms: dict) -> dict:
@@ -300,7 +302,6 @@ class ChatService:
         base_add = self._graph_service.add_nodes
         base_update = self._graph_service.update_node
         base_delete = self._graph_service.delete_nodes
-        base_delete_edges = self._graph_service.delete_edges
 
         def _get_node_type(node_id: str) -> Optional[str]:
             """Look up the type of an existing node, returning None on failure."""
@@ -317,7 +318,7 @@ class ChatService:
                 return None
 
         def add_nodes_enforced(nodes, edges=None, **kwargs):
-            untyped = [i for i, n in enumerate(nodes) if not n.get("type")]
+            untyped = [i for i, n in enumerate(nodes) if not n.get("type") or not isinstance(n.get("type"), str)]
             if untyped:
                 return {
                     "success": False,
@@ -366,22 +367,17 @@ class ChatService:
                     unknown_ids.append(nid)
                 elif not perms.get(node_type, {}).get("delete"):
                     forbidden_ids.append(nid)
+            errors = []
             if unknown_ids:
-                return {
-                    "success": False,
-                    "error": (
-                        f"Cannot delete node(s): not found or type undetermined: "
-                        f"{', '.join(unknown_ids)}."
-                    ),
-                }
+                errors.append(
+                    f"not found or type undetermined: {', '.join(unknown_ids)}"
+                )
             if forbidden_ids:
-                return {
-                    "success": False,
-                    "error": (
-                        f"Deleting these node(s) is not permitted in this collection: "
-                        f"{', '.join(forbidden_ids)}."
-                    ),
-                }
+                errors.append(
+                    f"deletion not permitted in this collection: {', '.join(forbidden_ids)}"
+                )
+            if errors:
+                return {"success": False, "error": "Cannot delete node(s) — " + "; ".join(errors) + "."}
             return base_delete(node_ids=node_ids, confirmed=confirmed, **kwargs)
 
         def delete_edges_enforced(edge_ids, confirmed=False, **kwargs):
@@ -638,8 +634,6 @@ Respond with ONLY a JSON array of extracted entities, no other text. Example for
                 if isinstance(block, dict) and block.get("type") == "text":
                     response_text += block.get("text", "")
 
-            # Parse the JSON response
-            import re
             # Find JSON array in response
             json_match = re.search(r'\[[\s\S]*\]', response_text)
             if not json_match:
