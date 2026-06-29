@@ -369,6 +369,7 @@ class TestExpertAgentSkills:
             )
 
         assert received_prompts, "create_completion was never called"
+        assert "You are a legislation expert." in received_prompts[0]
 
 
 # ---------------------------------------------------------------------------

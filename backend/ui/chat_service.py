@@ -259,14 +259,21 @@ class ChatService:
                         lines.append("")
 
                     perm_entries = list(perms.items())
-                    if perm_entries:
+                    any_permitted = any(
+                        ops.get(op)
+                        for _, ops in perm_entries
+                        for op in ("create", "update", "delete")
+                    )
+                    if any_permitted:
                         lines.append("PERMITTED OPERATIONS:")
                         for node_type, ops in perm_entries:
                             allowed = [op for op in ("create", "update", "delete") if ops.get(op)]
                             if allowed:
                                 lines.append(f"- {node_type}: {', '.join(allowed)}")
                     else:
-                        lines.append("PERMITTED OPERATIONS: none — do not create, update, or delete any nodes.")
+                        lines.append(
+                            "PERMITTED OPERATIONS: none — do not create, update, or delete any nodes."
+                        )
                     lines.append("")
                     lines.append(
                         "IMPORTANT: Only perform operations that are explicitly listed as "
@@ -276,10 +283,12 @@ class ChatService:
 
                     lines.append("")
                     lines.append(
-                        "INITIALIZATION: When the first user message in the conversation is "
-                        "'[COLLECTION_START]', respond by: 1) briefly explaining that you are "
-                        "an AI assistant, 2) describing what data you are collecting based on "
-                        "the instructions above, and 3) asking your first question to begin. "
+                        "INITIALIZATION: If the very first user turn in the conversation "
+                        "is '[COLLECTION_START]' and there are no prior assistant messages, "
+                        "respond by: 1) briefly explaining that you are an AI assistant, "
+                        "2) describing what data you are collecting based on the instructions "
+                        "above, and 3) asking your first question to begin. "
+                        "Do not re-introduce yourself on subsequent turns. "
                         "Do not mention or repeat '[COLLECTION_START]' in your response."
                     )
 
