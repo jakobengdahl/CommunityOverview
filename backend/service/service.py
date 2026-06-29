@@ -14,7 +14,7 @@ Key design principles:
 
 import logging
 from typing import List, Optional, Dict, Any
-from datetime import datetime
+from datetime import datetime, timezone
 from collections import Counter
 
 from backend.core import (
@@ -173,7 +173,7 @@ class GraphService:
             total_nodes=len(visible_nodes),
             total_edges=len(visible_edges),
             nodes_by_type=dict(nodes_by_type),
-            last_updated=datetime.utcnow(),
+            last_updated=datetime.now(timezone.utc),
         )
 
     def _get_visible_federation_graph_display_names(self, graph_access: GraphAccessNarrowing) -> Dict[str, str]:
@@ -1536,7 +1536,7 @@ class GraphService:
 
         return {
             "version": "1.0",
-            "exportDate": datetime.utcnow().isoformat(),
+            "exportDate": datetime.now(timezone.utc).isoformat(),
             "nodes": all_nodes,
             "edges": all_edges,
             "total_nodes": len(all_nodes),

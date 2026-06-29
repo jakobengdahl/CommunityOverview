@@ -13,7 +13,7 @@ import threading
 import queue
 import time
 from typing import Optional, Callable
-from datetime import datetime
+from datetime import datetime, timezone
 import requests
 import urllib.parse
 import socket
@@ -98,7 +98,7 @@ class DeliveryItem:
         self.event = event
         self.webhook_url = webhook_url
         self.attempt = attempt
-        self.enqueued_at = datetime.utcnow()
+        self.enqueued_at = datetime.now(timezone.utc)
 
 
 class DeliveryWorker:
@@ -264,7 +264,7 @@ class DeliveryWorker:
                     attempt=attempt,
                     max_attempts=self._max_attempts,
                     status_code=response.status_code,
-                    delivered_at=datetime.utcnow(),
+                    delivered_at=datetime.now(timezone.utc),
                 )
                 logger.info(
                     f"Successfully delivered event {event.event_id} to {webhook_url} "

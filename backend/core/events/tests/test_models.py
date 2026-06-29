@@ -3,7 +3,7 @@ Tests for event system models.
 """
 
 import pytest
-from datetime import datetime
+from datetime import datetime, timezone
 
 from backend.core.events.models import (
     Event,
@@ -162,6 +162,8 @@ class TestEvent:
         assert payload["event_id"] == event.event_id
         assert payload["event_type"] == "node.update"
         assert "occurred_at" in payload
+        occurred_at = payload["occurred_at"]
+        assert occurred_at.endswith("Z") and "+00:00" not in occurred_at
         assert payload["origin"]["event_origin"] == "mcp"
         assert payload["origin"]["attribution"]["actor"]["actor_id"] == "member-1"
         assert payload["origin"]["attribution"]["scope"]["graph_id"] == "graph-1"
@@ -184,7 +186,7 @@ class TestDeliveryResult:
             attempt=1,
             max_attempts=3,
             status_code=200,
-            delivered_at=datetime.utcnow(),
+            delivered_at=datetime.now(timezone.utc),
         )
 
         assert result.status == DeliveryStatus.SUCCESS

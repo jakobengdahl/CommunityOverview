@@ -3,7 +3,7 @@ Unit tests for graph_core models
 """
 
 import pytest
-from datetime import datetime
+from datetime import datetime, timezone
 import uuid
 
 from backend.core.models import (
@@ -313,7 +313,7 @@ class TestGraphStats:
             total_nodes=100,
             total_edges=150,
             nodes_by_type={"Actor": 50, "Initiative": 30},
-            last_updated=datetime.utcnow()
+            last_updated=datetime.now(timezone.utc)
         )
 
         assert stats.total_nodes == 100
