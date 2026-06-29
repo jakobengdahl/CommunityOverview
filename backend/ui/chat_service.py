@@ -226,8 +226,12 @@ class ChatService:
         """Get the current LLM provider type (openai or claude)."""
         return self._processor.provider_type
 
-    def _build_collection_prefix(self, short_name: str) -> Optional[str]:
-        """Resolve an AKC short_name to its trusted system prompt prefix server-side."""
+    def _resolve_collection(self, short_name: str) -> tuple:
+        """Resolve an AKC short_name → (system_prompt_prefix, permissions_dict).
+
+        Returns (None, {}) when the collection is not found or an error occurs.
+        permissions_dict maps node_type → {"create": bool, "update": bool, "delete": bool}.
+        """
         try:
             result = self._graph_service.search_graph(
                 query="", node_types=["ActiveKnowledgeCollection"], limit=500
@@ -235,11 +239,13 @@ class ChatService:
             for node in result.get("nodes", []):
                 meta = node.get("metadata") or {}
                 if meta.get("short_name") == short_name:
+                    perms = meta.get("node_type_permissions") or {}
+
                     lines = ["COLLECTION MODE INSTRUCTIONS:"]
                     if meta.get("prompt"):
                         lines.append(meta["prompt"])
                         lines.append("")
-                    perms = meta.get("node_type_permissions") or {}
+
                     perm_entries = [(t, ops) for t, ops in perms.items()]
                     if perm_entries:
                         lines.append("PERMITTED OPERATIONS:")
@@ -253,10 +259,83 @@ class ChatService:
                             "permitted above. Do not create, update, or delete node types that "
                             "are not listed, or perform operations not permitted for a given type."
                         )
-                    return "\n".join(lines)
+
+                    lines.append("")
+                    lines.append(
+                        "INITIALIZATION: When the first user message in the conversation is "
+                        "'[COLLECTION_START]', respond by: 1) briefly explaining that you are "
+                        "an AI assistant, 2) describing what data you are collecting based on "
+                        "the instructions above, and 3) asking your first question to begin. "
+                        "Do not mention or repeat '[COLLECTION_START]' in your response."
+                    )
+
+                    return "\n".join(lines), perms
         except Exception:
             logger.warning("Failed to resolve AKC short_name %r", short_name, exc_info=True)
-        return None
+        return None, {}
+
+    def _build_collection_prefix(self, short_name: str) -> Optional[str]:
+        """Kept for backward compatibility — returns only the prefix string."""
+        prefix, _ = self._resolve_collection(short_name)
+        return prefix
+
+    def _make_enforced_tools(self, perms: dict) -> dict:
+        """Return a tools_map overlay that enforces node_type_permissions at call time."""
+
+        base_add = self._graph_service.add_nodes
+        base_update = self._graph_service.update_node
+        base_delete = self._graph_service.delete_nodes
+
+        any_delete_allowed = any(ops.get("delete") for ops in perms.values())
+
+        def add_nodes_enforced(nodes, edges=None, **kwargs):
+            forbidden = [
+                n.get("type") for n in nodes
+                if not perms.get(n.get("type"), {}).get("create")
+            ]
+            if forbidden:
+                types = ", ".join(sorted(set(t for t in forbidden if t)))
+                return {
+                    "success": False,
+                    "error": (
+                        f"Node type(s) not permitted for creation in this collection: {types}. "
+                        "Please only create node types that are listed as permitted."
+                    ),
+                }
+            return base_add(nodes=nodes, edges=edges or [], **kwargs)
+
+        def update_node_enforced(node_id, updates, **kwargs):
+            try:
+                node_data = self._graph_service.get_node_details(node_id)
+                node_type = (
+                    node_data.get("type")
+                    or node_data.get("nodeType")
+                    or (node_data.get("data") or {}).get("type")
+                )
+                if node_type and not perms.get(node_type, {}).get("update"):
+                    return {
+                        "success": False,
+                        "error": (
+                            f"Updating {node_type} nodes is not permitted in this collection."
+                        ),
+                    }
+            except Exception:
+                pass  # if lookup fails, let the underlying call proceed
+            return base_update(node_id, updates, **kwargs)
+
+        def delete_nodes_enforced(node_ids, confirmed=False, **kwargs):
+            if not any_delete_allowed:
+                return {
+                    "success": False,
+                    "error": "Deleting nodes is not permitted in this collection.",
+                }
+            return base_delete(node_ids=node_ids, confirmed=confirmed, **kwargs)
+
+        return {
+            "add_nodes": add_nodes_enforced,
+            "update_node": update_node_enforced,
+            "delete_nodes": delete_nodes_enforced,
+        }
 
     def process_message(
         self,
@@ -295,7 +374,11 @@ class ChatService:
             - toolUsed: Name of the last tool used (if any)
             - toolResult: Result from the tool (if any)
         """
-        effective_prefix = self._build_collection_prefix(collection_short_name) if collection_short_name else None
+        effective_prefix, collection_perms = (
+            self._resolve_collection(collection_short_name)
+            if collection_short_name
+            else (None, {})
+        )
 
         self._current_federation_depth = federation_depth
         try:
@@ -304,6 +387,8 @@ class ChatService:
                 extra_context = f"{effective_prefix}\n\n{expert_context}"
             else:
                 extra_context = effective_prefix or expert_context
+
+            tools_override = self._make_enforced_tools(collection_perms) if collection_perms else None
 
             # skills_context is passed separately as skills_override so it lands
             # AFTER the base system prompt (recency precedence for behavioral overrides).
@@ -314,6 +399,7 @@ class ChatService:
                 provider=provider,
                 extra_context=extra_context,
                 skills_override=skills_context or None,
+                tools_override=tools_override,
             )
         finally:
             self._current_federation_depth = None

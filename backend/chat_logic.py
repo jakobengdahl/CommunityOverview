@@ -833,7 +833,7 @@ class ChatProcessor:
             }
         ]
 
-    def process_message(self, messages: List[Dict], api_key: str = None, provider: str = None, extra_context: str = None, skills_override: str = None) -> Dict:
+    def process_message(self, messages: List[Dict], api_key: str = None, provider: str = None, extra_context: str = None, skills_override: str = None, tools_override: Dict[str, Callable] = None) -> Dict:
         """
         Process a message history, call LLM, handle tools, return final response.
 
@@ -843,6 +843,8 @@ class ChatProcessor:
             provider: Optional provider override ('claude' or 'openai')
             extra_context: Optional context prepended before the base system prompt
                 (expert agent persona — should be established before base instructions).
+            tools_override: Optional dict of tool_name → callable that replaces entries
+                in self.tools_map for this request only (used for permission enforcement).
             skills_override: Optional user-selected skill instructions appended
                 AFTER the base system prompt for recency precedence over defaults.
         """
@@ -884,7 +886,7 @@ class ChatProcessor:
 
             # Check if tool use
             if response.stop_reason == "tool_use":
-                return self._handle_tool_use(messages, response, llm_provider, system_prompt=active_system_prompt)
+                return self._handle_tool_use(messages, response, llm_provider, system_prompt=active_system_prompt, tools_override=tools_override)
 
             # Just text response
             # Extract text from content blocks
@@ -914,13 +916,14 @@ class ChatProcessor:
                 "toolResult": None
             }
 
-    def _handle_tool_use(self, messages: List[Dict], response, provider: LLMProvider, accumulated_nodes=None, accumulated_edges=None, system_prompt: str = None) -> Dict:
+    def _handle_tool_use(self, messages: List[Dict], response, provider: LLMProvider, accumulated_nodes=None, accumulated_edges=None, system_prompt: str = None, tools_override: Dict[str, Callable] = None) -> Dict:
         """Handle tool use with support for tool chaining and result aggregation"""
         if accumulated_nodes is None:
             accumulated_nodes = []
         if accumulated_edges is None:
             accumulated_edges = []
         active_system_prompt = system_prompt if system_prompt is not None else self.system_prompt
+        effective_tools = {**self.tools_map, **(tools_override or {})}
 
         # Find ALL tool_use blocks (LLM can request multiple tools in parallel)
         tool_uses = [block for block in response.content if isinstance(block, dict) and block.get("type") == "tool_use"]
@@ -971,10 +974,10 @@ class ChatProcessor:
                     "marks": tool_input.get("marks", [])
                 }
 
-            elif tool_name in self.tools_map:
+            elif tool_name in effective_tools:
                 try:
                     # Call the actual python function
-                    func = self.tools_map[tool_name]
+                    func = effective_tools[tool_name]
 
                     # Check signature
                     sig = inspect.signature(func)
@@ -1039,7 +1042,7 @@ class ChatProcessor:
         # Check if LLM wants to use another tool (tool chaining)
         if final_response.stop_reason == "tool_use":
             # LLM wants to use another tool - continue recursively with accumulated data
-            return self._handle_tool_use(messages, final_response, provider, accumulated_nodes, accumulated_edges, system_prompt=active_system_prompt)
+            return self._handle_tool_use(messages, final_response, provider, accumulated_nodes, accumulated_edges, system_prompt=active_system_prompt, tools_override=tools_override)
 
         # Extract text from response (handle multiple text blocks)
         final_text = ""

@@ -50,6 +50,45 @@ function CollectKioskView({ shortName }) {
     fetchConfig();
   }, [shortName]);
 
+  // Auto-trigger AI opening message when the intro overlay is dismissed
+  useEffect(() => {
+    if (!introShown || !config) return;
+
+    const kickstart = async () => {
+      const kickstartMsg = { role: 'user', content: '[COLLECTION_START]' };
+      setMessages([{ id: crypto.randomUUID(), role: 'user', content: '[COLLECTION_START]', timestamp: new Date(), hidden: true }]);
+      setIsProcessing(true);
+      try {
+        const response = await api.sendChatMessage(
+          [kickstartMsg],
+          null,
+          { collectionShortName: shortName }
+        );
+        setMessages(prev => [...prev, {
+          id: crypto.randomUUID(),
+          role: 'assistant',
+          content: response.content || '(no response)',
+          timestamp: new Date(),
+          toolUsed: response.toolUsed,
+        }]);
+      } catch (err) {
+        console.error('[CollectKioskView] Kickstart error:', err);
+        setMessages(prev => [...prev, {
+          id: crypto.randomUUID(),
+          role: 'assistant',
+          content: 'Error starting the collection session. Please type a message to begin.',
+          timestamp: new Date(),
+        }]);
+      } finally {
+        setIsProcessing(false);
+        setTimeout(() => textareaRef.current?.focus(), 100);
+      }
+    };
+
+    kickstart();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [introShown]);
+
 
   const handleSend = useCallback(async () => {
     if (!inputValue.trim() || isProcessing) return;
@@ -197,15 +236,7 @@ function CollectKioskView({ shortName }) {
 
       {/* Messages area */}
       <div className="kiosk-messages">
-        {/* Welcome message */}
-        {messages.length === 0 && (
-          <div className="kiosk-welcome">
-            <FunnelFill size={24} style={{ color: '#F59E0B', marginBottom: '0.75rem' }} />
-            <p>The collection assistant is ready. Type your first message to begin.</p>
-          </div>
-        )}
-
-        {messages.map((msg) => (
+        {messages.filter(m => !m.hidden).map((msg) => (
           <div
             key={msg.id}
             className={`kiosk-message kiosk-message-${msg.role}`}
