@@ -195,7 +195,7 @@ class Event(BaseModel):
         return {
             "event_id": self.event_id,
             "event_type": self.event_type.value,
-            "occurred_at": self.occurred_at.isoformat() + "Z",
+            "occurred_at": self.occurred_at.isoformat().replace('+00:00', 'Z'),
             "origin": self.origin.to_dict(),
             "entity": {
                 "kind": self.entity.kind.value,
