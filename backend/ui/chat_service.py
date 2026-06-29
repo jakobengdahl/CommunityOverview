@@ -233,9 +233,16 @@ class ChatService:
     def _resolve_collection(self, short_name: str) -> tuple:
         """Resolve an AKC short_name → (system_prompt_prefix, permissions_dict).
 
-        Returns (None, None) when the collection is not found or an error occurs.
+        Returns:
+          - (prefix, perms) on success — both non-None; perms may be {} if no permissions
+            are configured (enforced tools still installed, all writes denied).
+          - (None, None) when short_name is not found — no enforcement applied.
+            Not cached so a collection created after first miss is picked up immediately.
+          - ("", {}) on exception — fail-closed; enforced tools installed, all writes denied.
+            Not cached so transient errors are retried on the next message.
+
         permissions_dict maps node_type → {"create": bool, "update": bool, "delete": bool}.
-        Results are cached on this instance to avoid repeated 500-node scans per message.
+        Successful lookups are cached on this instance to avoid repeated 500-node scans.
         """
         if short_name in self._collection_cache:
             return self._collection_cache[short_name]
