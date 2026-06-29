@@ -1,72 +1,6 @@
 {
   "schema": {
     "node_types": {
-      "SavedView": {
-        "fields": [
-          "name",
-          "description",
-          "summary",
-          "metadata"
-        ],
-        "static": true,
-        "category": "system",
-        "description": "Saved graph view snapshots for quick navigation",
-        "color": "#6B7280",
-        "icon": "BookmarkFill"
-      },
-      "VisualizationView": {
-        "fields": [
-          "name",
-          "description",
-          "summary",
-          "metadata"
-        ],
-        "static": true,
-        "category": "system",
-        "description": "Saved graph view snapshots (legacy)",
-        "color": "#6B7280",
-        "icon": "BookmarkFill"
-      },
-      "EventSubscription": {
-        "fields": [
-          "name",
-          "description",
-          "summary",
-          "metadata"
-        ],
-        "static": false,
-        "category": "system",
-        "description": "Webhook subscription for graph mutation events",
-        "color": "#8B5CF6",
-        "icon": "BellFill"
-      },
-      "Agent": {
-        "fields": [
-          "name",
-          "description",
-          "summary",
-          "metadata"
-        ],
-        "static": false,
-        "category": "system",
-        "description": "AI agent configuration",
-        "color": "#EC4899",
-        "icon": "CpuFill"
-      },
-      "Skill": {
-        "fields": [
-          "name",
-          "description",
-          "summary",
-          "metadata"
-        ],
-        "static": false,
-        "category": "system",
-        "ui_form": "skill",
-        "description": "Reusable AI skill definition (SKILL.md-compatible). metadata: {source_url, content, allowed_tools, when_to_use, version, effort}",
-        "color": "#8B5CF6",
-        "icon": "StarFill"
-      },
       "Actor": {
         "fields": [
           "name",
@@ -342,10 +276,6 @@
       "Concept": "#F97316",
       "UnitType": "#EF4444",
       "CodeList": "#FBBF24",
-      "SavedView": "#6B7280",
-      "VisualizationView": "#6B7280",
-      "EventSubscription": "#8B5CF6",
-      "Agent": "#EC4899",
       "Questionnaire": "#6366F1",
       "QuestionnaireComponent": "#818CF8",
       "ValueDomain": "#D97706",

@@ -424,6 +424,52 @@ class ChatService:
             "delete_edges": delete_edges_enforced,
         }
 
+    @staticmethod
+    def _sanitize_id(node_id: str) -> str:
+        """Truncate at first C0/DEL control character to prevent prompt injection via node IDs."""
+        for i, ch in enumerate(node_id):
+            if ch < '\x20' or ch == '\x7f':
+                return node_id[:i]
+        return node_id
+
+    @staticmethod
+    def _format_visualization_context(
+        visible_node_ids: Optional[List[str]],
+        selected_node_ids: Optional[List[str]],
+    ) -> Optional[str]:
+        """
+        Build a concise system-prompt snippet describing the current canvas state.
+
+        Returns None when visible_node_ids is not provided (unknown canvas state).
+        A visible list of [] means the canvas is explicitly empty, which is useful
+        context. Caps printed IDs at 100 to avoid bloating the prompt.
+        """
+        if visible_node_ids is None:
+            return None
+
+        id_cap = 100
+        visible = [ChatService._sanitize_id(i) for i in visible_node_ids]
+        selected = [ChatService._sanitize_id(i) for i in (selected_node_ids or [])]
+
+        if len(visible) <= id_cap:
+            id_part = f"Node IDs: [{', '.join(visible)}]" if visible else "Node IDs: []"
+        else:
+            id_part = f"Node IDs: (omitted — {len(visible)} nodes visible)"
+
+        if not selected:
+            selected_part = "Selected nodes: none"
+        elif len(selected) <= id_cap:
+            selected_part = f"Selected nodes: {len(selected)} ({', '.join(selected)})"
+        else:
+            selected_part = f"Selected nodes: {len(selected)} (omitted — too many)"
+
+        return (
+            "CURRENT VISUALIZATION STATE:\n"
+            f"Nodes currently displayed: {len(visible)}\n"
+            f"{id_part}\n"
+            f"{selected_part}"
+        )
+
     def process_message(
         self,
         messages: List[Dict[str, Any]],
@@ -433,6 +479,8 @@ class ChatService:
         expert_agent_id: Optional[str] = None,
         skills_context: Optional[str] = None,
         collection_short_name: Optional[str] = None,
+        visible_node_ids: Optional[List[str]] = None,
+        selected_node_ids: Optional[List[str]] = None,
     ) -> Dict[str, Any]:
         """
         Process a chat message and return the response.
@@ -454,6 +502,10 @@ class ChatService:
                 Skill nodes the user selected in the visualization. Injected
                 as extra system context for this single request only; it is
                 NOT persisted in conversation history.
+            visible_node_ids: IDs of nodes currently displayed in the browser
+                canvas. Injected as situational context so the AI can distinguish
+                between an empty canvas and a populated one.
+            selected_node_ids: IDs of nodes the user has selected in the canvas.
 
         Returns:
             Dict with:
@@ -484,9 +536,14 @@ class ChatService:
                 else None
             )
 
+            visualization_context = self._format_visualization_context(
+                visible_node_ids, selected_node_ids
+            )
+
             # skills_context is passed separately as skills_override so it lands
             # AFTER the base system prompt (recency precedence for behavioral overrides).
             # extra_context (expert persona) stays BEFORE the base prompt.
+            # visualization_context comes last — most immediate situational snapshot.
             return self._processor.process_message(
                 messages=messages,
                 api_key=api_key,
@@ -494,6 +551,7 @@ class ChatService:
                 extra_context=extra_context,
                 skills_override=skills_context or None,
                 tools_override=tools_override,
+                visualization_context=visualization_context,
             )
         finally:
             self._current_federation_depth = None

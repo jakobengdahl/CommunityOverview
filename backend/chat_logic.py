@@ -30,8 +30,8 @@ def _build_system_prompt() -> str:
     # Build node types section from config
     node_types_section = "METAMODEL - Node Types:\n"
     for type_name, type_config in schema.get("node_types", {}).items():
-        if type_config.get("static"):
-            continue  # Skip static types like SavedView in the main list
+        if type_config.get("category") == "system":
+            continue  # Skip system types in the main domain list
         color = type_config.get("color", "#9CA3AF")
         desc = type_config.get("description", "")
         # Map color to name for readability
@@ -44,9 +44,9 @@ def _build_system_prompt() -> str:
         color_name = color_names.get(color, "")
         node_types_section += f"- {type_name} ({color_name}): {desc}\n"
 
-    # Add static types at the end
+    # Add system types at the end
     for type_name, type_config in schema.get("node_types", {}).items():
-        if type_config.get("static"):
+        if type_config.get("category") == "system":
             desc = type_config.get("description", "")
             node_types_section += f"- {type_name} (gray): {desc}\n"
 
@@ -833,7 +833,7 @@ class ChatProcessor:
             }
         ]
 
-    def process_message(self, messages: List[Dict], api_key: str = None, provider: str = None, extra_context: str = None, skills_override: str = None, tools_override: Dict[str, Callable] = None) -> Dict:
+    def process_message(self, messages: List[Dict], api_key: str = None, provider: str = None, extra_context: str = None, skills_override: str = None, tools_override: Dict[str, Callable] = None, visualization_context: str = None) -> Dict:
         """
         Process a message history, call LLM, handle tools, return final response.
 
@@ -847,6 +847,9 @@ class ChatProcessor:
                 in self.tools_map for this request only (used for permission enforcement).
             skills_override: Optional user-selected skill instructions appended
                 AFTER the base system prompt for recency precedence over defaults.
+            visualization_context: Optional snapshot of the browser's current canvas state
+                (visible node IDs, selected nodes). Appended last so it is the freshest
+                context and helps the AI decide between add vs. replace actions.
         """
         try:
             # Use provided provider or fall back to configured provider
@@ -869,12 +872,15 @@ class ChatProcessor:
             # Build per-request system prompt:
             # 1. expert persona (extra_context) comes first — establishes who the model is
             # 2. base system prompt in the middle — tools, schema, behaviors
-            # 3. skill overrides (skills_override) come last — recency precedence for behavioral overrides
+            # 3. skill overrides (skills_override) — recency precedence for behavioral overrides
+            # 4. visualization_context comes last — most immediate situational snapshot
             active_system_prompt = (
                 f"{extra_context}\n\n{self.system_prompt}" if extra_context else self.system_prompt
             )
             if skills_override:
                 active_system_prompt = f"{active_system_prompt}\n\n{skills_override}"
+            if visualization_context:
+                active_system_prompt = f"{active_system_prompt}\n\n{visualization_context}"
 
             # First call to LLM
             response = llm_provider.create_completion(

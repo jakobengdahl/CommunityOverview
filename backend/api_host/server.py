@@ -19,6 +19,7 @@ Usage:
     app = create_app(config)
 """
 
+import asyncio
 import json
 import logging
 import os
@@ -29,12 +30,14 @@ from typing import Optional, Dict, Any, Callable
 logger = logging.getLogger(__name__)
 
 from fastapi import FastAPI, Path as FastAPIPath
-from fastapi.responses import JSONResponse, RedirectResponse, FileResponse
+from fastapi.responses import JSONResponse, RedirectResponse, FileResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from fastapi.middleware.cors import CORSMiddleware
 from starlette.datastructures import Headers
 from starlette.requests import Request
 from mcp.server.fastmcp import FastMCP
+
+from backend.core.session_registry import SessionRegistry
 
 from backend.core import GraphStorage
 from backend.llm_providers import get_llm_availability
@@ -296,6 +299,10 @@ def _bind_request_authorization_to_asgi_app(asgi_app):
     return request_bound_app
 
 
+_SESSION_STATE_MAX_BYTES = 256 * 1024  # 256 KB — enough for 5000 node IDs
+_SESSION_MAX_COUNT = 10_000  # cap auto-created sessions to limit unauthenticated DoS
+
+
 def create_app(
     config: Optional[AppConfig] = None,
     graph_storage: Optional[GraphStorage] = None,
@@ -350,6 +357,12 @@ def create_app(
                 "/auth/logout",
                 "/logged-out",
             ]:
+                return await call_next(request)
+
+            # Visualization session endpoints are secured by the session ID itself
+            # (CSPRNG, 100M-combination address space).  The browser's EventSource
+            # cannot send Authorization headers, so these routes must bypass auth.
+            if request.url.path.startswith("/sessions/"):
                 return await call_next(request)
 
             # MCP_AUTH_ENABLED=false: MCP endpoints bypass auth regardless of auth_enabled
@@ -546,6 +559,83 @@ def create_app(
     ui_router = create_ui_router(chat_service, document_service)
     app.include_router(ui_router, prefix="/ui")
 
+    # Initialize visualization session registry.
+    # The asyncio event loop reference is injected in the startup handler below
+    # so that sync MCP tools can push commands thread-safely.
+    session_registry = SessionRegistry()
+    app.state.session_registry = session_registry
+
+    @app.on_event("startup")
+    async def _session_registry_startup():
+        session_registry.set_event_loop(asyncio.get_running_loop())
+
+        async def _periodic_cleanup():
+            while True:
+                await asyncio.sleep(300)  # 5-minute eviction cycle
+                evicted = session_registry.cleanup_stale()
+                if evicted:
+                    logger.debug("session_registry: evicted %d stale sessions", evicted)
+
+        app.state.session_cleanup_task = asyncio.create_task(_periodic_cleanup())
+
+    # ==================== Visualization Session Endpoints ====================
+
+    @app.patch("/sessions/{session_id}/state")
+    async def update_session_state(session_id: str, request: Request) -> JSONResponse:
+        """Browser uploads its current canvas state so MCP tools can query it."""
+        if not session_registry.is_valid_session_id(session_id):
+            return JSONResponse({"error": "invalid session_id format"}, status_code=400)
+        body = await request.body()
+        if len(body) > _SESSION_STATE_MAX_BYTES:
+            return JSONResponse({"error": "state body too large"}, status_code=413)
+        try:
+            state = json.loads(body)
+        except Exception:
+            return JSONResponse({"error": "invalid JSON body"}, status_code=400)
+        if not isinstance(state, dict):
+            return JSONResponse({"error": "body must be a JSON object"}, status_code=400)
+        if not session_registry.update_state(session_id, state):
+            # Session not yet open: auto-create so state arrives before the SSE stream.
+            # Guard with a count cap to prevent unauthenticated session-space exhaustion.
+            if session_registry.session_count >= _SESSION_MAX_COUNT:
+                return JSONResponse({"error": "too many sessions"}, status_code=503)
+            session_registry.get_or_create(session_id)
+            session_registry.update_state(session_id, state)
+        return JSONResponse({"ok": True})
+
+    @app.get("/sessions/{session_id}/stream")
+    async def session_stream(session_id: str, request: Request):
+        """SSE stream — browser connects here to receive visualization commands."""
+        if not session_registry.is_valid_session_id(session_id):
+            return JSONResponse({"error": "invalid session_id format"}, status_code=400)
+        if (
+            session_id not in session_registry._sessions
+            and session_registry.session_count >= _SESSION_MAX_COUNT
+        ):
+            return JSONResponse({"error": "too many sessions"}, status_code=503)
+
+        async def event_generator():
+            yield f"data: {json.dumps({'type': 'connected', 'session_id': session_id})}\n\n"
+            try:
+                async for command in session_registry.stream(session_id):
+                    if command.get("type") == "ping":
+                        # SSE comment — keeps the connection alive, browsers ignore it
+                        yield ": ping\n\n"
+                    else:
+                        yield f"data: {json.dumps(command)}\n\n"
+            except asyncio.CancelledError:
+                pass
+
+        return StreamingResponse(
+            event_generator(),
+            media_type="text/event-stream",
+            headers={
+                "Cache-Control": "no-cache",
+                "Connection": "keep-alive",
+                "X-Accel-Buffering": "no",
+            },
+        )
+
     # Initialize FastMCP with dynamic instructions built from schema configuration
     instructions = _build_mcp_instructions()
 
@@ -559,7 +649,7 @@ def create_app(
         # by the gateway / Cloud Run IAP, so this check is not needed.
         host="0.0.0.0",
     )
-    tools_map = register_mcp_tools(mcp, graph_service)
+    tools_map = register_mcp_tools(mcp, graph_service, session_registry=session_registry)
 
     # Store MCP instance and tools map on app state
     app.state.mcp = mcp
@@ -678,6 +768,9 @@ def create_app(
         "get_presentation",
         "list_saved_views",
         "get_saved_view",
+        # Visualization session tools — read-only, safe without auth
+        "connect_to_visualization_session",
+        "get_visualization_session_state",
     }
 
     # Add execute_tool endpoint for direct tool execution
@@ -994,6 +1087,8 @@ def create_app(
     @app.on_event("shutdown")
     async def shutdown_event():
         """Gracefully shutdown agent registry and event system."""
+        if hasattr(app.state, "session_cleanup_task"):
+            app.state.session_cleanup_task.cancel()
         federation_manager.stop()
         agent_registry.stop()
         graph_storage.shutdown_events()

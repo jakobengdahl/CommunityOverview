@@ -229,6 +229,25 @@ class TestAuthEnabledTakesPrecedence:
         finally:
             os.unlink(path)
 
+    def test_sessions_exempt_from_auth_enabled(self):
+        """/sessions/ paths are exempt even when auth_enabled=True.
+
+        EventSource cannot send Authorization headers, so the session ID
+        itself acts as the access token.  A 401 here would silently break
+        all SSE visualization sessions.
+
+        Uses the PATCH /state endpoint (not /stream) because /stream is an
+        infinite SSE generator that would block TestClient indefinitely.
+        """
+        client, path = self._make_client(
+            auth_enabled=True, auth_password="secret"
+        )
+        try:
+            resp = client.patch("/sessions/1234-5678/state", json={})
+            assert resp.status_code == 200
+        finally:
+            os.unlink(path)
+
 
 class TestNoAuthDisabled:
     """When both auth flags are off, nothing is blocked."""

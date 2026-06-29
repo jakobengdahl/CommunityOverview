@@ -1,58 +1,6 @@
 {
   "schema": {
     "node_types": {
-      "SavedView": {
-        "fields": [
-          "name",
-          "description",
-          "summary",
-          "metadata"
-        ],
-        "static": true,
-        "category": "system",
-        "description": "Sparade grafvyer för snabbnavigering",
-        "color": "#6B7280",
-        "icon": "BookmarkFill"
-      },
-      "VisualizationView": {
-        "fields": [
-          "name",
-          "description",
-          "summary",
-          "metadata"
-        ],
-        "static": true,
-        "category": "system",
-        "description": "Sparade grafvyer (äldre format)",
-        "color": "#6B7280",
-        "icon": "BookmarkFill"
-      },
-      "EventSubscription": {
-        "fields": [
-          "name",
-          "description",
-          "summary",
-          "metadata"
-        ],
-        "static": false,
-        "category": "system",
-        "description": "Webhook-prenumeration för grafändringshändelser. Konfiguration lagras i metadata: filter (entity_kind, node_types, operations, keywords) och leverans (webhook_url, ignore_origins, ignore_session_ids)",
-        "color": "#8B5CF6",
-        "icon": "BellFill"
-      },
-      "Agent": {
-        "fields": [
-          "name",
-          "description",
-          "summary",
-          "metadata"
-        ],
-        "static": false,
-        "category": "system",
-        "description": "AI-agentkonfiguration. Länkas till EventSubscription via metadata.subscription_id. Agentkonfiguration i metadata.agent (type, config)",
-        "color": "#EC4899",
-        "icon": "CpuFill"
-      },
       "Actor": {
         "fields": [
           "name",
@@ -282,11 +230,7 @@
       "Capability": "#F59E0B",
       "Resource": "#A855F7",
       "Theme": "#D946EF",
-      "Goal": "#6366F1",
-      "SavedView": "#6B7280",
-      "VisualizationView": "#6B7280",
-      "EventSubscription": "#8B5CF6",
-      "Agent": "#EC4899"
+      "Goal": "#6366F1"
     },
     "prompt_prefix": "Du är en kunskapsassistent för SCB:s (Statistiska centralbyrån) kunskapsgraf. Du hjälper användare att navigera, söka och underhålla en kunskapsgraf som beskriver SCB:s statistikproduktion.\n\nGrafen innehåller följande SCB-specifika nodtyper utöver standardtyperna:\n- **Dataset**: Statistiska dataset som publiceras av SCB\n- **Hållpunkt**: SCB:s interna koncept för dataprodukter som är hållbara och stabila över tid – ett åtagande om kontinuerlig statistikleverans\n- **Undersökning**: Statistiska undersökningar (urvalsundersökningar, totalundersökningar, registerbaserade) som samlar in data\n- **Variabel**: Statistiska variabler som mäter egenskaper hos populationer\n- **Värdemängd**: Definierade uppsättningar av tillåtna värden (kodlistor, klassifikationer) för variabler\n- **Population**: Målpopulationer som undersökningar och dataset avser beskriva\n- **Klassifikation**: Statistiska klassifikationer och nomenklaturer (SNI, SSYK, KN etc.)\n- **Initiative** med subtypen **Projekt**: Avgränsade projekt med start- och slutdatum\n\nViktiga relationer i SCB-kontexten:\n- Undersökning PRODUCES Dataset\n- Variabel PART_OF Dataset\n- Variabel MEASURES Population\n- Variabel USES Värdemängd\n- Dataset DESCRIBES Population\n- Hållpunkt RELATES_TO Dataset\n- Klassifikation USES Värdemängd\n- Initiative (Projekt) PRODUCES Dataset\n\nSvara alltid på svenska om inte användaren skriver på annat språk.",
     "prompt_suffix": "Kom ihåg att föreslå sparade vyer när det är relevant, och fråga alltid om bekräftelse innan du gör ändringar i grafen. Använd SCB-terminologi när det är lämpligt.",
