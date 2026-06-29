@@ -436,6 +436,28 @@ class TestResolveCollection:
         # None = no collection found; distinct from {} = found but no permissions configured
         assert perms is None
 
+    def test_all_false_permissions_shows_none_in_prompt(self, graph_service, mock_llm_provider):
+        from backend.ui import ChatService
+
+        with patch("backend.chat_logic.create_provider", return_value=mock_llm_provider), \
+             patch.dict(os.environ, {"ANTHROPIC_API_KEY": "test-key"}):
+            service = ChatService(graph_service)
+
+        all_false_perms = {
+            "Actor": {"create": False, "update": False, "delete": False},
+            "Initiative": {"create": False, "update": False, "delete": False},
+        }
+        akc_node = _make_akc_node("no-ops-coll", all_false_perms)
+        with patch.object(
+            service._graph_service, "search_graph",
+            return_value={"nodes": [akc_node], "edges": [], "total": 1},
+        ):
+            prefix, perms = service._resolve_collection("no-ops-coll")
+
+        assert prefix is not None
+        assert "PERMITTED OPERATIONS: none" in prefix
+        assert perms == all_false_perms
+
     def test_guards_against_null_permission_entries(self, graph_service, mock_llm_provider):
         from backend.ui import ChatService
 
