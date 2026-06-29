@@ -28,6 +28,7 @@ function CollectKioskView({ shortName }) {
 
   const messagesEndRef = useRef(null);
   const textareaRef = useRef(null);
+  const kickstartFiredRef = useRef(false);
 
   // Scroll to bottom when messages change
   useEffect(() => {
@@ -50,20 +51,24 @@ function CollectKioskView({ shortName }) {
     fetchConfig();
   }, [shortName]);
 
-  // Auto-trigger AI opening message when the intro overlay is dismissed
+  // Auto-trigger AI opening message when the intro overlay is dismissed.
+  // kickstartFiredRef prevents the effect from running twice under React StrictMode.
   useEffect(() => {
-    if (!introShown || !config) return;
+    if (!introShown || !config || kickstartFiredRef.current) return;
+    kickstartFiredRef.current = true;
 
-    const kickstart = async () => {
-      const kickstartMsg = { role: 'user', content: '[COLLECTION_START]' };
-      setMessages([{ id: crypto.randomUUID(), role: 'user', content: '[COLLECTION_START]', timestamp: new Date(), hidden: true }]);
-      setIsProcessing(true);
-      try {
-        const response = await api.sendChatMessage(
-          [kickstartMsg],
-          null,
-          { collectionShortName: shortName }
-        );
+    const kickstartMsg = { role: 'user', content: '[COLLECTION_START]' };
+    setMessages([{
+      id: crypto.randomUUID(),
+      role: 'user',
+      content: '[COLLECTION_START]',
+      timestamp: new Date(),
+      hidden: true,
+    }]);
+    setIsProcessing(true);
+
+    api.sendChatMessage([kickstartMsg], null, { collectionShortName: shortName })
+      .then(response => {
         setMessages(prev => [...prev, {
           id: crypto.randomUUID(),
           role: 'assistant',
@@ -71,7 +76,8 @@ function CollectKioskView({ shortName }) {
           timestamp: new Date(),
           toolUsed: response.toolUsed,
         }]);
-      } catch (err) {
+      })
+      .catch(err => {
         console.error('[CollectKioskView] Kickstart error:', err);
         setMessages(prev => [...prev, {
           id: crypto.randomUUID(),
@@ -79,13 +85,11 @@ function CollectKioskView({ shortName }) {
           content: 'Error starting the collection session. Please type a message to begin.',
           timestamp: new Date(),
         }]);
-      } finally {
+      })
+      .finally(() => {
         setIsProcessing(false);
         setTimeout(() => textareaRef.current?.focus(), 100);
-      }
-    };
-
-    kickstart();
+      });
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [introShown]);
 

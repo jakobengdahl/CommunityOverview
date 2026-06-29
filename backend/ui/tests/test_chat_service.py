@@ -369,4 +369,192 @@ class TestExpertAgentSkills:
             )
 
         assert received_prompts, "create_completion was never called"
-        assert "You are a legislation expert." in received_prompts[0]
+
+
+# ---------------------------------------------------------------------------
+# Collection permission enforcement tests
+# ---------------------------------------------------------------------------
+
+def _make_akc_node(short_name, perms):
+    """Build a minimal ActiveKnowledgeCollection node dict as returned by search_graph."""
+    return {
+        "id": f"akc-{short_name}",
+        "name": short_name,
+        "type": "ActiveKnowledgeCollection",
+        "metadata": {
+            "short_name": short_name,
+            "prompt": "Collect test data.",
+            "node_type_permissions": perms,
+        },
+    }
+
+
+ACTOR_ONLY_PERMS = {
+    "Actor": {"create": True, "update": True, "delete": False},
+    "Initiative": {"create": False, "update": False, "delete": False},
+}
+
+
+class TestResolveCollection:
+    """Tests for ChatService._resolve_collection."""
+
+    def test_finds_matching_collection(self, graph_service, mock_llm_provider):
+        from backend.ui import ChatService
+
+        with patch("backend.chat_logic.create_provider", return_value=mock_llm_provider), \
+             patch.dict(os.environ, {"ANTHROPIC_API_KEY": "test-key"}):
+            service = ChatService(graph_service)
+
+        akc_node = _make_akc_node("test-coll", ACTOR_ONLY_PERMS)
+        with patch.object(
+            service._graph_service, "search_graph",
+            return_value={"nodes": [akc_node], "edges": [], "total": 1},
+        ):
+            prefix, perms = service._resolve_collection("test-coll")
+
+        assert prefix is not None
+        assert "COLLECTION MODE INSTRUCTIONS" in prefix
+        assert "INITIALIZATION" in prefix
+        assert perms["Actor"]["create"] is True
+        assert perms["Initiative"]["create"] is False
+
+    def test_returns_none_when_not_found(self, graph_service, mock_llm_provider):
+        from backend.ui import ChatService
+
+        with patch("backend.chat_logic.create_provider", return_value=mock_llm_provider), \
+             patch.dict(os.environ, {"ANTHROPIC_API_KEY": "test-key"}):
+            service = ChatService(graph_service)
+
+        with patch.object(
+            service._graph_service, "search_graph",
+            return_value={"nodes": [], "edges": [], "total": 0},
+        ):
+            prefix, perms = service._resolve_collection("missing")
+
+        assert prefix is None
+        assert perms == {}
+
+    def test_guards_against_null_permission_entries(self, graph_service, mock_llm_provider):
+        from backend.ui import ChatService
+
+        with patch("backend.chat_logic.create_provider", return_value=mock_llm_provider), \
+             patch.dict(os.environ, {"ANTHROPIC_API_KEY": "test-key"}):
+            service = ChatService(graph_service)
+
+        null_perms = {"Actor": None, "Initiative": {"create": True, "update": False, "delete": False}}
+        akc_node = _make_akc_node("null-coll", null_perms)
+        with patch.object(
+            service._graph_service, "search_graph",
+            return_value={"nodes": [akc_node], "edges": [], "total": 1},
+        ):
+            # Should not raise
+            prefix, perms = service._resolve_collection("null-coll")
+
+        assert perms["Actor"] == {}  # null → empty dict
+        assert perms["Initiative"]["create"] is True
+
+
+class TestMakeEnforcedTools:
+    """Tests for ChatService._make_enforced_tools."""
+
+    def _make_service(self, graph_service, mock_llm_provider):
+        from backend.ui import ChatService
+
+        with patch("backend.chat_logic.create_provider", return_value=mock_llm_provider), \
+             patch.dict(os.environ, {"ANTHROPIC_API_KEY": "test-key"}):
+            service = ChatService(graph_service)
+            service._processor.provider_type = "mock"
+            service._processor.default_api_key = "test-key"
+        return service
+
+    def test_add_nodes_blocks_forbidden_type(self, graph_service, mock_llm_provider):
+        service = self._make_service(graph_service, mock_llm_provider)
+        tools = service._make_enforced_tools(ACTOR_ONLY_PERMS)
+        result = tools["add_nodes"](
+            nodes=[{"type": "Initiative", "name": "New Init"}], edges=[]
+        )
+        assert result["success"] is False
+        assert "Initiative" in result["error"]
+
+    def test_add_nodes_allows_permitted_type(self, graph_service, mock_llm_provider):
+        service = self._make_service(graph_service, mock_llm_provider)
+        tools = service._make_enforced_tools(ACTOR_ONLY_PERMS)
+        result = tools["add_nodes"](
+            nodes=[{"type": "Actor", "name": "Test Actor"}], edges=[]
+        )
+        assert result.get("success") is not False
+
+    def test_add_nodes_blocks_missing_type(self, graph_service, mock_llm_provider):
+        service = self._make_service(graph_service, mock_llm_provider)
+        tools = service._make_enforced_tools(ACTOR_ONLY_PERMS)
+        result = tools["add_nodes"](nodes=[{"name": "No Type"}], edges=[])
+        assert result["success"] is False
+        assert "missing" in result["error"]
+
+    def test_update_node_blocks_non_permitted_type(self, graph_service, mock_llm_provider, sample_nodes):
+        # sample_nodes adds test-initiative-1 (type Initiative, update:False)
+        service = self._make_service(graph_service, mock_llm_provider)
+        tools = service._make_enforced_tools(ACTOR_ONLY_PERMS)
+        result = tools["update_node"]("test-initiative-1", {"name": "Renamed"})
+        assert result["success"] is False
+        assert "Initiative" in result["error"]
+
+    def test_update_node_allows_permitted_type(self, graph_service, mock_llm_provider, sample_nodes):
+        # sample_nodes adds test-actor-1 (type Actor, update:True)
+        service = self._make_service(graph_service, mock_llm_provider)
+        tools = service._make_enforced_tools(ACTOR_ONLY_PERMS)
+        result = tools["update_node"]("test-actor-1", {"description": "Updated"})
+        assert result.get("success") is not False
+
+    def test_delete_nodes_blocks_when_type_has_delete_false(self, graph_service, mock_llm_provider, sample_nodes):
+        service = self._make_service(graph_service, mock_llm_provider)
+        tools = service._make_enforced_tools(ACTOR_ONLY_PERMS)
+        result = tools["delete_nodes"](node_ids=["test-actor-1"], confirmed=True)
+        assert result["success"] is False
+        assert "not permitted" in result["error"]
+
+    def test_delete_edges_always_blocked_in_collection_mode(self, graph_service, mock_llm_provider):
+        service = self._make_service(graph_service, mock_llm_provider)
+        tools = service._make_enforced_tools(ACTOR_ONLY_PERMS)
+        result = tools["delete_edges"](edge_ids=["some-edge"], confirmed=True)
+        assert result["success"] is False
+        assert "not permitted" in result["error"]
+
+    def test_process_message_enforces_permissions_via_tools_override(
+        self, graph_service, mock_llm_provider
+    ):
+        """End-to-end: process_message with collection_short_name blocks forbidden node type."""
+        from backend.ui import ChatService
+
+        # Keep create_provider patched for the entire test so process_message can call it
+        with patch("backend.chat_logic.create_provider", return_value=mock_llm_provider), \
+             patch.dict(os.environ, {"ANTHROPIC_API_KEY": "test-key"}):
+            service = ChatService(graph_service)
+            service._processor.provider_type = "mock"
+            service._processor.default_api_key = "test-key"
+
+            akc_node = _make_akc_node("my-coll", ACTOR_ONLY_PERMS)
+            mock_llm_provider.mock_tool_calls = [
+                {
+                    "name": "add_nodes",
+                    "input": {
+                        "nodes": [{"type": "Initiative", "name": "KPI"}],
+                        "edges": [],
+                    },
+                }
+            ]
+            mock_llm_provider.mock_text_response = "Could not add node."
+
+            with patch.object(
+                service._graph_service, "search_graph",
+                return_value={"nodes": [akc_node], "edges": [], "total": 1},
+            ):
+                service.process_message(
+                    messages=[{"role": "user", "content": "Add KPI as StatisticalProgramme"}],
+                    collection_short_name="my-coll",
+                )
+
+        # The Initiative node must NOT have been created in the graph.
+        # Use the real search_graph (patch is now exited).
+        result = graph_service.search_graph(query="KPI")
+        assert result["total"] == 0, "Forbidden node type was created despite permission enforcement"

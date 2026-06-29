@@ -236,17 +236,22 @@ class ChatService:
             result = self._graph_service.search_graph(
                 query="", node_types=["ActiveKnowledgeCollection"], limit=500
             )
-            for node in result.get("nodes", []):
+            nodes = result.get("nodes", [])
+            found = False
+            for node in nodes:
                 meta = node.get("metadata") or {}
                 if meta.get("short_name") == short_name:
-                    perms = meta.get("node_type_permissions") or {}
+                    found = True
+                    raw_perms = meta.get("node_type_permissions") or {}
+                    # Guard against individual null entries in the permissions dict
+                    perms = {k: (v or {}) for k, v in raw_perms.items()}
 
                     lines = ["COLLECTION MODE INSTRUCTIONS:"]
                     if meta.get("prompt"):
                         lines.append(meta["prompt"])
                         lines.append("")
 
-                    perm_entries = [(t, ops) for t, ops in perms.items()]
+                    perm_entries = list(perms.items())
                     if perm_entries:
                         lines.append("PERMITTED OPERATIONS:")
                         for node_type, ops in perm_entries:
@@ -270,14 +275,16 @@ class ChatService:
                     )
 
                     return "\n".join(lines), perms
+
+            if not found:
+                logger.warning(
+                    "AKC short_name %r not found in %d ActiveKnowledgeCollection node(s). "
+                    "Collection may exceed the search limit of 500.",
+                    short_name, len(nodes),
+                )
         except Exception:
             logger.warning("Failed to resolve AKC short_name %r", short_name, exc_info=True)
         return None, {}
-
-    def _build_collection_prefix(self, short_name: str) -> Optional[str]:
-        """Kept for backward compatibility — returns only the prefix string."""
-        prefix, _ = self._resolve_collection(short_name)
-        return prefix
 
     def _make_enforced_tools(self, perms: dict) -> dict:
         """Return a tools_map overlay that enforces node_type_permissions at call time."""
@@ -285,56 +292,87 @@ class ChatService:
         base_add = self._graph_service.add_nodes
         base_update = self._graph_service.update_node
         base_delete = self._graph_service.delete_nodes
+        base_delete_edges = self._graph_service.delete_edges
 
-        any_delete_allowed = any(ops.get("delete") for ops in perms.values())
+        def _get_node_type(node_id: str) -> Optional[str]:
+            """Look up the type of an existing node, returning None on failure."""
+            try:
+                node_data = self._graph_service.get_node_details(node_id)
+                # get_node_details returns {"node": {...}} with type inside the node object
+                node_obj = node_data.get("node") or {}
+                return (
+                    node_obj.get("type")
+                    or node_obj.get("nodeType")
+                    or node_obj.get("node_type")
+                )
+            except Exception:
+                return None
 
         def add_nodes_enforced(nodes, edges=None, **kwargs):
-            forbidden = [
-                n.get("type") for n in nodes
-                if not perms.get(n.get("type"), {}).get("create")
-            ]
-            if forbidden:
-                types = ", ".join(sorted(set(t for t in forbidden if t)))
+            untyped = [i for i, n in enumerate(nodes) if not n.get("type")]
+            if untyped:
                 return {
                     "success": False,
                     "error": (
-                        f"Node type(s) not permitted for creation in this collection: {types}. "
+                        f"Node(s) at position(s) {untyped} are missing a 'type' field. "
+                        "Each node must specify a type."
+                    ),
+                }
+            forbidden = sorted({
+                n["type"] for n in nodes
+                if not perms.get(n["type"], {}).get("create")
+            })
+            if forbidden:
+                return {
+                    "success": False,
+                    "error": (
+                        f"Node type(s) not permitted for creation in this collection: "
+                        f"{', '.join(forbidden)}. "
                         "Please only create node types that are listed as permitted."
                     ),
                 }
             return base_add(nodes=nodes, edges=edges or [], **kwargs)
 
         def update_node_enforced(node_id, updates, **kwargs):
-            try:
-                node_data = self._graph_service.get_node_details(node_id)
-                node_type = (
-                    node_data.get("type")
-                    or node_data.get("nodeType")
-                    or (node_data.get("data") or {}).get("type")
-                )
-                if node_type and not perms.get(node_type, {}).get("update"):
-                    return {
-                        "success": False,
-                        "error": (
-                            f"Updating {node_type} nodes is not permitted in this collection."
-                        ),
-                    }
-            except Exception:
-                pass  # if lookup fails, let the underlying call proceed
+            node_type = _get_node_type(node_id)
+            if node_type and not perms.get(node_type, {}).get("update"):
+                return {
+                    "success": False,
+                    "error": f"Updating {node_type} nodes is not permitted in this collection.",
+                }
             return base_update(node_id, updates, **kwargs)
 
         def delete_nodes_enforced(node_ids, confirmed=False, **kwargs):
-            if not any_delete_allowed:
+            forbidden_ids = []
+            for nid in node_ids:
+                node_type = _get_node_type(nid)
+                if node_type and not perms.get(node_type, {}).get("delete"):
+                    forbidden_ids.append(nid)
+            if forbidden_ids:
                 return {
                     "success": False,
-                    "error": "Deleting nodes is not permitted in this collection.",
+                    "error": (
+                        f"Deleting these node(s) is not permitted in this collection: "
+                        f"{', '.join(forbidden_ids)}."
+                    ),
                 }
             return base_delete(node_ids=node_ids, confirmed=confirmed, **kwargs)
+
+        def delete_edges_enforced(edge_ids, confirmed=False, **kwargs):
+            # Edge deletion is not permitted in collection mode because it can
+            # sever relationships between restricted node types without a direct
+            # node-type check. Operators who need edge deletion should enable it
+            # explicitly — for now we block it uniformly in collection sessions.
+            return {
+                "success": False,
+                "error": "Deleting edges is not permitted in collection mode.",
+            }
 
         return {
             "add_nodes": add_nodes_enforced,
             "update_node": update_node_enforced,
             "delete_nodes": delete_nodes_enforced,
+            "delete_edges": delete_edges_enforced,
         }
 
     def process_message(
