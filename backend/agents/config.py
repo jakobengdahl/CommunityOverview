@@ -10,6 +10,96 @@ from dataclasses import dataclass, field
 from typing import List, Dict, Any, Optional
 from enum import Enum
 
+_WEEKDAY_NAMES: Dict[str, int] = {
+    "monday": 0, "tuesday": 1, "wednesday": 2, "thursday": 3,
+    "friday": 4, "saturday": 5, "sunday": 6,
+}
+_WEEKDAY_DISPLAY = ["Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday", "Sunday"]
+
+
+@dataclass
+class AgentSchedule:
+    """
+    Single time-based trigger for an agent.
+
+    day_of_week: 0=Monday … 6=Sunday
+    hour/minute: local time in the given timezone
+    """
+    day_of_week: int
+    hour: int
+    minute: int
+    timezone: str = "UTC"
+
+    @classmethod
+    def from_dict(cls, data: Dict[str, Any]) -> Optional["AgentSchedule"]:
+        """
+        Parse schedule from a metadata dict.  Returns None when data is missing
+        or contains invalid values — callers should treat None as "no schedule".
+
+        Accepted formats::
+
+            # integer weekday (0=Mon)
+            {"day_of_week": 1, "time": "14:00", "timezone": "Europe/Stockholm"}
+
+            # weekday name
+            {"day_of_week": "tuesday", "hour": 14, "minute": 0}
+        """
+        if not data:
+            return None
+
+        raw_day = data.get("day_of_week")
+        if raw_day is None:
+            return None
+        if isinstance(raw_day, str):
+            day = _WEEKDAY_NAMES.get(raw_day.lower())
+            if day is None:
+                return None
+        elif isinstance(raw_day, int):
+            day = raw_day
+        else:
+            return None
+
+        if not 0 <= day <= 6:
+            return None
+
+        raw_time = data.get("time")
+        if raw_time and isinstance(raw_time, str):
+            try:
+                parts = raw_time.split(":")
+                hour = int(parts[0])
+                minute = int(parts[1]) if len(parts) > 1 else 0
+            except (ValueError, IndexError):
+                return None
+        else:
+            try:
+                hour = int(data.get("hour", 0))
+                minute = int(data.get("minute", 0))
+            except (TypeError, ValueError):
+                return None
+
+        if not (0 <= hour <= 23 and 0 <= minute <= 59):
+            return None
+
+        return cls(
+            day_of_week=day,
+            hour=hour,
+            minute=minute,
+            timezone=str(data.get("timezone", "UTC")),
+        )
+
+    @property
+    def day_name(self) -> str:
+        return _WEEKDAY_DISPLAY[self.day_of_week]
+
+    def to_dict(self) -> Dict[str, Any]:
+        return {
+            "day_of_week": self.day_of_week,
+            "day_name": self.day_name,
+            "hour": self.hour,
+            "minute": self.minute,
+            "timezone": self.timezone,
+        }
+
 
 class MCPTransport(str, Enum):
     """Transport type for MCP server connections."""
@@ -85,6 +175,7 @@ class AgentConfig:
     skills_urls: List[str] = field(default_factory=list)
     # Skill node IDs in the graph (linked via USES_SKILL edges)
     skill_node_ids: List[str] = field(default_factory=list)
+    schedule: Optional[AgentSchedule] = None
 
     @classmethod
     def from_node(cls, node: Any) -> "AgentConfig":
@@ -114,6 +205,7 @@ class AgentConfig:
             tool_allowlist=metadata.get("tool_allowlist"),
             skills_urls=metadata.get("skills_urls", []),
             skill_node_ids=metadata.get("skill_node_ids", []),
+            schedule=AgentSchedule.from_dict(metadata.get("schedule") or {}),
         )
 
     def to_dict(self) -> Dict[str, Any]:
@@ -128,6 +220,7 @@ class AgentConfig:
             "tool_allowlist": self.tool_allowlist,
             "skills_urls": self.skills_urls,
             "skill_node_ids": self.skill_node_ids,
+            "schedule": self.schedule.to_dict() if self.schedule else None,
         }
 
 
