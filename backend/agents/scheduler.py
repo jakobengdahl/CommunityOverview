@@ -73,16 +73,17 @@ class AgentScheduler:
 
     def start(self) -> None:
         """Start the background thread.  Idempotent: no-op if already running."""
-        if self._running:
-            return
-        self._stop_event.clear()
-        self._running = True
-        self._thread = threading.Thread(
-            target=self._run,
-            name="agent-scheduler",
-            daemon=True,
-        )
-        self._thread.start()
+        with self._lock:
+            if self._running:
+                return
+            self._stop_event.clear()
+            self._running = True
+            self._thread = threading.Thread(
+                target=self._run,
+                name="agent-scheduler",
+                daemon=True,
+            )
+            self._thread.start()
         logger.info("Agent scheduler started (check interval: %ds)", _CHECK_INTERVAL)
 
     def stop(self, timeout: float = 5.0) -> None:
