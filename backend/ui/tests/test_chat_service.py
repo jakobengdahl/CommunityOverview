@@ -458,6 +458,23 @@ class TestResolveCollection:
         assert "PERMITTED OPERATIONS: none" in prefix
         assert perms == all_false_perms
 
+    def test_exception_during_resolution_fails_closed(self, graph_service, mock_llm_provider):
+        from backend.ui import ChatService
+
+        with patch("backend.chat_logic.create_provider", return_value=mock_llm_provider), \
+             patch.dict(os.environ, {"ANTHROPIC_API_KEY": "test-key"}):
+            service = ChatService(graph_service)
+
+        with patch.object(
+            service._graph_service, "search_graph",
+            side_effect=RuntimeError("graph unavailable"),
+        ):
+            prefix, perms = service._resolve_collection("any-coll")
+
+        # Exception → fail-closed: empty-perms sentinel, not (None, None)
+        assert perms is not None, "exception path must not return None (would be fail-open)"
+        assert perms == {}
+
     def test_guards_against_null_permission_entries(self, graph_service, mock_llm_provider):
         from backend.ui import ChatService
 

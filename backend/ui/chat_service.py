@@ -304,6 +304,10 @@ class ChatService:
                 )
         except Exception:
             logger.warning("Failed to resolve AKC short_name %r", short_name, exc_info=True)
+            # Fail-closed: resolution error → deny all writes rather than fall through
+            # to unconstrained mode. Empty perms installs enforced wrappers that block
+            # every add/update/delete regardless of node type.
+            return ("", {})
         return None, None
 
     def _make_enforced_tools(self, perms: dict) -> dict:
