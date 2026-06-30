@@ -391,6 +391,8 @@ class AgentRegistry:
             if worker_to_reschedule is not None:
                 self._scheduler.unregister(node_id)
                 self._scheduler.register(node_id, config, worker_to_reschedule)
+                if self.settings.scheduler_enabled:
+                    self._scheduler.start()  # idempotent; needed if schedule was just added
 
             if should_start:
                 if self._ensure_initialized():
