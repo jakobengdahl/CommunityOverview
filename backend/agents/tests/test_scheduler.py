@@ -93,6 +93,18 @@ class TestAgentScheduleFromDict:
     def test_returns_none_for_invalid_minute(self):
         assert AgentSchedule.from_dict({"day_of_week": 0, "hour": 10, "minute": 60}) is None
 
+    def test_returns_none_for_invalid_timezone(self):
+        assert AgentSchedule.from_dict(
+            {"day_of_week": 0, "time": "10:00", "timezone": "Not/AZone"}
+        ) is None
+
+    def test_valid_iana_timezone_accepted(self):
+        sched = AgentSchedule.from_dict(
+            {"day_of_week": 0, "time": "10:00", "timezone": "Europe/Stockholm"}
+        )
+        assert sched is not None
+        assert sched.timezone == "Europe/Stockholm"
+
     def test_sunday_is_day_6(self):
         sched = AgentSchedule.from_dict({"day_of_week": "sunday", "time": "00:00"})
         assert sched is not None

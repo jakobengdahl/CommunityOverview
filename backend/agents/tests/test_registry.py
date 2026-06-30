@@ -315,3 +315,56 @@ class TestGetAvailableIntegrations:
             graph_service=mock_service,
         )
         assert registry.get_schedules() == []
+
+    def test_trigger_agent_returns_false_for_unknown_agent(
+        self, mock_storage, mock_service
+    ):
+        registry = AgentRegistry(
+            settings=AgentsSettings(enabled=False),
+            graph_storage=mock_storage,
+            graph_service=mock_service,
+        )
+        assert registry.trigger_agent("no-such-agent") is False
+
+    def test_trigger_agent_returns_false_when_agent_has_no_schedule(
+        self, mock_storage, mock_service
+    ):
+        registry = AgentRegistry(
+            settings=AgentsSettings(enabled=False),
+            graph_storage=mock_storage,
+            graph_service=mock_service,
+        )
+        unscheduled_config = AgentConfig(agent_id="agent-1", name="No Schedule")
+        mock_worker = MagicMock()
+        mock_worker.config = unscheduled_config
+        registry._workers = {"agent-1": mock_worker}
+
+        assert registry.trigger_agent("agent-1") is False
+        mock_worker.enqueue.assert_not_called()
+
+    def test_trigger_agent_enqueues_payload_for_scheduled_agent(
+        self, mock_storage, mock_service
+    ):
+        registry = AgentRegistry(
+            settings=AgentsSettings(enabled=False),
+            graph_storage=mock_storage,
+            graph_service=mock_service,
+        )
+        config = AgentConfig(
+            agent_id="agent-1",
+            name="Scheduled",
+            schedule=AgentSchedule(day_of_week=1, hour=14, minute=0),
+        )
+        enqueued = []
+        mock_worker = MagicMock()
+        mock_worker.config = config
+        mock_worker.enqueue.side_effect = enqueued.append
+        registry._workers = {"agent-1": mock_worker}
+
+        result = registry.trigger_agent("agent-1")
+
+        assert result is True
+        assert len(enqueued) == 1
+        payload = enqueued[0]
+        assert payload["event_type"] == "scheduled_trigger"
+        assert payload["schedule"]["day_name"] == "Tuesday"

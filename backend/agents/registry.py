@@ -502,6 +502,12 @@ class AgentRegistry:
                 return False
             config = worker.config
 
+        if not config.schedule:
+            logger.warning(
+                "trigger_agent: agent %s has no schedule configured", agent_id
+            )
+            return False
+
         payload = _build_payload(config, datetime.now(timezone.utc))
         worker.enqueue(payload)
         logger.info("External trigger: enqueued scheduled_trigger for agent %s", agent_id)

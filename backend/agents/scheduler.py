@@ -88,10 +88,12 @@ class AgentScheduler:
 
     def stop(self, timeout: float = 5.0) -> None:
         """Stop the background thread, waking it immediately via the stop event."""
-        self._running = False
+        with self._lock:
+            self._running = False
+            thread = self._thread
         self._stop_event.set()
-        if self._thread:
-            self._thread.join(timeout=timeout)
+        if thread:
+            thread.join(timeout=timeout)
         logger.info("Agent scheduler stopped")
 
     # ------------------------------------------------------------------

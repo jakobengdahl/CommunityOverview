@@ -80,12 +80,14 @@ class AgentSchedule:
         if not (0 <= hour <= 23 and 0 <= minute <= 59):
             return None
 
-        return cls(
-            day_of_week=day,
-            hour=hour,
-            minute=minute,
-            timezone=str(data.get("timezone", "UTC")),
-        )
+        tz_str = str(data.get("timezone", "UTC"))
+        try:
+            from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
+            ZoneInfo(tz_str)
+        except (ZoneInfoNotFoundError, KeyError):
+            return None
+
+        return cls(day_of_week=day, hour=hour, minute=minute, timezone=tz_str)
 
     @property
     def day_name(self) -> str:

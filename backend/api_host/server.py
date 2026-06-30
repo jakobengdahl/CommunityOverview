@@ -1109,7 +1109,9 @@ def create_app(
         if not success:
             raise HTTPException(
                 status_code=404,
-                detail=f"No active worker found for agent '{agent_id}'",
+                detail=(
+                    f"Agent '{agent_id}' not found or has no schedule configured"
+                ),
             )
         return {"status": "triggered", "agent_id": agent_id}
 
