@@ -232,6 +232,11 @@ class AgentsSettings:
     Loaded from environment variables and/or config file.
     """
     enabled: bool = False
+    # scheduler_enabled: run the in-process time-based scheduler.
+    # Keep False (default) when the deployment platform can scale to zero —
+    # use POST /agents/{id}/trigger from an external scheduler (e.g. GCP Cloud
+    # Scheduler) instead.
+    scheduler_enabled: bool = False
     llm_provider: str = "openai"  # "openai" or "anthropic"
     llm_model: Optional[str] = None  # If None, uses provider default
     openai_api_key: Optional[str] = None
@@ -247,6 +252,9 @@ class AgentsSettings:
 
         Environment variables:
             AGENTS_ENABLED: "true" or "false" (default: false)
+            AGENTS_SCHEDULER_ENABLED: "true" or "false" (default: false).
+                Keep false on scale-to-zero deployments; use the external
+                POST /agents/{id}/trigger endpoint instead.
             LLM_PROVIDER: "openai" or "anthropic" (default: openai)
             LLM_MODEL: Model name (optional, uses provider default)
             OPENAI_API_KEY: OpenAI API key
@@ -258,6 +266,9 @@ class AgentsSettings:
         # Parse enabled flag
         enabled_str = os.environ.get("AGENTS_ENABLED", "false").lower()
         enabled = enabled_str in ("true", "1", "yes")
+
+        scheduler_enabled_str = os.environ.get("AGENTS_SCHEDULER_ENABLED", "false").lower()
+        scheduler_enabled = scheduler_enabled_str in ("true", "1", "yes")
 
         # Get LLM settings (share with chat service)
         llm_provider = os.environ.get("LLM_PROVIDER", "openai").lower()
@@ -294,6 +305,7 @@ class AgentsSettings:
 
         return cls(
             enabled=enabled,
+            scheduler_enabled=scheduler_enabled,
             llm_provider=llm_provider,
             llm_model=llm_model,
             openai_api_key=openai_api_key,
@@ -373,6 +385,7 @@ class AgentsSettings:
         """Convert to dictionary for API responses (excludes secrets)."""
         return {
             "enabled": self.enabled,
+            "scheduler_enabled": self.scheduler_enabled,
             "llm_provider": self.llm_provider,
             "llm_model": self.llm_model,
             "max_agent_turns": self.max_agent_turns,

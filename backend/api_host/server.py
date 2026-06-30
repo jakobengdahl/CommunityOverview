@@ -29,7 +29,7 @@ from typing import Optional, Dict, Any, Callable
 
 logger = logging.getLogger(__name__)
 
-from fastapi import FastAPI, Path as FastAPIPath
+from fastapi import FastAPI, HTTPException, Path as FastAPIPath
 from fastapi.responses import JSONResponse, RedirectResponse, FileResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from fastapi.middleware.cors import CORSMiddleware
@@ -1082,6 +1082,24 @@ def create_app(
             {"id": n.id, "name": n.name, "description": n.description or ""}
             for n in nodes
         ]
+
+    @app.post("/agents/{agent_id}/trigger")
+    async def agent_trigger(agent_id: str):
+        """
+        Fire a scheduled_trigger event for the named agent.
+
+        Intended for external schedulers (e.g. GCP Cloud Scheduler) so that
+        deployments configured for scale-to-zero do not need AGENTS_SCHEDULER_ENABLED.
+        The caller should authenticate this endpoint using OIDC (Cloud Run
+        service accounts) or an equivalent mechanism at the infrastructure level.
+        """
+        success = agent_registry.trigger_agent(agent_id)
+        if not success:
+            raise HTTPException(
+                status_code=404,
+                detail=f"No active worker found for agent '{agent_id}'",
+            )
+        return {"status": "triggered", "agent_id": agent_id}
 
     # Shutdown handler for graceful cleanup
     @app.on_event("shutdown")

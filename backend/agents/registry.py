@@ -222,7 +222,10 @@ class AgentRegistry:
 
         if worker is not None:
             self._scheduler.register(config.agent_id, config, worker)
-            self._scheduler.start()  # idempotent; covers dynamic-agent creation path
+            if self.settings.scheduler_enabled:
+                # idempotent; also covers dynamic-agent creation when AGENTS_ENABLED
+                # was false at boot
+                self._scheduler.start()
 
     def _stop_worker(self, agent_id: str) -> None:
         """Stop a worker for an agent."""
@@ -453,3 +456,27 @@ class AgentRegistry:
     def get_available_mcp_integrations(self) -> List[Dict[str, Any]]:
         """Get list of available MCP integrations for UI."""
         return [i.to_dict() for i in self.settings.mcp_integrations]
+
+    def trigger_agent(self, agent_id: str) -> bool:
+        """
+        Enqueue a scheduled_trigger event for the given agent.
+
+        Intended for the POST /agents/{id}/trigger HTTP endpoint so that
+        external schedulers (e.g. GCP Cloud Scheduler) can fire an agent on
+        demand without requiring the in-process AgentScheduler to be running.
+
+        Returns True if the event was enqueued, False if no worker exists.
+        """
+        from .scheduler import _build_payload
+        from datetime import datetime, timezone
+
+        with self._lock:
+            worker = self._workers.get(agent_id)
+            if not worker:
+                return False
+            config = worker.config
+
+        payload = _build_payload(config, datetime.now(timezone.utc))
+        worker.enqueue(payload)
+        logger.info("External trigger: enqueued scheduled_trigger for agent %s", agent_id)
+        return True
