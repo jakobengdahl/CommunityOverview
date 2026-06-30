@@ -111,6 +111,8 @@
     "export_graph": "Export graph",
     "export_success": "Graph exported",
     "export_error": "Could not export graph",
+    "view_section": "View",
+    "show_minimap": "Show minimap",
     "language_section": "Language",
     "language_en": "English",
     "language_sv": "Svenska",
@@ -133,5 +135,15 @@
     "cancel": "Cancel guide",
     "loading": "Loading...",
     "step_counter": "Step {current} of {total}"
+  },
+  "context_menu": {
+    "edit": "Edit",
+    "hide": "Hide",
+    "expand": "Find related nodes",
+    "delete": "Delete",
+    "nodes_selected": "{count} nodes selected",
+    "show_only": "Show only these",
+    "hide_all": "Hide all",
+    "delete_all": "Delete all"
   }
 }

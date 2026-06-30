@@ -2,7 +2,7 @@
 
 AI-powered knowledge sharing for communities with graph visualization, conversational chat, and intelligent document analysis.
 
-![Screenshot of Community Knowledge Sharing application](docs/images/screenshot.png)
+![Screenshot of Community Knowledge Sharing application](docs/images/ui-overview.png)
 
 ## Overview
 
@@ -12,19 +12,40 @@ This system helps organizations avoid overlapping investments by making visible:
 - Connections between actors, legislation, and themes
 
 **Key Features:**
-- **AI-Powered Chat:** Natural language interface with Claude or OpenAI for exploring and managing the knowledge graph
-- **Multi-Provider Support:** Switch between Claude (Anthropic) and OpenAI backends
-- **Multi-Language Support:** English and Swedish UI with language selectable via URL or startup
-- **Document Upload:** Upload PDF, Word, or text documents for automatic entity extraction
-- **Interactive Visualization:** React Flow graph with drag-and-drop, zoom, and pan
-- **Node Proposals:** LLM suggests entities with duplicate detection, user confirms before adding
-- **Node Marking:** AI assistant can annotate nodes with colors and labels (e.g. highlight by priority or impact) — session-only, never persisted
-- **AI Skills:** Profile-configurable SKILL.md instructions injected into the agent's system prompt; ships with generic impact analysis; ESS profile adds GSIM lineage and change-impact skills
-- **Skill Node Type:** Create and manage SKILL.md-compatible skill definitions directly in the graph using a dedicated form
-- **Schema-driven Context Menu:** Add custom right-click actions per node type via `schema_config.json` — open URLs with node field substitution or fire named callbacks
-- **ChatGPT Widget:** Embeddable widget for use in ChatGPT or other interfaces
-- **Save Views:** Create and share custom graph views
-- **Data Management:** Example datasets with easy loading from files or URLs
+
+*Graph & visualization*
+- **Interactive canvas:** React Flow graph with drag-and-drop, zoom, pan, and node groups
+- **Schema-driven node types:** Node types, colours, icons, and fields are all profile-configurable — no code changes needed
+- **Subtypes:** Optional sub-classification tags on any node type, with autocomplete from existing values
+- **Save views:** Snapshot and restore named canvas views, stored as nodes in the graph
+- **Schema-driven context menu:** Add custom right-click actions per node type via `schema_config.json` — open URLs with node field substitution or fire named callbacks
+- **Interactive guides:** Step-by-step onboarding tours triggered via URL parameter or AI assistant
+
+*AI chat & intelligence*
+- **AI-powered chat:** Natural language interface (Claude or OpenAI) for exploring and managing the graph
+- **Multi-provider support:** Switch between Claude (Anthropic), OpenAI, and any OpenAI-compatible endpoint (Ollama, Groq, Azure, etc.)
+- **Document upload:** Upload PDF, Word, or text documents for automatic entity extraction
+- **Node proposals:** LLM suggests entities with duplicate detection; user confirms before any node is added
+- **Node marking:** AI assistant can annotate nodes with colours and labels (session-only, never persisted)
+- **Markdown rendering:** Chat responses render Markdown (bold, lists, tables, code blocks)
+- **AI Skills:** Profile-configurable SKILL.md instructions injected into the agent system prompt; ships with generic impact analysis; ESS profile adds GSIM lineage and change-impact skills
+- **Skill node type:** Create and manage SKILL.md-compatible skill definitions directly in the graph
+
+*Integration & extensibility*
+- **MCP server:** Full Model Context Protocol support — connect Claude, ChatGPT, or any MCP-compatible AI client directly to the graph
+- **ChatGPT widget:** Embeddable widget for use in ChatGPT or other interfaces
+- **Event subscriptions & webhooks:** Receive HTTP POST notifications when nodes are created, updated, or deleted
+- **AI agent system:** Event-triggered and schedule-triggered agents that act on graph mutations or run on a cron schedule
+- **Federation:** Connect to multiple remote graph instances with configurable depth, provenance labels, and node adoption
+
+*Operations & deployment*
+- **Runs without LLM keys:** Graph API and MCP server work without any API key; AI chat is simply hidden
+- **Multi-language:** English and Swedish UI, selectable via URL, startup flag, or schema config
+- **Authentication:** Basic Auth for all endpoints or MCP-only (for Cloud Run + IAP setups)
+- **Profile system:** Run with different metadata models, AI prompts, and seed data per deployment profile
+- **Data management:** Example datasets with easy loading from local files or URLs
+
+See [docs/USER_GUIDE.md](./docs/USER_GUIDE.md) for a full user-facing walkthrough.
 
 **Tech Stack:**
 - **Frontend:** React + React Flow + Zustand (monorepo with npm workspaces)

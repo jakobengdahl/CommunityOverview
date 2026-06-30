@@ -118,9 +118,9 @@ uvicorn backend.api_host.server:get_app --factory --reload --port 8000
 ```
 
 The server will be available at:
-- REST API: http://localhost:8000/api/v1/
+- REST API: http://localhost:8000/api/
 - UI Backend (chat): http://localhost:8000/ui/
-- MCP endpoint: http://localhost:8000/mcp
+- MCP endpoint: http://localhost:8000/mcp  (also `/mcp/sse` for legacy SSE clients)
 - Health check: http://localhost:8000/health
 
 ### Production Mode
@@ -133,8 +133,8 @@ uvicorn backend.api_host.server:get_app --factory --host 0.0.0.0 --port 8000
 
 | Variable | Default | Description |
 |----------|---------|-------------|
-| `GRAPH_FILE` | `graph.json` | Path to graph data file |
-| `API_PREFIX` | `/api/v1` | REST API URL prefix |
+| `GRAPH_FILE` | `data/active/graph.json` | Path to graph data file |
+| `API_PREFIX` | `/api` | REST API URL prefix |
 | `MCP_NAME` | `community-graph` | MCP server name |
 | `OPENAI_API_KEY` | - | OpenAI API key (for chat) |
 | `ANTHROPIC_API_KEY` | - | Anthropic API key (for chat) |
@@ -291,16 +291,30 @@ npm test
 
 ### REST API Endpoints
 
+The default API prefix is `/api` (configurable via `API_PREFIX`).
+
 | Method | Endpoint | Description |
 |--------|----------|-------------|
-| GET | `/api/v1/search` | Search nodes |
-| GET | `/api/v1/node/{id}` | Get node details |
-| GET | `/api/v1/node/{id}/related` | Get related nodes |
-| POST | `/api/v1/nodes` | Add nodes and edges |
-| PATCH | `/api/v1/node/{id}` | Update a node |
-| DELETE | `/api/v1/nodes` | Delete nodes |
-| GET | `/api/v1/stats` | Get graph statistics |
-| GET | `/api/v1/similar` | Find similar nodes |
+| POST | `/api/search` | Search nodes |
+| GET | `/api/nodes/{id}` | Get node details |
+| POST | `/api/nodes/{id}/related` | Get related nodes |
+| POST | `/api/nodes` | Add nodes and edges |
+| PATCH | `/api/nodes/{id}` | Update a node |
+| DELETE | `/api/nodes` | Delete nodes |
+| POST | `/api/edges` | Add edges |
+| PATCH | `/api/edges/{id}` | Update an edge |
+| DELETE | `/api/edges/{id}` | Delete an edge |
+| GET | `/api/stats` | Get graph statistics |
+| POST | `/api/similar` | Find similar nodes |
+| POST | `/api/similar/batch` | Batch similarity search |
+| POST | `/api/federation/adopt` | Adopt a federated node into the local graph |
+| GET | `/api/schema` | Get schema config |
+| GET | `/api/presentation` | Get presentation config |
+| GET | `/api/capabilities` | Get service capabilities |
+| GET | `/api/export` | Export graph data |
+| POST | `/api/views/save` | Save a named graph view |
+| GET | `/api/views/{name}` | Get a saved view |
+| GET | `/api/views` | List saved views |
 | GET | `/agents/schedules` | List all agent schedules (for external scheduler reconciliation) |
 | POST | `/agents/{id}/trigger` | Fire a scheduled agent immediately (used by GCP Cloud Scheduler) |
 
