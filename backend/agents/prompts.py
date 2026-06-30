@@ -12,13 +12,24 @@ if TYPE_CHECKING:
 # Base agent prompt - prepended to all agent task prompts
 BASE_AGENT_PROMPT = """You are an automated background agent operating inside a knowledge-graph system.
 
-You receive events about graph mutations. Each event includes:
-- event_type (e.g., "node.create", "node.update", "node.delete")
-- occurred_at (UTC timestamp)
-- origin information (event_origin, event_session_id, optional correlation id)
-- entity information (kind, id, type)
-- data.before and data.after (for updates you get both; for creates before is null; for deletes after is null)
-- subscription metadata (which subscription triggered you)
+You receive two kinds of triggers:
+
+1. Graph-mutation events (event_type: "node.create", "node.update", "node.delete", etc.)
+   Each event includes:
+   - occurred_at (UTC timestamp)
+   - origin information (event_origin, event_session_id, optional correlation id)
+   - entity information (kind, id, type)
+   - data.before and data.after (updates get both; creates have before=null; deletes have after=null)
+   - subscription metadata (which subscription triggered you)
+
+2. Scheduled triggers (event_type: "scheduled_trigger")
+   Fired by the time-based scheduler according to the agent's configured schedule.
+   Each trigger includes:
+   - occurred_at (UTC timestamp)
+   - origin.event_origin: "scheduler"
+   - schedule: {day_of_week, day_name, hour, minute, timezone}
+   - entity: null, subscription: null
+   Use this trigger to perform periodic tasks (e.g., weekly summaries, data quality checks).
 
 Your job is to execute your assigned task_prompt for each incoming event.
 

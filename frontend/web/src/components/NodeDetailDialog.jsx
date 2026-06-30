@@ -25,6 +25,33 @@ function asUrl(value) {
   return null;
 }
 
+function renderNodeTypePermissions(perms) {
+  if (!perms || typeof perms !== 'object') return null;
+  const allowed = Object.entries(perms)
+    .filter(([, ops]) => ops && (ops.create || ops.update || ops.delete))
+    .map(([nodeType, ops]) => {
+      const ops_list = ['create', 'update', 'delete'].filter(op => ops[op]);
+      return { nodeType, ops_list };
+    });
+  if (allowed.length === 0) {
+    return <span style={{ color: '#888', fontSize: '0.85rem' }}>No operations permitted</span>;
+  }
+  return (
+    <div style={{ display: 'flex', flexWrap: 'wrap', gap: '0.35rem', marginTop: '0.25rem' }}>
+      {allowed.map(({ nodeType, ops_list }) => (
+        <span key={nodeType} style={{
+          display: 'inline-flex', alignItems: 'center', gap: '0.3rem',
+          background: '#1e2533', border: '1px solid #2d3748', borderRadius: '4px',
+          padding: '0.15rem 0.5rem', fontSize: '0.8rem',
+        }}>
+          <strong style={{ color: '#e2e8f0' }}>{nodeType}:</strong>
+          <span style={{ color: '#94a3b8' }}>{ops_list.join(', ')}</span>
+        </span>
+      ))}
+    </div>
+  );
+}
+
 function NodeDetailDialog({ node, onClose, onEdit }) {
   const { getNodeColor, schema } = useGraphStore();
   const { t } = useI18n();
@@ -153,7 +180,9 @@ function NodeDetailDialog({ node, onClose, onEdit }) {
                     <div key={key} className="node-detail-meta-item">
                       <span className="node-detail-meta-key">{key}:</span>
                       <span className="node-detail-meta-value">
-                        {typeof value === 'object' ? JSON.stringify(value) : String(value)}
+                        {key === 'node_type_permissions' && typeof value === 'object'
+                          ? renderNodeTypePermissions(value)
+                          : typeof value === 'object' ? JSON.stringify(value) : String(value)}
                       </span>
                     </div>
                   ))

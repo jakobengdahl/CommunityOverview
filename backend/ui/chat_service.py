@@ -17,6 +17,7 @@ import logging
 import os
 import json
 import inspect
+import re
 from datetime import datetime
 
 from backend.chat_logic import ChatProcessor
@@ -58,6 +59,9 @@ class ChatService:
         # Create the underlying ChatProcessor with our tools map
         self._processor = ChatProcessor(self._tools_map)
         self._current_federation_depth: Optional[int] = None
+        # Cache for resolved AKC configs — avoids repeated 500-node scans within a session.
+        # Keyed by short_name; value is (prefix, perms) tuple from _resolve_collection.
+        self._collection_cache: Dict[str, tuple] = {}
 
         # Expert agent registry — populated by load_expert_skills() at startup.
         self._expert_contexts: Dict[str, str] = {}
@@ -226,37 +230,199 @@ class ChatService:
         """Get the current LLM provider type (openai or claude)."""
         return self._processor.provider_type
 
-    def _build_collection_prefix(self, short_name: str) -> Optional[str]:
-        """Resolve an AKC short_name to its trusted system prompt prefix server-side."""
+    def _resolve_collection(self, short_name: str) -> tuple:
+        """Resolve an AKC short_name → (system_prompt_prefix, permissions_dict).
+
+        Returns:
+          - (prefix, perms) on success — both non-None; perms may be {} if no permissions
+            are configured (enforced tools still installed, all writes denied).
+          - (None, None) when short_name is not found — no enforcement applied.
+            Not cached so a collection created after first miss is picked up immediately.
+          - ("", {}) on exception — fail-closed; enforced tools installed, all writes denied.
+            Not cached so transient errors are retried on the next message.
+
+        permissions_dict maps node_type → {"create": bool, "update": bool, "delete": bool}.
+        Successful lookups are cached on this instance to avoid repeated 500-node scans.
+        """
+        if short_name in self._collection_cache:
+            return self._collection_cache[short_name]
         try:
             result = self._graph_service.search_graph(
                 query="", node_types=["ActiveKnowledgeCollection"], limit=500
             )
-            for node in result.get("nodes", []):
+            nodes = result.get("nodes", [])
+            found = False
+            for node in nodes:
                 meta = node.get("metadata") or {}
                 if meta.get("short_name") == short_name:
+                    found = True
+                    raw_perms = meta.get("node_type_permissions") or {}
+                    # Guard against individual null entries in the permissions dict
+                    perms = {k: (v or {}) for k, v in raw_perms.items()}
+
                     lines = ["COLLECTION MODE INSTRUCTIONS:"]
                     if meta.get("prompt"):
                         lines.append(meta["prompt"])
                         lines.append("")
-                    perms = meta.get("node_type_permissions") or {}
-                    perm_entries = [(t, ops) for t, ops in perms.items()]
-                    if perm_entries:
+
+                    perm_entries = list(perms.items())
+                    any_permitted = any(
+                        ops.get(op)
+                        for _, ops in perm_entries
+                        for op in ("create", "update", "delete")
+                    )
+                    if any_permitted:
                         lines.append("PERMITTED OPERATIONS:")
                         for node_type, ops in perm_entries:
                             allowed = [op for op in ("create", "update", "delete") if ops.get(op)]
                             if allowed:
                                 lines.append(f"- {node_type}: {', '.join(allowed)}")
-                        lines.append("")
+                    else:
                         lines.append(
-                            "IMPORTANT: Only perform operations that are explicitly listed as "
-                            "permitted above. Do not create, update, or delete node types that "
-                            "are not listed, or perform operations not permitted for a given type."
+                            "PERMITTED OPERATIONS: none — do not create, update, or delete any nodes."
                         )
-                    return "\n".join(lines)
+                    lines.append("")
+                    lines.append(
+                        "IMPORTANT: Only perform operations that are explicitly listed as "
+                        "permitted above. Do not create, update, or delete node types that "
+                        "are not listed, or perform operations not permitted for a given type."
+                    )
+
+                    lines.append("")
+                    lines.append(
+                        "INITIALIZATION: If the very first user turn in the conversation "
+                        "is '[COLLECTION_START]' and there are no prior assistant messages, "
+                        "respond by: 1) briefly explaining that you are an AI assistant, "
+                        "2) describing what data you are collecting based on the instructions "
+                        "above, and 3) asking your first question to begin. "
+                        "Do not re-introduce yourself on subsequent turns. "
+                        "Do not mention or repeat '[COLLECTION_START]' in your response."
+                    )
+
+                    result_tuple = ("\n".join(lines), perms)
+                    self._collection_cache[short_name] = result_tuple
+                    return result_tuple
+
+            if not found:
+                logger.warning(
+                    "AKC short_name %r not found in %d ActiveKnowledgeCollection node(s). "
+                    "Collection may exceed the search limit of 500.",
+                    short_name, len(nodes),
+                )
         except Exception:
             logger.warning("Failed to resolve AKC short_name %r", short_name, exc_info=True)
-        return None
+            # Fail-closed: resolution error → deny all writes rather than fall through
+            # to unconstrained mode. Empty perms installs enforced wrappers that block
+            # every add/update/delete regardless of node type.
+            return ("", {})
+        return None, None
+
+    def _make_enforced_tools(self, perms: dict) -> dict:
+        """Return a tools_map overlay that enforces node_type_permissions at call time."""
+
+        base_add = self._graph_service.add_nodes
+        base_update = self._graph_service.update_node
+        base_delete = self._graph_service.delete_nodes
+
+        def _get_node_type(node_id: str) -> Optional[str]:
+            """Look up the type of an existing node, returning None on failure."""
+            try:
+                node_data = self._graph_service.get_node_details(node_id)
+                # get_node_details returns {"node": {...}} with type inside the node object
+                node_obj = node_data.get("node") or {}
+                return (
+                    node_obj.get("type")
+                    or node_obj.get("nodeType")
+                    or node_obj.get("node_type")
+                )
+            except Exception:
+                return None
+
+        def add_nodes_enforced(nodes, edges=None, **kwargs):
+            untyped = [
+                i for i, n in enumerate(nodes)
+                if not isinstance(n.get("type"), str) or not n.get("type")
+            ]
+            if untyped:
+                return {
+                    "success": False,
+                    "error": (
+                        f"Node(s) at position(s) {untyped} are missing a 'type' field. "
+                        "Each node must specify a type."
+                    ),
+                }
+            forbidden = sorted({
+                n["type"] for n in nodes
+                if not perms.get(n["type"], {}).get("create")
+            })
+            if forbidden:
+                return {
+                    "success": False,
+                    "error": (
+                        f"Node type(s) not permitted for creation in this collection: "
+                        f"{', '.join(forbidden)}. "
+                        "Please only create node types that are listed as permitted."
+                    ),
+                }
+            return base_add(nodes=nodes, edges=edges or [], **kwargs)
+
+        def update_node_enforced(node_id, updates, **kwargs):
+            node_type = _get_node_type(node_id)
+            if node_type is None:
+                # Fail-closed: if we cannot determine the node type, deny the operation.
+                # The base call would also return "not found", but the error below is clearer.
+                return {
+                    "success": False,
+                    "error": "Cannot update node: node not found or type could not be determined.",
+                }
+            if not perms.get(node_type, {}).get("update"):
+                return {
+                    "success": False,
+                    "error": f"Updating {node_type} nodes is not permitted in this collection.",
+                }
+            return base_update(node_id, updates, **kwargs)
+
+        def delete_nodes_enforced(node_ids, confirmed=False, **kwargs):
+            forbidden_ids = []
+            unknown_ids = []
+            for nid in node_ids:
+                node_type = _get_node_type(nid)
+                if node_type is None:
+                    unknown_ids.append(nid)
+                elif not perms.get(node_type, {}).get("delete"):
+                    forbidden_ids.append(nid)
+            errors = []
+            if unknown_ids:
+                errors.append(
+                    f"not found or type undetermined: {', '.join(unknown_ids)}"
+                )
+            if forbidden_ids:
+                errors.append(
+                    f"deletion not permitted in this collection: {', '.join(forbidden_ids)}"
+                )
+            if errors:
+                return {
+                    "success": False,
+                    "error": "Cannot delete node(s) — " + "; ".join(errors) + ".",
+                }
+            return base_delete(node_ids=node_ids, confirmed=confirmed, **kwargs)
+
+        def delete_edges_enforced(edge_ids, confirmed=False, **kwargs):
+            # Edge deletion is not permitted in collection mode because it can
+            # sever relationships between restricted node types without a direct
+            # node-type check. Operators who need edge deletion should enable it
+            # explicitly — for now we block it uniformly in collection sessions.
+            return {
+                "success": False,
+                "error": "Deleting edges is not permitted in collection mode.",
+            }
+
+        return {
+            "add_nodes": add_nodes_enforced,
+            "update_node": update_node_enforced,
+            "delete_nodes": delete_nodes_enforced,
+            "delete_edges": delete_edges_enforced,
+        }
 
     @staticmethod
     def _sanitize_id(node_id: str) -> str:
@@ -347,7 +513,11 @@ class ChatService:
             - toolUsed: Name of the last tool used (if any)
             - toolResult: Result from the tool (if any)
         """
-        effective_prefix = self._build_collection_prefix(collection_short_name) if collection_short_name else None
+        effective_prefix, collection_perms = (
+            self._resolve_collection(collection_short_name)
+            if collection_short_name
+            else (None, None)
+        )
 
         self._current_federation_depth = federation_depth
         try:
@@ -356,6 +526,15 @@ class ChatService:
                 extra_context = f"{effective_prefix}\n\n{expert_context}"
             else:
                 extra_context = effective_prefix or expert_context
+
+            # collection_perms is None when no collection is active; {} means a collection
+            # was found but has no node_type_permissions configured — enforce even then
+            # so the enforced tool wrappers (e.g. delete_edges block) apply regardless.
+            tools_override = (
+                self._make_enforced_tools(collection_perms)
+                if collection_perms is not None
+                else None
+            )
 
             visualization_context = self._format_visualization_context(
                 visible_node_ids, selected_node_ids
@@ -371,6 +550,7 @@ class ChatService:
                 provider=provider,
                 extra_context=extra_context,
                 skills_override=skills_context or None,
+                tools_override=tools_override,
                 visualization_context=visualization_context,
             )
         finally:
@@ -539,8 +719,6 @@ Respond with ONLY a JSON array of extracted entities, no other text. Example for
                 if isinstance(block, dict) and block.get("type") == "text":
                     response_text += block.get("text", "")
 
-            # Parse the JSON response
-            import re
             # Find JSON array in response
             json_match = re.search(r'\[[\s\S]*\]', response_text)
             if not json_match:

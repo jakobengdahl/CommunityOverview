@@ -21,9 +21,7 @@ Subscriptions are stored as nodes in the graph itself (type: `EventSubscription`
 
 ### Agent Nodes
 
-Agent nodes (type: `Agent`) store configuration for future AI agents. An Agent links to an EventSubscription that defines which events trigger the agent.
-
-**Note:** The agent runtime is NOT implemented - these nodes only store configuration for future functionality.
+Agent nodes (type: `Agent`) define AI agents that react to graph events. An Agent links to an EventSubscription that defines which mutations trigger it. Agents can also be triggered on a time-based schedule — see `docs/AGENT_SCHEDULING.md`.
 
 ### Event Context
 
@@ -267,7 +265,6 @@ storage.setup_events(enabled=True)
 ## Future Enhancements
 
 The following are planned but not implemented:
-- Agent runtime for executing code in response to events
 - Persistent event queue with durability guarantees
 - Advanced filtering with query expressions
 - Event replay and debugging tools

@@ -15,6 +15,7 @@ from typing import Dict, Any, Optional, List, Callable, TYPE_CHECKING
 from .config import AgentConfig, AgentsSettings
 from .worker import AgentWorker, ProcessingResult
 from .mcp_loader import MCPLoader
+from .scheduler import AgentScheduler
 from backend.skills.loader import SkillsConfig
 
 if TYPE_CHECKING:
@@ -70,6 +71,9 @@ class AgentRegistry:
 
         # Result callback
         self._on_result: Optional[Callable[[ProcessingResult], None]] = None
+
+        # Time-based scheduler (shared, started alongside the registry)
+        self._scheduler = AgentScheduler()
 
     @property
     def is_enabled(self) -> bool:
@@ -154,6 +158,8 @@ class AgentRegistry:
         """Stop all agent workers."""
         logger.info("Stopping agent registry...")
 
+        self._scheduler.stop()
+
         with self._lock:
             for agent_id, worker in list(self._workers.items()):
                 try:
@@ -189,6 +195,7 @@ class AgentRegistry:
 
     def _start_worker(self, config: AgentConfig) -> None:
         """Start a worker for an agent."""
+        worker = None
         with self._lock:
             if config.agent_id in self._workers:
                 logger.warning(f"Worker already exists for agent {config.agent_id}")
@@ -213,8 +220,16 @@ class AgentRegistry:
                     f"Registered subscription {config.subscription_id} -> agent {config.agent_id}"
                 )
 
+        if worker is not None:
+            self._scheduler.register(config.agent_id, config, worker)
+            if self.settings.scheduler_enabled:
+                # idempotent; also covers dynamic-agent creation when AGENTS_ENABLED
+                # was false at boot
+                self._scheduler.start()
+
     def _stop_worker(self, agent_id: str) -> None:
         """Stop a worker for an agent."""
+        self._scheduler.unregister(agent_id)
         with self._lock:
             worker = self._workers.pop(agent_id, None)
             if worker:
@@ -343,6 +358,7 @@ class AgentRegistry:
             # _stop_worker each acquire the lock themselves, so we must not hold it here.
             should_start = False
             should_stop = False
+            worker_to_reschedule = None
 
             with self._lock:
                 existing_worker = self._workers.get(node_id)
@@ -365,11 +381,18 @@ class AgentRegistry:
                             self._subscription_agent_map[config.subscription_id] = node_id
 
                         logger.info(f"Reloaded agent: {config.name}")
+                        worker_to_reschedule = existing_worker
                     else:
                         should_start = True
                 else:
                     if existing_worker:
                         should_stop = True
+
+            if worker_to_reschedule is not None:
+                self._scheduler.unregister(node_id)
+                self._scheduler.register(node_id, config, worker_to_reschedule)
+                if self.settings.scheduler_enabled:
+                    self._scheduler.start()  # idempotent; needed if schedule was just added
 
             if should_start:
                 if self._ensure_initialized():
@@ -435,3 +458,59 @@ class AgentRegistry:
     def get_available_mcp_integrations(self) -> List[Dict[str, Any]]:
         """Get list of available MCP integrations for UI."""
         return [i.to_dict() for i in self.settings.mcp_integrations]
+
+    def get_schedules(self) -> List[Dict[str, Any]]:
+        """
+        Return schedule metadata for all active agents that have a schedule set.
+
+        Intended for SaaS / infrastructure layers that manage external schedulers
+        (e.g. GCP Cloud Scheduler).  Each entry contains enough information to
+        create or reconcile a Cloud Scheduler job:
+
+            - agent_id    → use as the job name / resource label
+            - trigger_path → POST to this path to fire the agent
+            - schedule.cron / schedule.timezone → job schedule
+        """
+        with self._lock:
+            result = []
+            for agent_id, worker in self._workers.items():
+                schedule = worker.config.schedule
+                if not schedule:
+                    continue
+                result.append({
+                    "agent_id": agent_id,
+                    "agent_name": worker.config.name,
+                    "trigger_path": f"/agents/{agent_id}/trigger",
+                    "schedule": schedule.to_dict(),
+                })
+        return result
+
+    def trigger_agent(self, agent_id: str) -> bool:
+        """
+        Enqueue a scheduled_trigger event for the given agent.
+
+        Intended for the POST /agents/{id}/trigger HTTP endpoint so that
+        external schedulers (e.g. GCP Cloud Scheduler) can fire an agent on
+        demand without requiring the in-process AgentScheduler to be running.
+
+        Returns True if the event was enqueued, False if no worker exists.
+        """
+        from .scheduler import _build_payload
+        from datetime import datetime, timezone
+
+        with self._lock:
+            worker = self._workers.get(agent_id)
+            if not worker:
+                return False
+            config = worker.config
+
+        if not config.schedule:
+            logger.warning(
+                "trigger_agent: agent %s has no schedule configured", agent_id
+            )
+            return False
+
+        payload = _build_payload(config, datetime.now(timezone.utc))
+        worker.enqueue(payload)
+        logger.info("External trigger: enqueued scheduled_trigger for agent %s", agent_id)
+        return True

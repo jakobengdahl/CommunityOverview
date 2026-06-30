@@ -20,7 +20,7 @@ Event System:
 import threading
 from concurrent.futures import Future, ThreadPoolExecutor
 from typing import List, Dict, Optional, Any, TYPE_CHECKING, Callable
-from datetime import datetime
+from datetime import datetime, timezone
 import networkx as nx
 from pathlib import Path
 from rapidfuzz.distance import Levenshtein
@@ -427,7 +427,7 @@ class GraphStorage:
                     **(self.graph_metadata or {}),
                     'version': (self.graph_metadata or {}).get('version', '1.0'),
                     'graph_name': (self.graph_metadata or {}).get('graph_name', self._default_graph_name()),
-                    'last_updated': datetime.utcnow().isoformat()
+                    'last_updated': datetime.now(timezone.utc).isoformat()
                 }
             }
             node_count = len(self.nodes)
@@ -913,7 +913,7 @@ class GraphStorage:
                 meta.update(extra)
                 node.metadata = meta
 
-            node.updated_at = datetime.utcnow()
+            node.updated_at = datetime.now(timezone.utc)
 
             # Update in graph
             self.graph.nodes[node_id]['data'] = node
@@ -1076,7 +1076,7 @@ class GraphStorage:
             total_nodes=len(self.nodes),
             total_edges=len(self.edges),
             nodes_by_type=nodes_by_type,
-            last_updated=datetime.utcnow()
+            last_updated=datetime.now(timezone.utc)
         )
 
     def get_subtypes_by_node_type(self, node_type: Optional[str] = None) -> Dict[str, List[str]]:
