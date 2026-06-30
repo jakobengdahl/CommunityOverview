@@ -202,9 +202,10 @@ export GRAPH_FILE="$ACTIVE_DATA"
 
 # Source nvm so nvm-managed node versions are in PATH.
 # In environments like SSPCloud, node is managed via nvm but not in PATH
-# until nvm is sourced.
+# until nvm is sourced. The || true prevents set -e from exiting when
+# nvm.sh itself returns non-zero (e.g. no default node version set yet).
 export NVM_DIR="${NVM_DIR:-$HOME/.nvm}"
-[ -s "$NVM_DIR/nvm.sh" ] && \. "$NVM_DIR/nvm.sh"
+[ -s "$NVM_DIR/nvm.sh" ] && \. "$NVM_DIR/nvm.sh" || true
 
 if ! command -v node &> /dev/null; then
     echo -e "${YELLOW}Node.js not found — installing automatically via nvm...${NC}"
@@ -214,7 +215,7 @@ if ! command -v node &> /dev/null; then
         echo "Installing nvm..."
         curl -fsSL https://raw.githubusercontent.com/nvm-sh/nvm/v0.39.7/install.sh | bash
         export NVM_DIR="${NVM_DIR:-$HOME/.nvm}"
-        \. "$NVM_DIR/nvm.sh"
+        \. "$NVM_DIR/nvm.sh" || true
     fi
 
     # Install and activate Node.js 20
