@@ -91,6 +91,17 @@ class AgentSchedule:
     def day_name(self) -> str:
         return _WEEKDAY_DISPLAY[self.day_of_week]
 
+    def to_cron(self) -> str:
+        """
+        Return a standard 5-field cron expression for this schedule.
+
+        Cron day-of-week convention: 0=Sunday, 1=Monday … 6=Saturday.
+        Python weekday convention:   0=Monday … 6=Sunday.
+        Conversion: cron_dow = (python_dow + 1) % 7
+        """
+        cron_dow = (self.day_of_week + 1) % 7
+        return f"{self.minute} {self.hour} * * {cron_dow}"
+
     def to_dict(self) -> Dict[str, Any]:
         return {
             "day_of_week": self.day_of_week,
@@ -98,6 +109,7 @@ class AgentSchedule:
             "hour": self.hour,
             "minute": self.minute,
             "timezone": self.timezone,
+            "cron": self.to_cron(),
         }
 
 

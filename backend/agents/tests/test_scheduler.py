@@ -111,6 +111,22 @@ class TestAgentScheduleFromDict:
         assert d["hour"] == 7
         assert d["minute"] == 45
         assert d["timezone"] == "UTC"
+        assert d["cron"] == "45 7 * * 4"  # Thursday=4 in cron (0=Sun)
+
+    def test_to_cron_monday(self):
+        # Python Monday=0, cron Monday=1
+        sched = AgentSchedule(day_of_week=0, hour=9, minute=0)
+        assert sched.to_cron() == "0 9 * * 1"
+
+    def test_to_cron_sunday(self):
+        # Python Sunday=6, cron Sunday=0
+        sched = AgentSchedule(day_of_week=6, hour=23, minute=30)
+        assert sched.to_cron() == "30 23 * * 0"
+
+    def test_to_cron_tuesday(self):
+        # Python Tuesday=1, cron Tuesday=2
+        sched = AgentSchedule(day_of_week=1, hour=14, minute=0)
+        assert sched.to_cron() == "0 14 * * 2"
 
 
 # ---------------------------------------------------------------------------

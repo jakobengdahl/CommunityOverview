@@ -457,6 +457,32 @@ class AgentRegistry:
         """Get list of available MCP integrations for UI."""
         return [i.to_dict() for i in self.settings.mcp_integrations]
 
+    def get_schedules(self) -> List[Dict[str, Any]]:
+        """
+        Return schedule metadata for all active agents that have a schedule set.
+
+        Intended for SaaS / infrastructure layers that manage external schedulers
+        (e.g. GCP Cloud Scheduler).  Each entry contains enough information to
+        create or reconcile a Cloud Scheduler job:
+
+            - agent_id    → use as the job name / resource label
+            - trigger_path → POST to this path to fire the agent
+            - schedule.cron / schedule.timezone → job schedule
+        """
+        with self._lock:
+            result = []
+            for agent_id, worker in self._workers.items():
+                schedule = worker.config.schedule
+                if not schedule:
+                    continue
+                result.append({
+                    "agent_id": agent_id,
+                    "agent_name": worker.config.name,
+                    "trigger_path": f"/agents/{agent_id}/trigger",
+                    "schedule": schedule.to_dict(),
+                })
+        return result
+
     def trigger_agent(self, agent_id: str) -> bool:
         """
         Enqueue a scheduled_trigger event for the given agent.

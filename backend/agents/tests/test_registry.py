@@ -7,7 +7,9 @@ from unittest.mock import MagicMock, patch, PropertyMock
 import threading
 import time
 
-from backend.agents.config import AgentConfig, AgentsSettings, MCPIntegration, MCPTransport
+from backend.agents.config import (
+    AgentConfig, AgentSchedule, AgentsSettings, MCPIntegration, MCPTransport,
+)
 from backend.agents.registry import AgentRegistry
 
 
@@ -264,3 +266,52 @@ class TestGetAvailableIntegrations:
         ids = [i["id"] for i in integrations]
         assert "GRAPH" in ids
         assert "WEB" in ids
+
+    def test_get_schedules_returns_agents_with_schedule(
+        self, mock_storage, mock_service
+    ):
+        """get_schedules() includes cron expression for SaaS/external scheduler use."""
+        registry = AgentRegistry(
+            settings=AgentsSettings(enabled=False),
+            graph_storage=mock_storage,
+            graph_service=mock_service,
+        )
+
+        # Inject a fake worker directly so we can test without starting MCP
+        scheduled_config = AgentConfig(
+            agent_id="agent-sched",
+            name="Scheduled Agent",
+            schedule=AgentSchedule(day_of_week=1, hour=14, minute=0,
+                                   timezone="Europe/Stockholm"),
+        )
+        unscheduled_config = AgentConfig(agent_id="agent-nosched", name="No Schedule")
+
+        mock_worker_a = MagicMock()
+        mock_worker_a.config = scheduled_config
+        mock_worker_b = MagicMock()
+        mock_worker_b.config = unscheduled_config
+
+        registry._workers = {
+            "agent-sched": mock_worker_a,
+            "agent-nosched": mock_worker_b,
+        }
+
+        schedules = registry.get_schedules()
+
+        assert len(schedules) == 1
+        entry = schedules[0]
+        assert entry["agent_id"] == "agent-sched"
+        assert entry["trigger_path"] == "/agents/agent-sched/trigger"
+        assert entry["schedule"]["cron"] == "0 14 * * 2"   # Tuesday in cron
+        assert entry["schedule"]["timezone"] == "Europe/Stockholm"
+        assert entry["schedule"]["day_name"] == "Tuesday"
+
+    def test_get_schedules_empty_when_no_agents_scheduled(
+        self, mock_storage, mock_service
+    ):
+        registry = AgentRegistry(
+            settings=AgentsSettings(enabled=False),
+            graph_storage=mock_storage,
+            graph_service=mock_service,
+        )
+        assert registry.get_schedules() == []

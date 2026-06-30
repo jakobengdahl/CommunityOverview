@@ -1083,6 +1083,18 @@ def create_app(
             for n in nodes
         ]
 
+    @app.get("/agents/schedules")
+    async def agents_schedules():
+        """
+        List all active agents that have a schedule configured.
+
+        Returns cron expressions and timezone for each schedule so that an
+        external scheduler (e.g. GCP Cloud Scheduler, a SaaS plugin) can
+        reconcile its jobs against the current agent configuration without
+        needing to parse agent node metadata directly.
+        """
+        return agent_registry.get_schedules()
+
     @app.post("/agents/{agent_id}/trigger")
     async def agent_trigger(agent_id: str):
         """
