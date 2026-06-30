@@ -496,6 +496,47 @@ def register_mcp_tools(mcp, service: GraphService, session_registry=None) -> Dic
     # ==================== Visualization Session Tools ====================
 
     @register_tool
+    def clear_visualization(visualization_session_id: str) -> Dict[str, Any]:
+        """
+        Clear all nodes, edges, and annotations from the visualization canvas.
+
+        Removes everything currently displayed in the browser window without
+        affecting the underlying graph data. Use this to start a fresh view.
+
+        Args:
+            visualization_session_id: The browser session ID shown in the header
+                (e.g. "8244-1742")
+
+        Returns:
+            Dict with success status and message
+        """
+        if not session_registry:
+            return {"success": False, "error": "Session registry not available"}
+        if not session_registry.is_valid_session_id(visualization_session_id):
+            return {"success": False, "error": "Invalid session ID format — expected DDDD-DDDD"}
+        state = session_registry.get_state(visualization_session_id)
+        if state is None:
+            return {
+                "success": False,
+                "error": (
+                    f"Session '{visualization_session_id}' not found. "
+                    "Call connect_to_visualization_session first to verify the session is open."
+                ),
+            }
+        session_registry.push_command_sync(
+            visualization_session_id,
+            {
+                "type": "tool_result",
+                "tool": "clear_visualization",
+                "result": {"action": "clear_visualization", "nodes": [], "edges": []},
+            },
+        )
+        return {
+            "success": True,
+            "message": f"Canvas cleared in session '{visualization_session_id}'",
+        }
+
+    @register_tool
     def connect_to_visualization_session(session_id: str) -> Dict[str, Any]:
         """
         Verify that a browser visualization session is open and ready.

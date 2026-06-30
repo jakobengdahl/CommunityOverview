@@ -260,3 +260,22 @@
   background: rgba(229, 115, 115, 0.12);
   color: #ff8a80;
 }
+
+.floating-header-clear {
+  background: transparent;
+  border: none;
+  color: #555;
+  cursor: pointer;
+  padding: 4px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  border-radius: 6px;
+  flex-shrink: 0;
+  transition: background 0.15s, color 0.15s;
+}
+
+.floating-header-clear:hover {
+  background: rgba(229, 115, 115, 0.15);
+  color: #e57373;
+}

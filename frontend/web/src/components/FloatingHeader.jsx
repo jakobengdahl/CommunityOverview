@@ -1,6 +1,6 @@
 import { useState, useRef, useEffect } from 'react';
 import { createPortal } from 'react-dom';
-import { List, Feather, Download, Map, BoxArrowRight } from 'react-bootstrap-icons';
+import { List, Feather, Download, Map, BoxArrowRight, XCircle } from 'react-bootstrap-icons';
 import useGraphStore from '../store/graphStore';
 import { useI18n } from '../i18n';
 import { COLOR_MAP } from './FloatingToolbar';
@@ -9,7 +9,7 @@ import './FloatingHeader.css';
 
 const MAX_INLINE_TYPES = 5;
 
-function FloatingHeader({ stats, title = 'Community Graph View', onExportGraph, sessionId }) {
+function FloatingHeader({ stats, title = 'Community Graph View', onExportGraph, sessionId, onClear }) {
   const { t, language, setLanguage } = useI18n();
   const { showMinimap, setShowMinimap } = useGraphStore();
   const [menuOpen, setMenuOpen] = useState(false);
@@ -58,6 +58,14 @@ function FloatingHeader({ stats, title = 'Community Graph View', onExportGraph, 
             {sessionId}
           </span>
         )}
+        <button
+          className="floating-header-clear"
+          onClick={onClear}
+          title="Clear canvas — remove all nodes and edges (or press Esc twice)"
+          aria-label="Clear canvas"
+        >
+          <XCircle size={15} />
+        </button>
       </div>
 
       {statsDialogOpen && stats?.nodes_by_type && createPortal(
