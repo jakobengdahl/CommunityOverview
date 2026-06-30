@@ -496,6 +496,41 @@ def register_mcp_tools(mcp, service: GraphService, session_registry=None) -> Dic
     # ==================== Visualization Session Tools ====================
 
     @register_tool
+    def clear_visualization(visualization_session_id: str) -> Dict[str, Any]:
+        """
+        Clear all nodes, edges, and annotations from the visualization canvas.
+
+        Removes everything currently displayed in the browser window without
+        affecting the underlying graph data. Use this to start a fresh view.
+
+        Args:
+            visualization_session_id: The browser session ID shown in the header
+                (e.g. "8244-1742")
+
+        Returns:
+            Dict with success status and message
+        """
+        if not session_registry:
+            return {"success": False, "error": "Session registry not available"}
+        if not session_registry.is_valid_session_id(visualization_session_id):
+            return {"success": False, "error": "Invalid session ID format — expected DDDD-DDDD"}
+        state = session_registry.get_state(visualization_session_id)
+        if state is None:
+            return {
+                "success": False,
+                "error": (
+                    f"Session '{visualization_session_id}' not found. "
+                    "Call connect_to_visualization_session first to verify the session is open."
+                ),
+            }
+        result = {"action": "clear_visualization", "nodes": [], "edges": [], "success": True}
+        _push_to_session(session_registry, visualization_session_id, "clear_visualization", result)
+        return {
+            "success": True,
+            "message": f"Canvas cleared in session '{visualization_session_id}'",
+        }
+
+    @register_tool
     def connect_to_visualization_session(session_id: str) -> Dict[str, Any]:
         """
         Verify that a browser visualization session is open and ready.
@@ -528,7 +563,7 @@ def register_mcp_tools(mcp, service: GraphService, session_registry=None) -> Dic
             "message": (
                 f"Session '{session_id}' is active. "
                 "You can now pass visualization_session_id to search_graph, "
-                "get_related_nodes, and get_saved_view."
+                "get_related_nodes, get_saved_view, and clear_visualization."
             ),
             "visible_node_count": len(state.get("visible_node_ids", [])),
         }

@@ -236,15 +236,21 @@ const useGraphStore = create((set, get) => ({
     set({ edges: edges.filter(edge => edge.id !== edgeId) });
   },
 
-  clearVisualization: () => set({
-    nodes: [],
-    edges: [],
-    highlightedNodeIds: [],
-    hiddenNodeIds: [],
-    hiddenEdgeIds: [],
-    nodeMarks: {},
-    pendingGroups: null,
-  }),
+  clearVisualization: () => {
+    set({
+      nodes: [],
+      edges: [],
+      highlightedNodeIds: [],
+      hiddenNodeIds: [],
+      hiddenEdgeIds: [],
+      nodeMarks: {},
+      pendingGroups: null,
+      clearGroupsFlag: true,
+      selectedGraphNodes: [],
+      selectedNodeId: null,
+    });
+    setTimeout(() => set({ clearGroupsFlag: false }), 100);
+  },
 
   setPendingGroups: (groups) => set({ pendingGroups: groups }),
 

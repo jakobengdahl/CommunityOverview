@@ -78,6 +78,9 @@ function App() {
   const urlGuideStartedRef = useRef(false);
   const urlViewLoadedRef = useRef(false);
   const latestViewport = useRef(null);
+  const dialogOpenRef = useRef(false);
+  const [statsDialogOpen, setStatsDialogOpen] = useState(false);
+  const [headerMenuOpen, setHeaderMenuOpen] = useState(false);
   const [notification, setNotification] = useState(null);
   const [deleteDialog, setDeleteDialog] = useState(null);
   const [saveViewDialog, setSaveViewDialog] = useState(null);
@@ -105,6 +108,39 @@ function App() {
       setFederationDepth(maxFederationDepth);
     }
   }, [federationDepth, maxFederationDepth, setFederationDepth]);
+
+  // Track whether any dialog is currently open (used by the double-Escape handler)
+  useEffect(() => {
+    dialogOpenRef.current = !!(
+      createNodeType || editingNode || detailNode || editingEdge ||
+      deleteDialog || saveViewDialog || showSubscriptionDialog ||
+      showAgentDialog || skillDialogType || showAKCDialog ||
+      statsDialogOpen || headerMenuOpen || (akcShortName && akcConfig && !akcIntroShown)
+    );
+  }, [createNodeType, editingNode, detailNode, editingEdge,
+      deleteDialog, saveViewDialog, showSubscriptionDialog,
+      showAgentDialog, skillDialogType, showAKCDialog,
+      statsDialogOpen, headerMenuOpen, akcShortName, akcConfig, akcIntroShown]);
+
+  // Double-Escape to clear the canvas (works even from input fields)
+  useEffect(() => {
+    let lastEscape = 0;
+    const handleKeyDown = (e) => {
+      if (e.key !== 'Escape') return;
+      if (e.repeat) return;
+      if (dialogOpenRef.current) return;
+      const now = Date.now();
+      if (now - lastEscape < 400) {
+        clearVisualization();
+        lastEscape = 0;
+      } else {
+        lastEscape = now;
+      }
+    };
+    // Capture phase so it fires even when focus is inside an input/textarea
+    document.addEventListener('keydown', handleKeyDown, true);
+    return () => document.removeEventListener('keydown', handleKeyDown, true);
+  }, [clearVisualization]);
 
   // ── Visualization session: SSE connection ──────────────────────────────
   // Opens a persistent SSE stream so external AI clients can push
@@ -816,7 +852,7 @@ function App() {
         />
       </div>
 
-      <FloatingHeader stats={stats} onExportGraph={handleExportGraph} sessionId={_vizSessionId} />
+      <FloatingHeader stats={stats} onExportGraph={handleExportGraph} sessionId={_vizSessionId} onClear={clearVisualization} onStatsDialogChange={setStatsDialogOpen} onMenuOpenChange={setHeaderMenuOpen} />
       {maxFederationDepth > 1 && (
         <div className="app-a11y-depth-live" aria-live="polite" aria-atomic="true">
           {t('federation.depth_indicator', { current: federationDepth, max: maxFederationDepth })}

@@ -21,6 +21,18 @@ Effort scale: XS = single-line fix · S = up to ~30 lines / one file · M = mult
 
 ## Open
 
+### [2026-06-30] `dialogOpenRef` is one render cycle behind actual dialog state
+- **File(s):** `frontend/web/src/App.jsx:111-120`
+- **Context:** Discovered during `claude/clear-canvas-button`
+- **Issue:** `dialogOpenRef` is updated via `useEffect`, which runs after the commit phase. In the narrow window between a dialog opening (state set) and the next React render+commit, `dialogOpenRef.current` is still `false`. A rapid double-Escape immediately after opening a dialog (e.g. stats dialog) could pass the guard and trigger `clearVisualization`. Fix: use a synchronous update approach — either replace the `useEffect` with a `useLayoutEffect`, or derive `dialogOpenRef` directly from a single computed value updated via `useLayoutEffect`.
+- **Effort:** S
+
+### [2026-06-30] `clearGroupsFlag` reset race if two clears fire within 100 ms
+- **File(s):** `frontend/web/src/store/graphStore.js:196`, `frontend/web/src/store/graphStore.js:250`
+- **Context:** Discovered during `claude/clear-canvas-button`
+- **Issue:** Both `updateVisualization` and `clearVisualization` set `clearGroupsFlag: true` then schedule a `setTimeout` to reset it to `false` after 100 ms. If a second clear fires before the first timeout elapses, the first timer will reset the flag prematurely on the second call's window, causing ReactFlow to miss the group-clearing signal. Pre-existing in `updateVisualization`; `clearVisualization` now shares the same pattern. Fix: cancel the previous timer before scheduling the next (store timer id in a module-level ref or closure variable).
+- **Effort:** S
+
 ### [2026-06-29] `_parse_datetime` produces naive datetimes from timezone-unaware strings
 - **File(s):** `backend/core/models.py:32-36`
 - **Context:** Discovered during `claude/fix-pytest-warnings`
