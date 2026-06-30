@@ -64,10 +64,12 @@ packages/
 The system includes an event-driven architecture for webhooks and AI agents:
 
 - **Event System**: Tracks graph mutations (create, update, delete) and dispatches events to subscribers.
-  - See `docs/EVENT_SUBSCRIPTIONS.md` for details.
-- **Agent System**: Allows creating AI agents that react to graph events using MCP tools.
-  - Agents are configured via `Agent` nodes in the graph.
-  - See `backend/agents/README.md` (if available) or the code in `backend/agents/`.
+  See `docs/EVENT_SUBSCRIPTIONS.md` for details.
+- **Agent System**: AI agents that react to graph events or run on a schedule using MCP tools.
+  Agents are configured via `Agent` nodes in the graph.
+  - **Event-triggered**: an agent links to an `EventSubscription` node that defines which graph mutations fire it.
+  - **Schedule-triggered**: an agent's `metadata.schedule` field sets a recurring day + time.
+  See `docs/AGENT_SCHEDULING.md` for scheduling details and GCP Cloud Scheduler integration.
 
 ### Concurrency & Persistence
 
@@ -138,6 +140,9 @@ uvicorn backend.api_host.server:get_app --factory --host 0.0.0.0 --port 8000
 | `ANTHROPIC_API_KEY` | - | Anthropic API key (for chat) |
 | `LLM_PROVIDER` | auto-detect | Force LLM provider: `openai` or `claude` |
 | `OPENAI_MODEL` | `gpt-4o` | OpenAI model to use |
+| `AGENTS_ENABLED` | `false` | Enable the AI agent system |
+| `AGENTS_LLM_PROVIDER` | - | LLM provider for agents (`openai` or `claude`) |
+| `AGENTS_SCHEDULER_ENABLED` | `false` | Enable in-process time-based scheduler (off for scale-to-zero) |
 
 ## Building Frontend
 
@@ -296,6 +301,8 @@ npm test
 | DELETE | `/api/v1/nodes` | Delete nodes |
 | GET | `/api/v1/stats` | Get graph statistics |
 | GET | `/api/v1/similar` | Find similar nodes |
+| GET | `/agents/schedules` | List all agent schedules (for external scheduler reconciliation) |
+| POST | `/agents/{id}/trigger` | Fire a scheduled agent immediately (used by GCP Cloud Scheduler) |
 
 ### MCP Tools
 
