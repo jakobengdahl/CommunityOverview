@@ -230,8 +230,8 @@ MCP tools automatically set `event_origin` to "mcp" and accept optional session/
 ## Web UI
 
 Right-click on the graph canvas to access:
-- **"Skapa webhook-prenumeration"**: Create an EventSubscription node
-- **"Skapa agent"**: Create an Agent with its EventSubscription
+- **"Create webhook subscription"**: Creates an EventSubscription node
+- **"Create agent"**: Creates an Agent with its EventSubscription
 
 The web UI automatically generates a unique session ID per browser session.
 

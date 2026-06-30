@@ -847,6 +847,16 @@ function App() {
           showMinimap={showMinimap}
           schema={schema}
           onContextMenuAction={handleContextMenuAction}
+          contextMenuLabels={{
+            edit: t('context_menu.edit'),
+            hide: t('context_menu.hide'),
+            expand: t('context_menu.expand'),
+            delete: t('context_menu.delete'),
+            nodesSelected: t('context_menu.nodes_selected'),
+            showOnly: t('context_menu.show_only'),
+            hideAll: t('context_menu.hide_all'),
+            deleteAll: t('context_menu.delete_all'),
+          }}
           nodeColorResolver={getNodeColor}
           onViewportChange={(vp) => { latestViewport.current = vp; }}
         />
@@ -932,6 +942,7 @@ function App() {
           placeholder="Enter a name for this view..."
           confirmText="Save"
           cancelText="Cancel"
+          loadingText={t('common.saving')}
           isLoading={isSavingView}
           onConfirm={handleConfirmSaveView}
           onCancel={() => setSaveViewDialog(null)}

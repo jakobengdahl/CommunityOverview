@@ -39,6 +39,12 @@ Effort scale: XS = single-line fix · S = up to ~30 lines / one file · M = mult
 - **Issue:** Graph data persisted before the `utcnow()→now(timezone.utc)` migration stores timestamps without timezone info (e.g. `"2024-01-01T00:00:00"`). `_parse_datetime` passes these through unchanged, resulting in naive `datetime` objects. New nodes created after the migration carry aware datetimes. The two coexist in memory for any graph loaded from older disk data. Currently harmless — no code path compares `created_at`/`updated_at` across nodes — but a future sorting or filtering feature would hit `TypeError: can't compare offset-naive and offset-aware datetimes`. Fix: make `_parse_datetime` attach `timezone.utc` when the parsed string has no timezone info.
 - **Effort:** S
 
+### [2026-06-30] `t()` fallback pattern in FloatingHeader.jsx silently breaks
+- **File(s):** `frontend/web/src/components/FloatingHeader.jsx:134,140`
+- **Context:** Discovered during i18n audit / docs session
+- **Issue:** Code uses `t('key') || 'fallback'` expecting a null/undefined return when a key is missing, but `t()` returns the key name as a string (truthy) when no translation is found. The `|| 'fallback'` branch never fires. The two immediately affected keys (`menu.view_section`, `menu.show_minimap`) were fixed by adding them to the JSON files. Any future missing key will silently show its key name in the UI. Fix: either update the fallback pattern to use `t('key') === 'key' ? 'fallback' : t('key')`, or make `t()` return null on a miss (breaking change to the hook contract).
+- **Effort:** S
+
 ---
 
 ## Fixed

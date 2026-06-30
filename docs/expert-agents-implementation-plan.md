@@ -1,6 +1,19 @@
-# Implementation Plan: Expert Agents with Skills and MCP Tools
+# Expert Agents — Implementation Plan (Historical)
 
-## Current State
+> **Note:** This document is a historical planning artifact from an earlier design
+> iteration. The agent system was subsequently implemented differently:
+> - The **SkillsLoader** (Phase 1–2 below) was built as documented and lives in
+>   `backend/skills/loader.py`.
+> - The **Agent node** system (event-triggered and schedule-triggered agents) was
+>   implemented in `backend/agents/` — see `docs/AGENT_SCHEDULING.md` and
+>   `docs/EVENT_SUBSCRIPTIONS.md` for the current design.
+> - The **ExpertOrchestrator / MessageBus / MCPToolRegistry** architecture
+>   (Phases 3–7 below) was **not implemented**. Expert agent selection and
+>   multi-agent orchestration remain open design questions.
+
+---
+
+## Original Design State
 
 Basic UI and configuration already exists:
 - **Configuration**: `config/scb/schema_config.json` defines experts with id, name, color, icon, intro text, and system_context

@@ -108,7 +108,19 @@ function GraphCanvasInner({
   onContextMenuAction = null,
   nodeColorResolver = null,
   onViewportChange = null,
+  contextMenuLabels = {},
 }) {
+  const cml = {
+    edit: 'Edit',
+    hide: 'Hide',
+    expand: 'Find related nodes',
+    delete: 'Delete',
+    nodesSelected: '{count} nodes selected',
+    showOnly: 'Show only these',
+    hideAll: 'Hide all',
+    deleteAll: 'Delete all',
+    ...contextMenuLabels,
+  };
   const [loadedNodeCount, setLoadedNodeCount] = useState(INITIAL_LOAD_COUNT);
   const [nodeContextMenu, setNodeContextMenu] = useState(null);
   const [multiNodeContextMenu, setMultiNodeContextMenu] = useState(null);
@@ -866,7 +878,7 @@ function GraphCanvasInner({
               onEdit(nodeContextMenu.node.id, nodeContextMenu.node.data);
               setNodeContextMenu(null);
             }}>
-              ✏️ Redigera
+              ✏️ {cml.edit}
             </button>
           )}
           {onHide && (
@@ -874,7 +886,7 @@ function GraphCanvasInner({
               onHide(nodeContextMenu.node.id);
               setNodeContextMenu(null);
             }}>
-              👁️ Dölj
+              👁️ {cml.hide}
             </button>
           )}
           {onExpand && (
@@ -882,7 +894,7 @@ function GraphCanvasInner({
               onExpand(nodeContextMenu.node.id, nodeContextMenu.node.data);
               setNodeContextMenu(null);
             }}>
-              🔍 Expandera
+              🔍 {cml.expand}
             </button>
           )}
           {(() => {
@@ -933,7 +945,7 @@ function GraphCanvasInner({
                 onDelete(nodeContextMenu.node.id);
                 setNodeContextMenu(null);
               }}>
-                🗑️ Ta bort
+                🗑️ {cml.delete}
               </button>
             </>
           )}
@@ -946,7 +958,7 @@ function GraphCanvasInner({
           style={{ left: multiNodeContextMenu.x, top: multiNodeContextMenu.y }}
         >
           <div className="context-menu-header">
-            {multiNodeContextMenu.nodes.length} noder markerade
+            {cml.nodesSelected.replace('{count}', multiNodeContextMenu.nodes.length)}
           </div>
           {onShowOnly && (
             <button onClick={() => {
@@ -954,7 +966,7 @@ function GraphCanvasInner({
               onShowOnly(nodeIds);
               setMultiNodeContextMenu(null);
             }}>
-              🔍 Visa enbart dessa
+              🔍 {cml.showOnly}
             </button>
           )}
           {(onHideMultiple || onHide) && (
@@ -967,7 +979,7 @@ function GraphCanvasInner({
               }
               setMultiNodeContextMenu(null);
             }}>
-              👁️ Dölj alla
+              👁️ {cml.hideAll}
             </button>
           )}
           {(onDeleteMultiple || onDelete) && (
@@ -982,7 +994,7 @@ function GraphCanvasInner({
                 }
                 setMultiNodeContextMenu(null);
               }}>
-                🗑️ Ta bort alla
+                🗑️ {cml.deleteAll}
               </button>
             </>
           )}
@@ -1002,7 +1014,7 @@ function GraphCanvasInner({
               onEditEdge(edgeContextMenu.edge.id, edgeContextMenu.edge);
               setEdgeContextMenu(null);
             }}>
-              ✏️ Redigera
+              ✏️ {cml.edit}
             </button>
           )}
           {onHideEdge && (
@@ -1010,7 +1022,7 @@ function GraphCanvasInner({
               onHideEdge(edgeContextMenu.edge.id);
               setEdgeContextMenu(null);
             }}>
-              👁️ Dölj
+              👁️ {cml.hide}
             </button>
           )}
           {onDeleteEdge && (
@@ -1020,7 +1032,7 @@ function GraphCanvasInner({
                 onDeleteEdge(edgeContextMenu.edge.id);
                 setEdgeContextMenu(null);
               }}>
-                🗑️ Ta bort
+                🗑️ {cml.delete}
               </button>
             </>
           )}

@@ -111,6 +111,8 @@
     "export_graph": "Exportera graf",
     "export_success": "Grafen exporterad",
     "export_error": "Kunde inte exportera grafen",
+    "view_section": "Vy",
+    "show_minimap": "Visa minimapp",
     "language_section": "Språk",
     "language_en": "English",
     "language_sv": "Svenska",
@@ -133,5 +135,18 @@
     "cancel": "Avbryt guide",
     "loading": "Laddar...",
     "step_counter": "Steg {current} av {total}"
+  },
+  "context_menu": {
+    "edit": "Redigera",
+    "hide": "Dölj",
+    "expand": "Hitta relaterade noder",
+    "delete": "Ta bort",
+    "nodes_selected": "{count} noder markerade",
+    "show_only": "Visa enbart dessa",
+    "hide_all": "Dölj alla",
+    "delete_all": "Ta bort alla"
+  },
+  "common": {
+    "saving": "Sparar..."
   }
 }
