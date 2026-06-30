@@ -145,5 +145,8 @@
     "show_only": "Show only these",
     "hide_all": "Hide all",
     "delete_all": "Delete all"
+  },
+  "common": {
+    "saving": "Saving..."
   }
 }

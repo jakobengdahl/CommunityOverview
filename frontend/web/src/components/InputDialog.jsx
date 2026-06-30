@@ -11,6 +11,7 @@ function InputDialog({
   defaultValue = '',
   confirmText = 'Save',
   cancelText = 'Cancel',
+  loadingText = 'Saving...',
   isLoading = false,
   onConfirm,
   onCancel,
@@ -76,7 +77,7 @@ function InputDialog({
             onClick={handleSubmit}
             disabled={!value.trim() || isLoading}
           >
-            {isLoading ? 'Saving...' : confirmText}
+            {isLoading ? loadingText : confirmText}
           </button>
         </div>
       </div>

@@ -942,6 +942,7 @@ function App() {
           placeholder="Enter a name for this view..."
           confirmText="Save"
           cancelText="Cancel"
+          loadingText={t('common.saving')}
           isLoading={isSavingView}
           onConfirm={handleConfirmSaveView}
           onCancel={() => setSaveViewDialog(null)}

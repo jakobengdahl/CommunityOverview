@@ -145,5 +145,8 @@
     "show_only": "Visa enbart dessa",
     "hide_all": "Dölj alla",
     "delete_all": "Ta bort alla"
+  },
+  "common": {
+    "saving": "Sparar..."
   }
 }
