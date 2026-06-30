@@ -1,14 +1,14 @@
 # Deployment Guide
 
-> Leverantörsoberoende guide för att deploya CommunityOverview
+> Provider-agnostic guide for deploying CommunityOverview
 
 ---
 
-## Innehåll
+## Contents
 
-1. [Översikt](#1-översikt)
-2. [Förberedelser](#2-förberedelser)
-3. [Lokal Deployment (Docker)](#3-lokal-deployment-docker)
+1. [Overview](#1-overview)
+2. [Prerequisites](#2-prerequisites)
+3. [Local Deployment (Docker)](#3-local-deployment-docker)
 4. [Cloud Deployment](#4-cloud-deployment)
    - [Google Cloud Run](#41-google-cloud-run)
    - [DigitalOcean App Platform](#42-digitalocean-app-platform)
@@ -16,18 +16,18 @@
    - [Railway](#44-railway)
    - [AWS (ECS/Fargate)](#45-aws-ecsfargate)
 5. [CI/CD Pipeline](#5-cicd-pipeline)
-6. [Uppdateringar & Underhåll](#6-uppdateringar--underhåll)
-7. [Felsökning](#7-felsökning)
+6. [Updates & Maintenance](#6-updates--maintenance)
+7. [Troubleshooting](#7-troubleshooting)
 
 ---
 
-## 1. Översikt
+## 1. Overview
 
-CommunityOverview är paketerat som en Docker-container som kan köras på vilken plattform som helst som stödjer containers:
+CommunityOverview is packaged as a Docker container that can run on any platform that supports containers:
 
 ```
 ┌─────────────────────────────────────────────────┐
-│  Docker Image (ghcr.io/user/communityoverview)  │
+│  Docker Image (ghcr.io/owner/communityoverview)  │
 │  ├── Frontend (React)                           │
 │  ├── Backend (FastAPI/Python)                   │
 │  └── MCP Server                                 │
@@ -41,59 +41,59 @@ CommunityOverview är paketerat som en Docker-container som kan köras på vilke
   └──────────┘ └──────────┘ └──────────┘
 ```
 
-### Arkitektur
+### Architecture
 
-| Komponent | Beskrivning |
+| Component | Description |
 |-----------|-------------|
-| **Frontend** | React SPA serverad av FastAPI |
-| **Backend** | FastAPI med REST API + SSE |
-| **MCP Server** | Model Context Protocol för AI-integrationer |
-| **Data** | JSON-fil (graph.json) med fillåsning |
+| **Frontend** | React SPA served by FastAPI |
+| **Backend** | FastAPI with REST API + SSE |
+| **MCP Server** | Model Context Protocol for AI integrations |
+| **Data** | JSON file (graph.json) with file locking |
 
-### Krav
+### Requirements
 
-- **RAM:** Minimum 512MB, rekommenderat 2GB
+- **RAM:** Minimum 512 MB, recommended 2 GB
 - **CPU:** 1 vCPU minimum
-- **Disk:** 1GB för applikation + data
-- **Port:** 8000 (konfigurerbar)
+- **Disk:** 1 GB for application + data
+- **Port:** 8000 (configurable)
 
 ---
 
-## 2. Förberedelser
+## 2. Prerequisites
 
-### 2.1 Hämta Koden
+### 2.1 Clone the Repository
 
 ```bash
 git clone https://github.com/jakobengdahl/CommunityOverview.git
 cd CommunityOverview
 ```
 
-### 2.2 Konfigurera Miljövariabler
+### 2.2 Configure Environment Variables
 
-Kopiera och redigera `.env`:
+Copy and edit `.env`:
 
 ```bash
-cp .env.example .env
+cp config/default/.env.example config/default/.env
 ```
 
-**Obligatoriska variabler:**
+**Required variables:**
 
 ```bash
-# LLM Provider (välj en)
+# LLM Provider (choose one)
 LLM_PROVIDER=claude
 ANTHROPIC_API_KEY=sk-ant-api03-xxxxx
 
-# ELLER
+# OR
 LLM_PROVIDER=openai
 OPENAI_API_KEY=sk-xxxxx
 
-# Autentisering (rekommenderas för produktion)
+# Authentication (recommended for production)
 AUTH_ENABLED=true
 AUTH_USERNAME=admin
-AUTH_PASSWORD=<starkt-lösenord>
+AUTH_PASSWORD=<strong-password>
 ```
 
-### 2.3 Bygg Docker Image Lokalt (Valfritt)
+### 2.3 Build Docker Image Locally (Optional)
 
 ```bash
 docker build -t communityoverview:latest .
@@ -101,33 +101,33 @@ docker build -t communityoverview:latest .
 
 ---
 
-## 3. Lokal Deployment (Docker)
+## 3. Local Deployment (Docker)
 
-### Utveckling
+### Development
 
 ```bash
-# Starta med docker compose
+# Start with docker compose
 docker compose up -d
 
-# Visa loggar
+# View logs
 docker compose logs -f
 
-# Stoppa
+# Stop
 docker compose down
 ```
 
-### Produktion (Self-hosted)
+### Production (Self-hosted)
 
 ```bash
-# Använd produktionskonfiguration
+# Use production configuration
 docker compose -f docker-compose.prod.yml up -d
 ```
 
-Produktionskonfigurationen inkluderar:
-- Resursbegränsningar (CPU/RAM)
-- Automatisk omstart
-- Loggrotation
-- Named volumes för data
+The production configuration includes:
+- Resource limits (CPU/RAM)
+- Automatic restart
+- Log rotation
+- Named volumes for data
 
 ---
 
@@ -135,26 +135,26 @@ Produktionskonfigurationen inkluderar:
 
 ### 4.1 Google Cloud Run
 
-**Fördelar:** Automatisk skalning, pay-per-use, managed SSL
+**Benefits:** Automatic scaling, pay-per-use, managed SSL
 
-**Förberedelser:**
+**Prerequisites:**
 
 ```bash
-# Installera gcloud CLI
+# Install gcloud CLI
 # https://cloud.google.com/sdk/docs/install
 
-# Logga in och sätt projekt
+# Log in and set project
 gcloud auth login
-gcloud config set project DITT_PROJEKT_ID
+gcloud config set project YOUR_PROJECT_ID
 
-# Aktivera tjänster
+# Enable services
 gcloud services enable run.googleapis.com artifactregistry.googleapis.com
 ```
 
 **Deployment:**
 
 ```bash
-# Alternativ 1: Bygg och deploya direkt
+# Option 1: Build and deploy directly from source
 gcloud run deploy communityoverview \
   --source . \
   --region europe-north1 \
@@ -166,7 +166,7 @@ gcloud run deploy communityoverview \
   --set-env-vars "ANTHROPIC_API_KEY=$ANTHROPIC_API_KEY" \
   --set-env-vars "AUTH_PASSWORD=$AUTH_PASSWORD"
 
-# Alternativ 2: Använd förbyggd image från GHCR
+# Option 2: Use pre-built image from GHCR
 gcloud run deploy communityoverview \
   --image ghcr.io/jakobengdahl/communityoverview:latest \
   --region europe-north1 \
@@ -177,44 +177,48 @@ gcloud run deploy communityoverview \
 
 **Persistent Storage (Cloud Run + Cloud Storage):**
 
-Cloud Run är stateless. För persistent data, använd Cloud Storage:
+Cloud Run is stateless. For persistent data, use Cloud Storage:
 
 ```bash
-# Skapa bucket
-gsutil mb -l europe-north1 gs://ditt-projekt-data
+# Create bucket
+gsutil mb -l europe-north1 gs://your-project-data
 
-# Montera via Cloud Run (kräver 2nd gen)
+# Mount via Cloud Run (requires 2nd gen)
 gcloud run deploy communityoverview \
   --execution-environment gen2 \
-  --add-volume name=data,type=cloud-storage,bucket=ditt-projekt-data \
+  --add-volume name=data,type=cloud-storage,bucket=your-project-data \
   --add-volume-mount volume=data,mount-path=/data
 ```
+
+> **Production deployments:** For managed pilot deployments, the infra repository
+> handles Cloud Run configuration, GCS volumes, and per-pilot secrets. See
+> [DEPLOYMENT_CONTRACT.md](./DEPLOYMENT_CONTRACT.md) for the image artifact interface.
 
 ---
 
 ### 4.2 DigitalOcean App Platform
 
-**Fördelar:** Enkel setup, integrerad databas, managed SSL
+**Benefits:** Simple setup, integrated database, managed SSL
 
 **Via UI:**
 
-1. Gå till [DigitalOcean App Platform](https://cloud.digitalocean.com/apps)
-2. Klicka "Create App"
-3. Välj "GitHub" som källa
-4. Välj repository och branch
-5. Konfigurera miljövariabler
+1. Go to [DigitalOcean App Platform](https://cloud.digitalocean.com/apps)
+2. Click "Create App"
+3. Select "GitHub" as source
+4. Select repository and branch
+5. Configure environment variables
 6. Deploy
 
 **Via CLI:**
 
 ```bash
-# Installera doctl
-brew install doctl  # eller apt install doctl
+# Install doctl
+brew install doctl  # or apt install doctl
 
-# Logga in
+# Log in
 doctl auth init
 
-# Skapa app.yaml
+# Create app.yaml
 cat > .do/app.yaml << 'EOF'
 name: communityoverview
 services:
@@ -236,7 +240,7 @@ services:
         value: ${AUTH_PASSWORD}
 EOF
 
-# Deploya
+# Deploy
 doctl apps create --spec .do/app.yaml
 ```
 
@@ -244,22 +248,22 @@ doctl apps create --spec .do/app.yaml
 
 ### 4.3 Fly.io
 
-**Fördelar:** Global edge deployment, enkel skalning, persistent volumes
+**Benefits:** Global edge deployment, simple scaling, persistent volumes
 
 **Setup:**
 
 ```bash
-# Installera flyctl
+# Install flyctl
 curl -L https://fly.io/install.sh | sh
 
-# Logga in
+# Log in
 fly auth login
 
-# Initiera app (första gången)
+# Initialize app (first time only)
 fly launch --no-deploy
 ```
 
-**Skapa fly.toml:**
+**Create fly.toml:**
 
 ```toml
 app = "communityoverview"
@@ -293,13 +297,13 @@ primary_region = "arn"  # Stockholm
 **Deployment:**
 
 ```bash
-# Sätt secrets
+# Set secrets
 fly secrets set ANTHROPIC_API_KEY=sk-ant-xxx AUTH_PASSWORD=xxx
 
-# Skapa volume för data
+# Create volume for data
 fly volumes create data --region arn --size 1
 
-# Deploya
+# Deploy
 fly deploy
 ```
 
@@ -307,35 +311,35 @@ fly deploy
 
 ### 4.4 Railway
 
-**Fördelar:** Extremt enkel, GitHub-integration, automatisk SSL
+**Benefits:** Extremely simple, GitHub integration, automatic SSL
 
 **Via UI:**
 
-1. Gå till [Railway](https://railway.app)
+1. Go to [Railway](https://railway.app)
 2. "New Project" → "Deploy from GitHub repo"
-3. Välj repository
-4. Lägg till miljövariabler i Settings
-5. Deployment sker automatiskt
+3. Select repository
+4. Add environment variables in Settings
+5. Deployment happens automatically
 
 **Via CLI:**
 
 ```bash
-# Installera Railway CLI
+# Install Railway CLI
 npm install -g @railway/cli
 
-# Logga in
+# Log in
 railway login
 
-# Länka till projekt
+# Link to project
 railway link
 
-# Sätt variabler
+# Set variables
 railway variables set LLM_PROVIDER=claude
 railway variables set ANTHROPIC_API_KEY=sk-ant-xxx
 railway variables set AUTH_ENABLED=true
 railway variables set AUTH_PASSWORD=xxx
 
-# Deploya
+# Deploy
 railway up
 ```
 
@@ -343,19 +347,19 @@ railway up
 
 ### 4.5 AWS (ECS/Fargate)
 
-**Fördelar:** Enterprise-grad, full kontroll, integrerat med AWS-ekosystemet
+**Benefits:** Enterprise-grade, full control, integrated with the AWS ecosystem
 
-**Förberedelser:**
+**Prerequisites:**
 
 ```bash
-# Installera AWS CLI
+# Install AWS CLI
 # https://aws.amazon.com/cli/
 
-# Konfigurera
+# Configure
 aws configure
 ```
 
-**Skapa ECS Task Definition (task-definition.json):**
+**Create ECS Task Definition (task-definition.json):**
 
 ```json
 {
@@ -401,10 +405,10 @@ aws configure
 **Deployment:**
 
 ```bash
-# Registrera task definition
+# Register task definition
 aws ecs register-task-definition --cli-input-json file://task-definition.json
 
-# Skapa service
+# Create service
 aws ecs create-service \
   --cluster default \
   --service-name communityoverview \
@@ -418,54 +422,72 @@ aws ecs create-service \
 
 ## 5. CI/CD Pipeline
 
-### Automatisk Build & Publish
+### Automatic Build & Publish
 
-Projektet inkluderar GitHub Actions workflows:
+The project includes GitHub Actions workflows. Images are published to GitHub Container Registry (GHCR) on every successful push to `dev`, `preview`, or `main`.
 
-| Workflow | Fil | Beskrivning |
-|----------|-----|-------------|
-| CI | `.github/workflows/ci.yml` | Tester + Docker build + push till GHCR |
-| Deploy | `.github/workflows/deploy.yml` | Deploy till valfri plattform |
+| Workflow | File | Description |
+|----------|------|-------------|
+| CI | `.github/workflows/ci.yml` | Tests + Docker build + push to GHCR + notify infra repo |
+| Deploy | `.github/workflows/deploy.yml` | Deployment stub (actual deployments managed by infra repo) |
 
-### Aktivera CI/CD
+### Published Images
 
-1. **Pusha till GitHub** - CI körs automatiskt på main
-2. **Image publiceras** till `ghcr.io/USERNAME/communityoverview:latest`
-3. **Aktivera deployment** genom att redigera `.github/workflows/deploy.yml`
+| Image | Registry path |
+|-------|---------------|
+| Core application | `ghcr.io/jakobengdahl/communityoverview` |
+| MCP OAuth Gateway | `ghcr.io/jakobengdahl/communityoverview-gateway` |
 
-### Konfigurera Secrets
+### Image Tags
 
-Gå till Repository → Settings → Secrets and variables → Actions:
+| Tag | Description |
+|-----|-------------|
+| `sha-<commit>` | Immutable — canonical reference for a specific build |
+| `dev` | Floating — latest successful build from `dev` branch |
+| `latest` | Floating — latest successful build from `main` branch |
 
-| Secret | Beskrivning |
-|--------|-------------|
-| `GCP_PROJECT_ID` | Google Cloud projekt-ID |
-| `GCP_SA_KEY` | Service account JSON (base64) |
-| `DIGITALOCEAN_ACCESS_TOKEN` | DO API-token |
-| `FLY_API_TOKEN` | Fly.io API-token |
-| `RAILWAY_TOKEN` | Railway API-token |
+### How a Merge Flows
+
+```
+Developer merges to dev
+         │
+         ▼
+CI: tests run (pytest backend/core/tests/)
+         │
+         ▼
+CI: build job (on success)
+  – builds core image → ghcr.io/jakobengdahl/communityoverview:sha-<sha>
+  – builds gateway image → ghcr.io/jakobengdahl/communityoverview-gateway:sha-<sha>
+  – pushes floating tag: dev
+         │
+         ▼
+CI: notify-infra job (if INFRA_DISPATCH_TOKEN configured)
+  – sends repository_dispatch app-release to infra repo
+```
+
+See [DEPLOYMENT_CONTRACT.md](./DEPLOYMENT_CONTRACT.md) for the full artifact interface specification.
 
 ---
 
-## 6. Uppdateringar & Underhåll
+## 6. Updates & Maintenance
 
-### Manuell Uppdatering
+### Manual Update
 
 ```bash
-# Hämta senaste kod
+# Pull latest code
 git pull origin main
 
-# Bygg ny image
+# Build new image
 docker build -t communityoverview:latest .
 
-# Starta om container
+# Restart container
 docker compose down && docker compose up -d
 ```
 
-### Automatisk Uppdatering (Watchtower)
+### Automatic Updates (Watchtower)
 
 ```bash
-# Lägg till Watchtower för automatiska uppdateringar
+# Add Watchtower for automatic updates
 docker run -d \
   --name watchtower \
   -v /var/run/docker.sock:/var/run/docker.sock \
@@ -474,7 +496,7 @@ docker run -d \
   communityoverview
 ```
 
-### Cloud-specifika Uppdateringar
+### Cloud-specific Updates
 
 **Google Cloud Run:**
 ```bash
@@ -488,64 +510,61 @@ fly deploy
 ```
 
 **Railway:**
-Automatiskt vid push till main (om konfigurerat).
+Automatic on push to main (if configured).
 
 ---
 
-## 7. Felsökning
+## 7. Troubleshooting
 
-### Container Startar Inte
+### Container Won't Start
 
 ```bash
-# Kolla loggar
+# Check logs
 docker logs communityoverview
 
-# Vanliga problem:
-# - Saknad ANTHROPIC_API_KEY
-# - Fel PORT-konfiguration
-# - Permissions på /data-mappen
+# Common causes:
+# - Missing ANTHROPIC_API_KEY or OPENAI_API_KEY
+# - Wrong PORT configuration
+# - Permissions on /data directory
 ```
 
-### Health Check Failar
+Note: the application starts without any LLM key — the chat panel is simply hidden. See [LLM_PROVIDERS.md](../LLM_PROVIDERS.md).
+
+### Health Check Fails
 
 ```bash
-# Testa manuellt
+# Test manually
 curl http://localhost:8000/health
 
-# Förväntat svar:
+# Expected response:
 # {"status":"healthy","graph_nodes":X,"graph_edges":Y}
 ```
 
-### Data Försvinner (Cloud)
+### Data Disappears (Cloud)
 
-Cloud-plattformar är ofta stateless. Säkerställ:
-- Volume mount är konfigurerad korrekt
-- Cloud Storage/persistent disk är uppsatt
-- Backup-strategi finns
+Cloud platforms are often stateless. Ensure:
+- Volume mount is configured correctly
+- Cloud Storage / persistent disk is set up
+- A backup strategy is in place
 
-### SSL/HTTPS Problem
+### SSL/HTTPS Issues
 
-De flesta cloud-plattformar hanterar SSL automatiskt. För self-hosted:
-
-```bash
-# Lägg till Caddy som reverse proxy
-# Se docker-compose.prod.yml för exempel
-```
+Most cloud platforms handle SSL automatically. For self-hosted setups, add a reverse proxy such as Caddy or nginx in front of the application.
 
 ---
 
-## Sammanfattning
+## Summary
 
-| Plattform | Komplexitet | Kostnad | Skalbarhet | Persistent Storage |
-|-----------|-------------|---------|------------|-------------------|
-| **Docker Compose** | Låg | Egen server | Manuell | Ja (volumes) |
-| **Cloud Run** | Låg | Pay-per-use | Auto | Cloud Storage |
-| **DigitalOcean** | Låg | ~$5/mån | Manuell | Ja |
-| **Fly.io** | Låg | Free tier | Auto | Volumes |
-| **Railway** | Mycket låg | Pay-per-use | Auto | Ja |
-| **AWS ECS** | Hög | Variabel | Auto | EFS/EBS |
+| Platform | Complexity | Cost | Scalability | Persistent Storage |
+|-----------|------------|------|------------|-------------------|
+| **Docker Compose** | Low | Own server | Manual | Yes (volumes) |
+| **Cloud Run** | Low | Pay-per-use | Auto | Cloud Storage |
+| **DigitalOcean** | Low | ~$5/month | Manual | Yes |
+| **Fly.io** | Low | Free tier | Auto | Volumes |
+| **Railway** | Very low | Pay-per-use | Auto | Yes |
+| **AWS ECS** | High | Variable | Auto | EFS/EBS |
 
-**Rekommendation för PoC:**
-- **Enklast:** Railway eller Fly.io
-- **Google-ekosystem:** Cloud Run
-- **Full kontroll:** Docker Compose på egen server
+**Recommendation for PoC / first deployment:**
+- **Simplest:** Railway or Fly.io
+- **Google ecosystem:** Cloud Run
+- **Full control:** Docker Compose on own server

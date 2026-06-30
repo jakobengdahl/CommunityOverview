@@ -393,6 +393,71 @@ Before modifying the schema:
 
 ---
 
+## Documentation
+
+All documentation lives in `docs/` and must be in **English** — including PR bodies,
+commit messages, and code comments.
+
+### When to update docs alongside code
+
+- **API changes** (`rest_api.py`, `mcp_tools.py`): update `backend/DEVELOPMENT.md`
+  endpoint table immediately. Wrong docs are worse than no docs.
+- **New features / UI changes**: update `docs/USER_GUIDE.md`. If the change affects
+  a screenshot, note it in the PR body — Jakob captures screenshots separately.
+- **New node types, relationship types, or profile changes**: update `docs/PROFILES.md`.
+- **Federation config or behaviour changes**: update `docs/FEDERATED_GRAPH_DESIGN.md`
+  Implementation Status section.
+- **Agent or subscription system changes**: update `docs/EVENT_SUBSCRIPTIONS.md`.
+
+### What never belongs in docs
+
+- Future proposals or TODOs in current-state documents — file them in `SMALL_FIXES.md`
+  or discuss in the PR body instead.
+- Swedish text in any file under `docs/` or in code comments — English only.
+
+### Screenshot workflow (USER_GUIDE.md)
+
+The guide references images in `docs/images/`. Screenshots are captured by Jakob,
+not generated programmatically. When a code change would invalidate an existing
+screenshot or require a new one, add a note to the PR body:
+
+> **Screenshots affected:** `docs/images/<filename>.png` — <why it changed>
+
+Do not remove `![alt](images/filename.png)` references from the guide just because
+the image file doesn't exist yet; Jakob will add it after deployment.
+
+---
+
+## Internationalisation (i18n)
+
+The UI supports multiple languages. English is the default; Swedish (`sv`) is the
+only other language with full coverage today.
+
+### Rules
+
+- **Never hardcode display strings** in React components. Use the `useI18n()` hook
+  and look up a key from the JSON files.
+- **Always add new keys to both** `frontend/web/src/i18n/en.json` **and**
+  `frontend/web/src/i18n/sv.json`. Missing a language file key causes the UI to
+  fall back to the key name, not English.
+- **`packages/ui-graph-canvas`** has no access to the host app's i18n system.
+  All user-visible text in that package must be accepted as props with English
+  defaults. Wire new props through `App.jsx` (translating with `t()`) and add the
+  corresponding keys to both JSON files.
+- The `contextMenuLabels` prop on `GraphCanvas` is the established pattern for this —
+  see `GraphCanvas.jsx` and `App.jsx` for the implementation.
+- Backend-side strings (error messages, log output) stay in English — they are
+  developer-facing, not end-user-facing.
+
+### Adding support for a new language
+
+1. Create `frontend/web/src/i18n/<lang>.json` mirroring the structure of `en.json`.
+2. Add `'<lang>'` to `SUPPORTED_LANGUAGES` in `frontend/web/src/i18n/index.jsx`.
+3. Add a `menu.language_<lang>` key to both `en.json` and `sv.json` (and the new file).
+4. The language selector in `FloatingHeader.jsx` will pick it up automatically.
+
+---
+
 ## Key Files
 
 | Path | Purpose |
@@ -408,3 +473,8 @@ Before modifying the schema:
 | `config/default/federation_config.json` | Federation topology |
 | `.github/workflows/ci.yml` | CI: tests on PRs, Docker build on preview/main push |
 | `backend/DEVELOPMENT.md` | Architecture overview and API docs |
+| `frontend/web/src/i18n/en.json` | English UI strings (source of truth for keys) |
+| `frontend/web/src/i18n/sv.json` | Swedish UI strings (must mirror en.json structure) |
+| `frontend/web/src/i18n/index.jsx` | i18n provider, `useI18n()` hook, language detection |
+| `packages/ui-graph-canvas/src/components/GraphCanvas.jsx` | Canvas + all context menus (text via props) |
+| `docs/USER_GUIDE.md` | End-user guide with screenshot references |
