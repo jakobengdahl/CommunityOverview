@@ -80,6 +80,7 @@ function App() {
   const latestViewport = useRef(null);
   const dialogOpenRef = useRef(false);
   const [statsDialogOpen, setStatsDialogOpen] = useState(false);
+  const [headerMenuOpen, setHeaderMenuOpen] = useState(false);
   const [notification, setNotification] = useState(null);
   const [deleteDialog, setDeleteDialog] = useState(null);
   const [saveViewDialog, setSaveViewDialog] = useState(null);
@@ -114,12 +115,12 @@ function App() {
       createNodeType || editingNode || detailNode || editingEdge ||
       deleteDialog || saveViewDialog || showSubscriptionDialog ||
       showAgentDialog || skillDialogType || showAKCDialog ||
-      statsDialogOpen || (akcShortName && akcConfig && !akcIntroShown)
+      statsDialogOpen || headerMenuOpen || (akcShortName && akcConfig && !akcIntroShown)
     );
   }, [createNodeType, editingNode, detailNode, editingEdge,
       deleteDialog, saveViewDialog, showSubscriptionDialog,
       showAgentDialog, skillDialogType, showAKCDialog,
-      statsDialogOpen, akcShortName, akcConfig, akcIntroShown]);
+      statsDialogOpen, headerMenuOpen, akcShortName, akcConfig, akcIntroShown]);
 
   // Double-Escape to clear the canvas (works even from input fields)
   useEffect(() => {
@@ -851,7 +852,7 @@ function App() {
         />
       </div>
 
-      <FloatingHeader stats={stats} onExportGraph={handleExportGraph} sessionId={_vizSessionId} onClear={clearVisualization} onStatsDialogChange={setStatsDialogOpen} />
+      <FloatingHeader stats={stats} onExportGraph={handleExportGraph} sessionId={_vizSessionId} onClear={clearVisualization} onStatsDialogChange={setStatsDialogOpen} onMenuOpenChange={setHeaderMenuOpen} />
       {maxFederationDepth > 1 && (
         <div className="app-a11y-depth-live" aria-live="polite" aria-atomic="true">
           {t('federation.depth_indicator', { current: federationDepth, max: maxFederationDepth })}

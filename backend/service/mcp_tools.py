@@ -563,7 +563,7 @@ def register_mcp_tools(mcp, service: GraphService, session_registry=None) -> Dic
             "message": (
                 f"Session '{session_id}' is active. "
                 "You can now pass visualization_session_id to search_graph, "
-                "get_related_nodes, and get_saved_view."
+                "get_related_nodes, get_saved_view, and clear_visualization."
             ),
             "visible_node_count": len(state.get("visible_node_ids", [])),
         }

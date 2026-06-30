@@ -246,6 +246,8 @@ const useGraphStore = create((set, get) => ({
       nodeMarks: {},
       pendingGroups: null,
       clearGroupsFlag: true,
+      selectedGraphNodes: [],
+      selectedNodeId: null,
     });
     setTimeout(() => set({ clearGroupsFlag: false }), 100);
   },

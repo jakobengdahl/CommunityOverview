@@ -9,7 +9,7 @@ import './FloatingHeader.css';
 
 const MAX_INLINE_TYPES = 5;
 
-function FloatingHeader({ stats, title = 'Community Graph View', onExportGraph, sessionId, onClear, onStatsDialogChange }) {
+function FloatingHeader({ stats, title = 'Community Graph View', onExportGraph, sessionId, onClear, onStatsDialogChange, onMenuOpenChange }) {
   const { t, language, setLanguage } = useI18n();
   const { showMinimap, setShowMinimap } = useGraphStore();
   const [menuOpen, setMenuOpen] = useState(false);
@@ -20,6 +20,10 @@ function FloatingHeader({ stats, title = 'Community Graph View', onExportGraph, 
   useEffect(() => {
     onStatsDialogChange?.(statsDialogOpen);
   }, [statsDialogOpen, onStatsDialogChange]);
+
+  useEffect(() => {
+    onMenuOpenChange?.(menuOpen);
+  }, [menuOpen, onMenuOpenChange]);
 
   useEffect(() => {
     const handleClickOutside = (e) => {
