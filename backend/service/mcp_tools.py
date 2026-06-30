@@ -523,14 +523,8 @@ def register_mcp_tools(mcp, service: GraphService, session_registry=None) -> Dic
                     "Call connect_to_visualization_session first to verify the session is open."
                 ),
             }
-        session_registry.push_command_sync(
-            visualization_session_id,
-            {
-                "type": "tool_result",
-                "tool": "clear_visualization",
-                "result": {"action": "clear_visualization", "nodes": [], "edges": []},
-            },
-        )
+        result = {"action": "clear_visualization", "nodes": [], "edges": [], "success": True}
+        _push_to_session(session_registry, visualization_session_id, "clear_visualization", result)
         return {
             "success": True,
             "message": f"Canvas cleared in session '{visualization_session_id}'",

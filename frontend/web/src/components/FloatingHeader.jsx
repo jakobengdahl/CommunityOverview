@@ -9,13 +9,17 @@ import './FloatingHeader.css';
 
 const MAX_INLINE_TYPES = 5;
 
-function FloatingHeader({ stats, title = 'Community Graph View', onExportGraph, sessionId, onClear }) {
+function FloatingHeader({ stats, title = 'Community Graph View', onExportGraph, sessionId, onClear, onStatsDialogChange }) {
   const { t, language, setLanguage } = useI18n();
   const { showMinimap, setShowMinimap } = useGraphStore();
   const [menuOpen, setMenuOpen] = useState(false);
   const [dropdownLeft, setDropdownLeft] = useState(null);
   const [statsDialogOpen, setStatsDialogOpen] = useState(false);
   const menuRef = useRef(null);
+
+  useEffect(() => {
+    onStatsDialogChange?.(statsDialogOpen);
+  }, [statsDialogOpen, onStatsDialogChange]);
 
   useEffect(() => {
     const handleClickOutside = (e) => {
@@ -60,7 +64,7 @@ function FloatingHeader({ stats, title = 'Community Graph View', onExportGraph, 
         )}
         <button
           className="floating-header-clear"
-          onClick={onClear}
+          onClick={() => onClear?.()}
           title="Clear canvas — remove all nodes and edges (or press Esc twice)"
           aria-label="Clear canvas"
         >

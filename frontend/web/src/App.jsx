@@ -79,6 +79,7 @@ function App() {
   const urlViewLoadedRef = useRef(false);
   const latestViewport = useRef(null);
   const dialogOpenRef = useRef(false);
+  const [statsDialogOpen, setStatsDialogOpen] = useState(false);
   const [notification, setNotification] = useState(null);
   const [deleteDialog, setDeleteDialog] = useState(null);
   const [saveViewDialog, setSaveViewDialog] = useState(null);
@@ -112,17 +113,20 @@ function App() {
     dialogOpenRef.current = !!(
       createNodeType || editingNode || detailNode || editingEdge ||
       deleteDialog || saveViewDialog || showSubscriptionDialog ||
-      showAgentDialog || skillDialogType || showAKCDialog
+      showAgentDialog || skillDialogType || showAKCDialog ||
+      statsDialogOpen || (akcShortName && akcConfig && !akcIntroShown)
     );
   }, [createNodeType, editingNode, detailNode, editingEdge,
       deleteDialog, saveViewDialog, showSubscriptionDialog,
-      showAgentDialog, skillDialogType, showAKCDialog]);
+      showAgentDialog, skillDialogType, showAKCDialog,
+      statsDialogOpen, akcShortName, akcConfig, akcIntroShown]);
 
   // Double-Escape to clear the canvas (works even from input fields)
   useEffect(() => {
     let lastEscape = 0;
     const handleKeyDown = (e) => {
       if (e.key !== 'Escape') return;
+      if (e.repeat) return;
       if (dialogOpenRef.current) return;
       const now = Date.now();
       if (now - lastEscape < 400) {
@@ -847,7 +851,7 @@ function App() {
         />
       </div>
 
-      <FloatingHeader stats={stats} onExportGraph={handleExportGraph} sessionId={_vizSessionId} onClear={clearVisualization} />
+      <FloatingHeader stats={stats} onExportGraph={handleExportGraph} sessionId={_vizSessionId} onClear={clearVisualization} onStatsDialogChange={setStatsDialogOpen} />
       {maxFederationDepth > 1 && (
         <div className="app-a11y-depth-live" aria-live="polite" aria-atomic="true">
           {t('federation.depth_indicator', { current: federationDepth, max: maxFederationDepth })}
