@@ -215,7 +215,7 @@ if ! command -v node &> /dev/null; then
         echo "Installing nvm..."
         curl -fsSL https://raw.githubusercontent.com/nvm-sh/nvm/v0.39.7/install.sh | bash
         export NVM_DIR="${NVM_DIR:-$HOME/.nvm}"
-        \. "$NVM_DIR/nvm.sh"
+        \. "$NVM_DIR/nvm.sh" || true
     fi
 
     # Install and activate Node.js 20
