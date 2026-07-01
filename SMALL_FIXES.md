@@ -45,11 +45,11 @@ Effort scale: XS = single-line fix · S = up to ~30 lines / one file · M = mult
 - **Issue:** The test asserts `sendChatMessage.mock.calls[0][2]).toEqual({ federationDepth: 2 })`, but `ChatPanel` now sends additional context fields (`selectedNodeIds`, `visibleNodeIds`, `expertAgentId`, `skillsContext`, `collectionShortName`) alongside `federationDepth`, so the exact-equality check fails. The test wasn't updated when those fields were added to the chat request payload. Fix: change the assertion to `toMatchObject({ federationDepth: 2 })` (matching the pattern already used for the `searchGraph` assertion two lines above), or list all current fields explicitly.
 - **Effort:** XS
 
-### [2026-07-01] `stat-metadata` profile references a non-existent icon name
-- **File(s):** `config/stat-metadata/schema_config.json:319`
+### [2026-07-01] `stat-metadata` profile's `ess-expert` agent references a non-existent icon name, and `expert_agents[].icon` is dead config
+- **File(s):** `config/stat-metadata/schema_config.json:319` (`presentation.expert_agents[].icon` for the `ess-expert` entry, not a node type), `frontend/web/src/components/ExpertAgentSelector.jsx:2,42`
 - **Context:** Discovered during `claude/icon-config-docs-lkte9g` (icon registry expansion + `docs/ICONS.md`)
-- **Issue:** The `Actor` entry's `icon` field is set to `"GlobeFill"`, but `react-bootstrap-icons` has no such export — only `Globe` (no filled variant) exists. Since `resolveIcon()` in `FloatingToolbar.jsx` silently falls back to the legacy/default icon when a schema `icon` value isn't a registered key, this profile's actor nodes render with the wrong icon with no visible error. Fix: change the value to an existing icon, e.g. `GlobeEuropeAfricaFill` (now registered, see `docs/ICONS.md`).
-- **Effort:** XS
+- **Issue:** Two separate problems here. (1) The value `"GlobeFill"` isn't a real `react-bootstrap-icons` export — only `Globe`, `Globe2`, and regional variants like `GlobeEuropeAfricaFill` exist. (2) More fundamentally, `expert_agents[].icon` isn't read by the frontend at all: `ExpertAgentSelector.jsx` renders a hardcoded `Robot` icon (line 42) for every agent regardless of `agent.color`/`agent.icon`, so this field currently has zero visible effect for any profile (`config/default`'s expert agents set `icon` too, same dead field). Fix: either wire `ExpertAgentSelector.jsx` to read `agent.icon` from `ICON_REGISTRY` (like `resolveIcon()` does for node types) and then correct the `GlobeFill` value to `GlobeEuropeAfricaFill`, or remove the unused `icon` field from `expert_agents` config entries across profiles if per-agent icons aren't wanted.
+- **Effort:** S
 
 ### [2026-07-01] `FloatingSearch` icon resolution ignores per-profile schema `icon` overrides
 - **File(s):** `frontend/web/src/components/FloatingToolbar.jsx:366-371`, `frontend/web/src/components/FloatingSearch.jsx:4,277`
