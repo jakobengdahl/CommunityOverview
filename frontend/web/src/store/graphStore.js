@@ -240,6 +240,12 @@ const useGraphStore = create((set, get) => ({
     set({ edges: edges.filter(edge => edge.id !== edgeId) });
   },
 
+  // Update fields of a single edge in place without touching nodes or groups.
+  updateEdgeData: (edgeId, updates) => {
+    const { edges } = get();
+    set({ edges: edges.map(edge => edge.id === edgeId ? { ...edge, ...updates } : edge) });
+  },
+
   clearVisualization: () => {
     set({
       nodes: [],

@@ -139,6 +139,25 @@ body.graph-suppress-selection * {
   background: #1a1a1a;
 }
 
+.context-menu-subheader {
+  padding: 6px 12px 2px;
+  font-size: 11px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  color: #888;
+}
+
+.edge-type-list {
+  max-height: 220px;
+  overflow-y: auto;
+}
+
+.edge-type-list button.edge-type-active {
+  color: #60A5FA;
+  font-weight: 600;
+}
+
 /* Selected edge styling */
 .react-flow__edge.selected .react-flow__edge-path {
   stroke: #646cff !important;
