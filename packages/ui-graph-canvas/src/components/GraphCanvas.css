@@ -6,6 +6,17 @@
   overflow: hidden;
 }
 
+/* Applied to <body> while multi-selecting nodes (shift/ctrl-drag). Prevents the
+   browser from highlighting surrounding UI text (session id, search terms,
+   labels) as an accidental side effect of the modifier-click. */
+body.graph-suppress-selection,
+body.graph-suppress-selection * {
+  -webkit-user-select: none;
+  -moz-user-select: none;
+  -ms-user-select: none;
+  user-select: none;
+}
+
 .graph-canvas-controls {
   position: absolute;
   top: 10px;
