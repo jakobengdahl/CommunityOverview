@@ -104,6 +104,29 @@ describe('GraphCanvas', () => {
     expect(screen.queryByLabelText('Federated search depth selector')).not.toBeInTheDocument();
   });
 
+  it('suppresses text selection while modifier-clicking to multi-select', () => {
+    render(<GraphCanvas nodes={sampleNodes} edges={sampleEdges} />);
+    const wrapper = screen.getByTestId('react-flow').parentElement;
+
+    expect(document.body.classList.contains('graph-suppress-selection')).toBe(false);
+
+    // Shift-click (multi-select) should suppress text selection on the body.
+    fireEvent.mouseDown(wrapper, { button: 0, shiftKey: true });
+    expect(document.body.classList.contains('graph-suppress-selection')).toBe(true);
+
+    // Releasing the mouse lifts the suppression.
+    fireEvent.mouseUp(document);
+    expect(document.body.classList.contains('graph-suppress-selection')).toBe(false);
+  });
+
+  it('does not suppress text selection on a plain click', () => {
+    render(<GraphCanvas nodes={sampleNodes} edges={sampleEdges} />);
+    const wrapper = screen.getByTestId('react-flow').parentElement;
+
+    fireEvent.mouseDown(wrapper, { button: 0 });
+    expect(document.body.classList.contains('graph-suppress-selection')).toBe(false);
+  });
+
   it('calls onFederationDepthChange when level is clicked', () => {
     const onFederationDepthChange = vi.fn();
 

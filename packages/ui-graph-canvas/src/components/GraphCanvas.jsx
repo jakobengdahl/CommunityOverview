@@ -558,6 +558,20 @@ function GraphCanvasInner({
       if (e.button === 0) {
         mouseDownPos.current = { x: e.clientX, y: e.clientY };
       }
+      // When shift/ctrl/meta-clicking nodes to multi-select, the browser would
+      // otherwise extend a text selection into surrounding UI (session id,
+      // search terms, labels), highlighting them blue. Suppress text selection
+      // for the duration of the interaction and clear any stray selection.
+      if (e.shiftKey || e.ctrlKey || e.metaKey) {
+        document.body.classList.add('graph-suppress-selection');
+        const selection = window.getSelection?.();
+        if (selection && selection.rangeCount > 0) {
+          selection.removeAllRanges();
+        }
+      }
+    };
+    const handleMouseUp = () => {
+      document.body.classList.remove('graph-suppress-selection');
     };
     const handleClick = (e) => {
       if (e.button !== 0) return;
@@ -587,9 +601,14 @@ function GraphCanvasInner({
     };
     wrapper.addEventListener('mousedown', handleMouseDown);
     wrapper.addEventListener('click', handleClick);
+    // Listen for mouseup on the document so the suppression is lifted even when
+    // the pointer is released outside the canvas wrapper.
+    document.addEventListener('mouseup', handleMouseUp);
     return () => {
       wrapper.removeEventListener('mousedown', handleMouseDown);
       wrapper.removeEventListener('click', handleClick);
+      document.removeEventListener('mouseup', handleMouseUp);
+      document.body.classList.remove('graph-suppress-selection');
     };
   }, [clearSelection, closeAllMenus]);
 
