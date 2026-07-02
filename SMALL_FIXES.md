@@ -75,6 +75,12 @@ Effort scale: XS = single-line fix · S = up to ~30 lines / one file · M = mult
 - **Issue:** Code uses `t('key') || 'fallback'` expecting a null/undefined return when a key is missing, but `t()` returns the key name as a string (truthy) when no translation is found. The `|| 'fallback'` branch never fires. The two immediately affected keys (`menu.view_section`, `menu.show_minimap`) were fixed by adding them to the JSON files. Any future missing key will silently show its key name in the UI. Fix: either update the fallback pattern to use `t('key') === 'key' ? 'fallback' : t('key')`, or make `t()` return null on a miss (breaking change to the hook contract).
 - **Effort:** S
 
+### [2026-07-02] `federationDepthFlow.test.jsx` fails on the current `dev` baseline
+- **File(s):** `frontend/web/tests/federationDepthFlow.test.jsx:73`
+- **Context:** Discovered during `claude/manual-edges-persistence-3wcpx8` (reproduced identically on `dev` before this branch's changes)
+- **Issue:** The test asserts `api.sendChatMessage.mock.calls[0][2]` deeply equals `{ federationDepth: 2 }`, but the chat request options object now carries additional fields (5 more keys), so the strict `toEqual` fails. The runtime behaviour is correct — the assertion is just too strict. Fix: assert the object *contains* `federationDepth: 2` (e.g. `expect.objectContaining`) instead of an exact match.
+- **Effort:** XS
+
 ---
 
 ## Fixed

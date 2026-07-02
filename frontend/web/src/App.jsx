@@ -54,6 +54,7 @@ function App() {
     closeEditingNode,
     removeNode,
     removeEdge,
+    updateEdgeData,
     presentation,
     setConfig,
     focusNodeId,
@@ -467,6 +468,20 @@ function App() {
     }
   }, [editingEdge, nodes, edges, updateVisualization, showNotification]);
 
+  // Callback: Change an edge's relationship type from the context menu.
+  // Persists to the backend and updates the single edge in place so groups and
+  // node positions are preserved.
+  const handleSetEdgeType = useCallback(async (edgeId, type) => {
+    try {
+      await api.updateEdge(edgeId, { type: type || null });
+      updateEdgeData(edgeId, { type: type || 'RELATES_TO' });
+      showNotification('success', 'Connection type updated');
+    } catch (error) {
+      console.error('Error updating edge type:', error);
+      showNotification('error', 'Could not update connection');
+    }
+  }, [updateEdgeData, showNotification]);
+
   // Callback: Connect nodes (from drag-connect in canvas)
   const handleConnect = useCallback(async (params) => {
     try {
@@ -824,6 +839,7 @@ function App() {
           onHideEdge={handleHideEdge}
           onDeleteEdge={handleDeleteEdge}
           onEditEdge={handleEditEdge}
+          onSetEdgeType={handleSetEdgeType}
           onConnect={handleConnect}
           onCreateGroup={handleCreateGroup}
           onSaveView={handleSaveView}
@@ -858,6 +874,8 @@ function App() {
             showOnly: t('context_menu.show_only'),
             hideAll: t('context_menu.hide_all'),
             deleteAll: t('context_menu.delete_all'),
+            changeType: t('context_menu.change_type'),
+            generalConnection: t('context_menu.general_connection'),
           }}
           nodeColorResolver={getNodeColor}
           onViewportChange={(vp) => { latestViewport.current = vp; }}

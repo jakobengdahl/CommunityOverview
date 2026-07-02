@@ -161,6 +161,53 @@ describe('GraphCanvas', () => {
     expect(onDeleteEdge).toHaveBeenCalledWith('edge-1');
   });
 
+  it('lets you change an edge relationship type from its context menu', () => {
+    const onSetEdgeType = vi.fn();
+    const schema = {
+      relationship_types: {
+        RELATES_TO: { description: 'Relates to (general connection)' },
+        BELONGS_TO: { description: 'Belongs to' },
+      },
+    };
+
+    render(
+      <GraphCanvas
+        nodes={sampleNodes}
+        edges={sampleEdges}
+        schema={schema}
+        onSetEdgeType={onSetEdgeType}
+      />
+    );
+
+    fireEvent.contextMenu(screen.getByTestId('edge-edge-1'));
+
+    // General connection is always offered and reflects the RELATES_TO edge.
+    expect(screen.getByRole('button', { name: /general connection/i })).toBeInTheDocument();
+
+    fireEvent.click(screen.getByRole('button', { name: /^belongs_to$/i }));
+
+    expect(onSetEdgeType).toHaveBeenCalledWith('edge-1', 'BELONGS_TO');
+  });
+
+  it('resets an edge to a general connection from its context menu', () => {
+    const onSetEdgeType = vi.fn();
+    const schema = { relationship_types: { BELONGS_TO: { description: 'Belongs to' } } };
+
+    render(
+      <GraphCanvas
+        nodes={sampleNodes}
+        edges={[{ id: 'edge-1', source: 'node-1', target: 'node-2', type: 'BELONGS_TO' }]}
+        schema={schema}
+        onSetEdgeType={onSetEdgeType}
+      />
+    );
+
+    fireEvent.contextMenu(screen.getByTestId('edge-edge-1'));
+    fireEvent.click(screen.getByRole('button', { name: /general connection/i }));
+
+    expect(onSetEdgeType).toHaveBeenCalledWith('edge-1', 'RELATES_TO');
+  });
+
   it('closes an open context menu when closeMenusSignal increases', () => {
     const { rerender } = render(
       <GraphCanvas nodes={sampleNodes} edges={sampleEdges} closeMenusSignal={0} />

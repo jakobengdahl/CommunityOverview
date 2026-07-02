@@ -80,6 +80,7 @@ function GraphCanvasInner({
   onHideEdge,
   onDeleteEdge,
   onEditEdge,
+  onSetEdgeType,
   onConnect: onConnectCallback,
   onCreateGroup,
   onSaveView,
@@ -120,8 +121,20 @@ function GraphCanvasInner({
     showOnly: 'Show only these',
     hideAll: 'Hide all',
     deleteAll: 'Delete all',
+    changeType: 'Change type',
+    generalConnection: 'General connection',
     ...contextMenuLabels,
   };
+
+  // Relationship types defined in the schema, used for the edge type picker.
+  const relationshipTypes = useMemo(() => {
+    const rt = schema?.relationship_types;
+    if (!rt || typeof rt !== 'object') return [];
+    return Object.entries(rt).map(([name, cfg]) => ({
+      type: name,
+      description: (cfg && typeof cfg === 'object' && cfg.description) || '',
+    }));
+  }, [schema]);
   const [loadedNodeCount, setLoadedNodeCount] = useState(INITIAL_LOAD_COUNT);
   const [nodeContextMenu, setNodeContextMenu] = useState(null);
   const [multiNodeContextMenu, setMultiNodeContextMenu] = useState(null);
@@ -280,10 +293,15 @@ function GraphCanvasInner({
 
   const onConnect = useCallback(
     (params) => {
-      setEdges((eds) => addEdge(params, eds));
-      // Notify parent to persist the connection to backend
+      // Persistence-first: when a parent handler is provided it persists the
+      // connection and the stored edge flows back in through the store, so what
+      // is drawn is always what is saved. Adding a local edge here as well would
+      // leave a phantom edge on screen if persistence fails. Only fall back to a
+      // local-only edge for consumers that don't wire up persistence.
       if (onConnectCallback) {
         onConnectCallback(params);
+      } else {
+        setEdges((eds) => addEdge(params, eds));
       }
     },
     [setEdges, onConnectCallback]
@@ -1036,6 +1054,40 @@ function GraphCanvasInner({
           <div className="context-menu-header">
             {edgeContextMenu.edge.label || edgeContextMenu.edge.data?.type || 'Connection'}
           </div>
+          {onSetEdgeType && relationshipTypes.length > 0 && (() => {
+            const currentType = edgeContextMenu.edge.label || edgeContextMenu.edge.data?.type || '';
+            const isGeneral = !currentType || currentType === 'RELATES_TO';
+            const setType = (type) => {
+              onSetEdgeType(edgeContextMenu.edge.id, type);
+              setEdgeContextMenu(null);
+            };
+            return (
+              <>
+                <div className="context-menu-subheader">{cml.changeType}</div>
+                <div className="edge-type-list">
+                  <button
+                    className={isGeneral ? 'edge-type-active' : ''}
+                    onClick={() => setType('RELATES_TO')}
+                  >
+                    {isGeneral ? '✓ ' : ''}{cml.generalConnection}
+                  </button>
+                  {relationshipTypes
+                    .filter(rt => rt.type !== 'RELATES_TO')
+                    .map(rt => (
+                      <button
+                        key={rt.type}
+                        title={rt.description || undefined}
+                        className={currentType === rt.type ? 'edge-type-active' : ''}
+                        onClick={() => setType(rt.type)}
+                      >
+                        {currentType === rt.type ? '✓ ' : ''}{rt.type}
+                      </button>
+                    ))}
+                </div>
+                <div className="context-menu-separator"></div>
+              </>
+            );
+          })()}
           {onEditEdge && (
             <button onClick={() => {
               onEditEdge(edgeContextMenu.edge.id, edgeContextMenu.edge);

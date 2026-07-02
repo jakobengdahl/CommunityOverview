@@ -144,7 +144,9 @@
     "nodes_selected": "{count} nodes selected",
     "show_only": "Show only these",
     "hide_all": "Hide all",
-    "delete_all": "Delete all"
+    "delete_all": "Delete all",
+    "change_type": "Change type",
+    "general_connection": "General connection"
   },
   "common": {
     "saving": "Saving..."

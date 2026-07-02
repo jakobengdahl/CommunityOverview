@@ -144,7 +144,9 @@
     "nodes_selected": "{count} noder markerade",
     "show_only": "Visa enbart dessa",
     "hide_all": "Dölj alla",
-    "delete_all": "Ta bort alla"
+    "delete_all": "Ta bort alla",
+    "change_type": "Ändra typ",
+    "general_connection": "Generell koppling"
   },
   "common": {
     "saving": "Sparar..."
