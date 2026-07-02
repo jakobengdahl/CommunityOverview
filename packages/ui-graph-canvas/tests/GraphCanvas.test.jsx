@@ -137,4 +137,19 @@ describe('GraphCanvas', () => {
 
     expect(onDeleteEdge).toHaveBeenCalledWith('edge-1');
   });
+
+  it('closes an open context menu when closeMenusSignal increases', () => {
+    const { rerender } = render(
+      <GraphCanvas nodes={sampleNodes} edges={sampleEdges} closeMenusSignal={0} />
+    );
+
+    fireEvent.contextMenu(screen.getByTestId('edge-edge-1'));
+    expect(document.querySelector('.edge-context-menu')).toBeInTheDocument();
+
+    rerender(
+      <GraphCanvas nodes={sampleNodes} edges={sampleEdges} closeMenusSignal={1} />
+    );
+
+    expect(document.querySelector('.edge-context-menu')).not.toBeInTheDocument();
+  });
 });

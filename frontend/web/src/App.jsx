@@ -71,6 +71,7 @@ function App() {
     nodeMarks,
     startGuide,
     getNodeColor,
+    closeMenusSignal,
   } = useGraphStore();
 
   const { t, setLanguage, language } = useI18n();
@@ -836,6 +837,7 @@ function App() {
           onFocusComplete={clearFocusNode}
           createGroupSignal={createGroupSignal}
           saveViewSignal={saveViewSignal}
+          closeMenusSignal={closeMenusSignal}
           groupsToRestore={pendingGroups}
           onGroupsRestored={() => setPendingGroups(null)}
           federationDepth={federationDepth}

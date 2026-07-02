@@ -20,6 +20,7 @@ function FloatingSearch() {
     schema,
     guideSearchInput,
     clearGuideSearchInput,
+    requestCloseMenus,
   } = useGraphStore();
 
   const [query, setQuery] = useState('');
@@ -260,6 +261,7 @@ function FloatingSearch() {
           onChange={(e) => setQuery(e.target.value)}
           onKeyDown={handleKeyDown}
           onFocus={() => {
+            requestCloseMenus();
             if (results.length > 0) setShowDropdown(true);
           }}
         />
