@@ -488,6 +488,10 @@ function App() {
       const result = await api.addEdge(params.source, params.target);
       if (result.success && result.edge) {
         addNodesToVisualization([], [result.edge]);
+      } else {
+        // The edge is only drawn once persisted, so a non-success response must
+        // surface an error rather than silently leaving nothing on the canvas.
+        showNotification('error', 'Could not create connection');
       }
     } catch (error) {
       console.error('Error creating edge:', error);
