@@ -156,7 +156,7 @@ describe('GraphCanvas', () => {
     );
 
     fireEvent.contextMenu(screen.getByTestId('edge-edge-1'));
-    fireEvent.click(screen.getByRole('button', { name: /ta bort/i }));
+    fireEvent.click(screen.getByRole('button', { name: /delete/i }));
 
     expect(onDeleteEdge).toHaveBeenCalledWith('edge-1');
   });

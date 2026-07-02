@@ -30,10 +30,18 @@ def _get_config_loader():
 
 
 def _parse_datetime(value: Any) -> Any:
-    """Parse ISO datetime strings, including UTC Z suffix, from graph JSON."""
+    """Parse ISO datetime strings, including UTC Z suffix, from graph JSON.
+
+    Timezone-naive strings — persisted before the utcnow()->now(timezone.utc)
+    migration — are treated as UTC so every in-memory datetime stays aware and
+    comparable with datetimes created after the migration.
+    """
     if isinstance(value, str):
         normalized = value[:-1] + '+00:00' if value.endswith('Z') else value
-        return datetime.fromisoformat(normalized)
+        parsed = datetime.fromisoformat(normalized)
+        if parsed.tzinfo is None:
+            parsed = parsed.replace(tzinfo=timezone.utc)
+        return parsed
     return value
 
 

@@ -26,6 +26,19 @@ function loadInitialFederationDepth() {
   return 1;
 }
 
+// Both updateVisualization and clearVisualization raise clearGroupsFlag and then
+// lower it after a short delay. A single shared timer means a second call within
+// that window cancels the earlier timer instead of letting it lower the flag
+// prematurely on the later call, which would make ReactFlow miss the signal.
+let clearGroupsResetTimer = null;
+function scheduleClearGroupsReset(set) {
+  if (clearGroupsResetTimer) clearTimeout(clearGroupsResetTimer);
+  clearGroupsResetTimer = setTimeout(() => {
+    clearGroupsResetTimer = null;
+    set({ clearGroupsFlag: false });
+  }, 100);
+}
+
 // Default welcome message (used before presentation is loaded)
 const DEFAULT_WELCOME_MESSAGE = {
   role: 'assistant',
@@ -197,7 +210,7 @@ const useGraphStore = create((set, get) => ({
       clearGroupsFlag: true, // Signal to clear groups
     });
     // Reset flag after a short delay
-    setTimeout(() => set({ clearGroupsFlag: false }), 100);
+    scheduleClearGroupsReset(set);
   },
 
   addNodesToVisualization: (newNodes, newEdges = []) => {
@@ -259,7 +272,7 @@ const useGraphStore = create((set, get) => ({
       selectedGraphNodes: [],
       selectedNodeId: null,
     });
-    setTimeout(() => set({ clearGroupsFlag: false }), 100);
+    scheduleClearGroupsReset(set);
   },
 
   setPendingGroups: (groups) => set({ pendingGroups: groups }),
