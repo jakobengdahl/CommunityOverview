@@ -95,6 +95,7 @@ function GraphCanvasInner({
   onFocusComplete,
   createGroupSignal = 0,
   saveViewSignal = 0,
+  closeMenusSignal = 0,
   groupsToRestore = null,
   onGroupsRestored,
   federationDepth = 1,
@@ -679,6 +680,13 @@ function GraphCanvasInner({
       handleSaveView();
     }
   }, [saveViewSignal, handleSaveView]);
+
+  // Close open context menus when signal changes (triggered by search box / chat input focus)
+  useEffect(() => {
+    if (closeMenusSignal > 0) {
+      closeAllMenus();
+    }
+  }, [closeMenusSignal, closeAllMenus]);
 
   // Restore groups from a saved view
   useEffect(() => {

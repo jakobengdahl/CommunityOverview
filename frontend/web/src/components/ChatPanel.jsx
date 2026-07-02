@@ -48,6 +48,7 @@ function ChatPanel({ collectionShortName }) {
     guideChatInput,
     clearGuideChatInput,
     getNodeColor,
+    requestCloseMenus,
   } = useGraphStore();
 
   const { t, language } = useI18n();
@@ -755,6 +756,7 @@ function ChatPanel({ collectionShortName }) {
           value={inputValue}
           onChange={(e) => setInputValue(e.target.value)}
           onKeyPress={handleKeyPress}
+          onFocus={requestCloseMenus}
           placeholder={uploadedFile
             ? t('chat.placeholder_with_file')
             : selectionSummary?.skillNodes?.length > 0

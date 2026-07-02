@@ -57,6 +57,18 @@ Effort scale: XS = single-line fix · S = up to ~30 lines / one file · M = mult
 - **Issue:** `FloatingToolbar.jsx` exports two different icon-resolution paths: `resolveIcon()` (used by the toolbar itself) checks the schema's `icon` field first, falling back to `LEGACY_ICON_MAP` by node-type name. But the exported `ICON_MAP` — used by `FloatingSearch.jsx` for search result icons — is built *only* from `LEGACY_ICON_MAP`, keyed by node-type name, and never looks at `schema.node_types[type].icon` at all. So a profile that overrides a node type's icon via config gets the override in the toolbar but not in search results, which is an inconsistent and surprising behavior for anyone configuring custom icons. Fix: build `ICON_MAP` from the loaded schema the same way `resolveIcon()` does (or have `FloatingSearch` call a shared `resolveIcon`-based helper instead of a static map).
 - **Effort:** S
 
+### [2026-07-02] `GraphCanvas.test.jsx` edge-delete test asserts a stale Swedish label
+- **File(s):** `packages/ui-graph-canvas/tests/GraphCanvas.test.jsx:136`
+- **Context:** Discovered during `claude/context-menu-search-close-5w7tqy` (reproduced identically on `dev` before this branch's changes)
+- **Issue:** The test looks up the edge context menu's delete button via `screen.getByRole('button', { name: /ta bort/i })`, but the component under test (`GraphCanvas.jsx`) renders the button with the English default label `Delete` (via `cml.delete`) unless a `contextMenuLabels.delete` prop is supplied — the test renders `<GraphCanvas>` with no `contextMenuLabels`, so the regex never matches and the test fails with a `getElementError`. Fix: either pass `contextMenuLabels={{ delete: 'Ta bort' }}` in the test render, or update the regex to match the actual default label (`/delete/i`).
+- **Effort:** XS
+
+### [2026-07-02] `GroupNode`'s local context menu doesn't close on keyboard-only Tab focus
+- **File(s):** `packages/ui-graph-canvas/src/components/GroupNode.jsx:34-58`
+- **Context:** Discovered during review of `claude/context-menu-search-close-5w7tqy`
+- **Issue:** `GroupNode`'s own context menu (right-click on a group) dismisses on `mousedown`/`contextmenu` outside the menu, which already covers clicking into the search box or chat input with the mouse. But if a user reaches those inputs via Tab (keyboard-only, no mousedown), the group's context menu stays open. The new `closeMenusSignal` mechanism added for the node/edge/multi-select context menus doesn't cover this either, since `GroupNode` manages its menu state independently. Fix: have `GroupNode` also listen for `focusin` on `document`, or subscribe to the same `closeMenusSignal` store field.
+- **Effort:** S
+
 ### [2026-06-30] `t()` fallback pattern in FloatingHeader.jsx silently breaks
 - **File(s):** `frontend/web/src/components/FloatingHeader.jsx:134,140`
 - **Context:** Discovered during i18n audit / docs session

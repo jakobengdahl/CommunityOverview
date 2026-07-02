@@ -166,6 +166,10 @@ const useGraphStore = create((set, get) => ({
   guideChatInput: null,    // { text, animated, auto_send } — fills chat textarea
   guideSearchInput: null,  // { text, animated } — fills search bar
 
+  // Incremented whenever the search box or chat input is focused, so GraphCanvas
+  // can close any open context menu (they live outside the canvas's own click-away area)
+  closeMenusSignal: 0,
+
   // Stats
   stats: null,
 
@@ -546,6 +550,8 @@ const useGraphStore = create((set, get) => ({
   clearGuideChatInput: () => set({ guideChatInput: null }),
   setGuideSearchInput: (payload) => set({ guideSearchInput: payload }),
   clearGuideSearchInput: () => set({ guideSearchInput: null }),
+
+  requestCloseMenus: () => set((state) => ({ closeMenusSignal: state.closeMenusSignal + 1 })),
 
   // Delete node from visualization
   removeNode: (nodeId) => {
