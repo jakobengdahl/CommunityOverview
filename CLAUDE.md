@@ -37,14 +37,22 @@ feature/*   ← one branch per task; PR always targets dev
 claude/*    ← branches created by Claude agents (same rules apply)
 ```
 
-**Never open a PR directly against `main` or `preview`.** Those merges are done
-manually and infrequently by the project owner:
+**Do not merge into `main` or `preview` on your own initiative.** Those merges are
+deployment actions, done infrequently by the project owner:
 - `dev → preview` when a batch of features is ready for deployment testing
 - `preview → main` when preview has been validated and a prod release is approved
 
+**Explicit exception:** Claude may perform a `dev → preview` or `preview → main`
+merge when — and only when — the project owner explicitly asks for it in that turn
+(e.g. "merge with preview", "merge dev into preview", "promote preview to main",
+"release to main", or an equivalent Swedish phrasing like "merga till preview").
+See "Explicit merge requests" below for how to carry this out. Absent such an
+explicit instruction, never initiate or propose these merges yourself.
+
 Docker images are built and published **only** when `preview` or `main` receives a
 push — never on feature branch pushes or PRs. Merging to `preview` or `main` is a
-deployment action, not a code review action.
+deployment action, not a code review action — treat it as one even when explicitly
+authorised.
 
 ### Hotfix path
 
@@ -56,12 +64,36 @@ If a critical bug must bypass the dev/preview queue:
 
 This is the only legitimate exception to the "PRs target dev" rule.
 
+### Explicit merge requests (`preview` / `main`)
+
+Claude may merge into `preview` or `main` **only** when the project owner explicitly
+requests that merge in the current turn. A phrase such as "merge with preview",
+"merge dev into preview", "promote preview to main", "release to main", or an
+equivalent Swedish phrasing ("merga dev till preview", "släpp till main") is the
+trigger. A general instruction like "ship it" or "merge the PR" does **not** count —
+if the target branch is ambiguous, ask before acting.
+
+When explicitly authorised:
+1. Confirm the source and target are what was asked for (`dev → preview` or
+   `preview → main`) and that the source branch is green in CI.
+2. Perform the merge that was requested — never substitute a different source or
+   target, and never chain an additional merge that was not asked for (e.g. do not
+   also push `preview → main` when only `dev → preview` was requested).
+3. Report exactly what was merged and remind the owner that this triggers a Docker
+   build/deploy for that environment.
+
+If any part of the request is unclear, stop and ask rather than assume.
+
 ---
 
 ## What Claude Must Never Do
 
-- Open a PR against `main` or `preview` (except hotfixes, see above).
-- Push directly to `dev`, `preview`, or `main`.
+- Open a PR against `main` or `preview` (except hotfixes, or an explicitly
+  requested merge that you choose to route through a PR — see above).
+- Push directly to `dev`.
+- Merge into `preview` or `main` on your own initiative — do so only when the
+  project owner explicitly asks for that specific merge (see "Explicit merge
+  requests" above).
 - Add features beyond what the task requires. If you discover a related bug or
   improvement, log it in `SMALL_FIXES.md` (see below) and stop — never fix it
   in the same branch.
@@ -69,7 +101,8 @@ This is the only legitimate exception to the "PRs target dev" rule.
   existed before you started working, or is in code you did not change. Log it
   in `SMALL_FIXES.md` with file, line, and context, then continue.
 - Skip the review loop for non-trivial changes.
-- Merge PRs against `main` or `preview` — those gates belong to the project owner.
+- Merge PRs against `main` or `preview` unless explicitly asked to in that turn —
+  those gates belong to the project owner (see "Explicit merge requests" above).
 - Stage debug artifacts: `print()` statements, `breakpoint()`, `pdb.set_trace()`,
   hardcoded test credentials, or generated data files left in source paths.
 - Stage files that are not source code and larger than ~50 KB without explicit
