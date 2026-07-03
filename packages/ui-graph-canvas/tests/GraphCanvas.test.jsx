@@ -1,8 +1,8 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest';
-import { render, screen, fireEvent } from '@testing-library/react';
+import { render, screen, fireEvent, act } from '@testing-library/react';
 import { GraphCanvas } from '../src/index';
 
-const hoisted = vi.hoisted(() => ({ onNodesChange: null }));
+const hoisted = vi.hoisted(() => ({ onNodesChange: null, selectionOnChange: null }));
 
 vi.mock('reactflow', () => {
   const MockReactFlow = ({ children, nodes, edges, onEdgeContextMenu, onNodeContextMenu }) => (
@@ -52,7 +52,9 @@ vi.mock('reactflow', () => {
       screenToFlowPosition: () => ({ x: 0, y: 0 }),
       setCenter: vi.fn(),
     }),
-    useOnSelectionChange: vi.fn(),
+    useOnSelectionChange: ({ onChange }) => {
+      hoisted.selectionOnChange = onChange;
+    },
     Background: () => <div data-testid="background" />,
     Controls: () => <div data-testid="controls" />,
     MiniMap: () => <div data-testid="minimap" />,
@@ -254,6 +256,44 @@ describe('GraphCanvas', () => {
       expect.arrayContaining([
         { id: 'node-1', type: 'select', selected: true },
         { id: 'node-2', type: 'select', selected: false },
+        { id: 'node-3', type: 'select', selected: true },
+        { id: 'node-4', type: 'select', selected: false },
+      ])
+    );
+  });
+
+  it('selects the union of all selected types from the multi-node context menu', () => {
+    const nodes = [
+      { id: 'node-1', name: 'Actor 1', type: 'Actor' },
+      { id: 'node-2', name: 'Initiative 1', type: 'Initiative' },
+      { id: 'node-3', name: 'Actor 2', type: 'Actor' },
+      { id: 'node-4', name: 'Theme 1', type: 'Theme' },
+    ];
+
+    render(<GraphCanvas nodes={nodes} edges={[]} />);
+
+    // Simulate a multi-selection spanning two types (Actor + Initiative).
+    act(() => {
+      hoisted.selectionOnChange({
+        nodes: [
+          { id: 'node-1', data: { nodeType: 'Actor' } },
+          { id: 'node-2', data: { nodeType: 'Initiative' } },
+        ],
+        edges: [],
+      });
+    });
+
+    // Right-clicking a node that is part of the multi-selection opens the multi menu.
+    fireEvent.contextMenu(screen.getByTestId('node-node-1'));
+    fireEvent.click(
+      screen.getByRole('button', { name: /select all nodes of the same type/i })
+    );
+
+    // Every Actor and Initiative node is selected; the Theme node is not.
+    expect(hoisted.onNodesChange).toHaveBeenCalledWith(
+      expect.arrayContaining([
+        { id: 'node-1', type: 'select', selected: true },
+        { id: 'node-2', type: 'select', selected: true },
         { id: 'node-3', type: 'select', selected: true },
         { id: 'node-4', type: 'select', selected: false },
       ])
