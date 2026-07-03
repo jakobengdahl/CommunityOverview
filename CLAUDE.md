@@ -308,6 +308,39 @@ In this environment there is no `gh` CLI — use the GitHub MCP tools to mark th
 PR ready (if it was opened as a draft) and squash-merge it. If the merge tool
 can't delete the branch, leave it for the owner to remove manually.
 
+#### Waiting for CI before merge — never poll with a scheduled self-wakeup
+
+CI takes a few minutes. **Do not** bridge that wait with a scheduled self-wakeup
+(`send_later` / `ScheduleWakeup` / a self-firing trigger). Each such wake fires as
+a *new* turn, which spawns a redundant approval/confirmation for Jakob — the exact
+"double approval" to avoid. Use one of these instead, in priority order:
+
+1. **GitHub auto-merge (preferred, if the target branch is protected).** If the
+   PR's base branch has a required status check and the repo allows auto-merge,
+   turn on native auto-merge and stop:
+   - Mark the PR ready (if draft), then call `enable_pr_auto_merge` (squash).
+   - `subscribe_pr_activity` for the PR, then **end the turn**.
+   - GitHub merges the moment CI is green and delivers a `merged` webhook (which
+     also auto-unsubscribes) — report that back to Jakob when it arrives. On a
+     CI-**failure** webhook, diagnose, fix, and push; auto-merge re-arms itself.
+   - This is the only path that needs zero further action and notifies on its own.
+     It requires a one-time repo setup (see note below); `enable_pr_auto_merge`
+     fails gracefully if auto-merge isn't available, so fall through to option 2.
+
+2. **Wait in the same turn (works on an unprotected branch).** When auto-merge
+   isn't available, keep the current turn open and wait for the required check to
+   complete using the sanctioned `Monitor` until-loop (never Bash `sleep`, never a
+   scheduled wakeup). Re-check `get_check_runs`; when it goes green, merge and
+   report; if it fails, fix and push. One turn, one approval.
+
+Either way, still `subscribe_pr_activity` so later review comments or a post-merge
+CI signal wake this session, and **do not** additionally schedule a self-wakeup for
+the same PR.
+
+> **One-time setup to unlock option 1 (recommended):** in the repo settings enable
+> *Allow auto-merge*, and add a branch-protection rule on `dev` that requires the
+> `Run Tests` check. Until then, option 2 is used automatically.
+
 Merge only when **all** of the following are true:
 
 - [ ] All tests pass locally (`pytest backend/ -q`)
