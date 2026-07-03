@@ -98,6 +98,8 @@ Right-clicking a node opens the context menu:
 - **Edit** — open the edit dialog
 - **Hide** — remove the node from the current view (does not delete it from the graph)
 - **Expand** — load all nodes directly connected to this node into the canvas
+- **Select all nodes of the same type** — select every node of this node's type across the
+  whole visualization, including ones scrolled outside the current viewport
 - **Custom actions** — schema-defined items per node type, e.g. "Open in SSPCloud" that
   substitutes a field value into a URL and opens it in a new tab
 - **Delete** — remove the node permanently (shown in red, requires confirmation)
@@ -110,7 +112,9 @@ Right-clicking on the **canvas background** offers quick-create options:
 - Create Agent
 
 Right-clicking a **selection of multiple nodes** shows bulk actions: Show only these,
-Hide all, Delete all.
+Select all nodes of the same type, Hide all, Delete all. "Select all nodes of the same
+type" extends the selection to every node whose type matches any type already in the
+selection.
 
 ### 2.5 Groups
 

@@ -2,12 +2,18 @@ import { describe, it, expect, vi, beforeEach } from 'vitest';
 import { render, screen, fireEvent } from '@testing-library/react';
 import { GraphCanvas } from '../src/index';
 
+const hoisted = vi.hoisted(() => ({ onNodesChange: null }));
+
 vi.mock('reactflow', () => {
-  const MockReactFlow = ({ children, nodes, edges, onEdgeContextMenu }) => (
+  const MockReactFlow = ({ children, nodes, edges, onEdgeContextMenu, onNodeContextMenu }) => (
     <div data-testid="react-flow" className="react-flow">
       <div data-testid="nodes">
         {nodes?.map((node) => (
-          <div key={node.id} data-testid={`node-${node.id}`}>
+          <div
+            key={node.id}
+            data-testid={`node-${node.id}`}
+            onContextMenu={(event) => onNodeContextMenu?.(event, node)}
+          >
             {node.data?.label}
           </div>
         ))}
@@ -32,7 +38,10 @@ vi.mock('reactflow', () => {
     default: MockReactFlow,
     ReactFlow: MockReactFlow,
     ReactFlowProvider: ({ children }) => <div>{children}</div>,
-    useNodesState: (initialNodes) => [initialNodes || [], vi.fn(), vi.fn()],
+    useNodesState: (initialNodes) => {
+      if (!hoisted.onNodesChange) hoisted.onNodesChange = vi.fn();
+      return [initialNodes || [], vi.fn(), hoisted.onNodesChange];
+    },
     useEdgesState: (initialEdges) => [initialEdges || [], vi.fn(), vi.fn()],
     useReactFlow: () => ({
       fitView: vi.fn(),
@@ -206,6 +215,49 @@ describe('GraphCanvas', () => {
     fireEvent.click(screen.getByRole('button', { name: /general connection/i }));
 
     expect(onSetEdgeType).toHaveBeenCalledWith('edge-1', 'RELATES_TO');
+  });
+
+  it('selects every node of the same type from a single node context menu', () => {
+    render(<GraphCanvas nodes={sampleNodes} edges={sampleEdges} />);
+
+    fireEvent.contextMenu(screen.getByTestId('node-node-1'));
+    fireEvent.click(
+      screen.getByRole('button', { name: /select all nodes of the same type/i })
+    );
+
+    // node-1 is an Actor, so it is selected while the Initiative node-2 is not.
+    expect(hoisted.onNodesChange).toHaveBeenCalledWith(
+      expect.arrayContaining([
+        { id: 'node-1', type: 'select', selected: true },
+        { id: 'node-2', type: 'select', selected: false },
+      ])
+    );
+  });
+
+  it('selects same-type nodes that were not part of the original selection', () => {
+    const nodes = [
+      { id: 'node-1', name: 'Actor 1', type: 'Actor' },
+      { id: 'node-2', name: 'Initiative 1', type: 'Initiative' },
+      { id: 'node-3', name: 'Actor 2', type: 'Actor' },
+      { id: 'node-4', name: 'Theme 1', type: 'Theme' },
+    ];
+
+    render(<GraphCanvas nodes={nodes} edges={[]} />);
+
+    // Right-clicking the one Actor should still select the other Actor (node-3).
+    fireEvent.contextMenu(screen.getByTestId('node-node-1'));
+    fireEvent.click(
+      screen.getByRole('button', { name: /select all nodes of the same type/i })
+    );
+
+    expect(hoisted.onNodesChange).toHaveBeenCalledWith(
+      expect.arrayContaining([
+        { id: 'node-1', type: 'select', selected: true },
+        { id: 'node-2', type: 'select', selected: false },
+        { id: 'node-3', type: 'select', selected: true },
+        { id: 'node-4', type: 'select', selected: false },
+      ])
+    );
   });
 
   it('closes an open context menu when closeMenusSignal increases', () => {

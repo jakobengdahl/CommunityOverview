@@ -119,6 +119,7 @@ function GraphCanvasInner({
     delete: 'Delete',
     nodesSelected: '{count} nodes selected',
     showOnly: 'Show only these',
+    selectSameType: 'Select all nodes of the same type',
     hideAll: 'Hide all',
     deleteAll: 'Delete all',
     changeType: 'Change type',
@@ -325,6 +326,21 @@ function GraphCanvasInner({
     if (nodeDeselects.length > 0) onNodesChange(nodeDeselects);
     if (edgeDeselects.length > 0) onEdgesChange(edgeDeselects);
   }, [nodes, edges, onNodesChange, onEdgesChange]);
+
+  // Select every node in the current visualization whose type matches any of the
+  // given types, regardless of whether it is currently within the viewport.
+  const selectNodesByType = useCallback((types) => {
+    const typeSet = new Set((types || []).filter(Boolean));
+    if (typeSet.size === 0) return;
+    const changes = nodes
+      .filter(n => n.type !== 'group')
+      .map(n => {
+        const nodeType = n.data?.nodeType || n.data?.type;
+        return { id: n.id, type: 'select', selected: typeSet.has(nodeType) };
+      });
+    if (changes.length > 0) onNodesChange(changes);
+    closeAllMenus();
+  }, [nodes, onNodesChange, closeAllMenus]);
 
   const handlePaneClick = useCallback(() => {
     closeAllMenus();
@@ -942,6 +958,12 @@ function GraphCanvasInner({
               🔍 {cml.expand}
             </button>
           )}
+          <button onClick={() => {
+            const nodeType = nodeContextMenu.node.data?.nodeType || nodeContextMenu.node.data?.type;
+            selectNodesByType([nodeType]);
+          }}>
+            🎯 {cml.selectSameType}
+          </button>
           {(() => {
             const nodeType = nodeContextMenu.node.data?.nodeType || nodeContextMenu.node.data?.type;
             const customItems = schema?.node_types?.[nodeType]?.context_menu;
@@ -1014,6 +1036,14 @@ function GraphCanvasInner({
               🔍 {cml.showOnly}
             </button>
           )}
+          <button onClick={() => {
+            const types = multiNodeContextMenu.nodes.map(
+              n => n.data?.nodeType || n.data?.type
+            );
+            selectNodesByType(types);
+          }}>
+            🎯 {cml.selectSameType}
+          </button>
           {(onHideMultiple || onHide) && (
             <button onClick={() => {
               const nodeIds = multiNodeContextMenu.nodes.map(n => n.id);
