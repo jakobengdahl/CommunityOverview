@@ -13,6 +13,7 @@ function InputDialog({
   cancelText = 'Cancel',
   loadingText = 'Saving...',
   isLoading = false,
+  allowEmpty = false,
   onConfirm,
   onCancel,
 }) {
@@ -25,17 +26,19 @@ function InputDialog({
     inputRef.current?.select();
   }, []);
 
+  const canSubmit = (allowEmpty || value.trim()) && !isLoading;
+
   // Handle keyboard events
   const handleKeyDown = (e) => {
     if (e.key === 'Escape' && !isLoading) {
       onCancel();
-    } else if (e.key === 'Enter' && value.trim() && !isLoading) {
+    } else if (e.key === 'Enter' && canSubmit) {
       onConfirm(value.trim());
     }
   };
 
   const handleSubmit = () => {
-    if (value.trim() && !isLoading) {
+    if (canSubmit) {
       onConfirm(value.trim());
     }
   };
@@ -75,7 +78,7 @@ function InputDialog({
           <button
             className="input-dialog-button primary"
             onClick={handleSubmit}
-            disabled={!value.trim() || isLoading}
+            disabled={!canSubmit}
           >
             {isLoading ? loadingText : confirmText}
           </button>

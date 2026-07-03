@@ -1,0 +1,235 @@
+.settings-dialog-overlay {
+  position: fixed;
+  inset: 0;
+  background: rgba(0, 0, 0, 0.6);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  z-index: 1500;
+}
+
+.settings-dialog {
+  background: rgba(26, 26, 26, 0.98);
+  border: 1px solid #333;
+  border-radius: 12px;
+  box-shadow: 0 12px 48px rgba(0, 0, 0, 0.6);
+  width: 340px;
+  max-width: 92vw;
+  max-height: 85vh;
+  display: flex;
+  flex-direction: column;
+  animation: settingsDialogIn 0.15s ease-out;
+}
+
+@keyframes settingsDialogIn {
+  from {
+    opacity: 0;
+    transform: translateY(-6px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
+.settings-dialog-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 14px 16px;
+  border-bottom: 1px solid #333;
+}
+
+.settings-dialog-header h3 {
+  margin: 0;
+  font-size: 1rem;
+  color: #fff;
+}
+
+.settings-dialog-close {
+  background: transparent;
+  border: none;
+  color: #ccc;
+  cursor: pointer;
+  padding: 4px;
+  display: flex;
+  align-items: center;
+  border-radius: 6px;
+  transition: background 0.15s, color 0.15s;
+}
+
+.settings-dialog-close:hover {
+  background: rgba(255, 255, 255, 0.1);
+  color: #fff;
+}
+
+.settings-dialog-content {
+  padding: 12px;
+  overflow-y: auto;
+  scrollbar-width: thin;
+  scrollbar-color: #555 transparent;
+}
+
+.settings-dialog-stats-summary {
+  display: flex;
+  gap: 24px;
+  padding: 8px 4px;
+}
+
+.settings-dialog-stat {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+}
+
+.settings-dialog-stat-value {
+  font-size: 1.4rem;
+  font-weight: 700;
+  color: #646cff;
+}
+
+.settings-dialog-stat-label {
+  font-size: 0.7rem;
+  color: #888;
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+}
+
+.settings-dialog-section-divider {
+  height: 1px;
+  background: #333;
+  margin: 10px 0;
+}
+
+.settings-dialog-section-title {
+  font-size: 0.7rem;
+  font-weight: 600;
+  color: #888;
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+  margin-bottom: 8px;
+  padding: 0 4px;
+}
+
+.settings-dialog-type-list {
+  padding: 4px 0;
+  border-top: 1px solid #333;
+  margin-top: 8px;
+  padding-top: 10px;
+}
+
+.settings-dialog-type-list-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin-bottom: 8px;
+}
+
+.settings-dialog-type-list-header .settings-dialog-section-title {
+  margin-bottom: 0;
+}
+
+.settings-dialog-type-details-btn {
+  background: transparent;
+  border: 1px solid #444;
+  border-radius: 4px;
+  color: #888;
+  font-size: 0.7rem;
+  padding: 2px 8px;
+  cursor: pointer;
+  transition: color 0.15s, border-color 0.15s;
+}
+
+.settings-dialog-type-details-btn:hover {
+  color: #ccc;
+  border-color: #666;
+}
+
+.settings-dialog-type-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 3px 4px;
+  font-size: 0.82rem;
+}
+
+.settings-dialog-type-dot {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  flex-shrink: 0;
+}
+
+.settings-dialog-type-name {
+  color: #ccc;
+  flex: 1;
+}
+
+.settings-dialog-type-count {
+  color: #888;
+  font-size: 0.8rem;
+  font-weight: 500;
+}
+
+.settings-dialog-menu-item {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  width: 100%;
+  padding: 8px 10px;
+  background: transparent;
+  border: none;
+  border-radius: 6px;
+  color: #ccc;
+  font-size: 0.82rem;
+  cursor: pointer;
+  text-align: left;
+  transition: background 0.15s, color 0.15s;
+}
+
+.settings-dialog-menu-item:hover {
+  background: rgba(255, 255, 255, 0.1);
+  color: #fff;
+}
+
+.settings-dialog-menu-item-logout {
+  color: #e57373;
+}
+
+.settings-dialog-menu-item-logout:hover {
+  background: rgba(229, 115, 115, 0.12);
+  color: #ff8a80;
+}
+
+/* Toggle switch for menu items */
+.settings-dialog-toggle {
+  margin-left: auto;
+  width: 28px;
+  height: 16px;
+  border-radius: 8px;
+  background: #444;
+  flex-shrink: 0;
+  position: relative;
+  transition: background 0.2s;
+}
+
+.settings-dialog-toggle::after {
+  content: '';
+  position: absolute;
+  top: 2px;
+  left: 2px;
+  width: 12px;
+  height: 12px;
+  border-radius: 50%;
+  background: #888;
+  transition: transform 0.2s, background 0.2s;
+}
+
+.settings-dialog-toggle.active {
+  background: rgba(100, 108, 255, 0.3);
+}
+
+.settings-dialog-toggle.active::after {
+  transform: translateX(12px);
+  background: #646cff;
+}

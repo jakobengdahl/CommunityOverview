@@ -24,7 +24,7 @@ shared knowledge graphs. This guide covers all user-facing features.
    - [Skills](#44-skills)
    - [Node marking](#45-node-marking)
    - [Document upload](#46-document-upload)
-5. [App menu](#5-app-menu)
+5. [Session menu and settings](#5-session-menu-and-settings)
 6. [Federation — searching across multiple graphs](#6-federation--searching-across-multiple-graphs)
 7. [Interactive guides](#7-interactive-guides)
 8. [Connecting external AI tools via MCP](#8-connecting-external-ai-tools-via-mcp)
@@ -45,7 +45,7 @@ The application is divided into four main areas:
 |------|---------|
 | **Left toolbar** | Create new nodes by clicking a node type icon; system tools (save view, minimap, etc.) at the bottom |
 | **Graph canvas** | Visual graph — drag nodes, zoom, pan, right-click for the context menu |
-| **Top bar** | Search, hamburger menu (☰), and session ID for connecting external AI clients |
+| **Top bar** | Search, session menu (☰), and session ID for connecting external AI clients |
 | **Chat panel** | Conversational AI assistant (right side, collapsible via the → arrow) |
 
 ---
@@ -287,26 +287,50 @@ You can also ask questions about the uploaded document without extracting entiti
 
 ---
 
-## 5. App menu
+## 5. Session menu and settings
 
-Click the **☰** (hamburger) icon in the top-left corner to open the app menu.
+Click the **☰** (hamburger) icon in the top-left corner to open the session menu —
+a panel that slides out from the left and docks to the screen edge. While it is open,
+the toolbar shifts right so it keeps floating next to the panel.
 
-![App menu open](images/hamburger-menu.png)
-*The app menu showing graph statistics, view settings, language selection, and admin actions.*
+![Session menu open](images/hamburger-menu.png)
+*The session menu with session navigation at the top, recent sessions in the middle,
+and Settings at the bottom.*
 
-### Graph statistics
+Your work happens inside a **session** (the ID shown in the top bar). The session
+menu lets you navigate between sessions, similar to how chats work in chat-based
+AI apps:
 
-The top of the menu shows the total number of nodes and edges currently in the graph,
+| Item | Effect |
+|------|--------|
+| **Start new session** | Saves the current session automatically and opens a fresh, empty one |
+| **Search previous sessions** | Filters the recent-session list by name or ID |
+| **Connect to session (via ID)** | Joins an existing session by entering its ID (format `1234-5678`) |
+| **Recent sessions** | The most recently used sessions — shown by name if you have named them, otherwise by ID. Click one to load it; the current session is saved automatically first. Use the pencil icon to name a session. |
+| **Settings** | Opens the Settings dialog (see below) |
+
+Sessions are stored locally in your browser. The canvas content (nodes, edges,
+positions, groups, and hidden nodes) is saved automatically while you work and
+restored when you return to a session.
+
+### Settings dialog
+
+The settings that previously lived directly in the app menu are now in the
+**Settings** dialog, opened from the bottom of the session menu.
+
+#### Graph statistics
+
+The top of the dialog shows the total number of nodes and edges currently in the graph,
 followed by a colour-coded breakdown by node type. If there are more than five types,
 a **Details** button opens a full node-type statistics dialog.
 
-### View settings
+#### View settings
 
 | Option | Effect |
 |--------|--------|
 | **Show minimap** | Toggle the minimap overlay in the bottom-right corner of the canvas |
 
-### Language
+#### Language
 
 Switch between **English** and **Svenska**. The change takes effect immediately and
 applies to all UI labels and chat placeholders.
@@ -314,7 +338,7 @@ applies to all UI labels and chat placeholders.
 The AI assistant always responds in the language you write in, regardless of the
 UI language setting.
 
-### Admin
+#### Admin
 
 | Action | Description |
 |--------|-------------|
@@ -475,7 +499,7 @@ Screenshots for this guide are saved to `docs/images/` in PNG format.
 | `node-proposal.png` | pending | Node proposal dialog with similarity matches |
 | `node-marking.png` | pending | Canvas with colour marking dots and legend |
 | `document-upload.png` | ✓ | Chat after file upload with extracted entity proposals |
-| `hamburger-menu.png` | ✓ | App menu (☰) with stats, view settings, language, admin |
+| `hamburger-menu.png` | ✓ | Session menu (☰) — left panel with session navigation and Settings entry |
 | `create-agent.png` | ✓ | Create Agent dialog with all configuration sections |
 | `skills.png` | ✓ | Chat panel bottom showing active skill and selected nodes |
 | `mcp-session-control.png` | ✓ | External AI (ChatGPT) controlling the canvas via session ID |

@@ -1,35 +1,21 @@
-import { describe, it, expect, beforeEach } from 'vitest';
+import { describe, it, expect, vi } from 'vitest';
 import { render, screen, fireEvent } from '@testing-library/react';
 
 import FloatingHeader from '../src/components/FloatingHeader';
-import useGraphStore from '../src/store/graphStore';
 import { I18nProvider } from '../src/i18n';
 
 describe('FloatingHeader', () => {
-  beforeEach(() => {
-    window.localStorage.clear();
-    useGraphStore.setState({
-      showMinimap: false,
-      setShowMinimap: useGraphStore.getState().setShowMinimap,
-    });
-  });
-
-  it('shows GUI language controls in the hamburger menu and persists selection', () => {
+  it('toggles the session drawer from the hamburger button', () => {
+    const onToggleDrawer = vi.fn();
     render(
       <I18nProvider>
-        <FloatingHeader
-          title="Test Graph"
-          stats={{ total_nodes: 1, total_edges: 2, nodes_by_type: { Actor: 1 } }}
-        />
+        <FloatingHeader title="Test Graph" sessionId="1234-5678" onToggleDrawer={onToggleDrawer} />
       </I18nProvider>
     );
 
+    expect(screen.getByText('1234-5678')).toBeInTheDocument();
+
     fireEvent.click(screen.getByTitle('Menu'));
-
-    expect(screen.getByText('Language')).toBeInTheDocument();
-
-    fireEvent.click(screen.getByRole('button', { name: 'Svenska' }));
-
-    expect(window.localStorage.getItem('app_language')).toBe('sv');
+    expect(onToggleDrawer).toHaveBeenCalledTimes(1);
   });
 });

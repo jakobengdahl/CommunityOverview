@@ -21,6 +21,12 @@ Effort scale: XS = single-line fix · S = up to ~30 lines / one file · M = mult
 
 ## Open
 
+### [2026-07-03] Backend test suite mutates checked-in `backend/test_graph_auth.json`
+- **File(s):** `backend/test_graph_auth.json`
+- **Context:** Discovered during `claude/session-sidebar-nav-sfs73g`
+- **Issue:** Running `pytest backend/ -q` leaves `backend/test_graph_auth.json` modified in the working tree (a test writes to the checked-in fixture instead of a tmp copy). Every full-suite run dirties the repo and risks accidental commits of test-run artifacts. Fix: locate the test(s) using this path and point them at a `tmp_path` copy, or gitignore a generated location.
+- **Effort:** S
+
 ### [2026-07-02] `GroupNode`'s local context menu doesn't close on keyboard-only Tab focus
 - **File(s):** `packages/ui-graph-canvas/src/components/GroupNode.jsx:34-58`
 - **Context:** Discovered during review of `claude/context-menu-search-close-5w7tqy`
@@ -28,7 +34,7 @@ Effort scale: XS = single-line fix · S = up to ~30 lines / one file · M = mult
 - **Effort:** S
 
 ### [2026-06-30] `t()` fallback pattern in FloatingHeader.jsx silently breaks
-- **File(s):** `frontend/web/src/components/FloatingHeader.jsx:134,140`
+- **File(s):** `frontend/web/src/components/FloatingHeader.jsx:134,140` — *note: as of `claude/session-sidebar-nav-sfs73g` these occurrences are gone (menu moved to `SettingsDialog.jsx`, which calls `t()` without the `|| 'fallback'` pattern). The general `t()`-returns-key-on-miss behaviour described below still applies to the hook contract.*
 - **Context:** Discovered during i18n audit / docs session
 - **Issue:** Code uses `t('key') || 'fallback'` expecting a null/undefined return when a key is missing, but `t()` returns the key name as a string (truthy) when no translation is found. The `|| 'fallback'` branch never fires. The two immediately affected keys (`menu.view_section`, `menu.show_minimap`) were fixed by adding them to the JSON files. Any future missing key will silently show its key name in the UI. Fix: either update the fallback pattern to use `t('key') === 'key' ? 'fallback' : t('key')`, or make `t()` return null on a miss (breaking change to the hook contract).
 - **Effort:** S

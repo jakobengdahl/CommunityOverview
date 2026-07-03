@@ -1,4 +1,4 @@
-import { useState, useCallback, useEffect, useLayoutEffect, useRef } from 'react';
+import { useState, useCallback, useEffect, useLayoutEffect, useMemo, useRef } from 'react';
 import { GraphCanvas, positionNewNodes } from '@community-graph/ui-graph-canvas';
 import '@community-graph/ui-graph-canvas/styles';
 import useGraphStore from './store/graphStore';
@@ -19,16 +19,15 @@ import CollectKioskView from './components/CollectKioskView';
 import EditEdgeDialog from './components/EditEdgeDialog';
 import NodeDetailDialog from './components/NodeDetailDialog';
 import GuideOverlay from './components/GuideOverlay';
+import SessionDrawer from './components/SessionDrawer';
+import SettingsDialog from './components/SettingsDialog';
 import * as api from './services/api';
+import * as sessionStore from './services/sessionStore';
 import './App.css';
 
 const _urlParams = new URLSearchParams(window.location.search);
 const _collectShortName = _urlParams.get('collect');
 const _akcShortName = _urlParams.get('akc');
-
-// Visualization session ID — generated once per page load, used to connect
-// external AI clients to this browser window via MCP.
-const _vizSessionId = api.generateVisualizationSessionId();
 
 function App() {
   const akcShortName = _akcShortName;
@@ -45,6 +44,7 @@ function App() {
     toggleNodeVisibility,
     toggleEdgeVisibility,
     setHiddenNodeIds,
+    setHiddenEdgeIds,
     stats,
     setStats,
     llmAvailable,
@@ -81,8 +81,6 @@ function App() {
   const urlViewLoadedRef = useRef(false);
   const latestViewport = useRef(null);
   const dialogOpenRef = useRef(false);
-  const [statsDialogOpen, setStatsDialogOpen] = useState(false);
-  const [headerMenuOpen, setHeaderMenuOpen] = useState(false);
   const [notification, setNotification] = useState(null);
   const [deleteDialog, setDeleteDialog] = useState(null);
   const [saveViewDialog, setSaveViewDialog] = useState(null);
@@ -102,6 +100,25 @@ function App() {
   const [akcIntroShown, setAkcIntroShown] = useState(false);
   const [akcConfig, setAkcConfig] = useState(null);
 
+  // ── Session navigation state ────────────────────────────────────────────
+  // The visualization session ID doubles as the working-session identity.
+  // It is state (not a constant) so the user can switch sessions; the SSE
+  // stream and state uploads reconnect automatically when it changes.
+  const [sessionId, setSessionId] = useState(() => api.generateVisualizationSessionId());
+  const [drawerOpen, setDrawerOpen] = useState(false);
+  const [settingsOpen, setSettingsOpen] = useState(false);
+  const [connectDialogOpen, setConnectDialogOpen] = useState(false);
+  const [renameDialog, setRenameDialog] = useState(null);
+  const [sessionsVersion, setSessionsVersion] = useState(0);
+  const sessions = useMemo(() => sessionStore.listSessions(), [sessionsVersion]);
+
+  // Callbacks waiting for the next canvas snapshot (positions/groups arrive
+  // from GraphCanvas via the saveViewSignal round-trip).
+  const snapshotCallbacksRef = useRef([]);
+  // Set when the user explicitly asked for the Save View dialog from the
+  // toolbar, so the snapshot round-trip knows to open it.
+  const viewDialogRequestedRef = useRef(false);
+
   const federationDepthLevels = (stats?.federation?.selectable_depth_levels || [1]).filter(v => Number.isInteger(v) && v >= 1);
   const maxFederationDepth = Math.max(1, ...federationDepthLevels, stats?.federation?.max_selectable_depth || 1);
 
@@ -120,12 +137,14 @@ function App() {
       createNodeType || editingNode || detailNode || editingEdge ||
       deleteDialog || saveViewDialog || showSubscriptionDialog ||
       showAgentDialog || skillDialogType || showAKCDialog ||
-      statsDialogOpen || headerMenuOpen || (akcShortName && akcConfig && !akcIntroShown)
+      drawerOpen || settingsOpen || connectDialogOpen || renameDialog ||
+      (akcShortName && akcConfig && !akcIntroShown)
     );
   }, [createNodeType, editingNode, detailNode, editingEdge,
       deleteDialog, saveViewDialog, showSubscriptionDialog,
       showAgentDialog, skillDialogType, showAKCDialog,
-      statsDialogOpen, headerMenuOpen, akcShortName, akcConfig, akcIntroShown]);
+      drawerOpen, settingsOpen, connectDialogOpen, renameDialog,
+      akcShortName, akcConfig, akcIntroShown]);
 
   // Double-Escape to clear the canvas (works even from input fields)
   useEffect(() => {
@@ -151,7 +170,7 @@ function App() {
   // Opens a persistent SSE stream so external AI clients can push
   // visualization commands to this browser window via MCP.
   useEffect(() => {
-    const evtSource = new EventSource(api.getVisualizationStreamUrl(_vizSessionId));
+    const evtSource = new EventSource(api.getVisualizationStreamUrl(sessionId));
     evtSource.onmessage = (e) => {
       try {
         const cmd = JSON.parse(e.data);
@@ -195,7 +214,7 @@ function App() {
       // Browser auto-reconnects on SSE errors; no manual retry needed.
     };
     return () => evtSource.close();
-  }, []); // eslint-disable-line react-hooks/exhaustive-deps
+  }, [sessionId]); // eslint-disable-line react-hooks/exhaustive-deps
 
   // ── Visualization session: canvas state upload ─────────────────────────
   // Uploads the current visible node list so MCP tools can query it.
@@ -204,13 +223,13 @@ function App() {
     if (_sessionUploadTimer.current) clearTimeout(_sessionUploadTimer.current);
     _sessionUploadTimer.current = setTimeout(() => {
       const state = useGraphStore.getState();
-      api.updateSessionState(_vizSessionId, {
+      api.updateSessionState(sessionId, {
         visible_node_ids: state.nodes.map(n => n.id),
         selected_node_ids: (state.selectedGraphNodes || []).map(n => n.id),
         node_count: state.nodes.length,
       }).catch(() => {});
     }, 1000);
-  }, [nodes]); // eslint-disable-line react-hooks/exhaustive-deps
+  }, [nodes, sessionId]); // eslint-disable-line react-hooks/exhaustive-deps
 
   // Load schema, presentation, stats and UI capabilities on startup (runs once)
   useEffect(() => {
@@ -555,21 +574,86 @@ function App() {
     }
   }, [deleteDialog, removeNode, showNotification]);
 
-  // Callback: Create group (called when group is created inside GraphCanvas)
-  const handleCreateGroup = useCallback((position, groupNode) => {
-    showNotification('success', 'Group created');
-  }, [showNotification]);
 
   // Toolbar: trigger group creation in GraphCanvas
   const handleToolbarCreateGroup = useCallback(() => {
     setCreateGroupSignal(prev => prev + 1);
   }, []);
 
-  // Callback: Save view - shows dialog
-  const handleSaveView = useCallback((viewData) => {
-    setSaveViewDialog({ viewData });
-    setSaveViewSignal(0); // Reset signal so it doesn't re-trigger
+  // Persist the current canvas as a snapshot for the active session.
+  // viewData carries node positions and groups collected by GraphCanvas;
+  // full node/edge data comes from the store.
+  const persistSessionSnapshot = useCallback((viewData) => {
+    const state = useGraphStore.getState();
+    // Never persist an empty canvas: it would register unused sessions, and
+    // for existing sessions it would overwrite stored content after an
+    // (often accidental) clear — the last non-empty snapshot is kept instead.
+    if (state.nodes.length === 0) return;
+    const positions = {};
+    const parentIds = {};
+    (viewData?.nodes || []).forEach(n => {
+      if (n.position) positions[n.id] = n.position;
+      if (n.parentId) parentIds[n.id] = n.parentId;
+    });
+    sessionStore.saveSnapshot(sessionId, {
+      nodes: state.nodes,
+      edges: state.edges,
+      positions,
+      parentIds,
+      groups: viewData?.groups || [],
+      hiddenNodeIds: state.hiddenNodeIds,
+      hiddenEdgeIds: state.hiddenEdgeIds,
+      savedAt: Date.now(),
+    });
+    setSessionsVersion(v => v + 1);
+  }, [sessionId]);
+
+  // Ask GraphCanvas for a snapshot (positions + groups); the callback runs
+  // after the snapshot has been persisted for the current session.
+  const requestSessionSnapshot = useCallback((onDone) => {
+    snapshotCallbacksRef.current.push(onDone);
+    setSaveViewSignal(prev => prev + 1);
   }, []);
+
+  // Callback from GraphCanvas when the saveViewSignal round-trip completes.
+  // Always persists the session snapshot; additionally opens the Save View
+  // dialog when that was what triggered the signal (toolbar button).
+  const handleSaveView = useCallback((viewData) => {
+    setSaveViewSignal(0); // Reset signal so it doesn't re-trigger
+    persistSessionSnapshot(viewData);
+    const callbacks = snapshotCallbacksRef.current.splice(0);
+    callbacks.forEach(cb => cb?.());
+    if (viewDialogRequestedRef.current) {
+      viewDialogRequestedRef.current = false;
+      setSaveViewDialog({ viewData });
+    }
+  }, [persistSessionSnapshot]);
+
+  // Auto-save the current session (debounced) so it can be restored from the
+  // session drawer later. Scheduled both from store-level changes (effect
+  // below) and from canvas-internal changes that never reach the store, like
+  // node drags and group creation.
+  const autoSaveTimerRef = useRef(null);
+  const scheduleAutoSave = useCallback(() => {
+    if (useGraphStore.getState().nodes.length === 0) return;
+    if (autoSaveTimerRef.current) clearTimeout(autoSaveTimerRef.current);
+    autoSaveTimerRef.current = setTimeout(() => {
+      requestSessionSnapshot(null);
+    }, 1500);
+  }, [requestSessionSnapshot]);
+
+  useEffect(() => {
+    scheduleAutoSave();
+    return () => {
+      if (autoSaveTimerRef.current) clearTimeout(autoSaveTimerRef.current);
+    };
+  }, [nodes, edges, hiddenNodeIds, hiddenEdgeIds, scheduleAutoSave]);
+
+  // Callback: Create group (called when group is created inside GraphCanvas)
+  const handleCreateGroup = useCallback((position, groupNode) => {
+    showNotification('success', 'Group created');
+    scheduleAutoSave();
+  }, [showNotification, scheduleAutoSave]);
 
   // Confirm save view
   const handleConfirmSaveView = useCallback(async (name) => {
@@ -769,8 +853,64 @@ function App() {
 
   // Toolbar save view: signal GraphCanvas to collect positions and trigger dialog
   const handleToolbarSaveView = useCallback(() => {
+    viewDialogRequestedRef.current = true;
     setSaveViewSignal(prev => prev + 1);
   }, []);
+
+  // ── Session navigation ──────────────────────────────────────────────────
+
+  // Switch working session: snapshot the current one first, then swap the
+  // session ID (reconnects the SSE stream) and restore the target's canvas.
+  const switchToSession = useCallback((targetId, { register = true } = {}) => {
+    requestSessionSnapshot(() => {
+      const snapshot = sessionStore.getSnapshot(targetId);
+      if (register) sessionStore.touchSession(targetId);
+      setSessionId(targetId);
+      clearVisualization();
+      if (snapshot?.nodes?.length) {
+        const positioned = snapshot.nodes.map(n =>
+          snapshot.positions?.[n.id] ? { ...n, _savedPosition: snapshot.positions[n.id] } : n
+        );
+        addNodesToVisualization(positioned, snapshot.edges || []);
+        if (snapshot.hiddenNodeIds?.length) setHiddenNodeIds(snapshot.hiddenNodeIds);
+        if (snapshot.hiddenEdgeIds?.length) setHiddenEdgeIds(snapshot.hiddenEdgeIds);
+        if (snapshot.groups?.length) {
+          setPendingGroups({ groups: snapshot.groups, parentIds: snapshot.parentIds || {} });
+        }
+      }
+      setSessionsVersion(v => v + 1);
+    });
+  }, [requestSessionSnapshot, clearVisualization, addNodesToVisualization,
+      setHiddenNodeIds, setHiddenEdgeIds, setPendingGroups]);
+
+  const handleNewSession = useCallback(() => {
+    switchToSession(api.generateVisualizationSessionId(), { register: false });
+    showNotification('info', t('sessions.new_session_started'));
+  }, [switchToSession, showNotification, t]);
+
+  const handleSelectSession = useCallback((targetId) => {
+    if (targetId !== sessionId) {
+      switchToSession(targetId);
+    }
+  }, [sessionId, switchToSession]);
+
+  const handleConnectSession = useCallback((targetId) => {
+    if (!sessionStore.isValidSessionId(targetId)) {
+      showNotification('error', t('sessions.invalid_session_id'));
+      return;
+    }
+    setConnectDialogOpen(false);
+    if (targetId !== sessionId) {
+      switchToSession(targetId);
+    }
+  }, [sessionId, switchToSession, showNotification, t]);
+
+  const handleRenameSession = useCallback((name) => {
+    if (!renameDialog) return;
+    sessionStore.renameSession(renameDialog.id, name);
+    setSessionsVersion(v => v + 1);
+    setRenameDialog(null);
+  }, [renameDialog]);
 
   // Export full graph from backend API
   const handleExportGraph = useCallback(async () => {
@@ -827,7 +967,7 @@ function App() {
   }, [nodes, edges, updateVisualization, closeEditingNode, showNotification]);
 
   return (
-    <div className="app">
+    <div className={`app${drawerOpen ? ' session-drawer-open' : ''}`}>
       <div className="app-canvas" id="guide-target-canvas">
         <GraphCanvas
           nodes={nodes}
@@ -849,6 +989,7 @@ function App() {
           onSetEdgeType={handleSetEdgeType}
           onConnect={handleConnect}
           onCreateGroup={handleCreateGroup}
+          onNodePositionChange={scheduleAutoSave}
           onSaveView={handleSaveView}
           onCreateSubscription={handleCreateSubscription}
           onCreateAgent={handleCreateAgent}
@@ -890,7 +1031,33 @@ function App() {
         />
       </div>
 
-      <FloatingHeader stats={stats} onExportGraph={handleExportGraph} sessionId={_vizSessionId} onClear={clearVisualization} onStatsDialogChange={setStatsDialogOpen} onMenuOpenChange={setHeaderMenuOpen} />
+      <FloatingHeader
+        sessionId={sessionId}
+        onClear={clearVisualization}
+        onToggleDrawer={() => setDrawerOpen(prev => !prev)}
+      />
+      <SessionDrawer
+        open={drawerOpen}
+        onClose={() => setDrawerOpen(false)}
+        sessions={sessions}
+        currentSessionId={sessionId}
+        onNewSession={handleNewSession}
+        onConnectSession={() => setConnectDialogOpen(true)}
+        onSelectSession={handleSelectSession}
+        onRenameSession={(id) => {
+          const entry = sessions.find(s => s.id === id);
+          setRenameDialog({ id, name: entry?.name || '' });
+        }}
+        onOpenSettings={() => setSettingsOpen(true)}
+        suspendEscape={!!(
+          // The drawer is non-modal, so any dialog can be stacked on top of
+          // it; while one is open, Escape belongs to that dialog.
+          settingsOpen || connectDialogOpen || renameDialog ||
+          createNodeType || editingNode || detailNode || editingEdge ||
+          deleteDialog || saveViewDialog || showSubscriptionDialog ||
+          showAgentDialog || skillDialogType || showAKCDialog
+        )}
+      />
       {maxFederationDepth > 1 && (
         <div className="app-a11y-depth-live" aria-live="polite" aria-atomic="true">
           {t('federation.depth_indicator', { current: federationDepth, max: maxFederationDepth })}
@@ -974,6 +1141,39 @@ function App() {
           isLoading={isSavingView}
           onConfirm={handleConfirmSaveView}
           onCancel={() => setSaveViewDialog(null)}
+        />
+      )}
+
+      {settingsOpen && (
+        <SettingsDialog
+          stats={stats}
+          onExportGraph={handleExportGraph}
+          onClose={() => setSettingsOpen(false)}
+        />
+      )}
+
+      {connectDialogOpen && (
+        <InputDialog
+          title={t('sessions.connect_session_title')}
+          label={t('sessions.connect_session_label')}
+          placeholder="1234-5678"
+          confirmText={t('sessions.connect')}
+          cancelText={t('common.cancel')}
+          onConfirm={handleConnectSession}
+          onCancel={() => setConnectDialogOpen(false)}
+        />
+      )}
+
+      {renameDialog && (
+        <InputDialog
+          title={t('sessions.rename_session_title')}
+          label={t('sessions.session_name_label')}
+          defaultValue={renameDialog.name}
+          confirmText={t('common.save')}
+          cancelText={t('common.cancel')}
+          allowEmpty
+          onConfirm={handleRenameSession}
+          onCancel={() => setRenameDialog(null)}
         />
       )}
 
