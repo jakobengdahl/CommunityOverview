@@ -574,10 +574,6 @@ function App() {
     }
   }, [deleteDialog, removeNode, showNotification]);
 
-  // Callback: Create group (called when group is created inside GraphCanvas)
-  const handleCreateGroup = useCallback((position, groupNode) => {
-    showNotification('success', 'Group created');
-  }, [showNotification]);
 
   // Toolbar: trigger group creation in GraphCanvas
   const handleToolbarCreateGroup = useCallback(() => {
@@ -589,8 +585,10 @@ function App() {
   // full node/edge data comes from the store.
   const persistSessionSnapshot = useCallback((viewData) => {
     const state = useGraphStore.getState();
-    // Don't register empty, never-used sessions in the registry
-    if (state.nodes.length === 0 && !sessionStore.hasSession(sessionId)) return;
+    // Never persist an empty canvas: it would register unused sessions, and
+    // for existing sessions it would overwrite stored content after an
+    // (often accidental) clear — the last non-empty snapshot is kept instead.
+    if (state.nodes.length === 0) return;
     const positions = {};
     const parentIds = {};
     (viewData?.nodes || []).forEach(n => {
@@ -630,6 +628,32 @@ function App() {
       setSaveViewDialog({ viewData });
     }
   }, [persistSessionSnapshot]);
+
+  // Auto-save the current session (debounced) so it can be restored from the
+  // session drawer later. Scheduled both from store-level changes (effect
+  // below) and from canvas-internal changes that never reach the store, like
+  // node drags and group creation.
+  const autoSaveTimerRef = useRef(null);
+  const scheduleAutoSave = useCallback(() => {
+    if (useGraphStore.getState().nodes.length === 0) return;
+    if (autoSaveTimerRef.current) clearTimeout(autoSaveTimerRef.current);
+    autoSaveTimerRef.current = setTimeout(() => {
+      requestSessionSnapshot(null);
+    }, 1500);
+  }, [requestSessionSnapshot]);
+
+  useEffect(() => {
+    scheduleAutoSave();
+    return () => {
+      if (autoSaveTimerRef.current) clearTimeout(autoSaveTimerRef.current);
+    };
+  }, [nodes, edges, hiddenNodeIds, hiddenEdgeIds, scheduleAutoSave]);
+
+  // Callback: Create group (called when group is created inside GraphCanvas)
+  const handleCreateGroup = useCallback((position, groupNode) => {
+    showNotification('success', 'Group created');
+    scheduleAutoSave();
+  }, [showNotification, scheduleAutoSave]);
 
   // Confirm save view
   const handleConfirmSaveView = useCallback(async (name) => {
@@ -835,20 +859,6 @@ function App() {
 
   // ── Session navigation ──────────────────────────────────────────────────
 
-  // Auto-save the current session (debounced) whenever the canvas changes,
-  // so it can be restored from the session drawer later.
-  const autoSaveTimerRef = useRef(null);
-  useEffect(() => {
-    if (nodes.length === 0) return;
-    if (autoSaveTimerRef.current) clearTimeout(autoSaveTimerRef.current);
-    autoSaveTimerRef.current = setTimeout(() => {
-      requestSessionSnapshot(null);
-    }, 1500);
-    return () => {
-      if (autoSaveTimerRef.current) clearTimeout(autoSaveTimerRef.current);
-    };
-  }, [nodes, edges, hiddenNodeIds, hiddenEdgeIds, requestSessionSnapshot]);
-
   // Switch working session: snapshot the current one first, then swap the
   // session ID (reconnects the SSE stream) and restore the target's canvas.
   const switchToSession = useCallback((targetId, { register = true } = {}) => {
@@ -979,6 +989,7 @@ function App() {
           onSetEdgeType={handleSetEdgeType}
           onConnect={handleConnect}
           onCreateGroup={handleCreateGroup}
+          onNodePositionChange={scheduleAutoSave}
           onSaveView={handleSaveView}
           onCreateSubscription={handleCreateSubscription}
           onCreateAgent={handleCreateAgent}
@@ -1153,6 +1164,7 @@ function App() {
           defaultValue={renameDialog.name}
           confirmText={t('common.save')}
           cancelText={t('common.cancel')}
+          allowEmpty
           onConfirm={handleRenameSession}
           onCancel={() => setRenameDialog(null)}
         />

@@ -39,7 +39,12 @@ function SessionDrawer({
   useEffect(() => {
     if (!open || suspendEscape) return;
     const handleKeyDown = (e) => {
-      if (e.key === 'Escape') onClose();
+      if (e.key === 'Escape') {
+        // Stop the event here so GraphCanvas's own Escape handler doesn't
+        // also clear the canvas selection when the drawer closes.
+        e.stopPropagation();
+        onClose();
+      }
     };
     document.addEventListener('keydown', handleKeyDown, true);
     return () => document.removeEventListener('keydown', handleKeyDown, true);

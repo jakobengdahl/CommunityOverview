@@ -94,15 +94,23 @@ function upsertEntry(index, id, patch) {
   return [...index, { id, name: null, updatedAt: Date.now(), nodeCount: 0, ...patch }];
 }
 
+// Snapshots larger than this are never worth evicting other sessions for —
+// they are unlikely to fit even in an empty localStorage.
+const MAX_SNAPSHOT_BYTES = 4 * 1024 * 1024;
+
 /**
  * Persist a canvas snapshot and update the session's index entry.
  * Evicts the oldest sessions when over capacity or when storage quota is hit.
+ * If the snapshot ultimately cannot be written, the index entry is rolled
+ * back so the drawer never advertises content that isn't in storage.
  *
  * @param {string} id - Session ID
  * @param {Object} snapshot - {nodes, edges, positions, parentIds, groups, hiddenNodeIds, hiddenEdgeIds, savedAt}
+ * @returns {boolean} true if the snapshot was written
  */
 export function saveSnapshot(id, snapshot) {
-  if (!id) return;
+  if (!id) return false;
+  const prevEntry = readIndex().find(e => e.id === id) || null;
   let index = upsertEntry(readIndex(), id, {
     updatedAt: Date.now(),
     nodeCount: snapshot?.nodes?.length || 0,
@@ -113,20 +121,30 @@ export function saveSnapshot(id, snapshot) {
   }
 
   const payload = JSON.stringify(snapshot);
-  try {
-    window.localStorage.setItem(SNAPSHOT_PREFIX + id, payload);
-  } catch {
-    // Quota exceeded — evict the oldest other session and retry once.
-    index = evictOldest(index.filter(e => e.id !== id)).concat(
-      index.filter(e => e.id === id)
-    );
-    try {
-      window.localStorage.setItem(SNAPSHOT_PREFIX + id, payload);
-    } catch {
-      // still failing — keep the index entry, drop the snapshot silently
+  let written = false;
+  if (payload.length <= MAX_SNAPSHOT_BYTES) {
+    for (;;) {
+      try {
+        window.localStorage.setItem(SNAPSHOT_PREFIX + id, payload);
+        written = true;
+        break;
+      } catch {
+        // Quota exceeded — evict the oldest *other* session and retry.
+        const others = index.filter(e => e.id !== id);
+        if (others.length === 0) break;
+        index = [...evictOldest(others), ...index.filter(e => e.id === id)];
+      }
     }
   }
+
+  if (!written) {
+    // Roll back to the previous entry (which still describes whatever
+    // snapshot remains in storage), or drop the entry entirely.
+    index = index.filter(e => e.id !== id);
+    if (prevEntry) index.push(prevEntry);
+  }
   writeIndex(index);
+  return written;
 }
 
 /**
