@@ -1049,7 +1049,14 @@ function App() {
           setRenameDialog({ id, name: entry?.name || '' });
         }}
         onOpenSettings={() => setSettingsOpen(true)}
-        suspendEscape={!!(settingsOpen || connectDialogOpen || renameDialog)}
+        suspendEscape={!!(
+          // The drawer is non-modal, so any dialog can be stacked on top of
+          // it; while one is open, Escape belongs to that dialog.
+          settingsOpen || connectDialogOpen || renameDialog ||
+          createNodeType || editingNode || detailNode || editingEdge ||
+          deleteDialog || saveViewDialog || showSubscriptionDialog ||
+          showAgentDialog || skillDialogType || showAKCDialog
+        )}
       />
       {maxFederationDepth > 1 && (
         <div className="app-a11y-depth-live" aria-live="polite" aria-atomic="true">
