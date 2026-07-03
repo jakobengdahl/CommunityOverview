@@ -116,6 +116,17 @@ If any part of the request is unclear, stop and ask rather than assume.
 
 Follow this process for every feature or bug fix, regardless of size.
 
+**Default session ownership (end-to-end).** Unless the task says otherwise, a
+Claude session owns the whole cycle for the chosen task: solve it, open a PR
+targeting `dev`, run the review loop with a subagent, update any documentation
+the change affects, and — once every review point is resolved and the
+definition-of-done checklist in step 10 passes — merge the PR to `dev` itself.
+Do not stop at "PR opened" and wait for the owner to merge; merging a clean,
+green `dev` PR is part of the job. The only branches Claude never merges on its
+own initiative are `preview` and `main` (see the branch strategy above). If the
+tooling can't delete the feature branch after merge, leave it — the owner
+removes it manually.
+
 ### 1. Orient — start from a fresh dev
 
 Always start with a current copy of `dev`:
@@ -293,11 +304,17 @@ GH_TOKEN=$(cat ~/.gh_token) gh pr merge <number> \
   --delete-branch
 ```
 
+In this environment there is no `gh` CLI — use the GitHub MCP tools to mark the
+PR ready (if it was opened as a draft) and squash-merge it. If the merge tool
+can't delete the branch, leave it for the owner to remove manually.
+
 Merge only when **all** of the following are true:
 
 - [ ] All tests pass locally (`pytest backend/ -q`)
 - [ ] CI is green on the PR (not red, not pending)
 - [ ] Review loop is clean (last subagent round raised no actionable findings)
+- [ ] Documentation affected by the change is updated in the same PR (see the
+      Documentation section for which files map to which changes)
 - [ ] No debug artifacts in the diff (`print`, `pdb`, hardcoded credentials)
 - [ ] PR body documents what was *not* changed (scope)
 - [ ] Dependency changes, if any, follow the rules below
