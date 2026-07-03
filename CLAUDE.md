@@ -308,6 +308,48 @@ In this environment there is no `gh` CLI — use the GitHub MCP tools to mark th
 PR ready (if it was opened as a draft) and squash-merge it. If the merge tool
 can't delete the branch, leave it for the owner to remove manually.
 
+#### Waiting for CI before merge — never poll with a scheduled self-wakeup
+
+CI takes a few minutes. **Do not** bridge that wait with a scheduled self-wakeup
+(`send_later` / `ScheduleWakeup` / a self-firing trigger). Each such wake fires as
+a *new* turn, which spawns a redundant approval/confirmation for Jakob — the exact
+"double approval" to avoid.
+
+In this remote environment there is **no `gh` CLI and no shell path to CI status** —
+CI state is observable only through the GitHub MCP tools and through the
+`subscribe_pr_activity` webhooks, which deliver **CI failures and the merge event but
+never CI success**. A shell `Monitor`/`until` loop therefore cannot watch CI here.
+Given that, the only clean "merge on green, notify when done, no extra approval" path
+is GitHub-native auto-merge:
+
+1. **GitHub auto-merge (the intended path — requires a protected base branch).**
+   - Mark the PR ready (if draft), then call `enable_pr_auto_merge` (squash).
+   - `subscribe_pr_activity` for the PR, then **end the turn**.
+   - GitHub merges the moment CI is green and delivers a `merged` webhook (which
+     also auto-unsubscribes) — report that back to Jakob when it arrives. On a
+     CI-**failure** webhook, diagnose, fix, and push; auto-merge re-arms itself.
+   - Zero further action, self-notifying, no scheduled wakeup.
+
+2. **Unprotected base branch (auto-merge cannot arm).** `enable_pr_auto_merge`
+   fails when the PR is already mergeable (an unprotected branch with no required
+   check is *always* immediately mergeable), so auto-merge is simply unavailable.
+   In that case:
+   - Check CI once with `get_check_runs`. If it is already green, merge now and
+     report.
+   - If CI is still pending, **do not** poll it with a scheduled wakeup. Leave the
+     PR open and subscribed and tell Jakob it is green-pending — he can merge, or
+     (better) protect the branch so option 1 handles it next time.
+
+Either way, `subscribe_pr_activity` so a CI failure or later review comment wakes
+this session, and **do not** additionally schedule a self-wakeup for the same PR.
+
+> **Required one-time setup for option 1 (strongly recommended):** enabling
+> *Allow auto-merge* in repo settings is **not sufficient on its own** — an
+> unprotected branch is always immediately mergeable, so auto-merge never arms. Also
+> add a branch-protection rule on `dev` that makes the `Run Tests` check
+> **required**. With both in place, every `dev` PR merges automatically on green and
+> notifies via the merge webhook, with no polling and no second approval.
+
 Merge only when **all** of the following are true:
 
 - [ ] All tests pass locally (`pytest backend/ -q`)
