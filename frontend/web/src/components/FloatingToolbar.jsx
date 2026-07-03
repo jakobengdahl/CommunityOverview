@@ -363,10 +363,5 @@ function FloatingToolbar({
   );
 }
 
-// Export ICON_MAP as resolved components for backward compatibility
-const ICON_MAP = Object.fromEntries(
-  Object.entries(LEGACY_ICON_MAP).map(([k, v]) => [k, ICON_REGISTRY[v]])
-);
-
-export { ICON_MAP, COLOR_MAP, ICON_REGISTRY };
+export { resolveIcon, COLOR_MAP, ICON_REGISTRY };
 export default FloatingToolbar;
