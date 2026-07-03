@@ -143,6 +143,7 @@
     "delete": "Ta bort",
     "nodes_selected": "{count} noder markerade",
     "show_only": "Visa enbart dessa",
+    "select_same_type": "Markera alla noder av samma sort",
     "hide_all": "Dölj alla",
     "delete_all": "Ta bort alla",
     "change_type": "Ändra typ",

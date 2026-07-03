@@ -876,6 +876,7 @@ function App() {
             delete: t('context_menu.delete'),
             nodesSelected: t('context_menu.nodes_selected'),
             showOnly: t('context_menu.show_only'),
+            selectSameType: t('context_menu.select_same_type'),
             hideAll: t('context_menu.hide_all'),
             deleteAll: t('context_menu.delete_all'),
             changeType: t('context_menu.change_type'),

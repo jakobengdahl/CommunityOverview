@@ -81,6 +81,12 @@ Effort scale: XS = single-line fix · S = up to ~30 lines / one file · M = mult
 - **Issue:** The test asserts `api.sendChatMessage.mock.calls[0][2]` deeply equals `{ federationDepth: 2 }`, but the chat request options object now carries additional fields (5 more keys), so the strict `toEqual` fails. The runtime behaviour is correct — the assertion is just too strict. Fix: assert the object *contains* `federationDepth: 2` (e.g. `expect.objectContaining`) instead of an exact match.
 - **Effort:** XS
 
+### [2026-07-03] `GraphCanvas.test.jsx` edge-delete test asserts Swedish label against English default
+- **File(s):** `packages/ui-graph-canvas/tests/GraphCanvas.test.jsx:168`
+- **Context:** Discovered during `claude/context-menu-select-by-type-olug86` (reproduced identically on `dev` before this branch's changes)
+- **Issue:** The test "calls onDeleteEdge from edge context menu" queries `getByRole('button', { name: /ta bort/i })`, but the component renders no `contextMenuLabels`, so the delete button uses the English default `Delete`. The query never matches and the test fails. Fix: query for `/delete/i` to match the English default, or pass `contextMenuLabels={{ delete: 'Ta bort' }}` to the render.
+- **Effort:** XS
+
 ---
 
 ## Fixed
