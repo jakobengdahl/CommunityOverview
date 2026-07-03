@@ -118,6 +118,35 @@
     "language_sv": "Svenska",
     "logout": "Log out"
   },
+  "sessions": {
+    "title": "Sessions",
+    "close": "Close menu",
+    "new_session": "Start new session",
+    "new_session_started": "New session started",
+    "search_sessions": "Search previous sessions",
+    "search_placeholder": "Search by name or ID...",
+    "connect_session": "Connect to session (via ID)",
+    "connect_session_title": "Connect to session",
+    "connect_session_label": "Session ID",
+    "connect": "Connect",
+    "invalid_session_id": "Invalid session ID — expected format 1234-5678",
+    "recent_sessions": "Recent sessions",
+    "no_sessions": "No previous sessions yet",
+    "no_matches": "No sessions match your search",
+    "rename_session": "Name session",
+    "rename_session_title": "Name session",
+    "session_name_label": "Session name",
+    "settings": "Settings"
+  },
+  "settings": {
+    "title": "Settings",
+    "close": "Close settings",
+    "nodes": "Nodes",
+    "edges": "Edges",
+    "nodes_by_type": "Nodes by type",
+    "details": "Details",
+    "admin_section": "Admin"
+  },
   "experts": {
     "title": "Expert Agents",
     "toggle_panel": "Add or remove expert agents"
@@ -150,6 +179,8 @@
     "general_connection": "General connection"
   },
   "common": {
-    "saving": "Saving..."
+    "saving": "Saving...",
+    "save": "Save",
+    "cancel": "Cancel"
   }
 }

@@ -118,6 +118,35 @@
     "language_sv": "Svenska",
     "logout": "Logga ut"
   },
+  "sessions": {
+    "title": "Sessioner",
+    "close": "Stäng menyn",
+    "new_session": "Starta ny session",
+    "new_session_started": "Ny session startad",
+    "search_sessions": "Sök bland tidigare sessioner",
+    "search_placeholder": "Sök på namn eller ID...",
+    "connect_session": "Anslut till session (via ID)",
+    "connect_session_title": "Anslut till session",
+    "connect_session_label": "Sessions-ID",
+    "connect": "Anslut",
+    "invalid_session_id": "Ogiltigt sessions-ID — förväntat format 1234-5678",
+    "recent_sessions": "Senaste sessioner",
+    "no_sessions": "Inga tidigare sessioner ännu",
+    "no_matches": "Inga sessioner matchar sökningen",
+    "rename_session": "Namnge session",
+    "rename_session_title": "Namnge session",
+    "session_name_label": "Sessionsnamn",
+    "settings": "Inställningar"
+  },
+  "settings": {
+    "title": "Inställningar",
+    "close": "Stäng inställningar",
+    "nodes": "Noder",
+    "edges": "Kanter",
+    "nodes_by_type": "Noder per typ",
+    "details": "Detaljer",
+    "admin_section": "Admin"
+  },
   "experts": {
     "title": "Expert-agenter",
     "toggle_panel": "Lägg till eller ta bort expert-agenter"
@@ -150,6 +179,8 @@
     "general_connection": "Generell koppling"
   },
   "common": {
-    "saving": "Sparar..."
+    "saving": "Sparar...",
+    "save": "Spara",
+    "cancel": "Avbryt"
   }
 }
