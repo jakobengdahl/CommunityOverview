@@ -1,4 +1,4 @@
-import { useState, useCallback, useEffect, useRef } from 'react';
+import { useState, useCallback, useEffect, useLayoutEffect, useRef } from 'react';
 import { GraphCanvas, positionNewNodes } from '@community-graph/ui-graph-canvas';
 import '@community-graph/ui-graph-canvas/styles';
 import useGraphStore from './store/graphStore';
@@ -111,8 +111,11 @@ function App() {
     }
   }, [federationDepth, maxFederationDepth, setFederationDepth]);
 
-  // Track whether any dialog is currently open (used by the double-Escape handler)
-  useEffect(() => {
+  // Track whether any dialog is currently open (used by the double-Escape handler).
+  // useLayoutEffect runs synchronously after commit so the ref is up to date before
+  // the next paint — closing the window where a rapid double-Escape right after a
+  // dialog opens could slip past the guard and clear the canvas.
+  useLayoutEffect(() => {
     dialogOpenRef.current = !!(
       createNodeType || editingNode || detailNode || editingEdge ||
       deleteDialog || saveViewDialog || showSubscriptionDialog ||

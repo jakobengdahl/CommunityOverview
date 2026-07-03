@@ -9,8 +9,47 @@ import uuid
 from backend.core.models import (
     Node, Edge, NodeType, RelationshipType,
     SimilarNode, GraphStats, AddNodesResult, DeleteNodesResult,
-    NODE_COLORS
+    NODE_COLORS, _parse_datetime
 )
+
+
+class TestParseDatetime:
+    """Tests for _parse_datetime timezone handling"""
+
+    def test_naive_string_becomes_utc_aware(self):
+        """Timestamps persisted before the UTC migration have no tz info and
+        must be treated as UTC so they stay comparable with aware datetimes."""
+        parsed = _parse_datetime("2024-01-01T00:00:00")
+        assert parsed.tzinfo is not None
+        assert parsed.utcoffset() == timezone.utc.utcoffset(None)
+
+    def test_z_suffix_string_is_utc_aware(self):
+        parsed = _parse_datetime("2024-01-01T00:00:00Z")
+        assert parsed.tzinfo is not None
+        assert parsed.utcoffset() == timezone.utc.utcoffset(None)
+
+    def test_offset_string_preserved(self):
+        parsed = _parse_datetime("2024-01-01T00:00:00+02:00")
+        assert parsed.utcoffset().total_seconds() == 2 * 3600
+
+    def test_non_string_passthrough(self):
+        assert _parse_datetime(None) is None
+
+    def test_node_from_dict_naive_timestamps_are_aware(self):
+        """A node loaded from pre-migration JSON must not mix naive and aware
+        datetimes — otherwise comparing created_at across nodes raises TypeError."""
+        legacy = Node.from_dict({
+            "id": "node-1",
+            "type": "Actor",
+            "name": "Legacy",
+            "created_at": "2024-01-01T00:00:00",
+            "updated_at": "2024-01-01T00:00:00",
+        })
+        fresh = Node(type="Actor", name="Fresh")
+
+        assert legacy.created_at.tzinfo is not None
+        # Must be comparable with a datetime created after the migration.
+        assert legacy.created_at < fresh.created_at
 
 
 class TestNodeType:
