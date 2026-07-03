@@ -21,12 +21,6 @@ Effort scale: XS = single-line fix · S = up to ~30 lines / one file · M = mult
 
 ## Open
 
-### [2026-07-01] `stat-metadata` profile's `ess-expert` agent references a non-existent icon name, and `expert_agents[].icon` is dead config
-- **File(s):** `config/stat-metadata/schema_config.json:319` (`presentation.expert_agents[].icon` for the `ess-expert` entry, not a node type), `frontend/web/src/components/ExpertAgentSelector.jsx:2,42`
-- **Context:** Discovered during `claude/icon-config-docs-lkte9g` (icon registry expansion + `docs/ICONS.md`)
-- **Issue:** Two separate problems here. (1) The value `"GlobeFill"` isn't a real `react-bootstrap-icons` export — only `Globe`, `Globe2`, and regional variants like `GlobeEuropeAfricaFill` exist. (2) More fundamentally, `expert_agents[].icon` isn't read by the frontend at all: `ExpertAgentSelector.jsx` renders a hardcoded `Robot` icon (line 42) for every agent regardless of `agent.color`/`agent.icon`, so this field currently has zero visible effect for any profile (`config/default`'s expert agents set `icon` too, same dead field). Fix: either wire `ExpertAgentSelector.jsx` to read `agent.icon` from `ICON_REGISTRY` (like `resolveIcon()` does for node types) and then correct the `GlobeFill` value to `GlobeEuropeAfricaFill`, or remove the unused `icon` field from `expert_agents` config entries across profiles if per-agent icons aren't wanted.
-- **Effort:** S
-
 ### [2026-07-01] `FloatingSearch` icon resolution ignores per-profile schema `icon` overrides
 - **File(s):** `frontend/web/src/components/FloatingToolbar.jsx:366-371`, `frontend/web/src/components/FloatingSearch.jsx:4,277`
 - **Context:** Discovered during `claude/icon-config-docs-lkte9g` (icon registry expansion + `docs/ICONS.md`)
@@ -50,6 +44,10 @@ Effort scale: XS = single-line fix · S = up to ~30 lines / one file · M = mult
 ## Fixed
 
 *(resolved entries moved here after merge, for reference)*
+
+### [2026-07-03] Fixed in branch `claude/next-pbug-small-fixes-zoij5e`
+
+- **`expert_agents[].icon` was dead config and `ess-expert` used a non-existent icon name** — `frontend/web/src/components/ExpertAgentSelector.jsx`, `config/stat-metadata/schema_config.json`. Wired the expert-agent list to resolve each agent's `icon` from the shared `ICON_REGISTRY` (falling back to `Robot`), colored by `agent.color`, replacing the generic hardcoded `Robot` and the redundant color dot. Corrected the `ess-expert` entry's invalid `GlobeFill` value to `GlobeEuropeAfricaFill`.
 
 ### [2026-07-02] Fixed in PR #187 (`claude/small-fix-md-review-jy2iln`)
 

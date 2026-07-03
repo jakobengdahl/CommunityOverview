@@ -316,7 +316,7 @@
         "specialty": "European Statistical System, NSIs and international cooperation",
         "specialty_en": "European Statistical System, NSIs and international cooperation",
         "color": "#3B82F6",
-        "icon": "GlobeFill",
+        "icon": "GlobeEuropeAfricaFill",
         "intro_en": "Hello! I'm the ESS Expert. I can help with questions about the European Statistical System, its member NSIs, Eurostat coordination, international statistical cooperation and the SDMX sponsor organisations.",
         "system_context": "You are an expert on the European Statistical System (ESS). You know the roles of Eurostat, national statistical institutes, EEA partners, and international organisations (SDMX sponsors, UN agencies). You understand ESCoP, Regulation 223/2009, and how statistical cooperation works across borders."
       },
