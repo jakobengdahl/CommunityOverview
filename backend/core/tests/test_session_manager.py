@@ -86,6 +86,42 @@ class TestApplyOps:
         with pytest.raises(OpError):
             await mgr.apply_ops(s.id, "c1", 0, [{"op": "bogus"}])
 
+    async def test_batch_is_atomic_on_mid_batch_failure(self):
+        """A failing op late in a batch must not apply/broadcast earlier ops.
+
+        Regression for the non-idempotent duplication + subscriber-divergence
+        bug: annotation_created before an invalid op used to be applied and
+        broadcast, then the batch returned 400 and a retry created a duplicate.
+        """
+        mgr = _manager()
+        s = mgr.create_session()
+        sub, _ = mgr.connect(s.id, "c1", "A")
+        await _drain(sub)
+        with pytest.raises(OpError):
+            await mgr.apply_ops(s.id, "c1", 0, [
+                {"op": "annotation_created", "annotation": {"kind": "note", "text": "hi"}},
+                {"op": "node_moved", "node_id": "a", "position": {"x": "bad"}},
+            ])
+        after = mgr.get_session(s.id)
+        assert after.seq == 0
+        assert after.state["annotations"] == []
+        assert after.state["node_refs"] == []
+        # Nothing was broadcast to subscribers.
+        assert await _drain(sub) == []
+
+    async def test_atomic_rollback_preserves_prior_state(self):
+        mgr = _manager()
+        s = mgr.create_session()
+        await mgr.apply_ops(s.id, "c1", 0, [{"op": "nodes_added", "node_ids": ["keep"]}])
+        with pytest.raises(OpError):
+            await mgr.apply_ops(s.id, "c1", 0, [
+                {"op": "nodes_added", "node_ids": ["x"]},
+                {"op": "group_membership_changed", "group_id": "missing", "member_node_ids": []},
+            ])
+        after = mgr.get_session(s.id)
+        assert after.state["node_refs"] == ["keep"]
+        assert after.seq == 1
+
 
 class TestClaimOps:
     async def test_claim_ops_are_ephemeral(self):

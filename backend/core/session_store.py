@@ -532,6 +532,10 @@ class SessionStore:
         self._rings.setdefault(session.id, deque(maxlen=self._ring_size)).append(applied)
         return applied
 
+    def ring(self, session_id: str) -> Optional[Deque[Dict[str, Any]]]:
+        """Return the per-session op ring buffer (or None), for batch rollback."""
+        return self._rings.get(session_id)
+
     def ops_since(self, session_id: str, since_seq: int) -> Optional[List[Dict[str, Any]]]:
         """Return applied ops with ``seq > since_seq`` from the ring buffer.
 

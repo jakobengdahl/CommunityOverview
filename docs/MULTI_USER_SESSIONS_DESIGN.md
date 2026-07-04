@@ -252,6 +252,14 @@ transition and removed in the final step.
   (`crypto.getRandomValues`, 10^8 space) — acceptable for open deployments already
   exposing connect-by-ID; SaaS adds real authorization.
 - All new endpoints respect the existing optional HTTP Basic Auth.
+  - **Open follow-up (backend steps 1–3):** the CRUD/ops endpoints honour Basic
+    Auth via request headers, but a browser `EventSource` cannot send an
+    `Authorization` header, so the new `GET /api/sessions/{id}/stream` is
+    unreachable under Basic Auth — the same constraint the legacy
+    `/sessions/{id}/stream` bypass already accommodates. Resolve before the
+    step-4 cutover: either bypass the new stream path too (it is protected by the
+    unguessable session id, the legacy rationale) or add a query-param/cookie
+    token for the stream only. Tracked in `SMALL_FIXES.md`.
 
 ## 4. Out of scope for the open core (SaaS features)
 

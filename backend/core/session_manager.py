@@ -21,6 +21,7 @@ used by the REST/SSE endpoints and by MCP pushes:
 from __future__ import annotations
 
 import asyncio
+import copy
 import time
 from typing import Any, Dict, List, Optional, Tuple
 
@@ -176,50 +177,94 @@ class SessionManager:
         if session is None:
             raise SessionNotFound()
 
-        applied: List[Dict[str, Any]] = []
-        state_changed = False
+        # Reject a malformed batch up front, before any op is applied or
+        # broadcast: op envelopes and claim payloads are structurally validated
+        # here, and state ops in ``apply_state_op`` always validate before they
+        # mutate. Combined with the rollback below, a batch is all-or-nothing —
+        # a mid-batch failure never leaves a partial prefix applied, persisted or
+        # broadcast (which would diverge subscribers and duplicate non-idempotent
+        # ops such as annotation_created on client retry).
+        for op in ops:
+            if not isinstance(op, dict):
+                raise OpError("each op must be an object")
+            op_type = op.get("op")
+            if op_type in CLAIM_OPS:
+                self._validate_claim_op(op)
+            elif op_type not in STATE_OPS:
+                raise OpError(f"unknown op: {op_type!r}")
 
         async with self._lock(session_id):
-            for op in ops:
-                if not isinstance(op, dict):
-                    raise OpError("each op must be an object")
-                op_type = op.get("op")
-                if op_type in CLAIM_OPS:
-                    applied.append(self._apply_claim_op(session_id, client_id, op))
-                elif op_type in STATE_OPS:
-                    result = self.store.apply_state_op(session, {**op, "client_id": client_id})
-                    if result is None:
-                        continue  # legitimate no-op (e.g. update on deleted annotation)
-                    state_changed = True
+            # Snapshot for rollback only for multi-op batches: a single op that
+            # fails always raises before mutating (validation precedes mutation
+            # in apply_state_op), so the hot single-op path stays copy-free.
+            need_rollback = len(ops) > 1
+            saved_state = copy.deepcopy(session.state) if need_rollback else None
+            saved_seq = session.seq
+            saved_name = session.name
+            ring = self.store.ring(session_id)
+            saved_ring = list(ring) if (need_rollback and ring is not None) else None
+
+            # ("state", applied) | ("claim", op_type, element_ids), in arrival order
+            pending: List[Tuple[Any, ...]] = []
+            state_changed = False
+            try:
+                for op in ops:
+                    op_type = op["op"]
+                    if op_type in CLAIM_OPS:
+                        pending.append(("claim", op_type, list(op["element_ids"])))
+                    else:
+                        result = self.store.apply_state_op(session, {**op, "client_id": client_id})
+                        if result is None:
+                            continue  # legitimate no-op (e.g. update on deleted annotation)
+                        state_changed = True
+                        pending.append(("state", result))
+            except Exception:
+                if need_rollback:
+                    session.state = saved_state
+                    session.seq = saved_seq
+                    session.name = saved_name
+                    if ring is not None and saved_ring is not None:
+                        ring.clear()
+                        ring.extend(saved_ring)
+                raise
+
+            if state_changed:
+                self.store.persist(session)
+
+            # Commit succeeded: apply ephemeral claim effects and broadcast every
+            # op in arrival order (originator included; clients apply idempotently).
+            applied: List[Dict[str, Any]] = []
+            for entry in pending:
+                if entry[0] == "state":
+                    result = entry[1]
                     self.bus.publish(
                         session_id,
                         {"type": "op", "client_id": client_id, "op": result, "seq": result["seq"]},
                     )
                     applied.append(result)
                 else:
-                    raise OpError(f"unknown op: {op_type!r}")
-
-            if state_changed:
-                self.store.persist(session)
+                    _, op_type, element_ids = entry
+                    if op_type == "selection_claimed":
+                        self.claims.claim(session_id, client_id, element_ids)
+                    else:
+                        element_ids = self.claims.release(session_id, client_id, element_ids)
+                    self.bus.publish(
+                        session_id,
+                        {
+                            "type": "op",
+                            "client_id": client_id,
+                            "op": {"op": op_type, "client_id": client_id, "element_ids": element_ids},
+                        },
+                    )
+                    applied.append({"op": op_type, "element_ids": element_ids})
 
         return {"applied": applied, "seq": session.seq}
 
-    def _apply_claim_op(self, session_id: str, client_id: str, op: Dict[str, Any]) -> Dict[str, Any]:
+    @staticmethod
+    def _validate_claim_op(op: Dict[str, Any]) -> None:
         element_ids = op.get("element_ids")
         if not isinstance(element_ids, list) or not all(isinstance(e, str) for e in element_ids):
             raise OpError(f"{op.get('op')}: 'element_ids' must be a list of strings")
-        op_type = op["op"]
-        if op_type == "selection_claimed":
-            self.claims.claim(session_id, client_id, element_ids)
-        else:
-            element_ids = self.claims.release(session_id, client_id, element_ids)
-        event = {
-            "type": "op",
-            "client_id": client_id,
-            "op": {"op": op_type, "client_id": client_id, "element_ids": element_ids},
-        }
-        self.bus.publish(session_id, event)
-        return {"op": op_type, "element_ids": element_ids}
 
     # ---------------- realtime connect / catch-up ----------------
 
