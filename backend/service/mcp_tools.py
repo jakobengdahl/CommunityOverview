@@ -20,18 +20,25 @@ from typing import List, Optional, Dict, Any, Callable
 from .service import GraphService
 
 
-def register_mcp_tools(mcp, service: GraphService, session_registry=None) -> Dict[str, Callable]:
+def register_mcp_tools(mcp, service: GraphService, session_registry=None, session_manager=None) -> Dict[str, Callable]:
     """
     Register all GraphService methods as MCP tools.
 
     Args:
         mcp: FastMCP instance to register tools with
         service: GraphService instance to use for operations
+        session_registry: legacy single-consumer visualization push registry
+        session_manager: new shared-session manager; pushes are additionally
+            broadcast to its hub subscribers so an AI agent is just another
+            collaborator (design 3.8)
 
     Returns:
         Dict mapping tool names to their functions (for ChatProcessor)
     """
     tools_map = {}
+
+    def _push(session_id, tool_name, result):
+        _push_to_session(session_registry, session_id, tool_name, result, session_manager)
 
     def register_tool(func: Callable) -> Callable:
         """Register a function as both MCP tool and in tools_map."""
@@ -71,7 +78,7 @@ def register_mcp_tools(mcp, service: GraphService, session_registry=None) -> Dic
             action=action,
             federation_depth=federation_depth,
         )
-        _push_to_session(session_registry, visualization_session_id, "search_graph", result)
+        _push(visualization_session_id, "search_graph", result)
         return result
 
     @register_tool
@@ -112,7 +119,7 @@ def register_mcp_tools(mcp, service: GraphService, session_registry=None) -> Dic
             relationship_types=relationship_types,
             depth=depth,
         )
-        _push_to_session(session_registry, visualization_session_id, "get_related_nodes", result)
+        _push(visualization_session_id, "get_related_nodes", result)
         return result
 
     # ==================== Similarity Tools ====================
@@ -476,7 +483,7 @@ def register_mcp_tools(mcp, service: GraphService, session_registry=None) -> Dic
             The nodes and edges to display in the visualization, with position and hidden node data
         """
         result = service.get_saved_view(name)
-        _push_to_session(session_registry, visualization_session_id, "get_saved_view", result)
+        _push(visualization_session_id, "get_saved_view", result)
         return result
 
     @register_tool
@@ -524,7 +531,7 @@ def register_mcp_tools(mcp, service: GraphService, session_registry=None) -> Dic
                 ),
             }
         result = {"action": "clear_visualization", "nodes": [], "edges": [], "success": True}
-        _push_to_session(session_registry, visualization_session_id, "clear_visualization", result)
+        _push(visualization_session_id, "clear_visualization", result)
         return {
             "success": True,
             "message": f"Canvas cleared in session '{visualization_session_id}'",
@@ -605,21 +612,29 @@ def _push_to_session(
     session_id: Optional[str],
     tool_name: str,
     result: Dict[str, Any],
+    session_manager=None,
 ) -> None:
-    """Push *result* to a browser session queue if *session_id* is set.
+    """Push *result* to a browser session if *session_id* is set.
 
     When the result has nodes but no explicit *action*, defaults to
     "add_to_visualization" so external AI tools add to the canvas rather
     than silently replacing it.
+
+    The command goes to the legacy single-consumer registry (current frontend)
+    and, when a *session_manager* is supplied, is also broadcast to the new
+    shared-session hub so every connected collaborator receives it (design 3.8).
     """
-    if not session_id or not session_registry:
-        return
-    if not session_registry.is_valid_session_id(session_id):
+    if not session_id:
         return
     command_result = dict(result)
     if "action" not in command_result and command_result.get("nodes"):
         command_result["action"] = "add_to_visualization"
-    session_registry.push_command_sync(
-        session_id,
-        {"type": "tool_result", "tool": tool_name, "result": command_result},
-    )
+    command = {"type": "tool_result", "tool": tool_name, "result": command_result}
+    if session_registry and session_registry.is_valid_session_id(session_id):
+        session_registry.push_command_sync(session_id, command)
+    if session_manager is not None:
+        try:
+            session_manager.push_command(session_id, command)
+        except Exception:
+            # Best-effort mirror to the hub; never break the legacy push path.
+            pass

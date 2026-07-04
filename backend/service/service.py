@@ -1312,6 +1312,35 @@ class GraphService:
             "message": f"Ready to save view '{name}'. Client will capture current visualization state."
         }
 
+    def resolve_session_nodes(self, node_ids: List[str]) -> Dict[str, Any]:
+        """Resolve a shared session's node references to node objects + edges.
+
+        Sessions store node **references** only (design D4); this rehydrates them
+        from the graph on load, mirroring ``get_saved_view``'s fetch logic and
+        the same access/visibility filtering. ``group-*`` ids are session-local
+        annotations, not graph nodes, and are skipped.
+        """
+        decision = self._evaluate_graph_access(action=GRAPH_ACTION_READ, target="resolve_session_nodes")
+        if not decision.allowed:
+            return self._build_access_denied_result(
+                action=GRAPH_ACTION_READ,
+                target="resolve_session_nodes",
+                decision=decision,
+            )
+
+        visible_node_ids: List[str] = []
+        nodes = []
+        for node_id in node_ids:
+            if not isinstance(node_id, str) or node_id.startswith("group-"):
+                continue
+            node = self._storage.get_node(node_id)
+            if node and self._is_node_visible(node, decision.graph_access):
+                visible_node_ids.append(node_id)
+                nodes.append(serialize_node(node))
+
+        edges = serialize_edges(self._storage.get_edges_between_nodes(visible_node_ids))
+        return {"success": True, "nodes": nodes, "edges": edges}
+
     def get_saved_view(self, name: str) -> Dict[str, Any]:
         """
         Get a saved view by name and load its content for display.

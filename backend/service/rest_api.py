@@ -17,8 +17,11 @@ Usage:
     app.include_router(router, prefix="/api")
 """
 
+import asyncio
+import json
 from typing import List, Optional, Dict, Any
 from fastapi import APIRouter, HTTPException, Query, Body, Request, Path
+from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, Field
 
 from backend.authorization import use_request_authorization
@@ -128,6 +131,23 @@ class AdoptFederatedNodeRequest(BaseModel):
 class SaveViewRequest(BaseModel):
     """Request model for saving a view."""
     name: str = Field(..., min_length=1, max_length=200, description="View name")
+
+
+class CreateSessionRequest(BaseModel):
+    """Request model for creating a shared session."""
+    name: Optional[str] = Field(None, max_length=200, description="Optional session name")
+
+
+class RenameSessionRequest(BaseModel):
+    """Request model for renaming a shared session."""
+    name: Optional[str] = Field(None, max_length=200, description="New session name (or null to clear)")
+
+
+class SessionOpsRequest(BaseModel):
+    """Request model for a batch of session ops."""
+    client_id: str = Field(..., min_length=1, max_length=100, description="Originating client id")
+    base_seq: Optional[int] = Field(None, description="Client's last-known seq (informational)")
+    ops: List[Dict[str, Any]] = Field(..., description="Ordered ops to apply")
 
 
 def _raise_for_access_denied(result: Dict[str, Any]) -> None:
@@ -419,6 +439,137 @@ def _register_views_endpoints(router: APIRouter, service: GraphService) -> None:
         return result
 
 
+def _register_session_endpoints(router: APIRouter, service: GraphService, session_manager) -> None:
+    """Register the server-side shared-session REST + SSE endpoints.
+
+    Only wired when a ``session_manager`` is supplied. These live alongside the
+    legacy ``/sessions/{id}/state|stream`` MCP-push channel, which is unchanged.
+    """
+    from backend.core.session_manager import (
+        OpBatchTooLarge,
+        RateLimited,
+        SessionLimitReached,
+        SessionNotFound,
+    )
+    from backend.core.session_store import OpError, is_valid_session_id
+
+    def _session_payload(session, *, resolve: bool, manager) -> Dict[str, Any]:
+        payload = session.to_dict()
+        payload["roster"] = manager.roster(session.id)
+        if resolve:
+            resolved = service.resolve_session_nodes(session.state.get("node_refs", []))
+            payload["resolved"] = {
+                "nodes": resolved.get("nodes", []),
+                "edges": resolved.get("edges", []),
+            }
+        return payload
+
+    @router.post("/sessions")
+    async def create_session(request: CreateSessionRequest) -> Dict[str, Any]:
+        try:
+            session = session_manager.create_session(request.name)
+        except SessionLimitReached:
+            raise HTTPException(status_code=503, detail="too many sessions")
+        return _session_payload(session, resolve=False, manager=session_manager)
+
+    @router.get("/sessions")
+    async def list_sessions() -> Dict[str, Any]:
+        return {"sessions": session_manager.list_sessions()}
+
+    @router.get("/sessions/{session_id}")
+    async def get_session(
+        session_id: str,
+        resolve: bool = Query(False, description="Resolve node references to node objects"),
+    ) -> Dict[str, Any]:
+        if not is_valid_session_id(session_id):
+            raise HTTPException(status_code=400, detail="invalid session_id format")
+        session = session_manager.get_session(session_id)
+        if session is None:
+            raise HTTPException(status_code=404, detail="session not found")
+        return _session_payload(session, resolve=resolve, manager=session_manager)
+
+    @router.patch("/sessions/{session_id}")
+    async def rename_session(session_id: str, request: RenameSessionRequest) -> Dict[str, Any]:
+        if not is_valid_session_id(session_id):
+            raise HTTPException(status_code=400, detail="invalid session_id format")
+        session = session_manager.rename_session(session_id, request.name)
+        if session is None:
+            raise HTTPException(status_code=404, detail="session not found")
+        return _session_payload(session, resolve=False, manager=session_manager)
+
+    @router.delete("/sessions/{session_id}")
+    async def delete_session(
+        session_id: str,
+        client_id: Optional[str] = Query(None, description="Deleting client id (for the notice)"),
+    ) -> Dict[str, Any]:
+        if not is_valid_session_id(session_id):
+            raise HTTPException(status_code=400, detail="invalid session_id format")
+        existed = session_manager.delete_session(session_id, deleted_by=client_id)
+        if not existed:
+            raise HTTPException(status_code=404, detail="session not found")
+        return {"deleted": True, "id": session_id}
+
+    @router.post("/sessions/{session_id}/ops")
+    async def apply_session_ops(session_id: str, request: SessionOpsRequest) -> Dict[str, Any]:
+        try:
+            return await session_manager.apply_ops(
+                session_id, request.client_id, request.base_seq, request.ops
+            )
+        except SessionNotFound:
+            raise HTTPException(status_code=404, detail="session not found")
+        except RateLimited:
+            raise HTTPException(status_code=429, detail="rate limit exceeded")
+        except OpBatchTooLarge:
+            raise HTTPException(status_code=413, detail="op batch too large")
+        except OpError as exc:
+            raise HTTPException(status_code=400, detail=str(exc))
+
+    @router.get("/sessions/{session_id}/stream")
+    async def stream_session(
+        session_id: str,
+        request: Request,
+        client_id: str = Query(..., min_length=1, max_length=100),
+        name: Optional[str] = Query(None, max_length=100),
+        since_seq: Optional[int] = Query(None),
+    ):
+        if not is_valid_session_id(session_id):
+            raise HTTPException(status_code=400, detail="invalid session_id format")
+        try:
+            session_manager.get_or_create(session_id)
+        except SessionLimitReached:
+            raise HTTPException(status_code=503, detail="too many sessions")
+
+        subscription, _member = session_manager.connect(session_id, client_id, name)
+
+        async def event_generator():
+            try:
+                catch_up = session_manager.catch_up(session_id, since_seq)
+                yield f"data: {json.dumps(catch_up)}\n\n"
+                while True:
+                    if await request.is_disconnected():
+                        break
+                    try:
+                        event = await asyncio.wait_for(subscription.get(), timeout=25.0)
+                    except asyncio.TimeoutError:
+                        yield ": ping\n\n"
+                        continue
+                    yield f"data: {json.dumps(event)}\n\n"
+            except asyncio.CancelledError:
+                pass
+            finally:
+                session_manager.disconnect(session_id, client_id, subscription)
+
+        return StreamingResponse(
+            event_generator(),
+            media_type="text/event-stream",
+            headers={
+                "Cache-Control": "no-cache",
+                "Connection": "keep-alive",
+                "X-Accel-Buffering": "no",
+            },
+        )
+
+
 def _register_export_endpoints(router: APIRouter, service: GraphService) -> None:
     @router.get("/export")
     async def export_graph(request: Request) -> Dict[str, Any]:
@@ -431,13 +582,16 @@ def _register_export_endpoints(router: APIRouter, service: GraphService) -> None
 
 # ==================== Router Factory ====================
 
-def create_rest_router(service: GraphService, prefix: str = "") -> APIRouter:
+def create_rest_router(service: GraphService, prefix: str = "", session_manager=None) -> APIRouter:
     """
     Create a FastAPI router with all graph operation endpoints.
 
     Args:
         service: GraphService instance to use for operations
         prefix: Optional URL prefix for all routes
+        session_manager: Optional SessionManager enabling shared-session
+            endpoints (/sessions CRUD + ops + stream). When None, those routes
+            are not registered.
 
     Returns:
         Configured APIRouter
@@ -451,6 +605,8 @@ def create_rest_router(service: GraphService, prefix: str = "") -> APIRouter:
     _register_metadata_endpoints(router, service)
     _register_views_endpoints(router, service)
     _register_export_endpoints(router, service)
+    if session_manager is not None:
+        _register_session_endpoints(router, service, session_manager)
 
     @router.get("/collect/{short_name}")
     async def get_collect_config(

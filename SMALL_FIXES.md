@@ -39,6 +39,30 @@ Effort scale: XS = single-line fix · S = up to ~30 lines / one file · M = mult
 - **Issue:** Code uses `t('key') || 'fallback'` expecting a null/undefined return when a key is missing, but `t()` returns the key name as a string (truthy) when no translation is found. The `|| 'fallback'` branch never fires. The two immediately affected keys (`menu.view_section`, `menu.show_minimap`) were fixed by adding them to the JSON files. Any future missing key will silently show its key name in the UI. Fix: either update the fallback pattern to use `t('key') === 'key' ? 'fallback' : t('key')`, or make `t()` return null on a miss (breaking change to the hook contract).
 - **Effort:** S
 
+### [2026-07-04] Shared-session SSE stream not reachable via EventSource under Basic Auth
+- **File(s):** `backend/service/rest_api.py` (`/api/sessions/{id}/stream`), `backend/api_host/server.py:362-366`
+- **Context:** Discovered during review of `claude/multi-user-sessions-step-3-ojk3mi` (multi-user sessions step 2/3)
+- **Issue:** The auth middleware bypasses `/sessions/` because a browser `EventSource` cannot send an `Authorization` header; the new shared-session stream lives under the API prefix at `/api/sessions/{id}/stream`, which is **not** bypassed. When `auth_enabled` is on, the new SSE stream is unreachable by EventSource at the step-4 frontend cutover. Design §3.9 says new endpoints should respect Basic Auth, so this is a genuine tension needing an owner decision: either bypass the new stream path too (it is already protected by the unguessable session id, the same rationale as the legacy bypass), or adopt a query-param / cookie token scheme for the stream only. CRUD/ops endpoints are unaffected (fetch can send headers). **Resolve before step 4.**
+- **Effort:** S
+
+### [2026-07-04] Shared-session persistence is a synchronous fsync on the event loop
+- **File(s):** `backend/core/session_manager.py` (`apply_ops` → `store.persist`), `backend/core/session_store.py` (`FileSessionPersistenceBackend.save`)
+- **Context:** Discovered during review of `claude/multi-user-sessions-step-3-ojk3mi`
+- **Issue:** `apply_ops` persists synchronously (atomic temp+rename with `fsync`) once per batch, inside the async handler. Design §3.3 specifies "debounced write-behind, flush ≤ 1 s". Correctness is fine (writes are atomic; batches are naturally debounced at the client's 100 ms flush), but under concurrent load the fsync blocks the event loop and works against the <500 ms round-trip target. Fix: move to a debounced write-behind flush (background task, coalescing per session) or offload the fsync via `asyncio.to_thread`. Perf optimization, not a bug.
+- **Effort:** M
+
+### [2026-07-04] MCP hub mirror lacks the cross-thread delivery the legacy registry has
+- **File(s):** `backend/service/mcp_tools.py` (`_push_to_session`), `backend/core/session_manager.py` (`push_command`), `backend/core/session_hub.py` (`InProcessEventBus.publish`)
+- **Context:** Discovered during review of `claude/multi-user-sessions-step-3-ojk3mi`
+- **Issue:** The legacy `SessionRegistry.push_command_sync` falls back to `call_soon_threadsafe` for callers off the event-loop thread; the new hub mirror uses `queue.put_nowait` directly, which is not thread-safe on an `asyncio.Queue`. FastMCP runs tools on the loop thread today, so this is fine in practice, and the `try/except` in `_push_to_session` swallows any error — but the mirror would silently drop the message if a tool ever ran in a threadpool. Revisit when MCP moves fully onto the hub (step 6): give the bus an event-loop reference and a `call_soon_threadsafe` publish path.
+- **Effort:** S
+
+### [2026-07-04] Two concurrent connections for the same client_id clobber presence/claims
+- **File(s):** `backend/core/session_hub.py` (`PresenceRegistry.leave`, `ClaimMap.release_all`), `backend/core/session_manager.py` (`disconnect`)
+- **Context:** Discovered during review of `claude/multi-user-sessions-step-3-ojk3mi`
+- **Issue:** Presence and claims are keyed by `client_id`. On a fast reconnect (old SSE not yet torn down), both connections share one roster entry and one claim owner; when the first closes, `disconnect` removes the roster entry and releases all of that client's claims even though the second connection is still live, so the still-connected client briefly vanishes from the roster and loses selection markers until its next heartbeat/claim. Mirrors the legacy registry's documented single-consumer limitation. Address with the presence UI in step 7 (e.g. per-connection tokens or refcounting per client_id).
+- **Effort:** M
+
 ---
 
 ## Fixed

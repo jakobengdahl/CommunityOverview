@@ -19,6 +19,10 @@ class AppConfig:
     graph_file: str = field(default_factory=lambda: os.getenv("GRAPH_FILE", "graph.json"))
     embeddings_file: Optional[str] = field(default_factory=lambda: os.getenv("EMBEDDINGS_FILE"))
 
+    # Shared-session store directory (one JSON file per session). Defaults to a
+    # "sessions" directory next to the graph file when unset.
+    sessions_dir: Optional[str] = field(default_factory=lambda: os.getenv("SESSIONS_DIR"))
+
     # Server configuration
     host: str = field(default_factory=lambda: os.getenv("HOST", "0.0.0.0"))
     port: int = field(default_factory=lambda: int(os.getenv("PORT", "8000")))

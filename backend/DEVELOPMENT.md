@@ -318,6 +318,30 @@ The default API prefix is `/api` (configurable via `API_PREFIX`).
 | GET | `/agents/schedules` | List all agent schedules (for external scheduler reconciliation) |
 | POST | `/agents/{id}/trigger` | Fire a scheduled agent immediately (used by GCP Cloud Scheduler) |
 
+### Shared Session Endpoints
+
+Server-side multi-user sessions (see `docs/MULTI_USER_SESSIONS_DESIGN.md`).
+Sessions are stored outside the graph as node references + layout + annotations;
+node content is rehydrated from the graph on load via `?resolve=true`.
+
+| Method | Endpoint | Description |
+|--------|----------|-------------|
+| POST | `/api/sessions` | Create a new shared session (server-assigned `DDDD-DDDD` id) |
+| GET | `/api/sessions` | List session metadata |
+| GET | `/api/sessions/{id}` | Get a session (meta + state + presence roster); `?resolve=true` also returns rehydrated nodes/edges |
+| PATCH | `/api/sessions/{id}` | Rename a session |
+| DELETE | `/api/sessions/{id}` | Delete a session (`?client_id=` names the deleter in the broadcast) |
+| POST | `/api/sessions/{id}/ops` | Apply an ordered op batch (`{client_id, base_seq, ops}` → `{applied, seq}`); server-ordered LWW, monotonic `seq` |
+| GET | `/api/sessions/{id}/stream` | SSE fan-out: presence, applied ops, and claims. Query `client_id`, `name`, `since_seq` (op catch-up or full-snapshot fallback) |
+
+Legacy MCP visualization-push channel (single-consumer; kept as a shim during
+the frontend transition, removed in the final step of the plan):
+
+| Method | Endpoint | Description |
+|--------|----------|-------------|
+| PATCH | `/sessions/{id}/state` | Browser uploads its current canvas state so MCP tools can query it |
+| GET | `/sessions/{id}/stream` | SSE stream delivering MCP visualization commands to the browser |
+
 ### MCP Tools
 
 | Tool Name | Description |
