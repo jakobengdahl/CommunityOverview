@@ -38,6 +38,8 @@ from starlette.requests import Request
 from mcp.server.fastmcp import FastMCP
 
 from backend.core.session_registry import SessionRegistry
+from backend.core.session_store import FileSessionPersistenceBackend, SessionStore
+from backend.core.session_manager import SessionManager
 
 from backend.core import GraphStorage
 from backend.llm_providers import get_llm_availability
@@ -528,8 +530,19 @@ def create_app(
     )
     _emit_startup_diagnostics_log(app.state.startup_diagnostics)
 
+    # Initialize server-side shared-session store + manager (multi-user sessions).
+    # Sessions live outside the graph, one JSON file per session under a
+    # directory next to the graph data (design D4/D5). This is the new op-driven
+    # path; the legacy /sessions/{id}/state|stream MCP-push channel below is
+    # untouched and continues to serve the current frontend until it cuts over.
+    sessions_dir = config.sessions_dir or str(config.get_graph_path().parent / "sessions")
+    session_store = SessionStore(FileSessionPersistenceBackend(sessions_dir))
+    session_manager = SessionManager(session_store)
+    app.state.session_store = session_store
+    app.state.session_manager = session_manager
+
     # Create and mount REST API router
-    rest_router = create_rest_router(graph_service)
+    rest_router = create_rest_router(graph_service, session_manager=session_manager)
     app.include_router(rest_router, prefix=config.api_prefix)
 
     # Create UI Backend services (ChatService and DocumentService)
@@ -649,7 +662,12 @@ def create_app(
         # by the gateway / Cloud Run IAP, so this check is not needed.
         host="0.0.0.0",
     )
-    tools_map = register_mcp_tools(mcp, graph_service, session_registry=session_registry)
+    tools_map = register_mcp_tools(
+        mcp,
+        graph_service,
+        session_registry=session_registry,
+        session_manager=session_manager,
+    )
 
     # Store MCP instance and tools map on app state
     app.state.mcp = mcp

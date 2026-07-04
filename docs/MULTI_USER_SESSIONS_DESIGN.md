@@ -1,6 +1,7 @@
 # Multi-User Shared Sessions — Design & Implementation Plan
 
-**Status:** Planned — no implementation step has started yet.
+**Status:** In progress — the backend foundation (steps 1–3) is implemented; the
+frontend cutover (step 4 onward) has not started.
 **Scope:** Open-source core only. SaaS-specific extensions (multi-instance scale-out,
 account-bound session history, workspace ACLs) are designed in the private SaaS
 repository and are explicitly out of scope here (see "Out of scope" below).
@@ -277,14 +278,27 @@ steps 6–8.
 
 | Step | Status | Title |
 |---|---|---|
-| 1 | not started | Server-side session store + REST CRUD |
-| 2 | not started | SSE fan-out hub + presence (backend) |
-| 3 | not started | Op protocol, conflict rules, catch-up |
+| 1 | done | Server-side session store + REST CRUD |
+| 2 | done | SSE fan-out hub + presence (backend) |
+| 3 | done | Op protocol, conflict rules, catch-up |
 | 4 | not started | Frontend: server-backed session lifecycle |
 | 5 | not started | New annotation kinds (note, label, arrow) |
 | 6 | not started | Frontend: realtime op emit/apply + canvas events |
 | 7 | not started | Presence UI + selection claims |
 | 8 | not started | Hardening, multi-client e2e, docs sweep |
+
+> **Implementation note (steps 1–3 landed together).** Step 3's op endpoint has
+> nothing to apply ops to or broadcast through without step 1's store and step 2's
+> event bus, so the three backend-only steps were built as one branch/PR:
+> `backend/core/session_store.py` (store + persistence seam + op state transforms),
+> `backend/core/session_hub.py` (event bus + presence + claims), and
+> `backend/core/session_manager.py` (op orchestration, catch-up, rate limiting),
+> wired through `/api/sessions*` in `rest_api.py`. Two deferrals, by design: the
+> legacy `/sessions/{id}/state|stream` MCP-push channel is left fully intact (it
+> still serves the current frontend until the step-4 cutover, and is removed only
+> in step 8 per §3.8), and MCP pushes are *mirrored* to the new hub rather than
+> moved off the legacy registry, so no live behaviour changes before the frontend
+> switches over.
 
 ### Step 1 — Server-side session store + REST CRUD
 
