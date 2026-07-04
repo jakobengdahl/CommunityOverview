@@ -108,8 +108,10 @@ Two protocols, mirroring the existing `GraphPersistenceBackend` pattern:
   `list_meta()`. Core ships `FileSessionPersistenceBackend`: one JSON file per
   session under `data/sessions/<id>.json` (atomic temp+rename, same locking style as
   `storage_backends.py`). Per-session files keep write amplification low under
-  frequent op-driven saves. Configurable retention (default: evict sessions untouched
-  for 90 days, cap total count).
+  frequent op-driven saves. **No automatic retention/eviction in v1** (D13): sessions
+  persist until explicitly deleted, because long-lived sessions may evolve into
+  de-facto saved visualizations; revisit retention once session/SavedView
+  convergence is decided.
 - `SessionEventBus` — `publish(session_id, event)`, `subscribe(session_id)`.
   Core ships `InProcessEventBus` (asyncio, per-subscriber queues). This is the seam a
   SaaS deployment replaces with a Redis-backed bus for multi-instance fan-out. The
@@ -122,7 +124,8 @@ The existing `GET /sessions/{id}/stream` SSE channel is upgraded to multi-subscr
 fan-out; clients send mutations as ops via `POST /api/sessions/{id}/ops`. Rationale:
 SSE is already wired end-to-end and proxy-friendly; a POST per op gives the server a
 natural serialization point and lets the response carry the authoritative `seq`.
-WebSocket remains a documented alternative if live-drag streaming (O1) later demands it.
+WebSocket remains a documented alternative if live-drag streaming (see D9) is ever
+promoted into scope and demands it.
 
 Op envelope (client → server):
 
@@ -194,17 +197,21 @@ adds real identity and ACLs behind its own boundary.
   `DELETE /api/sessions/{id}`; the server broadcasts `session_deleted` before
   removing state.
 - **Deleting the active session:** the deleting client auto-creates a new session
-  and switches into it. Other connected clients receive `session_deleted`, each
-  auto-creates its **own** new session, and shows a notice ("Session was deleted by
-  <name>") — they are not herded into one shared replacement (open decision O3).
+  and switches into it. Other **actively connected** clients receive
+  `session_deleted`, each auto-creates its **own** new session, and shows a notice
+  ("Session was deleted by <name>") — they are not herded into one shared
+  replacement. Users who are not connected get no takeover flow: the session simply
+  disappears from their recents list the next time the drawer refreshes names from
+  the server (D11).
 - **Multi-user delete warning:** if the presence roster shows other connected
   clients, the confirm dialog states how many users are connected.
 - **Recents:** `graph_sessions_index` in localStorage becomes a pure
   recently-visited list `{id, name, updatedAt}` — no snapshots. Names shown in the
   drawer are refreshed from the server when listed.
-- **Migration:** on first visit after upgrade, any legacy
-  `graph_session_snapshot_<id>` whose ID has no server-side session is imported
-  (one-time `POST` of the converted state), then the local snapshot is removed.
+- **Legacy data:** no import of old localStorage snapshots (D10) — the
+  localStorage session feature has not been rolled out to shared deployments, so
+  leftover `graph_session_snapshot_*` keys are simply removed on upgrade. The
+  recents index is kept as-is (names refresh from the server).
 
 ### 3.7 Frontend architecture changes
 
@@ -223,7 +230,8 @@ adds real identity and ACLs behind its own boundary.
 - Viewport stays personal — pan/zoom is **not** synced (each collaborator frames
   their own view; positions and content are shared). "Follow user" is a possible
   later enhancement, out of v1 scope.
-- Node moves sync on drag-end in v1; live drag streaming is optional polish (O1).
+- Node moves sync on drag-end in v1 (D9); live drag streaming (~10 Hz throttled) is
+  optional later polish, not part of the plan.
 
 ### 3.8 Compatibility with the MCP/SSE push channel
 
@@ -263,24 +271,26 @@ through an optional identity context on session endpoints when present.
 Each step is one branch + one PR to `dev`, owning its own tests and doc updates per
 `CLAUDE.md` (review loop, full backend suite before PR, merge on green). Steps 1–3
 are backend-only and invisible to users; the localStorage path keeps working until
-step 4 switches the frontend over.
+step 4 switches the frontend over. Annotations come early (step 5, decision D12) so
+realistic session content exists when realtime sync and presence are tested in
+steps 6–8.
 
 | Step | Status | Title |
 |---|---|---|
 | 1 | not started | Server-side session store + REST CRUD |
-| 2 | not started | SSE fan-out hub + presence |
+| 2 | not started | SSE fan-out hub + presence (backend) |
 | 3 | not started | Op protocol, conflict rules, catch-up |
 | 4 | not started | Frontend: server-backed session lifecycle |
-| 5 | not started | Frontend: realtime op emit/apply + canvas events |
-| 6 | not started | Presence UI + selection claims |
-| 7 | not started | New annotation kinds (note, label; arrow optional) |
+| 5 | not started | New annotation kinds (note, label, arrow) |
+| 6 | not started | Frontend: realtime op emit/apply + canvas events |
+| 7 | not started | Presence UI + selection claims |
 | 8 | not started | Hardening, multi-client e2e, docs sweep |
 
 ### Step 1 — Server-side session store + REST CRUD
 
 - New `backend/core/session_store.py`: `Session` model (3.1),
   `SessionPersistenceBackend` protocol, `FileSessionPersistenceBackend`
-  (`data/sessions/<id>.json`, atomic writes, retention config).
+  (`data/sessions/<id>.json`, atomic writes; no retention/eviction per D13).
 - REST in `backend/service/rest_api.py`: `POST /api/sessions`,
   `GET /api/sessions/{id}` (meta + state + roster placeholder),
   `PATCH /api/sessions/{id}` (rename), `DELETE /api/sessions/{id}`,
@@ -312,32 +322,46 @@ step 4 switches the frontend over.
   broadcast with `seq`, ring buffer (500 ops) + `since_seq` catch-up on stream
   connect, full-snapshot fallback event.
 - Selection claim map with 30 s TTL + release on disconnect (server side only; UI
-  comes in step 6).
+  comes in step 7).
 - Tests: ordering under concurrent posts, LWW per entity, idempotent set ops,
   claim expiry, catch-up vs snapshot fallback, rate limiting.
 
 ### Step 4 — Frontend: server-backed session lifecycle
 
 - Auto-create on load; `?session=` URL param read/write; drawer delete action with
-  confirm (multi-user warning wired but roster may be empty until step 6 UI);
+  confirm (multi-user warning wired but roster may be empty until step 7 UI);
   delete-active → auto-create + switch; rename via PATCH.
-- `sessionStore.js` reduced to recents index; legacy snapshot import (3.6) then
-  cleanup; load session state from server (resolved), save via full-state `PUT`
-  **temporarily** (ops arrive in step 5) reusing the existing auto-save debounce.
+- `sessionStore.js` reduced to recents index; legacy `graph_session_snapshot_*`
+  keys removed without import (D10); load session state from server (resolved),
+  save via full-state `PUT` **temporarily** (ops arrive in step 6) reusing the
+  existing auto-save debounce.
 - i18n: all new strings in both `en.json` and `sv.json`.
 - Tests: rework `sessionStore.test.js`, `sessionFlow.test.jsx`,
   `SessionDrawer.test.jsx` (mock fetch); docs: `docs/USER_GUIDE.md` §5 + §8.3.
 
-### Step 5 — Frontend: realtime op emit/apply + canvas events
+### Step 5 — New annotation kinds (note, label, arrow)
+
+- `note` (sticky note), free-floating `label`, and `arrow` components in
+  `packages/ui-graph-canvas`; creation via context menu; arrows anchored to a
+  point, node, or annotation. If arrow endpoint UX proves heavy, arrows may land
+  as a second PR within this step — but they stay in v1 scope (D12).
+- Persistence via step 4's full-state save (server annotation model from step 1 is
+  already generic); op wiring follows in step 6.
+- Runs early so realistic session content (notes, labels, arrows, groups) exists
+  for testing realtime sync and presence in later steps.
+- i18n keys, USER_GUIDE update (screenshot note for Jakob in PR body), canvas
+  package tests.
+
+### Step 6 — Frontend: realtime op emit/apply + canvas events
 
 - `sessionSyncClient.js` (3.7): op batching, SSE apply loop, echo-safe store
   application, reconnect + catch-up; replace step 4's full-state PUT with ops.
 - `packages/ui-graph-canvas`: discrete group callbacks (3.7), emit position ops on
-  drag-end, annotation CRUD wiring for groups.
+  drag-end, annotation CRUD ops for all kinds from step 5.
 - Tests: vitest for sync client (fake EventSource), canvas package tests for new
   callbacks.
 
-### Step 6 — Presence UI + selection claims
+### Step 7 — Presence UI + selection claims
 
 - Presence roster in the header/drawer (colored dots + names), remote selection
   markers on canvas (`remoteSelections` prop, colored outline + badge), claim
@@ -346,18 +370,11 @@ step 4 switches the frontend over.
 - Tests: claim lifecycle in sync client, marker rendering in canvas tests.
 - Docs: `docs/USER_GUIDE.md` new "Collaborating in a session" section.
 
-### Step 7 — New annotation kinds
-
-- `note` (sticky note) and free-floating `label` components in
-  `packages/ui-graph-canvas`; context-menu creation; ops + persistence already
-  generic from step 3. `arrow` only if O4 decides yes.
-- i18n keys, USER_GUIDE update (screenshot note for Jakob in PR body), tests.
-
 ### Step 8 — Hardening, multi-client e2e, docs sweep
 
 - Playwright multi-context e2e: two pages, one session — node add/move, annotation
   create, rename, delete-with-warning, claim markers, reconnect catch-up.
-- Remove the `PATCH /sessions/{id}/state` shim; rate-limit tuning; retention job.
+- Remove the `PATCH /sessions/{id}/state` shim; rate-limit tuning.
 - Docs sweep: `backend/DEVELOPMENT.md` final endpoint table,
   `docs/USER_GUIDE.md` §§2.5/2.6/5/8.3 consistency,
   `docs/DEPLOYMENT_AND_CONCURRENCY_ANALYSIS.md` — document the single-instance
@@ -375,26 +392,29 @@ step 4 switches the frontend over.
 - **D6** localStorage keeps only the recents index; snapshots are server-side (3.6).
 - **D7** Core identity is anonymous guest identity; session ID is the capability (3.4).
 - **D8** Viewport is personal, not synced (3.7).
+- **D9** *(2026-07-04)* Node moves sync on drag-end only in v1; live-drag streaming
+  is optional later polish outside this plan (3.7).
+- **D10** *(2026-07-04)* No import of legacy localStorage snapshots — the feature
+  was never rolled out; leftover snapshot keys are removed on upgrade (3.6).
+- **D11** *(2026-07-04)* On deletion of a shared session, actively connected
+  clients each get their own new session with a notice; non-connected users just
+  see it disappear from their recents list (3.6).
+- **D12** *(2026-07-04)* All three annotation kinds (note, label, arrow) are in v1
+  scope and are implemented early (step 5) so realistic content exists for testing
+  realtime and presence.
+- **D13** *(2026-07-04)* No automatic session retention/eviction in v1 — sessions
+  persist until explicitly deleted, since some sessions may evolve into de-facto
+  saved visualizations. Revisit together with session/SavedView convergence (3.2).
 
 ### Open (owner: project owner — resolve before the step that needs them)
 
-- **O1** (before step 5) Live-drag streaming (~10 Hz throttled positions) or drag-end
-  only? Recommendation: drag-end in step 5, live-drag as optional step 8 polish.
-- **O2** (before step 4) Legacy localStorage snapshot import: lazy one-time import as
-  designed, or drop old snapshots? Recommendation: import — it is cheap and lossless.
-- **O3** (before step 4) When a shared session is deleted, do other clients each get
-  their own new session (designed) or land together in one new shared session?
-  Recommendation: own sessions + notice.
-- **O4** (before step 7) Annotation kinds in v1: notes + labels only, or arrows too?
-  Recommendation: notes + labels; arrows need anchor/endpoint UX design first.
-- **O5** (before step 1) Server-side session retention defaults (90 days / count cap)
-  acceptable for open deployments? Configurable via env either way.
+None currently — O1–O5 were resolved 2026-07-04 and recorded as D9–D13 above.
 
 ## 7. Documentation & i18n obligations (summary)
 
 - `backend/DEVELOPMENT.md`: endpoint table — steps 1, 3, 8.
 - `docs/USER_GUIDE.md`: session menu (§5), live control (§8.3), groups (§2.5), new
-  collaboration section — steps 4, 6, 7; screenshots flagged in PR bodies.
+  collaboration section — steps 4, 5, 7; screenshots flagged in PR bodies.
 - `frontend/web/src/i18n/en.json` + `sv.json`: every step touching UI.
 - `packages/ui-graph-canvas`: all user-visible text via props with English defaults.
 - `docs/DEPLOYMENT_AND_CONCURRENCY_ANALYSIS.md`: step 8.
