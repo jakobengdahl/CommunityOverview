@@ -194,15 +194,17 @@ class SessionManager:
                 raise OpError(f"unknown op: {op_type!r}")
 
         async with self._lock(session_id):
-            # Snapshot for rollback only for multi-op batches: a single op that
-            # fails always raises before mutating (validation precedes mutation
-            # in apply_state_op), so the hot single-op path stays copy-free.
-            need_rollback = len(ops) > 1
-            saved_state = copy.deepcopy(session.state) if need_rollback else None
+            # Snapshot for rollback. persist() is inside the protected region so
+            # a persistence-layer failure (disk full, IO error) rolls back too —
+            # otherwise in-memory state/seq/ring would advance while disk and all
+            # subscribers stayed behind, duplicating non-idempotent ops on retry.
+            # The deepcopy cost is negligible at drag-end op cadence (D9).
+            saved_state = copy.deepcopy(session.state)
             saved_seq = session.seq
             saved_name = session.name
+            saved_updated_at = session.updated_at
             ring = self.store.ring(session_id)
-            saved_ring = list(ring) if (need_rollback and ring is not None) else None
+            saved_ring = list(ring) if ring is not None else None
 
             # ("state", applied) | ("claim", op_type, element_ids), in arrival order
             pending: List[Tuple[Any, ...]] = []
@@ -218,18 +220,17 @@ class SessionManager:
                             continue  # legitimate no-op (e.g. update on deleted annotation)
                         state_changed = True
                         pending.append(("state", result))
+                if state_changed:
+                    self.store.persist(session)
             except Exception:
-                if need_rollback:
-                    session.state = saved_state
-                    session.seq = saved_seq
-                    session.name = saved_name
-                    if ring is not None and saved_ring is not None:
-                        ring.clear()
-                        ring.extend(saved_ring)
+                session.state = saved_state
+                session.seq = saved_seq
+                session.name = saved_name
+                session.updated_at = saved_updated_at
+                if ring is not None and saved_ring is not None:
+                    ring.clear()
+                    ring.extend(saved_ring)
                 raise
-
-            if state_changed:
-                self.store.persist(session)
 
             # Commit succeeded: apply ephemeral claim effects and broadcast every
             # op in arrival order (originator included; clients apply idempotently).

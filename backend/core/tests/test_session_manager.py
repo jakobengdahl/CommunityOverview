@@ -109,6 +109,32 @@ class TestApplyOps:
         # Nothing was broadcast to subscribers.
         assert await _drain(sub) == []
 
+    async def test_persist_failure_rolls_back_and_does_not_broadcast(self):
+        """A persistence failure must roll back in-memory state and broadcast nothing.
+
+        Otherwise the poster gets a 500, retries, and re-applies on top of the
+        already-advanced in-memory state — duplicating annotation_created.
+        """
+        store = SessionStore(InMemorySessionPersistenceBackend())
+        mgr = SessionManager(store)
+        s = mgr.create_session()
+        sub, _ = mgr.connect(s.id, "c1", "A")
+        await _drain(sub)
+
+        def _boom(session):
+            raise OSError("disk full")
+
+        store.persist = _boom
+        with pytest.raises(OSError):
+            await mgr.apply_ops(s.id, "c1", 0, [
+                {"op": "annotation_created", "annotation": {"kind": "note", "text": "hi"}},
+            ])
+        after = mgr.get_session(s.id)
+        assert after.seq == 0
+        assert after.state["annotations"] == []
+        assert store.ops_since(s.id, 0) == []  # ring rolled back too
+        assert await _drain(sub) == []
+
     async def test_atomic_rollback_preserves_prior_state(self):
         mgr = _manager()
         s = mgr.create_session()
