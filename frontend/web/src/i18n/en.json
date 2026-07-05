@@ -182,7 +182,13 @@
     "hide_all": "Hide all",
     "delete_all": "Delete all",
     "change_type": "Change type",
-    "general_connection": "General connection"
+    "general_connection": "General connection",
+    "add_note": "Add note",
+    "add_label": "Add label",
+    "add_arrow": "Add arrow",
+    "annotation_color": "Colour",
+    "note_placeholder": "Note",
+    "label_placeholder": "Label"
   },
   "common": {
     "saving": "Saving...",

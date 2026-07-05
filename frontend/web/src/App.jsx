@@ -77,6 +77,61 @@ function groupsToAnnotations(viewGroups, parentIds) {
   }));
 }
 
+// Note/label/arrow annotations round-trip between the server annotation model
+// (design 3.1) and the canvas-shape overlay descriptors the GraphCanvas emits
+// (via onSaveView) and consumes (via annotationsToRestore). Groups keep their
+// own translation above; these cover the free-floating overlays from step 5.
+function annotationsToOverlays(annotations) {
+  const out = [];
+  for (const a of annotations || []) {
+    if (a?.kind === 'note') {
+      out.push({
+        id: a.id, kind: 'note', position: a.position || { x: 0, y: 0 },
+        text: a.text || '', color: a.color, size: a.size,
+      });
+    } else if (a?.kind === 'label') {
+      out.push({
+        id: a.id, kind: 'label', position: a.position || { x: 0, y: 0 },
+        text: a.text || '', color: a.style?.color,
+      });
+    } else if (a?.kind === 'arrow') {
+      const from = a.from || a.position || { x: 0, y: 0 };
+      const to = a.to || { x: from.x + 160, y: from.y };
+      out.push({
+        id: a.id, kind: 'arrow', position: { x: from.x, y: from.y },
+        dx: to.x - from.x, dy: to.y - from.y, color: a.style?.color,
+      });
+    }
+  }
+  return out;
+}
+
+function overlaysToAnnotations(overlays) {
+  return (overlays || []).map(o => {
+    if (o.kind === 'note') {
+      return {
+        id: o.id, kind: 'note', position: o.position || { x: 0, y: 0 },
+        text: o.text || '', color: o.color, size: o.size,
+      };
+    }
+    if (o.kind === 'label') {
+      return {
+        id: o.id, kind: 'label', position: o.position || { x: 0, y: 0 },
+        text: o.text || '', style: { color: o.color },
+      };
+    }
+    // arrow: store both endpoints as absolute points (design 3.1)
+    const from = o.position || { x: 0, y: 0 };
+    const dx = o.dx ?? 160;
+    const dy = o.dy ?? 0;
+    return {
+      id: o.id, kind: 'arrow', position: { x: from.x, y: from.y },
+      from: { x: from.x, y: from.y }, to: { x: from.x + dx, y: from.y + dy },
+      style: { color: o.color },
+    };
+  });
+}
+
 function App() {
   const akcShortName = _akcShortName;
   const {
@@ -109,6 +164,8 @@ function App() {
     clearFocusNode,
     pendingGroups,
     setPendingGroups,
+    pendingAnnotations,
+    setPendingAnnotations,
     setSelectedGraphNodes,
     setDetailNode,
     detailNode,
@@ -384,11 +441,12 @@ function App() {
         addNodesToVisualization(positioned, result.edges || []);
         if (result.hidden_node_ids?.length) setHiddenNodeIds(result.hidden_node_ids);
         if (result.groups?.length) setPendingGroups({ groups: result.groups, parentIds: result.parentIds || {} });
+        if (result.annotations?.length) setPendingAnnotations(result.annotations);
       } catch (err) {
         console.error('[App] Failed to load view from URL:', err);
       }
     })();
-  }, [stats, clearVisualization, addNodesToVisualization, setHiddenNodeIds, setPendingGroups]);
+  }, [stats, clearVisualization, addNodesToVisualization, setHiddenNodeIds, setPendingGroups, setPendingAnnotations]);
 
   const showNotification = useCallback((type, message) => {
     setNotification({ type, message });
@@ -417,6 +475,7 @@ function App() {
         const savedEdges = nodeData.metadata?.edges || [];
         const savedGroups = nodeData.metadata?.groups || [];
         const savedParentIds = nodeData.metadata?.parentIds || {};
+        const savedAnnotations = nodeData.metadata?.annotations || [];
         if (nodeIds.length > 0) {
           clearVisualization();
           const details = await Promise.all(
@@ -449,6 +508,9 @@ function App() {
             if (savedGroups.length > 0) {
               setPendingGroups({ groups: savedGroups, parentIds: savedParentIds });
             }
+            if (savedAnnotations.length > 0) {
+              setPendingAnnotations(savedAnnotations);
+            }
           }
         }
         showNotification('info', `Loaded saved view: ${nodeData.name || nodeData.label}`);
@@ -461,7 +523,7 @@ function App() {
 
     // For other nodes, show detail dialog
     setDetailNode({ id: nodeId, data: nodeData });
-  }, [clearVisualization, addNodesToVisualization, setPendingGroups, setDetailNode, showNotification]);
+  }, [clearVisualization, addNodesToVisualization, setPendingGroups, setPendingAnnotations, setDetailNode, showNotification]);
 
   // Callback: Expand node to show related nodes
   const handleExpand = useCallback(async (nodeId, nodeData) => {
@@ -686,15 +748,18 @@ function App() {
       if (n.parentId) parentIds[n.id] = n.parentId;
     });
     const targetId = sessionId;
-    // Annotations currently carry only group boxes — the only kind the canvas
-    // emits today. Once notes/labels/arrows exist (step 5) they must be
-    // collected here too, otherwise a full-state PUT would drop them.
+    // Annotations carry group boxes plus the free-floating overlays (notes,
+    // labels, arrows) the canvas collects in viewData.annotations. All kinds
+    // share one server-side annotation list (design 3.1).
     api.putSessionState(targetId, {
       node_refs: state.nodes.map(n => n.id),
       positions,
       hidden_node_ids: state.hiddenNodeIds || [],
       hidden_edge_ids: state.hiddenEdgeIds || [],
-      annotations: groupsToAnnotations(viewData?.groups || [], parentIds),
+      annotations: [
+        ...groupsToAnnotations(viewData?.groups || [], parentIds),
+        ...overlaysToAnnotations(viewData?.annotations || []),
+      ],
       manual_edges: [],
     }).catch(() => {});
     sessionStore.touchSession(targetId);
@@ -770,6 +835,7 @@ function App() {
           edge_ids: (saveViewDialog.viewData.edges || []).map(e => e.id),
           edges: saveViewDialog.viewData.edges || [],
           groups: saveViewDialog.viewData.groups,
+          annotations: saveViewDialog.viewData.annotations || [],
         },
         communities: [],
       };
@@ -969,8 +1035,10 @@ function App() {
     if (state.hidden_edge_ids?.length) setHiddenEdgeIds(state.hidden_edge_ids);
     const { groups, parentIds } = annotationsToGroups(state.annotations);
     if (groups.length) setPendingGroups({ groups, parentIds });
+    const overlays = annotationsToOverlays(state.annotations);
+    if (overlays.length) setPendingAnnotations(overlays);
   }, [clearVisualization, addNodesToVisualization, setHiddenNodeIds,
-      setHiddenEdgeIds, setPendingGroups]);
+      setHiddenEdgeIds, setPendingGroups, setPendingAnnotations]);
 
   const loadSessionFromServer = useCallback(async (targetId) => {
     try {
@@ -1157,6 +1225,9 @@ function App() {
           closeMenusSignal={closeMenusSignal}
           groupsToRestore={pendingGroups}
           onGroupsRestored={() => setPendingGroups(null)}
+          annotationsToRestore={pendingAnnotations}
+          onAnnotationsRestored={() => setPendingAnnotations(null)}
+          onAnnotationChange={scheduleAutoSave}
           federationDepth={federationDepth}
           onFederationDepthChange={setFederationDepth}
           maxFederationDepth={maxFederationDepth}
@@ -1178,6 +1249,13 @@ function App() {
             deleteAll: t('context_menu.delete_all'),
             changeType: t('context_menu.change_type'),
             generalConnection: t('context_menu.general_connection'),
+            addNote: t('context_menu.add_note'),
+            addLabel: t('context_menu.add_label'),
+            addArrow: t('context_menu.add_arrow'),
+            annotationColor: t('context_menu.annotation_color'),
+            deleteAnnotation: t('context_menu.delete'),
+            notePlaceholder: t('context_menu.note_placeholder'),
+            labelPlaceholder: t('context_menu.label_placeholder'),
           }}
           nodeColorResolver={getNodeColor}
           onViewportChange={(vp) => { latestViewport.current = vp; }}
@@ -1453,3 +1531,6 @@ function AppRoot() {
 }
 
 export default AppRoot;
+
+// Exported for unit testing the session annotation round-trip.
+export { annotationsToOverlays, overlaysToAnnotations };

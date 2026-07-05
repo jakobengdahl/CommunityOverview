@@ -1471,6 +1471,7 @@ class GraphService:
             "hidden_node_ids": filtered_hidden_node_ids,
             "groups": group_data,
             "parentIds": parent_ids,
+            "annotations": view_node.metadata.get('annotations', []),
             "action": "load_visualization"
         }
 

@@ -182,7 +182,13 @@
     "hide_all": "Dölj alla",
     "delete_all": "Ta bort alla",
     "change_type": "Ändra typ",
-    "general_connection": "Generell koppling"
+    "general_connection": "Generell koppling",
+    "add_note": "Lägg till anteckning",
+    "add_label": "Lägg till etikett",
+    "add_arrow": "Lägg till pil",
+    "annotation_color": "Färg",
+    "note_placeholder": "Anteckning",
+    "label_placeholder": "Etikett"
   },
   "common": {
     "saving": "Sparar...",

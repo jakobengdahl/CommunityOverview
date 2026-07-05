@@ -15,9 +15,14 @@ import 'reactflow/dist/style.css';
 
 import CustomNode from './CustomNode';
 import GroupNode from './GroupNode';
+import NoteNode from './NoteNode';
+import LabelNode from './LabelNode';
+import ArrowNode from './ArrowNode';
+import { AnnotationContext } from './AnnotationContext';
 import SimpleFloatingEdge from './SimpleFloatingEdge';
 import { applyLayout, getGridLayout, getCircularLayout, getLayoutedElements } from '../utils/graphLayout';
 import { getNodeColor, LAZY_LOAD_THRESHOLD, INITIAL_LOAD_COUNT, DEFAULT_EDGE_STYLE } from '../utils/constants';
+import { OVERLAY_TYPES, ANNOTATION_TYPES, isManualNode, overlayToFlowNode, flowNodeToOverlay } from '../utils/annotations';
 import './GraphCanvas.css';
 
 /**
@@ -99,6 +104,9 @@ function GraphCanvasInner({
   closeMenusSignal = 0,
   groupsToRestore = null,
   onGroupsRestored,
+  annotationsToRestore = null,
+  onAnnotationsRestored,
+  onAnnotationChange,
   federationDepth = 1,
   onFederationDepthChange,
   maxFederationDepth = 4,
@@ -124,6 +132,13 @@ function GraphCanvasInner({
     deleteAll: 'Delete all',
     changeType: 'Change type',
     generalConnection: 'General connection',
+    addNote: 'Add note',
+    addLabel: 'Add label',
+    addArrow: 'Add arrow',
+    annotationColor: 'Colour',
+    deleteAnnotation: 'Delete',
+    notePlaceholder: 'Note',
+    labelPlaceholder: 'Label',
     ...contextMenuLabels,
   };
 
@@ -143,10 +158,31 @@ function GraphCanvasInner({
   const [notification, setNotification] = useState(null);
   const [selectedNodes, setSelectedNodes] = useState([]);
   const [selectedEdges, setSelectedEdges] = useState([]);
+  const [paneContextMenu, setPaneContextMenu] = useState(null);
+  const paneMenuRef = useRef(null);
   const reactFlowWrapper = useRef(null);
   const rightDragStart = useRef({ x: 0, y: 0, time: null });
   const mouseDownPos = useRef(null);
   const { screenToFlowPosition, setCenter, getNodes: getFlowNodes, getViewport } = useReactFlow();
+
+  // Stable notifier for annotation nodes (note/label/arrow) to signal the host
+  // that an annotation was edited, recoloured or deleted so the session can be
+  // persisted. Wrapped in a ref so the callback identity stays stable across
+  // renders even as the parent's handler changes.
+  const onAnnotationChangeRef = useRef(onAnnotationChange);
+  onAnnotationChangeRef.current = onAnnotationChange;
+  const notifyAnnotationChange = useCallback(() => {
+    onAnnotationChangeRef.current?.();
+  }, []);
+  const annotationContextValue = useMemo(() => ({
+    notifyChange: notifyAnnotationChange,
+    labels: {
+      color: cml.annotationColor,
+      delete: cml.deleteAnnotation,
+      notePlaceholder: cml.notePlaceholder,
+      labelPlaceholder: cml.labelPlaceholder,
+    },
+  }), [notifyAnnotationChange, cml.annotationColor, cml.deleteAnnotation, cml.notePlaceholder, cml.labelPlaceholder]);
 
   const depthLevels = useMemo(() => {
     if (Array.isArray(federationDepthLevels) && federationDepthLevels.length > 0) {
@@ -258,7 +294,7 @@ function GraphCanvasInner({
     setNodes((nds) => {
       const manualNodes = clearGroupsFlag
         ? []
-        : nds.filter(n => n.type === 'group' || n.id.startsWith('group-'));
+        : nds.filter(isManualNode);
       const newNodes = reactFlowNodes.map(n => {
         const existing = nds.find(curr => curr.id === n.id);
         if (existing && existing.position.x !== 0) {
@@ -313,7 +349,50 @@ function GraphCanvasInner({
     setNodeContextMenu(null);
     setMultiNodeContextMenu(null);
     setEdgeContextMenu(null);
+    setPaneContextMenu(null);
   }, []);
+
+  // Create a free-floating annotation (note, label or arrow) at the given flow
+  // position. Notes/labels/arrows are persisted in the session annotation list
+  // via the save-view round-trip; onAnnotationChange schedules that save.
+  const createAnnotation = useCallback((kind, position) => {
+    const id = `${kind}-${Date.now()}`;
+    let newNode;
+    if (kind === 'note') {
+      newNode = {
+        id, type: 'note', position,
+        data: { text: '', color: undefined },
+        style: { width: 200, height: 140 },
+      };
+    } else if (kind === 'label') {
+      newNode = { id, type: 'label', position, data: { text: '', color: undefined } };
+    } else {
+      newNode = { id, type: 'arrow', position, data: { dx: 160, dy: 0, color: undefined } };
+    }
+    setNodes((nds) => reorderNodesForParentChild([...nds, newNode]));
+    setPaneContextMenu(null);
+    onAnnotationChangeRef.current?.();
+  }, [setNodes]);
+
+  // Dismiss the pane annotation menu on any outside interaction (e.g. clicking a
+  // graph node, which handlePaneClick does not cover), matching the annotation
+  // node menus. Escape is handled by the global keydown handler.
+  useEffect(() => {
+    if (!paneContextMenu) return;
+    const handleDismiss = (e) => {
+      if (paneMenuRef.current && paneMenuRef.current.contains(e.target)) return;
+      setPaneContextMenu(null);
+    };
+    const timer = setTimeout(() => {
+      document.addEventListener('mousedown', handleDismiss, true);
+      document.addEventListener('contextmenu', handleDismiss, true);
+    }, 0);
+    return () => {
+      clearTimeout(timer);
+      document.removeEventListener('mousedown', handleDismiss, true);
+      document.removeEventListener('contextmenu', handleDismiss, true);
+    };
+  }, [paneContextMenu]);
 
   const clearSelection = useCallback(() => {
     // Use onNodesChange/onEdgesChange with select events to properly clear ReactFlow's internal selection state
@@ -356,10 +435,11 @@ function GraphCanvasInner({
     const currentNodes = getFlowNodes();
     const groupNodes = currentNodes.filter(n => n.type === 'group');
 
-    // Determine which non-group nodes were part of this drag
+    // Determine which draggable graph nodes were part of this drag. Annotation
+    // nodes (groups, notes, labels, arrows) never become children of a group.
     const nodesToProcess = (allDraggedNodes && allDraggedNodes.length > 0)
-      ? allDraggedNodes.filter(n => n.type !== 'group')
-      : (draggedNode.type !== 'group' ? [draggedNode] : []);
+      ? allDraggedNodes.filter(n => !ANNOTATION_TYPES.has(n.type))
+      : (!ANNOTATION_TYPES.has(draggedNode.type) ? [draggedNode] : []);
     const draggedIds = new Set(nodesToProcess.map(n => n.id));
 
     console.log('[GraphCanvas] onNodeDragStop:', {
@@ -450,13 +530,27 @@ function GraphCanvasInner({
     });
   }, [setNodes, onNodePositionChange, getFlowNodes]);
 
-  // Right-click on empty background: prevent default and clear selection
+  // Right-click on empty background. A plain right-click opens the annotation
+  // creation menu (add note/label/arrow); a right-drag is a pan (panOnDrag
+  // includes button 2), so in that case keep the legacy clear-only behaviour.
   const onPaneContextMenu = useCallback((event) => {
     event.preventDefault();
     event.stopPropagation();
-    closeAllMenus();
-    clearSelection();
-  }, [closeAllMenus, clearSelection]);
+    const start = rightDragStart.current;
+    const movedFar = start.time != null &&
+      (Math.abs(event.clientX - start.x) > 5 || Math.abs(event.clientY - start.y) > 5);
+    rightDragStart.current = { x: 0, y: 0, time: null };
+    if (movedFar) {
+      closeAllMenus();
+      clearSelection();
+      return;
+    }
+    setNodeContextMenu(null);
+    setMultiNodeContextMenu(null);
+    setEdgeContextMenu(null);
+    const flowPosition = screenToFlowPosition({ x: event.clientX, y: event.clientY });
+    setPaneContextMenu({ x: event.clientX, y: event.clientY, flowPosition });
+  }, [closeAllMenus, clearSelection, screenToFlowPosition]);
 
   // Right-click on the selection box (multi-node selection)
   const onSelectionContextMenu = useCallback((event) => {
@@ -514,6 +608,7 @@ function GraphCanvasInner({
           style: g.style,
           color: g.data.color,
         })),
+        annotations: nodes.filter(n => OVERLAY_TYPES.has(n.type)).map(flowNodeToOverlay),
       };
       onSaveView(viewData);
     }
@@ -527,6 +622,9 @@ function GraphCanvasInner({
   const onNodeContextMenu = useCallback((event, node) => {
     event.preventDefault();
     event.stopPropagation();
+
+    // Annotation overlays render their own context menu (colour/delete).
+    if (OVERLAY_TYPES.has(node.type)) return;
 
     const isNodeSelected = selectedNodes.some(n => n.id === node.id);
     const hasMultipleSelected = selectedNodes.length > 1;
@@ -553,6 +651,8 @@ function GraphCanvasInner({
   // Double-click on node handler
   const handleNodeDoubleClick = useCallback((event, node) => {
     event.preventDefault();
+    // Annotation overlays handle their own double-click (inline text editing).
+    if (OVERLAY_TYPES.has(node.type)) return;
     if (onNodeDoubleClickCallback) {
       onNodeDoubleClickCallback(node.id, node.data);
     }
@@ -707,11 +807,24 @@ function GraphCanvasInner({
 
         if (selectedNodes.length > 0) {
           e.preventDefault();
-          const nodeIds = selectedNodes.map(n => n.id);
-          if (onHideMultiple) {
-            onHideMultiple(nodeIds);
-          } else if (onHide) {
-            nodeIds.forEach(id => onHide(id));
+          // Delete removes overlay annotations (note/label/arrow) from the
+          // canvas; graph nodes are hidden, not deleted. Groups are left to
+          // their own context menu so their children stay correctly parented.
+          const overlayIds = selectedNodes
+            .filter(n => OVERLAY_TYPES.has(n.type)).map(n => n.id);
+          const graphNodeIds = selectedNodes
+            .filter(n => !ANNOTATION_TYPES.has(n.type)).map(n => n.id);
+          if (overlayIds.length > 0) {
+            const removeSet = new Set(overlayIds);
+            setNodes(nds => nds.filter(n => !removeSet.has(n.id)));
+            onAnnotationChangeRef.current?.();
+          }
+          if (graphNodeIds.length > 0) {
+            if (onHideMultiple) {
+              onHideMultiple(graphNodeIds);
+            } else if (onHide) {
+              graphNodeIds.forEach(id => onHide(id));
+            }
           }
         }
       }
@@ -776,6 +889,24 @@ function GraphCanvasInner({
     }
   }, [groupsToRestore, setNodes, onGroupsRestored]);
 
+  // Restore free-floating annotations (note/label/arrow) from a loaded session.
+  useEffect(() => {
+    if (!annotationsToRestore || annotationsToRestore.length === 0) return;
+    const overlayNodes = annotationsToRestore
+      .filter(a => OVERLAY_TYPES.has(a?.kind))
+      .map(overlayToFlowNode);
+    if (overlayNodes.length === 0) {
+      onAnnotationsRestored?.();
+      return;
+    }
+    const restoreIds = new Set(overlayNodes.map(n => n.id));
+    setNodes((nds) => reorderNodesForParentChild([
+      ...nds.filter(n => !restoreIds.has(n.id)),
+      ...overlayNodes,
+    ]));
+    onAnnotationsRestored?.();
+  }, [annotationsToRestore, setNodes, onAnnotationsRestored]);
+
   // Focus on a specific node when focusNodeId changes
   // Report initial viewport after fitView animation settles
   useEffect(() => {
@@ -803,6 +934,9 @@ function GraphCanvasInner({
   const nodeTypes = useMemo(() => ({
     custom: CustomNode,
     group: GroupNode,
+    note: NoteNode,
+    label: LabelNode,
+    arrow: ArrowNode,
   }), []);
 
   const marksLegend = useMemo(() => {
@@ -826,6 +960,7 @@ function GraphCanvasInner({
   }, []);
 
   return (
+    <AnnotationContext.Provider value={annotationContextValue}>
     <div className="graph-canvas-container">
       {inputNodes.length > 0 && visibleNodes.length > LAZY_LOAD_THRESHOLD && loadedNodeCount < visibleNodes.length && (
         <div className="graph-canvas-controls">
@@ -1148,6 +1283,24 @@ function GraphCanvasInner({
         </div>
       )}
 
+      {paneContextMenu && (
+        <div
+          ref={paneMenuRef}
+          className="graph-context-menu pane-context-menu"
+          style={{ left: paneContextMenu.x, top: paneContextMenu.y }}
+        >
+          <button onClick={() => createAnnotation('note', paneContextMenu.flowPosition)}>
+            📝 {cml.addNote}
+          </button>
+          <button onClick={() => createAnnotation('label', paneContextMenu.flowPosition)}>
+            🏷️ {cml.addLabel}
+          </button>
+          <button onClick={() => createAnnotation('arrow', paneContextMenu.flowPosition)}>
+            ➡️ {cml.addArrow}
+          </button>
+        </div>
+      )}
+
       {notification && (
         <div className={`graph-notification graph-notification-${notification.type}`}>
           <span>{notification.type === 'success' ? '✓' : 'ℹ'}</span>
@@ -1156,6 +1309,7 @@ function GraphCanvasInner({
         </div>
       )}
     </div>
+    </AnnotationContext.Provider>
   );
 }
 
