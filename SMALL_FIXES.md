@@ -21,6 +21,12 @@ Effort scale: XS = single-line fix · S = up to ~30 lines / one file · M = mult
 
 ## Open
 
+### [2026-07-05] Debug `console.log` left in `GraphCanvas.onNodeDragStop`
+- **File(s):** `packages/ui-graph-canvas/src/components/GraphCanvas.jsx:468,513,533`
+- **Context:** Discovered during `claude/multi-user-sessions-step-5-bjoyp3`
+- **Issue:** `onNodeDragStop` logs three `console.log('[GraphCanvas] ...')` statements on every drag (drag stop, group enter, group exit). These are debug artifacts that spam the browser console during normal use. Remove them (or gate behind a debug flag).
+- **Effort:** XS
+
 ### [2026-07-03] Backend test suite mutates checked-in `backend/test_graph_auth.json`
 - **File(s):** `backend/test_graph_auth.json`
 - **Context:** Discovered during `claude/session-sidebar-nav-sfs73g`

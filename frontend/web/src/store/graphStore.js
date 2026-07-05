@@ -151,6 +151,7 @@ const useGraphStore = create((set, get) => ({
   clearGroupsFlag: false, // Signal to clear groups in visualization
   focusNodeId: null, // Node ID to zoom/pan to
   pendingGroups: null, // Groups to restore from a saved view
+  pendingAnnotations: null, // Note/label/arrow annotations to restore from a session
   chatPanelOpen: true, // Chat panel expanded vs minimized
   showMinimap: loadInitialShowMinimap(), // Minimap visibility (persisted)
 
@@ -268,6 +269,7 @@ const useGraphStore = create((set, get) => ({
       hiddenEdgeIds: [],
       nodeMarks: {},
       pendingGroups: null,
+      pendingAnnotations: null,
       clearGroupsFlag: true,
       selectedGraphNodes: [],
       selectedNodeId: null,
@@ -276,6 +278,8 @@ const useGraphStore = create((set, get) => ({
   },
 
   setPendingGroups: (groups) => set({ pendingGroups: groups }),
+
+  setPendingAnnotations: (annotations) => set({ pendingAnnotations: annotations }),
 
   setHighlightedNodeIds: (ids) => set({ highlightedNodeIds: ids }),
 

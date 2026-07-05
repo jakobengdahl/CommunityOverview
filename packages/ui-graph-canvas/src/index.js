@@ -12,6 +12,9 @@ export { default as GraphCanvas } from './components/GraphCanvas';
 // Individual components (for customization)
 export { default as CustomNode } from './components/CustomNode';
 export { default as GroupNode } from './components/GroupNode';
+export { default as NoteNode } from './components/NoteNode';
+export { default as LabelNode } from './components/LabelNode';
+export { default as ArrowNode } from './components/ArrowNode';
 
 // Layout utilities
 export {

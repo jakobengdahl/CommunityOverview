@@ -1,8 +1,9 @@
 # Multi-User Shared Sessions — Design & Implementation Plan
 
-**Status:** In progress — the backend foundation (steps 1–3) and the step-4
-frontend cutover (server-backed session lifecycle) are implemented; realtime op
-sync, presence UI and the new annotation kinds (steps 5–8) have not started.
+**Status:** In progress — the backend foundation (steps 1–3), the step-4
+frontend cutover (server-backed session lifecycle) and the step-5 annotation
+kinds (note, label, arrow) are implemented; realtime op sync, presence UI and
+hardening (steps 6–8) have not started.
 **Scope:** Open-source core only. SaaS-specific extensions (multi-instance scale-out,
 account-bound session history, workspace ACLs) are designed in the private SaaS
 repository and are explicitly out of scope here (see "Out of scope" below).
@@ -289,7 +290,7 @@ steps 6–8.
 | 2 | done | SSE fan-out hub + presence (backend) |
 | 3 | done | Op protocol, conflict rules, catch-up |
 | 4 | done | Frontend: server-backed session lifecycle |
-| 5 | not started | New annotation kinds (note, label, arrow) |
+| 5 | done | New annotation kinds (note, label, arrow) |
 | 6 | not started | Frontend: realtime op emit/apply + canvas events |
 | 7 | not started | Presence UI + selection claims |
 | 8 | not started | Hardening, multi-client e2e, docs sweep |
@@ -394,6 +395,27 @@ steps 6–8.
   for testing realtime sync and presence in later steps.
 - i18n keys, USER_GUIDE update (screenshot note for Jakob in PR body), canvas
   package tests.
+
+> **Implementation notes (step 5 as built).**
+> - **Overlay nodes.** Notes, labels and arrows are ReactFlow node types
+>   (`note`/`label`/`arrow`, components in `packages/ui-graph-canvas`), mirroring
+>   the existing group node. A shared `AnnotationContext` gives them a
+>   `notifyChange` hook (schedules the host's session save) and English-default
+>   labels (props-with-defaults i18n rule); host strings are wired through
+>   `App.jsx` `contextMenuLabels` + `en/sv.json`.
+> - **Creation via pane context menu.** Right-clicking empty canvas opens an
+>   "add note / label / arrow" menu (a plain right-click; a right-drag still
+>   pans, per `panOnDrag`). Groups keep their toolbar button.
+> - **Persistence.** `GraphCanvas.onSaveView` now also emits an `annotations`
+>   array; `App.jsx` translates all overlay kinds to/from the generic server
+>   annotation model (`annotationsToOverlays`/`overlaysToAnnotations`) and stores
+>   them via the step-4 full-state PUT. Restore uses a new
+>   `annotationsToRestore` prop (`pendingAnnotations` store field), parallel to
+>   groups. Op wiring still follows in step 6.
+> - **Arrow scope (D12).** v1 arrows are free-floating point-to-point pointers
+>   (stored as absolute `from`/`to` points, the base "anchored to a point"
+>   case). Re-anchoring an arrow endpoint to a node or annotation is deferred as
+>   later polish; the server model already carries the shape for it.
 
 ### Step 6 — Frontend: realtime op emit/apply + canvas events
 

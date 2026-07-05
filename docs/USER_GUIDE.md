@@ -13,7 +13,7 @@ shared knowledge graphs. This guide covers all user-facing features.
    - [Creating edges](#22-creating-edges)
    - [Editing and deleting](#23-editing-and-deleting)
    - [Right-click context menu](#24-right-click-context-menu)
-   - [Groups](#25-groups)
+   - [Groups and annotations](#25-groups-and-annotations)
    - [Saved views](#26-saved-views)
    - [Agents](#27-agents)
 3. [Search](#3-search)
@@ -116,11 +116,25 @@ Select all nodes of the same type, Hide all, Delete all. "Select all nodes of th
 type" extends the selection to every node whose type matches any type already in the
 selection.
 
-### 2.5 Groups
+### 2.5 Groups and annotations
 
 Nodes can be visually grouped by dragging them into a Group container (create one from
 the toolbar or via the group icon). Groups help organise large graphs without affecting
 the underlying data model.
+
+Alongside groups, you can add free-floating **annotations** to a session by right-clicking
+an empty area of the canvas and choosing one of:
+
+- **Note** — a resizable sticky note for longer comments. Double-click to edit its text;
+  right-click for a colour or to delete it.
+- **Label** — a short free-floating text label. Double-click to edit, right-click to
+  recolour or delete.
+- **Arrow** — a pointer you can position anywhere on the canvas. Right-click to recolour
+  or delete.
+
+Annotations are part of the session, not the knowledge graph: they are stored with the
+session (so everyone sharing the session sees them) and never change the underlying node
+and edge data. Select an annotation and press **Delete** to remove it.
 
 ### 2.6 Saved views
 
