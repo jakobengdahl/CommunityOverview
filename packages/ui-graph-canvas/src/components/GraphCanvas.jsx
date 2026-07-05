@@ -912,24 +912,18 @@ function GraphCanvasInner({
   }, [annotationsToRestore, setNodes, onAnnotationsRestored]);
 
   // Apply node positions arriving from another client (design step 6). Positions
-  // are absolute; a node parented to a group holds a relative position in
-  // ReactFlow, so subtract the group's position for those.
+  // are stored and emitted in ReactFlow's own coordinate space (`n.position`) —
+  // absolute for a free node, relative to the parent for a grouped node — and the
+  // load path restores them the same way, so apply them directly. (Subtracting a
+  // parent offset here would double-count it for grouped nodes and corrupt them.)
   useEffect(() => {
     if (!remotePositions) return;
     const ids = Object.keys(remotePositions);
     if (ids.length > 0) {
-      setNodes((nds) => {
-        const groupPos = {};
-        nds.forEach(n => { if (n.type === 'group') groupPos[n.id] = n.position; });
-        return nds.map(n => {
-          const abs = remotePositions[n.id];
-          if (!abs) return n;
-          const parentPos = n.parentId ? groupPos[n.parentId] : null;
-          return parentPos
-            ? { ...n, position: { x: abs.x - parentPos.x, y: abs.y - parentPos.y } }
-            : { ...n, position: { x: abs.x, y: abs.y } };
-        });
-      });
+      setNodes((nds) => nds.map(n => {
+        const pos = remotePositions[n.id];
+        return pos ? { ...n, position: { x: pos.x, y: pos.y } } : n;
+      }));
     }
     onRemotePositionsApplied?.();
   }, [remotePositions, setNodes, onRemotePositionsApplied]);

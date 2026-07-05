@@ -56,9 +56,12 @@ describe('GraphCanvas remote apply (design step 6)', () => {
     expect(onRemotePositionsApplied).toHaveBeenCalled();
   });
 
-  it('converts a remote position to relative for a node inside a group', () => {
+  it('applies a grouped node position verbatim (already relative — no re-offset)', () => {
+    // The emit side stores n.position, which ReactFlow keeps relative to the
+    // parent for a grouped node, so the apply side must not subtract the parent
+    // position again.
     render(
-      <GraphCanvas nodes={[]} edges={[]} remotePositions={{ 'child': { x: 150, y: 120 } }} />
+      <GraphCanvas nodes={[]} edges={[]} remotePositions={{ 'child': { x: 50, y: 20 } }} />
     );
     const seed = [
       { id: 'grp', type: 'group', position: { x: 100, y: 100 } },

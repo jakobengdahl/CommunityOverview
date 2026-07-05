@@ -285,10 +285,21 @@ export class SessionSyncClient {
     this._retryTimer = null;
     this._closed = false;
     this._flushing = false;
+    this._forceSingle = false;
   }
 
   get seq() { return this._seq; }
   get connected() { return this._source != null; }
+
+  /**
+   * The position the baseline currently holds for a node, or null. Lets the host
+   * place a node that another client added-then-moved at its authoritative spot,
+   * even though the two ops arrive as separate async-applied events.
+   */
+  baselinePosition(nodeId) {
+    const p = this._baseline.positions[nodeId];
+    return p ? { x: p.x, y: p.y } : null;
+  }
 
   /** Open the SSE stream. Idempotent. */
   connect() {
@@ -361,8 +372,10 @@ export class SessionSyncClient {
     if (this._flushing || this._closed) return;
     if (!this._ready || !this._queue.length || !this._fetch) return;
     this._flushing = true;
-    const batch = this._queue;
-    this._queue = [];
+    // After a rejected multi-op batch, resend one op at a time so a single bad
+    // op can't take valid ops down with it (the server applies a batch
+    // all-or-nothing). Otherwise send the whole queue as one batch.
+    const batch = this._forceSingle ? this._queue.splice(0, 1) : this._queue.splice(0);
     try {
       const resp = await this._fetch(this.opsUrl, {
         method: 'POST',
@@ -372,9 +385,21 @@ export class SessionSyncClient {
       if (resp && resp.ok) {
         const body = await resp.json().catch(() => ({}));
         if (typeof body.seq === 'number') this._seq = body.seq;
-      } else if (resp && (resp.status === 400 || resp.status === 413)) {
-        // Malformed / too large: retrying would poison the queue forever. Drop.
-        if (this.handlers.onDropped) this.handlers.onDropped(batch, resp.status);
+        if (this._forceSingle && this._queue.length === 0) this._forceSingle = false;
+      } else if (resp && (resp.status === 400 || resp.status === 413 ||
+                          resp.status === 404 || resp.status === 410)) {
+        // Terminal rejection (malformed / too large / session gone). Retrying
+        // never succeeds. If this was a multi-op batch, requeue and switch to
+        // one-at-a-time so only the offending op is ultimately dropped; a lone
+        // rejected op is dropped outright (its effect stays in the baseline, but
+        // it is genuinely un-persistable — e.g. a hard annotation-limit hit).
+        if (batch.length > 1) {
+          this._queue = batch.concat(this._queue);
+          this._forceSingle = true;
+        } else {
+          if (this.handlers.onDropped) this.handlers.onDropped(batch, resp.status);
+          if (this._forceSingle && this._queue.length === 0) this._forceSingle = false;
+        }
       } else {
         // 429 / 5xx / unknown: requeue and back off.
         this._queue = batch.concat(this._queue);

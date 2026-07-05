@@ -305,7 +305,19 @@ function App() {
             if (r?.node) { addNodes.push(r.node); (r.edges || []).forEach(e => addEdges.push(e)); }
           } catch { /* node may have been deleted from the graph — skip */ }
         }));
-        if (addNodes.length) addNodesToVisualization(addNodes, addEdges);
+        // Seed positions from the sync baseline: the originator emits nodes_added
+        // then node_moved as separate ops, so by the time this async resolve
+        // finishes the follow-up position is already folded into the baseline.
+        // Placing the node here (rather than relying on the racing remotePositions
+        // op, which is dropped when the node isn't mounted yet) prevents the node
+        // from settling at an auto-layout spot and re-emitting a wrong position.
+        if (addNodes.length) {
+          const positioned = addNodes.map(n => {
+            const pos = syncRef.current?.baselinePosition(n.id);
+            return pos ? { ...n, _savedPosition: pos } : n;
+          });
+          addNodesToVisualization(positioned, addEdges);
+        }
         break;
       }
       case 'nodes_removed':

@@ -269,6 +269,38 @@ describe('SessionSyncClient', () => {
     expect(fetchImpl.calls).toHaveLength(0);
   });
 
+  it('exposes the baseline position a node was moved to (for placing async-added nodes)', () => {
+    const { client } = makeClient();
+    client.connect();
+    const es = FakeEventSource.instances[0];
+    es.emit({ type: 'snapshot', seq: 0, session: { state: {} } });
+    es.emit({ type: 'op', client_id: 'other', op: { op: 'nodes_added', node_ids: ['a'] }, seq: 1 });
+    es.emit({ type: 'op', client_id: 'other', op: { op: 'node_moved', node_id: 'a', position: { x: 7, y: 8 } }, seq: 2 });
+    expect(client.baselinePosition('a')).toEqual({ x: 7, y: 8 });
+    expect(client.baselinePosition('missing')).toBeNull();
+  });
+
+  it('isolates a poison-pill op: a rejected multi-op batch resends singly, dropping only the bad op', async () => {
+    const onDropped = vi.fn();
+    // The server rejects any batch containing the annotation op; valid ops pass.
+    const fetchImpl = vi.fn(async (url, opts) => {
+      const ops = JSON.parse(opts.body).ops;
+      if (ops.some(o => o.op === 'annotation_created')) return { ok: false, status: 400 };
+      return { ok: true, status: 200, json: async () => ({ seq: 1 }) };
+    });
+    fetchImpl.calls = () => fetchImpl.mock.calls.map(([, o]) => JSON.parse(o.body).ops);
+    const { client } = makeClient({ fetchImpl, handlers: { onDropped } });
+    client.connect();
+    FakeEventSource.instances[0].emit({ type: 'snapshot', seq: 0, session: { state: {} } });
+    client.syncState({ node_refs: ['a'], annotations: [{ id: 'n1', kind: 'note', text: 'x' }] });
+    await new Promise(r => setTimeout(r, 60));
+    // The valid nodes_added was delivered in its own batch; the annotation was dropped.
+    const sent = fetchImpl.calls();
+    expect(sent.some(ops => ops.length === 1 && ops[0].op === 'nodes_added')).toBe(true);
+    expect(onDropped).toHaveBeenCalled();
+    expect(onDropped.mock.calls.at(-1)[0][0].op).toBe('annotation_created');
+  });
+
   it('dispatches session lifecycle events to handlers', () => {
     const onSessionRenamed = vi.fn();
     const onSessionDeleted = vi.fn();
