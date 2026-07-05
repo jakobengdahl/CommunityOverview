@@ -34,9 +34,10 @@ vi.mock('../src/services/api', () => {
   return {
     generateVisualizationSessionId: vi.fn(() => `1234-000${++idCounter}`),
     getVisualizationStreamUrl: vi.fn(() => 'http://localhost/stream'),
+    getSessionStreamUrl: vi.fn((id) => `http://localhost/api/sessions/${id}/stream`),
+    getSessionOpsUrl: vi.fn((id) => `http://localhost/api/sessions/${id}/ops`),
     updateSessionState: vi.fn(async () => ({ ok: true })),
     getClientId: vi.fn(() => 'client-test'),
-    putSessionState: vi.fn(async () => ({})),
     listServerSessions: vi.fn(async () => ({ sessions: [] })),
     renameServerSession: vi.fn(async () => ({})),
     deleteServerSession: vi.fn(async () => ({ deleted: true })),
@@ -69,12 +70,25 @@ vi.mock('../src/services/api', () => {
   };
 });
 
-// EventSource is not implemented in jsdom
+// EventSource is not implemented in jsdom. This fake auto-delivers a snapshot so
+// the sync client becomes "ready" and flushes queued ops during the test.
 class FakeEventSource {
-  constructor() {}
+  constructor(url) {
+    this.url = url;
+    this.onmessage = null;
+    this.onerror = null;
+    FakeEventSource.instances.push(this);
+    setTimeout(() => {
+      this.onmessage?.({ data: JSON.stringify({ type: 'snapshot', seq: 0, session: { state: {} } }) });
+    }, 0);
+  }
   close() {}
 }
+FakeEventSource.instances = [];
 global.EventSource = FakeEventSource;
+
+// The sync client posts op batches with global fetch; capture them.
+global.fetch = vi.fn(async () => ({ ok: true, status: 200, json: async () => ({ applied: [], seq: 1 }) }));
 
 import App from '../src/App';
 import * as api from '../src/services/api';
@@ -89,14 +103,22 @@ function renderApp() {
   );
 }
 
+function opsFrom(fetchMock) {
+  // Flatten every op sent across all captured op-batch POSTs.
+  return fetchMock.mock.calls.flatMap(([, opts]) => {
+    try { return JSON.parse(opts.body).ops || []; } catch { return []; }
+  });
+}
+
 describe('Server-backed session lifecycle', () => {
   beforeEach(() => {
     window.localStorage.clear();
     useGraphStore.getState().clearVisualization();
+    FakeEventSource.instances = [];
     vi.clearAllMocks();
   });
 
-  it('toolbar Save View still opens the naming dialog and saves state to the server', async () => {
+  it('toolbar Save View still opens the naming dialog and emits ops to the server', async () => {
     const { container } = renderApp();
 
     act(() => {
@@ -110,14 +132,17 @@ describe('Server-backed session lifecycle', () => {
     await waitFor(() => {
       expect(screen.getByText('Save View')).toBeInTheDocument();
     });
-    // The shared round-trip also persisted the canvas to the server
-    expect(api.putSessionState).toHaveBeenCalled();
-    const [, state] = api.putSessionState.mock.calls[0];
-    expect(state.node_refs).toEqual(['node-a']);
-    expect(state.positions['node-a']).toEqual({ x: 11, y: 22 });
+    // The shared round-trip persisted the canvas as incremental ops (step 6),
+    // materialising the session on its op stream rather than a full-state PUT.
+    await waitFor(() => {
+      expect(global.fetch).toHaveBeenCalled();
+    });
+    const ops = opsFrom(global.fetch);
+    expect(ops).toContainEqual({ op: 'nodes_added', node_ids: ['node-a'] });
+    expect(ops).toContainEqual({ op: 'node_moved', node_id: 'node-a', position: { x: 11, y: 22 } });
   });
 
-  it('switching session persists the current canvas first, then loads the target from the server', async () => {
+  it('switching session loads the target from the server, carrying its saved position', async () => {
     // Seed a previous session in the recents list so it shows in the drawer
     sessionStore.touchSession('5555-6666');
 
@@ -134,13 +159,6 @@ describe('Server-backed session lifecycle', () => {
     await waitFor(() => {
       expect(useGraphStore.getState().nodes.map(n => n.id)).toEqual(['node-b']);
     });
-
-    // The old (auto-generated 1234-000N) session was saved to the server first
-    expect(api.putSessionState).toHaveBeenCalled();
-    const [savedId, state] = api.putSessionState.mock.calls[0];
-    expect(savedId).toMatch(/^1234-/);
-    expect(state.node_refs).toEqual(['node-a']);
-    expect(state.positions['node-a']).toEqual({ x: 11, y: 22 });
 
     // The target was loaded resolved from the server, carrying its saved position
     expect(api.getSession).toHaveBeenCalledWith('5555-6666', { resolve: true });

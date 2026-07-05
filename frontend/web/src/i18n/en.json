@@ -142,6 +142,7 @@
     "delete_session_message_multi": "{count} other user(s) are connected to this session. Delete it anyway? Its content is removed for everyone and cannot be undone.",
     "delete_confirm": "Delete",
     "session_deleted": "Session deleted — started a new one",
+    "session_deleted_remote": "This session was deleted by another user — started a new one",
     "settings": "Settings"
   },
   "settings": {

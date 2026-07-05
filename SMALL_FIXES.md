@@ -21,6 +21,18 @@ Effort scale: XS = single-line fix · S = up to ~30 lines / one file · M = mult
 
 ## Open
 
+### [2026-07-05] Remote-added node can land at (0,0) if its move op has not arrived yet
+- **File(s):** `frontend/web/src/App.jsx` (`applyRemoteOp` `nodes_added`), `frontend/web/src/services/sessionSyncClient.js` (`baselinePosition`)
+- **Context:** Discovered during `claude/multi-user-sessions-step-6-xn4a5v` (step-6 review, non-blocking)
+- **Issue:** `nodes_added` resolves node details asynchronously and seeds `_savedPosition` from the sync baseline. If `getNodeDetails` resolves before the paired `node_moved` SSE op has been folded into the baseline, the node mounts at auto-layout/(0,0) and the next autosave can emit a `node_moved {0,0}` back. The window is very narrow (the move op travels the already-open SSE stream while `getNodeDetails` is a fresh HTTP round-trip), but not impossible. Fully closing it means also applying `remotePositions` to a node once it mounts (not only at add time).
+- **Effort:** S
+
+### [2026-07-05] Teardown flush drops queued ops while sync client is in `_forceSingle` mode
+- **File(s):** `frontend/web/src/services/sessionSyncClient.js` (`flush`/`close`), `frontend/web/src/App.jsx` (session-change cleanup)
+- **Context:** Discovered during `claude/multi-user-sessions-step-6-xn4a5v` (step-6 review, non-blocking)
+- **Issue:** On session switch/unmount the cleanup calls `flush()` then `close()`. In the rare `_forceSingle` error-recovery state `flush()` only sends one op (`splice(0,1)`) and `close()` clears the rest, so remaining queued ops are lost. `_forceSingle` is a rare state and teardown flush is best-effort, so impact is minimal.
+- **Effort:** XS
+
 ### [2026-07-05] `GroupNode` label input lacks ReactFlow `nodrag` class
 - **File(s):** `packages/ui-graph-canvas/src/components/GroupNode.jsx:179`
 - **Context:** Discovered during `claude/multi-user-sessions-step-5-bjoyp3`

@@ -1,9 +1,9 @@
 # Multi-User Shared Sessions — Design & Implementation Plan
 
 **Status:** In progress — the backend foundation (steps 1–3), the step-4
-frontend cutover (server-backed session lifecycle) and the step-5 annotation
-kinds (note, label, arrow) are implemented; realtime op sync, presence UI and
-hardening (steps 6–8) have not started.
+frontend cutover (server-backed session lifecycle), the step-5 annotation
+kinds (note, label, arrow) and the step-6 realtime op emit/apply loop are
+implemented; presence UI and hardening (steps 7–8) have not started.
 **Scope:** Open-source core only. SaaS-specific extensions (multi-instance scale-out,
 account-bound session history, workspace ACLs) are designed in the private SaaS
 repository and are explicitly out of scope here (see "Out of scope" below).
@@ -291,7 +291,7 @@ steps 6–8.
 | 3 | done | Op protocol, conflict rules, catch-up |
 | 4 | done | Frontend: server-backed session lifecycle |
 | 5 | done | New annotation kinds (note, label, arrow) |
-| 6 | not started | Frontend: realtime op emit/apply + canvas events |
+| 6 | done | Frontend: realtime op emit/apply + canvas events |
 | 7 | not started | Presence UI + selection claims |
 | 8 | not started | Hardening, multi-client e2e, docs sweep |
 
@@ -425,6 +425,56 @@ steps 6–8.
   drag-end, annotation CRUD ops for all kinds from step 5.
 - Tests: vitest for sync client (fake EventSource), canvas package tests for new
   callbacks.
+
+> **Implementation notes (step 6 as built).**
+> - **`sessionSyncClient.js` — transport + state-diff op derivation.** The client
+>   (`frontend/web/src/services/sessionSyncClient.js`) owns the op-protocol SSE
+>   stream (`GET /api/sessions/{id}/stream`) and the upstream `POST /ops` channel.
+>   Outgoing ops are derived by `computeOps(baseline, next)`: the host hands the
+>   client a full-state snapshot (the same object the step-4 PUT used) and the
+>   client diffs it against the last-synced baseline into the minimal op set.
+>   This routes *every* mutation path (search, expand, drag-end, annotation and
+>   group edits) through one place instead of wiring an explicit op emitter into
+>   each, and inherently collapses a bulk position change into a single
+>   `layout_applied` op (keeping big layouts under the server's per-batch cap).
+>   Ops batch on a short debounce; transient POST failures requeue with backoff,
+>   `400`/`413` drop to avoid poisoning the queue.
+> - **Echo-safety without a store guard flag.** The baseline mirrors what the
+>   server holds. A remote op is folded into the baseline (`applyOpToMirror`)
+>   *before* the host applies it locally, so the resulting store change diffs to
+>   nothing on the next snapshot — no bounce-back. This replaces the design's
+>   "guard flag around store mutations" with a single authoritative mirror.
+> - **Incremental remote apply (not reload).** Foreign ops are applied
+>   entity-by-entity onto the store + canvas (`applyRemoteOp` in `App.jsx`):
+>   `nodes_added` resolves the new nodes via `getNodeDetails`; positions,
+>   annotations and group membership are pushed to the canvas through new props
+>   (`remotePositions`, `remoteAnnotationOp`). This touches only the entities an
+>   op names, so a concurrent local edit is never clobbered — unlike a wholesale
+>   reload. A full reload + baseline reset is used *only* on reconnect catch-up
+>   (`onResync`), when the local user was disconnected and not editing.
+> - **Canvas events.** Drag-end already emitted `onNodePositionChange`; group
+>   edits now notify the host too — `GroupNode` calls the shared annotation
+>   `notifyChange` on rename, recolour, resize and delete (groups are annotations,
+>   design 3.1), so those edits schedule a snapshot and thus the right ops
+>   (`annotation_updated`, `annotation_deleted`, `group_membership_changed`).
+>   Rather than five separate `onGroup*` callback props that the host would only
+>   funnel back into the same snapshot/diff, group changes reach the server
+>   through this one notifier + the central reconciler — the design's realtime
+>   goal for group edits without redundant prop plumbing.
+> - **Lazy connect preserved.** The stream connects on the first non-empty save
+>   or when loading an existing session — never eagerly on load — so an empty,
+>   never-edited session is still never materialised server-side (the step-4
+>   behaviour under D13).
+> - **Full-state PUT retired from the frontend.** `putSessionState` is removed;
+>   `api.js` gains `getSessionStreamUrl`, `getSessionOpsUrl`. The `PUT
+>   /api/sessions/{id}/state` endpoint itself is left in place for removal in
+>   step 8 (§3.8), now unused by the client.
+> - **Known v1 limitations (deferred to step 7/8 polish).** Live position apply
+>   for a node being *re-parented* by a remote group-membership change does not
+>   recompute the absolute↔relative offset, so such a node can jump until the next
+>   position op; and a remote apply that lands within the local autosave debounce
+>   of a brand-new local annotation could, in the reconnect-resync path only,
+>   race it. Neither affects the common drag/add/remove/hide/annotate flows.
 
 ### Step 7 — Presence UI + selection claims
 

@@ -142,6 +142,7 @@
     "delete_session_message_multi": "{count} andra användare är anslutna till den här sessionen. Ta bort den ändå? Innehållet tas bort för alla och kan inte ångras.",
     "delete_confirm": "Ta bort",
     "session_deleted": "Sessionen togs bort — startade en ny",
+    "session_deleted_remote": "Sessionen togs bort av en annan användare — startade en ny",
     "settings": "Inställningar"
   },
   "settings": {
