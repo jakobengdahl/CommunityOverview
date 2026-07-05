@@ -109,7 +109,7 @@ function LabelNode({ id, data, selected }) {
           <input
             ref={inputRef}
             type="text"
-            className="graph-label-input"
+            className="graph-label-input nodrag"
             value={text}
             onChange={(e) => setText(e.target.value)}
             onBlur={commitText}

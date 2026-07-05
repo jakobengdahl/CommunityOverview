@@ -441,11 +441,12 @@ function App() {
         addNodesToVisualization(positioned, result.edges || []);
         if (result.hidden_node_ids?.length) setHiddenNodeIds(result.hidden_node_ids);
         if (result.groups?.length) setPendingGroups({ groups: result.groups, parentIds: result.parentIds || {} });
+        if (result.annotations?.length) setPendingAnnotations(result.annotations);
       } catch (err) {
         console.error('[App] Failed to load view from URL:', err);
       }
     })();
-  }, [stats, clearVisualization, addNodesToVisualization, setHiddenNodeIds, setPendingGroups]);
+  }, [stats, clearVisualization, addNodesToVisualization, setHiddenNodeIds, setPendingGroups, setPendingAnnotations]);
 
   const showNotification = useCallback((type, message) => {
     setNotification({ type, message });
@@ -474,6 +475,7 @@ function App() {
         const savedEdges = nodeData.metadata?.edges || [];
         const savedGroups = nodeData.metadata?.groups || [];
         const savedParentIds = nodeData.metadata?.parentIds || {};
+        const savedAnnotations = nodeData.metadata?.annotations || [];
         if (nodeIds.length > 0) {
           clearVisualization();
           const details = await Promise.all(
@@ -506,6 +508,9 @@ function App() {
             if (savedGroups.length > 0) {
               setPendingGroups({ groups: savedGroups, parentIds: savedParentIds });
             }
+            if (savedAnnotations.length > 0) {
+              setPendingAnnotations(savedAnnotations);
+            }
           }
         }
         showNotification('info', `Loaded saved view: ${nodeData.name || nodeData.label}`);
@@ -518,7 +523,7 @@ function App() {
 
     // For other nodes, show detail dialog
     setDetailNode({ id: nodeId, data: nodeData });
-  }, [clearVisualization, addNodesToVisualization, setPendingGroups, setDetailNode, showNotification]);
+  }, [clearVisualization, addNodesToVisualization, setPendingGroups, setPendingAnnotations, setDetailNode, showNotification]);
 
   // Callback: Expand node to show related nodes
   const handleExpand = useCallback(async (nodeId, nodeData) => {
@@ -830,6 +835,7 @@ function App() {
           edge_ids: (saveViewDialog.viewData.edges || []).map(e => e.id),
           edges: saveViewDialog.viewData.edges || [],
           groups: saveViewDialog.viewData.groups,
+          annotations: saveViewDialog.viewData.annotations || [],
         },
         communities: [],
       };

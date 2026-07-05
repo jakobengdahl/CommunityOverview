@@ -22,6 +22,7 @@ import { AnnotationContext } from './AnnotationContext';
 import SimpleFloatingEdge from './SimpleFloatingEdge';
 import { applyLayout, getGridLayout, getCircularLayout, getLayoutedElements } from '../utils/graphLayout';
 import { getNodeColor, LAZY_LOAD_THRESHOLD, INITIAL_LOAD_COUNT, DEFAULT_EDGE_STYLE } from '../utils/constants';
+import { OVERLAY_TYPES, ANNOTATION_TYPES, isManualNode, overlayToFlowNode, flowNodeToOverlay } from '../utils/annotations';
 import './GraphCanvas.css';
 
 /**
@@ -62,51 +63,6 @@ function reorderNodesForParentChild(nodes) {
   }
 
   return [...groups, ...nonGroupWithoutParent, ...withParent];
-}
-
-// Free-floating annotation node types (notes, labels, arrows). Groups are a
-// separate, pre-existing annotation kind with their own containment/parenting
-// logic, so they are tracked apart from these overlays.
-const OVERLAY_TYPES = new Set(['note', 'label', 'arrow']);
-const ANNOTATION_TYPES = new Set(['group', 'note', 'label', 'arrow']);
-
-function isManualNode(node) {
-  return node.type === 'group' || node.id.startsWith('group-') || OVERLAY_TYPES.has(node.type);
-}
-
-// Build a ReactFlow node for a note/label/arrow overlay from the host's
-// canvas-shape annotation ({id, kind, position, ...payload}).
-function overlayToFlowNode(overlay) {
-  const base = { id: overlay.id, type: overlay.kind, position: overlay.position || { x: 0, y: 0 } };
-  if (overlay.kind === 'note') {
-    return {
-      ...base,
-      data: { text: overlay.text || '', color: overlay.color },
-      style: overlay.size ? { width: overlay.size.w, height: overlay.size.h } : { width: 200, height: 140 },
-    };
-  }
-  if (overlay.kind === 'label') {
-    return { ...base, data: { text: overlay.text || '', color: overlay.color } };
-  }
-  // arrow
-  return { ...base, data: { dx: overlay.dx ?? 160, dy: overlay.dy ?? 0, color: overlay.color } };
-}
-
-// Serialize a ReactFlow overlay node back to the host's canvas-shape annotation.
-function flowNodeToOverlay(node) {
-  const base = { id: node.id, kind: node.type, position: node.position };
-  if (node.type === 'note') {
-    return {
-      ...base,
-      text: node.data?.text || '',
-      color: node.data?.color,
-      size: node.style ? { w: node.style.width, h: node.style.height } : undefined,
-    };
-  }
-  if (node.type === 'label') {
-    return { ...base, text: node.data?.text || '', color: node.data?.color };
-  }
-  return { ...base, dx: node.data?.dx ?? 160, dy: node.data?.dy ?? 0, color: node.data?.color };
 }
 
 /**
@@ -203,6 +159,7 @@ function GraphCanvasInner({
   const [selectedNodes, setSelectedNodes] = useState([]);
   const [selectedEdges, setSelectedEdges] = useState([]);
   const [paneContextMenu, setPaneContextMenu] = useState(null);
+  const paneMenuRef = useRef(null);
   const reactFlowWrapper = useRef(null);
   const rightDragStart = useRef({ x: 0, y: 0, time: null });
   const mouseDownPos = useRef(null);
@@ -416,6 +373,26 @@ function GraphCanvasInner({
     setPaneContextMenu(null);
     onAnnotationChangeRef.current?.();
   }, [setNodes]);
+
+  // Dismiss the pane annotation menu on any outside interaction (e.g. clicking a
+  // graph node, which handlePaneClick does not cover), matching the annotation
+  // node menus. Escape is handled by the global keydown handler.
+  useEffect(() => {
+    if (!paneContextMenu) return;
+    const handleDismiss = (e) => {
+      if (paneMenuRef.current && paneMenuRef.current.contains(e.target)) return;
+      setPaneContextMenu(null);
+    };
+    const timer = setTimeout(() => {
+      document.addEventListener('mousedown', handleDismiss, true);
+      document.addEventListener('contextmenu', handleDismiss, true);
+    }, 0);
+    return () => {
+      clearTimeout(timer);
+      document.removeEventListener('mousedown', handleDismiss, true);
+      document.removeEventListener('contextmenu', handleDismiss, true);
+    };
+  }, [paneContextMenu]);
 
   const clearSelection = useCallback(() => {
     // Use onNodesChange/onEdgesChange with select events to properly clear ReactFlow's internal selection state
@@ -1308,6 +1285,7 @@ function GraphCanvasInner({
 
       {paneContextMenu && (
         <div
+          ref={paneMenuRef}
           className="graph-context-menu pane-context-menu"
           style={{ left: paneContextMenu.x, top: paneContextMenu.y }}
         >

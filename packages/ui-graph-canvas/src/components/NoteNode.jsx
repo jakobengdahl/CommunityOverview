@@ -114,7 +114,7 @@ function NoteNode({ id, data, selected }) {
         {isEditing ? (
           <textarea
             ref={inputRef}
-            className="graph-note-input"
+            className="graph-note-input nodrag"
             value={text}
             onChange={(e) => setText(e.target.value)}
             onBlur={commitText}

@@ -1,8 +1,8 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest';
-import { render, screen, fireEvent } from '@testing-library/react';
+import { render, screen, fireEvent, act } from '@testing-library/react';
 import { GraphCanvas } from '../src/index';
 
-const hoisted = vi.hoisted(() => ({ setNodes: vi.fn() }));
+const hoisted = vi.hoisted(() => ({ setNodes: vi.fn(), selectionOnChange: null }));
 
 vi.mock('reactflow', () => {
   const MockReactFlow = ({ children, onPaneContextMenu, onPaneMouseDown }) => (
@@ -31,7 +31,7 @@ vi.mock('reactflow', () => {
       setCenter: vi.fn(),
       getViewport: () => ({ x: 0, y: 0, zoom: 1 }),
     }),
-    useOnSelectionChange: () => {},
+    useOnSelectionChange: ({ onChange }) => { hoisted.selectionOnChange = onChange; },
     Background: () => <div data-testid="background" />,
     Controls: () => <div data-testid="controls" />,
     MiniMap: () => <div data-testid="minimap" />,
@@ -126,8 +126,51 @@ describe('GraphCanvas annotation creation', () => {
     expect(onSaveView).toHaveBeenCalled();
     const viewData = onSaveView.mock.calls[0][0];
     expect(Array.isArray(viewData.annotations)).toBe(true);
-    // The overlay serialization is unit-tested via the components; here we only
-    // guarantee handleSaveView always provides the annotations field.
+    // Overlay serialization is unit-tested in overlaySerialization.test.js; here
+    // we only guarantee handleSaveView always provides the annotations field.
     void overlayNodes;
+  });
+
+  it('restores overlay annotations from a loaded session', () => {
+    const onAnnotationsRestored = vi.fn();
+    render(
+      <GraphCanvas
+        nodes={[]}
+        edges={[]}
+        onAnnotationsRestored={onAnnotationsRestored}
+        annotationsToRestore={[
+          { id: 'note-9', kind: 'note', position: { x: 2, y: 3 }, text: 'restored', size: { w: 200, h: 140 } },
+        ]}
+      />
+    );
+    const note = findCreatedNode('note');
+    expect(note).toBeTruthy();
+    expect(note.id).toBe('note-9');
+    expect(note.data.text).toBe('restored');
+    expect(onAnnotationsRestored).toHaveBeenCalled();
+  });
+
+  it('removes selected overlays on Delete without hiding them as graph nodes', () => {
+    const onHideMultiple = vi.fn();
+    const onAnnotationChange = vi.fn();
+    render(
+      <GraphCanvas nodes={[]} edges={[]} onHideMultiple={onHideMultiple} onAnnotationChange={onAnnotationChange} />
+    );
+    act(() => {
+      hoisted.selectionOnChange({ nodes: [{ id: 'note-1', type: 'note' }], edges: [] });
+    });
+    fireEvent.keyDown(document, { key: 'Delete' });
+
+    expect(onHideMultiple).not.toHaveBeenCalled();
+    expect(onAnnotationChange).toHaveBeenCalled();
+    const removed = hoisted.setNodes.mock.calls.some((call) => {
+      if (typeof call[0] !== 'function') return false;
+      try {
+        return call[0]([{ id: 'note-1', type: 'note' }, { id: 'keep' }]).every((n) => n.id !== 'note-1');
+      } catch {
+        return false;
+      }
+    });
+    expect(removed).toBe(true);
   });
 });
