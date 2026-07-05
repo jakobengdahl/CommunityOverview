@@ -107,6 +107,10 @@ function GraphCanvasInner({
   annotationsToRestore = null,
   onAnnotationsRestored,
   onAnnotationChange,
+  remotePositions = null,
+  onRemotePositionsApplied,
+  remoteAnnotationOps = null,
+  onRemoteAnnotationsApplied,
   federationDepth = 1,
   onFederationDepthChange,
   maxFederationDepth = 4,
@@ -906,6 +910,74 @@ function GraphCanvasInner({
     ]));
     onAnnotationsRestored?.();
   }, [annotationsToRestore, setNodes, onAnnotationsRestored]);
+
+  // Apply node positions arriving from another client (design step 6). Positions
+  // are absolute; a node parented to a group holds a relative position in
+  // ReactFlow, so subtract the group's position for those.
+  useEffect(() => {
+    if (!remotePositions) return;
+    const ids = Object.keys(remotePositions);
+    if (ids.length > 0) {
+      setNodes((nds) => {
+        const groupPos = {};
+        nds.forEach(n => { if (n.type === 'group') groupPos[n.id] = n.position; });
+        return nds.map(n => {
+          const abs = remotePositions[n.id];
+          if (!abs) return n;
+          const parentPos = n.parentId ? groupPos[n.parentId] : null;
+          return parentPos
+            ? { ...n, position: { x: abs.x - parentPos.x, y: abs.y - parentPos.y } }
+            : { ...n, position: { x: abs.x, y: abs.y } };
+        });
+      });
+    }
+    onRemotePositionsApplied?.();
+  }, [remotePositions, setNodes, onRemotePositionsApplied]);
+
+  // Apply a queue of group/overlay annotation changes from other clients (design
+  // step 6): upsert or delete annotation nodes and reassign group membership.
+  // A queue (not a single op) so a burst arriving in one render is not coalesced.
+  useEffect(() => {
+    if (!remoteAnnotationOps || remoteAnnotationOps.length === 0) return;
+    for (const op of remoteAnnotationOps) {
+      if (op.action === 'upsert-overlay' && op.overlay) {
+        const flowNode = overlayToFlowNode(op.overlay);
+        setNodes((nds) => reorderNodesForParentChild([
+          ...nds.filter(n => n.id !== flowNode.id),
+          flowNode,
+        ]));
+      } else if (op.action === 'upsert-group' && op.group) {
+        const g = op.group;
+        const groupNode = {
+          id: g.id, type: 'group', position: g.position || { x: 0, y: 0 },
+          data: { label: g.label || 'Group', description: '', color: g.color || '#646cff' },
+          style: g.style || { width: 300, height: 200 },
+        };
+        const members = new Set(op.members || []);
+        setNodes((nds) => reorderNodesForParentChild(
+          [...nds.filter(n => n.id !== g.id), groupNode].map(n => {
+            if (n.type === 'group') return n;
+            if (members.has(n.id)) return { ...n, parentId: g.id };
+            if (n.parentId === g.id) return { ...n, parentId: undefined };
+            return n;
+          })
+        ));
+      } else if (op.action === 'delete' && op.id) {
+        setNodes((nds) => nds
+          .map(n => (n.parentId === op.id ? { ...n, parentId: undefined } : n))
+          .filter(n => n.id !== op.id));
+      } else if (op.action === 'membership' && op.groupId) {
+        const members = new Set(op.members || []);
+        setNodes((nds) => reorderNodesForParentChild(nds.map(n => {
+          if (n.type === 'group') return n;
+          if (members.has(n.id)) return { ...n, parentId: op.groupId };
+          if (n.parentId === op.groupId) return { ...n, parentId: undefined };
+          return n;
+        })));
+      }
+    }
+    onRemoteAnnotationsApplied?.();
+  }, [remoteAnnotationOps, setNodes, onRemoteAnnotationsApplied]);
 
   // Focus on a specific node when focusNodeId changes
   // Report initial viewport after fitView animation settles

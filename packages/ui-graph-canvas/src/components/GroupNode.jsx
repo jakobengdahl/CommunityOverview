@@ -1,6 +1,7 @@
-import { memo, useState, useRef, useEffect } from 'react';
+import { memo, useState, useRef, useEffect, useContext } from 'react';
 import { createPortal } from 'react-dom';
 import { NodeResizer, useReactFlow } from 'reactflow';
+import { AnnotationContext } from './AnnotationContext';
 import './GroupNode.css';
 
 /**
@@ -20,6 +21,10 @@ function GroupNode({ id, data, selected }) {
   const groupRef = useRef(null);
   const contextMenuRef = useRef(null);
   const { setNodes } = useReactFlow();
+  // Groups are annotations (design 3.1); reuse the annotation change notifier so
+  // a rename, recolour, resize or delete schedules a session save (and, in a
+  // shared session, an op) the same way note/label/arrow edits do.
+  const { notifyChange } = useContext(AnnotationContext);
 
   useEffect(() => {
     if (isEditing && inputRef.current) {
@@ -68,7 +73,7 @@ function GroupNode({ id, data, selected }) {
 
   const handleLabelBlur = () => {
     setIsEditing(false);
-    if (editedLabel.trim()) {
+    if (editedLabel.trim() && editedLabel.trim() !== data.label) {
       setNodes((nds) =>
         nds.map((n) => {
           if (n.id === id) {
@@ -77,7 +82,8 @@ function GroupNode({ id, data, selected }) {
           return n;
         })
       );
-    } else {
+      notifyChange();
+    } else if (!editedLabel.trim()) {
       setEditedLabel(data.label || 'Group');
     }
   };
@@ -108,6 +114,7 @@ function GroupNode({ id, data, selected }) {
       })
     );
     setContextMenu(null);
+    notifyChange();
   };
 
   // Un-parent children and remove the group node from the canvas
@@ -132,6 +139,7 @@ function GroupNode({ id, data, selected }) {
           return updated || n;
         });
     });
+    notifyChange();
   };
 
   const handleHideGroup = () => {
@@ -150,6 +158,7 @@ function GroupNode({ id, data, selected }) {
       <NodeResizer
         minWidth={200}
         minHeight={150}
+        onResizeEnd={() => notifyChange()}
         isVisible={selected}
         lineStyle={{ stroke: data.color || '#646cff', strokeWidth: 4 }}
         handleStyle={{

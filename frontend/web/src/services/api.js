@@ -506,6 +506,18 @@ export function getVisualizationStreamUrl(sessionId) {
   return `${getPathRoot()}/sessions/${encodeURIComponent(sessionId)}/stream`;
 }
 
+/**
+ * Return the realtime op-protocol SSE stream URL for a shared session
+ * (design step 6). Distinct from the legacy MCP-push stream above: this one
+ * carries applied ops, presence and claims from the fan-out hub.
+ *
+ * @param {string} sessionId
+ * @returns {string}
+ */
+export function getSessionStreamUrl(sessionId) {
+  return `${SESSIONS_BASE()}/${encodeURIComponent(sessionId)}/stream`;
+}
+
 // Stable per-browser client id for shared-session presence and op attribution
 // (design 3.4). Kept in localStorage so it survives reloads.
 const CLIENT_ID_KEY = 'graph_client_id';
@@ -591,20 +603,15 @@ export async function deleteServerSession(sessionId, clientId) {
 }
 
 /**
- * Persist a session's whole canvas state to the server (full-state save).
- * Temporary transport for step 4 — replaced by incremental ops in step 6.
- * Materialises the session server-side on first save (get-or-create).
+ * Return the op-batch POST URL for a shared session (design step 6).
+ * The sync client posts here directly so it can react to HTTP status codes
+ * (429 backoff, 400 drop); hence a URL builder rather than a fetch helper.
  *
  * @param {string} sessionId
- * @param {{node_refs: string[], positions: Object, hidden_node_ids: string[],
- *          hidden_edge_ids: string[], annotations: Array, manual_edges: Array}} state
- * @returns {Promise<Object>} session payload
+ * @returns {string}
  */
-export async function putSessionState(sessionId, state) {
-  return apiFetch(`${SESSIONS_BASE()}/${encodeURIComponent(sessionId)}/state`, {
-    method: 'PUT',
-    body: JSON.stringify({ client_id: getClientId(), state }),
-  });
+export function getSessionOpsUrl(sessionId) {
+  return `${SESSIONS_BASE()}/${encodeURIComponent(sessionId)}/ops`;
 }
 
 /**

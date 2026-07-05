@@ -23,6 +23,7 @@ import SessionDrawer from './components/SessionDrawer';
 import SettingsDialog from './components/SettingsDialog';
 import * as api from './services/api';
 import * as sessionStore from './services/sessionStore';
+import { SessionSyncClient } from './services/sessionSyncClient';
 import './App.css';
 
 const _urlParams = new URLSearchParams(window.location.search);
@@ -132,6 +133,27 @@ function overlaysToAnnotations(overlays) {
   });
 }
 
+// Convert a server session state into the exact baseline shape the local
+// snapshot round-trip produces, so the sync client's diff sees no change for
+// content it just applied (echo-safety). node_refs come from the *resolved*
+// node ids actually on the canvas — refs that no longer resolve in the graph
+// must not look like local removals on the next snapshot.
+function serverStateToMirror(state, resolvedNodeIds) {
+  const s = state || {};
+  const { groups, parentIds } = annotationsToGroups(s.annotations);
+  const overlays = annotationsToOverlays(s.annotations);
+  return {
+    node_refs: resolvedNodeIds || s.node_refs || [],
+    positions: s.positions || {},
+    hidden_node_ids: s.hidden_node_ids || [],
+    hidden_edge_ids: s.hidden_edge_ids || [],
+    annotations: [
+      ...groupsToAnnotations(groups, parentIds),
+      ...overlaysToAnnotations(overlays),
+    ],
+  };
+}
+
 function App() {
   const akcShortName = _akcShortName;
   const {
@@ -222,6 +244,136 @@ function App() {
   const [deleteSessionDialog, setDeleteSessionDialog] = useState(null);
   const [sessionsVersion, setSessionsVersion] = useState(0);
   const sessions = useMemo(() => sessionStore.listSessions(), [sessionsVersion]);
+
+  // ── Realtime sync (design step 6) ───────────────────────────────────────
+  // The sync client owns the op-protocol stream and op emission for the active
+  // session. It is created per session; handlers are routed through a ref so
+  // the long-lived client always calls the latest closures. Positions arriving
+  // from other clients are pushed to the canvas via remotePositions.
+  const syncRef = useRef(null);
+  const syncHandlersRef = useRef({});
+  const applyServerSessionRef = useRef(null);
+  const [remotePositions, setRemotePositions] = useState(null);
+  const [remoteAnnotationOps, setRemoteAnnotationOps] = useState(null);
+
+  // Lazily create + connect the sync client for a session. Called on the first
+  // non-empty save and when loading an existing session — never eagerly on load,
+  // so an empty never-edited session is never materialised server-side (the
+  // step-4 lazy-materialisation behaviour). Handlers delegate through a ref so
+  // this long-lived client always runs the latest closures.
+  const ensureSyncConnected = useCallback((targetId) => {
+    const existing = syncRef.current;
+    if (existing && existing.sessionId === targetId) {
+      existing.connect();
+      return existing;
+    }
+    if (existing) existing.close();
+    const client = new SessionSyncClient({
+      sessionId: targetId,
+      clientId: api.getClientId(),
+      streamUrl: api.getSessionStreamUrl(targetId),
+      opsUrl: api.getSessionOpsUrl(targetId),
+      handlers: {
+        onReady: (...a) => syncHandlersRef.current.onReady?.(...a),
+        onResync: (...a) => syncHandlersRef.current.onResync?.(...a),
+        onRemoteOps: (...a) => syncHandlersRef.current.onRemoteOps?.(...a),
+        onSessionRenamed: (...a) => syncHandlersRef.current.onSessionRenamed?.(...a),
+        onSessionDeleted: (...a) => syncHandlersRef.current.onSessionDeleted?.(...a),
+      },
+    });
+    syncRef.current = client;
+    client.connect();
+    return client;
+  }, []);
+
+  // Apply a single remote op incrementally onto the local store + canvas. This
+  // touches only the entities the op names, so a concurrent local edit is never
+  // clobbered (unlike a wholesale reload). The sync client has already folded
+  // the op into its baseline, so the store changes here do not echo back out.
+  const applyRemoteOp = useCallback(async (op) => {
+    const store = useGraphStore.getState();
+    switch (op?.op) {
+      case 'nodes_added': {
+        const have = new Set(store.nodes.map(n => n.id));
+        const missing = (op.node_ids || []).filter(id => !have.has(id));
+        if (!missing.length) break;
+        const addNodes = [];
+        const addEdges = [];
+        await Promise.all(missing.map(async (id) => {
+          try {
+            const r = await api.getNodeDetails(id);
+            if (r?.node) { addNodes.push(r.node); (r.edges || []).forEach(e => addEdges.push(e)); }
+          } catch { /* node may have been deleted from the graph — skip */ }
+        }));
+        if (addNodes.length) addNodesToVisualization(addNodes, addEdges);
+        break;
+      }
+      case 'nodes_removed':
+        (op.node_ids || []).forEach(id => removeNode(id));
+        break;
+      case 'nodes_hidden':
+        setHiddenNodeIds(Array.from(new Set([...(store.hiddenNodeIds || []), ...(op.node_ids || [])])));
+        break;
+      case 'nodes_shown': {
+        const drop = new Set(op.node_ids || []);
+        setHiddenNodeIds((store.hiddenNodeIds || []).filter(id => !drop.has(id)));
+        break;
+      }
+      case 'edges_hidden':
+        setHiddenEdgeIds(Array.from(new Set([...(store.hiddenEdgeIds || []), ...(op.edge_ids || [])])));
+        break;
+      case 'edges_shown': {
+        const drop = new Set(op.edge_ids || []);
+        setHiddenEdgeIds((store.hiddenEdgeIds || []).filter(id => !drop.has(id)));
+        break;
+      }
+      case 'node_moved':
+        // Merge, don't replace: a burst of moves in one tick must not lose all
+        // but the last node's position.
+        if (op.node_id && op.position) setRemotePositions(prev => ({ ...(prev || {}), [op.node_id]: op.position }));
+        break;
+      case 'layout_applied':
+        if (op.positions) setRemotePositions(prev => ({ ...(prev || {}), ...op.positions }));
+        break;
+      case 'annotation_created':
+      case 'annotation_updated': {
+        const ann = op.annotation;
+        if (!ann || !ann.id) break;
+        if (ann.kind === 'group') {
+          const [group] = annotationsToGroups([ann]).groups;
+          setRemoteAnnotationOps(prev => [...(prev || []), { action: 'upsert-group', group, members: ann.member_node_ids || [] }]);
+        } else {
+          const [overlay] = annotationsToOverlays([ann]);
+          if (overlay) setRemoteAnnotationOps(prev => [...(prev || []), { action: 'upsert-overlay', overlay }]);
+        }
+        break;
+      }
+      case 'annotation_deleted':
+        if (op.annotation_id) setRemoteAnnotationOps(prev => [...(prev || []), { action: 'delete', id: op.annotation_id }]);
+        break;
+      case 'group_membership_changed':
+        setRemoteAnnotationOps(prev => [...(prev || []), { action: 'membership', groupId: op.group_id, members: op.member_node_ids || [] }]);
+        break;
+      default:
+        break; // session_renamed handled by its own event
+    }
+  }, [addNodesToVisualization, removeNode, setHiddenNodeIds, setHiddenEdgeIds]);
+
+  // Reconnect / catch-up path (missed ops after a disconnect): reload the whole
+  // session from the server and reset the baseline. Destructive, but a resync
+  // only fires after a dropped stream, when the local user was not editing.
+  const resyncFromServer = useCallback(async (targetId) => {
+    let payload;
+    try {
+      payload = await api.getSession(targetId, { resolve: true });
+    } catch {
+      return;
+    }
+    if (!syncRef.current || syncRef.current.sessionId !== targetId) return; // switched away
+    applyServerSessionRef.current?.(payload);
+    const resolvedIds = (payload?.resolved?.nodes || []).map(n => n.id);
+    syncRef.current.setBaseline(serverStateToMirror(payload?.state, resolvedIds));
+  }, []);
 
   // Callbacks waiting for the next canvas snapshot (positions/groups arrive
   // from GraphCanvas via the saveViewSignal round-trip).
@@ -751,7 +903,7 @@ function App() {
     // Annotations carry group boxes plus the free-floating overlays (notes,
     // labels, arrows) the canvas collects in viewData.annotations. All kinds
     // share one server-side annotation list (design 3.1).
-    api.putSessionState(targetId, {
+    const nextState = {
       node_refs: state.nodes.map(n => n.id),
       positions,
       hidden_node_ids: state.hiddenNodeIds || [],
@@ -760,11 +912,16 @@ function App() {
         ...groupsToAnnotations(viewData?.groups || [], parentIds),
         ...overlaysToAnnotations(viewData?.annotations || []),
       ],
-      manual_edges: [],
-    }).catch(() => {});
+    };
+    // Emit the change as incremental ops (design step 6, replacing step 4's
+    // full-state PUT). Connecting here — the first non-empty save — materialises
+    // the session server-side lazily, preserving the "no empty session files"
+    // behaviour of step 4 (an empty, never-edited session never connects).
+    const sync = ensureSyncConnected(targetId);
+    sync?.syncState(nextState);
     sessionStore.touchSession(targetId);
     setSessionsVersion(v => v + 1);
-  }, [sessionId]);
+  }, [sessionId, ensureSyncConnected]);
 
   // Ask GraphCanvas for a snapshot (positions + groups); the callback runs
   // after the snapshot has been persisted for the current session.
@@ -1039,21 +1196,73 @@ function App() {
     if (overlays.length) setPendingAnnotations(overlays);
   }, [clearVisualization, addNodesToVisualization, setHiddenNodeIds,
       setHiddenEdgeIds, setPendingGroups, setPendingAnnotations]);
+  // Expose the latest applyServerSession to resyncFromServer (defined earlier).
+  applyServerSessionRef.current = applyServerSession;
 
   const loadSessionFromServer = useCallback(async (targetId) => {
     try {
       const payload = await api.getSession(targetId, { resolve: true });
       applyServerSession(payload);
+      // Connect the realtime stream for this existing session and seed the sync
+      // baseline from its state so later edits diff against what the server holds.
+      const resolvedIds = (payload?.resolved?.nodes || []).map(n => n.id);
+      ensureSyncConnected(targetId)?.setBaseline(serverStateToMirror(payload?.state, resolvedIds));
     } catch {
       // Session does not exist server-side yet (new / not-yet-saved share URL),
-      // or the backend is unreachable — start from an empty canvas.
+      // or the backend is unreachable — start from an empty canvas. Do not
+      // connect: an empty, never-edited session stays unmaterialised.
       clearVisualization();
+      if (syncRef.current && syncRef.current.sessionId === targetId) {
+        syncRef.current.setBaseline({});
+      }
     }
-  }, [applyServerSession, clearVisualization]);
+  }, [applyServerSession, clearVisualization, ensureSyncConnected]);
 
-  // Switch working session: persist the current one first (server PUT via the
-  // snapshot round-trip), then swap the session ID (reconnects the SSE stream,
-  // reflects the URL) and load the target's canvas from the server.
+  // Keep the sync client's handlers pointed at the latest closures. A remote op
+  // or resync triggers a debounced authoritative apply; a remote delete of the
+  // active session drops the user into a fresh one with a notice (design D11);
+  // a remote rename refreshes the recents name.
+  useEffect(() => {
+    syncHandlersRef.current = {
+      onReady: () => {},
+      onResync: () => resyncFromServer(sessionId),
+      onRemoteOps: (ops) => { (ops || []).forEach(op => applyRemoteOp(op)); },
+      onSessionRenamed: (name) => {
+        sessionStore.renameSession(sessionId, name);
+        setSessionsVersion(v => v + 1);
+      },
+      onSessionDeleted: (deletedBy) => {
+        if (deletedBy && deletedBy === api.getClientId()) return; // our own delete
+        sessionStore.removeSession(sessionId);
+        clearVisualization();
+        const fresh = api.generateVisualizationSessionId();
+        setSessionId(fresh);
+        reflectSessionUrl(fresh);
+        setSessionsVersion(v => v + 1);
+        showNotification('info', t('sessions.session_deleted_remote'));
+      },
+    };
+  }, [sessionId, resyncFromServer, applyRemoteOp, clearVisualization, showNotification, t]);
+
+  // Tear down the client when the session changes or the app unmounts; the next
+  // save/load lazily reconnects for the new id.
+  useEffect(() => {
+    return () => {
+      const client = syncRef.current;
+      syncRef.current = null;
+      if (client) {
+        // Flush last-moment ops before closing; the POST outlives the stream teardown.
+        client.flush();
+        client.close();
+      }
+      setRemotePositions(null);
+      setRemoteAnnotationOps(null);
+    };
+  }, [sessionId]);
+
+  // Switch working session: persist the current one first (ops via the snapshot
+  // round-trip), then swap the session ID (reconnects the SSE stream, reflects
+  // the URL) and load the target's canvas from the server.
   const switchToSession = useCallback((targetId, { register = true } = {}) => {
     requestSessionSnapshot(async () => {
       setSessionId(targetId);
@@ -1228,6 +1437,10 @@ function App() {
           annotationsToRestore={pendingAnnotations}
           onAnnotationsRestored={() => setPendingAnnotations(null)}
           onAnnotationChange={scheduleAutoSave}
+          remotePositions={remotePositions}
+          onRemotePositionsApplied={() => setRemotePositions(null)}
+          remoteAnnotationOps={remoteAnnotationOps}
+          onRemoteAnnotationsApplied={() => setRemoteAnnotationOps(null)}
           federationDepth={federationDepth}
           onFederationDepthChange={setFederationDepth}
           maxFederationDepth={maxFederationDepth}
