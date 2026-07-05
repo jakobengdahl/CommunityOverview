@@ -22,6 +22,7 @@ from __future__ import annotations
 
 import asyncio
 import copy
+import json
 import time
 from typing import Any, Dict, List, Optional, Tuple
 
@@ -34,6 +35,10 @@ _DEFAULT_MAX_OPS_PER_BATCH = 500
 _DEFAULT_MAX_SESSIONS = 10_000
 _DEFAULT_BUCKET_CAPACITY = 200.0
 _DEFAULT_BUCKET_REFILL_PER_SEC = 100.0
+# Full-state PUT carries node **references** + layout + annotations, never node
+# copies, so 256 KB comfortably holds thousands of ids (mirrors the legacy
+# ``_SESSION_STATE_MAX_BYTES`` in api_host/server.py).
+_DEFAULT_MAX_STATE_BYTES = 256 * 1024
 
 
 class SessionNotFound(Exception):
@@ -87,6 +92,7 @@ class SessionManager:
         claims: Optional[ClaimMap] = None,
         max_ops_per_batch: int = _DEFAULT_MAX_OPS_PER_BATCH,
         max_sessions: int = _DEFAULT_MAX_SESSIONS,
+        max_state_bytes: int = _DEFAULT_MAX_STATE_BYTES,
         bucket_capacity: float = _DEFAULT_BUCKET_CAPACITY,
         bucket_refill_per_sec: float = _DEFAULT_BUCKET_REFILL_PER_SEC,
     ) -> None:
@@ -96,6 +102,7 @@ class SessionManager:
         self.claims = claims or ClaimMap()
         self._max_ops = max_ops_per_batch
         self._max_sessions = max_sessions
+        self._max_state_bytes = max_state_bytes
         self._bucket = _TokenBucket(bucket_capacity, bucket_refill_per_sec)
         self._locks: Dict[str, asyncio.Lock] = {}
 
@@ -146,6 +153,22 @@ class SessionManager:
             )
         self._locks.pop(session_id, None)
         return existed
+
+    def replace_state(self, session_id: str, state: Dict[str, Any]) -> Session:
+        """Replace a session's whole state (full-state PUT — design step 4).
+
+        Materialises the session if it does not exist yet (``get_or_create``),
+        so the share-URL / new-session flow can save into a client-chosen id
+        without an eager ``POST /api/sessions`` for every page load. Realtime
+        propagation of the replaced state to other clients arrives with the op
+        protocol in step 6; here the write is purely persistent.
+        """
+        if not is_valid_session_id(session_id):
+            raise SessionNotFound()
+        if len(json.dumps(state)) > self._max_state_bytes:
+            raise OpBatchTooLarge()
+        session, _created = self.get_or_create(session_id)
+        return self.store.replace_state(session, state)
 
     def roster(self, session_id: str) -> List[Dict[str, Any]]:
         return self.presence.roster(session_id)
