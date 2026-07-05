@@ -324,3 +324,99 @@ describe('SessionSyncClient', () => {
     expect(FakeEventSource.instances[0].closed).toBe(true);
   });
 });
+
+// ── Presence + selection claims (design step 7) ────────────────────────────
+describe('SessionSyncClient presence + claims', () => {
+  const roster = [
+    { client_id: 'client-me', display_name: 'Me', color: '#111' },
+    { client_id: 'client-other', display_name: 'Ada', color: '#e6194b' },
+  ];
+
+  it('seeds roster and claims from a snapshot, excluding own claims', () => {
+    const onPresence = vi.fn();
+    const onSelections = vi.fn();
+    const { client } = makeClient({ handlers: { onPresence, onSelections } });
+    client.connect();
+    FakeEventSource.instances[0].emit({
+      type: 'snapshot', seq: 0, session: { state: {} },
+      roster, claims: { 'node-a': 'client-other', 'node-b': 'client-me' },
+    });
+    expect(onPresence).toHaveBeenLastCalledWith(roster);
+    // Own claim on node-b is excluded; the remote claim is resolved to colour+name.
+    expect(client.getRemoteSelections()).toEqual({
+      'node-a': { clientId: 'client-other', color: '#e6194b', displayName: 'Ada' },
+    });
+    expect(onSelections).toHaveBeenLastCalledWith(client.getRemoteSelections());
+  });
+
+  it('adds and removes roster members on join / leave and drops departed claims', () => {
+    const onPresence = vi.fn();
+    const onSelections = vi.fn();
+    const { client } = makeClient({ handlers: { onPresence, onSelections } });
+    client.connect();
+    const es = FakeEventSource.instances[0];
+    es.emit({ type: 'snapshot', seq: 0, session: { state: {} }, roster, claims: { 'node-a': 'client-other' } });
+    expect(client.getRemoteSelections()['node-a']).toBeTruthy();
+
+    es.emit({ type: 'presence_left', client_id: 'client-other' });
+    expect(client.getRoster().map(m => m.client_id)).toEqual(['client-me']);
+    // The departed member's claim marker is released.
+    expect(client.getRemoteSelections()).toEqual({});
+
+    es.emit({ type: 'presence_joined', member: { client_id: 'client-3', display_name: 'Zoe', color: '#3cb44b' } });
+    expect(client.getRoster().map(m => m.client_id)).toContain('client-3');
+  });
+
+  it('tracks remote claim / release ops but ignores its own echoes', () => {
+    const { client } = makeClient();
+    client.connect();
+    const es = FakeEventSource.instances[0];
+    es.emit({ type: 'snapshot', seq: 0, session: { state: {} }, roster, claims: {} });
+
+    es.emit({ type: 'op', client_id: 'client-other', op: { op: 'selection_claimed', element_ids: ['node-a', 'node-b'] } });
+    expect(Object.keys(client.getRemoteSelections()).sort()).toEqual(['node-a', 'node-b']);
+
+    es.emit({ type: 'op', client_id: 'client-other', op: { op: 'selection_released', element_ids: ['node-a'] } });
+    expect(Object.keys(client.getRemoteSelections())).toEqual(['node-b']);
+
+    // Our own claim echo must not render as a remote marker.
+    es.emit({ type: 'op', client_id: 'client-me', op: { op: 'selection_claimed', element_ids: ['node-c'] } });
+    expect(client.getRemoteSelections()['node-c']).toBeUndefined();
+  });
+
+  it('setLocalSelection emits claim for added and release for removed ids', async () => {
+    const { client, fetchImpl } = makeClient();
+    client.connect();
+    FakeEventSource.instances[0].emit({ type: 'snapshot', seq: 0, session: { state: {} }, roster, claims: {} });
+
+    client.setLocalSelection(['node-a', 'node-b']);
+    await flush();
+    const first = fetchImpl.calls.at(-1).body.ops;
+    expect(first).toContainEqual({ op: 'selection_claimed', element_ids: ['node-a', 'node-b'] });
+
+    client.setLocalSelection(['node-b', 'node-c']);
+    await flush();
+    const ops = fetchImpl.calls.flatMap(c => c.body.ops);
+    expect(ops).toContainEqual({ op: 'selection_released', element_ids: ['node-a'] });
+    expect(ops).toContainEqual({ op: 'selection_claimed', element_ids: ['node-c'] });
+
+    // Re-declaring the same selection is a no-op (no new ops).
+    const before = fetchImpl.calls.length;
+    client.setLocalSelection(['node-b', 'node-c']);
+    await flush();
+    expect(fetchImpl.calls.length).toBe(before);
+  });
+
+  it('expires a remote claim client-side once its TTL passes', () => {
+    let now = 1000;
+    const { client } = makeClient({ nowFn: () => now });
+    client.connect();
+    const es = FakeEventSource.instances[0];
+    es.emit({ type: 'snapshot', seq: 0, session: { state: {} }, roster, claims: {} });
+    es.emit({ type: 'op', client_id: 'client-other', op: { op: 'selection_claimed', element_ids: ['node-a'] } });
+    expect(client.getRemoteSelections()['node-a']).toBeTruthy();
+    // Advance beyond the 30 s TTL: the claim no longer renders.
+    now += 31_000;
+    expect(client.getRemoteSelections()).toEqual({});
+  });
+});

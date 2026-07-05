@@ -25,6 +25,7 @@ shared knowledge graphs. This guide covers all user-facing features.
    - [Node marking](#45-node-marking)
    - [Document upload](#46-document-upload)
 5. [Session menu and settings](#5-session-menu-and-settings)
+   - [Collaborating in a session](#51-collaborating-in-a-session)
 6. [Federation — searching across multiple graphs](#6-federation--searching-across-multiple-graphs)
 7. [Interactive guides](#7-interactive-guides)
 8. [Connecting external AI tools via MCP](#8-connecting-external-ai-tools-via-mcp)
@@ -336,6 +337,34 @@ you are currently in, a fresh empty session is created and you are switched into
 it automatically. When other people are connected to a session you delete, the
 confirmation warns you how many are currently in it.
 
+### 5.1 Collaborating in a session
+
+Several people can work in the same session at the same time — just share the
+session URL (or the session ID via **Connect to session**). Everyone sees the
+same nodes, positions, groups and annotations, and changes appear for the others
+within a fraction of a second. Each person still pans and zooms their own view;
+only the content is shared, not the camera.
+
+**Who else is here.** When at least one other person joins, a row of coloured
+dots appears in the top bar next to the session ID — one dot per connected
+person, each in that person's colour with the initial of their name. Hover a dot
+to see the full name; your own dot is outlined in white.
+
+![Presence roster in the top bar](images/presence-roster.png)
+*Coloured presence dots show who else is currently in the session.*
+
+**Who is working on what.** When someone selects one or more nodes, those nodes
+get a coloured outline and a small name badge in that person's colour on every
+other participant's screen. This lets you see at a glance what a collaborator is
+holding, so you can avoid grabbing the same node. These markers are advisory —
+they never lock anything — and they disappear automatically when the person
+deselects, leaves, or a short time passes without activity.
+
+**Your name.** By default you appear as *Guest-1*, *Guest-2*, and so on. Set a
+recognisable name under **Settings → Your presence → Display name**; it is shown
+to everyone in the roster and on your selection badges. The name is stored in
+your browser and takes effect the next time you open or switch session.
+
 ### Settings dialog
 
 The settings that previously lived directly in the app menu are now in the
@@ -352,6 +381,12 @@ a **Details** button opens a full node-type statistics dialog.
 | Option | Effect |
 |--------|--------|
 | **Show minimap** | Toggle the minimap overlay in the bottom-right corner of the canvas |
+
+#### Your presence
+
+| Option | Effect |
+|--------|--------|
+| **Display name** | The name shown to other people collaborating in the same session (see [Collaborating in a session](#51-collaborating-in-a-session)). Leave it empty to appear as a numbered guest. |
 
 #### Language
 

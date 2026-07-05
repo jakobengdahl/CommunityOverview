@@ -38,6 +38,7 @@ vi.mock('../src/services/api', () => {
     getSessionOpsUrl: vi.fn((id) => `http://localhost/api/sessions/${id}/ops`),
     updateSessionState: vi.fn(async () => ({ ok: true })),
     getClientId: vi.fn(() => 'client-test'),
+    getDisplayName: vi.fn(() => null),
     listServerSessions: vi.fn(async () => ({ sessions: [] })),
     renameServerSession: vi.fn(async () => ({})),
     deleteServerSession: vi.fn(async () => ({ deleted: true })),

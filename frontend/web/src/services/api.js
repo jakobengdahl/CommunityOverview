@@ -541,6 +541,28 @@ export function getClientId() {
   return _clientId;
 }
 
+// User-editable presence name shown to collaborators in a shared session
+// (design 3.4). When unset the server assigns a "Guest-<n>" default.
+const DISPLAY_NAME_KEY = 'graph_display_name';
+
+export function getDisplayName() {
+  try {
+    return window.localStorage.getItem(DISPLAY_NAME_KEY) || null;
+  } catch {
+    return null;
+  }
+}
+
+export function setDisplayName(name) {
+  const trimmed = (name || '').trim();
+  try {
+    if (trimmed) window.localStorage.setItem(DISPLAY_NAME_KEY, trimmed);
+    else window.localStorage.removeItem(DISPLAY_NAME_KEY);
+  } catch {
+    // ignore storage errors
+  }
+}
+
 const SESSIONS_BASE = () => `${API_BASE}/sessions`;
 
 /**

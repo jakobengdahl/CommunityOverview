@@ -255,6 +255,9 @@ function App() {
   const applyServerSessionRef = useRef(null);
   const [remotePositions, setRemotePositions] = useState(null);
   const [remoteAnnotationOps, setRemoteAnnotationOps] = useState(null);
+  // Presence roster + remote selection markers for the active session (step 7).
+  const [roster, setRoster] = useState([]);
+  const [remoteSelections, setRemoteSelections] = useState({});
 
   // Lazily create + connect the sync client for a session. Called on the first
   // non-empty save and when loading an existing session — never eagerly on load,
@@ -271,12 +274,15 @@ function App() {
     const client = new SessionSyncClient({
       sessionId: targetId,
       clientId: api.getClientId(),
+      displayName: api.getDisplayName(),
       streamUrl: api.getSessionStreamUrl(targetId),
       opsUrl: api.getSessionOpsUrl(targetId),
       handlers: {
         onReady: (...a) => syncHandlersRef.current.onReady?.(...a),
         onResync: (...a) => syncHandlersRef.current.onResync?.(...a),
         onRemoteOps: (...a) => syncHandlersRef.current.onRemoteOps?.(...a),
+        onPresence: (...a) => syncHandlersRef.current.onPresence?.(...a),
+        onSelections: (...a) => syncHandlersRef.current.onSelections?.(...a),
         onSessionRenamed: (...a) => syncHandlersRef.current.onSessionRenamed?.(...a),
         onSessionDeleted: (...a) => syncHandlersRef.current.onSessionDeleted?.(...a),
       },
@@ -627,6 +633,13 @@ function App() {
         return n.data || n;
       });
     setSelectedGraphNodes(selectedWithData);
+    // Advertise the local selection as advisory soft-locks so collaborators see
+    // colored markers on the graph nodes this user is working with (design 3.5).
+    // Only real graph nodes carry markers, so annotations/groups are excluded.
+    const claimIds = selectedNodes
+      .filter(n => n.type === 'custom')
+      .map(n => n.id);
+    syncRef.current?.setLocalSelection(claimIds);
   }, [setSelectedGraphNodes]);
 
   // Callback: Double-click on node
@@ -1239,6 +1252,8 @@ function App() {
       onReady: () => {},
       onResync: () => resyncFromServer(sessionId),
       onRemoteOps: (ops) => { (ops || []).forEach(op => applyRemoteOp(op)); },
+      onPresence: (r) => setRoster(r),
+      onSelections: (s) => setRemoteSelections(s),
       onSessionRenamed: (name) => {
         sessionStore.renameSession(sessionId, name);
         setSessionsVersion(v => v + 1);
@@ -1269,6 +1284,8 @@ function App() {
       }
       setRemotePositions(null);
       setRemoteAnnotationOps(null);
+      setRoster([]);
+      setRemoteSelections({});
     };
   }, [sessionId]);
 
@@ -1453,6 +1470,7 @@ function App() {
           onRemotePositionsApplied={() => setRemotePositions(null)}
           remoteAnnotationOps={remoteAnnotationOps}
           onRemoteAnnotationsApplied={() => setRemoteAnnotationOps(null)}
+          remoteSelections={remoteSelections}
           federationDepth={federationDepth}
           onFederationDepthChange={setFederationDepth}
           maxFederationDepth={maxFederationDepth}
@@ -1489,6 +1507,8 @@ function App() {
 
       <FloatingHeader
         sessionId={sessionId}
+        roster={roster}
+        currentClientId={api.getClientId()}
         onClear={clearVisualization}
         onToggleDrawer={() => setDrawerOpen(prev => !prev)}
       />

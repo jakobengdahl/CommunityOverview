@@ -112,6 +112,23 @@ describe('GraphCanvas remote apply (design step 6)', () => {
     expect(result.find(n => n.id === 'child').parentId).toBeUndefined();
   });
 
+  it('injects remoteSelections into the matching node data (step 7)', () => {
+    render(
+      <GraphCanvas
+        nodes={[{ id: 'node-a', type: 'Actor', name: 'A' }]}
+        edges={[]}
+        remoteSelections={{ 'node-a': { clientId: 'c2', color: '#e6194b', displayName: 'Ada' } }}
+      />
+    );
+    const result = findResult(
+      [],
+      r => r.some(n => n.id === 'node-a' && n.data?.remoteSelection?.displayName === 'Ada'),
+    );
+    expect(result.find(n => n.id === 'node-a').data.remoteSelection).toEqual({
+      clientId: 'c2', color: '#e6194b', displayName: 'Ada',
+    });
+  });
+
   it('reassigns membership from a remote group_membership_changed', () => {
     render(
       <GraphCanvas nodes={[]} edges={[]} remoteAnnotationOps={[{ action: 'membership', groupId: 'grp', members: ['a'] }]} />

@@ -32,6 +32,13 @@ const POSITION_EPSILON = 0.5;
 // initial materialisation within the server's per-batch op cap.
 const LAYOUT_BATCH_THRESHOLD = 20;
 
+// Selection claims are advisory soft-locks (design 3.5). The server expires a
+// claim 30 s after its last renewal; the local client renews well inside that
+// window and mirrors the same TTL so a departed collaborator's marker never
+// lingers even if its disconnect event is missed.
+const CLAIM_TTL_MS = 30_000;
+const CLAIM_RENEW_MS = 15_000;
+
 const EMPTY_MIRROR = Object.freeze({
   node_refs: [],
   positions: {},
@@ -248,11 +255,13 @@ export class SessionSyncClient {
    * @param {string|null} [opts.displayName]
    * @param {string} opts.streamUrl  Full SSE URL (query appended by the client).
    * @param {string} opts.opsUrl     Full POST URL for op batches.
-   * @param {Object} [opts.handlers] onReady, onResync, onRemoteOps, onPresenceJoined,
-   *   onPresenceLeft, onSessionRenamed, onSessionDeleted.
+   * @param {Object} [opts.handlers] onReady, onResync, onRemoteOps, onPresence,
+   *   onSelections, onPresenceJoined, onPresenceLeft, onSessionRenamed,
+   *   onSessionDeleted, onDropped.
    * @param {number} [opts.flushIntervalMs]
    * @param {Function} [opts.fetchImpl]
    * @param {Function} [opts.EventSourceImpl]
+   * @param {Function} [opts.nowFn] Monotonic clock for claim TTLs (injectable for tests).
    */
   constructor({
     sessionId,
@@ -264,6 +273,7 @@ export class SessionSyncClient {
     flushIntervalMs = 150,
     fetchImpl,
     EventSourceImpl,
+    nowFn,
   }) {
     this.sessionId = sessionId;
     this.clientId = clientId;
@@ -274,6 +284,7 @@ export class SessionSyncClient {
     this.flushIntervalMs = flushIntervalMs;
     this._fetch = fetchImpl || (typeof fetch !== 'undefined' ? fetch.bind(globalThis) : null);
     this._EventSource = EventSourceImpl || (typeof EventSource !== 'undefined' ? EventSource : null);
+    this._now = nowFn || (() => Date.now());
 
     this._baseline = EMPTY_MIRROR;
     this._queue = [];
@@ -286,6 +297,13 @@ export class SessionSyncClient {
     this._closed = false;
     this._flushing = false;
     this._forceSingle = false;
+
+    // Presence + selection claims (design 3.4 / 3.5), all ephemeral.
+    this._roster = new Map();          // client_id -> member {client_id, display_name, color}
+    this._claims = new Map();          // element_id -> { clientId, expiresAt }
+    this._localSelection = [];         // element ids this client currently claims
+    this._renewTimer = null;
+    this._pruneTimer = null;
   }
 
   get seq() { return this._seq; }
@@ -301,9 +319,117 @@ export class SessionSyncClient {
     return p ? { x: p.x, y: p.y } : null;
   }
 
+  // ── Presence + selection claims (design 3.4 / 3.5) ─────────────────────────
+
+  /** Current roster as an array of members ({client_id, display_name, color}). */
+  getRoster() {
+    return Array.from(this._roster.values());
+  }
+
+  /**
+   * Live selection claims held by *other* clients, as
+   * ``element_id -> { clientId, color, displayName }``. Own claims are excluded
+   * (the local user already sees their own selection natively) and expired
+   * claims are skipped, so this is safe to render directly as remote markers.
+   */
+  getRemoteSelections() {
+    const now = this._now();
+    const out = {};
+    for (const [eid, claim] of this._claims) {
+      if (claim.expiresAt <= now || claim.clientId === this.clientId) continue;
+      const member = this._roster.get(claim.clientId);
+      if (!member) continue;
+      out[eid] = { clientId: claim.clientId, color: member.color, displayName: member.display_name };
+    }
+    return out;
+  }
+
+  /**
+   * Declare which elements the local user has selected. Diffs against the last
+   * declared set: newly selected elements are claimed, deselected ones released,
+   * and a renewal timer keeps the active claims alive server-side. No-ops when
+   * the selection is unchanged, so it is safe to call on every selection event.
+   */
+  setLocalSelection(elementIds) {
+    const next = Array.from(new Set((elementIds || []).filter(id => typeof id === 'string' && id)));
+    const nextSet = new Set(next);
+    const prevSet = new Set(this._localSelection);
+    const added = next.filter(id => !prevSet.has(id));
+    const removed = this._localSelection.filter(id => !nextSet.has(id));
+    this._localSelection = next;
+    if (removed.length) this._enqueue([{ op: 'selection_released', element_ids: removed }]);
+    if (added.length) this._enqueue([{ op: 'selection_claimed', element_ids: added }]);
+    if (next.length) this._startRenewTimer();
+    else this._stopRenewTimer();
+  }
+
+  _emitPresence() {
+    if (this.handlers.onPresence) this.handlers.onPresence(this.getRoster());
+  }
+
+  _emitSelections() {
+    if (this.handlers.onSelections) this.handlers.onSelections(this.getRemoteSelections());
+  }
+
+  _seedPresence(roster, claims) {
+    this._roster = new Map((roster || []).filter(m => m && m.client_id).map(m => [m.client_id, m]));
+    const now = this._now();
+    this._claims = new Map();
+    for (const [eid, clientId] of Object.entries(claims || {})) {
+      this._claims.set(eid, { clientId, expiresAt: now + CLAIM_TTL_MS });
+    }
+    this._emitPresence();
+    this._emitSelections();
+  }
+
+  _applyClaimOp(clientId, op) {
+    const ids = Array.isArray(op.element_ids) ? op.element_ids : [];
+    if (!ids.length) return;
+    if (op.op === 'selection_claimed') {
+      const expiresAt = this._now() + CLAIM_TTL_MS;
+      for (const eid of ids) this._claims.set(eid, { clientId, expiresAt });
+    } else {
+      for (const eid of ids) {
+        const held = this._claims.get(eid);
+        if (held && held.clientId === clientId) this._claims.delete(eid);
+      }
+    }
+    this._emitSelections();
+  }
+
+  _pruneClaims() {
+    const now = this._now();
+    let changed = false;
+    for (const [eid, claim] of this._claims) {
+      if (claim.expiresAt <= now) { this._claims.delete(eid); changed = true; }
+    }
+    if (changed) this._emitSelections();
+  }
+
+  _startPruneTimer() {
+    if (this._pruneTimer || this._closed) return;
+    this._pruneTimer = setInterval(() => this._pruneClaims(), CLAIM_TTL_MS / 3);
+  }
+
+  _startRenewTimer() {
+    if (this._renewTimer || this._closed) return;
+    this._renewTimer = setInterval(() => {
+      if (this._localSelection.length) {
+        this._enqueue([{ op: 'selection_claimed', element_ids: this._localSelection.slice() }]);
+      } else {
+        this._stopRenewTimer();
+      }
+    }, CLAIM_RENEW_MS);
+  }
+
+  _stopRenewTimer() {
+    if (this._renewTimer) { clearInterval(this._renewTimer); this._renewTimer = null; }
+  }
+
   /** Open the SSE stream. Idempotent. */
   connect() {
     if (this._source || this._closed || !this._EventSource) return;
+    this._startPruneTimer();
     const params = new URLSearchParams({ client_id: this.clientId });
     if (this.displayName) params.set('name', this.displayName);
     if (this._seq > 0) params.set('since_seq', String(this._seq));
@@ -428,6 +554,7 @@ export class SessionSyncClient {
       case 'snapshot':
         if (typeof data.seq === 'number') this._seq = data.seq;
         this._ready = true;
+        this._seedPresence(data.roster, data.claims);
         if (!this._hadSnapshot) {
           this._hadSnapshot = true;
           if (this.handlers.onReady) this.handlers.onReady(data.seq);
@@ -440,6 +567,7 @@ export class SessionSyncClient {
         if (typeof data.seq === 'number') this._seq = data.seq;
         this._ready = true;
         this._hadSnapshot = true;
+        this._seedPresence(data.roster, data.claims);
         if (Array.isArray(data.ops) && data.ops.length && this.handlers.onResync) {
           this.handlers.onResync();
         }
@@ -448,6 +576,13 @@ export class SessionSyncClient {
       case 'op': {
         const op = data.op || {};
         if (typeof data.seq === 'number') this._seq = data.seq;
+        // Claim ops are ephemeral (advisory soft-locks, never sequenced state).
+        // Track other clients' claims for presence markers; our own echoes need
+        // no tracking since the local user sees their own selection natively.
+        if (op.op === 'selection_claimed' || op.op === 'selection_released') {
+          if (data.client_id !== this.clientId) this._applyClaimOp(data.client_id, op);
+          return;
+        }
         if (data.client_id === this.clientId) return; // echo of our own op — baseline already has it
         // Fold the remote change into the baseline before the host applies it,
         // so the resulting local store change does not diff back out as an echo.
@@ -456,11 +591,23 @@ export class SessionSyncClient {
         break;
       }
       case 'presence_joined':
+        if (data.member && data.member.client_id) {
+          this._roster.set(data.member.client_id, data.member);
+          this._emitPresence();
+        }
         if (this.handlers.onPresenceJoined) this.handlers.onPresenceJoined(data.member);
         break;
-      case 'presence_left':
+      case 'presence_left': {
+        this._roster.delete(data.client_id);
+        let claimsChanged = false;
+        for (const [eid, claim] of this._claims) {
+          if (claim.clientId === data.client_id) { this._claims.delete(eid); claimsChanged = true; }
+        }
+        this._emitPresence();
+        if (claimsChanged) this._emitSelections();
         if (this.handlers.onPresenceLeft) this.handlers.onPresenceLeft(data.client_id);
         break;
+      }
       case 'session_renamed':
         if (this.handlers.onSessionRenamed) this.handlers.onSessionRenamed(data.name);
         break;
@@ -478,6 +625,8 @@ export class SessionSyncClient {
     if (this._source) { try { this._source.close(); } catch { /* ignore */ } this._source = null; }
     if (this._flushTimer) { clearTimeout(this._flushTimer); this._flushTimer = null; }
     if (this._retryTimer) { clearTimeout(this._retryTimer); this._retryTimer = null; }
+    this._stopRenewTimer();
+    if (this._pruneTimer) { clearInterval(this._pruneTimer); this._pruneTimer = null; }
     this._queue = [];
   }
 }
