@@ -282,3 +282,19 @@ class TestReplaceState:
         with pytest.raises(OpError):
             store.replace_state(s, {"node_refs": [1, 2]})
         assert s.state["node_refs"] == ["keep"]
+
+    def test_replace_resets_ring_so_stale_catch_up_forces_snapshot(self, tmp_path):
+        # A full-state replace has no per-op history: a client that was behind
+        # must resync from a snapshot, not receive an empty (falsely "caught up")
+        # op list. Clearing the ring makes ops_since return None for stale seqs.
+        store = _store(tmp_path)
+        s = store.create()
+        store.apply_state_op(s, {"op": "nodes_added", "node_ids": ["a"]})  # seq 1
+        store.apply_state_op(s, {"op": "nodes_added", "node_ids": ["b"]})  # seq 2
+
+        store.replace_state(s, {"node_refs": ["x"]})  # seq 3, ring reset
+
+        # A client stuck at seq 2 cannot be served from the ring → snapshot.
+        assert store.ops_since(s.id, 2) is None
+        # An already-current client still gets an empty diff, not a snapshot.
+        assert store.ops_since(s.id, s.seq) == []

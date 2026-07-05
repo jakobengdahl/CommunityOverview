@@ -342,8 +342,14 @@ def normalize_state(raw: Any, max_annotations: int) -> Dict[str, Any]:
     out["annotations"] = normalised_annotations
 
     manual_edges = raw.get("manual_edges", [])
-    if not isinstance(manual_edges, list) or not all(isinstance(e, dict) for e in manual_edges):
-        raise OpError("manual_edges must be a list of objects")
+    if not isinstance(manual_edges, list):
+        raise OpError("manual_edges must be a list")
+    for edge in manual_edges:
+        if not isinstance(edge, dict):
+            raise OpError("each manual edge must be an object")
+        for key in ("id", "source", "target", "type", "label"):
+            if edge.get(key) is not None and not isinstance(edge[key], str):
+                raise OpError(f"manual edge '{key}' must be a string")
     out["manual_edges"] = manual_edges
 
     return out
@@ -479,15 +485,20 @@ class SessionStore:
     def replace_state(self, session: Session, state: Dict[str, Any]) -> Session:
         """Replace a session's whole state (full-state PUT, design step 4).
 
-        Validates/normalises the payload, bumps ``seq`` (so a reconnecting client
-        with a stale ``since_seq`` falls back to a snapshot rather than replaying
-        ops that never existed) and persists atomically.
+        Validates/normalises the payload, bumps ``seq`` and persists atomically.
+        The ring buffer is reset: a full-state replace carries no per-op history,
+        so a reconnecting client with an older ``since_seq`` must resync from a
+        snapshot rather than replay ops that never entered the ring. Clearing the
+        ring makes ``ops_since`` return ``None`` (→ snapshot) for any stale
+        ``since_seq``, while an already-current client is still served ``[]`` by
+        the ``since_seq >= seq`` guard.
         """
         normalised = normalize_state(state, self._max_annotations)
         with self._lock:
             session.state = normalised
             session.seq += 1
             session.updated_at = _now_iso()
+            self._rings[session.id] = deque(maxlen=self._ring_size)
             self._backend.save(session.to_dict())
             return session
 

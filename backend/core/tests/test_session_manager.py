@@ -276,3 +276,20 @@ class TestReplaceState:
         mgr.create_session()
         with pytest.raises(SessionLimitReached):
             mgr.replace_state("4321-8765", {"node_refs": ["a"]})
+
+    async def test_malformed_payload_does_not_leave_phantom_session(self):
+        mgr = _manager()
+        with pytest.raises(OpError):
+            mgr.replace_state("4321-8765", {"node_refs": [1, 2]})
+        # The session was never validly created, so it must not linger.
+        assert mgr.get_session("4321-8765") is None
+
+    async def test_replace_forces_snapshot_on_reconnect(self):
+        mgr = _manager()
+        s = mgr.create_session()
+        await mgr.apply_ops(s.id, "c1", 0, [{"op": "nodes_added", "node_ids": ["a"]}])
+        mgr.replace_state(s.id, {"node_refs": ["x"]})
+        # A client that was behind gets a full snapshot, not an empty catch_up.
+        result = mgr.catch_up(s.id, 1)
+        assert result["type"] == "snapshot"
+        assert result["session"]["state"]["node_refs"] == ["x"]

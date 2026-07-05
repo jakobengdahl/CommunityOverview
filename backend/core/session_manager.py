@@ -167,8 +167,15 @@ class SessionManager:
             raise SessionNotFound()
         if len(json.dumps(state)) > self._max_state_bytes:
             raise OpBatchTooLarge()
-        session, _created = self.get_or_create(session_id)
-        return self.store.replace_state(session, state)
+        session, created = self.get_or_create(session_id)
+        try:
+            return self.store.replace_state(session, state)
+        except OpError:
+            # A malformed payload must not leave a phantom empty session behind
+            # when this call is what materialised it.
+            if created:
+                self.store.delete(session_id)
+            raise
 
     def roster(self, session_id: str) -> List[Dict[str, Any]]:
         return self.presence.roster(session_id)

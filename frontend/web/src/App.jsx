@@ -686,6 +686,9 @@ function App() {
       if (n.parentId) parentIds[n.id] = n.parentId;
     });
     const targetId = sessionId;
+    // Annotations currently carry only group boxes — the only kind the canvas
+    // emits today. Once notes/labels/arrows exist (step 5) they must be
+    // collected here too, otherwise a full-state PUT would drop them.
     api.putSessionState(targetId, {
       node_refs: state.nodes.map(n => n.id),
       positions,
