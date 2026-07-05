@@ -29,6 +29,54 @@ const _urlParams = new URLSearchParams(window.location.search);
 const _collectShortName = _urlParams.get('collect');
 const _akcShortName = _urlParams.get('akc');
 
+// Reflect the active session id in the URL so it can be shared/bookmarked
+// (design 3.6). replaceState avoids polluting history on every switch.
+function reflectSessionUrl(id) {
+  try {
+    const url = new URL(window.location.href);
+    url.searchParams.set('session', id);
+    window.history.replaceState({}, '', url);
+  } catch {
+    // ignore — URL reflection is best-effort
+  }
+}
+
+// Group boxes persist inside the generic server-side annotation list as
+// `kind: "group"` (design 3.1). These two helpers translate between that
+// server shape and the {groups, parentIds} shape the canvas round-trips.
+function annotationsToGroups(annotations) {
+  const groups = [];
+  const parentIds = {};
+  for (const a of annotations || []) {
+    if (a?.kind !== 'group') continue;
+    groups.push({
+      id: a.id,
+      label: a.label || 'Group',
+      position: a.position || { x: 0, y: 0 },
+      style: a.size ? { width: a.size.w, height: a.size.h } : undefined,
+      color: a.color,
+    });
+    for (const m of a.member_node_ids || []) parentIds[m] = a.id;
+  }
+  return { groups, parentIds };
+}
+
+function groupsToAnnotations(viewGroups, parentIds) {
+  const membersByGroup = {};
+  for (const [nodeId, groupId] of Object.entries(parentIds || {})) {
+    (membersByGroup[groupId] = membersByGroup[groupId] || []).push(nodeId);
+  }
+  return (viewGroups || []).map(g => ({
+    id: g.id,
+    kind: 'group',
+    position: g.position || { x: 0, y: 0 },
+    label: g.label || '',
+    color: g.color,
+    size: g.style ? { w: g.style.width, h: g.style.height } : undefined,
+    member_node_ids: membersByGroup[g.id] || [],
+  }));
+}
+
 function App() {
   const akcShortName = _akcShortName;
   const {
@@ -104,11 +152,17 @@ function App() {
   // The visualization session ID doubles as the working-session identity.
   // It is state (not a constant) so the user can switch sessions; the SSE
   // stream and state uploads reconnect automatically when it changes.
-  const [sessionId, setSessionId] = useState(() => api.generateVisualizationSessionId());
+  const [sessionId, setSessionId] = useState(() => {
+    const urlSession = _urlParams.get('session');
+    return sessionStore.isValidSessionId(urlSession)
+      ? urlSession
+      : api.generateVisualizationSessionId();
+  });
   const [drawerOpen, setDrawerOpen] = useState(false);
   const [settingsOpen, setSettingsOpen] = useState(false);
   const [connectDialogOpen, setConnectDialogOpen] = useState(false);
   const [renameDialog, setRenameDialog] = useState(null);
+  const [deleteSessionDialog, setDeleteSessionDialog] = useState(null);
   const [sessionsVersion, setSessionsVersion] = useState(0);
   const sessions = useMemo(() => sessionStore.listSessions(), [sessionsVersion]);
 
@@ -138,13 +192,13 @@ function App() {
       deleteDialog || saveViewDialog || showSubscriptionDialog ||
       showAgentDialog || skillDialogType || showAKCDialog ||
       drawerOpen || settingsOpen || connectDialogOpen || renameDialog ||
-      (akcShortName && akcConfig && !akcIntroShown)
+      deleteSessionDialog || (akcShortName && akcConfig && !akcIntroShown)
     );
   }, [createNodeType, editingNode, detailNode, editingEdge,
       deleteDialog, saveViewDialog, showSubscriptionDialog,
       showAgentDialog, skillDialogType, showAKCDialog,
       drawerOpen, settingsOpen, connectDialogOpen, renameDialog,
-      akcShortName, akcConfig, akcIntroShown]);
+      deleteSessionDialog, akcShortName, akcConfig, akcIntroShown]);
 
   // Double-Escape to clear the canvas (works even from input fields)
   useEffect(() => {
@@ -230,6 +284,39 @@ function App() {
       }).catch(() => {});
     }, 1000);
   }, [nodes, sessionId]); // eslint-disable-line react-hooks/exhaustive-deps
+
+  // ── Session bootstrap (once) ────────────────────────────────────────────
+  // Reflect the initial session id in the URL and, when it came from a
+  // ?session= share link, load its content from the server. A freshly
+  // generated id has no server content yet — it materialises on first save.
+  useEffect(() => {
+    reflectSessionUrl(sessionId);
+    const urlSession = _urlParams.get('session');
+    if (sessionStore.isValidSessionId(urlSession)) {
+      sessionStore.touchSession(urlSession);
+      loadSessionFromServer(urlSession);
+    }
+    setSessionsVersion(v => v + 1);
+  }, []); // eslint-disable-line react-hooks/exhaustive-deps
+
+  // Refresh recent-session names from the server whenever the drawer opens
+  // (localStorage names are only a cached hint — design 3.6).
+  useEffect(() => {
+    if (!drawerOpen) return;
+    let cancelled = false;
+    api.listServerSessions().then(({ sessions: serverSessions }) => {
+      if (cancelled) return;
+      let changed = false;
+      for (const s of serverSessions || []) {
+        if (sessionStore.hasSession(s.id)) {
+          sessionStore.renameSession(s.id, s.name);
+          changed = true;
+        }
+      }
+      if (changed) setSessionsVersion(v => v + 1);
+    }).catch(() => {});
+    return () => { cancelled = true; };
+  }, [drawerOpen]);
 
   // Load schema, presentation, stats and UI capabilities on startup (runs once)
   useEffect(() => {
@@ -580,14 +667,17 @@ function App() {
     setCreateGroupSignal(prev => prev + 1);
   }, []);
 
-  // Persist the current canvas as a snapshot for the active session.
+  // Persist the current canvas to the server for the active session.
   // viewData carries node positions and groups collected by GraphCanvas;
-  // full node/edge data comes from the store.
+  // node references come from the store. Session content lives server-side
+  // now (design step 4); the full-state PUT is temporary — step 6 replaces it
+  // with incremental ops. The session is materialised server-side on first
+  // save (get-or-create), so a fresh/shared id needs no eager POST.
   const persistSessionSnapshot = useCallback((viewData) => {
     const state = useGraphStore.getState();
     // Never persist an empty canvas: it would register unused sessions, and
     // for existing sessions it would overwrite stored content after an
-    // (often accidental) clear — the last non-empty snapshot is kept instead.
+    // (often accidental) clear — the last non-empty state is kept instead.
     if (state.nodes.length === 0) return;
     const positions = {};
     const parentIds = {};
@@ -595,16 +685,19 @@ function App() {
       if (n.position) positions[n.id] = n.position;
       if (n.parentId) parentIds[n.id] = n.parentId;
     });
-    sessionStore.saveSnapshot(sessionId, {
-      nodes: state.nodes,
-      edges: state.edges,
+    const targetId = sessionId;
+    // Annotations currently carry only group boxes — the only kind the canvas
+    // emits today. Once notes/labels/arrows exist (step 5) they must be
+    // collected here too, otherwise a full-state PUT would drop them.
+    api.putSessionState(targetId, {
+      node_refs: state.nodes.map(n => n.id),
       positions,
-      parentIds,
-      groups: viewData?.groups || [],
-      hiddenNodeIds: state.hiddenNodeIds,
-      hiddenEdgeIds: state.hiddenEdgeIds,
-      savedAt: Date.now(),
-    });
+      hidden_node_ids: state.hiddenNodeIds || [],
+      hidden_edge_ids: state.hiddenEdgeIds || [],
+      annotations: groupsToAnnotations(viewData?.groups || [], parentIds),
+      manual_edges: [],
+    }).catch(() => {});
+    sessionStore.touchSession(targetId);
     setSessionsVersion(v => v + 1);
   }, [sessionId]);
 
@@ -859,29 +952,49 @@ function App() {
 
   // ── Session navigation ──────────────────────────────────────────────────
 
-  // Switch working session: snapshot the current one first, then swap the
-  // session ID (reconnects the SSE stream) and restore the target's canvas.
-  const switchToSession = useCallback((targetId, { register = true } = {}) => {
-    requestSessionSnapshot(() => {
-      const snapshot = sessionStore.getSnapshot(targetId);
-      if (register) sessionStore.touchSession(targetId);
-      setSessionId(targetId);
+  // Load a session's canvas content from the server (resolved node refs +
+  // layout + group annotations) onto the store.
+  const applyServerSession = useCallback((payload) => {
+    clearVisualization();
+    const state = payload?.state || {};
+    const resolved = payload?.resolved || {};
+    const loadedNodes = resolved.nodes || [];
+    if (loadedNodes.length) {
+      const positioned = loadedNodes.map(n =>
+        state.positions?.[n.id] ? { ...n, _savedPosition: state.positions[n.id] } : n
+      );
+      addNodesToVisualization(positioned, resolved.edges || []);
+    }
+    if (state.hidden_node_ids?.length) setHiddenNodeIds(state.hidden_node_ids);
+    if (state.hidden_edge_ids?.length) setHiddenEdgeIds(state.hidden_edge_ids);
+    const { groups, parentIds } = annotationsToGroups(state.annotations);
+    if (groups.length) setPendingGroups({ groups, parentIds });
+  }, [clearVisualization, addNodesToVisualization, setHiddenNodeIds,
+      setHiddenEdgeIds, setPendingGroups]);
+
+  const loadSessionFromServer = useCallback(async (targetId) => {
+    try {
+      const payload = await api.getSession(targetId, { resolve: true });
+      applyServerSession(payload);
+    } catch {
+      // Session does not exist server-side yet (new / not-yet-saved share URL),
+      // or the backend is unreachable — start from an empty canvas.
       clearVisualization();
-      if (snapshot?.nodes?.length) {
-        const positioned = snapshot.nodes.map(n =>
-          snapshot.positions?.[n.id] ? { ...n, _savedPosition: snapshot.positions[n.id] } : n
-        );
-        addNodesToVisualization(positioned, snapshot.edges || []);
-        if (snapshot.hiddenNodeIds?.length) setHiddenNodeIds(snapshot.hiddenNodeIds);
-        if (snapshot.hiddenEdgeIds?.length) setHiddenEdgeIds(snapshot.hiddenEdgeIds);
-        if (snapshot.groups?.length) {
-          setPendingGroups({ groups: snapshot.groups, parentIds: snapshot.parentIds || {} });
-        }
-      }
+    }
+  }, [applyServerSession, clearVisualization]);
+
+  // Switch working session: persist the current one first (server PUT via the
+  // snapshot round-trip), then swap the session ID (reconnects the SSE stream,
+  // reflects the URL) and load the target's canvas from the server.
+  const switchToSession = useCallback((targetId, { register = true } = {}) => {
+    requestSessionSnapshot(async () => {
+      setSessionId(targetId);
+      reflectSessionUrl(targetId);
+      if (register) sessionStore.touchSession(targetId);
+      await loadSessionFromServer(targetId);
       setSessionsVersion(v => v + 1);
     });
-  }, [requestSessionSnapshot, clearVisualization, addNodesToVisualization,
-      setHiddenNodeIds, setHiddenEdgeIds, setPendingGroups]);
+  }, [requestSessionSnapshot, loadSessionFromServer]);
 
   const handleNewSession = useCallback(() => {
     switchToSession(api.generateVisualizationSessionId(), { register: false });
@@ -908,9 +1021,49 @@ function App() {
   const handleRenameSession = useCallback((name) => {
     if (!renameDialog) return;
     sessionStore.renameSession(renameDialog.id, name);
+    api.renameServerSession(renameDialog.id, name).catch(() => {});
     setSessionsVersion(v => v + 1);
     setRenameDialog(null);
   }, [renameDialog]);
+
+  // Open the delete confirmation, first checking the roster so the dialog can
+  // warn when other users are connected (design 3.6). The roster is populated
+  // only once clients subscribe via the realtime stream (step 7), so in step 4
+  // it is typically empty and the warning stays dormant.
+  const handleRequestDeleteSession = useCallback(async (targetId) => {
+    let connectedOthers = 0;
+    try {
+      const payload = await api.getSession(targetId);
+      const roster = payload?.roster || [];
+      connectedOthers = roster.filter(m => m.client_id !== api.getClientId()).length;
+    } catch {
+      // Session may not exist server-side yet — nothing to warn about.
+    }
+    setDeleteSessionDialog({ id: targetId, connectedOthers });
+  }, []);
+
+  const handleConfirmDeleteSession = useCallback(async () => {
+    if (!deleteSessionDialog) return;
+    const { id } = deleteSessionDialog;
+    setDeleteSessionDialog(null);
+    try {
+      await api.deleteServerSession(id, api.getClientId());
+    } catch {
+      // Ignore — the session may only ever have existed locally.
+    }
+    sessionStore.removeSession(id);
+    if (id === sessionId) {
+      // Deleting the active session: drop its content and switch into a fresh
+      // one (design 3.6). Other connected clients are notified via the
+      // server's session_deleted broadcast (handled once realtime lands).
+      clearVisualization();
+      const fresh = api.generateVisualizationSessionId();
+      setSessionId(fresh);
+      reflectSessionUrl(fresh);
+      showNotification('info', t('sessions.session_deleted'));
+    }
+    setSessionsVersion(v => v + 1);
+  }, [deleteSessionDialog, sessionId, clearVisualization, showNotification, t]);
 
   // Export full graph from backend API
   const handleExportGraph = useCallback(async () => {
@@ -1048,11 +1201,12 @@ function App() {
           const entry = sessions.find(s => s.id === id);
           setRenameDialog({ id, name: entry?.name || '' });
         }}
+        onDeleteSession={handleRequestDeleteSession}
         onOpenSettings={() => setSettingsOpen(true)}
         suspendEscape={!!(
           // The drawer is non-modal, so any dialog can be stacked on top of
           // it; while one is open, Escape belongs to that dialog.
-          settingsOpen || connectDialogOpen || renameDialog ||
+          settingsOpen || connectDialogOpen || renameDialog || deleteSessionDialog ||
           createNodeType || editingNode || detailNode || editingEdge ||
           deleteDialog || saveViewDialog || showSubscriptionDialog ||
           showAgentDialog || skillDialogType || showAKCDialog
@@ -1174,6 +1328,22 @@ function App() {
           allowEmpty
           onConfirm={handleRenameSession}
           onCancel={() => setRenameDialog(null)}
+        />
+      )}
+
+      {deleteSessionDialog && (
+        <ConfirmDialog
+          title={t('sessions.delete_session_title')}
+          message={
+            deleteSessionDialog.connectedOthers > 0
+              ? t('sessions.delete_session_message_multi', { count: deleteSessionDialog.connectedOthers })
+              : t('sessions.delete_session_message')
+          }
+          confirmText={t('sessions.delete_confirm')}
+          cancelText={t('common.cancel')}
+          confirmStyle="danger"
+          onConfirm={handleConfirmDeleteSession}
+          onCancel={() => setDeleteSessionDialog(null)}
         />
       )}
 

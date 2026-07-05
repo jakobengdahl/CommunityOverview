@@ -506,6 +506,107 @@ export function getVisualizationStreamUrl(sessionId) {
   return `${getPathRoot()}/sessions/${encodeURIComponent(sessionId)}/stream`;
 }
 
+// Stable per-browser client id for shared-session presence and op attribution
+// (design 3.4). Kept in localStorage so it survives reloads.
+const CLIENT_ID_KEY = 'graph_client_id';
+let _clientId = null;
+
+export function getClientId() {
+  if (_clientId) return _clientId;
+  try {
+    _clientId = window.localStorage.getItem(CLIENT_ID_KEY);
+  } catch {
+    _clientId = null;
+  }
+  if (!_clientId) {
+    _clientId = 'client-' + Math.random().toString(36).slice(2, 10);
+    try {
+      window.localStorage.setItem(CLIENT_ID_KEY, _clientId);
+    } catch {
+      // ignore storage errors — a per-tab id is still usable
+    }
+  }
+  return _clientId;
+}
+
+const SESSIONS_BASE = () => `${API_BASE}/sessions`;
+
+/**
+ * Create a new server-side shared session (server-assigned id).
+ * @param {string|null} name
+ * @returns {Promise<Object>} session payload (meta + state + roster)
+ */
+export async function createSession(name = null) {
+  return apiFetch(SESSIONS_BASE(), {
+    method: 'POST',
+    body: JSON.stringify({ name: name || null }),
+  });
+}
+
+/**
+ * List server-side session metadata (used to refresh recent-session names).
+ * @returns {Promise<{sessions: Array}>}
+ */
+export async function listServerSessions() {
+  return apiFetch(SESSIONS_BASE());
+}
+
+/**
+ * Get a server-side session. With resolve=true the node references are
+ * rehydrated to full node objects (+ edges) for loading onto the canvas.
+ * @param {string} sessionId
+ * @param {{resolve?: boolean}} options
+ * @returns {Promise<Object>}
+ */
+export async function getSession(sessionId, { resolve = false } = {}) {
+  const suffix = resolve ? '?resolve=true' : '';
+  return apiFetch(`${SESSIONS_BASE()}/${encodeURIComponent(sessionId)}${suffix}`);
+}
+
+/**
+ * Rename a server-side session (or clear the name with null/empty).
+ * @param {string} sessionId
+ * @param {string|null} name
+ * @returns {Promise<Object>}
+ */
+export async function renameServerSession(sessionId, name) {
+  return apiFetch(`${SESSIONS_BASE()}/${encodeURIComponent(sessionId)}`, {
+    method: 'PATCH',
+    body: JSON.stringify({ name: name || null }),
+  });
+}
+
+/**
+ * Delete a server-side session. The optional client id names the deleter in
+ * the broadcast so connected clients can show "deleted by <name>".
+ * @param {string} sessionId
+ * @param {string} [clientId]
+ * @returns {Promise<{deleted: boolean, id: string}>}
+ */
+export async function deleteServerSession(sessionId, clientId) {
+  const suffix = clientId ? `?client_id=${encodeURIComponent(clientId)}` : '';
+  return apiFetch(`${SESSIONS_BASE()}/${encodeURIComponent(sessionId)}${suffix}`, {
+    method: 'DELETE',
+  });
+}
+
+/**
+ * Persist a session's whole canvas state to the server (full-state save).
+ * Temporary transport for step 4 — replaced by incremental ops in step 6.
+ * Materialises the session server-side on first save (get-or-create).
+ *
+ * @param {string} sessionId
+ * @param {{node_refs: string[], positions: Object, hidden_node_ids: string[],
+ *          hidden_edge_ids: string[], annotations: Array, manual_edges: Array}} state
+ * @returns {Promise<Object>} session payload
+ */
+export async function putSessionState(sessionId, state) {
+  return apiFetch(`${SESSIONS_BASE()}/${encodeURIComponent(sessionId)}/state`, {
+    method: 'PUT',
+    body: JSON.stringify({ client_id: getClientId(), state }),
+  });
+}
+
 /**
  * Upload the current canvas state to the backend session registry.
  * Called on connect and whenever the visible node list changes.

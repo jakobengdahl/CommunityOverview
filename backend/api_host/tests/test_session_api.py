@@ -111,3 +111,46 @@ class TestResolve:
         ids = {n["id"] for n in resolved["nodes"]}
         assert "node-1" in ids
         assert "does-not-exist" not in ids
+
+
+class TestReplaceState:
+    def test_put_state_persists_and_materialises(self, test_app: TestClient):
+        # A client-chosen id materialises server-side on first save (get-or-create).
+        sid = "4321-8765"
+        test_app.delete(f"/api/sessions/{sid}")  # ensure a clean slate (store is shared across tests)
+        assert test_app.get(f"/api/sessions/{sid}").status_code == 404
+        resp = test_app.put(
+            f"/api/sessions/{sid}/state",
+            json={
+                "client_id": "c1",
+                "state": {
+                    "node_refs": ["node-1", "node-2"],
+                    "positions": {"node-1": {"x": 1, "y": 2}},
+                    "annotations": [{"kind": "group", "label": "G", "member_node_ids": ["node-1"]}],
+                },
+            },
+        )
+        assert resp.status_code == 200
+        body = resp.json()
+        assert body["state"]["node_refs"] == ["node-1", "node-2"]
+        assert body["state"]["positions"]["node-1"] == {"x": 1.0, "y": 2.0}
+        assert body["state"]["annotations"][0]["kind"] == "group"
+        # Persisted: a follow-up GET returns the same state
+        assert test_app.get(f"/api/sessions/{sid}").json()["state"]["node_refs"] == ["node-1", "node-2"]
+
+    def test_put_state_replaces_wholesale(self, test_app: TestClient):
+        sid = test_app.post("/api/sessions", json={}).json()["id"]
+        test_app.post(
+            f"/api/sessions/{sid}/ops",
+            json={"client_id": "c1", "ops": [{"op": "nodes_added", "node_ids": ["old"]}]},
+        )
+        test_app.put(f"/api/sessions/{sid}/state", json={"state": {"node_refs": ["a"]}})
+        assert test_app.get(f"/api/sessions/{sid}").json()["state"]["node_refs"] == ["a"]
+
+    def test_put_invalid_id_400(self, test_app: TestClient):
+        assert test_app.put("/api/sessions/not-valid/state", json={"state": {}}).status_code == 400
+
+    def test_put_invalid_state_400(self, test_app: TestClient):
+        sid = test_app.post("/api/sessions", json={}).json()["id"]
+        resp = test_app.put(f"/api/sessions/{sid}/state", json={"state": {"node_refs": [1, 2]}})
+        assert resp.status_code == 400

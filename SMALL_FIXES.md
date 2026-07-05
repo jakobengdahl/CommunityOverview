@@ -39,12 +39,6 @@ Effort scale: XS = single-line fix · S = up to ~30 lines / one file · M = mult
 - **Issue:** Code uses `t('key') || 'fallback'` expecting a null/undefined return when a key is missing, but `t()` returns the key name as a string (truthy) when no translation is found. The `|| 'fallback'` branch never fires. The two immediately affected keys (`menu.view_section`, `menu.show_minimap`) were fixed by adding them to the JSON files. Any future missing key will silently show its key name in the UI. Fix: either update the fallback pattern to use `t('key') === 'key' ? 'fallback' : t('key')`, or make `t()` return null on a miss (breaking change to the hook contract).
 - **Effort:** S
 
-### [2026-07-04] Shared-session SSE stream not reachable via EventSource under Basic Auth
-- **File(s):** `backend/service/rest_api.py` (`/api/sessions/{id}/stream`), `backend/api_host/server.py:362-366`
-- **Context:** Discovered during review of `claude/multi-user-sessions-step-3-ojk3mi` (multi-user sessions step 2/3)
-- **Issue:** The auth middleware bypasses `/sessions/` because a browser `EventSource` cannot send an `Authorization` header; the new shared-session stream lives under the API prefix at `/api/sessions/{id}/stream`, which is **not** bypassed. When `auth_enabled` is on, the new SSE stream is unreachable by EventSource at the step-4 frontend cutover. Design §3.9 says new endpoints should respect Basic Auth, so this is a genuine tension needing an owner decision: either bypass the new stream path too (it is already protected by the unguessable session id, the same rationale as the legacy bypass), or adopt a query-param / cookie token scheme for the stream only. CRUD/ops endpoints are unaffected (fetch can send headers). **Resolve before step 4.**
-- **Effort:** S
-
 ### [2026-07-04] Shared-session persistence is a synchronous fsync on the event loop
 - **File(s):** `backend/core/session_manager.py` (`apply_ops` → `store.persist`), `backend/core/session_store.py` (`FileSessionPersistenceBackend.save`)
 - **Context:** Discovered during review of `claude/multi-user-sessions-step-3-ojk3mi`
@@ -68,6 +62,10 @@ Effort scale: XS = single-line fix · S = up to ~30 lines / one file · M = mult
 ## Fixed
 
 *(resolved entries moved here after merge, for reference)*
+
+### [2026-07-05] Fixed in branch `claude/frontend-session-lifecycle-xys3wl` (multi-user sessions step 4)
+
+- **Shared-session SSE stream not reachable via EventSource under Basic Auth** — `backend/api_host/server.py`. Resolved with alternative A: the auth middleware now bypasses `GET /api/sessions/{id}/stream` (EventSource cannot send an `Authorization` header; the stream is protected by the unguessable session id, same rationale as the legacy `/sessions/` bypass). Only the stream is exempt — the fetch-reachable CRUD/ops endpoints stay guarded. Tests in `backend/api_host/tests/test_auth_middleware.py`.
 
 ### [2026-07-03] Fixed in branch `claude/next-small-fixes-bug-1izuu8`
 

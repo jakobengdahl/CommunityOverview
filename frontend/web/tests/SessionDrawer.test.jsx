@@ -5,8 +5,8 @@ import SessionDrawer from '../src/components/SessionDrawer';
 import { I18nProvider } from '../src/i18n';
 
 const SESSIONS = [
-  { id: '1111-2222', name: 'Energy analysis', updatedAt: 2000, nodeCount: 5 },
-  { id: '3333-4444', name: null, updatedAt: 1000, nodeCount: 2 },
+  { id: '1111-2222', name: 'Energy analysis', updatedAt: 2000 },
+  { id: '3333-4444', name: null, updatedAt: 1000 },
 ];
 
 function renderDrawer(overrides = {}) {
@@ -19,6 +19,7 @@ function renderDrawer(overrides = {}) {
     onConnectSession: vi.fn(),
     onSelectSession: vi.fn(),
     onRenameSession: vi.fn(),
+    onDeleteSession: vi.fn(),
     onOpenSettings: vi.fn(),
     ...overrides,
   };
@@ -51,6 +52,13 @@ describe('SessionDrawer', () => {
 
     fireEvent.click(screen.getByText('Energy analysis'));
     expect(props.onSelectSession).toHaveBeenCalledWith('1111-2222');
+  });
+
+  it('invokes the delete callback with the session id', () => {
+    const props = renderDrawer();
+    const deleteButtons = screen.getAllByLabelText('Delete session');
+    fireEvent.click(deleteButtons[0]);
+    expect(props.onDeleteSession).toHaveBeenCalledWith('1111-2222');
   });
 
   it('filters sessions from the search field', () => {

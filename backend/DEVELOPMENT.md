@@ -332,7 +332,8 @@ node content is rehydrated from the graph on load via `?resolve=true`.
 | PATCH | `/api/sessions/{id}` | Rename a session |
 | DELETE | `/api/sessions/{id}` | Delete a session (`?client_id=` names the deleter in the broadcast) |
 | POST | `/api/sessions/{id}/ops` | Apply an ordered op batch (`{client_id, base_seq, ops}` → `{applied, seq}`); server-ordered LWW, monotonic `seq` |
-| GET | `/api/sessions/{id}/stream` | SSE fan-out: presence, applied ops, and claims. Query `client_id`, `name`, `since_seq` (op catch-up or full-snapshot fallback) |
+| PUT | `/api/sessions/{id}/state` | Replace a session's whole state (`{client_id, state}`); materialises the session if absent. Temporary full-state save for the step-4 frontend — superseded by incremental ops in step 6 |
+| GET | `/api/sessions/{id}/stream` | SSE fan-out: presence, applied ops, and claims. Query `client_id`, `name`, `since_seq` (op catch-up or full-snapshot fallback). EventSource-opened, so it bypasses Basic Auth (protected by the unguessable session id — design §3.9) |
 
 Legacy MCP visualization-push channel (single-consumer; kept as a shim during
 the frontend transition, removed in the final step of the plan):

@@ -179,7 +179,8 @@
   letter-spacing: 0.04em;
 }
 
-.session-drawer-session-rename {
+.session-drawer-session-rename,
+.session-drawer-session-delete {
   background: transparent;
   border: none;
   color: #666;
@@ -194,12 +195,18 @@
 }
 
 .session-drawer-session:hover .session-drawer-session-rename,
-.session-drawer-session-rename:focus-visible {
+.session-drawer-session:hover .session-drawer-session-delete,
+.session-drawer-session-rename:focus-visible,
+.session-drawer-session-delete:focus-visible {
   opacity: 1;
 }
 
 .session-drawer-session-rename:hover {
   color: #ccc;
+}
+
+.session-drawer-session-delete:hover {
+  color: #e06c6c;
 }
 
 .session-drawer-footer {

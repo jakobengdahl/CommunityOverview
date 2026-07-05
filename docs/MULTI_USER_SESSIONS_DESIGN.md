@@ -1,7 +1,8 @@
 # Multi-User Shared Sessions — Design & Implementation Plan
 
-**Status:** In progress — the backend foundation (steps 1–3) is implemented; the
-frontend cutover (step 4 onward) has not started.
+**Status:** In progress — the backend foundation (steps 1–3) and the step-4
+frontend cutover (server-backed session lifecycle) are implemented; realtime op
+sync, presence UI and the new annotation kinds (steps 5–8) have not started.
 **Scope:** Open-source core only. SaaS-specific extensions (multi-instance scale-out,
 account-bound session history, workspace ACLs) are designed in the private SaaS
 repository and are explicitly out of scope here (see "Out of scope" below).
@@ -252,14 +253,12 @@ transition and removed in the final step.
   (`crypto.getRandomValues`, 10^8 space) — acceptable for open deployments already
   exposing connect-by-ID; SaaS adds real authorization.
 - All new endpoints respect the existing optional HTTP Basic Auth.
-  - **Open follow-up (backend steps 1–3):** the CRUD/ops endpoints honour Basic
+  - **Resolved (step 4, alternative A):** the CRUD/ops endpoints honour Basic
     Auth via request headers, but a browser `EventSource` cannot send an
-    `Authorization` header, so the new `GET /api/sessions/{id}/stream` is
-    unreachable under Basic Auth — the same constraint the legacy
-    `/sessions/{id}/stream` bypass already accommodates. Resolve before the
-    step-4 cutover: either bypass the new stream path too (it is protected by the
-    unguessable session id, the legacy rationale) or add a query-param/cookie
-    token for the stream only. Tracked in `SMALL_FIXES.md`.
+    `Authorization` header, so `GET /api/sessions/{id}/stream` bypasses the auth
+    middleware — protected instead by the unguessable session id, the same
+    rationale as the legacy `/sessions/{id}/stream` bypass. Only the stream is
+    exempt; the fetch-reachable CRUD/ops endpoints stay guarded.
 
 ## 4. Out of scope for the open core (SaaS features)
 
@@ -289,7 +288,7 @@ steps 6–8.
 | 1 | done | Server-side session store + REST CRUD |
 | 2 | done | SSE fan-out hub + presence (backend) |
 | 3 | done | Op protocol, conflict rules, catch-up |
-| 4 | not started | Frontend: server-backed session lifecycle |
+| 4 | done | Frontend: server-backed session lifecycle |
 | 5 | not started | New annotation kinds (note, label, arrow) |
 | 6 | not started | Frontend: realtime op emit/apply + canvas events |
 | 7 | not started | Presence UI + selection claims |
@@ -360,6 +359,28 @@ steps 6–8.
 - i18n: all new strings in both `en.json` and `sv.json`.
 - Tests: rework `sessionStore.test.js`, `sessionFlow.test.jsx`,
   `SessionDrawer.test.jsx` (mock fetch); docs: `docs/USER_GUIDE.md` §5 + §8.3.
+
+> **Implementation notes (step 4 as built).**
+> - **Full-state save endpoint.** The temporary full-state save is
+>   `PUT /api/sessions/{id}/state` (`{client_id, state}`), added in
+>   `session_store.normalize_state` / `SessionStore.replace_state`,
+>   `SessionManager.replace_state`, and `rest_api.py`. It validates the whole
+>   state at the boundary (positions, annotations, size cap) and bumps `seq`.
+>   Removed together with the other transitional shims when ops land (step 6/8).
+> - **Lazy server materialisation (refinement of "auto-create").** The default /
+>   new-session flow does **not** eagerly `POST /api/sessions` on every page
+>   load; the client keeps generating the id locally and the session is created
+>   server-side on its first non-empty save (`PUT` → `get_or_create`). Under D13
+>   (no auto-eviction) an eager POST-per-load would accumulate empty session
+>   files. `POST /api/sessions` remains available for SaaS/explicit use.
+> - **Groups via annotations.** Group boxes round-trip through the generic
+>   `annotations` list as `kind: "group"` (label, color, size, `member_node_ids`)
+>   so they survive the server save/load without waiting for the step-5
+>   annotation UI.
+> - **SSE stays on the legacy channel in step 4.** The browser still opens the
+>   legacy `/sessions/{id}/stream` for MCP pushes and the realtime op-apply loop
+>   over the new `/api/sessions/{id}/stream` arrives in step 6; the new stream's
+>   auth bypass (§3.9, alternative A) is in place so that cutover is unblocked.
 
 ### Step 5 — New annotation kinds (note, label, arrow)
 

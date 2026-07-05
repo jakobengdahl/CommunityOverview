@@ -306,12 +306,21 @@ AI apps:
 | **Start new session** | Saves the current session automatically and opens a fresh, empty one |
 | **Search previous sessions** | Filters the recent-session list by name or ID |
 | **Connect to session (via ID)** | Joins an existing session by entering its ID (format `1234-5678`) |
-| **Recent sessions** | The most recently used sessions — shown by name if you have named them, otherwise by ID. Click one to load it; the current session is saved automatically first. Use the pencil icon to name a session. |
+| **Recent sessions** | The most recently used sessions — shown by name if you have named them, otherwise by ID. Click one to load it; the current session is saved automatically first. Use the pencil icon to name a session, or the trash icon to delete it. |
 | **Settings** | Opens the Settings dialog (see below) |
 
-Sessions are stored locally in your browser. The canvas content (nodes, edges,
-positions, groups, and hidden nodes) is saved automatically while you work and
-restored when you return to a session.
+Session content (node membership, positions, groups, and hidden nodes) is stored
+**on the server**, so a session can be shared with others: the active session ID
+is kept in the page URL (`?session=1234-5678`), and anyone who opens that URL —
+or enters the ID via **Connect to session** — joins the same session. Your list
+of recently visited sessions stays local to your browser; only the session
+*content* lives on the server. The canvas is saved automatically while you work
+and restored when you return to a session.
+
+Deleting a session removes its content for everyone. If you delete the session
+you are currently in, a fresh empty session is created and you are switched into
+it automatically. When other people are connected to a session you delete, the
+confirmation warns you how many are currently in it.
 
 ### Settings dialog
 
@@ -437,10 +446,12 @@ in this mode (suitable for Cloud Run + IAP deployments).
 
 ### 8.3 Live visualization control via session ID
 
-Every open browser window is assigned a **session ID**, shown in the top bar next to
-the application title (e.g. `3953-2493`). An external AI connected via MCP can use
-this ID to target that specific browser window and push results directly into its
-canvas — in real time, while you watch.
+Each session has a **session ID**, shown in the top bar next to the application
+title (e.g. `3953-2493`) and reflected in the page URL (`?session=3953-2493`). The
+ID targets a shared, server-stored session: an external AI connected via MCP can
+use it to push results directly into that session's canvas — in real time, while
+you watch — and anyone who opens the same URL or connects by ID sees the same
+content.
 
 ![External AI controlling the canvas via session ID](images/mcp-session-control.png)
 *ChatGPT with the graph's MCP tool connected. The user tells it "Use session-id 3953-2493 — show the international statistical organisations here." The AI calls MCP tools and the nodes appear live in the browser on the right.*

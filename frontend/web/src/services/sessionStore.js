@@ -1,22 +1,23 @@
 /**
- * Local session registry backed by localStorage.
+ * Local recents index for shared sessions, backed by localStorage.
  *
- * A "session" is the working surface identified by the visualization session
- * ID (format "DDDD-DDDD"). Each session can have an optional user-given name
- * and a canvas snapshot (nodes, edges, positions, groups, hidden ids) so it
- * can be reloaded later, similar to how chats work in ChatGPT-style apps.
+ * Session *data* (node references, layout, annotations) now lives on the
+ * server (see `docs/MULTI_USER_SESSIONS_DESIGN.md`, step 4). localStorage keeps
+ * only a personal, best-effort list of recently visited sessions so the drawer
+ * can offer quick navigation — never any canvas content (decision D6).
  *
  * Storage layout:
- *   graph_sessions_index          → [{id, name, updatedAt, nodeCount}]
- *   graph_session_snapshot_<id>   → snapshot object
+ *   graph_sessions_index → [{id, name, updatedAt}]
+ *
+ * Names in this list are a cached hint; the drawer refreshes them from the
+ * server when it lists sessions.
  */
 
 const INDEX_KEY = 'graph_sessions_index';
-const SNAPSHOT_PREFIX = 'graph_session_snapshot_';
+const LEGACY_SNAPSHOT_PREFIX = 'graph_session_snapshot_';
 
-// Cap the registry so snapshots (which contain full node data) cannot grow
-// past localStorage quota. Oldest sessions are evicted first.
-const MAX_SESSIONS = 30;
+// Cap the personal recents list so it cannot grow unbounded. Oldest first.
+const MAX_SESSIONS = 50;
 
 export const SESSION_ID_PATTERN = /^\d{4}-\d{4}$/;
 
@@ -38,51 +39,42 @@ function writeIndex(index) {
   try {
     window.localStorage.setItem(INDEX_KEY, JSON.stringify(index));
   } catch {
-    // ignore storage errors — the registry is best-effort
+    // ignore storage errors — the recents list is best-effort
   }
 }
 
-function removeSnapshot(id) {
+/**
+ * Remove legacy per-session snapshot blobs left by the pre-server storage
+ * model (decision D10 — no import; the feature was never rolled out). The
+ * recents index itself is kept; names refresh from the server. Runs once on
+ * module load so upgrades reclaim the space without any user action.
+ */
+export function purgeLegacySnapshots() {
   try {
-    window.localStorage.removeItem(SNAPSHOT_PREFIX + id);
+    const toRemove = [];
+    for (let i = 0; i < window.localStorage.length; i++) {
+      const key = window.localStorage.key(i);
+      if (key && key.startsWith(LEGACY_SNAPSHOT_PREFIX)) toRemove.push(key);
+    }
+    toRemove.forEach(key => window.localStorage.removeItem(key));
   } catch {
-    // ignore
+    // ignore — purging is best-effort cleanup
   }
-}
-
-function evictOldest(index) {
-  const sorted = [...index].sort((a, b) => (a.updatedAt || 0) - (b.updatedAt || 0));
-  const victim = sorted[0];
-  if (!victim) return index;
-  removeSnapshot(victim.id);
-  return index.filter(e => e.id !== victim.id);
 }
 
 /**
  * List known sessions, most recently updated first.
- * @returns {Array<{id: string, name: string|null, updatedAt: number, nodeCount: number}>}
+ * @returns {Array<{id: string, name: string|null, updatedAt: number}>}
  */
 export function listSessions() {
   return readIndex().sort((a, b) => (b.updatedAt || 0) - (a.updatedAt || 0));
 }
 
 /**
- * Whether the session is present in the registry.
+ * Whether the session is present in the recents index.
  */
 export function hasSession(id) {
   return readIndex().some(e => e.id === id);
-}
-
-/**
- * Read a stored canvas snapshot for a session, or null.
- */
-export function getSnapshot(id) {
-  try {
-    const raw = window.localStorage.getItem(SNAPSHOT_PREFIX + id);
-    return raw ? JSON.parse(raw) : null;
-  } catch {
-    return null;
-  }
 }
 
 function upsertEntry(index, id, patch) {
@@ -91,73 +83,29 @@ function upsertEntry(index, id, patch) {
     Object.assign(existing, patch);
     return index;
   }
-  return [...index, { id, name: null, updatedAt: Date.now(), nodeCount: 0, ...patch }];
+  return [...index, { id, name: null, updatedAt: Date.now(), ...patch }];
 }
 
-// Snapshots larger than this are never worth evicting other sessions for —
-// they are unlikely to fit even in an empty localStorage.
-const MAX_SNAPSHOT_BYTES = 4 * 1024 * 1024;
-
 /**
- * Persist a canvas snapshot and update the session's index entry.
- * Evicts the oldest sessions when over capacity or when storage quota is hit.
- * If the snapshot ultimately cannot be written, the index entry is rolled
- * back so the drawer never advertises content that isn't in storage.
- *
- * @param {string} id - Session ID
- * @param {Object} snapshot - {nodes, edges, positions, parentIds, groups, hiddenNodeIds, hiddenEdgeIds, savedAt}
- * @returns {boolean} true if the snapshot was written
+ * Record a visit to a session (create or bump its recents entry).
+ * @param {string} id
+ * @param {{name?: string|null}} [patch]
  */
-export function saveSnapshot(id, snapshot) {
-  if (!id) return false;
-  const prevEntry = readIndex().find(e => e.id === id) || null;
-  let index = upsertEntry(readIndex(), id, {
-    updatedAt: Date.now(),
-    nodeCount: snapshot?.nodes?.length || 0,
-  });
-
+export function touchSession(id, patch = {}) {
+  if (!id) return;
+  let index = upsertEntry(readIndex(), id, { updatedAt: Date.now(), ...patch });
+  // Evict the oldest entries beyond the cap.
   while (index.length > MAX_SESSIONS) {
-    index = evictOldest(index);
-  }
-
-  const payload = JSON.stringify(snapshot);
-  let written = false;
-  if (payload.length <= MAX_SNAPSHOT_BYTES) {
-    for (;;) {
-      try {
-        window.localStorage.setItem(SNAPSHOT_PREFIX + id, payload);
-        written = true;
-        break;
-      } catch {
-        // Quota exceeded — evict the oldest *other* session and retry.
-        const others = index.filter(e => e.id !== id);
-        if (others.length === 0) break;
-        index = [...evictOldest(others), ...index.filter(e => e.id === id)];
-      }
-    }
-  }
-
-  if (!written) {
-    // Roll back to the previous entry (which still describes whatever
-    // snapshot remains in storage), or drop the entry entirely.
-    index = index.filter(e => e.id !== id);
-    if (prevEntry) index.push(prevEntry);
+    const victim = [...index].sort((a, b) => (a.updatedAt || 0) - (b.updatedAt || 0))[0];
+    if (!victim) break;
+    index = index.filter(e => e.id !== victim.id);
   }
   writeIndex(index);
-  return written;
 }
 
 /**
- * Register a session in the index without storing a snapshot
- * (used when connecting to a session by ID).
- */
-export function touchSession(id) {
-  if (!id) return;
-  writeIndex(upsertEntry(readIndex(), id, { updatedAt: Date.now() }));
-}
-
-/**
- * Give a session a user-visible name (or clear it with an empty value).
+ * Give a session a user-visible name in the recents list (empty clears it).
+ * Only updates an entry that already exists — never resurrects a removed one.
  */
 export function renameSession(id, name) {
   const index = readIndex();
@@ -166,3 +114,12 @@ export function renameSession(id, name) {
   entry.name = name?.trim() || null;
   writeIndex(index);
 }
+
+/**
+ * Remove a session from the recents list (e.g. after it is deleted).
+ */
+export function removeSession(id) {
+  writeIndex(readIndex().filter(e => e.id !== id));
+}
+
+purgeLegacySnapshots();

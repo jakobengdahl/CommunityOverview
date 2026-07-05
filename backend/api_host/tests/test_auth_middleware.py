@@ -248,6 +248,35 @@ class TestAuthEnabledTakesPrecedence:
         finally:
             os.unlink(path)
 
+    def test_shared_session_stream_exempt_from_auth_enabled(self):
+        """The new /api/sessions/{id}/stream is EventSource-opened too, so it is
+        exempt (design §3.9, alternative A). An invalid id returns 400 — proving
+        the request reached the handler rather than being 401'd by the middleware
+        (and avoiding the infinite SSE generator a valid id would start)."""
+        client, path = self._make_client(
+            auth_enabled=True, auth_password="secret"
+        )
+        try:
+            resp = client.get("/api/sessions/not-valid/stream", params={"client_id": "c1"})
+            assert resp.status_code == 400
+        finally:
+            os.unlink(path)
+
+    def test_shared_session_ops_still_guarded(self):
+        """Only the stream is bypassed — the fetch-reachable ops endpoint (which
+        can send an Authorization header) still requires auth."""
+        client, path = self._make_client(
+            auth_enabled=True, auth_password="secret"
+        )
+        try:
+            resp = client.post(
+                "/api/sessions/1234-5678/ops",
+                json={"client_id": "c1", "ops": []},
+            )
+            assert resp.status_code == 401
+        finally:
+            os.unlink(path)
+
 
 class TestNoAuthDisabled:
     """When both auth flags are off, nothing is blocked."""

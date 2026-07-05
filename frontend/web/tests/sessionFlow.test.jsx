@@ -26,12 +26,31 @@ vi.mock('@community-graph/ui-graph-canvas', async () => {
 });
 vi.mock('@community-graph/ui-graph-canvas/styles', () => ({}));
 
+const NODE_A = { id: 'node-a', type: 'Actor', name: 'Actor A' };
+const NODE_B = { id: 'node-b', type: 'Theme', name: 'Theme B' };
+
 vi.mock('../src/services/api', () => {
   let idCounter = 0;
   return {
     generateVisualizationSessionId: vi.fn(() => `1234-000${++idCounter}`),
     getVisualizationStreamUrl: vi.fn(() => 'http://localhost/stream'),
     updateSessionState: vi.fn(async () => ({ ok: true })),
+    getClientId: vi.fn(() => 'client-test'),
+    putSessionState: vi.fn(async () => ({})),
+    listServerSessions: vi.fn(async () => ({ sessions: [] })),
+    renameServerSession: vi.fn(async () => ({})),
+    deleteServerSession: vi.fn(async () => ({ deleted: true })),
+    getSession: vi.fn(async (id, opts) => {
+      if (id === '5555-6666' && opts?.resolve) {
+        return {
+          id,
+          state: { positions: { 'node-b': { x: 5, y: 6 } }, hidden_node_ids: [], hidden_edge_ids: [], annotations: [] },
+          resolved: { nodes: [NODE_B], edges: [] },
+          roster: [],
+        };
+      }
+      return { id, state: {}, resolved: { nodes: [], edges: [] }, roster: [] };
+    }),
     getSchema: vi.fn(async () => ({ node_types: {} })),
     getPresentation: vi.fn(async () => ({ title: 'Test' })),
     getGraphStats: vi.fn(async () => ({ total_nodes: 0, total_edges: 0 })),
@@ -58,11 +77,9 @@ class FakeEventSource {
 global.EventSource = FakeEventSource;
 
 import App from '../src/App';
+import * as api from '../src/services/api';
 import useGraphStore from '../src/store/graphStore';
 import { I18nProvider } from '../src/i18n';
-
-const NODE_A = { id: 'node-a', type: 'Actor', name: 'Actor A' };
-const NODE_B = { id: 'node-b', type: 'Theme', name: 'Theme B' };
 
 function renderApp() {
   return render(
@@ -72,13 +89,14 @@ function renderApp() {
   );
 }
 
-describe('Session snapshot multiplexing over saveViewSignal', () => {
+describe('Server-backed session lifecycle', () => {
   beforeEach(() => {
     window.localStorage.clear();
     useGraphStore.getState().clearVisualization();
+    vi.clearAllMocks();
   });
 
-  it('toolbar Save View still opens the naming dialog through the shared round-trip', async () => {
+  it('toolbar Save View still opens the naming dialog and saves state to the server', async () => {
     const { container } = renderApp();
 
     act(() => {
@@ -92,22 +110,16 @@ describe('Session snapshot multiplexing over saveViewSignal', () => {
     await waitFor(() => {
       expect(screen.getByText('Save View')).toBeInTheDocument();
     });
-    // The round-trip must not leave a queued callback that would misfire later
-    expect(sessionStore.listSessions()).toHaveLength(1); // snapshot also persisted
+    // The shared round-trip also persisted the canvas to the server
+    expect(api.putSessionState).toHaveBeenCalled();
+    const [, state] = api.putSessionState.mock.calls[0];
+    expect(state.node_refs).toEqual(['node-a']);
+    expect(state.positions['node-a']).toEqual({ x: 11, y: 22 });
   });
 
-  it('switching session persists the current canvas first, then restores the target', async () => {
-    // Seed a previous session that can be selected from the drawer
-    sessionStore.saveSnapshot('5555-6666', {
-      nodes: [NODE_B],
-      edges: [],
-      positions: { 'node-b': { x: 5, y: 6 } },
-      parentIds: {},
-      groups: [],
-      hiddenNodeIds: [],
-      hiddenEdgeIds: [],
-      savedAt: Date.now(),
-    });
+  it('switching session persists the current canvas first, then loads the target from the server', async () => {
+    // Seed a previous session in the recents list so it shows in the drawer
+    sessionStore.touchSession('5555-6666');
 
     renderApp();
 
@@ -123,14 +135,15 @@ describe('Session snapshot multiplexing over saveViewSignal', () => {
       expect(useGraphStore.getState().nodes.map(n => n.id)).toEqual(['node-b']);
     });
 
-    // The old (auto-generated 1234-000N) session was snapshotted before the swap
-    const oldSession = sessionStore.listSessions().find(s => s.id.startsWith('1234-'));
-    expect(oldSession).toBeTruthy();
-    const oldSnapshot = sessionStore.getSnapshot(oldSession.id);
-    expect(oldSnapshot.nodes.map(n => n.id)).toEqual(['node-a']);
-    expect(oldSnapshot.positions['node-a']).toEqual({ x: 11, y: 22 });
+    // The old (auto-generated 1234-000N) session was saved to the server first
+    expect(api.putSessionState).toHaveBeenCalled();
+    const [savedId, state] = api.putSessionState.mock.calls[0];
+    expect(savedId).toMatch(/^1234-/);
+    expect(state.node_refs).toEqual(['node-a']);
+    expect(state.positions['node-a']).toEqual({ x: 11, y: 22 });
 
-    // The restored node carries its saved position from the target snapshot
+    // The target was loaded resolved from the server, carrying its saved position
+    expect(api.getSession).toHaveBeenCalledWith('5555-6666', { resolve: true });
     expect(useGraphStore.getState().nodes[0]._savedPosition).toEqual({ x: 5, y: 6 });
   });
 });

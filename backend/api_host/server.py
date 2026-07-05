@@ -367,6 +367,14 @@ def create_app(
             if request.url.path.startswith("/sessions/"):
                 return await call_next(request)
 
+            # The shared-session SSE stream (/api/sessions/{id}/stream) is likewise
+            # opened by an EventSource that cannot send Authorization headers. It is
+            # protected by the unguessable session id — the same rationale as the
+            # legacy bypass above (design §3.9, alternative A). Only the stream is
+            # bypassed; the CRUD/ops endpoints are reached by fetch and stay guarded.
+            if request.url.path.endswith("/stream") and "/api/sessions/" in request.url.path:
+                return await call_next(request)
+
             # MCP_AUTH_ENABLED=false: MCP endpoints bypass auth regardless of auth_enabled
             # or mcp_basic_auth — this takes precedence over both.
             # Unset (None) → MCP follows auth_enabled (backwards compatible).

@@ -7,6 +7,7 @@ import {
   BoxArrowInRight,
   GearFill,
   PencilSquare,
+  Trash,
 } from 'react-bootstrap-icons';
 import { useI18n } from '../i18n';
 import './SessionDrawer.css';
@@ -26,6 +27,7 @@ function SessionDrawer({
   onConnectSession,
   onSelectSession,
   onRenameSession,
+  onDeleteSession,
   onOpenSettings,
   suspendEscape = false,
 }) {
@@ -140,6 +142,14 @@ function SessionDrawer({
               aria-label={t('sessions.rename_session')}
             >
               <PencilSquare size={13} />
+            </button>
+            <button
+              className="session-drawer-session-delete"
+              onClick={() => onDeleteSession?.(session.id)}
+              title={t('sessions.delete_session')}
+              aria-label={t('sessions.delete_session')}
+            >
+              <Trash size={13} />
             </button>
           </div>
         ))}
