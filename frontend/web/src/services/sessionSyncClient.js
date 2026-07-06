@@ -6,8 +6,8 @@
  * `docs/MULTI_USER_SESSIONS_DESIGN.md` §3.3/§3.7). Responsibilities:
  *
  *  - Subscribe to `GET /api/sessions/{id}/stream` and dispatch parsed events
- *    (snapshot, catch_up, applied ops, presence, rename, delete) to handlers
- *    that `App.jsx` binds to the Zustand store and canvas signals.
+ *    (snapshot, catch_up, applied ops, presence, rename, delete, MCP command)
+ *    to handlers that `App.jsx` binds to the Zustand store and canvas signals.
  *  - Derive the minimal op set from a full-state snapshot (`syncState`) by
  *    diffing against the last-synced baseline, batch ops and POST them to
  *    `/ops`. This keeps every mutation path (search, expand, drag, annotations)
@@ -257,7 +257,7 @@ export class SessionSyncClient {
    * @param {string} opts.opsUrl     Full POST URL for op batches.
    * @param {Object} [opts.handlers] onReady, onResync, onRemoteOps, onPresence,
    *   onSelections, onPresenceJoined, onPresenceLeft, onSessionRenamed,
-   *   onSessionDeleted, onDropped.
+   *   onSessionDeleted, onDropped, onCommand.
    * @param {number} [opts.flushIntervalMs]
    * @param {Function} [opts.fetchImpl]
    * @param {Function} [opts.EventSourceImpl]
@@ -634,8 +634,13 @@ export class SessionSyncClient {
       case 'session_deleted':
         if (this.handlers.onSessionDeleted) this.handlers.onSessionDeleted(data.deleted_by);
         break;
+      case 'command':
+        // MCP visualization push, broadcast to every subscriber (design §3.8),
+        // unlike the legacy single-consumer push stream it superseded (R5).
+        if (this.handlers.onCommand) this.handlers.onCommand(data.command);
+        break;
       default:
-        // 'command' (MCP push, handled by the legacy stream), 'ping', unknown: ignore.
+        // 'ping', unknown: ignore.
         break;
     }
   }

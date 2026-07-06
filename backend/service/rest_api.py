@@ -150,6 +150,22 @@ class SessionOpsRequest(BaseModel):
     ops: List[Dict[str, Any]] = Field(..., description="Ordered ops to apply")
 
 
+def _resolve_stream_event(event: Dict[str, Any], session_manager, session_id: str) -> Dict[str, Any]:
+    """Translate a slow-consumer resync sentinel into a fresh full snapshot.
+
+    ``InProcessEventBus.publish`` drops a subscriber's backlog and enqueues a
+    ``{"type": "resync"}`` sentinel when that subscriber's queue overflows
+    (session_hub.py). Forwarding the sentinel verbatim left the client with no
+    way to recover (design §8.1 R2); translating it into a real ``catch_up``
+    snapshot here reuses the client's existing "second snapshot means resync"
+    handling (`sessionSyncClient.js`), so no wire format or client change is
+    needed.
+    """
+    if event.get("type") == "resync":
+        return session_manager.catch_up(session_id, None)
+    return event
+
+
 def _raise_for_access_denied(result: Dict[str, Any]) -> None:
     if result.get("error_code") == "access_denied":
         raise HTTPException(status_code=403, detail=result.get("message") or result.get("error"))
@@ -553,6 +569,18 @@ def _register_session_endpoints(router: APIRouter, service: GraphService, sessio
                     except asyncio.TimeoutError:
                         yield ": ping\n\n"
                         continue
+                    try:
+                        event = _resolve_stream_event(event, session_manager, session_id)
+                    except SessionNotFound:
+                        # The session was deleted in the narrow window between
+                        # this subscriber's queue overflowing (which may have
+                        # drained an already-queued session_deleted event
+                        # too, per session_hub.py's drain-on-overflow) and the
+                        # resync translation running catch_up against a store
+                        # entry that no longer exists. Give the client the
+                        # notice it would otherwise have missed.
+                        yield f"data: {json.dumps({'type': 'session_deleted', 'deleted_by': None})}\n\n"
+                        break
                     yield f"data: {json.dumps(event)}\n\n"
             except asyncio.CancelledError:
                 pass

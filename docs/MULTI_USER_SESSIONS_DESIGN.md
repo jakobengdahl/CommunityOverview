@@ -379,6 +379,10 @@ steps 6–8.
 >   server-side on its first non-empty save (`PUT` → `get_or_create`). Under D13
 >   (no auto-eviction) an eager POST-per-load would accumulate empty session
 >   files. `POST /api/sessions` remains available for SaaS/explicit use.
+>   **Refined (R1 fix, §8.1):** this laziness applies only to a locally
+>   generated id — an explicit join (`?session=` share URL, "Connect to
+>   session") now connects eagerly regardless of whether anything has been
+>   saved yet; see the step-6 note below.
 > - **Groups via annotations.** Group boxes round-trip through the generic
 >   `annotations` list as `kind: "group"` (label, color, size, `member_node_ids`)
 >   so they survive the server save/load without waiting for the step-5
@@ -466,10 +470,17 @@ steps 6–8.
 >   funnel back into the same snapshot/diff, group changes reach the server
 >   through this one notifier + the central reconciler — the design's realtime
 >   goal for group edits without redundant prop plumbing.
-> - **Lazy connect preserved.** The stream connects on the first non-empty save
->   or when loading an existing session — never eagerly on load — so an empty,
->   never-edited session is still never materialised server-side (the step-4
->   behaviour under D13).
+> - **Lazy connect preserved for locally generated ids.** The stream connects on
+>   the first non-empty save or when loading an existing session — never
+>   eagerly on load for a freshly generated id — so an empty, never-edited
+>   session started fresh in this browser is still never materialised
+>   server-side (the step-4 behaviour under D13). **Refined (R1 fix, §8.1):** a
+>   join by explicit id — a `?session=` share URL or the drawer's "Connect to
+>   session" — now connects the op stream eagerly even when the session does
+>   not exist server-side yet, because opening the stream is itself what
+>   materialises it (`get_or_create` in the stream endpoint); staying lazy
+>   there left the joining collaborator permanently offline (no presence, no
+>   ops) until a manual reload.
 > - **Full-state PUT retired from the frontend.** `putSessionState` is removed;
 >   `api.js` gains `getSessionStreamUrl`, `getSessionOpsUrl`. The `PUT
 >   /api/sessions/{id}/state` endpoint itself is left in place for removal in
@@ -548,6 +559,13 @@ steps 6–8.
 >   materialises lazily under D13) is not a drop-in replacement for reaching an
 >   empty, never-edited session. Only the redundant *state upload* was removed, not
 >   the push transport. Migrating pushes onto the hub is a possible later cleanup.
+>   **Fixed (R5 fix, §8.1):** the sync client now applies the hub's broadcast
+>   `command` events, and the browser stops opening the legacy stream once the
+>   op stream has connected for the session — so a session with two or more
+>   collaborators has every command reach everyone, not just whichever browser
+>   wins the legacy channel's single queue. The legacy stream is still opened
+>   (and still the only delivery path) before the op stream first connects, so
+>   an unmaterialised session can still receive MCP pushes.
 > - **Op-batch body cap (hardening + rate-limit tuning).** `apply_ops` now bounds a
 >   batch by **size** (≤ 256 KB → `413`) as well as op **count** (≤ 500), catching a
 >   single oversized op such as a `layout_applied` with tens of thousands of
@@ -586,6 +604,13 @@ steps 6–8.
 - **D13** *(2026-07-04)* No automatic session retention/eviction in v1 — sessions
   persist until explicitly deleted, since some sessions may evolve into de-facto
   saved visualizations. Revisit together with session/SavedView convergence (3.2).
+- **D14** *(2026-07-06)* The empty-canvas persistence guard (R4, §8.1) applies
+  **only** while a session has never materialised server-side (no connected
+  sync client): a fresh, never-edited session must not register (D13). Once a
+  sync client is connected for the session, an intentionally empty state (last
+  node removed, double-Escape clear, an MCP `clear_visualization`) is real
+  content and must sync/save like any other state — it must not be resurrected
+  from the last non-empty snapshot on reload, and it must reach collaborators.
 
 ### Open (owner: project owner — resolve before the step that needs them)
 
@@ -616,7 +641,7 @@ branch. Ordered by severity within each group. Effort uses the
 
 ### 8.1 Functional bugs
 
-- **R1 — Joining a share URL for a not-yet-materialised session never connects
+- **Fixed** (`claude/multi-user-sessions-r1-r6-nuku0m`) **R1 — Joining a share URL for a not-yet-materialised session never connects
   the op stream.** `loadSessionFromServer` treats a 404 as "start empty and do
   not connect" and nothing ever retries, so a second user who opens
   `?session=<id>` before the first user's first save stays permanently offline
@@ -630,7 +655,7 @@ branch. Ordered by severity within each group. Effort uses the
   explicit share URL should connect eagerly — lazy connect need only apply to
   locally generated ids. **File(s):** `frontend/web/src/App.jsx:1212-1229`
   (`loadSessionFromServer` catch), `504-512` (bootstrap). **Effort:** S–M.
-- **R2 — Slow-consumer resync is dead code.** `InProcessEventBus.publish` sets
+- **Fixed** (`claude/multi-user-sessions-r1-r6-nuku0m`) **R2 — Slow-consumer resync is dead code.** `InProcessEventBus.publish` sets
   `Subscription.needs_resync` and enqueues a `{"type": "resync"}` sentinel
   (`backend/core/session_hub.py:98-105`), but `needs_resync` is read nowhere,
   the stream endpoint forwards the sentinel verbatim, and
@@ -641,7 +666,7 @@ branch. Ordered by severity within each group. Effort uses the
   trigger. **File(s):** `backend/core/session_hub.py:101`,
   `backend/service/rest_api.py` (stream generator),
   `frontend/web/src/services/sessionSyncClient.js:637-639`. **Effort:** S.
-- **R3 — `annotation_created` is not idempotent server-side.** The op appends
+- **Fixed** (`claude/multi-user-sessions-r1-r6-nuku0m`) **R3 — `annotation_created` is not idempotent server-side.** The op appends
   without checking for an existing id (`backend/core/session_store.py:477-486`).
   A lost POST response (server applied, network dropped the reply) makes the
   client requeue and resend the batch, producing two annotations with the same
@@ -649,7 +674,7 @@ branch. Ordered by severity within each group. Effort uses the
   `annotation_deleted` removes both. Treat a create with an existing id as an
   update (upsert) to make client retries safe. **File(s):**
   `backend/core/session_store.py:477`. **Effort:** XS.
-- **R4 — Empty canvas states are never persisted or propagated.**
+- **Fixed** (`claude/multi-user-sessions-r1-r6-nuku0m`, D14) **R4 — Empty canvas states are never persisted or propagated.**
   `persistSessionSnapshot` returns early when the store has zero nodes
   (`frontend/web/src/App.jsx:905`), so removing the *last* node, the
   double-Escape clear, and an MCP `clear_visualization` are (a) never sent to
@@ -661,7 +686,7 @@ branch. Ordered by severity within each group. Effort uses the
   decision (e.g. keep the guard only while `syncRef` is unconnected).
   **File(s):** `frontend/web/src/App.jsx:900-934`. **Effort:** S (plus
   decision).
-- **R5 — MCP pushes do not reach all collaborators (design §3.8).** The legacy
+- **Fixed** (`claude/multi-user-sessions-r1-r6-nuku0m`) **R5 — MCP pushes do not reach all collaborators (design §3.8).** The legacy
   `/sessions/{id}/stream` channel is single-consumer: with two browsers in one
   session, each pushed command is consumed by exactly one of the two SSE
   connections, nondeterministically. The hub mirror
@@ -676,7 +701,7 @@ branch. Ordered by severity within each group. Effort uses the
   `frontend/web/src/services/sessionSyncClient.js`, `frontend/web/src/App.jsx`
   (legacy EventSource effect), `backend/service/mcp_tools.py:631-661`.
   **Effort:** M.
-- **R6 — MCP `visible_node_ids` now includes hidden nodes.**
+- **Fixed** (`claude/multi-user-sessions-r1-r6-nuku0m`) **R6 — MCP `visible_node_ids` now includes hidden nodes.**
   `_session_view_state` (`backend/service/mcp_tools.py:43-58`) reports all
   `node_refs` without subtracting `hidden_node_ids`; the browser-uploaded state
   it replaced reported only visible nodes. `get_visualization_session_state`

@@ -92,6 +92,12 @@ class Session:
     updated_at: str = field(default_factory=_now_iso)
     seq: int = 0
     state: Dict[str, Any] = field(default_factory=_empty_state)
+    # Ephemeral (not persisted, not part of to_dict/from_dict): recently
+    # deleted annotation ids, so a create-op retry for an id another
+    # collaborator has since deleted is dropped instead of resurrecting it —
+    # matching annotation_updated's existing "update on deleted is dropped"
+    # rule. Bounded so a long-lived session's memory footprint stays flat.
+    _deleted_annotation_ids: Deque[str] = field(default_factory=lambda: deque(maxlen=200))
 
     def to_dict(self) -> Dict[str, Any]:
         return {
@@ -476,14 +482,33 @@ class SessionStore:
             state["hidden_edge_ids"] = _remove_all(state["hidden_edge_ids"], _require_id_list(op, "edge_ids"))
         elif op_type == "annotation_created":
             annotation = dict(_validate_annotation(op.get("annotation"), require_id=False))
-            if len(state["annotations"]) >= self._max_annotations:
-                raise OpError("annotation limit reached for this session")
-            if not isinstance(annotation.get("id"), str):
-                annotation["id"] = secrets.token_hex(8)
-            annotation.setdefault("created_by", op.get("client_id"))
-            annotation["updated_at"] = _now_iso()
-            state["annotations"].append(annotation)
-            applied["annotation"] = annotation
+            incoming_id = annotation.get("id") if isinstance(annotation.get("id"), str) else None
+            if incoming_id is not None and incoming_id in session._deleted_annotation_ids:
+                # A create-op retry for an id another collaborator has since
+                # deleted must not resurrect it — same rule as an update
+                # arriving after the delete, just below.
+                return None
+            existing = (
+                next((a for a in state["annotations"] if a.get("id") == incoming_id), None)
+                if incoming_id is not None
+                else None
+            )
+            if existing is not None:
+                # A retried create (lost response, resent batch) carries the same
+                # client-assigned id as the one already applied: upsert so the
+                # retry is idempotent instead of appending a duplicate.
+                existing.update(annotation)
+                existing["updated_at"] = _now_iso()
+                applied["annotation"] = existing
+            else:
+                if len(state["annotations"]) >= self._max_annotations:
+                    raise OpError("annotation limit reached for this session")
+                if not isinstance(annotation.get("id"), str):
+                    annotation["id"] = secrets.token_hex(8)
+                annotation.setdefault("created_by", op.get("client_id"))
+                annotation["updated_at"] = _now_iso()
+                state["annotations"].append(annotation)
+                applied["annotation"] = annotation
         elif op_type == "annotation_updated":
             incoming = _validate_annotation(op.get("annotation"), require_id=True)
             target = next((a for a in state["annotations"] if a.get("id") == incoming["id"]), None)
@@ -497,6 +522,7 @@ class SessionStore:
             if not isinstance(ann_id, str):
                 raise OpError("annotation_deleted requires a string 'annotation_id'")
             state["annotations"] = [a for a in state["annotations"] if a.get("id") != ann_id]
+            session._deleted_annotation_ids.append(ann_id)
             applied["annotation_id"] = ann_id
         elif op_type == "group_membership_changed":
             group_id = op.get("group_id")

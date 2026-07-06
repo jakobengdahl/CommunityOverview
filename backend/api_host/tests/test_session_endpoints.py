@@ -143,6 +143,27 @@ class TestGetVisualizationSessionState:
         assert data["node_count"] == 2
         assert data["selected_node_ids"] == ["node-1"]
 
+    def test_hidden_nodes_are_excluded_from_visible_node_ids(self, test_app: TestClient):
+        session_id = "2222-4444"
+        _open_browser(test_app, session_id)
+        _add_nodes(test_app, session_id, ["node-1", "node-2"])
+        test_app.post(
+            f"/api/sessions/{session_id}/ops",
+            json={"client_id": "setup", "ops": [{"op": "nodes_hidden", "node_ids": ["node-2"]}]},
+        )
+
+        response = test_app.post(
+            "/execute_tool",
+            json={
+                "tool_name": "get_visualization_session_state",
+                "arguments": {"session_id": session_id},
+            },
+        )
+        assert response.status_code == 200
+        data = response.json()
+        assert data["visible_node_ids"] == ["node-1"]
+        assert data["node_count"] == 1
+
 
 class TestClearVisualization:
     """MCP tool: clear_visualization.

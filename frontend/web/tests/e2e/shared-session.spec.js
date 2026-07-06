@@ -23,13 +23,16 @@ const randomSessionId = () => {
 
 const nodeCount = (page) => page.locator('.react-flow__node').count();
 
+// The search bar has no submit button — typing (debounced, 2+ chars) opens a
+// result dropdown and Enter selects the highlighted (first) result.
 async function search(page, query) {
   await page.locator('input[placeholder*="Search"]').first().fill(query);
-  await page.locator('button:has-text("Search")').first().click();
+  await expect(page.locator('.floating-search-dropdown').first()).toBeVisible({ timeout: 15000 });
+  await page.locator('input[placeholder*="Search"]').first().press('Enter');
 }
 
 // Add at least one node to the canvas via search; returns the resulting count.
-async function seedNodes(page, query = 'a') {
+async function seedNodes(page, query = 'an') {
   await search(page, query);
   await expect(page.locator('.react-flow__node').first()).toBeVisible({ timeout: 15000 });
   return nodeCount(page);
