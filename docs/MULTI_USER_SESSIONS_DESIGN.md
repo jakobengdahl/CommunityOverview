@@ -5,7 +5,9 @@ frontend cutover (server-backed session lifecycle), the step-5 annotation
 kinds (note, label, arrow), the step-6 realtime op emit/apply loop, the
 step-7 presence UI + selection claims, and the step-8 hardening (transitional
 shims removed, op-batch body cap, multi-client e2e, docs sweep) are all
-implemented.
+implemented. A post-implementation code review (2026-07-06) found the issues
+listed in §8 — fix them in follow-up sessions before considering the feature
+hardened.
 **Scope:** Open-source core only. SaaS-specific extensions (multi-instance scale-out,
 account-bound session history, workspace ACLs) are designed in the private SaaS
 repository and are explicitly out of scope here (see "Out of scope" below).
@@ -597,3 +599,171 @@ None currently — O1–O5 were resolved 2026-07-04 and recorded as D9–D13 abo
 - `frontend/web/src/i18n/en.json` + `sv.json`: every step touching UI.
 - `packages/ui-graph-canvas`: all user-visible text via props with English defaults.
 - `docs/DEPLOYMENT_AND_CONCURRENCY_ANALYSIS.md`: step 8.
+
+## 8. Code review findings (2026-07-06)
+
+Full review of every change landed for this feature (PRs #194–#200, commits
+`bdf30b7..58d161a`). Verified during the review: full i18n key parity between
+`en.json` and `sv.json` (and no missing keys used from the touched components);
+all frontend unit tests green (155 web + 47 canvas package); the removed state
+shims (`PUT /api/sessions/{id}/state`, `PATCH /sessions/{id}/state`) are gone
+from both code and the `DEVELOPMENT.md` endpoint table; the auth-middleware
+stream bypass matches §3.9 alternative A and is covered by tests.
+
+The issues below are **to be fixed in follow-up sessions**, not in the review
+branch. Ordered by severity within each group. Effort uses the
+`SMALL_FIXES.md` scale (XS / S / M).
+
+### 8.1 Functional bugs
+
+- **R1 — Joining a share URL for a not-yet-materialised session never connects
+  the op stream.** `loadSessionFromServer` treats a 404 as "start empty and do
+  not connect" and nothing ever retries, so a second user who opens
+  `?session=<id>` before the first user's first save stays permanently offline
+  (no presence, no ops) until a manual reload — contradicting §3.6 URL sharing.
+  Consequence: the Playwright spec's first scenario
+  (`frontend/web/tests/e2e/shared-session.spec.js` asserts presence dots
+  *before* any content exists) cannot pass against the current lazy-connect
+  behaviour, which suggests the spec was not re-run after the lazy-connect
+  refinement. Fix direction: connecting the stream is what materialises a
+  session server-side (`get_or_create` in the stream endpoint), so joining an
+  explicit share URL should connect eagerly — lazy connect need only apply to
+  locally generated ids. **File(s):** `frontend/web/src/App.jsx:1212-1229`
+  (`loadSessionFromServer` catch), `504-512` (bootstrap). **Effort:** S–M.
+- **R2 — Slow-consumer resync is dead code.** `InProcessEventBus.publish` sets
+  `Subscription.needs_resync` and enqueues a `{"type": "resync"}` sentinel
+  (`backend/core/session_hub.py:98-105`), but `needs_resync` is read nowhere,
+  the stream endpoint forwards the sentinel verbatim, and
+  `sessionSyncClient._handleEvent` ignores unknown types — so a client whose
+  queue overflowed (1000 events) silently diverges forever. Either the stream
+  handler should translate the sentinel into a fresh `catch_up(session_id,
+  None)` snapshot, or the client should treat `resync` as an `onResync`
+  trigger. **File(s):** `backend/core/session_hub.py:101`,
+  `backend/service/rest_api.py` (stream generator),
+  `frontend/web/src/services/sessionSyncClient.js:637-639`. **Effort:** S.
+- **R3 — `annotation_created` is not idempotent server-side.** The op appends
+  without checking for an existing id (`backend/core/session_store.py:477-486`).
+  A lost POST response (server applied, network dropped the reply) makes the
+  client requeue and resend the batch, producing two annotations with the same
+  id; `annotation_updated` then only updates the first match while
+  `annotation_deleted` removes both. Treat a create with an existing id as an
+  update (upsert) to make client retries safe. **File(s):**
+  `backend/core/session_store.py:477`. **Effort:** XS.
+- **R4 — Empty canvas states are never persisted or propagated.**
+  `persistSessionSnapshot` returns early when the store has zero nodes
+  (`frontend/web/src/App.jsx:905`), so removing the *last* node, the
+  double-Escape clear, and an MCP `clear_visualization` are (a) never sent to
+  collaborators and (b) never saved — the content resurrects on reload and
+  other clients keep diverged state. The guard's rationale (don't materialise
+  unused sessions, don't lose content to an accidental clear) only applies to
+  *never-materialised* sessions; once a session exists server-side, an
+  intentional empty state must sync like any other. Needs a small design
+  decision (e.g. keep the guard only while `syncRef` is unconnected).
+  **File(s):** `frontend/web/src/App.jsx:900-934`. **Effort:** S (plus
+  decision).
+- **R5 — MCP pushes do not reach all collaborators (design §3.8).** The legacy
+  `/sessions/{id}/stream` channel is single-consumer: with two browsers in one
+  session, each pushed command is consumed by exactly one of the two SSE
+  connections, nondeterministically. The hub mirror
+  (`backend/service/mcp_tools.py:658`) does broadcast to everyone, but
+  `sessionSyncClient` explicitly ignores `command` events
+  (`sessionSyncClient.js:637-639`, "handled by the legacy stream"). Node
+  additions still converge indirectly (the receiving client's autosave emits
+  ops), but `clear_visualization` / `load_visualization` leave clients
+  diverged (compounded by R4). Fix direction: have the sync client apply
+  `command` events (dedup against the legacy channel, or stop opening the
+  legacy stream once the op stream is connected). **File(s):**
+  `frontend/web/src/services/sessionSyncClient.js`, `frontend/web/src/App.jsx`
+  (legacy EventSource effect), `backend/service/mcp_tools.py:631-661`.
+  **Effort:** M.
+- **R6 — MCP `visible_node_ids` now includes hidden nodes.**
+  `_session_view_state` (`backend/service/mcp_tools.py:43-58`) reports all
+  `node_refs` without subtracting `hidden_node_ids`; the browser-uploaded state
+  it replaced reported only visible nodes. `get_visualization_session_state`
+  and `connect_to_visualization_session` therefore overcount. **File(s):**
+  `backend/service/mcp_tools.py:43`. **Effort:** XS.
+
+### 8.2 Smaller correctness / UX gaps
+
+- **R7 — Renaming an unmaterialised session loses the name.**
+  `handleRenameSession` PATCHes the server and swallows the 404
+  (`App.jsx:1312-1318`); when the session later materialises (name = null) the
+  drawer's name-refresh overwrites the locally kept name with null
+  (`App.jsx:516-531` writes `s.name` unconditionally). Either materialise on
+  rename (get-or-create semantics for PATCH) or skip null server names in the
+  refresh. **Effort:** S.
+- **R8 — Renames are invisible to catch-up.** `SessionManager.rename_session`
+  (`session_manager.py:141`) publishes a live event but does not bump `seq` or
+  enter the ring buffer, so a client that reconnects through the `catch_up`
+  (ops) path misses a rename that happened while it was away. Routing the REST
+  rename through `apply_ops` (`session_renamed` is already a STATE_OP — today
+  unreachable, no client emits it) would fix both this and the op's dead-path
+  status. **Effort:** S.
+- **R9 — Terminally rejected ops are dropped silently.** The sync client
+  supports an `onDropped` handler, but `App.jsx` does not wire it
+  (`App.jsx:1235-1256`), so a 400/413 drop (annotation limit, oversized
+  `layout_applied`) leaves canvas state that silently never persists. The
+  client also never splits an oversized queue proactively against the server's
+  500-op/256 KB batch caps — it only falls back to one-at-a-time after a
+  rejection. Wire `onDropped` to a notification + resync, and consider
+  chunking flushes. **File(s):** `frontend/web/src/App.jsx`,
+  `frontend/web/src/services/sessionSyncClient.js:513-558`. **Effort:** S.
+- **R10 — Delete/rename race with in-flight op batches.**
+  `delete_session` (`session_manager.py:150`) mutates the store without taking
+  the per-session asyncio lock and pops the lock object; an in-flight
+  `apply_ops` that already fetched the `Session` can `persist()` after the
+  delete and resurrect the session file on disk. Similarly a concurrent REST
+  rename during a failing batch is reverted by the batch's rollback
+  (`saved_name`). Take the per-session lock in `delete_session` /
+  `rename_session`. **Effort:** S.
+- **R11 — Network errors treated like "session does not exist".**
+  `loadSessionFromServer`'s catch clears the canvas and resets the baseline to
+  empty for *any* failure; after a transient backend blip on an existing
+  session, subsequent edits diff against an empty baseline and union stale +
+  new state server-side. Distinguish 404 from other errors (retry/back off
+  instead of clearing). **File(s):** `frontend/web/src/App.jsx:1220-1228`.
+  **Effort:** S.
+- **R12 — Group `description` is silently lost.** The canvas keeps a
+  description on group nodes, but `groupsToAnnotations` drops it, and both the
+  restore path and remote upserts hardcode `description: ''`
+  (`App.jsx:65-79`, `GraphCanvas.jsx:878,949`). Under the old localStorage
+  snapshots (full node copies) it survived reloads. Carry it through the group
+  annotation payload (the server model is schemaless here) or remove the field
+  from the canvas. **Effort:** XS.
+
+### 8.3 Hardening / cleanup
+
+- **R13 — `max_sessions` cap is in-memory only.** `SessionStore.session_count`
+  counts the in-memory map, which starts empty on every restart while session
+  files persist (D13: no eviction), so the unauthenticated stream endpoint
+  (auth-bypassed by design) can grow `data/sessions/` beyond the cap across
+  restarts. Also `list_meta` re-reads every session file on each
+  `GET /api/sessions` / drawer open. Count the backend's files (cache the
+  count) and consider a cheap meta cache. **File(s):**
+  `backend/core/session_store.py:396-430`. **Effort:** S.
+- **R14 — `manual_edges` is a dead session-state field.** Present in the
+  `Session` model (§3.1) but no op writes it, the sync client's mirror ignores
+  it, and the full-state PUT that could have populated it was removed in step
+  8 — manually drawn edges persist in the graph itself since PR #186. Remove
+  the field from the model and §3.1, or wire ops for session-local edges.
+  **File(s):** `backend/core/session_store.py:77`. **Effort:** XS.
+- **R15 — Duplicate/stale event delivery is tolerated but unguarded.** Events
+  published between the stream's `connect` (subscribe) and the `catch_up`
+  computation are delivered twice (once inside the snapshot/catch-up, once as
+  queued events), and a late POST response can move `_seq` backwards past a
+  newer broadcast seq. Everything is currently re-applied idempotently so this
+  is benign, but an explicit `if (data.seq <= this._seq) return` guard on
+  sequenced ops in `_handleEvent` would make the invariant robust instead of
+  incidental. **File(s):**
+  `frontend/web/src/services/sessionSyncClient.js:596-611`. **Effort:** XS.
+
+### 8.4 Already tracked elsewhere
+
+Related issues found (or re-confirmed) during this review that were already
+logged as open entries in `SMALL_FIXES.md` — not repeated above: the MCP hub
+mirror's missing cross-thread delivery (2026-07-04), presence/claims clobbering
+for two concurrent connections with one `client_id` (2026-07-04 — also hit by
+two *tabs* sharing the localStorage `client_id`, not just fast reconnects),
+the synchronous fsync on the event loop (2026-07-04), the post-parse op-batch
+byte cap (2026-07-06), the remote-added node (0,0) race (2026-07-05), and the
+teardown flush in `_forceSingle` mode (2026-07-05).
