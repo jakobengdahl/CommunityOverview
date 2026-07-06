@@ -228,6 +228,17 @@ class TestResyncTranslation:
         event = {"type": "op", "op": {"op": "nodes_added", "node_ids": ["a"]}, "seq": 1}
         assert _resolve_stream_event(event, mgr, s.id) == event
 
+    async def test_resync_for_a_deleted_session_raises_session_not_found(self):
+        # A session can be deleted in the narrow window between its
+        # subscriber's queue overflowing and the resync translation running;
+        # the stream endpoint's event_generator must catch this (rest_api.py)
+        # rather than let it crash the SSE response.
+        mgr = _manager()
+        s = mgr.create_session()
+        mgr.delete_session(s.id)
+        with pytest.raises(SessionNotFound):
+            _resolve_stream_event({"type": "resync"}, mgr, s.id)
+
 
 class TestLifecycle:
     async def test_connect_broadcasts_presence(self):

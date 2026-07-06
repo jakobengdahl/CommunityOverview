@@ -569,7 +569,18 @@ def _register_session_endpoints(router: APIRouter, service: GraphService, sessio
                     except asyncio.TimeoutError:
                         yield ": ping\n\n"
                         continue
-                    event = _resolve_stream_event(event, session_manager, session_id)
+                    try:
+                        event = _resolve_stream_event(event, session_manager, session_id)
+                    except SessionNotFound:
+                        # The session was deleted in the narrow window between
+                        # this subscriber's queue overflowing (which may have
+                        # drained an already-queued session_deleted event
+                        # too, per session_hub.py's drain-on-overflow) and the
+                        # resync translation running catch_up against a store
+                        # entry that no longer exists. Give the client the
+                        # notice it would otherwise have missed.
+                        yield f"data: {json.dumps({'type': 'session_deleted', 'deleted_by': None})}\n\n"
+                        break
                     yield f"data: {json.dumps(event)}\n\n"
             except asyncio.CancelledError:
                 pass
