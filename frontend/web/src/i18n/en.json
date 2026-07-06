@@ -162,6 +162,9 @@
     "you": "You",
     "collaborators": "People in this session"
   },
+  "header": {
+    "title": "Community Graph View"
+  },
   "experts": {
     "title": "Expert Agents",
     "toggle_panel": "Add or remove expert agents"

@@ -311,6 +311,29 @@ describe('SessionSyncClient', () => {
     expect(onDropped.mock.calls.at(-1)[0][0].op).toBe('annotation_created');
   });
 
+  it('teardown flush drains every queued op in force-single mode (close() loses none)', async () => {
+    // First POST (the multi-op batch) is terminally rejected, flipping the client
+    // into force-single recovery with the whole batch requeued.
+    const fetchImpl = makeFetch([{ ok: false, status: 400 }]);
+    // Long debounce so no automatic re-flush races the explicit teardown flush.
+    const { client } = makeClient({ fetchImpl, flushIntervalMs: 60_000 });
+    client.connect();
+    FakeEventSource.instances[0].emit({ type: 'snapshot', seq: 0, session: { state: {} } });
+    client.syncState({ node_refs: ['a'], hidden_node_ids: ['h'] }); // 2 ops in one batch
+    await client.flush();
+    expect(fetchImpl.calls).toHaveLength(1); // rejected batch, both ops requeued
+
+    client.flush();
+    client.close();
+    await new Promise(r => setTimeout(r, 10));
+    // Both requeued ops left as their own single-op batches despite close().
+    const singles = fetchImpl.calls.slice(1).map(c => c.body.ops);
+    expect(singles).toEqual([
+      [{ op: 'nodes_added', node_ids: ['a'] }],
+      [{ op: 'nodes_hidden', node_ids: ['h'] }],
+    ]);
+  });
+
   it('dispatches session lifecycle events to handlers', () => {
     const onSessionRenamed = vi.fn();
     const onSessionDeleted = vi.fn();

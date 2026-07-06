@@ -69,3 +69,34 @@ describe('GroupNode host notification (design step 6)', () => {
     expect(notifyChange).toHaveBeenCalledTimes(1);
   });
 });
+
+describe('GroupNode interaction fixes', () => {
+  beforeEach(() => vi.clearAllMocks());
+
+  it('label input opts out of canvas dragging (nodrag)', () => {
+    renderGroup();
+    fireEvent.doubleClick(screen.getByText('G'));
+    expect(screen.getByRole('textbox').className).toContain('nodrag');
+  });
+
+  it('closes the context menu when keyboard focus lands outside it (focusin)', async () => {
+    renderGroup();
+    fireEvent.contextMenu(screen.getByText('G'));
+    expect(document.querySelector('.graph-group-context-menu')).not.toBeNull();
+    // Dismiss listeners attach on a 0 ms timer so the opening event can't self-close.
+    await new Promise(r => setTimeout(r, 0));
+    const outside = document.createElement('input');
+    document.body.appendChild(outside);
+    fireEvent.focusIn(outside);
+    expect(document.querySelector('.graph-group-context-menu')).toBeNull();
+    outside.remove();
+  });
+
+  it('keeps the context menu open when focus moves inside it', async () => {
+    renderGroup();
+    fireEvent.contextMenu(screen.getByText('G'));
+    await new Promise(r => setTimeout(r, 0));
+    fireEvent.focusIn(screen.getByRole('button', { name: /delete group/i }));
+    expect(document.querySelector('.graph-group-context-menu')).not.toBeNull();
+  });
+});
