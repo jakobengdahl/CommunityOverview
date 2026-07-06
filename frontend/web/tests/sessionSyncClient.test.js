@@ -197,6 +197,16 @@ describe('SessionSyncClient', () => {
     expect(client.seq).toBe(5);
   });
 
+  it('forwards command events (MCP pushes broadcast via the hub, design R5)', async () => {
+    const onCommand = vi.fn();
+    const { client } = makeClient({ handlers: { onCommand } });
+    client.connect();
+    const es = FakeEventSource.instances[0];
+    const command = { type: 'tool_result', tool: 'search_graph', result: { action: 'add_to_visualization' } };
+    es.emit({ type: 'command', command });
+    expect(onCommand).toHaveBeenCalledWith(command);
+  });
+
   it('forwards remote ops but suppresses echoes of its own client', async () => {
     const onRemoteOps = vi.fn();
     const { client } = makeClient({ handlers: { onRemoteOps } });

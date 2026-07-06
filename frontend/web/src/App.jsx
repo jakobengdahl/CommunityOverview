@@ -258,6 +258,12 @@ function App() {
   // Presence roster + remote selection markers for the active session (step 7).
   const [roster, setRoster] = useState([]);
   const [remoteSelections, setRemoteSelections] = useState({});
+  // Whether the op-protocol stream has connected at least once for the active
+  // session (first snapshot delivered). Once true, MCP commands arrive via the
+  // op stream's broadcast `command` events, so the single-consumer legacy push
+  // stream is no longer opened for this session (design §3.8, R5).
+  const [opStreamReady, setOpStreamReady] = useState(false);
+  const lastAppliedCommandRef = useRef(null);
 
   // Lazily create + connect the sync client for a session. Called on the first
   // non-empty save and when loading an existing session — never eagerly on load,
@@ -278,13 +284,14 @@ function App() {
       streamUrl: api.getSessionStreamUrl(targetId),
       opsUrl: api.getSessionOpsUrl(targetId),
       handlers: {
-        onReady: (...a) => syncHandlersRef.current.onReady?.(...a),
+        onReady: (...a) => { setOpStreamReady(true); syncHandlersRef.current.onReady?.(...a); },
         onResync: (...a) => syncHandlersRef.current.onResync?.(...a),
         onRemoteOps: (...a) => syncHandlersRef.current.onRemoteOps?.(...a),
         onPresence: (...a) => syncHandlersRef.current.onPresence?.(...a),
         onSelections: (...a) => syncHandlersRef.current.onSelections?.(...a),
         onSessionRenamed: (...a) => syncHandlersRef.current.onSessionRenamed?.(...a),
         onSessionDeleted: (...a) => syncHandlersRef.current.onSessionDeleted?.(...a),
+        onCommand: (...a) => syncHandlersRef.current.onCommand?.(...a),
       },
     });
     syncRef.current = client;
@@ -447,46 +454,67 @@ function App() {
     return () => document.removeEventListener('keydown', handleKeyDown, true);
   }, [clearVisualization]);
 
-  // ── Visualization session: SSE connection ──────────────────────────────
-  // Opens a persistent SSE stream so external AI clients can push
-  // visualization commands to this browser window via MCP.
+  // Apply an MCP tool-result command to the canvas. Shared by the legacy push
+  // stream and the op-protocol stream's `command` events (design §3.8, R5) so
+  // an AI agent's pushes look identical regardless of which channel delivered
+  // them. Deduped against the last applied command: during the handover from
+  // the legacy stream to the op stream (or a brief overlap window) the same
+  // MCP push can be broadcast on both, and re-applying an identical command is
+  // a harmless no-op (e.g. a second `clear_visualization`) but is skipped here
+  // to avoid doing the work twice.
+  const applyToolResultCommand = useCallback((toolResult) => {
+    if (!toolResult) return;
+    const signature = JSON.stringify(toolResult);
+    if (lastAppliedCommandRef.current === signature) return;
+    lastAppliedCommandRef.current = signature;
+
+    const { nodes: currentNodes, edges: currentEdges,
+            addNodesToVisualization: addNodes,
+            updateVisualization: updateViz,
+            clearVisualization: clearViz } = useGraphStore.getState();
+
+    const filtered = (toolResult.nodes || []).filter(n =>
+      n.type !== 'Community' && n.data?.type !== 'Community'
+    );
+
+    if (toolResult.action === 'add_to_visualization') {
+      if (filtered.length > 0) {
+        const allEdges = [...currentEdges, ...(toolResult.edges || [])];
+        const vp = latestViewport.current;
+        const viewportCenter = vp ? {
+          x: (window.innerWidth / 2 - vp.x) / vp.zoom,
+          y: (window.innerHeight / 2 - vp.y) / vp.zoom,
+        } : null;
+        const positioned = positionNewNodes(filtered, currentNodes, allEdges, { viewportCenter });
+        addNodes(positioned, toolResult.edges || []);
+      }
+    } else if (toolResult.action === 'load_visualization' || toolResult.action === 'clear_visualization') {
+      clearViz();
+      if (filtered.length > 0) {
+        updateViz(filtered, toolResult.edges || []);
+      }
+    } else if (filtered.length > 0) {
+      updateViz(filtered, toolResult.edges || []);
+    }
+  }, []);
+
+  // ── Visualization session: legacy SSE connection ────────────────────────
+  // Opens the single-consumer push stream so external AI clients can push
+  // visualization commands to this browser window via MCP, until the
+  // op-protocol stream takes over. Once the op stream has connected for this
+  // session (`opStreamReady`), its broadcast `command` events replace this
+  // channel — reaching every collaborator, not just whichever browser wins the
+  // legacy stream's single queue (design §3.8, R5) — so this stream is closed
+  // and not reopened while that holds.
   useEffect(() => {
+    if (opStreamReady) return undefined;
     const evtSource = new EventSource(api.getVisualizationStreamUrl(sessionId));
     evtSource.onmessage = (e) => {
       try {
         const cmd = JSON.parse(e.data);
         if (cmd.type === 'ping' || cmd.type === 'connected') return;
         if (cmd.type !== 'tool_result' || !cmd.result) return;
-
-        const toolResult = cmd.result;
-        const { nodes: currentNodes, edges: currentEdges,
-                addNodesToVisualization: addNodes,
-                updateVisualization: updateViz,
-                clearVisualization: clearViz } = useGraphStore.getState();
-
-        const filtered = (toolResult.nodes || []).filter(n =>
-          n.type !== 'Community' && n.data?.type !== 'Community'
-        );
-
-        if (toolResult.action === 'add_to_visualization') {
-          if (filtered.length > 0) {
-            const allEdges = [...currentEdges, ...(toolResult.edges || [])];
-            const vp = latestViewport.current;
-            const viewportCenter = vp ? {
-              x: (window.innerWidth / 2 - vp.x) / vp.zoom,
-              y: (window.innerHeight / 2 - vp.y) / vp.zoom,
-            } : null;
-            const positioned = positionNewNodes(filtered, currentNodes, allEdges, { viewportCenter });
-            addNodes(positioned, toolResult.edges || []);
-          }
-        } else if (toolResult.action === 'load_visualization' || toolResult.action === 'clear_visualization') {
-          clearViz();
-          if (filtered.length > 0) {
-            updateViz(filtered, toolResult.edges || []);
-          }
-        } else if (filtered.length > 0) {
-          updateViz(filtered, toolResult.edges || []);
-        }
+        applyToolResultCommand(cmd.result);
       } catch (err) {
         console.error('[Session SSE] parse error:', err);
       }
@@ -495,7 +523,7 @@ function App() {
       // Browser auto-reconnects on SSE errors; no manual retry needed.
     };
     return () => evtSource.close();
-  }, [sessionId]); // eslint-disable-line react-hooks/exhaustive-deps
+  }, [sessionId, opStreamReady, applyToolResultCommand]);
 
   // ── Session bootstrap (once) ────────────────────────────────────────────
   // Reflect the initial session id in the URL and, when it came from a
@@ -506,7 +534,7 @@ function App() {
     const urlSession = _urlParams.get('session');
     if (sessionStore.isValidSessionId(urlSession)) {
       sessionStore.touchSession(urlSession);
-      loadSessionFromServer(urlSession);
+      loadSessionFromServer(urlSession, { eagerConnect: true });
     }
     setSessionsVersion(v => v + 1);
   }, []); // eslint-disable-line react-hooks/exhaustive-deps
@@ -899,17 +927,21 @@ function App() {
   // fresh/shared id needs no eager POST.
   const persistSessionSnapshot = useCallback((viewData) => {
     const state = useGraphStore.getState();
-    // Never persist an empty canvas: it would register unused sessions, and
-    // for existing sessions it would overwrite stored content after an
-    // (often accidental) clear — the last non-empty state is kept instead.
-    if (state.nodes.length === 0) return;
+    const targetId = sessionId;
+    // Suppress only while the session has never materialised server-side (no
+    // connected sync client): an empty, never-edited session must not
+    // register (D13). Once a sync client is connected the session already
+    // exists server-side, so an intentional empty state (last node removed,
+    // double-Escape clear, an MCP clear_visualization) is real content and
+    // must sync/save like any other state (D14 — see design §8.1 R4).
+    const materialized = syncRef.current?.sessionId === targetId && syncRef.current.connected;
+    if (state.nodes.length === 0 && !materialized) return;
     const positions = {};
     const parentIds = {};
     (viewData?.nodes || []).forEach(n => {
       if (n.position) positions[n.id] = n.position;
       if (n.parentId) parentIds[n.id] = n.parentId;
     });
-    const targetId = sessionId;
     // Annotations carry group boxes plus the free-floating overlays (notes,
     // labels, arrows) the canvas collects in viewData.annotations. All kinds
     // share one server-side annotation list (design 3.1).
@@ -1209,7 +1241,7 @@ function App() {
   // Expose the latest applyServerSession to resyncFromServer (defined earlier).
   applyServerSessionRef.current = applyServerSession;
 
-  const loadSessionFromServer = useCallback(async (targetId) => {
+  const loadSessionFromServer = useCallback(async (targetId, { eagerConnect = false } = {}) => {
     try {
       const payload = await api.getSession(targetId, { resolve: true });
       applyServerSession(payload);
@@ -1218,11 +1250,18 @@ function App() {
       const resolvedIds = (payload?.resolved?.nodes || []).map(n => n.id);
       ensureSyncConnected(targetId)?.setBaseline(serverStateToMirror(payload?.state, resolvedIds));
     } catch {
-      // Session does not exist server-side yet (new / not-yet-saved share URL),
-      // or the backend is unreachable — start from an empty canvas. Do not
-      // connect: an empty, never-edited session stays unmaterialised.
+      // Session does not exist server-side yet — new / not-yet-saved share URL,
+      // or the backend is unreachable. `eagerConnect` distinguishes a join by
+      // explicit id (share URL, "Connect to session") from a locally generated
+      // id (design §3.6): joining a specific session must connect regardless of
+      // the 404, because opening the stream is itself what materialises the
+      // session server-side (`get_or_create`) — staying lazy here would strand
+      // the joining client offline forever. A locally generated id stays lazy
+      // so an empty, never-edited session is never materialised (D13).
       clearVisualization();
-      if (syncRef.current && syncRef.current.sessionId === targetId) {
+      if (eagerConnect) {
+        ensureSyncConnected(targetId)?.setBaseline({});
+      } else if (syncRef.current && syncRef.current.sessionId === targetId) {
         syncRef.current.setBaseline({});
       }
     }
@@ -1253,8 +1292,13 @@ function App() {
         setSessionsVersion(v => v + 1);
         showNotification('info', t('sessions.session_deleted_remote'));
       },
+      onCommand: (command) => {
+        if (command?.type === 'tool_result' && command.result) {
+          applyToolResultCommand(command.result);
+        }
+      },
     };
-  }, [sessionId, resyncFromServer, applyRemoteOp, clearVisualization, showNotification, t]);
+  }, [sessionId, resyncFromServer, applyRemoteOp, clearVisualization, showNotification, t, applyToolResultCommand]);
 
   // Tear down the client when the session changes or the app unmounts; the next
   // save/load lazily reconnects for the new id.
@@ -1271,18 +1315,19 @@ function App() {
       setRemoteAnnotationOps(null);
       setRoster([]);
       setRemoteSelections({});
+      setOpStreamReady(false);
     };
   }, [sessionId]);
 
   // Switch working session: persist the current one first (ops via the snapshot
   // round-trip), then swap the session ID (reconnects the SSE stream, reflects
   // the URL) and load the target's canvas from the server.
-  const switchToSession = useCallback((targetId, { register = true } = {}) => {
+  const switchToSession = useCallback((targetId, { register = true, eagerConnect = false } = {}) => {
     requestSessionSnapshot(async () => {
       setSessionId(targetId);
       reflectSessionUrl(targetId);
       if (register) sessionStore.touchSession(targetId);
-      await loadSessionFromServer(targetId);
+      await loadSessionFromServer(targetId, { eagerConnect });
       setSessionsVersion(v => v + 1);
     });
   }, [requestSessionSnapshot, loadSessionFromServer]);
@@ -1305,7 +1350,9 @@ function App() {
     }
     setConnectDialogOpen(false);
     if (targetId !== sessionId) {
-      switchToSession(targetId);
+      // Explicit connect-by-id is a join, not a locally generated id: connect
+      // eagerly even if the session hasn't been saved server-side yet (R1).
+      switchToSession(targetId, { eagerConnect: true });
     }
   }, [sessionId, switchToSession, showNotification, t]);
 
