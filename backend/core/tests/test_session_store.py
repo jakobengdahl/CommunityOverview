@@ -159,6 +159,19 @@ class TestStateOps:
         assert len(s.state["annotations"]) == 1
         assert applied["annotation"]["id"] == "fixed-id"
 
+    def test_annotation_created_retry_after_delete_does_not_resurrect(self, tmp_path):
+        store = _store(tmp_path)
+        s = store.create()
+        ann = {"id": "fixed-id", "kind": "note", "text": "hi"}
+        self._apply(store, s, {"op": "annotation_created", "annotation": ann})
+        self._apply(store, s, {"op": "annotation_deleted", "annotation_id": "fixed-id"})
+        # A collaborator's create retry (lost response) for the now-deleted id
+        # arrives after the delete — same "dropped" rule as an update arriving
+        # after a delete, just below.
+        result = self._apply(store, s, {"op": "annotation_created", "annotation": ann})
+        assert result is None
+        assert s.state["annotations"] == []
+
     def test_annotation_update_on_deleted_is_dropped(self, tmp_path):
         store = _store(tmp_path)
         s = store.create()
