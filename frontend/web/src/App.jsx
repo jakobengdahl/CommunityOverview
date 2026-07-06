@@ -263,7 +263,12 @@ function App() {
   // op stream's broadcast `command` events, so the single-consumer legacy push
   // stream is no longer opened for this session (design §3.8, R5).
   const [opStreamReady, setOpStreamReady] = useState(false);
-  const lastAppliedCommandRef = useRef(null);
+  // Bounded recent-command-id history for MCP push dedup (R5) — a small LRU
+  // rather than a single last-applied slot, and keyed by the server-assigned
+  // command_id rather than payload content, so a later *legitimately* repeated
+  // command (e.g. an agent re-adds a node a user just removed) is never
+  // mistaken for the same broadcast delivered twice.
+  const appliedCommandIdsRef = useRef([]);
 
   // Lazily create + connect the sync client for a session. Called on the first
   // non-empty save and when loading an existing session — never eagerly on load,
@@ -457,16 +462,16 @@ function App() {
   // Apply an MCP tool-result command to the canvas. Shared by the legacy push
   // stream and the op-protocol stream's `command` events (design §3.8, R5) so
   // an AI agent's pushes look identical regardless of which channel delivered
-  // them. Deduped against the last applied command: during the handover from
-  // the legacy stream to the op stream (or a brief overlap window) the same
-  // MCP push can be broadcast on both, and re-applying an identical command is
-  // a harmless no-op (e.g. a second `clear_visualization`) but is skipped here
-  // to avoid doing the work twice.
-  const applyToolResultCommand = useCallback((toolResult) => {
+  // them. Deduped by command_id against recently applied ids: during the
+  // handover from the legacy stream to the op stream (or a brief overlap
+  // window) the same MCP push can be broadcast on both.
+  const applyToolResultCommand = useCallback((toolResult, commandId) => {
     if (!toolResult) return;
-    const signature = JSON.stringify(toolResult);
-    if (lastAppliedCommandRef.current === signature) return;
-    lastAppliedCommandRef.current = signature;
+    if (commandId) {
+      if (appliedCommandIdsRef.current.includes(commandId)) return;
+      appliedCommandIdsRef.current.push(commandId);
+      if (appliedCommandIdsRef.current.length > 20) appliedCommandIdsRef.current.shift();
+    }
 
     const { nodes: currentNodes, edges: currentEdges,
             addNodesToVisualization: addNodes,
@@ -514,7 +519,7 @@ function App() {
         const cmd = JSON.parse(e.data);
         if (cmd.type === 'ping' || cmd.type === 'connected') return;
         if (cmd.type !== 'tool_result' || !cmd.result) return;
-        applyToolResultCommand(cmd.result);
+        applyToolResultCommand(cmd.result, cmd.command_id);
       } catch (err) {
         console.error('[Session SSE] parse error:', err);
       }
@@ -925,17 +930,20 @@ function App() {
   // and is propagated as incremental ops (design step 6). The session is
   // materialised server-side on the first non-empty save (get-or-create), so a
   // fresh/shared id needs no eager POST.
+  // Whether the active session already exists server-side (a sync client is
+  // connected for it). Once true, an empty canvas is real content, not an
+  // unmaterialised session to protect (D14 — see design §8.1 R4). Shared by
+  // persistSessionSnapshot and scheduleAutoSave, which both gate on emptiness.
+  const isSessionMaterialized = useCallback(() => (
+    syncRef.current?.sessionId === sessionId && syncRef.current.connected
+  ), [sessionId]);
+
   const persistSessionSnapshot = useCallback((viewData) => {
     const state = useGraphStore.getState();
     const targetId = sessionId;
-    // Suppress only while the session has never materialised server-side (no
-    // connected sync client): an empty, never-edited session must not
-    // register (D13). Once a sync client is connected the session already
-    // exists server-side, so an intentional empty state (last node removed,
-    // double-Escape clear, an MCP clear_visualization) is real content and
-    // must sync/save like any other state (D14 — see design §8.1 R4).
-    const materialized = syncRef.current?.sessionId === targetId && syncRef.current.connected;
-    if (state.nodes.length === 0 && !materialized) return;
+    // Suppress only while the session has never materialised server-side: an
+    // empty, never-edited session must not register (D13).
+    if (state.nodes.length === 0 && !isSessionMaterialized()) return;
     const positions = {};
     const parentIds = {};
     (viewData?.nodes || []).forEach(n => {
@@ -963,7 +971,7 @@ function App() {
     sync?.syncState(nextState);
     sessionStore.touchSession(targetId);
     setSessionsVersion(v => v + 1);
-  }, [sessionId, ensureSyncConnected]);
+  }, [sessionId, ensureSyncConnected, isSessionMaterialized]);
 
   // Ask GraphCanvas for a snapshot (positions + groups); the callback runs
   // after the snapshot has been persisted for the current session.
@@ -992,12 +1000,16 @@ function App() {
   // node drags and group creation.
   const autoSaveTimerRef = useRef(null);
   const scheduleAutoSave = useCallback(() => {
-    if (useGraphStore.getState().nodes.length === 0) return;
+    // Mirrors persistSessionSnapshot's own emptiness guard (D14): without this
+    // check, an empty canvas never even reaches persistSessionSnapshot, since
+    // this guard runs first on every store-level change (last node removed,
+    // double-Escape clear, an MCP clear_visualization).
+    if (useGraphStore.getState().nodes.length === 0 && !isSessionMaterialized()) return;
     if (autoSaveTimerRef.current) clearTimeout(autoSaveTimerRef.current);
     autoSaveTimerRef.current = setTimeout(() => {
       requestSessionSnapshot(null);
     }, 1500);
-  }, [requestSessionSnapshot]);
+  }, [requestSessionSnapshot, isSessionMaterialized]);
 
   useEffect(() => {
     scheduleAutoSave();
@@ -1294,7 +1306,7 @@ function App() {
       },
       onCommand: (command) => {
         if (command?.type === 'tool_result' && command.result) {
-          applyToolResultCommand(command.result);
+          applyToolResultCommand(command.result, command.command_id);
         }
       },
     };

@@ -142,6 +142,35 @@ describe('Server-backed session lifecycle', () => {
     expect(ops).toContainEqual({ op: 'node_moved', node_id: 'node-a', position: { x: 11, y: 22 } });
   });
 
+  it('clearing a materialised session syncs the empty state instead of being silently dropped (R4)', async () => {
+    const { container } = renderApp();
+
+    act(() => {
+      useGraphStore.getState().updateVisualization([NODE_A], []);
+    });
+
+    // Materialise the session via an explicit save (same path as the test above).
+    const toolbarButtons = container.querySelectorAll('.floating-toolbar-item');
+    fireEvent.click(toolbarButtons[toolbarButtons.length - 1]);
+    await waitFor(() => {
+      expect(global.fetch).toHaveBeenCalled();
+    });
+    expect(opsFrom(global.fetch)).toContainEqual({ op: 'nodes_added', node_ids: ['node-a'] });
+
+    // Clear the canvas — what a double-Escape, a last-node delete, or an MCP
+    // clear_visualization does. Now that the session is materialised (the
+    // save above connected its sync client), this empty state must still
+    // reach the server via the debounced auto-save (R4/D14) instead of
+    // scheduleAutoSave's own emptiness guard silently dropping it.
+    act(() => {
+      useGraphStore.getState().clearVisualization();
+    });
+
+    await waitFor(() => {
+      expect(opsFrom(global.fetch)).toContainEqual({ op: 'nodes_removed', node_ids: ['node-a'] });
+    }, { timeout: 3000 });
+  });
+
   it('switching session loads the target from the server, carrying its saved position', async () => {
     // Seed a previous session in the recents list so it shows in the drawer
     sessionStore.touchSession('5555-6666');

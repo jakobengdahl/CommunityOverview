@@ -15,6 +15,7 @@ Usage:
     tools_map = register_mcp_tools(mcp, service)
 """
 
+import secrets
 from typing import List, Optional, Dict, Any, Callable
 
 from .service import GraphService
@@ -651,7 +652,16 @@ def _push_to_session(
     command_result = dict(result)
     if "action" not in command_result and command_result.get("nodes"):
         command_result["action"] = "add_to_visualization"
-    command = {"type": "tool_result", "tool": tool_name, "result": command_result}
+    # A unique id lets the browser dedupe the legacy stream and the hub
+    # broadcast delivering the same push during the handover between them
+    # (design §8.1 R5) without mistaking a later, genuinely repeated command
+    # for a duplicate of this one.
+    command = {
+        "type": "tool_result",
+        "tool": tool_name,
+        "result": command_result,
+        "command_id": secrets.token_hex(8),
+    }
     if session_registry and session_registry.is_valid_session_id(session_id):
         session_registry.push_command_sync(session_id, command)
     if session_manager is not None:
