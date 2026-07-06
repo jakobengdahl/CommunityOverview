@@ -499,11 +499,14 @@ export class SessionSyncClient {
    * sequential single-op batches instead (the loop holds its own copy of the
    * queue, so `close()` cannot clear it): a poisoned op still fails alone while
    * the valid ops behind it get their best-effort send. `base_seq` is
-   * informational server-side, so responses need no per-op handling.
+   * informational server-side, so responses need no per-op handling. Draining is
+   * safe even while a debounced single-op `_flush` is in flight — that op was
+   * already spliced out of the queue, and on failure it re-concats into a queue
+   * that is inert once `close()` has run (every timer is `_closed`-guarded).
    * @returns {Promise<void>}
    */
   flush() {
-    if (this._forceSingle && this._queue.length > 1 && this._ready && this._fetch && !this._flushing) {
+    if (this._forceSingle && this._queue.length > 0 && this._ready && this._fetch) {
       const pending = this._queue.splice(0);
       return (async () => {
         for (const op of pending) {

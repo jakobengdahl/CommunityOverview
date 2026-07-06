@@ -334,6 +334,38 @@ describe('SessionSyncClient', () => {
     ]);
   });
 
+  it('teardown flush drains the remainder even while a force-single op is in flight', async () => {
+    let release;
+    const gate = new Promise(r => { release = r; });
+    let call = 0;
+    // Call 1: the multi-op batch, terminally rejected (enters force-single).
+    // Call 2: the debounced single-op resend, held in flight across teardown.
+    const fetchImpl = vi.fn(async (url, opts) => {
+      fetchImpl.sent.push(JSON.parse(opts.body).ops);
+      call += 1;
+      if (call === 1) return { ok: false, status: 400 };
+      if (call === 2) await gate;
+      return { ok: true, status: 200, json: async () => ({ seq: 1 }) };
+    });
+    fetchImpl.sent = [];
+    const { client } = makeClient({ fetchImpl, flushIntervalMs: 1 });
+    client.connect();
+    FakeEventSource.instances[0].emit({ type: 'snapshot', seq: 0, session: { state: {} } });
+    client.syncState({ node_refs: ['a'], hidden_node_ids: ['h'], hidden_edge_ids: ['e'] }); // 3 ops
+    await client.flush(); // batch rejected → force-single, all 3 requeued
+    await new Promise(r => setTimeout(r, 10)); // debounce resends op 1, which now hangs
+    expect(fetchImpl.sent).toHaveLength(2);
+
+    client.flush();
+    client.close();
+    await new Promise(r => setTimeout(r, 10));
+    release();
+    expect(fetchImpl.sent.slice(2)).toEqual([
+      [{ op: 'nodes_hidden', node_ids: ['h'] }],
+      [{ op: 'edges_hidden', edge_ids: ['e'] }],
+    ]);
+  });
+
   it('dispatches session lifecycle events to handlers', () => {
     const onSessionRenamed = vi.fn();
     const onSessionDeleted = vi.fn();
