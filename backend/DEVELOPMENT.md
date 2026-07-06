@@ -332,7 +332,7 @@ node content is rehydrated from the graph on load via `?resolve=true`.
 | PATCH | `/api/sessions/{id}` | Rename a session |
 | DELETE | `/api/sessions/{id}` | Delete a session (`?client_id=` names the deleter in the broadcast) |
 | POST | `/api/sessions/{id}/ops` | Apply an ordered op batch (`{client_id, base_seq, ops}` → `{applied, seq}`); server-ordered LWW, monotonic `seq`. Bounded per batch by op count (≤ 500) **and** body size (≤ 256 KB → `413`), plus a per-client token bucket (200 burst, 100 ops/s refill → `429`) — design §3.9 |
-| GET | `/api/sessions/{id}/stream` | SSE fan-out: presence, applied ops, and claims. Query `client_id`, `name`, `since_seq` (op catch-up or full-snapshot fallback). EventSource-opened, so it bypasses Basic Auth (protected by the unguessable session id — design §3.9) |
+| GET | `/api/sessions/{id}/stream` | SSE fan-out: presence, applied ops, claims, and broadcast MCP commands (`{"type": "command", ...}` — every connected client applies these, not just one browser). Query `client_id`, `name`, `since_seq` (op catch-up or full-snapshot fallback). A slow consumer whose queue overflows is sent a fresh full snapshot rather than diverging. EventSource-opened, so it bypasses Basic Auth (protected by the unguessable session id — design §3.9) |
 
 Session state is server-owned: the browser no longer uploads canvas state, and
 MCP query tools read visible nodes / selection from the shared-session store
@@ -340,7 +340,9 @@ MCP query tools read visible nodes / selection from the shared-session store
 `PATCH /sessions/{id}/state` upload were removed in step 8 — design §3.8).
 
 Legacy MCP visualization-push channel (single-consumer; delivers AI-pushed
-visualization commands to the browser):
+visualization commands to the browser). The browser opens this only until the
+op-protocol stream above has connected for the session, since that stream's
+broadcast `command` events reach every collaborator instead of just one:
 
 | Method | Endpoint | Description |
 |--------|----------|-------------|
