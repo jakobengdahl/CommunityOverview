@@ -109,6 +109,11 @@ class SessionManager:
         self._max_op_batch_bytes = max_op_batch_bytes
         self._bucket = _TokenBucket(bucket_capacity, bucket_refill_per_sec)
         self._locks: Dict[str, asyncio.Lock] = {}
+        # Live connection count per (session_id, client_id): two connections
+        # for the same client_id (a fast reconnect, or two tabs sharing the
+        # localStorage client_id) must not have the first one's disconnect
+        # clear presence/claims out from under the second, still-live one.
+        self._connections: Dict[Tuple[str, str], int] = {}
 
     def _lock(self, session_id: str) -> asyncio.Lock:
         lock = self._locks.get(session_id)
@@ -138,17 +143,35 @@ class SessionManager:
     def list_sessions(self) -> List[Dict[str, Any]]:
         return self.store.list_meta()
 
-    def rename_session(self, session_id: str, name: Optional[str]) -> Optional[Session]:
-        session = self.store.rename(session_id, name)
-        if session is not None:
-            self.bus.publish(
-                session_id,
-                {"type": "session_renamed", "name": name, "seq": session.seq},
-            )
-        return session
+    async def rename_session(
+        self, session_id: str, name: Optional[str], client_id: Optional[str] = None
+    ) -> Session:
+        """Rename a session, materialising it if it only exists client-side.
 
-    def delete_session(self, session_id: str, deleted_by: Optional[str] = None) -> bool:
-        existed = self.store.delete(session_id)
+        Routed through ``apply_ops`` as a ``session_renamed`` state op (R8)
+        instead of writing the store directly: this gives the rename a
+        ``seq`` and a ring-buffer entry, so a client reconnecting via the
+        ``since_seq`` catch-up path (not just a full snapshot) observes it —
+        previously the op was a documented-but-unreachable STATE_OP with no
+        emitter. Routing through the same locked/rollback-safe path as any
+        other op also closes the rename-vs-in-flight-batch race (R10).
+        ``get_or_create`` first (R7): a PATCH for a session id that only
+        exists in the browser's URL/recents (never saved server-side) must
+        still take effect rather than 404, or the name is lost the moment the
+        session later materialises with a null server name.
+        """
+        self.get_or_create(session_id)
+        await self.apply_ops(session_id, client_id or "rest", None, [
+            {"op": "session_renamed", "name": name},
+        ])
+        return self.store.get(session_id)
+
+    async def delete_session(self, session_id: str, deleted_by: Optional[str] = None) -> bool:
+        # Same per-session lock apply_ops uses (R10): without it, an in-flight
+        # apply_ops batch that already holds a `Session` reference can persist()
+        # after this delete, resurrecting the file on disk.
+        async with self._lock(session_id):
+            existed = self.store.delete(session_id)
         if existed:
             # Broadcast before tearing down so connected clients get the notice.
             self.bus.publish(
@@ -198,8 +221,7 @@ class SessionManager:
         if not self._bucket.consume(client_id, max(1, len(ops))):
             raise RateLimited()
 
-        session = self.store.get(session_id)
-        if session is None:
+        if self.store.get(session_id) is None:
             raise SessionNotFound()
 
         # Reject a malformed batch up front, before any op is applied or
@@ -219,6 +241,14 @@ class SessionManager:
                 raise OpError(f"unknown op: {op_type!r}")
 
         async with self._lock(session_id):
+            # Re-fetch inside the lock rather than reusing the check above
+            # (R10): `delete_session` takes this same per-session lock, so if
+            # it ran between that check and here, the session is gone and this
+            # batch must not resurrect it via persist() below.
+            session = self.store.get(session_id)
+            if session is None:
+                raise SessionNotFound()
+
             # Snapshot for rollback. persist() is inside the protected region so
             # a persistence-layer failure (disk full, IO error) rolls back too —
             # otherwise in-memory state/seq/ring would advance while disk and all
@@ -246,7 +276,15 @@ class SessionManager:
                         state_changed = True
                         pending.append(("state", result))
                 if state_changed:
-                    self.store.persist(session)
+                    # Offload the atomic temp+rename+fsync write to a worker
+                    # thread: it's synchronous disk I/O and would otherwise
+                    # block the event loop for every batch, working against
+                    # the <500 ms round-trip target (design §3.3). The
+                    # per-session lock is still held across the await (so
+                    # ordering and the rollback-on-failure guarantee above are
+                    # unaffected) — only *other* sessions' handlers get to run
+                    # on the event loop while this write is in flight.
+                    await asyncio.to_thread(self.store.persist, session)
             except Exception:
                 session.state = saved_state
                 session.seq = saved_seq
@@ -304,12 +342,27 @@ class SessionManager:
         client's roster convergent.
         """
         subscription = self.bus.subscribe(session_id)
+        key = (session_id, client_id)
+        self._connections[key] = self._connections.get(key, 0) + 1
         member = self.presence.join(session_id, client_id, display_name)
         self.bus.publish(session_id, {"type": "presence_joined", "member": member})
         return subscription, member
 
     def disconnect(self, session_id: str, client_id: str, subscription: Subscription) -> None:
         self.bus.unsubscribe(subscription)
+        # Refcount live connections per client_id: a fast reconnect (old SSE
+        # not yet torn down) or two tabs sharing the localStorage client_id
+        # means two connections can be live for the same client_id at once.
+        # Only the *last* one disconnecting should release claims/presence —
+        # otherwise the still-connected one briefly vanishes from the roster
+        # and loses its selection markers until its next heartbeat/claim.
+        key = (session_id, client_id)
+        remaining = self._connections.get(key, 1) - 1
+        if remaining > 0:
+            self._connections[key] = remaining
+            return
+        self._connections.pop(key, None)
+
         released = self.claims.release_all(session_id, client_id)
         if released:
             self.bus.publish(

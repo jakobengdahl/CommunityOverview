@@ -5,6 +5,7 @@ presence roster/colour assignment, and selection-claim TTL/release.
 """
 
 import asyncio
+import threading
 
 import pytest
 
@@ -12,7 +13,14 @@ from backend.core.session_hub import ClaimMap, InProcessEventBus, PresenceRegist
 
 
 class TestInProcessEventBus:
-    def test_broadcast_to_all_subscribers(self):
+    """publish() is called from within SessionManager's async methods in
+    production, so a loop is always running; these tests run under
+    pytest-asyncio for the same reason (the no-loop / cross-thread paths are
+    covered separately below)."""
+
+    pytestmark = pytest.mark.asyncio
+
+    async def test_broadcast_to_all_subscribers(self):
         bus = InProcessEventBus()
         a = bus.subscribe("1234-5678")
         b = bus.subscribe("1234-5678")
@@ -20,14 +28,14 @@ class TestInProcessEventBus:
         assert a.queue.get_nowait() == {"type": "op", "n": 1}
         assert b.queue.get_nowait() == {"type": "op", "n": 1}
 
-    def test_isolated_per_session(self):
+    async def test_isolated_per_session(self):
         bus = InProcessEventBus()
         a = bus.subscribe("1111-1111")
         bus.subscribe("2222-2222")
         bus.publish("2222-2222", {"x": 1})
         assert a.queue.empty()
 
-    def test_unsubscribe_stops_delivery(self):
+    async def test_unsubscribe_stops_delivery(self):
         bus = InProcessEventBus()
         a = bus.subscribe("1234-5678")
         bus.unsubscribe(a)
@@ -35,7 +43,7 @@ class TestInProcessEventBus:
         assert a.queue.empty()
         assert bus.subscriber_count("1234-5678") == 0
 
-    def test_slow_consumer_gets_resync(self):
+    async def test_slow_consumer_gets_resync(self):
         bus = InProcessEventBus(queue_max=2)
         a = bus.subscribe("1234-5678")
         for i in range(5):
@@ -45,6 +53,37 @@ class TestInProcessEventBus:
             drained.append(a.queue.get_nowait())
         assert a.needs_resync is True
         assert drained[-1] == {"type": "resync"}
+
+
+class TestInProcessEventBusThreadSafety:
+    """A cross-thread caller must not touch asyncio.Queue directly (unsafe)."""
+
+    def test_publish_from_worker_thread_uses_call_soon_threadsafe(self):
+        async def scenario():
+            bus = InProcessEventBus()
+            bus.set_event_loop(asyncio.get_running_loop())
+            sub = bus.subscribe("1234-5678")
+
+            def publish_from_thread():
+                bus.publish("1234-5678", {"type": "op", "n": 1})
+
+            thread = threading.Thread(target=publish_from_thread)
+            thread.start()
+            thread.join(timeout=2)
+            event = await asyncio.wait_for(sub.queue.get(), timeout=2)
+            assert event == {"type": "op", "n": 1}
+
+        asyncio.run(scenario())
+
+    def test_publish_from_worker_thread_without_registered_loop_is_noop(self):
+        bus = InProcessEventBus()
+        sub = bus.subscribe("1234-5678")
+
+        thread = threading.Thread(target=lambda: bus.publish("1234-5678", {"type": "op"}))
+        thread.start()
+        thread.join(timeout=2)
+
+        assert sub.queue.empty()
 
 
 class TestPresenceRegistry:

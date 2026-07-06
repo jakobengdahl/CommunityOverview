@@ -141,6 +141,9 @@ class CreateSessionRequest(BaseModel):
 class RenameSessionRequest(BaseModel):
     """Request model for renaming a shared session."""
     name: Optional[str] = Field(None, max_length=200, description="New session name (or null to clear)")
+    client_id: Optional[str] = Field(
+        None, max_length=100, description="Renaming client id (attributes the op; defaults server-side)"
+    )
 
 
 class SessionOpsRequest(BaseModel):
@@ -508,7 +511,17 @@ def _register_session_endpoints(router: APIRouter, service: GraphService, sessio
     async def rename_session(session_id: str, request: RenameSessionRequest) -> Dict[str, Any]:
         if not is_valid_session_id(session_id):
             raise HTTPException(status_code=400, detail="invalid session_id format")
-        session = session_manager.rename_session(session_id, request.name)
+        try:
+            # get-or-create (R7): a rename for an id that only exists in the
+            # browser's URL/recents (never saved server-side) must materialise
+            # it rather than 404 — otherwise the name is lost the moment the
+            # session later saves with a null server name.
+            await session_manager.rename_session(session_id, request.name, request.client_id)
+        except SessionLimitReached:
+            raise HTTPException(status_code=503, detail="too many sessions")
+        except SessionNotFound:
+            raise HTTPException(status_code=404, detail="session not found")
+        session = session_manager.get_session(session_id)
         if session is None:
             raise HTTPException(status_code=404, detail="session not found")
         return _session_payload(session, resolve=False, manager=session_manager)
@@ -520,7 +533,7 @@ def _register_session_endpoints(router: APIRouter, service: GraphService, sessio
     ) -> Dict[str, Any]:
         if not is_valid_session_id(session_id):
             raise HTTPException(status_code=400, detail="invalid session_id format")
-        existed = session_manager.delete_session(session_id, deleted_by=client_id)
+        existed = await session_manager.delete_session(session_id, deleted_by=client_id)
         if not existed:
             raise HTTPException(status_code=404, detail="session not found")
         return {"deleted": True, "id": session_id}

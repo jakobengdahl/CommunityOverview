@@ -11,7 +11,10 @@ Three concerns:
 
 * ``InProcessEventBus`` — per-subscriber asyncio queues with a broadcast
   ``publish``. Slow consumers are dropped and told to resync (a full snapshot)
-  rather than blocking the whole session.
+  rather than blocking the whole session. ``publish`` is safe to call from a
+  non-loop thread once ``set_event_loop`` has been called at startup (mirrors
+  ``session_registry.py``'s ``push_command_sync``): it hands off via
+  ``call_soon_threadsafe`` instead of touching ``asyncio.Queue`` cross-thread.
 * ``PresenceRegistry`` — the roster of connected clients with server-assigned
   colours. Ephemeral, keyed by ``(session_id, client_id)``.
 * ``ClaimMap`` — advisory selection soft-locks with a 30 s TTL (D3). Expiry is
@@ -74,6 +77,17 @@ class InProcessEventBus:
         self._queue_max = queue_max
         self._subscribers: Dict[str, Dict[int, Subscription]] = {}
         self._ids = itertools.count()
+        self._loop: Optional[asyncio.AbstractEventLoop] = None
+
+    def set_event_loop(self, loop: asyncio.AbstractEventLoop) -> None:
+        """Store a reference to the running loop for thread-safe publish.
+
+        Mirrors ``session_registry.SessionRegistry.set_event_loop``: FastMCP
+        calls sync tools from the event-loop thread today, so the fast path
+        below is taken in normal operation, but a caller running in a genuine
+        worker thread must not touch ``asyncio.Queue`` cross-thread (unsafe).
+        """
+        self._loop = loop
 
     def subscribe(self, session_id: str) -> Subscription:
         sub = Subscription(session_id, next(self._ids), self._queue_max)
@@ -91,6 +105,17 @@ class InProcessEventBus:
         return len(self._subscribers.get(session_id, {}))
 
     def publish(self, session_id: str, event: Dict[str, Any]) -> None:
+        try:
+            asyncio.get_running_loop()
+        except RuntimeError:
+            # Not on the loop thread: hand off via call_soon_threadsafe rather
+            # than touching the subscriber queues directly from here.
+            if self._loop is not None and self._loop.is_running():
+                self._loop.call_soon_threadsafe(self._publish_now, session_id, event)
+            return
+        self._publish_now(session_id, event)
+
+    def _publish_now(self, session_id: str, event: Dict[str, Any]) -> None:
         for sub in list(self._subscribers.get(session_id, {}).values()):
             try:
                 sub.queue.put_nowait(event)

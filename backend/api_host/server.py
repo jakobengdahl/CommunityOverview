@@ -590,6 +590,11 @@ def create_app(
     @app.on_event("startup")
     async def _session_registry_startup():
         session_registry.set_event_loop(asyncio.get_running_loop())
+        # Same thread-safety net for the shared-session hub's event bus: a
+        # SaaS-swapped bus may not implement it, so this is best-effort.
+        set_bus_loop = getattr(session_manager.bus, "set_event_loop", None)
+        if set_bus_loop is not None:
+            set_bus_loop(asyncio.get_running_loop())
 
         async def _periodic_cleanup():
             while True:

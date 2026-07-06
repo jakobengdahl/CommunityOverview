@@ -81,10 +81,11 @@ class TestTwoClientsOneSession:
         assert mgr.claimed_elements(sid) == ["node-1"]
         await _drain(sub_a)
 
-        # Rename fans out to both.
-        mgr.rename_session(sid, "Renamed")
-        assert any(e["type"] == "session_renamed" for e in await _drain(sub_a))
-        assert any(e["type"] == "session_renamed" for e in await _drain(sub_b))
+        # Rename fans out to both, routed through the op protocol (R8) so it
+        # is sequenced and ring-buffered like any other state op.
+        await mgr.rename_session(sid, "Renamed", client_id="A")
+        assert any(e.get("op", {}).get("op") == "session_renamed" for e in await _drain(sub_a))
+        assert any(e.get("op", {}).get("op") == "session_renamed" for e in await _drain(sub_b))
 
     async def test_reconnect_catches_up_missed_ops(self):
         mgr = _manager()
@@ -140,7 +141,7 @@ class TestTwoClientsOneSession:
         sub_a, _ = mgr.connect(sid, "A", "Alice")
         await _drain(sub_a)
 
-        mgr.delete_session(sid, deleted_by="A")
+        await mgr.delete_session(sid, deleted_by="A")
         events = await _drain(sub_a)
         deleted = [e for e in events if e["type"] == "session_deleted"]
         assert deleted and deleted[0]["deleted_by"] == "A"

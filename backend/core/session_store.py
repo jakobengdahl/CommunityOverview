@@ -74,7 +74,6 @@ def _empty_state() -> Dict[str, Any]:
         "hidden_node_ids": [],
         "hidden_edge_ids": [],
         "annotations": [],
-        "manual_edges": [],
     }
 
 
@@ -342,6 +341,14 @@ class SessionStore:
         self._sessions: Dict[str, Session] = {}
         self._rings: Dict[str, Deque[Dict[str, Any]]] = {}
         self._lock = threading.RLock()
+        # Cache of the backend's persisted meta list (R13): a full disk scan
+        # otherwise runs on every drawer-open GET /api/sessions *and* every
+        # session_count() cap check, and session_count() previously counted
+        # only the in-memory map — which starts empty on every restart while
+        # session files persist (D13), letting the unauthenticated stream
+        # endpoint grow data/sessions/ past max_sessions across restarts.
+        # Invalidated on every backend.save()/delete() call.
+        self._meta_cache: Optional[List[Dict[str, Any]]] = None
 
     # ---------------- lifecycle ----------------
 
@@ -358,6 +365,7 @@ class SessionStore:
             self._sessions[session.id] = session
             self._rings[session.id] = deque(maxlen=self._ring_size)
             self._backend.save(session.to_dict())
+            self._meta_cache = None
             return session
 
     def get_or_create(self, session_id: str) -> "tuple[Session, bool]":
@@ -379,6 +387,7 @@ class SessionStore:
             self._sessions[session_id] = session
             self._rings[session_id] = deque(maxlen=self._ring_size)
             self._backend.save(session.to_dict())
+            self._meta_cache = None
             return session, True
 
     def get(self, session_id: str) -> Optional[Session]:
@@ -399,9 +408,14 @@ class SessionStore:
     def exists(self, session_id: str) -> bool:
         return self.get(session_id) is not None
 
+    def _ensure_meta_cache(self) -> List[Dict[str, Any]]:
+        if self._meta_cache is None:
+            self._meta_cache = self._backend.list_meta()
+        return self._meta_cache
+
     def list_meta(self) -> List[Dict[str, Any]]:
         with self._lock:
-            metas = {m["id"]: m for m in self._backend.list_meta()}
+            metas = {m["id"]: m for m in self._ensure_meta_cache()}
             # In-memory sessions may hold unpersisted-but-saved newer meta.
             for session in self._sessions.values():
                 metas[session.id] = session.meta()
@@ -418,6 +432,7 @@ class SessionStore:
             session.name = name
             session.updated_at = _now_iso()
             self._backend.save(session.to_dict())
+            self._meta_cache = None
             return session
 
     def delete(self, session_id: str) -> bool:
@@ -426,14 +441,26 @@ class SessionStore:
             self._sessions.pop(session_id, None)
             self._rings.pop(session_id, None)
             self._backend.delete(session_id)
+            self._meta_cache = None
             return existed
 
     def persist(self, session: Session) -> None:
         with self._lock:
             self._backend.save(session.to_dict())
+            self._meta_cache = None
 
     def session_count(self) -> int:
-        return len(self._sessions)
+        """Number of sessions that exist, on disk or in memory (R13).
+
+        Counting only the in-memory map understates reality after a restart
+        (D13: no eviction, session files outlive the process), which lets the
+        unauthenticated stream endpoint's ``get_or_create`` grow
+        ``data/sessions/`` past ``max_sessions`` indefinitely across restarts.
+        """
+        with self._lock:
+            disk_ids = {m["id"] for m in self._ensure_meta_cache()}
+            disk_ids.update(self._sessions.keys())
+            return len(disk_ids)
 
     # ---------------- op application ----------------
 

@@ -81,29 +81,17 @@ Effort scale: XS = single-line fix · S = up to ~30 lines / one file · M = mult
 - **Issue:** Code uses `t('key') || 'fallback'` expecting a null/undefined return when a key is missing, but `t()` returns the key name as a string (truthy) when no translation is found. The `|| 'fallback'` branch never fires. The two immediately affected keys (`menu.view_section`, `menu.show_minimap`) were fixed by adding them to the JSON files. Any future missing key will silently show its key name in the UI. Fix: either update the fallback pattern to use `t('key') === 'key' ? 'fallback' : t('key')`, or make `t()` return null on a miss (breaking change to the hook contract).
 - **Effort:** S
 
-### [2026-07-04] Shared-session persistence is a synchronous fsync on the event loop
-- **File(s):** `backend/core/session_manager.py` (`apply_ops` → `store.persist`), `backend/core/session_store.py` (`FileSessionPersistenceBackend.save`)
-- **Context:** Discovered during review of `claude/multi-user-sessions-step-3-ojk3mi`
-- **Issue:** `apply_ops` persists synchronously (atomic temp+rename with `fsync`) once per batch, inside the async handler. Design §3.3 specifies "debounced write-behind, flush ≤ 1 s". Correctness is fine (writes are atomic; batches are naturally debounced at the client's 100 ms flush), but under concurrent load the fsync blocks the event loop and works against the <500 ms round-trip target. Fix: move to a debounced write-behind flush (background task, coalescing per session) or offload the fsync via `asyncio.to_thread`. Perf optimization, not a bug.
-- **Effort:** M
-
-### [2026-07-04] MCP hub mirror lacks the cross-thread delivery the legacy registry has
-- **File(s):** `backend/service/mcp_tools.py` (`_push_to_session`), `backend/core/session_manager.py` (`push_command`), `backend/core/session_hub.py` (`InProcessEventBus.publish`)
-- **Context:** Discovered during review of `claude/multi-user-sessions-step-3-ojk3mi`
-- **Issue:** The legacy `SessionRegistry.push_command_sync` falls back to `call_soon_threadsafe` for callers off the event-loop thread; the new hub mirror uses `queue.put_nowait` directly, which is not thread-safe on an `asyncio.Queue`. FastMCP runs tools on the loop thread today, so this is fine in practice, and the `try/except` in `_push_to_session` swallows any error — but the mirror would silently drop the message if a tool ever ran in a threadpool. Revisit when MCP moves fully onto the hub (step 6): give the bus an event-loop reference and a `call_soon_threadsafe` publish path.
-- **Effort:** S
-
-### [2026-07-04] Two concurrent connections for the same client_id clobber presence/claims
-- **File(s):** `backend/core/session_hub.py` (`PresenceRegistry.leave`, `ClaimMap.release_all`), `backend/core/session_manager.py` (`disconnect`)
-- **Context:** Discovered during review of `claude/multi-user-sessions-step-3-ojk3mi`
-- **Issue:** Presence and claims are keyed by `client_id`. On a fast reconnect (old SSE not yet torn down), both connections share one roster entry and one claim owner; when the first closes, `disconnect` removes the roster entry and releases all of that client's claims even though the second connection is still live, so the still-connected client briefly vanishes from the roster and loses selection markers until its next heartbeat/claim. Mirrors the legacy registry's documented single-consumer limitation. Address with the presence UI in step 7 (e.g. per-connection tokens or refcounting per client_id).
-- **Effort:** M
-
 ---
 
 ## Fixed
 
 *(resolved entries moved here after merge, for reference)*
+
+### [2026-07-06] Fixed in branch `claude/session-hardening-backend` (multi-user sessions R7–R15 backend hardening)
+
+- **Shared-session persistence was a synchronous fsync on the event loop** — `backend/core/session_manager.py` (`apply_ops`). The atomic temp+rename+fsync write now runs via `asyncio.to_thread`, so it no longer blocks the event loop for every op batch. The per-session lock is still held across the await, so ordering and the rollback-on-failure guarantee are unaffected.
+- **MCP hub mirror lacked the cross-thread delivery the legacy registry has** — `backend/core/session_hub.py` (`InProcessEventBus`). Added `set_event_loop` (wired at startup in `backend/api_host/server.py`, best-effort for a SaaS-swapped bus) and a `call_soon_threadsafe` publish path for a caller off the event-loop thread, mirroring `session_registry.py`'s `push_command_sync`.
+- **Two concurrent connections for the same client_id clobbered presence/claims** — `backend/core/session_manager.py` (`connect`/`disconnect`). Connections are now refcounted per `(session_id, client_id)`; presence and claims are only released when the *last* live connection for a client_id disconnects, so a fast reconnect or two tabs sharing the localStorage client_id no longer briefly vanish from the roster.
 
 ### [2026-07-05] Fixed in branch `claude/frontend-session-lifecycle-xys3wl` (multi-user sessions step 4)
 

@@ -84,8 +84,7 @@ Session {
     node_refs: [node_id],      # graph nodes shown in this session (references only)
     positions: { node_id: {x, y} },
     hidden_node_ids: [..], hidden_edge_ids: [..],
-    annotations: [ Annotation ],
-    manual_edges: [ {id, source, target, label, type} ]   # session-local edges if any
+    annotations: [ Annotation ]
   }
 }
 
@@ -717,7 +716,7 @@ branch. Ordered by severity within each group. Effort uses the
   (`App.jsx:516-531` writes `s.name` unconditionally). Either materialise on
   rename (get-or-create semantics for PATCH) or skip null server names in the
   refresh. **Effort:** S.
-- **R8 — Renames are invisible to catch-up.** `SessionManager.rename_session`
+- **Fixed** (`claude/session-hardening-backend`) **R8 — Renames are invisible to catch-up.** `SessionManager.rename_session`
   (`session_manager.py:141`) publishes a live event but does not bump `seq` or
   enter the ring buffer, so a client that reconnects through the `catch_up`
   (ops) path misses a rename that happened while it was away. Routing the REST
@@ -733,7 +732,7 @@ branch. Ordered by severity within each group. Effort uses the
   rejection. Wire `onDropped` to a notification + resync, and consider
   chunking flushes. **File(s):** `frontend/web/src/App.jsx`,
   `frontend/web/src/services/sessionSyncClient.js:513-558`. **Effort:** S.
-- **R10 — Delete/rename race with in-flight op batches.**
+- **Fixed** (`claude/session-hardening-backend`) **R10 — Delete/rename race with in-flight op batches.**
   `delete_session` (`session_manager.py:150`) mutates the store without taking
   the per-session asyncio lock and pops the lock object; an in-flight
   `apply_ops` that already fetched the `Session` can `persist()` after the
@@ -758,7 +757,7 @@ branch. Ordered by severity within each group. Effort uses the
 
 ### 8.3 Hardening / cleanup
 
-- **R13 — `max_sessions` cap is in-memory only.** `SessionStore.session_count`
+- **Fixed** (`claude/session-hardening-backend`) **R13 — `max_sessions` cap is in-memory only.** `SessionStore.session_count`
   counts the in-memory map, which starts empty on every restart while session
   files persist (D13: no eviction), so the unauthenticated stream endpoint
   (auth-bypassed by design) can grow `data/sessions/` beyond the cap across
@@ -766,11 +765,12 @@ branch. Ordered by severity within each group. Effort uses the
   `GET /api/sessions` / drawer open. Count the backend's files (cache the
   count) and consider a cheap meta cache. **File(s):**
   `backend/core/session_store.py:396-430`. **Effort:** S.
-- **R14 — `manual_edges` is a dead session-state field.** Present in the
+- **Fixed** (`claude/session-hardening-backend`) **R14 — `manual_edges` is a dead session-state field.** Present in the
   `Session` model (§3.1) but no op writes it, the sync client's mirror ignores
   it, and the full-state PUT that could have populated it was removed in step
-  8 — manually drawn edges persist in the graph itself since PR #186. Remove
-  the field from the model and §3.1, or wire ops for session-local edges.
+  8 — manually drawn edges persist in the graph itself since PR #186. Removed
+  the field from the model and §3.1 (manual edges have persisted in the graph
+  itself since PR #186; no op ever wrote this field).
   **File(s):** `backend/core/session_store.py:77`. **Effort:** XS.
 - **R15 — Duplicate/stale event delivery is tolerated but unguarded.** Events
   published between the stream's `connect` (subscribe) and the `catch_up`
@@ -786,9 +786,11 @@ branch. Ordered by severity within each group. Effort uses the
 
 Related issues found (or re-confirmed) during this review that were already
 logged as open entries in `SMALL_FIXES.md` — not repeated above: the MCP hub
-mirror's missing cross-thread delivery (2026-07-04), presence/claims clobbering
-for two concurrent connections with one `client_id` (2026-07-04 — also hit by
-two *tabs* sharing the localStorage `client_id`, not just fast reconnects),
-the synchronous fsync on the event loop (2026-07-04), the post-parse op-batch
-byte cap (2026-07-06), the remote-added node (0,0) race (2026-07-05), and the
-teardown flush in `_forceSingle` mode (2026-07-05).
+mirror's missing cross-thread delivery (2026-07-04, **fixed** in
+`claude/session-hardening-backend`), presence/claims clobbering for two
+concurrent connections with one `client_id` (2026-07-04 — also hit by two
+*tabs* sharing the localStorage `client_id`, not just fast reconnects;
+**fixed** in `claude/session-hardening-backend`), the synchronous fsync on the
+event loop (2026-07-04, **fixed** in `claude/session-hardening-backend`), the
+post-parse op-batch byte cap (2026-07-06), the remote-added node (0,0) race
+(2026-07-05), and the teardown flush in `_forceSingle` mode (2026-07-05).
