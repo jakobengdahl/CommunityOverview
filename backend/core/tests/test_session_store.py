@@ -148,6 +148,17 @@ class TestStateOps:
         assert isinstance(applied["annotation"]["id"], str)
         assert s.state["annotations"][0]["text"] == "hi"
 
+    def test_annotation_created_retry_with_same_id_upserts_not_duplicates(self, tmp_path):
+        store = _store(tmp_path)
+        s = store.create()
+        ann = {"id": "fixed-id", "kind": "note", "text": "hi"}
+        self._apply(store, s, {"op": "annotation_created", "annotation": ann})
+        # Simulate a client retry of the exact same batch (e.g. a lost POST
+        # response) resending the identically-id'd create op.
+        applied = self._apply(store, s, {"op": "annotation_created", "annotation": ann})
+        assert len(s.state["annotations"]) == 1
+        assert applied["annotation"]["id"] == "fixed-id"
+
     def test_annotation_update_on_deleted_is_dropped(self, tmp_path):
         store = _store(tmp_path)
         s = store.create()

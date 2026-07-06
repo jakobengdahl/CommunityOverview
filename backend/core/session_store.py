@@ -476,14 +476,28 @@ class SessionStore:
             state["hidden_edge_ids"] = _remove_all(state["hidden_edge_ids"], _require_id_list(op, "edge_ids"))
         elif op_type == "annotation_created":
             annotation = dict(_validate_annotation(op.get("annotation"), require_id=False))
-            if len(state["annotations"]) >= self._max_annotations:
-                raise OpError("annotation limit reached for this session")
-            if not isinstance(annotation.get("id"), str):
-                annotation["id"] = secrets.token_hex(8)
-            annotation.setdefault("created_by", op.get("client_id"))
-            annotation["updated_at"] = _now_iso()
-            state["annotations"].append(annotation)
-            applied["annotation"] = annotation
+            incoming_id = annotation.get("id") if isinstance(annotation.get("id"), str) else None
+            existing = (
+                next((a for a in state["annotations"] if a.get("id") == incoming_id), None)
+                if incoming_id is not None
+                else None
+            )
+            if existing is not None:
+                # A retried create (lost response, resent batch) carries the same
+                # client-assigned id as the one already applied: upsert so the
+                # retry is idempotent instead of appending a duplicate.
+                existing.update(annotation)
+                existing["updated_at"] = _now_iso()
+                applied["annotation"] = existing
+            else:
+                if len(state["annotations"]) >= self._max_annotations:
+                    raise OpError("annotation limit reached for this session")
+                if not isinstance(annotation.get("id"), str):
+                    annotation["id"] = secrets.token_hex(8)
+                annotation.setdefault("created_by", op.get("client_id"))
+                annotation["updated_at"] = _now_iso()
+                state["annotations"].append(annotation)
+                applied["annotation"] = annotation
         elif op_type == "annotation_updated":
             incoming = _validate_annotation(op.get("annotation"), require_id=True)
             target = next((a for a in state["annotations"] if a.get("id") == incoming["id"]), None)
