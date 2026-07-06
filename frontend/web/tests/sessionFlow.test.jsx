@@ -171,6 +171,54 @@ describe('Server-backed session lifecycle', () => {
     }, { timeout: 3000 });
   });
 
+  it('MCP command dedup: same command_id is skipped, a different command_id re-applies (R5)', async () => {
+    renderApp();
+
+    // The legacy push stream is the fixed, id-less URL (distinct from the
+    // op-stream's `/api/sessions/{id}/stream`).
+    const legacySource = await waitFor(() => {
+      const found = FakeEventSource.instances.find(es => es.url === 'http://localhost/stream');
+      expect(found).toBeTruthy();
+      return found;
+    });
+
+    const deliver = (commandId) => act(() => {
+      legacySource.onmessage({
+        data: JSON.stringify({
+          type: 'tool_result',
+          result: { action: 'add_to_visualization', nodes: [NODE_A], edges: [] },
+          command_id: commandId,
+        }),
+      });
+    });
+
+    deliver('cmd-1');
+    await waitFor(() => {
+      expect(useGraphStore.getState().nodes.map(n => n.id)).toEqual(['node-a']);
+    });
+
+    act(() => {
+      useGraphStore.getState().removeNode('node-a');
+    });
+    expect(useGraphStore.getState().nodes).toEqual([]);
+
+    // A redelivery with the *same* command_id (the legacy stream and the hub
+    // broadcasting the same push during their handover window) must be
+    // skipped, not reapplied.
+    deliver('cmd-1');
+    await new Promise(r => setTimeout(r, 50));
+    expect(useGraphStore.getState().nodes).toEqual([]);
+
+    // A *different* command_id — a later, legitimately repeated command, e.g.
+    // an agent re-adding a node a user just removed — must still apply. This
+    // is the exact bug found in review: dedup must be keyed by command_id,
+    // not by payload content.
+    deliver('cmd-2');
+    await waitFor(() => {
+      expect(useGraphStore.getState().nodes.map(n => n.id)).toEqual(['node-a']);
+    });
+  });
+
   it('switching session loads the target from the server, carrying its saved position', async () => {
     // Seed a previous session in the recents list so it shows in the drawer
     sessionStore.touchSession('5555-6666');
