@@ -36,7 +36,6 @@ vi.mock('../src/services/api', () => {
     getVisualizationStreamUrl: vi.fn(() => 'http://localhost/stream'),
     getSessionStreamUrl: vi.fn((id) => `http://localhost/api/sessions/${id}/stream`),
     getSessionOpsUrl: vi.fn((id) => `http://localhost/api/sessions/${id}/ops`),
-    updateSessionState: vi.fn(async () => ({ ok: true })),
     getClientId: vi.fn(() => 'client-test'),
     getDisplayName: vi.fn(() => null),
     listServerSessions: vi.fn(async () => ({ sessions: [] })),

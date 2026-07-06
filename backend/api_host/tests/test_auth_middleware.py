@@ -230,21 +230,22 @@ class TestAuthEnabledTakesPrecedence:
             os.unlink(path)
 
     def test_sessions_exempt_from_auth_enabled(self):
-        """/sessions/ paths are exempt even when auth_enabled=True.
+        """Legacy /sessions/ paths are exempt even when auth_enabled=True.
 
         EventSource cannot send Authorization headers, so the session ID
         itself acts as the access token.  A 401 here would silently break
-        all SSE visualization sessions.
+        the MCP visualization push stream.
 
-        Uses the PATCH /state endpoint (not /stream) because /stream is an
-        infinite SSE generator that would block TestClient indefinitely.
+        Uses an invalid id on /sessions/{id}/stream: the handler returns 400
+        (invalid format) before starting the infinite SSE generator, which
+        proves the request reached the handler rather than being 401'd.
         """
         client, path = self._make_client(
             auth_enabled=True, auth_password="secret"
         )
         try:
-            resp = client.patch("/sessions/1234-5678/state", json={})
-            assert resp.status_code == 200
+            resp = client.get("/sessions/not-valid/stream")
+            assert resp.status_code == 400
         finally:
             os.unlink(path)
 

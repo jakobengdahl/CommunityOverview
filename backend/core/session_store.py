@@ -299,62 +299,6 @@ def _validate_annotation(value: Any, *, require_id: bool) -> Dict[str, Any]:
     return value
 
 
-def normalize_state(raw: Any, max_annotations: int) -> Dict[str, Any]:
-    """Validate and normalise a full session-state payload (full-state PUT).
-
-    Step 4 persists the whole session state in one request (design §5, step 4:
-    "save via full-state PUT temporarily"; ops replace this in step 6). Unknown
-    keys are dropped; every value is validated at this boundary the same way the
-    per-op path validates, so a client can never write a malformed session.
-    """
-    if not isinstance(raw, dict):
-        raise OpError("state must be an object")
-    out = _empty_state()
-
-    node_refs = raw.get("node_refs", [])
-    if not isinstance(node_refs, list) or not all(isinstance(x, str) for x in node_refs):
-        raise OpError("node_refs must be a list of strings")
-    out["node_refs"] = list(dict.fromkeys(node_refs))
-
-    positions = raw.get("positions", {})
-    if not isinstance(positions, dict):
-        raise OpError("positions must be an object")
-    out["positions"] = {str(k): _validate_position(v) for k, v in positions.items()}
-
-    for key in ("hidden_node_ids", "hidden_edge_ids"):
-        val = raw.get(key, [])
-        if not isinstance(val, list) or not all(isinstance(x, str) for x in val):
-            raise OpError(f"{key} must be a list of strings")
-        out[key] = list(dict.fromkeys(val))
-
-    annotations = raw.get("annotations", [])
-    if not isinstance(annotations, list):
-        raise OpError("annotations must be a list")
-    if len(annotations) > max_annotations:
-        raise OpError("annotation limit reached for this session")
-    normalised_annotations: List[Dict[str, Any]] = []
-    for annotation in annotations:
-        ann = dict(_validate_annotation(annotation, require_id=False))
-        if not isinstance(ann.get("id"), str):
-            ann["id"] = secrets.token_hex(8)
-        ann.setdefault("updated_at", _now_iso())
-        normalised_annotations.append(ann)
-    out["annotations"] = normalised_annotations
-
-    manual_edges = raw.get("manual_edges", [])
-    if not isinstance(manual_edges, list):
-        raise OpError("manual_edges must be a list")
-    for edge in manual_edges:
-        if not isinstance(edge, dict):
-            raise OpError("each manual edge must be an object")
-        for key in ("id", "source", "target", "type", "label"):
-            if edge.get(key) is not None and not isinstance(edge[key], str):
-                raise OpError(f"manual edge '{key}' must be a string")
-    out["manual_edges"] = manual_edges
-
-    return out
-
-
 def _union(existing: List[str], incoming: List[str]) -> List[str]:
     seen = set(existing)
     result = list(existing)
@@ -481,26 +425,6 @@ class SessionStore:
     def persist(self, session: Session) -> None:
         with self._lock:
             self._backend.save(session.to_dict())
-
-    def replace_state(self, session: Session, state: Dict[str, Any]) -> Session:
-        """Replace a session's whole state (full-state PUT, design step 4).
-
-        Validates/normalises the payload, bumps ``seq`` and persists atomically.
-        The ring buffer is reset: a full-state replace carries no per-op history,
-        so a reconnecting client with an older ``since_seq`` must resync from a
-        snapshot rather than replay ops that never entered the ring. Clearing the
-        ring makes ``ops_since`` return ``None`` (→ snapshot) for any stale
-        ``since_seq``, while an already-current client is still served ``[]`` by
-        the ``since_seq >= seq`` guard.
-        """
-        normalised = normalize_state(state, self._max_annotations)
-        with self._lock:
-            session.state = normalised
-            session.seq += 1
-            session.updated_at = _now_iso()
-            self._rings[session.id] = deque(maxlen=self._ring_size)
-            self._backend.save(session.to_dict())
-            return session
 
     def session_count(self) -> int:
         return len(self._sessions)

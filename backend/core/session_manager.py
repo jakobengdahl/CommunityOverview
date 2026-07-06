@@ -31,14 +31,18 @@ from .session_store import STATE_OPS, OpError, Session, SessionStore, is_valid_s
 
 CLAIM_OPS = {"selection_claimed", "selection_released"}
 
+# Ops carry node **references** + layout + annotations, never node copies, so
+# these bounds are generous for the real op cadence (drag-end, D9): a single
+# `layout_applied` op collapses a bulk re-layout, and normal editing produces a
+# few ops/second. The token bucket (200 burst, 100/s refill) absorbs a big
+# multi-select layout while a runaway client is throttled to 429 + backoff; the
+# byte cap (§3.9) bounds a single oversized batch (e.g. a `layout_applied` with
+# tens of thousands of positions) independently of the op *count* cap.
 _DEFAULT_MAX_OPS_PER_BATCH = 500
 _DEFAULT_MAX_SESSIONS = 10_000
 _DEFAULT_BUCKET_CAPACITY = 200.0
 _DEFAULT_BUCKET_REFILL_PER_SEC = 100.0
-# Full-state PUT carries node **references** + layout + annotations, never node
-# copies, so 256 KB comfortably holds thousands of ids (mirrors the legacy
-# ``_SESSION_STATE_MAX_BYTES`` in api_host/server.py).
-_DEFAULT_MAX_STATE_BYTES = 256 * 1024
+_DEFAULT_MAX_OP_BATCH_BYTES = 256 * 1024
 
 
 class SessionNotFound(Exception):
@@ -92,7 +96,7 @@ class SessionManager:
         claims: Optional[ClaimMap] = None,
         max_ops_per_batch: int = _DEFAULT_MAX_OPS_PER_BATCH,
         max_sessions: int = _DEFAULT_MAX_SESSIONS,
-        max_state_bytes: int = _DEFAULT_MAX_STATE_BYTES,
+        max_op_batch_bytes: int = _DEFAULT_MAX_OP_BATCH_BYTES,
         bucket_capacity: float = _DEFAULT_BUCKET_CAPACITY,
         bucket_refill_per_sec: float = _DEFAULT_BUCKET_REFILL_PER_SEC,
     ) -> None:
@@ -102,7 +106,7 @@ class SessionManager:
         self.claims = claims or ClaimMap()
         self._max_ops = max_ops_per_batch
         self._max_sessions = max_sessions
-        self._max_state_bytes = max_state_bytes
+        self._max_op_batch_bytes = max_op_batch_bytes
         self._bucket = _TokenBucket(bucket_capacity, bucket_refill_per_sec)
         self._locks: Dict[str, asyncio.Lock] = {}
 
@@ -154,34 +158,20 @@ class SessionManager:
         self._locks.pop(session_id, None)
         return existed
 
-    def replace_state(self, session_id: str, state: Dict[str, Any]) -> Session:
-        """Replace a session's whole state (full-state PUT — design step 4).
-
-        Materialises the session if it does not exist yet (``get_or_create``),
-        so the share-URL / new-session flow can save into a client-chosen id
-        without an eager ``POST /api/sessions`` for every page load. Realtime
-        propagation of the replaced state to other clients arrives with the op
-        protocol in step 6; here the write is purely persistent.
-        """
-        if not is_valid_session_id(session_id):
-            raise SessionNotFound()
-        if len(json.dumps(state)) > self._max_state_bytes:
-            raise OpBatchTooLarge()
-        session, created = self.get_or_create(session_id)
-        try:
-            return self.store.replace_state(session, state)
-        except OpError:
-            # A malformed payload must not leave a phantom empty session behind
-            # when this call is what materialised it.
-            if created:
-                self.store.delete(session_id)
-            raise
-
     def roster(self, session_id: str) -> List[Dict[str, Any]]:
         return self.presence.roster(session_id)
 
     def connected_count(self, session_id: str) -> int:
         return self.presence.count(session_id)
+
+    def claimed_elements(self, session_id: str) -> List[str]:
+        """Element ids with a live selection claim (advisory soft-locks, D3).
+
+        The current per-user selection is expressed as claims, so this is what an
+        MCP query tool reports as ``selected_node_ids`` now that the browser no
+        longer uploads its selection (design §3.8).
+        """
+        return list(self.claims.snapshot(session_id).keys())
 
     # ---------------- ops ----------------
 
@@ -197,6 +187,11 @@ class SessionManager:
         if not isinstance(ops, list):
             raise OpError("'ops' must be a list")
         if len(ops) > self._max_ops:
+            raise OpBatchTooLarge()
+        # Bound the batch by *size* as well as *count* (§3.9): a single op such
+        # as `layout_applied` can carry a large positions map that the op-count
+        # cap alone would not catch.
+        if len(json.dumps(ops)) > self._max_op_batch_bytes:
             raise OpBatchTooLarge()
         if not isinstance(client_id, str) or not client_id:
             raise OpError("'client_id' is required")

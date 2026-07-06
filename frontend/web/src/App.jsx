@@ -497,21 +497,6 @@ function App() {
     return () => evtSource.close();
   }, [sessionId]); // eslint-disable-line react-hooks/exhaustive-deps
 
-  // ── Visualization session: canvas state upload ─────────────────────────
-  // Uploads the current visible node list so MCP tools can query it.
-  const _sessionUploadTimer = useRef(null);
-  useEffect(() => {
-    if (_sessionUploadTimer.current) clearTimeout(_sessionUploadTimer.current);
-    _sessionUploadTimer.current = setTimeout(() => {
-      const state = useGraphStore.getState();
-      api.updateSessionState(sessionId, {
-        visible_node_ids: state.nodes.map(n => n.id),
-        selected_node_ids: (state.selectedGraphNodes || []).map(n => n.id),
-        node_count: state.nodes.length,
-      }).catch(() => {});
-    }, 1000);
-  }, [nodes, sessionId]); // eslint-disable-line react-hooks/exhaustive-deps
-
   // ── Session bootstrap (once) ────────────────────────────────────────────
   // Reflect the initial session id in the URL and, when it came from a
   // ?session= share link, load its content from the server. A freshly
@@ -909,9 +894,9 @@ function App() {
   // Persist the current canvas to the server for the active session.
   // viewData carries node positions and groups collected by GraphCanvas;
   // node references come from the store. Session content lives server-side
-  // now (design step 4); the full-state PUT is temporary — step 6 replaces it
-  // with incremental ops. The session is materialised server-side on first
-  // save (get-or-create), so a fresh/shared id needs no eager POST.
+  // and is propagated as incremental ops (design step 6). The session is
+  // materialised server-side on the first non-empty save (get-or-create), so a
+  // fresh/shared id needs no eager POST.
   const persistSessionSnapshot = useCallback((viewData) => {
     const state = useGraphStore.getState();
     // Never persist an empty canvas: it would register unused sessions, and

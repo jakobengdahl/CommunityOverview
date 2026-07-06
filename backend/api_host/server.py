@@ -301,7 +301,6 @@ def _bind_request_authorization_to_asgi_app(asgi_app):
     return request_bound_app
 
 
-_SESSION_STATE_MAX_BYTES = 256 * 1024  # 256 KB — enough for 5000 node IDs
 _SESSION_MAX_COUNT = 10_000  # cap auto-created sessions to limit unauthenticated DoS
 
 
@@ -540,9 +539,11 @@ def create_app(
 
     # Initialize server-side shared-session store + manager (multi-user sessions).
     # Sessions live outside the graph, one JSON file per session under a
-    # directory next to the graph data (design D4/D5). This is the new op-driven
-    # path; the legacy /sessions/{id}/state|stream MCP-push channel below is
-    # untouched and continues to serve the current frontend until it cuts over.
+    # directory next to the graph data (design D4/D5). The op-driven store is now
+    # the single source of truth for session state; the legacy /sessions/{id}/stream
+    # channel below is kept only to deliver MCP visualization pushes to the browser
+    # (design §3.8) — the browser no longer uploads canvas state, MCP tools read it
+    # from this store.
     sessions_dir = config.sessions_dir or str(config.get_graph_path().parent / "sessions")
     session_store = SessionStore(FileSessionPersistenceBackend(sessions_dir))
     session_manager = SessionManager(session_store)
@@ -601,32 +602,14 @@ def create_app(
 
     # ==================== Visualization Session Endpoints ====================
 
-    @app.patch("/sessions/{session_id}/state")
-    async def update_session_state(session_id: str, request: Request) -> JSONResponse:
-        """Browser uploads its current canvas state so MCP tools can query it."""
-        if not session_registry.is_valid_session_id(session_id):
-            return JSONResponse({"error": "invalid session_id format"}, status_code=400)
-        body = await request.body()
-        if len(body) > _SESSION_STATE_MAX_BYTES:
-            return JSONResponse({"error": "state body too large"}, status_code=413)
-        try:
-            state = json.loads(body)
-        except Exception:
-            return JSONResponse({"error": "invalid JSON body"}, status_code=400)
-        if not isinstance(state, dict):
-            return JSONResponse({"error": "body must be a JSON object"}, status_code=400)
-        if not session_registry.update_state(session_id, state):
-            # Session not yet open: auto-create so state arrives before the SSE stream.
-            # Guard with a count cap to prevent unauthenticated session-space exhaustion.
-            if session_registry.session_count >= _SESSION_MAX_COUNT:
-                return JSONResponse({"error": "too many sessions"}, status_code=503)
-            session_registry.get_or_create(session_id)
-            session_registry.update_state(session_id, state)
-        return JSONResponse({"ok": True})
-
     @app.get("/sessions/{session_id}/stream")
     async def session_stream(session_id: str, request: Request):
-        """SSE stream — browser connects here to receive visualization commands."""
+        """SSE stream — browser connects here to receive MCP visualization commands.
+
+        The browser opens this on load so external AI clients can push commands
+        into the window (design §3.8). Session *state* is no longer uploaded here;
+        MCP query tools read it from the shared-session store instead.
+        """
         if not session_registry.is_valid_session_id(session_id):
             return JSONResponse({"error": "invalid session_id format"}, status_code=400)
         if (
