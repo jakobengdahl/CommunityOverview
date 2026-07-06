@@ -21,6 +21,12 @@ Effort scale: XS = single-line fix · S = up to ~30 lines / one file · M = mult
 
 ## Open
 
+### [2026-07-06] `torch` (heavy ML dep) is pinned in the base `requirements.txt`
+- **File(s):** `backend/requirements.txt:36-37` (`--extra-index-url https://download.pytorch.org/whl/cpu`, `torch>=2.0.0`); also `sentence-transformers`, `scikit-learn` in the same file
+- **Context:** Discovered during `claude/multi-user-sessions-step-8-ntxe0r`
+- **Issue:** `CLAUDE.md` → Dependency Changes says "Never add ML/heavy dependencies (torch, sentence-transformers, etc.) to the base `requirements.txt` — they belong in `requirements-ml.txt`." Today `torch>=2.0.0` (with the `download.pytorch.org` extra index), `sentence-transformers>=2.2.0` and `scikit-learn>=1.0.0` sit in the base file. This bloats every install, and the pytorch extra-index makes the base install fail in networks that only allow PyPI (the `download.pytorch.org` CONNECT is refused → the whole `pip install -r requirements.txt` errors, blocking test/dev setup). Move these into `requirements-ml.txt` (or make embeddings/similarity optional) so the base install is pure-PyPI and lightweight; ensure the code degrades gracefully when the ML stack is absent (the tests already mock the embedding model, and similarity lazily imports sklearn).
+- **Effort:** M
+
 ### [2026-07-06] Op-batch byte cap measures after FastAPI has parsed the whole body
 - **File(s):** `backend/core/session_manager.py` (`apply_ops`, the `json.dumps(ops)` byte cap), `backend/service/rest_api.py` (`apply_session_ops`)
 - **Context:** Discovered during `claude/multi-user-sessions-step-8-ntxe0r` (step-8 review, non-blocking)
