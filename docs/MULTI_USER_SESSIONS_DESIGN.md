@@ -1,10 +1,11 @@
 # Multi-User Shared Sessions — Design & Implementation Plan
 
-**Status:** In progress — the backend foundation (steps 1–3), the step-4
+**Status:** Complete — the backend foundation (steps 1–3), the step-4
 frontend cutover (server-backed session lifecycle), the step-5 annotation
-kinds (note, label, arrow), the step-6 realtime op emit/apply loop and the
-step-7 presence UI + selection claims are implemented; only hardening (step 8)
-remains.
+kinds (note, label, arrow), the step-6 realtime op emit/apply loop, the
+step-7 presence UI + selection claims, and the step-8 hardening (transitional
+shims removed, op-batch body cap, multi-client e2e, docs sweep) are all
+implemented.
 **Scope:** Open-source core only. SaaS-specific extensions (multi-instance scale-out,
 account-bound session history, workspace ACLs) are designed in the private SaaS
 repository and are explicitly out of scope here (see "Out of scope" below).
@@ -294,7 +295,7 @@ steps 6–8.
 | 5 | done | New annotation kinds (note, label, arrow) |
 | 6 | done | Frontend: realtime op emit/apply + canvas events |
 | 7 | done | Presence UI + selection claims |
-| 8 | not started | Hardening, multi-client e2e, docs sweep |
+| 8 | done | Hardening, multi-client e2e, docs sweep |
 
 > **Implementation note (steps 1–3 landed together).** Step 3's op endpoint has
 > nothing to apply ops to or broadcast through without step 1's store and step 2's
@@ -525,6 +526,37 @@ steps 6–8.
   `docs/USER_GUIDE.md` §§2.5/2.6/5/8.3 consistency,
   `docs/DEPLOYMENT_AND_CONCURRENCY_ANALYSIS.md` — document the single-instance
   constraint and the two SaaS seams explicitly.
+
+> **Implementation notes (step 8 as built).**
+> - **Transitional state shims removed.** Both "full-state save" paths are gone:
+>   the step-4 `PUT /api/sessions/{id}/state` (`replace_state` / `normalize_state`
+>   in the store + manager) and the legacy `PATCH /sessions/{id}/state` browser
+>   upload. Session state is now written **only** as incremental ops, so there is
+>   a single source of truth (design §3.8).
+> - **MCP query tools read server-owned state.** `connect_to_visualization_session`,
+>   `get_visualization_session_state` and `clear_visualization` no longer read the
+>   browser-uploaded blob (which no longer exists). They report visible nodes from
+>   the shared-session store's `node_refs` and the current selection from the
+>   advisory claim map. A registry entry now means only "a browser is connected to
+>   receive MCP pushes" — the gate those tools use for "session is open".
+> - **Legacy push channel kept (scope boundary).** The legacy
+>   `GET /sessions/{id}/stream` MCP-push channel stays: §3.8 keeps MCP command
+>   pushes, the browser opens it eagerly on load, and the op stream (which
+>   materialises lazily under D13) is not a drop-in replacement for reaching an
+>   empty, never-edited session. Only the redundant *state upload* was removed, not
+>   the push transport. Migrating pushes onto the hub is a possible later cleanup.
+> - **Op-batch body cap (hardening + rate-limit tuning).** `apply_ops` now bounds a
+>   batch by **size** (≤ 256 KB → `413`) as well as op **count** (≤ 500), catching a
+>   single oversized op such as a `layout_applied` with tens of thousands of
+>   positions that the count cap alone would miss (design §3.9). The per-client
+>   token bucket (200 burst, 100 ops/s refill → `429`) is unchanged — generous for
+>   the drag-end op cadence (D9) while still throttling a runaway client.
+> - **Multi-client testing.** A deterministic multi-client integration test
+>   (`backend/core/tests/test_session_multiuser.py`) drives two clients through one
+>   session (presence, add/move fan-out, annotation create, claims, rename, delete
+>   broadcast, reconnect catch-up) in CI; a Playwright multi-context spec
+>   (`frontend/web/tests/e2e/shared-session.spec.js`) exercises the same scenarios
+>   through the real UI + SSE transport (run locally, outside the core pytest CI).
 
 ## 6. Decisions
 

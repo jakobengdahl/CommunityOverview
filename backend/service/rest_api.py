@@ -150,12 +150,6 @@ class SessionOpsRequest(BaseModel):
     ops: List[Dict[str, Any]] = Field(..., description="Ordered ops to apply")
 
 
-class ReplaceSessionStateRequest(BaseModel):
-    """Request model for a full-state session save (temporary; ops replace it in step 6)."""
-    client_id: Optional[str] = Field(None, max_length=100, description="Originating client id")
-    state: Dict[str, Any] = Field(..., description="Whole session state to persist")
-
-
 def _raise_for_access_denied(result: Dict[str, Any]) -> None:
     if result.get("error_code") == "access_denied":
         raise HTTPException(status_code=403, detail=result.get("message") or result.get("error"))
@@ -529,23 +523,6 @@ def _register_session_endpoints(router: APIRouter, service: GraphService, sessio
             raise HTTPException(status_code=413, detail="op batch too large")
         except OpError as exc:
             raise HTTPException(status_code=400, detail=str(exc))
-
-    @router.put("/sessions/{session_id}/state")
-    async def replace_session_state(
-        session_id: str, request: ReplaceSessionStateRequest
-    ) -> Dict[str, Any]:
-        """Persist a session's whole state (full-state save; ops replace this in step 6)."""
-        if not is_valid_session_id(session_id):
-            raise HTTPException(status_code=400, detail="invalid session_id format")
-        try:
-            session = session_manager.replace_state(session_id, request.state)
-        except SessionLimitReached:
-            raise HTTPException(status_code=503, detail="too many sessions")
-        except OpBatchTooLarge:
-            raise HTTPException(status_code=413, detail="state body too large")
-        except OpError as exc:
-            raise HTTPException(status_code=400, detail=str(exc))
-        return _session_payload(session, resolve=False, manager=session_manager)
 
     @router.get("/sessions/{session_id}/stream")
     async def stream_session(

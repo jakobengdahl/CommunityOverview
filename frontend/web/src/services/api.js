@@ -635,18 +635,3 @@ export async function deleteServerSession(sessionId, clientId) {
 export function getSessionOpsUrl(sessionId) {
   return `${SESSIONS_BASE()}/${encodeURIComponent(sessionId)}/ops`;
 }
-
-/**
- * Upload the current canvas state to the backend session registry.
- * Called on connect and whenever the visible node list changes.
- *
- * @param {string} sessionId - Visualization session ID
- * @param {{visible_node_ids: string[], selected_node_ids: string[], node_count: number}} state
- * @returns {Promise<{ok: boolean}>}
- */
-export async function updateSessionState(sessionId, state) {
-  return apiFetch(`${getPathRoot()}/sessions/${encodeURIComponent(sessionId)}/state`, {
-    method: 'PATCH',
-    body: JSON.stringify(state),
-  });
-}

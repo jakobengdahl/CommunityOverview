@@ -331,17 +331,20 @@ node content is rehydrated from the graph on load via `?resolve=true`.
 | GET | `/api/sessions/{id}` | Get a session (meta + state + presence roster); `?resolve=true` also returns rehydrated nodes/edges |
 | PATCH | `/api/sessions/{id}` | Rename a session |
 | DELETE | `/api/sessions/{id}` | Delete a session (`?client_id=` names the deleter in the broadcast) |
-| POST | `/api/sessions/{id}/ops` | Apply an ordered op batch (`{client_id, base_seq, ops}` → `{applied, seq}`); server-ordered LWW, monotonic `seq` |
-| PUT | `/api/sessions/{id}/state` | Replace a session's whole state (`{client_id, state}`); materialises the session if absent. Was the step-4 full-state save; the step-6 frontend now uses incremental ops, so this is unused by the client and slated for removal in step 8 (§3.8) |
+| POST | `/api/sessions/{id}/ops` | Apply an ordered op batch (`{client_id, base_seq, ops}` → `{applied, seq}`); server-ordered LWW, monotonic `seq`. Bounded per batch by op count (≤ 500) **and** body size (≤ 256 KB → `413`), plus a per-client token bucket (200 burst, 100 ops/s refill → `429`) — design §3.9 |
 | GET | `/api/sessions/{id}/stream` | SSE fan-out: presence, applied ops, and claims. Query `client_id`, `name`, `since_seq` (op catch-up or full-snapshot fallback). EventSource-opened, so it bypasses Basic Auth (protected by the unguessable session id — design §3.9) |
 
-Legacy MCP visualization-push channel (single-consumer; kept as a shim during
-the frontend transition, removed in the final step of the plan):
+Session state is server-owned: the browser no longer uploads canvas state, and
+MCP query tools read visible nodes / selection from the shared-session store
+(the step-4 `PUT /api/sessions/{id}/state` full-state save and the legacy
+`PATCH /sessions/{id}/state` upload were removed in step 8 — design §3.8).
+
+Legacy MCP visualization-push channel (single-consumer; delivers AI-pushed
+visualization commands to the browser):
 
 | Method | Endpoint | Description |
 |--------|----------|-------------|
-| PATCH | `/sessions/{id}/state` | Browser uploads its current canvas state so MCP tools can query it |
-| GET | `/sessions/{id}/stream` | SSE stream delivering MCP visualization commands to the browser |
+| GET | `/sessions/{id}/stream` | SSE stream delivering MCP visualization commands to the browser. A connected stream signals that a browser is present to receive pushes |
 
 ### MCP Tools
 

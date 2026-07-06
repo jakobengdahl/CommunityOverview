@@ -245,51 +245,31 @@ class TestLifecycle:
         assert events[0]["type"] == "command"
 
 
-class TestReplaceState:
-    async def test_replaces_existing_session(self):
-        mgr = _manager()
+class TestOpBatchByteCap:
+    """A batch is bounded by *size* as well as op *count* (design §3.9)."""
+
+    async def test_oversized_batch_raises_even_within_count_cap(self):
+        # A single op stays under the op-count cap but exceeds the byte cap: a
+        # `layout_applied` with many positions is the realistic case.
+        mgr = _manager(max_op_batch_bytes=256)
         s = mgr.create_session()
-        await mgr.apply_ops(s.id, "c1", 0, [{"op": "nodes_added", "node_ids": ["old"]}])
-        session = mgr.replace_state(s.id, {"node_refs": ["a", "b"]})
-        assert session.state["node_refs"] == ["a", "b"]
-        assert mgr.get_session(s.id).state["node_refs"] == ["a", "b"]
-
-    async def test_materialises_unknown_session(self):
-        mgr = _manager()
-        assert mgr.get_session("4321-8765") is None
-        mgr.replace_state("4321-8765", {"node_refs": ["a"]})
-        assert mgr.get_session("4321-8765").state["node_refs"] == ["a"]
-
-    async def test_invalid_id_raises_not_found(self):
-        mgr = _manager()
-        with pytest.raises(SessionNotFound):
-            mgr.replace_state("nope", {"node_refs": []})
-
-    async def test_oversized_state_raises(self):
-        mgr = _manager(max_state_bytes=64)
-        s = mgr.create_session()
+        positions = {f"node-{i}": {"x": i, "y": i} for i in range(1000)}
         with pytest.raises(OpBatchTooLarge):
-            mgr.replace_state(s.id, {"node_refs": [f"node-{i}" for i in range(1000)]})
+            await mgr.apply_ops(s.id, "c1", 0, [{"op": "layout_applied", "positions": positions}])
 
-    async def test_session_limit_blocks_materialisation(self):
-        mgr = _manager(max_sessions=1)
-        mgr.create_session()
-        with pytest.raises(SessionLimitReached):
-            mgr.replace_state("4321-8765", {"node_refs": ["a"]})
-
-    async def test_malformed_payload_does_not_leave_phantom_session(self):
-        mgr = _manager()
-        with pytest.raises(OpError):
-            mgr.replace_state("4321-8765", {"node_refs": [1, 2]})
-        # The session was never validly created, so it must not linger.
-        assert mgr.get_session("4321-8765") is None
-
-    async def test_replace_forces_snapshot_on_reconnect(self):
-        mgr = _manager()
+    async def test_small_batch_within_byte_cap_succeeds(self):
+        mgr = _manager(max_op_batch_bytes=256)
         s = mgr.create_session()
-        await mgr.apply_ops(s.id, "c1", 0, [{"op": "nodes_added", "node_ids": ["a"]}])
-        mgr.replace_state(s.id, {"node_refs": ["x"]})
-        # A client that was behind gets a full snapshot, not an empty catch_up.
-        result = mgr.catch_up(s.id, 1)
-        assert result["type"] == "snapshot"
-        assert result["session"]["state"]["node_refs"] == ["x"]
+        res = await mgr.apply_ops(s.id, "c1", 0, [{"op": "nodes_added", "node_ids": ["a"]}])
+        assert res["seq"] == 1
+
+    async def test_oversized_batch_leaves_state_untouched(self):
+        mgr = _manager(max_op_batch_bytes=256)
+        s = mgr.create_session()
+        await mgr.apply_ops(s.id, "c1", 0, [{"op": "nodes_added", "node_ids": ["keep"]}])
+        with pytest.raises(OpBatchTooLarge):
+            await mgr.apply_ops(
+                s.id, "c1", 0,
+                [{"op": "layout_applied", "positions": {f"n-{i}": {"x": i, "y": i} for i in range(1000)}}],
+            )
+        assert mgr.get_session(s.id).state["node_refs"] == ["keep"]

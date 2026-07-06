@@ -1,57 +1,45 @@
 """
-Tests for /sessions/{session_id}/state and /sessions/{session_id}/stream endpoints.
+Tests for the legacy MCP visualization-push channel and the MCP session tools.
+
+The browser no longer uploads canvas state (the ``PATCH /sessions/{id}/state``
+shim was removed in step 8). The remaining legacy endpoint is the push stream
+``GET /sessions/{id}/stream``; a registry entry simply signals that a browser is
+connected to receive MCP pushes. Session *state* is server-owned now (design
+§3.8): the MCP query tools read visible nodes from the shared-session store and
+the current selection from the advisory claim map.
 
 Covers:
-- State upload (PATCH) and retrieval via session registry
-- MCP session tools: connect_to_visualization_session and get_visualization_session_state
+- MCP session tools connect_to_visualization_session / get_visualization_session_state
+  reading server-owned state
+- clear_visualization gating on browser presence
+- MCP push enqueues a command when a browser is connected
 - Invalid session ID rejection
 """
 
 from fastapi.testclient import TestClient
 
 
-class TestSessionStateEndpoint:
-    """PATCH /sessions/{session_id}/state"""
+def _open_browser(test_app: TestClient, session_id: str) -> None:
+    """Simulate a browser holding the legacy push stream open for *session_id*.
 
-    def test_patch_state_creates_session_and_stores_state(self, test_app: TestClient):
-        session_id = "1234-5678"
-        state = {"visible_node_ids": ["a", "b"], "node_count": 2}
+    In production the browser opens ``GET /sessions/{id}/stream`` on load, which
+    calls ``registry.get_or_create``. Tests can't easily hold an SSE stream open,
+    so we materialise the registry entry directly. The file-backed store lives in
+    a shared temp dir, so first clear any session a previous run left on disk to
+    keep the id a clean slate.
+    """
+    test_app.app.state.session_manager.delete_session(session_id)
+    test_app.app.state.session_registry.get_or_create(session_id)
 
-        response = test_app.patch(f"/sessions/{session_id}/state", json=state)
-        assert response.status_code == 200
-        assert response.json()["ok"] is True
 
-    def test_patch_state_invalid_format_rejected(self, test_app: TestClient):
-        response = test_app.patch("/sessions/badformat/state", json={})
-        assert response.status_code == 400
-        assert "invalid" in response.json()["error"].lower()
-
-    def test_patch_state_non_object_body_rejected(self, test_app: TestClient):
-        response = test_app.patch(
-            "/sessions/1234-5678/state",
-            content=b'"just a string"',
-            headers={"Content-Type": "application/json"},
-        )
-        assert response.status_code == 400
-
-    def test_state_retrievable_via_mcp_session_tool(self, test_app: TestClient):
-        """State uploaded via PATCH should be visible to the MCP session tool."""
-        session_id = "4321-8765"
-        state = {"visible_node_ids": ["x", "y", "z"], "node_count": 3}
-        test_app.patch(f"/sessions/{session_id}/state", json=state)
-
-        response = test_app.post(
-            "/execute_tool",
-            json={
-                "tool_name": "get_visualization_session_state",
-                "arguments": {"session_id": session_id},
-            },
-        )
-        assert response.status_code == 200
-        data = response.json()
-        assert data["session_id"] == session_id
-        assert data["visible_node_ids"] == ["x", "y", "z"]
-        assert data["node_count"] == 3
+def _add_nodes(test_app: TestClient, session_id: str, node_ids) -> None:
+    """Materialise the store session (as the op stream would) and add node refs."""
+    test_app.app.state.session_manager.get_or_create(session_id)
+    resp = test_app.post(
+        f"/api/sessions/{session_id}/ops",
+        json={"client_id": "setup", "ops": [{"op": "nodes_added", "node_ids": list(node_ids)}]},
+    )
+    assert resp.status_code == 200
 
 
 class TestConnectToVisualizationSession:
@@ -70,12 +58,10 @@ class TestConnectToVisualizationSession:
         assert data["connected"] is False
         assert "not found" in data["message"].lower()
 
-    def test_returns_connected_for_active_session(self, test_app: TestClient):
+    def test_returns_connected_for_open_session(self, test_app: TestClient):
         session_id = "5678-1234"
-        test_app.patch(
-            f"/sessions/{session_id}/state",
-            json={"visible_node_ids": ["n1"], "node_count": 1},
-        )
+        _open_browser(test_app, session_id)
+        _add_nodes(test_app, session_id, ["n1"])
 
         response = test_app.post(
             "/execute_tool",
@@ -89,6 +75,21 @@ class TestConnectToVisualizationSession:
         assert data["connected"] is True
         assert data["session_id"] == session_id
         assert data["visible_node_count"] == 1
+
+    def test_connected_with_empty_store_reports_zero_nodes(self, test_app: TestClient):
+        """A browser can be connected before anything is saved server-side."""
+        session_id = "5555-6666"
+        _open_browser(test_app, session_id)
+
+        data = test_app.post(
+            "/execute_tool",
+            json={
+                "tool_name": "connect_to_visualization_session",
+                "arguments": {"session_id": session_id},
+            },
+        ).json()
+        assert data["connected"] is True
+        assert data["visible_node_count"] == 0
 
     def test_invalid_session_id_format_returns_error(self, test_app: TestClient):
         response = test_app.post(
@@ -116,17 +117,17 @@ class TestGetVisualizationSessionState:
             },
         )
         assert response.status_code == 200
-        data = response.json()
-        assert "error" in data
+        assert "error" in response.json()
 
-    def test_returns_state_for_known_session(self, test_app: TestClient):
+    def test_returns_server_owned_state_for_open_session(self, test_app: TestClient):
         session_id = "2222-3333"
-        state = {
-            "visible_node_ids": ["node-1", "node-2"],
-            "selected_node_ids": ["node-1"],
-            "node_count": 2,
-        }
-        test_app.patch(f"/sessions/{session_id}/state", json=state)
+        _open_browser(test_app, session_id)
+        _add_nodes(test_app, session_id, ["node-1", "node-2"])
+        # The current selection is expressed as an advisory claim (design §3.8).
+        test_app.post(
+            f"/api/sessions/{session_id}/ops",
+            json={"client_id": "setup", "ops": [{"op": "selection_claimed", "element_ids": ["node-1"]}]},
+        )
 
         response = test_app.post(
             "/execute_tool",
@@ -139,16 +140,42 @@ class TestGetVisualizationSessionState:
         data = response.json()
         assert data["session_id"] == session_id
         assert data["visible_node_ids"] == ["node-1", "node-2"]
+        assert data["node_count"] == 2
         assert data["selected_node_ids"] == ["node-1"]
 
 
+class TestClearVisualization:
+    """MCP tool: clear_visualization"""
+
+    def test_clear_unknown_session_errors(self, test_app: TestClient):
+        data = test_app.post(
+            "/execute_tool",
+            json={"tool_name": "clear_visualization", "arguments": {"visualization_session_id": "0000-1111"}},
+        ).json()
+        assert data["success"] is False
+        assert "not found" in data["error"].lower()
+
+    def test_clear_open_session_pushes_command(self, test_app: TestClient):
+        session_id = "3333-4444"
+        _open_browser(test_app, session_id)
+
+        data = test_app.post(
+            "/execute_tool",
+            json={"tool_name": "clear_visualization", "arguments": {"visualization_session_id": session_id}},
+        ).json()
+        assert data["success"] is True
+
+        registry = test_app.app.state.session_registry
+        cmd = registry._sessions[session_id]["queue"].get_nowait()
+        assert cmd["tool"] == "clear_visualization"
+
+
 class TestVisualizationSessionIdPush:
-    """MCP tools push result to session queue when visualization_session_id is set."""
+    """MCP tools push a result to the browser queue when a session is connected."""
 
     def test_search_graph_with_session_id_enqueues_command(self, test_app: TestClient):
-        """search_graph should push to the session when visualization_session_id is set."""
         session_id = "7777-8888"
-        test_app.patch(f"/sessions/{session_id}/state", json={"visible_node_ids": []})
+        _open_browser(test_app, session_id)
 
         response = test_app.post(
             "/execute_tool",
@@ -163,35 +190,26 @@ class TestVisualizationSessionIdPush:
         )
         assert response.status_code == 200
 
-        # The session queue should have received a command
         registry = test_app.app.state.session_registry
         assert not registry._sessions[session_id]["queue"].empty()
         cmd = registry._sessions[session_id]["queue"].get_nowait()
         assert cmd["type"] == "tool_result"
         assert cmd["tool"] == "search_graph"
 
-    def test_get_related_nodes_with_session_id_enqueues_command(
-        self, test_app: TestClient
-    ):
-        """get_related_nodes with visualization_session_id should push an additive command."""
+    def test_get_related_nodes_with_session_id_enqueues_command(self, test_app: TestClient):
         session_id = "4444-5555"
-        test_app.patch(f"/sessions/{session_id}/state", json={"visible_node_ids": []})
+        _open_browser(test_app, session_id)
 
         response = test_app.post(
             "/execute_tool",
             json={
                 "tool_name": "get_related_nodes",
-                "arguments": {
-                    "node_id": "node-1",
-                    "visualization_session_id": session_id,
-                },
+                "arguments": {"node_id": "node-1", "visualization_session_id": session_id},
             },
         )
         assert response.status_code == 200
 
-        # Enqueued command should have action=add_to_visualization (injected by default)
         registry = test_app.app.state.session_registry
-        assert not registry._sessions[session_id]["queue"].empty()
         cmd = registry._sessions[session_id]["queue"].get_nowait()
         assert cmd["type"] == "tool_result"
         assert cmd["tool"] == "get_related_nodes"
@@ -199,61 +217,19 @@ class TestVisualizationSessionIdPush:
         assert cmd["result"].get("action") == "add_to_visualization"
 
     def test_get_saved_view_with_session_id_enqueues_command(self, test_app: TestClient):
-        """get_saved_view with visualization_session_id should push to the session."""
         session_id = "6666-7777"
-        test_app.patch(f"/sessions/{session_id}/state", json={"visible_node_ids": []})
+        _open_browser(test_app, session_id)
 
         response = test_app.post(
             "/execute_tool",
             json={
                 "tool_name": "get_saved_view",
-                "arguments": {
-                    "name": "nonexistent-view",
-                    "visualization_session_id": session_id,
-                },
+                "arguments": {"name": "nonexistent-view", "visualization_session_id": session_id},
             },
         )
         assert response.status_code == 200
 
-        # The session queue receives a command regardless of whether the view exists
         registry = test_app.app.state.session_registry
-        assert not registry._sessions[session_id]["queue"].empty()
         cmd = registry._sessions[session_id]["queue"].get_nowait()
         assert cmd["type"] == "tool_result"
         assert cmd["tool"] == "get_saved_view"
-
-    def test_session_state_body_size_limit(self, test_app: TestClient):
-        """PATCH /sessions/{id}/state should reject oversized bodies."""
-        session_id = "1111-9999"
-        # ~390 KB of JSON — above the 256 KB cap (50k items ≈ 195 KB, 100k ≈ 390 KB)
-        large_payload = {"visible_node_ids": ["x"] * 100000}
-        response = test_app.patch(
-            f"/sessions/{session_id}/state", json=large_payload
-        )
-        assert response.status_code == 413
-
-    def test_session_count_cap_returns_503(self, test_app: TestClient):
-        """PATCH /state must return 503 when the session registry is full."""
-        registry = test_app.app.state.session_registry
-        # Fill registry to the cap with dummy entries (bypassing the normal path
-        # so we don't need 10 000 HTTP requests).
-        from backend.api_host.server import _SESSION_MAX_COUNT
-
-        original = dict(registry._sessions)
-        try:
-            for i in range(_SESSION_MAX_COUNT - len(registry._sessions)):
-                fake_id = f"{i:04d}-{i:04d}"
-                registry._sessions[fake_id] = {
-                    "queue": __import__("asyncio").Queue(),
-                    "state": {},
-                    "created_at": 0,
-                    "last_seen": 0,
-                }
-            assert registry.session_count >= _SESSION_MAX_COUNT
-
-            # A new session ID that is not already in the registry
-            response = test_app.patch("/sessions/8888-9999/state", json={})
-            assert response.status_code == 503
-        finally:
-            registry._sessions.clear()
-            registry._sessions.update(original)

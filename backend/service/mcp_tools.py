@@ -40,6 +40,23 @@ def register_mcp_tools(mcp, service: GraphService, session_registry=None, sessio
     def _push(session_id, tool_name, result):
         _push_to_session(session_registry, session_id, tool_name, result, session_manager)
 
+    def _session_view_state(session_id):
+        """Return ``(visible_node_ids, selected_node_ids)`` as the server sees them.
+
+        Session state is server-owned (design §3.8): visible nodes come from the
+        shared-session store's node references, the current selection from the
+        advisory claim map. The browser no longer uploads canvas state — an MCP
+        tool reads the same state every collaborator converges on.
+        """
+        visible: list = []
+        selected: list = []
+        if session_manager is not None:
+            session = session_manager.get_session(session_id)
+            if session is not None:
+                visible = list(session.state.get("node_refs", []))
+            selected = list(session_manager.claimed_elements(session_id))
+        return visible, selected
+
     def register_tool(func: Callable) -> Callable:
         """Register a function as both MCP tool and in tools_map."""
         mcp.tool()(func)
@@ -521,8 +538,7 @@ def register_mcp_tools(mcp, service: GraphService, session_registry=None, sessio
             return {"success": False, "error": "Session registry not available"}
         if not session_registry.is_valid_session_id(visualization_session_id):
             return {"success": False, "error": "Invalid session ID format — expected DDDD-DDDD"}
-        state = session_registry.get_state(visualization_session_id)
-        if state is None:
+        if not session_registry.session_exists(visualization_session_id):
             return {
                 "success": False,
                 "error": (
@@ -555,8 +571,7 @@ def register_mcp_tools(mcp, service: GraphService, session_registry=None, sessio
             return {"connected": False, "error": "Session registry not available"}
         if not session_registry.is_valid_session_id(session_id):
             return {"connected": False, "error": "Invalid session ID format — expected DDDD-DDDD"}
-        state = session_registry.get_state(session_id)
-        if state is None:
+        if not session_registry.session_exists(session_id):
             return {
                 "connected": False,
                 "message": (
@@ -564,6 +579,7 @@ def register_mcp_tools(mcp, service: GraphService, session_registry=None, sessio
                     "Open the application in a browser and use the displayed session ID."
                 ),
             }
+        visible, _ = _session_view_state(session_id)
         return {
             "connected": True,
             "session_id": session_id,
@@ -572,7 +588,7 @@ def register_mcp_tools(mcp, service: GraphService, session_registry=None, sessio
                 "You can now pass visualization_session_id to search_graph, "
                 "get_related_nodes, get_saved_view, and clear_visualization."
             ),
-            "visible_node_count": len(state.get("visible_node_ids", [])),
+            "visible_node_count": len(visible),
         }
 
     @register_tool
@@ -594,15 +610,20 @@ def register_mcp_tools(mcp, service: GraphService, session_registry=None, sessio
             return {"error": "Session registry not available"}
         if not session_registry.is_valid_session_id(session_id):
             return {"error": "Invalid session ID format — expected DDDD-DDDD"}
-        state = session_registry.get_state(session_id)
-        if state is None:
+        if not session_registry.session_exists(session_id):
             return {
                 "error": (
                     f"Session '{session_id}' not found. "
                     "Call connect_to_visualization_session first to verify the session is open."
                 )
             }
-        return {"session_id": session_id, **state}
+        visible, selected = _session_view_state(session_id)
+        return {
+            "session_id": session_id,
+            "visible_node_ids": visible,
+            "selected_node_ids": selected,
+            "node_count": len(visible),
+        }
 
     return tools_map
 

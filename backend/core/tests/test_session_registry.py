@@ -70,32 +70,6 @@ class TestSessionLifecycle:
         assert reg.session_count == 2
 
 
-class TestStateManagement:
-    """update_state / get_state."""
-
-    def test_get_state_returns_none_for_unknown(self):
-        reg = SessionRegistry()
-        assert reg.get_state("9999-9999") is None
-
-    def test_update_state_returns_false_for_unknown(self):
-        reg = SessionRegistry()
-        assert reg.update_state("9999-9999", {"visible_node_ids": []}) is False
-
-    def test_update_and_get_state_roundtrip(self):
-        reg = SessionRegistry()
-        reg.get_or_create("1234-5678")
-        state = {"visible_node_ids": ["a", "b"], "node_count": 2}
-        assert reg.update_state("1234-5678", state)
-        assert reg.get_state("1234-5678") == state
-
-    def test_update_state_replaces_previous(self):
-        reg = SessionRegistry()
-        reg.get_or_create("1234-5678")
-        reg.update_state("1234-5678", {"visible_node_ids": ["a"]})
-        reg.update_state("1234-5678", {"visible_node_ids": ["b", "c"]})
-        assert reg.get_state("1234-5678") == {"visible_node_ids": ["b", "c"]}
-
-
 class TestPushCommandSync:
     """push_command_sync via the running event loop."""
 

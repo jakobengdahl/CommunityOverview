@@ -66,7 +66,7 @@ most filesystems. `fsync()` ensures data reaches disk before the rename.
 | Thread safety | ✅ Implemented | `threading.RLock` on all mutations |
 | File locking | ✅ Implemented | `fcntl.flock` / `msvcrt.locking` |
 | Atomic writes | ✅ Implemented | temp file + rename |
-| Session management | ⚠️ Basic | Basic Auth, no per-user tracking |
+| Session management | ⚠️ Basic | Basic Auth, anonymous guest identity; shared sessions are single-instance (see below) |
 | Transactions | ⚠️ Not supported | No rollback on partial failure |
 | Multi-process | ✅ Works | File lock protects between processes |
 
@@ -74,6 +74,46 @@ The application is safe for concurrent users at the current deployment scale.
 Transactions and per-user tracking remain open items for a future storage backend
 migration (see [CORE_RUNTIME_AND_EXTENSION_ENABLEMENT.md](./CORE_RUNTIME_AND_EXTENSION_ENABLEMENT.md),
 workstream 5).
+
+---
+
+## Shared sessions — single-instance constraint & SaaS seams
+
+The multi-user shared-session feature (see
+[MULTI_USER_SESSIONS_DESIGN.md](./MULTI_USER_SESSIONS_DESIGN.md)) is
+**single-instance by design in the open core**. Realtime fan-out (SSE),
+presence and selection claims are held in process memory, so two browsers
+collaborate correctly only when they are served by the **same** backend
+process. Running more than one core replica behind a load balancer would split
+collaborators across processes: each would see a consistent-but-partial view,
+because neither the event bus nor presence crosses process boundaries.
+
+Session **content** is persisted (one JSON file per session under
+`data/sessions/<id>.json`, atomic temp+rename writes with the same file-lock
+discipline as the graph store) and survives a restart, so a single-instance
+deployment loses only ephemeral state (the live op stream, roster and claims) on
+a bounce — clients reconnect and resync from a snapshot. There is **no automatic
+session retention/eviction** (design D13): a session lives until explicitly
+deleted.
+
+Two seams keep the core single-instance while letting the SaaS layer scale out
+(design §3.2, D5) — the core ships only the in-process implementations:
+
+| Seam | Core implementation | SaaS replacement |
+|------|---------------------|------------------|
+| `SessionPersistenceBackend` (`core/session_store.py`) | `FileSessionPersistenceBackend` — one JSON file per session | Shared DB-backed store (e.g. Postgres) so every replica reads/writes the same session state |
+| `SessionEventBus` (`core/session_hub.py`) | `InProcessEventBus` — per-subscriber asyncio queues, one process | Redis (or equivalent) pub/sub bus so applied ops, presence and claims fan out across replicas |
+
+The core's only obligation to SaaS is to keep these two seams stable and to pass
+through an optional identity context on the session endpoints when present.
+Everything else about multi-instance scale-out (shared DB, Redis fan-out,
+account-bound history, workspace ACLs) lives behind that boundary and is out of
+scope for the open core.
+
+The REST/ops surface is bounded to keep a single instance healthy under load:
+each op batch is capped by op count (≤ 500) and body size (≤ 256 KB → `413`), and
+a per-client token bucket (200 burst, 100 ops/s refill → `429`) throttles a
+runaway client (design §3.9).
 
 ---
 

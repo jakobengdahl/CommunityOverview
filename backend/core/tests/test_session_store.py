@@ -19,7 +19,6 @@ from backend.core.session_store import (
     Session,
     SessionStore,
     is_valid_session_id,
-    normalize_state,
 )
 
 
@@ -213,88 +212,3 @@ class TestRingBufferCatchUp:
         assert [op["seq"] for op in store.ops_since(s.id, 4)] == [5]
 
 
-class TestNormalizeState:
-    def test_drops_unknown_keys_and_dedupes(self):
-        out = normalize_state(
-            {
-                "node_refs": ["a", "b", "a"],
-                "hidden_node_ids": ["h", "h"],
-                "bogus": 123,
-            },
-            max_annotations=100,
-        )
-        assert out["node_refs"] == ["a", "b"]
-        assert out["hidden_node_ids"] == ["h"]
-        assert "bogus" not in out
-        # missing keys default to the empty-state shape
-        assert out["positions"] == {}
-        assert out["annotations"] == []
-        assert out["manual_edges"] == []
-
-    def test_validates_positions(self):
-        out = normalize_state({"positions": {"a": {"x": 1, "y": 2}}}, max_annotations=100)
-        assert out["positions"] == {"a": {"x": 1.0, "y": 2.0}}
-        with pytest.raises(OpError):
-            normalize_state({"positions": {"a": {"x": "no"}}}, max_annotations=100)
-
-    def test_rejects_non_string_node_refs(self):
-        with pytest.raises(OpError):
-            normalize_state({"node_refs": ["a", 3]}, max_annotations=100)
-
-    def test_assigns_annotation_ids_and_enforces_limit(self):
-        out = normalize_state(
-            {"annotations": [{"kind": "group", "label": "G", "member_node_ids": ["a"]}]},
-            max_annotations=100,
-        )
-        assert isinstance(out["annotations"][0]["id"], str)
-        assert out["annotations"][0]["kind"] == "group"
-        with pytest.raises(OpError):
-            normalize_state(
-                {"annotations": [{"kind": "note"}, {"kind": "note"}]},
-                max_annotations=1,
-            )
-
-    def test_rejects_unknown_annotation_kind(self):
-        with pytest.raises(OpError):
-            normalize_state({"annotations": [{"kind": "sticker"}]}, max_annotations=100)
-
-
-class TestReplaceState:
-    def test_replaces_bumps_seq_and_persists(self, tmp_path):
-        store = _store(tmp_path)
-        s = store.create()
-        store.apply_state_op(s, {"op": "nodes_added", "node_ids": ["old"]})
-        prev_seq = s.seq
-
-        store.replace_state(s, {"node_refs": ["a", "b"], "positions": {"a": {"x": 1, "y": 1}}})
-
-        assert s.state["node_refs"] == ["a", "b"]
-        assert "old" not in s.state["node_refs"]
-        assert s.seq == prev_seq + 1
-        # survives a reload from disk
-        reloaded = _store(tmp_path).get(s.id)
-        assert reloaded.state["node_refs"] == ["a", "b"]
-
-    def test_invalid_state_raises_before_mutation(self, tmp_path):
-        store = _store(tmp_path)
-        s = store.create()
-        store.apply_state_op(s, {"op": "nodes_added", "node_ids": ["keep"]})
-        with pytest.raises(OpError):
-            store.replace_state(s, {"node_refs": [1, 2]})
-        assert s.state["node_refs"] == ["keep"]
-
-    def test_replace_resets_ring_so_stale_catch_up_forces_snapshot(self, tmp_path):
-        # A full-state replace has no per-op history: a client that was behind
-        # must resync from a snapshot, not receive an empty (falsely "caught up")
-        # op list. Clearing the ring makes ops_since return None for stale seqs.
-        store = _store(tmp_path)
-        s = store.create()
-        store.apply_state_op(s, {"op": "nodes_added", "node_ids": ["a"]})  # seq 1
-        store.apply_state_op(s, {"op": "nodes_added", "node_ids": ["b"]})  # seq 2
-
-        store.replace_state(s, {"node_refs": ["x"]})  # seq 3, ring reset
-
-        # A client stuck at seq 2 cannot be served from the ring → snapshot.
-        assert store.ops_since(s.id, 2) is None
-        # An already-current client still gets an empty diff, not a snapshot.
-        assert store.ops_since(s.id, s.seq) == []
