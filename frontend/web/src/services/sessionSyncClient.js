@@ -414,12 +414,28 @@ export class SessionSyncClient {
   _startRenewTimer() {
     if (this._renewTimer || this._closed) return;
     this._renewTimer = setInterval(() => {
-      if (this._localSelection.length) {
-        this._enqueue([{ op: 'selection_claimed', element_ids: this._localSelection.slice() }]);
-      } else {
+      if (!this._localSelection.length) {
         this._stopRenewTimer();
+        return;
       }
+      // Skip renewals while the stream is down: the server released this
+      // client's claims on disconnect and reseeds on reconnect, so queuing
+      // renewal ops that cannot be sent would only grow the backlog. The
+      // reconnect handler re-advertises the selection instead.
+      if (!this._ready) return;
+      this._enqueue([{ op: 'selection_claimed', element_ids: this._localSelection.slice() }]);
     }, CLAIM_RENEW_MS);
+  }
+
+  /**
+   * Re-claim the current local selection after a reconnect. The server releases
+   * a client's claims when its stream drops, so on reconnect other clients have
+   * lost this user's selection markers — re-emit them to restore the markers.
+   */
+  _readvertiseSelection() {
+    if (this._localSelection.length) {
+      this._enqueue([{ op: 'selection_claimed', element_ids: this._localSelection.slice() }]);
+    }
   }
 
   _stopRenewTimer() {
@@ -558,8 +574,9 @@ export class SessionSyncClient {
         if (!this._hadSnapshot) {
           this._hadSnapshot = true;
           if (this.handlers.onReady) this.handlers.onReady(data.seq);
-        } else if (this.handlers.onResync) {
-          this.handlers.onResync();
+        } else {
+          this._readvertiseSelection();
+          if (this.handlers.onResync) this.handlers.onResync();
         }
         this._flushSoon();
         break;
@@ -568,6 +585,9 @@ export class SessionSyncClient {
         this._ready = true;
         this._hadSnapshot = true;
         this._seedPresence(data.roster, data.claims);
+        // catch_up only follows a reconnect (since_seq was sent), so always
+        // re-advertise the local selection the server dropped on disconnect.
+        this._readvertiseSelection();
         if (Array.isArray(data.ops) && data.ops.length && this.handlers.onResync) {
           this.handlers.onResync();
         }

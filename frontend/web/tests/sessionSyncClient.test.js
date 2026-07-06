@@ -407,6 +407,44 @@ describe('SessionSyncClient presence + claims', () => {
     expect(fetchImpl.calls.length).toBe(before);
   });
 
+  it('re-advertises the local selection on reconnect (server dropped it on disconnect)', async () => {
+    const { client, fetchImpl } = makeClient();
+    client.connect();
+    const es = FakeEventSource.instances[0];
+    es.emit({ type: 'snapshot', seq: 0, session: { state: {} }, roster, claims: {} });
+    client.setLocalSelection(['node-a']);
+    await flush();
+
+    // Reconnect delivers a catch_up: the local selection is re-advertised so
+    // other clients get the marker back.
+    es.emit({ type: 'catch_up', seq: 1, ops: [], roster, claims: {} });
+    await flush();
+    const reclaims = fetchImpl.calls.flatMap(c => c.body.ops)
+      .filter(o => o.op === 'selection_claimed' && o.element_ids.includes('node-a'));
+    expect(reclaims.length).toBeGreaterThanOrEqual(2); // initial claim + reconnect re-advertise
+  });
+
+  it('does not queue renewal claims while the stream is disconnected', () => {
+    vi.useFakeTimers();
+    try {
+      const { client, fetchImpl } = makeClient();
+      client.connect();
+      const es = FakeEventSource.instances[0];
+      es.emit({ type: 'snapshot', seq: 0, session: { state: {} }, roster, claims: {} });
+      client.setLocalSelection(['node-a']);
+      vi.advanceTimersByTime(5); // let the initial claim flush
+      const afterClaim = fetchImpl.calls.length;
+      expect(afterClaim).toBeGreaterThan(0);
+
+      es.error(); // stream drops → not ready
+      vi.advanceTimersByTime(60_000); // several renewal intervals pass
+      // No new ops were sent while disconnected (renewals are skipped).
+      expect(fetchImpl.calls.length).toBe(afterClaim);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
   it('expires a remote claim client-side once its TTL passes', () => {
     let now = 1000;
     const { client } = makeClient({ nowFn: () => now });
