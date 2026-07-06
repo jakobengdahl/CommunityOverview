@@ -250,8 +250,9 @@ transition and removed in the final step.
 
 ### 3.9 Limits & safety
 
-- Body caps per op batch (reuse `_SESSION_STATE_MAX_BYTES` scale), max annotations
-  per session, max ops/second per client (token bucket) with `429` + client backoff.
+- Body caps per op batch (`_DEFAULT_MAX_OP_BATCH_BYTES`, 256 KB → `413`), max ops
+  per batch (`_DEFAULT_MAX_OPS_PER_BATCH`, 500), max annotations per session, max
+  ops/second per client (token bucket) with `429` + client backoff.
 - Session IDs remain unguessable enough for the core's trust model
   (`crypto.getRandomValues`, 10^8 space) — acceptable for open deployments already
   exposing connect-by-ID; SaaS adds real authorization.

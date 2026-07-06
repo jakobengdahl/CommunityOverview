@@ -21,6 +21,12 @@ Effort scale: XS = single-line fix · S = up to ~30 lines / one file · M = mult
 
 ## Open
 
+### [2026-07-06] Op-batch byte cap measures after FastAPI has parsed the whole body
+- **File(s):** `backend/core/session_manager.py` (`apply_ops`, the `json.dumps(ops)` byte cap), `backend/service/rest_api.py` (`apply_session_ops`)
+- **Context:** Discovered during `claude/multi-user-sessions-step-8-ntxe0r` (step-8 review, non-blocking)
+- **Issue:** The 256 KB op-batch cap is checked on the already-parsed `ops` list, so an arbitrarily large request body is read and JSON-parsed into memory before the cap can reject it (returning `413` only afterwards). The removed legacy `PATCH /sessions/{id}/state` checked `len(body)` pre-parse. Pre-existing to the ops path (since step 3); worth a pre-parse `Content-Length` / raw-body guard at the endpoint for symmetry.
+- **Effort:** S
+
 ### [2026-07-05] Remote-added node can land at (0,0) if its move op has not arrived yet
 - **File(s):** `frontend/web/src/App.jsx` (`applyRemoteOp` `nodes_added`), `frontend/web/src/services/sessionSyncClient.js` (`baselinePosition`)
 - **Context:** Discovered during `claude/multi-user-sessions-step-6-xn4a5v` (step-6 review, non-blocking)
