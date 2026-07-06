@@ -53,7 +53,8 @@ def register_mcp_tools(mcp, service: GraphService, session_registry=None, sessio
         if session_manager is not None:
             session = session_manager.get_session(session_id)
             if session is not None:
-                visible = list(session.state.get("node_refs", []))
+                hidden = set(session.state.get("hidden_node_ids", []))
+                visible = [n for n in session.state.get("node_refs", []) if n not in hidden]
             selected = list(session_manager.claimed_elements(session_id))
         return visible, selected
 
