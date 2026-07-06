@@ -3,6 +3,7 @@ import { createPortal } from 'react-dom';
 import { Download, Map, BoxArrowRight, X } from 'react-bootstrap-icons';
 import useGraphStore from '../store/graphStore';
 import { useI18n } from '../i18n';
+import { getDisplayName, setDisplayName } from '../services/api';
 import { COLOR_MAP } from './FloatingToolbar';
 import NodeTypeStatsDialog from './NodeTypeStatsDialog';
 import './SettingsDialog.css';
@@ -18,6 +19,7 @@ function SettingsDialog({ stats, onExportGraph, onClose }) {
   const { t, language, setLanguage } = useI18n();
   const { showMinimap, setShowMinimap } = useGraphStore();
   const [statsDialogOpen, setStatsDialogOpen] = useState(false);
+  const [displayName, setDisplayNameState] = useState(() => getDisplayName() || '');
 
   useEffect(() => {
     const handleKeyDown = (e) => {
@@ -105,6 +107,24 @@ function SettingsDialog({ stats, onExportGraph, onClose }) {
             <span>{t('menu.show_minimap')}</span>
             <span className={`settings-dialog-toggle${showMinimap ? ' active' : ''}`} />
           </button>
+
+          <div className="settings-dialog-section-divider" />
+          <div className="settings-dialog-section-title">{t('settings.presence_section')}</div>
+          <div className="settings-dialog-field">
+            <label className="settings-dialog-field-label" htmlFor="settings-display-name">
+              {t('settings.display_name')}
+            </label>
+            <input
+              id="settings-display-name"
+              className="settings-dialog-field-input"
+              type="text"
+              maxLength={40}
+              value={displayName}
+              placeholder={t('settings.display_name_placeholder')}
+              onChange={(e) => { setDisplayNameState(e.target.value); setDisplayName(e.target.value); }}
+            />
+            <p className="settings-dialog-field-hint">{t('settings.display_name_hint')}</p>
+          </div>
 
           <div className="settings-dialog-section-divider" />
           <div className="settings-dialog-section-title">{t('menu.language_section')}</div>

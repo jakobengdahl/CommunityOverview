@@ -70,6 +70,46 @@
   flex-shrink: 0;
 }
 
+.floating-header-presence {
+  display: flex;
+  align-items: center;
+  flex-shrink: 0;
+}
+
+.floating-header-presence-dot {
+  width: 20px;
+  height: 20px;
+  border-radius: 50%;
+  border: 2px solid #1a1a1a;
+  margin-left: -6px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 0.62rem;
+  font-weight: 700;
+  color: #fff;
+  text-shadow: 0 1px 1px rgba(0, 0, 0, 0.4);
+  user-select: none;
+  cursor: default;
+}
+
+.floating-header-presence-dot:first-child {
+  margin-left: 0;
+}
+
+.floating-header-presence-dot.is-self {
+  border-color: #fff;
+}
+
+.floating-header-presence-more {
+  margin-left: 4px;
+  font-size: 0.7rem;
+  font-weight: 600;
+  color: #aaa;
+  user-select: none;
+  cursor: default;
+}
+
 .floating-header-clear {
   background: transparent;
   border: none;

@@ -2,8 +2,9 @@
 
 **Status:** In progress — the backend foundation (steps 1–3), the step-4
 frontend cutover (server-backed session lifecycle), the step-5 annotation
-kinds (note, label, arrow) and the step-6 realtime op emit/apply loop are
-implemented; presence UI and hardening (steps 7–8) have not started.
+kinds (note, label, arrow), the step-6 realtime op emit/apply loop and the
+step-7 presence UI + selection claims are implemented; only hardening (step 8)
+remains.
 **Scope:** Open-source core only. SaaS-specific extensions (multi-instance scale-out,
 account-bound session history, workspace ACLs) are designed in the private SaaS
 repository and are explicitly out of scope here (see "Out of scope" below).
@@ -292,7 +293,7 @@ steps 6–8.
 | 4 | done | Frontend: server-backed session lifecycle |
 | 5 | done | New annotation kinds (note, label, arrow) |
 | 6 | done | Frontend: realtime op emit/apply + canvas events |
-| 7 | not started | Presence UI + selection claims |
+| 7 | done | Presence UI + selection claims |
 | 8 | not started | Hardening, multi-client e2e, docs sweep |
 
 > **Implementation note (steps 1–3 landed together).** Step 3's op endpoint has
@@ -484,6 +485,36 @@ steps 6–8.
 - i18n for all labels (props-with-defaults in the canvas package).
 - Tests: claim lifecycle in sync client, marker rendering in canvas tests.
 - Docs: `docs/USER_GUIDE.md` new "Collaborating in a session" section.
+
+> **Implementation notes (step 7 as built).** Backend-only step: the presence
+> roster, colour assignment and the claim map (with 30 s TTL + disconnect
+> release) already shipped in steps 2–3, so step 7 is purely the frontend that
+> consumes them.
+> - **Presence + claims in `sessionSyncClient.js`.** The sync client now tracks
+>   the roster and the live claim map. It seeds both from the `roster`/`claims`
+>   fields already present on the `snapshot`/`catch_up` events, updates the roster
+>   on `presence_joined`/`presence_left`, and folds remote `selection_claimed` /
+>   `selection_released` ops into the claim map (own echoes ignored — the local
+>   user sees their own selection natively). `onPresence(roster)` and
+>   `onSelections(map)` handlers push the derived state to the host;
+>   `getRemoteSelections()` resolves each foreign claim to `{ color, displayName }`
+>   and excludes the local client.
+> - **Claim emit / renew / expire.** `setLocalSelection(ids)` diffs against the
+>   previous selection and enqueues `selection_claimed` for added elements and
+>   `selection_released` for removed ones through the existing `/ops` channel. A
+>   15 s renewal timer re-claims the current selection so the server's 30 s TTL
+>   never lapses mid-selection; a client-side prune drops any remote claim whose
+>   mirrored TTL passes, so a departed collaborator's marker can never linger even
+>   if its disconnect event is missed.
+> - **Markers on the canvas.** `App.jsx` passes a `remoteSelections` map to
+>   `GraphCanvas`, which injects `data.remoteSelection` onto the matching node.
+>   `CustomNode` renders a coloured outline plus a name badge in the collaborator's
+>   colour. Only real graph nodes carry claims (annotations/groups are excluded).
+> - **Roster UI + identity.** A compact presence-dot row lives in
+>   `FloatingHeader` (shown only once another user is present). `display_name` is
+>   user-editable under Settings → Your presence (stored in `localStorage`,
+>   applied on the next stream connect); when unset the server assigns
+>   `Guest-<n>` as before.
 
 ### Step 8 — Hardening, multi-client e2e, docs sweep
 

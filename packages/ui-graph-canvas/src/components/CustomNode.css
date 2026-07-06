@@ -29,6 +29,27 @@
   z-index: 5;
 }
 
+/* Remote collaborator's selection marker (design 3.5): a name badge above the
+   node in that user's presence colour, paired with the outline set inline. */
+.graph-node-remote-badge {
+  position: absolute;
+  top: -11px;
+  left: -2px;
+  max-width: 150px;
+  padding: 1px 6px;
+  font-size: 0.62rem;
+  font-weight: 700;
+  line-height: 1.4;
+  color: #fff;
+  border-radius: 6px;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  box-shadow: 0 1px 3px rgba(0, 0, 0, 0.4);
+  z-index: 6;
+  pointer-events: none;
+}
+
 .graph-node-tooltip .tooltip-mark-label {
   font-size: 0.8rem;
   font-weight: 600;

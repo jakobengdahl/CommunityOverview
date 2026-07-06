@@ -152,7 +152,15 @@
     "edges": "Kanter",
     "nodes_by_type": "Noder per typ",
     "details": "Detaljer",
-    "admin_section": "Admin"
+    "admin_section": "Admin",
+    "presence_section": "Din närvaro",
+    "display_name": "Visningsnamn",
+    "display_name_placeholder": "Gäst",
+    "display_name_hint": "Visas för andra som samarbetar i samma session. Börjar gälla nästa gång du öppnar eller byter session."
+  },
+  "presence": {
+    "you": "Du",
+    "collaborators": "Personer i den här sessionen"
   },
   "experts": {
     "title": "Expert-agenter",

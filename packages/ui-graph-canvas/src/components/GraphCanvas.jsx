@@ -111,6 +111,7 @@ function GraphCanvasInner({
   onRemotePositionsApplied,
   remoteAnnotationOps = null,
   onRemoteAnnotationsApplied,
+  remoteSelections = null,
   federationDepth = 1,
   onFederationDepthChange,
   maxFederationDepth = 4,
@@ -272,6 +273,7 @@ function GraphCanvasInner({
           isHighlighted: highlightedNodeIds.includes(node.id),
           markColor: mark?.color ?? null,
           markLabel: mark?.label ?? null,
+          remoteSelection: remoteSelections?.[node.id] ?? null,
           onExpand: onExpand ? () => onExpand(node.id, node) : null,
           onEdit: onEdit ? () => onEdit(node.id, node) : null,
         },
@@ -288,7 +290,7 @@ function GraphCanvasInner({
     }
 
     return applyLayout(nodesWithoutPosition, reactFlowEdges, layoutType);
-  }, [nodesToRender, reactFlowEdges, layoutType, onExpand, onEdit, highlightedNodeIds, nodeMarks]);
+  }, [nodesToRender, reactFlowEdges, layoutType, onExpand, onEdit, highlightedNodeIds, nodeMarks, remoteSelections]);
 
   const [nodes, setNodes, onNodesChange] = useNodesState(reactFlowNodes);
   const [edges, setEdges, onEdgesChange] = useEdgesState(reactFlowEdges);

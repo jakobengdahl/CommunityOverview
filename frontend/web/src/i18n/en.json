@@ -152,7 +152,15 @@
     "edges": "Edges",
     "nodes_by_type": "Nodes by type",
     "details": "Details",
-    "admin_section": "Admin"
+    "admin_section": "Admin",
+    "presence_section": "Your presence",
+    "display_name": "Display name",
+    "display_name_placeholder": "Guest",
+    "display_name_hint": "Shown to others collaborating in the same session. Takes effect the next time you open or switch session."
+  },
+  "presence": {
+    "you": "You",
+    "collaborators": "People in this session"
   },
   "experts": {
     "title": "Expert Agents",
