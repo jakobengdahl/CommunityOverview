@@ -240,10 +240,13 @@ before closing. The goal: nothing is lost between sessions.
 git push -u origin claude/<short-description>
 ```
 
-Open a PR targeting `dev` using `gh pr create` (token at `~/.gh_token`, load with `GH_TOKEN=$(cat ~/.gh_token)`). Include in the PR body:
-- A short summary of what changed and why.
-- What was explicitly *not* changed (scope).
-- Test plan: which tests cover this, and how to verify manually.
+Open a PR targeting `dev` using `gh pr create` (token at `~/.gh_token`, load with `GH_TOKEN=$(cat ~/.gh_token)`). In remote environments without the `gh` CLI, use the GitHub MCP tools instead.
+
+The PR body follows `.github/pull_request_template.md`:
+- **Summary** — what changed and why.
+- **What was not changed (scope)** — explicit boundaries.
+- **Test plan** — which tests cover this, and how to verify manually.
+- **Screenshots affected** — see the Documentation section.
 
 ### 8. Review Loop
 
