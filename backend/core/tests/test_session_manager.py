@@ -9,7 +9,7 @@ import asyncio
 
 import pytest
 
-from backend.core.session_hub import ClaimMap
+from backend.core.session_hub import ClaimMap, InProcessEventBus
 from backend.core.session_store import InMemorySessionPersistenceBackend, OpError, SessionStore
 from backend.core.session_manager import (
     OpBatchTooLarge,
@@ -18,6 +18,7 @@ from backend.core.session_manager import (
     SessionManager,
     SessionNotFound,
 )
+from backend.service.rest_api import _resolve_stream_event
 
 pytestmark = pytest.mark.asyncio
 
@@ -194,6 +195,38 @@ class TestCatchUp:
         s = mgr.create_session()
         cu = mgr.catch_up(s.id, None)
         assert cu["type"] == "snapshot"
+
+
+class TestResyncTranslation:
+    """R2: a slow consumer's dropped backlog must resync, not diverge forever."""
+
+    async def test_overflowed_subscriber_resync_sentinel_becomes_a_snapshot(self):
+        bus = InProcessEventBus(queue_max=2)
+        mgr = SessionManager(SessionStore(InMemorySessionPersistenceBackend()), event_bus=bus)
+        s = mgr.create_session()
+        sub, _ = mgr.connect(s.id, "slow", "Slow")
+        await _drain(sub)  # discard the connect's own presence_joined echo
+
+        # Flood past the tiny queue without draining so the bus drops the
+        # backlog and enqueues a `{"type": "resync"}` sentinel (session_hub.py).
+        for i in range(5):
+            bus.publish(s.id, {"type": "op", "op": {"op": "nodes_added", "node_ids": [f"n{i}"]}, "seq": i})
+
+        events = await _drain(sub)
+        assert events[-1] == {"type": "resync"}
+
+        # The stream endpoint must not forward that sentinel verbatim: it
+        # translates it into a real snapshot the client already knows how to
+        # treat as a resync (a second `snapshot`/`catch_up` delivery).
+        resolved = _resolve_stream_event(events[-1], mgr, s.id)
+        assert resolved["type"] == "snapshot"
+        assert resolved["seq"] == s.seq
+
+    async def test_non_resync_events_pass_through_unchanged(self):
+        mgr = _manager()
+        s = mgr.create_session()
+        event = {"type": "op", "op": {"op": "nodes_added", "node_ids": ["a"]}, "seq": 1}
+        assert _resolve_stream_event(event, mgr, s.id) == event
 
 
 class TestLifecycle:
