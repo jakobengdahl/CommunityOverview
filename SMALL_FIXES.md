@@ -21,6 +21,12 @@ Effort scale: XS = single-line fix · S = up to ~30 lines / one file · M = mult
 
 ## Open
 
+### [2026-07-06] Hardcoded English default title in `FloatingHeader`
+- **File(s):** `frontend/web/src/components/FloatingHeader.jsx` (`title = 'Community Graph View'` prop default)
+- **Context:** Discovered during `claude/multi-user-sessions-review-66xabr` (pre-existing, unrelated to the sessions feature)
+- **Issue:** The header title defaults to a hardcoded English string inside a `frontend/web` component, violating the i18n rule in `CLAUDE.md` ("never hardcode display strings — use `useI18n()`"). The component already imports `useI18n` (for the presence roster), so the default can move to a `t('header.title')` key added to both `en.json` and `sv.json`.
+- **Effort:** XS
+
 ### [2026-07-06] `torch` (heavy ML dep) is pinned in the base `requirements.txt`
 - **File(s):** `backend/requirements.txt:36-37` (`--extra-index-url https://download.pytorch.org/whl/cpu`, `torch>=2.0.0`); also `sentence-transformers`, `scikit-learn` in the same file
 - **Context:** Discovered during `claude/multi-user-sessions-step-8-ntxe0r`
