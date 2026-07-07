@@ -21,6 +21,7 @@ import asyncio
 import json
 from typing import List, Optional, Dict, Any
 from fastapi import APIRouter, HTTPException, Query, Body, Request, Path
+from fastapi.encoders import jsonable_encoder
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, Field
 from pydantic import ValidationError as PydanticValidationError
@@ -545,7 +546,11 @@ def _register_session_endpoints(router: APIRouter, service: GraphService, sessio
         try:
             request = SessionOpsRequest.model_validate_json(body)
         except PydanticValidationError as exc:
-            raise HTTPException(status_code=422, detail=str(exc))
+            # Match FastAPI's default RequestValidationError shape (a list of
+            # error dicts), since automatic body validation no longer runs.
+            # jsonable_encoder handles error entries whose "input" is raw bytes
+            # (e.g. an invalid-JSON error embeds the undecoded body).
+            raise HTTPException(status_code=422, detail=jsonable_encoder(exc.errors()))
         try:
             return await session_manager.apply_ops(
                 session_id, request.client_id, request.base_seq, request.ops

@@ -132,3 +132,22 @@ class TestOpBatchBodyCap:
         # No route for .../state anymore → 404 (path unregistered), never 2xx.
         assert test_app.put(f"/api/sessions/{sid}/state", json={"state": {}}).status_code in (404, 405)
         assert test_app.patch(f"/sessions/{sid}/state", json={}).status_code in (404, 405)
+
+    def test_missing_required_field_returns_422_with_structured_detail(self, test_app: TestClient):
+        """The ops body is now parsed manually (for the pre-parse byte cap); a
+        missing required field must still 422 with a FastAPI-shaped error list."""
+        sid = test_app.post("/api/sessions", json={}).json()["id"]
+        resp = test_app.post(f"/api/sessions/{sid}/ops", json={"ops": []})
+        assert resp.status_code == 422
+        detail = resp.json()["detail"]
+        assert isinstance(detail, list)
+        assert any(err.get("loc") == ["client_id"] for err in detail)
+
+    def test_malformed_json_body_returns_422(self, test_app: TestClient):
+        sid = test_app.post("/api/sessions", json={}).json()["id"]
+        resp = test_app.post(
+            f"/api/sessions/{sid}/ops",
+            content=b"not json",
+            headers={"content-type": "application/json"},
+        )
+        assert resp.status_code == 422
