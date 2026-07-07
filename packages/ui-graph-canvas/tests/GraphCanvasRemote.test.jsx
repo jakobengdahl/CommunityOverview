@@ -56,6 +56,25 @@ describe('GraphCanvas remote apply (design step 6)', () => {
     expect(onRemotePositionsApplied).toHaveBeenCalled();
   });
 
+  it('applies a remote position once its node mounts, even if it arrived first', () => {
+    // Race in the backlog: node_moved for a node reaches the client before the
+    // paired nodes_added has resolved its async node-details fetch, so the
+    // position effect fires while the node doesn't exist in ReactFlow yet.
+    const { rerender } = render(
+      <GraphCanvas nodes={[]} edges={[]} remotePositions={{ 'late-node': { x: 33, y: 44 } }} />
+    );
+    // The node now mounts (its nodes_added resolved) and the parent has since
+    // cleared remotePositions, as App.jsx does once notified. Only the mount
+    // itself should be enough to apply the position that arrived too early.
+    hoisted.setNodes.mockClear();
+    rerender(
+      <GraphCanvas nodes={[{ id: 'late-node', type: 'Actor', name: 'Late' }]} edges={[]} remotePositions={null} />
+    );
+    const seed = [{ id: 'late-node', type: 'custom', position: { x: 0, y: 0 } }];
+    const result = findResult(seed, r => r.find(n => n.id === 'late-node')?.position.x === 33);
+    expect(result?.find(n => n.id === 'late-node').position).toEqual({ x: 33, y: 44 });
+  });
+
   it('applies a grouped node position verbatim (already relative — no re-offset)', () => {
     // The emit side stores n.position, which ReactFlow keeps relative to the
     // parent for a grouped node, so the apply side must not subtract the parent
