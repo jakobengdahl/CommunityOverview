@@ -6,34 +6,30 @@ from backend.api_host.config import AppConfig
 
 # Mock environment to ensure predictable config
 @pytest.fixture
-def unauthenticated_app():
+def unauthenticated_app(tmp_path):
     config = AppConfig(
         auth_enabled=False,
-        graph_file="test_graph_unauth.json"
+        graph_file=str(tmp_path / "test_graph_unauth.json")
     )
-    # We use a temporary graph file or rely on the fact that tests usually mock storage
-    # But create_app creates real storage if not provided.
-    # Ideally we should mock GraphStorage, but for integration testing the endpoint logic,
-    # using a test file path is okay (it will be created in root or backend dir).
     return create_app(config=config)
 
 @pytest.fixture
-def authenticated_app():
+def authenticated_app(tmp_path):
     config = AppConfig(
         auth_enabled=True,
         auth_username="admin",
         auth_password="password",
-        graph_file="test_graph_auth.json"
+        graph_file=str(tmp_path / "test_graph_auth.json")
     )
     return create_app(config=config)
 
 @pytest.fixture
-def auth_enabled_no_password_app():
+def auth_enabled_no_password_app(tmp_path):
     """auth_enabled=True but no password configured — middleware not installed."""
     config = AppConfig(
         auth_enabled=True,
         auth_password=None,
-        graph_file="test_graph_no_pw.json"
+        graph_file=str(tmp_path / "test_graph_no_pw.json")
     )
     return create_app(config=config)
 
