@@ -110,6 +110,11 @@ class SessionManager:
         self._bucket = _TokenBucket(bucket_capacity, bucket_refill_per_sec)
         self._locks: Dict[str, asyncio.Lock] = {}
 
+    @property
+    def max_op_batch_bytes(self) -> int:
+        """Byte cap enforced on a single ops batch (§3.9)."""
+        return self._max_op_batch_bytes
+
     def _lock(self, session_id: str) -> asyncio.Lock:
         lock = self._locks.get(session_id)
         if lock is None:
