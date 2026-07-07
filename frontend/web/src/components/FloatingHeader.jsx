@@ -57,8 +57,9 @@ function PresenceRoster({ roster, currentClientId, t }) {
   );
 }
 
-function FloatingHeader({ title = 'Community Graph View', sessionId, roster, currentClientId, onClear, onToggleDrawer }) {
+function FloatingHeader({ title, sessionId, roster, currentClientId, onClear, onToggleDrawer }) {
   const { t } = useI18n();
+  const heading = title || t('header.title');
   return (
     <div className="floating-header" id="guide-target-header">
       <div className="floating-header-bar">
@@ -70,7 +71,7 @@ function FloatingHeader({ title = 'Community Graph View', sessionId, roster, cur
         >
           <List size={20} />
         </button>
-        <span className="floating-header-title">{title}</span>
+        <span className="floating-header-title">{heading}</span>
         {sessionId && (
           <span className="floating-header-session-id" title="Session ID — share with an external AI to connect it to this window">
             {sessionId}

@@ -492,9 +492,34 @@ export class SessionSyncClient {
    * client is torn down on session switch so last-moment ops still leave: the
    * POST is initiated synchronously (its `fetch` survives a following `close()`,
    * which only tears down the EventSource, not the in-flight request).
+   *
+   * In `_forceSingle` recovery mode the regular flush sends one op per call and
+   * relies on later flushes for the rest — but teardown gives no later flush, and
+   * a following `close()` would drop the remainder. Drain the whole queue here as
+   * sequential single-op batches instead (the loop holds its own copy of the
+   * queue, so `close()` cannot clear it): a poisoned op still fails alone while
+   * the valid ops behind it get their best-effort send. `base_seq` is
+   * informational server-side, so responses need no per-op handling. Draining is
+   * safe even while a debounced single-op `_flush` is in flight — that op was
+   * already spliced out of the queue, and on failure it re-concats into a queue
+   * that is inert once `close()` has run (every timer is `_closed`-guarded).
    * @returns {Promise<void>}
    */
   flush() {
+    if (this._forceSingle && this._queue.length > 0 && this._ready && this._fetch) {
+      const pending = this._queue.splice(0);
+      return (async () => {
+        for (const op of pending) {
+          try {
+            await this._fetch(this.opsUrl, {
+              method: 'POST',
+              headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify({ client_id: this.clientId, base_seq: this._seq, ops: [op] }),
+            });
+          } catch { /* best-effort teardown flush */ }
+        }
+      })();
+    }
     return this._flush();
   }
 

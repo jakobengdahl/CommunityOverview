@@ -21,10 +21,10 @@ Effort scale: XS = single-line fix · S = up to ~30 lines / one file · M = mult
 
 ## Open
 
-### [2026-07-06] Hardcoded English default title in `FloatingHeader`
-- **File(s):** `frontend/web/src/components/FloatingHeader.jsx` (`title = 'Community Graph View'` prop default)
-- **Context:** Discovered during `claude/multi-user-sessions-review-66xabr` (pre-existing, unrelated to the sessions feature)
-- **Issue:** The header title defaults to a hardcoded English string inside a `frontend/web` component, violating the i18n rule in `CLAUDE.md` ("never hardcode display strings — use `useI18n()`"). The component already imports `useI18n` (for the presence roster), so the default can move to a `t('header.title')` key added to both `en.json` and `sv.json`.
+### [2026-07-06] Remaining hardcoded tooltip strings in `FloatingHeader`
+- **File(s):** `frontend/web/src/components/FloatingHeader.jsx` (`title="Menu"` on the hamburger button, the session-id `title` tooltip, the clear-canvas `title`/`aria-label`)
+- **Context:** Discovered during `claude/small-fixes-list-0njxzz` (while fixing the hardcoded default title)
+- **Issue:** Beyond the (now fixed) default title, the component still hardcodes three English tooltip/aria strings instead of routing them through `useI18n()`. Same i18n rule violation, lower visibility (hover/AT text only). Move them to `header.*` keys in both `en.json` and `sv.json`.
 - **Effort:** XS
 
 ### [2026-07-06] `torch` (heavy ML dep) is pinned in the base `requirements.txt`
@@ -45,34 +45,10 @@ Effort scale: XS = single-line fix · S = up to ~30 lines / one file · M = mult
 - **Issue:** `nodes_added` resolves node details asynchronously and seeds `_savedPosition` from the sync baseline. If `getNodeDetails` resolves before the paired `node_moved` SSE op has been folded into the baseline, the node mounts at auto-layout/(0,0) and the next autosave can emit a `node_moved {0,0}` back. The window is very narrow (the move op travels the already-open SSE stream while `getNodeDetails` is a fresh HTTP round-trip), but not impossible. Fully closing it means also applying `remotePositions` to a node once it mounts (not only at add time).
 - **Effort:** S
 
-### [2026-07-05] Teardown flush drops queued ops while sync client is in `_forceSingle` mode
-- **File(s):** `frontend/web/src/services/sessionSyncClient.js` (`flush`/`close`), `frontend/web/src/App.jsx` (session-change cleanup)
-- **Context:** Discovered during `claude/multi-user-sessions-step-6-xn4a5v` (step-6 review, non-blocking)
-- **Issue:** On session switch/unmount the cleanup calls `flush()` then `close()`. In the rare `_forceSingle` error-recovery state `flush()` only sends one op (`splice(0,1)`) and `close()` clears the rest, so remaining queued ops are lost. `_forceSingle` is a rare state and teardown flush is best-effort, so impact is minimal.
-- **Effort:** XS
-
-### [2026-07-05] `GroupNode` label input lacks ReactFlow `nodrag` class
-- **File(s):** `packages/ui-graph-canvas/src/components/GroupNode.jsx:179`
-- **Context:** Discovered during `claude/multi-user-sessions-step-5-bjoyp3`
-- **Issue:** The group's inline label `<input>` has no `nodrag` class, so drag-selecting text inside it drags the group node instead of selecting text. The step-5 note/label editors were given `nodrag`; GroupNode should match for consistency.
-- **Effort:** XS
-
-### [2026-07-05] Debug `console.log` left in `GraphCanvas.onNodeDragStop`
-- **File(s):** `packages/ui-graph-canvas/src/components/GraphCanvas.jsx:468,513,533`
-- **Context:** Discovered during `claude/multi-user-sessions-step-5-bjoyp3`
-- **Issue:** `onNodeDragStop` logs three `console.log('[GraphCanvas] ...')` statements on every drag (drag stop, group enter, group exit). These are debug artifacts that spam the browser console during normal use. Remove them (or gate behind a debug flag).
-- **Effort:** XS
-
 ### [2026-07-03] Backend test suite mutates checked-in `backend/test_graph_auth.json`
 - **File(s):** `backend/test_graph_auth.json`
 - **Context:** Discovered during `claude/session-sidebar-nav-sfs73g`
 - **Issue:** Running `pytest backend/ -q` leaves `backend/test_graph_auth.json` modified in the working tree (a test writes to the checked-in fixture instead of a tmp copy). Every full-suite run dirties the repo and risks accidental commits of test-run artifacts. Fix: locate the test(s) using this path and point them at a `tmp_path` copy, or gitignore a generated location.
-- **Effort:** S
-
-### [2026-07-02] `GroupNode`'s local context menu doesn't close on keyboard-only Tab focus
-- **File(s):** `packages/ui-graph-canvas/src/components/GroupNode.jsx:34-58`
-- **Context:** Discovered during review of `claude/context-menu-search-close-5w7tqy`
-- **Issue:** `GroupNode`'s own context menu (right-click on a group) dismisses on `mousedown`/`contextmenu` outside the menu, which already covers clicking into the search box or chat input with the mouse. But if a user reaches those inputs via Tab (keyboard-only, no mousedown), the group's context menu stays open. The new `closeMenusSignal` mechanism added for the node/edge/multi-select context menus doesn't cover this either, since `GroupNode` manages its menu state independently. Fix: have `GroupNode` also listen for `focusin` on `document`, or subscribe to the same `closeMenusSignal` store field.
 - **Effort:** S
 
 ### [2026-06-30] `t()` fallback pattern in FloatingHeader.jsx silently breaks
@@ -104,6 +80,14 @@ Effort scale: XS = single-line fix · S = up to ~30 lines / one file · M = mult
 ## Fixed
 
 *(resolved entries moved here after merge, for reference)*
+
+### [2026-07-06] Fixed in branch `claude/small-fixes-list-0njxzz`
+
+- **Hardcoded English default title in `FloatingHeader`** — `frontend/web/src/components/FloatingHeader.jsx`. The `title` prop default now falls back to `t('header.title')`; the key was added to both `en.json` and `sv.json`. The remaining hardcoded tooltip strings in the same component are logged as a new Open entry.
+- **Teardown flush drops queued ops while sync client is in `_forceSingle` mode** — `frontend/web/src/services/sessionSyncClient.js`. `flush()` now drains the whole queue as sequential single-op batches when in force-single recovery, holding its own copy of the queue so a following `close()` cannot clear it. Regression test in `frontend/web/tests/sessionSyncClient.test.js`.
+- **`GroupNode` label input lacks ReactFlow `nodrag` class** — `packages/ui-graph-canvas/src/components/GroupNode.jsx`. Added `nodrag` so drag-selecting text in the inline label editor no longer drags the group.
+- **Debug `console.log` left in `GraphCanvas.onNodeDragStop`** — `packages/ui-graph-canvas/src/components/GraphCanvas.jsx`. Removed the three drag/group-enter/group-exit debug logs.
+- **`GroupNode`'s local context menu doesn't close on keyboard-only Tab focus** — `packages/ui-graph-canvas/src/components/GroupNode.jsx`. The dismiss handler now also listens for `focusin` on `document` (capture phase), so Tab-focusing the search box or chat input closes the menu. Tests in `packages/ui-graph-canvas/tests/GroupNode.test.jsx`.
 
 ### [2026-07-05] Fixed in branch `claude/frontend-session-lifecycle-xys3wl` (multi-user sessions step 4)
 

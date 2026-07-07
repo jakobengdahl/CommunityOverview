@@ -52,12 +52,16 @@ function GroupNode({ id, data, selected }) {
     const timer = setTimeout(() => {
       document.addEventListener('mousedown', handleDismiss, true);
       document.addEventListener('contextmenu', handleDismiss, true);
+      // focusin covers keyboard-only navigation (Tab into search/chat inputs),
+      // which never produces a mousedown.
+      document.addEventListener('focusin', handleDismiss, true);
       document.addEventListener('keydown', handleKeyDown, true);
     }, 0);
     return () => {
       clearTimeout(timer);
       document.removeEventListener('mousedown', handleDismiss, true);
       document.removeEventListener('contextmenu', handleDismiss, true);
+      document.removeEventListener('focusin', handleDismiss, true);
       document.removeEventListener('keydown', handleKeyDown, true);
     };
   }, [contextMenu]);
@@ -188,7 +192,7 @@ function GroupNode({ id, data, selected }) {
             <input
               ref={inputRef}
               type="text"
-              className="graph-group-label-input"
+              className="graph-group-label-input nodrag"
               value={editedLabel}
               onChange={handleLabelChange}
               onBlur={handleLabelBlur}

@@ -448,14 +448,6 @@ function GraphCanvasInner({
       : (!ANNOTATION_TYPES.has(draggedNode.type) ? [draggedNode] : []);
     const draggedIds = new Set(nodesToProcess.map(n => n.id));
 
-    console.log('[GraphCanvas] onNodeDragStop:', {
-      primaryNode: draggedNode.id,
-      primaryType: draggedNode.type,
-      allDraggedCount: allDraggedNodes?.length ?? 0,
-      nonGroupDraggedIds: [...draggedIds],
-      groupCount: groupNodes.length,
-    });
-
     // Nothing to process: either no non-group nodes dragged or no groups exist
     if (draggedIds.size === 0 || groupNodes.length === 0) return;
 
@@ -493,12 +485,6 @@ function GraphCanvasInner({
 
         if (targetGroup && n.parentId !== targetGroup.id) {
           // Enter group
-          console.log('[GraphCanvas] Node entering group:', {
-            nodeId: n.id,
-            groupId: targetGroup.id,
-            absPos,
-            relPos: { x: absPos.x - targetGroup.position.x, y: absPos.y - targetGroup.position.y },
-          });
           return {
             ...n,
             parentId: targetGroup.id,
@@ -513,10 +499,6 @@ function GraphCanvasInner({
         if (!targetGroup && n.parentId) {
           // Exit group
           const oldParent = groupNodes.find(gn => gn.id === n.parentId);
-          console.log('[GraphCanvas] Node exiting group:', {
-            nodeId: n.id,
-            oldGroupId: n.parentId,
-          });
           return {
             ...n,
             parentId: undefined,

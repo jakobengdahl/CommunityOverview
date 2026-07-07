@@ -19,6 +19,15 @@ describe('FloatingHeader', () => {
     expect(onToggleDrawer).toHaveBeenCalledTimes(1);
   });
 
+  it('falls back to the i18n default title when no title prop is given', () => {
+    render(
+      <I18nProvider>
+        <FloatingHeader sessionId="1234-5678" />
+      </I18nProvider>
+    );
+    expect(screen.getByText('Community Graph View')).toBeInTheDocument();
+  });
+
   it('hides the presence roster when the local user is alone', () => {
     const { container } = render(
       <I18nProvider>

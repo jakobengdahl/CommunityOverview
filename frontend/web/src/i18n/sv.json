@@ -162,6 +162,9 @@
     "you": "Du",
     "collaborators": "Personer i den här sessionen"
   },
+  "header": {
+    "title": "Community Graph View"
+  },
   "experts": {
     "title": "Expert-agenter",
     "toggle_panel": "Lägg till eller ta bort expert-agenter"
