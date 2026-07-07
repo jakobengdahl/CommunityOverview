@@ -163,7 +163,11 @@
     "collaborators": "Personer i den här sessionen"
   },
   "header": {
-    "title": "Community Graph View"
+    "title": "Community Graph View",
+    "menu": "Meny",
+    "session_id_tooltip": "Sessions-ID — dela med en extern AI för att ansluta den till detta fönster",
+    "clear_canvas_tooltip": "Rensa canvas — ta bort alla noder och kanter (eller tryck Esc två gånger)",
+    "clear_canvas_aria": "Rensa canvas"
   },
   "experts": {
     "title": "Expert-agenter",

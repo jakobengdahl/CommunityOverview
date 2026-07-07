@@ -78,6 +78,11 @@ export function I18nProvider({ children, defaultLanguage }) {
       ?? getNestedValue(translations[DEFAULT_LANGUAGE], key)
       ?? key;
 
+    if (import.meta.env.DEV && value === key && getNestedValue(translations[DEFAULT_LANGUAGE], key) === undefined) {
+      // eslint-disable-next-line no-console
+      console.warn(`[i18n] Missing translation key: "${key}"`);
+    }
+
     if (typeof value === 'string') {
       return interpolate(value, params);
     }

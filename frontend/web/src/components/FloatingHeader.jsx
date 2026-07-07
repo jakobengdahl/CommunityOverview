@@ -67,13 +67,13 @@ function FloatingHeader({ title, sessionId, roster, currentClientId, onClear, on
         <button
           className="floating-header-hamburger"
           onClick={() => onToggleDrawer?.()}
-          title="Menu"
+          title={t('header.menu')}
         >
           <List size={20} />
         </button>
         <span className="floating-header-title">{heading}</span>
         {sessionId && (
-          <span className="floating-header-session-id" title="Session ID — share with an external AI to connect it to this window">
+          <span className="floating-header-session-id" title={t('header.session_id_tooltip')}>
             {sessionId}
           </span>
         )}
@@ -81,8 +81,8 @@ function FloatingHeader({ title, sessionId, roster, currentClientId, onClear, on
         <button
           className="floating-header-clear"
           onClick={() => onClear?.()}
-          title="Clear canvas — remove all nodes and edges (or press Esc twice)"
-          aria-label="Clear canvas"
+          title={t('header.clear_canvas_tooltip')}
+          aria-label={t('header.clear_canvas_aria')}
         >
           <XCircle size={15} />
         </button>
