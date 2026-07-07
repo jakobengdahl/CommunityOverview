@@ -163,7 +163,11 @@
     "collaborators": "People in this session"
   },
   "header": {
-    "title": "Community Graph View"
+    "title": "Community Graph View",
+    "menu": "Menu",
+    "session_id_tooltip": "Session ID — share with an external AI to connect it to this window",
+    "clear_canvas_tooltip": "Clear canvas — remove all nodes and edges (or press Esc twice)",
+    "clear_canvas_aria": "Clear canvas"
   },
   "experts": {
     "title": "Expert Agents",
