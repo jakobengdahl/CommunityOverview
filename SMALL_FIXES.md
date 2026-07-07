@@ -21,35 +21,11 @@ Effort scale: XS = single-line fix · S = up to ~30 lines / one file · M = mult
 
 ## Open
 
-### [2026-07-06] Remaining hardcoded tooltip strings in `FloatingHeader`
-- **File(s):** `frontend/web/src/components/FloatingHeader.jsx` (`title="Menu"` on the hamburger button, the session-id `title` tooltip, the clear-canvas `title`/`aria-label`)
-- **Context:** Discovered during `claude/small-fixes-list-0njxzz` (while fixing the hardcoded default title)
-- **Issue:** Beyond the (now fixed) default title, the component still hardcodes three English tooltip/aria strings instead of routing them through `useI18n()`. Same i18n rule violation, lower visibility (hover/AT text only). Move them to `header.*` keys in both `en.json` and `sv.json`.
-- **Effort:** XS
-
 ### [2026-07-06] `torch` (heavy ML dep) is pinned in the base `requirements.txt`
 - **File(s):** `backend/requirements.txt:36-37` (`--extra-index-url https://download.pytorch.org/whl/cpu`, `torch>=2.0.0`); also `sentence-transformers`, `scikit-learn` in the same file
 - **Context:** Discovered during `claude/multi-user-sessions-step-8-ntxe0r`
 - **Issue:** `CLAUDE.md` → Dependency Changes says "Never add ML/heavy dependencies (torch, sentence-transformers, etc.) to the base `requirements.txt` — they belong in `requirements-ml.txt`." Today `torch>=2.0.0` (with the `download.pytorch.org` extra index), `sentence-transformers>=2.2.0` and `scikit-learn>=1.0.0` sit in the base file. This bloats every install, and the pytorch extra-index makes the base install fail in networks that only allow PyPI (the `download.pytorch.org` CONNECT is refused → the whole `pip install -r requirements.txt` errors, blocking test/dev setup). Move these into `requirements-ml.txt` (or make embeddings/similarity optional) so the base install is pure-PyPI and lightweight; ensure the code degrades gracefully when the ML stack is absent (the tests already mock the embedding model, and similarity lazily imports sklearn).
 - **Effort:** M
-
-### [2026-07-06] Op-batch byte cap measures after FastAPI has parsed the whole body
-- **File(s):** `backend/core/session_manager.py` (`apply_ops`, the `json.dumps(ops)` byte cap), `backend/service/rest_api.py` (`apply_session_ops`)
-- **Context:** Discovered during `claude/multi-user-sessions-step-8-ntxe0r` (step-8 review, non-blocking)
-- **Issue:** The 256 KB op-batch cap is checked on the already-parsed `ops` list, so an arbitrarily large request body is read and JSON-parsed into memory before the cap can reject it (returning `413` only afterwards). The removed legacy `PATCH /sessions/{id}/state` checked `len(body)` pre-parse. Pre-existing to the ops path (since step 3); worth a pre-parse `Content-Length` / raw-body guard at the endpoint for symmetry.
-- **Effort:** S
-
-### [2026-07-05] Remote-added node can land at (0,0) if its move op has not arrived yet
-- **File(s):** `frontend/web/src/App.jsx` (`applyRemoteOp` `nodes_added`), `frontend/web/src/services/sessionSyncClient.js` (`baselinePosition`)
-- **Context:** Discovered during `claude/multi-user-sessions-step-6-xn4a5v` (step-6 review, non-blocking)
-- **Issue:** `nodes_added` resolves node details asynchronously and seeds `_savedPosition` from the sync baseline. If `getNodeDetails` resolves before the paired `node_moved` SSE op has been folded into the baseline, the node mounts at auto-layout/(0,0) and the next autosave can emit a `node_moved {0,0}` back. The window is very narrow (the move op travels the already-open SSE stream while `getNodeDetails` is a fresh HTTP round-trip), but not impossible. Fully closing it means also applying `remotePositions` to a node once it mounts (not only at add time).
-- **Effort:** S
-
-### [2026-07-03] Backend test suite mutates checked-in `backend/test_graph_auth.json`
-- **File(s):** `backend/test_graph_auth.json`
-- **Context:** Discovered during `claude/session-sidebar-nav-sfs73g`
-- **Issue:** Running `pytest backend/ -q` leaves `backend/test_graph_auth.json` modified in the working tree (a test writes to the checked-in fixture instead of a tmp copy). Every full-suite run dirties the repo and risks accidental commits of test-run artifacts. Fix: locate the test(s) using this path and point them at a `tmp_path` copy, or gitignore a generated location.
-- **Effort:** S
 
 ### [2026-06-30] `t()` fallback pattern in FloatingHeader.jsx silently breaks
 - **File(s):** `frontend/web/src/components/FloatingHeader.jsx:134,140` — *note: as of `claude/session-sidebar-nav-sfs73g` these occurrences are gone (menu moved to `SettingsDialog.jsx`, which calls `t()` without the `|| 'fallback'` pattern). The general `t()`-returns-key-on-miss behaviour described below still applies to the hook contract.*
@@ -86,6 +62,13 @@ Effort scale: XS = single-line fix · S = up to ~30 lines / one file · M = mult
 ## Fixed
 
 *(resolved entries moved here after merge, for reference)*
+
+### [2026-07-07] Fixed in small-fix session (PRs #207-#210)
+
+- **Remaining hardcoded tooltip strings in `FloatingHeader`** (PR #207) — `frontend/web/src/components/FloatingHeader.jsx`. Routed `title="Menu"`, the session-id tooltip, and the clear-canvas `title`/`aria-label` through `useI18n()`, adding `header.menu`, `header.session_id_tooltip`, `header.clear_canvas_tooltip`, `header.clear_canvas_aria` to both `en.json` and `sv.json`. Also added a dev-only `console.warn` in `frontend/web/src/i18n/index.jsx`'s `t()` when a key falls back to itself in both languages, as a non-breaking safeguard against future missing keys.
+- **Backend test suite mutates checked-in `backend/test_graph_auth.json`** (PR #208) — `backend/tests/test_security_execute_tool.py`. Pointed the `unauthenticated_app`/`authenticated_app`/`auth_enabled_no_password_app` fixtures at `tmp_path` instead of a hardcoded relative filename, and removed the three stray checked-in JSON files (`test_graph_auth.json`, `test_graph_no_pw.json`, `test_graph_unauth.json`) they were writing to.
+- **Op-batch byte cap measures after FastAPI has parsed the whole body** (PR #209) — `backend/service/rest_api.py`, `backend/core/session_manager.py`. `apply_session_ops` now takes the raw `Request`, checks `Content-Length` against the cap before reading the body, and re-checks the actual byte length before handing it to `SessionOpsRequest.model_validate_json()`. Added `SessionManager.max_op_batch_bytes` as a public property. Review also caught a 422-vs-500 bug in the new manual-parsing error path (an unencoded bytes value in a JSON-decode error), fixed with `jsonable_encoder()` and covered by new regression tests in `backend/api_host/tests/test_session_api.py`.
+- **Remote-added node can land at (0,0) if its move op has not arrived yet** (PR #210) — `packages/ui-graph-canvas/src/components/GraphCanvas.jsx`. A remote position for a node that hasn't mounted yet is now held in a `pendingRemotePositionsRef` instead of being dropped when `remotePositions` clears; a new effect re-applies any pending entry once the node's mount changes the node list. Regression test in `packages/ui-graph-canvas/tests/GraphCanvasRemote.test.jsx` (verified to fail on the pre-fix code). A follow-on gap (the ref isn't pruned for a node that's deleted or never mounts) is logged as a new Open entry above.
 
 ### [2026-07-06] Fixed in branch `claude/small-fixes-list-0njxzz`
 
