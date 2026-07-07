@@ -23,6 +23,7 @@ from typing import List, Optional, Dict, Any
 from fastapi import APIRouter, HTTPException, Query, Body, Request, Path
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, Field
+from pydantic import ValidationError as PydanticValidationError
 
 from backend.authorization import use_request_authorization
 
@@ -526,7 +527,25 @@ def _register_session_endpoints(router: APIRouter, service: GraphService, sessio
         return {"deleted": True, "id": session_id}
 
     @router.post("/sessions/{session_id}/ops")
-    async def apply_session_ops(session_id: str, request: SessionOpsRequest) -> Dict[str, Any]:
+    async def apply_session_ops(session_id: str, http_request: Request) -> Dict[str, Any]:
+        # Reject an oversized batch from the Content-Length header alone, before
+        # buffering the body — the len(json.dumps(ops)) cap in apply_ops only
+        # catches this after FastAPI has already read and parsed the whole body.
+        content_length = http_request.headers.get("content-length")
+        if content_length is not None:
+            try:
+                declared_length = int(content_length)
+            except ValueError:
+                declared_length = None
+            if declared_length is not None and declared_length > session_manager.max_op_batch_bytes:
+                raise HTTPException(status_code=413, detail="op batch too large")
+        body = await http_request.body()
+        if len(body) > session_manager.max_op_batch_bytes:
+            raise HTTPException(status_code=413, detail="op batch too large")
+        try:
+            request = SessionOpsRequest.model_validate_json(body)
+        except PydanticValidationError as exc:
+            raise HTTPException(status_code=422, detail=str(exc))
         try:
             return await session_manager.apply_ops(
                 session_id, request.client_id, request.base_seq, request.ops
