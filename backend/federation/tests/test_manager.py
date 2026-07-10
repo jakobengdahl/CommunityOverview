@@ -126,6 +126,16 @@ def test_score_node_match_real_name_beats_alias():
             > FederationManager._score_node_match(alias_node, "esam"))
 
 
+def test_score_node_match_alias_does_not_lift_above_stronger_name():
+    """A federated node matching on both name (contains) and an exact alias must not
+    outscore a node whose name is an exact match — name and alias combine with max()."""
+    name_plus_alias = Node(id="x", type=NodeType.ACTOR, name="Global esam network",
+                           description="x", aliases=["esam"])
+    exact_name = Node(id="y", type=NodeType.ACTOR, name="esam", description="x")
+    assert (FederationManager._score_node_match(exact_name, "esam")
+            > FederationManager._score_node_match(name_plus_alias, "esam"))
+
+
 def test_scheduler_starts_for_scheduled_graph():
     config = FederationFileConfig.model_validate({
         "federation": {

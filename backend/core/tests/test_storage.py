@@ -439,6 +439,20 @@ class TestSearchRanking:
         ids = [n.id for n in results]
         assert ids.index("name") < ids.index("alias")
 
+    def test_alias_does_not_lift_node_above_stronger_name_match(self, temp_storage):
+        """A node matching on both its name (contains) and an exact alias must not
+        outrank another node whose name is an exact match — alias and name score
+        are combined with max(), not summed."""
+        nodes = [
+            Node(id="name-plus-alias", type=NodeType.THEME, name="Global esam network",
+                 description="unrelated", aliases=["esam"]),
+            Node(id="exact-name", type=NodeType.THEME, name="esam",
+                 description="unrelated"),
+        ]
+        temp_storage.add_nodes(nodes, [])
+        results = temp_storage.search_nodes("esam")
+        assert results[0].id == "exact-name"
+
     def test_alias_match_beats_multi_secondary_match(self, temp_storage):
         """An exact alias match must rank above a node with many secondary hits but no
         name/alias match."""

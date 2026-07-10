@@ -496,24 +496,32 @@ class GraphStorage:
         score = 0
         name_lower = (node.name or "").lower()
 
-        # Primary tier — name matching (large gaps prevent secondary signal bleed-through)
+        # Primary tier — a node's own name (500 000–300 000) or an alias, whichever
+        # is stronger. Name and alias are combined with max(), not summed, so an
+        # alias can never lift a node past another node's stronger real-name match:
+        # every alias score (≤250 000) stays below every name score (≥300 000), and
+        # a node that already matches on its name ignores its aliases entirely.
+        name_score = 0
         if name_lower == query_lower:
-            score += 500_000
+            name_score = 500_000
         elif name_lower.startswith(query_lower):
-            score += 400_000
+            name_score = 400_000
         elif query_lower in name_lower:
-            score += 300_000
+            name_score = 300_000
 
-        # Alias tier — synonyms rank as second-class names: below any real-name
+        # Alias sub-tier — synonyms rank as second-class names: below any real-name
         # match but above type/tag/description signals.
+        alias_score = 0
         if node.aliases:
             aliases_lower = [a.lower() for a in node.aliases]
             if query_lower in aliases_lower:
-                score += 250_000
+                alias_score = 250_000
             elif any(a.startswith(query_lower) for a in aliases_lower):
-                score += 220_000
+                alias_score = 220_000
             elif any(query_lower in a for a in aliases_lower):
-                score += 200_000
+                alias_score = 200_000
+
+        score += max(name_score, alias_score)
 
         # Secondary — type matching (including localized labels)
         type_key = str(node.type)

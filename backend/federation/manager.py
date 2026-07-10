@@ -198,23 +198,29 @@ class FederationManager:
         score = 0
         name_lower = (node.name or "").lower()
 
-        # Primary tier — name matching
+        # Primary tier — a node's own name or an alias, whichever is stronger.
+        # Combined with max(), not summed, so an alias (≤250 000) can never lift a
+        # node past another node's stronger real-name match (≥300 000).
+        name_score = 0
         if name_lower == query_lower:
-            score += 500_000
+            name_score = 500_000
         elif name_lower.startswith(query_lower):
-            score += 400_000
+            name_score = 400_000
         elif query_lower in name_lower:
-            score += 300_000
+            name_score = 300_000
 
-        # Alias tier — synonyms rank as second-class names, above secondary signals
+        # Alias sub-tier — synonyms rank as second-class names, above secondary signals
+        alias_score = 0
         if node.aliases:
             aliases_lower = [a.lower() for a in node.aliases]
             if query_lower in aliases_lower:
-                score += 250_000
+                alias_score = 250_000
             elif any(a.startswith(query_lower) for a in aliases_lower):
-                score += 220_000
+                alias_score = 220_000
             elif any(query_lower in a for a in aliases_lower):
-                score += 200_000
+                alias_score = 200_000
+
+        score += max(name_score, alias_score)
 
         # Secondary — type matching (type name only; federation cache has no localized labels)
         type_name_lower = str(node.type).lower()
