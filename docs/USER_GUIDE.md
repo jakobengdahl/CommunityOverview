@@ -127,11 +127,14 @@ Alongside groups, you can add free-floating **annotations** to a session by righ
 an empty area of the canvas and choosing one of:
 
 - **Note** — a resizable sticky note for longer comments. Double-click to edit its text;
-  right-click for a colour or to delete it.
+  right-click for a colour, to change the text size, or to delete it.
 - **Label** — a short free-floating text label. Double-click to edit, right-click to
-  recolour or delete.
-- **Arrow** — a pointer you can position anywhere on the canvas. Right-click to recolour
-  or delete.
+  recolour, change its text size, or delete.
+- **Arrow / line** — a connector you can position anywhere on the canvas. Right-click to
+  recolour, toggle an arrowhead on either end (so it can be a plain line, a single arrow,
+  or a double arrow), or delete. When selected, drag either endpoint; bring an endpoint
+  close to a node or another annotation and it snaps onto it (magnetic), staying attached
+  as that target moves. Arrows do not attach to other arrows.
 
 Annotations are part of the session, not the knowledge graph: they are stored with the
 session (so everyone sharing the session sees them) and never change the underlying node

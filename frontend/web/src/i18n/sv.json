@@ -205,7 +205,10 @@
     "add_arrow": "Lägg till pil",
     "annotation_color": "Färg",
     "note_placeholder": "Anteckning",
-    "label_placeholder": "Etikett"
+    "label_placeholder": "Etikett",
+    "annotation_text_size": "Textstorlek",
+    "arrow_start_head": "Pilspets i början",
+    "arrow_end_head": "Pilspets i slutet"
   },
   "common": {
     "saving": "Sparar...",

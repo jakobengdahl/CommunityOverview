@@ -88,20 +88,24 @@ function annotationsToOverlays(annotations) {
     if (a?.kind === 'note') {
       out.push({
         id: a.id, kind: 'note', position: a.position || { x: 0, y: 0 },
-        text: a.text || '', color: a.color, size: a.size,
+        text: a.text || '', color: a.color, fontSize: a.fontSize, size: a.size,
       });
     } else if (a?.kind === 'label') {
       out.push({
         id: a.id, kind: 'label', position: a.position || { x: 0, y: 0 },
-        text: a.text || '', color: a.style?.color,
+        text: a.text || '', color: a.style?.color, fontSize: a.style?.fontSize,
       });
     } else if (a?.kind === 'arrow') {
       const from = a.from || a.position || { x: 0, y: 0 };
       const to = a.to || { x: from.x + 160, y: from.y };
-      out.push({
+      const overlay = {
         id: a.id, kind: 'arrow', position: { x: from.x, y: from.y },
         dx: to.x - from.x, dy: to.y - from.y, color: a.style?.color,
-      });
+        startArrow: a.startArrow ?? false, endArrow: a.endArrow ?? true,
+      };
+      if (a.startAnchor) overlay.startAnchor = a.startAnchor;
+      if (a.endAnchor) overlay.endAnchor = a.endAnchor;
+      out.push(overlay);
     }
   }
   return out;
@@ -112,24 +116,28 @@ function overlaysToAnnotations(overlays) {
     if (o.kind === 'note') {
       return {
         id: o.id, kind: 'note', position: o.position || { x: 0, y: 0 },
-        text: o.text || '', color: o.color, size: o.size,
+        text: o.text || '', color: o.color, fontSize: o.fontSize, size: o.size,
       };
     }
     if (o.kind === 'label') {
       return {
         id: o.id, kind: 'label', position: o.position || { x: 0, y: 0 },
-        text: o.text || '', style: { color: o.color },
+        text: o.text || '', style: { color: o.color, fontSize: o.fontSize },
       };
     }
     // arrow: store both endpoints as absolute points (design 3.1)
     const from = o.position || { x: 0, y: 0 };
     const dx = o.dx ?? 160;
     const dy = o.dy ?? 0;
-    return {
+    const ann = {
       id: o.id, kind: 'arrow', position: { x: from.x, y: from.y },
       from: { x: from.x, y: from.y }, to: { x: from.x + dx, y: from.y + dy },
       style: { color: o.color },
+      startArrow: o.startArrow ?? false, endArrow: o.endArrow ?? true,
     };
+    if (o.startAnchor) ann.startAnchor = o.startAnchor;
+    if (o.endAnchor) ann.endAnchor = o.endAnchor;
+    return ann;
   });
 }
 
@@ -1572,6 +1580,9 @@ function App() {
             deleteAnnotation: t('context_menu.delete'),
             notePlaceholder: t('context_menu.note_placeholder'),
             labelPlaceholder: t('context_menu.label_placeholder'),
+            annotationTextSize: t('context_menu.annotation_text_size'),
+            arrowStartHead: t('context_menu.arrow_start_head'),
+            arrowEndHead: t('context_menu.arrow_end_head'),
           }}
           nodeColorResolver={getNodeColor}
           onViewportChange={(vp) => { latestViewport.current = vp; }}
