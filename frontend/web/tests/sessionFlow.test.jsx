@@ -94,6 +94,7 @@ import App from '../src/App';
 import * as api from '../src/services/api';
 import useGraphStore from '../src/store/graphStore';
 import { I18nProvider } from '../src/i18n';
+import { SessionSyncClient } from '../src/services/sessionSyncClient';
 
 function renderApp() {
   return render(
@@ -240,5 +241,92 @@ describe('Server-backed session lifecycle', () => {
     // The target was loaded resolved from the server, carrying its saved position
     expect(api.getSession).toHaveBeenCalledWith('5555-6666', { resolve: true });
     expect(useGraphStore.getState().nodes[0]._savedPosition).toEqual({ x: 5, y: 6 });
+  });
+
+  it('a real load failure (non-404) shows an error notice and stays on the current session', async () => {
+    // Distinguishes an actual backend/network error from a 404 ("session
+    // doesn't exist yet", handled elsewhere as a normal empty session): only
+    // the latter should ever clear the canvas.
+    sessionStore.touchSession('7777-8888');
+    renderApp();
+
+    act(() => {
+      useGraphStore.getState().updateVisualization([NODE_A], []);
+    });
+
+    const serverError = new Error('Internal Server Error');
+    serverError.status = 500;
+    api.getSession.mockImplementationOnce(async () => { throw serverError; });
+
+    fireEvent.click(screen.getByTitle('Menu'));
+    fireEvent.click(screen.getByText('7777-8888'));
+
+    await waitFor(() => {
+      expect(screen.getByText('Could not load session')).toBeInTheDocument();
+    });
+
+    // The failed switch must not have cleared the current canvas or changed session.
+    expect(useGraphStore.getState().nodes.map(n => n.id)).toEqual(['node-a']);
+  });
+
+  it('a baseline-seeding failure after a successful load still commits the switch', async () => {
+    // The canvas load (applyServerSession) already succeeded by the time the
+    // sync baseline is seeded — a failure only in that best-effort step must
+    // not make the switch look like it never happened (App.jsx would
+    // otherwise report success visually while claiming to still be on the
+    // old session).
+    sessionStore.touchSession('9999-0000');
+    renderApp();
+
+    act(() => {
+      useGraphStore.getState().updateVisualization([NODE_A], []);
+    });
+
+    const setBaselineSpy = vi.spyOn(SessionSyncClient.prototype, 'setBaseline')
+      .mockImplementationOnce(() => { throw new Error('malformed baseline'); });
+
+    fireEvent.click(screen.getByTitle('Menu'));
+    fireEvent.click(screen.getByText('9999-0000'));
+
+    await waitFor(() => {
+      expect(window.location.search).toContain('session=9999-0000');
+    });
+    // The target session's (empty) canvas was applied — no error notice shown.
+    expect(useGraphStore.getState().nodes).toEqual([]);
+    expect(screen.queryByText('Could not load session')).not.toBeInTheDocument();
+
+    setBaselineSpy.mockRestore();
+  });
+
+  it('malformed session data fails before the canvas is touched (atomic switch)', async () => {
+    // annotations must be an array; a non-iterable value breaks the shared
+    // annotationsToGroups/annotationsToOverlays transform used both by
+    // applyServerSession and by the sync-baseline computation this now runs
+    // *before* applyServerSession, precisely so a throw here can't leave the
+    // canvas half-mutated with the switch reported as failed.
+    sessionStore.touchSession('aaaa-bbbb');
+    renderApp();
+
+    act(() => {
+      useGraphStore.getState().updateVisualization([NODE_A], []);
+    });
+
+    api.getSession.mockImplementationOnce(async (id) => ({
+      id,
+      state: { annotations: {} },
+      resolved: { nodes: [NODE_B], edges: [] },
+      roster: [],
+    }));
+
+    fireEvent.click(screen.getByTitle('Menu'));
+    fireEvent.click(screen.getByText('aaaa-bbbb'));
+
+    await waitFor(() => {
+      expect(screen.getByText('Could not load session')).toBeInTheDocument();
+    });
+
+    // Failed before mutating anything: still the original canvas and session.
+    expect(useGraphStore.getState().nodes.map(n => n.id)).toEqual(['node-a']);
+    expect(window.location.search).not.toContain('session=aaaa-bbbb');
   });
 });

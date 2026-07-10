@@ -143,6 +143,7 @@
     "delete_confirm": "Ta bort",
     "session_deleted": "Sessionen togs bort — startade en ny",
     "session_deleted_remote": "Sessionen togs bort av en annan användare — startade en ny",
+    "connect_error": "Kunde inte läsa in sessionen",
     "settings": "Inställningar"
   },
   "settings": {

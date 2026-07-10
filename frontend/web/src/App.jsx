@@ -281,7 +281,15 @@ function App() {
       existing.connect();
       return existing;
     }
-    if (existing) existing.close();
+    if (existing) {
+      existing.flush();
+      existing.close();
+      setRemotePositions(null);
+      setRemoteAnnotationOps(null);
+      setRoster([]);
+      setRemoteSelections({});
+      setOpStreamReady(false);
+    }
     const client = new SessionSyncClient({
       sessionId: targetId,
       clientId: api.getClientId(),
@@ -1256,25 +1264,41 @@ function App() {
   const loadSessionFromServer = useCallback(async (targetId, { eagerConnect = false } = {}) => {
     try {
       const payload = await api.getSession(targetId, { resolve: true });
+      // Compute the sync baseline before touching the canvas: it runs the same
+      // annotation-transform logic applyServerSession does internally, so if
+      // malformed server data would throw, it throws here — before
+      // clearVisualization() below — leaving the current canvas untouched and
+      // this as a clean "switch failed" rather than a half-applied one.
+      const resolvedIds = (payload?.resolved?.nodes || []).map(n => n.id);
+      const baselineMirror = serverStateToMirror(payload?.state, resolvedIds);
       applyServerSession(payload);
       // Connect the realtime stream for this existing session and seed the sync
       // baseline from its state so later edits diff against what the server holds.
-      const resolvedIds = (payload?.resolved?.nodes || []).map(n => n.id);
-      ensureSyncConnected(targetId)?.setBaseline(serverStateToMirror(payload?.state, resolvedIds));
-    } catch {
+      // Best-effort from here on: the canvas above already loaded correctly, and
+      // ensureSyncConnected's own failure modes (client construction / connect)
+      // are unrelated to the payload data that made loading it fail earlier, so
+      // they must not be reported as a failed switch either. (Pre-existing:
+      // ensureSyncConnected retries on every subsequent auto-save, so a
+      // transient failure recovers there — a persistent one, e.g. a malformed
+      // stream URL, would keep failing the same way each time; that's an
+      // existing gap in ensureSyncConnected itself, not introduced here.)
+      try {
+        ensureSyncConnected(targetId)?.setBaseline(baselineMirror);
+      } catch (syncError) {
+        console.error('Error connecting sync client:', syncError);
+      }
+    } catch (error) {
       // Session does not exist server-side yet — new / not-yet-saved share URL,
-      // or the backend is unreachable. `eagerConnect` distinguishes a join by
-      // explicit id (share URL, "Connect to session") from a locally generated
-      // id (design §3.6): joining a specific session must connect regardless of
-      // the 404, because opening the stream is itself what materialises the
-      // session server-side (`get_or_create`) — staying lazy here would strand
-      // the joining client offline forever. A locally generated id stays lazy
-      // so an empty, never-edited session is never materialised (D13).
-      clearVisualization();
-      if (eagerConnect) {
-        ensureSyncConnected(targetId)?.setBaseline({});
-      } else if (syncRef.current && syncRef.current.sessionId === targetId) {
-        syncRef.current.setBaseline({});
+      if (error?.status === 404) {
+        clearVisualization();
+        if (eagerConnect) {
+          ensureSyncConnected(targetId)?.setBaseline({});
+        } else if (syncRef.current && syncRef.current.sessionId === targetId) {
+          syncRef.current.setBaseline({});
+        }
+      } else {
+        console.error('Error loading session:', error);
+        throw error;
       }
     }
   }, [applyServerSession, clearVisualization, ensureSyncConnected]);
@@ -1315,19 +1339,20 @@ function App() {
   // Tear down the client when the session changes or the app unmounts; the next
   // save/load lazily reconnects for the new id.
   useEffect(() => {
+    const currentSessionId = sessionId;
     return () => {
       const client = syncRef.current;
-      syncRef.current = null;
-      if (client) {
+      if (client && client.sessionId === currentSessionId) {
+        syncRef.current = null;
         // Flush last-moment ops before closing; the POST outlives the stream teardown.
         client.flush();
         client.close();
+        setRemotePositions(null);
+        setRemoteAnnotationOps(null);
+        setRoster([]);
+        setRemoteSelections({});
+        setOpStreamReady(false);
       }
-      setRemotePositions(null);
-      setRemoteAnnotationOps(null);
-      setRoster([]);
-      setRemoteSelections({});
-      setOpStreamReady(false);
     };
   }, [sessionId]);
 
@@ -1336,13 +1361,17 @@ function App() {
   // the URL) and load the target's canvas from the server.
   const switchToSession = useCallback((targetId, { register = true, eagerConnect = false } = {}) => {
     requestSessionSnapshot(async () => {
-      setSessionId(targetId);
-      reflectSessionUrl(targetId);
-      if (register) sessionStore.touchSession(targetId);
-      await loadSessionFromServer(targetId, { eagerConnect });
-      setSessionsVersion(v => v + 1);
+      try {
+        await loadSessionFromServer(targetId, { eagerConnect });
+        setSessionId(targetId);
+        reflectSessionUrl(targetId);
+        if (register) sessionStore.touchSession(targetId);
+        setSessionsVersion(v => v + 1);
+      } catch (error) {
+        showNotification('error', t('sessions.connect_error'));
+      }
     });
-  }, [requestSessionSnapshot, loadSessionFromServer]);
+  }, [requestSessionSnapshot, loadSessionFromServer, showNotification, t]);
 
   const handleNewSession = useCallback(() => {
     switchToSession(api.generateVisualizationSessionId(), { register: false });

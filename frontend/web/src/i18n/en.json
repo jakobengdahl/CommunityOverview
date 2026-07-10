@@ -143,6 +143,7 @@
     "delete_confirm": "Delete",
     "session_deleted": "Session deleted — started a new one",
     "session_deleted_remote": "This session was deleted by another user — started a new one",
+    "connect_error": "Could not load session",
     "settings": "Settings"
   },
   "settings": {

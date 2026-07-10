@@ -1,5 +1,25 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 
+describe('apiFetch error handling', () => {
+  const originalFetch = global.fetch;
+
+  afterEach(() => {
+    global.fetch = originalFetch;
+    vi.resetModules();
+  });
+
+  it('attaches the HTTP status to the thrown error, so callers can distinguish e.g. 404 from other failures', async () => {
+    global.fetch = vi.fn(async () => ({
+      ok: false,
+      status: 404,
+      json: async () => ({ detail: 'session not found' }),
+    }));
+    const { getSession } = await import('../src/services/api.js');
+
+    await expect(getSession('missing-id')).rejects.toMatchObject({ status: 404 });
+  });
+});
+
 describe('getEventSessionId', () => {
   let originalSessionStorage;
   let mockSessionStorage;

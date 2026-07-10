@@ -366,6 +366,21 @@ describe('SessionSyncClient', () => {
     ]);
   });
 
+  it('teardown flush sends queued ops even if the stream never became ready', async () => {
+    // A client can be swapped out (session switch) before its stream ever
+    // delivers a first snapshot. flush() must not drop ops queued in that
+    // window — only the debounced auto-flush should wait for _ready.
+    const { client, fetchImpl } = makeClient({ flushIntervalMs: 60_000 });
+    client.connect();
+    client.syncState({ node_refs: ['a'] });
+    await flush();
+    expect(fetchImpl.calls).toHaveLength(0); // never-ready: auto-flush stays quiet
+
+    await client.flush();
+    expect(fetchImpl.calls).toHaveLength(1);
+    expect(fetchImpl.calls[0].body.ops).toContainEqual({ op: 'nodes_added', node_ids: ['a'] });
+  });
+
   it('dispatches session lifecycle events to handlers', () => {
     const onSessionRenamed = vi.fn();
     const onSessionDeleted = vi.fn();
