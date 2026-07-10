@@ -241,4 +241,30 @@ describe('Server-backed session lifecycle', () => {
     expect(api.getSession).toHaveBeenCalledWith('5555-6666', { resolve: true });
     expect(useGraphStore.getState().nodes[0]._savedPosition).toEqual({ x: 5, y: 6 });
   });
+
+  it('a real load failure (non-404) shows an error notice and stays on the current session', async () => {
+    // Distinguishes an actual backend/network error from a 404 ("session
+    // doesn't exist yet", handled elsewhere as a normal empty session): only
+    // the latter should ever clear the canvas.
+    sessionStore.touchSession('7777-8888');
+    renderApp();
+
+    act(() => {
+      useGraphStore.getState().updateVisualization([NODE_A], []);
+    });
+
+    const serverError = new Error('Internal Server Error');
+    serverError.status = 500;
+    api.getSession.mockImplementationOnce(async () => { throw serverError; });
+
+    fireEvent.click(screen.getByTitle('Menu'));
+    fireEvent.click(screen.getByText('7777-8888'));
+
+    await waitFor(() => {
+      expect(screen.getByText('Could not load session')).toBeInTheDocument();
+    });
+
+    // The failed switch must not have cleared the current canvas or changed session.
+    expect(useGraphStore.getState().nodes.map(n => n.id)).toEqual(['node-a']);
+  });
 });

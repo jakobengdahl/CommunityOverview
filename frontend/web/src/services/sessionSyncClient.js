@@ -488,10 +488,12 @@ export class SessionSyncClient {
   }
 
   /**
-   * Force an immediate flush attempt, bypassing the debounce. Used before the
-   * client is torn down on session switch so last-moment ops still leave: the
-   * POST is initiated synchronously (its `fetch` survives a following `close()`,
-   * which only tears down the EventSource, not the in-flight request).
+   * Force an immediate flush attempt, bypassing the debounce and the `_ready`
+   * gate. Used before the client is torn down on session switch so last-moment
+   * ops still leave even if the stream never delivered a snapshot (e.g. the
+   * user switches away before the session confirms): the POST is initiated
+   * synchronously (its `fetch` survives a following `close()`, which only
+   * tears down the EventSource, not the in-flight request).
    *
    * In `_forceSingle` recovery mode the regular flush sends one op per call and
    * relies on later flushes for the rest — but teardown gives no later flush, and
@@ -506,7 +508,7 @@ export class SessionSyncClient {
    * @returns {Promise<void>}
    */
   flush() {
-    if (this._forceSingle && this._queue.length > 0 && this._ready && this._fetch) {
+    if (this._forceSingle && this._queue.length > 0 && this._fetch) {
       const pending = this._queue.splice(0);
       return (async () => {
         for (const op of pending) {
@@ -520,7 +522,7 @@ export class SessionSyncClient {
         }
       })();
     }
-    return this._flush();
+    return this._flush({ bypassReady: true });
   }
 
   _scheduleFlush() {
@@ -535,9 +537,9 @@ export class SessionSyncClient {
     if (this._queue.length) this._scheduleFlush();
   }
 
-  async _flush() {
+  async _flush({ bypassReady = false } = {}) {
     if (this._flushing || this._closed) return;
-    if (!this._ready || !this._queue.length || !this._fetch) return;
+    if ((!this._ready && !bypassReady) || !this._queue.length || !this._fetch) return;
     this._flushing = true;
     // After a rejected multi-op batch, resend one op at a time so a single bad
     // op can't take valid ops down with it (the server applies a batch
