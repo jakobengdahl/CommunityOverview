@@ -94,6 +94,7 @@ import App from '../src/App';
 import * as api from '../src/services/api';
 import useGraphStore from '../src/store/graphStore';
 import { I18nProvider } from '../src/i18n';
+import { SessionSyncClient } from '../src/services/sessionSyncClient';
 
 function renderApp() {
   return render(
@@ -266,5 +267,34 @@ describe('Server-backed session lifecycle', () => {
 
     // The failed switch must not have cleared the current canvas or changed session.
     expect(useGraphStore.getState().nodes.map(n => n.id)).toEqual(['node-a']);
+  });
+
+  it('a baseline-seeding failure after a successful load still commits the switch', async () => {
+    // The canvas load (applyServerSession) already succeeded by the time the
+    // sync baseline is seeded — a failure only in that best-effort step must
+    // not make the switch look like it never happened (App.jsx would
+    // otherwise report success visually while claiming to still be on the
+    // old session).
+    sessionStore.touchSession('9999-0000');
+    renderApp();
+
+    act(() => {
+      useGraphStore.getState().updateVisualization([NODE_A], []);
+    });
+
+    const setBaselineSpy = vi.spyOn(SessionSyncClient.prototype, 'setBaseline')
+      .mockImplementationOnce(() => { throw new Error('malformed baseline'); });
+
+    fireEvent.click(screen.getByTitle('Menu'));
+    fireEvent.click(screen.getByText('9999-0000'));
+
+    await waitFor(() => {
+      expect(window.location.search).toContain('session=9999-0000');
+    });
+    // The target session's (empty) canvas was applied — no error notice shown.
+    expect(useGraphStore.getState().nodes).toEqual([]);
+    expect(screen.queryByText('Could not load session')).not.toBeInTheDocument();
+
+    setBaselineSpy.mockRestore();
   });
 });

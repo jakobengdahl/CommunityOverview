@@ -1267,8 +1267,17 @@ function App() {
       applyServerSession(payload);
       // Connect the realtime stream for this existing session and seed the sync
       // baseline from its state so later edits diff against what the server holds.
-      const resolvedIds = (payload?.resolved?.nodes || []).map(n => n.id);
-      ensureSyncConnected(targetId)?.setBaseline(serverStateToMirror(payload?.state, resolvedIds));
+      // Best-effort: the canvas above is already correctly loaded, so a failure
+      // only to seed the baseline must not be reported as "switch failed" —
+      // that would leave switchToSession's caller believing it's still on the
+      // old session while the visible canvas is actually the new one. An
+      // unseeded/stale baseline self-corrects on the client's next resync.
+      try {
+        const resolvedIds = (payload?.resolved?.nodes || []).map(n => n.id);
+        ensureSyncConnected(targetId)?.setBaseline(serverStateToMirror(payload?.state, resolvedIds));
+      } catch (baselineError) {
+        console.error('Error seeding sync baseline:', baselineError);
+      }
     } catch (error) {
       // Session does not exist server-side yet — new / not-yet-saved share URL,
       if (error?.status === 404) {
