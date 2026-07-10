@@ -127,6 +127,14 @@ Each node type has the following fields:
 | `ui_form` | No | Specialized creation dialog. `"skill"` opens the SKILL.md-compatible form |
 | `context_menu` | No | Array of extra items for the right-click context menu (see below) |
 
+Every node — regardless of its type or its `fields` list — also carries a
+universal `aliases` field: a list of alternative names/synonyms. Aliases are
+editable in every node editor and are matched during search (ranked just below
+a node's real name, above tags and descriptions), so a node can be found by an
+abbreviation or alternate spelling. You do not need to list `aliases` in a
+node type's `fields` array; it is always available, just like `tags` and
+`subtypes`.
+
 See [`docs/ICONS.md`](ICONS.md) for the full, up-to-date list of icon names
 you can choose from — grouped by theme (people & organizations, statistics,
 documents, security, technology, and more) — plus the process for

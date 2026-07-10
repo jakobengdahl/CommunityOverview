@@ -130,8 +130,9 @@ class GraphStorage:
         """Build searchable text for a node, including type name and localized labels."""
         tags_text = " ".join(node.tags) if hasattr(node, 'tags') and node.tags else ""
         subtypes_text = " ".join(node.subtypes) if hasattr(node, 'subtypes') and node.subtypes else ""
+        aliases_text = " ".join(node.aliases) if hasattr(node, 'aliases') and node.aliases else ""
         type_text = self._type_searchable_text.get(str(node.type), str(node.type).lower())
-        return f"{node.name} {node.description} {node.summary} {tags_text} {subtypes_text} {type_text}".lower()
+        return f"{node.name} {node.description} {node.summary} {tags_text} {subtypes_text} {aliases_text} {type_text}".lower()
 
     def add_system_listener(self, listener: Callable[["Event"], None]) -> None:
         """
@@ -486,19 +487,41 @@ class GraphStorage:
 
         Name matches use large base values (300 000–500 000) so that any
         name-tier match always outranks secondary signals (type/tags/description)
-        regardless of how many secondary signals accumulate.  Secondary signals
-        use values up to ~1 850, well below the 100 000-point gap between tiers.
+        regardless of how many secondary signals accumulate.  Aliases are
+        alternative names and score in a dedicated band (200 000–250 000) that
+        sits just below real-name matches but above every secondary signal.
+        Secondary signals use values up to ~1 850, well below the 100 000-point
+        gap between tiers.
         """
         score = 0
         name_lower = (node.name or "").lower()
 
-        # Primary tier — name matching (large gaps prevent secondary signal bleed-through)
+        # Primary tier — a node's own name (500 000–300 000) or an alias, whichever
+        # is stronger. Name and alias are combined with max(), not summed, so an
+        # alias can never lift a node past another node's stronger real-name match:
+        # every alias score (≤250 000) stays below every name score (≥300 000), and
+        # a node that already matches on its name ignores its aliases entirely.
+        name_score = 0
         if name_lower == query_lower:
-            score += 500_000
+            name_score = 500_000
         elif name_lower.startswith(query_lower):
-            score += 400_000
+            name_score = 400_000
         elif query_lower in name_lower:
-            score += 300_000
+            name_score = 300_000
+
+        # Alias sub-tier — synonyms rank as second-class names: below any real-name
+        # match but above type/tag/description signals.
+        alias_score = 0
+        if node.aliases:
+            aliases_lower = [a.lower() for a in node.aliases]
+            if query_lower in aliases_lower:
+                alias_score = 250_000
+            elif any(a.startswith(query_lower) for a in aliases_lower):
+                alias_score = 220_000
+            elif any(query_lower in a for a in aliases_lower):
+                alias_score = 200_000
+
+        score += max(name_score, alias_score)
 
         # Secondary — type matching (including localized labels)
         type_key = str(node.type)
@@ -900,7 +923,7 @@ class GraphStorage:
             before_state = node.to_dict()
 
             # Update allowed fields
-            allowed_fields = {'name', 'description', 'summary', 'tags', 'subtypes', 'metadata'}
+            allowed_fields = {'name', 'description', 'summary', 'tags', 'subtypes', 'aliases', 'metadata'}
             reserved_fields = {'id', 'type', 'embedding', 'created_at', 'updated_at'}
             for key, value in updates.items():
                 if key in allowed_fields:
@@ -922,7 +945,7 @@ class GraphStorage:
             self._searchable_text_cache[node.id] = self._build_searchable_text(node)
 
             # Update embedding if text fields or tags changed (non-blocking)
-            if any(k in updates for k in ['name', 'description', 'summary', 'tags']):
+            if any(k in updates for k in ['name', 'description', 'summary', 'tags', 'aliases']):
                 try:
                     self.vector_store.update_node_embedding(node)
                 except Exception as embed_error:

@@ -164,6 +164,7 @@ class Node(BaseModel):
     summary: str = Field(default="", max_length=300)  # For visualization
     tags: List[str] = Field(default_factory=list)  # Searchable tags for categorization
     subtypes: List[str] = Field(default_factory=list)  # Sub-classifications within the node type
+    aliases: List[str] = Field(default_factory=list)  # Alternative names/synonyms; matched in search
     metadata: Dict[str, Any] = Field(default_factory=dict)
     embedding: Optional[List[float]] = None  # For future vector search
     created_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))

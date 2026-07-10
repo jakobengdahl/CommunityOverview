@@ -4,7 +4,7 @@ import * as api from '../services/api';
 import SubtypeInput from './SubtypeInput';
 import './EditNodeDialog.css';
 
-const BASE_FIELDS = new Set(['name', 'description', 'summary', 'tags', 'subtypes', 'metadata']);
+const BASE_FIELDS = new Set(['name', 'description', 'summary', 'tags', 'subtypes', 'aliases', 'metadata']);
 
 const FIELD_LABELS = {
   start_date: 'Start date',
@@ -41,6 +41,7 @@ function EditNodeDialog({ node, onClose, onSave }) {
     description: '',
     summary: '',
     tags: '',
+    aliases: '',
   });
   const [subtypes, setSubtypes] = useState([]);
   const [existingSubtypes, setExistingSubtypes] = useState([]);
@@ -70,6 +71,7 @@ function EditNodeDialog({ node, onClose, onSave }) {
         description: node.data.description || '',
         summary: node.data.summary || '',
         tags: (node.data.tags || []).join(', '),
+        aliases: (node.data.aliases || []).join(', '),
         ...extraData,
       });
       setSubtypes(node.data.subtypes || []);
@@ -101,6 +103,7 @@ function EditNodeDialog({ node, onClose, onSave }) {
       description: formData.description,
       summary: formData.summary,
       tags: formData.tags.split(',').map(t => t.trim()).filter(Boolean),
+      aliases: formData.aliases.split(',').map(a => a.trim()).filter(Boolean),
       subtypes,
       ...extraData,
     });
@@ -197,6 +200,18 @@ function EditNodeDialog({ node, onClose, onSave }) {
               value={formData.tags}
               onChange={handleChange}
               placeholder="tag1, tag2, tag3"
+            />
+          </div>
+
+          <div className="form-group">
+            <label htmlFor="aliases">Aliases / synonyms (comma-separated)</label>
+            <input
+              type="text"
+              id="aliases"
+              name="aliases"
+              value={formData.aliases}
+              onChange={handleChange}
+              placeholder="alternative name, abbreviation, synonym"
             />
           </div>
 

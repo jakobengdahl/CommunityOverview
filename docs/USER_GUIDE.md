@@ -187,8 +187,9 @@ via the right-click menu.
 
 ## 3. Search
 
-The search bar at the top of the page searches across all node names, descriptions,
-and summaries in the graph (including federated graphs if federation is enabled).
+The search bar at the top of the page searches across all node names, aliases,
+descriptions, summaries, and tags in the graph (including federated graphs if
+federation is enabled).
 
 ![Search bar and results](images/search.png)
 *Search results shown as a dropdown. Click a result to centre the canvas on that node and highlight it.*
@@ -196,6 +197,9 @@ and summaries in the graph (including federated graphs if federation is enabled)
 **Tips:**
 - Searches are fuzzy — partial words and approximate spellings are matched.
 - Results show the node type alongside the name.
+- Any node can carry **aliases / synonyms** (set them in the node editor). A node
+  is found by its aliases too, so an abbreviation or alternate spelling still
+  surfaces it — an alias match ranks just below a match on the node's real name.
 - When multiple graphs are federated, results show a `<GraphName>: <NodeName>` prefix
   so you can tell which graph the result comes from.
 

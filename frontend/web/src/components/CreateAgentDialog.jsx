@@ -18,6 +18,7 @@ export default function CreateAgentDialog({ onClose, onSave, initialData }) {
   // Agent info
   const [name, setName] = useState('');
   const [description, setDescription] = useState('');
+  const [aliases, setAliases] = useState('');
   const [enabled, setEnabled] = useState(true);
   const [taskPrompt, setTaskPrompt] = useState('');
 
@@ -44,6 +45,7 @@ export default function CreateAgentDialog({ onClose, onSave, initialData }) {
       // Agent fields
       setName(agent.name || '');
       setDescription(agent.description || '');
+      setAliases((agent.aliases || []).join(', '));
 
       if (agent.metadata) {
         // Try new structure first (flattened)
@@ -154,6 +156,8 @@ export default function CreateAgentDialog({ onClose, onSave, initialData }) {
       return;
     }
 
+    const aliasList = aliases.split(',').map(a => a.trim()).filter(Boolean);
+
     // Logic for Create vs Update
     if (initialData) {
       // UPDATE existing agent
@@ -165,6 +169,7 @@ export default function CreateAgentDialog({ onClose, onSave, initialData }) {
         name: name.trim(),
         description: description.trim(),
         summary: `MCP agent with ${selectedIntegrations.length} integration(s)`,
+        aliases: aliasList,
         metadata: {
           ...initialData.agent.metadata,
           subscription_id: subscriptionId, // Preserve or set ID
@@ -252,6 +257,7 @@ export default function CreateAgentDialog({ onClose, onSave, initialData }) {
         type: 'Agent',
         description: description.trim() || `AI agent: ${name}`,
         summary: `MCP agent with ${selectedIntegrations.length} integration(s)`,
+        aliases: aliasList,
         metadata: {
           subscription_id: subscriptionId,
           enabled: enabled,
@@ -323,6 +329,17 @@ export default function CreateAgentDialog({ onClose, onSave, initialData }) {
                 onChange={e => setDescription(e.target.value)}
                 placeholder="Optional description of the agent's purpose"
                 rows={2}
+              />
+            </div>
+
+            <div className="form-group">
+              <label htmlFor="agent-aliases">Aliases / synonyms (comma-separated)</label>
+              <input
+                id="agent-aliases"
+                type="text"
+                value={aliases}
+                onChange={e => setAliases(e.target.value)}
+                placeholder="alternative name, abbreviation, synonym"
               />
             </div>
 

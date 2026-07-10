@@ -5,7 +5,7 @@ import SubtypeInput from './SubtypeInput';
 import './CreateNodeDialog.css';
 
 // Fields always shown via dedicated form controls — never repeated as extra fields
-const BASE_FIELDS = new Set(['name', 'description', 'summary', 'tags', 'subtypes', 'metadata']);
+const BASE_FIELDS = new Set(['name', 'description', 'summary', 'tags', 'subtypes', 'aliases', 'metadata']);
 
 const FIELD_LABELS = {
   start_date: 'Start date',
@@ -31,6 +31,7 @@ function CreateNodeDialog({ nodeType, onClose, onSave }) {
     description: '',
     summary: '',
     tags: '',
+    aliases: '',
     ...Object.fromEntries(extraFields.map(f => [f, ''])),
   });
   const [subtypes, setSubtypes] = useState([]);
@@ -66,6 +67,7 @@ function CreateNodeDialog({ nodeType, onClose, onSave }) {
         description: formData.description.trim(),
         summary: formData.summary.trim(),
         tags: formData.tags.split(',').map(t => t.trim()).filter(Boolean),
+        aliases: formData.aliases.split(',').map(a => a.trim()).filter(Boolean),
       };
 
       if (subtypes.length > 0) {
@@ -172,6 +174,18 @@ function CreateNodeDialog({ nodeType, onClose, onSave }) {
               value={formData.tags}
               onChange={handleChange}
               placeholder="tag1, tag2, tag3"
+            />
+          </div>
+
+          <div className="form-group">
+            <label htmlFor="create-aliases">Aliases / synonyms (comma-separated)</label>
+            <input
+              type="text"
+              id="create-aliases"
+              name="aliases"
+              value={formData.aliases}
+              onChange={handleChange}
+              placeholder="alternative name, abbreviation, synonym"
             />
           </div>
 

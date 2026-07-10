@@ -618,7 +618,7 @@ class GraphService:
         # so it is persisted without requiring model changes.
         _NODE_MODEL_FIELDS = {
             'id', 'type', 'name', 'description', 'summary',
-            'tags', 'subtypes', 'metadata', 'embedding', 'created_at', 'updated_at',
+            'tags', 'subtypes', 'aliases', 'metadata', 'embedding', 'created_at', 'updated_at',
         }
         try:
             node_objects = []
@@ -842,7 +842,7 @@ class GraphService:
 
         Args:
             node_id: ID of the node to update
-            updates: Dict with fields to update (name, description, summary, tags, metadata)
+            updates: Dict with fields to update (name, description, summary, tags, aliases, metadata)
             event_origin: Source of the mutation (web-ui, mcp, system, agent:<id>)
             event_session_id: Unique session ID for loop prevention
             event_correlation_id: Correlation ID for chaining related events

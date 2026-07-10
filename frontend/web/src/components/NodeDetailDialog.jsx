@@ -3,7 +3,7 @@ import useGraphStore from '../store/graphStore';
 import { useI18n } from '../i18n';
 import './NodeDetailDialog.css';
 
-const BASE_FIELDS = new Set(['name', 'description', 'summary', 'tags', 'subtypes', 'metadata', 'identifier']);
+const BASE_FIELDS = new Set(['name', 'description', 'summary', 'tags', 'subtypes', 'aliases', 'metadata', 'identifier']);
 
 const FIELD_LABELS = {
   identifier: 'Resource link (URL)',
@@ -130,6 +130,17 @@ function NodeDetailDialog({ node, onClose, onEdit }) {
               <div className="node-detail-tags">
                 {data.tags.map((tag, i) => (
                   <span key={i} className="node-detail-tag">{tag}</span>
+                ))}
+              </div>
+            </div>
+          )}
+
+          {data.aliases && data.aliases.length > 0 && (
+            <div className="node-detail-section">
+              <label>{t('detail.aliases')}</label>
+              <div className="node-detail-tags">
+                {data.aliases.map((alias, i) => (
+                  <span key={i} className="node-detail-tag">{alias}</span>
                 ))}
               </div>
             </div>

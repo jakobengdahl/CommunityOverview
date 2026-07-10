@@ -6,6 +6,7 @@ export default function CreateSkillDialog({ nodeType = 'Skill', onClose, onSave,
 
   const [name, setName]             = useState('');
   const [description, setDescription] = useState('');
+  const [aliases, setAliases]       = useState('');
   const [whenToUse, setWhenToUse]   = useState('');
   const [content, setContent]       = useState('');
   const [sourceUrl, setSourceUrl]   = useState('');
@@ -17,6 +18,7 @@ export default function CreateSkillDialog({ nodeType = 'Skill', onClose, onSave,
     if (!initialData) return;
     setName(initialData.name || '');
     setDescription(initialData.description || '');
+    setAliases((initialData.aliases || []).join(', '));
     const m = initialData.metadata || {};
     setWhenToUse(m.when_to_use || '');
     setContent(m.content || '');
@@ -29,6 +31,8 @@ export default function CreateSkillDialog({ nodeType = 'Skill', onClose, onSave,
   const handleSubmit = (e) => {
     e.preventDefault();
     if (!name.trim()) return;
+
+    const aliasList = aliases.split(',').map(a => a.trim()).filter(Boolean);
 
     const metadata = {
       ...(initialData?.metadata || {}),
@@ -47,6 +51,7 @@ export default function CreateSkillDialog({ nodeType = 'Skill', onClose, onSave,
           name: name.trim(),
           description: description.trim(),
           summary: whenToUse.trim().slice(0, 120) || name.trim(),
+          aliases: aliasList,
           metadata,
         },
       });
@@ -56,6 +61,7 @@ export default function CreateSkillDialog({ nodeType = 'Skill', onClose, onSave,
         type: nodeType,
         description: description.trim(),
         summary: whenToUse.trim().slice(0, 120) || name.trim(),
+        aliases: aliasList,
         metadata,
         communities: [],
       });
@@ -95,6 +101,17 @@ export default function CreateSkillDialog({ nodeType = 'Skill', onClose, onSave,
                 onChange={e => setDescription(e.target.value)}
                 placeholder="Short description of what this skill does"
                 rows={2}
+              />
+            </div>
+
+            <div className="form-group">
+              <label htmlFor="skill-aliases">Aliases / synonyms (comma-separated)</label>
+              <input
+                id="skill-aliases"
+                type="text"
+                value={aliases}
+                onChange={e => setAliases(e.target.value)}
+                placeholder="alternative name, abbreviation, synonym"
               />
             </div>
 
