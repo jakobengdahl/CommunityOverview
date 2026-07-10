@@ -1275,9 +1275,13 @@ function App() {
       // Connect the realtime stream for this existing session and seed the sync
       // baseline from its state so later edits diff against what the server holds.
       // Best-effort from here on: the canvas above already loaded correctly, and
-      // a client-construction failure is not data-related — ensureSyncConnected
-      // is re-invoked (and retried) on the next auto-save regardless (see the
-      // sync call there), so it isn't reported as a failed switch.
+      // ensureSyncConnected's own failure modes (client construction / connect)
+      // are unrelated to the payload data that made loading it fail earlier, so
+      // they must not be reported as a failed switch either. (Pre-existing:
+      // ensureSyncConnected retries on every subsequent auto-save, so a
+      // transient failure recovers there — a persistent one, e.g. a malformed
+      // stream URL, would keep failing the same way each time; that's an
+      // existing gap in ensureSyncConnected itself, not introduced here.)
       try {
         ensureSyncConnected(targetId)?.setBaseline(baselineMirror);
       } catch (syncError) {
