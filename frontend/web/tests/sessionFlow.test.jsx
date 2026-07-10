@@ -297,4 +297,36 @@ describe('Server-backed session lifecycle', () => {
 
     setBaselineSpy.mockRestore();
   });
+
+  it('malformed session data fails before the canvas is touched (atomic switch)', async () => {
+    // annotations must be an array; a non-iterable value breaks the shared
+    // annotationsToGroups/annotationsToOverlays transform used both by
+    // applyServerSession and by the sync-baseline computation this now runs
+    // *before* applyServerSession, precisely so a throw here can't leave the
+    // canvas half-mutated with the switch reported as failed.
+    sessionStore.touchSession('aaaa-bbbb');
+    renderApp();
+
+    act(() => {
+      useGraphStore.getState().updateVisualization([NODE_A], []);
+    });
+
+    api.getSession.mockImplementationOnce(async (id) => ({
+      id,
+      state: { annotations: {} },
+      resolved: { nodes: [NODE_B], edges: [] },
+      roster: [],
+    }));
+
+    fireEvent.click(screen.getByTitle('Menu'));
+    fireEvent.click(screen.getByText('aaaa-bbbb'));
+
+    await waitFor(() => {
+      expect(screen.getByText('Could not load session')).toBeInTheDocument();
+    });
+
+    // Failed before mutating anything: still the original canvas and session.
+    expect(useGraphStore.getState().nodes.map(n => n.id)).toEqual(['node-a']);
+    expect(window.location.search).not.toContain('session=aaaa-bbbb');
+  });
 });
