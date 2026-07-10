@@ -22,7 +22,7 @@ import { AnnotationContext } from './AnnotationContext';
 import SimpleFloatingEdge from './SimpleFloatingEdge';
 import { applyLayout, getGridLayout, getCircularLayout, getLayoutedElements } from '../utils/graphLayout';
 import { getNodeColor, LAZY_LOAD_THRESHOLD, INITIAL_LOAD_COUNT, DEFAULT_EDGE_STYLE } from '../utils/constants';
-import { OVERLAY_TYPES, ANNOTATION_TYPES, isManualNode, isArrowAnchored, overlayToFlowNode, flowNodeToOverlay, nodeCenter, resolveAnchoredArrow, clearDanglingAnchors } from '../utils/annotations';
+import { OVERLAY_TYPES, ANNOTATION_TYPES, isManualNode, isArrowHeld, overlayToFlowNode, flowNodeToOverlay, nodeCenter, resolveAnchoredArrow } from '../utils/annotations';
 import './GraphCanvas.css';
 
 /**
@@ -906,10 +906,13 @@ function GraphCanvasInner({
   }, [annotationsToRestore, setNodes, onAnnotationsRestored]);
 
   // Keep arrow/line endpoints anchored to a node/annotation glued to that
-  // target's centre as it moves or resizes, and drop anchors whose target was
-  // deleted. resolveAnchoredArrow returns null when an arrow's geometry already
-  // matches and clearDanglingAnchors returns null when anchors are unchanged, so
-  // this stays idempotent and does not loop even though it depends on `nodes`.
+  // target's centre as it moves or resizes. The stored anchor id is never
+  // cleared here — a target that leaves the view (filtered, collapsed, not yet
+  // loaded, or deleted) is indistinguishable from this vantage, so the anchor is
+  // preserved and re-glues if the target returns. While the target is absent the
+  // arrow is not held and becomes draggable again (so a deleted target can't
+  // strand it). resolveAnchoredArrow returns null when geometry already matches,
+  // keeping this idempotent and loop-free despite depending on `nodes`.
   useEffect(() => {
     const centers = new Map();
     const existing = new Set();
@@ -925,24 +928,32 @@ function GraphCanvasInner({
     }
     if (!hasAnchored) return;
     const updates = new Map();
+    let geometryChanged = false;
     for (const n of nodes) {
       if (n.type !== 'arrow') continue;
-      const cleared = clearDanglingAnchors(n.data, existing);
-      const effective = cleared ? { ...n, data: { ...n.data, ...cleared } } : n;
-      const resolved = resolveAnchoredArrow(effective, centers);
-      if (cleared || resolved) updates.set(n.id, { cleared, resolved });
+      if (!n.data?.startAnchor && !n.data?.endAnchor) continue;
+      const resolved = resolveAnchoredArrow(n, centers);
+      const desiredDraggable = !isArrowHeld(n.data, existing);
+      if (resolved || n.draggable !== desiredDraggable) {
+        updates.set(n.id, { resolved, desiredDraggable });
+        if (resolved) geometryChanged = true;
+      }
     }
     if (updates.size === 0) return;
     setNodes((nds) => nds.map((n) => {
       const u = updates.get(n.id);
       if (!u) return n;
-      let data = n.data;
-      if (u.cleared) data = { ...data, ...u.cleared };
-      if (u.resolved) data = { ...data, dx: u.resolved.dx, dy: u.resolved.dy };
-      const position = u.resolved ? u.resolved.position : n.position;
-      return { ...n, position, data, draggable: !isArrowAnchored(data) };
+      let next = n;
+      if (u.resolved) {
+        next = { ...next, position: u.resolved.position, data: { ...next.data, dx: u.resolved.dx, dy: u.resolved.dy } };
+      }
+      if (next.draggable !== u.desiredDraggable) {
+        next = { ...next, draggable: u.desiredDraggable };
+      }
+      return next;
     }));
-    onAnnotationChangeRef.current?.();
+    // Only geometry is persisted; a draggable-only flip needs no save.
+    if (geometryChanged) onAnnotationChangeRef.current?.();
   }, [nodes, setNodes]);
 
   // Apply node positions arriving from another client (design step 6). Positions

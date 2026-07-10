@@ -4,10 +4,10 @@ import {
   flowNodeToOverlay,
   isManualNode,
   isArrowAnchored,
+  isArrowHeld,
   nodeCenter,
   findSnapTarget,
   resolveAnchoredArrow,
-  clearDanglingAnchors,
 } from '../src/utils/annotations';
 
 // GraphCanvas maps between the host's canvas-shape overlay descriptors and
@@ -143,22 +143,18 @@ describe('resolveAnchoredArrow', () => {
   });
 });
 
-describe('clearDanglingAnchors', () => {
-  it('returns null when the arrow has no anchors', () => {
-    expect(clearDanglingAnchors({ dx: 1, dy: 1 }, new Set())).toBeNull();
+describe('isArrowHeld', () => {
+  it('is false when the arrow has no anchors', () => {
+    expect(isArrowHeld({ dx: 1, dy: 1 }, new Set())).toBe(false);
   });
 
-  it('returns null when every anchor target still exists', () => {
-    expect(clearDanglingAnchors({ startAnchor: 'a', endAnchor: 'b' }, new Set(['a', 'b']))).toBeNull();
+  it('is held while at least one anchor target is present', () => {
+    expect(isArrowHeld({ startAnchor: 'a', endAnchor: 'b' }, new Set(['b']))).toBe(true);
   });
 
-  it('drops only the anchor whose target was deleted', () => {
-    expect(clearDanglingAnchors({ startAnchor: 'a', endAnchor: 'b' }, new Set(['a'])))
-      .toEqual({ startAnchor: 'a', endAnchor: undefined });
-  });
-
-  it('drops both anchors when both targets are gone', () => {
-    expect(clearDanglingAnchors({ startAnchor: 'a', endAnchor: 'b' }, new Set()))
-      .toEqual({ startAnchor: undefined, endAnchor: undefined });
+  it('is not held when every anchor target is absent from the view', () => {
+    // Anchors stay in the data (they re-glue if the target returns) but a
+    // filtered/collapsed/deleted target must not hold the arrow non-draggable.
+    expect(isArrowHeld({ startAnchor: 'a', endAnchor: 'b' }, new Set(['c']))).toBe(false);
   });
 });

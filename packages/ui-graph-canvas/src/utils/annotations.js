@@ -112,17 +112,16 @@ export function findSnapTarget(point, nodes, { excludeId, radius = SNAP_RADIUS }
   return best;
 }
 
-// Drop any anchor whose target id is absent from `existingIds` (the target was
-// deleted). Returns the new {startAnchor, endAnchor} pair, or null when nothing
-// changed. Without this a deleted target would strand the arrow as permanently
-// non-draggable with a handle still signalling a phantom attachment.
-export function clearDanglingAnchors(data, existingIds) {
+// Whether an arrow endpoint is *currently* held to a present target. An anchor
+// id is preserved even while its target is absent from the view (filtered,
+// collapsed, or not yet loaded) so it re-glues when the target returns — but
+// while absent the arrow is not held and stays freely draggable. `existingIds`
+// is the set of node ids currently rendered.
+export function isArrowHeld(data, existingIds) {
   const { startAnchor, endAnchor } = data || {};
-  if (!startAnchor && !endAnchor) return null;
-  const nextStart = startAnchor && !existingIds.has(startAnchor) ? undefined : startAnchor;
-  const nextEnd = endAnchor && !existingIds.has(endAnchor) ? undefined : endAnchor;
-  if (nextStart === startAnchor && nextEnd === endAnchor) return null;
-  return { startAnchor: nextStart, endAnchor: nextEnd };
+  return Boolean(
+    (startAnchor && existingIds.has(startAnchor)) || (endAnchor && existingIds.has(endAnchor))
+  );
 }
 
 // Recompute an arrow's geometry so its anchored endpoints sit on the current
