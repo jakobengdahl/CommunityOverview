@@ -9,10 +9,17 @@ const hoisted = vi.hoisted(() => ({ setNodes: vi.fn() }));
 
 vi.mock('reactflow', () => ({
   NodeResizer: () => <div data-testid="resizer" />,
-  useReactFlow: () => ({ setNodes: hoisted.setNodes }),
+  useReactFlow: () => ({
+    setNodes: hoisted.setNodes,
+    screenToFlowPosition: (p) => p,
+    getNodes: () => [],
+  }),
 }));
 
-const labels = { color: 'Colour', delete: 'Delete', notePlaceholder: 'Note', labelPlaceholder: 'Label' };
+const labels = {
+  color: 'Colour', delete: 'Delete', notePlaceholder: 'Note', labelPlaceholder: 'Label',
+  textSize: 'Text size', arrowStartHead: 'Start arrowhead', arrowEndHead: 'End arrowhead',
+};
 
 function renderWithContext(ui, notifyChange = vi.fn()) {
   return {
@@ -61,6 +68,17 @@ describe('NoteNode', () => {
     const updater = hoisted.setNodes.mock.calls[0][0];
     expect(updater([{ id: 'note-1' }, { id: 'other' }])).toEqual([{ id: 'other' }]);
   });
+
+  it('changes the note text size from the context menu', () => {
+    const { notifyChange } = renderWithContext(<NoteNode id="note-1" data={{ text: 'x' }} selected />);
+    fireEvent.contextMenu(screen.getByText('x'));
+    const sizeButtons = document.querySelectorAll('.size-button');
+    expect(sizeButtons.length).toBe(4);
+    fireEvent.click(sizeButtons[3]);
+    expect(notifyChange).toHaveBeenCalledTimes(1);
+    const updater = hoisted.setNodes.mock.calls[0][0];
+    expect(updater([{ id: 'note-1', data: { text: 'x' } }])[0].data.fontSize).toBe(24);
+  });
 });
 
 describe('LabelNode', () => {
@@ -87,6 +105,17 @@ describe('LabelNode', () => {
     expect(hoisted.setNodes).toHaveBeenCalledTimes(1);
     expect(notifyChange).toHaveBeenCalledTimes(1);
   });
+
+  it('changes the label text size from the context menu', () => {
+    const { notifyChange } = renderWithContext(<LabelNode id="label-1" data={{ text: 'x' }} selected />);
+    fireEvent.contextMenu(screen.getByText('x'));
+    const sizeButtons = document.querySelectorAll('.size-button');
+    expect(sizeButtons.length).toBe(4);
+    fireEvent.click(sizeButtons[2]);
+    expect(notifyChange).toHaveBeenCalledTimes(1);
+    const updater = hoisted.setNodes.mock.calls[0][0];
+    expect(updater([{ id: 'label-1', data: { text: 'x' } }])[0].data.fontSize).toBe(20);
+  });
 });
 
 describe('ArrowNode', () => {
@@ -95,6 +124,37 @@ describe('ArrowNode', () => {
   it('renders an arrow line', () => {
     const { container } = renderWithContext(<ArrowNode id="arrow-1" data={{ dx: 160, dy: 0 }} selected={false} />);
     expect(container.querySelectorAll('line').length).toBeGreaterThan(0);
+  });
+
+  it('draws a head at the end by default, none at the start', () => {
+    const { container } = renderWithContext(<ArrowNode id="arrow-1" data={{ dx: 160, dy: 0 }} selected={false} />);
+    const visible = container.querySelectorAll('line')[1];
+    expect(visible.getAttribute('marker-end')).toBe('url(#graph-arrow-head-arrow-1)');
+    expect(visible.getAttribute('marker-start')).toBeNull();
+  });
+
+  it('renders a plain line when both heads are off', () => {
+    const { container } = renderWithContext(
+      <ArrowNode id="arrow-1" data={{ dx: 160, dy: 0, startArrow: false, endArrow: false }} selected={false} />
+    );
+    const visible = container.querySelectorAll('line')[1];
+    expect(visible.getAttribute('marker-end')).toBeNull();
+    expect(visible.getAttribute('marker-start')).toBeNull();
+  });
+
+  it('shows two endpoint handles when selected', () => {
+    const { container } = renderWithContext(<ArrowNode id="arrow-1" data={{ dx: 160, dy: 0 }} selected />);
+    expect(container.querySelectorAll('circle.graph-arrow-handle').length).toBe(2);
+  });
+
+  it('toggles the start head from the context menu', () => {
+    const { notifyChange } = renderWithContext(<ArrowNode id="arrow-1" data={{ dx: 160, dy: 0, endArrow: true }} selected={false} />);
+    fireEvent.contextMenu(document.querySelector('.graph-arrow-node'));
+    const toggle = screen.getByText('Start arrowhead');
+    fireEvent.click(toggle);
+    expect(notifyChange).toHaveBeenCalledTimes(1);
+    const updater = hoisted.setNodes.mock.calls[0][0];
+    expect(updater([{ id: 'arrow-1', data: { startArrow: false } }])[0].data.startArrow).toBe(true);
   });
 
   it('deletes itself and notifies from the context menu', () => {

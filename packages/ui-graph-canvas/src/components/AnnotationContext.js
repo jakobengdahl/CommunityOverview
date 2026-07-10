@@ -14,5 +14,8 @@ export const AnnotationContext = createContext({
     delete: 'Delete',
     notePlaceholder: 'Note',
     labelPlaceholder: 'Label',
+    textSize: 'Text size',
+    arrowStartHead: 'Start arrowhead',
+    arrowEndHead: 'End arrowhead',
   },
 });

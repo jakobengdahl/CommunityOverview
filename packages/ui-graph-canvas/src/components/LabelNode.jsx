@@ -2,15 +2,17 @@ import { memo, useState, useRef, useEffect, useContext } from 'react';
 import { createPortal } from 'react-dom';
 import { useReactFlow } from 'reactflow';
 import { AnnotationContext } from './AnnotationContext';
+import { DEFAULT_LABEL_FONT_SIZE } from '../utils/annotations';
 import './LabelNode.css';
 
 /**
  * LabelNode - A free-floating text label annotation (no container/box).
  *
- * Double-click to edit, right-click for colour and delete. Stored in the
- * session's annotation list (kind: "label").
+ * Double-click to edit, right-click for colour, text size and delete. Stored in
+ * the session's annotation list (kind: "label").
  */
 const LABEL_COLORS = ['#e6edf3', '#FDE047', '#4ADE80', '#60A5FA', '#F472B6', '#FB923C'];
+const LABEL_FONT_SIZES = [14, 16, 20, 28];
 
 function LabelNode({ id, data, selected }) {
   const [isEditing, setIsEditing] = useState(false);
@@ -82,6 +84,13 @@ function LabelNode({ id, data, selected }) {
     notifyChange();
   };
 
+  const changeFontSize = (fontSize) => {
+    setNodes((nds) =>
+      nds.map((n) => (n.id === id ? { ...n, data: { ...n.data, fontSize } } : n))
+    );
+    notifyChange();
+  };
+
   const remove = () => {
     setNodes((nds) => nds.filter((n) => n.id !== id));
     setContextMenu(null);
@@ -89,12 +98,13 @@ function LabelNode({ id, data, selected }) {
   };
 
   const color = data.color || LABEL_COLORS[0];
+  const fontSize = data.fontSize || DEFAULT_LABEL_FONT_SIZE;
 
   return (
     <>
       <div
         className={`graph-label-node${selected ? ' selected' : ''}`}
-        style={{ color }}
+        style={{ color, fontSize }}
         onDoubleClick={(e) => {
           e.stopPropagation();
           setIsEditing(true);
@@ -110,6 +120,7 @@ function LabelNode({ id, data, selected }) {
             ref={inputRef}
             type="text"
             className="graph-label-input nodrag"
+            style={{ fontSize }}
             value={text}
             onChange={(e) => setText(e.target.value)}
             onBlur={commitText}
@@ -138,6 +149,19 @@ function LabelNode({ id, data, selected }) {
                 style={{ backgroundColor: c }}
                 onClick={() => changeColor(c)}
               />
+            ))}
+          </div>
+          <div className="context-menu-title">{labels.textSize}</div>
+          <div className="context-menu-sizes">
+            {LABEL_FONT_SIZES.map((s) => (
+              <button
+                key={s}
+                className={`size-button${fontSize === s ? ' active' : ''}`}
+                style={{ fontSize: Math.min(s, 18) }}
+                onClick={() => changeFontSize(s)}
+              >
+                A
+              </button>
             ))}
           </div>
           <button className="context-menu-delete" onClick={remove}>

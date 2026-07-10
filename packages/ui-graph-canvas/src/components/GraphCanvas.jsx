@@ -22,7 +22,7 @@ import { AnnotationContext } from './AnnotationContext';
 import SimpleFloatingEdge from './SimpleFloatingEdge';
 import { applyLayout, getGridLayout, getCircularLayout, getLayoutedElements } from '../utils/graphLayout';
 import { getNodeColor, LAZY_LOAD_THRESHOLD, INITIAL_LOAD_COUNT, DEFAULT_EDGE_STYLE } from '../utils/constants';
-import { OVERLAY_TYPES, ANNOTATION_TYPES, isManualNode, overlayToFlowNode, flowNodeToOverlay } from '../utils/annotations';
+import { OVERLAY_TYPES, ANNOTATION_TYPES, isManualNode, overlayToFlowNode, flowNodeToOverlay, nodeCenter, resolveAnchoredArrow } from '../utils/annotations';
 import './GraphCanvas.css';
 
 /**
@@ -144,6 +144,9 @@ function GraphCanvasInner({
     deleteAnnotation: 'Delete',
     notePlaceholder: 'Note',
     labelPlaceholder: 'Label',
+    annotationTextSize: 'Text size',
+    arrowStartHead: 'Start arrowhead',
+    arrowEndHead: 'End arrowhead',
     ...contextMenuLabels,
   };
 
@@ -190,8 +193,11 @@ function GraphCanvasInner({
       delete: cml.deleteAnnotation,
       notePlaceholder: cml.notePlaceholder,
       labelPlaceholder: cml.labelPlaceholder,
+      textSize: cml.annotationTextSize,
+      arrowStartHead: cml.arrowStartHead,
+      arrowEndHead: cml.arrowEndHead,
     },
-  }), [notifyAnnotationChange, cml.annotationColor, cml.deleteAnnotation, cml.notePlaceholder, cml.labelPlaceholder]);
+  }), [notifyAnnotationChange, cml.annotationColor, cml.deleteAnnotation, cml.notePlaceholder, cml.labelPlaceholder, cml.annotationTextSize, cml.arrowStartHead, cml.arrowEndHead]);
 
   const depthLevels = useMemo(() => {
     if (Array.isArray(federationDepthLevels) && federationDepthLevels.length > 0) {
@@ -377,7 +383,7 @@ function GraphCanvasInner({
     } else if (kind === 'label') {
       newNode = { id, type: 'label', position, data: { text: '', color: undefined } };
     } else {
-      newNode = { id, type: 'arrow', position, data: { dx: 160, dy: 0, color: undefined } };
+      newNode = { id, type: 'arrow', position, data: { dx: 160, dy: 0, color: undefined, startArrow: false, endArrow: true } };
     }
     setNodes((nds) => reorderNodesForParentChild([...nds, newNode]));
     setPaneContextMenu(null);
@@ -898,6 +904,36 @@ function GraphCanvasInner({
     ]));
     onAnnotationsRestored?.();
   }, [annotationsToRestore, setNodes, onAnnotationsRestored]);
+
+  // Keep arrow/line endpoints anchored to a node/annotation glued to that
+  // target's centre as it moves or resizes. resolveAnchoredArrow returns null
+  // when an arrow's geometry already matches, so this stays idempotent and does
+  // not loop even though it depends on `nodes`.
+  useEffect(() => {
+    const centers = new Map();
+    let hasAnchored = false;
+    for (const n of nodes) {
+      if (n.type === 'arrow') {
+        if (n.data?.startAnchor || n.data?.endAnchor) hasAnchored = true;
+        continue;
+      }
+      const c = nodeCenter(n);
+      if (c) centers.set(n.id, c);
+    }
+    if (!hasAnchored) return;
+    const updates = new Map();
+    for (const n of nodes) {
+      if (n.type !== 'arrow') continue;
+      const resolved = resolveAnchoredArrow(n, centers);
+      if (resolved) updates.set(n.id, resolved);
+    }
+    if (updates.size === 0) return;
+    setNodes((nds) => nds.map((n) => {
+      const u = updates.get(n.id);
+      return u ? { ...n, position: u.position, data: { ...n.data, dx: u.dx, dy: u.dy } } : n;
+    }));
+    onAnnotationChangeRef.current?.();
+  }, [nodes, setNodes]);
 
   // Apply node positions arriving from another client (design step 6). Positions
   // are stored and emitted in ReactFlow's own coordinate space (`n.position`) —
