@@ -103,7 +103,7 @@ describe('GraphCanvas annotation creation', () => {
     fireEvent.click(screen.getByRole('button', { name: /add arrow/i }));
     const arrow = findCreatedNode('arrow');
     expect(arrow).toBeTruthy();
-    expect(arrow.data).toEqual({ dx: 160, dy: 0, color: undefined });
+    expect(arrow.data).toEqual({ dx: 160, dy: 0, color: undefined, startArrow: false, endArrow: true });
     expect(arrow.position).toEqual({ x: 10, y: 20 });
   });
 

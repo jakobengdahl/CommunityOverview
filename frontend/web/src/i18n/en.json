@@ -205,7 +205,10 @@
     "add_arrow": "Add arrow",
     "annotation_color": "Colour",
     "note_placeholder": "Note",
-    "label_placeholder": "Label"
+    "label_placeholder": "Label",
+    "annotation_text_size": "Text size",
+    "arrow_start_head": "Start arrowhead",
+    "arrow_end_head": "End arrowhead"
   },
   "common": {
     "saving": "Saving...",

@@ -2,16 +2,18 @@ import { memo, useState, useRef, useEffect, useContext } from 'react';
 import { createPortal } from 'react-dom';
 import { NodeResizer, useReactFlow } from 'reactflow';
 import { AnnotationContext } from './AnnotationContext';
+import { DEFAULT_NOTE_FONT_SIZE } from '../utils/annotations';
 import './NoteNode.css';
 
 /**
  * NoteNode - A free-floating sticky note annotation.
  *
- * Double-click to edit the text, right-click for colour and delete. The note is
- * stored in the session's annotation list (kind: "note"); its content lives with
- * the session, never in the knowledge graph.
+ * Double-click to edit the text, right-click for colour, text size and delete.
+ * The note is stored in the session's annotation list (kind: "note"); its
+ * content lives with the session, never in the knowledge graph.
  */
 const NOTE_COLORS = ['#FEF08A', '#FDBA74', '#86EFAC', '#93C5FD', '#F9A8D4', '#E9D5FF'];
+const NOTE_FONT_SIZES = [12, 14, 18, 24];
 
 function NoteNode({ id, data, selected }) {
   const [isEditing, setIsEditing] = useState(false);
@@ -80,6 +82,13 @@ function NoteNode({ id, data, selected }) {
     notifyChange();
   };
 
+  const changeFontSize = (fontSize) => {
+    setNodes((nds) =>
+      nds.map((n) => (n.id === id ? { ...n, data: { ...n.data, fontSize } } : n))
+    );
+    notifyChange();
+  };
+
   const remove = () => {
     setNodes((nds) => nds.filter((n) => n.id !== id));
     setContextMenu(null);
@@ -87,6 +96,7 @@ function NoteNode({ id, data, selected }) {
   };
 
   const color = data.color || NOTE_COLORS[0];
+  const fontSize = data.fontSize || DEFAULT_NOTE_FONT_SIZE;
 
   return (
     <>
@@ -115,6 +125,7 @@ function NoteNode({ id, data, selected }) {
           <textarea
             ref={inputRef}
             className="graph-note-input nodrag"
+            style={{ fontSize }}
             value={text}
             onChange={(e) => setText(e.target.value)}
             onBlur={commitText}
@@ -122,7 +133,10 @@ function NoteNode({ id, data, selected }) {
             onClick={(e) => e.stopPropagation()}
           />
         ) : (
-          <div className={`graph-note-text${data.text ? '' : ' graph-note-placeholder'}`}>
+          <div
+            className={`graph-note-text${data.text ? '' : ' graph-note-placeholder'}`}
+            style={{ fontSize }}
+          >
             {data.text || labels.notePlaceholder}
           </div>
         )}
@@ -143,6 +157,19 @@ function NoteNode({ id, data, selected }) {
                 style={{ backgroundColor: c }}
                 onClick={() => changeColor(c)}
               />
+            ))}
+          </div>
+          <div className="context-menu-title">{labels.textSize}</div>
+          <div className="context-menu-sizes">
+            {NOTE_FONT_SIZES.map((s) => (
+              <button
+                key={s}
+                className={`size-button${fontSize === s ? ' active' : ''}`}
+                style={{ fontSize: Math.min(s, 18) }}
+                onClick={() => changeFontSize(s)}
+              >
+                A
+              </button>
             ))}
           </div>
           <button className="context-menu-delete" onClick={remove}>

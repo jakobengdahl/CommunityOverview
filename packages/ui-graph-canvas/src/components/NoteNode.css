@@ -78,6 +78,55 @@
   border-color: white;
 }
 
+.graph-annotation-context-menu .context-menu-toggle {
+  width: 100%;
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 12px;
+  background: transparent;
+  border: 1px solid #444;
+  color: #e6edf3;
+  padding: 6px 12px;
+  border-radius: 4px;
+  cursor: pointer;
+  font-size: 13px;
+  margin-bottom: 6px;
+  transition: all 0.2s;
+}
+
+.graph-annotation-context-menu .context-menu-toggle:hover {
+  border-color: #666;
+  background: #333;
+}
+
+.graph-annotation-context-menu .context-menu-sizes {
+  display: flex;
+  gap: 6px;
+  margin-bottom: 8px;
+}
+
+.graph-annotation-context-menu .size-button {
+  flex: 1;
+  background: transparent;
+  border: 1px solid #444;
+  color: #e6edf3;
+  border-radius: 4px;
+  cursor: pointer;
+  padding: 4px 0;
+  transition: all 0.2s;
+}
+
+.graph-annotation-context-menu .size-button:hover {
+  border-color: #666;
+  background: #333;
+}
+
+.graph-annotation-context-menu .size-button.active {
+  border-color: #60A5FA;
+  color: #60A5FA;
+}
+
 .graph-annotation-context-menu .context-menu-delete {
   width: 100%;
   background: transparent;

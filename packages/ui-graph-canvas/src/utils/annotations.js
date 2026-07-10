@@ -9,8 +9,23 @@
 export const OVERLAY_TYPES = new Set(['note', 'label', 'arrow']);
 export const ANNOTATION_TYPES = new Set(['group', 'note', 'label', 'arrow']);
 
+// Default text sizes (px) for note body and label text; overridable per node.
+export const DEFAULT_NOTE_FONT_SIZE = 14;
+export const DEFAULT_LABEL_FONT_SIZE = 16;
+
+// Flow distance (px, unscaled) within which an arrow endpoint snaps onto a
+// node/annotation centre. Kept generous so connecting is easy (design intent).
+export const SNAP_RADIUS = 40;
+
 export function isManualNode(node) {
   return node.type === 'group' || node.id.startsWith('group-') || OVERLAY_TYPES.has(node.type);
+}
+
+// An arrow with either endpoint bound to a node/annotation should not be
+// dragged as a whole — its anchored ends must stay on their targets. Only its
+// endpoint handles move it. Free arrows drag normally.
+export function isArrowAnchored(data) {
+  return Boolean(data?.startAnchor || data?.endAnchor);
 }
 
 // Build a ReactFlow node for a note/label/arrow overlay from the host's
@@ -20,15 +35,24 @@ export function overlayToFlowNode(overlay) {
   if (overlay.kind === 'note') {
     return {
       ...base,
-      data: { text: overlay.text || '', color: overlay.color },
+      data: { text: overlay.text || '', color: overlay.color, fontSize: overlay.fontSize },
       style: overlay.size ? { width: overlay.size.w, height: overlay.size.h } : { width: 200, height: 140 },
     };
   }
   if (overlay.kind === 'label') {
-    return { ...base, data: { text: overlay.text || '', color: overlay.color } };
+    return { ...base, data: { text: overlay.text || '', color: overlay.color, fontSize: overlay.fontSize } };
   }
-  // arrow
-  return { ...base, data: { dx: overlay.dx ?? 160, dy: overlay.dy ?? 0, color: overlay.color } };
+  // arrow / line: endpoints carry independent head symbols and optional anchors.
+  const data = {
+    dx: overlay.dx ?? 160,
+    dy: overlay.dy ?? 0,
+    color: overlay.color,
+    startArrow: overlay.startArrow ?? false,
+    endArrow: overlay.endArrow ?? true,
+  };
+  if (overlay.startAnchor) data.startAnchor = overlay.startAnchor;
+  if (overlay.endAnchor) data.endAnchor = overlay.endAnchor;
+  return { ...base, data, draggable: !isArrowAnchored(data) };
 }
 
 // Serialize a ReactFlow overlay node back to the host's canvas-shape annotation.
@@ -39,11 +63,81 @@ export function flowNodeToOverlay(node) {
       ...base,
       text: node.data?.text || '',
       color: node.data?.color,
+      fontSize: node.data?.fontSize,
       size: node.style ? { w: node.style.width, h: node.style.height } : undefined,
     };
   }
   if (node.type === 'label') {
-    return { ...base, text: node.data?.text || '', color: node.data?.color };
+    return { ...base, text: node.data?.text || '', color: node.data?.color, fontSize: node.data?.fontSize };
   }
-  return { ...base, dx: node.data?.dx ?? 160, dy: node.data?.dy ?? 0, color: node.data?.color };
+  const out = {
+    ...base,
+    dx: node.data?.dx ?? 160,
+    dy: node.data?.dy ?? 0,
+    color: node.data?.color,
+    startArrow: node.data?.startArrow ?? false,
+    endArrow: node.data?.endArrow ?? true,
+  };
+  if (node.data?.startAnchor) out.startAnchor = node.data.startAnchor;
+  if (node.data?.endAnchor) out.endAnchor = node.data.endAnchor;
+  return out;
+}
+
+// Centre point (flow coords) of a node, using its measured size when available.
+// Returns null when the node has no usable position.
+export function nodeCenter(node) {
+  const pos = node.positionAbsolute || node.position;
+  if (!pos) return null;
+  const w = node.width || node.style?.width || 0;
+  const h = node.height || node.style?.height || 0;
+  return { x: pos.x + w / 2, y: pos.y + h / 2 };
+}
+
+// Find the nearest snappable node/annotation centre to `point` within `radius`.
+// Arrows never snap to other arrows, nor to themselves. Returns the target's
+// id or null when nothing is close enough.
+export function findSnapTarget(point, nodes, { excludeId, radius = SNAP_RADIUS } = {}) {
+  let best = null;
+  let bestDist = radius;
+  for (const n of nodes) {
+    if (n.id === excludeId || n.type === 'arrow') continue;
+    const c = nodeCenter(n);
+    if (!c) continue;
+    const d = Math.hypot(c.x - point.x, c.y - point.y);
+    if (d <= bestDist) {
+      bestDist = d;
+      best = n.id;
+    }
+  }
+  return best;
+}
+
+// Whether an arrow endpoint is *currently* held to a present target. An anchor
+// id is preserved even while its target is absent from the view (filtered,
+// collapsed, or not yet loaded) so it re-glues when the target returns — but
+// while absent the arrow is not held and stays freely draggable. `existingIds`
+// is the set of node ids currently rendered.
+export function isArrowHeld(data, existingIds) {
+  const { startAnchor, endAnchor } = data || {};
+  return Boolean(
+    (startAnchor && existingIds.has(startAnchor)) || (endAnchor && existingIds.has(endAnchor))
+  );
+}
+
+// Recompute an arrow's geometry so its anchored endpoints sit on the current
+// centres of their target nodes. `centers` maps nodeId -> {x, y}. Returns a new
+// {position, dx, dy} when it differs from the arrow's current geometry, else
+// null (nothing to update). Endpoints without a live anchor keep their place.
+export function resolveAnchoredArrow(arrow, centers) {
+  const { startAnchor, endAnchor } = arrow.data || {};
+  if (!startAnchor && !endAnchor) return null;
+  const pos = arrow.position;
+  const dx = arrow.data?.dx ?? 160;
+  const dy = arrow.data?.dy ?? 0;
+  const start = (startAnchor && centers.get(startAnchor)) || { x: pos.x, y: pos.y };
+  const end = (endAnchor && centers.get(endAnchor)) || { x: pos.x + dx, y: pos.y + dy };
+  const newDx = end.x - start.x;
+  const newDy = end.y - start.y;
+  if (start.x === pos.x && start.y === pos.y && newDx === dx && newDy === dy) return null;
+  return { position: { x: start.x, y: start.y }, dx: newDx, dy: newDy };
 }

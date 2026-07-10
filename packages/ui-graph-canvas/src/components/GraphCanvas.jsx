@@ -22,7 +22,7 @@ import { AnnotationContext } from './AnnotationContext';
 import SimpleFloatingEdge from './SimpleFloatingEdge';
 import { applyLayout, getGridLayout, getCircularLayout, getLayoutedElements } from '../utils/graphLayout';
 import { getNodeColor, LAZY_LOAD_THRESHOLD, INITIAL_LOAD_COUNT, DEFAULT_EDGE_STYLE } from '../utils/constants';
-import { OVERLAY_TYPES, ANNOTATION_TYPES, isManualNode, overlayToFlowNode, flowNodeToOverlay } from '../utils/annotations';
+import { OVERLAY_TYPES, ANNOTATION_TYPES, isManualNode, isArrowHeld, overlayToFlowNode, flowNodeToOverlay, nodeCenter, resolveAnchoredArrow } from '../utils/annotations';
 import './GraphCanvas.css';
 
 /**
@@ -144,6 +144,9 @@ function GraphCanvasInner({
     deleteAnnotation: 'Delete',
     notePlaceholder: 'Note',
     labelPlaceholder: 'Label',
+    annotationTextSize: 'Text size',
+    arrowStartHead: 'Start arrowhead',
+    arrowEndHead: 'End arrowhead',
     ...contextMenuLabels,
   };
 
@@ -190,8 +193,11 @@ function GraphCanvasInner({
       delete: cml.deleteAnnotation,
       notePlaceholder: cml.notePlaceholder,
       labelPlaceholder: cml.labelPlaceholder,
+      textSize: cml.annotationTextSize,
+      arrowStartHead: cml.arrowStartHead,
+      arrowEndHead: cml.arrowEndHead,
     },
-  }), [notifyAnnotationChange, cml.annotationColor, cml.deleteAnnotation, cml.notePlaceholder, cml.labelPlaceholder]);
+  }), [notifyAnnotationChange, cml.annotationColor, cml.deleteAnnotation, cml.notePlaceholder, cml.labelPlaceholder, cml.annotationTextSize, cml.arrowStartHead, cml.arrowEndHead]);
 
   const depthLevels = useMemo(() => {
     if (Array.isArray(federationDepthLevels) && federationDepthLevels.length > 0) {
@@ -377,7 +383,7 @@ function GraphCanvasInner({
     } else if (kind === 'label') {
       newNode = { id, type: 'label', position, data: { text: '', color: undefined } };
     } else {
-      newNode = { id, type: 'arrow', position, data: { dx: 160, dy: 0, color: undefined } };
+      newNode = { id, type: 'arrow', position, data: { dx: 160, dy: 0, color: undefined, startArrow: false, endArrow: true } };
     }
     setNodes((nds) => reorderNodesForParentChild([...nds, newNode]));
     setPaneContextMenu(null);
@@ -898,6 +904,57 @@ function GraphCanvasInner({
     ]));
     onAnnotationsRestored?.();
   }, [annotationsToRestore, setNodes, onAnnotationsRestored]);
+
+  // Keep arrow/line endpoints anchored to a node/annotation glued to that
+  // target's centre as it moves or resizes. The stored anchor id is never
+  // cleared here — a target that leaves the view (filtered, collapsed, not yet
+  // loaded, or deleted) is indistinguishable from this vantage, so the anchor is
+  // preserved and re-glues if the target returns. While the target is absent the
+  // arrow is not held and becomes draggable again (so a deleted target can't
+  // strand it). resolveAnchoredArrow returns null when geometry already matches,
+  // keeping this idempotent and loop-free despite depending on `nodes`.
+  useEffect(() => {
+    const centers = new Map();
+    const existing = new Set();
+    let hasAnchored = false;
+    for (const n of nodes) {
+      if (n.type === 'arrow') {
+        if (n.data?.startAnchor || n.data?.endAnchor) hasAnchored = true;
+        continue;
+      }
+      existing.add(n.id);
+      const c = nodeCenter(n);
+      if (c) centers.set(n.id, c);
+    }
+    if (!hasAnchored) return;
+    const updates = new Map();
+    let geometryChanged = false;
+    for (const n of nodes) {
+      if (n.type !== 'arrow') continue;
+      if (!n.data?.startAnchor && !n.data?.endAnchor) continue;
+      const resolved = resolveAnchoredArrow(n, centers);
+      const desiredDraggable = !isArrowHeld(n.data, existing);
+      if (resolved || n.draggable !== desiredDraggable) {
+        updates.set(n.id, { resolved, desiredDraggable });
+        if (resolved) geometryChanged = true;
+      }
+    }
+    if (updates.size === 0) return;
+    setNodes((nds) => nds.map((n) => {
+      const u = updates.get(n.id);
+      if (!u) return n;
+      let next = n;
+      if (u.resolved) {
+        next = { ...next, position: u.resolved.position, data: { ...next.data, dx: u.resolved.dx, dy: u.resolved.dy } };
+      }
+      if (next.draggable !== u.desiredDraggable) {
+        next = { ...next, draggable: u.desiredDraggable };
+      }
+      return next;
+    }));
+    // Only geometry is persisted; a draggable-only flip needs no save.
+    if (geometryChanged) onAnnotationChangeRef.current?.();
+  }, [nodes, setNodes]);
 
   // Apply node positions arriving from another client (design step 6). Positions
   // are stored and emitted in ReactFlow's own coordinate space (`n.position`) —
