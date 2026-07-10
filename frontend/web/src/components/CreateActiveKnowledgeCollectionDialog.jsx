@@ -25,6 +25,7 @@ export default function CreateActiveKnowledgeCollectionDialog({ onClose, onSave,
   const [name, setName] = useState('');
   const [shortName, setShortName] = useState('');
   const [description, setDescription] = useState('');
+  const [aliases, setAliases] = useState('');
 
   // Collection configuration
   const [introductionText, setIntroductionText] = useState('');
@@ -48,6 +49,7 @@ export default function CreateActiveKnowledgeCollectionDialog({ onClose, onSave,
       const node = initialData.node;
       setName(node.name || '');
       setDescription(node.description || '');
+      setAliases((node.aliases || []).join(', '));
 
       const meta = node.metadata || {};
       setShortName(meta.short_name || '');
@@ -143,6 +145,7 @@ export default function CreateActiveKnowledgeCollectionDialog({ onClose, onSave,
       description: description.trim(),
       summary: `Knowledge collection: ${name.trim()}`,
       tags: [],
+      aliases: aliases.split(',').map(a => a.trim()).filter(Boolean),
       metadata: {
         short_name: shortName.trim(),
         introduction_text: introductionText.trim(),
@@ -226,6 +229,17 @@ export default function CreateActiveKnowledgeCollectionDialog({ onClose, onSave,
                 onChange={e => setDescription(e.target.value)}
                 placeholder="Describe the purpose of this knowledge collection"
                 rows={2}
+              />
+            </div>
+
+            <div className="form-group">
+              <label htmlFor="akc-aliases">Aliases / synonyms (comma-separated)</label>
+              <input
+                id="akc-aliases"
+                type="text"
+                value={aliases}
+                onChange={e => setAliases(e.target.value)}
+                placeholder="alternative name, abbreviation, synonym"
               />
             </div>
           </div>

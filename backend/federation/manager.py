@@ -192,7 +192,8 @@ class FederationManager:
 
         Uses the same tier structure as GraphStorage._score_node_match: large
         primary scores for name matches (300 000–500 000) prevent secondary
-        signals from bleeding across name-match tiers.
+        signals from bleeding across name-match tiers. Aliases score in a
+        dedicated band (200 000–250 000) just below real-name matches.
         """
         score = 0
         name_lower = (node.name or "").lower()
@@ -204,6 +205,16 @@ class FederationManager:
             score += 400_000
         elif query_lower in name_lower:
             score += 300_000
+
+        # Alias tier — synonyms rank as second-class names, above secondary signals
+        if node.aliases:
+            aliases_lower = [a.lower() for a in node.aliases]
+            if query_lower in aliases_lower:
+                score += 250_000
+            elif any(a.startswith(query_lower) for a in aliases_lower):
+                score += 220_000
+            elif any(query_lower in a for a in aliases_lower):
+                score += 200_000
 
         # Secondary — type matching (type name only; federation cache has no localized labels)
         type_name_lower = str(node.type).lower()
@@ -269,7 +280,8 @@ class FederationManager:
                 if not match_all:
                     tags_text = " ".join(node.tags) if node.tags else ""
                     subtypes_text = " ".join(node.subtypes) if node.subtypes else ""
-                    searchable_text = f"{node.name} {node.description} {node.summary} {tags_text} {subtypes_text}".lower()
+                    aliases_text = " ".join(node.aliases) if node.aliases else ""
+                    searchable_text = f"{node.name} {node.description} {node.summary} {tags_text} {subtypes_text} {aliases_text}".lower()
                     if query_lower not in searchable_text:
                         continue
 

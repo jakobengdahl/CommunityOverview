@@ -217,6 +217,7 @@ def register_mcp_tools(mcp, service: GraphService, session_registry=None, sessio
           - summary: optional, max 300 characters (short text for visualization)
           - tags: optional list of strings
           - subtypes: optional list of strings for sub-classification within the node type
+          - aliases: optional list of alternative names/synonyms; also matched in search
 
         Edge type is optional. If omitted, it defaults to "RELATES_TO".
 
@@ -249,7 +250,7 @@ def register_mcp_tools(mcp, service: GraphService, session_registry=None, sessio
 
         Args:
             node_id: ID of the node to update
-            updates: Dict with fields to update (name, description, summary, tags, metadata)
+            updates: Dict with fields to update (name, description, summary, tags, aliases, metadata)
             event_session_id: Optional session ID for webhook loop prevention
             event_correlation_id: Optional correlation ID for chaining events
 

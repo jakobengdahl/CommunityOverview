@@ -5,6 +5,7 @@ import threading
 import pytest
 from http.server import BaseHTTPRequestHandler, HTTPServer
 
+from backend.core.models import Node, NodeType
 from backend.federation.config import FederationFileConfig
 from backend.federation.manager import FederationManager
 
@@ -103,6 +104,26 @@ async def test_sync_degrades_when_unreachable_url():
 
     status = manager.get_status()
     assert status["graphs"][0]["status"] == "degraded"
+
+
+def test_score_node_match_alias_beats_description():
+    """A federated node matched only via an alias must outrank a description-only match."""
+    alias_node = Node(id="a", type=NodeType.ACTOR, name="Unrelated",
+                      description="unrelated", aliases=["esam"])
+    desc_node = Node(id="d", type=NodeType.ACTOR, name="Another",
+                     description="part of the esam network")
+    alias_score = FederationManager._score_node_match(alias_node, "esam")
+    desc_score = FederationManager._score_node_match(desc_node, "esam")
+    assert alias_score > desc_score
+
+
+def test_score_node_match_real_name_beats_alias():
+    """A real-name match must outrank an alias-only match in federated search too."""
+    name_node = Node(id="n", type=NodeType.ACTOR, name="Nordic esam", description="x")
+    alias_node = Node(id="a", type=NodeType.ACTOR, name="Unrelated",
+                      description="x", aliases=["esam"])
+    assert (FederationManager._score_node_match(name_node, "esam")
+            > FederationManager._score_node_match(alias_node, "esam"))
 
 
 def test_scheduler_starts_for_scheduled_graph():

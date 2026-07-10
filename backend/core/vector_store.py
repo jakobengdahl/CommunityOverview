@@ -120,10 +120,11 @@ class VectorStore:
 
     def _get_text_representation(self, node: Node) -> str:
         """Create a text representation of the node for embedding"""
-        # Combine name, description, summary, and tags
-        # Tags are important for similarity search
+        # Combine name, aliases, description, summary, and tags
+        # Tags and aliases are important for similarity search
         tags_text = " ".join(node.tags) if hasattr(node, 'tags') and node.tags else ""
-        text = f"{node.name}. {node.description or ''}. {node.summary or ''}. {tags_text}"
+        aliases_text = " ".join(node.aliases) if hasattr(node, 'aliases') and node.aliases else ""
+        text = f"{node.name}. {aliases_text}. {node.description or ''}. {node.summary or ''}. {tags_text}"
         return text.strip()
 
     def generate_embedding(self, node: Node) -> List[float]:

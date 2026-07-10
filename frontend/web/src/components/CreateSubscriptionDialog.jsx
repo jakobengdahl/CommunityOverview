@@ -20,6 +20,7 @@ export default function CreateSubscriptionDialog({ onClose, onSave, initialData 
   // Basic info
   const [name, setName] = useState('');
   const [description, setDescription] = useState('');
+  const [aliases, setAliases] = useState('');
 
   // Filter settings
   const [selectedNodeTypes, setSelectedNodeTypes] = useState([]);
@@ -39,6 +40,7 @@ export default function CreateSubscriptionDialog({ onClose, onSave, initialData 
     if (!initialData) return;
     setName(initialData.name || '');
     setDescription(initialData.description || '');
+    setAliases((initialData.aliases || []).join(', '));
     const filters = initialData.metadata?.filters || {};
     const delivery = initialData.metadata?.delivery || {};
     if (filters.target?.node_types) setSelectedNodeTypes(filters.target.node_types);
@@ -81,6 +83,7 @@ export default function CreateSubscriptionDialog({ onClose, onSave, initialData 
     }
 
     // Build the subscription node
+    const aliasList = aliases.split(',').map(a => a.trim()).filter(Boolean);
     const activeOps = Object.entries(operations).filter(([_, v]) => v).map(([k]) => k).join(', ');
     const metadata = {
       ...(initialData?.metadata || {}),
@@ -104,6 +107,7 @@ export default function CreateSubscriptionDialog({ onClose, onSave, initialData 
           name: name.trim(),
           description: description.trim() || t('subscription_dialog.webhook_description', { name }),
           summary: t('subscription_dialog.webhook_summary', { events: activeOps }),
+          aliases: aliasList,
           metadata,
         },
       });
@@ -114,6 +118,7 @@ export default function CreateSubscriptionDialog({ onClose, onSave, initialData 
         type: 'EventSubscription',
         description: description.trim() || t('subscription_dialog.webhook_description', { name }),
         summary: t('subscription_dialog.webhook_summary', { events: activeOps }),
+        aliases: aliasList,
         metadata,
         communities: [],
       });
@@ -153,6 +158,17 @@ export default function CreateSubscriptionDialog({ onClose, onSave, initialData 
                 onChange={e => setDescription(e.target.value)}
                 placeholder={t('subscription_dialog.description_placeholder')}
                 rows={2}
+              />
+            </div>
+
+            <div className="form-group">
+              <label htmlFor="sub-aliases">{t('subscription_dialog.aliases_label')}</label>
+              <input
+                id="sub-aliases"
+                type="text"
+                value={aliases}
+                onChange={e => setAliases(e.target.value)}
+                placeholder={t('subscription_dialog.aliases_placeholder')}
               />
             </div>
           </div>

@@ -286,6 +286,29 @@ class TestGraphStorageSearch:
 
         assert len(results1) == len(results2)
 
+    def test_search_matches_alias(self, temp_storage):
+        """A node is found when the query matches only one of its aliases."""
+        node = Node(id="ec", type=NodeType.ACTOR, name="European Commission",
+                    aliases=["EC", "EU Commission"])
+        temp_storage.add_nodes([node], [])
+        results = temp_storage.search_nodes("EU Commission")
+        assert any(n.id == "ec" for n in results)
+
+    def test_search_alias_case_insensitive(self, temp_storage):
+        """Alias matching ignores case."""
+        node = Node(id="ec", type=NodeType.ACTOR, name="European Commission",
+                    aliases=["EC"])
+        temp_storage.add_nodes([node], [])
+        assert any(n.id == "ec" for n in temp_storage.search_nodes("ec"))
+
+    def test_update_node_sets_aliases(self, temp_storage):
+        """update_node persists aliases and they become searchable."""
+        node = Node(id="ec", type=NodeType.ACTOR, name="European Commission")
+        temp_storage.add_nodes([node], [])
+        temp_storage.update_node("ec", {"aliases": ["EC"]})
+        assert temp_storage.nodes["ec"].aliases == ["EC"]
+        assert any(n.id == "ec" for n in temp_storage.search_nodes("EC"))
+
 
 class TestSearchRanking:
     """Tests for search result ranking/prioritization."""
@@ -389,6 +412,46 @@ class TestSearchRanking:
         temp_storage.add_nodes(nodes, [])
         results = temp_storage.search_nodes("esam")
         assert results[0].id == "exact"
+
+    def test_alias_match_ranks_above_description_only(self, temp_storage):
+        """An exact alias match must rank above a description-only hit."""
+        nodes = [
+            Node(id="alias", type=NodeType.ACTOR, name="Unrelated name",
+                 description="unrelated", aliases=["esam"]),
+            Node(id="desc", type=NodeType.THEME, name="Another unrelated name",
+                 description="part of the esam network"),
+        ]
+        temp_storage.add_nodes(nodes, [])
+        results = temp_storage.search_nodes("esam")
+        ids = [n.id for n in results]
+        assert ids.index("alias") < ids.index("desc")
+
+    def test_real_name_ranks_above_alias(self, temp_storage):
+        """A node whose real name matches must rank above a node matching only via alias."""
+        nodes = [
+            Node(id="name", type=NodeType.THEME, name="Nordic esam initiative",
+                 description="unrelated"),
+            Node(id="alias", type=NodeType.ACTOR, name="Unrelated name",
+                 description="unrelated", aliases=["esam"]),
+        ]
+        temp_storage.add_nodes(nodes, [])
+        results = temp_storage.search_nodes("esam")
+        ids = [n.id for n in results]
+        assert ids.index("name") < ids.index("alias")
+
+    def test_alias_match_beats_multi_secondary_match(self, temp_storage):
+        """An exact alias match must rank above a node with many secondary hits but no
+        name/alias match."""
+        nodes = [
+            Node(id="alias", type=NodeType.ACTOR, name="Unrelated name",
+                 description="unrelated", aliases=["esam"]),
+            Node(id="multi", type=NodeType.THEME, name="Nordic collaboration",
+                 description="part of the esam network", tags=["esam"],
+                 subtypes=["esam working group"]),
+        ]
+        temp_storage.add_nodes(nodes, [])
+        results = temp_storage.search_nodes("esam")
+        assert results[0].id == "alias"
 
     def test_subtype_match_ranks_above_description_only(self, temp_storage):
         """A subtype hit (400 pts) should rank above a description-only hit (200 pts)."""
