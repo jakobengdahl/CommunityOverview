@@ -115,6 +115,11 @@ function ArrowNode({ id, data, selected }) {
     );
   }, [getNodes, id, setNodes]);
 
+  // Teardown for an in-flight endpoint drag; kept in a ref so it can also run on
+  // unmount (arrow deleted/deselected mid-drag) without leaking window listeners.
+  const dragTeardownRef = useRef(null);
+  useEffect(() => () => dragTeardownRef.current?.(), []);
+
   const startEndpointDrag = (endpoint) => (e) => {
     e.stopPropagation();
     e.preventDefault();
@@ -123,14 +128,21 @@ function ArrowNode({ id, data, selected }) {
       const flowPoint = screenToFlowPosition({ x: ev.clientX, y: ev.clientY });
       moveEndpoint(endpoint, flowPoint);
     };
-    const handleUp = () => {
+    const teardown = () => {
       draggingRef.current = null;
+      dragTeardownRef.current = null;
       window.removeEventListener('pointermove', handleMove, true);
       window.removeEventListener('pointerup', handleUp, true);
+      window.removeEventListener('pointercancel', handleUp, true);
+    };
+    const handleUp = () => {
+      teardown();
       notifyChange();
     };
+    dragTeardownRef.current = teardown;
     window.addEventListener('pointermove', handleMove, true);
     window.addEventListener('pointerup', handleUp, true);
+    window.addEventListener('pointercancel', handleUp, true);
   };
 
   const dx = Number(data.dx ?? 160);

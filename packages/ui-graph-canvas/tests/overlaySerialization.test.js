@@ -7,6 +7,7 @@ import {
   nodeCenter,
   findSnapTarget,
   resolveAnchoredArrow,
+  clearDanglingAnchors,
 } from '../src/utils/annotations';
 
 // GraphCanvas maps between the host's canvas-shape overlay descriptors and
@@ -139,5 +140,25 @@ describe('resolveAnchoredArrow', () => {
   it('leaves an endpoint put when its anchor target is gone', () => {
     const arrow = { position: { x: 0, y: 0 }, data: { dx: 100, dy: 0, endAnchor: 'gone' } };
     expect(resolveAnchoredArrow(arrow, new Map())).toBeNull();
+  });
+});
+
+describe('clearDanglingAnchors', () => {
+  it('returns null when the arrow has no anchors', () => {
+    expect(clearDanglingAnchors({ dx: 1, dy: 1 }, new Set())).toBeNull();
+  });
+
+  it('returns null when every anchor target still exists', () => {
+    expect(clearDanglingAnchors({ startAnchor: 'a', endAnchor: 'b' }, new Set(['a', 'b']))).toBeNull();
+  });
+
+  it('drops only the anchor whose target was deleted', () => {
+    expect(clearDanglingAnchors({ startAnchor: 'a', endAnchor: 'b' }, new Set(['a'])))
+      .toEqual({ startAnchor: 'a', endAnchor: undefined });
+  });
+
+  it('drops both anchors when both targets are gone', () => {
+    expect(clearDanglingAnchors({ startAnchor: 'a', endAnchor: 'b' }, new Set()))
+      .toEqual({ startAnchor: undefined, endAnchor: undefined });
   });
 });

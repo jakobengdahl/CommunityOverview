@@ -22,7 +22,7 @@ import { AnnotationContext } from './AnnotationContext';
 import SimpleFloatingEdge from './SimpleFloatingEdge';
 import { applyLayout, getGridLayout, getCircularLayout, getLayoutedElements } from '../utils/graphLayout';
 import { getNodeColor, LAZY_LOAD_THRESHOLD, INITIAL_LOAD_COUNT, DEFAULT_EDGE_STYLE } from '../utils/constants';
-import { OVERLAY_TYPES, ANNOTATION_TYPES, isManualNode, overlayToFlowNode, flowNodeToOverlay, nodeCenter, resolveAnchoredArrow } from '../utils/annotations';
+import { OVERLAY_TYPES, ANNOTATION_TYPES, isManualNode, isArrowAnchored, overlayToFlowNode, flowNodeToOverlay, nodeCenter, resolveAnchoredArrow, clearDanglingAnchors } from '../utils/annotations';
 import './GraphCanvas.css';
 
 /**
@@ -906,17 +906,20 @@ function GraphCanvasInner({
   }, [annotationsToRestore, setNodes, onAnnotationsRestored]);
 
   // Keep arrow/line endpoints anchored to a node/annotation glued to that
-  // target's centre as it moves or resizes. resolveAnchoredArrow returns null
-  // when an arrow's geometry already matches, so this stays idempotent and does
-  // not loop even though it depends on `nodes`.
+  // target's centre as it moves or resizes, and drop anchors whose target was
+  // deleted. resolveAnchoredArrow returns null when an arrow's geometry already
+  // matches and clearDanglingAnchors returns null when anchors are unchanged, so
+  // this stays idempotent and does not loop even though it depends on `nodes`.
   useEffect(() => {
     const centers = new Map();
+    const existing = new Set();
     let hasAnchored = false;
     for (const n of nodes) {
       if (n.type === 'arrow') {
         if (n.data?.startAnchor || n.data?.endAnchor) hasAnchored = true;
         continue;
       }
+      existing.add(n.id);
       const c = nodeCenter(n);
       if (c) centers.set(n.id, c);
     }
@@ -924,13 +927,20 @@ function GraphCanvasInner({
     const updates = new Map();
     for (const n of nodes) {
       if (n.type !== 'arrow') continue;
-      const resolved = resolveAnchoredArrow(n, centers);
-      if (resolved) updates.set(n.id, resolved);
+      const cleared = clearDanglingAnchors(n.data, existing);
+      const effective = cleared ? { ...n, data: { ...n.data, ...cleared } } : n;
+      const resolved = resolveAnchoredArrow(effective, centers);
+      if (cleared || resolved) updates.set(n.id, { cleared, resolved });
     }
     if (updates.size === 0) return;
     setNodes((nds) => nds.map((n) => {
       const u = updates.get(n.id);
-      return u ? { ...n, position: u.position, data: { ...n.data, dx: u.dx, dy: u.dy } } : n;
+      if (!u) return n;
+      let data = n.data;
+      if (u.cleared) data = { ...data, ...u.cleared };
+      if (u.resolved) data = { ...data, dx: u.resolved.dx, dy: u.resolved.dy };
+      const position = u.resolved ? u.resolved.position : n.position;
+      return { ...n, position, data, draggable: !isArrowAnchored(data) };
     }));
     onAnnotationChangeRef.current?.();
   }, [nodes, setNodes]);

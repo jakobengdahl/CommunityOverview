@@ -112,6 +112,19 @@ export function findSnapTarget(point, nodes, { excludeId, radius = SNAP_RADIUS }
   return best;
 }
 
+// Drop any anchor whose target id is absent from `existingIds` (the target was
+// deleted). Returns the new {startAnchor, endAnchor} pair, or null when nothing
+// changed. Without this a deleted target would strand the arrow as permanently
+// non-draggable with a handle still signalling a phantom attachment.
+export function clearDanglingAnchors(data, existingIds) {
+  const { startAnchor, endAnchor } = data || {};
+  if (!startAnchor && !endAnchor) return null;
+  const nextStart = startAnchor && !existingIds.has(startAnchor) ? undefined : startAnchor;
+  const nextEnd = endAnchor && !existingIds.has(endAnchor) ? undefined : endAnchor;
+  if (nextStart === startAnchor && nextEnd === endAnchor) return null;
+  return { startAnchor: nextStart, endAnchor: nextEnd };
+}
+
 // Recompute an arrow's geometry so its anchored endpoints sit on the current
 // centres of their target nodes. `centers` maps nodeId -> {x, y}. Returns a new
 // {position, dx, dy} when it differs from the arrow's current geometry, else
