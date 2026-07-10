@@ -15,10 +15,31 @@ import 'reactflow/dist/style.css';
 
 import CustomNode from './CustomNode';
 import GroupNode from './GroupNode';
+import NoteNode from './NoteNode';
+import LabelNode from './LabelNode';
+import ArrowNode from './ArrowNode';
+import { AnnotationContext } from './AnnotationContext';
 import SimpleFloatingEdge from './SimpleFloatingEdge';
 import { applyLayout, getGridLayout, getCircularLayout, getLayoutedElements } from '../utils/graphLayout';
 import { getNodeColor, LAZY_LOAD_THRESHOLD, INITIAL_LOAD_COUNT, DEFAULT_EDGE_STYLE } from '../utils/constants';
+import { OVERLAY_TYPES, ANNOTATION_TYPES, isManualNode, overlayToFlowNode, flowNodeToOverlay } from '../utils/annotations';
 import './GraphCanvas.css';
+
+/**
+ * Build a URL from a template string, substituting {field} or [field] tokens
+ * with URI-encoded values from the node's data object. Returns null if the
+ * template is not a valid http/https URL after substitution.
+ */
+function buildContextMenuUrl(urlTemplate, nodeData) {
+  if (typeof urlTemplate !== 'string') return null;
+  const trimmed = urlTemplate.trim();
+  if (!/^https?:\/\//i.test(trimmed)) return null;
+  return trimmed.replace(/\{(\w+)\}|\[(\w+)\]/g, (_match, curlyKey, bracketKey) => {
+    const key = curlyKey || bracketKey;
+    const value = nodeData[key] ?? '';
+    return encodeURIComponent(String(value));
+  });
+}
 
 /**
  * Ensure parent (group) nodes appear before their children in the array.
@@ -53,6 +74,7 @@ function GraphCanvasInner({
   highlightedNodeIds = [],
   hiddenNodeIds = [],
   hiddenEdgeIds = [],
+  nodeMarks = {},
   clearGroupsFlag = false,
   onExpand,
   onEdit,
@@ -63,6 +85,7 @@ function GraphCanvasInner({
   onHideEdge,
   onDeleteEdge,
   onEditEdge,
+  onSetEdgeType,
   onConnect: onConnectCallback,
   onCreateGroup,
   onSaveView,
@@ -78,8 +101,17 @@ function GraphCanvasInner({
   onFocusComplete,
   createGroupSignal = 0,
   saveViewSignal = 0,
+  closeMenusSignal = 0,
   groupsToRestore = null,
   onGroupsRestored,
+  annotationsToRestore = null,
+  onAnnotationsRestored,
+  onAnnotationChange,
+  remotePositions = null,
+  onRemotePositionsApplied,
+  remoteAnnotationOps = null,
+  onRemoteAnnotationsApplied,
+  remoteSelections = null,
   federationDepth = 1,
   onFederationDepthChange,
   maxFederationDepth = 4,
@@ -87,7 +119,43 @@ function GraphCanvasInner({
   federationDepthLabel = "Depth",
   federationDepthTooltip = "Depth levels are defined by installation configuration",
   showMinimap = false,
+  schema = null,
+  onContextMenuAction = null,
+  nodeColorResolver = null,
+  onViewportChange = null,
+  contextMenuLabels = {},
 }) {
+  const cml = {
+    edit: 'Edit',
+    hide: 'Hide',
+    expand: 'Find related nodes',
+    delete: 'Delete',
+    nodesSelected: '{count} nodes selected',
+    showOnly: 'Show only these',
+    selectSameType: 'Select all nodes of the same type',
+    hideAll: 'Hide all',
+    deleteAll: 'Delete all',
+    changeType: 'Change type',
+    generalConnection: 'General connection',
+    addNote: 'Add note',
+    addLabel: 'Add label',
+    addArrow: 'Add arrow',
+    annotationColor: 'Colour',
+    deleteAnnotation: 'Delete',
+    notePlaceholder: 'Note',
+    labelPlaceholder: 'Label',
+    ...contextMenuLabels,
+  };
+
+  // Relationship types defined in the schema, used for the edge type picker.
+  const relationshipTypes = useMemo(() => {
+    const rt = schema?.relationship_types;
+    if (!rt || typeof rt !== 'object') return [];
+    return Object.entries(rt).map(([name, cfg]) => ({
+      type: name,
+      description: (cfg && typeof cfg === 'object' && cfg.description) || '',
+    }));
+  }, [schema]);
   const [loadedNodeCount, setLoadedNodeCount] = useState(INITIAL_LOAD_COUNT);
   const [nodeContextMenu, setNodeContextMenu] = useState(null);
   const [multiNodeContextMenu, setMultiNodeContextMenu] = useState(null);
@@ -95,10 +163,35 @@ function GraphCanvasInner({
   const [notification, setNotification] = useState(null);
   const [selectedNodes, setSelectedNodes] = useState([]);
   const [selectedEdges, setSelectedEdges] = useState([]);
+  const [paneContextMenu, setPaneContextMenu] = useState(null);
+  const paneMenuRef = useRef(null);
   const reactFlowWrapper = useRef(null);
   const rightDragStart = useRef({ x: 0, y: 0, time: null });
   const mouseDownPos = useRef(null);
-  const { screenToFlowPosition, setCenter, getNodes: getFlowNodes } = useReactFlow();
+  // Remote positions for a node that hasn't mounted yet (nodes_added is still
+  // awaiting its async node-details fetch when the paired node_moved arrives)
+  // are held here until the node appears, instead of being dropped.
+  const pendingRemotePositionsRef = useRef({});
+  const { screenToFlowPosition, setCenter, getNodes: getFlowNodes, getViewport } = useReactFlow();
+
+  // Stable notifier for annotation nodes (note/label/arrow) to signal the host
+  // that an annotation was edited, recoloured or deleted so the session can be
+  // persisted. Wrapped in a ref so the callback identity stays stable across
+  // renders even as the parent's handler changes.
+  const onAnnotationChangeRef = useRef(onAnnotationChange);
+  onAnnotationChangeRef.current = onAnnotationChange;
+  const notifyAnnotationChange = useCallback(() => {
+    onAnnotationChangeRef.current?.();
+  }, []);
+  const annotationContextValue = useMemo(() => ({
+    notifyChange: notifyAnnotationChange,
+    labels: {
+      color: cml.annotationColor,
+      delete: cml.deleteAnnotation,
+      notePlaceholder: cml.notePlaceholder,
+      labelPlaceholder: cml.labelPlaceholder,
+    },
+  }), [notifyAnnotationChange, cml.annotationColor, cml.deleteAnnotation, cml.notePlaceholder, cml.labelPlaceholder]);
 
   const depthLevels = useMemo(() => {
     if (Array.isArray(federationDepthLevels) && federationDepthLevels.length > 0) {
@@ -170,20 +263,27 @@ function GraphCanvasInner({
   const reactFlowNodes = useMemo(() => {
     const hasSavedPositions = nodesToRender.some(n => n._savedPosition);
 
-    const nodesWithoutPosition = nodesToRender.map(node => ({
-      id: node.id,
-      type: 'custom',
-      data: {
-        ...node,
-        label: node.name,
-        summary: node.summary || node.description?.slice(0, 100),
-        nodeType: node.type,
-        color: getNodeColor(node.type),
-        onExpand: onExpand ? () => onExpand(node.id, node) : null,
-        onEdit: onEdit ? () => onEdit(node.id, node) : null,
-      },
-      position: node._savedPosition || { x: 0, y: 0 },
-    }));
+    const nodesWithoutPosition = nodesToRender.map(node => {
+      const mark = nodeMarks[node.id];
+      return {
+        id: node.id,
+        type: 'custom',
+        data: {
+          ...node,
+          label: node.name,
+          summary: node.summary || node.description?.slice(0, 100),
+          nodeType: node.type,
+          color: (nodeColorResolver || getNodeColor)(node.type),
+          isHighlighted: highlightedNodeIds.includes(node.id),
+          markColor: mark?.color ?? null,
+          markLabel: mark?.label ?? null,
+          remoteSelection: remoteSelections?.[node.id] ?? null,
+          onExpand: onExpand ? () => onExpand(node.id, node) : null,
+          onEdit: onEdit ? () => onEdit(node.id, node) : null,
+        },
+        position: node._savedPosition || { x: 0, y: 0 },
+      };
+    });
 
     if (nodesWithoutPosition.length === 0) {
       return nodesWithoutPosition;
@@ -194,7 +294,7 @@ function GraphCanvasInner({
     }
 
     return applyLayout(nodesWithoutPosition, reactFlowEdges, layoutType);
-  }, [nodesToRender, reactFlowEdges, layoutType, onExpand, onEdit]);
+  }, [nodesToRender, reactFlowEdges, layoutType, onExpand, onEdit, highlightedNodeIds, nodeMarks, remoteSelections]);
 
   const [nodes, setNodes, onNodesChange] = useNodesState(reactFlowNodes);
   const [edges, setEdges, onEdgesChange] = useEdgesState(reactFlowEdges);
@@ -204,7 +304,7 @@ function GraphCanvasInner({
     setNodes((nds) => {
       const manualNodes = clearGroupsFlag
         ? []
-        : nds.filter(n => n.type === 'group' || n.id.startsWith('group-'));
+        : nds.filter(isManualNode);
       const newNodes = reactFlowNodes.map(n => {
         const existing = nds.find(curr => curr.id === n.id);
         if (existing && existing.position.x !== 0) {
@@ -240,10 +340,15 @@ function GraphCanvasInner({
 
   const onConnect = useCallback(
     (params) => {
-      setEdges((eds) => addEdge(params, eds));
-      // Notify parent to persist the connection to backend
+      // Persistence-first: when a parent handler is provided it persists the
+      // connection and the stored edge flows back in through the store, so what
+      // is drawn is always what is saved. Adding a local edge here as well would
+      // leave a phantom edge on screen if persistence fails. Only fall back to a
+      // local-only edge for consumers that don't wire up persistence.
       if (onConnectCallback) {
         onConnectCallback(params);
+      } else {
+        setEdges((eds) => addEdge(params, eds));
       }
     },
     [setEdges, onConnectCallback]
@@ -254,7 +359,50 @@ function GraphCanvasInner({
     setNodeContextMenu(null);
     setMultiNodeContextMenu(null);
     setEdgeContextMenu(null);
+    setPaneContextMenu(null);
   }, []);
+
+  // Create a free-floating annotation (note, label or arrow) at the given flow
+  // position. Notes/labels/arrows are persisted in the session annotation list
+  // via the save-view round-trip; onAnnotationChange schedules that save.
+  const createAnnotation = useCallback((kind, position) => {
+    const id = `${kind}-${Date.now()}`;
+    let newNode;
+    if (kind === 'note') {
+      newNode = {
+        id, type: 'note', position,
+        data: { text: '', color: undefined },
+        style: { width: 200, height: 140 },
+      };
+    } else if (kind === 'label') {
+      newNode = { id, type: 'label', position, data: { text: '', color: undefined } };
+    } else {
+      newNode = { id, type: 'arrow', position, data: { dx: 160, dy: 0, color: undefined } };
+    }
+    setNodes((nds) => reorderNodesForParentChild([...nds, newNode]));
+    setPaneContextMenu(null);
+    onAnnotationChangeRef.current?.();
+  }, [setNodes]);
+
+  // Dismiss the pane annotation menu on any outside interaction (e.g. clicking a
+  // graph node, which handlePaneClick does not cover), matching the annotation
+  // node menus. Escape is handled by the global keydown handler.
+  useEffect(() => {
+    if (!paneContextMenu) return;
+    const handleDismiss = (e) => {
+      if (paneMenuRef.current && paneMenuRef.current.contains(e.target)) return;
+      setPaneContextMenu(null);
+    };
+    const timer = setTimeout(() => {
+      document.addEventListener('mousedown', handleDismiss, true);
+      document.addEventListener('contextmenu', handleDismiss, true);
+    }, 0);
+    return () => {
+      clearTimeout(timer);
+      document.removeEventListener('mousedown', handleDismiss, true);
+      document.removeEventListener('contextmenu', handleDismiss, true);
+    };
+  }, [paneContextMenu]);
 
   const clearSelection = useCallback(() => {
     // Use onNodesChange/onEdgesChange with select events to properly clear ReactFlow's internal selection state
@@ -267,6 +415,21 @@ function GraphCanvasInner({
     if (nodeDeselects.length > 0) onNodesChange(nodeDeselects);
     if (edgeDeselects.length > 0) onEdgesChange(edgeDeselects);
   }, [nodes, edges, onNodesChange, onEdgesChange]);
+
+  // Select every node in the current visualization whose type matches any of the
+  // given types, regardless of whether it is currently within the viewport.
+  const selectNodesByType = useCallback((types) => {
+    const typeSet = new Set((types || []).filter(Boolean));
+    if (typeSet.size === 0) return;
+    const changes = nodes
+      .filter(n => n.type !== 'group')
+      .map(n => {
+        const nodeType = n.data?.nodeType || n.data?.type;
+        return { id: n.id, type: 'select', selected: typeSet.has(nodeType) };
+      });
+    if (changes.length > 0) onNodesChange(changes);
+    closeAllMenus();
+  }, [nodes, onNodesChange, closeAllMenus]);
 
   const handlePaneClick = useCallback(() => {
     closeAllMenus();
@@ -282,19 +445,12 @@ function GraphCanvasInner({
     const currentNodes = getFlowNodes();
     const groupNodes = currentNodes.filter(n => n.type === 'group');
 
-    // Determine which non-group nodes were part of this drag
+    // Determine which draggable graph nodes were part of this drag. Annotation
+    // nodes (groups, notes, labels, arrows) never become children of a group.
     const nodesToProcess = (allDraggedNodes && allDraggedNodes.length > 0)
-      ? allDraggedNodes.filter(n => n.type !== 'group')
-      : (draggedNode.type !== 'group' ? [draggedNode] : []);
+      ? allDraggedNodes.filter(n => !ANNOTATION_TYPES.has(n.type))
+      : (!ANNOTATION_TYPES.has(draggedNode.type) ? [draggedNode] : []);
     const draggedIds = new Set(nodesToProcess.map(n => n.id));
-
-    console.log('[GraphCanvas] onNodeDragStop:', {
-      primaryNode: draggedNode.id,
-      primaryType: draggedNode.type,
-      allDraggedCount: allDraggedNodes?.length ?? 0,
-      nonGroupDraggedIds: [...draggedIds],
-      groupCount: groupNodes.length,
-    });
 
     // Nothing to process: either no non-group nodes dragged or no groups exist
     if (draggedIds.size === 0 || groupNodes.length === 0) return;
@@ -333,12 +489,6 @@ function GraphCanvasInner({
 
         if (targetGroup && n.parentId !== targetGroup.id) {
           // Enter group
-          console.log('[GraphCanvas] Node entering group:', {
-            nodeId: n.id,
-            groupId: targetGroup.id,
-            absPos,
-            relPos: { x: absPos.x - targetGroup.position.x, y: absPos.y - targetGroup.position.y },
-          });
           return {
             ...n,
             parentId: targetGroup.id,
@@ -353,10 +503,6 @@ function GraphCanvasInner({
         if (!targetGroup && n.parentId) {
           // Exit group
           const oldParent = groupNodes.find(gn => gn.id === n.parentId);
-          console.log('[GraphCanvas] Node exiting group:', {
-            nodeId: n.id,
-            oldGroupId: n.parentId,
-          });
           return {
             ...n,
             parentId: undefined,
@@ -376,13 +522,27 @@ function GraphCanvasInner({
     });
   }, [setNodes, onNodePositionChange, getFlowNodes]);
 
-  // Right-click on empty background: prevent default and clear selection
+  // Right-click on empty background. A plain right-click opens the annotation
+  // creation menu (add note/label/arrow); a right-drag is a pan (panOnDrag
+  // includes button 2), so in that case keep the legacy clear-only behaviour.
   const onPaneContextMenu = useCallback((event) => {
     event.preventDefault();
     event.stopPropagation();
-    closeAllMenus();
-    clearSelection();
-  }, [closeAllMenus, clearSelection]);
+    const start = rightDragStart.current;
+    const movedFar = start.time != null &&
+      (Math.abs(event.clientX - start.x) > 5 || Math.abs(event.clientY - start.y) > 5);
+    rightDragStart.current = { x: 0, y: 0, time: null };
+    if (movedFar) {
+      closeAllMenus();
+      clearSelection();
+      return;
+    }
+    setNodeContextMenu(null);
+    setMultiNodeContextMenu(null);
+    setEdgeContextMenu(null);
+    const flowPosition = screenToFlowPosition({ x: event.clientX, y: event.clientY });
+    setPaneContextMenu({ x: event.clientX, y: event.clientY, flowPosition });
+  }, [closeAllMenus, clearSelection, screenToFlowPosition]);
 
   // Right-click on the selection box (multi-node selection)
   const onSelectionContextMenu = useCallback((event) => {
@@ -440,6 +600,7 @@ function GraphCanvasInner({
           style: g.style,
           color: g.data.color,
         })),
+        annotations: nodes.filter(n => OVERLAY_TYPES.has(n.type)).map(flowNodeToOverlay),
       };
       onSaveView(viewData);
     }
@@ -453,6 +614,9 @@ function GraphCanvasInner({
   const onNodeContextMenu = useCallback((event, node) => {
     event.preventDefault();
     event.stopPropagation();
+
+    // Annotation overlays render their own context menu (colour/delete).
+    if (OVERLAY_TYPES.has(node.type)) return;
 
     const isNodeSelected = selectedNodes.some(n => n.id === node.id);
     const hasMultipleSelected = selectedNodes.length > 1;
@@ -479,6 +643,8 @@ function GraphCanvasInner({
   // Double-click on node handler
   const handleNodeDoubleClick = useCallback((event, node) => {
     event.preventDefault();
+    // Annotation overlays handle their own double-click (inline text editing).
+    if (OVERLAY_TYPES.has(node.type)) return;
     if (onNodeDoubleClickCallback) {
       onNodeDoubleClickCallback(node.id, node.data);
     }
@@ -518,6 +684,20 @@ function GraphCanvasInner({
       if (e.button === 0) {
         mouseDownPos.current = { x: e.clientX, y: e.clientY };
       }
+      // When shift/ctrl/meta-clicking nodes to multi-select, the browser would
+      // otherwise extend a text selection into surrounding UI (session id,
+      // search terms, labels), highlighting them blue. Suppress text selection
+      // for the duration of the interaction and clear any stray selection.
+      if (e.shiftKey || e.ctrlKey || e.metaKey) {
+        document.body.classList.add('graph-suppress-selection');
+        const selection = window.getSelection?.();
+        if (selection && selection.rangeCount > 0) {
+          selection.removeAllRanges();
+        }
+      }
+    };
+    const handleMouseUp = () => {
+      document.body.classList.remove('graph-suppress-selection');
     };
     const handleClick = (e) => {
       if (e.button !== 0) return;
@@ -547,9 +727,14 @@ function GraphCanvasInner({
     };
     wrapper.addEventListener('mousedown', handleMouseDown);
     wrapper.addEventListener('click', handleClick);
+    // Listen for mouseup on the document so the suppression is lifted even when
+    // the pointer is released outside the canvas wrapper.
+    document.addEventListener('mouseup', handleMouseUp);
     return () => {
       wrapper.removeEventListener('mousedown', handleMouseDown);
       wrapper.removeEventListener('click', handleClick);
+      document.removeEventListener('mouseup', handleMouseUp);
+      document.body.classList.remove('graph-suppress-selection');
     };
   }, [clearSelection, closeAllMenus]);
 
@@ -614,11 +799,24 @@ function GraphCanvasInner({
 
         if (selectedNodes.length > 0) {
           e.preventDefault();
-          const nodeIds = selectedNodes.map(n => n.id);
-          if (onHideMultiple) {
-            onHideMultiple(nodeIds);
-          } else if (onHide) {
-            nodeIds.forEach(id => onHide(id));
+          // Delete removes overlay annotations (note/label/arrow) from the
+          // canvas; graph nodes are hidden, not deleted. Groups are left to
+          // their own context menu so their children stay correctly parented.
+          const overlayIds = selectedNodes
+            .filter(n => OVERLAY_TYPES.has(n.type)).map(n => n.id);
+          const graphNodeIds = selectedNodes
+            .filter(n => !ANNOTATION_TYPES.has(n.type)).map(n => n.id);
+          if (overlayIds.length > 0) {
+            const removeSet = new Set(overlayIds);
+            setNodes(nds => nds.filter(n => !removeSet.has(n.id)));
+            onAnnotationChangeRef.current?.();
+          }
+          if (graphNodeIds.length > 0) {
+            if (onHideMultiple) {
+              onHideMultiple(graphNodeIds);
+            } else if (onHide) {
+              graphNodeIds.forEach(id => onHide(id));
+            }
           }
         }
       }
@@ -640,6 +838,13 @@ function GraphCanvasInner({
       handleSaveView();
     }
   }, [saveViewSignal, handleSaveView]);
+
+  // Close open context menus when signal changes (triggered by search box / chat input focus)
+  useEffect(() => {
+    if (closeMenusSignal > 0) {
+      closeAllMenus();
+    }
+  }, [closeMenusSignal, closeAllMenus]);
 
   // Restore groups from a saved view
   useEffect(() => {
@@ -676,7 +881,121 @@ function GraphCanvasInner({
     }
   }, [groupsToRestore, setNodes, onGroupsRestored]);
 
+  // Restore free-floating annotations (note/label/arrow) from a loaded session.
+  useEffect(() => {
+    if (!annotationsToRestore || annotationsToRestore.length === 0) return;
+    const overlayNodes = annotationsToRestore
+      .filter(a => OVERLAY_TYPES.has(a?.kind))
+      .map(overlayToFlowNode);
+    if (overlayNodes.length === 0) {
+      onAnnotationsRestored?.();
+      return;
+    }
+    const restoreIds = new Set(overlayNodes.map(n => n.id));
+    setNodes((nds) => reorderNodesForParentChild([
+      ...nds.filter(n => !restoreIds.has(n.id)),
+      ...overlayNodes,
+    ]));
+    onAnnotationsRestored?.();
+  }, [annotationsToRestore, setNodes, onAnnotationsRestored]);
+
+  // Apply node positions arriving from another client (design step 6). Positions
+  // are stored and emitted in ReactFlow's own coordinate space (`n.position`) —
+  // absolute for a free node, relative to the parent for a grouped node — and the
+  // load path restores them the same way, so apply them directly. (Subtracting a
+  // parent offset here would double-count it for grouped nodes and corrupt them.)
+  // A position for a node that isn't mounted yet (the paired nodes_added is
+  // still awaiting its async node-details fetch) is kept in
+  // pendingRemotePositionsRef rather than dropped — the effect below applies it
+  // once the node appears.
+  useEffect(() => {
+    if (!remotePositions) return;
+    const ids = Object.keys(remotePositions);
+    ids.forEach(id => { pendingRemotePositionsRef.current[id] = remotePositions[id]; });
+    if (ids.length > 0) {
+      setNodes((nds) => nds.map(n => {
+        const pos = pendingRemotePositionsRef.current[n.id];
+        if (!pos) return n;
+        delete pendingRemotePositionsRef.current[n.id];
+        return { ...n, position: { x: pos.x, y: pos.y } };
+      }));
+    }
+    onRemotePositionsApplied?.();
+  }, [remotePositions, setNodes, onRemotePositionsApplied]);
+
+  // Catch up a newly-mounted node on a remote position that arrived before it
+  // existed (see pendingRemotePositionsRef above). Runs whenever the node list
+  // changes, e.g. once nodes_added's async node-details fetch resolves. Must
+  // return the *same* array reference when nothing matched — this effect
+  // depends on `nodes`, so a new reference on every run would loop forever.
+  useEffect(() => {
+    if (Object.keys(pendingRemotePositionsRef.current).length === 0) return;
+    setNodes((nds) => {
+      let changed = false;
+      const next = nds.map(n => {
+        const pos = pendingRemotePositionsRef.current[n.id];
+        if (!pos) return n;
+        changed = true;
+        delete pendingRemotePositionsRef.current[n.id];
+        return { ...n, position: { x: pos.x, y: pos.y } };
+      });
+      return changed ? next : nds;
+    });
+  }, [nodes, setNodes]);
+
+  // Apply a queue of group/overlay annotation changes from other clients (design
+  // step 6): upsert or delete annotation nodes and reassign group membership.
+  // A queue (not a single op) so a burst arriving in one render is not coalesced.
+  useEffect(() => {
+    if (!remoteAnnotationOps || remoteAnnotationOps.length === 0) return;
+    for (const op of remoteAnnotationOps) {
+      if (op.action === 'upsert-overlay' && op.overlay) {
+        const flowNode = overlayToFlowNode(op.overlay);
+        setNodes((nds) => reorderNodesForParentChild([
+          ...nds.filter(n => n.id !== flowNode.id),
+          flowNode,
+        ]));
+      } else if (op.action === 'upsert-group' && op.group) {
+        const g = op.group;
+        const groupNode = {
+          id: g.id, type: 'group', position: g.position || { x: 0, y: 0 },
+          data: { label: g.label || 'Group', description: '', color: g.color || '#646cff' },
+          style: g.style || { width: 300, height: 200 },
+        };
+        const members = new Set(op.members || []);
+        setNodes((nds) => reorderNodesForParentChild(
+          [...nds.filter(n => n.id !== g.id), groupNode].map(n => {
+            if (n.type === 'group') return n;
+            if (members.has(n.id)) return { ...n, parentId: g.id };
+            if (n.parentId === g.id) return { ...n, parentId: undefined };
+            return n;
+          })
+        ));
+      } else if (op.action === 'delete' && op.id) {
+        setNodes((nds) => nds
+          .map(n => (n.parentId === op.id ? { ...n, parentId: undefined } : n))
+          .filter(n => n.id !== op.id));
+      } else if (op.action === 'membership' && op.groupId) {
+        const members = new Set(op.members || []);
+        setNodes((nds) => reorderNodesForParentChild(nds.map(n => {
+          if (n.type === 'group') return n;
+          if (members.has(n.id)) return { ...n, parentId: op.groupId };
+          if (n.parentId === op.groupId) return { ...n, parentId: undefined };
+          return n;
+        })));
+      }
+    }
+    onRemoteAnnotationsApplied?.();
+  }, [remoteAnnotationOps, setNodes, onRemoteAnnotationsApplied]);
+
   // Focus on a specific node when focusNodeId changes
+  // Report initial viewport after fitView animation settles
+  useEffect(() => {
+    if (!onViewportChange) return;
+    const timer = setTimeout(() => onViewportChange(getViewport()), 900);
+    return () => clearTimeout(timer);
+  }, []); // eslint-disable-line react-hooks/exhaustive-deps
+
   useEffect(() => {
     if (!focusNodeId) return;
     const targetNode = nodes.find(n => n.id === focusNodeId);
@@ -696,7 +1015,21 @@ function GraphCanvasInner({
   const nodeTypes = useMemo(() => ({
     custom: CustomNode,
     group: GroupNode,
+    note: NoteNode,
+    label: LabelNode,
+    arrow: ArrowNode,
   }), []);
+
+  const marksLegend = useMemo(() => {
+    const seen = new Map();
+    for (const mark of Object.values(nodeMarks)) {
+      const key = `${mark.color}::${mark.label || ''}`;
+      if (!seen.has(key)) {
+        seen.set(key, { color: mark.color, label: mark.label || '' });
+      }
+    }
+    return Array.from(seen.values());
+  }, [nodeMarks]);
 
   const edgeTypes = useMemo(() => ({
     floating: SimpleFloatingEdge,
@@ -708,6 +1041,7 @@ function GraphCanvasInner({
   }, []);
 
   return (
+    <AnnotationContext.Provider value={annotationContextValue}>
     <div className="graph-canvas-container">
       {inputNodes.length > 0 && visibleNodes.length > LAZY_LOAD_THRESHOLD && loadedNodeCount < visibleNodes.length && (
         <div className="graph-canvas-controls">
@@ -760,6 +1094,7 @@ function GraphCanvasInner({
           multiSelectionKeyCode={['Shift', 'Meta', 'Control']}
           edgesUpdatable={false}
           onMoveStart={closeAllMenus}
+          onMove={onViewportChange ? (_event, vp) => onViewportChange(vp) : undefined}
           proOptions={{ hideAttribution: true }}
         >
           <Background color="#333" gap={16} />
@@ -774,6 +1109,17 @@ function GraphCanvasInner({
             />
           )}
         </ReactFlow>
+
+        {marksLegend.length > 0 && (
+          <div className="graph-marks-legend">
+            {marksLegend.map((entry, i) => (
+              <div key={i} className="graph-marks-legend-entry">
+                <span className="graph-marks-legend-dot" style={{ backgroundColor: entry.color }} />
+                {entry.label && <span className="graph-marks-legend-label">{entry.label}</span>}
+              </div>
+            ))}
+          </div>
+        )}
 
         {depthLevels.length > 1 && (
           <div className="federation-depth-control" aria-label="Federated search depth selector">
@@ -809,7 +1155,7 @@ function GraphCanvasInner({
               onEdit(nodeContextMenu.node.id, nodeContextMenu.node.data);
               setNodeContextMenu(null);
             }}>
-              ✏️ Redigera
+              ✏️ {cml.edit}
             </button>
           )}
           {onHide && (
@@ -817,7 +1163,7 @@ function GraphCanvasInner({
               onHide(nodeContextMenu.node.id);
               setNodeContextMenu(null);
             }}>
-              👁️ Dölj
+              👁️ {cml.hide}
             </button>
           )}
           {onExpand && (
@@ -825,9 +1171,56 @@ function GraphCanvasInner({
               onExpand(nodeContextMenu.node.id, nodeContextMenu.node.data);
               setNodeContextMenu(null);
             }}>
-              🔍 Expandera
+              🔍 {cml.expand}
             </button>
           )}
+          <button onClick={() => {
+            const nodeType = nodeContextMenu.node.data?.nodeType || nodeContextMenu.node.data?.type;
+            selectNodesByType([nodeType]);
+          }}>
+            🎯 {cml.selectSameType}
+          </button>
+          {(() => {
+            const nodeType = nodeContextMenu.node.data?.nodeType || nodeContextMenu.node.data?.type;
+            const customItems = schema?.node_types?.[nodeType]?.context_menu;
+            if (!Array.isArray(customItems) || customItems.length === 0) return null;
+            const nodeData = nodeContextMenu.node.data || {};
+            const items = customItems.map((item, idx) => {
+              if (!item?.label || !item?.action) return null;
+              if (item.action.type === 'open_url') {
+                const url = buildContextMenuUrl(item.action.url, nodeData);
+                if (!url) return null;
+                return (
+                  <button key={idx} onClick={() => {
+                    window.open(url, '_blank', 'noopener,noreferrer');
+                    setNodeContextMenu(null);
+                  }}>
+                    {item.icon ? `${item.icon} ` : '🔗 '}{item.label}
+                  </button>
+                );
+              }
+              if (item.action.type === 'callback') {
+                const actionName = item.action.name;
+                if (!actionName || !onContextMenuAction) return null;
+                return (
+                  <button key={idx} onClick={() => {
+                    onContextMenuAction(actionName, nodeContextMenu.node.id, nodeData);
+                    setNodeContextMenu(null);
+                  }}>
+                    {item.icon ? `${item.icon} ` : '⚡ '}{item.label}
+                  </button>
+                );
+              }
+              return null;
+            }).filter(Boolean);
+            if (items.length === 0) return null;
+            return (
+              <>
+                {items}
+                <div className="context-menu-separator"></div>
+              </>
+            );
+          })()}
           {onDelete && (
             <>
               <div className="context-menu-separator"></div>
@@ -835,7 +1228,7 @@ function GraphCanvasInner({
                 onDelete(nodeContextMenu.node.id);
                 setNodeContextMenu(null);
               }}>
-                🗑️ Ta bort
+                🗑️ {cml.delete}
               </button>
             </>
           )}
@@ -848,7 +1241,7 @@ function GraphCanvasInner({
           style={{ left: multiNodeContextMenu.x, top: multiNodeContextMenu.y }}
         >
           <div className="context-menu-header">
-            {multiNodeContextMenu.nodes.length} noder markerade
+            {cml.nodesSelected.replace('{count}', multiNodeContextMenu.nodes.length)}
           </div>
           {onShowOnly && (
             <button onClick={() => {
@@ -856,9 +1249,17 @@ function GraphCanvasInner({
               onShowOnly(nodeIds);
               setMultiNodeContextMenu(null);
             }}>
-              🔍 Visa enbart dessa
+              🔍 {cml.showOnly}
             </button>
           )}
+          <button onClick={() => {
+            const types = multiNodeContextMenu.nodes.map(
+              n => n.data?.nodeType || n.data?.type
+            );
+            selectNodesByType(types);
+          }}>
+            🎯 {cml.selectSameType}
+          </button>
           {(onHideMultiple || onHide) && (
             <button onClick={() => {
               const nodeIds = multiNodeContextMenu.nodes.map(n => n.id);
@@ -869,7 +1270,7 @@ function GraphCanvasInner({
               }
               setMultiNodeContextMenu(null);
             }}>
-              👁️ Dölj alla
+              👁️ {cml.hideAll}
             </button>
           )}
           {(onDeleteMultiple || onDelete) && (
@@ -884,7 +1285,7 @@ function GraphCanvasInner({
                 }
                 setMultiNodeContextMenu(null);
               }}>
-                🗑️ Ta bort alla
+                🗑️ {cml.deleteAll}
               </button>
             </>
           )}
@@ -899,12 +1300,46 @@ function GraphCanvasInner({
           <div className="context-menu-header">
             {edgeContextMenu.edge.label || edgeContextMenu.edge.data?.type || 'Connection'}
           </div>
+          {onSetEdgeType && relationshipTypes.length > 0 && (() => {
+            const currentType = edgeContextMenu.edge.label || edgeContextMenu.edge.data?.type || '';
+            const isGeneral = !currentType || currentType === 'RELATES_TO';
+            const setType = (type) => {
+              onSetEdgeType(edgeContextMenu.edge.id, type);
+              setEdgeContextMenu(null);
+            };
+            return (
+              <>
+                <div className="context-menu-subheader">{cml.changeType}</div>
+                <div className="edge-type-list">
+                  <button
+                    className={isGeneral ? 'edge-type-active' : ''}
+                    onClick={() => setType('RELATES_TO')}
+                  >
+                    {isGeneral ? '✓ ' : ''}{cml.generalConnection}
+                  </button>
+                  {relationshipTypes
+                    .filter(rt => rt.type !== 'RELATES_TO')
+                    .map(rt => (
+                      <button
+                        key={rt.type}
+                        title={rt.description || undefined}
+                        className={currentType === rt.type ? 'edge-type-active' : ''}
+                        onClick={() => setType(rt.type)}
+                      >
+                        {currentType === rt.type ? '✓ ' : ''}{rt.type}
+                      </button>
+                    ))}
+                </div>
+                <div className="context-menu-separator"></div>
+              </>
+            );
+          })()}
           {onEditEdge && (
             <button onClick={() => {
               onEditEdge(edgeContextMenu.edge.id, edgeContextMenu.edge);
               setEdgeContextMenu(null);
             }}>
-              ✏️ Redigera
+              ✏️ {cml.edit}
             </button>
           )}
           {onHideEdge && (
@@ -912,7 +1347,7 @@ function GraphCanvasInner({
               onHideEdge(edgeContextMenu.edge.id);
               setEdgeContextMenu(null);
             }}>
-              👁️ Dölj
+              👁️ {cml.hide}
             </button>
           )}
           {onDeleteEdge && (
@@ -922,10 +1357,28 @@ function GraphCanvasInner({
                 onDeleteEdge(edgeContextMenu.edge.id);
                 setEdgeContextMenu(null);
               }}>
-                🗑️ Ta bort
+                🗑️ {cml.delete}
               </button>
             </>
           )}
+        </div>
+      )}
+
+      {paneContextMenu && (
+        <div
+          ref={paneMenuRef}
+          className="graph-context-menu pane-context-menu"
+          style={{ left: paneContextMenu.x, top: paneContextMenu.y }}
+        >
+          <button onClick={() => createAnnotation('note', paneContextMenu.flowPosition)}>
+            📝 {cml.addNote}
+          </button>
+          <button onClick={() => createAnnotation('label', paneContextMenu.flowPosition)}>
+            🏷️ {cml.addLabel}
+          </button>
+          <button onClick={() => createAnnotation('arrow', paneContextMenu.flowPosition)}>
+            ➡️ {cml.addArrow}
+          </button>
         </div>
       )}
 
@@ -937,6 +1390,7 @@ function GraphCanvasInner({
         </div>
       )}
     </div>
+    </AnnotationContext.Provider>
   );
 }
 

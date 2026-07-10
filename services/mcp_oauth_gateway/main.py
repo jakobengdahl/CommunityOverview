@@ -44,10 +44,14 @@ logger = logging.getLogger(__name__)
 app = FastAPI(title="MCP OAuth Gateway", version="1.0.0")
 
 # CORS – required for browser-based MCP clients (MCPJam, ChatGPT plugin preview, etc.)
+# Credentials cannot be allowed when wildcard origins are used per the CORS spec;
+# a wildcard+credentials combination is a security risk on token endpoints.
+_cors_origins = config.CORS_ALLOWED_ORIGINS
+_allow_credentials = "*" not in _cors_origins
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
-    allow_credentials=True,
+    allow_origins=_cors_origins,
+    allow_credentials=_allow_credentials,
     allow_methods=["*"],
     allow_headers=["*"],
     expose_headers=["*"],

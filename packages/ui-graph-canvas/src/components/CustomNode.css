@@ -18,8 +18,68 @@
   box-shadow: 0 0 12px rgba(100, 108, 255, 0.4);
 }
 
+.graph-node-mark-badge {
+  position: absolute;
+  top: -6px;
+  right: -6px;
+  width: 14px;
+  height: 14px;
+  border-radius: 50%;
+  border: 2px solid #1a1a1a;
+  z-index: 5;
+}
+
+/* Remote collaborator's selection marker (design 3.5): a name badge above the
+   node in that user's presence colour, paired with the outline set inline. */
+.graph-node-remote-badge {
+  position: absolute;
+  top: -11px;
+  left: -2px;
+  max-width: 150px;
+  padding: 1px 6px;
+  font-size: 0.62rem;
+  font-weight: 700;
+  line-height: 1.4;
+  color: #fff;
+  border-radius: 6px;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  box-shadow: 0 1px 3px rgba(0, 0, 0, 0.4);
+  z-index: 6;
+  pointer-events: none;
+}
+
+.graph-node-tooltip .tooltip-mark-label {
+  font-size: 0.8rem;
+  font-weight: 600;
+  color: #fff;
+  margin-bottom: 0.5rem;
+  padding: 0.25rem 0.5rem;
+  border-left: 3px solid;
+  background: rgba(255, 255, 255, 0.08);
+  border-radius: 0 4px 4px 0;
+}
+
 .graph-custom-node.selected {
   box-shadow: 0 0 0 3px rgba(100, 108, 255, 0.7), 0 0 16px rgba(100, 108, 255, 0.3);
+}
+
+/* Skill nodes — dashed border and gold glow when selected */
+.graph-custom-node.skill-node {
+  border-style: dashed;
+}
+
+.graph-custom-node.skill-node.selected {
+  box-shadow: 0 0 0 3px rgba(251, 191, 36, 0.8), 0 0 20px rgba(251, 191, 36, 0.4);
+}
+
+.skill-node-badge {
+  display: inline-block;
+  margin-right: 4px;
+  font-size: 0.7rem;
+  opacity: 0.9;
+  vertical-align: middle;
 }
 
 .graph-node-header {

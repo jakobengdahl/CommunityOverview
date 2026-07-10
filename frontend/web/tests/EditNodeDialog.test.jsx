@@ -75,7 +75,7 @@ describe('EditNodeDialog', () => {
       // Default types should be present
       expect(typeSelect).toContainHTML('Actor');
       expect(typeSelect).toContainHTML('Initiative');
-      expect(typeSelect).toContainHTML('Community');
+      expect(typeSelect).toContainHTML('Capability');
       expect(typeSelect).toContainHTML('Resource');
     });
   });

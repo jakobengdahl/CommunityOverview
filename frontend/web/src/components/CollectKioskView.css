@@ -1,0 +1,411 @@
+/* ================================================================
+   CollectKioskView — Full-screen AI kiosk for data collection
+   Dark theme, matching the main app's colour scheme.
+   ================================================================ */
+
+/* ── Root container ────────────────────────────────────────────── */
+.kiosk-root {
+  display: flex;
+  flex-direction: column;
+  height: 100vh;
+  width: 100vw;
+  background: #0f0f0f;
+  color: #e0e0e0;
+  font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif;
+  overflow: hidden;
+}
+
+/* ── Loading state ─────────────────────────────────────────────── */
+.kiosk-loading {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  flex: 1;
+  gap: 1rem;
+  color: #888;
+}
+
+.kiosk-spinner {
+  width: 36px;
+  height: 36px;
+  border: 3px solid #333;
+  border-top-color: #F59E0B;
+  border-radius: 50%;
+  animation: kiosk-spin 0.8s linear infinite;
+}
+
+@keyframes kiosk-spin {
+  to { transform: rotate(360deg); }
+}
+
+/* ── Error state ───────────────────────────────────────────────── */
+.kiosk-error-card {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  flex: 1;
+  text-align: center;
+  padding: 2rem;
+  max-width: 480px;
+  margin: auto;
+}
+
+.kiosk-error-card h2 {
+  margin: 0 0 0.75rem 0;
+  color: #fff;
+  font-size: 1.4rem;
+}
+
+/* ── Intro overlay ─────────────────────────────────────────────── */
+.kiosk-intro-overlay {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  flex: 1;
+  padding: 2rem;
+  background: #0f0f0f;
+  animation: kiosk-fade-in 0.3s ease;
+}
+
+.kiosk-intro-card {
+  background: #1a1a1a;
+  border: 1px solid #2e2e2e;
+  border-radius: 16px;
+  box-shadow: 0 12px 48px rgba(0, 0, 0, 0.6);
+  padding: 2.5rem 3rem;
+  max-width: 560px;
+  width: 100%;
+  text-align: center;
+  animation: kiosk-slide-up 0.35s ease;
+}
+
+.kiosk-intro-icon {
+  margin-bottom: 1.25rem;
+}
+
+.kiosk-intro-title {
+  margin: 0 0 1.5rem 0;
+  font-size: 1.6rem;
+  font-weight: 700;
+  color: #fff;
+  line-height: 1.3;
+}
+
+.kiosk-intro-text {
+  color: #bbb;
+  font-size: 1rem;
+  line-height: 1.65;
+  margin-bottom: 2rem;
+  text-align: left;
+}
+
+.kiosk-start-button {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.5rem;
+  padding: 0.75rem 2rem;
+  background: #F59E0B;
+  color: #000;
+  border: none;
+  border-radius: 8px;
+  font-size: 1rem;
+  font-weight: 600;
+  cursor: pointer;
+  transition: background 0.2s, transform 0.1s;
+}
+
+.kiosk-start-button:hover {
+  background: #D97706;
+  transform: translateY(-1px);
+}
+
+.kiosk-start-button:active {
+  transform: translateY(0);
+}
+
+/* ── Header ────────────────────────────────────────────────────── */
+.kiosk-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 0.75rem 1.5rem;
+  background: #161616;
+  border-bottom: 1px solid #2a2a2a;
+  flex-shrink: 0;
+  gap: 1rem;
+}
+
+.kiosk-header-left {
+  display: flex;
+  align-items: center;
+  gap: 0.6rem;
+}
+
+.kiosk-header-title {
+  font-weight: 600;
+  font-size: 0.95rem;
+  color: #eee;
+}
+
+.kiosk-header-right {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+}
+
+.kiosk-header-badge {
+  font-size: 0.75rem;
+  padding: 0.2rem 0.6rem;
+  border-radius: 20px;
+  background: rgba(245, 158, 11, 0.15);
+  color: #F59E0B;
+  border: 1px solid rgba(245, 158, 11, 0.3);
+  font-weight: 500;
+}
+
+/* ── Messages area ─────────────────────────────────────────────── */
+.kiosk-messages {
+  flex: 1;
+  overflow-y: auto;
+  padding: 1.5rem;
+  display: flex;
+  flex-direction: column;
+  gap: 1rem;
+}
+
+.kiosk-messages::-webkit-scrollbar {
+  width: 6px;
+}
+
+.kiosk-messages::-webkit-scrollbar-track {
+  background: #111;
+}
+
+.kiosk-messages::-webkit-scrollbar-thumb {
+  background: #333;
+  border-radius: 3px;
+}
+
+/* ── Welcome placeholder ───────────────────────────────────────── */
+.kiosk-welcome {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  text-align: center;
+  color: #555;
+  padding: 3rem 1rem;
+  font-size: 0.95rem;
+}
+
+/* ── Message bubbles ───────────────────────────────────────────── */
+.kiosk-message {
+  display: flex;
+  max-width: 760px;
+  margin: 0 auto;
+  width: 100%;
+}
+
+.kiosk-message-user {
+  justify-content: flex-end;
+}
+
+.kiosk-message-assistant {
+  justify-content: flex-start;
+}
+
+.kiosk-message-bubble {
+  padding: 0.75rem 1rem;
+  border-radius: 12px;
+  max-width: 75%;
+  word-wrap: break-word;
+  white-space: pre-wrap;
+}
+
+.kiosk-message-user .kiosk-message-bubble {
+  background: #1e3a5f;
+  border-radius: 12px 12px 4px 12px;
+}
+
+.kiosk-message-assistant .kiosk-message-bubble {
+  background: #1e1e1e;
+  border: 1px solid #2e2e2e;
+  border-radius: 12px 12px 12px 4px;
+}
+
+.kiosk-message-content {
+  font-size: 0.92rem;
+  line-height: 1.6;
+  color: #ddd;
+}
+
+.kiosk-message-meta {
+  margin-top: 0.35rem;
+  font-size: 0.75rem;
+  color: #555;
+  display: flex;
+  align-items: center;
+  gap: 0.25rem;
+}
+
+.kiosk-tool-badge {
+  font-size: 0.7rem;
+  padding: 0.1rem 0.4rem;
+  background: rgba(245, 158, 11, 0.12);
+  color: #F59E0B;
+  border-radius: 4px;
+  margin-left: 0.4rem;
+}
+
+/* ── Thinking / loading indicator ─────────────────────────────── */
+.kiosk-thinking {
+  padding: 0.75rem 1.25rem;
+}
+
+.kiosk-dots {
+  display: flex;
+  gap: 5px;
+  align-items: center;
+}
+
+.kiosk-dots span {
+  display: block;
+  width: 7px;
+  height: 7px;
+  background: #555;
+  border-radius: 50%;
+  animation: kiosk-dot-bounce 1.2s infinite ease-in-out;
+}
+
+.kiosk-dots span:nth-child(1) { animation-delay: 0s; }
+.kiosk-dots span:nth-child(2) { animation-delay: 0.2s; }
+.kiosk-dots span:nth-child(3) { animation-delay: 0.4s; }
+
+@keyframes kiosk-dot-bounce {
+  0%, 60%, 100% { transform: translateY(0); opacity: 0.4; }
+  30% { transform: translateY(-6px); opacity: 1; }
+}
+
+/* ── Error banner ──────────────────────────────────────────────── */
+.kiosk-chat-error {
+  padding: 0.5rem 1.5rem;
+  background: rgba(239, 68, 68, 0.15);
+  color: #FCA5A5;
+  font-size: 0.85rem;
+  text-align: center;
+  flex-shrink: 0;
+}
+
+/* ── Input area ────────────────────────────────────────────────── */
+.kiosk-input-area {
+  display: flex;
+  align-items: flex-end;
+  gap: 0.75rem;
+  padding: 1rem 1.5rem;
+  background: #161616;
+  border-top: 1px solid #2a2a2a;
+  flex-shrink: 0;
+}
+
+.kiosk-input {
+  flex: 1;
+  padding: 0.65rem 0.9rem;
+  background: #1e1e1e;
+  border: 1px solid #333;
+  border-radius: 8px;
+  color: #e0e0e0;
+  font-size: 0.92rem;
+  font-family: inherit;
+  resize: none;
+  outline: none;
+  transition: border-color 0.2s;
+  line-height: 1.5;
+}
+
+.kiosk-input:focus {
+  border-color: #F59E0B;
+}
+
+.kiosk-input::placeholder {
+  color: #444;
+}
+
+.kiosk-input:disabled {
+  opacity: 0.6;
+  cursor: not-allowed;
+}
+
+.kiosk-send-button {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 44px;
+  height: 44px;
+  padding: 0;
+  background: #F59E0B;
+  color: #000;
+  border: none;
+  border-radius: 8px;
+  cursor: pointer;
+  flex-shrink: 0;
+  transition: background 0.2s, transform 0.1s;
+}
+
+.kiosk-send-button:hover:not(:disabled) {
+  background: #D97706;
+  transform: translateY(-1px);
+}
+
+.kiosk-send-button:active:not(:disabled) {
+  transform: translateY(0);
+}
+
+.kiosk-send-button:disabled {
+  background: #2a2a2a;
+  color: #555;
+  cursor: not-allowed;
+}
+
+/* ── Animations ────────────────────────────────────────────────── */
+@keyframes kiosk-fade-in {
+  from { opacity: 0; }
+  to { opacity: 1; }
+}
+
+@keyframes kiosk-slide-up {
+  from {
+    opacity: 0;
+    transform: translateY(24px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
+/* ── Responsive tweaks ─────────────────────────────────────────── */
+@media (max-width: 600px) {
+  .kiosk-intro-card {
+    padding: 1.75rem 1.5rem;
+    border-radius: 12px;
+  }
+
+  .kiosk-intro-title {
+    font-size: 1.3rem;
+  }
+
+  .kiosk-messages {
+    padding: 1rem;
+  }
+
+  .kiosk-input-area {
+    padding: 0.75rem 1rem;
+  }
+
+  .kiosk-message-bubble {
+    max-width: 90%;
+  }
+}

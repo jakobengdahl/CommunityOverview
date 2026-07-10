@@ -19,6 +19,10 @@ class AppConfig:
     graph_file: str = field(default_factory=lambda: os.getenv("GRAPH_FILE", "graph.json"))
     embeddings_file: Optional[str] = field(default_factory=lambda: os.getenv("EMBEDDINGS_FILE"))
 
+    # Shared-session store directory (one JSON file per session). Defaults to a
+    # "sessions" directory next to the graph file when unset.
+    sessions_dir: Optional[str] = field(default_factory=lambda: os.getenv("SESSIONS_DIR"))
+
     # Server configuration
     host: str = field(default_factory=lambda: os.getenv("HOST", "0.0.0.0"))
     port: int = field(default_factory=lambda: int(os.getenv("PORT", "8000")))
@@ -37,7 +41,16 @@ class AppConfig:
     auth_enabled: bool = field(default_factory=lambda: os.getenv("AUTH_ENABLED", "false").lower() == "true")
     auth_username: str = field(default_factory=lambda: os.getenv("AUTH_USERNAME", "admin"))
     auth_password: Optional[str] = field(default_factory=lambda: os.getenv("AUTH_PASSWORD"))
+    auth_bearer_token: Optional[str] = field(default_factory=lambda: os.getenv("AUTH_BEARER_TOKEN"))
+    cors_allowed_origins: list[str] = field(default_factory=lambda: [o.strip() for o in os.getenv("CORS_ALLOWED_ORIGINS", "*").split(",")])
     mcp_basic_auth: bool = field(default_factory=lambda: os.getenv("MCP_BASIC_AUTH", "false").lower() == "true")
+    # When set to False, /mcp and /execute_tool bypass auth even if auth_enabled=True.
+    # When None (default / env var absent), MCP follows auth_enabled — no behaviour change.
+    mcp_auth_enabled: Optional[bool] = field(
+        default_factory=lambda: (
+            None if (_v := os.getenv("MCP_AUTH_ENABLED")) is None else _v.lower() == "true"
+        )
+    )
 
     # Profile configuration
     config_profile: str = field(default_factory=lambda: os.getenv("CONFIG_PROFILE", "default"))

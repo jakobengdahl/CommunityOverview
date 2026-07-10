@@ -27,6 +27,9 @@ dist/
 *.swo
 *~
 
+# Claude Code
+.claude/
+
 # OS
 .DS_Store
 Thumbs.db
@@ -67,3 +70,5 @@ data/federated-*/
 dummy.json
 benchmark_search.py
 benchmark_search_real.py
+node_modules\n__pycache__\ncoverage\ntarget\n.pytest_cache\n.DS_Store
+node_modules/\n__pycache__/\ncoverage/\n.pytest_cache/

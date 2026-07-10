@@ -88,6 +88,25 @@ echo -e "  ${BLUE}Profile:${NC}     $PROFILE_NAME"
 # Source .env files with fallback chain: profile → default → root
 apply_profile_env "$PROFILE_NAME"
 
+# Auto-detect LLM provider when not explicitly configured.
+# In SSPCloud (and similar environments), OPENAI_API_KEY + OPENAI_BASE_URL are
+# injected via Vault secrets but LLM_PROVIDER is not set. Without this, the
+# backend defaults to the Claude provider and reports LLM as unavailable.
+if [ -z "$LLM_PROVIDER" ]; then
+    if [ -n "$OPENAI_API_KEY" ] && [ -n "$OPENAI_BASE_URL" ]; then
+        export LLM_PROVIDER=openai
+        echo -e "  ${BLUE}LLM:${NC}         openai (auto-detected from OPENAI_BASE_URL)"
+    elif [ -n "$OPENAI_API_KEY" ]; then
+        export LLM_PROVIDER=openai
+        echo -e "  ${BLUE}LLM:${NC}         openai (auto-detected from OPENAI_API_KEY)"
+    elif [ -n "$ANTHROPIC_API_KEY" ]; then
+        export LLM_PROVIDER=claude
+        echo -e "  ${BLUE}LLM:${NC}         claude (auto-detected from ANTHROPIC_API_KEY)"
+    else
+        echo -e "  ${YELLOW}LLM:${NC}         not configured — AI assistant will be unavailable"
+    fi
+fi
+
 # Resolve schema config: env var takes precedence, then profile fallback
 if [ -n "$GRAPH_SCHEMA_CONFIG" ]; then
     export SCHEMA_FILE="$GRAPH_SCHEMA_CONFIG"
@@ -176,6 +195,42 @@ fi
 
 # Set GRAPH_FILE to point to active data
 export GRAPH_FILE="$ACTIVE_DATA"
+
+# =====================
+# Node.js Check / Auto-install
+# =====================
+
+# Source nvm so nvm-managed node versions are in PATH.
+# In environments like SSPCloud, node is managed via nvm but not in PATH
+# until nvm is sourced. The || true prevents set -e from exiting when
+# nvm.sh itself returns non-zero (e.g. no default node version set yet).
+export NVM_DIR="${NVM_DIR:-$HOME/.nvm}"
+[ -s "$NVM_DIR/nvm.sh" ] && \. "$NVM_DIR/nvm.sh" || true
+
+if ! command -v node &> /dev/null; then
+    echo -e "${YELLOW}Node.js not found — installing automatically via nvm...${NC}"
+
+    # Install nvm if not already present
+    if [ ! -s "$NVM_DIR/nvm.sh" ]; then
+        echo "Installing nvm..."
+        curl -fsSL https://raw.githubusercontent.com/nvm-sh/nvm/v0.39.7/install.sh | bash
+        export NVM_DIR="${NVM_DIR:-$HOME/.nvm}"
+        \. "$NVM_DIR/nvm.sh" || true
+    fi
+
+    # Install and activate Node.js 20
+    echo "Installing Node.js 20 (this may take a minute)..."
+    nvm install 20
+    nvm use 20
+
+    if ! command -v node &> /dev/null; then
+        echo -e "${RED}Error: Node.js installation failed. Install it manually:${NC}"
+        echo -e "  nvm install 20"
+        exit 1
+    fi
+
+    echo -e "${GREEN}Node.js $(node --version) installed.${NC}"
+fi
 
 # =====================
 # Python Environment

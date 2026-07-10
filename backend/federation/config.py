@@ -7,11 +7,11 @@ Configuration is intentionally read-only at runtime and loaded from file/env.
 from __future__ import annotations
 
 import json
-import os
-from pathlib import Path
 from typing import Any, Dict, List, Optional, Literal
 
-from pydantic import BaseModel, Field, validator
+from pydantic import BaseModel, Field, field_validator
+
+from backend.config_context import resolve_federation_config_path_info
 
 
 DEFAULT_FEDERATION_PATH = "config/default/federation_config.json"
@@ -41,7 +41,8 @@ class FederationSync(BaseModel):
     on_startup: bool = True
     on_demand: bool = True
 
-    @validator("interval_seconds")
+    @field_validator("interval_seconds")
+    @classmethod
     def validate_interval(cls, value: int) -> int:
         if value < 10:
             raise ValueError("interval_seconds must be >= 10")
@@ -68,19 +69,22 @@ class FederationGraphConfig(BaseModel):
     sync: FederationSync = Field(default_factory=FederationSync)
     auth: FederationAuth = Field(default_factory=FederationAuth)
 
-    @validator("graph_id")
+    @field_validator("graph_id")
+    @classmethod
     def validate_graph_id(cls, value: str) -> str:
         if not value.strip():
             raise ValueError("graph_id cannot be empty")
         return value
 
-    @validator("max_depth_override")
+    @field_validator("max_depth_override")
+    @classmethod
     def validate_depth_override(cls, value: Optional[int]) -> Optional[int]:
         if value is not None and value < 0:
             raise ValueError("max_depth_override must be >= 0")
         return value
 
-    @validator("endpoints")
+    @field_validator("endpoints")
+    @classmethod
     def validate_endpoints(cls, value: FederationEndpoints) -> FederationEndpoints:
         if not any([value.graph_json_url, value.mcp_url, value.gui_url]):
             raise ValueError("At least one endpoint URL must be configured")
@@ -97,14 +101,16 @@ class FederationSettings(BaseModel):
     allow_live_remote_enrichment: bool = False
     graphs: List[FederationGraphConfig] = Field(default_factory=list)
 
-    @validator("max_traversal_depth")
+    @field_validator("max_traversal_depth")
+    @classmethod
     def validate_traversal_depth(cls, value: int) -> int:
         if value < 0:
             raise ValueError("max_traversal_depth must be >= 0")
         return value
 
 
-    @validator("depth_levels")
+    @field_validator("depth_levels")
+    @classmethod
     def validate_depth_levels(cls, value: Optional[List[int]]) -> Optional[List[int]]:
         if value is None:
             return value
@@ -113,7 +119,8 @@ class FederationSettings(BaseModel):
             raise ValueError("depth_levels must contain at least one value >= 1")
         return cleaned
 
-    @validator("default_timeout_ms")
+    @field_validator("default_timeout_ms")
+    @classmethod
     def validate_timeout(cls, value: int) -> int:
         if value < 100:
             raise ValueError("default_timeout_ms must be >= 100")
@@ -126,15 +133,14 @@ class FederationFileConfig(BaseModel):
     federation: FederationSettings = Field(default_factory=FederationSettings)
 
 
+def resolve_federation_config_context() -> Dict[str, str]:
+    """Resolve federation config path and its public source metadata."""
+    return resolve_federation_config_path_info(DEFAULT_FEDERATION_PATH)
+
+
 def resolve_federation_config_path() -> str:
     """Resolve federation config path from environment or defaults."""
-    env_path = os.getenv("FEDERATION_FILE") or os.getenv("GRAPH_FEDERATION_CONFIG")
-    if env_path:
-        return env_path
-
-    project_root = Path(__file__).parent.parent.parent
-    default_path = project_root / DEFAULT_FEDERATION_PATH
-    return str(default_path)
+    return resolve_federation_config_context()["path"]
 
 
 def load_federation_config() -> FederationFileConfig:

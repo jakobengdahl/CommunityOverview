@@ -64,10 +64,12 @@ packages/
 The system includes an event-driven architecture for webhooks and AI agents:
 
 - **Event System**: Tracks graph mutations (create, update, delete) and dispatches events to subscribers.
-  - See `docs/EVENT_SUBSCRIPTIONS.md` for details.
-- **Agent System**: Allows creating AI agents that react to graph events using MCP tools.
-  - Agents are configured via `Agent` nodes in the graph.
-  - See `backend/agents/README.md` (if available) or the code in `backend/agents/`.
+  See `docs/EVENT_SUBSCRIPTIONS.md` for details.
+- **Agent System**: AI agents that react to graph events or run on a schedule using MCP tools.
+  Agents are configured via `Agent` nodes in the graph.
+  - **Event-triggered**: an agent links to an `EventSubscription` node that defines which graph mutations fire it.
+  - **Schedule-triggered**: an agent's `metadata.schedule` field sets a recurring day + time.
+  See `docs/AGENT_SCHEDULING.md` for scheduling details and GCP Cloud Scheduler integration.
 
 ### Concurrency & Persistence
 
@@ -116,9 +118,9 @@ uvicorn backend.api_host.server:get_app --factory --reload --port 8000
 ```
 
 The server will be available at:
-- REST API: http://localhost:8000/api/v1/
+- REST API: http://localhost:8000/api/
 - UI Backend (chat): http://localhost:8000/ui/
-- MCP endpoint: http://localhost:8000/mcp
+- MCP endpoint: http://localhost:8000/mcp  (also `/mcp/sse` for legacy SSE clients)
 - Health check: http://localhost:8000/health
 
 ### Production Mode
@@ -131,13 +133,16 @@ uvicorn backend.api_host.server:get_app --factory --host 0.0.0.0 --port 8000
 
 | Variable | Default | Description |
 |----------|---------|-------------|
-| `GRAPH_FILE` | `graph.json` | Path to graph data file |
-| `API_PREFIX` | `/api/v1` | REST API URL prefix |
+| `GRAPH_FILE` | `data/active/graph.json` | Path to graph data file |
+| `API_PREFIX` | `/api` | REST API URL prefix |
 | `MCP_NAME` | `community-graph` | MCP server name |
 | `OPENAI_API_KEY` | - | OpenAI API key (for chat) |
 | `ANTHROPIC_API_KEY` | - | Anthropic API key (for chat) |
 | `LLM_PROVIDER` | auto-detect | Force LLM provider: `openai` or `claude` |
 | `OPENAI_MODEL` | `gpt-4o` | OpenAI model to use |
+| `AGENTS_ENABLED` | `false` | Enable the AI agent system |
+| `AGENTS_LLM_PROVIDER` | - | LLM provider for agents (`openai` or `claude`) |
+| `AGENTS_SCHEDULER_ENABLED` | `false` | Enable in-process time-based scheduler (off for scale-to-zero) |
 
 ## Building Frontend
 
@@ -286,16 +291,62 @@ npm test
 
 ### REST API Endpoints
 
+The default API prefix is `/api` (configurable via `API_PREFIX`).
+
 | Method | Endpoint | Description |
 |--------|----------|-------------|
-| GET | `/api/v1/search` | Search nodes |
-| GET | `/api/v1/node/{id}` | Get node details |
-| GET | `/api/v1/node/{id}/related` | Get related nodes |
-| POST | `/api/v1/nodes` | Add nodes and edges |
-| PATCH | `/api/v1/node/{id}` | Update a node |
-| DELETE | `/api/v1/nodes` | Delete nodes |
-| GET | `/api/v1/stats` | Get graph statistics |
-| GET | `/api/v1/similar` | Find similar nodes |
+| POST | `/api/search` | Search nodes |
+| GET | `/api/nodes/{id}` | Get node details |
+| POST | `/api/nodes/{id}/related` | Get related nodes |
+| POST | `/api/nodes` | Add nodes and edges |
+| PATCH | `/api/nodes/{id}` | Update a node |
+| DELETE | `/api/nodes` | Delete nodes |
+| POST | `/api/edges` | Add edges |
+| PATCH | `/api/edges/{id}` | Update an edge |
+| DELETE | `/api/edges/{id}` | Delete an edge |
+| GET | `/api/stats` | Get graph statistics |
+| POST | `/api/similar` | Find similar nodes |
+| POST | `/api/similar/batch` | Batch similarity search |
+| POST | `/api/federation/adopt` | Adopt a federated node into the local graph |
+| GET | `/api/schema` | Get schema config |
+| GET | `/api/presentation` | Get presentation config |
+| GET | `/api/capabilities` | Get service capabilities |
+| GET | `/api/export` | Export graph data |
+| POST | `/api/views/save` | Save a named graph view |
+| GET | `/api/views/{name}` | Get a saved view |
+| GET | `/api/views` | List saved views |
+| GET | `/agents/schedules` | List all agent schedules (for external scheduler reconciliation) |
+| POST | `/agents/{id}/trigger` | Fire a scheduled agent immediately (used by GCP Cloud Scheduler) |
+
+### Shared Session Endpoints
+
+Server-side multi-user sessions (see `docs/MULTI_USER_SESSIONS_DESIGN.md`).
+Sessions are stored outside the graph as node references + layout + annotations;
+node content is rehydrated from the graph on load via `?resolve=true`.
+
+| Method | Endpoint | Description |
+|--------|----------|-------------|
+| POST | `/api/sessions` | Create a new shared session (server-assigned `DDDD-DDDD` id) |
+| GET | `/api/sessions` | List session metadata |
+| GET | `/api/sessions/{id}` | Get a session (meta + state + presence roster); `?resolve=true` also returns rehydrated nodes/edges |
+| PATCH | `/api/sessions/{id}` | Rename a session |
+| DELETE | `/api/sessions/{id}` | Delete a session (`?client_id=` names the deleter in the broadcast) |
+| POST | `/api/sessions/{id}/ops` | Apply an ordered op batch (`{client_id, base_seq, ops}` → `{applied, seq}`); server-ordered LWW, monotonic `seq`. Bounded per batch by op count (≤ 500) **and** body size (≤ 256 KB → `413`), plus a per-client token bucket (200 burst, 100 ops/s refill → `429`) — design §3.9 |
+| GET | `/api/sessions/{id}/stream` | SSE fan-out: presence, applied ops, claims, and broadcast MCP commands (`{"type": "command", ...}` — every connected client applies these, not just one browser). Query `client_id`, `name`, `since_seq` (op catch-up or full-snapshot fallback). A slow consumer whose queue overflows is sent a fresh full snapshot rather than diverging. EventSource-opened, so it bypasses Basic Auth (protected by the unguessable session id — design §3.9) |
+
+Session state is server-owned: the browser no longer uploads canvas state, and
+MCP query tools read visible nodes / selection from the shared-session store
+(the step-4 `PUT /api/sessions/{id}/state` full-state save and the legacy
+`PATCH /sessions/{id}/state` upload were removed in step 8 — design §3.8).
+
+Legacy MCP visualization-push channel (single-consumer; delivers AI-pushed
+visualization commands to the browser). The browser opens this only until the
+op-protocol stream above has connected for the session, since that stream's
+broadcast `command` events reach every collaborator instead of just one:
+
+| Method | Endpoint | Description |
+|--------|----------|-------------|
+| GET | `/sessions/{id}/stream` | SSE stream delivering MCP visualization commands to the browser. A connected stream signals that a browser is present to receive pushes |
 
 ### MCP Tools
 

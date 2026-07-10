@@ -43,6 +43,11 @@ PUBLIC_BASE_URL: str = _required("PUBLIC_BASE_URL").rstrip("/")
 # TCP port the server listens on
 PORT: int = int(_optional("PORT", "8080"))
 
+# Comma-separated list of allowed CORS origins (default: wildcard).
+# When set to specific origins, credentials are allowed; when wildcard, credentials are disabled.
+_raw_cors_origins: str = _optional("CORS_ALLOWED_ORIGINS", "*")
+CORS_ALLOWED_ORIGINS: List[str] = [o.strip() for o in _raw_cors_origins.split(",") if o.strip()]
+
 # Google OIDC endpoints (public, no secrets)
 GOOGLE_AUTH_URL = "https://accounts.google.com/o/oauth2/v2/auth"
 GOOGLE_TOKEN_URL = "https://oauth2.googleapis.com/token"

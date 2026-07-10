@@ -85,6 +85,8 @@
     "ignore_origins_hint": "For loop prevention: events from these origins are not sent",
     "cancel": "Cancel",
     "submit": "Create subscription",
+    "submit_edit": "Save changes",
+    "title_edit": "Edit webhook subscription",
     "validation_error": "Name and webhook URL are required",
     "webhook_description": "Webhook subscription: {name}",
     "webhook_summary": "Listening on {events} events"
@@ -99,7 +101,9 @@
   "notifications": {
     "showing_nodes": "Showing {count} nodes",
     "subscription_created": "Subscription \"{name}\" created",
+    "subscription_updated": "Subscription \"{name}\" updated",
     "subscription_error": "Could not create subscription",
+    "subscription_update_error": "Could not update subscription",
     "saved_view_description": "Saved view: {name}",
     "saved_view_summary": "Contains {count} nodes"
   },
@@ -107,10 +111,63 @@
     "export_graph": "Export graph",
     "export_success": "Graph exported",
     "export_error": "Could not export graph",
+    "view_section": "View",
+    "show_minimap": "Show minimap",
     "language_section": "Language",
     "language_en": "English",
     "language_sv": "Svenska",
     "logout": "Log out"
+  },
+  "sessions": {
+    "title": "Sessions",
+    "close": "Close menu",
+    "new_session": "Start new session",
+    "new_session_started": "New session started",
+    "search_sessions": "Search previous sessions",
+    "search_placeholder": "Search by name or ID...",
+    "connect_session": "Connect to session (via ID)",
+    "connect_session_title": "Connect to session",
+    "connect_session_label": "Session ID",
+    "connect": "Connect",
+    "invalid_session_id": "Invalid session ID — expected format 1234-5678",
+    "recent_sessions": "Recent sessions",
+    "no_sessions": "No previous sessions yet",
+    "no_matches": "No sessions match your search",
+    "rename_session": "Name session",
+    "rename_session_title": "Name session",
+    "session_name_label": "Session name",
+    "delete_session": "Delete session",
+    "delete_session_title": "Delete session",
+    "delete_session_message": "Delete this session? Its content is removed for everyone. This cannot be undone.",
+    "delete_session_message_multi": "{count} other user(s) are connected to this session. Delete it anyway? Its content is removed for everyone and cannot be undone.",
+    "delete_confirm": "Delete",
+    "session_deleted": "Session deleted — started a new one",
+    "session_deleted_remote": "This session was deleted by another user — started a new one",
+    "settings": "Settings"
+  },
+  "settings": {
+    "title": "Settings",
+    "close": "Close settings",
+    "nodes": "Nodes",
+    "edges": "Edges",
+    "nodes_by_type": "Nodes by type",
+    "details": "Details",
+    "admin_section": "Admin",
+    "presence_section": "Your presence",
+    "display_name": "Display name",
+    "display_name_placeholder": "Guest",
+    "display_name_hint": "Shown to others collaborating in the same session. Takes effect the next time you open or switch session."
+  },
+  "presence": {
+    "you": "You",
+    "collaborators": "People in this session"
+  },
+  "header": {
+    "title": "Community Graph View",
+    "menu": "Menu",
+    "session_id_tooltip": "Session ID — share with an external AI to connect it to this window",
+    "clear_canvas_tooltip": "Clear canvas — remove all nodes and edges (or press Esc twice)",
+    "clear_canvas_aria": "Clear canvas"
   },
   "experts": {
     "title": "Expert Agents",
@@ -121,5 +178,37 @@
     "depth_tooltip": "Depth levels are defined by installation configuration",
     "depth_indicator": "Depth {current}/{max}",
     "depth_indicator_tooltip": "Current federated search depth and maximum allowed depth"
+  },
+  "guide": {
+    "title": "Guide",
+    "next": "Next",
+    "close": "Close",
+    "cancel": "Cancel guide",
+    "loading": "Loading...",
+    "step_counter": "Step {current} of {total}"
+  },
+  "context_menu": {
+    "edit": "Edit",
+    "hide": "Hide",
+    "expand": "Find related nodes",
+    "delete": "Delete",
+    "nodes_selected": "{count} nodes selected",
+    "show_only": "Show only these",
+    "select_same_type": "Select all nodes of the same type",
+    "hide_all": "Hide all",
+    "delete_all": "Delete all",
+    "change_type": "Change type",
+    "general_connection": "General connection",
+    "add_note": "Add note",
+    "add_label": "Add label",
+    "add_arrow": "Add arrow",
+    "annotation_color": "Colour",
+    "note_placeholder": "Note",
+    "label_placeholder": "Label"
+  },
+  "common": {
+    "saving": "Saving...",
+    "save": "Save",
+    "cancel": "Cancel"
   }
 }

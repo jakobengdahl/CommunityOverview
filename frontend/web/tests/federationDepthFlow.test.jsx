@@ -70,6 +70,6 @@ describe('Federation depth runtime flow', () => {
       expect(api.sendChatMessage).toHaveBeenCalled();
     });
 
-    expect(api.sendChatMessage.mock.calls[0][2]).toEqual({ federationDepth: 2 });
+    expect(api.sendChatMessage.mock.calls[0][2]).toMatchObject({ federationDepth: 2 });
   });
 });

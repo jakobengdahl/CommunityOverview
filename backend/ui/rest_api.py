@@ -12,7 +12,7 @@ This module does NOT create graph objects directly.
 from typing import List, Dict, Any, Optional
 from fastapi import APIRouter, UploadFile, File, Form, HTTPException, Depends, Request
 from fastapi.responses import JSONResponse
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator
 import json
 
 from .chat_service import ChatService
@@ -33,6 +33,34 @@ class ChatRequest(BaseModel):
     api_key: Optional[str] = Field(None, description="Optional API key override")
     provider: Optional[str] = Field(None, description="Optional provider: 'claude' or 'openai'")
     federation_depth: Optional[int] = Field(None, ge=1, le=9, description="Optional federated search depth")
+    expert_agent_id: Optional[str] = Field(None, description="Optional expert agent ID — injects the agent's persona and skills into the system prompt")
+    skills_context: Optional[str] = Field(
+        None,
+        description=(
+            "Temporary skill instructions from Skill nodes selected in the visualization"
+            " — injected as extra system context for this request only"
+        ),
+    )
+    collection_short_name: Optional[str] = Field(None, pattern=r'^[a-z0-9][a-z0-9-]{0,98}[a-z0-9]$|^[a-z0-9]$', description="AKC short name — server resolves prompt server-side")
+    visible_node_ids: Optional[List[str]] = Field(
+        None,
+        description="IDs of nodes currently displayed in the browser canvas",
+    )
+    selected_node_ids: Optional[List[str]] = Field(
+        None,
+        description="IDs of nodes the user has selected in the canvas",
+    )
+
+    @field_validator("visible_node_ids", "selected_node_ids", mode="before")
+    @classmethod
+    def _validate_node_id_list(cls, v: object) -> object:
+        if v is None:
+            return v
+        if not isinstance(v, list):
+            raise ValueError("must be a list")
+        # Cap list size, reject non-strings, cap per-item length
+        v = v[:5000]
+        return [item[:256] for item in v if isinstance(item, str)]
 
 
 class SimpleChatRequest(BaseModel):
@@ -42,6 +70,7 @@ class SimpleChatRequest(BaseModel):
     api_key: Optional[str] = Field(None, description="Optional API key override")
     provider: Optional[str] = Field(None, description="Optional provider: 'claude' or 'openai'")
     federation_depth: Optional[int] = Field(None, ge=1, le=9, description="Optional federated search depth")
+    expert_agent_id: Optional[str] = Field(None, description="Optional expert agent ID")
 
 
 class ChatResponse(BaseModel):
@@ -119,6 +148,11 @@ def create_ui_router(
                 api_key=request.api_key,
                 provider=request.provider,
                 federation_depth=request.federation_depth,
+                expert_agent_id=request.expert_agent_id,
+                skills_context=request.skills_context,
+                collection_short_name=request.collection_short_name,
+                visible_node_ids=request.visible_node_ids,
+                selected_node_ids=request.selected_node_ids,
             )
 
             return ChatResponse(
@@ -148,7 +182,8 @@ def create_ui_router(
                 user_message=request.message,
                 api_key=request.api_key,
                 provider=request.provider,
-                federation_depth=request.federation_depth
+                federation_depth=request.federation_depth,
+                expert_agent_id=request.expert_agent_id,
             )
 
             return ChatResponse(
@@ -295,6 +330,24 @@ def create_ui_router(
 
         except Exception as e:
             raise HTTPException(status_code=500, detail=str(e))
+
+    # ==================== Capabilities Endpoint ====================
+
+    @router.get("/capabilities")
+    async def get_ui_capabilities() -> Dict[str, Any]:
+        """
+        Return UI feature availability based on runtime configuration.
+
+        Called by the frontend during startup to decide which features to show.
+        Currently reports LLM availability so the chat panel can be hidden when
+        no API keys are configured.
+        """
+        from backend.llm_providers import get_llm_availability
+        llm = get_llm_availability()
+        return {
+            "llm_available": llm["available"],
+            "llm_provider": llm["provider"],
+        }
 
     # ==================== Info Endpoints ====================
 

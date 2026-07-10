@@ -11,8 +11,8 @@ See backend/config_loader.py for configuration loading.
 
 from enum import Enum
 from typing import Optional, List, Dict, Any, Union
-from datetime import datetime
-from pydantic import BaseModel, Field, validator
+from datetime import datetime, timezone
+from pydantic import BaseModel, Field, field_validator
 import uuid
 
 
@@ -30,10 +30,18 @@ def _get_config_loader():
 
 
 def _parse_datetime(value: Any) -> Any:
-    """Parse ISO datetime strings, including UTC Z suffix, from graph JSON."""
+    """Parse ISO datetime strings, including UTC Z suffix, from graph JSON.
+
+    Timezone-naive strings — persisted before the utcnow()->now(timezone.utc)
+    migration — are treated as UTC so every in-memory datetime stays aware and
+    comparable with datetimes created after the migration.
+    """
     if isinstance(value, str):
         normalized = value[:-1] + '+00:00' if value.endswith('Z') else value
-        return datetime.fromisoformat(normalized)
+        parsed = datetime.fromisoformat(normalized)
+        if parsed.tzinfo is None:
+            parsed = parsed.replace(tzinfo=timezone.utc)
+        return parsed
     return value
 
 
@@ -158,15 +166,12 @@ class Node(BaseModel):
     subtypes: List[str] = Field(default_factory=list)  # Sub-classifications within the node type
     metadata: Dict[str, Any] = Field(default_factory=dict)
     embedding: Optional[List[float]] = None  # For future vector search
-    created_at: datetime = Field(default_factory=datetime.utcnow)
-    updated_at: datetime = Field(default_factory=datetime.utcnow)
+    created_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
+    updated_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
 
-    class Config:
-        json_encoders = {
-            datetime: lambda v: v.isoformat()
-        }
 
-    @validator('type', pre=True)
+    @field_validator('type', mode='before')
+    @classmethod
     def validate_type(cls, v):
         """Validate and normalize node type. Accepts any string for forward/backward compatibility."""
         if isinstance(v, NodeType):
@@ -213,17 +218,14 @@ class Edge(BaseModel):
     id: str = Field(default_factory=lambda: str(uuid.uuid4()))
     source: str  # Node ID
     target: str  # Node ID
-    type: Union[RelationshipType, str] = Field(default="RELATES_TO")  # Optional, defaults to general connection
+    type: Union[RelationshipType, str] = Field(default=RelationshipType.RELATES_TO)  # Optional, defaults to general connection
     label: str = Field(default="")  # Optional free-text label for the connection
     metadata: Dict[str, Any] = Field(default_factory=dict)
-    created_at: datetime = Field(default_factory=datetime.utcnow)
+    created_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
 
-    class Config:
-        json_encoders = {
-            datetime: lambda v: v.isoformat()
-        }
 
-    @validator('type', pre=True, always=True)
+    @field_validator('type', mode='before')
+    @classmethod
     def validate_type(cls, v):
         """Validate and normalize relationship type. Defaults to RELATES_TO if empty/None."""
         if v is None or v == "":
@@ -275,10 +277,6 @@ class GraphStats(BaseModel):
     nodes_by_type: Dict[str, int]
     last_updated: datetime
 
-    class Config:
-        json_encoders = {
-            datetime: lambda v: v.isoformat()
-        }
 
 
 class ProposedNodesResult(BaseModel):
@@ -300,5 +298,12 @@ class DeleteNodesResult(BaseModel):
     """Result from delete_nodes operation"""
     deleted_node_ids: List[str]
     affected_edge_ids: List[str]  # Edges that were also removed
+    success: bool
+    message: str = ""
+
+
+class DeleteEdgesResult(BaseModel):
+    """Result from delete_edges operation"""
+    deleted_edge_ids: List[str]
     success: bool
     message: str = ""

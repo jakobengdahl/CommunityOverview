@@ -55,7 +55,7 @@ class TestDocumentServiceUpload:
         content = b"Test file content"
         filename = "test_upload.txt"
 
-        result = asyncio.get_event_loop().run_until_complete(
+        result = asyncio.run(
             document_service.save_upload(content, filename)
         )
 
@@ -72,7 +72,7 @@ class TestDocumentServiceUpload:
         content = b"Test content"
         filename = "test.xyz"
 
-        result = asyncio.get_event_loop().run_until_complete(
+        result = asyncio.run(
             document_service.save_upload(content, filename)
         )
 
@@ -86,7 +86,7 @@ class TestDocumentServiceUpload:
         content = b"x" * (document_service.MAX_FILE_SIZE + 1)
         filename = "large.txt"
 
-        result = asyncio.get_event_loop().run_until_complete(
+        result = asyncio.run(
             document_service.save_upload(content, filename)
         )
 
@@ -99,7 +99,7 @@ class TestDocumentServiceUpload:
         content = b"This is test content for extraction."
         filename = "test_extract.txt"
 
-        result = asyncio.get_event_loop().run_until_complete(
+        result = asyncio.run(
             document_service.process_upload(content, filename)
         )
 

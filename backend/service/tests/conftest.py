@@ -32,7 +32,8 @@ class MockSentenceTransformer:
 
     def encode(self, texts, convert_to_numpy=True, show_progress_bar=False):
         """Generate mock embeddings based on text hash."""
-        if isinstance(texts, str):
+        is_single = isinstance(texts, str)
+        if is_single:
             texts = [texts]
         embeddings = []
         for text in texts:
@@ -40,7 +41,8 @@ class MockSentenceTransformer:
             self._np.random.seed(abs(hash(text)) % (2**32))
             embedding = self._np.random.rand(384).astype(self._np.float32)  # MiniLM dimension
             embeddings.append(embedding)
-        return self._np.array(embeddings)
+        result = self._np.array(embeddings)
+        return result[0] if is_single else result
 
 
 @pytest.fixture(autouse=True)
@@ -73,7 +75,7 @@ def mock_embedding_model():
 @pytest.fixture
 def temp_dir() -> Generator[str, None, None]:
     """Create a temporary directory for test files."""
-    with tempfile.TemporaryDirectory() as tmpdir:
+    with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as tmpdir:
         yield tmpdir
 
 
@@ -121,7 +123,7 @@ def sample_nodes() -> list:
         ),
         Node(
             id="community-1",
-            type=NodeType.COMMUNITY,
+            type=NodeType.CAPABILITY,
             name="eSam",
             description="eGovernment collaboration community",
             summary="eGov community"

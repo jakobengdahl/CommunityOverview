@@ -2,6 +2,7 @@ import { useState, useRef, useEffect } from 'react';
 import { PlusCircleFill, Robot, CheckSquareFill, Square, XLg } from 'react-bootstrap-icons';
 import useGraphStore from '../store/graphStore';
 import { useI18n } from '../i18n';
+import { ICON_REGISTRY } from './FloatingToolbar';
 import './ExpertAgentSelector.css';
 
 function ExpertAgentSelector() {
@@ -59,6 +60,7 @@ function ExpertAgentSelector() {
               const isActive = activeExperts.includes(agent.id);
               const agentName = language === 'sv' ? agent.name : (agent.name_en || agent.name);
               const specialty = language === 'sv' ? agent.specialty : (agent.specialty_en || agent.specialty);
+              const AgentIcon = (agent.icon && ICON_REGISTRY[agent.icon]) || Robot;
 
               return (
                 <button
@@ -72,7 +74,7 @@ function ExpertAgentSelector() {
                       : <Square size={14} />
                     }
                   </div>
-                  <div className="expert-selector-dot" style={{ backgroundColor: agent.color }} />
+                  <AgentIcon size={14} className="expert-selector-icon" style={{ color: agent.color }} />
                   <div className="expert-selector-info">
                     <span className="expert-selector-name">{agentName}</span>
                     <span className="expert-selector-specialty">{specialty}</span>

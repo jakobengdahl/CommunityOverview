@@ -17,21 +17,19 @@ Event System:
 - Event context (origin, session_id) enables loop prevention
 """
 
-import json
-import os
-import sys
-import tempfile
 import threading
+from concurrent.futures import Future, ThreadPoolExecutor
 from typing import List, Dict, Optional, Any, TYPE_CHECKING, Callable
-from datetime import datetime
+from datetime import datetime, timezone
 import networkx as nx
 from pathlib import Path
 from rapidfuzz.distance import Levenshtein
 
 from .models import (
     Node, Edge, NodeType, RelationshipType,
-    SimilarNode, GraphStats, AddNodesResult, DeleteNodesResult
+    SimilarNode, GraphStats, AddNodesResult, DeleteNodesResult, DeleteEdgesResult
 )
+from .storage_backends import FileGraphPersistenceBackend, GraphPersistenceBackend
 from .vector_store import VectorStore
 
 # Event system imports
@@ -44,29 +42,6 @@ if TYPE_CHECKING:
     from .events.delivery import DeliveryWorker
 
 
-# Cross-platform file locking
-if sys.platform == 'win32':
-    import msvcrt
-
-    def _lock_file(f, exclusive=True):
-        """Acquire file lock on Windows."""
-        msvcrt.locking(f.fileno(), msvcrt.LK_NBLCK if exclusive else msvcrt.LK_LOCK, 1)
-
-    def _unlock_file(f):
-        """Release file lock on Windows."""
-        msvcrt.locking(f.fileno(), msvcrt.LK_UNLCK, 1)
-else:
-    import fcntl
-
-    def _lock_file(f, exclusive=True):
-        """Acquire file lock on Unix."""
-        fcntl.flock(f, fcntl.LOCK_EX if exclusive else fcntl.LOCK_SH)
-
-    def _unlock_file(f):
-        """Release file lock on Unix."""
-        fcntl.flock(f, fcntl.LOCK_UN)
-
-
 class GraphStorage:
     """
     Manages graph storage with NetworkX + JSON persistence.
@@ -77,20 +52,33 @@ class GraphStorage:
     - Writes are atomic (temp file + rename) to prevent corruption
     """
 
-    def __init__(self, json_path: str = "graph.json", embeddings_path: str = None):
+    def __init__(
+        self,
+        json_path: str = "graph.json",
+        embeddings_path: str = None,
+        persistence_backend: Optional[GraphPersistenceBackend] = None,
+    ):
         """
         Initialize GraphStorage.
 
         Args:
-            json_path: Path to the JSON file for graph persistence
+            json_path: Path to the JSON file for graph persistence when using the
+                default file-backed persistence backend.
             embeddings_path: Path to the embeddings pickle file (Legacy/Deprecated).
                            New implementation stores embeddings in graph.json directly.
+            persistence_backend: Optional persistence backend adapter. Defaults to
+                the file-backed JSON backend to preserve standalone behavior.
         """
-        self.json_path = Path(json_path)
+        self._persistence_backend = persistence_backend or FileGraphPersistenceBackend(json_path)
+        self.json_path = getattr(self._persistence_backend, "json_path", Path(json_path))
 
         # Thread lock for in-memory data structure protection
         # RLock allows same thread to acquire lock multiple times (reentrant)
         self._lock = threading.RLock()
+
+        # Executor for background I/O operations (saving to disk)
+        # Using max_workers=1 to ensure sequential writes
+        self._io_executor = ThreadPoolExecutor(max_workers=1)
 
         # We initialize VectorStore without a storage path as it now holds state in memory
         # and relies on GraphStorage for persistence via graph.json
@@ -110,7 +98,7 @@ class GraphStorage:
 
         self.graph_metadata: Dict[str, Any] = {
             "version": "1.0",
-            "graph_name": self.json_path.stem,
+            "graph_name": self._default_graph_name(),
         }
 
         # Event system (initialized lazily via setup_events())
@@ -120,6 +108,10 @@ class GraphStorage:
         self._system_listeners: List[Callable[[Event], None]] = []
 
         self.load()
+
+    def _default_graph_name(self) -> str:
+        """Return the backend-specific default graph name."""
+        return self._persistence_backend.default_graph_name()
 
     def _build_type_searchable_text(self) -> None:
         """Build a lookup of node type -> searchable text including localized labels."""
@@ -209,13 +201,16 @@ class GraphStorage:
             self._event_dispatcher.set_agent_delivery_callback(callback)
 
     def shutdown_events(self) -> None:
-        """Shutdown the event system gracefully."""
+        """Shutdown the event system and I/O executor gracefully."""
         if self._delivery_worker:
             self._delivery_worker.stop(wait=True)
             self._delivery_worker = None
 
         self._event_dispatcher = None
         self._events_enabled = False
+
+        # Shut down I/O executor and wait for pending saves
+        self._io_executor.shutdown(wait=True)
 
     def _emit_event(
         self,
@@ -348,36 +343,32 @@ class GraphStorage:
 
     def load(self) -> None:
         """
-        Load graph from JSON file.
+        Load graph from the configured persistence backend.
 
-        Thread-safe: Uses lock for in-memory updates and file lock for reading.
+        Thread-safe: Uses lock for in-memory updates.
         """
         with self._lock:
-            if not self.json_path.exists():
+            if not self._persistence_backend.exists():
                 print(f"No graph file found at {self.json_path}, creating new empty graph")
-                self.save()
+                # Wait for the initial file write to complete so callers can
+                # immediately open the file (e.g. creating a second storage instance).
+                self.save().result()
                 return
 
             try:
-                # Use file locking to prevent reading while another process writes
-                with open(self.json_path, 'r', encoding='utf-8') as f:
-                    _lock_file(f, exclusive=False)  # Shared lock for reading
-                    try:
-                        data = json.load(f)
-                    finally:
-                        _unlock_file(f)
+                data = self._persistence_backend.load_graph_data()
 
                 metadata = data.get('metadata') if isinstance(data, dict) else None
                 if isinstance(metadata, dict):
                     self.graph_metadata = {
                         "version": metadata.get("version", "1.0"),
-                        "graph_name": metadata.get("graph_name") or self.json_path.stem,
+                        "graph_name": metadata.get("graph_name") or self._default_graph_name(),
                         **{k: v for k, v in metadata.items() if k not in {"version", "graph_name"}},
                     }
                 else:
                     self.graph_metadata = {
                         "version": "1.0",
-                        "graph_name": self.json_path.stem,
+                        "graph_name": self._default_graph_name(),
                     }
 
                 # Clear existing data
@@ -417,13 +408,16 @@ class GraphStorage:
                 print(f"Error loading graph: {e}")
                 raise
 
-    def save(self) -> None:
+    def save(self) -> "Future[None]":
         """
-        Save graph to JSON file.
+        Save graph through the configured persistence backend.
+
+        Captures graph state while holding the lock, then offloads the actual
+        file I/O to a background thread to prevent blocking the event loop.
+        Returns the Future representing the background write — callers that
+        must know when the write completes can call .result() on it.
 
         Thread-safe: Uses lock for reading in-memory data.
-        Atomic: Writes to temp file first, then renames to prevent corruption.
-        File-locked: Uses OS-level locking to prevent concurrent writes.
         """
         with self._lock:
             data = {
@@ -432,54 +426,52 @@ class GraphStorage:
                 'metadata': {
                     **(self.graph_metadata or {}),
                     'version': (self.graph_metadata or {}).get('version', '1.0'),
-                    'graph_name': (self.graph_metadata or {}).get('graph_name', self.json_path.stem),
-                    'last_updated': datetime.utcnow().isoformat()
+                    'graph_name': (self.graph_metadata or {}).get('graph_name', self._default_graph_name()),
+                    'last_updated': datetime.now(timezone.utc).isoformat()
                 }
             }
+            node_count = len(self.nodes)
+            edge_count = len(self.edges)
 
-            # Create directory if it doesn't exist
-            self.json_path.parent.mkdir(parents=True, exist_ok=True)
+        # Offload blocking I/O to background thread to avoid blocking event loop.
+        # Returns the Future so callers that must wait (e.g. load()) can call .result().
+        return self._io_executor.submit(self._do_save_to_disk, data, node_count, edge_count)
 
-            # Atomic write: write to temp file, then rename
-            # This prevents corruption if the process is killed mid-write
-            temp_fd, temp_path = tempfile.mkstemp(
-                suffix='.json',
-                prefix='graph_',
-                dir=self.json_path.parent
-            )
+    def _do_save_to_disk(self, data: Dict[str, Any], node_count: int, edge_count: int) -> None:
+        """
+        Internal method: delegate serialized graph data to the persistence backend.
+        Runs in the background executor so file I/O doesn't block the event loop.
 
-            try:
-                with os.fdopen(temp_fd, 'w', encoding='utf-8') as f:
-                    _lock_file(f, exclusive=True)  # Exclusive lock for writing
-                    try:
-                        json.dump(data, f, indent=2, ensure_ascii=False)
-                        f.flush()
-                        os.fsync(f.fileno())  # Ensure data is written to disk
-                    finally:
-                        _unlock_file(f)
+        Exceptions are intentionally re-raised so the ThreadPoolExecutor stores
+        them in the returned Future. Callers that call .result() (e.g. load())
+        will then receive the exception rather than a silent no-op.
+        """
+        try:
+            self._persistence_backend.save_graph_data(data)
+            print(f"Saved {node_count} nodes and {edge_count} edges to {self.json_path}")
+        except Exception as e:
+            print(f"Error saving graph to disk: {e}")
+            raise
 
-                # Atomic rename (on most filesystems)
-                # On Windows, we need to remove the target first
-                if sys.platform == 'win32' and self.json_path.exists():
-                    os.replace(temp_path, self.json_path)
-                else:
-                    os.rename(temp_path, self.json_path)
+    def flush(self) -> None:
+        """
+        Wait for any pending background save operations to complete.
 
-                print(f"Saved {len(self.nodes)} nodes and {len(self.edges)} edges to {self.json_path}")
+        Useful in tests and in code that reloads from disk immediately
+        after mutating the graph.
 
-            except Exception as e:
-                # Clean up temp file on error
-                if os.path.exists(temp_path):
-                    os.unlink(temp_path)
-                raise e
-
+        Correctness relies on max_workers=1 (FIFO task ordering). The no-op
+        submitted here will only run after all previously submitted saves.
+        """
+        # Submit a no-op sentinel and block until it runs — drains the queue.
+        self._io_executor.submit(lambda: None).result()
 
     def get_graph_name(self) -> str:
         """Return configured graph name from graph metadata."""
         name = (self.graph_metadata or {}).get("graph_name")
         if isinstance(name, str) and name.strip():
             return name.strip()
-        return self.json_path.stem
+        return self._default_graph_name()
 
     def reload(self) -> None:
         """
@@ -489,6 +481,55 @@ class GraphStorage:
         """
         self.load()
 
+    def _score_node_match(self, node: "Node", query_lower: str) -> int:
+        """Score how well a node matches a query. Higher = better match.
+
+        Name matches use large base values (300 000–500 000) so that any
+        name-tier match always outranks secondary signals (type/tags/description)
+        regardless of how many secondary signals accumulate.  Secondary signals
+        use values up to ~1 850, well below the 100 000-point gap between tiers.
+        """
+        score = 0
+        name_lower = (node.name or "").lower()
+
+        # Primary tier — name matching (large gaps prevent secondary signal bleed-through)
+        if name_lower == query_lower:
+            score += 500_000
+        elif name_lower.startswith(query_lower):
+            score += 400_000
+        elif query_lower in name_lower:
+            score += 300_000
+
+        # Secondary — type matching (including localized labels)
+        type_key = str(node.type)
+        type_name_lower = type_key.lower()
+        type_text = self._type_searchable_text.get(type_key, type_name_lower)
+        if type_name_lower == query_lower:
+            score += 700
+        elif type_name_lower.startswith(query_lower):
+            score += 650
+        elif query_lower in type_text:
+            score += 600
+
+        # Secondary — tag matching
+        if node.tags:
+            tags_lower = [t.lower() for t in node.tags]
+            if query_lower in tags_lower:
+                score += 500
+            elif any(query_lower in t for t in tags_lower):
+                score += 450
+
+        # Secondary — subtype matching
+        if node.subtypes:
+            if any(query_lower in s.lower() for s in node.subtypes):
+                score += 400
+
+        # Secondary — description / summary matching (lowest)
+        if query_lower in (node.description or "").lower() or query_lower in (node.summary or "").lower():
+            score += 200
+
+        return score
+
     def search_nodes(
         self,
         query: str,
@@ -496,8 +537,10 @@ class GraphStorage:
         limit: int = 50
     ) -> List[Node]:
         """
-        Search nodes based on text query
-        Matches against name, description, summary, and tags.
+        Search nodes based on text query.
+        Matches against name, description, summary, tags, subtypes, and node type (including
+        localized labels). Results are ranked so that name matches rank above type matches,
+        which rank above description/tag matches.
         Empty query or '*' returns all nodes (subject to filtering and limit).
         """
         query_lower = query.lower().strip()
@@ -511,7 +554,6 @@ class GraphStorage:
             if node_types and node.type not in node_types:
                 continue
 
-            # Text matching including tags (if not matching all)
             if not match_all:
                 searchable_text = self._searchable_text_cache.get(node.id)
                 if searchable_text is None:
@@ -524,10 +566,10 @@ class GraphStorage:
 
             results.append(node)
 
-            if len(results) >= limit:
-                break
+        if not match_all:
+            results.sort(key=lambda n: self._score_node_match(n, query_lower), reverse=True)
 
-        return results
+        return results[:limit]
 
     def get_node(self, node_id: str) -> Optional[Node]:
         """Get a specific node"""
@@ -859,11 +901,19 @@ class GraphStorage:
 
             # Update allowed fields
             allowed_fields = {'name', 'description', 'summary', 'tags', 'subtypes', 'metadata'}
+            reserved_fields = {'id', 'type', 'embedding', 'created_at', 'updated_at'}
             for key, value in updates.items():
                 if key in allowed_fields:
                     setattr(node, key, value)
+            # Fold schema-defined extra fields (anything outside the base model) into metadata
+            extra = {k: v for k, v in updates.items()
+                     if k not in allowed_fields and k not in reserved_fields}
+            if extra:
+                meta = dict(node.metadata or {})
+                meta.update(extra)
+                node.metadata = meta
 
-            node.updated_at = datetime.utcnow()
+            node.updated_at = datetime.now(timezone.utc)
 
             # Update in graph
             self.graph.nodes[node_id]['data'] = node
@@ -1026,7 +1076,7 @@ class GraphStorage:
             total_nodes=len(self.nodes),
             total_edges=len(self.edges),
             nodes_by_type=nodes_by_type,
-            last_updated=datetime.utcnow()
+            last_updated=datetime.now(timezone.utc)
         )
 
     def get_subtypes_by_node_type(self, node_type: Optional[str] = None) -> Dict[str, List[str]]:
@@ -1161,6 +1211,59 @@ class GraphStorage:
             )
 
             return True
+
+    def delete_edges(
+        self,
+        edge_ids: List[str],
+        event_context: Optional[EventContext] = None,
+    ) -> DeleteEdgesResult:
+        """Delete edges by ID. Limit enforcement is the caller's responsibility."""
+        with self._lock:
+            deleted_edge_ids = []
+            edge_before_states: Dict[str, Dict[str, Any]] = {}
+
+            try:
+                for edge_id in edge_ids:
+                    edge = self.edges.get(edge_id)
+                    if edge is None:
+                        continue
+
+                    edge_before_states[edge_id] = edge.to_dict()
+
+                    try:
+                        self.graph.remove_edge(edge.source, edge.target, key=edge_id)
+                    except Exception:
+                        pass
+
+                    del self.edges[edge_id]
+                    deleted_edge_ids.append(edge_id)
+
+                self.save()
+
+                for edge_id in deleted_edge_ids:
+                    before_state = edge_before_states[edge_id]
+                    edge_type = before_state.get("type", "RELATES_TO")
+                    self._emit_event(
+                        event_type=EventType.EDGE_DELETE,
+                        entity_kind=EntityKind.EDGE,
+                        entity_id=edge_id,
+                        entity_type=edge_type,
+                        before=before_state,
+                        after=None,
+                        context=event_context,
+                    )
+
+                return DeleteEdgesResult(
+                    deleted_edge_ids=deleted_edge_ids,
+                    success=True,
+                    message=f"Deleted {len(deleted_edge_ids)} edges"
+                )
+            except Exception as e:
+                return DeleteEdgesResult(
+                    deleted_edge_ids=[],
+                    success=False,
+                    message=f"Error during edge deletion: {str(e)}"
+                )
 
     def add_edge(
         self,

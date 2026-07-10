@@ -21,9 +21,7 @@ Subscriptions are stored as nodes in the graph itself (type: `EventSubscription`
 
 ### Agent Nodes
 
-Agent nodes (type: `Agent`) store configuration for future AI agents. An Agent links to an EventSubscription that defines which events trigger the agent.
-
-**Note:** The agent runtime is NOT implemented - these nodes only store configuration for future functionality.
+Agent nodes (type: `Agent`) define AI agents that react to graph events. An Agent links to an EventSubscription that defines which mutations trigger it. Agents can also be triggered on a time-based schedule — see `docs/AGENT_SCHEDULING.md`.
 
 ### Event Context
 
@@ -232,8 +230,8 @@ MCP tools automatically set `event_origin` to "mcp" and accept optional session/
 ## Web UI
 
 Right-click on the graph canvas to access:
-- **"Skapa webhook-prenumeration"**: Create an EventSubscription node
-- **"Skapa agent"**: Create an Agent with its EventSubscription
+- **"Create webhook subscription"**: Creates an EventSubscription node
+- **"Create agent"**: Creates an Agent with its EventSubscription
 
 The web UI automatically generates a unique session ID per browser session.
 
@@ -267,7 +265,6 @@ storage.setup_events(enabled=True)
 ## Future Enhancements
 
 The following are planned but not implemented:
-- Agent runtime for executing code in response to events
 - Persistent event queue with durability guarantees
 - Advanced filtering with query expressions
 - Event replay and debugging tools

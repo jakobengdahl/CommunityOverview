@@ -33,6 +33,7 @@ class MockLLMProvider:
         self.mock_text_response: str = "Mock response from LLM"
         self.call_count = 0
         self.received_messages: List[List[Dict]] = []
+        self.received_system_prompts: List[str] = []
 
     def create_completion(
         self,
@@ -43,6 +44,7 @@ class MockLLMProvider:
     ) -> LLMResponse:
         """Return mock response with optional tool calls."""
         self.received_messages.append(messages)
+        self.received_system_prompts.append(system_prompt)
         self.call_count += 1
 
         # First call returns tool calls, subsequent calls return text
@@ -71,6 +73,7 @@ class MockLLMProvider:
         self.mock_text_response = "Mock response from LLM"
         self.call_count = 0
         self.received_messages = []
+        self.received_system_prompts = []
 
 
 class MockSentenceTransformer:
@@ -83,20 +86,22 @@ class MockSentenceTransformer:
 
     def encode(self, texts, convert_to_numpy=True, show_progress_bar=False):
         """Generate mock embeddings based on text hash."""
-        if isinstance(texts, str):
+        is_single = isinstance(texts, str)
+        if is_single:
             texts = [texts]
         embeddings = []
         for text in texts:
             self._np.random.seed(abs(hash(text)) % (2**32))
             embedding = self._np.random.rand(384).astype(self._np.float32)
             embeddings.append(embedding)
-        return self._np.array(embeddings)
+        result = self._np.array(embeddings)
+        return result[0] if is_single else result
 
 
 @pytest.fixture(autouse=True)
 def mock_embedding_model():
     """Mock the embedding model to avoid network calls."""
-    import graph_core.vector_store as vs
+    import backend.core.vector_store as vs
     original_ensure = vs._ensure_sentence_transformers
 
     def mock_ensure():
@@ -152,7 +157,7 @@ def chat_service(graph_service, mock_llm_provider):
     but the GraphService is real (in-memory).
     """
     # Patch BEFORE creating ChatService so ChatProcessor uses mock
-    with patch('chat_logic.create_provider', return_value=mock_llm_provider):
+    with patch('backend.chat_logic.create_provider', return_value=mock_llm_provider):
         with patch.dict(os.environ, {'ANTHROPIC_API_KEY': 'test-key'}):
             service = ChatService(graph_service)
             service._processor.provider_type = "mock"
@@ -220,7 +225,7 @@ def fastapi_test_client(graph_service, mock_llm_provider):
     from fastapi.testclient import TestClient
 
     # Patch BEFORE creating ChatService
-    with patch('chat_logic.create_provider', return_value=mock_llm_provider):
+    with patch('backend.chat_logic.create_provider', return_value=mock_llm_provider):
         with patch.dict(os.environ, {'ANTHROPIC_API_KEY': 'test-key'}):
             app = FastAPI()
 

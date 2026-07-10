@@ -1,7 +1,7 @@
 import { useState, useEffect, useRef, useCallback } from 'react';
 import { Search } from 'react-bootstrap-icons';
 import useGraphStore from '../store/graphStore';
-import { ICON_MAP, COLOR_MAP } from './FloatingToolbar';
+import { resolveIcon, COLOR_MAP } from './FloatingToolbar';
 import * as api from '../services/api';
 import './FloatingSearch.css';
 import { useI18n } from '../i18n';
@@ -18,6 +18,9 @@ function FloatingSearch() {
     federationDepth,
     stats,
     schema,
+    guideSearchInput,
+    clearGuideSearchInput,
+    requestCloseMenus,
   } = useGraphStore();
 
   const [query, setQuery] = useState('');
@@ -109,6 +112,27 @@ function FloatingSearch() {
     document.addEventListener('keydown', handleGlobalKey);
     return () => document.removeEventListener('keydown', handleGlobalKey);
   }, []);
+
+  // Guide: animate typing into search input
+  useEffect(() => {
+    if (!guideSearchInput) return;
+    const { text, animated } = guideSearchInput;
+    clearGuideSearchInput();
+
+    if (!animated) {
+      setQuery(text);
+      return;
+    }
+
+    let i = 0;
+    setQuery('');
+    const interval = setInterval(() => {
+      i++;
+      setQuery(text.slice(0, i));
+      if (i >= text.length) clearInterval(interval);
+    }, 30);
+    return () => clearInterval(interval);
+  }, [guideSearchInput]); // eslint-disable-line react-hooks/exhaustive-deps
 
   const selectResult = useCallback(async (node) => {
     // SavedView: clear canvas and load the saved view's nodes with positions and edges
@@ -225,7 +249,7 @@ function FloatingSearch() {
   };
 
   return (
-    <div className="floating-search" ref={containerRef}>
+    <div className="floating-search" id="guide-target-search" ref={containerRef}>
       <div className="floating-search-bar">
         <Search size={18} className="floating-search-icon" />
         <input
@@ -237,6 +261,7 @@ function FloatingSearch() {
           onChange={(e) => setQuery(e.target.value)}
           onKeyDown={handleKeyDown}
           onFocus={() => {
+            requestCloseMenus();
             if (results.length > 0) setShowDropdown(true);
           }}
         />
@@ -251,7 +276,7 @@ function FloatingSearch() {
       {showDropdown && results.length > 0 && (
         <div className="floating-search-dropdown">
           {results.map((node, index) => {
-            const Icon = ICON_MAP[node.type];
+            const Icon = resolveIcon(node.type, schema);
             const color = COLOR_MAP[node.type] || '#9CA3AF';
             const isInViz = vizNodes.some(n => n.id === node.id) && !hiddenNodeIds.includes(node.id);
 

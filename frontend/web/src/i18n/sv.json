@@ -85,6 +85,8 @@
     "ignore_origins_hint": "För loopskydd: events från dessa origins skickas inte",
     "cancel": "Avbryt",
     "submit": "Skapa prenumeration",
+    "submit_edit": "Spara ändringar",
+    "title_edit": "Redigera webhook-prenumeration",
     "validation_error": "Namn och webhook-URL krävs",
     "webhook_description": "Webhook-prenumeration: {name}",
     "webhook_summary": "Lyssnar på {events} events"
@@ -99,7 +101,9 @@
   "notifications": {
     "showing_nodes": "Visar {count} noder",
     "subscription_created": "Prenumeration \"{name}\" skapad",
+    "subscription_updated": "Prenumeration \"{name}\" uppdaterad",
     "subscription_error": "Kunde inte skapa prenumeration",
+    "subscription_update_error": "Kunde inte uppdatera prenumeration",
     "saved_view_description": "Sparad vy: {name}",
     "saved_view_summary": "Innehåller {count} noder"
   },
@@ -107,10 +111,63 @@
     "export_graph": "Exportera graf",
     "export_success": "Grafen exporterad",
     "export_error": "Kunde inte exportera grafen",
+    "view_section": "Vy",
+    "show_minimap": "Visa minimapp",
     "language_section": "Språk",
     "language_en": "English",
     "language_sv": "Svenska",
     "logout": "Logga ut"
+  },
+  "sessions": {
+    "title": "Sessioner",
+    "close": "Stäng menyn",
+    "new_session": "Starta ny session",
+    "new_session_started": "Ny session startad",
+    "search_sessions": "Sök bland tidigare sessioner",
+    "search_placeholder": "Sök på namn eller ID...",
+    "connect_session": "Anslut till session (via ID)",
+    "connect_session_title": "Anslut till session",
+    "connect_session_label": "Sessions-ID",
+    "connect": "Anslut",
+    "invalid_session_id": "Ogiltigt sessions-ID — förväntat format 1234-5678",
+    "recent_sessions": "Senaste sessioner",
+    "no_sessions": "Inga tidigare sessioner ännu",
+    "no_matches": "Inga sessioner matchar sökningen",
+    "rename_session": "Namnge session",
+    "rename_session_title": "Namnge session",
+    "session_name_label": "Sessionsnamn",
+    "delete_session": "Ta bort session",
+    "delete_session_title": "Ta bort session",
+    "delete_session_message": "Ta bort den här sessionen? Innehållet tas bort för alla. Detta kan inte ångras.",
+    "delete_session_message_multi": "{count} andra användare är anslutna till den här sessionen. Ta bort den ändå? Innehållet tas bort för alla och kan inte ångras.",
+    "delete_confirm": "Ta bort",
+    "session_deleted": "Sessionen togs bort — startade en ny",
+    "session_deleted_remote": "Sessionen togs bort av en annan användare — startade en ny",
+    "settings": "Inställningar"
+  },
+  "settings": {
+    "title": "Inställningar",
+    "close": "Stäng inställningar",
+    "nodes": "Noder",
+    "edges": "Kanter",
+    "nodes_by_type": "Noder per typ",
+    "details": "Detaljer",
+    "admin_section": "Admin",
+    "presence_section": "Din närvaro",
+    "display_name": "Visningsnamn",
+    "display_name_placeholder": "Gäst",
+    "display_name_hint": "Visas för andra som samarbetar i samma session. Börjar gälla nästa gång du öppnar eller byter session."
+  },
+  "presence": {
+    "you": "Du",
+    "collaborators": "Personer i den här sessionen"
+  },
+  "header": {
+    "title": "Community Graph View",
+    "menu": "Meny",
+    "session_id_tooltip": "Sessions-ID — dela med en extern AI för att ansluta den till detta fönster",
+    "clear_canvas_tooltip": "Rensa canvas — ta bort alla noder och kanter (eller tryck Esc två gånger)",
+    "clear_canvas_aria": "Rensa canvas"
   },
   "experts": {
     "title": "Expert-agenter",
@@ -121,5 +178,37 @@
     "depth_tooltip": "Djupnivåer styrs av installationens konfiguration",
     "depth_indicator": "Djup {current}/{max}",
     "depth_indicator_tooltip": "Aktuell federerad söknivå och högsta tillåtna nivå"
+  },
+  "guide": {
+    "title": "Guide",
+    "next": "Nästa",
+    "close": "Stäng",
+    "cancel": "Avbryt guide",
+    "loading": "Laddar...",
+    "step_counter": "Steg {current} av {total}"
+  },
+  "context_menu": {
+    "edit": "Redigera",
+    "hide": "Dölj",
+    "expand": "Hitta relaterade noder",
+    "delete": "Ta bort",
+    "nodes_selected": "{count} noder markerade",
+    "show_only": "Visa enbart dessa",
+    "select_same_type": "Markera alla noder av samma sort",
+    "hide_all": "Dölj alla",
+    "delete_all": "Ta bort alla",
+    "change_type": "Ändra typ",
+    "general_connection": "Generell koppling",
+    "add_note": "Lägg till anteckning",
+    "add_label": "Lägg till etikett",
+    "add_arrow": "Lägg till pil",
+    "annotation_color": "Färg",
+    "note_placeholder": "Anteckning",
+    "label_placeholder": "Etikett"
+  },
+  "common": {
+    "saving": "Sparar...",
+    "save": "Spara",
+    "cancel": "Avbryt"
   }
 }

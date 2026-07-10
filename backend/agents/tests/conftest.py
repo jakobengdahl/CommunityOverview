@@ -50,6 +50,7 @@ class MockGraphService:
     def __init__(self):
         self.search_calls = []
         self.update_calls = []
+        self.delete_edges_calls = []
 
     def search_graph(self, query: str = "", **kwargs) -> Dict[str, Any]:
         """Mock search returning empty results."""
@@ -60,6 +61,11 @@ class MockGraphService:
         """Mock update node."""
         self.update_calls.append({"node_id": node_id, **kwargs})
         return {"success": True, "node_id": node_id}
+
+    def delete_edges(self, edge_ids, **kwargs) -> Dict[str, Any]:
+        """Mock bulk delete edges."""
+        self.delete_edges_calls.append({"edge_ids": edge_ids, **kwargs})
+        return {"success": True, "deleted_edge_ids": edge_ids}
 
 
 @pytest.fixture
