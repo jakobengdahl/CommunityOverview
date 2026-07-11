@@ -380,6 +380,20 @@ cluster. Decompose them behavior-preservingly, one slice per PR.
   flags); update README/SSPCloud docs.
 - **Effort:** S
 
+### C7. Commit a root lockfile so frontend CI is reproducible
+
+- **Problem:** no `package-lock.json` is tracked for the npm workspaces, so the
+  frontend CI job introduced in A1 uses `npm install` and resolves fresh
+  transitive versions on every run. This defeats the reproducibility the safety
+  net is meant to provide — a green run does not guarantee the next run installs
+  the same tree, and it prevents `setup-node`'s npm cache (which keys off a
+  lockfile) from working. Discovered while implementing A1 (2026-07-11).
+- **Proposed change:** generate and commit a root `package-lock.json`, switch the
+  frontend CI job from `npm install` to `npm ci`, and enable `cache: 'npm'` on
+  `setup-node`. Verify the committed lockfile installs the same versions the
+  suite currently passes on.
+- **Effort:** S
+
 ---
 
 ## Priority 4 — documentation and knowledge structure
@@ -453,7 +467,7 @@ summary instead.
 | # | Item | Effort | Depends on | Status |
 |---|------|--------|-----------|--------|
 | 1 | A2 ML deps out of base requirements | M | — | done (PR #220) |
-| 2 | A1 full test suite in CI | M | A2 | open |
+| 2 | A1 full test suite in CI | M | A2 | done (PR #221) |
 | 3 | A4 protect `dev` + auto-merge | XS | A1 | open *(owner action)* |
 | 4 | A3 session-ID hardening, step 1 (rate limit + CORS) | S–M | — | open |
 | 5 | C1 stale data removal + script fix | S | — | open |
@@ -471,6 +485,7 @@ summary instead.
 | 17 | D1 docs realignment + index | S–M | B3, C1 | open |
 | 18 | D2 CLAUDE.md truth verification pass | XS | A1, A2, A4 | open |
 | 19 | B4 service.py / storage.py split | L | A1, next feature touching them | open |
+| 20 | C7 commit root lockfile for reproducible frontend CI | S | A1 | open |
 
 ### How a session updates this document
 
@@ -491,6 +506,15 @@ summary instead.
    same branch.
 
 ## Completed
+
+- **[2026-07-11] A1 — full test suite in CI (PR #221).** Split the single
+  `test` job into three attributable jobs: `backend-tests` (`pytest backend/ -q`
+  on the base ML-free install, mock embedding path — no network download),
+  `frontend-tests` (`npm run test:unit` across web/widget/canvas), and
+  `gateway-tests` (the OAuth gateway suite, isolated with its own pins). The
+  build/publish job now depends on all three. Updated CLAUDE.md's Test section
+  and added a CI section to `backend/DEVELOPMENT.md`. Frontend job uses
+  `npm install` pending a committed lockfile — logged as new item C7.
 
 - **[2026-07-11] A2 — ML deps out of base requirements (PR #220).** Moved
   `torch` + `sentence-transformers` and the pytorch extra index into

@@ -292,6 +292,22 @@ npm test
 ./scripts/test-e2e.sh
 ```
 
+### Continuous Integration
+
+`.github/workflows/ci.yml` runs three test jobs on every push and pull request,
+kept separate so a failure points at the layer that broke:
+
+- **Backend tests** — `pytest backend/ -q` on the base (ML-free) requirements.
+  Semantic search and chat use their mock/fallback paths, so no embedding model
+  is downloaded in CI.
+- **Frontend tests** — `npm run test:unit` across the web, widget, and canvas
+  workspaces. Playwright e2e is intentionally excluded from the required path.
+- **Gateway tests** — the MCP OAuth gateway suite, run in isolation with its own
+  pinned dependencies.
+
+The Docker build/publish job runs only on `preview`/`main` pushes and depends on
+all three test jobs.
+
 ## API Reference
 
 ### REST API Endpoints
