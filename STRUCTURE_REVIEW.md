@@ -441,29 +441,54 @@ the review session.
 
 ---
 
-## Suggested execution order
+## Execution order and status
 
-| # | Item | Effort | Depends on |
-|---|------|--------|-----------|
-| 1 | A2 ML deps out of base requirements | M | — |
-| 2 | A1 full test suite in CI | M | A2 |
-| 3 | A4 protect `dev` + auto-merge | XS | A1 (owner action) |
-| 4 | A3 session-ID hardening, step 1 (rate limit + CORS) | S–M | — |
-| 5 | C1 stale data removal + script fix | S | — |
-| 6 | B3 home the flat backend modules | M | A1 |
-| 7 | B2 decompose server.py | M | A1 |
-| 8 | B1 decompose App.jsx (slice 1: shared-session hook) | M | — |
-| 9 | C2 lint gates | M | A1 |
-| 10 | A3 step 2 (stream token scheme) | M | A3 step 1 |
-| 11 | B1 remaining slices | M×2 | B1 slice 1 |
-| 12 | B5 GraphCanvas decomposition | M | — |
-| 13 | C3 HTTP client + dependency policy | S–M | — |
-| 14 | C4 Node 18 → 20 build image | XS | — |
-| 15 | C5 security scanning in CI | S | A1 |
-| 16 | C6 start-script consolidation | S | — |
-| 17 | D1 docs realignment + index | S–M | B3, C1 |
-| 18 | D2 CLAUDE.md truth verification pass | XS | A1, A2, A4 |
-| 19 | B4 service.py / storage.py split | L | A1, next feature touching them |
+This table is the source of truth for progress. A session working through this
+backlog updates the **Status** column in the same PR that implements the item:
+`open` → `in progress (slice X/Y, PR #N)` → `done (PR #N)`. Items marked
+*(owner action)* are repo-settings changes only Jakob can make — a session may
+prepare and document them but must not block on them; note them in the session
+summary instead.
+
+| # | Item | Effort | Depends on | Status |
+|---|------|--------|-----------|--------|
+| 1 | A2 ML deps out of base requirements | M | — | open |
+| 2 | A1 full test suite in CI | M | A2 | open |
+| 3 | A4 protect `dev` + auto-merge | XS | A1 | open *(owner action)* |
+| 4 | A3 session-ID hardening, step 1 (rate limit + CORS) | S–M | — | open |
+| 5 | C1 stale data removal + script fix | S | — | open |
+| 6 | B3 home the flat backend modules | M | A1 | open |
+| 7 | B2 decompose server.py | M | A1 | open |
+| 8 | B1 decompose App.jsx (slice 1: shared-session hook) | M | — | open |
+| 9 | C2 lint gates | M | A1 | open |
+| 10 | A3 step 2 (stream token scheme) | M | A3 step 1 | open |
+| 11 | B1 remaining slices | M×2 | B1 slice 1 | open |
+| 12 | B5 GraphCanvas decomposition | M | — | open |
+| 13 | C3 HTTP client + dependency policy | S–M | — | open |
+| 14 | C4 Node 18 → 20 build image | XS | — | open |
+| 15 | C5 security scanning in CI | S | A1 | open |
+| 16 | C6 start-script consolidation | S | — | open |
+| 17 | D1 docs realignment + index | S–M | B3, C1 | open |
+| 18 | D2 CLAUDE.md truth verification pass | XS | A1, A2, A4 | open |
+| 19 | B4 service.py / storage.py split | L | A1, next feature touching them | open |
+
+### How a session updates this document
+
+1. Pick the first `open` item (top to bottom) whose dependencies are `done`,
+   skipping *(owner action)* rows. Before starting, check
+   `git log --oneline origin/dev -20` to confirm the item hasn't already been
+   addressed.
+2. Implement it per its *Session brief*, following the Standard Development
+   Workflow in `CLAUDE.md` (branch → tests → PR to `dev` → review loop → merge).
+3. In the same PR, update this file: set the Status cell, and on completion
+   move a one-line summary (date, PR number, what changed) to *Completed*
+   below.
+4. If reality has drifted from what an item describes (already fixed, wrong
+   assumption, changed priorities), correct the item text rather than forcing
+   the described change — this document must stay true.
+5. New structural findings discovered en route: add them as new rows/items
+   (or `SMALL_FIXES.md` entries if they are small bugs), never fix them in the
+   same branch.
 
 ## Completed
 
