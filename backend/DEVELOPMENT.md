@@ -304,6 +304,9 @@ The default API prefix is `/api` (configurable via `API_PREFIX`).
 | POST | `/api/edges` | Add edges |
 | PATCH | `/api/edges/{id}` | Update an edge |
 | DELETE | `/api/edges/{id}` | Delete an edge |
+| GET | `/api/history` | Recent graph mutation history (newest first; `limit`, `offset`) |
+| GET | `/api/nodes/{id}/history` | Mutation history for a single node |
+| GET | `/api/edges/{id}/history` | Mutation history for a single edge |
 | GET | `/api/stats` | Get graph statistics |
 | POST | `/api/similar` | Find similar nodes |
 | POST | `/api/similar/batch` | Batch similarity search |

@@ -362,6 +362,46 @@ def _register_edge_crud_endpoints(router: APIRouter, service: GraphService) -> N
         return result
 
 
+def _register_history_endpoints(router: APIRouter, service: GraphService) -> None:
+    @router.get("/history")
+    async def get_graph_history(
+        request: Request,
+        limit: int = Query(50, ge=1, le=500, description="Max entries to return"),
+        offset: int = Query(0, ge=0, description="Number of entries to skip"),
+    ) -> Dict[str, Any]:
+        """Get recent graph mutation history (newest first)."""
+        with use_request_authorization(headers=request.headers):
+            result = service.get_graph_history(limit=limit, offset=offset)
+        _raise_for_access_denied(result)
+        return result
+
+    @router.get("/nodes/{node_id}/history")
+    async def get_node_history(
+        node_id: str,
+        request: Request,
+        limit: int = Query(50, ge=1, le=500, description="Max entries to return"),
+        offset: int = Query(0, ge=0, description="Number of entries to skip"),
+    ) -> Dict[str, Any]:
+        """Get mutation history for a single node (newest first)."""
+        with use_request_authorization(headers=request.headers):
+            result = service.get_node_history(node_id, limit=limit, offset=offset)
+        _raise_for_access_denied(result)
+        return result
+
+    @router.get("/edges/{edge_id}/history")
+    async def get_edge_history(
+        edge_id: str,
+        request: Request,
+        limit: int = Query(50, ge=1, le=500, description="Max entries to return"),
+        offset: int = Query(0, ge=0, description="Number of entries to skip"),
+    ) -> Dict[str, Any]:
+        """Get mutation history for a single edge (newest first)."""
+        with use_request_authorization(headers=request.headers):
+            result = service.get_edge_history(edge_id, limit=limit, offset=offset)
+        _raise_for_access_denied(result)
+        return result
+
+
 def _register_metadata_endpoints(router: APIRouter, service: GraphService) -> None:
     @router.get("/stats")
     async def get_graph_stats(request: Request) -> Dict[str, Any]:
@@ -654,6 +694,7 @@ def create_rest_router(service: GraphService, prefix: str = "", session_manager=
     _register_similarity_endpoints(router, service)
     _register_node_crud_endpoints(router, service)
     _register_edge_crud_endpoints(router, service)
+    _register_history_endpoints(router, service)
     _register_metadata_endpoints(router, service)
     _register_views_endpoints(router, service)
     _register_export_endpoints(router, service)

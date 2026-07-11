@@ -1141,6 +1141,67 @@ class GraphService:
         stats["federation"] = federation_info
         return stats
 
+    # ==================== History Operations ====================
+
+    def get_graph_history(self, limit: int = 50, offset: int = 0) -> Dict[str, Any]:
+        """Return recent graph mutation history (newest first)."""
+        decision = self._evaluate_graph_access(action=GRAPH_ACTION_READ, target="get_graph_history")
+        if not decision.allowed:
+            return self._build_access_denied_result(
+                action=GRAPH_ACTION_READ,
+                target="get_graph_history",
+                decision=decision,
+            )
+
+        entries = self._storage.get_recent_history(limit=limit, offset=offset)
+        return {
+            "success": True,
+            "entries": entries,
+            "count": len(entries),
+            "limit": limit,
+            "offset": offset,
+        }
+
+    def get_node_history(self, node_id: str, limit: int = 50, offset: int = 0) -> Dict[str, Any]:
+        """Return mutation history for a single node (newest first)."""
+        decision = self._evaluate_graph_access(action=GRAPH_ACTION_READ, target="get_node_history")
+        if not decision.allowed:
+            return self._build_access_denied_result(
+                action=GRAPH_ACTION_READ,
+                target="get_node_history",
+                decision=decision,
+            )
+
+        entries = self._storage.get_node_history(node_id, limit=limit, offset=offset)
+        return {
+            "success": True,
+            "node_id": node_id,
+            "entries": entries,
+            "count": len(entries),
+            "limit": limit,
+            "offset": offset,
+        }
+
+    def get_edge_history(self, edge_id: str, limit: int = 50, offset: int = 0) -> Dict[str, Any]:
+        """Return mutation history for a single edge (newest first)."""
+        decision = self._evaluate_graph_access(action=GRAPH_ACTION_READ, target="get_edge_history")
+        if not decision.allowed:
+            return self._build_access_denied_result(
+                action=GRAPH_ACTION_READ,
+                target="get_edge_history",
+                decision=decision,
+            )
+
+        entries = self._storage.get_edge_history(edge_id, limit=limit, offset=offset)
+        return {
+            "success": True,
+            "edge_id": edge_id,
+            "entries": entries,
+            "count": len(entries),
+            "limit": limit,
+            "offset": offset,
+        }
+
     def list_node_types(self) -> Dict[str, Any]:
         """
         List all allowed node types according to the schema config.
