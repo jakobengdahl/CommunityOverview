@@ -469,7 +469,7 @@ summary instead.
 | 1 | A2 ML deps out of base requirements | M | — | done (PR #220) |
 | 2 | A1 full test suite in CI | M | A2 | done (PR #221) |
 | 3 | A4 protect `dev` + auto-merge | XS | A1 | open *(owner action)* |
-| 4 | A3 session-ID hardening, step 1 (rate limit + CORS) | S–M | — | open |
+| 4 | A3 session-ID hardening, step 1 (rate limit + CORS) | S–M | — | done (PR #222) |
 | 5 | C1 stale data removal + script fix | S | — | open |
 | 6 | B3 home the flat backend modules | M | A1 | open |
 | 7 | B2 decompose server.py | M | A1 | open |
@@ -506,6 +506,16 @@ summary instead.
    same branch.
 
 ## Completed
+
+- **[2026-07-11] A3 step 1 — session-id lookup throttle + same-origin CORS
+  default (PR #222).** Added a per-source token bucket
+  (`SessionManager.check_lookup_rate`, 60 burst + 2/s, keyed on client address)
+  on the auth-bypassed `GET /api/sessions/{id}` and SSE stream-handshake
+  endpoints, returning `429` when exhausted — the check runs before the
+  never-returning SSE generator starts. Changed the CORS default from `*` to no
+  cross-origin access (unset `CORS_ALLOWED_ORIGINS` → same-origin only). Updated
+  `MULTI_USER_SESSIONS_DESIGN.md` §3.9. Step 2 (high-entropy per-session stream
+  token, row 10) remains open.
 
 - **[2026-07-11] A1 — full test suite in CI (PR #221).** Split the single
   `test` job into three attributable jobs: `backend-tests` (`pytest backend/ -q`

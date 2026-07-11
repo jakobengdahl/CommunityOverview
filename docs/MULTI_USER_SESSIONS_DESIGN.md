@@ -258,6 +258,18 @@ transition and removed in the final step.
 - Session IDs remain unguessable enough for the core's trust model
   (`crypto.getRandomValues`, 10^8 space) — acceptable for open deployments already
   exposing connect-by-ID; SaaS adds real authorization.
+  - **Brute-force throttle (hardening).** The 10^8 space is only ~26.6 bits, so
+    the auth-bypassed lookup endpoints (`GET /api/sessions/{id}` and the SSE
+    stream handshake) apply a per-source token bucket
+    (`SessionManager.check_lookup_rate`, 60 burst + 2/s) keyed on the real client
+    IP and return `429` when exhausted. Normal open/reconnect traffic stays far
+    under budget; an attacker is capped at ~2 guesses/second, turning a full
+    enumeration into years of effort. Behind a reverse proxy set
+    `TRUSTED_PROXY_HOPS` (Cloud Run: `1`) so the key is derived from
+    `X-Forwarded-For` (counted from the right, spoof-resistant) instead of
+    collapsing to the proxy address — one shared bucket for the whole internet.
+    A high-entropy per-session stream token (so the short id is only a join code)
+    is the planned follow-up.
 - All new endpoints respect the existing optional HTTP Basic Auth.
   - **Resolved (step 4, alternative A):** the CRUD/ops endpoints honour Basic
     Auth via request headers, but a browser `EventSource` cannot send an
@@ -265,6 +277,10 @@ transition and removed in the final step.
     middleware — protected instead by the unguessable session id, the same
     rationale as the legacy `/sessions/{id}/stream` bypass. Only the stream is
     exempt; the fetch-reachable CRUD/ops endpoints stay guarded.
+- CORS defaults to same-origin only. `CORS_ALLOWED_ORIGINS` is unset by default,
+  which now means *no* cross-origin access rather than a `*` wildcard — an
+  operator opts specific origins (or `*`) in explicitly. This stops any website
+  from driving an auth-bypassed instance from a victim's browser.
 
 ## 4. Out of scope for the open core (SaaS features)
 

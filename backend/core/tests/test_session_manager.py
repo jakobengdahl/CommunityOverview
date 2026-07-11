@@ -81,6 +81,16 @@ class TestApplyOps:
         with pytest.raises(RateLimited):
             await mgr.apply_ops(s.id, "c1", 0, [{"op": "nodes_added", "node_ids": ["c"]}])
 
+    async def test_lookup_rate_limit_throttles_per_key(self):
+        """Session-id lookups are throttled per source and refill over time."""
+        mgr = _manager(lookup_bucket_capacity=2, lookup_refill_per_sec=0)
+        mgr.check_lookup_rate("1.2.3.4")
+        mgr.check_lookup_rate("1.2.3.4")
+        with pytest.raises(RateLimited):
+            mgr.check_lookup_rate("1.2.3.4")
+        # A different source has its own budget.
+        mgr.check_lookup_rate("5.6.7.8")
+
     async def test_invalid_op_raises_operror(self):
         mgr = _manager()
         s = mgr.create_session()

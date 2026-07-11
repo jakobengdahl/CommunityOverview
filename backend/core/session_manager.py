@@ -44,6 +44,16 @@ _DEFAULT_BUCKET_CAPACITY = 200.0
 _DEFAULT_BUCKET_REFILL_PER_SEC = 100.0
 _DEFAULT_MAX_OP_BATCH_BYTES = 256 * 1024
 
+# The session-lookup endpoints (GET /api/sessions/{id} and the SSE stream
+# handshake) bypass Basic Auth and are guarded only by the session id, whose
+# DDDD-DDDD shape is a 10^8 space (~26.6 bits — below credential strength). A
+# per-source token bucket bounds guess throughput so brute-forcing that space is
+# infeasible, while normal open/reconnect traffic (a few lookups per session)
+# stays well under budget. 60 burst + 2/s sustained caps an attacker at ~2
+# guesses/second, turning a full enumeration into years of effort.
+_DEFAULT_LOOKUP_BUCKET_CAPACITY = 60.0
+_DEFAULT_LOOKUP_REFILL_PER_SEC = 2.0
+
 
 class SessionNotFound(Exception):
     pass
@@ -99,6 +109,8 @@ class SessionManager:
         max_op_batch_bytes: int = _DEFAULT_MAX_OP_BATCH_BYTES,
         bucket_capacity: float = _DEFAULT_BUCKET_CAPACITY,
         bucket_refill_per_sec: float = _DEFAULT_BUCKET_REFILL_PER_SEC,
+        lookup_bucket_capacity: float = _DEFAULT_LOOKUP_BUCKET_CAPACITY,
+        lookup_refill_per_sec: float = _DEFAULT_LOOKUP_REFILL_PER_SEC,
     ) -> None:
         self.store = store
         self.bus = event_bus or InProcessEventBus()
@@ -108,7 +120,19 @@ class SessionManager:
         self._max_sessions = max_sessions
         self._max_op_batch_bytes = max_op_batch_bytes
         self._bucket = _TokenBucket(bucket_capacity, bucket_refill_per_sec)
+        self._lookup_bucket = _TokenBucket(lookup_bucket_capacity, lookup_refill_per_sec)
         self._locks: Dict[str, asyncio.Lock] = {}
+
+    def check_lookup_rate(self, client_key: str) -> None:
+        """Throttle unauthenticated session-id lookups by source.
+
+        Consumes one token from ``client_key``'s bucket, raising ``RateLimited``
+        when the source has exhausted its budget. Called by the auth-bypassed
+        ``GET /api/sessions/{id}`` and SSE stream-handshake endpoints so the
+        short session id cannot be brute-forced (see the bucket sizing note).
+        """
+        if not self._lookup_bucket.consume(client_key, 1.0):
+            raise RateLimited()
 
     @property
     def max_op_batch_bytes(self) -> int:

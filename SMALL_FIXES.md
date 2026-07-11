@@ -21,6 +21,40 @@ Effort scale: XS = single-line fix · S = up to ~30 lines / one file · M = mult
 
 ## Open
 
+### [2026-07-11] Session-lookup `429` on the SSE handshake can leave the EventSource dead
+- **File(s):** `frontend/web/src/services/sessionSyncClient.js:460` (`connect`/`onerror`)
+- **Context:** Discovered during `claude/structure-backlog-next-e9w7tx` (STRUCTURE_REVIEW A3 step 1 review)
+- **Issue:** The stream handshake can now return `429` (lookup rate limit). Per
+  the WHATWG spec a non-2xx *initial* EventSource response fails the connection
+  and does **not** auto-reconnect (only a drop of an already-open 200 stream
+  does). `onerror` only sets `_ready = false` and relies on native reconnect, so
+  a handshake `429` leaves a dead stream until a manual page reload. Low impact
+  in practice — per-client keying (60 burst + 2/s) means only an abusive client
+  hits it — but the client should schedule a backoff reconnect when the handshake
+  is rejected rather than assuming the browser recovers.
+- **Effort:** S
+
+### [2026-07-11] `_TokenBucket` per-key state grows unbounded
+- **File(s):** `backend/core/session_manager.py:81` (`_TokenBucket._tokens`/`._last`)
+- **Context:** Discovered during `claude/structure-backlog-next-e9w7tx` (STRUCTURE_REVIEW A3 step 1 review)
+- **Issue:** The token-bucket dicts are never evicted. The ops bucket is keyed on
+  `client_id` (bounded by live sessions), but the new lookup bucket is keyed on
+  client IP — an attacker rotating source IPs both defeats the per-IP limit and
+  inflates the dicts without bound (memory pressure). Add idle eviction or an LRU
+  size cap. (The per-IP-rotation weakness itself is inherent to IP rate limiting;
+  A3 step 2's high-entropy stream token is the real remedy.)
+- **Effort:** S
+
+### [2026-07-11] Legacy `/sessions/{id}/stream` MCP-push channel is auth-bypassed but not rate-limited
+- **File(s):** `backend/api_host/server.py:605` (`/sessions/{session_id}/stream`), bypass at `server.py:366`
+- **Context:** Discovered during `claude/structure-backlog-next-e9w7tx` (STRUCTURE_REVIEW A3 step 1 review)
+- **Issue:** A3 step 1 throttles the new `/api/sessions` lookup endpoints but the
+  legacy visualization-push channel exposes the same `get_or_create`/enumeration
+  oracle over the identical `\d{4}-\d{4}` space with no `check_lookup_rate`. It is
+  slated for removal (design §3.8); until then it is the same weakness left
+  unthrottled. Apply the same lookup rate limit, or prioritise its removal.
+- **Effort:** S
+
 ### [2026-07-11] `EditEdgeDialog` uses hardcoded English strings instead of i18n
 - **File(s):** `frontend/web/src/components/EditEdgeDialog.jsx` (`Edit Connection`, `Connection`, `Type`, `Label`, `Delete`, `Cancel`, `Save`, placeholder text)
 - **Context:** Discovered during `claude/graph-history-ui`

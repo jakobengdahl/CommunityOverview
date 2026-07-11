@@ -511,6 +511,40 @@ def _register_session_endpoints(router: APIRouter, service: GraphService, sessio
     )
     from backend.core.session_store import OpError, is_valid_session_id
 
+    def _rate_limit_lookup(http_request: Request) -> None:
+        """Throttle auth-bypassed session-id lookups by client address.
+
+        Guards the enumeration oracle these endpoints expose (200/404 for
+        get, session creation for the stream handshake) against brute force.
+        """
+        try:
+            session_manager.check_lookup_rate(_lookup_rate_key(http_request))
+        except RateLimited:
+            raise HTTPException(status_code=429, detail="rate limit exceeded")
+
+    def _lookup_rate_key(http_request: Request) -> str:
+        """Return the real client IP to key the lookup rate limit on.
+
+        Directly reached (``trusted_proxy_hops == 0``): the socket peer. Behind
+        ``N`` trusted proxies: the ``N``-th entry from the right of
+        ``X-Forwarded-For`` — the address the outermost trusted proxy recorded.
+        Client-supplied entries sit further left and are ignored, so the key
+        cannot be spoofed to mint a fresh per-source budget.
+        """
+        direct = http_request.client.host if http_request.client else "unknown"
+        config = getattr(http_request.app.state, "config", None)
+        trusted_hops = getattr(config, "trusted_proxy_hops", 0) or 0
+        if trusted_hops <= 0:
+            return direct
+        forwarded = http_request.headers.get("x-forwarded-for")
+        if not forwarded:
+            return direct
+        parts = [p.strip() for p in forwarded.split(",") if p.strip()]
+        if not parts:
+            return direct
+        idx = max(0, len(parts) - trusted_hops)
+        return parts[idx]
+
     def _session_payload(session, *, resolve: bool, manager) -> Dict[str, Any]:
         payload = session.to_dict()
         payload["roster"] = manager.roster(session.id)
@@ -536,11 +570,13 @@ def _register_session_endpoints(router: APIRouter, service: GraphService, sessio
 
     @router.get("/sessions/{session_id}")
     async def get_session(
+        http_request: Request,
         session_id: str,
         resolve: bool = Query(False, description="Resolve node references to node objects"),
     ) -> Dict[str, Any]:
         if not is_valid_session_id(session_id):
             raise HTTPException(status_code=400, detail="invalid session_id format")
+        _rate_limit_lookup(http_request)
         session = session_manager.get_session(session_id)
         if session is None:
             raise HTTPException(status_code=404, detail="session not found")
@@ -614,6 +650,7 @@ def _register_session_endpoints(router: APIRouter, service: GraphService, sessio
     ):
         if not is_valid_session_id(session_id):
             raise HTTPException(status_code=400, detail="invalid session_id format")
+        _rate_limit_lookup(request)
         try:
             session_manager.get_or_create(session_id)
         except SessionLimitReached:

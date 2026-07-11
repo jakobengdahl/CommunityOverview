@@ -95,6 +95,34 @@ def test_cors_origins_whitespace_stripped(temp_graph_file, temp_static_dirs):
     assert response.headers.get("access-control-allow-origin") == "https://b.com"
 
 
+def test_cors_default_is_same_origin_only(temp_graph_file, temp_static_dirs, monkeypatch):
+    """With CORS_ALLOWED_ORIGINS unset the default is no cross-origin access.
+
+    A wildcard default would let any website drive an auth-bypassed instance
+    from a victim's browser; the default must instead add no CORS headers for a
+    cross-origin request until an operator opts origins in explicitly.
+    """
+    monkeypatch.delenv("CORS_ALLOWED_ORIGINS", raising=False)
+    web_path, widget_path = temp_static_dirs
+    config = AppConfig(
+        graph_file=temp_graph_file,
+        web_static_path=web_path,
+        widget_static_path=widget_path,
+    )
+    config.auth_enabled = False
+    assert config.cors_allowed_origins == []
+
+    app = create_app(config)
+    client = TestClient(app)
+
+    headers = {
+        "Origin": "https://example.com",
+        "Access-Control-Request-Method": "GET",
+    }
+    response = client.options("/health", headers=headers)
+    assert "access-control-allow-origin" not in response.headers
+
+
 def test_cors_unauthorized_origin_rejected(temp_graph_file, temp_static_dirs):
     """Test that unauthorized origins are rejected in CORS."""
     web_path, widget_path = temp_static_dirs
