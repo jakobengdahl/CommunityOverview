@@ -32,6 +32,7 @@ Usage:
 # Core storage
 from .storage import GraphStorage
 from .storage_backends import FileGraphPersistenceBackend, GraphPersistenceBackend
+from .history_store import GraphHistoryStore, event_to_history_record, derive_is_ai_action
 
 # Vector store (for direct access if needed)
 from .vector_store import VectorStore
@@ -72,6 +73,9 @@ __all__ = [
     "GraphStorage",
     "GraphPersistenceBackend",
     "FileGraphPersistenceBackend",
+    "GraphHistoryStore",
+    "event_to_history_record",
+    "derive_is_ai_action",
     "VectorStore",
 
     # Enums (legacy)

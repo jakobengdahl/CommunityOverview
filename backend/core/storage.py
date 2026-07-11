@@ -72,6 +72,12 @@ class GraphStorage:
         self._persistence_backend = persistence_backend or FileGraphPersistenceBackend(json_path)
         self.json_path = getattr(self._persistence_backend, "json_path", Path(json_path))
 
+        # Durable append-only mutation history sidecar. Only enabled for the
+        # file-backed standalone backend, which owns a concrete json_path next
+        # to which the history NDJSON lives. Non-file backends own their own
+        # persistence and history strategy, so we leave this None there.
+        self._history_store = self._init_history_store()
+
         # Thread lock for in-memory data structure protection
         # RLock allows same thread to acquire lock multiple times (reentrant)
         self._lock = threading.RLock()
@@ -112,6 +118,15 @@ class GraphStorage:
     def _default_graph_name(self) -> str:
         """Return the backend-specific default graph name."""
         return self._persistence_backend.default_graph_name()
+
+    def _init_history_store(self) -> Optional["GraphHistoryStore"]:
+        """Create the append-only history sidecar for file-backed standalone mode."""
+        if not isinstance(self._persistence_backend, FileGraphPersistenceBackend):
+            return None
+        from .history_store import GraphHistoryStore
+
+        history_path = self.json_path.with_name(self.json_path.stem + ".history.ndjson")
+        return GraphHistoryStore(history_path)
 
     def _build_type_searchable_text(self) -> None:
         """Build a lookup of node type -> searchable text including localized labels."""
@@ -257,6 +272,15 @@ class GraphStorage:
             ),
         )
 
+        # Persist to durable history first (independent of webhook delivery).
+        # History is an audit trail, so it must be written even when the event
+        # system is disabled. Never let a history failure break the mutation.
+        if self._history_store is not None:
+            try:
+                self._history_store.append_event(event)
+            except Exception as e:
+                print(f"Warning: Failed to persist mutation history: {e}")
+
         # Notify system listeners (always, even if events disabled for webhooks)
         for listener in self._system_listeners:
             try:
@@ -340,6 +364,36 @@ class GraphStorage:
             before=edge_before.to_dict() if edge_before else None,
             after=edge_after.to_dict() if edge_after else None,
             context=context,
+        )
+
+    def get_recent_history(self, limit: int = 50, offset: int = 0) -> List[Dict[str, Any]]:
+        """Return recent graph mutation history, newest first.
+
+        Returns an empty list when durable history is unavailable (non
+        file-backed backends).
+        """
+        if self._history_store is None:
+            return []
+        return self._history_store.get_recent(limit=limit, offset=offset)
+
+    def get_node_history(
+        self, node_id: str, limit: int = 50, offset: int = 0
+    ) -> List[Dict[str, Any]]:
+        """Return mutation history for a single node id, newest first."""
+        if self._history_store is None:
+            return []
+        return self._history_store.get_entity_history(
+            node_id, kind=EntityKind.NODE.value, limit=limit, offset=offset
+        )
+
+    def get_edge_history(
+        self, edge_id: str, limit: int = 50, offset: int = 0
+    ) -> List[Dict[str, Any]]:
+        """Return mutation history for a single edge id, newest first."""
+        if self._history_store is None:
+            return []
+        return self._history_store.get_entity_history(
+            edge_id, kind=EntityKind.EDGE.value, limit=limit, offset=offset
         )
 
     def load(self) -> None:
