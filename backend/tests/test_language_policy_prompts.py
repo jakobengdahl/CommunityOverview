@@ -3,7 +3,7 @@ from pathlib import Path
 
 import pytest
 
-from backend.language_policy import format_language_policy_for_prompt
+from backend.llm.language_policy import format_language_policy_for_prompt
 
 
 @pytest.fixture(autouse=True)
@@ -19,7 +19,7 @@ def configured_test_schema():
 
 
 def test_system_prompt_includes_language_policy():
-    from backend.chat_logic import _build_system_prompt
+    from backend.ui.chat_logic import _build_system_prompt
 
     prompt = _build_system_prompt()
 

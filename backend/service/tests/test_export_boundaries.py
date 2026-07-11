@@ -1,6 +1,6 @@
 """Focused tests for export boundary behavior."""
 
-from backend.authorization import GraphAccessNarrowing, GraphAuthorizationContext, GraphAuthorizationDecision, use_request_authorization
+from backend.runtime.authorization import GraphAccessNarrowing, GraphAuthorizationContext, GraphAuthorizationDecision, use_request_authorization
 from backend.core import Edge, GraphStorage, Node, NodeType
 from backend.service import GraphService
 

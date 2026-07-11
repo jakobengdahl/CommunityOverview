@@ -80,7 +80,7 @@ Effort scale: XS = single-line fix · S = up to ~30 lines / one file · M = mult
 - **Effort:** S
 
 ### [2026-07-11] present_form action wins over a co-occurring pure-action tool
-- **File(s):** `backend/chat_logic.py` (`_handle_tool_use` final `pending_form` overlay)
+- **File(s):** `backend/ui/chat_logic.py` (`_handle_tool_use` final `pending_form` overlay)
 - **Context:** Discovered during review of `claude/active-collector-gui-inputs-0qj15m`
 - **Issue:** `toolResult` carries a single `action`. If the LLM calls `present_form` in the same turn as another pure-action tool (`mark_nodes`, `clear_visualization`, `start_guide`, `save_view`), the overlay makes `present_form` win and the other action is dropped (the frontend dispatches on `action ===`). Node/edge-returning tools are unaffected (their data rides in `nodes`/`edges`). This is an inherent single-`action` channel limitation, not specific to present_form; very rare in practice. A general fix would let the response carry multiple actions.
 - **Effort:** M

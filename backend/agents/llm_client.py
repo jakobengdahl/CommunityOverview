@@ -10,7 +10,7 @@ import logging
 from typing import List, Dict, Any, Optional, Callable
 from dataclasses import dataclass
 
-from backend.llm_providers import (
+from backend.llm.llm_providers import (
     LLMProvider,
     LLMResponse,
     ClaudeProvider,

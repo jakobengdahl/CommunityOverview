@@ -8,7 +8,7 @@ from contextvars import ContextVar
 from dataclasses import dataclass, field
 from typing import Any, Dict, Iterator, Mapping, Optional, Protocol
 
-from backend.request_context import get_request_actor_context, get_request_scope_context
+from backend.runtime.request_context import get_request_actor_context, get_request_scope_context
 
 AUTHORIZATION_MODE_ENV = "COMMUNITYOVERVIEW_AUTHORIZATION_MODE"
 AUTHORIZATION_MODE_PERMISSIVE = "permissive"

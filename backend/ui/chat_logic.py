@@ -4,9 +4,9 @@ import json
 import logging
 from dotenv import load_dotenv
 import inspect
-from backend.llm_providers import create_provider, LLMProvider
+from backend.llm.llm_providers import create_provider, LLMProvider
 from backend import config_loader
-from backend.language_policy import format_language_policy_for_prompt
+from backend.llm.language_policy import format_language_policy_for_prompt
 
 # Initialize logger
 logger = logging.getLogger(__name__)

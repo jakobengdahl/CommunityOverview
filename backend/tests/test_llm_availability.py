@@ -5,7 +5,7 @@ import os
 import pytest
 from unittest.mock import patch
 
-from backend.llm_providers import get_llm_availability
+from backend.llm.llm_providers import get_llm_availability
 
 
 class TestGetLlmAvailability:

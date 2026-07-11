@@ -42,14 +42,14 @@ from backend.core.session_store import FileSessionPersistenceBackend, SessionSto
 from backend.core.session_manager import SessionManager
 
 from backend.core import GraphStorage
-from backend.llm_providers import get_llm_availability
+from backend.llm.llm_providers import get_llm_availability
 from backend.service import GraphService, create_rest_router, register_mcp_tools, json_serializer
 from backend.ui import ChatService, DocumentService, create_ui_router
 from backend.agents import AgentRegistry, AgentsSettings
 from backend.federation import FederationManager, load_federation_config, summarize_federation_config
 from backend import config_loader
-from backend.authorization import use_request_authorization
-from backend.language_policy import format_language_policy_for_prompt
+from backend.runtime.authorization import use_request_authorization
+from backend.llm.language_policy import format_language_policy_for_prompt
 
 from .config import AppConfig
 

@@ -25,7 +25,7 @@ from backend.core import (
 )
 
 from backend import config_loader
-from backend.authorization import (
+from backend.runtime.authorization import (
     GRAPH_ACTION_MUTATE,
     GRAPH_ACTION_READ,
     DefaultGraphAuthorizationHook,
