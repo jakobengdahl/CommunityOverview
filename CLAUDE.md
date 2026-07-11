@@ -158,14 +158,20 @@ git checkout -b claude/<short-description> origin/dev
 
 ### 5. Test
 
-CI runs only the core test suite:
+CI runs the full suite in three attributable jobs (see `.github/workflows/ci.yml`):
+the complete backend pytest suite, the frontend vitest workspaces, and the OAuth
+gateway tests. Reproduce what CI validates locally:
 
 ```bash
-pytest backend/core/tests/ -v --tb=short
+pytest backend/ -q          # backend-tests job (base/ML-free install)
+npm run test:unit           # frontend-tests job (all workspaces)
+pytest services/mcp_oauth_gateway/test_oauth_flow.py -q   # gateway-tests job
 ```
 
-Run this locally to match what CI validates. During active iteration, also run the
-tests for the specific module you changed:
+The backend job installs only the base requirements (no ML stack); semantic search
+and chat fall back to their mock paths, so no model is downloaded in CI.
+
+During active iteration, run just the tests for the module you changed:
 
 ```bash
 pytest backend/<module>/tests/ -q
