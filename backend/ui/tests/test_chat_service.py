@@ -792,6 +792,30 @@ class TestPresentForm:
         assert "present_form" in names
         assert "save_collection_response" in names
 
+    def test_present_form_survives_alongside_node_returning_tool(self, chat_service):
+        # Regression: when present_form is called in the same turn as a tool that
+        # returns nodes, the accumulated nodes must not clobber the form spec.
+        service, mock_llm = chat_service
+        service.graph_service.add_nodes(
+            nodes=[{"type": "Actor", "name": "Findable Agency"}], edges=[]
+        )
+
+        mock_llm.mock_tool_calls = [
+            {"name": "search_graph", "input": {"query": "Findable Agency"}},
+            {"name": "present_form", "input": {"fields": [
+                {"id": "role", "label": "Role", "type": "radio", "options": ["A", "B"]},
+            ]}},
+        ]
+        mock_llm.mock_text_response = "Here are results; please also fill in the form."
+
+        result = service.process_message(messages=[{"role": "user", "content": "go"}])
+
+        tr = result["toolResult"]
+        assert tr["action"] == "present_form", "form action must survive node results"
+        assert tr["form"]["fields"][0]["id"] == "role"
+        # Nodes from search_graph should still be carried for visualization.
+        assert any(n.get("name") == "Findable Agency" for n in tr.get("nodes", []))
+
 
 def _add_akc(graph_service, short_name, perms=None):
     """Persist a minimal ActiveKnowledgeCollection node and return its id."""

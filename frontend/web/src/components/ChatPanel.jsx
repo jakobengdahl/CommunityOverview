@@ -164,7 +164,7 @@ function ChatPanel({ collectionShortName }) {
     try {
       const conversationMessages = chatMessages
         .filter(m => m.role !== 'system' && m.id !== 'welcome')
-        .map(m => ({ role: m.role, content: m.content }));
+        .map(m => ({ role: m.role, content: m.llmContent ?? m.content }));
 
       conversationMessages.push({ role: 'user', content: messageForLLM });
 
@@ -340,7 +340,7 @@ function ChatPanel({ collectionShortName }) {
     try {
       const conversationMessages = chatMessages
         .filter(m => m.id !== 'welcome')
-        .map(m => ({ role: m.role, content: m.content }));
+        .map(m => ({ role: m.role, content: m.llmContent ?? m.content }));
       conversationMessages.push({ role: 'user', content: msg });
 
       const response = await api.sendChatMessage(conversationMessages, null, { federationDepth, expertAgentId: activeExperts.length > 0 ? activeExperts[activeExperts.length - 1] : undefined, collectionShortName });
@@ -378,7 +378,7 @@ function ChatPanel({ collectionShortName }) {
     try {
       const conversationMessages = chatMessages
         .filter(m => m.id !== 'welcome')
-        .map(m => ({ role: m.role, content: m.content }));
+        .map(m => ({ role: m.role, content: m.llmContent ?? m.content }));
       conversationMessages.push({ role: 'user', content: msg });
 
       const response = await api.sendChatMessage(conversationMessages, null, { federationDepth, expertAgentId: activeExperts.length > 0 ? activeExperts[activeExperts.length - 1] : undefined, collectionShortName });
@@ -402,7 +402,7 @@ function ChatPanel({ collectionShortName }) {
     try {
       const conversationMessages = chatMessages
         .filter(m => m.id !== 'welcome')
-        .map(m => ({ role: m.role, content: m.content }));
+        .map(m => ({ role: m.role, content: m.llmContent ?? m.content }));
       conversationMessages.push({ role: 'user', content: msg });
 
       const response = await api.sendChatMessage(conversationMessages, null, { federationDepth, expertAgentId: activeExperts.length > 0 ? activeExperts[activeExperts.length - 1] : undefined, collectionShortName });
@@ -451,13 +451,16 @@ function ChatPanel({ collectionShortName }) {
       `[Form answers submitted]\n${readable}\n\n` +
       `Structured answers to store with save_collection_response: ${JSON.stringify(answers)}`;
 
-    addChatMessage({ role: 'user', content: readable, timestamp: new Date() });
+    // Persist llmContent on the message so the structured payload (not just the
+    // human-readable summary) survives into later turns' history — matching the
+    // kiosk, and keeping the answers aggregatable if the save is deferred.
+    addChatMessage({ role: 'user', content: readable, llmContent, timestamp: new Date() });
     setIsProcessing(true);
 
     try {
       const conversationMessages = chatMessages
         .filter(m => m.role !== 'system' && m.id !== 'welcome')
-        .map(m => ({ role: m.role, content: m.content }));
+        .map(m => ({ role: m.role, content: m.llmContent ?? m.content }));
       conversationMessages.push({ role: 'user', content: llmContent });
 
       const response = await api.sendChatMessage(conversationMessages, null, {

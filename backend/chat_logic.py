@@ -1002,8 +1002,13 @@ class ChatProcessor:
                 "toolResult": None
             }
 
-    def _handle_tool_use(self, messages: List[Dict], response, provider: LLMProvider, accumulated_nodes=None, accumulated_edges=None, system_prompt: str = None, tools_override: Dict[str, Callable] = None) -> Dict:
-        """Handle tool use with support for tool chaining and result aggregation"""
+    def _handle_tool_use(self, messages: List[Dict], response, provider: LLMProvider, accumulated_nodes=None, accumulated_edges=None, system_prompt: str = None, tools_override: Dict[str, Callable] = None, pending_form=None) -> Dict:
+        """Handle tool use with support for tool chaining and result aggregation.
+
+        pending_form carries a present_form action result across tool-chaining
+        recursion so the form spec survives even when later tools return nodes/edges
+        (which would otherwise take over final_tool_result and drop the form).
+        """
         if accumulated_nodes is None:
             accumulated_nodes = []
         if accumulated_edges is None:
@@ -1106,6 +1111,11 @@ class ChatProcessor:
                             accumulated_edges.append(edge)
                             existing_edge_ids.add(edge.get("id"))
 
+            # Preserve a present_form action so a later node/edge-returning tool in
+            # the same turn (or a subsequent chained tool) cannot drop the form spec.
+            if isinstance(tool_result, dict) and tool_result.get("action") == "present_form":
+                pending_form = tool_result
+
             # Store tool result with its ID for the response
             tool_results.append({
                 "tool_use_id": tool_id,
@@ -1141,7 +1151,7 @@ class ChatProcessor:
         # Check if LLM wants to use another tool (tool chaining)
         if final_response.stop_reason == "tool_use":
             # LLM wants to use another tool - continue recursively with accumulated data
-            return self._handle_tool_use(messages, final_response, provider, accumulated_nodes, accumulated_edges, system_prompt=active_system_prompt, tools_override=tools_override)
+            return self._handle_tool_use(messages, final_response, provider, accumulated_nodes, accumulated_edges, system_prompt=active_system_prompt, tools_override=tools_override, pending_form=pending_form)
 
         # Extract text from response (handle multiple text blocks)
         final_text = ""
@@ -1161,6 +1171,14 @@ class ChatProcessor:
         # If no accumulated data but we have tool results, use the last one
         if not final_tool_result and tool_results:
             final_tool_result = tool_results[-1]["result"]
+
+        # A present_form action must always reach the client (it renders the input
+        # widgets). Overlay it last so its action/form survive alongside any nodes/edges.
+        if pending_form:
+            if isinstance(final_tool_result, dict):
+                final_tool_result = {**final_tool_result, **pending_form}
+            else:
+                final_tool_result = pending_form
 
         return {
             "content": final_text,

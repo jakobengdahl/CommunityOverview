@@ -50,10 +50,14 @@ export default function CollectionForm({ form, onSubmit, disabled = false, submi
     fields.forEach((f) => { init[f.id] = initialValue(f); });
     return init;
   });
+  // Sliders carry a default midpoint value, so a required slider would otherwise
+  // count as answered without the user ever choosing. Track interaction explicitly.
+  const [touched, setTouched] = useState({});
   const [error, setError] = useState(false);
 
   const setValue = (id, value) => {
     setValues((prev) => ({ ...prev, [id]: value }));
+    setTouched((prev) => (prev[id] ? prev : { ...prev, [id]: true }));
   };
 
   const toggleCheckbox = (id, optValue) => {
@@ -69,9 +73,8 @@ export default function CollectionForm({ form, onSubmit, disabled = false, submi
   const isAnswered = (field) => {
     const v = values[field.id];
     if (field.type === 'checkbox') return Array.isArray(v) && v.length > 0;
-    if (field.type === 'boolean' || field.type === 'slider' || field.type === 'number') {
-      return v !== '' && v !== null && v !== undefined;
-    }
+    // A required slider must be moved — its default midpoint is not a real answer.
+    if (field.type === 'slider') return field.required ? !!touched[field.id] : true;
     return v !== '' && v !== null && v !== undefined;
   };
 
