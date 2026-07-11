@@ -10,7 +10,19 @@ import { useI18n } from '../i18n';
 import * as api from '../services/api';
 import { positionNewNodes } from '@community-graph/ui-graph-canvas';
 import ExpertAgentSelector from './ExpertAgentSelector';
+import CollectionForm from './CollectionForm';
 import './ChatPanel.css';
+
+/** Extract a present_form spec from a chat response, or null if none. */
+const formFromResponse = (response) =>
+  response?.toolResult?.action === 'present_form' ? response.toolResult.form : null;
+
+/** Render one answer value for the human-readable summary. */
+const formatAnswerValue = (value) => {
+  if (Array.isArray(value)) return value.join(', ');
+  if (typeof value === 'boolean') return value ? 'Yes' : 'No';
+  return String(value ?? '');
+};
 
 /** Max characters of node context to include with a message to the LLM */
 const MAX_SELECTION_CONTEXT_CHARS = 6000;
@@ -29,6 +41,7 @@ function ChatPanel({ collectionShortName }) {
   const {
     chatMessages,
     addChatMessage,
+    updateChatMessage,
     nodes,
     edges,
     addNodesToVisualization,
@@ -256,6 +269,7 @@ function ChatPanel({ collectionShortName }) {
           affected_edges: toolResult.affected_edges,
           node_ids: toolResult.node_ids,
         } : null,
+        form: formFromResponse(response),
       };
       addChatMessage(assistantMessage);
 
@@ -423,6 +437,52 @@ function ChatPanel({ collectionShortName }) {
       content: t('chat.delete_cancelled'),
       timestamp: new Date(),
     });
+  };
+
+  const handleSubmitForm = async (messageId, answers) => {
+    if (isProcessing) return;
+
+    updateChatMessage(messageId, { formSubmitted: true });
+
+    const readable = answers
+      .map(a => `- ${a.label || a.field_id}: ${formatAnswerValue(a.value)}`)
+      .join('\n');
+    const llmContent =
+      `[Form answers submitted]\n${readable}\n\n` +
+      `Structured answers to store with save_collection_response: ${JSON.stringify(answers)}`;
+
+    addChatMessage({ role: 'user', content: readable, timestamp: new Date() });
+    setIsProcessing(true);
+
+    try {
+      const conversationMessages = chatMessages
+        .filter(m => m.role !== 'system' && m.id !== 'welcome')
+        .map(m => ({ role: m.role, content: m.content }));
+      conversationMessages.push({ role: 'user', content: llmContent });
+
+      const response = await api.sendChatMessage(conversationMessages, null, {
+        federationDepth,
+        expertAgentId: activeExperts.length > 0 ? activeExperts[activeExperts.length - 1] : undefined,
+        collectionShortName,
+      });
+
+      addChatMessage({
+        role: 'assistant',
+        content: response.content,
+        timestamp: new Date(),
+        toolUsed: response.toolUsed,
+        form: formFromResponse(response),
+      });
+    } catch (err) {
+      addChatMessage({
+        role: 'assistant',
+        content: t('chat.error_prefix', { message: err.message }),
+        timestamp: new Date(),
+      });
+      setError(err.message);
+    } finally {
+      setIsProcessing(false);
+    }
   };
 
   // Summarize selected nodes — skill nodes and regular nodes are split so the UI
@@ -677,6 +737,20 @@ function ChatPanel({ collectionShortName }) {
                     </button>
                   </div>
                 </div>
+              )}
+
+              {msg.form && (
+                <CollectionForm
+                  form={msg.form}
+                  submitted={!!msg.formSubmitted}
+                  disabled={isProcessing}
+                  onSubmit={(answers) => handleSubmitForm(msg.id, answers)}
+                  labels={{
+                    submit: t('chat.form_submit'),
+                    submitted: t('chat.form_submitted'),
+                    requiredHint: t('chat.form_required'),
+                  }}
+                />
               )}
             </div>
             <div className="message-timestamp">

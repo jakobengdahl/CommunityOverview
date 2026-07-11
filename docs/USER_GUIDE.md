@@ -303,6 +303,28 @@ You can also ask questions about the uploaded document without extracting entiti
 > *"What is the main goal of this document?"*
 > *"List the organisations mentioned."*
 
+### 4.7 Structured inputs in collection sessions
+
+In an Active Knowledge Collection — the focused data-gathering assistant reached
+through a collection link — the assistant can present interactive input controls
+instead of asking for free text. When a question has a fixed set of choices or a
+bounded numeric range, it renders **radio buttons**, **checkboxes**, **dropdowns**,
+or a **slider** directly in the chat. This makes answering faster and keeps the
+collected data consistent.
+
+![Structured input form in a collection session](images/collection-form.png)
+*The collection assistant presents a form with radio buttons, checkboxes, and a slider. The respondent answers with the controls and clicks Submit.*
+
+When you submit a form, the assistant stores your answers as a structured
+**CollectionResponse** — one record per submission, linked to the collection, with
+a consistent field-by-field shape. Because every submission uses the same fields,
+the responses for a collection can be compiled into simple aggregations or
+statistics later (for example, counts per option). Ask the collection owner's
+assistant to summarise the responses to see this in action.
+
+Free-text answers still work at any time; the structured controls are offered only
+where they make a question easier to answer.
+
 ---
 
 ## 5. Session menu and settings

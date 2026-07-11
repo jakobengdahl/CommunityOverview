@@ -758,3 +758,139 @@ class TestVisualizationContext:
 
         assert received_prompts, "create_completion was never called"
         assert "CURRENT VISUALIZATION STATE" not in received_prompts[0]
+
+
+class TestPresentForm:
+    """Tests for the present_form action-tool passthrough."""
+
+    def test_present_form_returns_action_and_spec(self, chat_service):
+        service, mock_llm = chat_service
+        form_spec = {
+            "title": "Quick feedback",
+            "fields": [
+                {"id": "role", "label": "Your role", "type": "radio",
+                 "options": ["Manager", "Analyst"], "required": True},
+                {"id": "score", "label": "Satisfaction", "type": "slider",
+                 "min": 1, "max": 5},
+            ],
+        }
+        mock_llm.mock_tool_calls = [{"name": "present_form", "input": form_spec}]
+        mock_llm.mock_text_response = "Please fill in the form below."
+
+        result = service.process_message(messages=[{"role": "user", "content": "start"}])
+
+        assert result["toolUsed"] == "present_form"
+        tr = result["toolResult"]
+        assert tr["action"] == "present_form"
+        assert tr["form"]["title"] == "Quick feedback"
+        assert len(tr["form"]["fields"]) == 2
+        assert tr["form"]["fields"][0]["type"] == "radio"
+
+    def test_present_form_tool_is_advertised(self, chat_service):
+        service, _ = chat_service
+        names = {t["name"] for t in service._processor.tool_definitions}
+        assert "present_form" in names
+        assert "save_collection_response" in names
+
+
+def _add_akc(graph_service, short_name, perms=None):
+    """Persist a minimal ActiveKnowledgeCollection node and return its id."""
+    result = graph_service.add_nodes(
+        nodes=[{
+            "type": "ActiveKnowledgeCollection",
+            "name": f"Collection {short_name}",
+            "metadata": {
+                "short_name": short_name,
+                "prompt": "Collect feedback.",
+                "node_type_permissions": perms or {},
+            },
+        }],
+        edges=[],
+    )
+    ids = result.get("added_node_ids") or []
+    return ids[0] if ids else None
+
+
+class TestSaveCollectionResponse:
+    """Tests for the save_collection_response tool and its wiring."""
+
+    def _service(self, graph_service, mock_llm_provider):
+        from backend.ui import ChatService
+        with patch("backend.chat_logic.create_provider", return_value=mock_llm_provider), \
+             patch.dict(os.environ, {"ANTHROPIC_API_KEY": "test-key"}):
+            service = ChatService(graph_service)
+            service._processor.provider_type = "mock"
+            service._processor.default_api_key = "test-key"
+        return service
+
+    def test_saves_structured_response_node(self, graph_service, mock_llm_provider):
+        service = self._service(graph_service, mock_llm_provider)
+        akc_id = _add_akc(graph_service, "feedback")
+
+        # Resolve first so the collection-node identity is cached.
+        service._resolve_collection("feedback")
+        tool = service._make_collection_response_tool("feedback")["save_collection_response"]
+
+        out = tool(answers=[
+            {"field_id": "role", "label": "Role", "type": "radio", "value": "Manager"},
+            {"field_id": "topics", "label": "Topics", "type": "checkbox", "value": ["A", "B"]},
+        ])
+
+        assert out["success"] is True
+        assert out["answer_count"] == 2
+
+        found = graph_service.search_graph(query="", node_types=["CollectionResponse"], limit=10)
+        nodes = found.get("nodes", [])
+        assert len(nodes) == 1
+        meta = nodes[0]["metadata"]
+        assert meta["collection_short_name"] == "feedback"
+        assert meta["collection_id"] == akc_id
+        assert len(meta["answers"]) == 2
+        assert meta["answers"][0]["field_id"] == "role"
+        assert meta["answers"][1]["value"] == ["A", "B"]
+
+    def test_rejects_empty_answers(self, graph_service, mock_llm_provider):
+        service = self._service(graph_service, mock_llm_provider)
+        _add_akc(graph_service, "feedback")
+        service._resolve_collection("feedback")
+        tool = service._make_collection_response_tool("feedback")["save_collection_response"]
+
+        out = tool(answers=[])
+        assert out["success"] is False
+        assert "answer" in out["error"].lower()
+
+    def test_process_message_installs_response_tool_in_collection_mode(self, chat_service):
+        service, mock_llm = chat_service
+        graph_service = service.graph_service
+        _add_akc(graph_service, "feedback")
+
+        mock_llm.mock_tool_calls = [{
+            "name": "save_collection_response",
+            "input": {"answers": [
+                {"field_id": "role", "label": "Role", "type": "radio", "value": "Analyst"},
+            ]},
+        }]
+        mock_llm.mock_text_response = "Saved, thank you."
+
+        result = service.process_message(
+            messages=[{"role": "user", "content": "here are my answers"}],
+            collection_short_name="feedback",
+        )
+
+        assert result["toolUsed"] == "save_collection_response"
+        found = graph_service.search_graph(query="", node_types=["CollectionResponse"], limit=10)
+        assert len(found.get("nodes", [])) == 1
+
+    def test_response_tool_absent_outside_collection_mode(self, chat_service):
+        service, mock_llm = chat_service
+        graph_service = service.graph_service
+        mock_llm.mock_tool_calls = [{
+            "name": "save_collection_response",
+            "input": {"answers": [{"field_id": "x", "value": "y"}]},
+        }]
+        mock_llm.mock_text_response = "done"
+
+        service.process_message(messages=[{"role": "user", "content": "hi"}])
+
+        found = graph_service.search_graph(query="", node_types=["CollectionResponse"], limit=10)
+        assert found.get("nodes", []) == []

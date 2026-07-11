@@ -21,6 +21,12 @@ Effort scale: XS = single-line fix · S = up to ~30 lines / one file · M = mult
 
 ## Open
 
+### [2026-07-11] `Skill` system node type appears as a permission row in the AKC dialog
+- **File(s):** `frontend/web/src/components/CreateActiveKnowledgeCollectionDialog.jsx:6` (`EXCLUDED_TYPES`)
+- **Context:** Discovered during `claude/active-collector-gui-inputs-0qj15m`
+- **Issue:** `get_schema` returns all node types including system ones, and the AKC permissions table filters only via `EXCLUDED_TYPES`, which omits `Skill`. So `Skill` (a system type users never create in a collection) shows up as a create/update/delete row in the collection permissions table. `CollectionResponse` was added to `EXCLUDED_TYPES` in this branch; `Skill` should likely be excluded too, but it is pre-existing and out of scope here. Consider excluding all `category: system` types generically instead of maintaining a hardcoded list.
+- **Effort:** XS
+
 ### [2026-07-10] `applyServerSession` can still throw mid-mutation on a malformed `resolved.edges`
 - **File(s):** `frontend/web/src/App.jsx` (`applyServerSession`, `addNodesToVisualization(positioned, resolved.edges || [])`)
 - **Context:** Discovered during review of `claude/session-switch-pr-review-1zayib`
