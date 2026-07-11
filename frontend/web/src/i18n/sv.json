@@ -46,7 +46,41 @@
     "metadata": "Metadata",
     "edit": "Redigera",
     "close": "Stäng",
-    "unknown_node": "Okänd nod"
+    "unknown_node": "Okänd nod",
+    "tab_details": "Detaljer"
+  },
+  "history": {
+    "panel_title": "Senaste aktivitet",
+    "open": "Senaste aktivitet",
+    "close": "Stäng",
+    "refresh": "Uppdatera",
+    "empty": "Ingen aktivitet ännu",
+    "loading": "Laddar…",
+    "load_more": "Ladda fler",
+    "error": "Kunde inte ladda aktivitet",
+    "ai_badge": "AI",
+    "ai_badge_title": "Utförd av en AI-agent",
+    "origin_label": "via {origin}",
+    "view_history": "Historik",
+    "no_entity_history": "Ingen historik för det här objektet ännu",
+    "before": "Före",
+    "after": "Efter",
+    "event": {
+      "node_create": "Nod skapad",
+      "node_update": "Nod uppdaterad",
+      "node_delete": "Nod borttagen",
+      "edge_create": "Koppling skapad",
+      "edge_update": "Koppling uppdaterad",
+      "edge_delete": "Koppling borttagen",
+      "unknown": "Ändring"
+    },
+    "time": {
+      "just_now": "just nu",
+      "minutes_ago": "{count} min sedan",
+      "hours_ago": "{count} h sedan",
+      "days_ago": "{count} d sedan",
+      "unknown": "okänd"
+    }
   },
   "proposal": {
     "title": "Föreslaget tillägg:",

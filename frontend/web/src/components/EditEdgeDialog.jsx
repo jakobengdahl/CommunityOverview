@@ -1,9 +1,13 @@
 import { useState, useEffect } from 'react';
 import useGraphStore from '../store/graphStore';
+import { useI18n } from '../i18n';
+import EntityHistoryView from './EntityHistoryView';
 import './EditNodeDialog.css';
 
 function EditEdgeDialog({ edge, nodes, onClose, onSave, onDelete }) {
   const { getRelationshipTypes } = useGraphStore();
+  const { t } = useI18n();
+  const [view, setView] = useState('details');
   const [formData, setFormData] = useState({
     type: '',
     label: '',
@@ -61,6 +65,34 @@ function EditEdgeDialog({ edge, nodes, onClose, onSave, onDelete }) {
           <button className="close-button" onClick={onClose}>x</button>
         </header>
 
+        <div className="node-detail-tabs" role="tablist">
+          <button
+            type="button"
+            role="tab"
+            aria-selected={view === 'details'}
+            className={`node-detail-tab${view === 'details' ? ' active' : ''}`}
+            onClick={() => setView('details')}
+          >
+            {t('detail.tab_details')}
+          </button>
+          {edge?.id && (
+            <button
+              type="button"
+              role="tab"
+              aria-selected={view === 'history'}
+              className={`node-detail-tab${view === 'history' ? ' active' : ''}`}
+              onClick={() => setView('history')}
+            >
+              {t('history.view_history')}
+            </button>
+          )}
+        </div>
+
+        {view === 'history' ? (
+          <div style={{ padding: '16px' }}>
+            <EntityHistoryView entityKind="edge" entityId={edge.id} />
+          </div>
+        ) : (
         <form onSubmit={handleSubmit}>
           <div className="form-group">
             <label>Connection</label>
@@ -117,6 +149,7 @@ function EditEdgeDialog({ edge, nodes, onClose, onSave, onDelete }) {
             </button>
           </div>
         </form>
+        )}
       </div>
     </div>
   );

@@ -21,6 +21,24 @@ Effort scale: XS = single-line fix · S = up to ~30 lines / one file · M = mult
 
 ## Open
 
+### [2026-07-11] `EditEdgeDialog` uses hardcoded English strings instead of i18n
+- **File(s):** `frontend/web/src/components/EditEdgeDialog.jsx` (`Edit Connection`, `Connection`, `Type`, `Label`, `Delete`, `Cancel`, `Save`, placeholder text)
+- **Context:** Discovered during `claude/graph-history-ui`
+- **Issue:** Unlike other dialogs, `EditEdgeDialog` does not use `useI18n()` for its
+  existing labels — they are hardcoded in English, so the edge editor is not
+  translated. (The History tab added in this branch does use i18n.) Should be
+  migrated to `t()` with matching keys added to `en.json`/`sv.json`.
+- **Effort:** S
+
+### [2026-07-11] USER_GUIDE says double-click opens the edit dialog
+- **File(s):** `docs/USER_GUIDE.md` (section 2.3)
+- **Context:** Discovered during `claude/graph-history-ui`
+- **Issue:** Double-clicking a node actually opens the *detail* dialog
+  (`NodeDetailDialog`), from which Edit is a button — not the edit dialog
+  directly. Updated the wording in this branch to match; noting here in case the
+  screenshot/flow descriptions elsewhere assume the old behaviour.
+- **Effort:** XS
+
 ### [2026-07-11] No per-collection opt-out for persisting CollectionResponse
 - **File(s):** `backend/ui/chat_service.py` (`process_message`, response-tool install gate)
 - **Context:** Discovered during review of `claude/active-collector-gui-inputs-0qj15m`

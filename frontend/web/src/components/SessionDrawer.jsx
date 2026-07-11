@@ -8,6 +8,7 @@ import {
   GearFill,
   PencilSquare,
   Trash,
+  ClockHistory,
 } from 'react-bootstrap-icons';
 import { useI18n } from '../i18n';
 import './SessionDrawer.css';
@@ -29,6 +30,7 @@ function SessionDrawer({
   onRenameSession,
   onDeleteSession,
   onOpenSettings,
+  onOpenActivity,
   suspendEscape = false,
 }) {
   const { t } = useI18n();
@@ -156,6 +158,12 @@ function SessionDrawer({
       </div>
 
       <div className="session-drawer-footer">
+        {onOpenActivity && (
+          <button className="session-drawer-item" onClick={onOpenActivity}>
+            <ClockHistory size={15} />
+            <span>{t('history.open')}</span>
+          </button>
+        )}
         <button className="session-drawer-item" onClick={onOpenSettings}>
           <GearFill size={15} />
           <span>{t('sessions.settings')}</span>
