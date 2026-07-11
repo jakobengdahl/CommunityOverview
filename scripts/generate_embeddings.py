@@ -1,15 +1,16 @@
 import sys
 import os
-from pathlib import Path
+import argparse
 
 # Add project root to sys.path
 sys.path.append(os.getcwd())
 
 from backend.core import GraphStorage
 
-def generate_embeddings():
-    graph_path = "backend/graph.json"
+DEFAULT_GRAPH_PATH = "data/active/graph.json"
 
+
+def generate_embeddings(graph_path=DEFAULT_GRAPH_PATH):
     print(f"Loading graph from {graph_path}...")
     # Initialize without specifying embeddings path to use in-memory/json storage
     storage = GraphStorage(json_path=graph_path)
@@ -26,12 +27,20 @@ def generate_embeddings():
     try:
         # This will update node.embedding on the objects
         storage.vector_store.update_nodes_embeddings(nodes)
-        # We must explicitly save the storage to persist the updated nodes to graph.json
+        # We must explicitly save the storage to persist the updated nodes
         storage.save()
-        print("Success! Embeddings generated and saved to graph.json.")
+        print(f"Success! Embeddings generated and saved to {graph_path}.")
         print(f"Total embeddings: {storage.vector_store.get_embedding_count()}")
     except Exception as e:
         print(f"Error generating embeddings: {e}")
 
+
 if __name__ == "__main__":
-    generate_embeddings()
+    parser = argparse.ArgumentParser(description="Generate embeddings for a graph file.")
+    parser.add_argument(
+        "--graph-file",
+        default=DEFAULT_GRAPH_PATH,
+        help=f"Path to the graph JSON file (default: {DEFAULT_GRAPH_PATH})",
+    )
+    args = parser.parse_args()
+    generate_embeddings(args.graph_file)
