@@ -47,6 +47,12 @@ class AppConfig:
     # default would let any site drive an auth-bypassed instance from the browser.
     cors_allowed_origins: list[str] = field(default_factory=lambda: [o.strip() for o in os.getenv("CORS_ALLOWED_ORIGINS", "").split(",") if o.strip()])
     mcp_basic_auth: bool = field(default_factory=lambda: os.getenv("MCP_BASIC_AUTH", "false").lower() == "true")
+    # Number of trusted reverse-proxy hops in front of the app. 0 (default) means
+    # the app is reached directly, so per-client rate limiting keys on the socket
+    # peer. Behind a proxy (e.g. Cloud Run: set to 1) the real client IP is read
+    # from X-Forwarded-For, counting from the right so client-spoofed entries on
+    # the left are ignored — otherwise every user shares one rate-limit bucket.
+    trusted_proxy_hops: int = field(default_factory=lambda: int(os.getenv("TRUSTED_PROXY_HOPS", "0")))
     # When set to False, /mcp and /execute_tool bypass auth even if auth_enabled=True.
     # When None (default / env var absent), MCP follows auth_enabled — no behaviour change.
     mcp_auth_enabled: Optional[bool] = field(

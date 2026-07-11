@@ -261,11 +261,15 @@ transition and removed in the final step.
   - **Brute-force throttle (hardening).** The 10^8 space is only ~26.6 bits, so
     the auth-bypassed lookup endpoints (`GET /api/sessions/{id}` and the SSE
     stream handshake) apply a per-source token bucket
-    (`SessionManager.check_lookup_rate`, 60 burst + 2/s) keyed on client address
-    and return `429` when exhausted. Normal open/reconnect traffic stays far
+    (`SessionManager.check_lookup_rate`, 60 burst + 2/s) keyed on the real client
+    IP and return `429` when exhausted. Normal open/reconnect traffic stays far
     under budget; an attacker is capped at ~2 guesses/second, turning a full
-    enumeration into years of effort. A high-entropy per-session stream token
-    (so the short id is only a join code) is the planned follow-up.
+    enumeration into years of effort. Behind a reverse proxy set
+    `TRUSTED_PROXY_HOPS` (Cloud Run: `1`) so the key is derived from
+    `X-Forwarded-For` (counted from the right, spoof-resistant) instead of
+    collapsing to the proxy address — one shared bucket for the whole internet.
+    A high-entropy per-session stream token (so the short id is only a join code)
+    is the planned follow-up.
 - All new endpoints respect the existing optional HTTP Basic Auth.
   - **Resolved (step 4, alternative A):** the CRUD/ops endpoints honour Basic
     Auth via request headers, but a browser `EventSource` cannot send an

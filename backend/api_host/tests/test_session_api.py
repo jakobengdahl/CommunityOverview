@@ -75,6 +75,44 @@ class TestSessionLookupRateLimit:
         )
         assert resp.status_code == 429
 
+    def test_rate_limit_keys_on_real_client_behind_proxy(
+        self, temp_graph_file, temp_static_dirs
+    ):
+        """With a trusted proxy, each real client gets its own budget and a
+        client cannot spoof X-Forwarded-For to mint a fresh one."""
+        from backend.api_host import create_app, AppConfig
+        from backend.core.session_manager import _TokenBucket
+
+        web_path, widget_path = temp_static_dirs
+        config = AppConfig(
+            graph_file=temp_graph_file,
+            web_static_path=web_path,
+            widget_static_path=widget_path,
+            auth_enabled=False,
+            trusted_proxy_hops=1,
+        )
+        app = create_app(config)
+        app.state.session_manager._lookup_bucket = _TokenBucket(1.0, 0.0)
+        client = TestClient(app)
+
+        # Real client A (last entry, added by the trusted proxy) — first guess ok.
+        assert client.get(
+            "/api/sessions/9999-9999", headers={"X-Forwarded-For": "1.1.1.1"}
+        ).status_code == 404
+        # Client B — a different real IP has an independent bucket.
+        assert client.get(
+            "/api/sessions/9999-9998", headers={"X-Forwarded-For": "2.2.2.2"}
+        ).status_code == 404
+        # Client A again — its bucket is now exhausted.
+        assert client.get(
+            "/api/sessions/9999-9997", headers={"X-Forwarded-For": "1.1.1.1"}
+        ).status_code == 429
+        # A spoofed leading entry does not change A's key, so still throttled.
+        assert client.get(
+            "/api/sessions/9999-9996",
+            headers={"X-Forwarded-For": "9.9.9.9, 1.1.1.1"},
+        ).status_code == 429
+
 
 class TestSessionOps:
     def test_apply_ops_updates_state(self, test_app: TestClient):
