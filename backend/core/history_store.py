@@ -17,6 +17,7 @@ so concurrent writers never interleave a single record.
 from __future__ import annotations
 
 import json
+import logging
 import os
 import sys
 import tempfile
@@ -35,6 +36,8 @@ if TYPE_CHECKING:
 _AI_ORIGIN_PREFIXES = ("agent:",)
 _AI_ORIGIN_EXACT = ("mcp",)
 _AI_ACTOR_TYPES = ("agent", "ai")
+
+logger = logging.getLogger(__name__)
 
 # When retention is enabled but no explicit throttle is given, check at most
 # this often so compaction never runs on every single append.
@@ -151,7 +154,16 @@ class GraphHistoryStore:
             if self._retention_enabled:
                 self._appends_since_compaction += 1
                 if self._appends_since_compaction >= self._compaction_interval:
-                    self._compact_locked()
+                    # The record is already durably written above; a compaction
+                    # failure is best-effort maintenance and must not surface as
+                    # a failed mutation. It self-heals on the next interval.
+                    try:
+                        self._compact_locked()
+                    except Exception:
+                        logger.warning(
+                            "Graph history compaction failed; retrying next interval",
+                            exc_info=True,
+                        )
 
     def compact(self) -> None:
         """Force a retention pass now. No-op when retention is disabled."""

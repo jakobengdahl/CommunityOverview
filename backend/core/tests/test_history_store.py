@@ -281,6 +281,61 @@ def test_max_age_cap_drops_old_records():
         assert remaining == ["fresh"]
 
 
+@pytest.mark.parametrize("cap", [0, -5])
+def test_non_positive_max_events_disables_retention(cap):
+    with tempfile.TemporaryDirectory() as tmpdir:
+        store = GraphHistoryStore(
+            os.path.join(tmpdir, "graph.history.ndjson"),
+            max_events=cap,
+            compaction_interval=1,
+        )
+        for i in range(6):
+            store.append_record(_record(f"n-{i}", f"2026-01-0{i + 1}T00:00:00Z"))
+        assert len(store.get_recent(limit=100)) == 6
+
+
+def test_unparseable_or_missing_timestamp_is_retained():
+    with tempfile.TemporaryDirectory() as tmpdir:
+        store = GraphHistoryStore(
+            os.path.join(tmpdir, "graph.history.ndjson"),
+            max_age_days=1,
+        )
+        old = (datetime.now(timezone.utc) - timedelta(days=5)).isoformat().replace("+00:00", "Z")
+        store.append_record(_record("bad-ts", "not-a-date"))
+        store.append_record(
+            {"event_id": "e", "entity_id": "no-ts", "entity_kind": "node", "event_type": "node.create"}
+        )
+        store.append_record(_record("old", old))
+
+        store.compact()
+
+        remaining = {r["entity_id"] for r in store.get_recent(limit=100)}
+        # Only the genuinely-old record is dropped; unparseable/missing
+        # timestamps are never silently discarded.
+        assert remaining == {"bad-ts", "no-ts"}
+
+
+def test_compaction_failure_does_not_break_append(monkeypatch):
+    with tempfile.TemporaryDirectory() as tmpdir:
+        path = os.path.join(tmpdir, "graph.history.ndjson")
+        store = GraphHistoryStore(path, max_events=2, compaction_interval=1)
+
+        import backend.core.history_store as hs
+
+        def boom(*args, **kwargs):
+            raise OSError("simulated rename failure")
+
+        monkeypatch.setattr(hs.os, "rename", boom)
+        monkeypatch.setattr(hs.os, "replace", boom)
+
+        # Every append triggers a compaction that fails, but the mutation record
+        # is already durably written, so appends must still succeed.
+        for i in range(4):
+            store.append_record(_record(f"n-{i}", f"2026-01-0{i + 1}T00:00:00Z"))
+
+        assert len(store.get_recent(limit=100)) == 4
+
+
 def test_atomic_rewrite_never_corrupts_on_failure(monkeypatch):
     with tempfile.TemporaryDirectory() as tmpdir:
         path = os.path.join(tmpdir, "graph.history.ndjson")
