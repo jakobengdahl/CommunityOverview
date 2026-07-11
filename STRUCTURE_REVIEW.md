@@ -470,7 +470,7 @@ summary instead.
 | 2 | A1 full test suite in CI | M | A2 | done (PR #221) |
 | 3 | A4 protect `dev` + auto-merge | XS | A1 | open *(owner action)* |
 | 4 | A3 session-ID hardening, step 1 (rate limit + CORS) | S–M | — | done (PR #222) |
-| 5 | C1 stale data removal + script fix | S | — | open |
+| 5 | C1 stale data removal + script fix | S | — | done (PR #223) |
 | 6 | B3 home the flat backend modules | M | A1 | open |
 | 7 | B2 decompose server.py | M | A1 | open |
 | 8 | B1 decompose App.jsx (slice 1: shared-session hook) | M | — | open |
@@ -506,6 +506,18 @@ summary instead.
    same branch.
 
 ## Completed
+
+- **[2026-07-11] C1 — stale tracked graph data removed + embedding scripts
+  parameterised (PR #223).** Untracked and deleted `backend/graph.json` (1.4 MB
+  stale runtime data) and the root `graph.json` stub, adding gitignore rules so
+  neither is re-tracked. `scripts/generate_embeddings.py` and
+  `scripts/migrate_embeddings.py` now take a `--graph-file` argument defaulting
+  to `data/active/graph.json` instead of hardcoding `backend/graph.json`
+  (migrate derives its pickle path next to the graph file). Removed the stale
+  `backend/graph.json` data-location line from the `backend/DEVELOPMENT.md`
+  architecture tree; the `GRAPH_FILE` env-var table already documents the real
+  `data/active/graph.json` location. `git ls-files '*graph.json'` now shows only
+  seed data (`config/stat-metadata/graph.json`).
 
 - **[2026-07-11] A3 step 1 — session-id lookup throttle + same-origin CORS
   default (PR #222).** Added a per-source token bucket

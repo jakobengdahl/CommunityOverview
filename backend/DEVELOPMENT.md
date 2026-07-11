@@ -13,8 +13,7 @@ backend/
 ├── ui/                  # User chat and document analysis (LLM integration)
 ├── api_host/            # FastAPI application server
 ├── chat_logic.py        # Chat processing logic
-├── llm_providers.py     # LLM provider abstraction
-└── graph.json           # Graph data (auto-created)
+└── llm_providers.py     # LLM provider abstraction
 frontend/
 ├── web/                 # Full web application
 └── widget/              # Embeddable widget for ChatGPT etc.
