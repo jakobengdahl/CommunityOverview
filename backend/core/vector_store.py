@@ -57,8 +57,8 @@ def _cosine_similarity_matrix(query, matrix):
 class VectorStore:
     """
     Manages vector embeddings for graph nodes.
-    Uses sentence-transformers for generating embeddings
-    and sklearn for cosine similarity search.
+    Uses sentence-transformers for generating embeddings (optional ML extra)
+    and numpy for cosine similarity search.
 
     Embeddings are stored directly on the Node objects and passed to this class
     to build the in-memory search index.
