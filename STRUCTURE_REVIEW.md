@@ -256,6 +256,14 @@ cluster. Decompose them behavior-preservingly, one slice per PR.
   requirements files, `DEVELOPMENT.md` and `Dockerfile`; DEVELOPMENT.md
   architecture tree matches reality; full suite green.
 - **Effort:** M (mechanical; can be two PRs: chat/llm first, runtime seam second)
+- **Note (PR #224):** the six named modules (`chat_logic`, `llm_providers`,
+  `language_policy`, `authorization`, `request_context`, `config_context`) are
+  homed and the root shim is gone. `config_loader.py` and `document_processor.py`
+  still sit at `backend/` root: the B3 proposal never assigned `config_loader.py`
+  a target package, and `document_processor.py` carries an open "merge into
+  `backend/ui/document_service.py` vs keep" question — both need a design
+  decision, so they are split out as item **B6** below rather than forced here.
+  The "root contains only packages" clause is therefore satisfied once B6 lands.
 
 > **Session brief:** In CommunityOverview, relocate the flat modules at
 > backend/ root into their owning packages per STRUCTURE_REVIEW.md item B3
@@ -290,6 +298,27 @@ cluster. Decompose them behavior-preservingly, one slice per PR.
   `SMALL_FIXES.md` pruning entry for `pendingRemotePositionsRef` lives —
   resolve it in the extraction).
 - **Effort:** M
+
+### B6. Home `config_loader.py` and `document_processor.py`
+
+- **Problem:** the B3 relocation (PR #224) homed six flat modules but left
+  `config_loader.py` (22 KB, widely imported) and `document_processor.py`
+  (53 lines) at `backend/` root, because neither had a settled destination:
+  B3's proposed change never assigned `config_loader.py` a target package, and
+  `document_processor.py` carries an open "merge into
+  `backend/ui/document_service.py` vs keep as its own file" question. Until
+  these land, the B3 "root contains only packages" DoD is not fully met.
+- **Proposed change:** decide `config_loader.py`'s home (likely `backend/core/`
+  or a new `backend/config/` package — it loads schema/federation config and is
+  imported across layers) and relocate it with its importers; decide whether
+  `document_processor.py` earns a file or folds into
+  `backend/ui/document_service.py`. Update the DEVELOPMENT.md / README trees and
+  the CLAUDE.md Key Files entry for `config_loader.py`. Pure relocation, no
+  logic changes — but the destination is a design decision, so surface it to
+  Jakob before moving `config_loader.py`.
+- **Definition of done:** `backend/` root contains only packages, requirements
+  files, `DEVELOPMENT.md` and `Dockerfile`; full suite green.
+- **Effort:** S
 
 ---
 
@@ -471,7 +500,7 @@ summary instead.
 | 3 | A4 protect `dev` + auto-merge | XS | A1 | open *(owner action)* |
 | 4 | A3 session-ID hardening, step 1 (rate limit + CORS) | S–M | — | done (PR #222) |
 | 5 | C1 stale data removal + script fix | S | — | done (PR #223) |
-| 6 | B3 home the flat backend modules | M | A1 | open |
+| 6 | B3 home the flat backend modules | M | A1 | done (PR #224) |
 | 7 | B2 decompose server.py | M | A1 | open |
 | 8 | B1 decompose App.jsx (slice 1: shared-session hook) | M | — | open |
 | 9 | C2 lint gates | M | A1 | open |
@@ -486,6 +515,7 @@ summary instead.
 | 18 | D2 CLAUDE.md truth verification pass | XS | A1, A2, A4 | open |
 | 19 | B4 service.py / storage.py split | L | A1, next feature touching them | open |
 | 20 | C7 commit root lockfile for reproducible frontend CI | S | A1 | open |
+| 21 | B6 home `config_loader.py` + `document_processor.py` | S | B3 | open |
 
 ### How a session updates this document
 
@@ -506,6 +536,20 @@ summary instead.
    same branch.
 
 ## Completed
+
+- **[2026-07-11] B3 — flat backend modules homed into owning packages
+  (PR #224).** Relocated the loose modules at `backend/` root:
+  `chat_logic.py` → `backend/ui/` (removing the root-level `./chat_logic.py`
+  compatibility shim), `llm_providers.py` + `language_policy.py` →
+  `backend/llm/`, and `authorization.py` + `request_context.py` +
+  `config_context.py` → `backend/runtime/`. Pure relocation — no logic, route,
+  or signature changes; all backend imports and tests updated to the new paths
+  (942 passed / 16 skipped on the base install). `backend/DEVELOPMENT.md`
+  architecture tree and the `README.md` project structure now match the tree;
+  stale path references in `LLM_PROVIDERS.md` and `SMALL_FIXES.md` corrected.
+  `config_loader.py` and `document_processor.py` were intentionally left at
+  root (no assigned target / open merge question) and split out as new item
+  B6, so B3's "root contains only packages" clause completes with B6.
 
 - **[2026-07-11] C1 — stale tracked graph data removed + embedding scripts
   parameterised (PR #223).** Untracked and deleted `backend/graph.json` (1.4 MB
