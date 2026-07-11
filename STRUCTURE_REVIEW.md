@@ -467,7 +467,7 @@ summary instead.
 | # | Item | Effort | Depends on | Status |
 |---|------|--------|-----------|--------|
 | 1 | A2 ML deps out of base requirements | M | — | done (PR #220) |
-| 2 | A1 full test suite in CI | M | A2 | open |
+| 2 | A1 full test suite in CI | M | A2 | done (PR #221) |
 | 3 | A4 protect `dev` + auto-merge | XS | A1 | open *(owner action)* |
 | 4 | A3 session-ID hardening, step 1 (rate limit + CORS) | S–M | — | open |
 | 5 | C1 stale data removal + script fix | S | — | open |
@@ -506,6 +506,15 @@ summary instead.
    same branch.
 
 ## Completed
+
+- **[2026-07-11] A1 — full test suite in CI (PR #221).** Split the single
+  `test` job into three attributable jobs: `backend-tests` (`pytest backend/ -q`
+  on the base ML-free install, mock embedding path — no network download),
+  `frontend-tests` (`npm run test:unit` across web/widget/canvas), and
+  `gateway-tests` (the OAuth gateway suite, isolated with its own pins). The
+  build/publish job now depends on all three. Updated CLAUDE.md's Test section
+  and added a CI section to `backend/DEVELOPMENT.md`. Frontend job uses
+  `npm install` pending a committed lockfile — logged as new item C7.
 
 - **[2026-07-11] A2 — ML deps out of base requirements (PR #220).** Moved
   `torch` + `sentence-transformers` and the pytorch extra index into
