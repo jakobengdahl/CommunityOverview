@@ -11,6 +11,7 @@ Covers:
 
 import os
 import tempfile
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 import pytest
@@ -28,6 +29,7 @@ from backend.core.events import (
     EventAttribution,
     EventActorAttribution,
 )
+from backend.core.history_store import GraphHistoryStore
 
 
 @pytest.fixture
@@ -185,6 +187,181 @@ def test_derive_is_ai_action_rules():
         EventAttribution(actor=EventActorAttribution(actor_type="agent")),
     ) is True
     assert derive_is_ai_action("web-ui", {"actor": {"actor_type": "ai"}}) is True
+
+
+# --- Retention / compaction -------------------------------------------------
+
+
+def _record(entity_id: str, occurred_at: str) -> dict:
+    return {
+        "event_id": f"evt-{entity_id}",
+        "event_type": "node.create",
+        "occurred_at": occurred_at,
+        "entity_kind": "node",
+        "entity_id": entity_id,
+        "entity_type": "Actor",
+    }
+
+
+def test_history_unbounded_by_default(storage):
+    # The default fixture sets no retention, so every record is kept.
+    for i in range(30):
+        storage.add_nodes([Node(id=f"n-{i}", type=NodeType.ACTOR, name=f"N{i}")], [])
+
+    assert len(storage.get_recent_history(limit=1000)) == 30
+    lines = storage._history_store.history_path.read_text().splitlines()
+    assert len(lines) == 30
+
+
+def test_max_events_cap_keeps_newest_and_paginates():
+    with tempfile.TemporaryDirectory() as tmpdir:
+        json_path = os.path.join(tmpdir, "graph.json")
+        st = GraphStorage(
+            json_path=json_path,
+            history_max_events=5,
+            history_compaction_interval=1,
+        )
+        try:
+            for i in range(12):
+                st.add_nodes([Node(id=f"n-{i}", type=NodeType.ACTOR, name=f"N{i}")], [])
+
+            # Only the newest 5 records survive on disk, in append order.
+            on_disk = st._history_store.history_path.read_text().splitlines()
+            assert len(on_disk) == 5
+
+            recent = st.get_recent_history(limit=100)
+            assert [e["entity_id"] for e in recent] == [
+                "n-11", "n-10", "n-9", "n-8", "n-7",
+            ]
+
+            # Pagination still works over the trimmed, newest-first view.
+            page = st.get_recent_history(limit=2, offset=1)
+            assert [e["entity_id"] for e in page] == ["n-10", "n-9"]
+        finally:
+            st.flush()
+
+
+def test_compaction_preserves_records_appended_after_trim():
+    with tempfile.TemporaryDirectory() as tmpdir:
+        json_path = os.path.join(tmpdir, "graph.json")
+        st = GraphStorage(
+            json_path=json_path,
+            history_max_events=3,
+            history_compaction_interval=1,
+        )
+        try:
+            for i in range(5):
+                st.add_nodes([Node(id=f"n-{i}", type=NodeType.ACTOR, name=f"N{i}")], [])
+            # After the first burst only the newest 3 remain.
+            assert [e["entity_id"] for e in st.get_recent_history()] == ["n-4", "n-3", "n-2"]
+
+            # Records appended after the trim are not lost; the window slides.
+            for i in range(5, 8):
+                st.add_nodes([Node(id=f"n-{i}", type=NodeType.ACTOR, name=f"N{i}")], [])
+            assert [e["entity_id"] for e in st.get_recent_history()] == ["n-7", "n-6", "n-5"]
+        finally:
+            st.flush()
+
+
+def test_max_age_cap_drops_old_records():
+    with tempfile.TemporaryDirectory() as tmpdir:
+        store = GraphHistoryStore(
+            os.path.join(tmpdir, "graph.history.ndjson"),
+            max_age_days=1,
+        )
+        now = datetime.now(timezone.utc)
+        old = (now - timedelta(days=3)).isoformat().replace("+00:00", "Z")
+        fresh = now.isoformat().replace("+00:00", "Z")
+        store.append_record(_record("old", old))
+        store.append_record(_record("fresh", fresh))
+
+        store.compact()
+
+        remaining = [r["entity_id"] for r in store.get_recent(limit=100)]
+        assert remaining == ["fresh"]
+
+
+@pytest.mark.parametrize("cap", [0, -5])
+def test_non_positive_max_events_disables_retention(cap):
+    with tempfile.TemporaryDirectory() as tmpdir:
+        store = GraphHistoryStore(
+            os.path.join(tmpdir, "graph.history.ndjson"),
+            max_events=cap,
+            compaction_interval=1,
+        )
+        for i in range(6):
+            store.append_record(_record(f"n-{i}", f"2026-01-0{i + 1}T00:00:00Z"))
+        assert len(store.get_recent(limit=100)) == 6
+
+
+def test_unparseable_or_missing_timestamp_is_retained():
+    with tempfile.TemporaryDirectory() as tmpdir:
+        store = GraphHistoryStore(
+            os.path.join(tmpdir, "graph.history.ndjson"),
+            max_age_days=1,
+        )
+        old = (datetime.now(timezone.utc) - timedelta(days=5)).isoformat().replace("+00:00", "Z")
+        store.append_record(_record("bad-ts", "not-a-date"))
+        store.append_record(
+            {"event_id": "e", "entity_id": "no-ts", "entity_kind": "node", "event_type": "node.create"}
+        )
+        store.append_record(_record("old", old))
+
+        store.compact()
+
+        remaining = {r["entity_id"] for r in store.get_recent(limit=100)}
+        # Only the genuinely-old record is dropped; unparseable/missing
+        # timestamps are never silently discarded.
+        assert remaining == {"bad-ts", "no-ts"}
+
+
+def test_compaction_failure_does_not_break_append(monkeypatch):
+    with tempfile.TemporaryDirectory() as tmpdir:
+        path = os.path.join(tmpdir, "graph.history.ndjson")
+        store = GraphHistoryStore(path, max_events=2, compaction_interval=1)
+
+        import backend.core.history_store as hs
+
+        def boom(*args, **kwargs):
+            raise OSError("simulated rename failure")
+
+        monkeypatch.setattr(hs.os, "rename", boom)
+        monkeypatch.setattr(hs.os, "replace", boom)
+
+        # Every append triggers a compaction that fails, but the mutation record
+        # is already durably written, so appends must still succeed.
+        for i in range(4):
+            store.append_record(_record(f"n-{i}", f"2026-01-0{i + 1}T00:00:00Z"))
+
+        assert len(store.get_recent(limit=100)) == 4
+
+
+def test_atomic_rewrite_never_corrupts_on_failure(monkeypatch):
+    with tempfile.TemporaryDirectory() as tmpdir:
+        path = os.path.join(tmpdir, "graph.history.ndjson")
+        store = GraphHistoryStore(path, max_events=2, compaction_interval=1000)
+        for i in range(5):
+            store.append_record(_record(f"n-{i}", f"2026-01-0{i + 1}T00:00:00Z"))
+
+        before = Path(path).read_text()
+
+        import backend.core.history_store as hs
+
+        def boom(*args, **kwargs):
+            raise OSError("simulated rename failure")
+
+        monkeypatch.setattr(hs.os, "rename", boom)
+        monkeypatch.setattr(hs.os, "replace", boom)
+
+        with pytest.raises(OSError):
+            store.compact()
+
+        # The original sidecar is untouched: every record still readable,
+        # and no stray temp file is left behind.
+        assert Path(path).read_text() == before
+        assert len(store.get_recent(limit=100)) == 5
+        leftovers = [p for p in os.listdir(tmpdir) if p.startswith("graph_history_")]
+        assert leftovers == []
 
 
 def test_history_disabled_for_non_file_backend():
