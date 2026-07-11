@@ -42,7 +42,10 @@ class AppConfig:
     auth_username: str = field(default_factory=lambda: os.getenv("AUTH_USERNAME", "admin"))
     auth_password: Optional[str] = field(default_factory=lambda: os.getenv("AUTH_PASSWORD"))
     auth_bearer_token: Optional[str] = field(default_factory=lambda: os.getenv("AUTH_BEARER_TOKEN"))
-    cors_allowed_origins: list[str] = field(default_factory=lambda: [o.strip() for o in os.getenv("CORS_ALLOWED_ORIGINS", "*").split(",")])
+    # Default to no cross-origin access (same-origin only). Set CORS_ALLOWED_ORIGINS
+    # to a comma-separated list (or "*") to opt specific origins in. A wildcard
+    # default would let any site drive an auth-bypassed instance from the browser.
+    cors_allowed_origins: list[str] = field(default_factory=lambda: [o.strip() for o in os.getenv("CORS_ALLOWED_ORIGINS", "").split(",") if o.strip()])
     mcp_basic_auth: bool = field(default_factory=lambda: os.getenv("MCP_BASIC_AUTH", "false").lower() == "true")
     # When set to False, /mcp and /execute_tool bypass auth even if auth_enabled=True.
     # When None (default / env var absent), MCP follows auth_enabled — no behaviour change.

@@ -511,6 +511,18 @@ def _register_session_endpoints(router: APIRouter, service: GraphService, sessio
     )
     from backend.core.session_store import OpError, is_valid_session_id
 
+    def _rate_limit_lookup(http_request: Request) -> None:
+        """Throttle auth-bypassed session-id lookups by client address.
+
+        Guards the enumeration oracle these endpoints expose (200/404 for
+        get, session creation for the stream handshake) against brute force.
+        """
+        client_key = http_request.client.host if http_request.client else "unknown"
+        try:
+            session_manager.check_lookup_rate(client_key)
+        except RateLimited:
+            raise HTTPException(status_code=429, detail="rate limit exceeded")
+
     def _session_payload(session, *, resolve: bool, manager) -> Dict[str, Any]:
         payload = session.to_dict()
         payload["roster"] = manager.roster(session.id)
@@ -536,11 +548,13 @@ def _register_session_endpoints(router: APIRouter, service: GraphService, sessio
 
     @router.get("/sessions/{session_id}")
     async def get_session(
+        http_request: Request,
         session_id: str,
         resolve: bool = Query(False, description="Resolve node references to node objects"),
     ) -> Dict[str, Any]:
         if not is_valid_session_id(session_id):
             raise HTTPException(status_code=400, detail="invalid session_id format")
+        _rate_limit_lookup(http_request)
         session = session_manager.get_session(session_id)
         if session is None:
             raise HTTPException(status_code=404, detail="session not found")
@@ -614,6 +628,7 @@ def _register_session_endpoints(router: APIRouter, service: GraphService, sessio
     ):
         if not is_valid_session_id(session_id):
             raise HTTPException(status_code=400, detail="invalid session_id format")
+        _rate_limit_lookup(request)
         try:
             session_manager.get_or_create(session_id)
         except SessionLimitReached:

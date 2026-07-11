@@ -51,6 +51,31 @@ class TestSessionCrud:
         assert test_app.get("/api/sessions/not-valid").status_code == 400
 
 
+class TestSessionLookupRateLimit:
+    """The auth-bypassed lookup endpoints throttle id-guessing brute force."""
+
+    def _shrink_bucket(self, test_app: TestClient, capacity: float) -> None:
+        from backend.core.session_manager import _TokenBucket
+
+        mgr = test_app.app.state.session_manager
+        mgr._lookup_bucket = _TokenBucket(capacity, 0.0)
+
+    def test_get_session_returns_429_when_exhausted(self, test_app: TestClient):
+        # One token: the first valid-format guess passes (404), the next is 429.
+        self._shrink_bucket(test_app, capacity=1)
+        assert test_app.get("/api/sessions/9999-9999").status_code == 404
+        assert test_app.get("/api/sessions/9999-9998").status_code == 429
+
+    def test_stream_handshake_returns_429_when_exhausted(self, test_app: TestClient):
+        # Zero tokens so the handshake is rejected before the SSE generator
+        # (which never returns) starts — a valid id that passed would block.
+        self._shrink_bucket(test_app, capacity=0)
+        resp = test_app.get(
+            "/api/sessions/1234-5678/stream", params={"client_id": "c1"}
+        )
+        assert resp.status_code == 429
+
+
 class TestSessionOps:
     def test_apply_ops_updates_state(self, test_app: TestClient):
         sid = test_app.post("/api/sessions", json={}).json()["id"]
