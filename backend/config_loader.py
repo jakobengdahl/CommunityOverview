@@ -100,6 +100,19 @@ SYSTEM_NODE_TYPES = {
         "color": "#F59E0B",
         "icon": "FunnelFill",
     },
+    "CollectionResponse": {
+        "fields": ["name", "description", "summary", "metadata"],
+        "static": True,
+        "category": "system",
+        "description": (
+            "A single structured submission gathered by an ActiveKnowledgeCollection. "
+            "metadata: {collection_short_name, collection_id, answers[], submitted_at}. "
+            "answers is a flat list of {field_id, label, type, value} so responses can be "
+            "aggregated into simple statistics across a collection."
+        ),
+        "color": "#F59E0B",
+        "icon": "ClipboardCheckFill",
+    },
 }
 
 

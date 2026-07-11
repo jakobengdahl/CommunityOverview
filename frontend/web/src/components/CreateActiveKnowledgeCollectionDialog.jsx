@@ -3,7 +3,7 @@ import { ClipboardFill } from 'react-bootstrap-icons';
 import useGraphStore from '../store/graphStore';
 import './CreateSubscriptionDialog.css'; // Reuse the same styles
 
-const EXCLUDED_TYPES = ['SavedView', 'VisualizationView', 'EventSubscription', 'Agent', 'ActiveKnowledgeCollection'];
+const EXCLUDED_TYPES = ['SavedView', 'VisualizationView', 'EventSubscription', 'Agent', 'ActiveKnowledgeCollection', 'CollectionResponse'];
 
 /**
  * Dialog for creating/editing an ActiveKnowledgeCollection node.

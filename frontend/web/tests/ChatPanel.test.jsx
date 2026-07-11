@@ -452,4 +452,44 @@ describe('ChatPanel', () => {
       expect(screen.getByText(/10:30/)).toBeInTheDocument();
     });
   });
+
+  describe('Collection form', () => {
+    it('renders an assistant present_form and submits structured answers', async () => {
+      useGraphStore.setState({
+        chatMessages: [{
+          id: 'form-msg',
+          role: 'assistant',
+          content: 'Please answer:',
+          form: {
+            title: 'Q1',
+            fields: [
+              { id: 'role', label: 'Role', type: 'radio', options: ['Manager', 'Analyst'], required: true },
+            ],
+          },
+        }],
+        chatPanelOpen: true,
+      });
+
+      api.sendChatMessage.mockResolvedValue({
+        content: 'Saved, thank you.',
+        toolUsed: 'save_collection_response',
+        toolResult: null,
+      });
+
+      render(<ChatPanel collectionShortName="feedback" />);
+
+      expect(screen.getByText('Q1')).toBeInTheDocument();
+      fireEvent.click(screen.getByLabelText('Manager'));
+      fireEvent.click(screen.getByRole('button', { name: 'Submit' }));
+
+      await waitFor(() => expect(api.sendChatMessage).toHaveBeenCalledTimes(1));
+
+      const history = api.sendChatMessage.mock.calls[0][0];
+      const lastMsg = history[history.length - 1];
+      expect(lastMsg.role).toBe('user');
+      expect(lastMsg.content).toContain('save_collection_response');
+      expect(lastMsg.content).toContain('"field_id":"role"');
+      expect(lastMsg.content).toContain('Manager');
+    });
+  });
 });

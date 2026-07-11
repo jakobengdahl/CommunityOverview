@@ -433,6 +433,13 @@ const useGraphStore = create((set, get) => ({
     set({ chatMessages: [...chatMessages, { ...message, id: message.id || Date.now() }] });
   },
 
+  updateChatMessage: (id, patch) => {
+    const { chatMessages } = get();
+    set({
+      chatMessages: chatMessages.map(m => (m.id === id ? { ...m, ...patch } : m)),
+    });
+  },
+
   clearChatMessages: (t) => {
     const { presentation } = get();
     const welcomeMessage = createWelcomeMessage(presentation, t);

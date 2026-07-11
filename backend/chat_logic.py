@@ -816,6 +816,86 @@ class ChatProcessor:
                 }
             },
             {
+                "name": "present_form",
+                "description": (
+                    "Render an interactive input form in the chat so the user can answer with GUI "
+                    "controls (radio buttons, checkboxes, sliders, dropdowns) instead of free text. "
+                    "Use this in a data-collection session whenever a question has a fixed set of "
+                    "options or a bounded numeric range — it makes answering faster and keeps the "
+                    "collected data consistent for later aggregation. After the user submits, you "
+                    "receive their answers as a normal message; then call save_collection_response "
+                    "to store them. Present one focused form at a time."
+                ),
+                "input_schema": {
+                    "type": "object",
+                    "properties": {
+                        "title": {"type": "string", "description": "Optional short heading for the form"},
+                        "description": {"type": "string", "description": "Optional helper text shown above the fields"},
+                        "submit_label": {"type": "string", "description": "Optional label for the submit button (default 'Submit')"},
+                        "fields": {
+                            "type": "array",
+                            "description": "The input fields to render, in order.",
+                            "items": {
+                                "type": "object",
+                                "properties": {
+                                    "id": {"type": "string", "description": "Stable machine key for the field (e.g. 'role'). Reused when saving the answer."},
+                                    "label": {"type": "string", "description": "Question text shown to the user"},
+                                    "type": {
+                                        "type": "string",
+                                        "enum": ["text", "textarea", "number", "radio", "checkbox", "select", "slider", "boolean"],
+                                        "description": "Control type. radio/select = one choice; checkbox = multiple choices; slider = bounded number.",
+                                    },
+                                    "options": {
+                                        "type": "array",
+                                        "description": "Choices for radio/checkbox/select. Each item may be a string or {value, label}.",
+                                        "items": {"type": ["string", "object"]},
+                                    },
+                                    "min": {"type": "number", "description": "Minimum for slider/number"},
+                                    "max": {"type": "number", "description": "Maximum for slider/number"},
+                                    "step": {"type": "number", "description": "Step for slider/number"},
+                                    "required": {"type": "boolean", "description": "Whether an answer is mandatory"},
+                                    "placeholder": {"type": "string", "description": "Placeholder for text/number fields"},
+                                },
+                                "required": ["id", "label", "type"],
+                            },
+                        },
+                    },
+                    "required": ["fields"],
+                },
+            },
+            {
+                "name": "save_collection_response",
+                "description": (
+                    "Persist one structured submission gathered in the current collection session as "
+                    "a CollectionResponse node, linked to the active collection. Only available in "
+                    "collection mode. Call this after the user submits a form (or answers the "
+                    "equivalent questions in free text) so the answers are stored in a consistent, "
+                    "aggregatable shape. Pass every answered field."
+                ),
+                "input_schema": {
+                    "type": "object",
+                    "properties": {
+                        "answers": {
+                            "type": "array",
+                            "description": "The answered fields.",
+                            "items": {
+                                "type": "object",
+                                "properties": {
+                                    "field_id": {"type": "string", "description": "Matches the form field 'id' (or a stable key you choose)"},
+                                    "label": {"type": "string", "description": "Human-readable question text"},
+                                    "type": {"type": "string", "description": "Field type (radio, checkbox, slider, text, etc.)"},
+                                    "value": {"description": "The submitted value: string, number, boolean, or array for multi-select"},
+                                },
+                                "required": ["field_id", "value"],
+                            },
+                        },
+                        "respondent_label": {"type": "string", "description": "Optional label identifying the respondent (only if publicly appropriate — never store personal data without consent)"},
+                        "form_title": {"type": "string", "description": "Optional title of the form these answers came from"},
+                    },
+                    "required": ["answers"],
+                },
+            },
+            {
                 "name": "get_schema",
                 "description": "Get the complete schema configuration including all node types with their fields, colors, and descriptions, as well as all relationship types.",
                 "input_schema": {
@@ -922,8 +1002,13 @@ class ChatProcessor:
                 "toolResult": None
             }
 
-    def _handle_tool_use(self, messages: List[Dict], response, provider: LLMProvider, accumulated_nodes=None, accumulated_edges=None, system_prompt: str = None, tools_override: Dict[str, Callable] = None) -> Dict:
-        """Handle tool use with support for tool chaining and result aggregation"""
+    def _handle_tool_use(self, messages: List[Dict], response, provider: LLMProvider, accumulated_nodes=None, accumulated_edges=None, system_prompt: str = None, tools_override: Dict[str, Callable] = None, pending_form=None) -> Dict:
+        """Handle tool use with support for tool chaining and result aggregation.
+
+        pending_form carries a present_form action result across tool-chaining
+        recursion so the form spec survives even when later tools return nodes/edges
+        (which would otherwise take over final_tool_result and drop the form).
+        """
         if accumulated_nodes is None:
             accumulated_nodes = []
         if accumulated_edges is None:
@@ -980,6 +1065,19 @@ class ChatProcessor:
                     "marks": tool_input.get("marks", [])
                 }
 
+            # Special case for present_form - signals frontend to render input widgets.
+            # No graph access; the form spec is passed straight through for the client to render.
+            elif tool_name == "present_form":
+                tool_result = {
+                    "action": "present_form",
+                    "form": {
+                        "title": tool_input.get("title"),
+                        "description": tool_input.get("description"),
+                        "submit_label": tool_input.get("submit_label"),
+                        "fields": tool_input.get("fields", []),
+                    },
+                }
+
             elif tool_name in effective_tools:
                 try:
                     # Call the actual python function
@@ -1012,6 +1110,11 @@ class ChatProcessor:
                         if isinstance(edge, dict) and edge.get("id") not in existing_edge_ids:
                             accumulated_edges.append(edge)
                             existing_edge_ids.add(edge.get("id"))
+
+            # Preserve a present_form action so a later node/edge-returning tool in
+            # the same turn (or a subsequent chained tool) cannot drop the form spec.
+            if isinstance(tool_result, dict) and tool_result.get("action") == "present_form":
+                pending_form = tool_result
 
             # Store tool result with its ID for the response
             tool_results.append({
@@ -1048,7 +1151,7 @@ class ChatProcessor:
         # Check if LLM wants to use another tool (tool chaining)
         if final_response.stop_reason == "tool_use":
             # LLM wants to use another tool - continue recursively with accumulated data
-            return self._handle_tool_use(messages, final_response, provider, accumulated_nodes, accumulated_edges, system_prompt=active_system_prompt, tools_override=tools_override)
+            return self._handle_tool_use(messages, final_response, provider, accumulated_nodes, accumulated_edges, system_prompt=active_system_prompt, tools_override=tools_override, pending_form=pending_form)
 
         # Extract text from response (handle multiple text blocks)
         final_text = ""
@@ -1068,6 +1171,14 @@ class ChatProcessor:
         # If no accumulated data but we have tool results, use the last one
         if not final_tool_result and tool_results:
             final_tool_result = tool_results[-1]["result"]
+
+        # A present_form action must always reach the client (it renders the input
+        # widgets). Overlay it last so its action/form survive alongside any nodes/edges.
+        if pending_form:
+            if isinstance(final_tool_result, dict):
+                final_tool_result = {**final_tool_result, **pending_form}
+            else:
+                final_tool_result = pending_form
 
         return {
             "content": final_text,

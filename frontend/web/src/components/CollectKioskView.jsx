@@ -1,7 +1,32 @@
 import { useState, useEffect, useRef, useCallback } from 'react';
 import { FunnelFill, SendFill, ArrowRightCircleFill } from 'react-bootstrap-icons';
 import * as api from '../services/api';
+import CollectionForm from './CollectionForm';
 import './CollectKioskView.css';
+
+/** Extract a present_form spec from a chat response, or null if none. */
+function formFromResponse(response) {
+  return response?.toolResult?.action === 'present_form' ? response.toolResult.form : null;
+}
+
+/** Render one answer value for the human-readable summary. */
+function formatAnswerValue(value) {
+  if (Array.isArray(value)) return value.join(', ');
+  if (typeof value === 'boolean') return value ? 'Yes' : 'No';
+  return String(value ?? '');
+}
+
+/** Build the visible summary and the LLM-facing content for a submitted form. */
+function buildFormSubmission(answers) {
+  const readable = answers
+    .map((a) => `- ${a.label || a.field_id}: ${formatAnswerValue(a.value)}`)
+    .join('\n');
+  const display = readable;
+  const llmContent =
+    `[Form answers submitted]\n${readable}\n\n` +
+    `Structured answers to store with save_collection_response: ${JSON.stringify(answers)}`;
+  return { display, llmContent };
+}
 
 /**
  * CollectKioskView — Full-screen AI-assistant kiosk for data collection.
@@ -75,6 +100,7 @@ function CollectKioskView({ shortName }) {
           content: response.content || '(no response)',
           timestamp: new Date(),
           toolUsed: response.toolUsed,
+          form: formFromResponse(response),
         }]);
       })
       .catch(err => {
@@ -102,8 +128,9 @@ function CollectKioskView({ shortName }) {
     // Capture history synchronously before state updates to avoid stale-closure issues.
     // Hidden messages (e.g. the [COLLECTION_START] kickstart) must stay in the API history
     // so the conversation starts with a user turn as required by the Anthropic API.
+    // A form submission carries its structured payload in llmContent (not shown in chat).
     const conversationHistory = [
-      ...messages.map(m => ({ role: m.role, content: m.content })),
+      ...messages.map(m => ({ role: m.role, content: m.llmContent ?? m.content })),
       { role: 'user', content: userText },
     ];
 
@@ -130,6 +157,7 @@ function CollectKioskView({ shortName }) {
         content: response.content || '(no response)',
         timestamp: new Date(),
         toolUsed: response.toolUsed,
+        form: formFromResponse(response),
       }]);
     } catch (err) {
       console.error('[CollectKioskView] Chat error:', err);
@@ -145,6 +173,60 @@ function CollectKioskView({ shortName }) {
       setTimeout(() => textareaRef.current?.focus(), 100);
     }
   }, [inputValue, isProcessing, messages, shortName]);
+
+  const handleFormSubmit = useCallback(async (messageId, answers) => {
+    if (isProcessing) return;
+
+    const { display, llmContent } = buildFormSubmission(answers);
+
+    // Lock the submitted form so it can't be resubmitted.
+    setMessages(prev => prev.map(m =>
+      m.id === messageId ? { ...m, formSubmitted: true } : m
+    ));
+
+    const conversationHistory = [
+      ...messages.map(m => ({ role: m.role, content: m.llmContent ?? m.content })),
+      { role: 'user', content: llmContent },
+    ];
+
+    setMessages(prev => [...prev, {
+      id: crypto.randomUUID(),
+      role: 'user',
+      content: display,
+      llmContent,
+      timestamp: new Date(),
+    }]);
+    setIsProcessing(true);
+    setChatError(null);
+
+    try {
+      const response = await api.sendChatMessage(
+        conversationHistory,
+        null,
+        { collectionShortName: shortName }
+      );
+      setMessages(prev => [...prev, {
+        id: crypto.randomUUID(),
+        role: 'assistant',
+        content: response.content || '(no response)',
+        timestamp: new Date(),
+        toolUsed: response.toolUsed,
+        form: formFromResponse(response),
+      }]);
+    } catch (err) {
+      console.error('[CollectKioskView] Form submit error:', err);
+      setChatError(err.message);
+      setMessages(prev => [...prev, {
+        id: crypto.randomUUID(),
+        role: 'assistant',
+        content: `Error: ${err.message}`,
+        timestamp: new Date(),
+      }]);
+    } finally {
+      setIsProcessing(false);
+      setTimeout(() => textareaRef.current?.focus(), 100);
+    }
+  }, [isProcessing, messages, shortName]);
 
   const handleKeyPress = (e) => {
     if (e.key === 'Enter' && !e.shiftKey) {
@@ -249,6 +331,14 @@ function CollectKioskView({ shortName }) {
           >
             <div className="kiosk-message-bubble">
               <div className="kiosk-message-content">{msg.content}</div>
+              {msg.form && (
+                <CollectionForm
+                  form={msg.form}
+                  submitted={!!msg.formSubmitted}
+                  disabled={isProcessing}
+                  onSubmit={(answers) => handleFormSubmit(msg.id, answers)}
+                />
+              )}
               <div className="kiosk-message-meta">
                 {msg.role === 'assistant' ? 'Assistant' : 'You'}
                 {msg.timestamp && (

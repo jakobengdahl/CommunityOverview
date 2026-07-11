@@ -10,7 +10,19 @@ import { useI18n } from '../i18n';
 import * as api from '../services/api';
 import { positionNewNodes } from '@community-graph/ui-graph-canvas';
 import ExpertAgentSelector from './ExpertAgentSelector';
+import CollectionForm from './CollectionForm';
 import './ChatPanel.css';
+
+/** Extract a present_form spec from a chat response, or null if none. */
+const formFromResponse = (response) =>
+  response?.toolResult?.action === 'present_form' ? response.toolResult.form : null;
+
+/** Render one answer value for the human-readable summary. */
+const formatAnswerValue = (value) => {
+  if (Array.isArray(value)) return value.join(', ');
+  if (typeof value === 'boolean') return value ? 'Yes' : 'No';
+  return String(value ?? '');
+};
 
 /** Max characters of node context to include with a message to the LLM */
 const MAX_SELECTION_CONTEXT_CHARS = 6000;
@@ -29,6 +41,7 @@ function ChatPanel({ collectionShortName }) {
   const {
     chatMessages,
     addChatMessage,
+    updateChatMessage,
     nodes,
     edges,
     addNodesToVisualization,
@@ -110,6 +123,81 @@ function ChatPanel({ collectionShortName }) {
     );
   };
 
+  // Apply the visualization side-effects a chat response's toolResult implies
+  // (save view, clear, add/replace/update nodes, marks, guides). Shared by the
+  // typed-message path (handleSend) and the form-submit path (handleSubmitForm)
+  // so both entry points behave identically.
+  const applyToolResultSideEffects = async (toolResult) => {
+    if (!toolResult) return;
+    if (toolResult.action === 'save_view' || toolResult.action === 'save_visualization') {
+      const viewName = toolResult.name;
+      const currentNodes = useGraphStore.getState().nodes;
+      const viewNode = {
+        name: viewName,
+        type: 'SavedView',
+        description: t('notifications.saved_view_description', { name: viewName }),
+        summary: t('notifications.saved_view_summary', { count: currentNodes.length }),
+        metadata: { node_ids: currentNodes.map(n => n.id) },
+        communities: [],
+      };
+      try {
+        await api.addNodes([viewNode], []);
+      } catch (err) {
+        console.error('[ChatPanel] Failed to save view:', err);
+      }
+    }
+    else if (toolResult.action === 'clear_visualization') {
+      clearVisualization();
+    }
+    else if (toolResult.action === 'load_visualization') {
+      if (toolResult.nodes && toolResult.nodes.length > 0) {
+        const filteredNodes = filterCommunityNodes(toolResult.nodes);
+        updateVisualization(filteredNodes, toolResult.edges || []);
+      }
+    }
+    else if (toolResult.action === 'add_to_visualization') {
+      if (toolResult.nodes && toolResult.nodes.length > 0) {
+        const filteredNodes = filterCommunityNodes(toolResult.nodes);
+        const currentNodes = useGraphStore.getState().nodes;
+        const allEdges = [...edges, ...(toolResult.edges || [])];
+        const positionedNodes = positionNewNodes(filteredNodes, currentNodes, allEdges);
+        addNodesToVisualization(positionedNodes, toolResult.edges || []);
+      }
+    }
+    else if (toolResult.action === 'update_in_visualization') {
+      if (toolResult.nodes && toolResult.nodes.length > 0) {
+        const { nodes: currentNodes, edges: currentEdges, updateVisualization: update } = useGraphStore.getState();
+        const updatedNodeIds = new Set(toolResult.nodes.map(n => n.id));
+        const mergedNodes = currentNodes.map(n =>
+          updatedNodeIds.has(n.id)
+            ? toolResult.nodes.find(un => un.id === n.id)
+            : n
+        );
+        const newNodes = toolResult.nodes.filter(n =>
+          !currentNodes.some(cn => cn.id === n.id)
+        );
+        update([...mergedNodes, ...newNodes], currentEdges);
+      }
+    }
+    else if (toolResult.action === 'mark_nodes') {
+      useGraphStore.getState().setNodeMarks(toolResult.marks || []);
+    }
+    else if (toolResult.action === 'start_guide') {
+      const guideId = toolResult.guide_id;
+      const guides = useGraphStore.getState().presentation?.guides || [];
+      const guide = guides.find(g => g.id === guideId);
+      if (guide) {
+        startGuide(guide);
+      } else {
+        console.warn(`[ChatPanel] start_guide: guide "${guideId}" not found in presentation config`);
+      }
+    }
+    else if (toolResult.nodes && toolResult.nodes.length > 0) {
+      const filteredNodes = filterCommunityNodes(toolResult.nodes);
+      updateVisualization(filteredNodes, toolResult.edges || []);
+    }
+  };
+
   const handleSend = async () => {
     if ((!inputValue.trim() && !uploadedFile) || isProcessing) return;
 
@@ -151,7 +239,7 @@ function ChatPanel({ collectionShortName }) {
     try {
       const conversationMessages = chatMessages
         .filter(m => m.role !== 'system' && m.id !== 'welcome')
-        .map(m => ({ role: m.role, content: m.content }));
+        .map(m => ({ role: m.role, content: m.llmContent ?? m.content }));
 
       conversationMessages.push({ role: 'user', content: messageForLLM });
 
@@ -168,79 +256,7 @@ function ChatPanel({ collectionShortName }) {
 
       const toolResult = response.toolResult;
 
-      if (toolResult) {
-        if (toolResult.action === 'save_view' || toolResult.action === 'save_visualization') {
-          const viewName = toolResult.name;
-          const currentNodes = useGraphStore.getState().nodes;
-
-          const viewNode = {
-            name: viewName,
-            type: 'SavedView',
-            description: t('notifications.saved_view_description', { name: viewName }),
-            summary: t('notifications.saved_view_summary', { count: currentNodes.length }),
-            metadata: {
-              node_ids: currentNodes.map(n => n.id),
-            },
-            communities: [],
-          };
-
-          try {
-            await api.addNodes([viewNode], []);
-          } catch (err) {
-            console.error('[ChatPanel] Failed to save view:', err);
-          }
-        }
-        else if (toolResult.action === 'clear_visualization') {
-          clearVisualization();
-        }
-        else if (toolResult.action === 'load_visualization') {
-          if (toolResult.nodes && toolResult.nodes.length > 0) {
-            const filteredNodes = filterCommunityNodes(toolResult.nodes);
-            updateVisualization(filteredNodes, toolResult.edges || []);
-          }
-        }
-        else if (toolResult.action === 'add_to_visualization') {
-          if (toolResult.nodes && toolResult.nodes.length > 0) {
-            const filteredNodes = filterCommunityNodes(toolResult.nodes);
-            const currentNodes = useGraphStore.getState().nodes;
-            const allEdges = [...edges, ...(toolResult.edges || [])];
-            const positionedNodes = positionNewNodes(filteredNodes, currentNodes, allEdges);
-            addNodesToVisualization(positionedNodes, toolResult.edges || []);
-          }
-        }
-        else if (toolResult.action === 'update_in_visualization') {
-          if (toolResult.nodes && toolResult.nodes.length > 0) {
-            const { nodes: currentNodes, edges: currentEdges, updateVisualization } = useGraphStore.getState();
-            const updatedNodeIds = new Set(toolResult.nodes.map(n => n.id));
-            const mergedNodes = currentNodes.map(n =>
-              updatedNodeIds.has(n.id)
-                ? toolResult.nodes.find(un => un.id === n.id)
-                : n
-            );
-            const newNodes = toolResult.nodes.filter(n =>
-              !currentNodes.some(cn => cn.id === n.id)
-            );
-            updateVisualization([...mergedNodes, ...newNodes], currentEdges);
-          }
-        }
-        else if (toolResult.action === 'mark_nodes') {
-          useGraphStore.getState().setNodeMarks(toolResult.marks || []);
-        }
-        else if (toolResult.action === 'start_guide') {
-          const guideId = toolResult.guide_id;
-          const guides = useGraphStore.getState().presentation?.guides || [];
-          const guide = guides.find(g => g.id === guideId);
-          if (guide) {
-            startGuide(guide);
-          } else {
-            console.warn(`[ChatPanel] start_guide: guide "${guideId}" not found in presentation config`);
-          }
-        }
-        else if (toolResult.nodes && toolResult.nodes.length > 0) {
-          const filteredNodes = filterCommunityNodes(toolResult.nodes);
-          updateVisualization(filteredNodes, toolResult.edges || []);
-        }
-      }
+      await applyToolResultSideEffects(toolResult);
 
       const assistantMessage = {
         role: 'assistant',
@@ -256,6 +272,7 @@ function ChatPanel({ collectionShortName }) {
           affected_edges: toolResult.affected_edges,
           node_ids: toolResult.node_ids,
         } : null,
+        form: formFromResponse(response),
       };
       addChatMessage(assistantMessage);
 
@@ -326,7 +343,7 @@ function ChatPanel({ collectionShortName }) {
     try {
       const conversationMessages = chatMessages
         .filter(m => m.id !== 'welcome')
-        .map(m => ({ role: m.role, content: m.content }));
+        .map(m => ({ role: m.role, content: m.llmContent ?? m.content }));
       conversationMessages.push({ role: 'user', content: msg });
 
       const response = await api.sendChatMessage(conversationMessages, null, { federationDepth, expertAgentId: activeExperts.length > 0 ? activeExperts[activeExperts.length - 1] : undefined, collectionShortName });
@@ -364,7 +381,7 @@ function ChatPanel({ collectionShortName }) {
     try {
       const conversationMessages = chatMessages
         .filter(m => m.id !== 'welcome')
-        .map(m => ({ role: m.role, content: m.content }));
+        .map(m => ({ role: m.role, content: m.llmContent ?? m.content }));
       conversationMessages.push({ role: 'user', content: msg });
 
       const response = await api.sendChatMessage(conversationMessages, null, { federationDepth, expertAgentId: activeExperts.length > 0 ? activeExperts[activeExperts.length - 1] : undefined, collectionShortName });
@@ -388,7 +405,7 @@ function ChatPanel({ collectionShortName }) {
     try {
       const conversationMessages = chatMessages
         .filter(m => m.id !== 'welcome')
-        .map(m => ({ role: m.role, content: m.content }));
+        .map(m => ({ role: m.role, content: m.llmContent ?? m.content }));
       conversationMessages.push({ role: 'user', content: msg });
 
       const response = await api.sendChatMessage(conversationMessages, null, { federationDepth, expertAgentId: activeExperts.length > 0 ? activeExperts[activeExperts.length - 1] : undefined, collectionShortName });
@@ -423,6 +440,57 @@ function ChatPanel({ collectionShortName }) {
       content: t('chat.delete_cancelled'),
       timestamp: new Date(),
     });
+  };
+
+  const handleSubmitForm = async (messageId, answers) => {
+    if (isProcessing) return;
+
+    updateChatMessage(messageId, { formSubmitted: true });
+
+    const readable = answers
+      .map(a => `- ${a.label || a.field_id}: ${formatAnswerValue(a.value)}`)
+      .join('\n');
+    const llmContent =
+      `[Form answers submitted]\n${readable}\n\n` +
+      `Structured answers to store with save_collection_response: ${JSON.stringify(answers)}`;
+
+    // Persist llmContent on the message so the structured payload (not just the
+    // human-readable summary) survives into later turns' history — matching the
+    // kiosk, and keeping the answers aggregatable if the save is deferred.
+    addChatMessage({ role: 'user', content: readable, llmContent, timestamp: new Date() });
+    setIsProcessing(true);
+
+    try {
+      const conversationMessages = chatMessages
+        .filter(m => m.role !== 'system' && m.id !== 'welcome')
+        .map(m => ({ role: m.role, content: m.llmContent ?? m.content }));
+      conversationMessages.push({ role: 'user', content: llmContent });
+
+      const response = await api.sendChatMessage(conversationMessages, null, {
+        federationDepth,
+        expertAgentId: activeExperts.length > 0 ? activeExperts[activeExperts.length - 1] : undefined,
+        collectionShortName,
+      });
+
+      await applyToolResultSideEffects(response.toolResult);
+
+      addChatMessage({
+        role: 'assistant',
+        content: response.content,
+        timestamp: new Date(),
+        toolUsed: response.toolUsed,
+        form: formFromResponse(response),
+      });
+    } catch (err) {
+      addChatMessage({
+        role: 'assistant',
+        content: t('chat.error_prefix', { message: err.message }),
+        timestamp: new Date(),
+      });
+      setError(err.message);
+    } finally {
+      setIsProcessing(false);
+    }
   };
 
   // Summarize selected nodes — skill nodes and regular nodes are split so the UI
@@ -677,6 +745,20 @@ function ChatPanel({ collectionShortName }) {
                     </button>
                   </div>
                 </div>
+              )}
+
+              {msg.form && (
+                <CollectionForm
+                  form={msg.form}
+                  submitted={!!msg.formSubmitted}
+                  disabled={isProcessing}
+                  onSubmit={(answers) => handleSubmitForm(msg.id, answers)}
+                  labels={{
+                    submit: t('chat.form_submit'),
+                    submitted: t('chat.form_submitted'),
+                    requiredHint: t('chat.form_required'),
+                  }}
+                />
               )}
             </div>
             <div className="message-timestamp">

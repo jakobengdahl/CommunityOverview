@@ -18,7 +18,7 @@ import os
 import json
 import inspect
 import re
-from datetime import datetime
+from datetime import datetime, timezone
 
 from backend.chat_logic import ChatProcessor
 from backend.llm_providers import create_provider, LLMProvider
@@ -62,6 +62,9 @@ class ChatService:
         # Cache for resolved AKC configs — avoids repeated 500-node scans within a session.
         # Keyed by short_name; value is (prefix, perms) tuple from _resolve_collection.
         self._collection_cache: Dict[str, tuple] = {}
+        # Identity of the resolved AKC node, keyed by short_name: {"id", "name"}.
+        # Used by save_collection_response to link responses back to their collection.
+        self._collection_nodes: Dict[str, Dict[str, Any]] = {}
 
         # Expert agent registry — populated by load_expert_skills() at startup.
         self._expert_contexts: Dict[str, str] = {}
@@ -256,6 +259,10 @@ class ChatService:
                 meta = node.get("metadata") or {}
                 if meta.get("short_name") == short_name:
                     found = True
+                    self._collection_nodes[short_name] = {
+                        "id": node.get("id"),
+                        "name": node.get("name") or short_name,
+                    }
                     raw_perms = meta.get("node_type_permissions") or {}
                     # Guard against individual null entries in the permissions dict
                     perms = {k: (v or {}) for k, v in raw_perms.items()}
@@ -286,6 +293,19 @@ class ChatService:
                         "IMPORTANT: Only perform operations that are explicitly listed as "
                         "permitted above. Do not create, update, or delete node types that "
                         "are not listed, or perform operations not permitted for a given type."
+                    )
+
+                    lines.append("")
+                    lines.append(
+                        "STRUCTURED INPUT: When a question has a fixed set of choices or a bounded "
+                        "numeric range, prefer the present_form tool to render radio buttons, "
+                        "checkboxes, sliders, or dropdowns instead of asking for free text — it "
+                        "makes answering easier and keeps the data consistent. After the user "
+                        "submits a form (or answers the equivalent questions), call "
+                        "save_collection_response with one entry per answered field so the "
+                        "submission is stored in a consistent, aggregatable shape. Reuse each "
+                        "field's id when saving. Do not ask for personal data unless the "
+                        "collection instructions explicitly require it."
                     )
 
                     lines.append("")
@@ -424,6 +444,84 @@ class ChatService:
             "delete_edges": delete_edges_enforced,
         }
 
+    def _make_collection_response_tool(self, short_name: str) -> dict:
+        """Return a tools_map overlay with a save_collection_response bound to this collection.
+
+        The response is stored as a CollectionResponse node whose metadata carries a flat
+        answers list plus a reference to the owning collection (short_name + id), so responses
+        can later be aggregated into simple statistics. The collection reference lives in
+        metadata (authoritative for aggregation); an edge to the collection node is added
+        best-effort for graph navigation.
+        """
+        info = self._collection_nodes.get(short_name) or {}
+        collection_id = info.get("id")
+        collection_name = info.get("name") or short_name
+
+        def save_collection_response(answers, respondent_label=None, form_title=None, **kwargs):
+            if not isinstance(answers, list):
+                return {"success": False, "error": "answers must be a list of {field_id, value} objects."}
+
+            normalized = []
+            for a in answers:
+                if not isinstance(a, dict):
+                    continue
+                field_id = a.get("field_id") or a.get("id")
+                if not field_id or "value" not in a:
+                    continue
+                normalized.append({
+                    "field_id": str(field_id),
+                    "label": a.get("label"),
+                    "type": a.get("type"),
+                    "value": a.get("value"),
+                })
+            if not normalized:
+                return {
+                    "success": False,
+                    "error": "No valid answers provided — each answer needs a field_id and a value.",
+                }
+
+            submitted_at = datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
+
+            def _fmt(v):
+                return ", ".join(str(x) for x in v) if isinstance(v, list) else str(v)
+
+            summary = "; ".join(
+                f"{a['label'] or a['field_id']}: {_fmt(a['value'])}" for a in normalized
+            )[:300]
+
+            node = {
+                "type": "CollectionResponse",
+                "name": f"{collection_name} — response {submitted_at}"[:200],
+                "summary": summary,
+                "metadata": {
+                    "collection_short_name": short_name,
+                    "collection_id": collection_id,
+                    "form_title": form_title,
+                    "respondent_label": respondent_label,
+                    "answers": normalized,
+                    "submitted_at": submitted_at,
+                },
+            }
+            edges = []
+            if collection_id:
+                edges.append({"source": node["name"], "target": collection_id})
+
+            result = self._graph_service.add_nodes(nodes=[node], edges=edges)
+            if result.get("success"):
+                added = result.get("added_node_ids") or []
+                return {
+                    "action": "collection_response_saved",
+                    "success": True,
+                    "response_id": added[0] if added else None,
+                    "answer_count": len(normalized),
+                }
+            return {
+                "success": False,
+                "error": result.get("message") or "Failed to save collection response.",
+            }
+
+        return {"save_collection_response": save_collection_response}
+
     @staticmethod
     def _sanitize_id(node_id: str) -> str:
         """Truncate at first C0/DEL control character to prevent prompt injection via node IDs."""
@@ -535,6 +633,14 @@ class ChatService:
                 if collection_perms is not None
                 else None
             )
+            # Install save_collection_response only within an active (resolved or
+            # fail-closed) collection session — effective_prefix is None only when the
+            # short_name did not resolve, in which case storing a response is meaningless.
+            if collection_short_name and effective_prefix is not None:
+                tools_override = {
+                    **(tools_override or {}),
+                    **self._make_collection_response_tool(collection_short_name),
+                }
 
             visualization_context = self._format_visualization_context(
                 visible_node_ids, selected_node_ids
