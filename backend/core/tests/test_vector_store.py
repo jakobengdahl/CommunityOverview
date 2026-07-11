@@ -267,6 +267,66 @@ class TestVectorStoreMatrix:
         assert temp_vector_store.node_ids == []
 
 
+class TestVectorStoreNumpySearch:
+    """Semantic search runs on numpy alone — no ML extras (torch /
+    sentence-transformers) required. Regression for STRUCTURE_REVIEW.md A2,
+    which moved those extras out of the base requirements."""
+
+    def _store_with_embeddings(self):
+        # Deterministic embeddings set directly on the nodes, so no embedding
+        # model is loaded at any point in these tests.
+        nodes = [
+            Node(id="n1", type=NodeType.ACTOR, name="A"),
+            Node(id="n2", type=NodeType.ACTOR, name="B"),
+            Node(id="n3", type=NodeType.ACTOR, name="C"),
+        ]
+        nodes[0].embedding = [1.0, 0.0, 0.0]
+        nodes[1].embedding = [0.9, 0.1, 0.0]
+        nodes[2].embedding = [0.0, 0.0, 1.0]
+        store = VectorStore()
+        store.rebuild_index(nodes)
+        return store, nodes
+
+    def test_cosine_similarity_matrix_matches_expected(self):
+        from backend.core.vector_store import _cosine_similarity_matrix
+
+        store, _ = self._store_with_embeddings()
+        query = np.array([[1.0, 0.0, 0.0]])
+        sims = _cosine_similarity_matrix(query, store.embedding_matrix)
+
+        assert sims.shape == (3,)
+        assert sims[0] == pytest.approx(1.0, abs=1e-6)   # identical vector
+        assert sims[2] == pytest.approx(0.0, abs=1e-6)   # orthogonal vector
+        assert sims[0] > sims[1] > sims[2]
+
+    def test_search_by_node_uses_numpy_only(self):
+        """Searching by an already-embedded node needs only numpy; the model
+        must never be loaded."""
+        store, nodes = self._store_with_embeddings()
+
+        with patch.object(store, "_load_model",
+                           side_effect=AssertionError("model must not load")):
+            results = store.search(query_node=nodes[0], limit=5)
+
+        result_ids = [node_id for node_id, _ in results]
+        assert "n1" not in result_ids       # query node itself excluded
+        assert result_ids[0] == "n2"         # nearest neighbour ranked first
+
+    def test_search_by_text_degrades_when_model_missing(self):
+        """Query-text search embeds the query with the ML model; when that
+        model is unavailable, search returns no semantic hits instead of
+        raising."""
+        store, _ = self._store_with_embeddings()
+
+        def missing_model():
+            raise ImportError("No module named 'sentence_transformers'")
+
+        with patch.object(store, "_load_model", side_effect=missing_model):
+            results = store.search(query_text="anything", limit=5)
+
+        assert results == []
+
+
 # Skip slow tests by default, run with: pytest -m slow
 def pytest_configure(config):
     config.addinivalue_line("markers", "slow: marks tests as slow (require model loading)")

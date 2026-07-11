@@ -452,7 +452,7 @@ summary instead.
 
 | # | Item | Effort | Depends on | Status |
 |---|------|--------|-----------|--------|
-| 1 | A2 ML deps out of base requirements | M | — | open |
+| 1 | A2 ML deps out of base requirements | M | — | done (PR #220) |
 | 2 | A1 full test suite in CI | M | A2 | open |
 | 3 | A4 protect `dev` + auto-merge | XS | A1 | open *(owner action)* |
 | 4 | A3 session-ID hardening, step 1 (rate limit + CORS) | S–M | — | open |
@@ -492,4 +492,10 @@ summary instead.
 
 ## Completed
 
-*(move items here with date + PR number as they are finished)*
+- **[2026-07-11] A2 — ML deps out of base requirements (PR #220).** Moved
+  `torch` + `sentence-transformers` and the pytorch extra index into
+  `requirements-ml.txt` (un-deprecated); replaced the sole `scikit-learn` use
+  (cosine similarity) with numpy so semantic search runs on the base install;
+  `search()` degrades gracefully without the ML stack. Base `pip install` now
+  succeeds on PyPI-only networks; full backend suite passes without ML.
+  Dockerfile installs the extras by default via an `INSTALL_ML` build arg.

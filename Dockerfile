@@ -52,9 +52,18 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 RUN groupadd --gid 1000 appgroup \
     && useradd --uid 1000 --gid appgroup --shell /bin/bash --create-home appuser
 
-# Copy backend requirements and install dependencies
+# Copy backend requirements and install dependencies.
+# The base requirements run the full app (semantic search included). The ML
+# extras (torch + sentence-transformers) add embedding *generation* and are
+# installed by default; set --build-arg INSTALL_ML=false for a lighter image
+# that relies on pre-computed embeddings only.
+ARG INSTALL_ML=true
 COPY backend/requirements.txt backend/requirements.txt
-RUN pip install --no-cache-dir -r backend/requirements.txt
+COPY backend/requirements-ml.txt backend/requirements-ml.txt
+RUN pip install --no-cache-dir -r backend/requirements.txt \
+    && if [ "$INSTALL_ML" = "true" ]; then \
+         pip install --no-cache-dir -r backend/requirements-ml.txt; \
+       fi
 
 # Copy backend code and config
 COPY backend ./backend

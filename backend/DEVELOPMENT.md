@@ -96,8 +96,13 @@ python -m venv venv
 source venv/bin/activate  # Linux/Mac
 # or: venv\Scripts\activate  # Windows
 
-# Install Python packages
+# Install Python packages (base — runs the full app, including semantic search)
 pip install -r backend/requirements.txt
+
+# Optional: ML extras for generating semantic embeddings from text
+# (torch + sentence-transformers, CPU-only). Without them, embedding
+# generation is skipped gracefully and name-based similarity still works.
+pip install -r backend/requirements-ml.txt
 ```
 
 ### JavaScript Dependencies
