@@ -18,7 +18,7 @@ import os
 import json
 import inspect
 import re
-from datetime import datetime
+from datetime import datetime, timezone
 
 from backend.chat_logic import ChatProcessor
 from backend.llm_providers import create_provider, LLMProvider
@@ -480,7 +480,7 @@ class ChatService:
                     "error": "No valid answers provided — each answer needs a field_id and a value.",
                 }
 
-            submitted_at = datetime.utcnow().isoformat() + "Z"
+            submitted_at = datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
 
             def _fmt(v):
                 return ", ".join(str(x) for x in v) if isinstance(v, list) else str(v)

@@ -21,7 +21,17 @@ Effort scale: XS = single-line fix · S = up to ~30 lines / one file · M = mult
 
 ## Open
 
-### [2026-07-11] `Skill` system node type appears as a permission row in the AKC dialog
+### [2026-07-11] No per-collection opt-out for persisting CollectionResponse
+- **File(s):** `backend/ui/chat_service.py` (`process_message`, response-tool install gate)
+- **Context:** Discovered during review of `claude/active-collector-gui-inputs-0qj15m`
+- **Issue:** `save_collection_response` is installed for every *resolved* collection (gated only on `collection_short_name and effective_prefix is not None`), independent of `node_type_permissions`. This is intentional — response-collecting is the collection's purpose and the write target type is hardcoded to `CollectionResponse` (no type-injection risk) — but an owner who configures a purely informational, read-only collection has no way to disable response persistence. Consider an explicit per-collection `collect_responses` flag (default on) if that use case materialises.
+- **Effort:** S
+
+### [2026-07-11] present_form action wins over a co-occurring pure-action tool
+- **File(s):** `backend/chat_logic.py` (`_handle_tool_use` final `pending_form` overlay)
+- **Context:** Discovered during review of `claude/active-collector-gui-inputs-0qj15m`
+- **Issue:** `toolResult` carries a single `action`. If the LLM calls `present_form` in the same turn as another pure-action tool (`mark_nodes`, `clear_visualization`, `start_guide`, `save_view`), the overlay makes `present_form` win and the other action is dropped (the frontend dispatches on `action ===`). Node/edge-returning tools are unaffected (their data rides in `nodes`/`edges`). This is an inherent single-`action` channel limitation, not specific to present_form; very rare in practice. A general fix would let the response carry multiple actions.
+- **Effort:** M
 - **File(s):** `frontend/web/src/components/CreateActiveKnowledgeCollectionDialog.jsx:6` (`EXCLUDED_TYPES`)
 - **Context:** Discovered during `claude/active-collector-gui-inputs-0qj15m`
 - **Issue:** `get_schema` returns all node types including system ones, and the AKC permissions table filters only via `EXCLUDED_TYPES`, which omits `Skill`. So `Skill` (a system type users never create in a collection) shows up as a create/update/delete row in the collection permissions table. `CollectionResponse` was added to `EXCLUDED_TYPES` in this branch; `Skill` should likely be excluded too, but it is pre-existing and out of scope here. Consider excluding all `category: system` types generically instead of maintaining a hardcoded list.

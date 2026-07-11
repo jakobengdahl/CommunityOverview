@@ -816,6 +816,46 @@ class TestPresentForm:
         # Nodes from search_graph should still be carried for visualization.
         assert any(n.get("name") == "Findable Agency" for n in tr.get("nodes", []))
 
+    def test_present_form_survives_chained_recursion(self, graph_service):
+        # Regression: present_form in one tool frame, then a node-returning tool in a
+        # later chained frame — the form spec must still reach the client.
+        from backend.ui import ChatService
+        from backend.llm_providers import LLMResponse
+
+        class SeqProvider:
+            def __init__(self):
+                self.n = 0
+
+            def create_completion(self, messages, system_prompt, tools, max_tokens=4096):
+                self.n += 1
+                if self.n == 1:
+                    return LLMResponse(content=[
+                        {"type": "text", "text": "Fill this in."},
+                        {"type": "tool_use", "id": "t1", "name": "present_form",
+                         "input": {"fields": [
+                             {"id": "role", "label": "Role", "type": "radio", "options": ["A", "B"]},
+                         ]}},
+                    ], stop_reason="tool_use")
+                if self.n == 2:
+                    return LLMResponse(content=[
+                        {"type": "tool_use", "id": "t2", "name": "search_graph",
+                         "input": {"query": "Findable Agency"}},
+                    ], stop_reason="tool_use")
+                return LLMResponse(content=[{"type": "text", "text": "Done."}], stop_reason="end_turn")
+
+        with patch("backend.chat_logic.create_provider", return_value=SeqProvider()), \
+             patch.dict(os.environ, {"ANTHROPIC_API_KEY": "test-key"}):
+            service = ChatService(graph_service)
+            service._processor.provider_type = "mock"
+            service._processor.default_api_key = "test-key"
+            graph_service.add_nodes(nodes=[{"type": "Actor", "name": "Findable Agency"}], edges=[])
+
+            result = service.process_message(messages=[{"role": "user", "content": "go"}])
+
+        tr = result["toolResult"]
+        assert tr["action"] == "present_form", "form must survive a chained node-returning tool"
+        assert any(n.get("name") == "Findable Agency" for n in tr.get("nodes", []))
+
 
 def _add_akc(graph_service, short_name, perms=None):
     """Persist a minimal ActiveKnowledgeCollection node and return its id."""
