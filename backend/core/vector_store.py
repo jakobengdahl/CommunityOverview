@@ -3,13 +3,15 @@ Vector Store for embeddings.
 Handles generating, storing, and searching embeddings for nodes.
 
 This module is part of graph_core - the core graph storage layer.
-It uses sentence-transformers with CPU-only PyTorch for lightweight embeddings.
 
-Required dependencies (see backend/requirements.txt):
-  numpy, sentence-transformers, scikit-learn, torch (CPU)
+Semantic *search* over existing embeddings needs only numpy (part of the base
+requirements). *Generating* embeddings from text needs sentence-transformers
+with CPU-only PyTorch, which are optional ML extras (requirements-ml.txt).
+When those extras are absent, embedding generation is skipped gracefully and
+callers fall back to name-based similarity.
 
-Imports are deferred (lazy) to speed up initial module load, but the
-packages MUST be installed in the environment.
+Imports are deferred (lazy) so the module loads fast and so the absence of the
+optional ML stack surfaces only when embedding generation is actually attempted.
 """
 
 import pickle
@@ -21,7 +23,6 @@ from .models import Node
 # Global references for lazy-loaded modules
 _np = None
 _SentenceTransformer = None
-_cosine_similarity = None
 
 
 def _ensure_numpy():
@@ -34,7 +35,7 @@ def _ensure_numpy():
 
 
 def _ensure_sentence_transformers():
-    """Lazy load sentence-transformers"""
+    """Lazy load sentence-transformers (optional ML extra)"""
     global _SentenceTransformer
     if _SentenceTransformer is None:
         from sentence_transformers import SentenceTransformer
@@ -42,13 +43,15 @@ def _ensure_sentence_transformers():
     return _SentenceTransformer
 
 
-def _ensure_sklearn():
-    """Lazy load sklearn cosine_similarity"""
-    global _cosine_similarity
-    if _cosine_similarity is None:
-        from sklearn.metrics.pairwise import cosine_similarity
-        _cosine_similarity = cosine_similarity
-    return _cosine_similarity
+def _cosine_similarity_matrix(query, matrix):
+    """Cosine similarity of a (1, d) query against an (n, d) matrix -> (n,).
+
+    Implemented with numpy so semantic search does not depend on scikit-learn.
+    """
+    np = _ensure_numpy()
+    query_norm = query / (np.linalg.norm(query, axis=1, keepdims=True) + 1e-12)
+    matrix_norm = matrix / (np.linalg.norm(matrix, axis=1, keepdims=True) + 1e-12)
+    return (query_norm @ matrix_norm.T)[0]
 
 
 class VectorStore:
@@ -189,25 +192,32 @@ class VectorStore:
         if not self.embeddings or self.embedding_matrix is None:
             return []
 
-        self._load_model()
-        cosine_similarity = _ensure_sklearn()
+        np = _ensure_numpy()
 
-        if query_node:
-            # If searching by node, check if we already have its embedding
-            if query_node.id in self.embeddings:
-                query_embedding = self.embeddings[query_node.id]
+        # Obtaining the query embedding may need the optional ML stack (to embed
+        # query text or a not-yet-embedded node). If it is unavailable, degrade
+        # to no semantic results rather than failing the whole search.
+        try:
+            if query_node:
+                # If searching by node, check if we already have its embedding
+                if query_node.id in self.embeddings:
+                    query_embedding = self.embeddings[query_node.id]
+                else:
+                    query_embedding = self.generate_embedding(query_node)
+            elif query_text:
+                self._load_model()
+                query_embedding = self.model.encode(query_text)
             else:
-                query_embedding = self.generate_embedding(query_node)
-        elif query_text:
-            query_embedding = self.model.encode(query_text)
-        else:
+                return []
+        except ImportError as e:
+            print(f"Warning: semantic search unavailable (embedding model not installed): {e}")
             return []
 
-        # Reshape for sklearn (1, embedding_dim)
-        query_embedding = query_embedding.reshape(1, -1)
+        # Reshape to (1, embedding_dim); handle both list and array inputs
+        query_embedding = np.asarray(query_embedding).reshape(1, -1)
 
         # Calculate cosine similarity
-        similarities = cosine_similarity(query_embedding, self.embedding_matrix)[0]
+        similarities = _cosine_similarity_matrix(query_embedding, self.embedding_matrix)
 
         # Get indices of top results
         # We can filter by threshold here

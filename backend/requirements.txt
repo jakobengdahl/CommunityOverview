@@ -31,17 +31,8 @@ uvicorn>=0.20.0
 # String similarity (MIT-licensed, C++ optimized)
 rapidfuzz>=3.0.0
 
-# ===== ML Dependencies (OPTIMIZED FOR DISK SPACE) =====
-# Install PyTorch CPU-only version (much smaller than CUDA version)
---extra-index-url https://download.pytorch.org/whl/cpu
-torch>=2.0.0
-
-# numpy - used directly by vector_store.py for embedding index
+# numpy - used directly by vector_store.py for the embedding index and
+# cosine-similarity search. Pure-PyPI and lightweight, so it stays in the base
+# requirements: semantic *search* over existing embeddings works without the ML
+# extras. Generating new embeddings needs the ML stack (requirements-ml.txt).
 numpy>=1.24.0
-
-# Sentence transformers for semantic similarity
-# This will use the CPU-only PyTorch installed above
-sentence-transformers>=2.2.0
-
-# Lightweight ML utilities
-scikit-learn>=1.0.0
