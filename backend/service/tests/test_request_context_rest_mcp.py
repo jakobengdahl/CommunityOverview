@@ -8,7 +8,7 @@ from fastapi.testclient import TestClient
 
 from backend.api_host import create_app
 from backend.api_host.config import AppConfig
-from backend.authorization import GraphAccessNarrowing, GraphAuthorizationContext, GraphAuthorizationDecision
+from backend.runtime.authorization import GraphAccessNarrowing, GraphAuthorizationContext, GraphAuthorizationDecision
 from backend.core import Edge, Node, NodeType
 from backend.federation.config import FederationFileConfig
 from backend.federation.manager import FederationManager

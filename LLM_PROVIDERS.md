@@ -18,7 +18,7 @@ To enable AI features later, set the appropriate API key and restart the server.
 
 ## Supported Providers
 
-- **Claude** (Anthropic) - Uses `claude-sonnet-4-5` by default (see `backend/llm_providers.py`)
+- **Claude** (Anthropic) - Uses `claude-sonnet-4-5` by default (see `backend/llm/llm_providers.py`)
 - **OpenAI** - Uses GPT-4o (configurable), or any OpenAI-compatible endpoint via `OPENAI_BASE_URL`
 
 ## Configuration

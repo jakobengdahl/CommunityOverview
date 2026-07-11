@@ -40,7 +40,7 @@ class TestRequestActorService:
         }
 
     def test_internal_seam_still_resolves_rich_actor_context(self, monkeypatch):
-        from backend.request_context import get_request_actor_context
+        from backend.runtime.request_context import get_request_actor_context
 
         monkeypatch.setenv("COMMUNITYOVERVIEW_ACTOR_ID", "env-actor")
         monkeypatch.setenv("COMMUNITYOVERVIEW_ACTOR_TYPE", "service")
@@ -107,7 +107,7 @@ class TestRequestScopeService:
         }
 
     def test_internal_seam_still_resolves_rich_scope_context(self, monkeypatch):
-        from backend.request_context import get_request_scope_context
+        from backend.runtime.request_context import get_request_scope_context
 
         monkeypatch.setenv("COMMUNITYOVERVIEW_WORKSPACE_ID", "env-workspace")
         monkeypatch.setenv("COMMUNITYOVERVIEW_WORKSPACE_KIND", "team")
@@ -137,7 +137,7 @@ class TestRequestScopeService:
         }
 
     def test_graph_selection_seam_remains_non_sensitive_and_tracks_mode(self, monkeypatch):
-        from backend.request_context import get_public_request_graph_selection_context
+        from backend.runtime.request_context import get_public_request_graph_selection_context
 
         monkeypatch.setenv("COMMUNITYOVERVIEW_WORKSPACE_KIND", "team")
 

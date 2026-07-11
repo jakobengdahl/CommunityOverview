@@ -17,8 +17,8 @@ import logging
 from typing import Dict, List, Optional, Any
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 
-from backend.config_context import resolve_federation_config_path_info, resolve_schema_config_path_info
-from backend.request_context import (
+from backend.runtime.config_context import resolve_federation_config_path_info, resolve_schema_config_path_info
+from backend.runtime.request_context import (
     get_public_request_actor_context,
     get_public_request_graph_selection_context,
     get_public_request_scope_context,

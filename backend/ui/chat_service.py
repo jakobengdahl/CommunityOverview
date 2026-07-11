@@ -20,8 +20,8 @@ import inspect
 import re
 from datetime import datetime, timezone
 
-from backend.chat_logic import ChatProcessor
-from backend.llm_providers import create_provider, LLMProvider
+from backend.ui.chat_logic import ChatProcessor
+from backend.llm.llm_providers import create_provider, LLMProvider
 from backend.service import GraphService
 
 logger = logging.getLogger(__name__)

@@ -61,7 +61,7 @@ class TestHealthAndRoot:
         """Info endpoint reports llm_available=True when API key is set."""
         with patch.dict(os.environ, {"ANTHROPIC_API_KEY": "sk-ant-test", "LLM_PROVIDER": "claude"}):
             from backend.api_host import create_app
-            with patch('backend.chat_logic.create_provider'):
+            with patch('backend.ui.chat_logic.create_provider'):
                 app = create_app(app_config)
             client = TestClient(app)
             response = client.get("/info")
@@ -173,7 +173,7 @@ class TestHealthAndRoot:
         caplog,
     ):
         """App startup emits structured diagnostics for operability tooling."""
-        with patch("backend.chat_logic.create_provider", return_value=mock_llm_provider):
+        with patch("backend.ui.chat_logic.create_provider", return_value=mock_llm_provider):
             with patch.dict(os.environ, {"ANTHROPIC_API_KEY": "test-key"}):
                 with caplog.at_level("INFO"):
                     app = create_app(app_config)
@@ -197,7 +197,7 @@ class TestHealthAndRoot:
         monkeypatch.setenv("COMMUNITYOVERVIEW_TENANT_NAME", "Highly Sensitive Tenant")
         monkeypatch.setenv("COMMUNITYOVERVIEW_ENVIRONMENT", "staging")
 
-        with patch("backend.chat_logic.create_provider", return_value=mock_llm_provider):
+        with patch("backend.ui.chat_logic.create_provider", return_value=mock_llm_provider):
             with patch.dict(os.environ, {"ANTHROPIC_API_KEY": "test-key"}):
                 client = TestClient(create_app(app_config))
 
@@ -247,7 +247,7 @@ class TestHealthAndRoot:
         )
         degraded_graph_storage = GraphStorage(str(graph_path))
 
-        with patch("backend.chat_logic.create_provider", return_value=mock_llm_provider):
+        with patch("backend.ui.chat_logic.create_provider", return_value=mock_llm_provider):
             with patch.dict(os.environ, {"ANTHROPIC_API_KEY": "test-key"}):
                 client = TestClient(create_app(app_config, graph_storage=degraded_graph_storage))
 
@@ -694,7 +694,7 @@ class TestUiCapabilitiesEndpoint:
         """llm_available is True when ANTHROPIC_API_KEY is configured."""
         with patch.dict(os.environ, {"ANTHROPIC_API_KEY": "sk-ant-test", "LLM_PROVIDER": "claude"}):
             from backend.api_host import create_app
-            with patch('backend.chat_logic.create_provider'):
+            with patch('backend.ui.chat_logic.create_provider'):
                 app = create_app(app_config)
             client = TestClient(app)
             response = client.get("/ui/capabilities")
@@ -720,7 +720,7 @@ class TestUiCapabilitiesEndpoint:
         with patch.dict(os.environ, env_patch):
             os.environ.pop("ANTHROPIC_API_KEY", None)
             from backend.api_host import create_app
-            with patch('backend.chat_logic.create_provider'):
+            with patch('backend.ui.chat_logic.create_provider'):
                 app = create_app(app_config)
             client = TestClient(app)
             response = client.get("/ui/capabilities")
@@ -748,7 +748,7 @@ class TestStartupDiagnosticsLlmCheck:
         """LLM check status is 'ok' when a key is configured."""
         with patch.dict(os.environ, {"ANTHROPIC_API_KEY": "sk-ant-test", "LLM_PROVIDER": "claude"}):
             from backend.api_host import create_app
-            with patch('backend.chat_logic.create_provider'):
+            with patch('backend.ui.chat_logic.create_provider'):
                 app = create_app(app_config)
             client = TestClient(app)
             response = client.get("/diagnostics/startup")

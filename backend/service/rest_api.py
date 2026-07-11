@@ -26,7 +26,7 @@ from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, Field
 from pydantic import ValidationError as PydanticValidationError
 
-from backend.authorization import use_request_authorization
+from backend.runtime.authorization import use_request_authorization
 
 from .service import GraphService
 

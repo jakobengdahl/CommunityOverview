@@ -19,7 +19,7 @@ class TestChatServiceInit:
         """ChatService should create a tools map with all expected tools."""
         from backend.ui import ChatService
 
-        with patch('backend.chat_logic.create_provider'):
+        with patch('backend.ui.chat_logic.create_provider'):
             service = ChatService(graph_service)
 
         expected_tools = [
@@ -45,7 +45,7 @@ class TestChatServiceInit:
         """All tools in the map should route to GraphService methods."""
         from backend.ui import ChatService
 
-        with patch('backend.chat_logic.create_provider'):
+        with patch('backend.ui.chat_logic.create_provider'):
             service = ChatService(graph_service)
 
         # search_graph is wrapped in _search_graph_tool (adds federation_depth support)
@@ -273,7 +273,7 @@ class TestExpertAgentSkills:
         from backend.ui import ChatService
         from backend.skills.loader import SkillsConfig
 
-        with patch('backend.chat_logic.create_provider'), \
+        with patch('backend.ui.chat_logic.create_provider'), \
              patch.dict(os.environ, {'ANTHROPIC_API_KEY': 'test-key'}):
             service = ChatService(graph_service)
 
@@ -288,7 +288,7 @@ class TestExpertAgentSkills:
         from backend.ui import ChatService
         from backend.skills.loader import SkillsConfig
 
-        with patch('backend.chat_logic.create_provider'), \
+        with patch('backend.ui.chat_logic.create_provider'), \
              patch.dict(os.environ, {'ANTHROPIC_API_KEY': 'test-key'}):
             service = ChatService(graph_service)
 
@@ -301,7 +301,7 @@ class TestExpertAgentSkills:
         """Unknown expert_agent_id must not raise — returns None."""
         from backend.ui import ChatService
 
-        with patch('backend.chat_logic.create_provider'), \
+        with patch('backend.ui.chat_logic.create_provider'), \
              patch.dict(os.environ, {'ANTHROPIC_API_KEY': 'test-key'}):
             service = ChatService(graph_service)
 
@@ -311,7 +311,7 @@ class TestExpertAgentSkills:
         """An expert with system_context but no skills returns just the context."""
         from backend.ui import ChatService
 
-        with patch('backend.chat_logic.create_provider'), \
+        with patch('backend.ui.chat_logic.create_provider'), \
              patch.dict(os.environ, {'ANTHROPIC_API_KEY': 'test-key'}):
             service = ChatService(graph_service)
 
@@ -326,7 +326,7 @@ class TestExpertAgentSkills:
         from backend.ui import ChatService
         from backend.skills.loader import SkillDefinition
 
-        with patch('backend.chat_logic.create_provider'), \
+        with patch('backend.ui.chat_logic.create_provider'), \
              patch.dict(os.environ, {'ANTHROPIC_API_KEY': 'test-key'}):
             service = ChatService(graph_service)
 
@@ -349,7 +349,7 @@ class TestExpertAgentSkills:
         """process_message() with expert_agent_id should pass extra_context to ChatProcessor."""
         from backend.ui import ChatService
 
-        with patch('backend.chat_logic.create_provider', return_value=mock_llm_provider), \
+        with patch('backend.ui.chat_logic.create_provider', return_value=mock_llm_provider), \
              patch.dict(os.environ, {'ANTHROPIC_API_KEY': 'test-key'}):
             service = ChatService(graph_service)
             service._processor.provider_type = "mock"
@@ -407,7 +407,7 @@ class TestResolveCollection:
     def test_finds_matching_collection(self, graph_service, mock_llm_provider):
         from backend.ui import ChatService
 
-        with patch("backend.chat_logic.create_provider", return_value=mock_llm_provider), \
+        with patch("backend.ui.chat_logic.create_provider", return_value=mock_llm_provider), \
              patch.dict(os.environ, {"ANTHROPIC_API_KEY": "test-key"}):
             service = ChatService(graph_service)
 
@@ -427,7 +427,7 @@ class TestResolveCollection:
     def test_returns_none_when_not_found(self, graph_service, mock_llm_provider):
         from backend.ui import ChatService
 
-        with patch("backend.chat_logic.create_provider", return_value=mock_llm_provider), \
+        with patch("backend.ui.chat_logic.create_provider", return_value=mock_llm_provider), \
              patch.dict(os.environ, {"ANTHROPIC_API_KEY": "test-key"}):
             service = ChatService(graph_service)
 
@@ -444,7 +444,7 @@ class TestResolveCollection:
     def test_all_false_permissions_shows_none_in_prompt(self, graph_service, mock_llm_provider):
         from backend.ui import ChatService
 
-        with patch("backend.chat_logic.create_provider", return_value=mock_llm_provider), \
+        with patch("backend.ui.chat_logic.create_provider", return_value=mock_llm_provider), \
              patch.dict(os.environ, {"ANTHROPIC_API_KEY": "test-key"}):
             service = ChatService(graph_service)
 
@@ -466,7 +466,7 @@ class TestResolveCollection:
     def test_exception_during_resolution_fails_closed(self, graph_service, mock_llm_provider):
         from backend.ui import ChatService
 
-        with patch("backend.chat_logic.create_provider", return_value=mock_llm_provider), \
+        with patch("backend.ui.chat_logic.create_provider", return_value=mock_llm_provider), \
              patch.dict(os.environ, {"ANTHROPIC_API_KEY": "test-key"}):
             service = ChatService(graph_service)
 
@@ -483,7 +483,7 @@ class TestResolveCollection:
     def test_guards_against_null_permission_entries(self, graph_service, mock_llm_provider):
         from backend.ui import ChatService
 
-        with patch("backend.chat_logic.create_provider", return_value=mock_llm_provider), \
+        with patch("backend.ui.chat_logic.create_provider", return_value=mock_llm_provider), \
              patch.dict(os.environ, {"ANTHROPIC_API_KEY": "test-key"}):
             service = ChatService(graph_service)
 
@@ -509,7 +509,7 @@ class TestMakeEnforcedTools:
     def _make_service(self, graph_service, mock_llm_provider):
         from backend.ui import ChatService
 
-        with patch("backend.chat_logic.create_provider", return_value=mock_llm_provider), \
+        with patch("backend.ui.chat_logic.create_provider", return_value=mock_llm_provider), \
              patch.dict(os.environ, {"ANTHROPIC_API_KEY": "test-key"}):
             service = ChatService(graph_service)
             service._processor.provider_type = "mock"
@@ -596,7 +596,7 @@ class TestMakeEnforcedTools:
         from backend.ui import ChatService
 
         # Keep create_provider patched for the entire test so process_message can call it
-        with patch("backend.chat_logic.create_provider", return_value=mock_llm_provider), \
+        with patch("backend.ui.chat_logic.create_provider", return_value=mock_llm_provider), \
              patch.dict(os.environ, {"ANTHROPIC_API_KEY": "test-key"}):
             service = ChatService(graph_service)
             service._processor.provider_type = "mock"
@@ -704,7 +704,7 @@ class TestVisualizationContext:
         """process_message() with canvas state should inject it into the system prompt."""
         from backend.ui import ChatService
 
-        with patch('backend.chat_logic.create_provider', return_value=mock_llm_provider), \
+        with patch('backend.ui.chat_logic.create_provider', return_value=mock_llm_provider), \
              patch.dict(os.environ, {'ANTHROPIC_API_KEY': 'test-key'}):
             service = ChatService(graph_service)
             service._processor.provider_type = "mock"
@@ -737,7 +737,7 @@ class TestVisualizationContext:
         """process_message() without canvas fields should not inject the state block."""
         from backend.ui import ChatService
 
-        with patch('backend.chat_logic.create_provider', return_value=mock_llm_provider), \
+        with patch('backend.ui.chat_logic.create_provider', return_value=mock_llm_provider), \
              patch.dict(os.environ, {'ANTHROPIC_API_KEY': 'test-key'}):
             service = ChatService(graph_service)
             service._processor.provider_type = "mock"
@@ -820,7 +820,7 @@ class TestPresentForm:
         # Regression: present_form in one tool frame, then a node-returning tool in a
         # later chained frame — the form spec must still reach the client.
         from backend.ui import ChatService
-        from backend.llm_providers import LLMResponse
+        from backend.llm.llm_providers import LLMResponse
 
         class SeqProvider:
             def __init__(self):
@@ -843,7 +843,7 @@ class TestPresentForm:
                     ], stop_reason="tool_use")
                 return LLMResponse(content=[{"type": "text", "text": "Done."}], stop_reason="end_turn")
 
-        with patch("backend.chat_logic.create_provider", return_value=SeqProvider()), \
+        with patch("backend.ui.chat_logic.create_provider", return_value=SeqProvider()), \
              patch.dict(os.environ, {"ANTHROPIC_API_KEY": "test-key"}):
             service = ChatService(graph_service)
             service._processor.provider_type = "mock"
@@ -880,7 +880,7 @@ class TestSaveCollectionResponse:
 
     def _service(self, graph_service, mock_llm_provider):
         from backend.ui import ChatService
-        with patch("backend.chat_logic.create_provider", return_value=mock_llm_provider), \
+        with patch("backend.ui.chat_logic.create_provider", return_value=mock_llm_provider), \
              patch.dict(os.environ, {"ANTHROPIC_API_KEY": "test-key"}):
             service = ChatService(graph_service)
             service._processor.provider_type = "mock"

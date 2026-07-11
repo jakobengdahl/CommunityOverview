@@ -10,10 +10,13 @@ The system is organized into several packages:
 backend/
 ├── core/                # Core graph data structures and storage
 ├── service/             # GraphService layer, REST API, MCP tools
-├── ui/                  # User chat and document analysis (LLM integration)
-├── api_host/            # FastAPI application server
-├── chat_logic.py        # Chat processing logic
-└── llm_providers.py     # LLM provider abstraction
+├── ui/                  # User chat (incl. chat_logic.py) and document analysis
+├── llm/                 # LLM provider abstraction and language-policy prompts
+├── runtime/             # Request/authorization/config runtime context
+├── agents/              # Agent execution and event subscriptions
+├── federation/          # Federated graph cache and search
+├── skills/              # Skills loader system
+└── api_host/            # FastAPI application server
 frontend/
 ├── web/                 # Full web application
 └── widget/              # Embeddable widget for ChatGPT etc.

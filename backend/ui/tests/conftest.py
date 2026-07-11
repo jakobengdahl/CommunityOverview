@@ -18,7 +18,7 @@ import os
 from backend.core import GraphStorage, Node, Edge, NodeType
 from backend.service import GraphService
 from backend.ui import ChatService, DocumentService, create_ui_router
-from backend.llm_providers import LLMResponse
+from backend.llm.llm_providers import LLMResponse
 
 
 class MockLLMProvider:
@@ -157,7 +157,7 @@ def chat_service(graph_service, mock_llm_provider):
     but the GraphService is real (in-memory).
     """
     # Patch BEFORE creating ChatService so ChatProcessor uses mock
-    with patch('backend.chat_logic.create_provider', return_value=mock_llm_provider):
+    with patch('backend.ui.chat_logic.create_provider', return_value=mock_llm_provider):
         with patch.dict(os.environ, {'ANTHROPIC_API_KEY': 'test-key'}):
             service = ChatService(graph_service)
             service._processor.provider_type = "mock"
@@ -225,7 +225,7 @@ def fastapi_test_client(graph_service, mock_llm_provider):
     from fastapi.testclient import TestClient
 
     # Patch BEFORE creating ChatService
-    with patch('backend.chat_logic.create_provider', return_value=mock_llm_provider):
+    with patch('backend.ui.chat_logic.create_provider', return_value=mock_llm_provider):
         with patch.dict(os.environ, {'ANTHROPIC_API_KEY': 'test-key'}):
             app = FastAPI()
 

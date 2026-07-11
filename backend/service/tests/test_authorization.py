@@ -2,7 +2,7 @@
 
 import json
 
-from backend.authorization import (
+from backend.runtime.authorization import (
     GRAPH_ACTION_MUTATE,
     GraphAccessNarrowing,
     GraphAuthorizationContext,

@@ -71,10 +71,16 @@ See [docs/USER_GUIDE.md](./docs/USER_GUIDE.md) for a full user-facing walkthroug
     mcp_tools.py                  # MCP tool definitions
   /ui                             # Chat and document handling
     chat_service.py               # LLM chat with tool execution
+    chat_logic.py                 # Chat processing logic
     document_service.py           # Document parsing
     rest_api.py                   # Chat REST endpoints
-  llm_providers.py                # LLM provider abstraction
-  chat_logic.py                   # Chat processing logic
+  /llm                            # LLM provider abstraction
+    llm_providers.py              # LLM provider abstraction
+    language_policy.py            # Language-policy prompt helpers
+  /runtime                        # Request/authorization/config runtime context
+    authorization.py              # Graph authorization context
+    request_context.py            # Actor/scope request context
+    config_context.py             # Config path resolution context
   /skills                         # Skills loader system
     loader.py                     # SkillsLoader — fetches/parses SKILL.md files
 /config                           # Configuration profiles

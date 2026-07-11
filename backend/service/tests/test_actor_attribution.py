@@ -1,6 +1,6 @@
 """Targeted tests for actor attribution in mutation results and events."""
 
-from backend.authorization import use_request_authorization
+from backend.runtime.authorization import use_request_authorization
 
 
 class TestMutationAttribution:

@@ -342,7 +342,7 @@ def create_ui_router(
         Currently reports LLM availability so the chat panel can be hidden when
         no API keys are configured.
         """
-        from backend.llm_providers import get_llm_availability
+        from backend.llm.llm_providers import get_llm_availability
         llm = get_llm_availability()
         return {
             "llm_available": llm["available"],

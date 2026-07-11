@@ -11,7 +11,7 @@ from typing import Any, Dict, List, Optional, Literal
 
 from pydantic import BaseModel, Field, field_validator
 
-from backend.config_context import resolve_federation_config_path_info
+from backend.runtime.config_context import resolve_federation_config_path_info
 
 
 DEFAULT_FEDERATION_PATH = "config/default/federation_config.json"
