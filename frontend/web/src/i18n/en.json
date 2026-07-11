@@ -46,7 +46,41 @@
     "metadata": "Metadata",
     "edit": "Edit",
     "close": "Close",
-    "unknown_node": "Unknown node"
+    "unknown_node": "Unknown node",
+    "tab_details": "Details"
+  },
+  "history": {
+    "panel_title": "Recent activity",
+    "open": "Recent activity",
+    "close": "Close",
+    "refresh": "Refresh",
+    "empty": "No activity yet",
+    "loading": "Loading…",
+    "load_more": "Load more",
+    "error": "Could not load activity",
+    "ai_badge": "AI",
+    "ai_badge_title": "Performed by an AI agent",
+    "origin_label": "via {origin}",
+    "view_history": "History",
+    "no_entity_history": "No history for this item yet",
+    "before": "Before",
+    "after": "After",
+    "event": {
+      "node_create": "Node created",
+      "node_update": "Node updated",
+      "node_delete": "Node deleted",
+      "edge_create": "Connection created",
+      "edge_update": "Connection updated",
+      "edge_delete": "Connection deleted",
+      "unknown": "Change"
+    },
+    "time": {
+      "just_now": "just now",
+      "minutes_ago": "{count} min ago",
+      "hours_ago": "{count} h ago",
+      "days_ago": "{count} d ago",
+      "unknown": "unknown"
+    }
   },
   "proposal": {
     "title": "Proposed addition:",

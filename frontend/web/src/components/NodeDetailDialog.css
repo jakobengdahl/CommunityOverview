@@ -37,6 +37,34 @@
   gap: 10px;
 }
 
+.node-detail-tabs {
+  display: flex;
+  gap: 4px;
+  padding: 8px 20px 0;
+  border-bottom: 1px solid #444;
+  flex-shrink: 0;
+}
+
+.node-detail-tab {
+  background: transparent;
+  border: none;
+  border-bottom: 2px solid transparent;
+  color: #999;
+  font-size: 0.85rem;
+  padding: 6px 4px;
+  cursor: pointer;
+  transition: color 0.15s, border-color 0.15s;
+}
+
+.node-detail-tab:hover {
+  color: #ddd;
+}
+
+.node-detail-tab.active {
+  color: #fff;
+  border-bottom-color: #646cff;
+}
+
 .node-detail-type-dot {
   width: 12px;
   height: 12px;

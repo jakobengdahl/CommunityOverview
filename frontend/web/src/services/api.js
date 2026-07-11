@@ -242,6 +242,45 @@ export async function deleteEdge(edgeId) {
 }
 
 /**
+ * Get recent graph mutation history (newest first).
+ * @param {Object} options - { limit, offset }
+ * @returns {Promise<{success: boolean, entries: Array, count: number, limit: number, offset: number}>}
+ */
+export async function getGraphHistory(options = {}) {
+  const limit = options.limit ?? 50;
+  const offset = options.offset ?? 0;
+  return apiFetch(`${API_BASE}/history?limit=${limit}&offset=${offset}`);
+}
+
+/**
+ * Get mutation history for a single node (newest first).
+ * @param {string} nodeId - Node ID
+ * @param {Object} options - { limit, offset }
+ * @returns {Promise<{success: boolean, node_id: string, entries: Array, count: number}>}
+ */
+export async function getNodeHistory(nodeId, options = {}) {
+  const limit = options.limit ?? 50;
+  const offset = options.offset ?? 0;
+  return apiFetch(
+    `${API_BASE}/nodes/${encodeURIComponent(nodeId)}/history?limit=${limit}&offset=${offset}`
+  );
+}
+
+/**
+ * Get mutation history for a single edge (newest first).
+ * @param {string} edgeId - Edge ID
+ * @param {Object} options - { limit, offset }
+ * @returns {Promise<{success: boolean, edge_id: string, entries: Array, count: number}>}
+ */
+export async function getEdgeHistory(edgeId, options = {}) {
+  const limit = options.limit ?? 50;
+  const offset = options.offset ?? 0;
+  return apiFetch(
+    `${API_BASE}/edges/${encodeURIComponent(edgeId)}/history?limit=${limit}&offset=${offset}`
+  );
+}
+
+/**
  * Get graph statistics
  * @param {Array} communities - Optional community filter
  * @returns {Promise<{total_nodes: number, total_edges: number, ...}>}

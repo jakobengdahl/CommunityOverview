@@ -26,6 +26,7 @@ shared knowledge graphs. This guide covers all user-facing features.
    - [Document upload](#46-document-upload)
 5. [Session menu and settings](#5-session-menu-and-settings)
    - [Collaborating in a session](#51-collaborating-in-a-session)
+   - [Recent activity (audit log)](#52-recent-activity-audit-log)
 6. [Federation — searching across multiple graphs](#6-federation--searching-across-multiple-graphs)
 7. [Interactive guides](#7-interactive-guides)
 8. [Connecting external AI tools via MCP](#8-connecting-external-ai-tools-via-mcp)
@@ -85,7 +86,9 @@ node. A dialog lets you select the relationship type.
 
 ### 2.3 Editing and deleting
 
-**Edit:** Double-click a node to open its edit dialog. All fields are editable.
+**Edit:** Double-click a node to open its detail dialog, then click **Edit**. All
+fields are editable. The detail dialog also has a **History** tab showing the
+read-only change log for that node (see [5.2](#52-recent-activity-audit-log)).
 
 **Delete node:** Right-click → **Delete**, or select a node and press **Delete**.
 Deletions require confirmation. A single operation can remove up to 10 nodes at once.
@@ -351,6 +354,7 @@ AI apps:
 | **Search previous sessions** | Filters the recent-session list by name or ID |
 | **Connect to session (via ID)** | Joins an existing session by entering its ID (format `1234-5678`) |
 | **Recent sessions** | The most recently used sessions — shown by name if you have named them, otherwise by ID. Click one to load it; the current session is saved automatically first. Use the pencil icon to name a session, or the trash icon to delete it. |
+| **Recent activity** | Opens the activity panel — a read-only audit log of graph changes (see [5.2](#52-recent-activity-audit-log)) |
 | **Settings** | Opens the Settings dialog (see below) |
 
 Session content (node membership, positions, groups, and hidden nodes) is stored
@@ -393,6 +397,36 @@ deselects, leaves, or a short time passes without activity.
 recognisable name under **Settings → Your presence → Display name**; it is shown
 to everyone in the roster and on your selection badges. The name is stored in
 your browser and takes effect the next time you open or switch session.
+
+### 5.2 Recent activity (audit log)
+
+Open **Recent activity** from the bottom of the session menu to see a read-only
+log of everything that has changed in the graph, newest first. The panel slides
+in from the right edge of the screen.
+
+![Recent activity panel](images/recent-activity.png)
+*The activity panel lists graph changes newest-first, with an **AI** badge on
+changes made by an agent.*
+
+Each entry shows:
+
+- **What happened** — node or connection created, updated, or deleted.
+- **When** — a relative time (e.g. "5 min ago") with the exact date and time
+  underneath.
+- **Which item** — the entity's type and name (or ID).
+- **Where it came from** — the origin of the change (for example `web-ui` or
+  `mcp`), shown as *via …*.
+- An **AI** badge when the change was made by an AI agent rather than a person.
+
+For an update, a compact **before → after** diff lists the fields that changed.
+Use **Load more** at the bottom to page further back through the history, and the
+refresh icon in the header to reload from the top. This view never changes the
+graph — it is purely for looking back at what happened.
+
+History is also available per item: double-click a node (or open a connection's
+editor) and switch to the **History** tab to see only that item's changes. When a
+standalone graph has no recorded history yet, the panel simply shows that there is
+no activity.
 
 ### Settings dialog
 
@@ -589,6 +623,7 @@ Screenshots for this guide are saved to `docs/images/` in PNG format.
 | `node-marking.png` | pending | Canvas with colour marking dots and legend |
 | `document-upload.png` | ✓ | Chat after file upload with extracted entity proposals |
 | `hamburger-menu.png` | ✓ | Session menu (☰) — left panel with session navigation and Settings entry |
+| `recent-activity.png` | pending | Recent activity panel (right side) with entries, an AI badge, and a before→after diff |
 | `create-agent.png` | ✓ | Create Agent dialog with all configuration sections |
 | `skills.png` | ✓ | Chat panel bottom showing active skill and selected nodes |
 | `mcp-session-control.png` | ✓ | External AI (ChatGPT) controlling the canvas via session ID |

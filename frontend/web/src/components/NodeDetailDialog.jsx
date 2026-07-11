@@ -1,6 +1,7 @@
-import { useEffect } from 'react';
+import { useEffect, useState } from 'react';
 import useGraphStore from '../store/graphStore';
 import { useI18n } from '../i18n';
+import EntityHistoryView from './EntityHistoryView';
 import './NodeDetailDialog.css';
 
 const BASE_FIELDS = new Set(['name', 'description', 'summary', 'tags', 'subtypes', 'aliases', 'metadata', 'identifier']);
@@ -55,6 +56,7 @@ function renderNodeTypePermissions(perms) {
 function NodeDetailDialog({ node, onClose, onEdit }) {
   const { getNodeColor, schema } = useGraphStore();
   const { t } = useI18n();
+  const [view, setView] = useState('details');
 
   const data = node?.data || {};
   const nodeType = data.type || data.nodeType || '';
@@ -109,6 +111,30 @@ function NodeDetailDialog({ node, onClose, onEdit }) {
           <button className="close-button" onClick={onClose}>&times;</button>
         </header>
 
+        <div className="node-detail-tabs" role="tablist">
+          <button
+            role="tab"
+            aria-selected={view === 'details'}
+            className={`node-detail-tab${view === 'details' ? ' active' : ''}`}
+            onClick={() => setView('details')}
+          >
+            {t('detail.tab_details')}
+          </button>
+          <button
+            role="tab"
+            aria-selected={view === 'history'}
+            className={`node-detail-tab${view === 'history' ? ' active' : ''}`}
+            onClick={() => setView('history')}
+          >
+            {t('history.view_history')}
+          </button>
+        </div>
+
+        {view === 'history' ? (
+          <div className="node-detail-body">
+            <EntityHistoryView entityKind="node" entityId={node.id} />
+          </div>
+        ) : (
         <div className="node-detail-body">
           {data.summary && (
             <div className="node-detail-section">
@@ -202,12 +228,13 @@ function NodeDetailDialog({ node, onClose, onEdit }) {
             </div>
           )}
         </div>
+        )}
 
         <div className="node-detail-actions">
           <button className="secondary" onClick={onClose}>
             {t('detail.close')}
           </button>
-          {onEdit && (
+          {onEdit && view === 'details' && (
             <button
               className="primary"
               onClick={() => onEdit(node.id, data)}

@@ -21,6 +21,7 @@ import NodeDetailDialog from './components/NodeDetailDialog';
 import GuideOverlay from './components/GuideOverlay';
 import SessionDrawer from './components/SessionDrawer';
 import SettingsDialog from './components/SettingsDialog';
+import RecentActivityDrawer from './components/RecentActivityDrawer';
 import * as api from './services/api';
 import * as sessionStore from './services/sessionStore';
 import { SessionSyncClient } from './services/sessionSyncClient';
@@ -246,6 +247,7 @@ function App() {
       : api.generateVisualizationSessionId();
   });
   const [drawerOpen, setDrawerOpen] = useState(false);
+  const [activityOpen, setActivityOpen] = useState(false);
   const [settingsOpen, setSettingsOpen] = useState(false);
   const [connectDialogOpen, setConnectDialogOpen] = useState(false);
   const [renameDialog, setRenameDialog] = useState(null);
@@ -1610,6 +1612,10 @@ function App() {
         }}
         onDeleteSession={handleRequestDeleteSession}
         onOpenSettings={() => setSettingsOpen(true)}
+        onOpenActivity={() => {
+          setDrawerOpen(false);
+          setActivityOpen(true);
+        }}
         suspendEscape={!!(
           // The drawer is non-modal, so any dialog can be stacked on top of
           // it; while one is open, Escape belongs to that dialog.
@@ -1618,6 +1624,10 @@ function App() {
           deleteDialog || saveViewDialog || showSubscriptionDialog ||
           showAgentDialog || skillDialogType || showAKCDialog
         )}
+      />
+      <RecentActivityDrawer
+        open={activityOpen}
+        onClose={() => setActivityOpen(false)}
       />
       {maxFederationDepth > 1 && (
         <div className="app-a11y-depth-live" aria-live="polite" aria-atomic="true">
