@@ -57,6 +57,9 @@ class GraphStorage:
         json_path: str = "graph.json",
         embeddings_path: str = None,
         persistence_backend: Optional[GraphPersistenceBackend] = None,
+        history_max_events: Optional[int] = None,
+        history_max_age_days: Optional[float] = None,
+        history_compaction_interval: Optional[int] = None,
     ):
         """
         Initialize GraphStorage.
@@ -68,6 +71,15 @@ class GraphStorage:
                            New implementation stores embeddings in graph.json directly.
             persistence_backend: Optional persistence backend adapter. Defaults to
                 the file-backed JSON backend to preserve standalone behavior.
+            history_max_events: Optional cap on retained history records. When set
+                (> 0), the history sidecar is compacted down to the newest N
+                records. Default None keeps unbounded history (current behaviour).
+            history_max_age_days: Optional cap on history record age in days. When
+                set (> 0), records older than the cutoff are dropped on compaction.
+                Default None applies no age-based retention.
+            history_compaction_interval: Optional number of appends between
+                compaction passes (throttle). Defaults to an amortised value when
+                retention is enabled; ignored when retention is disabled.
         """
         self._persistence_backend = persistence_backend or FileGraphPersistenceBackend(json_path)
         self.json_path = getattr(self._persistence_backend, "json_path", Path(json_path))
@@ -76,6 +88,9 @@ class GraphStorage:
         # file-backed standalone backend, which owns a concrete json_path next
         # to which the history NDJSON lives. Non-file backends own their own
         # persistence and history strategy, so we leave this None there.
+        self._history_max_events = history_max_events
+        self._history_max_age_days = history_max_age_days
+        self._history_compaction_interval = history_compaction_interval
         self._history_store = self._init_history_store()
 
         # Thread lock for in-memory data structure protection
@@ -126,7 +141,12 @@ class GraphStorage:
         from .history_store import GraphHistoryStore
 
         history_path = self.json_path.with_name(self.json_path.stem + ".history.ndjson")
-        return GraphHistoryStore(history_path)
+        return GraphHistoryStore(
+            history_path,
+            max_events=self._history_max_events,
+            max_age_days=self._history_max_age_days,
+            compaction_interval=self._history_compaction_interval,
+        )
 
     def _build_type_searchable_text(self) -> None:
         """Build a lookup of node type -> searchable text including localized labels."""
