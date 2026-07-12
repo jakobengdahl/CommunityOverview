@@ -155,7 +155,7 @@ class TestDeliveryWorker:
             worker.stop(wait=True)
 
     @patch("backend.core.events.delivery.is_safe_url", return_value=True)
-    @patch("backend.core.events.delivery.requests.post")
+    @patch("backend.core.events.delivery.httpx.post")
     def test_successful_delivery(self, mock_post, mock_safe_url):
         """Test successful webhook delivery."""
         mock_response = Mock()
@@ -180,7 +180,7 @@ class TestDeliveryWorker:
             worker.stop(wait=True)
 
     @patch("backend.core.events.delivery.is_safe_url", return_value=True)
-    @patch("backend.core.events.delivery.requests.post")
+    @patch("backend.core.events.delivery.httpx.post")
     def test_failed_delivery_with_retry(self, mock_post, mock_safe_url):
         """Test that failed deliveries are retried."""
         # Fail twice, then succeed
@@ -215,7 +215,7 @@ class TestDeliveryWorker:
             worker.stop(wait=True)
 
     @patch("backend.core.events.delivery.is_safe_url", return_value=True)
-    @patch("backend.core.events.delivery.requests.post")
+    @patch("backend.core.events.delivery.httpx.post")
     def test_max_retries_exceeded(self, mock_post, mock_safe_url):
         """Test that events are dropped after max retries."""
         # Always fail
@@ -244,12 +244,12 @@ class TestDeliveryWorker:
             worker.stop(wait=True)
 
     @patch("backend.core.events.delivery.is_safe_url", return_value=True)
-    @patch("backend.core.events.delivery.requests.post")
+    @patch("backend.core.events.delivery.httpx.post")
     def test_timeout_handling(self, mock_post, mock_safe_url):
         """Test that timeouts are handled correctly."""
-        import requests
+        import httpx2 as httpx
 
-        mock_post.side_effect = requests.Timeout("Connection timed out")
+        mock_post.side_effect = httpx.TimeoutException("Connection timed out")
 
         results = []
         worker = DeliveryWorker(
@@ -271,7 +271,7 @@ class TestDeliveryWorker:
             worker.stop(wait=True)
 
     @patch("backend.core.events.delivery.is_safe_url", return_value=True)
-    @patch("backend.core.events.delivery.requests.post")
+    @patch("backend.core.events.delivery.httpx.post")
     def test_webhook_payload_format(self, mock_post, mock_safe_url):
         """Test that webhook receives correct payload format."""
         mock_response = Mock(status_code=200)

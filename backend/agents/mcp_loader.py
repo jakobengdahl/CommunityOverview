@@ -14,7 +14,7 @@ import subprocess
 import threading
 from typing import List, Dict, Any, Optional, Callable
 from dataclasses import dataclass, field
-import requests
+import httpx2 as httpx
 
 from .config import MCPIntegration, MCPTransport
 
@@ -152,7 +152,7 @@ class MCPLoader:
 
             # Try info endpoint
             info_url = f"{base_url}/info"
-            response = requests.get(info_url, timeout=5)
+            response = httpx.get(info_url, timeout=5, follow_redirects=True)
             if response.status_code == 200:
                 info = response.json()
                 # Our graph MCP includes tools in the info endpoint
@@ -160,7 +160,7 @@ class MCPLoader:
                     # We know our graph MCP tools
                     tools = self._get_graph_mcp_tools(integration)
 
-        except requests.RequestException as e:
+        except httpx.RequestError as e:
             logger.warning(f"Could not query {integration.id} info: {e}")
 
         # If no tools discovered, use known tools for GRAPH integration
@@ -758,7 +758,7 @@ class MCPLoader:
                 return {"error": "URL required"}
 
             try:
-                response = requests.get(url, timeout=30)
+                response = httpx.get(url, timeout=30, follow_redirects=True)
                 response.raise_for_status()
 
                 # Simple HTML to text conversion
@@ -842,11 +842,12 @@ class MCPLoader:
             count = input_args.get("count", 10)
 
             try:
-                response = requests.get(
+                response = httpx.get(
                     "https://api.search.brave.com/res/v1/web/search",
                     params={"q": query, "count": count},
                     headers={"X-Subscription-Token": api_key},
                     timeout=10,
+                    follow_redirects=True,
                 )
                 response.raise_for_status()
                 data = response.json()
