@@ -421,14 +421,32 @@ cluster. Decompose them behavior-preservingly, one slice per PR.
 
 - **Problem:** the backend uses `httpx2` (Pydantic's maintained continuation
   of httpx) while `services/mcp_oauth_gateway` pins legacy `httpx==0.28.0`;
-  `requests` is *also* in the base requirements (used for document processing).
+  `requests` was *also* in the base requirements (used by the webhook delivery
+  worker and the MCP loader — not document processing as originally stated).
   The gateway pins exact versions while the backend policy is `>=` minimums.
   The gateway's `python-jose 3.3.0` should be reviewed against its known CVEs
   (CVE-2024-33663/33664) or replaced with `pyjwt`.
-- **Proposed change:** standardize on `httpx2` in both components; drop
-  `requests` if its uses migrate; align the gateway's pin policy with the repo
-  rule; evaluate the `python-jose` → `pyjwt` swap.
-- **Effort:** S–M
+- **Proposed change (sliced):**
+  - **Slice 1 — backend HTTP-client unification (done, PR #232):** migrate the
+    two remaining `requests` call sites (`backend/core/events/delivery.py`,
+    `backend/agents/mcp_loader.py`, plus the `scripts/test-e2e-live.py` dev
+    helper) to the already-present `httpx2`, and drop `requests` from
+    `backend/requirements.txt`. Pure, behaviour-preserving client swap
+    (`follow_redirects=True` matches the old redirect behaviour; exceptions
+    mapped `Timeout`→`TimeoutException`, `RequestException`→`RequestError`).
+  - **Slice 2 — gateway alignment (open, needs an owner decision):** the
+    remaining three sub-parts all touch `services/mcp_oauth_gateway`, a
+    separately-deployed component that *deliberately* exact-pins its
+    dependencies (see the C2 note) and whose auth path is security-sensitive:
+    (a) migrating its `httpx==0.28.0` to `httpx2`, (b) relaxing its exact pins
+    toward the repo's `>=` policy — which contradicts the deliberate
+    reproducibility pinning, so it is a policy decision, not a mechanical
+    change — and (c) the `python-jose` → `pyjwt` swap, a security-sensitive
+    change to JWT minting/verification (`auth.py`: `get_unverified_claims`,
+    `encode`, `decode`, `JWTError`). These belong together in a gateway-focused
+    session with explicit owner sign-off on the pin-policy and JWT-library
+    questions.
+- **Effort:** S–M (slice 1 S; slice 2 S–M + decision)
 
 ### C4. Upgrade the frontend build image off Node 18
 
@@ -557,7 +575,7 @@ summary instead.
 | 10 | A3 step 2 (stream token scheme) | M | A3 step 1 | open *(owner action — design decision; see A3 Update 2026-07-12, PR #228)* |
 | 11 | B1 remaining slices | M×2 | B1 slice 1 | in progress (slice 2/4, PR #229) |
 | 12 | B5 GraphCanvas decomposition | M | — | in progress (slice 1/2, PR #230) |
-| 13 | C3 HTTP client + dependency policy | S–M | — | open |
+| 13 | C3 HTTP client + dependency policy | S–M | — | in progress (slice 1/2, PR #232) |
 | 14 | C4 Node 18 → 20 build image | XS | — | open |
 | 15 | C5 security scanning in CI | S | A1 | open |
 | 16 | C6 start-script consolidation | S | — | open |
@@ -586,6 +604,31 @@ summary instead.
    same branch.
 
 ## Completed
+
+- **[2026-07-12] C3 slice 1 — backend HTTP-client unification, `requests` dropped
+  (PR #232).** Migrated the two remaining `requests` call sites off the redundant
+  second HTTP client onto the already-present `httpx2`: the SSRF-guarded webhook
+  delivery worker (`backend/core/events/delivery.py`) and the MCP loader's info /
+  fetch / brave-search GETs (`backend/agents/mcp_loader.py`), plus the
+  `scripts/test-e2e-live.py` manual dev helper. Removed `requests>=2.31.0` from
+  `backend/requirements.txt`; no app or script source imports `requests` any more.
+  Behaviour-preserving: `follow_redirects=True` matches the old `requests`
+  redirect-following default and exceptions are mapped (`Timeout` →
+  `TimeoutException`, `RequestException`/`.exceptions.RequestException` →
+  `RequestError`); the client-independent `is_safe_url` SSRF check is untouched.
+  Updated the delivery tests to patch `httpx.post` / raise `httpx.TimeoutException`.
+  Review loop caught one real behavioural deviation and fixed it in-slice: the MCP
+  loader's `/info` block caught `httpx.RequestError`, but `requests` had folded
+  two more cases into `RequestException` that `httpx` surfaces outside it — a
+  200/non-JSON body (`json.JSONDecodeError`, a `ValueError`) and a malformed
+  configured URL (`httpx.InvalidURL`) — so the handler was broadened to
+  `(httpx.RequestError, httpx.InvalidURL, ValueError)` with regression tests for
+  both (`TestConnectHttpInfoQuery`). Full backend suite green (944 passed / 16 skipped).
+  Logged one finding en route
+  (SMALL_FIXES 2026-07-12): the SSRF check is not re-applied across redirects — a
+  latent, pre-existing gap preserved by keeping `follow_redirects=True`. C3 slice 2
+  (gateway `httpx`→`httpx2`, pin-policy alignment, and the security-sensitive
+  `python-jose`→`pyjwt` swap) stays open under row 13 and needs an owner decision.
 
 - **[2026-07-12] B5 slice 1 — remote-position logic extracted from `GraphCanvas.jsx`
   into `useRemotePositions` (PR #230).** Moved the `pendingRemotePositionsRef` and
