@@ -143,6 +143,50 @@ describe('Server-backed session lifecycle', () => {
     expect(ops).toContainEqual({ op: 'node_moved', node_id: 'node-a', position: { x: 11, y: 22 } });
   });
 
+  // Regression (SMALL_FIXES 2026-07-10): if a sync client's connect() throws
+  // (e.g. new EventSource on a malformed stream URL), ensureSyncConnected must
+  // not let the exception escape the un-guarded auto-save call site, nor leave a
+  // half-connected client installed. Here the first save's connect() throws: the
+  // failure is contained (persistSessionSnapshot still completes, so the Save
+  // View dialog opens) and the next save builds a fresh client that flushes the
+  // pending ops to the server.
+  it('a sync connect failure is contained and recovers on the next save', async () => {
+    const connectSpy = vi.spyOn(SessionSyncClient.prototype, 'connect')
+      .mockImplementationOnce(() => { throw new Error('malformed stream URL'); });
+
+    const { container } = renderApp();
+
+    act(() => {
+      useGraphStore.getState().updateVisualization([NODE_A], []);
+    });
+
+    const toolbarButtons = container.querySelectorAll('.floating-toolbar-item');
+    const saveButton = toolbarButtons[toolbarButtons.length - 1];
+
+    // First save: connect() throws but is swallowed, so the snapshot round-trip
+    // completes and still opens the naming dialog (with the old bug the throw
+    // escaped persistSessionSnapshot and this dialog never appeared).
+    fireEvent.click(saveButton);
+    await waitFor(() => {
+      expect(connectSpy).toHaveBeenCalledTimes(1);
+    });
+    await waitFor(() => {
+      expect(screen.getByText('Save View')).toBeInTheDocument();
+    });
+
+    // Second save: a fresh client connects, so the pending ops finally reach the
+    // server — proving the first failure was not left stuck in syncRef.
+    fireEvent.click(saveButton);
+    await waitFor(() => {
+      expect(connectSpy.mock.calls.length).toBeGreaterThanOrEqual(2);
+    });
+    await waitFor(() => {
+      expect(opsFrom(global.fetch)).toContainEqual({ op: 'nodes_added', node_ids: ['node-a'] });
+    });
+
+    connectSpy.mockRestore();
+  });
+
   it('clearing a materialised session syncs the empty state instead of being silently dropped (R4)', async () => {
     const { container } = renderApp();
 

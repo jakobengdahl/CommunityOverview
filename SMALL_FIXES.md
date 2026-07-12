@@ -89,18 +89,6 @@ Effort scale: XS = single-line fix · S = up to ~30 lines / one file · M = mult
 - **Issue:** `get_schema` returns all node types including system ones, and the AKC permissions table filters only via `EXCLUDED_TYPES`, which omits `Skill`. So `Skill` (a system type users never create in a collection) shows up as a create/update/delete row in the collection permissions table. `CollectionResponse` was added to `EXCLUDED_TYPES` in this branch; `Skill` should likely be excluded too, but it is pre-existing and out of scope here. Consider excluding all `category: system` types generically instead of maintaining a hardcoded list.
 - **Effort:** XS
 
-### [2026-07-10] `applyServerSession` can still throw mid-mutation on a malformed `resolved.edges`
-- **File(s):** `frontend/web/src/App.jsx` (`applyServerSession`, `addNodesToVisualization(positioned, resolved.edges || [])`)
-- **Context:** Discovered during review of `claude/session-switch-pr-review-1zayib`
-- **Issue:** `loadSessionFromServer` now computes `serverStateToMirror(payload?.state, resolvedIds)` before calling `applyServerSession(payload)` specifically so a malformed `state.annotations` throws before `clearVisualization()` runs (atomic switch failure) rather than after. `serverStateToMirror` never touches `resolved.edges`, though, so if the server ever returned a truthy non-array `resolved.edges`, `addNodesToVisualization`'s internal edge iteration would still throw — but only after `clearVisualization()` inside `applyServerSession` has already run, reproducing the same "switch reported as failed but canvas already mutated" bug for that one field. Narrow (requires a backend response shape bug, not user-triggered) and not covered by the new regression test, which only exercises the annotations path. Fix by validating/normalizing `resolved.edges` (and ideally the rest of the payload shape) before any mutating call in `applyServerSession`, mirroring the annotations fix.
-- **Effort:** S
-
-### [2026-07-10] `ensureSyncConnected`'s "retries on next auto-save" isn't true for a persistent connect failure
-- **File(s):** `frontend/web/src/App.jsx` (`ensureSyncConnected`, `syncRef.current = client` before `client.connect()`); auto-save call site around `App.jsx:978` (`ensureSyncConnected(targetId)` with no try/catch)
-- **Context:** Discovered during review of `claude/session-switch-pr-review-1zayib`
-- **Issue:** `ensureSyncConnected` assigns `syncRef.current = client` before calling `client.connect()`. If `connect()` throws deterministically (e.g. `new EventSource(url)` on a malformed stream URL), the broken client is already installed in `syncRef.current`; the next `ensureSyncConnected(targetId)` call takes the `existing.connect()` fast path and retries the *same* malformed URL, failing the same way every time rather than recovering. The auto-save call site (`App.jsx:978`, `const sync = ensureSyncConnected(targetId); sync?.syncState(nextState);`) has no try/catch, so a persistent failure there throws uncaught. Pre-existing, outside the diff that surfaced it. Fix by not installing a half-connected client in `syncRef.current` until `connect()` succeeds, or by guarding the auto-save call site.
-- **Effort:** S
-
 ### [2026-06-30] `t()` fallback pattern in FloatingHeader.jsx silently breaks
 - **File(s):** `frontend/web/src/components/FloatingHeader.jsx:134,140` — *note: as of `claude/session-sidebar-nav-sfs73g` these occurrences are gone (menu moved to `SettingsDialog.jsx`, which calls `t()` without the `|| 'fallback'` pattern). The general `t()`-returns-key-on-miss behaviour described below still applies to the hook contract.*
 - **Context:** Discovered during i18n audit / docs session
