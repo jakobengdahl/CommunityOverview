@@ -163,7 +163,6 @@ function App() {
     remoteSelections,
     setRemoteSelections,
     opStreamReady,
-    setOpStreamReady,
   } = useSyncConnection(sessionId);
   const applyServerSessionRef = useRef(null);
   // Bounded recent-command-id history for MCP push dedup (R5) — a small LRU
@@ -284,24 +283,35 @@ function App() {
           break; // session_renamed handled by its own event
       }
     },
-    [addNodesToVisualization, removeNode, setHiddenNodeIds, setHiddenEdgeIds]
+    [
+      addNodesToVisualization,
+      removeNode,
+      setHiddenNodeIds,
+      setHiddenEdgeIds,
+      setRemotePositions,
+      setRemoteAnnotationOps,
+      syncRef,
+    ]
   );
 
   // Reconnect / catch-up path (missed ops after a disconnect): reload the whole
   // session from the server and reset the baseline. Destructive, but a resync
   // only fires after a dropped stream, when the local user was not editing.
-  const resyncFromServer = useCallback(async (targetId) => {
-    let payload;
-    try {
-      payload = await api.getSession(targetId, { resolve: true });
-    } catch {
-      return;
-    }
-    if (!syncRef.current || syncRef.current.sessionId !== targetId) return; // switched away
-    applyServerSessionRef.current?.(payload);
-    const resolvedIds = (payload?.resolved?.nodes || []).map((n) => n.id);
-    syncRef.current.setBaseline(serverStateToMirror(payload?.state, resolvedIds));
-  }, []);
+  const resyncFromServer = useCallback(
+    async (targetId) => {
+      let payload;
+      try {
+        payload = await api.getSession(targetId, { resolve: true });
+      } catch {
+        return;
+      }
+      if (!syncRef.current || syncRef.current.sessionId !== targetId) return; // switched away
+      applyServerSessionRef.current?.(payload);
+      const resolvedIds = (payload?.resolved?.nodes || []).map((n) => n.id);
+      syncRef.current.setBaseline(serverStateToMirror(payload?.state, resolvedIds));
+    },
+    [syncRef]
+  );
 
   // Callbacks waiting for the next canvas snapshot (positions/groups arrive
   // from GraphCanvas via the saveViewSignal round-trip).
