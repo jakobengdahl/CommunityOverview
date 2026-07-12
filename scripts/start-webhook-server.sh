@@ -10,7 +10,7 @@
 # and watch live events as nodes are created, updated or deleted in the graph.
 #
 # Usage:
-#   ./start-webhook-server.sh [port]
+#   ./scripts/start-webhook-server.sh [port]
 #
 # Default port: 9000
 

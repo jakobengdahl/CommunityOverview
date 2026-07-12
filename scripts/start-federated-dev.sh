@@ -6,7 +6,7 @@
 # testing of cross-graph search, node adoption, and federation features.
 #
 # Usage:
-#   ./start-federated-dev.sh [OPTIONS]
+#   ./scripts/start-federated-dev.sh [OPTIONS]
 #
 # Options:
 #   --profile <name>   Add a profile instance (can be repeated for multi-profile)
@@ -14,8 +14,8 @@
 #   --lang <en|sv>     Set the application language (default: en)
 #
 # Examples:
-#   ./start-federated-dev.sh                          # Default: two instances (A/B)
-#   ./start-federated-dev.sh --profile esam --profile unece  # Profile per instance
+#   ./scripts/start-federated-dev.sh                          # Default: two instances (A/B)
+#   ./scripts/start-federated-dev.sh --profile esam --profile unece  # Profile per instance
 #
 # Without --profile: starts two instances (Graph A / Graph B) using default schema,
 # with data auto-split from the default example.
@@ -34,8 +34,9 @@ BLUE='\033[0;34m'
 CYAN='\033[0;36m'
 NC='\033[0m' # No Color
 
-# Get the directory where the script is located
-SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# Repo root (this script lives in scripts/, so resolve one level up).
+# config/profile-utils.sh expects SCRIPT_DIR to point at the repo root.
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 BACKEND_DIR="$SCRIPT_DIR/backend"
 DATA_DIR="$SCRIPT_DIR/data"
 CONFIG_DIR="$SCRIPT_DIR/config"
@@ -68,7 +69,7 @@ while [[ $# -gt 0 ]]; do
             ;;
         *)
             echo -e "${RED}Unknown option: $1${NC}"
-            echo "Usage: ./start-federated-dev.sh [--profile <name>]... [--build] [--lang <en|sv>]"
+            echo "Usage: ./scripts/start-federated-dev.sh [--profile <name>]... [--build] [--lang <en|sv>]"
             exit 1
             ;;
     esac
@@ -79,7 +80,7 @@ USE_PROFILES=false
 if [ ${#PROFILES[@]} -gt 0 ]; then
     if [ ${#PROFILES[@]} -lt 2 ]; then
         echo -e "${RED}Error: At least two --profile flags are required for federation.${NC}"
-        echo "Usage: ./start-federated-dev.sh --profile <name1> --profile <name2> [--profile <name3>] ..."
+        echo "Usage: ./scripts/start-federated-dev.sh --profile <name1> --profile <name2> [--profile <name3>] ..."
         exit 1
     fi
     USE_PROFILES=true

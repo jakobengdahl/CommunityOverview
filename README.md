@@ -285,7 +285,7 @@ Profiles allow you to run the application with different metadata models, node t
 #   test           - Minimal config for testing
 ```
 
-For cloud environments (SSPCloud), run `./start-sprint.sh` — it auto-installs all dependencies
+For cloud environments (SSPCloud), run `./scripts/start-sprint.sh` — it auto-installs all dependencies
 and loads the `stat-metadata` profile. See [docs/SSPCloud-setup.md](./docs/SSPCloud-setup.md).
 
 Each profile can contain:

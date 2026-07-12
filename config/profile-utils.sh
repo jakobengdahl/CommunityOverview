@@ -2,7 +2,7 @@
 # =============================================================================
 # Profile Resolution Utilities
 # =============================================================================
-# Shared helpers for start-dev.sh and start-federated-dev.sh.
+# Shared helpers for start-dev.sh and scripts/start-federated-dev.sh.
 # Source this file after setting SCRIPT_DIR.
 #
 # Provides:
