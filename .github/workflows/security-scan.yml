@@ -1,0 +1,106 @@
+# =============================================================================
+# Security Scan – dependency vulnerability reporting
+# =============================================================================
+# Runs pip-audit over the Python requirement files and `npm audit` over the
+# JS workspaces to surface known-vulnerable dependencies (STRUCTURE_REVIEW C5).
+#
+# Triggers:
+#   - pull_request : catches vulnerable dependencies introduced by a change
+#   - schedule     : catches newly-disclosed advisories against unchanged deps
+#   - workflow_dispatch : on-demand manual run
+#
+# Reporting-first / non-blocking: each audit step uses `continue-on-error`, so a
+# finding shows a red step and a job summary but never fails the workflow or
+# blocks a merge. Once the baseline is understood these can be flipped to
+# blocking (drop `continue-on-error`) and marked required via `dev` branch
+# protection (STRUCTURE_REVIEW A4) — the same rollout path as the lint gates.
+#
+# CodeQL is intentionally NOT configured here: it is enabled via GitHub's
+# "default setup" in repository Security settings (owner action, see C5), not
+# through a committed workflow.
+# =============================================================================
+
+name: Security Scan
+
+on:
+  pull_request:
+    branches: [main, preview, dev]
+    paths-ignore:
+      - '**.md'
+      - 'docs/**'
+      - 'SMALL_FIXES.md'
+  schedule:
+    # Weekly, Monday 06:00 UTC – re-audits unchanged deps against fresh advisories.
+    - cron: '0 6 * * 1'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  # ---------------------------------------------------------------------------
+  # pip-audit – Python dependency advisories.
+  # Audits the requirement files directly (no install), so the heavy ML stack
+  # is not resolved here. requirements-ml.txt is intentionally skipped: it
+  # pulls torch from the pytorch extra index (see its header comment), which is
+  # slow and network-fragile to resolve; the base + dev + gateway files cover
+  # every dependency shipped in the default install.
+  # ---------------------------------------------------------------------------
+  pip-audit:
+    name: pip-audit (Python deps)
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+          cache: 'pip'
+
+      - name: Install pip-audit
+        run: pip install pip-audit
+
+      - name: Audit backend base requirements
+        continue-on-error: true
+        run: |
+          echo "## pip-audit — backend/requirements.txt" >> "$GITHUB_STEP_SUMMARY"
+          pip-audit -r backend/requirements.txt -f markdown 2>&1 | tee -a "$GITHUB_STEP_SUMMARY"
+
+      - name: Audit backend dev requirements
+        continue-on-error: true
+        run: |
+          echo "## pip-audit — backend/requirements-dev.txt" >> "$GITHUB_STEP_SUMMARY"
+          pip-audit -r backend/requirements-dev.txt -f markdown 2>&1 | tee -a "$GITHUB_STEP_SUMMARY"
+
+      - name: Audit gateway requirements
+        continue-on-error: true
+        run: |
+          echo "## pip-audit — services/mcp_oauth_gateway/requirements.txt" >> "$GITHUB_STEP_SUMMARY"
+          pip-audit -r services/mcp_oauth_gateway/requirements.txt -f markdown 2>&1 | tee -a "$GITHUB_STEP_SUMMARY"
+
+  # ---------------------------------------------------------------------------
+  # npm audit – JS dependency advisories. The root lockfile covers all three
+  # workspaces, so a single root audit reports across web, widget and canvas.
+  # --omit=dev limits the report to dependencies that ship at runtime.
+  # ---------------------------------------------------------------------------
+  npm-audit:
+    name: npm audit (JS deps)
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set up Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      - name: Audit production dependencies
+        continue-on-error: true
+        run: |
+          echo "## npm audit (--omit=dev, all workspaces)" >> "$GITHUB_STEP_SUMMARY"
+          npm audit --omit=dev 2>&1 | tee -a "$GITHUB_STEP_SUMMARY"
