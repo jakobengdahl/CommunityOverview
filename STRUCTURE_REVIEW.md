@@ -465,7 +465,7 @@ cluster. Decompose them behavior-preservingly, one slice per PR.
   enable CodeQL default setup in repo settings (owner action). Non-blocking
   reporting first.
 - **Effort:** S
-- **Note (PR #TBD):** the `pip-audit` + `npm audit` reporting is delivered as a
+- **Note (PR #234):** the `pip-audit` + `npm audit` reporting is delivered as a
   dedicated `.github/workflows/security-scan.yml` (pull-request + weekly
   schedule + manual dispatch), kept out of `ci.yml` so the schedule never
   triggers a build. Each audit step is `continue-on-error` (reporting-first:
@@ -587,7 +587,7 @@ summary instead.
 | 12 | B5 GraphCanvas decomposition | M | — | in progress (slice 1/2, PR #230) |
 | 13 | C3 HTTP client + dependency policy | S–M | — | in progress (slice 1/2, PR #232) |
 | 14 | C4 Node 18 → 20 build image | XS | — | done (PR #233) |
-| 15 | C5 security scanning in CI | S | A1 | done (PR #TBD) — CodeQL default setup still *(owner action)* |
+| 15 | C5 security scanning in CI | S | A1 | done (PR #234) — CodeQL default setup still *(owner action)* |
 | 16 | C6 start-script consolidation | S | — | open |
 | 17 | D1 docs realignment + index | S–M | B3, C1 | open |
 | 18 | D2 CLAUDE.md truth verification pass | XS | A1, A2, A4 | open |
@@ -615,7 +615,7 @@ summary instead.
 
 ## Completed
 
-- **[2026-07-12] C5 — dependency security scanning added to CI (PR #TBD).** Added
+- **[2026-07-12] C5 — dependency security scanning added to CI (PR #234).** Added
   `.github/workflows/security-scan.yml`, a standalone workflow (kept out of
   `ci.yml` so its weekly `schedule` never triggers a Docker build) that runs
   `pip-audit` over the backend base, dev and gateway requirement files and one
