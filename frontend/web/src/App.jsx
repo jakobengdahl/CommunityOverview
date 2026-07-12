@@ -25,6 +25,13 @@ import RecentActivityDrawer from './components/RecentActivityDrawer';
 import * as api from './services/api';
 import * as sessionStore from './services/sessionStore';
 import { SessionSyncClient } from './services/sessionSyncClient';
+import {
+  annotationsToGroups,
+  groupsToAnnotations,
+  annotationsToOverlays,
+  overlaysToAnnotations,
+} from './utils/sessionAnnotations';
+import { serverStateToMirror, useSharedSession } from './hooks/useSharedSession';
 import './App.css';
 
 const _urlParams = new URLSearchParams(window.location.search);
@@ -41,126 +48,6 @@ function reflectSessionUrl(id) {
   } catch {
     // ignore — URL reflection is best-effort
   }
-}
-
-// Group boxes persist inside the generic server-side annotation list as
-// `kind: "group"` (design 3.1). These two helpers translate between that
-// server shape and the {groups, parentIds} shape the canvas round-trips.
-function annotationsToGroups(annotations) {
-  const groups = [];
-  const parentIds = {};
-  for (const a of annotations || []) {
-    if (a?.kind !== 'group') continue;
-    groups.push({
-      id: a.id,
-      label: a.label || 'Group',
-      position: a.position || { x: 0, y: 0 },
-      style: a.size ? { width: a.size.w, height: a.size.h } : undefined,
-      color: a.color,
-    });
-    for (const m of a.member_node_ids || []) parentIds[m] = a.id;
-  }
-  return { groups, parentIds };
-}
-
-function groupsToAnnotations(viewGroups, parentIds) {
-  const membersByGroup = {};
-  for (const [nodeId, groupId] of Object.entries(parentIds || {})) {
-    (membersByGroup[groupId] = membersByGroup[groupId] || []).push(nodeId);
-  }
-  return (viewGroups || []).map(g => ({
-    id: g.id,
-    kind: 'group',
-    position: g.position || { x: 0, y: 0 },
-    label: g.label || '',
-    color: g.color,
-    size: g.style ? { w: g.style.width, h: g.style.height } : undefined,
-    member_node_ids: membersByGroup[g.id] || [],
-  }));
-}
-
-// Note/label/arrow annotations round-trip between the server annotation model
-// (design 3.1) and the canvas-shape overlay descriptors the GraphCanvas emits
-// (via onSaveView) and consumes (via annotationsToRestore). Groups keep their
-// own translation above; these cover the free-floating overlays from step 5.
-function annotationsToOverlays(annotations) {
-  const out = [];
-  for (const a of annotations || []) {
-    if (a?.kind === 'note') {
-      out.push({
-        id: a.id, kind: 'note', position: a.position || { x: 0, y: 0 },
-        text: a.text || '', color: a.color, fontSize: a.fontSize, size: a.size,
-      });
-    } else if (a?.kind === 'label') {
-      out.push({
-        id: a.id, kind: 'label', position: a.position || { x: 0, y: 0 },
-        text: a.text || '', color: a.style?.color, fontSize: a.style?.fontSize,
-      });
-    } else if (a?.kind === 'arrow') {
-      const from = a.from || a.position || { x: 0, y: 0 };
-      const to = a.to || { x: from.x + 160, y: from.y };
-      const overlay = {
-        id: a.id, kind: 'arrow', position: { x: from.x, y: from.y },
-        dx: to.x - from.x, dy: to.y - from.y, color: a.style?.color,
-        startArrow: a.startArrow ?? false, endArrow: a.endArrow ?? true,
-      };
-      if (a.startAnchor) overlay.startAnchor = a.startAnchor;
-      if (a.endAnchor) overlay.endAnchor = a.endAnchor;
-      out.push(overlay);
-    }
-  }
-  return out;
-}
-
-function overlaysToAnnotations(overlays) {
-  return (overlays || []).map(o => {
-    if (o.kind === 'note') {
-      return {
-        id: o.id, kind: 'note', position: o.position || { x: 0, y: 0 },
-        text: o.text || '', color: o.color, fontSize: o.fontSize, size: o.size,
-      };
-    }
-    if (o.kind === 'label') {
-      return {
-        id: o.id, kind: 'label', position: o.position || { x: 0, y: 0 },
-        text: o.text || '', style: { color: o.color, fontSize: o.fontSize },
-      };
-    }
-    // arrow: store both endpoints as absolute points (design 3.1)
-    const from = o.position || { x: 0, y: 0 };
-    const dx = o.dx ?? 160;
-    const dy = o.dy ?? 0;
-    const ann = {
-      id: o.id, kind: 'arrow', position: { x: from.x, y: from.y },
-      from: { x: from.x, y: from.y }, to: { x: from.x + dx, y: from.y + dy },
-      style: { color: o.color },
-      startArrow: o.startArrow ?? false, endArrow: o.endArrow ?? true,
-    };
-    if (o.startAnchor) ann.startAnchor = o.startAnchor;
-    if (o.endAnchor) ann.endAnchor = o.endAnchor;
-    return ann;
-  });
-}
-
-// Convert a server session state into the exact baseline shape the local
-// snapshot round-trip produces, so the sync client's diff sees no change for
-// content it just applied (echo-safety). node_refs come from the *resolved*
-// node ids actually on the canvas — refs that no longer resolve in the graph
-// must not look like local removals on the next snapshot.
-function serverStateToMirror(state, resolvedNodeIds) {
-  const s = state || {};
-  const { groups, parentIds } = annotationsToGroups(s.annotations);
-  const overlays = annotationsToOverlays(s.annotations);
-  return {
-    node_refs: resolvedNodeIds || s.node_refs || [],
-    positions: s.positions || {},
-    hidden_node_ids: s.hidden_node_ids || [],
-    hidden_edge_ids: s.hidden_edge_ids || [],
-    annotations: [
-      ...groupsToAnnotations(groups, parentIds),
-      ...overlaysToAnnotations(overlays),
-    ],
-  };
 }
 
 function App() {
@@ -317,8 +204,19 @@ function App() {
         onCommand: (...a) => syncHandlersRef.current.onCommand?.(...a),
       },
     });
+    // Connect before installing: if connect() throws (e.g. new EventSource on a
+    // malformed stream URL), a half-connected client must not be left in
+    // syncRef.current — the same-session fast path above would otherwise keep
+    // retrying that dead client forever, and the un-guarded auto-save call site
+    // would throw. On failure return null so callers' optional-chained calls
+    // no-op and the next auto-save/load builds a fresh client.
+    try {
+      client.connect();
+    } catch (err) {
+      console.error('Error connecting sync client:', err);
+      return null;
+    }
     syncRef.current = client;
-    client.connect();
     return client;
   }, []);
 
@@ -1247,71 +1145,21 @@ function App() {
 
   // ── Session navigation ──────────────────────────────────────────────────
 
-  // Load a session's canvas content from the server (resolved node refs +
-  // layout + group annotations) onto the store.
-  const applyServerSession = useCallback((payload) => {
-    clearVisualization();
-    const state = payload?.state || {};
-    const resolved = payload?.resolved || {};
-    const loadedNodes = resolved.nodes || [];
-    if (loadedNodes.length) {
-      const positioned = loadedNodes.map(n =>
-        state.positions?.[n.id] ? { ...n, _savedPosition: state.positions[n.id] } : n
-      );
-      addNodesToVisualization(positioned, resolved.edges || []);
-    }
-    if (state.hidden_node_ids?.length) setHiddenNodeIds(state.hidden_node_ids);
-    if (state.hidden_edge_ids?.length) setHiddenEdgeIds(state.hidden_edge_ids);
-    const { groups, parentIds } = annotationsToGroups(state.annotations);
-    if (groups.length) setPendingGroups({ groups, parentIds });
-    const overlays = annotationsToOverlays(state.annotations);
-    if (overlays.length) setPendingAnnotations(overlays);
-  }, [clearVisualization, addNodesToVisualization, setHiddenNodeIds,
-      setHiddenEdgeIds, setPendingGroups, setPendingAnnotations]);
+  // Shared-session lifecycle (STRUCTURE_REVIEW B1 slice 1): load a server-backed
+  // session's canvas + seed the sync baseline. Extracted into useSharedSession
+  // so the transition logic is testable in isolation.
+  const { applyServerSession, loadSessionFromServer } = useSharedSession({
+    clearVisualization,
+    addNodesToVisualization,
+    setHiddenNodeIds,
+    setHiddenEdgeIds,
+    setPendingGroups,
+    setPendingAnnotations,
+    ensureSyncConnected,
+    syncRef,
+  });
   // Expose the latest applyServerSession to resyncFromServer (defined earlier).
   applyServerSessionRef.current = applyServerSession;
-
-  const loadSessionFromServer = useCallback(async (targetId, { eagerConnect = false } = {}) => {
-    try {
-      const payload = await api.getSession(targetId, { resolve: true });
-      // Compute the sync baseline before touching the canvas: it runs the same
-      // annotation-transform logic applyServerSession does internally, so if
-      // malformed server data would throw, it throws here — before
-      // clearVisualization() below — leaving the current canvas untouched and
-      // this as a clean "switch failed" rather than a half-applied one.
-      const resolvedIds = (payload?.resolved?.nodes || []).map(n => n.id);
-      const baselineMirror = serverStateToMirror(payload?.state, resolvedIds);
-      applyServerSession(payload);
-      // Connect the realtime stream for this existing session and seed the sync
-      // baseline from its state so later edits diff against what the server holds.
-      // Best-effort from here on: the canvas above already loaded correctly, and
-      // ensureSyncConnected's own failure modes (client construction / connect)
-      // are unrelated to the payload data that made loading it fail earlier, so
-      // they must not be reported as a failed switch either. (Pre-existing:
-      // ensureSyncConnected retries on every subsequent auto-save, so a
-      // transient failure recovers there — a persistent one, e.g. a malformed
-      // stream URL, would keep failing the same way each time; that's an
-      // existing gap in ensureSyncConnected itself, not introduced here.)
-      try {
-        ensureSyncConnected(targetId)?.setBaseline(baselineMirror);
-      } catch (syncError) {
-        console.error('Error connecting sync client:', syncError);
-      }
-    } catch (error) {
-      // Session does not exist server-side yet — new / not-yet-saved share URL,
-      if (error?.status === 404) {
-        clearVisualization();
-        if (eagerConnect) {
-          ensureSyncConnected(targetId)?.setBaseline({});
-        } else if (syncRef.current && syncRef.current.sessionId === targetId) {
-          syncRef.current.setBaseline({});
-        }
-      } else {
-        console.error('Error loading session:', error);
-        throw error;
-      }
-    }
-  }, [applyServerSession, clearVisualization, ensureSyncConnected]);
 
   // Keep the sync client's handlers pointed at the latest closures. A remote op
   // or resync triggers a debounced authoritative apply; a remote delete of the
@@ -1870,6 +1718,3 @@ function AppRoot() {
 }
 
 export default AppRoot;
-
-// Exported for unit testing the session annotation round-trip.
-export { annotationsToOverlays, overlaysToAnnotations };

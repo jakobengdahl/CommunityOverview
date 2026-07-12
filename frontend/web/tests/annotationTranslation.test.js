@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest';
-import { annotationsToOverlays, overlaysToAnnotations } from '../src/App.jsx';
+import { annotationsToOverlays, overlaysToAnnotations } from '../src/utils/sessionAnnotations';
 
 // The canvas emits overlay descriptors (note/label/arrow) via onSaveView; App
 // stores them in the server annotation model and restores them on load. These
