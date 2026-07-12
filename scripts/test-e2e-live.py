@@ -21,8 +21,10 @@ import sys
 import time
 import httpx2 as httpx
 
-# Shared client; follow_redirects preserves the requests default this script relied on
-_http = httpx.Client(follow_redirects=True)
+# Shared client; follow_redirects=True and timeout=None preserve the requests
+# defaults this script relied on (httpx would otherwise not follow redirects and
+# would impose a 5s default timeout on calls that pass none).
+_http = httpx.Client(follow_redirects=True, timeout=None)
 
 SERVER_URL = os.environ.get("E2E_SERVER_URL", "http://localhost:8000")
 API_PREFIX = "/api/v1"
