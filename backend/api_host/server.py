@@ -263,7 +263,8 @@ def create_app(
     register_tool_routes(app, graph_service, tools_map, _auth_active)
 
     # System / operability routes (favicon, health, info, logout, …).
-    # Registered before static mounts so specific routes win over the /web mount.
+    # Their paths are disjoint from the /web and /widget static mounts, so the
+    # registration order relative to those mounts does not affect resolution.
     register_system_routes(
         app,
         config,
