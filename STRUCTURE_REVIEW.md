@@ -520,18 +520,24 @@ outsized cost.
 
 ### D1. Realign the architecture docs with the tree
 
-- **Problem:** the DEVELOPMENT.md architecture overview omits
-  `backend/federation/`, `backend/agents/`, `backend/skills/`,
-  `backend/core/events/` and all the flat modules, and still lists
-  `backend/graph.json` as the data file. README's project structure omits
-  `services/mcp_oauth_gateway`. The two "enablement plan" docs and
-  `docs/sprint_documentation/` mix design-proposal and historical material into
-  the same namespace as current-state guides with no status marking.
-- **Proposed change:** update both structure trees (after B3/C1 land, or as
-  part of them); add a `docs/README.md` index that tags every doc as
-  **current** / **design (target state)** / **historical**, and move
-  `sprint_documentation/` under a clearly historical heading. This lets an
-  agent session skip stale material instead of reconciling it.
+- **Problem (partly resolved en route by B3/C1):** the `backend/DEVELOPMENT.md`
+  architecture tree portion of this problem is **already fixed** — B3 (PR #224)
+  added `federation/`, `agents/`, `skills/`, `llm/`, `runtime/` to the tree and
+  C1 (PR #223) removed the stale `backend/graph.json` data-file line, so that
+  tree now matches the package layout. What remained: README's project structure
+  omitted `services/mcp_oauth_gateway` (and several backend packages —
+  `agents/`, `federation/`, `tests/`, `core/events/`), and the two "enablement
+  plan" docs plus `docs/sprint_documentation/` mixed design-proposal and
+  historical material into the same namespace as current-state guides with no
+  status marking.
+- **Proposed change:** bring README's project structure up to date with the tree
+  (add `services/mcp_oauth_gateway` and the missing backend packages/modules);
+  add a `docs/README.md` index that tags every doc as **current** /
+  **design (target state)** / **historical**, with `sprint_documentation/`
+  under the historical heading. This lets an agent session skip stale material
+  instead of reconciling it. (The `DEVELOPMENT.md` tree needed no further change
+  — B3/C1 already realigned it; the remaining `config_loader.py` /
+  `document_processor.py` root modules are tracked separately under B6.)
 - **Effort:** S–M
 
 ### D2. Keep CLAUDE.md, CI, and reality in one truth
