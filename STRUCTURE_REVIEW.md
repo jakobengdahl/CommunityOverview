@@ -421,14 +421,32 @@ cluster. Decompose them behavior-preservingly, one slice per PR.
 
 - **Problem:** the backend uses `httpx2` (Pydantic's maintained continuation
   of httpx) while `services/mcp_oauth_gateway` pins legacy `httpx==0.28.0`;
-  `requests` is *also* in the base requirements (used for document processing).
-  The gateway pins exact versions while the backend policy is `>=` minimums.
-  The gateway's `python-jose 3.3.0` should be reviewed against its known CVEs
-  (CVE-2024-33663/33664) or replaced with `pyjwt`.
+  `requests` was *also* in the base requirements (webhook delivery, MCP-tool
+  fetch/search, and the live e2e script — not document processing as the
+  original text said). The gateway pins exact versions while the backend policy
+  is `>=` minimums. The gateway's `python-jose 3.3.0` should be reviewed against
+  its known CVEs (CVE-2024-33663/33664) or replaced with `pyjwt`.
 - **Proposed change:** standardize on `httpx2` in both components; drop
   `requests` if its uses migrate; align the gateway's pin policy with the repo
   rule; evaluate the `python-jose` → `pyjwt` swap.
 - **Effort:** S–M
+- **Note (PR #231, slice 1/2):** the backend side is done — `requests` is gone
+  from `backend/requirements.txt` and its three call sites (`events/delivery.py`,
+  `agents/mcp_loader.py`, `scripts/test-e2e-live.py`) plus the `test_delivery.py`
+  mocks now use `httpx2`. Behaviour-preserving (`follow_redirects=True` keeps the
+  `requests` default; the pre-existing SSRF-via-redirect gap it exposes in
+  webhook delivery is logged in `SMALL_FIXES.md`, not changed here).
+  **Remaining slice 2 is gateway-only and carries an owner decision:** moving
+  `services/mcp_oauth_gateway` off `httpx==0.28.0` to `httpx2` and loosening its
+  exact pins is mechanical, **but** the `python-jose` → `pyjwt` swap is *not* a
+  drop-in — the gateway uses `jose.jwt.get_unverified_claims`, `encode` and
+  `decode` for OAuth token verification, so swapping the JWT library is a
+  security-sensitive rewrite that needs Jakob's sign-off before it is forced.
+  Note too that loosening the gateway's pins runs counter to C7's
+  reproducible-install goal for the frontend, so the pin-policy question is also
+  a deliberate decision rather than an automatic "apply the repo rule". Slice 2
+  should therefore land the mechanical `httpx2` move and surface the
+  `jose`/pin-policy questions to the owner.
 
 ### C4. Upgrade the frontend build image off Node 18
 
@@ -557,7 +575,7 @@ summary instead.
 | 10 | A3 step 2 (stream token scheme) | M | A3 step 1 | open *(owner action — design decision; see A3 Update 2026-07-12, PR #228)* |
 | 11 | B1 remaining slices | M×2 | B1 slice 1 | in progress (slice 2/4, PR #229) |
 | 12 | B5 GraphCanvas decomposition | M | — | in progress (slice 1/2, PR #230) |
-| 13 | C3 HTTP client + dependency policy | S–M | — | open |
+| 13 | C3 HTTP client + dependency policy | S–M | — | in progress (slice 1/2, PR #231) |
 | 14 | C4 Node 18 → 20 build image | XS | — | open |
 | 15 | C5 security scanning in CI | S | A1 | open |
 | 16 | C6 start-script consolidation | S | — | open |
@@ -586,6 +604,17 @@ summary instead.
    same branch.
 
 ## Completed
+
+- **[2026-07-12] C3 slice 1 — backend HTTP client consolidated on `httpx2`,
+  `requests` dropped (PR #231).** Removed `requests` from `backend/requirements.txt`
+  and migrated its three call sites (`core/events/delivery.py`,
+  `agents/mcp_loader.py`, `scripts/test-e2e-live.py`) plus the `test_delivery.py`
+  mocks to `httpx2`, leaving a single backend HTTP client. Behaviour-preserving
+  (`Timeout`→`TimeoutException`, `RequestException`→`HTTPError`,
+  `follow_redirects=True` to match the `requests` default); the SSRF-via-redirect
+  gap that default exposes in webhook delivery is logged in `SMALL_FIXES.md`.
+  Full backend suite green (942 passed). Slice 2 (gateway `httpx2` move +
+  pin-policy + the owner-gated `python-jose`→`pyjwt` evaluation) remains open.
 
 - **[2026-07-12] B5 slice 1 — remote-position logic extracted from `GraphCanvas.jsx`
   into `useRemotePositions` (PR #230).** Moved the `pendingRemotePositionsRef` and
