@@ -501,7 +501,7 @@ summary instead.
 | 4 | A3 session-ID hardening, step 1 (rate limit + CORS) | S–M | — | done (PR #222) |
 | 5 | C1 stale data removal + script fix | S | — | done (PR #223) |
 | 6 | B3 home the flat backend modules | M | A1 | done (PR #224) |
-| 7 | B2 decompose server.py | M | A1 | open |
+| 7 | B2 decompose server.py | M | A1 | done (PR #225) |
 | 8 | B1 decompose App.jsx (slice 1: shared-session hook) | M | — | open |
 | 9 | C2 lint gates | M | A1 | open |
 | 10 | A3 step 2 (stream token scheme) | M | A3 step 1 | open |
@@ -536,6 +536,21 @@ summary instead.
    same branch.
 
 ## Completed
+
+- **[2026-07-12] B2 — `api_host/server.py` decomposed into composable modules
+  (PR #225).** Split the 1 180-line `create_app()` monolith into dedicated
+  modules under `backend/api_host/`: `middleware.py` (auth + CORS install),
+  `diagnostics.py` (startup/readiness builders + public-path constants),
+  `mcp_mount.py` (MCP instructions, request-auth ASGI binder, `MCPBrowserHandler`,
+  `mount_mcp`), `session_stream.py` (visualization-session registry lifecycle +
+  legacy `/sessions/{id}/stream` SSE), `tool_routes.py` (`/execute_tool`,
+  `/export_graph`, `SAFE_TOOLS`), `system_routes.py` (favicon/collect, health/
+  ready/startup-diagnostics, root, logout, info) and `agent_routes.py`
+  (`/federation/*` + `/agents/*`). `server.py` is now composition only
+  (335 lines). Pure move-and-import refactor — no route paths, behaviour or
+  signatures change; middleware order (auth before CORS) and route/mount order
+  preserved; `FastMCP` stays importable from `backend.api_host.server` for the
+  MCP-transport test. Full backend suite unchanged (942 passed / 16 skipped).
 
 - **[2026-07-11] B3 — flat backend modules homed into owning packages
   (PR #224).** Relocated the loose modules at `backend/` root:
