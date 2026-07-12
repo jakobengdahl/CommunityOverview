@@ -160,7 +160,9 @@ git checkout -b claude/<short-description> origin/dev
 
 CI runs the full suite in three attributable jobs (see `.github/workflows/ci.yml`):
 the complete backend pytest suite, the frontend vitest workspaces, and the OAuth
-gateway tests. Reproduce what CI validates locally:
+gateway tests. Two further **non-required** jobs (`python-lint`, `frontend-lint`)
+run the ruff / eslint / prettier gates — see the Lint & format tooling note under
+Code Style. Reproduce what CI validates locally:
 
 ```bash
 pytest backend/ -q          # backend-tests job (base/ML-free install)
@@ -491,6 +493,23 @@ Before modifying the schema:
 - No half-finished stubs, no `# TODO` left in committed code.
 - Security: never introduce raw SQL, shell injection, or unvalidated external data
   into logic paths. Validate at system boundaries only.
+
+### Lint & format tooling
+
+Mechanical gates run in CI (jobs `python-lint` and `frontend-lint`) and locally:
+
+```bash
+ruff check backend scripts          # Python lint (replaces flake8-style checks)
+ruff format backend scripts         # Python formatter (replaces black)
+npm run lint                        # ESLint (flat config, react + react-hooks)
+npm run format                      # Prettier (JS/JSX in the workspaces)
+```
+
+Config lives in root `pyproject.toml` (ruff), `eslint.config.mjs`, and
+`.prettierrc.json`. The lint jobs are **non-required** until `dev` gets branch
+protection (STRUCTURE_REVIEW A4); a lint failure is a signal, not a merge
+blocker, for now. `react-hooks/rules-of-hooks` violations are errors — treat
+them as real bugs. `services/mcp_oauth_gateway/` is outside the ruff scope.
 
 ---
 
