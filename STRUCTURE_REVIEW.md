@@ -547,7 +547,7 @@ summary instead.
 | 7 | B2 decompose server.py | M | A1 | done (PR #225) |
 | 8 | B1 decompose App.jsx (slice 1: shared-session hook) | M | — | done (PR #226) |
 | 9 | C2 lint gates | M | A1 | done (PR #227) |
-| 10 | A3 step 2 (stream token scheme) | M | A3 step 1 | open *(owner action — design decision; see A3 Update 2026-07-12, PR #NNN)* |
+| 10 | A3 step 2 (stream token scheme) | M | A3 step 1 | open *(owner action — design decision; see A3 Update 2026-07-12, PR #228)* |
 | 11 | B1 remaining slices | M×2 | B1 slice 1 | open |
 | 12 | B5 GraphCanvas decomposition | M | — | open |
 | 13 | C3 HTTP client + dependency policy | S–M | — | open |
@@ -581,7 +581,7 @@ summary instead.
 ## Completed
 
 - **[2026-07-12] A3 step 2 review — stream-token scheme reclassified as an owner
-  design decision (PR #NNN).** Tracing the session-creation flow showed the
+  design decision (PR #228).** Tracing the session-creation flow showed the
   step-2 premise (a token minted by an authenticated creator via
   `POST /api/sessions`) does not match the implementation: the browser never
   calls the create endpoint (`createServerSession` is uncalled), ids are
