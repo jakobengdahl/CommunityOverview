@@ -60,17 +60,17 @@ Environment variables already set by the caller are never overridden.
 ./start-dev.sh --profile scb --lang sv            # SCB profile in Swedish
 ```
 
-For cloud environments (e.g. SSPCloud), use `start-sprint.sh` which auto-installs
+For cloud environments (e.g. SSPCloud), use `scripts/start-sprint.sh` which auto-installs
 dependencies and loads the `stat-metadata` profile. See [docs/SSPCloud-setup.md](../docs/SSPCloud-setup.md).
 
 ### Federated (Multi-Profile)
 
 ```bash
 # Legacy mode: two instances with default schema, auto-split data
-./start-federated-dev.sh
+./scripts/start-federated-dev.sh
 
 # Profile mode: each profile becomes a federated instance
-./start-federated-dev.sh --profile esam --profile unece
+./scripts/start-federated-dev.sh --profile esam --profile unece
 ```
 
 In profile federation mode, each instance gets its own schema, env vars, and graph data. Federation configs are auto-generated to wire the instances together.

@@ -68,7 +68,7 @@ data/active/graph.json
 /graph.json
 /backend/graph.json
 
-# Federated test data (managed by start-federated-dev.sh)
+# Federated test data (managed by scripts/start-federated-dev.sh)
 data/federated-a/
 data/federated-b/
 data/federated-*/

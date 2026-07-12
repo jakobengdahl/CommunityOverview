@@ -598,7 +598,7 @@ summary instead.
 | 13 | C3 HTTP client + dependency policy | S–M | — | in progress (slice 1/2, PR #232) |
 | 14 | C4 Node 18 → 20 build image | XS | — | done (PR #233) |
 | 15 | C5 security scanning in CI | S | A1 | done (PR #234) — CodeQL default setup still *(owner action)* |
-| 16 | C6 start-script consolidation | S | — | open |
+| 16 | C6 start-script consolidation | S | — | done (PR #235) |
 | 17 | D1 docs realignment + index | S–M | B3, C1 | open |
 | 18 | D2 CLAUDE.md truth verification pass | XS | A1, A2, A4 | open |
 | 19 | B4 service.py / storage.py split | L | A1, next feature touching them | open |
@@ -624,6 +624,24 @@ summary instead.
    same branch.
 
 ## Completed
+
+- **[2026-07-12] C6 — root start scripts consolidated under `scripts/` (PR #235).**
+  Kept `start-dev.sh` at the repo root as the canonical entry point and moved the
+  four environment-specific wrappers into `scripts/`:
+  `start-federated-dev.sh`, `start-sprint.sh`, `start-sspcloud-metadata.sh`, and
+  `start-webhook-server.sh`. The three wrappers that source
+  `config/profile-utils.sh` derive every path from `SCRIPT_DIR` and rely on the
+  profile-utils contract that `SCRIPT_DIR` is the repo root, so each now resolves
+  one level up from its own location (`$(dirname "${BASH_SOURCE[0]}")/..`) rather
+  than renaming the variable and breaking that sourcing contract — all downstream
+  `$SCRIPT_DIR/...` paths and `cd "$SCRIPT_DIR"` are unchanged. `start-webhook-server.sh`
+  is self-contained and moved as-is. Pure relocation — no script logic, flags, or
+  behaviour changed. Updated every in-repo reference (`README.md`,
+  `config/README.md`, the `.gitignore` and `config/profile-utils.sh` comments,
+  `docs/sprint_documentation/US-03-IMPLEMENTATION-PLAN.md`) and each moved script's
+  own usage header to the `scripts/` path. Verified `bash -n` clean on all five
+  scripts and that `SCRIPT_DIR` resolves to the repo root (profile-utils sources
+  correctly) from the new location.
 
 - **[2026-07-12] C5 — dependency security scanning added to CI (PR #234).** Added
   `.github/workflows/security-scan.yml`, a standalone workflow (kept out of

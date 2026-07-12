@@ -7,7 +7,7 @@
 # interactively, and starts the app.
 #
 # Usage:
-#   ./start-sprint.sh
+#   ./scripts/start-sprint.sh
 #
 # Re-run at any time to update LLM settings or restart the server.
 #
@@ -20,7 +20,9 @@ CYAN='\033[0;36m'
 BOLD='\033[1m'
 NC='\033[0m'
 
-SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# Repo root (this script lives in scripts/, so resolve one level up).
+# config/profile-utils.sh expects SCRIPT_DIR to point at the repo root.
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 BACKEND_DIR="$SCRIPT_DIR/backend"
 DATA_DIR="$SCRIPT_DIR/data"
 ACTIVE_DATA="$DATA_DIR/active/graph.json"
