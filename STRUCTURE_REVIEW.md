@@ -502,7 +502,7 @@ summary instead.
 | 5 | C1 stale data removal + script fix | S | — | done (PR #223) |
 | 6 | B3 home the flat backend modules | M | A1 | done (PR #224) |
 | 7 | B2 decompose server.py | M | A1 | done (PR #225) |
-| 8 | B1 decompose App.jsx (slice 1: shared-session hook) | M | — | open |
+| 8 | B1 decompose App.jsx (slice 1: shared-session hook) | M | — | done (PR #226) |
 | 9 | C2 lint gates | M | A1 | open |
 | 10 | A3 step 2 (stream token scheme) | M | A3 step 1 | open |
 | 11 | B1 remaining slices | M×2 | B1 slice 1 | open |
@@ -536,6 +536,27 @@ summary instead.
    same branch.
 
 ## Completed
+
+- **[2026-07-12] B1 slice 1 — shared-session lifecycle extracted from `App.jsx`
+  into `useSharedSession` (PR #226).** Moved `applyServerSession`,
+  `loadSessionFromServer` and `serverStateToMirror` out of the 1 875-line
+  `App.jsx` god component (~140 lines lighter) into a testable
+  `frontend/web/src/hooks/useSharedSession.js` with injected dependencies; homed
+  the four pure annotation⇄canvas transforms in
+  `frontend/web/src/utils/sessionAnnotations.js`, shared by the hook and by
+  App's incremental-op / snapshot paths (the `annotationTranslation` test now
+  imports them directly, dropping the test-only re-export from `App.jsx`).
+  Behaviour-preserving. Resolved the two open 2026-07-10 `SMALL_FIXES.md`
+  entries that lived in this logic: `applyServerSession` now validates the
+  resolved node/edge shape before its first mutating call (a malformed payload
+  fails the switch atomically instead of half-clearing the canvas), and
+  `ensureSyncConnected` connects before installing the client in `syncRef`,
+  returning `null` on failure so a persistent connect error neither sticks a
+  dead client on the fast path nor throws out of the auto-save call site.
+  Added `useSharedSession` unit tests plus a `sessionFlow` integration
+  regression for the contained connect failure (verified failing pre-fix).
+  `ensureSyncConnected`'s own extraction into a `useSyncConnection` hook remains
+  B1 slice 2 (row 11). Frontend suite green (canvas 74 / web 206 / widget 56).
 
 - **[2026-07-12] B2 — `api_host/server.py` decomposed into composable modules
   (PR #225).** Split the 1 180-line `create_app()` monolith into dedicated
