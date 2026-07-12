@@ -71,6 +71,4 @@ export function useRemotePositions({ remotePositions, onRemotePositionsApplied, 
       return changed ? next : nds;
     });
   }, [nodes, setNodes]);
-
-  return pendingRef;
 }
