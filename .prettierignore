@@ -1,0 +1,18 @@
+# Build output and dependencies
+**/dist/**
+**/node_modules/**
+**/coverage/**
+**/playwright-report/**
+**/test-results/**
+
+# Generated / vendored assets
+**/*.min.js
+**/*.min.css
+
+# Non-JS trees (formatted by their own tools)
+backend/**
+scripts/**
+services/**
+config/**
+data/**
+docs/**
