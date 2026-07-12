@@ -24,7 +24,6 @@ import SettingsDialog from './components/SettingsDialog';
 import RecentActivityDrawer from './components/RecentActivityDrawer';
 import * as api from './services/api';
 import * as sessionStore from './services/sessionStore';
-import { SessionSyncClient } from './services/sessionSyncClient';
 import {
   annotationsToGroups,
   groupsToAnnotations,
@@ -32,6 +31,7 @@ import {
   overlaysToAnnotations,
 } from './utils/sessionAnnotations';
 import { serverStateToMirror, useSharedSession } from './hooks/useSharedSession';
+import { useSyncConnection } from './hooks/useSyncConnection';
 import './App.css';
 
 const _urlParams = new URLSearchParams(window.location.search);
@@ -144,84 +144,33 @@ function App() {
 
   // ── Realtime sync (design step 6) ───────────────────────────────────────
   // The sync client owns the op-protocol stream and op emission for the active
-  // session. It is created per session; handlers are routed through a ref so
-  // the long-lived client always calls the latest closures. Positions arriving
-  // from other clients are pushed to the canvas via remotePositions.
-  const syncRef = useRef(null);
-  const syncHandlersRef = useRef({});
+  // session. Its create / connect / teardown lifecycle and the connection-scoped
+  // state (remote positions/annotations, roster, remote selections, op-stream
+  // readiness) live in useSyncConnection (STRUCTURE_REVIEW B1 slice 2); handlers
+  // are routed through syncHandlersRef so the long-lived client always calls the
+  // latest closures. Positions arriving from other clients reach the canvas via
+  // remotePositions.
+  const {
+    syncRef,
+    syncHandlersRef,
+    ensureSyncConnected,
+    remotePositions,
+    setRemotePositions,
+    remoteAnnotationOps,
+    setRemoteAnnotationOps,
+    roster,
+    setRoster,
+    remoteSelections,
+    setRemoteSelections,
+    opStreamReady,
+  } = useSyncConnection(sessionId);
   const applyServerSessionRef = useRef(null);
-  const [remotePositions, setRemotePositions] = useState(null);
-  const [remoteAnnotationOps, setRemoteAnnotationOps] = useState(null);
-  // Presence roster + remote selection markers for the active session (step 7).
-  const [roster, setRoster] = useState([]);
-  const [remoteSelections, setRemoteSelections] = useState({});
-  // Whether the op-protocol stream has connected at least once for the active
-  // session (first snapshot delivered). Once true, MCP commands arrive via the
-  // op stream's broadcast `command` events, so the single-consumer legacy push
-  // stream is no longer opened for this session (design §3.8, R5).
-  const [opStreamReady, setOpStreamReady] = useState(false);
   // Bounded recent-command-id history for MCP push dedup (R5) — a small LRU
   // rather than a single last-applied slot, and keyed by the server-assigned
   // command_id rather than payload content, so a later *legitimately* repeated
   // command (e.g. an agent re-adds a node a user just removed) is never
   // mistaken for the same broadcast delivered twice.
   const appliedCommandIdsRef = useRef([]);
-
-  // Lazily create + connect the sync client for a session. Called on the first
-  // non-empty save and when loading an existing session — never eagerly on load,
-  // so an empty never-edited session is never materialised server-side (the
-  // step-4 lazy-materialisation behaviour). Handlers delegate through a ref so
-  // this long-lived client always runs the latest closures.
-  const ensureSyncConnected = useCallback((targetId) => {
-    const existing = syncRef.current;
-    if (existing && existing.sessionId === targetId) {
-      existing.connect();
-      return existing;
-    }
-    if (existing) {
-      existing.flush();
-      existing.close();
-      setRemotePositions(null);
-      setRemoteAnnotationOps(null);
-      setRoster([]);
-      setRemoteSelections({});
-      setOpStreamReady(false);
-    }
-    const client = new SessionSyncClient({
-      sessionId: targetId,
-      clientId: api.getClientId(),
-      displayName: api.getDisplayName(),
-      streamUrl: api.getSessionStreamUrl(targetId),
-      opsUrl: api.getSessionOpsUrl(targetId),
-      handlers: {
-        onReady: (...a) => {
-          setOpStreamReady(true);
-          syncHandlersRef.current.onReady?.(...a);
-        },
-        onResync: (...a) => syncHandlersRef.current.onResync?.(...a),
-        onRemoteOps: (...a) => syncHandlersRef.current.onRemoteOps?.(...a),
-        onPresence: (...a) => syncHandlersRef.current.onPresence?.(...a),
-        onSelections: (...a) => syncHandlersRef.current.onSelections?.(...a),
-        onSessionRenamed: (...a) => syncHandlersRef.current.onSessionRenamed?.(...a),
-        onSessionDeleted: (...a) => syncHandlersRef.current.onSessionDeleted?.(...a),
-        onCommand: (...a) => syncHandlersRef.current.onCommand?.(...a),
-      },
-    });
-    // Connect before installing: if connect() throws (e.g. new EventSource on a
-    // malformed stream URL), a half-connected client must not be left in
-    // syncRef.current — the same-session fast path above would otherwise keep
-    // retrying that dead client forever, and the un-guarded auto-save call site
-    // would throw. On failure return null so callers' optional-chained calls
-    // no-op and the next auto-save/load builds a fresh client.
-    try {
-      client.connect();
-    } catch (err) {
-      console.error('Error connecting sync client:', err);
-      return null;
-    }
-    syncRef.current = client;
-    return client;
-  }, []);
 
   // Apply a single remote op incrementally onto the local store + canvas. This
   // touches only the entities the op names, so a concurrent local edit is never
@@ -334,24 +283,35 @@ function App() {
           break; // session_renamed handled by its own event
       }
     },
-    [addNodesToVisualization, removeNode, setHiddenNodeIds, setHiddenEdgeIds]
+    [
+      addNodesToVisualization,
+      removeNode,
+      setHiddenNodeIds,
+      setHiddenEdgeIds,
+      setRemotePositions,
+      setRemoteAnnotationOps,
+      syncRef,
+    ]
   );
 
   // Reconnect / catch-up path (missed ops after a disconnect): reload the whole
   // session from the server and reset the baseline. Destructive, but a resync
   // only fires after a dropped stream, when the local user was not editing.
-  const resyncFromServer = useCallback(async (targetId) => {
-    let payload;
-    try {
-      payload = await api.getSession(targetId, { resolve: true });
-    } catch {
-      return;
-    }
-    if (!syncRef.current || syncRef.current.sessionId !== targetId) return; // switched away
-    applyServerSessionRef.current?.(payload);
-    const resolvedIds = (payload?.resolved?.nodes || []).map((n) => n.id);
-    syncRef.current.setBaseline(serverStateToMirror(payload?.state, resolvedIds));
-  }, []);
+  const resyncFromServer = useCallback(
+    async (targetId) => {
+      let payload;
+      try {
+        payload = await api.getSession(targetId, { resolve: true });
+      } catch {
+        return;
+      }
+      if (!syncRef.current || syncRef.current.sessionId !== targetId) return; // switched away
+      applyServerSessionRef.current?.(payload);
+      const resolvedIds = (payload?.resolved?.nodes || []).map((n) => n.id);
+      syncRef.current.setBaseline(serverStateToMirror(payload?.state, resolvedIds));
+    },
+    [syncRef]
+  );
 
   // Callbacks waiting for the next canvas snapshot (positions/groups arrive
   // from GraphCanvas via the saveViewSignal round-trip).
@@ -1388,27 +1348,10 @@ function App() {
     showNotification,
     t,
     applyToolResultCommand,
+    syncHandlersRef,
+    setRoster,
+    setRemoteSelections,
   ]);
-
-  // Tear down the client when the session changes or the app unmounts; the next
-  // save/load lazily reconnects for the new id.
-  useEffect(() => {
-    const currentSessionId = sessionId;
-    return () => {
-      const client = syncRef.current;
-      if (client && client.sessionId === currentSessionId) {
-        syncRef.current = null;
-        // Flush last-moment ops before closing; the POST outlives the stream teardown.
-        client.flush();
-        client.close();
-        setRemotePositions(null);
-        setRemoteAnnotationOps(null);
-        setRoster([]);
-        setRemoteSelections({});
-        setOpStreamReady(false);
-      }
-    };
-  }, [sessionId]);
 
   // Switch working session: persist the current one first (ops via the snapshot
   // round-trip), then swap the session ID (reconnects the SSE stream, reflects

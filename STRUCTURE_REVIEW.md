@@ -548,7 +548,7 @@ summary instead.
 | 8 | B1 decompose App.jsx (slice 1: shared-session hook) | M | — | done (PR #226) |
 | 9 | C2 lint gates | M | A1 | done (PR #227) |
 | 10 | A3 step 2 (stream token scheme) | M | A3 step 1 | open *(owner action — design decision; see A3 Update 2026-07-12, PR #228)* |
-| 11 | B1 remaining slices | M×2 | B1 slice 1 | open |
+| 11 | B1 remaining slices | M×2 | B1 slice 1 | in progress (slice 2/4, PR #229) |
 | 12 | B5 GraphCanvas decomposition | M | — | open |
 | 13 | C3 HTTP client + dependency policy | S–M | — | open |
 | 14 | C4 Node 18 → 20 build image | XS | — | open |
@@ -579,6 +579,24 @@ summary instead.
    same branch.
 
 ## Completed
+
+- **[2026-07-12] B1 slice 2 — sync-client lifecycle extracted from `App.jsx`
+  into `useSyncConnection` (PR #229).** Moved the per-session `SessionSyncClient`
+  create/connect/teardown flow out of the god component into
+  `frontend/web/src/hooks/useSyncConnection.js`, which now owns `syncRef` +
+  `syncHandlersRef`, the connection-scoped state reset together on teardown
+  (`remotePositions`, `remoteAnnotationOps`, `roster`, `remoteSelections`,
+  `opStreamReady`), `ensureSyncConnected` (lazy create / same-session reconnect
+  fast path / previous-client teardown) and the session-change/unmount teardown
+  effect. Behaviour-preserving: the connect-before-install guard (a client whose
+  `connect()` throws is never left in `syncRef`) and the "only close a client
+  that still belongs to the captured session id" teardown check are both intact;
+  op-application handlers (`applyRemoteOp`, `applyToolResultCommand`,
+  `resyncFromServer`, the handler-wiring effect) stay in `App.jsx` and are still
+  routed through `syncHandlersRef`. `App.jsx` drops ~92 lines and no longer
+  imports `SessionSyncClient`. Added `useSyncConnection` unit tests (7). Frontend
+  suite green (web 213 / canvas 74 / widget 56). B1 slices 3 (dialog
+  orchestration) and 4 (chat/proposal wiring) remain open under row 11.
 
 - **[2026-07-12] A3 step 2 review — stream-token scheme reclassified as an owner
   design decision (PR #228).** Tracing the session-creation flow showed the
@@ -631,8 +649,8 @@ summary instead.
   dead client on the fast path nor throws out of the auto-save call site.
   Added `useSharedSession` unit tests plus a `sessionFlow` integration
   regression for the contained connect failure (verified failing pre-fix).
-  `ensureSyncConnected`'s own extraction into a `useSyncConnection` hook remains
-  B1 slice 2 (row 11). Frontend suite green (canvas 74 / web 206 / widget 56).
+  `ensureSyncConnected`'s own extraction into a `useSyncConnection` hook landed
+  as B1 slice 2 (PR #229). Frontend suite green (canvas 74 / web 206 / widget 56).
 
 - **[2026-07-12] B2 — `api_host/server.py` decomposed into composable modules
   (PR #225).** Split the 1 180-line `create_app()` monolith into dedicated
