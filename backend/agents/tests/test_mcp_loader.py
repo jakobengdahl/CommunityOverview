@@ -537,3 +537,22 @@ class TestConnectHttpInfoQuery:
         tools = loader._connect_http(integration)
 
         assert tools == []
+
+    def test_info_endpoint_malformed_url_is_swallowed(self):
+        """A malformed configured URL must not escape _connect_http.
+
+        httpx raises httpx.InvalidURL (neither a RequestError nor a ValueError) on
+        a malformed URL, where requests folded MissingSchema/InvalidURL into
+        RequestException. The handler must still degrade to an empty tool list.
+        """
+        integration = MCPIntegration(
+            id="WEB",
+            name="Some HTTP MCP",
+            transport=MCPTransport.HTTP,
+            url="http://[::1/mcp",  # unclosed IPv6 bracket -> httpx.InvalidURL
+        )
+        loader = MCPLoader([integration])
+
+        tools = loader._connect_http(integration)
+
+        assert tools == []

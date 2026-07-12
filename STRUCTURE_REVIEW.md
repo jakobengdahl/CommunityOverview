@@ -618,11 +618,12 @@ summary instead.
   `RequestError`); the client-independent `is_safe_url` SSRF check is untouched.
   Updated the delivery tests to patch `httpx.post` / raise `httpx.TimeoutException`.
   Review loop caught one real behavioural deviation and fixed it in-slice: the MCP
-  loader's `/info` block caught `httpx.RequestError`, but a 200/non-JSON body makes
-  `httpx` raise a plain `json.JSONDecodeError` (a `ValueError`) rather than the
-  `RequestException`-subclass `requests` used, so the handler was broadened to
-  `(httpx.RequestError, ValueError)` and a regression test added
-  (`TestConnectHttpInfoQuery`). Full backend suite green (943 passed / 16 skipped).
+  loader's `/info` block caught `httpx.RequestError`, but `requests` had folded
+  two more cases into `RequestException` that `httpx` surfaces outside it — a
+  200/non-JSON body (`json.JSONDecodeError`, a `ValueError`) and a malformed
+  configured URL (`httpx.InvalidURL`) — so the handler was broadened to
+  `(httpx.RequestError, httpx.InvalidURL, ValueError)` with regression tests for
+  both (`TestConnectHttpInfoQuery`). Full backend suite green (944 passed / 16 skipped).
   Logged one finding en route
   (SMALL_FIXES 2026-07-12): the SSRF check is not re-applied across redirects — a
   latent, pre-existing gap preserved by keeping `follow_redirects=True`. C3 slice 2
