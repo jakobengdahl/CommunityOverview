@@ -605,7 +605,7 @@ summary instead.
 | 14 | C4 Node 18 → 20 build image | XS | — | done (PR #233) |
 | 15 | C5 security scanning in CI | S | A1 | done (PR #234) — CodeQL default setup still *(owner action)* |
 | 16 | C6 start-script consolidation | S | — | done (PR #235) |
-| 17 | D1 docs realignment + index | S–M | B3, C1 | open |
+| 17 | D1 docs realignment + index | S–M | B3, C1 | done (PR #236) |
 | 18 | D2 CLAUDE.md truth verification pass | XS | A1, A2, A4 | open |
 | 19 | B4 service.py / storage.py split | L | A1, next feature touching them | open |
 | 20 | C7 commit root lockfile for reproducible frontend CI | S | A1 | open |
@@ -630,6 +630,24 @@ summary instead.
    same branch.
 
 ## Completed
+
+- **[2026-07-12] D1 — status-tagged docs index + README structure realignment
+  (PR #236).** Added `docs/README.md`, an index tagging every document as
+  **current** (present-system guides/process docs), **design (target state)**
+  (the runtime/extension/plugin enablement plans) or **historical**
+  (`sprint_documentation/`, `expert-agents-implementation-plan.md`,
+  `MIGRATION_NOTES.md`), so a session can skip stale material instead of
+  reconciling it — all 20 indexed docs verified present with resolving links.
+  Brought README's `## Project Structure` up to date with the tree: added the
+  omitted top-level `services/mcp_oauth_gateway`, the backend packages `agents/`,
+  `federation/`, `tests/`, `core/events/`, plus `storage_backends.py` and the two
+  root modules (`config_loader.py`, `document_processor.py`), and a pointer to the
+  new index. The `backend/DEVELOPMENT.md` tree needed no change — B3 (#224) had
+  already added federation/agents/skills/llm/runtime and C1 (#223) removed the
+  stale `graph.json` data-file line — so the D1 item text was corrected to reflect
+  that and scope the item to the README + index work. `config_loader.py` /
+  `document_processor.py` relocation stays tracked under B6. Docs-only, no code
+  change.
 
 - **[2026-07-12] C6 — root start scripts consolidated under `scripts/` (PR #235).**
   Kept `start-dev.sh` at the repo root as the canonical entry point and moved the
