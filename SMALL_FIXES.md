@@ -113,17 +113,15 @@ Effort scale: XS = single-line fix · S = up to ~30 lines / one file · M = mult
 - **Issue:** Presence and claims are keyed by `client_id`. On a fast reconnect (old SSE not yet torn down), both connections share one roster entry and one claim owner; when the first closes, `disconnect` removes the roster entry and releases all of that client's claims even though the second connection is still live, so the still-connected client briefly vanishes from the roster and loses selection markers until its next heartbeat/claim. Mirrors the legacy registry's documented single-consumer limitation. Address with the presence UI in step 7 (e.g. per-connection tokens or refcounting per client_id).
 - **Effort:** M
 
-### [2026-07-07] `pendingRemotePositionsRef` in `GraphCanvas` is never pruned for a node that's deleted or never mounts
-- **File(s):** `packages/ui-graph-canvas/src/components/GraphCanvas.jsx:174` (`pendingRemotePositionsRef`)
-- **Context:** Discovered during review of `claude/small-fix-session` (fix for "Remote-added node can land at (0,0)")
-- **Issue:** A remote position for a node that hasn't mounted yet is now held in `pendingRemotePositionsRef` until the node appears. If the node is instead removed (`nodes_removed`) or never mounts (e.g. the add is rejected/cancelled), the entry is never cleared — a small, bounded per-session memory leak (one `{x,y}` per node id that never gets consumed), not a correctness issue.
-- **Effort:** XS
-
 ---
 
 ## Fixed
 
 *(resolved entries moved here after merge, for reference)*
+
+### [2026-07-12] Fixed while extracting the remote-position logic (STRUCTURE_REVIEW B5 slice 1)
+
+- **`pendingRemotePositionsRef` in `GraphCanvas` is never pruned for a node that's deleted or never mounts** — `packages/ui-graph-canvas/src/hooks/useRemotePositions.js`. The pending-positions logic moved out of `GraphCanvas.jsx` into a `useRemotePositions` hook; each pending entry now carries an arrival timestamp and the catch-up effect drops entries older than a 30s TTL, so a position whose node was removed or never mounts is pruned instead of leaking for the session. Regression test in `packages/ui-graph-canvas/tests/useRemotePositions.test.jsx`.
 
 ### [2026-07-07] Fixed in small-fix session (PRs #207-#210)
 

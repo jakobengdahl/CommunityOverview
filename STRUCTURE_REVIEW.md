@@ -331,16 +331,23 @@ cluster. Decompose them behavior-preservingly, one slice per PR.
 - **Effort:** L (2–3 PR slices). Lower urgency than B1–B3; do when a feature
   next forces a change in these files.
 
-### B5. Split `packages/ui-graph-canvas/src/components/GraphCanvas.jsx` (1 463)
+### B5. Split `packages/ui-graph-canvas/src/components/GraphCanvas.jsx` (1 589)
 
 - **Problem:** canvas rendering, all context menus, remote-position handling
-  and annotation logic in one component in the shared package.
+  and annotation logic in one component in the shared package. (The file had
+  grown to 1 636 lines by the time B5 was picked up — the original 1 463 count
+  was stale.)
 - **Proposed change:** extract context menus into their own components (props
   contract already exists via `contextMenuLabels`), and remote-position/
   pending-position logic into a hook (which is also where the open
   `SMALL_FIXES.md` pruning entry for `pendingRemotePositionsRef` lives —
   resolve it in the extraction).
-- **Effort:** M
+- **Effort:** M (2 slices)
+- **Note (PR #230, slice 1/2):** the remote-position/pending-position logic is
+  extracted into `packages/ui-graph-canvas/src/hooks/useRemotePositions.js` and
+  the `pendingRemotePositionsRef` pruning entry is resolved (30s TTL on pending
+  entries). Remaining slice 2: extract the four inline context menus (and,
+  optionally, the `remoteAnnotationOps` effect) out of `GraphCanvas.jsx`.
 
 ### B6. Home `config_loader.py` and `document_processor.py`
 
@@ -549,7 +556,7 @@ summary instead.
 | 9 | C2 lint gates | M | A1 | done (PR #227) |
 | 10 | A3 step 2 (stream token scheme) | M | A3 step 1 | open *(owner action — design decision; see A3 Update 2026-07-12, PR #228)* |
 | 11 | B1 remaining slices | M×2 | B1 slice 1 | in progress (slice 2/4, PR #229) |
-| 12 | B5 GraphCanvas decomposition | M | — | open |
+| 12 | B5 GraphCanvas decomposition | M | — | in progress (slice 1/2, PR #230) |
 | 13 | C3 HTTP client + dependency policy | S–M | — | open |
 | 14 | C4 Node 18 → 20 build image | XS | — | open |
 | 15 | C5 security scanning in CI | S | A1 | open |
@@ -579,6 +586,19 @@ summary instead.
    same branch.
 
 ## Completed
+
+- **[2026-07-12] B5 slice 1 — remote-position logic extracted from `GraphCanvas.jsx`
+  into `useRemotePositions` (PR #230).** Moved the `pendingRemotePositionsRef` and
+  the two remote-position effects (apply from another client + catch-up once a
+  not-yet-mounted node appears) out of the 1 636-line god component into
+  `packages/ui-graph-canvas/src/hooks/useRemotePositions.js` (`GraphCanvas.jsx`
+  1 636 → 1 589). Behaviour-preserving — the apply-on-mount catch-up and the
+  same-array-reference loop guard are intact. Resolved the open 2026-07-07
+  `SMALL_FIXES.md` entry: pending entries now carry an arrival timestamp and are
+  pruned after a 30s TTL, so a position whose node was removed or never mounts no
+  longer leaks for the session. Added `useRemotePositions` unit tests (5, including
+  a TTL-prune regression). Canvas suite green (8 files / 79 tests). B5 slice 2
+  (context-menu extraction) remains open under row 12.
 
 - **[2026-07-12] B1 slice 2 — sync-client lifecycle extracted from `App.jsx`
   into `useSyncConnection` (PR #229).** Moved the per-session `SessionSyncClient`

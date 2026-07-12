@@ -20,6 +20,7 @@ import LabelNode from './LabelNode';
 import ArrowNode from './ArrowNode';
 import { AnnotationContext } from './AnnotationContext';
 import SimpleFloatingEdge from './SimpleFloatingEdge';
+import { useRemotePositions } from '../hooks/useRemotePositions';
 import {
   applyLayout,
   getGridLayout,
@@ -190,10 +191,6 @@ function GraphCanvasInner({
   const reactFlowWrapper = useRef(null);
   const rightDragStart = useRef({ x: 0, y: 0, time: null });
   const mouseDownPos = useRef(null);
-  // Remote positions for a node that hasn't mounted yet (nodes_added is still
-  // awaiting its async node-details fetch when the paired node_moved arrives)
-  // are held here until the node appears, instead of being dropped.
-  const pendingRemotePositionsRef = useRef({});
   const { screenToFlowPosition, setCenter, getNodes: getFlowNodes, getViewport } = useReactFlow();
 
   // Stable notifier for annotation nodes (note/label/arrow) to signal the host
@@ -1056,53 +1053,9 @@ function GraphCanvasInner({
     if (geometryChanged) onAnnotationChangeRef.current?.();
   }, [nodes, setNodes]);
 
-  // Apply node positions arriving from another client (design step 6). Positions
-  // are stored and emitted in ReactFlow's own coordinate space (`n.position`) —
-  // absolute for a free node, relative to the parent for a grouped node — and the
-  // load path restores them the same way, so apply them directly. (Subtracting a
-  // parent offset here would double-count it for grouped nodes and corrupt them.)
-  // A position for a node that isn't mounted yet (the paired nodes_added is
-  // still awaiting its async node-details fetch) is kept in
-  // pendingRemotePositionsRef rather than dropped — the effect below applies it
-  // once the node appears.
-  useEffect(() => {
-    if (!remotePositions) return;
-    const ids = Object.keys(remotePositions);
-    ids.forEach((id) => {
-      pendingRemotePositionsRef.current[id] = remotePositions[id];
-    });
-    if (ids.length > 0) {
-      setNodes((nds) =>
-        nds.map((n) => {
-          const pos = pendingRemotePositionsRef.current[n.id];
-          if (!pos) return n;
-          delete pendingRemotePositionsRef.current[n.id];
-          return { ...n, position: { x: pos.x, y: pos.y } };
-        })
-      );
-    }
-    onRemotePositionsApplied?.();
-  }, [remotePositions, setNodes, onRemotePositionsApplied]);
-
-  // Catch up a newly-mounted node on a remote position that arrived before it
-  // existed (see pendingRemotePositionsRef above). Runs whenever the node list
-  // changes, e.g. once nodes_added's async node-details fetch resolves. Must
-  // return the *same* array reference when nothing matched — this effect
-  // depends on `nodes`, so a new reference on every run would loop forever.
-  useEffect(() => {
-    if (Object.keys(pendingRemotePositionsRef.current).length === 0) return;
-    setNodes((nds) => {
-      let changed = false;
-      const next = nds.map((n) => {
-        const pos = pendingRemotePositionsRef.current[n.id];
-        if (!pos) return n;
-        changed = true;
-        delete pendingRemotePositionsRef.current[n.id];
-        return { ...n, position: { x: pos.x, y: pos.y } };
-      });
-      return changed ? next : nds;
-    });
-  }, [nodes, setNodes]);
+  // Apply node positions arriving from another client (design step 6), holding
+  // positions for not-yet-mounted nodes until they appear.
+  useRemotePositions({ remotePositions, onRemotePositionsApplied, nodes, setNodes });
 
   // Apply a queue of group/overlay annotation changes from other clients (design
   // step 6): upsert or delete annotation nodes and reassign group membership.
