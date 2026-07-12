@@ -113,9 +113,18 @@ Effort scale: XS = single-line fix · S = up to ~30 lines / one file · M = mult
 - **Issue:** Presence and claims are keyed by `client_id`. On a fast reconnect (old SSE not yet torn down), both connections share one roster entry and one claim owner; when the first closes, `disconnect` removes the roster entry and releases all of that client's claims even though the second connection is still live, so the still-connected client briefly vanishes from the roster and loses selection markers until its next heartbeat/claim. Mirrors the legacy registry's documented single-consumer limitation. Address with the presence UI in step 7 (e.g. per-connection tokens or refcounting per client_id).
 - **Effort:** M
 
----
-
-## Fixed
+### [2026-07-12] Webhook delivery follows redirects, bypassing the `is_safe_url` SSRF guard
+- **File(s):** `backend/core/events/delivery.py:245` (`httpx.post(..., follow_redirects=True)`)
+- **Context:** Discovered during `claude/structure-backlog-next-d3iq0q` (STRUCTURE_REVIEW C3 slice 1, httpx migration)
+- **Issue:** `is_safe_url` validates the *original* webhook URL, but the POST is
+  sent with `follow_redirects=True`, so a webhook that passes the SSRF check can
+  `30x`-redirect the client to an internal address that the guard would have
+  rejected. This is pre-existing behaviour — `requests.post` followed redirects
+  by default and the httpx migration preserved it with `follow_redirects=True`
+  rather than changing behaviour in a mechanical-refactor slice. Fix: set
+  `follow_redirects=False` for webhook delivery (a webhook endpoint has no
+  legitimate reason to redirect), or re-run `is_safe_url` on each redirect hop.
+- **Effort:** XS
 
 *(resolved entries moved here after merge, for reference)*
 

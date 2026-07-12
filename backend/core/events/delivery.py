@@ -14,7 +14,7 @@ import queue
 import time
 from typing import Optional, Callable
 from datetime import datetime, timezone
-import requests
+import httpx2 as httpx
 import urllib.parse
 import socket
 import ipaddress
@@ -243,7 +243,7 @@ class DeliveryWorker:
             payload = event.to_webhook_payload()
 
             # Make HTTP request
-            response = requests.post(
+            response = httpx.post(
                 webhook_url,
                 json=payload,
                 headers={
@@ -253,6 +253,7 @@ class DeliveryWorker:
                     "X-Event-Type": event.event_type.value,
                 },
                 timeout=self._timeout,
+                follow_redirects=True,
             )
 
             # Check response
@@ -281,14 +282,14 @@ class DeliveryWorker:
                 )
                 return
 
-        except requests.Timeout:
+        except httpx.TimeoutException:
             self._handle_failure(
                 item,
                 error_message="Request timed out",
             )
             return
 
-        except requests.RequestException as e:
+        except httpx.HTTPError as e:
             self._handle_failure(
                 item,
                 error_message=str(e),

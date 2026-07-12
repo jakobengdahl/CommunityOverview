@@ -19,7 +19,10 @@ Usage:
 import os
 import sys
 import time
-import requests
+import httpx2 as httpx
+
+# Shared client; follow_redirects preserves the requests default this script relied on
+_http = httpx.Client(follow_redirects=True)
 
 SERVER_URL = os.environ.get("E2E_SERVER_URL", "http://localhost:8000")
 API_PREFIX = "/api/v1"
@@ -34,14 +37,14 @@ def log(message: str, level: str = "INFO"):
 def check_server_health() -> bool:
     """Check if the server is running and healthy."""
     try:
-        response = requests.get(f"{SERVER_URL}/health", timeout=5)
+        response = _http.get(f"{SERVER_URL}/health", timeout=5)
         if response.status_code == 200:
             data = response.json()
             log(
                 f"Server healthy: {data['graph_nodes']} nodes, {data['graph_edges']} edges"
             )
             return True
-    except requests.exceptions.RequestException as e:
+    except httpx.HTTPError as e:
         log(f"Server health check failed: {e}", "ERROR")
     return False
 
@@ -49,7 +52,7 @@ def check_server_health() -> bool:
 def test_root_endpoint():
     """Test the root endpoint returns API info."""
     log("Testing root endpoint...")
-    response = requests.get(f"{SERVER_URL}/")
+    response = _http.get(f"{SERVER_URL}/")
     assert response.status_code == 200, f"Expected 200, got {response.status_code}"
     data = response.json()
     assert "name" in data, "Missing 'name' in response"
@@ -60,7 +63,7 @@ def test_root_endpoint():
 def test_health_endpoint():
     """Test the health check endpoint."""
     log("Testing health endpoint...")
-    response = requests.get(f"{SERVER_URL}/health")
+    response = _http.get(f"{SERVER_URL}/health")
     assert response.status_code == 200
     data = response.json()
     assert data["status"] == "healthy"
@@ -72,7 +75,7 @@ def test_health_endpoint():
 def test_rest_search():
     """Test REST API search endpoint."""
     log("Testing REST search...")
-    response = requests.get(
+    response = _http.get(
         f"{SERVER_URL}{API_PREFIX}/search", params={"query": "", "limit": 5}
     )
     assert response.status_code == 200, f"Search failed: {response.text}"
@@ -85,7 +88,7 @@ def test_rest_search():
 def test_rest_get_stats():
     """Test REST API stats endpoint."""
     log("Testing REST stats...")
-    response = requests.get(f"{SERVER_URL}{API_PREFIX}/stats")
+    response = _http.get(f"{SERVER_URL}{API_PREFIX}/stats")
     assert response.status_code == 200, f"Stats failed: {response.text}"
     data = response.json()
     assert "total_nodes" in data
@@ -97,7 +100,7 @@ def test_rest_get_stats():
 def test_execute_tool_search():
     """Test the execute_tool endpoint with search_graph."""
     log("Testing execute_tool with search_graph...")
-    response = requests.post(
+    response = _http.post(
         f"{SERVER_URL}/execute_tool",
         json={"tool_name": "search_graph", "arguments": {"query": "", "limit": 5}},
     )
@@ -110,7 +113,7 @@ def test_execute_tool_search():
 def test_execute_tool_get_stats():
     """Test the execute_tool endpoint with get_graph_stats."""
     log("Testing execute_tool with get_graph_stats...")
-    response = requests.post(
+    response = _http.post(
         f"{SERVER_URL}/execute_tool",
         json={"tool_name": "get_graph_stats", "arguments": {}},
     )
@@ -123,7 +126,7 @@ def test_execute_tool_get_stats():
 def test_execute_tool_invalid_tool():
     """Test execute_tool with invalid tool name returns 404."""
     log("Testing execute_tool with invalid tool...")
-    response = requests.post(
+    response = _http.post(
         f"{SERVER_URL}/execute_tool",
         json={"tool_name": "nonexistent_tool", "arguments": {}},
     )
@@ -136,7 +139,7 @@ def test_execute_tool_invalid_tool():
 def test_execute_tool_missing_name():
     """Test execute_tool without tool name returns 400."""
     log("Testing execute_tool without tool name...")
-    response = requests.post(f"{SERVER_URL}/execute_tool", json={"arguments": {}})
+    response = _http.post(f"{SERVER_URL}/execute_tool", json={"arguments": {}})
     assert response.status_code == 400, f"Expected 400, got {response.status_code}"
     log("✓ execute_tool correctly returns 400 for missing tool name")
 
@@ -144,7 +147,7 @@ def test_execute_tool_missing_name():
 def test_export_graph():
     """Test the export_graph endpoint."""
     log("Testing export_graph...")
-    response = requests.get(f"{SERVER_URL}/export_graph")
+    response = _http.get(f"{SERVER_URL}/export_graph")
     assert response.status_code == 200, f"Export failed: {response.text}"
     data = response.json()
     assert "nodes" in data
@@ -158,7 +161,7 @@ def test_crud_workflow():
 
     # 1. Add nodes
     log("  Adding test nodes...")
-    response = requests.post(
+    response = _http.post(
         f"{SERVER_URL}/execute_tool",
         json={
             "tool_name": "add_nodes",
@@ -196,7 +199,7 @@ def test_crud_workflow():
 
     # 2. Get node details
     log("  Getting node details...")
-    response = requests.post(
+    response = _http.post(
         f"{SERVER_URL}/execute_tool",
         json={
             "tool_name": "get_node_details",
@@ -213,7 +216,7 @@ def test_crud_workflow():
 
     # 3. Update node
     log("  Updating node...")
-    response = requests.post(
+    response = _http.post(
         f"{SERVER_URL}/execute_tool",
         json={
             "tool_name": "update_node",
@@ -228,7 +231,7 @@ def test_crud_workflow():
 
     # 4. Get related nodes
     log("  Getting related nodes...")
-    response = requests.post(
+    response = _http.post(
         f"{SERVER_URL}/execute_tool",
         json={
             "tool_name": "get_related_nodes",
@@ -244,7 +247,7 @@ def test_crud_workflow():
 
     # 5. Delete nodes (cleanup)
     log("  Deleting test nodes...")
-    response = requests.post(
+    response = _http.post(
         f"{SERVER_URL}/execute_tool",
         json={
             "tool_name": "delete_nodes",
@@ -267,11 +270,11 @@ def test_rest_vs_mcp_parity():
     log("Testing REST vs MCP parity...")
 
     # Get stats via REST
-    rest_response = requests.get(f"{SERVER_URL}{API_PREFIX}/stats")
+    rest_response = _http.get(f"{SERVER_URL}{API_PREFIX}/stats")
     rest_stats = rest_response.json()
 
     # Get stats via MCP tool
-    mcp_response = requests.post(
+    mcp_response = _http.post(
         f"{SERVER_URL}/execute_tool",
         json={"tool_name": "get_graph_stats", "arguments": {}},
     )
