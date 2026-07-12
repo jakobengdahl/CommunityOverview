@@ -85,7 +85,7 @@ See `docs/DEPLOYMENT_AND_CONCURRENCY_ANALYSIS.md` for a deep dive.
 ## Prerequisites
 
 - Python 3.11+
-- Node.js 18+
+- Node.js 20+
 - npm 9+
 
 ## Installation
