@@ -196,7 +196,11 @@ adds real identity and ACLs behind its own boundary.
 ### 3.6 Session lifecycle & URL sharing
 
 - **Auto-create:** on first load without a valid `?session=` URL param or usable
-  recent session, the client calls `POST /api/sessions` and enters the new session.
+  recent session, the client generates an id locally
+  (`generateVisualizationSessionId`) and enters the new session; the session is
+  materialised server-side lazily on the first non-empty save / stream connect
+  (see the lazy-connect note in the D-decisions), not via an eager
+  `POST /api/sessions`.
 - **URL sharing:** the active session ID is reflected in the URL
   (`?session=DDDD-DDDD`); opening such a URL joins that session (creating it
   server-side if it does not exist, preserving today's connect-by-ID behavior).
@@ -269,7 +273,13 @@ transition and removed in the final step.
     `X-Forwarded-For` (counted from the right, spoof-resistant) instead of
     collapsing to the proxy address — one shared bucket for the whole internet.
     A high-entropy per-session stream token (so the short id is only a join code)
-    is the planned follow-up.
+    was the planned follow-up, but it presupposes an authenticated
+    session-creation channel: because sessions are materialised lazily over this
+    same auth-bypassed stream (client-generated ids, no `POST /api/sessions`
+    call), there is no authenticated point at which to deliver the creator its
+    token, and its value is conditional on Basic Auth being active. The token
+    scheme therefore needs a session-creation-flow decision first — tracked in
+    `STRUCTURE_REVIEW.md` item A3 (step 2).
 - All new endpoints respect the existing optional HTTP Basic Auth.
   - **Resolved (step 4, alternative A):** the CRUD/ops endpoints honour Basic
     Auth via request headers, but a browser `EventSource` cannot send an
