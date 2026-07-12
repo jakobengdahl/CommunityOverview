@@ -465,6 +465,16 @@ cluster. Decompose them behavior-preservingly, one slice per PR.
   enable CodeQL default setup in repo settings (owner action). Non-blocking
   reporting first.
 - **Effort:** S
+- **Note (PR #TBD):** the `pip-audit` + `npm audit` reporting is delivered as a
+  dedicated `.github/workflows/security-scan.yml` (pull-request + weekly
+  schedule + manual dispatch), kept out of `ci.yml` so the schedule never
+  triggers a build. Each audit step is `continue-on-error` (reporting-first:
+  findings show a red step + a job summary but never block a merge). The root
+  lockfile covers all three workspaces, so one root `npm audit --omit=dev`
+  reports across web/widget/canvas; `requirements-ml.txt` is skipped (its torch
+  extra-index is slow/fragile to resolve and adds no default-install coverage).
+  **CodeQL default setup remains an owner action** — it is enabled in the repo
+  Security settings, not via a committed workflow.
 
 ### C6. Consolidate the root start scripts
 
@@ -577,7 +587,7 @@ summary instead.
 | 12 | B5 GraphCanvas decomposition | M | — | in progress (slice 1/2, PR #230) |
 | 13 | C3 HTTP client + dependency policy | S–M | — | in progress (slice 1/2, PR #232) |
 | 14 | C4 Node 18 → 20 build image | XS | — | done (PR #233) |
-| 15 | C5 security scanning in CI | S | A1 | open |
+| 15 | C5 security scanning in CI | S | A1 | done (PR #TBD) — CodeQL default setup still *(owner action)* |
 | 16 | C6 start-script consolidation | S | — | open |
 | 17 | D1 docs realignment + index | S–M | B3, C1 | open |
 | 18 | D2 CLAUDE.md truth verification pass | XS | A1, A2, A4 | open |
@@ -604,6 +614,24 @@ summary instead.
    same branch.
 
 ## Completed
+
+- **[2026-07-12] C5 — dependency security scanning added to CI (PR #TBD).** Added
+  `.github/workflows/security-scan.yml`, a standalone workflow (kept out of
+  `ci.yml` so its weekly `schedule` never triggers a Docker build) that runs
+  `pip-audit` over the backend base, dev and gateway requirement files and one
+  root `npm audit --omit=dev` covering all three JS workspaces via the shared
+  lockfile. Triggers: `pull_request`, a weekly `schedule` (re-audits unchanged
+  deps against fresh advisories), and `workflow_dispatch`. Reporting-first — each
+  audit step is `continue-on-error`, so a finding surfaces as a red step plus a
+  job-summary table but never blocks a merge (same rollout path as the C2 lint
+  gates: flip to blocking + required once the baseline is understood, alongside
+  the A4 branch-protection work). `requirements-ml.txt` is intentionally excluded
+  (its pytorch extra-index is slow/fragile to resolve and adds no coverage beyond
+  the default install). Verified locally: `npm audit --omit=dev` flags the tracked
+  `lodash` advisory and the gateway `pip-audit` surfaces the known
+  `python-jose 3.3.0` CVEs (aligning with C3). **CodeQL default setup is left as an
+  owner action** (enabled in repo Security settings, not a committed workflow), so
+  row 15 tracks it as a remaining *(owner action)*.
 
 - **[2026-07-12] C4 — frontend build image upgraded off Node 18 (PR #233).** Bumped
   the `Dockerfile` frontend builder stage from `node:18-alpine` (EOL April 2025) to
