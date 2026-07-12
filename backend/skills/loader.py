@@ -810,7 +810,6 @@ def _parse_yaml_simple(text: str) -> Dict[str, Any]:
         pass
 
     result: Dict[str, Any] = {}
-    current_key: Optional[str] = None
     current_map: Optional[Dict[str, str]] = None
 
     for line in text.splitlines():
@@ -825,7 +824,6 @@ def _parse_yaml_simple(text: str) -> Dict[str, Any]:
             v = v.strip().strip('"').strip("'")
 
             if indent == 0:
-                current_key = k
                 if v:
                     result[k] = v
                     current_map = None

@@ -377,7 +377,7 @@ class TestChatFlowIntegration:
                 "edges": []
             }
         )
-        rest_node_id = response.json()["added_node_ids"][0]
+        assert response.json()["added_node_ids"]
 
         # Search via chat should find it
         mock_llm.set_response(
@@ -424,7 +424,7 @@ class TestChatFlowIntegration:
                 "messages": [{"role": "user", "content": "Add a Chat Created Node"}]
             }
         )
-        chat_node_id = response.json()["toolResult"]["nodes"][0]["id"]
+        assert response.json()["toolResult"]["nodes"][0]["id"]
 
         # Should be findable via REST
         response = client.post("/api/search", json={"query": "Chat Created"})

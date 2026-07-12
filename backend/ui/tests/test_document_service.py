@@ -131,6 +131,7 @@ class TestDocumentServiceFileSanitization:
         # Results might be different due to timestamp (or same if called fast)
         # Both should start with digits
         assert result1[0].isdigit()
+        assert result2[0].isdigit()
 
 
 class TestDocumentServiceCleanup:

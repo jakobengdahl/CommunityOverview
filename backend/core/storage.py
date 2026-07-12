@@ -40,6 +40,7 @@ from .events.models import (
 if TYPE_CHECKING:
     from .events.dispatcher import EventDispatcher
     from .events.delivery import DeliveryWorker
+    from .history_store import GraphHistoryStore
 
 
 class GraphStorage:

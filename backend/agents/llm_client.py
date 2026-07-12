@@ -7,8 +7,11 @@ Reuses the existing LLM provider infrastructure.
 
 import json
 import logging
-from typing import List, Dict, Any, Optional, Callable
+from typing import List, Dict, Any, Optional, Callable, TYPE_CHECKING
 from dataclasses import dataclass
+
+if TYPE_CHECKING:
+    from .config import AgentsSettings
 
 from backend.llm.llm_providers import (
     LLMProvider,

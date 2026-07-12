@@ -1,6 +1,11 @@
 """Targeted tests for actor attribution in mutation results and events."""
 
+from typing import TYPE_CHECKING
+
 from backend.runtime.authorization import use_request_authorization
+
+if TYPE_CHECKING:
+    from backend.service.service import GraphService
 
 
 class TestMutationAttribution:

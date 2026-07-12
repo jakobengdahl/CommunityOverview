@@ -32,7 +32,6 @@ class TestGetLlmAvailability:
 
     def test_returns_available_true_when_openai_key_set(self):
         env = {"OPENAI_API_KEY": "sk-test", "LLM_PROVIDER": "openai"}
-        env_remove = {}
         with patch.dict(os.environ, env, clear=False):
             os.environ.pop("ANTHROPIC_API_KEY", None)
             result = get_llm_availability()

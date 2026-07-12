@@ -35,10 +35,6 @@ from backend.runtime.authorization import (
     build_graph_authorization_context,
 )
 from backend.federation import FederationManager
-
-# Initialize logger
-logger = logging.getLogger(__name__)
-
 from .serializers import (
     serialize_node, serialize_nodes,
     serialize_edge, serialize_edges,
@@ -47,6 +43,9 @@ from .serializers import (
     serialize_delete_edges_result,
     serialize_to_json
 )
+
+# Initialize logger
+logger = logging.getLogger(__name__)
 
 
 # Node type descriptions for metadata

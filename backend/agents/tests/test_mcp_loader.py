@@ -207,7 +207,7 @@ class TestToolExecutor:
         executor = loader.create_tool_executor(graph_service=mock_service)
 
         # Call the executor with a GRAPH tool
-        result = executor("GRAPH__search_graph", {"query": "test"})
+        executor("GRAPH__search_graph", {"query": "test"})
 
         # Should have called the mock service
         assert len(mock_service.search_calls) == 1
@@ -243,7 +243,7 @@ class TestToolExecutor:
         executor = loader.create_tool_executor(graph_service=mock_service)
 
         # Test with namespaced name
-        result = executor("GRAPH__update_node", {"node_id": "node-1", "name": "New Name"})
+        executor("GRAPH__update_node", {"node_id": "node-1", "name": "New Name"})
 
         assert len(mock_service.update_calls) == 1
 

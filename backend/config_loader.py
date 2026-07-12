@@ -173,7 +173,7 @@ class ExpertAgentConfig(BaseModel):
     skills_urls: List[str] = Field(default_factory=list)
 
 
-from backend.skills.loader import SkillsConfig  # noqa: F401 — re-exported for callers
+from backend.skills.loader import SkillsConfig  # noqa: E402,F401 — mid-module import breaks a cycle; re-exported for callers
 
 
 class LanguagePolicyConfig(BaseModel):
