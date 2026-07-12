@@ -159,6 +159,49 @@ changes.
 > per STRUCTURE_REVIEW.md item A3. Update MULTI_USER_SESSIONS_DESIGN.md and the
 > auth-middleware tests.
 
+**Update (2026-07-12) — step 2 (stream token) is blocked on a design decision;
+reclassified as (owner action).** A session picking up row 10 traced the actual
+session-creation flow and found the step-2 premise no longer matches the code:
+
+- Step 2 as written assumes the token is *"returned only to authenticated
+  creators/joiners"* — i.e. an authenticated creator mints the session (the §3.6
+  *auto-create via `POST /api/sessions`* flow) and receives the token. But the
+  browser **never calls `POST /api/sessions`**: `createServerSession` in
+  `frontend/web/src/services/api.js` has zero callers. Sessions are created with
+  a **client-generated id** (`api.generateVisualizationSessionId`) and
+  materialised **lazily over the auth-bypassed stream** (`get_or_create` inside
+  `stream_session`, `backend/service/rest_api.py`) or the first ops POST — the
+  "lazy connect preserved for locally generated ids" behaviour in the design
+  D-notes.
+- Consequence: on the **creator** path there is no authenticated call before
+  materialisation, so there is no authenticated channel to hand the creator its
+  token — and delivering the token over the stream (the first channel the creator
+  touches) would hand it to the very unauthenticated attacker the token is meant
+  to stop (chicken-and-egg).
+- The token's value is also **conditional on Basic Auth being active**: with auth
+  off (a common pilot/dev posture) `GET /api/sessions/{id}` is itself unguarded
+  and leaks the token, so the token adds nothing on those deployments.
+
+Implementing step 2 is therefore a product/security decision, not a mechanical
+change. The fork:
+  - **(a) authenticated-`POST`-first creation** — the creator mints the session
+    server-side (server-assigned id + token) before sharing; changes the
+    client-generated-id + share-by-8-digit-code lifecycle (§3.6) and the
+    share-URL-creates-session behaviour.
+  - **(b) keep lazy materialisation, token-gates-joiners-only** — unauthenticated
+    clients can still materialise/join empty sessions; the token only protects an
+    already-materialised session's content, and only when auth is active. Does not
+    fully meet the original DoD ("brute-forcing an 8-digit ID no longer grants
+    stream access") for the first unauthenticated reader.
+  - **(c) defer to SaaS-tier authorization** — treat real per-session auth as a
+    premium-layer concern and close it there rather than in the open core.
+
+Step 1's per-source rate limit + same-origin CORS default (PR #222) remain the
+shipped mitigation until this is decided. An incidental §3.6 doc↔implementation
+drift found en route (auto-create described as `POST /api/sessions` vs the actual
+lazy client-side create) is corrected in this same PR to keep the design doc
+internally consistent.
+
 ### A4. Protect `dev` and make the required checks real
 
 - **Problem:** `CLAUDE.md` itself documents that auto-merge cannot arm because
@@ -504,7 +547,7 @@ summary instead.
 | 7 | B2 decompose server.py | M | A1 | done (PR #225) |
 | 8 | B1 decompose App.jsx (slice 1: shared-session hook) | M | — | done (PR #226) |
 | 9 | C2 lint gates | M | A1 | done (PR #227) |
-| 10 | A3 step 2 (stream token scheme) | M | A3 step 1 | open |
+| 10 | A3 step 2 (stream token scheme) | M | A3 step 1 | open *(owner action — design decision; see A3 Update 2026-07-12, PR #228)* |
 | 11 | B1 remaining slices | M×2 | B1 slice 1 | open |
 | 12 | B5 GraphCanvas decomposition | M | — | open |
 | 13 | C3 HTTP client + dependency policy | S–M | — | open |
@@ -536,6 +579,21 @@ summary instead.
    same branch.
 
 ## Completed
+
+- **[2026-07-12] A3 step 2 review — stream-token scheme reclassified as an owner
+  design decision (PR #228).** Tracing the session-creation flow showed the
+  step-2 premise (a token minted by an authenticated creator via
+  `POST /api/sessions`) does not match the implementation: the browser never
+  calls the create endpoint (`createServerSession` is uncalled), ids are
+  client-generated (`generateVisualizationSessionId`) and sessions materialise
+  lazily over the auth-bypassed stream (`get_or_create`), so there is no
+  authenticated channel to deliver the creator's token and the token's value is
+  conditional on Basic Auth being active. Corrected the A3 item with the design
+  fork (authenticated-POST-first vs joiners-only vs SaaS-tier) and moved row 10 to
+  *(owner action)* pending Jakob's call on the creation-flow model; updated
+  `MULTI_USER_SESSIONS_DESIGN.md` §3.9 to record the blocker and corrected an
+  incidental §3.6 auto-create description to match the lazy client-side flow. No
+  code change.
 
 - **[2026-07-12] C2 — ruff / eslint / prettier lint gates introduced
   (PR #227).** `ruff` replaces `black` for the Python backend (lint + format;
