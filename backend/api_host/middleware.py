@@ -69,7 +69,10 @@ def add_auth_middleware(app: FastAPI, config: AppConfig) -> None:
         # protected by the unguessable session id — the same rationale as the
         # legacy bypass above (design §3.9, alternative A). Only the stream is
         # bypassed; the CRUD/ops endpoints are reached by fetch and stay guarded.
-        if request.url.path.endswith("/stream") and "/api/sessions/" in request.url.path:
+        if (
+            request.url.path.endswith("/stream")
+            and "/api/sessions/" in request.url.path
+        ):
             return await call_next(request)
 
         # MCP_AUTH_ENABLED=false: MCP endpoints bypass auth regardless of auth_enabled

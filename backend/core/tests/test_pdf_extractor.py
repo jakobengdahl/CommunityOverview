@@ -3,8 +3,6 @@ Tests for the pypdf-based PDF text extractor.
 """
 
 import io
-import os
-import tempfile
 
 import pytest
 
@@ -37,8 +35,12 @@ def _make_minimal_pdf(text: str = "Hello PDF World") -> bytes:
     font_id = _add(b"")
     contents_id = _add(b"")
 
-    objects[catalog_id - 1] = f"{catalog_id} 0 obj\n<< /Type /Catalog /Pages {pages_id} 0 R >>\nendobj\n".encode()
-    objects[pages_id - 1] = f"{pages_id} 0 obj\n<< /Type /Pages /Kids [{page_id} 0 R] /Count 1 >>\nendobj\n".encode()
+    objects[catalog_id - 1] = (
+        f"{catalog_id} 0 obj\n<< /Type /Catalog /Pages {pages_id} 0 R >>\nendobj\n".encode()
+    )
+    objects[pages_id - 1] = (
+        f"{pages_id} 0 obj\n<< /Type /Pages /Kids [{page_id} 0 R] /Count 1 >>\nendobj\n".encode()
+    )
     objects[page_id - 1] = (
         f"{page_id} 0 obj\n"
         f"<< /Type /Page /Parent {pages_id} 0 R "
@@ -47,11 +49,11 @@ def _make_minimal_pdf(text: str = "Hello PDF World") -> bytes:
         f"/Resources << /Font << /F1 {font_id} 0 R >> >> >>\n"
         f"endobj\n"
     ).encode()
-    objects[font_id - 1] = f"{font_id} 0 obj\n<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>\nendobj\n".encode()
+    objects[font_id - 1] = (
+        f"{font_id} 0 obj\n<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>\nendobj\n".encode()
+    )
     objects[contents_id - 1] = (
-        f"{contents_id} 0 obj\n"
-        f"<< /Length {len(stream_bytes)} >>\n"
-        f"stream\n".encode()
+        f"{contents_id} 0 obj\n<< /Length {len(stream_bytes)} >>\nstream\n".encode()
         + stream_bytes
         + b"\nendstream\nendobj\n"
     )

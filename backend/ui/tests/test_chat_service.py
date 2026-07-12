@@ -19,7 +19,7 @@ class TestChatServiceInit:
         """ChatService should create a tools map with all expected tools."""
         from backend.ui import ChatService
 
-        with patch('backend.ui.chat_logic.create_provider'):
+        with patch("backend.ui.chat_logic.create_provider"):
             service = ChatService(graph_service)
 
         expected_tools = [
@@ -45,7 +45,7 @@ class TestChatServiceInit:
         """All tools in the map should route to GraphService methods."""
         from backend.ui import ChatService
 
-        with patch('backend.ui.chat_logic.create_provider'):
+        with patch("backend.ui.chat_logic.create_provider"):
             service = ChatService(graph_service)
 
         # search_graph is wrapped in _search_graph_tool (adds federation_depth support)
@@ -68,10 +68,14 @@ class TestChatServiceToolExecution:
         ]
         mock_llm.mock_text_response = "Found 2 nodes matching 'Test'."
 
-        result = service.process_message([{"role": "user", "content": "Search for Test"}])
+        result = service.process_message(
+            [{"role": "user", "content": "Search for Test"}]
+        )
 
         # Verify response
-        assert "Found" in result["content"] or "nodes" in str(result.get("toolResult", {}))
+        assert "Found" in result["content"] or "nodes" in str(
+            result.get("toolResult", {})
+        )
         assert result["toolUsed"] == "search_graph"
 
     def test_add_nodes_tool_uses_graph_service(self, chat_service):
@@ -84,11 +88,15 @@ class TestChatServiceToolExecution:
                 "name": "add_nodes",
                 "input": {
                     "nodes": [
-                        {"id": "new-node-1", "name": "New Node",
-                         "type": "Actor", "description": "Test"}
+                        {
+                            "id": "new-node-1",
+                            "name": "New Node",
+                            "type": "Actor",
+                            "description": "Test",
+                        }
                     ],
-                    "edges": []
-                }
+                    "edges": [],
+                },
             }
         ]
         mock_llm.mock_text_response = "Added 1 new node."
@@ -109,8 +117,8 @@ class TestChatServiceToolExecution:
                 "name": "update_node",
                 "input": {
                     "node_id": "test-actor-1",
-                    "updates": {"description": "Updated description"}
-                }
+                    "updates": {"description": "Updated description"},
+                },
             }
         ]
         mock_llm.mock_text_response = "Node updated successfully."
@@ -134,10 +142,7 @@ class TestChatServiceToolExecution:
         mock_llm.mock_tool_calls = [
             {
                 "name": "delete_nodes",
-                "input": {
-                    "node_ids": ["test-actor-1"],
-                    "confirmed": True
-                }
+                "input": {"node_ids": ["test-actor-1"], "confirmed": True},
             }
         ]
         mock_llm.mock_text_response = "Node deleted."
@@ -155,12 +160,14 @@ class TestChatServiceToolExecution:
         mock_llm.mock_tool_calls = [
             {
                 "name": "get_related_nodes",
-                "input": {"node_id": "test-actor-1", "depth": 1}
+                "input": {"node_id": "test-actor-1", "depth": 1},
             }
         ]
         mock_llm.mock_text_response = "Found related nodes."
 
-        result = service.process_message([{"role": "user", "content": "Show related nodes"}])
+        result = service.process_message(
+            [{"role": "user", "content": "Show related nodes"}]
+        )
 
         assert result["toolUsed"] == "get_related_nodes"
         assert "toolResult" in result
@@ -175,10 +182,7 @@ class TestChatServiceConversation:
         mock_llm.mock_tool_calls = []
         mock_llm.mock_text_response = "Hello! How can I help?"
 
-        service.process_chat_request(
-            user_message="Hello",
-            conversation_history=[]
-        )
+        service.process_chat_request(user_message="Hello", conversation_history=[])
 
         # Verify message was sent to LLM
         assert len(mock_llm.received_messages) > 0
@@ -193,7 +197,7 @@ class TestChatServiceConversation:
 
         service.process_chat_request(
             user_message="What is this about?",
-            document_context="This is a document about AI and machine learning."
+            document_context="This is a document about AI and machine learning.",
         )
 
         # Verify document context was included
@@ -226,10 +230,16 @@ class TestGraphServiceIntegration:
             {
                 "name": "add_nodes",
                 "input": {
-                    "nodes": [{"id": "int-test-1", "name": "Integration Test",
-                              "type": "Initiative", "description": "Test"}],
-                    "edges": []
-                }
+                    "nodes": [
+                        {
+                            "id": "int-test-1",
+                            "name": "Integration Test",
+                            "type": "Initiative",
+                            "description": "Test",
+                        }
+                    ],
+                    "edges": [],
+                },
             }
         ]
         mock_llm.mock_text_response = "Added node."
@@ -243,7 +253,9 @@ class TestGraphServiceIntegration:
             {"name": "search_graph", "input": {"query": "Integration Test"}}
         ]
         mock_llm.mock_text_response = "Found the node."
-        result = service.process_message([{"role": "user", "content": "Find Integration Test"}])
+        result = service.process_message(
+            [{"role": "user", "content": "Find Integration Test"}]
+        )
 
         # Verify the node was found (proving GraphService persisted it)
         tool_result = result.get("toolResult", {})
@@ -254,13 +266,19 @@ class TestGraphServiceIntegration:
 # Expert agent skills injection
 # ---------------------------------------------------------------------------
 
+
 class TestExpertAgentSkills:
     """Tests for expert agent skills loading and context injection."""
 
-    def _make_expert(self, expert_id="legislation-expert",
-                     system_context="You are a legislation expert.", skills_urls=None):
+    def _make_expert(
+        self,
+        expert_id="legislation-expert",
+        system_context="You are a legislation expert.",
+        skills_urls=None,
+    ):
         """Return a minimal ExpertAgentConfig-like object (plain SimpleNamespace)."""
         from types import SimpleNamespace
+
         return SimpleNamespace(
             id=expert_id,
             system_context=system_context,
@@ -273,14 +291,19 @@ class TestExpertAgentSkills:
         from backend.ui import ChatService
         from backend.skills.loader import SkillsConfig
 
-        with patch('backend.ui.chat_logic.create_provider'), \
-             patch.dict(os.environ, {'ANTHROPIC_API_KEY': 'test-key'}):
+        with (
+            patch("backend.ui.chat_logic.create_provider"),
+            patch.dict(os.environ, {"ANTHROPIC_API_KEY": "test-key"}),
+        ):
             service = ChatService(graph_service)
 
         expert = self._make_expert(system_context="You are a legislation expert.")
         await service.load_expert_skills([expert], SkillsConfig())
 
-        assert service._expert_contexts["legislation-expert"] == "You are a legislation expert."
+        assert (
+            service._expert_contexts["legislation-expert"]
+            == "You are a legislation expert."
+        )
 
     @pytest.mark.asyncio
     async def test_load_expert_skills_no_urls_stores_empty_list(self, graph_service):
@@ -288,8 +311,10 @@ class TestExpertAgentSkills:
         from backend.ui import ChatService
         from backend.skills.loader import SkillsConfig
 
-        with patch('backend.ui.chat_logic.create_provider'), \
-             patch.dict(os.environ, {'ANTHROPIC_API_KEY': 'test-key'}):
+        with (
+            patch("backend.ui.chat_logic.create_provider"),
+            patch.dict(os.environ, {"ANTHROPIC_API_KEY": "test-key"}),
+        ):
             service = ChatService(graph_service)
 
         expert = self._make_expert(skills_urls=[])
@@ -301,8 +326,10 @@ class TestExpertAgentSkills:
         """Unknown expert_agent_id must not raise — returns None."""
         from backend.ui import ChatService
 
-        with patch('backend.ui.chat_logic.create_provider'), \
-             patch.dict(os.environ, {'ANTHROPIC_API_KEY': 'test-key'}):
+        with (
+            patch("backend.ui.chat_logic.create_provider"),
+            patch.dict(os.environ, {"ANTHROPIC_API_KEY": "test-key"}),
+        ):
             service = ChatService(graph_service)
 
         assert service._build_expert_context("unknown-id") is None
@@ -311,8 +338,10 @@ class TestExpertAgentSkills:
         """An expert with system_context but no skills returns just the context."""
         from backend.ui import ChatService
 
-        with patch('backend.ui.chat_logic.create_provider'), \
-             patch.dict(os.environ, {'ANTHROPIC_API_KEY': 'test-key'}):
+        with (
+            patch("backend.ui.chat_logic.create_provider"),
+            patch.dict(os.environ, {"ANTHROPIC_API_KEY": "test-key"}),
+        ):
             service = ChatService(graph_service)
 
         service._expert_contexts["leg"] = "You are a legislation expert."
@@ -326,13 +355,18 @@ class TestExpertAgentSkills:
         from backend.ui import ChatService
         from backend.skills.loader import SkillDefinition
 
-        with patch('backend.ui.chat_logic.create_provider'), \
-             patch.dict(os.environ, {'ANTHROPIC_API_KEY': 'test-key'}):
+        with (
+            patch("backend.ui.chat_logic.create_provider"),
+            patch.dict(os.environ, {"ANTHROPIC_API_KEY": "test-key"}),
+        ):
             service = ChatService(graph_service)
 
         skill = SkillDefinition(
-            id="s1", name="GDPR Skill", description="",
-            content="GDPR guidance.", source_url="http://x.com/SKILL.md"
+            id="s1",
+            name="GDPR Skill",
+            description="",
+            content="GDPR guidance.",
+            source_url="http://x.com/SKILL.md",
         )
         service._expert_contexts["leg"] = "You are a legislation expert."
         # Full skills go in _expert_skills_full (populated by load_expert_skills at startup)
@@ -349,8 +383,12 @@ class TestExpertAgentSkills:
         """process_message() with expert_agent_id should pass extra_context to ChatProcessor."""
         from backend.ui import ChatService
 
-        with patch('backend.ui.chat_logic.create_provider', return_value=mock_llm_provider), \
-             patch.dict(os.environ, {'ANTHROPIC_API_KEY': 'test-key'}):
+        with (
+            patch(
+                "backend.ui.chat_logic.create_provider", return_value=mock_llm_provider
+            ),
+            patch.dict(os.environ, {"ANTHROPIC_API_KEY": "test-key"}),
+        ):
             service = ChatService(graph_service)
             service._processor.provider_type = "mock"
             service._processor.default_api_key = "test-key"
@@ -381,6 +419,7 @@ class TestExpertAgentSkills:
 # Collection permission enforcement tests
 # ---------------------------------------------------------------------------
 
+
 def _make_akc_node(short_name, perms):
     """Build a minimal ActiveKnowledgeCollection node dict as returned by search_graph."""
     return {
@@ -407,13 +446,18 @@ class TestResolveCollection:
     def test_finds_matching_collection(self, graph_service, mock_llm_provider):
         from backend.ui import ChatService
 
-        with patch("backend.ui.chat_logic.create_provider", return_value=mock_llm_provider), \
-             patch.dict(os.environ, {"ANTHROPIC_API_KEY": "test-key"}):
+        with (
+            patch(
+                "backend.ui.chat_logic.create_provider", return_value=mock_llm_provider
+            ),
+            patch.dict(os.environ, {"ANTHROPIC_API_KEY": "test-key"}),
+        ):
             service = ChatService(graph_service)
 
         akc_node = _make_akc_node("test-coll", ACTOR_ONLY_PERMS)
         with patch.object(
-            service._graph_service, "search_graph",
+            service._graph_service,
+            "search_graph",
             return_value={"nodes": [akc_node], "edges": [], "total": 1},
         ):
             prefix, perms = service._resolve_collection("test-coll")
@@ -427,12 +471,17 @@ class TestResolveCollection:
     def test_returns_none_when_not_found(self, graph_service, mock_llm_provider):
         from backend.ui import ChatService
 
-        with patch("backend.ui.chat_logic.create_provider", return_value=mock_llm_provider), \
-             patch.dict(os.environ, {"ANTHROPIC_API_KEY": "test-key"}):
+        with (
+            patch(
+                "backend.ui.chat_logic.create_provider", return_value=mock_llm_provider
+            ),
+            patch.dict(os.environ, {"ANTHROPIC_API_KEY": "test-key"}),
+        ):
             service = ChatService(graph_service)
 
         with patch.object(
-            service._graph_service, "search_graph",
+            service._graph_service,
+            "search_graph",
             return_value={"nodes": [], "edges": [], "total": 0},
         ):
             prefix, perms = service._resolve_collection("missing")
@@ -441,11 +490,17 @@ class TestResolveCollection:
         # None = no collection found; distinct from {} = found but no permissions configured
         assert perms is None
 
-    def test_all_false_permissions_shows_none_in_prompt(self, graph_service, mock_llm_provider):
+    def test_all_false_permissions_shows_none_in_prompt(
+        self, graph_service, mock_llm_provider
+    ):
         from backend.ui import ChatService
 
-        with patch("backend.ui.chat_logic.create_provider", return_value=mock_llm_provider), \
-             patch.dict(os.environ, {"ANTHROPIC_API_KEY": "test-key"}):
+        with (
+            patch(
+                "backend.ui.chat_logic.create_provider", return_value=mock_llm_provider
+            ),
+            patch.dict(os.environ, {"ANTHROPIC_API_KEY": "test-key"}),
+        ):
             service = ChatService(graph_service)
 
         all_false_perms = {
@@ -454,7 +509,8 @@ class TestResolveCollection:
         }
         akc_node = _make_akc_node("no-ops-coll", all_false_perms)
         with patch.object(
-            service._graph_service, "search_graph",
+            service._graph_service,
+            "search_graph",
             return_value={"nodes": [akc_node], "edges": [], "total": 1},
         ):
             prefix, perms = service._resolve_collection("no-ops-coll")
@@ -463,28 +519,43 @@ class TestResolveCollection:
         assert "PERMITTED OPERATIONS: none" in prefix
         assert perms == all_false_perms
 
-    def test_exception_during_resolution_fails_closed(self, graph_service, mock_llm_provider):
+    def test_exception_during_resolution_fails_closed(
+        self, graph_service, mock_llm_provider
+    ):
         from backend.ui import ChatService
 
-        with patch("backend.ui.chat_logic.create_provider", return_value=mock_llm_provider), \
-             patch.dict(os.environ, {"ANTHROPIC_API_KEY": "test-key"}):
+        with (
+            patch(
+                "backend.ui.chat_logic.create_provider", return_value=mock_llm_provider
+            ),
+            patch.dict(os.environ, {"ANTHROPIC_API_KEY": "test-key"}),
+        ):
             service = ChatService(graph_service)
 
         with patch.object(
-            service._graph_service, "search_graph",
+            service._graph_service,
+            "search_graph",
             side_effect=RuntimeError("graph unavailable"),
         ):
             prefix, perms = service._resolve_collection("any-coll")
 
         # Exception → fail-closed: empty-perms sentinel, not (None, None)
-        assert perms is not None, "exception path must not return None (would be fail-open)"
+        assert perms is not None, (
+            "exception path must not return None (would be fail-open)"
+        )
         assert perms == {}
 
-    def test_guards_against_null_permission_entries(self, graph_service, mock_llm_provider):
+    def test_guards_against_null_permission_entries(
+        self, graph_service, mock_llm_provider
+    ):
         from backend.ui import ChatService
 
-        with patch("backend.ui.chat_logic.create_provider", return_value=mock_llm_provider), \
-             patch.dict(os.environ, {"ANTHROPIC_API_KEY": "test-key"}):
+        with (
+            patch(
+                "backend.ui.chat_logic.create_provider", return_value=mock_llm_provider
+            ),
+            patch.dict(os.environ, {"ANTHROPIC_API_KEY": "test-key"}),
+        ):
             service = ChatService(graph_service)
 
         null_perms = {
@@ -493,7 +564,8 @@ class TestResolveCollection:
         }
         akc_node = _make_akc_node("null-coll", null_perms)
         with patch.object(
-            service._graph_service, "search_graph",
+            service._graph_service,
+            "search_graph",
             return_value={"nodes": [akc_node], "edges": [], "total": 1},
         ):
             # Should not raise
@@ -509,8 +581,12 @@ class TestMakeEnforcedTools:
     def _make_service(self, graph_service, mock_llm_provider):
         from backend.ui import ChatService
 
-        with patch("backend.ui.chat_logic.create_provider", return_value=mock_llm_provider), \
-             patch.dict(os.environ, {"ANTHROPIC_API_KEY": "test-key"}):
+        with (
+            patch(
+                "backend.ui.chat_logic.create_provider", return_value=mock_llm_provider
+            ),
+            patch.dict(os.environ, {"ANTHROPIC_API_KEY": "test-key"}),
+        ):
             service = ChatService(graph_service)
             service._processor.provider_type = "mock"
             service._processor.default_api_key = "test-key"
@@ -582,7 +658,9 @@ class TestMakeEnforcedTools:
         assert "nonexistent-id" in result["error"]
         assert "test-actor-1" in result["error"]
 
-    def test_delete_edges_always_blocked_in_collection_mode(self, graph_service, mock_llm_provider):
+    def test_delete_edges_always_blocked_in_collection_mode(
+        self, graph_service, mock_llm_provider
+    ):
         service = self._make_service(graph_service, mock_llm_provider)
         tools = service._make_enforced_tools(ACTOR_ONLY_PERMS)
         result = tools["delete_edges"](edge_ids=["some-edge"], confirmed=True)
@@ -596,8 +674,12 @@ class TestMakeEnforcedTools:
         from backend.ui import ChatService
 
         # Keep create_provider patched for the entire test so process_message can call it
-        with patch("backend.ui.chat_logic.create_provider", return_value=mock_llm_provider), \
-             patch.dict(os.environ, {"ANTHROPIC_API_KEY": "test-key"}):
+        with (
+            patch(
+                "backend.ui.chat_logic.create_provider", return_value=mock_llm_provider
+            ),
+            patch.dict(os.environ, {"ANTHROPIC_API_KEY": "test-key"}),
+        ):
             service = ChatService(graph_service)
             service._processor.provider_type = "mock"
             service._processor.default_api_key = "test-key"
@@ -615,11 +697,14 @@ class TestMakeEnforcedTools:
             mock_llm_provider.mock_text_response = "Could not add node."
 
             with patch.object(
-                service._graph_service, "search_graph",
+                service._graph_service,
+                "search_graph",
                 return_value={"nodes": [akc_node], "edges": [], "total": 1},
             ):
                 service.process_message(
-                    messages=[{"role": "user", "content": "Add KPI as StatisticalProgramme"}],
+                    messages=[
+                        {"role": "user", "content": "Add KPI as StatisticalProgramme"}
+                    ],
                     collection_short_name="my-coll",
                 )
 
@@ -681,7 +766,9 @@ class TestVisualizationContext:
         from backend.ui import ChatService
 
         large_selected = [f"sel-{i}" for i in range(150)]
-        result = ChatService._format_visualization_context(["visible-1"], large_selected)
+        result = ChatService._format_visualization_context(
+            ["visible-1"], large_selected
+        )
 
         assert "Selected nodes: 150" in result
         assert "omitted" in result
@@ -704,8 +791,12 @@ class TestVisualizationContext:
         """process_message() with canvas state should inject it into the system prompt."""
         from backend.ui import ChatService
 
-        with patch('backend.ui.chat_logic.create_provider', return_value=mock_llm_provider), \
-             patch.dict(os.environ, {'ANTHROPIC_API_KEY': 'test-key'}):
+        with (
+            patch(
+                "backend.ui.chat_logic.create_provider", return_value=mock_llm_provider
+            ),
+            patch.dict(os.environ, {"ANTHROPIC_API_KEY": "test-key"}),
+        ):
             service = ChatService(graph_service)
             service._processor.provider_type = "mock"
             service._processor.default_api_key = "test-key"
@@ -737,8 +828,12 @@ class TestVisualizationContext:
         """process_message() without canvas fields should not inject the state block."""
         from backend.ui import ChatService
 
-        with patch('backend.ui.chat_logic.create_provider', return_value=mock_llm_provider), \
-             patch.dict(os.environ, {'ANTHROPIC_API_KEY': 'test-key'}):
+        with (
+            patch(
+                "backend.ui.chat_logic.create_provider", return_value=mock_llm_provider
+            ),
+            patch.dict(os.environ, {"ANTHROPIC_API_KEY": "test-key"}),
+        ):
             service = ChatService(graph_service)
             service._processor.provider_type = "mock"
             service._processor.default_api_key = "test-key"
@@ -768,16 +863,28 @@ class TestPresentForm:
         form_spec = {
             "title": "Quick feedback",
             "fields": [
-                {"id": "role", "label": "Your role", "type": "radio",
-                 "options": ["Manager", "Analyst"], "required": True},
-                {"id": "score", "label": "Satisfaction", "type": "slider",
-                 "min": 1, "max": 5},
+                {
+                    "id": "role",
+                    "label": "Your role",
+                    "type": "radio",
+                    "options": ["Manager", "Analyst"],
+                    "required": True,
+                },
+                {
+                    "id": "score",
+                    "label": "Satisfaction",
+                    "type": "slider",
+                    "min": 1,
+                    "max": 5,
+                },
             ],
         }
         mock_llm.mock_tool_calls = [{"name": "present_form", "input": form_spec}]
         mock_llm.mock_text_response = "Please fill in the form below."
 
-        result = service.process_message(messages=[{"role": "user", "content": "start"}])
+        result = service.process_message(
+            messages=[{"role": "user", "content": "start"}]
+        )
 
         assert result["toolUsed"] == "present_form"
         tr = result["toolResult"]
@@ -802,9 +909,19 @@ class TestPresentForm:
 
         mock_llm.mock_tool_calls = [
             {"name": "search_graph", "input": {"query": "Findable Agency"}},
-            {"name": "present_form", "input": {"fields": [
-                {"id": "role", "label": "Role", "type": "radio", "options": ["A", "B"]},
-            ]}},
+            {
+                "name": "present_form",
+                "input": {
+                    "fields": [
+                        {
+                            "id": "role",
+                            "label": "Role",
+                            "type": "radio",
+                            "options": ["A", "B"],
+                        },
+                    ]
+                },
+            },
         ]
         mock_llm.mock_text_response = "Here are results; please also fill in the form."
 
@@ -826,49 +943,84 @@ class TestPresentForm:
             def __init__(self):
                 self.n = 0
 
-            def create_completion(self, messages, system_prompt, tools, max_tokens=4096):
+            def create_completion(
+                self, messages, system_prompt, tools, max_tokens=4096
+            ):
                 self.n += 1
                 if self.n == 1:
-                    return LLMResponse(content=[
-                        {"type": "text", "text": "Fill this in."},
-                        {"type": "tool_use", "id": "t1", "name": "present_form",
-                         "input": {"fields": [
-                             {"id": "role", "label": "Role", "type": "radio", "options": ["A", "B"]},
-                         ]}},
-                    ], stop_reason="tool_use")
+                    return LLMResponse(
+                        content=[
+                            {"type": "text", "text": "Fill this in."},
+                            {
+                                "type": "tool_use",
+                                "id": "t1",
+                                "name": "present_form",
+                                "input": {
+                                    "fields": [
+                                        {
+                                            "id": "role",
+                                            "label": "Role",
+                                            "type": "radio",
+                                            "options": ["A", "B"],
+                                        },
+                                    ]
+                                },
+                            },
+                        ],
+                        stop_reason="tool_use",
+                    )
                 if self.n == 2:
-                    return LLMResponse(content=[
-                        {"type": "tool_use", "id": "t2", "name": "search_graph",
-                         "input": {"query": "Findable Agency"}},
-                    ], stop_reason="tool_use")
-                return LLMResponse(content=[{"type": "text", "text": "Done."}], stop_reason="end_turn")
+                    return LLMResponse(
+                        content=[
+                            {
+                                "type": "tool_use",
+                                "id": "t2",
+                                "name": "search_graph",
+                                "input": {"query": "Findable Agency"},
+                            },
+                        ],
+                        stop_reason="tool_use",
+                    )
+                return LLMResponse(
+                    content=[{"type": "text", "text": "Done."}], stop_reason="end_turn"
+                )
 
-        with patch("backend.ui.chat_logic.create_provider", return_value=SeqProvider()), \
-             patch.dict(os.environ, {"ANTHROPIC_API_KEY": "test-key"}):
+        with (
+            patch("backend.ui.chat_logic.create_provider", return_value=SeqProvider()),
+            patch.dict(os.environ, {"ANTHROPIC_API_KEY": "test-key"}),
+        ):
             service = ChatService(graph_service)
             service._processor.provider_type = "mock"
             service._processor.default_api_key = "test-key"
-            graph_service.add_nodes(nodes=[{"type": "Actor", "name": "Findable Agency"}], edges=[])
+            graph_service.add_nodes(
+                nodes=[{"type": "Actor", "name": "Findable Agency"}], edges=[]
+            )
 
-            result = service.process_message(messages=[{"role": "user", "content": "go"}])
+            result = service.process_message(
+                messages=[{"role": "user", "content": "go"}]
+            )
 
         tr = result["toolResult"]
-        assert tr["action"] == "present_form", "form must survive a chained node-returning tool"
+        assert tr["action"] == "present_form", (
+            "form must survive a chained node-returning tool"
+        )
         assert any(n.get("name") == "Findable Agency" for n in tr.get("nodes", []))
 
 
 def _add_akc(graph_service, short_name, perms=None):
     """Persist a minimal ActiveKnowledgeCollection node and return its id."""
     result = graph_service.add_nodes(
-        nodes=[{
-            "type": "ActiveKnowledgeCollection",
-            "name": f"Collection {short_name}",
-            "metadata": {
-                "short_name": short_name,
-                "prompt": "Collect feedback.",
-                "node_type_permissions": perms or {},
-            },
-        }],
+        nodes=[
+            {
+                "type": "ActiveKnowledgeCollection",
+                "name": f"Collection {short_name}",
+                "metadata": {
+                    "short_name": short_name,
+                    "prompt": "Collect feedback.",
+                    "node_type_permissions": perms or {},
+                },
+            }
+        ],
         edges=[],
     )
     ids = result.get("added_node_ids") or []
@@ -880,8 +1032,13 @@ class TestSaveCollectionResponse:
 
     def _service(self, graph_service, mock_llm_provider):
         from backend.ui import ChatService
-        with patch("backend.ui.chat_logic.create_provider", return_value=mock_llm_provider), \
-             patch.dict(os.environ, {"ANTHROPIC_API_KEY": "test-key"}):
+
+        with (
+            patch(
+                "backend.ui.chat_logic.create_provider", return_value=mock_llm_provider
+            ),
+            patch.dict(os.environ, {"ANTHROPIC_API_KEY": "test-key"}),
+        ):
             service = ChatService(graph_service)
             service._processor.provider_type = "mock"
             service._processor.default_api_key = "test-key"
@@ -893,17 +1050,33 @@ class TestSaveCollectionResponse:
 
         # Resolve first so the collection-node identity is cached.
         service._resolve_collection("feedback")
-        tool = service._make_collection_response_tool("feedback")["save_collection_response"]
+        tool = service._make_collection_response_tool("feedback")[
+            "save_collection_response"
+        ]
 
-        out = tool(answers=[
-            {"field_id": "role", "label": "Role", "type": "radio", "value": "Manager"},
-            {"field_id": "topics", "label": "Topics", "type": "checkbox", "value": ["A", "B"]},
-        ])
+        out = tool(
+            answers=[
+                {
+                    "field_id": "role",
+                    "label": "Role",
+                    "type": "radio",
+                    "value": "Manager",
+                },
+                {
+                    "field_id": "topics",
+                    "label": "Topics",
+                    "type": "checkbox",
+                    "value": ["A", "B"],
+                },
+            ]
+        )
 
         assert out["success"] is True
         assert out["answer_count"] == 2
 
-        found = graph_service.search_graph(query="", node_types=["CollectionResponse"], limit=10)
+        found = graph_service.search_graph(
+            query="", node_types=["CollectionResponse"], limit=10
+        )
         nodes = found.get("nodes", [])
         assert len(nodes) == 1
         meta = nodes[0]["metadata"]
@@ -917,23 +1090,36 @@ class TestSaveCollectionResponse:
         service = self._service(graph_service, mock_llm_provider)
         _add_akc(graph_service, "feedback")
         service._resolve_collection("feedback")
-        tool = service._make_collection_response_tool("feedback")["save_collection_response"]
+        tool = service._make_collection_response_tool("feedback")[
+            "save_collection_response"
+        ]
 
         out = tool(answers=[])
         assert out["success"] is False
         assert "answer" in out["error"].lower()
 
-    def test_process_message_installs_response_tool_in_collection_mode(self, chat_service):
+    def test_process_message_installs_response_tool_in_collection_mode(
+        self, chat_service
+    ):
         service, mock_llm = chat_service
         graph_service = service.graph_service
         _add_akc(graph_service, "feedback")
 
-        mock_llm.mock_tool_calls = [{
-            "name": "save_collection_response",
-            "input": {"answers": [
-                {"field_id": "role", "label": "Role", "type": "radio", "value": "Analyst"},
-            ]},
-        }]
+        mock_llm.mock_tool_calls = [
+            {
+                "name": "save_collection_response",
+                "input": {
+                    "answers": [
+                        {
+                            "field_id": "role",
+                            "label": "Role",
+                            "type": "radio",
+                            "value": "Analyst",
+                        },
+                    ]
+                },
+            }
+        ]
         mock_llm.mock_text_response = "Saved, thank you."
 
         result = service.process_message(
@@ -942,19 +1128,25 @@ class TestSaveCollectionResponse:
         )
 
         assert result["toolUsed"] == "save_collection_response"
-        found = graph_service.search_graph(query="", node_types=["CollectionResponse"], limit=10)
+        found = graph_service.search_graph(
+            query="", node_types=["CollectionResponse"], limit=10
+        )
         assert len(found.get("nodes", [])) == 1
 
     def test_response_tool_absent_outside_collection_mode(self, chat_service):
         service, mock_llm = chat_service
         graph_service = service.graph_service
-        mock_llm.mock_tool_calls = [{
-            "name": "save_collection_response",
-            "input": {"answers": [{"field_id": "x", "value": "y"}]},
-        }]
+        mock_llm.mock_tool_calls = [
+            {
+                "name": "save_collection_response",
+                "input": {"answers": [{"field_id": "x", "value": "y"}]},
+            }
+        ]
         mock_llm.mock_text_response = "done"
 
         service.process_message(messages=[{"role": "user", "content": "hi"}])
 
-        found = graph_service.search_graph(query="", node_types=["CollectionResponse"], limit=10)
+        found = graph_service.search_graph(
+            query="", node_types=["CollectionResponse"], limit=10
+        )
         assert found.get("nodes", []) == []

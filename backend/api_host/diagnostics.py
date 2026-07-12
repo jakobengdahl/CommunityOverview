@@ -29,7 +29,9 @@ def count_enabled_capabilities(capabilities: Dict[str, Any]) -> Dict[str, int]:
     return {
         "configured": len(manifest),
         "enabled": sum(1 for capability in manifest if capability.get("enabled", True)),
-        "disabled": sum(1 for capability in manifest if not capability.get("enabled", True)),
+        "disabled": sum(
+            1 for capability in manifest if not capability.get("enabled", True)
+        ),
     }
 
 
@@ -110,7 +112,9 @@ def build_startup_diagnostics(
             "status": "ok",
             "schema_config_source": config_context["schema_config_source"],
             "federation_config_source": config_context["federation_config_source"],
-            "tenant_config_dir_configured": config_context["tenant_config_dir_configured"],
+            "tenant_config_dir_configured": config_context[
+                "tenant_config_dir_configured"
+            ],
         },
         "graph_storage": {
             "status": graph_integrity["status"],
@@ -119,7 +123,9 @@ def build_startup_diagnostics(
             "integrity": graph_integrity,
         },
         "event_delivery": {
-            "status": "ok" if getattr(graph_storage, "_events_enabled", False) else "disabled",
+            "status": "ok"
+            if getattr(graph_storage, "_events_enabled", False)
+            else "disabled",
         },
         "llm": {
             "status": "ok" if llm_availability["available"] else "no_key",
@@ -134,7 +140,9 @@ def build_startup_diagnostics(
             "configured_integrations": len(agent_status.get("mcp_integrations", [])),
         },
         "federation": {
-            "status": federation_runtime.get("status", "disabled" if not federation_summary.get("enabled") else "ok"),
+            "status": federation_runtime.get(
+                "status", "disabled" if not federation_summary.get("enabled") else "ok"
+            ),
             "enabled": federation_summary.get("enabled", False),
             "configured_graphs": federation_summary.get("configured_graphs", 0),
             "active_graphs": federation_summary.get("active_graphs", 0),
@@ -142,8 +150,10 @@ def build_startup_diagnostics(
     }
 
     blocking_failures = [
-        name for name, check in checks.items()
-        if name in {"config", "graph_storage"} and check.get("status") not in {"ok", "disabled"}
+        name
+        for name, check in checks.items()
+        if name in {"config", "graph_storage"}
+        and check.get("status") not in {"ok", "disabled"}
     ]
     readiness_status = "ready" if not blocking_failures else "not_ready"
 

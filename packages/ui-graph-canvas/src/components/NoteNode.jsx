@@ -75,17 +75,13 @@ function NoteNode({ id, data, selected }) {
   };
 
   const changeColor = (color) => {
-    setNodes((nds) =>
-      nds.map((n) => (n.id === id ? { ...n, data: { ...n.data, color } } : n))
-    );
+    setNodes((nds) => nds.map((n) => (n.id === id ? { ...n, data: { ...n.data, color } } : n)));
     setContextMenu(null);
     notifyChange();
   };
 
   const changeFontSize = (fontSize) => {
-    setNodes((nds) =>
-      nds.map((n) => (n.id === id ? { ...n, data: { ...n.data, fontSize } } : n))
-    );
+    setNodes((nds) => nds.map((n) => (n.id === id ? { ...n, data: { ...n.data, fontSize } } : n)));
     notifyChange();
   };
 
@@ -142,42 +138,43 @@ function NoteNode({ id, data, selected }) {
         )}
       </div>
 
-      {contextMenu && createPortal(
-        <div
-          ref={contextMenuRef}
-          className="graph-annotation-context-menu"
-          style={{ left: contextMenu.x, top: contextMenu.y }}
-        >
-          <div className="context-menu-title">{labels.color}</div>
-          <div className="context-menu-colors">
-            {NOTE_COLORS.map((c) => (
-              <button
-                key={c}
-                className="color-button"
-                style={{ backgroundColor: c }}
-                onClick={() => changeColor(c)}
-              />
-            ))}
-          </div>
-          <div className="context-menu-title">{labels.textSize}</div>
-          <div className="context-menu-sizes">
-            {NOTE_FONT_SIZES.map((s) => (
-              <button
-                key={s}
-                className={`size-button${fontSize === s ? ' active' : ''}`}
-                style={{ fontSize: Math.min(s, 18) }}
-                onClick={() => changeFontSize(s)}
-              >
-                A
-              </button>
-            ))}
-          </div>
-          <button className="context-menu-delete" onClick={remove}>
-            🗑️ {labels.delete}
-          </button>
-        </div>,
-        document.body
-      )}
+      {contextMenu &&
+        createPortal(
+          <div
+            ref={contextMenuRef}
+            className="graph-annotation-context-menu"
+            style={{ left: contextMenu.x, top: contextMenu.y }}
+          >
+            <div className="context-menu-title">{labels.color}</div>
+            <div className="context-menu-colors">
+              {NOTE_COLORS.map((c) => (
+                <button
+                  key={c}
+                  className="color-button"
+                  style={{ backgroundColor: c }}
+                  onClick={() => changeColor(c)}
+                />
+              ))}
+            </div>
+            <div className="context-menu-title">{labels.textSize}</div>
+            <div className="context-menu-sizes">
+              {NOTE_FONT_SIZES.map((s) => (
+                <button
+                  key={s}
+                  className={`size-button${fontSize === s ? ' active' : ''}`}
+                  style={{ fontSize: Math.min(s, 18) }}
+                  onClick={() => changeFontSize(s)}
+                >
+                  A
+                </button>
+              ))}
+            </div>
+            <button className="context-menu-delete" onClick={remove}>
+              🗑️ {labels.delete}
+            </button>
+          </div>,
+          document.body
+        )}
     </>
   );
 }

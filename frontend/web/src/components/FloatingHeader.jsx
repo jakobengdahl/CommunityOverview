@@ -16,27 +16,19 @@ function initialFor(name) {
  */
 function PresenceRoster({ roster, currentClientId, t }) {
   const members = Array.isArray(roster) ? roster : [];
-  const others = members.filter(m => m.client_id !== currentClientId);
+  const others = members.filter((m) => m.client_id !== currentClientId);
   if (others.length === 0) return null;
 
   // Show self first, then others; cap the visible dots and summarise the rest.
-  const ordered = [
-    ...members.filter(m => m.client_id === currentClientId),
-    ...others,
-  ];
+  const ordered = [...members.filter((m) => m.client_id === currentClientId), ...others];
   const visible = ordered.slice(0, MAX_VISIBLE_DOTS);
   const overflow = ordered.length - visible.length;
 
   return (
-    <div
-      className="floating-header-presence"
-      aria-label={t('presence.collaborators')}
-    >
-      {visible.map(m => {
+    <div className="floating-header-presence" aria-label={t('presence.collaborators')}>
+      {visible.map((m) => {
         const isSelf = m.client_id === currentClientId;
-        const label = isSelf
-          ? `${m.display_name} (${t('presence.you')})`
-          : m.display_name;
+        const label = isSelf ? `${m.display_name} (${t('presence.you')})` : m.display_name;
         return (
           <span
             key={m.client_id}

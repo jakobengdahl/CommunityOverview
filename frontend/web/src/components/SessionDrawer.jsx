@@ -61,8 +61,8 @@ function SessionDrawer({
   const filteredSessions = useMemo(() => {
     const q = query.trim().toLowerCase();
     if (!q) return sessions;
-    return sessions.filter(s =>
-      (s.name || '').toLowerCase().includes(q) || s.id.toLowerCase().includes(q)
+    return sessions.filter(
+      (s) => (s.name || '').toLowerCase().includes(q) || s.id.toLowerCase().includes(q)
     );
   }, [sessions, query]);
 
@@ -130,12 +130,8 @@ function SessionDrawer({
               onClick={() => onSelectSession(session.id)}
               title={session.name ? `${session.name} (${session.id})` : session.id}
             >
-              <span className="session-drawer-session-label">
-                {session.name || session.id}
-              </span>
-              {session.name && (
-                <span className="session-drawer-session-id">{session.id}</span>
-              )}
+              <span className="session-drawer-session-label">{session.name || session.id}</span>
+              {session.name && <span className="session-drawer-session-id">{session.id}</span>}
             </button>
             <button
               className="session-drawer-session-rename"

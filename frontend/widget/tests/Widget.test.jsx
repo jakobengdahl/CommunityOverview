@@ -21,16 +21,10 @@ vi.mock('@community-graph/ui-graph-canvas', () => ({
       {nodes?.map((node) => (
         <div key={node.id} data-testid={`node-${node.id}`}>
           <span>{node.name}</span>
-          <button
-            data-testid={`expand-${node.id}`}
-            onClick={() => onExpand?.(node.id, node)}
-          >
+          <button data-testid={`expand-${node.id}`} onClick={() => onExpand?.(node.id, node)}>
             Expand
           </button>
-          <button
-            data-testid={`edit-${node.id}`}
-            onClick={() => onEdit?.(node.id, node)}
-          >
+          <button data-testid={`edit-${node.id}`} onClick={() => onEdit?.(node.id, node)}>
             Edit
           </button>
         </div>
@@ -170,14 +164,12 @@ describe('Widget', () => {
 
     it('adds new nodes from expand to the graph', async () => {
       const initialNodes = [{ id: 'n1', name: 'Node 1', type: 'Actor' }];
-      const relatedNodes = [
-        { id: 'n2', name: 'Related Node', type: 'Initiative' },
-      ];
+      const relatedNodes = [{ id: 'n2', name: 'Related Node', type: 'Initiative' }];
 
       mcp.searchGraph.mockResolvedValue({ nodes: initialNodes, edges: [] });
       mcp.getRelatedNodes.mockResolvedValue({
         nodes: [...initialNodes, ...relatedNodes],
-        edges: [{ id: 'e1', source: 'n1', target: 'n2', type: 'IMPLEMENTS' }]
+        edges: [{ id: 'e1', source: 'n1', target: 'n2', type: 'IMPLEMENTS' }],
       });
 
       render(<Widget />);
@@ -286,7 +278,7 @@ describe('Widget', () => {
       render(<Widget initialQuery="initial search" />);
 
       // Wait a bit to ensure no call happens
-      await new Promise(resolve => setTimeout(resolve, 100));
+      await new Promise((resolve) => setTimeout(resolve, 100));
 
       expect(mcp.searchGraph).not.toHaveBeenCalled();
     });
@@ -295,9 +287,12 @@ describe('Widget', () => {
   describe('Loading state', () => {
     it('shows loading indicator during search', async () => {
       let resolveSearch;
-      mcp.searchGraph.mockImplementation(() => new Promise(resolve => {
-        resolveSearch = resolve;
-      }));
+      mcp.searchGraph.mockImplementation(
+        () =>
+          new Promise((resolve) => {
+            resolveSearch = resolve;
+          })
+      );
 
       render(<Widget />);
 
@@ -321,9 +316,12 @@ describe('Widget', () => {
 
     it('disables search input and button during loading', async () => {
       let resolveSearch;
-      mcp.searchGraph.mockImplementation(() => new Promise(resolve => {
-        resolveSearch = resolve;
-      }));
+      mcp.searchGraph.mockImplementation(
+        () =>
+          new Promise((resolve) => {
+            resolveSearch = resolve;
+          })
+      );
 
       render(<Widget />);
 
@@ -400,7 +398,9 @@ describe('MCP Tool Compliance - Widget Callbacks', () => {
 
     render(<Widget />);
 
-    fireEvent.change(screen.getByPlaceholderText('Search graph...'), { target: { value: 'my search' } });
+    fireEvent.change(screen.getByPlaceholderText('Search graph...'), {
+      target: { value: 'my search' },
+    });
     fireEvent.click(screen.getByRole('button', { name: 'Search' }));
 
     await waitFor(() => {

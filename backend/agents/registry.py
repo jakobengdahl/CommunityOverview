@@ -181,7 +181,9 @@ class AgentRegistry:
         agents = []
 
         for node in self._storage.nodes.values():
-            node_type = node.type.value if hasattr(node.type, "value") else str(node.type)
+            node_type = (
+                node.type.value if hasattr(node.type, "value") else str(node.type)
+            )
             if node_type != "Agent":
                 continue
 
@@ -321,17 +323,14 @@ class AgentRegistry:
                 # when AGENTS_ENABLED was not set at startup)
                 if not self._ensure_initialized():
                     logger.error(
-                        f"Cannot start agent {config.name}: "
-                        f"MCP initialization failed"
+                        f"Cannot start agent {config.name}: MCP initialization failed"
                     )
                     return
 
                 # Auto-enable agent system when agents are created dynamically
                 if not self.settings.enabled:
                     self.settings.enabled = True
-                    logger.info(
-                        "Agent system auto-enabled (agent created dynamically)"
-                    )
+                    logger.info("Agent system auto-enabled (agent created dynamically)")
 
                 self._start_worker(config)
                 logger.info(f"Started worker for new agent: {config.name}")
@@ -369,7 +368,9 @@ class AgentRegistry:
 
                         # Update subscription mapping
                         old_sub_id = None
-                        for sub_id, agent_id in list(self._subscription_agent_map.items()):
+                        for sub_id, agent_id in list(
+                            self._subscription_agent_map.items()
+                        ):
                             if agent_id == node_id:
                                 old_sub_id = sub_id
                                 break
@@ -378,7 +379,9 @@ class AgentRegistry:
                             del self._subscription_agent_map[old_sub_id]
 
                         if config.subscription_id:
-                            self._subscription_agent_map[config.subscription_id] = node_id
+                            self._subscription_agent_map[config.subscription_id] = (
+                                node_id
+                            )
 
                         logger.info(f"Reloaded agent: {config.name}")
                         worker_to_reschedule = existing_worker
@@ -399,18 +402,13 @@ class AgentRegistry:
                     if not self.settings.enabled:
                         self.settings.enabled = True
                         logger.info(
-                            "Agent system auto-enabled "
-                            "(agent enabled dynamically)"
+                            "Agent system auto-enabled (agent enabled dynamically)"
                         )
                     self._start_worker(config)
-                    logger.info(
-                        f"Started worker for enabled agent: "
-                        f"{config.name}"
-                    )
+                    logger.info(f"Started worker for enabled agent: {config.name}")
                 else:
                     logger.error(
-                        f"Cannot start agent {config.name}: "
-                        f"MCP initialization failed"
+                        f"Cannot start agent {config.name}: MCP initialization failed"
                     )
             elif should_stop:
                 self._stop_worker(node_id)
@@ -477,12 +475,14 @@ class AgentRegistry:
                 schedule = worker.config.schedule
                 if not schedule:
                     continue
-                result.append({
-                    "agent_id": agent_id,
-                    "agent_name": worker.config.name,
-                    "trigger_path": f"/agents/{agent_id}/trigger",
-                    "schedule": schedule.to_dict(),
-                })
+                result.append(
+                    {
+                        "agent_id": agent_id,
+                        "agent_name": worker.config.name,
+                        "trigger_path": f"/agents/{agent_id}/trigger",
+                        "schedule": schedule.to_dict(),
+                    }
+                )
         return result
 
     def trigger_agent(self, agent_id: str) -> bool:
@@ -512,5 +512,7 @@ class AgentRegistry:
 
         payload = _build_payload(config, datetime.now(timezone.utc))
         worker.enqueue(payload)
-        logger.info("External trigger: enqueued scheduled_trigger for agent %s", agent_id)
+        logger.info(
+            "External trigger: enqueued scheduled_trigger for agent %s", agent_id
+        )
         return True

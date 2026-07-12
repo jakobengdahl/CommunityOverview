@@ -1,11 +1,5 @@
 import { describe, it, expect } from 'vitest';
-import {
-  relativeTime,
-  entityName,
-  computeDiff,
-  formatValue,
-  isUpdate,
-} from './history';
+import { relativeTime, entityName, computeDiff, formatValue, isUpdate } from './history';
 
 describe('relativeTime', () => {
   const now = Date.parse('2026-07-11T12:00:00Z');
@@ -57,9 +51,7 @@ describe('computeDiff', () => {
       after: { name: 'New', summary: 'keep' },
       patch: { name: 'New' },
     };
-    expect(computeDiff(entry)).toEqual([
-      { field: 'name', before: 'Old', after: 'New' },
-    ]);
+    expect(computeDiff(entry)).toEqual([{ field: 'name', before: 'Old', after: 'New' }]);
   });
 
   it('shows an added field (absent in before) as undefined→value', () => {
@@ -69,9 +61,7 @@ describe('computeDiff', () => {
       after: { tags: ['x'] },
       patch: { tags: ['x'] },
     };
-    expect(computeDiff(entry)).toEqual([
-      { field: 'tags', before: undefined, after: ['x'] },
-    ]);
+    expect(computeDiff(entry)).toEqual([{ field: 'tags', before: undefined, after: ['x'] }]);
   });
 
   it('falls back to before/after diffing when no patch is present (edges)', () => {
@@ -81,9 +71,7 @@ describe('computeDiff', () => {
       after: { label: 'B', type: 'REL' },
       patch: null,
     };
-    expect(computeDiff(entry)).toEqual([
-      { field: 'label', before: 'A', after: 'B' },
-    ]);
+    expect(computeDiff(entry)).toEqual([{ field: 'label', before: 'A', after: 'B' }]);
   });
 
   it('returns nothing when there is no before/after/patch', () => {

@@ -67,7 +67,9 @@ function SettingsDialog({ stats, onExportGraph, onClose }) {
               {stats.nodes_by_type && Object.keys(stats.nodes_by_type).length > 0 && (
                 <div className="settings-dialog-type-list">
                   <div className="settings-dialog-type-list-header">
-                    <span className="settings-dialog-section-title">{t('settings.nodes_by_type')}</span>
+                    <span className="settings-dialog-section-title">
+                      {t('settings.nodes_by_type')}
+                    </span>
                     {Object.keys(stats.nodes_by_type).length > MAX_INLINE_TYPES && (
                       <button
                         className="settings-dialog-type-details-btn"
@@ -121,34 +123,28 @@ function SettingsDialog({ stats, onExportGraph, onClose }) {
               maxLength={40}
               value={displayName}
               placeholder={t('settings.display_name_placeholder')}
-              onChange={(e) => { setDisplayNameState(e.target.value); setDisplayName(e.target.value); }}
+              onChange={(e) => {
+                setDisplayNameState(e.target.value);
+                setDisplayName(e.target.value);
+              }}
             />
             <p className="settings-dialog-field-hint">{t('settings.display_name_hint')}</p>
           </div>
 
           <div className="settings-dialog-section-divider" />
           <div className="settings-dialog-section-title">{t('menu.language_section')}</div>
-          <button
-            className="settings-dialog-menu-item"
-            onClick={() => setLanguage('en')}
-          >
+          <button className="settings-dialog-menu-item" onClick={() => setLanguage('en')}>
             <span>{t('menu.language_en')}</span>
             <span className={`settings-dialog-toggle${language === 'en' ? ' active' : ''}`} />
           </button>
-          <button
-            className="settings-dialog-menu-item"
-            onClick={() => setLanguage('sv')}
-          >
+          <button className="settings-dialog-menu-item" onClick={() => setLanguage('sv')}>
             <span>{t('menu.language_sv')}</span>
             <span className={`settings-dialog-toggle${language === 'sv' ? ' active' : ''}`} />
           </button>
 
           <div className="settings-dialog-section-divider" />
           <div className="settings-dialog-section-title">{t('settings.admin_section')}</div>
-          <button
-            className="settings-dialog-menu-item"
-            onClick={() => onExportGraph?.()}
-          >
+          <button className="settings-dialog-menu-item" onClick={() => onExportGraph?.()}>
             <Download size={14} />
             <span>{t('menu.export_graph')}</span>
           </button>
@@ -169,13 +165,15 @@ function SettingsDialog({ stats, onExportGraph, onClose }) {
         </div>
       </div>
 
-      {statsDialogOpen && stats?.nodes_by_type && createPortal(
-        <NodeTypeStatsDialog
-          nodesByType={stats.nodes_by_type}
-          onClose={() => setStatsDialogOpen(false)}
-        />,
-        document.body
-      )}
+      {statsDialogOpen &&
+        stats?.nodes_by_type &&
+        createPortal(
+          <NodeTypeStatsDialog
+            nodesByType={stats.nodes_by_type}
+            onClose={() => setStatsDialogOpen(false)}
+          />,
+          document.body
+        )}
     </div>
   );
 }

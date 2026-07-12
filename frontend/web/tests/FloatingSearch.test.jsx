@@ -78,9 +78,7 @@ describe('FloatingSearch federation labels', () => {
     });
 
     api.searchGraph.mockResolvedValueOnce({
-      nodes: [
-        { id: 'local-1', type: 'Actor', name: 'Only local node', metadata: {} },
-      ],
+      nodes: [{ id: 'local-1', type: 'Actor', name: 'Only local node', metadata: {} }],
       edges: [],
     });
 
@@ -108,9 +106,7 @@ describe('FloatingSearch federation labels', () => {
     });
 
     api.searchGraph.mockResolvedValueOnce({
-      nodes: [
-        { id: 'local-1', type: 'Actor', name: 'Only local node', metadata: {} },
-      ],
+      nodes: [{ id: 'local-1', type: 'Actor', name: 'Only local node', metadata: {} }],
       edges: [],
     });
 

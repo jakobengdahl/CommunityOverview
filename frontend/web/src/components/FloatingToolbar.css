@@ -62,7 +62,9 @@
   border-radius: 6px;
   color: #ccc;
   cursor: pointer;
-  transition: background 0.15s, color 0.15s;
+  transition:
+    background 0.15s,
+    color 0.15s;
 }
 
 .floating-toolbar-item:hover {
@@ -74,11 +76,11 @@
   background: color-mix(in srgb, var(--toolbar-item-color, #666) 30%, transparent);
 }
 
-.floating-toolbar-item[draggable="true"] {
+.floating-toolbar-item[draggable='true'] {
   cursor: grab;
 }
 
-.floating-toolbar-item[draggable="true"]:active {
+.floating-toolbar-item[draggable='true']:active {
   cursor: grabbing;
 }
 

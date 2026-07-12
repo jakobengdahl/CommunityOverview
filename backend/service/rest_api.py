@@ -33,23 +33,31 @@ from .service import GraphService
 
 # ==================== Request/Response Models ====================
 
+
 class SearchRequest(BaseModel):
     """Request model for search operations."""
+
     query: str = Field(..., description="Search text")
     node_types: Optional[List[str]] = Field(None, description="Filter by node types")
     limit: int = Field(50, ge=1, le=500, description="Max results")
-    federation_depth: Optional[int] = Field(None, ge=1, le=9, description="Optional federated search depth")
+    federation_depth: Optional[int] = Field(
+        None, ge=1, le=9, description="Optional federated search depth"
+    )
 
 
 class RelatedNodesRequest(BaseModel):
     """Request model for related nodes query."""
+
     node_id: str = Field(..., description="Starting node ID")
-    relationship_types: Optional[List[str]] = Field(None, description="Filter by relationship types")
+    relationship_types: Optional[List[str]] = Field(
+        None, description="Filter by relationship types"
+    )
     depth: int = Field(1, ge=1, le=5, description="Traversal depth")
 
 
 class SimilarNodesRequest(BaseModel):
     """Request model for similarity search."""
+
     name: str = Field(..., description="Name to search for")
     node_type: Optional[str] = Field(None, description="Filter by node type")
     threshold: float = Field(0.7, ge=0.0, le=1.0, description="Similarity threshold")
@@ -58,6 +66,7 @@ class SimilarNodesRequest(BaseModel):
 
 class SimilarNodesBatchRequest(BaseModel):
     """Request model for batch similarity search."""
+
     names: List[str] = Field(..., description="Names to search for")
     node_type: Optional[str] = Field(None, description="Filter by node type")
     threshold: float = Field(0.7, ge=0.0, le=1.0, description="Similarity threshold")
@@ -66,93 +75,158 @@ class SimilarNodesBatchRequest(BaseModel):
 
 class AddNodesRequest(BaseModel):
     """Request model for adding nodes."""
+
     nodes: List[Dict[str, Any]] = Field(..., description="Nodes to add")
-    edges: List[Dict[str, Any]] = Field(default_factory=list, description="Edges to add")
+    edges: List[Dict[str, Any]] = Field(
+        default_factory=list, description="Edges to add"
+    )
     # Event context (optional, for webhooks/loop prevention)
-    event_origin: Optional[str] = Field(None, description="Source of mutation (web-ui, mcp, system, agent:<id>)")
-    event_session_id: Optional[str] = Field(None, description="Session ID for loop prevention")
-    event_correlation_id: Optional[str] = Field(None, description="Correlation ID for chaining events")
+    event_origin: Optional[str] = Field(
+        None, description="Source of mutation (web-ui, mcp, system, agent:<id>)"
+    )
+    event_session_id: Optional[str] = Field(
+        None, description="Session ID for loop prevention"
+    )
+    event_correlation_id: Optional[str] = Field(
+        None, description="Correlation ID for chaining events"
+    )
 
 
 class UpdateNodeRequest(BaseModel):
     """Request model for updating a node."""
+
     updates: Dict[str, Any] = Field(..., description="Fields to update")
     # Event context (optional, for webhooks/loop prevention)
-    event_origin: Optional[str] = Field(None, description="Source of mutation (web-ui, mcp, system, agent:<id>)")
-    event_session_id: Optional[str] = Field(None, description="Session ID for loop prevention")
-    event_correlation_id: Optional[str] = Field(None, description="Correlation ID for chaining events")
+    event_origin: Optional[str] = Field(
+        None, description="Source of mutation (web-ui, mcp, system, agent:<id>)"
+    )
+    event_session_id: Optional[str] = Field(
+        None, description="Session ID for loop prevention"
+    )
+    event_correlation_id: Optional[str] = Field(
+        None, description="Correlation ID for chaining events"
+    )
 
 
 class DeleteNodesRequest(BaseModel):
     """Request model for deleting nodes."""
-    node_ids: List[str] = Field(..., max_length=10, description="Node IDs to delete (max 10)")
+
+    node_ids: List[str] = Field(
+        ..., max_length=10, description="Node IDs to delete (max 10)"
+    )
     confirmed: bool = Field(False, description="Confirmation flag")
     # Event context (optional, for webhooks/loop prevention)
-    event_origin: Optional[str] = Field(None, description="Source of mutation (web-ui, mcp, system, agent:<id>)")
-    event_session_id: Optional[str] = Field(None, description="Session ID for loop prevention")
-    event_correlation_id: Optional[str] = Field(None, description="Correlation ID for chaining events")
+    event_origin: Optional[str] = Field(
+        None, description="Source of mutation (web-ui, mcp, system, agent:<id>)"
+    )
+    event_session_id: Optional[str] = Field(
+        None, description="Session ID for loop prevention"
+    )
+    event_correlation_id: Optional[str] = Field(
+        None, description="Correlation ID for chaining events"
+    )
 
 
 class AddEdgeRequest(BaseModel):
     """Request model for adding a single edge."""
+
     source: str = Field(..., description="Source node ID")
     target: str = Field(..., description="Target node ID")
-    type: Optional[str] = Field(None, description="Relationship type (optional, defaults to RELATES_TO)")
+    type: Optional[str] = Field(
+        None, description="Relationship type (optional, defaults to RELATES_TO)"
+    )
     label: Optional[str] = Field(None, description="Free-text label (optional)")
     event_origin: Optional[str] = Field(None, description="Source of mutation")
-    event_session_id: Optional[str] = Field(None, description="Session ID for loop prevention")
-    event_correlation_id: Optional[str] = Field(None, description="Correlation ID for chaining events")
+    event_session_id: Optional[str] = Field(
+        None, description="Session ID for loop prevention"
+    )
+    event_correlation_id: Optional[str] = Field(
+        None, description="Correlation ID for chaining events"
+    )
 
 
 class UpdateEdgeRequest(BaseModel):
     """Request model for updating an edge."""
-    updates: Dict[str, Any] = Field(..., description="Fields to update (type, label, metadata)")
+
+    updates: Dict[str, Any] = Field(
+        ..., description="Fields to update (type, label, metadata)"
+    )
     event_origin: Optional[str] = Field(None, description="Source of mutation")
-    event_session_id: Optional[str] = Field(None, description="Session ID for loop prevention")
-    event_correlation_id: Optional[str] = Field(None, description="Correlation ID for chaining events")
+    event_session_id: Optional[str] = Field(
+        None, description="Session ID for loop prevention"
+    )
+    event_correlation_id: Optional[str] = Field(
+        None, description="Correlation ID for chaining events"
+    )
 
 
 class DeleteEdgeRequest(BaseModel):
     """Request model for deleting a single edge."""
-    event_origin: Optional[str] = Field(None, description="Source of mutation")
-    event_session_id: Optional[str] = Field(None, description="Session ID for loop prevention")
-    event_correlation_id: Optional[str] = Field(None, description="Correlation ID for chaining events")
 
+    event_origin: Optional[str] = Field(None, description="Source of mutation")
+    event_session_id: Optional[str] = Field(
+        None, description="Session ID for loop prevention"
+    )
+    event_correlation_id: Optional[str] = Field(
+        None, description="Correlation ID for chaining events"
+    )
 
 
 class AdoptFederatedNodeRequest(BaseModel):
     """Request model for adopting a federated cached node into local graph."""
+
     federated_node_id: str = Field(..., description="Federated cached node ID")
     local_name: Optional[str] = Field(None, description="Optional local name override")
     relationship_type: str = Field("ADOPTED_FROM", description="Lineage relation type")
-    create_new_copy: bool = Field(False, description="Create a new local copy even if already adopted")
+    create_new_copy: bool = Field(
+        False, description="Create a new local copy even if already adopted"
+    )
     event_origin: Optional[str] = Field(None, description="Source of mutation")
-    event_session_id: Optional[str] = Field(None, description="Session ID for loop prevention")
-    event_correlation_id: Optional[str] = Field(None, description="Correlation ID for chaining events")
+    event_session_id: Optional[str] = Field(
+        None, description="Session ID for loop prevention"
+    )
+    event_correlation_id: Optional[str] = Field(
+        None, description="Correlation ID for chaining events"
+    )
+
 
 class SaveViewRequest(BaseModel):
     """Request model for saving a view."""
+
     name: str = Field(..., min_length=1, max_length=200, description="View name")
 
 
 class CreateSessionRequest(BaseModel):
     """Request model for creating a shared session."""
-    name: Optional[str] = Field(None, max_length=200, description="Optional session name")
+
+    name: Optional[str] = Field(
+        None, max_length=200, description="Optional session name"
+    )
 
 
 class RenameSessionRequest(BaseModel):
     """Request model for renaming a shared session."""
-    name: Optional[str] = Field(None, max_length=200, description="New session name (or null to clear)")
+
+    name: Optional[str] = Field(
+        None, max_length=200, description="New session name (or null to clear)"
+    )
 
 
 class SessionOpsRequest(BaseModel):
     """Request model for a batch of session ops."""
-    client_id: str = Field(..., min_length=1, max_length=100, description="Originating client id")
-    base_seq: Optional[int] = Field(None, description="Client's last-known seq (informational)")
+
+    client_id: str = Field(
+        ..., min_length=1, max_length=100, description="Originating client id"
+    )
+    base_seq: Optional[int] = Field(
+        None, description="Client's last-known seq (informational)"
+    )
     ops: List[Dict[str, Any]] = Field(..., description="Ordered ops to apply")
 
 
-def _resolve_stream_event(event: Dict[str, Any], session_manager, session_id: str) -> Dict[str, Any]:
+def _resolve_stream_event(
+    event: Dict[str, Any], session_manager, session_id: str
+) -> Dict[str, Any]:
     """Translate a slow-consumer resync sentinel into a fresh full snapshot.
 
     ``InProcessEventBus.publish`` drops a subscriber's backlog and enqueues a
@@ -170,14 +244,19 @@ def _resolve_stream_event(event: Dict[str, Any], session_manager, session_id: st
 
 def _raise_for_access_denied(result: Dict[str, Any]) -> None:
     if result.get("error_code") == "access_denied":
-        raise HTTPException(status_code=403, detail=result.get("message") or result.get("error"))
+        raise HTTPException(
+            status_code=403, detail=result.get("message") or result.get("error")
+        )
 
 
 # ==================== Route Registration Helpers ====================
 
+
 def _register_search_endpoints(router: APIRouter, service: GraphService) -> None:
     @router.post("/search")
-    async def search_graph(request: SearchRequest, http_request: Request) -> Dict[str, Any]:
+    async def search_graph(
+        request: SearchRequest, http_request: Request
+    ) -> Dict[str, Any]:
         """Search for nodes in the graph based on text query."""
         with use_request_authorization(headers=http_request.headers):
             result = service.search_graph(
@@ -204,14 +283,12 @@ def _register_search_endpoints(router: APIRouter, service: GraphService) -> None
         node_id: str,
         request: Request,
         relationship_types: Optional[List[str]] = Body(None),
-        depth: int = Body(1, ge=1, le=5)
+        depth: int = Body(1, ge=1, le=5),
     ) -> Dict[str, Any]:
         """Get nodes connected to the given node."""
         with use_request_authorization(headers=request.headers):
             result = service.get_related_nodes(
-                node_id=node_id,
-                relationship_types=relationship_types,
-                depth=depth
+                node_id=node_id, relationship_types=relationship_types, depth=depth
             )
         _raise_for_access_denied(result)
         return result
@@ -225,21 +302,25 @@ def _register_similarity_endpoints(router: APIRouter, service: GraphService) -> 
             name=request.name,
             node_type=request.node_type,
             threshold=request.threshold,
-            limit=request.limit
+            limit=request.limit,
         )
 
     @router.post("/similar/batch")
-    async def find_similar_nodes_batch(request: SimilarNodesBatchRequest) -> Dict[str, Any]:
+    async def find_similar_nodes_batch(
+        request: SimilarNodesBatchRequest,
+    ) -> Dict[str, Any]:
         """Find similar nodes for multiple names at once."""
         return service.find_similar_nodes_batch(
             names=request.names,
             node_type=request.node_type,
             threshold=request.threshold,
-            limit=request.limit
+            limit=request.limit,
         )
 
     @router.post("/federation/adopt")
-    async def adopt_federated_node(request: AdoptFederatedNodeRequest, http_request: Request) -> Dict[str, Any]:
+    async def adopt_federated_node(
+        request: AdoptFederatedNodeRequest, http_request: Request
+    ) -> Dict[str, Any]:
         """Adopt (clone) a federated cached node into local graph."""
         with use_request_authorization(headers=http_request.headers):
             result = service.adopt_federated_node(
@@ -253,13 +334,17 @@ def _register_similarity_endpoints(router: APIRouter, service: GraphService) -> 
             )
         _raise_for_access_denied(result)
         if not result.get("success", True):
-            raise HTTPException(status_code=400, detail=result.get("message", "Adoption failed"))
+            raise HTTPException(
+                status_code=400, detail=result.get("message", "Adoption failed")
+            )
         return result
 
 
 def _register_node_crud_endpoints(router: APIRouter, service: GraphService) -> None:
     @router.post("/nodes")
-    async def add_nodes(request: AddNodesRequest, http_request: Request) -> Dict[str, Any]:
+    async def add_nodes(
+        request: AddNodesRequest, http_request: Request
+    ) -> Dict[str, Any]:
         """Add new nodes and edges to the graph."""
         with use_request_authorization(headers=http_request.headers):
             result = service.add_nodes(
@@ -275,7 +360,9 @@ def _register_node_crud_endpoints(router: APIRouter, service: GraphService) -> N
         return result
 
     @router.patch("/nodes/{node_id}")
-    async def update_node(node_id: str, request: UpdateNodeRequest, http_request: Request) -> Dict[str, Any]:
+    async def update_node(
+        node_id: str, request: UpdateNodeRequest, http_request: Request
+    ) -> Dict[str, Any]:
         """Update an existing node."""
         with use_request_authorization(headers=http_request.headers):
             result = service.update_node(
@@ -291,7 +378,9 @@ def _register_node_crud_endpoints(router: APIRouter, service: GraphService) -> N
         return result
 
     @router.delete("/nodes")
-    async def delete_nodes(request: DeleteNodesRequest, http_request: Request) -> Dict[str, Any]:
+    async def delete_nodes(
+        request: DeleteNodesRequest, http_request: Request
+    ) -> Dict[str, Any]:
         """Delete nodes from the graph (max 10 at a time)."""
         with use_request_authorization(headers=http_request.headers):
             result = service.delete_nodes(
@@ -309,7 +398,9 @@ def _register_node_crud_endpoints(router: APIRouter, service: GraphService) -> N
 
 def _register_edge_crud_endpoints(router: APIRouter, service: GraphService) -> None:
     @router.post("/edges")
-    async def add_edge(request: AddEdgeRequest, http_request: Request) -> Dict[str, Any]:
+    async def add_edge(
+        request: AddEdgeRequest, http_request: Request
+    ) -> Dict[str, Any]:
         """Add a single edge between existing nodes. Type is optional (defaults to RELATES_TO)."""
         with use_request_authorization(headers=http_request.headers):
             result = service.add_edge(
@@ -327,7 +418,9 @@ def _register_edge_crud_endpoints(router: APIRouter, service: GraphService) -> N
         return result
 
     @router.patch("/edges/{edge_id}")
-    async def update_edge(edge_id: str, request: UpdateEdgeRequest, http_request: Request) -> Dict[str, Any]:
+    async def update_edge(
+        edge_id: str, request: UpdateEdgeRequest, http_request: Request
+    ) -> Dict[str, Any]:
         """Update an existing edge (type, label, metadata)."""
         with use_request_authorization(headers=http_request.headers):
             result = service.update_edge(
@@ -422,7 +515,9 @@ def _register_metadata_endpoints(router: APIRouter, service: GraphService) -> No
         return service.list_relationship_types()
 
     @router.get("/meta/subtypes")
-    async def get_subtypes(node_type: Optional[str] = Query(None, description="Filter by node type")) -> Dict[str, Any]:
+    async def get_subtypes(
+        node_type: Optional[str] = Query(None, description="Filter by node type"),
+    ) -> Dict[str, Any]:
         """Get existing subtypes used in the graph, grouped by node type."""
         return service.get_subtypes(node_type)
 
@@ -497,7 +592,9 @@ def _register_views_endpoints(router: APIRouter, service: GraphService) -> None:
         return result
 
 
-def _register_session_endpoints(router: APIRouter, service: GraphService, session_manager) -> None:
+def _register_session_endpoints(
+    router: APIRouter, service: GraphService, session_manager
+) -> None:
     """Register the server-side shared-session REST + SSE endpoints.
 
     Only wired when a ``session_manager`` is supplied. These live alongside the
@@ -572,7 +669,9 @@ def _register_session_endpoints(router: APIRouter, service: GraphService, sessio
     async def get_session(
         http_request: Request,
         session_id: str,
-        resolve: bool = Query(False, description="Resolve node references to node objects"),
+        resolve: bool = Query(
+            False, description="Resolve node references to node objects"
+        ),
     ) -> Dict[str, Any]:
         if not is_valid_session_id(session_id):
             raise HTTPException(status_code=400, detail="invalid session_id format")
@@ -583,7 +682,9 @@ def _register_session_endpoints(router: APIRouter, service: GraphService, sessio
         return _session_payload(session, resolve=resolve, manager=session_manager)
 
     @router.patch("/sessions/{session_id}")
-    async def rename_session(session_id: str, request: RenameSessionRequest) -> Dict[str, Any]:
+    async def rename_session(
+        session_id: str, request: RenameSessionRequest
+    ) -> Dict[str, Any]:
         if not is_valid_session_id(session_id):
             raise HTTPException(status_code=400, detail="invalid session_id format")
         session = session_manager.rename_session(session_id, request.name)
@@ -594,7 +695,9 @@ def _register_session_endpoints(router: APIRouter, service: GraphService, sessio
     @router.delete("/sessions/{session_id}")
     async def delete_session(
         session_id: str,
-        client_id: Optional[str] = Query(None, description="Deleting client id (for the notice)"),
+        client_id: Optional[str] = Query(
+            None, description="Deleting client id (for the notice)"
+        ),
     ) -> Dict[str, Any]:
         if not is_valid_session_id(session_id):
             raise HTTPException(status_code=400, detail="invalid session_id format")
@@ -604,7 +707,9 @@ def _register_session_endpoints(router: APIRouter, service: GraphService, sessio
         return {"deleted": True, "id": session_id}
 
     @router.post("/sessions/{session_id}/ops")
-    async def apply_session_ops(session_id: str, http_request: Request) -> Dict[str, Any]:
+    async def apply_session_ops(
+        session_id: str, http_request: Request
+    ) -> Dict[str, Any]:
         # Reject an oversized batch from the Content-Length header alone, before
         # buffering the body — the len(json.dumps(ops)) cap in apply_ops only
         # catches this after FastAPI has already read and parsed the whole body.
@@ -614,7 +719,10 @@ def _register_session_endpoints(router: APIRouter, service: GraphService, sessio
                 declared_length = int(content_length)
             except ValueError:
                 declared_length = None
-            if declared_length is not None and declared_length > session_manager.max_op_batch_bytes:
+            if (
+                declared_length is not None
+                and declared_length > session_manager.max_op_batch_bytes
+            ):
                 raise HTTPException(status_code=413, detail="op batch too large")
         body = await http_request.body()
         if len(body) > session_manager.max_op_batch_bytes:
@@ -671,7 +779,9 @@ def _register_session_endpoints(router: APIRouter, service: GraphService, sessio
                         yield ": ping\n\n"
                         continue
                     try:
-                        event = _resolve_stream_event(event, session_manager, session_id)
+                        event = _resolve_stream_event(
+                            event, session_manager, session_id
+                        )
                     except SessionNotFound:
                         # The session was deleted in the narrow window between
                         # this subscriber's queue overflowing (which may have
@@ -711,7 +821,10 @@ def _register_export_endpoints(router: APIRouter, service: GraphService) -> None
 
 # ==================== Router Factory ====================
 
-def create_rest_router(service: GraphService, prefix: str = "", session_manager=None) -> APIRouter:
+
+def create_rest_router(
+    service: GraphService, prefix: str = "", session_manager=None
+) -> APIRouter:
     """
     Create a FastAPI router with all graph operation endpoints.
 
@@ -740,7 +853,9 @@ def create_rest_router(service: GraphService, prefix: str = "", session_manager=
 
     @router.get("/collect/{short_name}")
     async def get_collect_config(
-        short_name: str = Path(..., pattern=r'^[a-z0-9][a-z0-9-]{0,98}[a-z0-9]$|^[a-z0-9]$')
+        short_name: str = Path(
+            ..., pattern=r"^[a-z0-9][a-z0-9-]{0,98}[a-z0-9]$|^[a-z0-9]$"
+        ),
     ) -> Dict[str, Any]:
         """Get Active Knowledge Collection public config by short name.
 
@@ -750,9 +865,7 @@ def create_rest_router(service: GraphService, prefix: str = "", session_manager=
         """
         try:
             result = service.search_graph(
-                query="",
-                node_types=["ActiveKnowledgeCollection"],
-                limit=500
+                query="", node_types=["ActiveKnowledgeCollection"], limit=500
             )
             nodes = result.get("nodes", [])
             for node in nodes:
@@ -763,11 +876,13 @@ def create_rest_router(service: GraphService, prefix: str = "", session_manager=
                         "name": node.get("name", ""),
                         "short_name": short_name,
                         "introduction_text": metadata.get("introduction_text", ""),
-                        "node_type_permissions": metadata.get("node_type_permissions", {}),
+                        "node_type_permissions": metadata.get(
+                            "node_type_permissions", {}
+                        ),
                     }
             raise HTTPException(
                 status_code=404,
-                detail=f"No Active Knowledge Collection found with short_name '{short_name}'"
+                detail=f"No Active Knowledge Collection found with short_name '{short_name}'",
             )
         except HTTPException:
             raise

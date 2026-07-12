@@ -11,8 +11,13 @@ vi.mock('@community-graph/ui-graph-canvas', async () => {
     useEffect(() => {
       if (saveViewSignal > 0 && onSaveView) {
         onSaveView({
-          nodes: nodes.map(n => ({ id: n.id, position: { x: 11, y: 22 }, parentId: undefined })),
-          edges: edges.map(e => ({ id: e.id, source: e.source, target: e.target, label: e.label })),
+          nodes: nodes.map((n) => ({ id: n.id, position: { x: 11, y: 22 }, parentId: undefined })),
+          edges: edges.map((e) => ({
+            id: e.id,
+            source: e.source,
+            target: e.target,
+            label: e.label,
+          })),
           groups: [],
         });
       }
@@ -45,7 +50,12 @@ vi.mock('../src/services/api', () => {
       if (id === '5555-6666' && opts?.resolve) {
         return {
           id,
-          state: { positions: { 'node-b': { x: 5, y: 6 } }, hidden_node_ids: [], hidden_edge_ids: [], annotations: [] },
+          state: {
+            positions: { 'node-b': { x: 5, y: 6 } },
+            hidden_node_ids: [],
+            hidden_edge_ids: [],
+            annotations: [],
+          },
           resolved: { nodes: [NODE_B], edges: [] },
           roster: [],
         };
@@ -79,7 +89,9 @@ class FakeEventSource {
     this.onerror = null;
     FakeEventSource.instances.push(this);
     setTimeout(() => {
-      this.onmessage?.({ data: JSON.stringify({ type: 'snapshot', seq: 0, session: { state: {} } }) });
+      this.onmessage?.({
+        data: JSON.stringify({ type: 'snapshot', seq: 0, session: { state: {} } }),
+      });
     }, 0);
   }
   close() {}
@@ -88,7 +100,11 @@ FakeEventSource.instances = [];
 global.EventSource = FakeEventSource;
 
 // The sync client posts op batches with global fetch; capture them.
-global.fetch = vi.fn(async () => ({ ok: true, status: 200, json: async () => ({ applied: [], seq: 1 }) }));
+global.fetch = vi.fn(async () => ({
+  ok: true,
+  status: 200,
+  json: async () => ({ applied: [], seq: 1 }),
+}));
 
 import App from '../src/App';
 import * as api from '../src/services/api';
@@ -107,7 +123,11 @@ function renderApp() {
 function opsFrom(fetchMock) {
   // Flatten every op sent across all captured op-batch POSTs.
   return fetchMock.mock.calls.flatMap(([, opts]) => {
-    try { return JSON.parse(opts.body).ops || []; } catch { return []; }
+    try {
+      return JSON.parse(opts.body).ops || [];
+    } catch {
+      return [];
+    }
   });
 }
 
@@ -151,8 +171,11 @@ describe('Server-backed session lifecycle', () => {
   // View dialog opens) and the next save builds a fresh client that flushes the
   // pending ops to the server.
   it('a sync connect failure is contained and recovers on the next save', async () => {
-    const connectSpy = vi.spyOn(SessionSyncClient.prototype, 'connect')
-      .mockImplementationOnce(() => { throw new Error('malformed stream URL'); });
+    const connectSpy = vi
+      .spyOn(SessionSyncClient.prototype, 'connect')
+      .mockImplementationOnce(() => {
+        throw new Error('malformed stream URL');
+      });
 
     const { container } = renderApp();
 
@@ -211,9 +234,12 @@ describe('Server-backed session lifecycle', () => {
       useGraphStore.getState().clearVisualization();
     });
 
-    await waitFor(() => {
-      expect(opsFrom(global.fetch)).toContainEqual({ op: 'nodes_removed', node_ids: ['node-a'] });
-    }, { timeout: 3000 });
+    await waitFor(
+      () => {
+        expect(opsFrom(global.fetch)).toContainEqual({ op: 'nodes_removed', node_ids: ['node-a'] });
+      },
+      { timeout: 3000 }
+    );
   });
 
   it('MCP command dedup: same command_id is skipped, a different command_id re-applies (R5)', async () => {
@@ -222,24 +248,25 @@ describe('Server-backed session lifecycle', () => {
     // The legacy push stream is the fixed, id-less URL (distinct from the
     // op-stream's `/api/sessions/{id}/stream`).
     const legacySource = await waitFor(() => {
-      const found = FakeEventSource.instances.find(es => es.url === 'http://localhost/stream');
+      const found = FakeEventSource.instances.find((es) => es.url === 'http://localhost/stream');
       expect(found).toBeTruthy();
       return found;
     });
 
-    const deliver = (commandId) => act(() => {
-      legacySource.onmessage({
-        data: JSON.stringify({
-          type: 'tool_result',
-          result: { action: 'add_to_visualization', nodes: [NODE_A], edges: [] },
-          command_id: commandId,
-        }),
+    const deliver = (commandId) =>
+      act(() => {
+        legacySource.onmessage({
+          data: JSON.stringify({
+            type: 'tool_result',
+            result: { action: 'add_to_visualization', nodes: [NODE_A], edges: [] },
+            command_id: commandId,
+          }),
+        });
       });
-    });
 
     deliver('cmd-1');
     await waitFor(() => {
-      expect(useGraphStore.getState().nodes.map(n => n.id)).toEqual(['node-a']);
+      expect(useGraphStore.getState().nodes.map((n) => n.id)).toEqual(['node-a']);
     });
 
     act(() => {
@@ -251,7 +278,7 @@ describe('Server-backed session lifecycle', () => {
     // broadcasting the same push during their handover window) must be
     // skipped, not reapplied.
     deliver('cmd-1');
-    await new Promise(r => setTimeout(r, 50));
+    await new Promise((r) => setTimeout(r, 50));
     expect(useGraphStore.getState().nodes).toEqual([]);
 
     // A *different* command_id — a later, legitimately repeated command, e.g.
@@ -260,7 +287,7 @@ describe('Server-backed session lifecycle', () => {
     // not by payload content.
     deliver('cmd-2');
     await waitFor(() => {
-      expect(useGraphStore.getState().nodes.map(n => n.id)).toEqual(['node-a']);
+      expect(useGraphStore.getState().nodes.map((n) => n.id)).toEqual(['node-a']);
     });
   });
 
@@ -279,7 +306,7 @@ describe('Server-backed session lifecycle', () => {
     fireEvent.click(screen.getByText('5555-6666'));
 
     await waitFor(() => {
-      expect(useGraphStore.getState().nodes.map(n => n.id)).toEqual(['node-b']);
+      expect(useGraphStore.getState().nodes.map((n) => n.id)).toEqual(['node-b']);
     });
 
     // The target was loaded resolved from the server, carrying its saved position
@@ -300,7 +327,9 @@ describe('Server-backed session lifecycle', () => {
 
     const serverError = new Error('Internal Server Error');
     serverError.status = 500;
-    api.getSession.mockImplementationOnce(async () => { throw serverError; });
+    api.getSession.mockImplementationOnce(async () => {
+      throw serverError;
+    });
 
     fireEvent.click(screen.getByTitle('Menu'));
     fireEvent.click(screen.getByText('7777-8888'));
@@ -310,7 +339,7 @@ describe('Server-backed session lifecycle', () => {
     });
 
     // The failed switch must not have cleared the current canvas or changed session.
-    expect(useGraphStore.getState().nodes.map(n => n.id)).toEqual(['node-a']);
+    expect(useGraphStore.getState().nodes.map((n) => n.id)).toEqual(['node-a']);
   });
 
   it('a baseline-seeding failure after a successful load still commits the switch', async () => {
@@ -326,8 +355,11 @@ describe('Server-backed session lifecycle', () => {
       useGraphStore.getState().updateVisualization([NODE_A], []);
     });
 
-    const setBaselineSpy = vi.spyOn(SessionSyncClient.prototype, 'setBaseline')
-      .mockImplementationOnce(() => { throw new Error('malformed baseline'); });
+    const setBaselineSpy = vi
+      .spyOn(SessionSyncClient.prototype, 'setBaseline')
+      .mockImplementationOnce(() => {
+        throw new Error('malformed baseline');
+      });
 
     fireEvent.click(screen.getByTitle('Menu'));
     fireEvent.click(screen.getByText('9999-0000'));
@@ -370,7 +402,7 @@ describe('Server-backed session lifecycle', () => {
     });
 
     // Failed before mutating anything: still the original canvas and session.
-    expect(useGraphStore.getState().nodes.map(n => n.id)).toEqual(['node-a']);
+    expect(useGraphStore.getState().nodes.map((n) => n.id)).toEqual(['node-a']);
     expect(window.location.search).not.toContain('session=aaaa-bbbb');
   });
 });

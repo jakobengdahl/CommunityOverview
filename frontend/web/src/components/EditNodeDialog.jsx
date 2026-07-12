@@ -4,7 +4,15 @@ import * as api from '../services/api';
 import SubtypeInput from './SubtypeInput';
 import './EditNodeDialog.css';
 
-const BASE_FIELDS = new Set(['name', 'description', 'summary', 'tags', 'subtypes', 'aliases', 'metadata']);
+const BASE_FIELDS = new Set([
+  'name',
+  'description',
+  'summary',
+  'tags',
+  'subtypes',
+  'aliases',
+  'metadata',
+]);
 
 const FIELD_LABELS = {
   start_date: 'Start date',
@@ -16,7 +24,7 @@ const FIELD_LABELS = {
 };
 
 function formatFieldLabel(field) {
-  return FIELD_LABELS[field] || field.replace(/_/g, ' ').replace(/\b\w/g, c => c.toUpperCase());
+  return FIELD_LABELS[field] || field.replace(/_/g, ' ').replace(/\b\w/g, (c) => c.toUpperCase());
 }
 
 // Default node types as fallback if schema not loaded
@@ -48,22 +56,23 @@ function EditNodeDialog({ node, onClose, onSave }) {
 
   // Extra fields driven by the schema for the current node type
   const schemaFields = schema?.node_types?.[formData.type]?.fields || [];
-  const extraFields = schemaFields.filter(f => !BASE_FIELDS.has(f));
+  const extraFields = schemaFields.filter((f) => !BASE_FIELDS.has(f));
 
   // Get node types from schema or use defaults
   const nodeTypes = getNodeTypes();
-  const availableTypes = nodeTypes.length > 0
-    ? nodeTypes.filter(t => !t.static) // Exclude static types like SavedView
-    : DEFAULT_NODE_TYPES;
+  const availableTypes =
+    nodeTypes.length > 0
+      ? nodeTypes.filter((t) => !t.static) // Exclude static types like SavedView
+      : DEFAULT_NODE_TYPES;
 
   useEffect(() => {
     if (node?.data) {
       const nodeType = node.data.type || '';
       const sf = schema?.node_types?.[nodeType]?.fields || [];
-      const ef = sf.filter(f => !BASE_FIELDS.has(f));
+      const ef = sf.filter((f) => !BASE_FIELDS.has(f));
       // Extra fields are stored in node.metadata by the backend
       const extraData = Object.fromEntries(
-        ef.map(f => [f, node.data.metadata?.[f] ?? node.data[f] ?? ''])
+        ef.map((f) => [f, node.data.metadata?.[f] ?? node.data[f] ?? ''])
       );
       setFormData({
         name: node.data.name || '',
@@ -81,8 +90,9 @@ function EditNodeDialog({ node, onClose, onSave }) {
   // Fetch existing subtypes when node type changes
   useEffect(() => {
     if (formData.type) {
-      api.getSubtypes(formData.type)
-        .then(data => {
+      api
+        .getSubtypes(formData.type)
+        .then((data) => {
           setExistingSubtypes(data.subtypes?.[formData.type] || []);
         })
         .catch(() => {});
@@ -91,33 +101,41 @@ function EditNodeDialog({ node, onClose, onSave }) {
 
   const handleChange = (e) => {
     const { name, value } = e.target;
-    setFormData(prev => ({ ...prev, [name]: value }));
+    setFormData((prev) => ({ ...prev, [name]: value }));
   };
 
   const handleSubmit = (e) => {
     e.preventDefault();
-    const extraData = Object.fromEntries(extraFields.map(f => [f, formData[f] ?? '']));
+    const extraData = Object.fromEntries(extraFields.map((f) => [f, formData[f] ?? '']));
     onSave({
       name: formData.name,
       type: formData.type,
       description: formData.description,
       summary: formData.summary,
-      tags: formData.tags.split(',').map(t => t.trim()).filter(Boolean),
-      aliases: formData.aliases.split(',').map(a => a.trim()).filter(Boolean),
+      tags: formData.tags
+        .split(',')
+        .map((t) => t.trim())
+        .filter(Boolean),
+      aliases: formData.aliases
+        .split(',')
+        .map((a) => a.trim())
+        .filter(Boolean),
       subtypes,
       ...extraData,
     });
   };
 
   useEffect(() => {
-    const handleEsc = (e) => { if (e.key === 'Escape') onClose(); };
+    const handleEsc = (e) => {
+      if (e.key === 'Escape') onClose();
+    };
     document.addEventListener('keydown', handleEsc);
     return () => document.removeEventListener('keydown', handleEsc);
   }, [onClose]);
 
   return (
     <div className="edit-dialog-overlay" onClick={onClose}>
-      <div className="edit-dialog" onClick={e => e.stopPropagation()}>
+      <div className="edit-dialog" onClick={(e) => e.stopPropagation()}>
         <header className="edit-dialog-header">
           <div className="edit-dialog-header-title">
             <span
@@ -126,7 +144,9 @@ function EditNodeDialog({ node, onClose, onSave }) {
             />
             <h2>Edit {formData.type || 'Node'}</h2>
           </div>
-          <button className="close-button" onClick={onClose}>×</button>
+          <button className="close-button" onClick={onClose}>
+            ×
+          </button>
         </header>
 
         <form onSubmit={handleSubmit}>
@@ -144,15 +164,9 @@ function EditNodeDialog({ node, onClose, onSave }) {
 
           <div className="form-group">
             <label htmlFor="type">Type</label>
-            <select
-              id="type"
-              name="type"
-              value={formData.type}
-              onChange={handleChange}
-              required
-            >
+            <select id="type" name="type" value={formData.type} onChange={handleChange} required>
               <option value="">Select type...</option>
-              {availableTypes.map(nodeType => (
+              {availableTypes.map((nodeType) => (
                 <option key={nodeType.type} value={nodeType.type}>
                   {nodeType.type}
                 </option>
@@ -215,7 +229,7 @@ function EditNodeDialog({ node, onClose, onSave }) {
             />
           </div>
 
-          {extraFields.map(field => {
+          {extraFields.map((field) => {
             const isDateField = field.includes('date');
             const useDateTime = isDateField && formData.type === 'Event';
             const label = formatFieldLabel(field);

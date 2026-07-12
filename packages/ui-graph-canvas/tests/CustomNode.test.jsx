@@ -72,7 +72,11 @@ describe('CustomNode tooltip', () => {
 
   it('has no remote marker when remoteSelection is absent', () => {
     render(
-      <CustomNode id="node-1" selected={false} data={{ label: 'Node 1', nodeType: 'Actor', color: '#3B82F6' }} />
+      <CustomNode
+        id="node-1"
+        selected={false}
+        data={{ label: 'Node 1', nodeType: 'Actor', color: '#3B82F6' }}
+      />
     );
     const node = screen.getByText('Node 1').closest('.graph-custom-node');
     expect(node.className).not.toContain('remote-selected');

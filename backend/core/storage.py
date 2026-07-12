@@ -26,16 +26,21 @@ from pathlib import Path
 from rapidfuzz.distance import Levenshtein
 
 from .models import (
-    Node, Edge, NodeType, RelationshipType,
-    SimilarNode, GraphStats, AddNodesResult, DeleteNodesResult, DeleteEdgesResult
+    Node,
+    Edge,
+    NodeType,
+    RelationshipType,
+    SimilarNode,
+    GraphStats,
+    AddNodesResult,
+    DeleteNodesResult,
+    DeleteEdgesResult,
 )
 from .storage_backends import FileGraphPersistenceBackend, GraphPersistenceBackend
 from .vector_store import VectorStore
 
 # Event system imports
-from .events.models import (
-    Event, EventType, EntityKind, EventContext, EntityData
-)
+from .events.models import Event, EventType, EntityKind, EventContext, EntityData
 
 if TYPE_CHECKING:
     from .events.dispatcher import EventDispatcher
@@ -82,8 +87,12 @@ class GraphStorage:
                 compaction passes (throttle). Defaults to an amortised value when
                 retention is enabled; ignored when retention is disabled.
         """
-        self._persistence_backend = persistence_backend or FileGraphPersistenceBackend(json_path)
-        self.json_path = getattr(self._persistence_backend, "json_path", Path(json_path))
+        self._persistence_backend = persistence_backend or FileGraphPersistenceBackend(
+            json_path
+        )
+        self.json_path = getattr(
+            self._persistence_backend, "json_path", Path(json_path)
+        )
 
         # Durable append-only mutation history sidecar. Only enabled for the
         # file-backed standalone backend, which owns a concrete json_path next
@@ -107,7 +116,9 @@ class GraphStorage:
         self.vector_store = VectorStore()
         self.vector_store.preload_model()  # Start loading embedding model in background
 
-        self.graph = nx.MultiDiGraph()  # MultiDiGraph allows multiple edges between same nodes
+        self.graph = (
+            nx.MultiDiGraph()
+        )  # MultiDiGraph allows multiple edges between same nodes
         self.nodes: Dict[str, Node] = {}  # node_id -> Node
         self.edges: Dict[str, Edge] = {}  # edge_id -> Edge
 
@@ -153,21 +164,32 @@ class GraphStorage:
         """Build a lookup of node type -> searchable text including localized labels."""
         try:
             from backend.config_loader import get_schema
+
             schema = get_schema()
             for type_name, type_config in schema.get("node_types", {}).items():
                 labels = type_config.get("labels", {})
                 label_values = " ".join(labels.values()) if labels else ""
-                self._type_searchable_text[type_name] = f"{type_name} {label_values}".lower().strip()
+                self._type_searchable_text[type_name] = (
+                    f"{type_name} {label_values}".lower().strip()
+                )
         except Exception:
             # Config not available; type matching will use type name only
             pass
 
     def _build_searchable_text(self, node: "Node") -> str:
         """Build searchable text for a node, including type name and localized labels."""
-        tags_text = " ".join(node.tags) if hasattr(node, 'tags') and node.tags else ""
-        subtypes_text = " ".join(node.subtypes) if hasattr(node, 'subtypes') and node.subtypes else ""
-        aliases_text = " ".join(node.aliases) if hasattr(node, 'aliases') and node.aliases else ""
-        type_text = self._type_searchable_text.get(str(node.type), str(node.type).lower())
+        tags_text = " ".join(node.tags) if hasattr(node, "tags") and node.tags else ""
+        subtypes_text = (
+            " ".join(node.subtypes)
+            if hasattr(node, "subtypes") and node.subtypes
+            else ""
+        )
+        aliases_text = (
+            " ".join(node.aliases) if hasattr(node, "aliases") and node.aliases else ""
+        )
+        type_text = self._type_searchable_text.get(
+            str(node.type), str(node.type).lower()
+        )
         return f"{node.name} {node.description} {node.summary} {tags_text} {subtypes_text} {aliases_text} {type_text}".lower()
 
     def add_system_listener(self, listener: Callable[["Event"], None]) -> None:
@@ -310,17 +332,20 @@ class GraphStorage:
                 print(f"Error in system listener: {e}")
 
         if not self._events_enabled or not self._event_dispatcher:
-            print(f"EVENT: Skipped (events_enabled={self._events_enabled}, dispatcher={self._event_dispatcher is not None})")
+            print(
+                f"EVENT: Skipped (events_enabled={self._events_enabled}, dispatcher={self._event_dispatcher is not None})"
+            )
             return
 
-        print(f"EVENT: Emitting {event_type.value} for {entity_kind.value} {entity_id} ({entity_type})")
+        print(
+            f"EVENT: Emitting {event_type.value} for {entity_kind.value} {entity_id} ({entity_type})"
+        )
 
         # Dispatch asynchronously (non-blocking)
         try:
             self._event_dispatcher.dispatch(event)
         except Exception as e:
             print(f"Warning: Failed to dispatch event: {e}")
-
 
     def emit_federated_node_event(
         self,
@@ -354,7 +379,6 @@ class GraphStorage:
             context=context,
         )
 
-
     def emit_federated_edge_event(
         self,
         operation: str,
@@ -365,7 +389,9 @@ class GraphStorage:
         """Emit an event for federated cache edge changes."""
         operation_map = {
             "create": EventType.EDGE_CREATE,
-            "update": EventType.EDGE_UPDATE if hasattr(EventType, "EDGE_UPDATE") else EventType.EDGE_CREATE,
+            "update": EventType.EDGE_UPDATE
+            if hasattr(EventType, "EDGE_UPDATE")
+            else EventType.EDGE_CREATE,
             "delete": EventType.EDGE_DELETE,
         }
         event_type = operation_map.get(operation)
@@ -387,7 +413,9 @@ class GraphStorage:
             context=context,
         )
 
-    def get_recent_history(self, limit: int = 50, offset: int = 0) -> List[Dict[str, Any]]:
+    def get_recent_history(
+        self, limit: int = 50, offset: int = 0
+    ) -> List[Dict[str, Any]]:
         """Return recent graph mutation history, newest first.
 
         Returns an empty list when durable history is unavailable (non
@@ -425,7 +453,9 @@ class GraphStorage:
         """
         with self._lock:
             if not self._persistence_backend.exists():
-                print(f"No graph file found at {self.json_path}, creating new empty graph")
+                print(
+                    f"No graph file found at {self.json_path}, creating new empty graph"
+                )
                 # Wait for the initial file write to complete so callers can
                 # immediately open the file (e.g. creating a second storage instance).
                 self.save().result()
@@ -434,12 +464,17 @@ class GraphStorage:
             try:
                 data = self._persistence_backend.load_graph_data()
 
-                metadata = data.get('metadata') if isinstance(data, dict) else None
+                metadata = data.get("metadata") if isinstance(data, dict) else None
                 if isinstance(metadata, dict):
                     self.graph_metadata = {
                         "version": metadata.get("version", "1.0"),
-                        "graph_name": metadata.get("graph_name") or self._default_graph_name(),
-                        **{k: v for k, v in metadata.items() if k not in {"version", "graph_name"}},
+                        "graph_name": metadata.get("graph_name")
+                        or self._default_graph_name(),
+                        **{
+                            k: v
+                            for k, v in metadata.items()
+                            if k not in {"version", "graph_name"}
+                        },
                     }
                 else:
                     self.graph_metadata = {
@@ -456,29 +491,30 @@ class GraphStorage:
                 self._searchable_text_cache.clear()
 
                 # Load nodes
-                for node_data in data.get('nodes', []):
+                for node_data in data.get("nodes", []):
                     node = Node.from_dict(node_data)
                     self.nodes[node.id] = node
                     self.graph.add_node(node.id, data=node)
 
                     # Precompute searchable text
-                    self._searchable_text_cache[node.id] = self._build_searchable_text(node)
+                    self._searchable_text_cache[node.id] = self._build_searchable_text(
+                        node
+                    )
 
                 # Load edges
-                for edge_data in data.get('edges', []):
+                for edge_data in data.get("edges", []):
                     edge = Edge.from_dict(edge_data)
                     self.edges[edge.id] = edge
                     self.graph.add_edge(
-                        edge.source,
-                        edge.target,
-                        key=edge.id,
-                        data=edge
+                        edge.source, edge.target, key=edge.id, data=edge
                     )
 
                 # Rebuild vector store index from loaded nodes
                 self.vector_store.rebuild_index(list(self.nodes.values()))
 
-                print(f"Loaded {len(self.nodes)} nodes and {len(self.edges)} edges from {self.json_path}")
+                print(
+                    f"Loaded {len(self.nodes)} nodes and {len(self.edges)} edges from {self.json_path}"
+                )
 
             except Exception as e:
                 print(f"Error loading graph: {e}")
@@ -497,23 +533,29 @@ class GraphStorage:
         """
         with self._lock:
             data = {
-                'nodes': [node.to_dict() for node in self.nodes.values()],
-                'edges': [edge.to_dict() for edge in self.edges.values()],
-                'metadata': {
+                "nodes": [node.to_dict() for node in self.nodes.values()],
+                "edges": [edge.to_dict() for edge in self.edges.values()],
+                "metadata": {
                     **(self.graph_metadata or {}),
-                    'version': (self.graph_metadata or {}).get('version', '1.0'),
-                    'graph_name': (self.graph_metadata or {}).get('graph_name', self._default_graph_name()),
-                    'last_updated': datetime.now(timezone.utc).isoformat()
-                }
+                    "version": (self.graph_metadata or {}).get("version", "1.0"),
+                    "graph_name": (self.graph_metadata or {}).get(
+                        "graph_name", self._default_graph_name()
+                    ),
+                    "last_updated": datetime.now(timezone.utc).isoformat(),
+                },
             }
             node_count = len(self.nodes)
             edge_count = len(self.edges)
 
         # Offload blocking I/O to background thread to avoid blocking event loop.
         # Returns the Future so callers that must wait (e.g. load()) can call .result().
-        return self._io_executor.submit(self._do_save_to_disk, data, node_count, edge_count)
+        return self._io_executor.submit(
+            self._do_save_to_disk, data, node_count, edge_count
+        )
 
-    def _do_save_to_disk(self, data: Dict[str, Any], node_count: int, edge_count: int) -> None:
+    def _do_save_to_disk(
+        self, data: Dict[str, Any], node_count: int, edge_count: int
+    ) -> None:
         """
         Internal method: delegate serialized graph data to the persistence backend.
         Runs in the background executor so file I/O doesn't block the event loop.
@@ -524,7 +566,9 @@ class GraphStorage:
         """
         try:
             self._persistence_backend.save_graph_data(data)
-            print(f"Saved {node_count} nodes and {edge_count} edges to {self.json_path}")
+            print(
+                f"Saved {node_count} nodes and {edge_count} edges to {self.json_path}"
+            )
         except Exception as e:
             print(f"Error saving graph to disk: {e}")
             raise
@@ -623,16 +667,16 @@ class GraphStorage:
                 score += 400
 
         # Secondary — description / summary matching (lowest)
-        if query_lower in (node.description or "").lower() or query_lower in (node.summary or "").lower():
+        if (
+            query_lower in (node.description or "").lower()
+            or query_lower in (node.summary or "").lower()
+        ):
             score += 200
 
         return score
 
     def search_nodes(
-        self,
-        query: str,
-        node_types: Optional[List[NodeType]] = None,
-        limit: int = 50
+        self, query: str, node_types: Optional[List[NodeType]] = None, limit: int = 50
     ) -> List[Node]:
         """
         Search nodes based on text query.
@@ -665,7 +709,9 @@ class GraphStorage:
             results.append(node)
 
         if not match_all:
-            results.sort(key=lambda n: self._score_node_match(n, query_lower), reverse=True)
+            results.sort(
+                key=lambda n: self._score_node_match(n, query_lower), reverse=True
+            )
 
         return results[:limit]
 
@@ -685,14 +731,14 @@ class GraphStorage:
         self,
         node_id: str,
         relationship_types: Optional[List[RelationshipType]] = None,
-        depth: int = 1
+        depth: int = 1,
     ) -> Dict[str, Any]:
         """
         Get nodes connected to the given node
         Returns both nodes and edges
         """
         if node_id not in self.nodes:
-            return {'nodes': [], 'edges': []}
+            return {"nodes": [], "edges": []}
 
         visited_nodes = set([node_id])
         visited_edges = set()
@@ -703,8 +749,10 @@ class GraphStorage:
 
             for curr_id in current_layer:
                 # Outgoing edges
-                for _, target, edge_id, edge_data in self.graph.out_edges(curr_id, keys=True, data=True):
-                    edge = edge_data['data']
+                for _, target, edge_id, edge_data in self.graph.out_edges(
+                    curr_id, keys=True, data=True
+                ):
+                    edge = edge_data["data"]
                     if relationship_types and edge.type not in relationship_types:
                         continue
                     visited_edges.add(edge_id)
@@ -713,8 +761,10 @@ class GraphStorage:
                         next_layer.add(target)
 
                 # Incoming edges
-                for source, _, edge_id, edge_data in self.graph.in_edges(curr_id, keys=True, data=True):
-                    edge = edge_data['data']
+                for source, _, edge_id, edge_data in self.graph.in_edges(
+                    curr_id, keys=True, data=True
+                ):
+                    edge = edge_data["data"]
                     if relationship_types and edge.type not in relationship_types:
                         continue
                     visited_edges.add(edge_id)
@@ -725,8 +775,8 @@ class GraphStorage:
             current_layer = next_layer
 
         return {
-            'nodes': [self.nodes[nid] for nid in visited_nodes if nid in self.nodes],
-            'edges': [self.edges[eid] for eid in visited_edges if eid in self.edges]
+            "nodes": [self.nodes[nid] for nid in visited_nodes if nid in self.nodes],
+            "edges": [self.edges[eid] for eid in visited_edges if eid in self.edges],
         }
 
     def find_similar_nodes(
@@ -734,7 +784,7 @@ class GraphStorage:
         name: str,
         node_type: Optional[NodeType] = None,
         threshold: float = 0.7,
-        limit: int = 5
+        limit: int = 5,
     ) -> List[SimilarNode]:
         """
         Find similar nodes based on Levenshtein distance AND vector embeddings
@@ -762,20 +812,20 @@ class GraphStorage:
                 similarity = 1.0 - (distance / max_len)
 
             if similarity >= threshold:
-                results.append(SimilarNode(
-                    node=node,
-                    similarity_score=round(similarity, 2),
-                    match_reason=f"Name similarity: {int(similarity * 100)}%"
-                ))
+                results.append(
+                    SimilarNode(
+                        node=node,
+                        similarity_score=round(similarity, 2),
+                        match_reason=f"Name similarity: {int(similarity * 100)}%",
+                    )
+                )
                 seen_node_ids.add(node.id)
 
         # 2. Vector Search (Semantic similarity)
         # Lower threshold for vector search to catch semantic matches that might have different names
         vector_threshold = max(0.4, threshold - 0.2)
         vector_results = self.vector_store.search(
-            query_text=name,
-            limit=limit,
-            threshold=vector_threshold
+            query_text=name, limit=limit, threshold=vector_threshold
         )
 
         for node_id, score in vector_results:
@@ -789,11 +839,13 @@ class GraphStorage:
             if node_type and node.type != node_type:
                 continue
 
-            results.append(SimilarNode(
-                node=node,
-                similarity_score=round(score, 2),
-                match_reason=f"Semantic similarity: {int(score * 100)}%"
-            ))
+            results.append(
+                SimilarNode(
+                    node=node,
+                    similarity_score=round(score, 2),
+                    match_reason=f"Semantic similarity: {int(score * 100)}%",
+                )
+            )
             seen_node_ids.add(node_id)
 
         # Sort by similarity score
@@ -805,7 +857,7 @@ class GraphStorage:
         names: List[str],
         node_type: Optional[NodeType] = None,
         threshold: float = 0.7,
-        limit: int = 5
+        limit: int = 5,
     ) -> Dict[str, List[SimilarNode]]:
         """
         Find similar nodes for multiple names at once (batch processing)
@@ -818,10 +870,7 @@ class GraphStorage:
 
         for name in names:
             results[name] = self.find_similar_nodes(
-                name=name,
-                node_type=node_type,
-                threshold=threshold,
-                limit=limit
+                name=name, node_type=node_type, threshold=threshold, limit=limit
             )
 
         return results
@@ -856,7 +905,7 @@ class GraphStorage:
                             added_node_ids=[],
                             added_edge_ids=[],
                             success=False,
-                            message=f"Node with ID {node.id} already exists"
+                            message=f"Node with ID {node.id} already exists",
                         )
 
                     self.nodes[node.id] = node
@@ -865,7 +914,9 @@ class GraphStorage:
                     nodes_to_embed.append(node)
 
                     # Precompute searchable text
-                    self._searchable_text_cache[node.id] = self._build_searchable_text(node)
+                    self._searchable_text_cache[node.id] = self._build_searchable_text(
+                        node
+                    )
 
                 # Generate embeddings for new nodes (non-blocking)
                 if nodes_to_embed:
@@ -894,14 +945,18 @@ class GraphStorage:
                         if source_id in name_to_id:
                             source_id = name_to_id[source_id]
                         else:
-                            raise ValueError(f"Source node '{edge.source}' does not exist (not found by ID or name)")
+                            raise ValueError(
+                                f"Source node '{edge.source}' does not exist (not found by ID or name)"
+                            )
 
                     # If target is not a valid ID, try to resolve it as a name
                     if target_id not in self.nodes:
                         if target_id in name_to_id:
                             target_id = name_to_id[target_id]
                         else:
-                            raise ValueError(f"Target node '{edge.target}' does not exist (not found by ID or name)")
+                            raise ValueError(
+                                f"Target node '{edge.target}' does not exist (not found by ID or name)"
+                            )
 
                     # Update edge with resolved IDs
                     edge.source = source_id
@@ -912,15 +967,12 @@ class GraphStorage:
                             added_node_ids=[],
                             added_edge_ids=[],
                             success=False,
-                            message=f"Edge with ID {edge.id} already exists"
+                            message=f"Edge with ID {edge.id} already exists",
                         )
 
                     self.edges[edge.id] = edge
                     self.graph.add_edge(
-                        edge.source,
-                        edge.target,
-                        key=edge.id,
-                        data=edge
+                        edge.source, edge.target, key=edge.id, data=edge
                     )
                     added_edge_ids.append(edge.id)
 
@@ -931,7 +983,11 @@ class GraphStorage:
                 for node_id in added_node_ids:
                     node = self.nodes.get(node_id)
                     if node:
-                        node_type = node.type.value if hasattr(node.type, 'value') else str(node.type)
+                        node_type = (
+                            node.type.value
+                            if hasattr(node.type, "value")
+                            else str(node.type)
+                        )
                         self._emit_event(
                             event_type=EventType.NODE_CREATE,
                             entity_kind=EntityKind.NODE,
@@ -946,7 +1002,11 @@ class GraphStorage:
                 for edge_id in added_edge_ids:
                     edge = self.edges.get(edge_id)
                     if edge:
-                        edge_type = edge.type.value if hasattr(edge.type, 'value') else str(edge.type)
+                        edge_type = (
+                            edge.type.value
+                            if hasattr(edge.type, "value")
+                            else str(edge.type)
+                        )
                         self._emit_event(
                             event_type=EventType.EDGE_CREATE,
                             entity_kind=EntityKind.EDGE,
@@ -961,7 +1021,7 @@ class GraphStorage:
                     added_node_ids=added_node_ids,
                     added_edge_ids=added_edge_ids,
                     success=True,
-                    message=f"Added {len(added_node_ids)} nodes and {len(added_edge_ids)} edges"
+                    message=f"Added {len(added_node_ids)} nodes and {len(added_edge_ids)} edges",
                 )
 
             except Exception as e:
@@ -969,7 +1029,7 @@ class GraphStorage:
                     added_node_ids=[],
                     added_edge_ids=[],
                     success=False,
-                    message=f"Error during add: {str(e)}"
+                    message=f"Error during add: {str(e)}",
                 )
 
     def update_node(
@@ -998,14 +1058,25 @@ class GraphStorage:
             before_state = node.to_dict()
 
             # Update allowed fields
-            allowed_fields = {'name', 'description', 'summary', 'tags', 'subtypes', 'aliases', 'metadata'}
-            reserved_fields = {'id', 'type', 'embedding', 'created_at', 'updated_at'}
+            allowed_fields = {
+                "name",
+                "description",
+                "summary",
+                "tags",
+                "subtypes",
+                "aliases",
+                "metadata",
+            }
+            reserved_fields = {"id", "type", "embedding", "created_at", "updated_at"}
             for key, value in updates.items():
                 if key in allowed_fields:
                     setattr(node, key, value)
             # Fold schema-defined extra fields (anything outside the base model) into metadata
-            extra = {k: v for k, v in updates.items()
-                     if k not in allowed_fields and k not in reserved_fields}
+            extra = {
+                k: v
+                for k, v in updates.items()
+                if k not in allowed_fields and k not in reserved_fields
+            }
             if extra:
                 meta = dict(node.metadata or {})
                 meta.update(extra)
@@ -1014,13 +1085,16 @@ class GraphStorage:
             node.updated_at = datetime.now(timezone.utc)
 
             # Update in graph
-            self.graph.nodes[node_id]['data'] = node
+            self.graph.nodes[node_id]["data"] = node
 
             # Update searchable text cache
             self._searchable_text_cache[node.id] = self._build_searchable_text(node)
 
             # Update embedding if text fields or tags changed (non-blocking)
-            if any(k in updates for k in ['name', 'description', 'summary', 'tags', 'aliases']):
+            if any(
+                k in updates
+                for k in ["name", "description", "summary", "tags", "aliases"]
+            ):
                 try:
                     self.vector_store.update_node_embedding(node)
                 except Exception as embed_error:
@@ -1030,7 +1104,9 @@ class GraphStorage:
             self.save()
 
             # Emit update event
-            node_type = node.type.value if hasattr(node.type, 'value') else str(node.type)
+            node_type = (
+                node.type.value if hasattr(node.type, "value") else str(node.type)
+            )
             self._emit_event(
                 event_type=EventType.NODE_UPDATE,
                 entity_kind=EntityKind.NODE,
@@ -1066,7 +1142,7 @@ class GraphStorage:
                     deleted_node_ids=[],
                     affected_edge_ids=[],
                     success=False,
-                    message="Max 10 nodes can be deleted at a time. Contact admin for bulk deletion."
+                    message="Max 10 nodes can be deleted at a time. Contact admin for bulk deletion.",
                 )
 
             if not confirmed:
@@ -1074,7 +1150,7 @@ class GraphStorage:
                     deleted_node_ids=[],
                     affected_edge_ids=[],
                     success=False,
-                    message="Deletion requires confirmed=True parameter"
+                    message="Deletion requires confirmed=True parameter",
                 )
 
             deleted_node_ids = []
@@ -1151,7 +1227,7 @@ class GraphStorage:
                     deleted_node_ids=deleted_node_ids,
                     affected_edge_ids=affected_edge_ids,
                     success=True,
-                    message=f"Deleted {len(deleted_node_ids)} nodes and {len(affected_edge_ids)} edges"
+                    message=f"Deleted {len(deleted_node_ids)} nodes and {len(affected_edge_ids)} edges",
                 )
 
             except Exception as e:
@@ -1159,7 +1235,7 @@ class GraphStorage:
                     deleted_node_ids=[],
                     affected_edge_ids=[],
                     success=False,
-                    message=f"Error during deletion: {str(e)}"
+                    message=f"Error during deletion: {str(e)}",
                 )
 
     def get_stats(self) -> GraphStats:
@@ -1167,17 +1243,21 @@ class GraphStorage:
         # Count nodes per type
         nodes_by_type = {}
         for node in self.nodes.values():
-            type_name = node.type.value if hasattr(node.type, 'value') else str(node.type)
+            type_name = (
+                node.type.value if hasattr(node.type, "value") else str(node.type)
+            )
             nodes_by_type[type_name] = nodes_by_type.get(type_name, 0) + 1
 
         return GraphStats(
             total_nodes=len(self.nodes),
             total_edges=len(self.edges),
             nodes_by_type=nodes_by_type,
-            last_updated=datetime.now(timezone.utc)
+            last_updated=datetime.now(timezone.utc),
         )
 
-    def get_subtypes_by_node_type(self, node_type: Optional[str] = None) -> Dict[str, List[str]]:
+    def get_subtypes_by_node_type(
+        self, node_type: Optional[str] = None
+    ) -> Dict[str, List[str]]:
         """Get all unique subtypes grouped by node type.
 
         Args:
@@ -1188,10 +1268,12 @@ class GraphStorage:
         """
         result: Dict[str, set] = {}
         for node in self.nodes.values():
-            type_name = node.type.value if hasattr(node.type, 'value') else str(node.type)
+            type_name = (
+                node.type.value if hasattr(node.type, "value") else str(node.type)
+            )
             if node_type and type_name != node_type:
                 continue
-            if hasattr(node, 'subtypes') and node.subtypes:
+            if hasattr(node, "subtypes") and node.subtypes:
                 if type_name not in result:
                     result[type_name] = set()
                 result[type_name].update(node.subtypes)
@@ -1201,14 +1283,16 @@ class GraphStorage:
         """Get all edges where both source and target are in the given node IDs"""
         node_id_set = set(node_ids)
         return [
-            edge for edge in self.edges.values()
+            edge
+            for edge in self.edges.values()
             if edge.source in node_id_set and edge.target in node_id_set
         ]
 
     def get_edges_for_node(self, node_id: str) -> List[Edge]:
         """Get all edges connected to a specific node"""
         return [
-            edge for edge in self.edges.values()
+            edge
+            for edge in self.edges.values()
             if edge.source == node_id or edge.target == node_id
         ]
 
@@ -1236,10 +1320,10 @@ class GraphStorage:
             before_state = edge.to_dict()
 
             # Update allowed fields
-            allowed_fields = {'type', 'label', 'metadata'}
+            allowed_fields = {"type", "label", "metadata"}
             for key, value in updates.items():
                 if key in allowed_fields:
-                    if key == 'type' and (value is None or value == ""):
+                    if key == "type" and (value is None or value == ""):
                         value = "RELATES_TO"
                     setattr(edge, key, value)
 
@@ -1247,7 +1331,9 @@ class GraphStorage:
             self.save()
 
             # Emit update event
-            edge_type = edge.type.value if hasattr(edge.type, 'value') else str(edge.type)
+            edge_type = (
+                edge.type.value if hasattr(edge.type, "value") else str(edge.type)
+            )
             self._emit_event(
                 event_type=EventType.EDGE_UPDATE,
                 entity_kind=EntityKind.EDGE,
@@ -1283,7 +1369,9 @@ class GraphStorage:
 
             edge = self.edges[edge_id]
             before_state = edge.to_dict()
-            edge_type = edge.type.value if hasattr(edge.type, 'value') else str(edge.type)
+            edge_type = (
+                edge.type.value if hasattr(edge.type, "value") else str(edge.type)
+            )
 
             # Remove from graph
             try:
@@ -1354,13 +1442,13 @@ class GraphStorage:
                 return DeleteEdgesResult(
                     deleted_edge_ids=deleted_edge_ids,
                     success=True,
-                    message=f"Deleted {len(deleted_edge_ids)} edges"
+                    message=f"Deleted {len(deleted_edge_ids)} edges",
                 )
             except Exception as e:
                 return DeleteEdgesResult(
                     deleted_edge_ids=[],
                     success=False,
-                    message=f"Error during edge deletion: {str(e)}"
+                    message=f"Error during edge deletion: {str(e)}",
                 )
 
     def add_edge(
@@ -1407,7 +1495,9 @@ class GraphStorage:
             self.save()
 
             # Emit create event
-            edge_type = edge.type.value if hasattr(edge.type, 'value') else str(edge.type)
+            edge_type = (
+                edge.type.value if hasattr(edge.type, "value") else str(edge.type)
+            )
             self._emit_event(
                 event_type=EventType.EDGE_CREATE,
                 entity_kind=EntityKind.EDGE,
@@ -1433,13 +1523,17 @@ class GraphStorage:
 
             if node_id in self.graph:
                 # Outgoing edges
-                for _, _, _, edge_data in self.graph.out_edges(node_id, keys=True, data=True):
-                    edge = edge_data['data']
+                for _, _, _, edge_data in self.graph.out_edges(
+                    node_id, keys=True, data=True
+                ):
+                    edge = edge_data["data"]
                     collected_edges[edge.id] = edge
 
                 # Incoming edges
-                for _, _, _, edge_data in self.graph.in_edges(node_id, keys=True, data=True):
-                    edge = edge_data['data']
+                for _, _, _, edge_data in self.graph.in_edges(
+                    node_id, keys=True, data=True
+                ):
+                    edge = edge_data["data"]
                     collected_edges[edge.id] = edge
 
         return list(collected_edges.values())

@@ -97,7 +97,9 @@ class Session:
     # collaborator has since deleted is dropped instead of resurrecting it —
     # matching annotation_updated's existing "update on deleted is dropped"
     # rule. Bounded so a long-lived session's memory footprint stays flat.
-    _deleted_annotation_ids: Deque[str] = field(default_factory=lambda: deque(maxlen=200))
+    _deleted_annotation_ids: Deque[str] = field(
+        default_factory=lambda: deque(maxlen=200)
+    )
 
     def to_dict(self) -> Dict[str, Any]:
         return {
@@ -135,20 +137,17 @@ class Session:
 
 # ==================== Persistence seam (D5) ====================
 
+
 class SessionPersistenceBackend(Protocol):
     """Storage seam for sessions. Core ships the file impl; SaaS swaps a DB."""
 
-    def load(self, session_id: str) -> Optional[Dict[str, Any]]:
-        ...
+    def load(self, session_id: str) -> Optional[Dict[str, Any]]: ...
 
-    def save(self, session: Dict[str, Any]) -> None:
-        ...
+    def save(self, session: Dict[str, Any]) -> None: ...
 
-    def delete(self, session_id: str) -> None:
-        ...
+    def delete(self, session_id: str) -> None: ...
 
-    def list_meta(self) -> List[Dict[str, Any]]:
-        ...
+    def list_meta(self) -> List[Dict[str, Any]]: ...
 
 
 # Cross-platform file locking mirrors storage_backends.py so session writes get
@@ -275,6 +274,7 @@ class InMemorySessionPersistenceBackend:
 
 # ==================== Op validation + application ====================
 
+
 def _require_id_list(op: Dict[str, Any], key: str) -> List[str]:
     value = op.get(key)
     if not isinstance(value, list) or not all(isinstance(v, str) for v in value):
@@ -348,7 +348,10 @@ class SessionStore:
     def _new_id(self) -> str:
         for _ in range(100):
             candidate = f"{secrets.randbelow(10000):04d}-{secrets.randbelow(10000):04d}"
-            if candidate not in self._sessions and self._backend.load(candidate) is None:
+            if (
+                candidate not in self._sessions
+                and self._backend.load(candidate) is None
+            ):
                 return candidate
         raise RuntimeError("could not allocate a free session id")
 
@@ -422,7 +425,10 @@ class SessionStore:
 
     def delete(self, session_id: str) -> bool:
         with self._lock:
-            existed = session_id in self._sessions or self._backend.load(session_id) is not None
+            existed = (
+                session_id in self._sessions
+                or self._backend.load(session_id) is not None
+            )
             self._sessions.pop(session_id, None)
             self._rings.pop(session_id, None)
             self._backend.delete(session_id)
@@ -437,7 +443,9 @@ class SessionStore:
 
     # ---------------- op application ----------------
 
-    def apply_state_op(self, session: Session, op: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+    def apply_state_op(
+        self, session: Session, op: Dict[str, Any]
+    ) -> Optional[Dict[str, Any]]:
         """Apply one persisted state op to ``session``.
 
         Mutates ``session.state`` in place, bumps ``session.seq``, appends the
@@ -454,12 +462,16 @@ class SessionStore:
         applied: Optional[Dict[str, Any]] = dict(op)
 
         if op_type == "nodes_added":
-            state["node_refs"] = _union(state["node_refs"], _require_id_list(op, "node_ids"))
+            state["node_refs"] = _union(
+                state["node_refs"], _require_id_list(op, "node_ids")
+            )
         elif op_type == "nodes_removed":
             removals = _require_id_list(op, "node_ids")
             drop = set(removals)
             state["node_refs"] = _remove_all(state["node_refs"], removals)
-            state["positions"] = {k: v for k, v in state["positions"].items() if k not in drop}
+            state["positions"] = {
+                k: v for k, v in state["positions"].items() if k not in drop
+            }
             state["hidden_node_ids"] = _remove_all(state["hidden_node_ids"], removals)
             for ann in state["annotations"]:
                 members = ann.get("member_node_ids")
@@ -473,23 +485,41 @@ class SessionStore:
             state["positions"][node_id] = position
             applied["position"] = position
         elif op_type == "nodes_hidden":
-            state["hidden_node_ids"] = _union(state["hidden_node_ids"], _require_id_list(op, "node_ids"))
+            state["hidden_node_ids"] = _union(
+                state["hidden_node_ids"], _require_id_list(op, "node_ids")
+            )
         elif op_type == "nodes_shown":
-            state["hidden_node_ids"] = _remove_all(state["hidden_node_ids"], _require_id_list(op, "node_ids"))
+            state["hidden_node_ids"] = _remove_all(
+                state["hidden_node_ids"], _require_id_list(op, "node_ids")
+            )
         elif op_type == "edges_hidden":
-            state["hidden_edge_ids"] = _union(state["hidden_edge_ids"], _require_id_list(op, "edge_ids"))
+            state["hidden_edge_ids"] = _union(
+                state["hidden_edge_ids"], _require_id_list(op, "edge_ids")
+            )
         elif op_type == "edges_shown":
-            state["hidden_edge_ids"] = _remove_all(state["hidden_edge_ids"], _require_id_list(op, "edge_ids"))
+            state["hidden_edge_ids"] = _remove_all(
+                state["hidden_edge_ids"], _require_id_list(op, "edge_ids")
+            )
         elif op_type == "annotation_created":
-            annotation = dict(_validate_annotation(op.get("annotation"), require_id=False))
-            incoming_id = annotation.get("id") if isinstance(annotation.get("id"), str) else None
-            if incoming_id is not None and incoming_id in session._deleted_annotation_ids:
+            annotation = dict(
+                _validate_annotation(op.get("annotation"), require_id=False)
+            )
+            incoming_id = (
+                annotation.get("id") if isinstance(annotation.get("id"), str) else None
+            )
+            if (
+                incoming_id is not None
+                and incoming_id in session._deleted_annotation_ids
+            ):
                 # A create-op retry for an id another collaborator has since
                 # deleted must not resurrect it — same rule as an update
                 # arriving after the delete, just below.
                 return None
             existing = (
-                next((a for a in state["annotations"] if a.get("id") == incoming_id), None)
+                next(
+                    (a for a in state["annotations"] if a.get("id") == incoming_id),
+                    None,
+                )
                 if incoming_id is not None
                 else None
             )
@@ -511,7 +541,9 @@ class SessionStore:
                 applied["annotation"] = annotation
         elif op_type == "annotation_updated":
             incoming = _validate_annotation(op.get("annotation"), require_id=True)
-            target = next((a for a in state["annotations"] if a.get("id") == incoming["id"]), None)
+            target = next(
+                (a for a in state["annotations"] if a.get("id") == incoming["id"]), None
+            )
             if target is None:
                 return None  # update on deleted annotation is dropped (D-table rule)
             target.update(incoming)
@@ -521,7 +553,9 @@ class SessionStore:
             ann_id = op.get("annotation_id") or op.get("id")
             if not isinstance(ann_id, str):
                 raise OpError("annotation_deleted requires a string 'annotation_id'")
-            state["annotations"] = [a for a in state["annotations"] if a.get("id") != ann_id]
+            state["annotations"] = [
+                a for a in state["annotations"] if a.get("id") != ann_id
+            ]
             session._deleted_annotation_ids.append(ann_id)
             applied["annotation_id"] = ann_id
         elif op_type == "group_membership_changed":
@@ -530,7 +564,11 @@ class SessionStore:
                 raise OpError("group_membership_changed requires a string 'group_id'")
             members = _require_id_list(op, "member_node_ids")
             group = next(
-                (a for a in state["annotations"] if a.get("id") == group_id and a.get("kind") == "group"),
+                (
+                    a
+                    for a in state["annotations"]
+                    if a.get("id") == group_id and a.get("kind") == "group"
+                ),
                 None,
             )
             if group is None:
@@ -546,7 +584,9 @@ class SessionStore:
             positions = op.get("positions")
             if not isinstance(positions, dict):
                 raise OpError("layout_applied requires a 'positions' object")
-            normalised = {nid: _validate_position(pos) for nid, pos in positions.items()}
+            normalised = {
+                nid: _validate_position(pos) for nid, pos in positions.items()
+            }
             state["positions"].update(normalised)
             applied["positions"] = normalised
 
@@ -555,14 +595,18 @@ class SessionStore:
         applied["op"] = op_type
         applied["seq"] = session.seq
         applied.pop("client_id", None)
-        self._rings.setdefault(session.id, deque(maxlen=self._ring_size)).append(applied)
+        self._rings.setdefault(session.id, deque(maxlen=self._ring_size)).append(
+            applied
+        )
         return applied
 
     def ring(self, session_id: str) -> Optional[Deque[Dict[str, Any]]]:
         """Return the per-session op ring buffer (or None), for batch rollback."""
         return self._rings.get(session_id)
 
-    def ops_since(self, session_id: str, since_seq: int) -> Optional[List[Dict[str, Any]]]:
+    def ops_since(
+        self, session_id: str, since_seq: int
+    ) -> Optional[List[Dict[str, Any]]]:
         """Return applied ops with ``seq > since_seq`` from the ring buffer.
 
         Returns ``None`` when the ring cannot prove continuity (it was trimmed

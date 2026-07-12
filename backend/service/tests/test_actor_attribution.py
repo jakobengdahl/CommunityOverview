@@ -9,12 +9,16 @@ if TYPE_CHECKING:
 
 
 class TestMutationAttribution:
-    def test_standalone_mutation_defaults_to_no_attribution(self, empty_service: "GraphService"):
+    def test_standalone_mutation_defaults_to_no_attribution(
+        self, empty_service: "GraphService"
+    ):
         captured_events = []
         empty_service.storage.add_system_listener(captured_events.append)
 
         result = empty_service.add_nodes(
-            nodes=[{"id": "actor-standalone", "type": "Actor", "name": "Standalone Actor"}],
+            nodes=[
+                {"id": "actor-standalone", "type": "Actor", "name": "Standalone Actor"}
+            ],
             edges=[],
             event_origin="web-ui",
         )
@@ -25,20 +29,26 @@ class TestMutationAttribution:
         assert captured_events[0].origin.event_origin == "web-ui"
         assert captured_events[0].origin.attribution is None
 
-    def test_request_bound_mutation_includes_actor_and_scope_attribution(self, empty_service: "GraphService"):
+    def test_request_bound_mutation_includes_actor_and_scope_attribution(
+        self, empty_service: "GraphService"
+    ):
         captured_events = []
         empty_service.storage.add_system_listener(captured_events.append)
 
-        with use_request_authorization(headers={
-            "x-communityoverview-actor-id": "member-123",
-            "x-communityoverview-actor-type": "member",
-            "x-communityoverview-auth-source": "gateway",
-            "x-communityoverview-workspace-id": "workspace-7",
-            "x-communityoverview-workspace-kind": "team",
-            "x-communityoverview-graph-id": "graph-42",
-        }):
+        with use_request_authorization(
+            headers={
+                "x-communityoverview-actor-id": "member-123",
+                "x-communityoverview-actor-type": "member",
+                "x-communityoverview-auth-source": "gateway",
+                "x-communityoverview-workspace-id": "workspace-7",
+                "x-communityoverview-workspace-kind": "team",
+                "x-communityoverview-graph-id": "graph-42",
+            }
+        ):
             result = empty_service.add_nodes(
-                nodes=[{"id": "actor-request", "type": "Actor", "name": "Request Actor"}],
+                nodes=[
+                    {"id": "actor-request", "type": "Actor", "name": "Request Actor"}
+                ],
                 edges=[],
                 event_origin="web-ui",
             )

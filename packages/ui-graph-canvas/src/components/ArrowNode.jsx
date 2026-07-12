@@ -80,40 +80,43 @@ function ArrowNode({ id, data, selected }) {
 
   // Move one endpoint to a new flow-coordinate point, snapping onto a nearby
   // node/annotation centre when close and recording/clearing its anchor.
-  const moveEndpoint = useCallback((endpoint, flowPoint) => {
-    const targetId = findSnapTarget(flowPoint, getNodes(), { excludeId: id });
-    let snapPoint = flowPoint;
-    if (targetId) {
-      const target = getNodes().find((n) => n.id === targetId);
-      const pos = target?.positionAbsolute || target?.position;
-      if (pos) {
-        const w = target.width || target.style?.width || 0;
-        const h = target.height || target.style?.height || 0;
-        snapPoint = { x: pos.x + w / 2, y: pos.y + h / 2 };
-      }
-    }
-    setNodes((nds) =>
-      nds.map((n) => {
-        if (n.id !== id) return n;
-        const dx = Number(n.data.dx ?? 160);
-        const dy = Number(n.data.dy ?? 0);
-        let position = n.position;
-        let nextData = { ...n.data };
-        if (endpoint === 'start') {
-          const end = { x: n.position.x + dx, y: n.position.y + dy };
-          position = { x: snapPoint.x, y: snapPoint.y };
-          nextData.dx = end.x - snapPoint.x;
-          nextData.dy = end.y - snapPoint.y;
-          nextData.startAnchor = targetId || undefined;
-        } else {
-          nextData.dx = snapPoint.x - n.position.x;
-          nextData.dy = snapPoint.y - n.position.y;
-          nextData.endAnchor = targetId || undefined;
+  const moveEndpoint = useCallback(
+    (endpoint, flowPoint) => {
+      const targetId = findSnapTarget(flowPoint, getNodes(), { excludeId: id });
+      let snapPoint = flowPoint;
+      if (targetId) {
+        const target = getNodes().find((n) => n.id === targetId);
+        const pos = target?.positionAbsolute || target?.position;
+        if (pos) {
+          const w = target.width || target.style?.width || 0;
+          const h = target.height || target.style?.height || 0;
+          snapPoint = { x: pos.x + w / 2, y: pos.y + h / 2 };
         }
-        return { ...n, position, data: nextData, draggable: !isArrowAnchored(nextData) };
-      })
-    );
-  }, [getNodes, id, setNodes]);
+      }
+      setNodes((nds) =>
+        nds.map((n) => {
+          if (n.id !== id) return n;
+          const dx = Number(n.data.dx ?? 160);
+          const dy = Number(n.data.dy ?? 0);
+          let position = n.position;
+          let nextData = { ...n.data };
+          if (endpoint === 'start') {
+            const end = { x: n.position.x + dx, y: n.position.y + dy };
+            position = { x: snapPoint.x, y: snapPoint.y };
+            nextData.dx = end.x - snapPoint.x;
+            nextData.dy = end.y - snapPoint.y;
+            nextData.startAnchor = targetId || undefined;
+          } else {
+            nextData.dx = snapPoint.x - n.position.x;
+            nextData.dy = snapPoint.y - n.position.y;
+            nextData.endAnchor = targetId || undefined;
+          }
+          return { ...n, position, data: nextData, draggable: !isArrowAnchored(nextData) };
+        })
+      );
+    },
+    [getNodes, id, setNodes]
+  );
 
   // Teardown for an in-flight endpoint drag; kept in a ref so it can also run on
   // unmount (arrow deleted/deselected mid-drag) without leaking window listeners.
@@ -196,7 +199,14 @@ function ArrowNode({ id, data, selected }) {
             </marker>
           </defs>
           {/* Transparent wide hit target so the thin line is easy to grab. */}
-          <line x1={originX} y1={originY} x2={endX} y2={endY} stroke="transparent" strokeWidth={16} />
+          <line
+            x1={originX}
+            y1={originY}
+            x2={endX}
+            y2={endY}
+            stroke="transparent"
+            strokeWidth={16}
+          />
           <line
             x1={originX}
             y1={originY}
@@ -236,37 +246,38 @@ function ArrowNode({ id, data, selected }) {
         </svg>
       </div>
 
-      {contextMenu && createPortal(
-        <div
-          ref={contextMenuRef}
-          className="graph-annotation-context-menu"
-          style={{ left: contextMenu.x, top: contextMenu.y }}
-        >
-          <div className="context-menu-title">{labels.color}</div>
-          <div className="context-menu-colors">
-            {ARROW_COLORS.map((c) => (
-              <button
-                key={c}
-                className="color-button"
-                style={{ backgroundColor: c }}
-                onClick={() => changeColor(c)}
-              />
-            ))}
-          </div>
-          <button className="context-menu-toggle" onClick={() => toggleHead('startArrow')}>
-            <span>{labels.arrowStartHead}</span>
-            <span>{startArrow ? '✔' : ''}</span>
-          </button>
-          <button className="context-menu-toggle" onClick={() => toggleHead('endArrow')}>
-            <span>{labels.arrowEndHead}</span>
-            <span>{endArrow ? '✔' : ''}</span>
-          </button>
-          <button className="context-menu-delete" onClick={remove}>
-            🗑️ {labels.delete}
-          </button>
-        </div>,
-        document.body
-      )}
+      {contextMenu &&
+        createPortal(
+          <div
+            ref={contextMenuRef}
+            className="graph-annotation-context-menu"
+            style={{ left: contextMenu.x, top: contextMenu.y }}
+          >
+            <div className="context-menu-title">{labels.color}</div>
+            <div className="context-menu-colors">
+              {ARROW_COLORS.map((c) => (
+                <button
+                  key={c}
+                  className="color-button"
+                  style={{ backgroundColor: c }}
+                  onClick={() => changeColor(c)}
+                />
+              ))}
+            </div>
+            <button className="context-menu-toggle" onClick={() => toggleHead('startArrow')}>
+              <span>{labels.arrowStartHead}</span>
+              <span>{startArrow ? '✔' : ''}</span>
+            </button>
+            <button className="context-menu-toggle" onClick={() => toggleHead('endArrow')}>
+              <span>{labels.arrowEndHead}</span>
+              <span>{endArrow ? '✔' : ''}</span>
+            </button>
+            <button className="context-menu-delete" onClick={remove}>
+              🗑️ {labels.delete}
+            </button>
+          </div>,
+          document.body
+        )}
     </>
   );
 }

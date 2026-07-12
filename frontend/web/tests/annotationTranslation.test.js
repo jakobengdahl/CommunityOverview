@@ -7,10 +7,22 @@ import { annotationsToOverlays, overlaysToAnnotations } from '../src/utils/sessi
 describe('annotation overlay translation', () => {
   it('round-trips a note through the server model', () => {
     const overlays = [
-      { id: 'note-1', kind: 'note', position: { x: 10, y: 20 }, text: 'hello', color: '#FEF08A', size: { w: 200, h: 140 } },
+      {
+        id: 'note-1',
+        kind: 'note',
+        position: { x: 10, y: 20 },
+        text: 'hello',
+        color: '#FEF08A',
+        size: { w: 200, h: 140 },
+      },
     ];
     const server = overlaysToAnnotations(overlays);
-    expect(server[0]).toMatchObject({ id: 'note-1', kind: 'note', text: 'hello', color: '#FEF08A' });
+    expect(server[0]).toMatchObject({
+      id: 'note-1',
+      kind: 'note',
+      text: 'hello',
+      color: '#FEF08A',
+    });
     expect(annotationsToOverlays(server)).toEqual(overlays);
   });
 
@@ -25,7 +37,16 @@ describe('annotation overlay translation', () => {
 
   it('round-trips an arrow via absolute from/to points', () => {
     const overlays = [
-      { id: 'arrow-1', kind: 'arrow', position: { x: 5, y: 6 }, dx: 100, dy: 40, color: '#fff', startArrow: false, endArrow: true },
+      {
+        id: 'arrow-1',
+        kind: 'arrow',
+        position: { x: 5, y: 6 },
+        dx: 100,
+        dy: 40,
+        color: '#fff',
+        startArrow: false,
+        endArrow: true,
+      },
     ];
     const server = overlaysToAnnotations(overlays);
     expect(server[0].from).toEqual({ x: 5, y: 6 });
@@ -36,8 +57,16 @@ describe('annotation overlay translation', () => {
   it('round-trips a double-headed line with anchors and no colour', () => {
     const overlays = [
       {
-        id: 'arrow-2', kind: 'arrow', position: { x: 0, y: 0 }, dx: 80, dy: 0, color: undefined,
-        startArrow: true, endArrow: false, startAnchor: 'node-a', endAnchor: 'node-b',
+        id: 'arrow-2',
+        kind: 'arrow',
+        position: { x: 0, y: 0 },
+        dx: 80,
+        dy: 0,
+        color: undefined,
+        startArrow: true,
+        endArrow: false,
+        startAnchor: 'node-a',
+        endAnchor: 'node-b',
       },
     ];
     const server = overlaysToAnnotations(overlays);
@@ -49,8 +78,23 @@ describe('annotation overlay translation', () => {
 
   it('round-trips note and label text sizes', () => {
     const overlays = [
-      { id: 'note-1', kind: 'note', position: { x: 0, y: 0 }, text: 'n', color: '#FEF08A', fontSize: 24, size: { w: 200, h: 140 } },
-      { id: 'label-1', kind: 'label', position: { x: 1, y: 1 }, text: 'l', color: '#fff', fontSize: 28 },
+      {
+        id: 'note-1',
+        kind: 'note',
+        position: { x: 0, y: 0 },
+        text: 'n',
+        color: '#FEF08A',
+        fontSize: 24,
+        size: { w: 200, h: 140 },
+      },
+      {
+        id: 'label-1',
+        kind: 'label',
+        position: { x: 1, y: 1 },
+        text: 'l',
+        color: '#fff',
+        fontSize: 28,
+      },
     ];
     expect(annotationsToOverlays(overlaysToAnnotations(overlays))).toEqual(overlays);
   });

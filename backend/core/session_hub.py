@@ -28,8 +28,16 @@ from typing import Any, Dict, List, Optional, Protocol
 
 # Distinct, high-contrast marker colours assigned round-robin to joiners.
 _PRESENCE_COLORS = [
-    "#e6194b", "#3cb44b", "#4363d8", "#f58231", "#911eb4",
-    "#46f0f0", "#f032e6", "#bcf60c", "#fabebe", "#008080",
+    "#e6194b",
+    "#3cb44b",
+    "#4363d8",
+    "#f58231",
+    "#911eb4",
+    "#46f0f0",
+    "#f032e6",
+    "#bcf60c",
+    "#fabebe",
+    "#008080",
 ]
 
 _CLAIM_TTL_SECONDS = 30.0
@@ -57,14 +65,11 @@ class Subscription:
 class SessionEventBus(Protocol):
     """Fan-out seam. Core ships in-process; SaaS swaps a Redis-backed bus."""
 
-    def publish(self, session_id: str, event: Dict[str, Any]) -> None:
-        ...
+    def publish(self, session_id: str, event: Dict[str, Any]) -> None: ...
 
-    def subscribe(self, session_id: str) -> Subscription:
-        ...
+    def subscribe(self, session_id: str) -> Subscription: ...
 
-    def unsubscribe(self, subscription: Subscription) -> None:
-        ...
+    def unsubscribe(self, subscription: Subscription) -> None: ...
 
 
 class InProcessEventBus:
@@ -133,10 +138,14 @@ class PresenceRegistry:
         self._color_cursor[session_id] = idx + 1
         return _PRESENCE_COLORS[idx]
 
-    def join(self, session_id: str, client_id: str, display_name: Optional[str]) -> Dict[str, Any]:
+    def join(
+        self, session_id: str, client_id: str, display_name: Optional[str]
+    ) -> Dict[str, Any]:
         roster = self._rosters.setdefault(session_id, {})
         existing = roster.get(client_id)
-        color = existing["color"] if existing else self._assign_color(session_id, roster)
+        color = (
+            existing["color"] if existing else self._assign_color(session_id, roster)
+        )
         member = {
             "client_id": client_id,
             "display_name": display_name or f"Guest-{len(roster) + 1}",
@@ -165,7 +174,9 @@ class PresenceRegistry:
 class ClaimMap:
     """Advisory selection soft-locks with a 30 s TTL and disconnect release."""
 
-    def __init__(self, ttl: float = _CLAIM_TTL_SECONDS, *, time_fn=time.monotonic) -> None:
+    def __init__(
+        self, ttl: float = _CLAIM_TTL_SECONDS, *, time_fn=time.monotonic
+    ) -> None:
         self._ttl = ttl
         self._time = time_fn
         # session_id -> element_id -> {client_id, expires_at}
@@ -182,7 +193,9 @@ class ClaimMap:
         if not claims:
             self._claims.pop(session_id, None)
 
-    def claim(self, session_id: str, client_id: str, element_ids: List[str]) -> List[str]:
+    def claim(
+        self, session_id: str, client_id: str, element_ids: List[str]
+    ) -> List[str]:
         """Claim (or renew) ``element_ids`` for ``client_id``.
 
         A claim held by another client is taken over — claims are advisory, so
@@ -196,7 +209,9 @@ class ClaimMap:
             claims[eid] = {"client_id": client_id, "expires_at": expires_at}
         return element_ids
 
-    def release(self, session_id: str, client_id: str, element_ids: List[str]) -> List[str]:
+    def release(
+        self, session_id: str, client_id: str, element_ids: List[str]
+    ) -> List[str]:
         self._prune(session_id)
         claims = self._claims.get(session_id, {})
         released = []
@@ -221,4 +236,6 @@ class ClaimMap:
     def snapshot(self, session_id: str) -> Dict[str, str]:
         """Return ``element_id -> client_id`` for all live (non-expired) claims."""
         self._prune(session_id)
-        return {eid: c["client_id"] for eid, c in self._claims.get(session_id, {}).items()}
+        return {
+            eid: c["client_id"] for eid, c in self._claims.get(session_id, {}).items()
+        }

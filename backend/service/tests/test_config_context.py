@@ -46,7 +46,9 @@ class TestConfigContextRestEndpoint:
         tenant_dir = tmp_path / "tenant-config"
         tenant_dir.mkdir()
         (tenant_dir / "schema_config.json").write_text("{}", encoding="utf-8")
-        (tenant_dir / "federation_config.json").write_text('{"federation": {}}', encoding="utf-8")
+        (tenant_dir / "federation_config.json").write_text(
+            '{"federation": {}}', encoding="utf-8"
+        )
         monkeypatch.setenv("COMMUNITYOVERVIEW_TENANT_CONFIG_DIR", str(tenant_dir))
 
         config = AppConfig(auth_enabled=False, graph_file=str(tmp_path / "graph.json"))
@@ -96,7 +98,9 @@ class TestConfigContextMcpTool:
     def test_tool_is_safe_and_accessible_via_execute_tool(self, app_client):
         client, _ = app_client
 
-        response = client.post("/execute_tool", json={"tool_name": "get_config_context", "arguments": {}})
+        response = client.post(
+            "/execute_tool", json={"tool_name": "get_config_context", "arguments": {}}
+        )
 
         assert response.status_code == 200
         result = response.json()

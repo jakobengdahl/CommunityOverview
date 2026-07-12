@@ -103,7 +103,7 @@ export default function CreateAgentDialog({ onClose, onSave, initialData }) {
 
           // Select GRAPH by default if available (only if not editing)
           if (!initialData) {
-            const graphIntegration = data.find(i => i.id === 'GRAPH');
+            const graphIntegration = data.find((i) => i.id === 'GRAPH');
             if (graphIntegration) {
               setSelectedIntegrations(['GRAPH']);
             }
@@ -120,12 +120,14 @@ export default function CreateAgentDialog({ onClose, onSave, initialData }) {
 
   // Get available node types from schema
   const nodeTypes = schema?.node_types
-    ? Object.keys(schema.node_types).filter(t => !['SavedView', 'VisualizationView', 'EventSubscription', 'Agent'].includes(t))
+    ? Object.keys(schema.node_types).filter(
+        (t) => !['SavedView', 'VisualizationView', 'EventSubscription', 'Agent'].includes(t)
+      )
     : [];
 
   const handleToggleNodeType = (type) => {
     if (selectedNodeTypes.includes(type)) {
-      setSelectedNodeTypes(selectedNodeTypes.filter(t => t !== type));
+      setSelectedNodeTypes(selectedNodeTypes.filter((t) => t !== type));
     } else {
       setSelectedNodeTypes([...selectedNodeTypes, type]);
     }
@@ -137,7 +139,7 @@ export default function CreateAgentDialog({ onClose, onSave, initialData }) {
 
   const handleToggleIntegration = (integrationId) => {
     if (selectedIntegrations.includes(integrationId)) {
-      setSelectedIntegrations(selectedIntegrations.filter(id => id !== integrationId));
+      setSelectedIntegrations(selectedIntegrations.filter((id) => id !== integrationId));
     } else {
       setSelectedIntegrations([...selectedIntegrations, integrationId]);
     }
@@ -156,7 +158,10 @@ export default function CreateAgentDialog({ onClose, onSave, initialData }) {
       return;
     }
 
-    const aliasList = aliases.split(',').map(a => a.trim()).filter(Boolean);
+    const aliasList = aliases
+      .split(',')
+      .map((a) => a.trim())
+      .filter(Boolean);
 
     // Logic for Create vs Update
     if (initialData) {
@@ -190,7 +195,10 @@ export default function CreateAgentDialog({ onClose, onSave, initialData }) {
         subscriptionUpdates = {
           name: `${name} - Subscription`,
           description: `Event subscription for agent: ${name}`,
-          summary: `Listens to ${Object.entries(operations).filter(([_, v]) => v).map(([k]) => k).join(', ')} events`,
+          summary: `Listens to ${Object.entries(operations)
+            .filter(([_, v]) => v)
+            .map(([k]) => k)
+            .join(', ')} events`,
           metadata: {
             ...initialData.subscription.metadata,
             filters: {
@@ -198,9 +206,14 @@ export default function CreateAgentDialog({ onClose, onSave, initialData }) {
                 entity_kind: 'node',
                 node_types: selectedNodeTypes,
               },
-              operations: Object.entries(operations).filter(([_, v]) => v).map(([k]) => k),
+              operations: Object.entries(operations)
+                .filter(([_, v]) => v)
+                .map(([k]) => k),
               keywords: {
-                any: keywords.split(',').map(k => k.trim()).filter(k => k),
+                any: keywords
+                  .split(',')
+                  .map((k) => k.trim())
+                  .filter((k) => k),
               },
             },
             delivery: {
@@ -215,9 +228,8 @@ export default function CreateAgentDialog({ onClose, onSave, initialData }) {
         agentId,
         agentUpdates,
         subscriptionId,
-        subscriptionUpdates
+        subscriptionUpdates,
       });
-
     } else {
       // CREATE new agent
       const idPrefix = 'agent-' + Date.now().toString(36);
@@ -230,16 +242,24 @@ export default function CreateAgentDialog({ onClose, onSave, initialData }) {
         name: `${name} - Subscription`,
         type: 'EventSubscription',
         description: `Event subscription for agent: ${name}`,
-        summary: `Listens to ${Object.entries(operations).filter(([_, v]) => v).map(([k]) => k).join(', ')} events`,
+        summary: `Listens to ${Object.entries(operations)
+          .filter(([_, v]) => v)
+          .map(([k]) => k)
+          .join(', ')} events`,
         metadata: {
           filters: {
             target: {
               entity_kind: 'node',
               node_types: selectedNodeTypes,
             },
-            operations: Object.entries(operations).filter(([_, v]) => v).map(([k]) => k),
+            operations: Object.entries(operations)
+              .filter(([_, v]) => v)
+              .map(([k]) => k),
             keywords: {
-              any: keywords.split(',').map(k => k.trim()).filter(k => k),
+              any: keywords
+                .split(',')
+                .map((k) => k.trim())
+                .filter((k) => k),
             },
           },
           delivery: {
@@ -285,7 +305,7 @@ export default function CreateAgentDialog({ onClose, onSave, initialData }) {
 
   return (
     <div className="dialog-overlay" onClick={onClose}>
-      <div className="dialog-content subscription-dialog" onClick={e => e.stopPropagation()}>
+      <div className="dialog-content subscription-dialog" onClick={(e) => e.stopPropagation()}>
         <h2>{initialData ? 'Edit Agent' : 'Create Agent'}</h2>
         <p className="dialog-description">
           An agent listens to graph changes and processes events using an LLM with MCP tools.
@@ -315,7 +335,7 @@ export default function CreateAgentDialog({ onClose, onSave, initialData }) {
                 id="agent-name"
                 type="text"
                 value={name}
-                onChange={e => setName(e.target.value)}
+                onChange={(e) => setName(e.target.value)}
                 placeholder="e.g. 'Content Enrichment Agent'"
                 required
               />
@@ -326,7 +346,7 @@ export default function CreateAgentDialog({ onClose, onSave, initialData }) {
               <textarea
                 id="agent-description"
                 value={description}
-                onChange={e => setDescription(e.target.value)}
+                onChange={(e) => setDescription(e.target.value)}
                 placeholder="Optional description of the agent's purpose"
                 rows={2}
               />
@@ -338,7 +358,7 @@ export default function CreateAgentDialog({ onClose, onSave, initialData }) {
                 id="agent-aliases"
                 type="text"
                 value={aliases}
-                onChange={e => setAliases(e.target.value)}
+                onChange={(e) => setAliases(e.target.value)}
                 placeholder="alternative name, abbreviation, synonym"
               />
             </div>
@@ -348,7 +368,7 @@ export default function CreateAgentDialog({ onClose, onSave, initialData }) {
               <textarea
                 id="agent-task-prompt"
                 value={taskPrompt}
-                onChange={e => setTaskPrompt(e.target.value)}
+                onChange={(e) => setTaskPrompt(e.target.value)}
                 placeholder={`Describe what the agent should do when receiving events. Example:
 
 When a new Initiative node is created:
@@ -378,8 +398,12 @@ When a new Initiative node is created:
               <p style={{ color: '#888' }}>No MCP integrations configured on the server</p>
             ) : (
               <div className="checkbox-group">
-                {availableIntegrations.map(integration => (
-                  <label key={integration.id} className="checkbox-label" style={{ marginBottom: '0.5rem' }}>
+                {availableIntegrations.map((integration) => (
+                  <label
+                    key={integration.id}
+                    className="checkbox-label"
+                    style={{ marginBottom: '0.5rem' }}
+                  >
                     <input
                       type="checkbox"
                       checked={selectedIntegrations.includes(integration.id)}
@@ -405,7 +429,7 @@ When a new Initiative node is created:
             <div className="form-group">
               <label>Node Types (empty = all)</label>
               <div className="checkbox-group node-types-grid">
-                {nodeTypes.map(type => (
+                {nodeTypes.map((type) => (
                   <label key={type} className="checkbox-label">
                     <input
                       type="checkbox"
@@ -454,10 +478,13 @@ When a new Initiative node is created:
                 id="agent-keywords"
                 type="text"
                 value={keywords}
-                onChange={e => setKeywords(e.target.value)}
+                onChange={(e) => setKeywords(e.target.value)}
                 placeholder="Leave empty to match all events"
               />
-              <small>Optional: only trigger for events containing these keywords. Leave empty to match all events matching the node type and operation filters above.</small>
+              <small>
+                Optional: only trigger for events containing these keywords. Leave empty to match
+                all events matching the node type and operation filters above.
+              </small>
             </div>
           </div>
 

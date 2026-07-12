@@ -2,6 +2,7 @@
 LLM Provider abstraction layer for supporting multiple AI backends.
 Supports both Claude (Anthropic) and OpenAI APIs.
 """
+
 from abc import ABC, abstractmethod
 from typing import Any, Dict, List, Optional
 import json
@@ -17,8 +18,8 @@ class LLMProvider(ABC):
         messages: List[Dict],
         system_prompt: str,
         tools: List[Dict],
-        max_tokens: int = 4096
-    ) -> 'LLMResponse':
+        max_tokens: int = 4096,
+    ) -> "LLMResponse":
         """Create a completion with the LLM"""
         pass
 
@@ -31,12 +32,7 @@ class LLMProvider(ABC):
 class LLMResponse:
     """Unified response format across providers"""
 
-    def __init__(
-        self,
-        content: List[Dict],
-        stop_reason: str,
-        raw_response: Any = None
-    ):
+    def __init__(self, content: List[Dict], stop_reason: str, raw_response: Any = None):
         self.content = content
         self.stop_reason = stop_reason
         self.raw_response = raw_response
@@ -47,6 +43,7 @@ class ClaudeProvider(LLMProvider):
 
     def __init__(self, api_key: str):
         from anthropic import Anthropic
+
         self.client = Anthropic(api_key=api_key)
         self.model = "claude-sonnet-4-5"
 
@@ -55,7 +52,7 @@ class ClaudeProvider(LLMProvider):
         messages: List[Dict],
         system_prompt: str,
         tools: List[Dict],
-        max_tokens: int = 4096
+        max_tokens: int = 4096,
     ) -> LLMResponse:
         """Create completion using Claude API"""
         response = self.client.messages.create(
@@ -63,29 +60,26 @@ class ClaudeProvider(LLMProvider):
             max_tokens=max_tokens,
             system=system_prompt,
             tools=tools,
-            messages=messages
+            messages=messages,
         )
 
         # Convert Claude response to unified format
         content = []
         for block in response.content:
             if block.type == "text":
-                content.append({
-                    "type": "text",
-                    "text": block.text
-                })
+                content.append({"type": "text", "text": block.text})
             elif block.type == "tool_use":
-                content.append({
-                    "type": "tool_use",
-                    "id": block.id,
-                    "name": block.name,
-                    "input": block.input
-                })
+                content.append(
+                    {
+                        "type": "tool_use",
+                        "id": block.id,
+                        "name": block.name,
+                        "input": block.input,
+                    }
+                )
 
         return LLMResponse(
-            content=content,
-            stop_reason=response.stop_reason,
-            raw_response=response
+            content=content, stop_reason=response.stop_reason, raw_response=response
         )
 
     def format_tool_definitions(self, tools: List[Dict]) -> List[Dict]:
@@ -98,7 +92,10 @@ class OpenAIProvider(LLMProvider):
 
     def __init__(self, api_key: str):
         from openai import OpenAI
-        base_url = os.getenv("OPENAI_BASE_URL")  # None = use SDK default (api.openai.com)
+
+        base_url = os.getenv(
+            "OPENAI_BASE_URL"
+        )  # None = use SDK default (api.openai.com)
         self.client = OpenAI(api_key=api_key, base_url=base_url)
         self.model = os.getenv("OPENAI_MODEL", "gpt-4o")
         self._tool_calling = os.getenv("OPENAI_TOOL_CALLING", "true").lower() != "false"
@@ -108,7 +105,7 @@ class OpenAIProvider(LLMProvider):
         messages: List[Dict],
         system_prompt: str,
         tools: List[Dict],
-        max_tokens: int = 4096
+        max_tokens: int = 4096,
     ) -> LLMResponse:
         """Create completion using OpenAI API"""
 
@@ -123,7 +120,7 @@ class OpenAIProvider(LLMProvider):
             max_tokens=max_tokens,
             messages=openai_messages,
             tools=openai_tools if openai_tools else None,
-            tool_choice="auto" if openai_tools else None
+            tool_choice="auto" if openai_tools else None,
         )
 
         # Convert OpenAI response to unified format
@@ -132,28 +129,25 @@ class OpenAIProvider(LLMProvider):
 
         # Add text content if present
         if message.content:
-            content.append({
-                "type": "text",
-                "text": message.content
-            })
+            content.append({"type": "text", "text": message.content})
 
         # Add tool calls if present
         if message.tool_calls:
             for tool_call in message.tool_calls:
-                content.append({
-                    "type": "tool_use",
-                    "id": tool_call.id,
-                    "name": tool_call.function.name,
-                    "input": json.loads(tool_call.function.arguments)
-                })
+                content.append(
+                    {
+                        "type": "tool_use",
+                        "id": tool_call.id,
+                        "name": tool_call.function.name,
+                        "input": json.loads(tool_call.function.arguments),
+                    }
+                )
 
         # Map finish_reason to stop_reason
         stop_reason = self._map_finish_reason(response.choices[0].finish_reason)
 
         return LLMResponse(
-            content=content,
-            stop_reason=stop_reason,
-            raw_response=response
+            content=content, stop_reason=stop_reason, raw_response=response
         )
 
     def format_tool_definitions(self, tools: List[Dict]) -> List[Dict]:
@@ -168,27 +162,22 @@ class OpenAIProvider(LLMProvider):
                 "function": {
                     "name": tool["name"],
                     "description": tool["description"],
-                    "parameters": tool["input_schema"]
-                }
+                    "parameters": tool["input_schema"],
+                },
             }
             openai_tools.append(openai_tool)
 
         return openai_tools
 
     def _convert_messages_to_openai(
-        self,
-        messages: List[Dict],
-        system_prompt: str
+        self, messages: List[Dict], system_prompt: str
     ) -> List[Dict]:
         """Convert Claude message format to OpenAI format"""
         openai_messages = []
 
         # Add system prompt as first message
         if system_prompt:
-            openai_messages.append({
-                "role": "system",
-                "content": system_prompt
-            })
+            openai_messages.append({"role": "system", "content": system_prompt})
 
         for msg in messages:
             role = msg.get("role")
@@ -197,20 +186,19 @@ class OpenAIProvider(LLMProvider):
             if role == "user":
                 # Handle both string content and array of content blocks
                 if isinstance(content, str):
-                    openai_messages.append({
-                        "role": "user",
-                        "content": content
-                    })
+                    openai_messages.append({"role": "user", "content": content})
                 elif isinstance(content, list):
                     # Check if this is a tool_result message
                     if content and content[0].get("type") == "tool_result":
                         # Convert tool results to OpenAI format
                         for item in content:
-                            openai_messages.append({
-                                "role": "tool",
-                                "tool_call_id": item.get("tool_use_id"),
-                                "content": item.get("content", "")
-                            })
+                            openai_messages.append(
+                                {
+                                    "role": "tool",
+                                    "tool_call_id": item.get("tool_use_id"),
+                                    "content": item.get("content", ""),
+                                }
+                            )
                     else:
                         # Regular content blocks
                         text_parts = []
@@ -218,10 +206,9 @@ class OpenAIProvider(LLMProvider):
                             if isinstance(block, dict) and block.get("type") == "text":
                                 text_parts.append(block.get("text", ""))
                         if text_parts:
-                            openai_messages.append({
-                                "role": "user",
-                                "content": "\n".join(text_parts)
-                            })
+                            openai_messages.append(
+                                {"role": "user", "content": "\n".join(text_parts)}
+                            )
 
             elif role == "assistant":
                 # Handle assistant messages with tool calls
@@ -234,14 +221,18 @@ class OpenAIProvider(LLMProvider):
                             if block.get("type") == "text":
                                 text_parts.append(block.get("text", ""))
                             elif block.get("type") == "tool_use":
-                                tool_calls.append({
-                                    "id": block.get("id"),
-                                    "type": "function",
-                                    "function": {
-                                        "name": block.get("name"),
-                                        "arguments": json.dumps(block.get("input", {}))
+                                tool_calls.append(
+                                    {
+                                        "id": block.get("id"),
+                                        "type": "function",
+                                        "function": {
+                                            "name": block.get("name"),
+                                            "arguments": json.dumps(
+                                                block.get("input", {})
+                                            ),
+                                        },
                                     }
-                                })
+                                )
 
                     msg_dict = {"role": "assistant"}
                     if text_parts:
@@ -251,10 +242,7 @@ class OpenAIProvider(LLMProvider):
 
                     openai_messages.append(msg_dict)
                 elif isinstance(content, str):
-                    openai_messages.append({
-                        "role": "assistant",
-                        "content": content
-                    })
+                    openai_messages.append({"role": "assistant", "content": content})
 
         return openai_messages
 
@@ -264,7 +252,7 @@ class OpenAIProvider(LLMProvider):
             "stop": "end_turn",
             "tool_calls": "tool_use",
             "length": "max_tokens",
-            "content_filter": "end_turn"
+            "content_filter": "end_turn",
         }
         return mapping.get(finish_reason, "end_turn")
 
@@ -331,4 +319,6 @@ def create_provider(api_key: str, provider_type: Optional[str] = None) -> LLMPro
     elif provider_type == "claude":
         return ClaudeProvider(api_key)
     else:
-        raise ValueError(f"Unknown provider type: {provider_type}. Supported: 'claude', 'openai'")
+        raise ValueError(
+            f"Unknown provider type: {provider_type}. Supported: 'claude', 'openai'"
+        )

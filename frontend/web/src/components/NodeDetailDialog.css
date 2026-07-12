@@ -53,7 +53,9 @@
   font-size: 0.85rem;
   padding: 6px 4px;
   cursor: pointer;
-  transition: color 0.15s, border-color 0.15s;
+  transition:
+    color 0.15s,
+    border-color 0.15s;
 }
 
 .node-detail-tab:hover {

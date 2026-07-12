@@ -39,7 +39,9 @@ async function seedNodes(page, query = 'an') {
 }
 
 test.describe('shared session — two users, one session', () => {
-  test('presence, node fan-out, note fan-out and rename sync across clients', async ({ browser }) => {
+  test('presence, node fan-out, note fan-out and rename sync across clients', async ({
+    browser,
+  }) => {
     const sessionId = randomSessionId();
     const ctxA = await browser.newContext();
     const ctxB = await browser.newContext();
@@ -57,7 +59,9 @@ test.describe('shared session — two users, one session', () => {
 
     // Presence: once the second client joins, A sees at least one presence dot
     // (its own is shown only when another user is present).
-    await expect(a.locator('.floating-header-presence-dot').first()).toBeVisible({ timeout: 15000 });
+    await expect(a.locator('.floating-header-presence-dot').first()).toBeVisible({
+      timeout: 15000,
+    });
 
     // Node add fan-out: A adds nodes, B converges to the same count via ops.
     const countA = await seedNodes(a);
@@ -97,10 +101,15 @@ test.describe('shared session — two users, one session', () => {
     await a.mouse.move(box.x + 160, box.y + 120, { steps: 8 });
     await a.mouse.up();
 
-    await expect.poll(async () => {
-      const now = await nodeB.boundingBox();
-      return now && before ? Math.abs(now.x - before.x) + Math.abs(now.y - before.y) : 0;
-    }, { timeout: 15000 }).toBeGreaterThan(20);
+    await expect
+      .poll(
+        async () => {
+          const now = await nodeB.boundingBox();
+          return now && before ? Math.abs(now.x - before.x) + Math.abs(now.y - before.y) : 0;
+        },
+        { timeout: 15000 }
+      )
+      .toBeGreaterThan(20);
 
     await ctxA.close();
     await ctxB.close();
@@ -118,14 +127,18 @@ test.describe('shared session — two users, one session', () => {
     // Make the session non-empty so it materialises server-side and appears in
     // the recents list, then wait until B is present on A's roster.
     await seedNodes(a);
-    await expect(a.locator('.floating-header-presence-dot').first()).toBeVisible({ timeout: 15000 });
+    await expect(a.locator('.floating-header-presence-dot').first()).toBeVisible({
+      timeout: 15000,
+    });
 
     // Open the drawer and trigger delete on the current session.
     await a.locator('.floating-header-hamburger').click();
     await a.locator('.session-drawer-session.current .session-drawer-session-delete').click();
 
     // The confirm dialog must mention that other users are connected (design 3.6).
-    await expect(a.locator('text=/other user\\(s\\) are connected/i')).toBeVisible({ timeout: 15000 });
+    await expect(a.locator('text=/other user\\(s\\) are connected/i')).toBeVisible({
+      timeout: 15000,
+    });
 
     await ctxA.close();
     await ctxB.close();

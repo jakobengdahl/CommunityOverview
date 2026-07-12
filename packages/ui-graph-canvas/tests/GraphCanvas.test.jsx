@@ -70,9 +70,7 @@ const sampleNodes = [
   { id: 'node-2', name: 'Node 2', type: 'Initiative', description: 'b' },
 ];
 
-const sampleEdges = [
-  { id: 'edge-1', source: 'node-1', target: 'node-2', type: 'RELATES_TO' },
-];
+const sampleEdges = [{ id: 'edge-1', source: 'node-1', target: 'node-2', type: 'RELATES_TO' }];
 
 describe('GraphCanvas', () => {
   beforeEach(() => {
@@ -158,13 +156,7 @@ describe('GraphCanvas', () => {
   it('calls onDeleteEdge from edge context menu when delete is clicked', () => {
     const onDeleteEdge = vi.fn();
 
-    render(
-      <GraphCanvas
-        nodes={sampleNodes}
-        edges={sampleEdges}
-        onDeleteEdge={onDeleteEdge}
-      />
-    );
+    render(<GraphCanvas nodes={sampleNodes} edges={sampleEdges} onDeleteEdge={onDeleteEdge} />);
 
     fireEvent.contextMenu(screen.getByTestId('edge-edge-1'));
     fireEvent.click(screen.getByRole('button', { name: /delete/i }));
@@ -223,9 +215,7 @@ describe('GraphCanvas', () => {
     render(<GraphCanvas nodes={sampleNodes} edges={sampleEdges} />);
 
     fireEvent.contextMenu(screen.getByTestId('node-node-1'));
-    fireEvent.click(
-      screen.getByRole('button', { name: /select all nodes of the same type/i })
-    );
+    fireEvent.click(screen.getByRole('button', { name: /select all nodes of the same type/i }));
 
     // node-1 is an Actor, so it is selected while the Initiative node-2 is not.
     expect(hoisted.onNodesChange).toHaveBeenCalledWith(
@@ -248,9 +238,7 @@ describe('GraphCanvas', () => {
 
     // Right-clicking the one Actor should still select the other Actor (node-3).
     fireEvent.contextMenu(screen.getByTestId('node-node-1'));
-    fireEvent.click(
-      screen.getByRole('button', { name: /select all nodes of the same type/i })
-    );
+    fireEvent.click(screen.getByRole('button', { name: /select all nodes of the same type/i }));
 
     expect(hoisted.onNodesChange).toHaveBeenCalledWith(
       expect.arrayContaining([
@@ -285,9 +273,7 @@ describe('GraphCanvas', () => {
 
     // Right-clicking a node that is part of the multi-selection opens the multi menu.
     fireEvent.contextMenu(screen.getByTestId('node-node-1'));
-    fireEvent.click(
-      screen.getByRole('button', { name: /select all nodes of the same type/i })
-    );
+    fireEvent.click(screen.getByRole('button', { name: /select all nodes of the same type/i }));
 
     // Every Actor and Initiative node is selected; the Theme node is not.
     expect(hoisted.onNodesChange).toHaveBeenCalledWith(
@@ -308,9 +294,7 @@ describe('GraphCanvas', () => {
     fireEvent.contextMenu(screen.getByTestId('edge-edge-1'));
     expect(document.querySelector('.edge-context-menu')).toBeInTheDocument();
 
-    rerender(
-      <GraphCanvas nodes={sampleNodes} edges={sampleEdges} closeMenusSignal={1} />
-    );
+    rerender(<GraphCanvas nodes={sampleNodes} edges={sampleEdges} closeMenusSignal={1} />);
 
     expect(document.querySelector('.edge-context-menu')).not.toBeInTheDocument();
   });

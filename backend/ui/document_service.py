@@ -12,8 +12,7 @@ go through ChatService -> GraphService.
 
 import os
 import tempfile
-import shutil
-from typing import Optional, Dict, Any, BinaryIO
+from typing import Optional, Dict, Any
 from pathlib import Path
 
 from backend.document_processor import DocumentProcessor
@@ -33,7 +32,7 @@ class DocumentService:
     """
 
     # Supported file extensions
-    SUPPORTED_EXTENSIONS = {'.pdf', '.docx', '.doc', '.txt'}
+    SUPPORTED_EXTENSIONS = {".pdf", ".docx", ".doc", ".txt"}
 
     # Max file size (10 MB)
     MAX_FILE_SIZE = 10 * 1024 * 1024
@@ -70,7 +69,7 @@ class DocumentService:
             return {
                 "success": False,
                 "error": f"Unsupported file format: {path.suffix}. Supported: {', '.join(self.SUPPORTED_EXTENSIONS)}",
-                "filename": path.name
+                "filename": path.name,
             }
 
         # Validate file exists
@@ -78,7 +77,7 @@ class DocumentService:
             return {
                 "success": False,
                 "error": f"File not found: {file_path}",
-                "filename": path.name
+                "filename": path.name,
             }
 
         # Extract text
@@ -89,20 +88,16 @@ class DocumentService:
                 "text": text,
                 "filename": path.name,
                 "char_count": len(text),
-                "word_count": len(text.split())
+                "word_count": len(text.split()),
             }
         except Exception as e:
             return {
                 "success": False,
                 "error": f"Error extracting text: {str(e)}",
-                "filename": path.name
+                "filename": path.name,
             }
 
-    async def save_upload(
-        self,
-        file_content: bytes,
-        filename: str
-    ) -> Dict[str, Any]:
+    async def save_upload(self, file_content: bytes, filename: str) -> Dict[str, Any]:
         """
         Save an uploaded file to temporary storage.
 
@@ -121,14 +116,14 @@ class DocumentService:
         if ext not in self.SUPPORTED_EXTENSIONS:
             return {
                 "success": False,
-                "error": f"Unsupported file format: {ext}. Supported: {', '.join(self.SUPPORTED_EXTENSIONS)}"
+                "error": f"Unsupported file format: {ext}. Supported: {', '.join(self.SUPPORTED_EXTENSIONS)}",
             }
 
         # Validate size
         if len(file_content) > self.MAX_FILE_SIZE:
             return {
                 "success": False,
-                "error": f"File too large. Max size: {self.MAX_FILE_SIZE / 1024 / 1024:.1f} MB"
+                "error": f"File too large. Max size: {self.MAX_FILE_SIZE / 1024 / 1024:.1f} MB",
             }
 
         # Create safe filename
@@ -137,25 +132,20 @@ class DocumentService:
         # Save to temp directory
         try:
             file_path = Path(self._upload_dir) / safe_filename
-            with open(file_path, 'wb') as f:
+            with open(file_path, "wb") as f:
                 f.write(file_content)
 
             return {
                 "success": True,
                 "file_path": str(file_path),
                 "filename": filename,
-                "size": len(file_content)
+                "size": len(file_content),
             }
         except Exception as e:
-            return {
-                "success": False,
-                "error": f"Error saving file: {str(e)}"
-            }
+            return {"success": False, "error": f"Error saving file: {str(e)}"}
 
     async def process_upload(
-        self,
-        file_content: bytes,
-        filename: str
+        self, file_content: bytes, filename: str
     ) -> Dict[str, Any]:
         """
         Save and extract text from an uploaded file.
@@ -204,7 +194,7 @@ class DocumentService:
         name = Path(filename).name
 
         # Replace unsafe characters
-        safe_name = re.sub(r'[^\w\-_\.]', '_', name)
+        safe_name = re.sub(r"[^\w\-_\.]", "_", name)
 
         # Add timestamp prefix for uniqueness
         timestamp = int(time.time() * 1000)

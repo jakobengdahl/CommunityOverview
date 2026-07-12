@@ -11,12 +11,11 @@ import json
 import os
 from pathlib import Path
 from typing import Generator, List, Dict, Any
-from unittest.mock import patch, MagicMock
+from unittest.mock import patch
 
 from fastapi.testclient import TestClient
 
 from backend.api_host import create_app, AppConfig
-from backend.core import GraphStorage
 
 
 @pytest.fixture(autouse=True)
@@ -50,6 +49,7 @@ class MockSentenceTransformer:
     def __init__(self, model_name=None):
         self.model_name = model_name
         import numpy as np
+
         self._np = np
 
     def encode(self, texts, convert_to_numpy=True, show_progress_bar=False):
@@ -70,6 +70,7 @@ class MockSentenceTransformer:
 def mock_embedding_model():
     """Mock the embedding model to avoid network calls."""
     import backend.core.vector_store as vs
+
     original_ensure = vs._ensure_sentence_transformers
 
     def mock_ensure():
@@ -106,22 +107,25 @@ class MockLLMProvider:
 
     def create_completion(self, messages, system_prompt, tools, max_tokens=4096):
         from backend.llm.llm_providers import LLMResponse
+
         self.call_count += 1
 
         if self.mock_tool_calls and self.call_count == 1:
             content = []
             for i, tool_call in enumerate(self.mock_tool_calls):
-                content.append({
-                    "type": "tool_use",
-                    "id": f"mock_tool_{i}",
-                    "name": tool_call["name"],
-                    "input": tool_call.get("input", {})
-                })
+                content.append(
+                    {
+                        "type": "tool_use",
+                        "id": f"mock_tool_{i}",
+                        "name": tool_call["name"],
+                        "input": tool_call.get("input", {}),
+                    }
+                )
             return LLMResponse(content=content, stop_reason="tool_use")
         else:
             return LLMResponse(
                 content=[{"type": "text", "text": self.mock_text_response}],
-                stop_reason="end_turn"
+                stop_reason="end_turn",
             )
 
     def reset(self):
@@ -149,7 +153,7 @@ def sample_graph_data() -> dict:
                 "communities": ["TestCommunity"],
                 "tags": ["test", "org"],
                 "created_at": "2024-01-01T00:00:00Z",
-                "updated_at": "2024-01-01T00:00:00Z"
+                "updated_at": "2024-01-01T00:00:00Z",
             },
             {
                 "id": "node-2",
@@ -159,7 +163,7 @@ def sample_graph_data() -> dict:
                 "communities": ["TestCommunity"],
                 "tags": ["test", "project"],
                 "created_at": "2024-01-01T00:00:00Z",
-                "updated_at": "2024-01-01T00:00:00Z"
+                "updated_at": "2024-01-01T00:00:00Z",
             },
             {
                 "id": "node-3",
@@ -169,8 +173,8 @@ def sample_graph_data() -> dict:
                 "communities": ["OtherCommunity"],
                 "tags": ["test", "doc"],
                 "created_at": "2024-01-01T00:00:00Z",
-                "updated_at": "2024-01-01T00:00:00Z"
-            }
+                "updated_at": "2024-01-01T00:00:00Z",
+            },
         ],
         "edges": [
             {
@@ -178,27 +182,23 @@ def sample_graph_data() -> dict:
                 "source": "node-1",
                 "target": "node-2",
                 "type": "IMPLEMENTS",
-                "created_at": "2024-01-01T00:00:00Z"
+                "created_at": "2024-01-01T00:00:00Z",
             },
             {
                 "id": "edge-2",
                 "source": "node-2",
                 "target": "node-3",
                 "type": "PRODUCES",
-                "created_at": "2024-01-01T00:00:00Z"
-            }
-        ]
+                "created_at": "2024-01-01T00:00:00Z",
+            },
+        ],
     }
 
 
 @pytest.fixture
 def temp_graph_file(sample_graph_data) -> Generator[str, None, None]:
     """Create a temporary graph file with sample data."""
-    with tempfile.NamedTemporaryFile(
-        mode='w',
-        suffix='.json',
-        delete=False
-    ) as f:
+    with tempfile.NamedTemporaryFile(mode="w", suffix=".json", delete=False) as f:
         json.dump(sample_graph_data, f)
         temp_path = f.name
 
@@ -252,12 +252,12 @@ def test_app(app_config, mock_llm_provider) -> TestClient:
     For tests that need to configure the mock LLM, use test_app_with_mock.
     """
     # Patch LLM provider BEFORE creating app
-    with patch('backend.ui.chat_logic.create_provider', return_value=mock_llm_provider):
-        with patch.dict(os.environ, {'ANTHROPIC_API_KEY': 'test-key'}):
+    with patch("backend.ui.chat_logic.create_provider", return_value=mock_llm_provider):
+        with patch.dict(os.environ, {"ANTHROPIC_API_KEY": "test-key"}):
             app = create_app(app_config)
             # Update the chat service to use our mock
-            if hasattr(app.state, 'chat_service'):
-                app.state.chat_service._processor.default_api_key = 'test-key'
+            if hasattr(app.state, "chat_service"):
+                app.state.chat_service._processor.default_api_key = "test-key"
             yield TestClient(app)
 
 
@@ -268,23 +268,19 @@ def test_app_with_mock(app_config, mock_llm_provider):
     Returns a tuple of (TestClient, mock_llm_provider) for tests that need to configure the mock.
     """
     # Patch LLM provider BEFORE creating app
-    with patch('backend.ui.chat_logic.create_provider', return_value=mock_llm_provider):
-        with patch.dict(os.environ, {'ANTHROPIC_API_KEY': 'test-key'}):
+    with patch("backend.ui.chat_logic.create_provider", return_value=mock_llm_provider):
+        with patch.dict(os.environ, {"ANTHROPIC_API_KEY": "test-key"}):
             app = create_app(app_config)
             # Update the chat service to use our mock
-            if hasattr(app.state, 'chat_service'):
-                app.state.chat_service._processor.default_api_key = 'test-key'
+            if hasattr(app.state, "chat_service"):
+                app.state.chat_service._processor.default_api_key = "test-key"
             yield TestClient(app), mock_llm_provider
 
 
 @pytest.fixture
 def empty_graph_file() -> Generator[str, None, None]:
     """Create an empty graph file."""
-    with tempfile.NamedTemporaryFile(
-        mode='w',
-        suffix='.json',
-        delete=False
-    ) as f:
+    with tempfile.NamedTemporaryFile(mode="w", suffix=".json", delete=False) as f:
         json.dump({"nodes": [], "edges": []}, f)
         temp_path = f.name
 

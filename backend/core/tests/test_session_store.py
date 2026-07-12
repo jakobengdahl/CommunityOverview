@@ -8,7 +8,6 @@ dropped-update rule, and the ring buffer catch-up continuity check.
 """
 
 import json
-from pathlib import Path
 
 import pytest
 
@@ -112,8 +111,17 @@ class TestStateOps:
         store = _store(tmp_path)
         s = store.create()
         self._apply(store, s, {"op": "nodes_added", "node_ids": ["a", "b"]})
-        self._apply(store, s, {"op": "node_moved", "node_id": "a", "position": {"x": 1, "y": 2}})
-        self._apply(store, s, {"op": "annotation_created", "annotation": {"kind": "group", "member_node_ids": ["a", "b"]}})
+        self._apply(
+            store, s, {"op": "node_moved", "node_id": "a", "position": {"x": 1, "y": 2}}
+        )
+        self._apply(
+            store,
+            s,
+            {
+                "op": "annotation_created",
+                "annotation": {"kind": "group", "member_node_ids": ["a", "b"]},
+            },
+        )
         self._apply(store, s, {"op": "nodes_removed", "node_ids": ["a"]})
         assert s.state["node_refs"] == ["b"]
         assert "a" not in s.state["positions"]
@@ -122,15 +130,21 @@ class TestStateOps:
     def test_node_moved_is_lww(self, tmp_path):
         store = _store(tmp_path)
         s = store.create()
-        self._apply(store, s, {"op": "node_moved", "node_id": "a", "position": {"x": 1, "y": 1}})
-        self._apply(store, s, {"op": "node_moved", "node_id": "a", "position": {"x": 9, "y": 9}})
+        self._apply(
+            store, s, {"op": "node_moved", "node_id": "a", "position": {"x": 1, "y": 1}}
+        )
+        self._apply(
+            store, s, {"op": "node_moved", "node_id": "a", "position": {"x": 9, "y": 9}}
+        )
         assert s.state["positions"]["a"] == {"x": 9.0, "y": 9.0}
 
     def test_node_moved_rejects_bad_position(self, tmp_path):
         store = _store(tmp_path)
         s = store.create()
         with pytest.raises(OpError):
-            self._apply(store, s, {"op": "node_moved", "node_id": "a", "position": {"x": "no"}})
+            self._apply(
+                store, s, {"op": "node_moved", "node_id": "a", "position": {"x": "no"}}
+            )
 
     def test_hide_show_sets(self, tmp_path):
         store = _store(tmp_path)
@@ -144,11 +158,17 @@ class TestStateOps:
     def test_annotation_created_assigns_id(self, tmp_path):
         store = _store(tmp_path)
         s = store.create()
-        applied = self._apply(store, s, {"op": "annotation_created", "annotation": {"kind": "note", "text": "hi"}})
+        applied = self._apply(
+            store,
+            s,
+            {"op": "annotation_created", "annotation": {"kind": "note", "text": "hi"}},
+        )
         assert isinstance(applied["annotation"]["id"], str)
         assert s.state["annotations"][0]["text"] == "hi"
 
-    def test_annotation_created_retry_with_same_id_upserts_not_duplicates(self, tmp_path):
+    def test_annotation_created_retry_with_same_id_upserts_not_duplicates(
+        self, tmp_path
+    ):
         store = _store(tmp_path)
         s = store.create()
         ann = {"id": "fixed-id", "kind": "note", "text": "hi"}
@@ -175,11 +195,20 @@ class TestStateOps:
     def test_annotation_update_on_deleted_is_dropped(self, tmp_path):
         store = _store(tmp_path)
         s = store.create()
-        applied = self._apply(store, s, {"op": "annotation_created", "annotation": {"kind": "note"}})
+        applied = self._apply(
+            store, s, {"op": "annotation_created", "annotation": {"kind": "note"}}
+        )
         ann_id = applied["annotation"]["id"]
         self._apply(store, s, {"op": "annotation_deleted", "annotation_id": ann_id})
         seq_before = s.seq
-        result = self._apply(store, s, {"op": "annotation_updated", "annotation": {"id": ann_id, "kind": "note", "text": "x"}})
+        result = self._apply(
+            store,
+            s,
+            {
+                "op": "annotation_updated",
+                "annotation": {"id": ann_id, "kind": "note", "text": "x"},
+            },
+        )
         assert result is None
         assert s.seq == seq_before  # dropped op must not advance seq
 
@@ -187,21 +216,45 @@ class TestStateOps:
         store = _store(tmp_path)
         s = store.create()
         with pytest.raises(OpError):
-            self._apply(store, s, {"op": "group_membership_changed", "group_id": "missing", "member_node_ids": []})
+            self._apply(
+                store,
+                s,
+                {
+                    "op": "group_membership_changed",
+                    "group_id": "missing",
+                    "member_node_ids": [],
+                },
+            )
 
     def test_layout_applied_batch(self, tmp_path):
         store = _store(tmp_path)
         s = store.create()
-        self._apply(store, s, {"op": "layout_applied", "positions": {"a": {"x": 1, "y": 2}, "b": {"x": 3, "y": 4}}})
-        assert s.state["positions"] == {"a": {"x": 1.0, "y": 2.0}, "b": {"x": 3.0, "y": 4.0}}
+        self._apply(
+            store,
+            s,
+            {
+                "op": "layout_applied",
+                "positions": {"a": {"x": 1, "y": 2}, "b": {"x": 3, "y": 4}},
+            },
+        )
+        assert s.state["positions"] == {
+            "a": {"x": 1.0, "y": 2.0},
+            "b": {"x": 3.0, "y": 4.0},
+        }
 
     def test_annotation_limit_enforced(self, tmp_path):
         store = SessionStore(InMemorySessionPersistenceBackend(), max_annotations=2)
         s = store.create()
-        self._apply(store, s, {"op": "annotation_created", "annotation": {"kind": "note"}})
-        self._apply(store, s, {"op": "annotation_created", "annotation": {"kind": "note"}})
+        self._apply(
+            store, s, {"op": "annotation_created", "annotation": {"kind": "note"}}
+        )
+        self._apply(
+            store, s, {"op": "annotation_created", "annotation": {"kind": "note"}}
+        )
         with pytest.raises(OpError):
-            self._apply(store, s, {"op": "annotation_created", "annotation": {"kind": "note"}})
+            self._apply(
+                store, s, {"op": "annotation_created", "annotation": {"kind": "note"}}
+            )
 
     def test_unknown_op_raises(self, tmp_path):
         store = _store(tmp_path)
@@ -234,5 +287,3 @@ class TestRingBufferCatchUp:
         assert store.ops_since(s.id, 1) is None
         # but a recent enough since_seq is served from the ring
         assert [op["seq"] for op in store.ops_since(s.id, 4)] == [5]
-
-

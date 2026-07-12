@@ -10,7 +10,9 @@ from backend.llm.language_policy import format_language_policy_for_prompt
 def configured_test_schema():
     from backend import config_loader
 
-    test_config_path = str(Path(__file__).parent.parent.parent / "config" / "test" / "schema_config.json")
+    test_config_path = str(
+        Path(__file__).parent.parent.parent / "config" / "test" / "schema_config.json"
+    )
     os.environ["SCHEMA_FILE"] = test_config_path
     config_loader.reset_loader()
     yield
@@ -33,7 +35,9 @@ def test_system_prompt_includes_language_policy():
 def test_external_language_policy_instructions_allow_user_language_separately():
     from backend import config_loader
 
-    instructions = format_language_policy_for_prompt(config_loader.get_presentation(), external_agent=True)
+    instructions = format_language_policy_for_prompt(
+        config_loader.get_presentation(), external_agent=True
+    )
 
     assert "LANGUAGE POLICY:" in instructions
     assert "Mode: required" in instructions

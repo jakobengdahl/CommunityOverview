@@ -1,12 +1,12 @@
 import pytest
 import time
 import uuid
-from unittest.mock import MagicMock, patch
+from unittest.mock import patch
 
-from backend.core import GraphStorage, Node, NodeType
+from backend.core import GraphStorage
 from backend.service import GraphService
-from backend.agents import AgentRegistry, AgentsSettings, AgentConfig
-from backend.core.events.dispatcher import EventDispatcher
+from backend.agents import AgentRegistry, AgentsSettings
+
 
 class TestAgentFlow:
     @pytest.fixture
@@ -24,7 +24,7 @@ class TestAgentFlow:
             enabled=True,
             llm_provider="openai",
             openai_api_key="sk-test",
-            mcp_integrations=[], # No external tools needed for this test
+            mcp_integrations=[],  # No external tools needed for this test
         )
 
         # 4. Registry
@@ -39,7 +39,9 @@ class TestAgentFlow:
                 return False
             if not registry.is_agent_subscription(subscription_id):
                 return False
-            return registry.enqueue_for_subscription(subscription_id, event.to_webhook_payload())
+            return registry.enqueue_for_subscription(
+                subscription_id, event.to_webhook_payload()
+            )
 
         storage.set_agent_delivery_callback(agent_delivery_callback)
 
@@ -90,14 +92,14 @@ class TestAgentFlow:
                 "filters": {
                     "target": {"entity_kind": "node", "node_types": ["Resource"]},
                     "operations": ["create"],
-                    "keywords": {"any": []}
+                    "keywords": {"any": []},
                 },
                 "delivery": {
-                    "webhook_url": f"internal://agent/placeholder",
+                    "webhook_url": "internal://agent/placeholder",
                     "ignore_origins": [],
-                    "ignore_session_ids": []
-                }
-            }
+                    "ignore_session_ids": [],
+                },
+            },
         }
 
         agent_node = {
@@ -106,11 +108,9 @@ class TestAgentFlow:
             "metadata": {
                 "subscription_id": sub_id,
                 "enabled": True,
-                "prompts": {
-                    "task_prompt": "Do something."
-                },
-                "mcp_integration_ids": []
-            }
+                "prompts": {"task_prompt": "Do something."},
+                "mcp_integration_ids": [],
+            },
         }
 
         # 2. Add Agent and Subscription
@@ -126,7 +126,9 @@ class TestAgentFlow:
         # Allow a brief moment for the thread/listener to fire
         time.sleep(0.5)
 
-        assert agent_id in registry._workers, "Worker should be running for the new agent"
+        assert agent_id in registry._workers, (
+            "Worker should be running for the new agent"
+        )
         worker = registry._workers[agent_id]
         assert worker.is_running
 
@@ -138,11 +140,11 @@ class TestAgentFlow:
         resource_node = {
             "name": "My New Resource",
             "type": "Resource",
-            "description": "Some description"
+            "description": "Some description",
         }
 
         # Mock the worker's enqueue method to verify it gets called
-        with patch.object(worker, 'enqueue', wraps=worker.enqueue) as mock_enqueue:
+        with patch.object(worker, "enqueue", wraps=worker.enqueue) as mock_enqueue:
             res_result = service.add_nodes([resource_node], [])
             assert res_result["success"] is True
 

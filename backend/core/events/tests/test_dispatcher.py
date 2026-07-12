@@ -2,9 +2,7 @@
 Tests for event dispatcher.
 """
 
-import pytest
-from unittest.mock import MagicMock, patch
-from typing import List, Dict, Any
+from typing import List, Dict
 
 from backend.core.events.models import (
     Event,
@@ -12,10 +10,6 @@ from backend.core.events.models import (
     EntityKind,
     EventContext,
     EntityData,
-    SubscriptionFilters,
-    SubscriptionDelivery,
-    TargetFilters,
-    KeywordFilters,
 )
 from backend.core.events.dispatcher import EventDispatcher
 
@@ -121,9 +115,7 @@ class TestDispatcherFiltering:
 
     def test_matches_specific_node_type(self):
         """Test filtering by node type."""
-        sub = create_subscription_node(
-            "sub-1", "Actor Events", node_types=["Actor"]
-        )
+        sub = create_subscription_node("sub-1", "Actor Events", node_types=["Actor"])
         storage = MockStorage([sub])
         dispatcher = EventDispatcher(storage)
 
@@ -143,8 +135,7 @@ class TestDispatcherFiltering:
     def test_matches_multiple_node_types(self):
         """Test filtering by multiple node types."""
         sub = create_subscription_node(
-            "sub-1", "Actor/Initiative Events",
-            node_types=["Actor", "Initiative"]
+            "sub-1", "Actor/Initiative Events", node_types=["Actor", "Initiative"]
         )
         storage = MockStorage([sub])
         dispatcher = EventDispatcher(storage)
@@ -164,9 +155,7 @@ class TestDispatcherFiltering:
 
     def test_matches_specific_operations(self):
         """Test filtering by operation type."""
-        sub = create_subscription_node(
-            "sub-1", "Create Only", operations=["create"]
-        )
+        sub = create_subscription_node("sub-1", "Create Only", operations=["create"])
         storage = MockStorage([sub])
         dispatcher = EventDispatcher(storage)
 
@@ -189,9 +178,7 @@ class TestKeywordMatching:
 
     def test_matches_keyword_in_name(self):
         """Test keyword matching in name field."""
-        sub = create_subscription_node(
-            "sub-1", "AI Events", keywords=["AI"]
-        )
+        sub = create_subscription_node("sub-1", "AI Events", keywords=["AI"])
         storage = MockStorage([sub])
         dispatcher = EventDispatcher(storage)
 
@@ -205,20 +192,20 @@ class TestKeywordMatching:
 
     def test_matches_keyword_in_description(self):
         """Test keyword matching in description field."""
-        sub = create_subscription_node(
-            "sub-1", "AI Events", keywords=["artificiell"]
-        )
+        sub = create_subscription_node("sub-1", "AI Events", keywords=["artificiell"])
         storage = MockStorage([sub])
         dispatcher = EventDispatcher(storage)
 
         delivered = []
         dispatcher.set_delivery_callback(lambda e, u: delivered.append((e, u)))
 
-        event = create_event(after={
-            "name": "Tech Project",
-            "description": "Projekt om artificiell intelligens",
-            "type": "Initiative"
-        })
+        event = create_event(
+            after={
+                "name": "Tech Project",
+                "description": "Projekt om artificiell intelligens",
+                "type": "Initiative",
+            }
+        )
         dispatcher.dispatch(event)
 
         assert len(delivered) == 1
@@ -234,19 +221,16 @@ class TestKeywordMatching:
         delivered = []
         dispatcher.set_delivery_callback(lambda e, u: delivered.append((e, u)))
 
-        event = create_event(after={
-            "name": "DIGITALISERING Initiativ",
-            "type": "Initiative"
-        })
+        event = create_event(
+            after={"name": "DIGITALISERING Initiativ", "type": "Initiative"}
+        )
         dispatcher.dispatch(event)
 
         assert len(delivered) == 1
 
     def test_no_match_without_keyword(self):
         """Test that events without keywords don't match."""
-        sub = create_subscription_node(
-            "sub-1", "AI Events", keywords=["blockchain"]
-        )
+        sub = create_subscription_node("sub-1", "AI Events", keywords=["blockchain"])
         storage = MockStorage([sub])
         dispatcher = EventDispatcher(storage)
 
@@ -265,8 +249,7 @@ class TestLoopPrevention:
     def test_blocks_ignored_origin(self):
         """Test that events from ignored origins are blocked."""
         sub = create_subscription_node(
-            "sub-1", "Subscription",
-            ignore_origins=["agent:my-agent"]
+            "sub-1", "Subscription", ignore_origins=["agent:my-agent"]
         )
         storage = MockStorage([sub])
         dispatcher = EventDispatcher(storage)
@@ -282,8 +265,7 @@ class TestLoopPrevention:
     def test_allows_non_ignored_origin(self):
         """Test that events from non-ignored origins pass."""
         sub = create_subscription_node(
-            "sub-1", "Subscription",
-            ignore_origins=["agent:my-agent"]
+            "sub-1", "Subscription", ignore_origins=["agent:my-agent"]
         )
         storage = MockStorage([sub])
         dispatcher = EventDispatcher(storage)
@@ -299,8 +281,7 @@ class TestLoopPrevention:
     def test_blocks_ignored_session_id(self):
         """Test that events with ignored session IDs are blocked."""
         sub = create_subscription_node(
-            "sub-1", "Subscription",
-            ignore_session_ids=["session-123"]
+            "sub-1", "Subscription", ignore_session_ids=["session-123"]
         )
         storage = MockStorage([sub])
         dispatcher = EventDispatcher(storage)
@@ -316,8 +297,7 @@ class TestLoopPrevention:
     def test_allows_events_without_origin(self):
         """Test that events without origin info are allowed (PoC default)."""
         sub = create_subscription_node(
-            "sub-1", "Subscription",
-            ignore_origins=["agent:my-agent"]
+            "sub-1", "Subscription", ignore_origins=["agent:my-agent"]
         )
         storage = MockStorage([sub])
         dispatcher = EventDispatcher(storage)
@@ -406,11 +386,13 @@ class TestFederationFilterMatching:
         delivered = []
         dispatcher.set_delivery_callback(lambda e, u: delivered.append((e, u)))
 
-        event = create_event(after={
-            "name": "Remote Actor",
-            "type": "Actor",
-            "metadata": {"origin_graph_id": "esam-main", "federation_distance": 1},
-        })
+        event = create_event(
+            after={
+                "name": "Remote Actor",
+                "type": "Actor",
+                "metadata": {"origin_graph_id": "esam-main", "federation_distance": 1},
+            }
+        )
         dispatcher.dispatch(event)
 
         assert len(delivered) == 0
@@ -427,11 +409,13 @@ class TestFederationFilterMatching:
         delivered = []
         dispatcher.set_delivery_callback(lambda e, u: delivered.append((e, u)))
 
-        event = create_event(after={
-            "name": "Remote Actor",
-            "type": "Actor",
-            "metadata": {"origin_graph_id": "esam-main", "federation_distance": 1},
-        })
+        event = create_event(
+            after={
+                "name": "Remote Actor",
+                "type": "Actor",
+                "metadata": {"origin_graph_id": "esam-main", "federation_distance": 1},
+            }
+        )
         dispatcher.dispatch(event)
 
         assert len(delivered) == 1
@@ -450,21 +434,30 @@ class TestFederationFilterMatching:
         delivered = []
         dispatcher.set_delivery_callback(lambda e, u: delivered.append((e, u)))
 
-        event_ok = create_event(after={
-            "name": "Remote Actor",
-            "type": "Actor",
-            "metadata": {"origin_graph_id": "esam-main", "federation_distance": 1},
-        })
-        event_wrong_graph = create_event(after={
-            "name": "Remote Actor",
-            "type": "Actor",
-            "metadata": {"origin_graph_id": "other-graph", "federation_distance": 1},
-        })
-        event_too_far = create_event(after={
-            "name": "Remote Actor",
-            "type": "Actor",
-            "metadata": {"origin_graph_id": "esam-main", "federation_distance": 2},
-        })
+        event_ok = create_event(
+            after={
+                "name": "Remote Actor",
+                "type": "Actor",
+                "metadata": {"origin_graph_id": "esam-main", "federation_distance": 1},
+            }
+        )
+        event_wrong_graph = create_event(
+            after={
+                "name": "Remote Actor",
+                "type": "Actor",
+                "metadata": {
+                    "origin_graph_id": "other-graph",
+                    "federation_distance": 1,
+                },
+            }
+        )
+        event_too_far = create_event(
+            after={
+                "name": "Remote Actor",
+                "type": "Actor",
+                "metadata": {"origin_graph_id": "esam-main", "federation_distance": 2},
+            }
+        )
 
         dispatcher.dispatch(event_ok)
         dispatcher.dispatch(event_wrong_graph)

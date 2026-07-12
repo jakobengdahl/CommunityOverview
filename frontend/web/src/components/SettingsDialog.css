@@ -55,7 +55,9 @@
   display: flex;
   align-items: center;
   border-radius: 6px;
-  transition: background 0.15s, color 0.15s;
+  transition:
+    background 0.15s,
+    color 0.15s;
 }
 
 .settings-dialog-close:hover {
@@ -137,7 +139,9 @@
   font-size: 0.7rem;
   padding: 2px 8px;
   cursor: pointer;
-  transition: color 0.15s, border-color 0.15s;
+  transition:
+    color 0.15s,
+    border-color 0.15s;
 }
 
 .settings-dialog-type-details-btn:hover {
@@ -184,7 +188,9 @@
   font-size: 0.82rem;
   cursor: pointer;
   text-align: left;
-  transition: background 0.15s, color 0.15s;
+  transition:
+    background 0.15s,
+    color 0.15s;
 }
 
 .settings-dialog-menu-item:hover {
@@ -222,7 +228,9 @@
   height: 12px;
   border-radius: 50%;
   background: #888;
-  transition: transform 0.2s, background 0.2s;
+  transition:
+    transform 0.2s,
+    background 0.2s;
 }
 
 .settings-dialog-toggle.active {

@@ -36,7 +36,7 @@ describe('getEventSessionId', () => {
         for (let key in store) {
           delete store[key];
         }
-      })
+      }),
     };
 
     originalSessionStorage = global.sessionStorage;

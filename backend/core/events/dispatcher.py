@@ -14,9 +14,7 @@ from datetime import datetime, timezone
 
 from .models import (
     Event,
-    EventType,
     EntityKind,
-    EventContext,
     SubscriptionFilters,
     SubscriptionDelivery,
     SubscriptionInfo,
@@ -102,7 +100,9 @@ class EventDispatcher:
 
         # Search for EventSubscription nodes
         for node in self._storage.nodes.values():
-            node_type = node.type.value if hasattr(node.type, 'value') else str(node.type)
+            node_type = (
+                node.type.value if hasattr(node.type, "value") else str(node.type)
+            )
             if node_type != "EventSubscription":
                 continue
 
@@ -122,12 +122,14 @@ class EventDispatcher:
 
             delivery = self._parse_delivery(delivery_data)
 
-            subscriptions.append({
-                "id": node.id,
-                "name": node.name,
-                "filters": filters,
-                "delivery": delivery,
-            })
+            subscriptions.append(
+                {
+                    "id": node.id,
+                    "name": node.name,
+                    "filters": filters,
+                    "delivery": delivery,
+                }
+            )
 
         # Update cache
         self._subscriptions_cache = subscriptions
@@ -147,9 +149,7 @@ class EventDispatcher:
         )
 
         keywords_data = data.get("keywords", {})
-        keywords = KeywordFilters(
-            any=keywords_data.get("any", [])
-        )
+        keywords = KeywordFilters(any=keywords_data.get("any", []))
 
         federation_data = data.get("federation", {})
         federation = FederationFilters(
@@ -195,7 +195,9 @@ class EventDispatcher:
         subscriptions = self._load_subscriptions()
         dispatch_count = 0
 
-        print(f"EVENT: Dispatching to {len(subscriptions)} subscription(s), event type: {event.event_type.value}")
+        print(
+            f"EVENT: Dispatching to {len(subscriptions)} subscription(s), event type: {event.event_type.value}"
+        )
 
         for sub in subscriptions:
             matches = self._matches(event, sub)
@@ -220,12 +222,12 @@ class EventDispatcher:
                 handled_by_agent = False
                 if self._on_agent_deliver:
                     try:
-                        handled_by_agent = self._on_agent_deliver(
-                            event_copy, sub["id"]
-                        )
+                        handled_by_agent = self._on_agent_deliver(event_copy, sub["id"])
                         if handled_by_agent:
                             dispatch_count += 1
-                            print(f"EVENT: Routed to agent for subscription '{sub['name']}'")
+                            print(
+                                f"EVENT: Routed to agent for subscription '{sub['name']}'"
+                            )
                             logger.info(
                                 f"Routed event {event.event_id} to agent "
                                 f"via subscription {sub['name']}"
@@ -340,11 +342,12 @@ class EventDispatcher:
 
         return False
 
-
     def _matches_federation(self, event: Event, federation: FederationFilters) -> bool:
         """Check federation-scoped filters for local/federated event selection."""
         entity_data = event.entity.after or event.entity.before or {}
-        metadata = entity_data.get("metadata", {}) if isinstance(entity_data, dict) else {}
+        metadata = (
+            entity_data.get("metadata", {}) if isinstance(entity_data, dict) else {}
+        )
 
         origin_graph_id = metadata.get("origin_graph_id")
         federation_distance = metadata.get("federation_distance")

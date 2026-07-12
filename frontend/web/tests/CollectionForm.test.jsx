@@ -13,8 +13,22 @@ describe('CollectionForm', () => {
     title: 'Feedback',
     submit_label: 'Send it',
     fields: [
-      { id: 'role', label: 'Your role', type: 'radio', options: ['Manager', 'Analyst'], required: true },
-      { id: 'topics', label: 'Topics', type: 'checkbox', options: [{ value: 'a', label: 'AI' }, { value: 'b', label: 'Data' }] },
+      {
+        id: 'role',
+        label: 'Your role',
+        type: 'radio',
+        options: ['Manager', 'Analyst'],
+        required: true,
+      },
+      {
+        id: 'topics',
+        label: 'Topics',
+        type: 'checkbox',
+        options: [
+          { value: 'a', label: 'AI' },
+          { value: 'b', label: 'Data' },
+        ],
+      },
       { id: 'score', label: 'Satisfaction', type: 'slider', min: 1, max: 5, step: 1 },
       { id: 'comment', label: 'Comment', type: 'text' },
     ],
@@ -45,7 +59,7 @@ describe('CollectionForm', () => {
 
     expect(onSubmit).toHaveBeenCalledTimes(1);
     const answers = onSubmit.mock.calls[0][0];
-    const byId = Object.fromEntries(answers.map(a => [a.field_id, a]));
+    const byId = Object.fromEntries(answers.map((a) => [a.field_id, a]));
     expect(byId.role.value).toBe('Manager');
     expect(byId.role.type).toBe('radio');
     expect(byId.topics.value).toEqual(['b']);
@@ -53,7 +67,9 @@ describe('CollectionForm', () => {
   });
 
   it('locks the form and shows submitted label when submitted', () => {
-    render(<CollectionForm form={form} onSubmit={onSubmit} submitted labels={{ submitted: 'Done' }} />);
+    render(
+      <CollectionForm form={form} onSubmit={onSubmit} submitted labels={{ submitted: 'Done' }} />
+    );
     const button = screen.getByRole('button', { name: 'Done' });
     expect(button).toBeDisabled();
     fireEvent.click(button);

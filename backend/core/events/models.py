@@ -14,6 +14,7 @@ import uuid
 
 class EventType(str, Enum):
     """Types of graph mutation events."""
+
     NODE_CREATE = "node.create"
     NODE_UPDATE = "node.update"
     NODE_DELETE = "node.delete"
@@ -24,12 +25,14 @@ class EventType(str, Enum):
 
 class EntityKind(str, Enum):
     """Kind of entity that triggered the event."""
+
     NODE = "node"
     EDGE = "edge"
 
 
 class EventOrigin:
     """Common event origin values."""
+
     WEB_UI = "web-ui"
     MCP = "mcp"
     SYSTEM = "system"
@@ -55,11 +58,15 @@ class EventOrigin:
 class EventActorAttribution(BaseModel):
     """Generic actor attribution for mutation and event metadata."""
 
-    actor_id: str = Field(default="", description="Generic actor identifier when available")
+    actor_id: str = Field(
+        default="", description="Generic actor identifier when available"
+    )
     actor_type: str = Field(default="", description="Generic actor type when available")
     is_authenticated: bool = Field(default=False)
     auth_source: str = Field(default="anonymous")
-    source: str = Field(default="default", description="Where the attribution inputs came from")
+    source: str = Field(
+        default="default", description="Where the attribution inputs came from"
+    )
 
     def to_dict(self) -> Dict[str, Any]:
         return {
@@ -77,7 +84,9 @@ class EventScopeAttribution(BaseModel):
     workspace_id: str = Field(default="")
     workspace_kind: str = Field(default="")
     graph_id: str = Field(default="")
-    source: str = Field(default="default", description="Where the scope inputs came from")
+    source: str = Field(
+        default="default", description="Where the scope inputs came from"
+    )
 
     def to_dict(self) -> Dict[str, Any]:
         return {
@@ -119,17 +128,15 @@ class EventContext(BaseModel):
     This context is passed through mutations and included in webhook payloads
     but is NOT stored in the graph itself.
     """
+
     event_origin: Optional[str] = Field(
-        None,
-        description="Source of the mutation (web-ui, mcp, system, agent:<id>)"
+        None, description="Source of the mutation (web-ui, mcp, system, agent:<id>)"
     )
     event_session_id: Optional[str] = Field(
-        None,
-        description="Unique session ID for loop prevention"
+        None, description="Unique session ID for loop prevention"
     )
     event_correlation_id: Optional[str] = Field(
-        None,
-        description="Correlation ID for chaining related events"
+        None, description="Correlation ID for chaining related events"
     )
     attribution: Optional[EventAttribution] = Field(
         None,
@@ -150,6 +157,7 @@ class EntityData(BaseModel):
     """
     Data about the entity (node or edge) that was mutated.
     """
+
     kind: EntityKind
     id: str
     type: str  # node.type or edge.type
@@ -168,6 +176,7 @@ class SubscriptionInfo(BaseModel):
     """
     Information about the subscription that matched this event.
     """
+
     id: str  # EventSubscription node ID
     name: str  # EventSubscription name (for readability)
 
@@ -176,6 +185,7 @@ class Event(BaseModel):
     """
     A graph mutation event that can be sent to webhooks.
     """
+
     event_id: str = Field(default_factory=lambda: str(uuid.uuid4()))
     event_type: EventType
     occurred_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
@@ -189,13 +199,12 @@ class Event(BaseModel):
     # Subscription info (filled in when dispatching)
     subscription: Optional[SubscriptionInfo] = None
 
-
     def to_webhook_payload(self) -> Dict[str, Any]:
         """Convert to the webhook payload format."""
         return {
             "event_id": self.event_id,
             "event_type": self.event_type.value,
-            "occurred_at": self.occurred_at.isoformat().replace('+00:00', 'Z'),
+            "occurred_at": self.occurred_at.isoformat().replace("+00:00", "Z"),
             "origin": self.origin.to_dict(),
             "entity": {
                 "kind": self.entity.kind.value,
@@ -205,17 +214,20 @@ class Event(BaseModel):
                     "before": self.entity.before,
                     "after": self.entity.after,
                     "patch": self.entity.patch,
-                }
+                },
             },
             "subscription": {
                 "id": self.subscription.id,
                 "name": self.subscription.name,
-            } if self.subscription else None,
+            }
+            if self.subscription
+            else None,
         }
 
 
 class DeliveryStatus(str, Enum):
     """Status of a webhook delivery attempt."""
+
     SUCCESS = "success"
     FAILED = "failed"
     RETRYING = "retrying"
@@ -226,6 +238,7 @@ class DeliveryResult(BaseModel):
     """
     Result of attempting to deliver an event to a webhook.
     """
+
     event_id: str
     subscription_id: str
     webhook_url: str
@@ -237,59 +250,57 @@ class DeliveryResult(BaseModel):
     delivered_at: Optional[datetime] = None
 
 
-
 # Subscription configuration models (stored in EventSubscription node metadata)
+
 
 class KeywordFilters(BaseModel):
     """Keyword filters for matching events."""
+
     any: List[str] = Field(
         default_factory=list,
-        description="Match if any of these keywords appear in name/description/summary/tags"
+        description="Match if any of these keywords appear in name/description/summary/tags",
     )
 
 
 class TargetFilters(BaseModel):
     """Target filters for what entities to match."""
+
     entity_kind: EntityKind = Field(
-        default=EntityKind.NODE,
-        description="Match node or edge events"
+        default=EntityKind.NODE, description="Match node or edge events"
     )
     node_types: List[str] = Field(
-        default_factory=list,
-        description="Match specific node types (empty = all)"
+        default_factory=list, description="Match specific node types (empty = all)"
     )
     relationship_types: List[str] = Field(
         default_factory=list,
-        description="Match specific relationship types for edge events (empty = all)"
+        description="Match specific relationship types for edge events (empty = all)",
     )
-
-
 
 
 class FederationFilters(BaseModel):
     """Federation scope filters for subscription matching."""
+
     scope: str = Field(
-        default="local_only",
-        description="local_only or local_and_federated"
+        default="local_only", description="local_only or local_and_federated"
     )
     include_graph_ids: List[str] = Field(
-        default_factory=list,
-        description="Optional allow-list of origin graph IDs"
+        default_factory=list, description="Optional allow-list of origin graph IDs"
     )
     max_distance: Optional[int] = Field(
-        default=None,
-        description="Optional max federation distance"
+        default=None, description="Optional max federation distance"
     )
+
 
 class SubscriptionFilters(BaseModel):
     """
     Filter configuration for an EventSubscription.
     Stored in EventSubscription.metadata.filters
     """
+
     target: TargetFilters = Field(default_factory=TargetFilters)
     operations: List[str] = Field(
         default_factory=lambda: ["create", "update", "delete"],
-        description="Which operations to match (create, update, delete)"
+        description="Which operations to match (create, update, delete)",
     )
     keywords: KeywordFilters = Field(default_factory=KeywordFilters)
     federation: FederationFilters = Field(default_factory=FederationFilters)
@@ -300,15 +311,11 @@ class SubscriptionDelivery(BaseModel):
     Delivery configuration for an EventSubscription.
     Stored in EventSubscription.metadata.delivery
     """
-    webhook_url: str = Field(
-        ...,
-        description="URL to POST events to"
-    )
+
+    webhook_url: str = Field(..., description="URL to POST events to")
     ignore_origins: List[str] = Field(
-        default_factory=list,
-        description="Origins to ignore (for loop prevention)"
+        default_factory=list, description="Origins to ignore (for loop prevention)"
     )
     ignore_session_ids: List[str] = Field(
-        default_factory=list,
-        description="Session IDs to ignore (for loop prevention)"
+        default_factory=list, description="Session IDs to ignore (for loop prevention)"
     )

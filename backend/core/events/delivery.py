@@ -63,7 +63,7 @@ def is_safe_url(url: str) -> bool:
     """
     try:
         parsed = urllib.parse.urlparse(url)
-        if parsed.scheme not in ('http', 'https'):
+        if parsed.scheme not in ("http", "https"):
             return False
 
         hostname = parsed.hostname
@@ -80,7 +80,7 @@ def is_safe_url(url: str) -> bool:
         for addr_info in addr_infos:
             ip_str = addr_info[4][0]
             # Strip the zone ID that may appear in IPv6 link-local addresses
-            ip_str = ip_str.split('%')[0]
+            ip_str = ip_str.split("%")[0]
             ip = ipaddress.ip_address(ip_str)
             if not _is_safe_ip(ip):
                 return False
@@ -179,9 +179,7 @@ class DeliveryWorker:
         """
         item = DeliveryItem(event=event, webhook_url=webhook_url)
         self._queue.put(item)
-        logger.debug(
-            f"Enqueued event {event.event_id} for delivery to {webhook_url}"
-        )
+        logger.debug(f"Enqueued event {event.event_id} for delivery to {webhook_url}")
 
     def _process_queue(self) -> None:
         """Main loop for processing the delivery queue."""
@@ -217,14 +215,18 @@ class DeliveryWorker:
             # Validate URL to prevent SSRF — drop immediately, never retry.
             # A private/reserved IP will not become public on a subsequent attempt.
             if not is_safe_url(webhook_url):
-                error_message = "Blocked attempt to send webhook to restricted IP address"
+                error_message = (
+                    "Blocked attempt to send webhook to restricted IP address"
+                )
                 logger.error(
                     f"SSRF blocked: event {event.event_id} to {webhook_url}. {error_message}"
                 )
                 if self._on_result:
                     result = DeliveryResult(
                         event_id=event.event_id,
-                        subscription_id=event.subscription.id if event.subscription else "",
+                        subscription_id=event.subscription.id
+                        if event.subscription
+                        else "",
                         webhook_url=webhook_url,
                         status=DeliveryStatus.DROPPED,
                         attempt=attempt,

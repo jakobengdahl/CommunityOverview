@@ -11,10 +11,23 @@ from typing import List, Dict, Any, Optional
 from enum import Enum
 
 _WEEKDAY_NAMES: Dict[str, int] = {
-    "monday": 0, "tuesday": 1, "wednesday": 2, "thursday": 3,
-    "friday": 4, "saturday": 5, "sunday": 6,
+    "monday": 0,
+    "tuesday": 1,
+    "wednesday": 2,
+    "thursday": 3,
+    "friday": 4,
+    "saturday": 5,
+    "sunday": 6,
 }
-_WEEKDAY_DISPLAY = ["Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday", "Sunday"]
+_WEEKDAY_DISPLAY = [
+    "Monday",
+    "Tuesday",
+    "Wednesday",
+    "Thursday",
+    "Friday",
+    "Saturday",
+    "Sunday",
+]
 
 
 @dataclass
@@ -25,6 +38,7 @@ class AgentSchedule:
     day_of_week: 0=Monday … 6=Sunday
     hour/minute: local time in the given timezone
     """
+
     day_of_week: int
     hour: int
     minute: int
@@ -83,6 +97,7 @@ class AgentSchedule:
         tz_str = str(data.get("timezone", "UTC"))
         try:
             from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
+
             ZoneInfo(tz_str)
         except (ZoneInfoNotFoundError, KeyError):
             return None
@@ -117,6 +132,7 @@ class AgentSchedule:
 
 class MCPTransport(str, Enum):
     """Transport type for MCP server connections."""
+
     HTTP = "http"  # HTTP/SSE transport
     STDIO = "stdio"  # stdio transport (subprocess)
 
@@ -136,6 +152,7 @@ class MCPIntegration:
         env: Environment variables to pass to stdio subprocess
         enabled: Whether this integration is active
     """
+
     id: str
     name: str
     description: str = ""
@@ -162,6 +179,7 @@ class MCPIntegration:
 @dataclass
 class AgentPrompts:
     """Prompts configuration for an agent."""
+
     task_prompt: str = ""
 
     @classmethod
@@ -178,6 +196,7 @@ class AgentConfig:
 
     Parsed from Agent node metadata in the graph.
     """
+
     agent_id: str
     name: str
     enabled: bool = True
@@ -245,6 +264,7 @@ class AgentsSettings:
 
     Loaded from environment variables and/or config file.
     """
+
     enabled: bool = False
     # scheduler_enabled: run the in-process time-based scheduler.
     # Keep False (default) when the deployment platform can scale to zero —
@@ -281,7 +301,9 @@ class AgentsSettings:
         enabled_str = os.environ.get("AGENTS_ENABLED", "false").lower()
         enabled = enabled_str in ("true", "1", "yes")
 
-        scheduler_enabled_str = os.environ.get("AGENTS_SCHEDULER_ENABLED", "false").lower()
+        scheduler_enabled_str = os.environ.get(
+            "AGENTS_SCHEDULER_ENABLED", "false"
+        ).lower()
         scheduler_enabled = scheduler_enabled_str in ("true", "1", "yes")
 
         # Get LLM settings (share with chat service)
@@ -340,47 +362,60 @@ class AgentsSettings:
 
         # GRAPH: Internal graph MCP (always available via local endpoint)
         port = os.environ.get("PORT", "8000")
-        integrations.append(MCPIntegration(
-            id="GRAPH",
-            name="Graph API",
-            description="Read and write to the knowledge graph",
-            transport=MCPTransport.HTTP,
-            url=f"http://localhost:{port}/mcp/sse",
-            enabled=True,
-        ))
+        integrations.append(
+            MCPIntegration(
+                id="GRAPH",
+                name="Graph API",
+                description="Read and write to the knowledge graph",
+                transport=MCPTransport.HTTP,
+                url=f"http://localhost:{port}/mcp/sse",
+                enabled=True,
+            )
+        )
 
         # WEB: Fetch MCP server for web content
-        integrations.append(MCPIntegration(
-            id="WEB",
-            name="Web Fetch",
-            description="Fetch and convert web content",
-            transport=MCPTransport.STDIO,
-            command=["npx", "-y", "@anthropic/fetch-mcp"],
-            enabled=True,
-        ))
+        integrations.append(
+            MCPIntegration(
+                id="WEB",
+                name="Web Fetch",
+                description="Fetch and convert web content",
+                transport=MCPTransport.STDIO,
+                command=["npx", "-y", "@anthropic/fetch-mcp"],
+                enabled=True,
+            )
+        )
 
         # FS: Filesystem MCP server
-        integrations.append(MCPIntegration(
-            id="FS",
-            name="Filesystem",
-            description="Read and write files",
-            transport=MCPTransport.STDIO,
-            command=["npx", "-y", "@anthropic/filesystem-mcp", "/tmp/agent-workspace"],
-            enabled=True,
-        ))
+        integrations.append(
+            MCPIntegration(
+                id="FS",
+                name="Filesystem",
+                description="Read and write files",
+                transport=MCPTransport.STDIO,
+                command=[
+                    "npx",
+                    "-y",
+                    "@anthropic/filesystem-mcp",
+                    "/tmp/agent-workspace",
+                ],
+                enabled=True,
+            )
+        )
 
         # SEARCH: Brave Search MCP (only if API key is available)
         brave_api_key = os.environ.get("BRAVE_API_KEY")
         if brave_api_key:
-            integrations.append(MCPIntegration(
-                id="SEARCH",
-                name="Brave Search",
-                description="Search the web using Brave Search",
-                transport=MCPTransport.STDIO,
-                command=["npx", "-y", "@anthropic/brave-search-mcp"],
-                env={"BRAVE_API_KEY": brave_api_key},
-                enabled=True,
-            ))
+            integrations.append(
+                MCPIntegration(
+                    id="SEARCH",
+                    name="Brave Search",
+                    description="Search the web using Brave Search",
+                    transport=MCPTransport.STDIO,
+                    command=["npx", "-y", "@anthropic/brave-search-mcp"],
+                    env={"BRAVE_API_KEY": brave_api_key},
+                    enabled=True,
+                )
+            )
 
         return integrations
 

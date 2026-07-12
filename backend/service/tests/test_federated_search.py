@@ -9,21 +9,23 @@ from backend.service import GraphService
 
 
 def _make_manager_with_single_cached_node() -> FederationManager:
-    config = FederationFileConfig.model_validate({
-        "federation": {
-            "enabled": True,
-            "graphs": [
-                {
-                    "graph_id": "esam-main",
-                    "display_name": "eSam",
-                    "enabled": True,
-                    "endpoints": {
-                        "graph_json_url": "https://example.invalid/graph.json"
-                    },
-                }
-            ],
+    config = FederationFileConfig.model_validate(
+        {
+            "federation": {
+                "enabled": True,
+                "graphs": [
+                    {
+                        "graph_id": "esam-main",
+                        "display_name": "eSam",
+                        "enabled": True,
+                        "endpoints": {
+                            "graph_json_url": "https://example.invalid/graph.json"
+                        },
+                    }
+                ],
+            }
         }
-    })
+    )
     manager = FederationManager(config)
 
     # Inject a cached federated node directly to isolate service merge behavior.
@@ -39,20 +41,25 @@ def _make_manager_with_single_cached_node() -> FederationManager:
 
 def test_search_graph_merges_local_and_federated_results(tmp_path):
     graph_file = tmp_path / "graph.json"
-    graph_file.write_text(json.dumps({
-        "nodes": [
+    graph_file.write_text(
+        json.dumps(
             {
-                "id": "local-1",
-                "type": "Actor",
-                "name": "Local eSam collaboration",
-                "description": "Local node",
-                "summary": "",
-                "tags": [],
-                "metadata": {},
+                "nodes": [
+                    {
+                        "id": "local-1",
+                        "type": "Actor",
+                        "name": "Local eSam collaboration",
+                        "description": "Local node",
+                        "summary": "",
+                        "tags": [],
+                        "metadata": {},
+                    }
+                ],
+                "edges": [],
             }
-        ],
-        "edges": [],
-    }), encoding="utf-8")
+        ),
+        encoding="utf-8",
+    )
 
     storage = GraphStorage(str(graph_file))
     manager = _make_manager_with_single_cached_node()
@@ -67,20 +74,25 @@ def test_search_graph_merges_local_and_federated_results(tmp_path):
 
 def test_search_graph_respects_limit_before_federated_merge(tmp_path):
     graph_file = tmp_path / "graph.json"
-    graph_file.write_text(json.dumps({
-        "nodes": [
+    graph_file.write_text(
+        json.dumps(
             {
-                "id": "local-1",
-                "type": "Actor",
-                "name": "Local eSam collaboration",
-                "description": "Local node",
-                "summary": "",
-                "tags": [],
-                "metadata": {},
+                "nodes": [
+                    {
+                        "id": "local-1",
+                        "type": "Actor",
+                        "name": "Local eSam collaboration",
+                        "description": "Local node",
+                        "summary": "",
+                        "tags": [],
+                        "metadata": {},
+                    }
+                ],
+                "edges": [],
             }
-        ],
-        "edges": [],
-    }), encoding="utf-8")
+        ),
+        encoding="utf-8",
+    )
 
     storage = GraphStorage(str(graph_file))
     manager = _make_manager_with_single_cached_node()
@@ -97,21 +109,25 @@ def test_search_graph_applies_federation_depth_budget(tmp_path):
     graph_file.write_text(json.dumps({"nodes": [], "edges": []}), encoding="utf-8")
     storage = GraphStorage(str(graph_file))
 
-    config = FederationFileConfig.model_validate({
-        "federation": {
-            "enabled": True,
-            "max_traversal_depth": 1,
-            "graphs": [
-                {
-                    "graph_id": "esam-main",
-                    "display_name": "eSam",
-                    "enabled": True,
-                    "max_depth_override": 1,
-                    "endpoints": {"graph_json_url": "https://example.invalid/graph.json"},
-                }
-            ],
+    config = FederationFileConfig.model_validate(
+        {
+            "federation": {
+                "enabled": True,
+                "max_traversal_depth": 1,
+                "graphs": [
+                    {
+                        "graph_id": "esam-main",
+                        "display_name": "eSam",
+                        "enabled": True,
+                        "max_depth_override": 1,
+                        "endpoints": {
+                            "graph_json_url": "https://example.invalid/graph.json"
+                        },
+                    }
+                ],
+            }
         }
-    })
+    )
     manager = FederationManager(config)
 
     graph = config.federation.graphs[0]
@@ -119,7 +135,12 @@ def test_search_graph_applies_federation_depth_budget(tmp_path):
         graph,
         [
             {"id": "remote-1", "type": "Actor", "name": "Depth one"},
-            {"id": "remote-2", "type": "Actor", "name": "Depth two", "metadata": {"federation_distance": 2}},
+            {
+                "id": "remote-2",
+                "type": "Actor",
+                "name": "Depth two",
+                "metadata": {"federation_distance": 2},
+            },
         ],
         [],
     )
@@ -140,21 +161,25 @@ def test_search_graph_uses_runtime_federation_depth_override(tmp_path):
     graph_file.write_text(json.dumps({"nodes": [], "edges": []}), encoding="utf-8")
     storage = GraphStorage(str(graph_file))
 
-    config = FederationFileConfig.model_validate({
-        "federation": {
-            "enabled": True,
-            "max_traversal_depth": 3,
-            "graphs": [
-                {
-                    "graph_id": "esam-main",
-                    "display_name": "eSam",
-                    "enabled": True,
-                    "max_depth_override": 3,
-                    "endpoints": {"graph_json_url": "https://example.invalid/graph.json"},
-                }
-            ],
+    config = FederationFileConfig.model_validate(
+        {
+            "federation": {
+                "enabled": True,
+                "max_traversal_depth": 3,
+                "graphs": [
+                    {
+                        "graph_id": "esam-main",
+                        "display_name": "eSam",
+                        "enabled": True,
+                        "max_depth_override": 3,
+                        "endpoints": {
+                            "graph_json_url": "https://example.invalid/graph.json"
+                        },
+                    }
+                ],
+            }
         }
-    })
+    )
     manager = FederationManager(config)
 
     graph = config.federation.graphs[0]
@@ -162,7 +187,12 @@ def test_search_graph_uses_runtime_federation_depth_override(tmp_path):
         graph,
         [
             {"id": "remote-1", "type": "Actor", "name": "Depth one"},
-            {"id": "remote-2", "type": "Actor", "name": "Depth two", "metadata": {"federation_distance": 2}},
+            {
+                "id": "remote-2",
+                "type": "Actor",
+                "name": "Depth two",
+                "metadata": {"federation_distance": 2},
+            },
         ],
         [],
     )
@@ -170,7 +200,9 @@ def test_search_graph_uses_runtime_federation_depth_override(tmp_path):
     manager._cache["esam-main"].nodes = cache_nodes
 
     service = GraphService(storage, federation_manager=manager)
-    result = service.search_graph(query="Depth", node_types=["Actor"], limit=10, federation_depth=1)
+    result = service.search_graph(
+        query="Depth", node_types=["Actor"], limit=10, federation_depth=1
+    )
 
     names = [n["name"] for n in result["nodes"]]
     assert "Depth one" in names
@@ -180,28 +212,37 @@ def test_search_graph_uses_runtime_federation_depth_override(tmp_path):
 
 def test_graph_stats_exposes_depth_and_graph_labels(tmp_path):
     graph_file = tmp_path / "graph.json"
-    graph_file.write_text(json.dumps({
-        "nodes": [],
-        "edges": [],
-        "metadata": {"graph_name": "My Local Graph"},
-    }), encoding="utf-8")
+    graph_file.write_text(
+        json.dumps(
+            {
+                "nodes": [],
+                "edges": [],
+                "metadata": {"graph_name": "My Local Graph"},
+            }
+        ),
+        encoding="utf-8",
+    )
     storage = GraphStorage(str(graph_file))
 
-    config = FederationFileConfig.model_validate({
-        "federation": {
-            "enabled": True,
-            "max_traversal_depth": 3,
-            "graphs": [
-                {
-                    "graph_id": "esam-main",
-                    "display_name": "eSam",
-                    "enabled": True,
-                    "max_depth_override": 2,
-                    "endpoints": {"graph_json_url": "https://example.invalid/graph.json"},
-                }
-            ],
+    config = FederationFileConfig.model_validate(
+        {
+            "federation": {
+                "enabled": True,
+                "max_traversal_depth": 3,
+                "graphs": [
+                    {
+                        "graph_id": "esam-main",
+                        "display_name": "eSam",
+                        "enabled": True,
+                        "max_depth_override": 2,
+                        "endpoints": {
+                            "graph_json_url": "https://example.invalid/graph.json"
+                        },
+                    }
+                ],
+            }
         }
-    })
+    )
     manager = FederationManager(config)
 
     service = GraphService(storage, federation_manager=manager)
@@ -219,22 +260,26 @@ def test_graph_stats_uses_configured_depth_levels_when_present(tmp_path):
     graph_file.write_text(json.dumps({"nodes": [], "edges": []}), encoding="utf-8")
     storage = GraphStorage(str(graph_file))
 
-    config = FederationFileConfig.model_validate({
-        "federation": {
-            "enabled": True,
-            "max_traversal_depth": 4,
-            "depth_levels": [1, 3, 4],
-            "graphs": [
-                {
-                    "graph_id": "esam-main",
-                    "display_name": "eSam",
-                    "enabled": True,
-                    "max_depth_override": 3,
-                    "endpoints": {"graph_json_url": "https://example.invalid/graph.json"},
-                }
-            ],
+    config = FederationFileConfig.model_validate(
+        {
+            "federation": {
+                "enabled": True,
+                "max_traversal_depth": 4,
+                "depth_levels": [1, 3, 4],
+                "graphs": [
+                    {
+                        "graph_id": "esam-main",
+                        "display_name": "eSam",
+                        "enabled": True,
+                        "max_depth_override": 3,
+                        "endpoints": {
+                            "graph_json_url": "https://example.invalid/graph.json"
+                        },
+                    }
+                ],
+            }
         }
-    })
+    )
     manager = FederationManager(config)
 
     service = GraphService(storage, federation_manager=manager)

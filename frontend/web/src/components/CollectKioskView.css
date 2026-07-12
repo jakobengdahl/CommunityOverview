@@ -30,13 +30,15 @@
   width: 36px;
   height: 36px;
   border: 3px solid #333;
-  border-top-color: #F59E0B;
+  border-top-color: #f59e0b;
   border-radius: 50%;
   animation: kiosk-spin 0.8s linear infinite;
 }
 
 @keyframes kiosk-spin {
-  to { transform: rotate(360deg); }
+  to {
+    transform: rotate(360deg);
+  }
 }
 
 /* ── Error state ───────────────────────────────────────────────── */
@@ -106,18 +108,20 @@
   align-items: center;
   gap: 0.5rem;
   padding: 0.75rem 2rem;
-  background: #F59E0B;
+  background: #f59e0b;
   color: #000;
   border: none;
   border-radius: 8px;
   font-size: 1rem;
   font-weight: 600;
   cursor: pointer;
-  transition: background 0.2s, transform 0.1s;
+  transition:
+    background 0.2s,
+    transform 0.1s;
 }
 
 .kiosk-start-button:hover {
-  background: #D97706;
+  background: #d97706;
   transform: translateY(-1px);
 }
 
@@ -160,7 +164,7 @@
   padding: 0.2rem 0.6rem;
   border-radius: 20px;
   background: rgba(245, 158, 11, 0.15);
-  color: #F59E0B;
+  color: #f59e0b;
   border: 1px solid rgba(245, 158, 11, 0.3);
   font-weight: 500;
 }
@@ -255,7 +259,7 @@
   font-size: 0.7rem;
   padding: 0.1rem 0.4rem;
   background: rgba(245, 158, 11, 0.12);
-  color: #F59E0B;
+  color: #f59e0b;
   border-radius: 4px;
   margin-left: 0.4rem;
 }
@@ -280,20 +284,34 @@
   animation: kiosk-dot-bounce 1.2s infinite ease-in-out;
 }
 
-.kiosk-dots span:nth-child(1) { animation-delay: 0s; }
-.kiosk-dots span:nth-child(2) { animation-delay: 0.2s; }
-.kiosk-dots span:nth-child(3) { animation-delay: 0.4s; }
+.kiosk-dots span:nth-child(1) {
+  animation-delay: 0s;
+}
+.kiosk-dots span:nth-child(2) {
+  animation-delay: 0.2s;
+}
+.kiosk-dots span:nth-child(3) {
+  animation-delay: 0.4s;
+}
 
 @keyframes kiosk-dot-bounce {
-  0%, 60%, 100% { transform: translateY(0); opacity: 0.4; }
-  30% { transform: translateY(-6px); opacity: 1; }
+  0%,
+  60%,
+  100% {
+    transform: translateY(0);
+    opacity: 0.4;
+  }
+  30% {
+    transform: translateY(-6px);
+    opacity: 1;
+  }
 }
 
 /* ── Error banner ──────────────────────────────────────────────── */
 .kiosk-chat-error {
   padding: 0.5rem 1.5rem;
   background: rgba(239, 68, 68, 0.15);
-  color: #FCA5A5;
+  color: #fca5a5;
   font-size: 0.85rem;
   text-align: center;
   flex-shrink: 0;
@@ -326,7 +344,7 @@
 }
 
 .kiosk-input:focus {
-  border-color: #F59E0B;
+  border-color: #f59e0b;
 }
 
 .kiosk-input::placeholder {
@@ -345,17 +363,19 @@
   width: 44px;
   height: 44px;
   padding: 0;
-  background: #F59E0B;
+  background: #f59e0b;
   color: #000;
   border: none;
   border-radius: 8px;
   cursor: pointer;
   flex-shrink: 0;
-  transition: background 0.2s, transform 0.1s;
+  transition:
+    background 0.2s,
+    transform 0.1s;
 }
 
 .kiosk-send-button:hover:not(:disabled) {
-  background: #D97706;
+  background: #d97706;
   transform: translateY(-1px);
 }
 
@@ -371,8 +391,12 @@
 
 /* ── Animations ────────────────────────────────────────────────── */
 @keyframes kiosk-fade-in {
-  from { opacity: 0; }
-  to { opacity: 1; }
+  from {
+    opacity: 0;
+  }
+  to {
+    opacity: 1;
+  }
 }
 
 @keyframes kiosk-slide-up {

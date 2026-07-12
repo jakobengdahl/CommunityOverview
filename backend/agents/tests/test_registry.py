@@ -3,12 +3,14 @@ Tests for agent registry.
 """
 
 import pytest
-from unittest.mock import MagicMock, patch, PropertyMock
-import threading
-import time
+from unittest.mock import MagicMock
 
 from backend.agents.config import (
-    AgentConfig, AgentSchedule, AgentsSettings, MCPIntegration, MCPTransport,
+    AgentConfig,
+    AgentSchedule,
+    AgentsSettings,
+    MCPIntegration,
+    MCPTransport,
 )
 from backend.agents.registry import AgentRegistry
 
@@ -38,7 +40,9 @@ class TestAgentRegistry:
             ],
         )
 
-    def test_registry_disabled_by_default(self, mock_storage, mock_service, disabled_settings):
+    def test_registry_disabled_by_default(
+        self, mock_storage, mock_service, disabled_settings
+    ):
         """Test that registry is disabled when settings.enabled is False."""
         registry = AgentRegistry(
             settings=disabled_settings,
@@ -48,7 +52,9 @@ class TestAgentRegistry:
 
         assert registry.is_enabled is False
 
-    def test_registry_enabled_when_configured(self, mock_storage, mock_service, enabled_settings):
+    def test_registry_enabled_when_configured(
+        self, mock_storage, mock_service, enabled_settings
+    ):
         """Test that registry is enabled when settings.enabled is True."""
         registry = AgentRegistry(
             settings=enabled_settings,
@@ -58,7 +64,9 @@ class TestAgentRegistry:
 
         assert registry.is_enabled is True
 
-    def test_start_disabled_does_nothing(self, mock_storage, mock_service, disabled_settings):
+    def test_start_disabled_does_nothing(
+        self, mock_storage, mock_service, disabled_settings
+    ):
         """Test that start() does nothing when disabled."""
         registry = AgentRegistry(
             settings=disabled_settings,
@@ -70,7 +78,9 @@ class TestAgentRegistry:
 
         assert registry.list_workers() == []
 
-    def test_subscription_agent_mapping(self, mock_storage, mock_service, enabled_settings):
+    def test_subscription_agent_mapping(
+        self, mock_storage, mock_service, enabled_settings
+    ):
         """Test subscription to agent ID mapping."""
         registry = AgentRegistry(
             settings=enabled_settings,
@@ -137,7 +147,9 @@ class TestAgentLifecycle:
             graph_service=mock_service,
         )
 
-    def test_load_agents_finds_agent_nodes(self, registry_with_agent, sample_agent_node):
+    def test_load_agents_finds_agent_nodes(
+        self, registry_with_agent, sample_agent_node
+    ):
         """Test that _load_agents finds Agent nodes in storage."""
         agents = registry_with_agent._load_agents()
 
@@ -281,8 +293,9 @@ class TestGetAvailableIntegrations:
         scheduled_config = AgentConfig(
             agent_id="agent-sched",
             name="Scheduled Agent",
-            schedule=AgentSchedule(day_of_week=1, hour=14, minute=0,
-                                   timezone="Europe/Stockholm"),
+            schedule=AgentSchedule(
+                day_of_week=1, hour=14, minute=0, timezone="Europe/Stockholm"
+            ),
         )
         unscheduled_config = AgentConfig(agent_id="agent-nosched", name="No Schedule")
 
@@ -302,7 +315,7 @@ class TestGetAvailableIntegrations:
         entry = schedules[0]
         assert entry["agent_id"] == "agent-sched"
         assert entry["trigger_path"] == "/agents/agent-sched/trigger"
-        assert entry["schedule"]["cron"] == "0 14 * * 2"   # Tuesday in cron
+        assert entry["schedule"]["cron"] == "0 14 * * 2"  # Tuesday in cron
         assert entry["schedule"]["timezone"] == "Europe/Stockholm"
         assert entry["schedule"]["day_name"] == "Tuesday"
 

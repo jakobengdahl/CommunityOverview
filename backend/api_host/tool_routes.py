@@ -74,12 +74,16 @@ def register_tool_routes(
             if not auth_active:
                 if tool_name not in SAFE_TOOLS:
                     return JSONResponse(
-                        {"error": f"Tool '{tool_name}' requires authentication. Please enable AUTH_ENABLED or use a safe tool."},
-                        status_code=403
+                        {
+                            "error": f"Tool '{tool_name}' requires authentication. Please enable AUTH_ENABLED or use a safe tool."
+                        },
+                        status_code=403,
                     )
 
             if tool_name not in tools_map:
-                return JSONResponse({"error": f"Tool {tool_name} not found"}, status_code=404)
+                return JSONResponse(
+                    {"error": f"Tool {tool_name} not found"}, status_code=404
+                )
 
             func = tools_map[tool_name]
             with use_request_authorization(headers=request.headers):
@@ -108,4 +112,6 @@ def register_tool_routes(
             return JSONResponse(result)
         except Exception as e:
             error_trace = traceback.format_exc()
-            return JSONResponse({"error": str(e), "traceback": error_trace}, status_code=500)
+            return JSONResponse(
+                {"error": str(e), "traceback": error_trace}, status_code=500
+            )

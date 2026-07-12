@@ -55,7 +55,9 @@
   align-items: center;
   justify-content: center;
   border-radius: 6px;
-  transition: background 0.15s, color 0.15s;
+  transition:
+    background 0.15s,
+    color 0.15s;
 }
 
 .session-drawer-close:hover {
@@ -81,7 +83,9 @@
   font-size: 0.85rem;
   cursor: pointer;
   text-align: left;
-  transition: background 0.15s, color 0.15s;
+  transition:
+    background 0.15s,
+    color 0.15s;
 }
 
 .session-drawer-item:hover,
@@ -191,7 +195,9 @@
   border-radius: 6px;
   flex-shrink: 0;
   opacity: 0;
-  transition: color 0.15s, opacity 0.15s;
+  transition:
+    color 0.15s,
+    opacity 0.15s;
 }
 
 .session-drawer-session:hover .session-drawer-session-rename,

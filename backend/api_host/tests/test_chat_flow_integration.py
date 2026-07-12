@@ -9,10 +9,6 @@ These tests verify the complete chat workflow:
 5. Node appears in search results
 """
 
-import pytest
-import asyncio
-from fastapi.testclient import TestClient
-
 
 class TestChatFlowIntegration:
     """Integration tests for complete chat workflows."""
@@ -25,16 +21,18 @@ class TestChatFlowIntegration:
         response = client.post(
             "/api/nodes",
             json={
-                "nodes": [{
-                    "name": "AI Research Lab",
-                    "type": "Actor",
-                    "description": "Research laboratory focused on AI",
-                    "summary": "AI research facility",
-                    "communities": ["Research"],
-                    "tags": ["ai", "research"]
-                }],
-                "edges": []
-            }
+                "nodes": [
+                    {
+                        "name": "AI Research Lab",
+                        "type": "Actor",
+                        "description": "Research laboratory focused on AI",
+                        "summary": "AI research facility",
+                        "communities": ["Research"],
+                        "tags": ["ai", "research"],
+                    }
+                ],
+                "edges": [],
+            },
         )
         assert response.status_code == 200
         assert response.json()["success"]
@@ -42,20 +40,13 @@ class TestChatFlowIntegration:
         # Configure mock to return search results
         mock_llm.set_response(
             "I found the AI Research Lab. It's an Actor in the Research community.",
-            tool_use={
-                "name": "search_graph",
-                "input": {"query": "AI", "limit": 10}
-            }
+            tool_use={"name": "search_graph", "input": {"query": "AI", "limit": 10}},
         )
 
         # User asks to search via chat
         response = client.post(
             "/ui/chat",
-            json={
-                "messages": [
-                    {"role": "user", "content": "Find AI-related nodes"}
-                ]
-            }
+            json={"messages": [{"role": "user", "content": "Find AI-related nodes"}]},
         )
         assert response.status_code == 200
         result = response.json()
@@ -66,7 +57,9 @@ class TestChatFlowIntegration:
         tool_result = result.get("toolResult")
         assert tool_result is not None
         # Search should return results
-        assert tool_result.get("total", 0) >= 1 or len(tool_result.get("nodes", [])) >= 1
+        assert (
+            tool_result.get("total", 0) >= 1 or len(tool_result.get("nodes", [])) >= 1
+        )
 
     def test_chat_add_node_flow(self, test_app_with_mock):
         """Test: Full flow of adding a node via chat with confirmation."""
@@ -78,26 +71,31 @@ class TestChatFlowIntegration:
             tool_use={
                 "name": "add_nodes",
                 "input": {
-                    "nodes": [{
-                        "name": "Smart City Initiative",
-                        "type": "Initiative",
-                        "description": "A project to develop smart city solutions",
-                        "summary": "Smart city development project",
-                        "communities": ["Digital"],
-                        "tags": ["smart-city", "urban", "digital"]
-                    }],
-                    "edges": []
-                }
-            }
+                    "nodes": [
+                        {
+                            "name": "Smart City Initiative",
+                            "type": "Initiative",
+                            "description": "A project to develop smart city solutions",
+                            "summary": "Smart city development project",
+                            "communities": ["Digital"],
+                            "tags": ["smart-city", "urban", "digital"],
+                        }
+                    ],
+                    "edges": [],
+                },
+            },
         )
 
         response = client.post(
             "/ui/chat",
             json={
                 "messages": [
-                    {"role": "user", "content": "Add a new initiative called Smart City Initiative about developing smart city solutions"}
+                    {
+                        "role": "user",
+                        "content": "Add a new initiative called Smart City Initiative about developing smart city solutions",
+                    }
                 ]
-            }
+            },
         )
         assert response.status_code == 200
         result = response.json()
@@ -125,16 +123,18 @@ class TestChatFlowIntegration:
         response = client.post(
             "/api/nodes",
             json={
-                "nodes": [{
-                    "name": "Old Project",
-                    "type": "Initiative",
-                    "description": "Original description",
-                    "summary": "Original summary",
-                    "communities": [],
-                    "tags": []
-                }],
-                "edges": []
-            }
+                "nodes": [
+                    {
+                        "name": "Old Project",
+                        "type": "Initiative",
+                        "description": "Original description",
+                        "summary": "Original summary",
+                        "communities": [],
+                        "tags": [],
+                    }
+                ],
+                "edges": [],
+            },
         )
         node_id = response.json()["added_node_ids"][0]
 
@@ -147,19 +147,22 @@ class TestChatFlowIntegration:
                     "node_id": node_id,
                     "updates": {
                         "description": "Updated description with more details",
-                        "tags": ["updated", "improved"]
-                    }
-                }
-            }
+                        "tags": ["updated", "improved"],
+                    },
+                },
+            },
         )
 
         response = client.post(
             "/ui/chat",
             json={
                 "messages": [
-                    {"role": "user", "content": f"Update the description of node {node_id}"}
+                    {
+                        "role": "user",
+                        "content": f"Update the description of node {node_id}",
+                    }
                 ]
-            }
+            },
         )
         assert response.status_code == 200
         result = response.json()
@@ -181,11 +184,25 @@ class TestChatFlowIntegration:
             "/api/nodes",
             json={
                 "nodes": [
-                    {"name": "ToDelete1", "type": "Actor", "description": "Test", "summary": "Test", "communities": [], "tags": []},
-                    {"name": "ToDelete2", "type": "Actor", "description": "Test", "summary": "Test", "communities": [], "tags": []}
+                    {
+                        "name": "ToDelete1",
+                        "type": "Actor",
+                        "description": "Test",
+                        "summary": "Test",
+                        "communities": [],
+                        "tags": [],
+                    },
+                    {
+                        "name": "ToDelete2",
+                        "type": "Actor",
+                        "description": "Test",
+                        "summary": "Test",
+                        "communities": [],
+                        "tags": [],
+                    },
                 ],
-                "edges": []
-            }
+                "edges": [],
+            },
         )
         node_ids = response.json()["added_node_ids"]
 
@@ -194,45 +211,33 @@ class TestChatFlowIntegration:
             "I'll delete these nodes. Please confirm.",
             tool_use={
                 "name": "delete_nodes",
-                "input": {
-                    "node_ids": node_ids,
-                    "confirmed": False
-                }
-            }
+                "input": {"node_ids": node_ids, "confirmed": False},
+            },
         )
 
         response = client.post(
             "/ui/chat",
-            json={
-                "messages": [
-                    {"role": "user", "content": "Delete the test nodes"}
-                ]
-            }
+            json={"messages": [{"role": "user", "content": "Delete the test nodes"}]},
         )
         result = response.json()
         tool_result = result.get("toolResult", {})
         # Should require confirmation
-        assert tool_result.get("requires_confirmation") or not tool_result.get("success")
+        assert tool_result.get("requires_confirmation") or not tool_result.get(
+            "success"
+        )
 
         # Now with confirmation
         mock_llm.set_response(
             "Nodes deleted successfully.",
             tool_use={
                 "name": "delete_nodes",
-                "input": {
-                    "node_ids": node_ids,
-                    "confirmed": True
-                }
-            }
+                "input": {"node_ids": node_ids, "confirmed": True},
+            },
         )
 
         response = client.post(
             "/ui/chat",
-            json={
-                "messages": [
-                    {"role": "user", "content": "Yes, delete them"}
-                ]
-            }
+            json={"messages": [{"role": "user", "content": "Yes, delete them"}]},
         )
         result = response.json()
         assert result.get("toolUsed") == "delete_nodes"
@@ -261,22 +266,30 @@ class TestChatFlowIntegration:
                 "messages": [
                     {"role": "user", "content": "How many initiatives are there?"}
                 ]
-            }
+            },
         )
         assert response.status_code == 200
 
         # Second message referencing the first
-        mock_llm.set_response("Yes, those 5 initiatives are all related to digital transformation.")
+        mock_llm.set_response(
+            "Yes, those 5 initiatives are all related to digital transformation."
+        )
 
         response = client.post(
             "/ui/chat",
             json={
                 "messages": [
                     {"role": "user", "content": "How many initiatives are there?"},
-                    {"role": "assistant", "content": "I found 5 initiatives in the graph."},
-                    {"role": "user", "content": "Are they all related to digital transformation?"}
+                    {
+                        "role": "assistant",
+                        "content": "I found 5 initiatives in the graph.",
+                    },
+                    {
+                        "role": "user",
+                        "content": "Are they all related to digital transformation?",
+                    },
                 ]
-            }
+            },
         )
         assert response.status_code == 200
         # The mock received all messages in context
@@ -287,11 +300,14 @@ class TestChatFlowIntegration:
 
         # Upload a document
         from io import BytesIO
-        file_content = b"This is a test document about AI governance and policy frameworks."
+
+        file_content = (
+            b"This is a test document about AI governance and policy frameworks."
+        )
 
         response = client.post(
             "/ui/upload/extract",
-            files={"file": ("test.txt", BytesIO(file_content), "text/plain")}
+            files={"file": ("test.txt", BytesIO(file_content), "text/plain")},
         )
         assert response.status_code == 200
         extracted = response.json()
@@ -303,17 +319,20 @@ class TestChatFlowIntegration:
             "The document discusses AI governance and policy frameworks. I can help extract relevant nodes.",
             tool_use={
                 "name": "search_graph",
-                "input": {"query": "AI governance policy", "limit": 5}
-            }
+                "input": {"query": "AI governance policy", "limit": 5},
+            },
         )
 
         response = client.post(
             "/ui/chat",
             json={
                 "messages": [
-                    {"role": "user", "content": f"Analyze this document and find related nodes:\n\n{document_text}"}
+                    {
+                        "role": "user",
+                        "content": f"Analyze this document and find related nodes:\n\n{document_text}",
+                    }
                 ]
-            }
+            },
         )
         assert response.status_code == 200
         result = response.json()
@@ -332,8 +351,8 @@ class TestChatFlowIntegration:
             "/ui/propose-nodes",
             json={
                 "text": "The Ministry of Innovation has launched Digital Strategy 2030, a comprehensive plan for national digitalization.",
-                "communities": ["Government"]
-            }
+                "communities": ["Government"],
+            },
         )
         assert response.status_code == 200
         result = response.json()
@@ -351,8 +370,7 @@ class TestChatFlowIntegration:
         mock_llm.set_response("The graph currently contains 10 nodes and 5 edges.")
 
         response = client.post(
-            "/ui/chat/simple",
-            json={"message": "What's the graph size?"}
+            "/ui/chat/simple", json={"message": "What's the graph size?"}
         )
         assert response.status_code == 200
         result = response.json()
@@ -366,33 +384,30 @@ class TestChatFlowIntegration:
         response = client.post(
             "/api/nodes",
             json={
-                "nodes": [{
-                    "name": "REST Created Node",
-                    "type": "Resource",
-                    "description": "Created via REST",
-                    "summary": "REST node",
-                    "communities": [],
-                    "tags": ["rest"]
-                }],
-                "edges": []
-            }
+                "nodes": [
+                    {
+                        "name": "REST Created Node",
+                        "type": "Resource",
+                        "description": "Created via REST",
+                        "summary": "REST node",
+                        "communities": [],
+                        "tags": ["rest"],
+                    }
+                ],
+                "edges": [],
+            },
         )
         assert response.json()["added_node_ids"]
 
         # Search via chat should find it
         mock_llm.set_response(
             "Found the REST Created Node.",
-            tool_use={
-                "name": "search_graph",
-                "input": {"query": "REST Created"}
-            }
+            tool_use={"name": "search_graph", "input": {"query": "REST Created"}},
         )
 
         response = client.post(
             "/ui/chat",
-            json={
-                "messages": [{"role": "user", "content": "Find the REST node"}]
-            }
+            json={"messages": [{"role": "user", "content": "Find the REST node"}]},
         )
         result = response.json()
         tool_result = result.get("toolResult", {})
@@ -405,24 +420,24 @@ class TestChatFlowIntegration:
             tool_use={
                 "name": "add_nodes",
                 "input": {
-                    "nodes": [{
-                        "name": "Chat Created Node",
-                        "type": "Resource",
-                        "description": "Created via chat",
-                        "summary": "Chat node",
-                        "communities": [],
-                        "tags": ["chat"]
-                    }],
-                    "edges": []
-                }
-            }
+                    "nodes": [
+                        {
+                            "name": "Chat Created Node",
+                            "type": "Resource",
+                            "description": "Created via chat",
+                            "summary": "Chat node",
+                            "communities": [],
+                            "tags": ["chat"],
+                        }
+                    ],
+                    "edges": [],
+                },
+            },
         )
 
         response = client.post(
             "/ui/chat",
-            json={
-                "messages": [{"role": "user", "content": "Add a Chat Created Node"}]
-            }
+            json={"messages": [{"role": "user", "content": "Add a Chat Created Node"}]},
         )
         assert response.json()["toolResult"]["nodes"][0]["id"]
 
@@ -438,17 +453,12 @@ class TestChatFlowIntegration:
 
         mock_llm.set_response(
             "Here are the search results.",
-            tool_use={
-                "name": "search_graph",
-                "input": {"query": "test", "limit": 5}
-            }
+            tool_use={"name": "search_graph", "input": {"query": "test", "limit": 5}},
         )
 
         response = client.post(
             "/ui/chat",
-            json={
-                "messages": [{"role": "user", "content": "Search for test"}]
-            }
+            json={"messages": [{"role": "user", "content": "Search for test"}]},
         )
         result = response.json()
 

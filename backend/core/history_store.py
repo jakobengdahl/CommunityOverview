@@ -29,7 +29,7 @@ from typing import Any, Dict, List, Optional, TYPE_CHECKING
 from .storage_backends import _lock_file, _unlock_file
 
 if TYPE_CHECKING:
-    from .events.models import Event, EventAttribution
+    from .events.models import Event
 
 
 # Origins that unambiguously indicate an autonomous/agent-driven mutation.
@@ -120,16 +120,22 @@ class GraphHistoryStore:
         self._lock = threading.Lock()
 
         # Retention is opt-in: a cap counts only when it is a positive value.
-        self.max_events = max_events if (max_events is not None and max_events > 0) else None
+        self.max_events = (
+            max_events if (max_events is not None and max_events > 0) else None
+        )
         self.max_age_days = (
             max_age_days if (max_age_days is not None and max_age_days > 0) else None
         )
-        self._retention_enabled = self.max_events is not None or self.max_age_days is not None
+        self._retention_enabled = (
+            self.max_events is not None or self.max_age_days is not None
+        )
 
         if compaction_interval is not None:
             self._compaction_interval = max(1, compaction_interval)
         elif self.max_events is not None:
-            self._compaction_interval = max(1, min(self.max_events, _DEFAULT_COMPACTION_INTERVAL))
+            self._compaction_interval = max(
+                1, min(self.max_events, _DEFAULT_COMPACTION_INTERVAL)
+            )
         else:
             self._compaction_interval = _DEFAULT_COMPACTION_INTERVAL
         self._appends_since_compaction = 0
@@ -244,9 +250,7 @@ class GraphHistoryStore:
             return
         self._rewrite_atomic(kept)
 
-    def _apply_retention(
-        self, records: List[Dict[str, Any]]
-    ) -> List[Dict[str, Any]]:
+    def _apply_retention(self, records: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
         """Return the records to keep, in chronological order.
 
         Age filtering runs first, then the max-events cap keeps the newest N.

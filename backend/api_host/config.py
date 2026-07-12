@@ -16,12 +16,18 @@ class AppConfig:
     """Configuration for the app host server."""
 
     # Graph storage configuration
-    graph_file: str = field(default_factory=lambda: os.getenv("GRAPH_FILE", "graph.json"))
-    embeddings_file: Optional[str] = field(default_factory=lambda: os.getenv("EMBEDDINGS_FILE"))
+    graph_file: str = field(
+        default_factory=lambda: os.getenv("GRAPH_FILE", "graph.json")
+    )
+    embeddings_file: Optional[str] = field(
+        default_factory=lambda: os.getenv("EMBEDDINGS_FILE")
+    )
 
     # Shared-session store directory (one JSON file per session). Defaults to a
     # "sessions" directory next to the graph file when unset.
-    sessions_dir: Optional[str] = field(default_factory=lambda: os.getenv("SESSIONS_DIR"))
+    sessions_dir: Optional[str] = field(
+        default_factory=lambda: os.getenv("SESSIONS_DIR")
+    )
 
     # Server configuration
     host: str = field(default_factory=lambda: os.getenv("HOST", "0.0.0.0"))
@@ -31,38 +37,66 @@ class AppConfig:
     api_prefix: str = field(default_factory=lambda: os.getenv("API_PREFIX", "/api"))
 
     # Static files configuration
-    web_static_path: Optional[str] = field(default_factory=lambda: os.getenv("WEB_STATIC_PATH"))
-    widget_static_path: Optional[str] = field(default_factory=lambda: os.getenv("WIDGET_STATIC_PATH"))
+    web_static_path: Optional[str] = field(
+        default_factory=lambda: os.getenv("WEB_STATIC_PATH")
+    )
+    widget_static_path: Optional[str] = field(
+        default_factory=lambda: os.getenv("WIDGET_STATIC_PATH")
+    )
 
     # MCP configuration
-    mcp_name: str = field(default_factory=lambda: os.getenv("MCP_NAME", "community-knowledge-graph"))
+    mcp_name: str = field(
+        default_factory=lambda: os.getenv("MCP_NAME", "community-knowledge-graph")
+    )
 
     # Security configuration
-    auth_enabled: bool = field(default_factory=lambda: os.getenv("AUTH_ENABLED", "false").lower() == "true")
-    auth_username: str = field(default_factory=lambda: os.getenv("AUTH_USERNAME", "admin"))
-    auth_password: Optional[str] = field(default_factory=lambda: os.getenv("AUTH_PASSWORD"))
-    auth_bearer_token: Optional[str] = field(default_factory=lambda: os.getenv("AUTH_BEARER_TOKEN"))
+    auth_enabled: bool = field(
+        default_factory=lambda: os.getenv("AUTH_ENABLED", "false").lower() == "true"
+    )
+    auth_username: str = field(
+        default_factory=lambda: os.getenv("AUTH_USERNAME", "admin")
+    )
+    auth_password: Optional[str] = field(
+        default_factory=lambda: os.getenv("AUTH_PASSWORD")
+    )
+    auth_bearer_token: Optional[str] = field(
+        default_factory=lambda: os.getenv("AUTH_BEARER_TOKEN")
+    )
     # Default to no cross-origin access (same-origin only). Set CORS_ALLOWED_ORIGINS
     # to a comma-separated list (or "*") to opt specific origins in. A wildcard
     # default would let any site drive an auth-bypassed instance from the browser.
-    cors_allowed_origins: list[str] = field(default_factory=lambda: [o.strip() for o in os.getenv("CORS_ALLOWED_ORIGINS", "").split(",") if o.strip()])
-    mcp_basic_auth: bool = field(default_factory=lambda: os.getenv("MCP_BASIC_AUTH", "false").lower() == "true")
+    cors_allowed_origins: list[str] = field(
+        default_factory=lambda: [
+            o.strip()
+            for o in os.getenv("CORS_ALLOWED_ORIGINS", "").split(",")
+            if o.strip()
+        ]
+    )
+    mcp_basic_auth: bool = field(
+        default_factory=lambda: os.getenv("MCP_BASIC_AUTH", "false").lower() == "true"
+    )
     # Number of trusted reverse-proxy hops in front of the app. 0 (default) means
     # the app is reached directly, so per-client rate limiting keys on the socket
     # peer. Behind a proxy (e.g. Cloud Run: set to 1) the real client IP is read
     # from X-Forwarded-For, counting from the right so client-spoofed entries on
     # the left are ignored — otherwise every user shares one rate-limit bucket.
-    trusted_proxy_hops: int = field(default_factory=lambda: int(os.getenv("TRUSTED_PROXY_HOPS", "0")))
+    trusted_proxy_hops: int = field(
+        default_factory=lambda: int(os.getenv("TRUSTED_PROXY_HOPS", "0"))
+    )
     # When set to False, /mcp and /execute_tool bypass auth even if auth_enabled=True.
     # When None (default / env var absent), MCP follows auth_enabled — no behaviour change.
     mcp_auth_enabled: Optional[bool] = field(
         default_factory=lambda: (
-            None if (_v := os.getenv("MCP_AUTH_ENABLED")) is None else _v.lower() == "true"
+            None
+            if (_v := os.getenv("MCP_AUTH_ENABLED")) is None
+            else _v.lower() == "true"
         )
     )
 
     # Profile configuration
-    config_profile: str = field(default_factory=lambda: os.getenv("CONFIG_PROFILE", "default"))
+    config_profile: str = field(
+        default_factory=lambda: os.getenv("CONFIG_PROFILE", "default")
+    )
 
     def __post_init__(self):
         """Resolve default static paths relative to this package."""

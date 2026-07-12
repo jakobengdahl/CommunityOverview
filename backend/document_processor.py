@@ -1,8 +1,8 @@
 import os
-from typing import Optional
 import docx
 
 from backend.core.pdf_extractor import extract_text_from_pdf_path
+
 
 class DocumentProcessor:
     """Handles text extraction from PDF and Word documents"""
@@ -24,12 +24,12 @@ class DocumentProcessor:
         _, ext = os.path.splitext(file_path)
         ext = ext.lower()
 
-        if ext == '.pdf':
+        if ext == ".pdf":
             return DocumentProcessor.parse_pdf(file_path)
-        elif ext in ['.docx', '.doc']:
+        elif ext in [".docx", ".doc"]:
             return DocumentProcessor.parse_docx(file_path)
-        elif ext == '.txt':
-            with open(file_path, 'r', encoding='utf-8') as f:
+        elif ext == ".txt":
+            with open(file_path, "r", encoding="utf-8") as f:
                 return f.read()
         else:
             raise ValueError(f"Unsupported file format: {ext}")

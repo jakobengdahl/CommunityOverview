@@ -24,9 +24,9 @@ def migrate_embeddings(graph_path=DEFAULT_GRAPH_PATH):
 
     # Load raw pickle
     try:
-        with open(embeddings_path, 'rb') as f:
+        with open(embeddings_path, "rb") as f:
             data = pickle.load(f)
-            embeddings = data.get('embeddings', {})
+            embeddings = data.get("embeddings", {})
             print(f"Loaded {len(embeddings)} embeddings from pickle.")
     except Exception as e:
         print(f"Error loading pickle: {e}")
@@ -42,7 +42,7 @@ def migrate_embeddings(graph_path=DEFAULT_GRAPH_PATH):
         if node_id in storage.nodes:
             # Assign embedding to node
             # Ensure it's a list for JSON serialization
-            if hasattr(embedding, 'tolist'):
+            if hasattr(embedding, "tolist"):
                 embedding_list = embedding.tolist()
             else:
                 embedding_list = list(embedding)
@@ -57,13 +57,15 @@ def migrate_embeddings(graph_path=DEFAULT_GRAPH_PATH):
     print("Graph saved with embeddings.")
 
     # Rename old pickle to indicate it's deprecated/backup
-    backup_path = embeddings_path.with_suffix('.pkl.bak')
+    backup_path = embeddings_path.with_suffix(".pkl.bak")
     embeddings_path.rename(backup_path)
     print(f"Moved {embeddings_path} to {backup_path}")
 
 
 if __name__ == "__main__":
-    parser = argparse.ArgumentParser(description="Migrate embeddings from pickle into a graph file.")
+    parser = argparse.ArgumentParser(
+        description="Migrate embeddings from pickle into a graph file."
+    )
     parser.add_argument(
         "--graph-file",
         default=DEFAULT_GRAPH_PATH,

@@ -37,7 +37,10 @@ def _add_nodes(test_app: TestClient, session_id: str, node_ids) -> None:
     test_app.app.state.session_manager.get_or_create(session_id)
     resp = test_app.post(
         f"/api/sessions/{session_id}/ops",
-        json={"client_id": "setup", "ops": [{"op": "nodes_added", "node_ids": list(node_ids)}]},
+        json={
+            "client_id": "setup",
+            "ops": [{"op": "nodes_added", "node_ids": list(node_ids)}],
+        },
     )
     assert resp.status_code == 200
 
@@ -126,7 +129,10 @@ class TestGetVisualizationSessionState:
         # The current selection is expressed as an advisory claim (design §3.8).
         test_app.post(
             f"/api/sessions/{session_id}/ops",
-            json={"client_id": "setup", "ops": [{"op": "selection_claimed", "element_ids": ["node-1"]}]},
+            json={
+                "client_id": "setup",
+                "ops": [{"op": "selection_claimed", "element_ids": ["node-1"]}],
+            },
         )
 
         response = test_app.post(
@@ -143,13 +149,18 @@ class TestGetVisualizationSessionState:
         assert data["node_count"] == 2
         assert data["selected_node_ids"] == ["node-1"]
 
-    def test_hidden_nodes_are_excluded_from_visible_node_ids(self, test_app: TestClient):
+    def test_hidden_nodes_are_excluded_from_visible_node_ids(
+        self, test_app: TestClient
+    ):
         session_id = "2222-4444"
         _open_browser(test_app, session_id)
         _add_nodes(test_app, session_id, ["node-1", "node-2"])
         test_app.post(
             f"/api/sessions/{session_id}/ops",
-            json={"client_id": "setup", "ops": [{"op": "nodes_hidden", "node_ids": ["node-2"]}]},
+            json={
+                "client_id": "setup",
+                "ops": [{"op": "nodes_hidden", "node_ids": ["node-2"]}],
+            },
         )
 
         response = test_app.post(
@@ -216,7 +227,9 @@ class TestVisualizationSessionIdPush:
         assert cmd["type"] == "tool_result"
         assert cmd["tool"] == "search_graph"
 
-    def test_get_related_nodes_with_session_id_enqueues_command(self, test_app: TestClient):
+    def test_get_related_nodes_with_session_id_enqueues_command(
+        self, test_app: TestClient
+    ):
         session_id = "4444-5555"
         _open_browser(test_app, session_id)
 
@@ -224,7 +237,10 @@ class TestVisualizationSessionIdPush:
             "/execute_tool",
             json={
                 "tool_name": "get_related_nodes",
-                "arguments": {"node_id": "node-1", "visualization_session_id": session_id},
+                "arguments": {
+                    "node_id": "node-1",
+                    "visualization_session_id": session_id,
+                },
             },
         )
         assert response.status_code == 200
@@ -236,7 +252,9 @@ class TestVisualizationSessionIdPush:
         # Default action must be additive (not replace)
         assert cmd["result"].get("action") == "add_to_visualization"
 
-    def test_get_saved_view_with_session_id_enqueues_command(self, test_app: TestClient):
+    def test_get_saved_view_with_session_id_enqueues_command(
+        self, test_app: TestClient
+    ):
         session_id = "6666-7777"
         _open_browser(test_app, session_id)
 
@@ -244,7 +262,10 @@ class TestVisualizationSessionIdPush:
             "/execute_tool",
             json={
                 "tool_name": "get_saved_view",
-                "arguments": {"name": "nonexistent-view", "visualization_session_id": session_id},
+                "arguments": {
+                    "name": "nonexistent-view",
+                    "visualization_session_id": session_id,
+                },
             },
         )
         assert response.status_code == 200

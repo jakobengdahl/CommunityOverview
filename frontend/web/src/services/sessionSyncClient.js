@@ -52,8 +52,10 @@ function roundPos(p) {
 }
 
 function samePos(a, b) {
-  return Math.abs((a?.x || 0) - (b?.x || 0)) <= POSITION_EPSILON &&
-         Math.abs((a?.y || 0) - (b?.y || 0)) <= POSITION_EPSILON;
+  return (
+    Math.abs((a?.x || 0) - (b?.x || 0)) <= POSITION_EPSILON &&
+    Math.abs((a?.y || 0) - (b?.y || 0)) <= POSITION_EPSILON
+  );
 }
 
 /** Normalise a host state object into the comparable baseline mirror shape. */
@@ -76,7 +78,7 @@ export function normalizeMirror(state) {
 
 function diffAdded(prev, next) {
   const before = new Set(prev);
-  return next.filter(id => !before.has(id));
+  return next.filter((id) => !before.has(id));
 }
 
 // Stable serialisation for annotation equality (key order can vary between the
@@ -118,7 +120,7 @@ export function computeOps(prevState, nextState) {
 
   // Positions: only for nodes that survive in next. New-with-position and moved
   // both count. Bulk changes collapse into one layout_applied op.
-  const movedIds = next.node_refs.filter(id => {
+  const movedIds = next.node_refs.filter((id) => {
     const np = next.positions[id];
     if (!np) return false;
     const pp = prev.positions[id];
@@ -126,10 +128,14 @@ export function computeOps(prevState, nextState) {
   });
   if (movedIds.length > LAYOUT_BATCH_THRESHOLD) {
     const positions = {};
-    movedIds.forEach(id => { positions[id] = next.positions[id]; });
+    movedIds.forEach((id) => {
+      positions[id] = next.positions[id];
+    });
     ops.push({ op: 'layout_applied', positions });
   } else {
-    movedIds.forEach(id => ops.push({ op: 'node_moved', node_id: id, position: next.positions[id] }));
+    movedIds.forEach((id) =>
+      ops.push({ op: 'node_moved', node_id: id, position: next.positions[id] })
+    );
   }
 
   const hiddenAdded = diffAdded(prev.hidden_node_ids, next.hidden_node_ids);
@@ -143,8 +149,8 @@ export function computeOps(prevState, nextState) {
   if (edgeHiddenRemoved.length) ops.push({ op: 'edges_shown', edge_ids: edgeHiddenRemoved });
 
   // Annotations, keyed by id.
-  const prevAnn = new Map(prev.annotations.filter(a => a && a.id).map(a => [a.id, a]));
-  const nextAnn = new Map(next.annotations.filter(a => a && a.id).map(a => [a.id, a]));
+  const prevAnn = new Map(prev.annotations.filter((a) => a && a.id).map((a) => [a.id, a]));
+  const nextAnn = new Map(next.annotations.filter((a) => a && a.id).map((a) => [a.id, a]));
   for (const [id, ann] of nextAnn) {
     const before = prevAnn.get(id);
     if (!before) {
@@ -189,18 +195,19 @@ export function applyOpToMirror(mirrorState, op) {
       break;
     case 'nodes_removed': {
       const drop = new Set(op.node_ids || []);
-      m.node_refs = m.node_refs.filter(id => !drop.has(id));
+      m.node_refs = m.node_refs.filter((id) => !drop.has(id));
       m.positions = Object.fromEntries(Object.entries(m.positions).filter(([id]) => !drop.has(id)));
-      m.hidden_node_ids = m.hidden_node_ids.filter(id => !drop.has(id));
-      m.annotations = m.annotations.map(a => (
+      m.hidden_node_ids = m.hidden_node_ids.filter((id) => !drop.has(id));
+      m.annotations = m.annotations.map((a) =>
         Array.isArray(a.member_node_ids)
-          ? { ...a, member_node_ids: a.member_node_ids.filter(id => !drop.has(id)) }
+          ? { ...a, member_node_ids: a.member_node_ids.filter((id) => !drop.has(id)) }
           : a
-      ));
+      );
       break;
     }
     case 'node_moved':
-      if (op.node_id && op.position) m.positions = { ...m.positions, [op.node_id]: roundPos(op.position) };
+      if (op.node_id && op.position)
+        m.positions = { ...m.positions, [op.node_id]: roundPos(op.position) };
       break;
     case 'layout_applied':
       for (const [id, pos] of Object.entries(op.positions || {})) m.positions[id] = roundPos(pos);
@@ -210,7 +217,7 @@ export function applyOpToMirror(mirrorState, op) {
       break;
     case 'nodes_shown': {
       const drop = new Set(op.node_ids || []);
-      m.hidden_node_ids = m.hidden_node_ids.filter(id => !drop.has(id));
+      m.hidden_node_ids = m.hidden_node_ids.filter((id) => !drop.has(id));
       break;
     }
     case 'edges_hidden':
@@ -218,28 +225,32 @@ export function applyOpToMirror(mirrorState, op) {
       break;
     case 'edges_shown': {
       const drop = new Set(op.edge_ids || []);
-      m.hidden_edge_ids = m.hidden_edge_ids.filter(id => !drop.has(id));
+      m.hidden_edge_ids = m.hidden_edge_ids.filter((id) => !drop.has(id));
       break;
     }
     case 'annotation_created':
     case 'annotation_updated': {
       const ann = op.annotation;
       if (ann && ann.id) {
-        const idx = m.annotations.findIndex(a => a.id === ann.id);
+        const idx = m.annotations.findIndex((a) => a.id === ann.id);
         if (idx === -1) m.annotations = [...m.annotations, ann];
-        else { const next = m.annotations.slice(); next[idx] = { ...next[idx], ...ann }; m.annotations = next; }
+        else {
+          const next = m.annotations.slice();
+          next[idx] = { ...next[idx], ...ann };
+          m.annotations = next;
+        }
       }
       break;
     }
     case 'annotation_deleted':
-      m.annotations = m.annotations.filter(a => a.id !== op.annotation_id);
+      m.annotations = m.annotations.filter((a) => a.id !== op.annotation_id);
       break;
     case 'group_membership_changed':
-      m.annotations = m.annotations.map(a => (
+      m.annotations = m.annotations.map((a) =>
         a.id === op.group_id && a.kind === 'group'
           ? { ...a, member_node_ids: [...(op.member_node_ids || [])] }
           : a
-      ));
+      );
       break;
     default:
       break; // session_renamed etc. carry no mirror state
@@ -283,13 +294,14 @@ export class SessionSyncClient {
     this.handlers = handlers;
     this.flushIntervalMs = flushIntervalMs;
     this._fetch = fetchImpl || (typeof fetch !== 'undefined' ? fetch.bind(globalThis) : null);
-    this._EventSource = EventSourceImpl || (typeof EventSource !== 'undefined' ? EventSource : null);
+    this._EventSource =
+      EventSourceImpl || (typeof EventSource !== 'undefined' ? EventSource : null);
     this._now = nowFn || (() => Date.now());
 
     this._baseline = EMPTY_MIRROR;
     this._queue = [];
     this._seq = 0;
-    this._ready = false;      // stream has delivered its first event (session exists)
+    this._ready = false; // stream has delivered its first event (session exists)
     this._hadSnapshot = false;
     this._source = null;
     this._flushTimer = null;
@@ -299,15 +311,19 @@ export class SessionSyncClient {
     this._forceSingle = false;
 
     // Presence + selection claims (design 3.4 / 3.5), all ephemeral.
-    this._roster = new Map();          // client_id -> member {client_id, display_name, color}
-    this._claims = new Map();          // element_id -> { clientId, expiresAt }
-    this._localSelection = [];         // element ids this client currently claims
+    this._roster = new Map(); // client_id -> member {client_id, display_name, color}
+    this._claims = new Map(); // element_id -> { clientId, expiresAt }
+    this._localSelection = []; // element ids this client currently claims
     this._renewTimer = null;
     this._pruneTimer = null;
   }
 
-  get seq() { return this._seq; }
-  get connected() { return this._source != null; }
+  get seq() {
+    return this._seq;
+  }
+  get connected() {
+    return this._source != null;
+  }
 
   /**
    * The position the baseline currently holds for a node, or null. Lets the host
@@ -339,7 +355,11 @@ export class SessionSyncClient {
       if (claim.expiresAt <= now || claim.clientId === this.clientId) continue;
       const member = this._roster.get(claim.clientId);
       if (!member) continue;
-      out[eid] = { clientId: claim.clientId, color: member.color, displayName: member.display_name };
+      out[eid] = {
+        clientId: claim.clientId,
+        color: member.color,
+        displayName: member.display_name,
+      };
     }
     return out;
   }
@@ -351,11 +371,13 @@ export class SessionSyncClient {
    * the selection is unchanged, so it is safe to call on every selection event.
    */
   setLocalSelection(elementIds) {
-    const next = Array.from(new Set((elementIds || []).filter(id => typeof id === 'string' && id)));
+    const next = Array.from(
+      new Set((elementIds || []).filter((id) => typeof id === 'string' && id))
+    );
     const nextSet = new Set(next);
     const prevSet = new Set(this._localSelection);
-    const added = next.filter(id => !prevSet.has(id));
-    const removed = this._localSelection.filter(id => !nextSet.has(id));
+    const added = next.filter((id) => !prevSet.has(id));
+    const removed = this._localSelection.filter((id) => !nextSet.has(id));
     this._localSelection = next;
     if (removed.length) this._enqueue([{ op: 'selection_released', element_ids: removed }]);
     if (added.length) this._enqueue([{ op: 'selection_claimed', element_ids: added }]);
@@ -372,7 +394,9 @@ export class SessionSyncClient {
   }
 
   _seedPresence(roster, claims) {
-    this._roster = new Map((roster || []).filter(m => m && m.client_id).map(m => [m.client_id, m]));
+    this._roster = new Map(
+      (roster || []).filter((m) => m && m.client_id).map((m) => [m.client_id, m])
+    );
     const now = this._now();
     this._claims = new Map();
     for (const [eid, clientId] of Object.entries(claims || {})) {
@@ -401,7 +425,10 @@ export class SessionSyncClient {
     const now = this._now();
     let changed = false;
     for (const [eid, claim] of this._claims) {
-      if (claim.expiresAt <= now) { this._claims.delete(eid); changed = true; }
+      if (claim.expiresAt <= now) {
+        this._claims.delete(eid);
+        changed = true;
+      }
     }
     if (changed) this._emitSelections();
   }
@@ -439,7 +466,10 @@ export class SessionSyncClient {
   }
 
   _stopRenewTimer() {
-    if (this._renewTimer) { clearInterval(this._renewTimer); this._renewTimer = null; }
+    if (this._renewTimer) {
+      clearInterval(this._renewTimer);
+      this._renewTimer = null;
+    }
   }
 
   /** Open the SSE stream. Idempotent. */
@@ -454,7 +484,11 @@ export class SessionSyncClient {
     source.onmessage = (e) => {
       if (!e || !e.data) return;
       let data;
-      try { data = JSON.parse(e.data); } catch { return; }
+      try {
+        data = JSON.parse(e.data);
+      } catch {
+        return;
+      }
       this._handleEvent(data);
     };
     source.onerror = () => {
@@ -518,7 +552,9 @@ export class SessionSyncClient {
               headers: { 'Content-Type': 'application/json' },
               body: JSON.stringify({ client_id: this.clientId, base_seq: this._seq, ops: [op] }),
             });
-          } catch { /* best-effort teardown flush */ }
+          } catch {
+            /* best-effort teardown flush */
+          }
         }
       })();
     }
@@ -555,8 +591,10 @@ export class SessionSyncClient {
         const body = await resp.json().catch(() => ({}));
         if (typeof body.seq === 'number') this._seq = body.seq;
         if (this._forceSingle && this._queue.length === 0) this._forceSingle = false;
-      } else if (resp && (resp.status === 400 || resp.status === 413 ||
-                          resp.status === 404 || resp.status === 410)) {
+      } else if (
+        resp &&
+        (resp.status === 400 || resp.status === 413 || resp.status === 404 || resp.status === 410)
+      ) {
         // Terminal rejection (malformed / too large / session gone). Retrying
         // never succeeds. If this was a multi-op batch, requeue and switch to
         // one-at-a-time so only the offending op is ultimately dropped; a lone
@@ -586,10 +624,13 @@ export class SessionSyncClient {
 
   _scheduleRetry() {
     if (this._retryTimer || this._closed) return;
-    this._retryTimer = setTimeout(() => {
-      this._retryTimer = null;
-      this._flush();
-    }, Math.max(500, this.flushIntervalMs * 4));
+    this._retryTimer = setTimeout(
+      () => {
+        this._retryTimer = null;
+        this._flush();
+      },
+      Math.max(500, this.flushIntervalMs * 4)
+    );
   }
 
   _handleEvent(data) {
@@ -634,7 +675,8 @@ export class SessionSyncClient {
         // Fold the remote change into the baseline before the host applies it,
         // so the resulting local store change does not diff back out as an echo.
         this._baseline = applyOpToMirror(this._baseline, op);
-        if (this.handlers.onRemoteOps) this.handlers.onRemoteOps([op], { clientId: data.client_id });
+        if (this.handlers.onRemoteOps)
+          this.handlers.onRemoteOps([op], { clientId: data.client_id });
         break;
       }
       case 'presence_joined':
@@ -648,7 +690,10 @@ export class SessionSyncClient {
         this._roster.delete(data.client_id);
         let claimsChanged = false;
         for (const [eid, claim] of this._claims) {
-          if (claim.clientId === data.client_id) { this._claims.delete(eid); claimsChanged = true; }
+          if (claim.clientId === data.client_id) {
+            this._claims.delete(eid);
+            claimsChanged = true;
+          }
         }
         this._emitPresence();
         if (claimsChanged) this._emitSelections();
@@ -674,11 +719,27 @@ export class SessionSyncClient {
 
   close() {
     this._closed = true;
-    if (this._source) { try { this._source.close(); } catch { /* ignore */ } this._source = null; }
-    if (this._flushTimer) { clearTimeout(this._flushTimer); this._flushTimer = null; }
-    if (this._retryTimer) { clearTimeout(this._retryTimer); this._retryTimer = null; }
+    if (this._source) {
+      try {
+        this._source.close();
+      } catch {
+        /* ignore */
+      }
+      this._source = null;
+    }
+    if (this._flushTimer) {
+      clearTimeout(this._flushTimer);
+      this._flushTimer = null;
+    }
+    if (this._retryTimer) {
+      clearTimeout(this._retryTimer);
+      this._retryTimer = null;
+    }
     this._stopRenewTimer();
-    if (this._pruneTimer) { clearInterval(this._pruneTimer); this._pruneTimer = null; }
+    if (this._pruneTimer) {
+      clearInterval(this._pruneTimer);
+      this._pruneTimer = null;
+    }
     this._queue = [];
   }
 }

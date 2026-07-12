@@ -49,9 +49,11 @@ def build_mcp_instructions() -> str:
     if presentation.get("prompt_prefix"):
         prompt_context = f"\nDOMAIN CONTEXT:\n{presentation['prompt_prefix']}\n"
 
-    language_policy_section = format_language_policy_for_prompt(presentation, external_agent=True)
+    language_policy_section = format_language_policy_for_prompt(
+        presentation, external_agent=True
+    )
 
-    instructions = f"""You are a helpful knowledge agent for: {presentation.get('title', 'Knowledge Graph')}.
+    instructions = f"""You are a helpful knowledge agent for: {presentation.get("title", "Knowledge Graph")}.
 {prompt_context}
 METADATA MODEL — Node Types available in this graph:
 
@@ -154,23 +156,29 @@ class MCPBrowserHandler:
 
         # Regular browser GET → return helpful info
         if method == "GET":
-            response = JSONResponse({
-                "endpoint": "/mcp/sse",
-                "type": "MCP (Model Context Protocol) Server",
-                "description": "This endpoint is for MCP clients, not direct browser access.",
-                "usage": "Use an MCP-compatible client (like Claude Desktop or ChatGPT) to connect to this endpoint.",
-                "protocol": "MCP supports SSE and Streamable HTTP transports.",
-                "transports": {
-                    "sse_legacy": "/mcp/sse",
-                    "streamable_http": "/mcp" if self.streamable_app else "not available",
-                },
-                "streamable_http_endpoints": {
-                    "POST /mcp": "send JSON-RPC message; respond inline or as SSE stream",
-                    "GET /mcp": "open SSE stream for server-initiated messages (Accept: text/event-stream)",
-                } if self.streamable_app else {},
-                "documentation": "https://modelcontextprotocol.io/",
-                "available_tools": list(self.tools_map.keys()),
-            })
+            response = JSONResponse(
+                {
+                    "endpoint": "/mcp/sse",
+                    "type": "MCP (Model Context Protocol) Server",
+                    "description": "This endpoint is for MCP clients, not direct browser access.",
+                    "usage": "Use an MCP-compatible client (like Claude Desktop or ChatGPT) to connect to this endpoint.",
+                    "protocol": "MCP supports SSE and Streamable HTTP transports.",
+                    "transports": {
+                        "sse_legacy": "/mcp/sse",
+                        "streamable_http": "/mcp"
+                        if self.streamable_app
+                        else "not available",
+                    },
+                    "streamable_http_endpoints": {
+                        "POST /mcp": "send JSON-RPC message; respond inline or as SSE stream",
+                        "GET /mcp": "open SSE stream for server-initiated messages (Accept: text/event-stream)",
+                    }
+                    if self.streamable_app
+                    else {},
+                    "documentation": "https://modelcontextprotocol.io/",
+                    "available_tools": list(self.tools_map.keys()),
+                }
+            )
             await response(scope, receive, send)
             return
 
@@ -189,7 +197,9 @@ def mount_mcp(app: FastAPI, mcp, tools_map) -> None:
     # Try to create Streamable HTTP app (requires mcp ≥ 1.8).
     # If the installed version doesn't support it, fall back to SSE-only.
     try:
-        mcp_streamable_app = bind_request_authorization_to_asgi_app(mcp.streamable_http_app())
+        mcp_streamable_app = bind_request_authorization_to_asgi_app(
+            mcp.streamable_http_app()
+        )
     except (AttributeError, TypeError):
         mcp_streamable_app = None
 

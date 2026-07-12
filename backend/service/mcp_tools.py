@@ -21,7 +21,9 @@ from typing import List, Optional, Dict, Any, Callable
 from .service import GraphService
 
 
-def register_mcp_tools(mcp, service: GraphService, session_registry=None, session_manager=None) -> Dict[str, Callable]:
+def register_mcp_tools(
+    mcp, service: GraphService, session_registry=None, session_manager=None
+) -> Dict[str, Callable]:
     """
     Register all GraphService methods as MCP tools.
 
@@ -39,7 +41,9 @@ def register_mcp_tools(mcp, service: GraphService, session_registry=None, sessio
     tools_map = {}
 
     def _push(session_id, tool_name, result):
-        _push_to_session(session_registry, session_id, tool_name, result, session_manager)
+        _push_to_session(
+            session_registry, session_id, tool_name, result, session_manager
+        )
 
     def _session_view_state(session_id):
         """Return ``(visible_node_ids, selected_node_ids)`` as the server sees them.
@@ -55,7 +59,9 @@ def register_mcp_tools(mcp, service: GraphService, session_registry=None, sessio
             session = session_manager.get_session(session_id)
             if session is not None:
                 hidden = set(session.state.get("hidden_node_ids", []))
-                visible = [n for n in session.state.get("node_refs", []) if n not in hidden]
+                visible = [
+                    n for n in session.state.get("node_refs", []) if n not in hidden
+                ]
             selected = list(session_manager.claimed_elements(session_id))
         return visible, selected
 
@@ -148,7 +154,7 @@ def register_mcp_tools(mcp, service: GraphService, session_registry=None, sessio
         name: str,
         node_type: Optional[str] = None,
         threshold: float = 0.7,
-        limit: int = 5
+        limit: int = 5,
     ) -> Dict[str, Any]:
         """
         Find similar nodes based on name (for duplicate detection)
@@ -163,10 +169,7 @@ def register_mcp_tools(mcp, service: GraphService, session_registry=None, sessio
             Dict with similar nodes and similarity scores
         """
         return service.find_similar_nodes(
-            name=name,
-            node_type=node_type,
-            threshold=threshold,
-            limit=limit
+            name=name, node_type=node_type, threshold=threshold, limit=limit
         )
 
     @register_tool
@@ -174,7 +177,7 @@ def register_mcp_tools(mcp, service: GraphService, session_registry=None, sessio
         names: List[str],
         node_type: Optional[str] = None,
         threshold: float = 0.7,
-        limit: int = 5
+        limit: int = 5,
     ) -> Dict[str, Any]:
         """
         Find similar nodes for multiple names at once (batch processing)
@@ -193,10 +196,7 @@ def register_mcp_tools(mcp, service: GraphService, session_registry=None, sessio
             Dict with results for each name
         """
         return service.find_similar_nodes_batch(
-            names=names,
-            node_type=node_type,
-            threshold=threshold,
-            limit=limit
+            names=names, node_type=node_type, threshold=threshold, limit=limit
         )
 
     # ==================== CRUD Tools ====================
@@ -540,7 +540,10 @@ def register_mcp_tools(mcp, service: GraphService, session_registry=None, sessio
         if not session_registry:
             return {"success": False, "error": "Session registry not available"}
         if not session_registry.is_valid_session_id(visualization_session_id):
-            return {"success": False, "error": "Invalid session ID format — expected DDDD-DDDD"}
+            return {
+                "success": False,
+                "error": "Invalid session ID format — expected DDDD-DDDD",
+            }
         if not session_registry.session_exists(visualization_session_id):
             return {
                 "success": False,
@@ -549,7 +552,12 @@ def register_mcp_tools(mcp, service: GraphService, session_registry=None, sessio
                     "Call connect_to_visualization_session first to verify the session is open."
                 ),
             }
-        result = {"action": "clear_visualization", "nodes": [], "edges": [], "success": True}
+        result = {
+            "action": "clear_visualization",
+            "nodes": [],
+            "edges": [],
+            "success": True,
+        }
         _push(visualization_session_id, "clear_visualization", result)
         return {
             "success": True,
@@ -573,7 +581,10 @@ def register_mcp_tools(mcp, service: GraphService, session_registry=None, sessio
         if not session_registry:
             return {"connected": False, "error": "Session registry not available"}
         if not session_registry.is_valid_session_id(session_id):
-            return {"connected": False, "error": "Invalid session ID format — expected DDDD-DDDD"}
+            return {
+                "connected": False,
+                "error": "Invalid session ID format — expected DDDD-DDDD",
+            }
         if not session_registry.session_exists(session_id):
             return {
                 "connected": False,

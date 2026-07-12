@@ -37,9 +37,7 @@ describe('Federation depth runtime flow', () => {
 
   it('uses selected federation depth for both search and chat requests', async () => {
     api.searchGraph.mockResolvedValueOnce({
-      nodes: [
-        { id: 'local-1', type: 'Actor', name: 'Local node', metadata: {} },
-      ],
+      nodes: [{ id: 'local-1', type: 'Actor', name: 'Local node', metadata: {} }],
       edges: [],
     });
 

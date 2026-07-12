@@ -71,8 +71,6 @@ def register_agent_routes(
         if not success:
             raise HTTPException(
                 status_code=404,
-                detail=(
-                    f"Agent '{agent_id}' not found or has no schedule configured"
-                ),
+                detail=(f"Agent '{agent_id}' not found or has no schedule configured"),
             )
         return {"status": "triggered", "agent_id": agent_id}

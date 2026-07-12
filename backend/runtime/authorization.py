@@ -8,7 +8,10 @@ from contextvars import ContextVar
 from dataclasses import dataclass, field
 from typing import Any, Dict, Iterator, Mapping, Optional, Protocol
 
-from backend.runtime.request_context import get_request_actor_context, get_request_scope_context
+from backend.runtime.request_context import (
+    get_request_actor_context,
+    get_request_scope_context,
+)
 
 AUTHORIZATION_MODE_ENV = "COMMUNITYOVERVIEW_AUTHORIZATION_MODE"
 AUTHORIZATION_MODE_PERMISSIVE = "permissive"
@@ -72,15 +75,21 @@ class GraphAuthorizationDecision:
 class GraphAuthorizationHook(Protocol):
     """Protocol for hosted or plugin-provided graph authorization hooks."""
 
-    def evaluate(self, context: GraphAuthorizationContext) -> GraphAuthorizationDecision:
-        ...
+    def evaluate(
+        self, context: GraphAuthorizationContext
+    ) -> GraphAuthorizationDecision: ...
 
 
 class DefaultGraphAuthorizationHook:
     """Standalone-safe default hook with optional environment narrowing."""
 
-    def evaluate(self, context: GraphAuthorizationContext) -> GraphAuthorizationDecision:
-        mode = _clean_string(os.getenv(AUTHORIZATION_MODE_ENV)).lower() or AUTHORIZATION_MODE_PERMISSIVE
+    def evaluate(
+        self, context: GraphAuthorizationContext
+    ) -> GraphAuthorizationDecision:
+        mode = (
+            _clean_string(os.getenv(AUTHORIZATION_MODE_ENV)).lower()
+            or AUTHORIZATION_MODE_PERMISSIVE
+        )
 
         if mode == AUTHORIZATION_MODE_DENY_ALL:
             return GraphAuthorizationDecision(
@@ -90,7 +99,10 @@ class DefaultGraphAuthorizationHook:
                 source="environment",
             )
 
-        if mode == AUTHORIZATION_MODE_READ_ONLY and context.action == GRAPH_ACTION_MUTATE:
+        if (
+            mode == AUTHORIZATION_MODE_READ_ONLY
+            and context.action == GRAPH_ACTION_MUTATE
+        ):
             return GraphAuthorizationDecision(
                 allowed=False,
                 reason="Graph mutations are disabled by the current authorization mode.",
@@ -100,8 +112,12 @@ class DefaultGraphAuthorizationHook:
 
         return GraphAuthorizationDecision(
             allowed=True,
-            mode=mode if mode in {AUTHORIZATION_MODE_READ_ONLY, AUTHORIZATION_MODE_DENY_ALL} else AUTHORIZATION_MODE_PERMISSIVE,
-            source="environment" if _clean_string(os.getenv(AUTHORIZATION_MODE_ENV)) else "default",
+            mode=mode
+            if mode in {AUTHORIZATION_MODE_READ_ONLY, AUTHORIZATION_MODE_DENY_ALL}
+            else AUTHORIZATION_MODE_PERMISSIVE,
+            source="environment"
+            if _clean_string(os.getenv(AUTHORIZATION_MODE_ENV))
+            else "default",
         )
 
 
@@ -122,22 +138,26 @@ def use_request_authorization(
     graph_id: Optional[str] = None,
 ) -> Iterator[None]:
     """Temporarily bind request-level authorization inputs for service calls."""
-    token = _request_authorization_inputs.set({
-        "headers": headers,
-        "actor_id": actor_id,
-        "actor_type": actor_type,
-        "auth_source": auth_source,
-        "workspace_id": workspace_id,
-        "workspace_kind": workspace_kind,
-        "graph_id": graph_id,
-    })
+    token = _request_authorization_inputs.set(
+        {
+            "headers": headers,
+            "actor_id": actor_id,
+            "actor_type": actor_type,
+            "auth_source": auth_source,
+            "workspace_id": workspace_id,
+            "workspace_kind": workspace_kind,
+            "graph_id": graph_id,
+        }
+    )
     try:
         yield
     finally:
         _request_authorization_inputs.reset(token)
 
 
-def build_graph_authorization_context(*, action: str, target: str) -> GraphAuthorizationContext:
+def build_graph_authorization_context(
+    *, action: str, target: str
+) -> GraphAuthorizationContext:
     """Build a graph authorization context from request-safe inputs and environment defaults."""
     inputs = get_current_request_authorization_inputs()
     actor = get_request_actor_context(

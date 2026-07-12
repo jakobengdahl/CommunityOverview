@@ -7,9 +7,7 @@ const hoisted = vi.hoisted(() => ({ setNodes: vi.fn() }));
 
 vi.mock('reactflow', () => ({
   // Expose onResizeEnd via a clickable stub so the test can fire a resize.
-  NodeResizer: ({ onResizeEnd }) => (
-    <button data-testid="resize" onClick={() => onResizeEnd?.()} />
-  ),
+  NodeResizer: ({ onResizeEnd }) => <button data-testid="resize" onClick={() => onResizeEnd?.()} />,
   useReactFlow: () => ({ setNodes: hoisted.setNodes }),
 }));
 
@@ -84,7 +82,7 @@ describe('GroupNode interaction fixes', () => {
     fireEvent.contextMenu(screen.getByText('G'));
     expect(document.querySelector('.graph-group-context-menu')).not.toBeNull();
     // Dismiss listeners attach on a 0 ms timer so the opening event can't self-close.
-    await new Promise(r => setTimeout(r, 0));
+    await new Promise((r) => setTimeout(r, 0));
     const outside = document.createElement('input');
     document.body.appendChild(outside);
     fireEvent.focusIn(outside);
@@ -95,7 +93,7 @@ describe('GroupNode interaction fixes', () => {
   it('keeps the context menu open when focus moves inside it', async () => {
     renderGroup();
     fireEvent.contextMenu(screen.getByText('G'));
-    await new Promise(r => setTimeout(r, 0));
+    await new Promise((r) => setTimeout(r, 0));
     fireEvent.focusIn(screen.getByRole('button', { name: /delete group/i }));
     expect(document.querySelector('.graph-group-context-menu')).not.toBeNull();
   });

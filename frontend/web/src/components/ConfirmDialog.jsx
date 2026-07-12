@@ -47,16 +47,10 @@ function ConfirmDialog({
         </div>
 
         <div className="confirm-dialog-actions">
-          <button
-            className="confirm-dialog-button cancel"
-            onClick={onCancel}
-          >
+          <button className="confirm-dialog-button cancel" onClick={onCancel}>
             {cancelText}
           </button>
-          <button
-            className={`confirm-dialog-button ${confirmStyle}`}
-            onClick={onConfirm}
-          >
+          <button className={`confirm-dialog-button ${confirmStyle}`} onClick={onConfirm}>
             {confirmText}
           </button>
         </div>
