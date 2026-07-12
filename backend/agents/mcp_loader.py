@@ -160,7 +160,10 @@ class MCPLoader:
                     # We know our graph MCP tools
                     tools = self._get_graph_mcp_tools(integration)
 
-        except httpx.RequestError as e:
+        except (httpx.RequestError, ValueError) as e:
+            # ValueError also covers json.JSONDecodeError on a 200/non-JSON body,
+            # which requests folded into RequestException but httpx surfaces as a
+            # plain ValueError — keep it swallowed-and-logged as before.
             logger.warning(f"Could not query {integration.id} info: {e}")
 
         # If no tools discovered, use known tools for GRAPH integration

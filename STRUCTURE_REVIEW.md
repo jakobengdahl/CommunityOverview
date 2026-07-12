@@ -617,7 +617,13 @@ summary instead.
   `TimeoutException`, `RequestException`/`.exceptions.RequestException` →
   `RequestError`); the client-independent `is_safe_url` SSRF check is untouched.
   Updated the delivery tests to patch `httpx.post` / raise `httpx.TimeoutException`.
-  Full backend suite green (942 passed / 16 skipped). Logged one finding en route
+  Review loop caught one real behavioural deviation and fixed it in-slice: the MCP
+  loader's `/info` block caught `httpx.RequestError`, but a 200/non-JSON body makes
+  `httpx` raise a plain `json.JSONDecodeError` (a `ValueError`) rather than the
+  `RequestException`-subclass `requests` used, so the handler was broadened to
+  `(httpx.RequestError, ValueError)` and a regression test added
+  (`TestConnectHttpInfoQuery`). Full backend suite green (943 passed / 16 skipped).
+  Logged one finding en route
   (SMALL_FIXES 2026-07-12): the SSRF check is not re-applied across redirects — a
   latent, pre-existing gap preserved by keeping `follow_redirects=True`. C3 slice 2
   (gateway `httpx`→`httpx2`, pin-policy alignment, and the security-sensitive

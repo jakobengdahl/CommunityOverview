@@ -2,7 +2,8 @@
 Tests for MCP loader and tool namespacing.
 """
 
-from unittest.mock import patch
+import json
+from unittest.mock import Mock, patch
 
 from backend.agents.config import MCPIntegration, MCPTransport
 from backend.agents.mcp_loader import MCPLoader, NamespacedTool
@@ -506,3 +507,33 @@ class TestMCPLoaderLifecycle:
 
         assert "error" in result
         assert result["error"] == "Path must be within agent workspace"
+
+
+class TestConnectHttpInfoQuery:
+    """Tests for the HTTP info-endpoint tool-discovery path."""
+
+    @patch("backend.agents.mcp_loader.httpx.get")
+    def test_info_endpoint_non_json_body_is_swallowed(self, mock_get):
+        """A 200 response with a non-JSON body must not raise.
+
+        httpx surfaces a JSON decode failure as a plain ValueError, which — unlike
+        requests' JSONDecodeError (a RequestException) — is not an httpx.RequestError.
+        The handler must still swallow-and-log it so tool discovery degrades to an
+        empty list instead of propagating out of _connect_http.
+        """
+        response = Mock()
+        response.status_code = 200
+        response.json.side_effect = json.JSONDecodeError("no json", "<html>", 0)
+        mock_get.return_value = response
+
+        integration = MCPIntegration(
+            id="WEB",
+            name="Some HTTP MCP",
+            transport=MCPTransport.HTTP,
+            url="http://localhost:9999/mcp",
+        )
+        loader = MCPLoader([integration])
+
+        tools = loader._connect_http(integration)
+
+        assert tools == []
