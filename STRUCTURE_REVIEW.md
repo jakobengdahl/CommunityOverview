@@ -576,7 +576,7 @@ summary instead.
 | 11 | B1 remaining slices | M×2 | B1 slice 1 | in progress (slice 2/4, PR #229) |
 | 12 | B5 GraphCanvas decomposition | M | — | in progress (slice 1/2, PR #230) |
 | 13 | C3 HTTP client + dependency policy | S–M | — | in progress (slice 1/2, PR #232) |
-| 14 | C4 Node 18 → 20 build image | XS | — | open |
+| 14 | C4 Node 18 → 20 build image | XS | — | done (PR #233) |
 | 15 | C5 security scanning in CI | S | A1 | open |
 | 16 | C6 start-script consolidation | S | — | open |
 | 17 | D1 docs realignment + index | S–M | B3, C1 | open |
@@ -604,6 +604,15 @@ summary instead.
    same branch.
 
 ## Completed
+
+- **[2026-07-12] C4 — frontend build image upgraded off Node 18 (PR #233).** Bumped
+  the `Dockerfile` frontend builder stage from `node:18-alpine` (EOL April 2025) to
+  `node:20-alpine`, matching the Node 20 already pinned in `.nvmrc` and both CI
+  `setup-node` jobs, and updated the `backend/DEVELOPMENT.md` prerequisite from
+  "Node.js 18+" to "Node.js 20+". No application code, dependency, or build-step
+  change — a single-version alignment across the documented, CI-tested, and
+  image-build toolchains. Stayed on 20 (not 22 LTS) to keep one Node version
+  everywhere rather than introduce a new one.
 
 - **[2026-07-12] C3 slice 1 — backend HTTP-client unification, `requests` dropped
   (PR #232).** Migrated the two remaining `requests` call sites off the redundant
