@@ -32,7 +32,11 @@ Usage:
 # Core storage
 from .storage import GraphStorage
 from .storage_backends import FileGraphPersistenceBackend, GraphPersistenceBackend
-from .history_store import GraphHistoryStore, event_to_history_record, derive_is_ai_action
+from .history_store import (
+    GraphHistoryStore,
+    event_to_history_record,
+    derive_is_ai_action,
+)
 
 # Vector store (for direct access if needed)
 from .vector_store import VectorStore
@@ -43,7 +47,6 @@ from .models import (
     NodeType,
     RelationshipType,
     NODE_COLORS,
-
     # Dynamic type functions (new, config-based)
     get_node_type_names,
     get_relationship_type_names,
@@ -51,11 +54,9 @@ from .models import (
     is_valid_relationship_type,
     get_node_color,
     NODE_COLORS_LOOKUP,
-
     # Core models
     Node,
     Edge,
-
     # Result models
     SimilarNode,
     GraphStats,
@@ -66,7 +67,13 @@ from .models import (
 )
 
 # Event system
-from .events import EventContext, EventOrigin, EventAttribution, EventActorAttribution, EventScopeAttribution
+from .events import (
+    EventContext,
+    EventOrigin,
+    EventAttribution,
+    EventActorAttribution,
+    EventScopeAttribution,
+)
 
 __all__ = [
     # Core storage
@@ -77,12 +84,10 @@ __all__ = [
     "event_to_history_record",
     "derive_is_ai_action",
     "VectorStore",
-
     # Enums (legacy)
     "NodeType",
     "RelationshipType",
     "NODE_COLORS",
-
     # Dynamic type functions (new)
     "get_node_type_names",
     "get_relationship_type_names",
@@ -90,11 +95,9 @@ __all__ = [
     "is_valid_relationship_type",
     "get_node_color",
     "NODE_COLORS_LOOKUP",
-
     # Core models
     "Node",
     "Edge",
-
     # Result models
     "SimilarNode",
     "GraphStats",
@@ -102,7 +105,6 @@ __all__ = [
     "AddNodesResult",
     "DeleteNodesResult",
     "DeleteEdgesResult",
-
     # Event system
     "EventContext",
     "EventOrigin",

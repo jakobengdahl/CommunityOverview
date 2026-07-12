@@ -108,7 +108,6 @@ class FederationSettings(BaseModel):
             raise ValueError("max_traversal_depth must be >= 0")
         return value
 
-
     @field_validator("depth_levels")
     @classmethod
     def validate_depth_levels(cls, value: Optional[List[int]]) -> Optional[List[int]]:

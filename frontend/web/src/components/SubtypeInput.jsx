@@ -20,8 +20,8 @@ function SubtypeInput({ value = [], onChange, existingSubtypes = [], label = 'Su
   const wrapperRef = useRef(null);
 
   // Filter suggestions based on current input, excluding already-selected values
-  const filteredSuggestions = existingSubtypes.filter(s => {
-    const alreadySelected = value.some(v => v.toLowerCase() === s.toLowerCase());
+  const filteredSuggestions = existingSubtypes.filter((s) => {
+    const alreadySelected = value.some((v) => v.toLowerCase() === s.toLowerCase());
     if (alreadySelected) return false;
     if (!inputValue.trim()) return true;
     return s.toLowerCase().includes(inputValue.toLowerCase());
@@ -44,26 +44,35 @@ function SubtypeInput({ value = [], onChange, existingSubtypes = [], label = 'Su
   }, []);
 
   // Normalize case: if an existing subtype matches case-insensitively, use existing casing
-  const normalizeCase = useCallback((text) => {
-    const trimmed = text.trim();
-    if (!trimmed) return '';
-    const match = existingSubtypes.find(s => s.toLowerCase() === trimmed.toLowerCase());
-    return match || trimmed;
-  }, [existingSubtypes]);
+  const normalizeCase = useCallback(
+    (text) => {
+      const trimmed = text.trim();
+      if (!trimmed) return '';
+      const match = existingSubtypes.find((s) => s.toLowerCase() === trimmed.toLowerCase());
+      return match || trimmed;
+    },
+    [existingSubtypes]
+  );
 
-  const addSubtype = useCallback((text) => {
-    const normalized = normalizeCase(text);
-    if (!normalized) return;
-    // Don't add duplicates (case-insensitive)
-    if (value.some(v => v.toLowerCase() === normalized.toLowerCase())) return;
-    onChange([...value, normalized]);
-    setInputValue('');
-    setShowSuggestions(true);
-  }, [value, onChange, normalizeCase]);
+  const addSubtype = useCallback(
+    (text) => {
+      const normalized = normalizeCase(text);
+      if (!normalized) return;
+      // Don't add duplicates (case-insensitive)
+      if (value.some((v) => v.toLowerCase() === normalized.toLowerCase())) return;
+      onChange([...value, normalized]);
+      setInputValue('');
+      setShowSuggestions(true);
+    },
+    [value, onChange, normalizeCase]
+  );
 
-  const removeSubtype = useCallback((index) => {
-    onChange(value.filter((_, i) => i !== index));
-  }, [value, onChange]);
+  const removeSubtype = useCallback(
+    (index) => {
+      onChange(value.filter((_, i) => i !== index));
+    },
+    [value, onChange]
+  );
 
   const handleKeyDown = (e) => {
     if (e.key === 'Enter') {
@@ -80,10 +89,10 @@ function SubtypeInput({ value = [], onChange, existingSubtypes = [], label = 'Su
       }
     } else if (e.key === 'ArrowDown') {
       e.preventDefault();
-      setSelectedIndex(i => Math.min(i + 1, filteredSuggestions.length - 1));
+      setSelectedIndex((i) => Math.min(i + 1, filteredSuggestions.length - 1));
     } else if (e.key === 'ArrowUp') {
       e.preventDefault();
-      setSelectedIndex(i => Math.max(i - 1, 0));
+      setSelectedIndex((i) => Math.max(i - 1, 0));
     } else if (e.key === 'Backspace' && !inputValue && value.length > 0) {
       removeSubtype(value.length - 1);
     } else if (e.key === 'Escape') {
@@ -110,7 +119,10 @@ function SubtypeInput({ value = [], onChange, existingSubtypes = [], label = 'Su
             <button
               type="button"
               className="subtype-chip-remove"
-              onClick={(e) => { e.stopPropagation(); removeSubtype(index); }}
+              onClick={(e) => {
+                e.stopPropagation();
+                removeSubtype(index);
+              }}
             >
               ×
             </button>
@@ -133,7 +145,10 @@ function SubtypeInput({ value = [], onChange, existingSubtypes = [], label = 'Su
             <li
               key={suggestion}
               className={`subtype-suggestion-item ${index === selectedIndex ? 'selected' : ''}`}
-              onMouseDown={(e) => { e.preventDefault(); addSubtype(suggestion); }}
+              onMouseDown={(e) => {
+                e.preventDefault();
+                addSubtype(suggestion);
+              }}
               onMouseEnter={() => setSelectedIndex(index)}
             >
               {suggestion}

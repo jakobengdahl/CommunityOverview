@@ -5,12 +5,14 @@ claim ops, catch-up vs snapshot, rate limiting, batch caps, and the
 presence/claim lifecycle on connect/disconnect.
 """
 
-import asyncio
-
 import pytest
 
-from backend.core.session_hub import ClaimMap, InProcessEventBus
-from backend.core.session_store import InMemorySessionPersistenceBackend, OpError, SessionStore
+from backend.core.session_hub import InProcessEventBus
+from backend.core.session_store import (
+    InMemorySessionPersistenceBackend,
+    OpError,
+    SessionStore,
+)
 from backend.core.session_manager import (
     OpBatchTooLarge,
     RateLimited,
@@ -40,10 +42,15 @@ class TestApplyOps:
         s = mgr.create_session()
         sub, _ = mgr.connect(s.id, "c1", "A")
         await _drain(sub)  # discard presence_joined
-        res = await mgr.apply_ops(s.id, "c1", 0, [
-            {"op": "nodes_added", "node_ids": ["a"]},
-            {"op": "node_moved", "node_id": "a", "position": {"x": 1, "y": 2}},
-        ])
+        res = await mgr.apply_ops(
+            s.id,
+            "c1",
+            0,
+            [
+                {"op": "nodes_added", "node_ids": ["a"]},
+                {"op": "node_moved", "node_id": "a", "position": {"x": 1, "y": 2}},
+            ],
+        )
         assert res["seq"] == 2
         events = await _drain(sub)
         assert [e["op"]["op"] for e in events] == ["nodes_added", "node_moved"]
@@ -55,23 +62,35 @@ class TestApplyOps:
         s = mgr.create_session()
         calls = {"n": 0}
         original = store.persist
-        store.persist = lambda session: (calls.__setitem__("n", calls["n"] + 1), original(session))[1]
-        await mgr.apply_ops(s.id, "c1", 0, [
-            {"op": "nodes_added", "node_ids": ["a"]},
-            {"op": "nodes_added", "node_ids": ["b"]},
-        ])
+        store.persist = lambda session: (
+            calls.__setitem__("n", calls["n"] + 1),
+            original(session),
+        )[1]
+        await mgr.apply_ops(
+            s.id,
+            "c1",
+            0,
+            [
+                {"op": "nodes_added", "node_ids": ["a"]},
+                {"op": "nodes_added", "node_ids": ["b"]},
+            ],
+        )
         assert calls["n"] == 1
 
     async def test_unknown_session_raises(self):
         mgr = _manager()
         with pytest.raises(SessionNotFound):
-            await mgr.apply_ops("9999-9999", "c1", 0, [{"op": "nodes_added", "node_ids": ["a"]}])
+            await mgr.apply_ops(
+                "9999-9999", "c1", 0, [{"op": "nodes_added", "node_ids": ["a"]}]
+            )
 
     async def test_batch_too_large(self):
         mgr = _manager(max_ops_per_batch=2)
         s = mgr.create_session()
         with pytest.raises(OpBatchTooLarge):
-            await mgr.apply_ops(s.id, "c1", 0, [{"op": "nodes_added", "node_ids": []}] * 3)
+            await mgr.apply_ops(
+                s.id, "c1", 0, [{"op": "nodes_added", "node_ids": []}] * 3
+            )
 
     async def test_rate_limit(self):
         mgr = _manager(bucket_capacity=2, bucket_refill_per_sec=0)
@@ -79,7 +98,9 @@ class TestApplyOps:
         await mgr.apply_ops(s.id, "c1", 0, [{"op": "nodes_added", "node_ids": ["a"]}])
         await mgr.apply_ops(s.id, "c1", 0, [{"op": "nodes_added", "node_ids": ["b"]}])
         with pytest.raises(RateLimited):
-            await mgr.apply_ops(s.id, "c1", 0, [{"op": "nodes_added", "node_ids": ["c"]}])
+            await mgr.apply_ops(
+                s.id, "c1", 0, [{"op": "nodes_added", "node_ids": ["c"]}]
+            )
 
     async def test_lookup_rate_limit_throttles_per_key(self):
         """Session-id lookups are throttled per source and refill over time."""
@@ -109,10 +130,18 @@ class TestApplyOps:
         sub, _ = mgr.connect(s.id, "c1", "A")
         await _drain(sub)
         with pytest.raises(OpError):
-            await mgr.apply_ops(s.id, "c1", 0, [
-                {"op": "annotation_created", "annotation": {"kind": "note", "text": "hi"}},
-                {"op": "node_moved", "node_id": "a", "position": {"x": "bad"}},
-            ])
+            await mgr.apply_ops(
+                s.id,
+                "c1",
+                0,
+                [
+                    {
+                        "op": "annotation_created",
+                        "annotation": {"kind": "note", "text": "hi"},
+                    },
+                    {"op": "node_moved", "node_id": "a", "position": {"x": "bad"}},
+                ],
+            )
         after = mgr.get_session(s.id)
         assert after.seq == 0
         assert after.state["annotations"] == []
@@ -137,9 +166,17 @@ class TestApplyOps:
 
         store.persist = _boom
         with pytest.raises(OSError):
-            await mgr.apply_ops(s.id, "c1", 0, [
-                {"op": "annotation_created", "annotation": {"kind": "note", "text": "hi"}},
-            ])
+            await mgr.apply_ops(
+                s.id,
+                "c1",
+                0,
+                [
+                    {
+                        "op": "annotation_created",
+                        "annotation": {"kind": "note", "text": "hi"},
+                    },
+                ],
+            )
         after = mgr.get_session(s.id)
         assert after.seq == 0
         assert after.state["annotations"] == []
@@ -149,12 +186,23 @@ class TestApplyOps:
     async def test_atomic_rollback_preserves_prior_state(self):
         mgr = _manager()
         s = mgr.create_session()
-        await mgr.apply_ops(s.id, "c1", 0, [{"op": "nodes_added", "node_ids": ["keep"]}])
+        await mgr.apply_ops(
+            s.id, "c1", 0, [{"op": "nodes_added", "node_ids": ["keep"]}]
+        )
         with pytest.raises(OpError):
-            await mgr.apply_ops(s.id, "c1", 0, [
-                {"op": "nodes_added", "node_ids": ["x"]},
-                {"op": "group_membership_changed", "group_id": "missing", "member_node_ids": []},
-            ])
+            await mgr.apply_ops(
+                s.id,
+                "c1",
+                0,
+                [
+                    {"op": "nodes_added", "node_ids": ["x"]},
+                    {
+                        "op": "group_membership_changed",
+                        "group_id": "missing",
+                        "member_node_ids": [],
+                    },
+                ],
+            )
         after = mgr.get_session(s.id)
         assert after.state["node_refs"] == ["keep"]
         assert after.seq == 1
@@ -166,7 +214,9 @@ class TestClaimOps:
         s = mgr.create_session()
         sub, _ = mgr.connect(s.id, "c1", "A")
         await _drain(sub)
-        res = await mgr.apply_ops(s.id, "c1", 0, [{"op": "selection_claimed", "element_ids": ["n1"]}])
+        res = await mgr.apply_ops(
+            s.id, "c1", 0, [{"op": "selection_claimed", "element_ids": ["n1"]}]
+        )
         # claims do not advance the persisted seq
         assert res["seq"] == 0
         assert mgr.claims.snapshot(s.id) == {"n1": "c1"}
@@ -185,7 +235,9 @@ class TestCatchUp:
         mgr = _manager()
         s = mgr.create_session()
         for i in range(3):
-            await mgr.apply_ops(s.id, "c1", 0, [{"op": "nodes_added", "node_ids": [f"n{i}"]}])
+            await mgr.apply_ops(
+                s.id, "c1", 0, [{"op": "nodes_added", "node_ids": [f"n{i}"]}]
+            )
         cu = mgr.catch_up(s.id, 1)
         assert cu["type"] == "catch_up"
         assert [op["seq"] for op in cu["ops"]] == [2, 3]
@@ -195,7 +247,9 @@ class TestCatchUp:
         mgr = SessionManager(store)
         s = mgr.create_session()
         for i in range(3):
-            await mgr.apply_ops(s.id, "c1", 0, [{"op": "nodes_added", "node_ids": [f"n{i}"]}])
+            await mgr.apply_ops(
+                s.id, "c1", 0, [{"op": "nodes_added", "node_ids": [f"n{i}"]}]
+            )
         cu = mgr.catch_up(s.id, 0)
         assert cu["type"] == "snapshot"
         assert cu["session"]["state"]["node_refs"] == ["n0", "n1", "n2"]
@@ -212,7 +266,9 @@ class TestResyncTranslation:
 
     async def test_overflowed_subscriber_resync_sentinel_becomes_a_snapshot(self):
         bus = InProcessEventBus(queue_max=2)
-        mgr = SessionManager(SessionStore(InMemorySessionPersistenceBackend()), event_bus=bus)
+        mgr = SessionManager(
+            SessionStore(InMemorySessionPersistenceBackend()), event_bus=bus
+        )
         s = mgr.create_session()
         sub, _ = mgr.connect(s.id, "slow", "Slow")
         await _drain(sub)  # discard the connect's own presence_joined echo
@@ -220,7 +276,14 @@ class TestResyncTranslation:
         # Flood past the tiny queue without draining so the bus drops the
         # backlog and enqueues a `{"type": "resync"}` sentinel (session_hub.py).
         for i in range(5):
-            bus.publish(s.id, {"type": "op", "op": {"op": "nodes_added", "node_ids": [f"n{i}"]}, "seq": i})
+            bus.publish(
+                s.id,
+                {
+                    "type": "op",
+                    "op": {"op": "nodes_added", "node_ids": [f"n{i}"]},
+                    "seq": i,
+                },
+            )
 
         events = await _drain(sub)
         assert events[-1] == {"type": "resync"}
@@ -263,7 +326,9 @@ class TestLifecycle:
         mgr = _manager()
         s = mgr.create_session()
         sub, _ = mgr.connect(s.id, "c1", "A")
-        await mgr.apply_ops(s.id, "c1", 0, [{"op": "selection_claimed", "element_ids": ["n1"]}])
+        await mgr.apply_ops(
+            s.id, "c1", 0, [{"op": "selection_claimed", "element_ids": ["n1"]}]
+        )
         mgr.disconnect(s.id, "c1", sub)
         assert mgr.claims.snapshot(s.id) == {}
         assert mgr.roster(s.id) == []
@@ -309,21 +374,34 @@ class TestOpBatchByteCap:
         s = mgr.create_session()
         positions = {f"node-{i}": {"x": i, "y": i} for i in range(1000)}
         with pytest.raises(OpBatchTooLarge):
-            await mgr.apply_ops(s.id, "c1", 0, [{"op": "layout_applied", "positions": positions}])
+            await mgr.apply_ops(
+                s.id, "c1", 0, [{"op": "layout_applied", "positions": positions}]
+            )
 
     async def test_small_batch_within_byte_cap_succeeds(self):
         mgr = _manager(max_op_batch_bytes=256)
         s = mgr.create_session()
-        res = await mgr.apply_ops(s.id, "c1", 0, [{"op": "nodes_added", "node_ids": ["a"]}])
+        res = await mgr.apply_ops(
+            s.id, "c1", 0, [{"op": "nodes_added", "node_ids": ["a"]}]
+        )
         assert res["seq"] == 1
 
     async def test_oversized_batch_leaves_state_untouched(self):
         mgr = _manager(max_op_batch_bytes=256)
         s = mgr.create_session()
-        await mgr.apply_ops(s.id, "c1", 0, [{"op": "nodes_added", "node_ids": ["keep"]}])
+        await mgr.apply_ops(
+            s.id, "c1", 0, [{"op": "nodes_added", "node_ids": ["keep"]}]
+        )
         with pytest.raises(OpBatchTooLarge):
             await mgr.apply_ops(
-                s.id, "c1", 0,
-                [{"op": "layout_applied", "positions": {f"n-{i}": {"x": i, "y": i} for i in range(1000)}}],
+                s.id,
+                "c1",
+                0,
+                [
+                    {
+                        "op": "layout_applied",
+                        "positions": {f"n-{i}": {"x": i, "y": i} for i in range(1000)},
+                    }
+                ],
             )
         assert mgr.get_session(s.id).state["node_refs"] == ["keep"]

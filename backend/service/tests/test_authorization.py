@@ -19,7 +19,9 @@ class DenyMutationsHook:
     def __init__(self):
         self.seen_contexts = []
 
-    def evaluate(self, context: GraphAuthorizationContext) -> GraphAuthorizationDecision:
+    def evaluate(
+        self, context: GraphAuthorizationContext
+    ) -> GraphAuthorizationDecision:
         self.seen_contexts.append(context)
         if context.action == GRAPH_ACTION_MUTATE:
             return GraphAuthorizationDecision(
@@ -35,12 +37,16 @@ class WorkspaceSelectionNarrowingHook:
     def __init__(self):
         self.seen_contexts = []
 
-    def evaluate(self, context: GraphAuthorizationContext) -> GraphAuthorizationDecision:
+    def evaluate(
+        self, context: GraphAuthorizationContext
+    ) -> GraphAuthorizationDecision:
         self.seen_contexts.append(context)
         selected_graph_id = context.scope.get("graph_id", "")
         workspace_id = context.scope.get("workspace_id", "")
         if not selected_graph_id or not workspace_id:
-            return GraphAuthorizationDecision(allowed=True, mode="selection-aware", source="test")
+            return GraphAuthorizationDecision(
+                allowed=True, mode="selection-aware", source="test"
+            )
         return GraphAuthorizationDecision(
             allowed=True,
             mode="selection-aware",
@@ -58,7 +64,9 @@ class FixedNarrowingHook:
         self.allow_local_graph = allow_local_graph
         self.include_graph_ids = include_graph_ids
 
-    def evaluate(self, context: GraphAuthorizationContext) -> GraphAuthorizationDecision:
+    def evaluate(
+        self, context: GraphAuthorizationContext
+    ) -> GraphAuthorizationDecision:
         return GraphAuthorizationDecision(
             allowed=True,
             mode="fixed",
@@ -73,35 +81,46 @@ class FixedNarrowingHook:
 
 def _make_multi_graph_service(tmp_path, hook) -> GraphService:
     graph_file = tmp_path / "graph.json"
-    graph_file.write_text(json.dumps({
-        "nodes": [
-            {"id": "local-1", "type": "Actor", "name": "Local result"},
-        ],
-        "edges": [],
-    }), encoding="utf-8")
+    graph_file.write_text(
+        json.dumps(
+            {
+                "nodes": [
+                    {"id": "local-1", "type": "Actor", "name": "Local result"},
+                ],
+                "edges": [],
+            }
+        ),
+        encoding="utf-8",
+    )
     storage = GraphStorage(str(graph_file))
 
-    config = FederationFileConfig.model_validate({
-        "federation": {
-            "enabled": True,
-            "graphs": [
-                {
-                    "graph_id": "graph-alpha",
-                    "display_name": "Alpha",
-                    "enabled": True,
-                    "capabilities": {"allow_adopt": True},
-                    "endpoints": {"graph_json_url": "https://example.invalid/alpha.json"},
-                },
-                {
-                    "graph_id": "graph-beta",
-                    "display_name": "Beta",
-                    "enabled": True,
-                    "capabilities": {"allow_adopt": True},
-                    "endpoints": {"graph_json_url": "https://example.invalid/beta.json"},
-                },
-            ],
+    config = FederationFileConfig.model_validate(
+        {
+            "federation": {
+                "enabled": True,
+                "graphs": [
+                    {
+                        "graph_id": "graph-alpha",
+                        "display_name": "Alpha",
+                        "enabled": True,
+                        "capabilities": {"allow_adopt": True},
+                        "endpoints": {
+                            "graph_json_url": "https://example.invalid/alpha.json"
+                        },
+                    },
+                    {
+                        "graph_id": "graph-beta",
+                        "display_name": "Beta",
+                        "enabled": True,
+                        "capabilities": {"allow_adopt": True},
+                        "endpoints": {
+                            "graph_json_url": "https://example.invalid/beta.json"
+                        },
+                    },
+                ],
+            }
         }
-    })
+    )
     manager = FederationManager(config)
 
     for graph, node_id, name in (
@@ -120,56 +139,81 @@ def _make_multi_graph_service(tmp_path, hook) -> GraphService:
 
 def _make_saved_view_service(tmp_path, hook) -> GraphService:
     graph_file = tmp_path / "saved-view-graph.json"
-    graph_file.write_text(json.dumps({
-        "nodes": [
-            {"id": "local-1", "type": "Actor", "name": "Local node"},
+    graph_file.write_text(
+        json.dumps(
             {
-                "id": "alpha-1",
-                "type": "Actor",
-                "name": "Alpha node",
-                "metadata": {"origin_graph_id": "graph-alpha"},
-            },
-            {
-                "id": "beta-1",
-                "type": "Actor",
-                "name": "Beta node",
-                "metadata": {"origin_graph_id": "graph-beta"},
-            },
-            {
-                "id": "view-1",
-                "type": "SavedView",
-                "name": "Scoped View",
-                "summary": "Scoped view summary",
-                "metadata": {
-                    "node_ids": ["local-1", "alpha-1", "beta-1"],
-                    "positions": {
-                        "local-1": {"x": 1, "y": 1},
-                        "alpha-1": {"x": 2, "y": 2},
-                        "beta-1": {"x": 3, "y": 3},
+                "nodes": [
+                    {"id": "local-1", "type": "Actor", "name": "Local node"},
+                    {
+                        "id": "alpha-1",
+                        "type": "Actor",
+                        "name": "Alpha node",
+                        "metadata": {"origin_graph_id": "graph-alpha"},
                     },
-                    "hidden_nodes": ["alpha-1", "beta-1"],
-                    "parentIds": {
-                        "local-1": "group-1",
-                        "alpha-1": "group-1",
-                        "beta-1": "group-2",
+                    {
+                        "id": "beta-1",
+                        "type": "Actor",
+                        "name": "Beta node",
+                        "metadata": {"origin_graph_id": "graph-beta"},
                     },
-                    "groups": [
-                        {"id": "group-1", "label": "Visible group", "position": {"x": 0, "y": 0}},
-                        {"id": "group-2", "label": "Hidden group", "position": {"x": 4, "y": 4}},
-                    ],
-                },
-            },
-        ],
-        "edges": [
-            {"id": "edge-1", "source": "local-1", "target": "alpha-1", "type": "RELATES_TO"},
-            {"id": "edge-2", "source": "alpha-1", "target": "beta-1", "type": "RELATES_TO"},
-        ],
-    }), encoding="utf-8")
+                    {
+                        "id": "view-1",
+                        "type": "SavedView",
+                        "name": "Scoped View",
+                        "summary": "Scoped view summary",
+                        "metadata": {
+                            "node_ids": ["local-1", "alpha-1", "beta-1"],
+                            "positions": {
+                                "local-1": {"x": 1, "y": 1},
+                                "alpha-1": {"x": 2, "y": 2},
+                                "beta-1": {"x": 3, "y": 3},
+                            },
+                            "hidden_nodes": ["alpha-1", "beta-1"],
+                            "parentIds": {
+                                "local-1": "group-1",
+                                "alpha-1": "group-1",
+                                "beta-1": "group-2",
+                            },
+                            "groups": [
+                                {
+                                    "id": "group-1",
+                                    "label": "Visible group",
+                                    "position": {"x": 0, "y": 0},
+                                },
+                                {
+                                    "id": "group-2",
+                                    "label": "Hidden group",
+                                    "position": {"x": 4, "y": 4},
+                                },
+                            ],
+                        },
+                    },
+                ],
+                "edges": [
+                    {
+                        "id": "edge-1",
+                        "source": "local-1",
+                        "target": "alpha-1",
+                        "type": "RELATES_TO",
+                    },
+                    {
+                        "id": "edge-2",
+                        "source": "alpha-1",
+                        "target": "beta-1",
+                        "type": "RELATES_TO",
+                    },
+                ],
+            }
+        ),
+        encoding="utf-8",
+    )
     return GraphService(GraphStorage(str(graph_file)), authorization_hook=hook)
 
 
 class TestGraphAuthorizationSeam:
-    def test_default_service_behavior_remains_permissive(self, empty_service: GraphService):
+    def test_default_service_behavior_remains_permissive(
+        self, empty_service: GraphService
+    ):
         result = empty_service.add_nodes(
             nodes=[{"type": "Actor", "name": "Standalone-safe actor"}],
             edges=[],
@@ -229,8 +273,12 @@ class TestGraphAuthorizationSeam:
         hook = WorkspaceSelectionNarrowingHook()
         service = _make_multi_graph_service(tmp_path, hook)
 
-        with use_request_authorization(workspace_id="workspace-1", graph_id="graph-beta"):
-            result = service.search_graph(query="result", node_types=["Actor"], limit=10)
+        with use_request_authorization(
+            workspace_id="workspace-1", graph_id="graph-beta"
+        ):
+            result = service.search_graph(
+                query="result", node_types=["Actor"], limit=10
+            )
 
         assert [node["name"] for node in result["nodes"]] == ["Beta result"]
         assert result["federation"]["federated_nodes"] == 1
@@ -241,7 +289,9 @@ class TestGraphAuthorizationSeam:
     def test_search_limit_is_applied_after_narrowing(self, tmp_path):
         service = _make_multi_graph_service(tmp_path, WorkspaceSelectionNarrowingHook())
 
-        with use_request_authorization(workspace_id="workspace-1", graph_id="graph-beta"):
+        with use_request_authorization(
+            workspace_id="workspace-1", graph_id="graph-beta"
+        ):
             result = service.search_graph(query="result", node_types=["Actor"], limit=1)
 
         assert [node["name"] for node in result["nodes"]] == ["Beta result"]
@@ -251,7 +301,9 @@ class TestGraphAuthorizationSeam:
     def test_get_saved_view_filters_disallowed_graph_nodes(self, tmp_path):
         service = _make_saved_view_service(
             tmp_path,
-            FixedNarrowingHook(allow_local_graph=True, include_graph_ids=("graph-alpha",)),
+            FixedNarrowingHook(
+                allow_local_graph=True, include_graph_ids=("graph-alpha",)
+            ),
         )
 
         result = service.get_saved_view("Scoped View")
@@ -264,7 +316,9 @@ class TestGraphAuthorizationSeam:
         assert result["parentIds"] == {"local-1": "group-1", "alpha-1": "group-1"}
 
     def test_request_bound_stats_and_saved_views_honor_narrowing(self, tmp_path):
-        hook = FixedNarrowingHook(allow_local_graph=False, include_graph_ids=("graph-beta",))
+        hook = FixedNarrowingHook(
+            allow_local_graph=False, include_graph_ids=("graph-beta",)
+        )
         service = _make_multi_graph_service(tmp_path, hook)
         saved_view_service = _make_saved_view_service(tmp_path, hook)
 
@@ -282,10 +336,14 @@ class TestGraphAuthorizationSeam:
         }
         assert views == {"success": True, "views": [], "total": 0}
 
-    def test_selection_aware_hook_can_block_adoption_outside_selected_graph(self, tmp_path):
+    def test_selection_aware_hook_can_block_adoption_outside_selected_graph(
+        self, tmp_path
+    ):
         service = _make_multi_graph_service(tmp_path, WorkspaceSelectionNarrowingHook())
 
-        with use_request_authorization(workspace_id="workspace-1", graph_id="graph-beta"):
+        with use_request_authorization(
+            workspace_id="workspace-1", graph_id="graph-beta"
+        ):
             result = service.adopt_federated_node("federated::graph-alpha::remote-1")
 
         assert result["success"] is False

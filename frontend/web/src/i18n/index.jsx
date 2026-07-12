@@ -51,7 +51,11 @@ export function I18nProvider({ children, defaultLanguage }) {
   const [language, setLanguageState] = useState(() => {
     const detected = detectLanguage();
     // If a defaultLanguage from backend config is provided and no URL/localStorage override
-    if (defaultLanguage && !new URLSearchParams(window.location.search).get('lang') && !localStorage.getItem('app_language')) {
+    if (
+      defaultLanguage &&
+      !new URLSearchParams(window.location.search).get('lang') &&
+      !localStorage.getItem('app_language')
+    ) {
       return SUPPORTED_LANGUAGES.includes(defaultLanguage) ? defaultLanguage : detected;
     }
     return detected;
@@ -66,36 +70,43 @@ export function I18nProvider({ children, defaultLanguage }) {
 
   // Update language when backend config provides a default (only if no user override)
   useEffect(() => {
-    if (defaultLanguage && !localStorage.getItem('app_language') && !new URLSearchParams(window.location.search).get('lang')) {
+    if (
+      defaultLanguage &&
+      !localStorage.getItem('app_language') &&
+      !new URLSearchParams(window.location.search).get('lang')
+    ) {
       if (SUPPORTED_LANGUAGES.includes(defaultLanguage)) {
         setLanguageState(defaultLanguage);
       }
     }
   }, [defaultLanguage]);
 
-  const t = useCallback((key, params) => {
-    const value = getNestedValue(translations[language], key)
-      ?? getNestedValue(translations[DEFAULT_LANGUAGE], key)
-      ?? key;
+  const t = useCallback(
+    (key, params) => {
+      const value =
+        getNestedValue(translations[language], key) ??
+        getNestedValue(translations[DEFAULT_LANGUAGE], key) ??
+        key;
 
-    if (import.meta.env.DEV && value === key && getNestedValue(translations[DEFAULT_LANGUAGE], key) === undefined) {
-      // eslint-disable-next-line no-console
-      console.warn(`[i18n] Missing translation key: "${key}"`);
-    }
+      if (
+        import.meta.env.DEV &&
+        value === key &&
+        getNestedValue(translations[DEFAULT_LANGUAGE], key) === undefined
+      ) {
+        console.warn(`[i18n] Missing translation key: "${key}"`);
+      }
 
-    if (typeof value === 'string') {
-      return interpolate(value, params);
-    }
-    return value; // arrays, objects returned as-is
-  }, [language]);
+      if (typeof value === 'string') {
+        return interpolate(value, params);
+      }
+      return value; // arrays, objects returned as-is
+    },
+    [language]
+  );
 
   const value = { language, setLanguage, t, supportedLanguages: SUPPORTED_LANGUAGES };
 
-  return (
-    <I18nContext.Provider value={value}>
-      {children}
-    </I18nContext.Provider>
-  );
+  return <I18nContext.Provider value={value}>{children}</I18nContext.Provider>;
 }
 
 /**

@@ -503,7 +503,7 @@ summary instead.
 | 6 | B3 home the flat backend modules | M | A1 | done (PR #224) |
 | 7 | B2 decompose server.py | M | A1 | done (PR #225) |
 | 8 | B1 decompose App.jsx (slice 1: shared-session hook) | M | — | done (PR #226) |
-| 9 | C2 lint gates | M | A1 | open |
+| 9 | C2 lint gates | M | A1 | done (PR #227) |
 | 10 | A3 step 2 (stream token scheme) | M | A3 step 1 | open |
 | 11 | B1 remaining slices | M×2 | B1 slice 1 | open |
 | 12 | B5 GraphCanvas decomposition | M | — | open |
@@ -536,6 +536,24 @@ summary instead.
    same branch.
 
 ## Completed
+
+- **[2026-07-12] C2 — ruff / eslint / prettier lint gates introduced
+  (PR #227).** `ruff` replaces `black` for the Python backend (lint + format;
+  config in root `pyproject.toml`, scoped to `backend/` and `scripts/`); ESLint
+  flat config (`eslint.config.mjs`, react + react-hooks) plus Prettier cover the
+  three JS workspaces. `react-hooks/rules-of-hooks` is an error; the newer
+  React-Compiler-era advisories are warnings so the baseline stays green. Two CI
+  jobs (`python-lint`, `frontend-lint`) run the gates but are intentionally left
+  out of the `build` job's `needs`, so they are **non-required** until `dev`
+  branch protection lands (A4). Delivered as three separated commits — tooling
+  config, manual residual fixes (F821 forward-ref `TYPE_CHECKING` imports, two
+  E402, dead-assignment removals; no behaviour change), and a pure autofix sweep
+  (137 ruff fixes + `ruff format`, `eslint --fix` + `prettier --write`). Backend
+  suite 942 passed / 16 skipped and frontend workspaces (canvas 74 / web 206 /
+  widget 56) unchanged. `services/mcp_oauth_gateway/` is excluded from ruff on
+  purpose (separate component — folds into C3). Noted en route: a root
+  `package-lock.json` is already tracked, so C7's "no lockfile is tracked"
+  premise is partly stale (its `npm install` → `npm ci` point still stands).
 
 - **[2026-07-12] B1 slice 1 — shared-session lifecycle extracted from `App.jsx`
   into `useSharedSession` (PR #226).** Moved `applyServerSession`,

@@ -26,8 +26,20 @@ import json
 import time
 from typing import Any, Dict, List, Optional, Tuple
 
-from .session_hub import ClaimMap, InProcessEventBus, PresenceRegistry, SessionEventBus, Subscription
-from .session_store import STATE_OPS, OpError, Session, SessionStore, is_valid_session_id
+from .session_hub import (
+    ClaimMap,
+    InProcessEventBus,
+    PresenceRegistry,
+    SessionEventBus,
+    Subscription,
+)
+from .session_store import (
+    STATE_OPS,
+    OpError,
+    Session,
+    SessionStore,
+    is_valid_session_id,
+)
 
 CLAIM_OPS = {"selection_claimed", "selection_released"}
 
@@ -74,7 +86,9 @@ class SessionLimitReached(Exception):
 class _TokenBucket:
     """Per-client token bucket bounding ops/second."""
 
-    def __init__(self, capacity: float, refill_per_sec: float, *, time_fn=time.monotonic) -> None:
+    def __init__(
+        self, capacity: float, refill_per_sec: float, *, time_fn=time.monotonic
+    ) -> None:
         self._capacity = capacity
         self._refill = refill_per_sec
         self._time = time_fn
@@ -120,7 +134,9 @@ class SessionManager:
         self._max_sessions = max_sessions
         self._max_op_batch_bytes = max_op_batch_bytes
         self._bucket = _TokenBucket(bucket_capacity, bucket_refill_per_sec)
-        self._lookup_bucket = _TokenBucket(lookup_bucket_capacity, lookup_refill_per_sec)
+        self._lookup_bucket = _TokenBucket(
+            lookup_bucket_capacity, lookup_refill_per_sec
+        )
         self._locks: Dict[str, asyncio.Lock] = {}
 
     def check_lookup_rate(self, client_key: str) -> None:
@@ -269,7 +285,9 @@ class SessionManager:
                     if op_type in CLAIM_OPS:
                         pending.append(("claim", op_type, list(op["element_ids"])))
                     else:
-                        result = self.store.apply_state_op(session, {**op, "client_id": client_id})
+                        result = self.store.apply_state_op(
+                            session, {**op, "client_id": client_id}
+                        )
                         if result is None:
                             continue  # legitimate no-op (e.g. update on deleted annotation)
                         state_changed = True
@@ -294,7 +312,12 @@ class SessionManager:
                     result = entry[1]
                     self.bus.publish(
                         session_id,
-                        {"type": "op", "client_id": client_id, "op": result, "seq": result["seq"]},
+                        {
+                            "type": "op",
+                            "client_id": client_id,
+                            "op": result,
+                            "seq": result["seq"],
+                        },
                     )
                     applied.append(result)
                 else:
@@ -302,13 +325,19 @@ class SessionManager:
                     if op_type == "selection_claimed":
                         self.claims.claim(session_id, client_id, element_ids)
                     else:
-                        element_ids = self.claims.release(session_id, client_id, element_ids)
+                        element_ids = self.claims.release(
+                            session_id, client_id, element_ids
+                        )
                     self.bus.publish(
                         session_id,
                         {
                             "type": "op",
                             "client_id": client_id,
-                            "op": {"op": op_type, "client_id": client_id, "element_ids": element_ids},
+                            "op": {
+                                "op": op_type,
+                                "client_id": client_id,
+                                "element_ids": element_ids,
+                            },
                         },
                     )
                     applied.append({"op": op_type, "element_ids": element_ids})
@@ -318,7 +347,9 @@ class SessionManager:
     @staticmethod
     def _validate_claim_op(op: Dict[str, Any]) -> None:
         element_ids = op.get("element_ids")
-        if not isinstance(element_ids, list) or not all(isinstance(e, str) for e in element_ids):
+        if not isinstance(element_ids, list) or not all(
+            isinstance(e, str) for e in element_ids
+        ):
             raise OpError(f"{op.get('op')}: 'element_ids' must be a list of strings")
 
     # ---------------- realtime connect / catch-up ----------------
@@ -337,7 +368,9 @@ class SessionManager:
         self.bus.publish(session_id, {"type": "presence_joined", "member": member})
         return subscription, member
 
-    def disconnect(self, session_id: str, client_id: str, subscription: Subscription) -> None:
+    def disconnect(
+        self, session_id: str, client_id: str, subscription: Subscription
+    ) -> None:
         self.bus.unsubscribe(subscription)
         released = self.claims.release_all(session_id, client_id)
         if released:
@@ -346,12 +379,18 @@ class SessionManager:
                 {
                     "type": "op",
                     "client_id": client_id,
-                    "op": {"op": "selection_released", "client_id": client_id, "element_ids": released},
+                    "op": {
+                        "op": "selection_released",
+                        "client_id": client_id,
+                        "element_ids": released,
+                    },
                 },
             )
         member = self.presence.leave(session_id, client_id)
         if member is not None:
-            self.bus.publish(session_id, {"type": "presence_left", "client_id": client_id})
+            self.bus.publish(
+                session_id, {"type": "presence_left", "client_id": client_id}
+            )
 
     def catch_up(self, session_id: str, since_seq: Optional[int]) -> Dict[str, Any]:
         """Return the initial payload for a (re)connecting stream.

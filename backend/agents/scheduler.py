@@ -46,7 +46,9 @@ class AgentScheduler:
     # Registration
     # ------------------------------------------------------------------
 
-    def register(self, agent_id: str, config: "AgentConfig", worker: "AgentWorker") -> None:
+    def register(
+        self, agent_id: str, config: "AgentConfig", worker: "AgentWorker"
+    ) -> None:
         """Register an agent for scheduled firing.  No-op when no schedule is set."""
         if not config.schedule:
             return
@@ -162,7 +164,9 @@ def _build_payload(config: "AgentConfig", fired_at: datetime) -> Dict:
     return {
         "event_id": f"sched-{uuid.uuid4()}",
         "event_type": "scheduled_trigger",
-        "occurred_at": fired_at.astimezone(timezone.utc).isoformat().replace("+00:00", "Z"),
+        "occurred_at": fired_at.astimezone(timezone.utc)
+        .isoformat()
+        .replace("+00:00", "Z"),
         "origin": {
             "event_origin": "scheduler",
             "event_session_id": None,

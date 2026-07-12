@@ -57,7 +57,9 @@
   align-items: center;
   justify-content: center;
   border-radius: 6px;
-  transition: background 0.15s, color 0.15s;
+  transition:
+    background 0.15s,
+    color 0.15s;
 }
 
 .activity-drawer-refresh:hover:not(:disabled),
@@ -106,7 +108,9 @@
   color: #ddd;
   font-size: 0.82rem;
   cursor: pointer;
-  transition: background 0.15s, border-color 0.15s;
+  transition:
+    background 0.15s,
+    border-color 0.15s;
 }
 
 .activity-drawer-load-more:hover:not(:disabled) {

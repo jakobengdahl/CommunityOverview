@@ -23,7 +23,7 @@ logger = logging.getLogger(__name__)
 
 # Standalone logged-out page HTML (shared between /logged-out and the
 # 401 response in Basic Auth mode).
-LOGGED_OUT_HTML = '''<!doctype html>
+LOGGED_OUT_HTML = """<!doctype html>
 <html lang="en">
 <head>
   <meta charset="utf-8" />
@@ -91,7 +91,7 @@ LOGGED_OUT_HTML = '''<!doctype html>
   </div>
 </body>
 </html>
-'''
+"""
 
 
 def register_system_routes(
@@ -119,11 +119,16 @@ def register_system_routes(
     @app.get("/collect/{short_name}")
     @app.get("/collect/{short_name}/")
     async def collect_redirect(
-        short_name: str = FastAPIPath(..., pattern=r'^[a-z0-9][a-z0-9-]{0,98}[a-z0-9]$|^[a-z0-9]$')
+        short_name: str = FastAPIPath(
+            ..., pattern=r"^[a-z0-9][a-z0-9-]{0,98}[a-z0-9]$|^[a-z0-9]$"
+        ),
     ) -> RedirectResponse:
         """Redirect collect kiosk URL to the web app in collect mode."""
         from urllib.parse import quote
-        return RedirectResponse(url=f"/web/?collect={quote(short_name, safe='')}", status_code=302)
+
+        return RedirectResponse(
+            url=f"/web/?collect={quote(short_name, safe='')}", status_code=302
+        )
 
     @app.get("/collect")
     async def collect_root_redirect() -> RedirectResponse:
@@ -180,9 +185,7 @@ def register_system_routes(
         if config.mcp_basic_auth and not config.auth_enabled:
             # Behind GCP IAP – the only way to clear the IAP session cookie
             # is via the GCP-provided endpoint.
-            return RedirectResponse(
-                url="/_gcp_iap/clear_login_cookie", status_code=302
-            )
+            return RedirectResponse(url="/_gcp_iap/clear_login_cookie", status_code=302)
 
         if config.auth_enabled:
             # Basic Auth – the browser caches credentials and resends them

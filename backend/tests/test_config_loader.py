@@ -19,6 +19,7 @@ class TestConfigLoader:
         """Reset the config loader before each test."""
         # Import here to reset the module state
         from backend import config_loader
+
         config_loader.reset_loader()
         yield
         os.environ.pop("SCHEMA_FILE", None)
@@ -44,7 +45,9 @@ class TestConfigLoader:
 
         # All six system node types must be present regardless of config file content
         for system_type in config_loader.SYSTEM_NODE_TYPES:
-            assert system_type in schema["node_types"], f"System type '{system_type}' missing from schema"
+            assert system_type in schema["node_types"], (
+                f"System type '{system_type}' missing from schema"
+            )
             assert schema["node_types"][system_type]["static"] is True
             assert schema["node_types"][system_type]["category"] == "system"
 
@@ -102,8 +105,14 @@ class TestConfigLoader:
         # Domain type must be present
         assert "MyDomain" in schema["node_types"]
         # System types must come from code, not from the stale config entries
-        assert schema["node_types"]["SavedView"]["color"] == config_loader.SYSTEM_NODE_TYPES["SavedView"]["color"]
-        assert schema["node_types"]["Agent"]["color"] == config_loader.SYSTEM_NODE_TYPES["Agent"]["color"]
+        assert (
+            schema["node_types"]["SavedView"]["color"]
+            == config_loader.SYSTEM_NODE_TYPES["SavedView"]["color"]
+        )
+        assert (
+            schema["node_types"]["Agent"]["color"]
+            == config_loader.SYSTEM_NODE_TYPES["Agent"]["color"]
+        )
         # No duplicates — each type appears exactly once
         type_names = list(schema["node_types"].keys())
         assert type_names.count("SavedView") == 1
@@ -140,7 +149,12 @@ class TestConfigLoader:
         from backend import config_loader
 
         # Set custom config path
-        test_config_path = str(Path(__file__).parent.parent.parent / "config" / "test" / "schema_config.json")
+        test_config_path = str(
+            Path(__file__).parent.parent.parent
+            / "config"
+            / "test"
+            / "schema_config.json"
+        )
         os.environ["SCHEMA_FILE"] = test_config_path
 
         # Reset and reload
@@ -181,7 +195,12 @@ class TestConfigLoader:
         from backend import config_loader
 
         # Set custom config path
-        test_config_path = str(Path(__file__).parent.parent.parent / "config" / "test" / "schema_config.json")
+        test_config_path = str(
+            Path(__file__).parent.parent.parent
+            / "config"
+            / "test"
+            / "schema_config.json"
+        )
         os.environ["SCHEMA_FILE"] = test_config_path
 
         config_loader.reset_loader()
@@ -223,7 +242,12 @@ class TestConfigLoader:
         """Test capability manifest is loaded from custom config."""
         from backend import config_loader
 
-        test_config_path = str(Path(__file__).parent.parent.parent / "config" / "test" / "schema_config.json")
+        test_config_path = str(
+            Path(__file__).parent.parent.parent
+            / "config"
+            / "test"
+            / "schema_config.json"
+        )
         os.environ["SCHEMA_FILE"] = test_config_path
         config_loader.reset_loader()
 
@@ -278,7 +302,9 @@ class TestConfigLoader:
         from backend import config_loader
 
         os.environ["COMMUNITYOVERVIEW_RUNTIME_MODE"] = "hosted"
-        os.environ["COMMUNITYOVERVIEW_ENABLED_EXTENSIONS"] = "federation, analytics , federation,"
+        os.environ["COMMUNITYOVERVIEW_ENABLED_EXTENSIONS"] = (
+            "federation, analytics , federation,"
+        )
         config_loader.reset_loader()
 
         runtime_info = config_loader.get_runtime_info()
@@ -401,7 +427,7 @@ class TestConfigLoader:
         from backend import config_loader
 
         # Create a temp file with invalid JSON
-        with tempfile.NamedTemporaryFile(mode='w', suffix='.json', delete=False) as f:
+        with tempfile.NamedTemporaryFile(mode="w", suffix=".json", delete=False) as f:
             f.write("{ invalid json }")
             temp_path = f.name
 
@@ -448,6 +474,7 @@ class TestSchemaIntegration:
     def reset_loader(self):
         """Reset the config loader before each test."""
         from backend import config_loader
+
         config_loader.reset_loader()
         yield
         config_loader.reset_loader()
@@ -472,7 +499,7 @@ class TestSchemaIntegration:
         from backend.service import GraphService
 
         # Create temp graph file
-        with tempfile.NamedTemporaryFile(mode='w', suffix='.json', delete=False) as f:
+        with tempfile.NamedTemporaryFile(mode="w", suffix=".json", delete=False) as f:
             json.dump({"nodes": [], "edges": []}, f)
             temp_path = f.name
 
@@ -503,7 +530,7 @@ class TestSchemaIntegration:
         from backend.core import GraphStorage
         from backend.service import GraphService
 
-        with tempfile.NamedTemporaryFile(mode='w', suffix='.json', delete=False) as f:
+        with tempfile.NamedTemporaryFile(mode="w", suffix=".json", delete=False) as f:
             json.dump({"nodes": [], "edges": []}, f)
             temp_path = f.name
 
@@ -532,6 +559,7 @@ class TestConfigWithAlternateFile:
     def setup_and_cleanup(self):
         """Set up and clean up for alternate config tests."""
         from backend import config_loader
+
         config_loader.reset_loader()
         yield
         # Clean up env var
@@ -544,7 +572,12 @@ class TestConfigWithAlternateFile:
         from backend import config_loader
 
         # Use test config with extra types
-        test_config_path = str(Path(__file__).parent.parent.parent / "config" / "test" / "schema_config.json")
+        test_config_path = str(
+            Path(__file__).parent.parent.parent
+            / "config"
+            / "test"
+            / "schema_config.json"
+        )
         os.environ["SCHEMA_FILE"] = test_config_path
         config_loader.reset_loader()
 
@@ -553,7 +586,10 @@ class TestConfigWithAlternateFile:
         # Custom types should be present
         assert "CustomActor" in schema["node_types"]
         assert schema["node_types"]["CustomActor"]["color"] == "#FF0000"
-        assert schema["node_types"]["CustomActor"]["description"] == "Custom actor type for testing"
+        assert (
+            schema["node_types"]["CustomActor"]["description"]
+            == "Custom actor type for testing"
+        )
 
         # Static types should also be present
         assert "SavedView" in schema["node_types"]
@@ -563,7 +599,12 @@ class TestConfigWithAlternateFile:
         """Test that presentation colors are loaded from custom config."""
         from backend import config_loader
 
-        test_config_path = str(Path(__file__).parent.parent.parent / "config" / "test" / "schema_config.json")
+        test_config_path = str(
+            Path(__file__).parent.parent.parent
+            / "config"
+            / "test"
+            / "schema_config.json"
+        )
         os.environ["SCHEMA_FILE"] = test_config_path
         config_loader.reset_loader()
 
@@ -710,13 +751,17 @@ class TestConfigContext:
         assert "schema_config_path" not in result
         assert "federation_config_path" not in result
 
-    def test_resolves_schema_and_federation_from_tenant_config_dir(self, tmp_path: Path):
+    def test_resolves_schema_and_federation_from_tenant_config_dir(
+        self, tmp_path: Path
+    ):
         from backend import config_loader
 
         tenant_dir = tmp_path / "tenant-config"
         tenant_dir.mkdir()
         (tenant_dir / "schema_config.json").write_text("{}", encoding="utf-8")
-        (tenant_dir / "federation_config.json").write_text('{"federation": {}}', encoding="utf-8")
+        (tenant_dir / "federation_config.json").write_text(
+            '{"federation": {}}', encoding="utf-8"
+        )
 
         os.environ["COMMUNITYOVERVIEW_TENANT_CONFIG_DIR"] = str(tenant_dir)
 

@@ -1,8 +1,8 @@
 """
 Unit tests for LLM availability detection in llm_providers.py.
 """
+
 import os
-import pytest
 from unittest.mock import patch
 
 from backend.llm.llm_providers import get_llm_availability
@@ -32,7 +32,6 @@ class TestGetLlmAvailability:
 
     def test_returns_available_true_when_openai_key_set(self):
         env = {"OPENAI_API_KEY": "sk-test", "LLM_PROVIDER": "openai"}
-        env_remove = {}
         with patch.dict(os.environ, env, clear=False):
             os.environ.pop("ANTHROPIC_API_KEY", None)
             result = get_llm_availability()
@@ -76,4 +75,9 @@ class TestGetLlmAvailability:
     def test_returns_dict_with_expected_keys(self):
         with patch.dict(os.environ, {}, clear=False):
             result = get_llm_availability()
-        assert set(result.keys()) == {"available", "provider", "has_anthropic_key", "has_openai_key"}
+        assert set(result.keys()) == {
+            "available",
+            "provider",
+            "has_anthropic_key",
+            "has_openai_key",
+        }

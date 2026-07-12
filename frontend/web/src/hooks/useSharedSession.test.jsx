@@ -28,7 +28,7 @@ describe('serverStateToMirror', () => {
   it('uses the resolved node ids for node_refs, not the raw state refs', () => {
     const mirror = serverStateToMirror(
       { node_refs: ['stale'], positions: { 'node-a': { x: 1, y: 2 } } },
-      ['node-a'],
+      ['node-a']
     );
     expect(mirror.node_refs).toEqual(['node-a']);
     expect(mirror.positions).toEqual({ 'node-a': { x: 1, y: 2 } });
@@ -43,15 +43,21 @@ describe('serverStateToMirror', () => {
     const mirror = serverStateToMirror(
       {
         annotations: [
-          { id: 'g1', kind: 'group', label: 'G', position: { x: 0, y: 0 }, member_node_ids: ['node-a'] },
+          {
+            id: 'g1',
+            kind: 'group',
+            label: 'G',
+            position: { x: 0, y: 0 },
+            member_node_ids: ['node-a'],
+          },
           { id: 'n1', kind: 'note', position: { x: 3, y: 4 }, text: 'hi' },
         ],
       },
-      ['node-a'],
+      ['node-a']
     );
-    const kinds = mirror.annotations.map(a => a.kind).sort();
+    const kinds = mirror.annotations.map((a) => a.kind).sort();
     expect(kinds).toEqual(['group', 'note']);
-    const group = mirror.annotations.find(a => a.kind === 'group');
+    const group = mirror.annotations.find((a) => a.kind === 'group');
     expect(group.member_node_ids).toEqual(['node-a']);
   });
 
@@ -95,7 +101,7 @@ describe('useSharedSession.applyServerSession', () => {
       result.current.applyServerSession({
         state: {},
         resolved: { nodes: [NODE_A], edges: { malformed: true } },
-      }),
+      })
     ).toThrow(/resolved\.edges/);
 
     expect(deps.clearVisualization).not.toHaveBeenCalled();
@@ -107,7 +113,7 @@ describe('useSharedSession.applyServerSession', () => {
     const { result } = renderHook(() => useSharedSession(deps));
 
     expect(() =>
-      result.current.applyServerSession({ state: {}, resolved: { nodes: { bad: 1 }, edges: [] } }),
+      result.current.applyServerSession({ state: {}, resolved: { nodes: { bad: 1 }, edges: [] } })
     ).toThrow(/resolved\.nodes/);
     expect(deps.clearVisualization).not.toHaveBeenCalled();
   });
@@ -144,9 +150,7 @@ describe('useSharedSession.loadSessionFromServer', () => {
     expect(api.getSession).toHaveBeenCalledWith('1234-5678', { resolve: true });
     expect(deps.clearVisualization).toHaveBeenCalledTimes(1);
     expect(deps.addNodesToVisualization).toHaveBeenCalled();
-    expect(setBaseline).toHaveBeenCalledWith(
-      expect.objectContaining({ node_refs: ['node-a'] }),
-    );
+    expect(setBaseline).toHaveBeenCalledWith(expect.objectContaining({ node_refs: ['node-a'] }));
   });
 
   it('treats a 404 as an empty session and seeds an empty eager baseline', async () => {
@@ -175,7 +179,7 @@ describe('useSharedSession.loadSessionFromServer', () => {
     await expect(
       act(async () => {
         await result.current.loadSessionFromServer('1234-5678');
-      }),
+      })
     ).rejects.toThrow('boom');
     expect(deps.clearVisualization).not.toHaveBeenCalled();
   });
@@ -194,7 +198,7 @@ describe('useSharedSession.loadSessionFromServer', () => {
     await expect(
       act(async () => {
         await result.current.loadSessionFromServer('1234-5678');
-      }),
+      })
     ).rejects.toThrow(/resolved\.edges/);
     expect(deps.clearVisualization).not.toHaveBeenCalled();
     expect(deps.addNodesToVisualization).not.toHaveBeenCalled();

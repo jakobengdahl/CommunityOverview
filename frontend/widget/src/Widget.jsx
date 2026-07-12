@@ -41,7 +41,7 @@ function Widget({ initialQuery = '', onNodeSelect }) {
       if (result.nodes) {
         setNodes(result.nodes);
         setEdges(result.edges || []);
-        setHighlightedNodeIds(result.nodes.map(n => n.id));
+        setHighlightedNodeIds(result.nodes.map((n) => n.id));
         setTimeout(() => setHighlightedNodeIds([]), 3000);
       }
     } catch (err) {
@@ -52,35 +52,41 @@ function Widget({ initialQuery = '', onNodeSelect }) {
     }
   }, []);
 
-  const handleExpand = useCallback(async (nodeId, nodeData) => {
-    setIsLoading(true);
-    try {
-      const result = await mcp.getRelatedNodes(nodeId);
-      if (result.nodes) {
-        const existingIds = new Set(nodes.map(n => n.id));
-        const newNodes = result.nodes.filter(n => !existingIds.has(n.id));
+  const handleExpand = useCallback(
+    async (nodeId, nodeData) => {
+      setIsLoading(true);
+      try {
+        const result = await mcp.getRelatedNodes(nodeId);
+        if (result.nodes) {
+          const existingIds = new Set(nodes.map((n) => n.id));
+          const newNodes = result.nodes.filter((n) => !existingIds.has(n.id));
 
-        const existingEdgeIds = new Set(edges.map(e => e.id));
-        const newEdges = (result.edges || []).filter(e => !existingEdgeIds.has(e.id));
+          const existingEdgeIds = new Set(edges.map((e) => e.id));
+          const newEdges = (result.edges || []).filter((e) => !existingEdgeIds.has(e.id));
 
-        setNodes([...nodes, ...newNodes]);
-        setEdges([...edges, ...newEdges]);
-        setHighlightedNodeIds(newNodes.map(n => n.id));
-        setTimeout(() => setHighlightedNodeIds([]), 3000);
+          setNodes([...nodes, ...newNodes]);
+          setEdges([...edges, ...newEdges]);
+          setHighlightedNodeIds(newNodes.map((n) => n.id));
+          setTimeout(() => setHighlightedNodeIds([]), 3000);
+        }
+      } catch (err) {
+        console.error('Expand failed:', err);
+        setError(err.message);
+      } finally {
+        setIsLoading(false);
       }
-    } catch (err) {
-      console.error('Expand failed:', err);
-      setError(err.message);
-    } finally {
-      setIsLoading(false);
-    }
-  }, [nodes, edges]);
+    },
+    [nodes, edges]
+  );
 
-  const handleEdit = useCallback((nodeId, nodeData) => {
-    if (onNodeSelect) {
-      onNodeSelect(nodeId, nodeData);
-    }
-  }, [onNodeSelect]);
+  const handleEdit = useCallback(
+    (nodeId, nodeData) => {
+      if (onNodeSelect) {
+        onNodeSelect(nodeId, nodeData);
+      }
+    },
+    [onNodeSelect]
+  );
 
   // Show message if MCP not available
   if (!mcpAvailable) {
@@ -89,12 +95,9 @@ function Widget({ initialQuery = '', onNodeSelect }) {
         <div className="widget-error">
           <h3>MCP Not Available</h3>
           <p>
-            This widget requires MCP tools to be available via{' '}
-            <code>window.openai.callTool</code>.
+            This widget requires MCP tools to be available via <code>window.openai.callTool</code>.
           </p>
-          <p>
-            Please ensure you're running this widget in a compatible environment.
-          </p>
+          <p>Please ensure you're running this widget in a compatible environment.</p>
         </div>
       </div>
     );

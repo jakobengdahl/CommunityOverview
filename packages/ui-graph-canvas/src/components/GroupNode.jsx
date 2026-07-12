@@ -124,9 +124,9 @@ function GroupNode({ id, data, selected }) {
   // Un-parent children and remove the group node from the canvas
   const removeGroupKeepChildren = () => {
     setNodes((nds) => {
-      const children = nds.filter(n => n.parentId === id);
-      const groupNode = nds.find(n => n.id === id);
-      const updatedChildren = children.map(child => ({
+      const children = nds.filter((n) => n.parentId === id);
+      const groupNode = nds.find((n) => n.id === id);
+      const updatedChildren = children.map((child) => ({
         ...child,
         parentId: undefined,
         extent: undefined,
@@ -137,9 +137,9 @@ function GroupNode({ id, data, selected }) {
       }));
 
       return nds
-        .filter(n => n.id !== id)
-        .map(n => {
-          const updated = updatedChildren.find(c => c.id === n.id);
+        .filter((n) => n.id !== id)
+        .map((n) => {
+          const updated = updatedChildren.find((c) => c.id === n.id);
           return updated || n;
         });
     });
@@ -178,7 +178,7 @@ function GroupNode({ id, data, selected }) {
         className="graph-group-node"
         style={{
           borderColor: data.color || '#646cff',
-          backgroundColor: `${data.color || '#646cff'}15`
+          backgroundColor: `${data.color || '#646cff'}15`,
         }}
       >
         <div
@@ -203,37 +203,36 @@ function GroupNode({ id, data, selected }) {
             <span className="graph-group-label">{data.label || 'Group'}</span>
           )}
         </div>
-        {data.description && (
-          <div className="graph-group-description">{data.description}</div>
-        )}
+        {data.description && <div className="graph-group-description">{data.description}</div>}
       </div>
 
-      {contextMenu && createPortal(
-        <div
-          ref={contextMenuRef}
-          className="graph-group-context-menu"
-          style={{ left: contextMenu.x, top: contextMenu.y }}
-        >
-          <div className="context-menu-title">Group Color</div>
-          <div className="context-menu-colors">
-            {colors.map((color) => (
-              <button
-                key={color}
-                className="color-button"
-                style={{ backgroundColor: color }}
-                onClick={() => handleChangeColor(color)}
-              />
-            ))}
-          </div>
-          <button className="context-menu-action" onClick={handleHideGroup}>
-            👁️ Hide Group
-          </button>
-          <button className="context-menu-delete" onClick={handleDeleteGroup}>
-            🗑️ Delete Group
-          </button>
-        </div>,
-        document.body
-      )}
+      {contextMenu &&
+        createPortal(
+          <div
+            ref={contextMenuRef}
+            className="graph-group-context-menu"
+            style={{ left: contextMenu.x, top: contextMenu.y }}
+          >
+            <div className="context-menu-title">Group Color</div>
+            <div className="context-menu-colors">
+              {colors.map((color) => (
+                <button
+                  key={color}
+                  className="color-button"
+                  style={{ backgroundColor: color }}
+                  onClick={() => handleChangeColor(color)}
+                />
+              ))}
+            </div>
+            <button className="context-menu-action" onClick={handleHideGroup}>
+              👁️ Hide Group
+            </button>
+            <button className="context-menu-delete" onClick={handleDeleteGroup}>
+              🗑️ Delete Group
+            </button>
+          </div>,
+          document.body
+        )}
     </>
   );
 }

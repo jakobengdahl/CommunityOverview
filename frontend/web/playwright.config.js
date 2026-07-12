@@ -26,7 +26,8 @@ export default defineConfig({
   // Start the backend and frontend servers before tests
   webServer: [
     {
-      command: 'cd ../../ && python -m pytest --collect-only -q 2>/dev/null || python -m app_host.server',
+      command:
+        'cd ../../ && python -m pytest --collect-only -q 2>/dev/null || python -m app_host.server',
       url: 'http://localhost:8000/health',
       reuseExistingServer: !process.env.CI,
       timeout: 120 * 1000,

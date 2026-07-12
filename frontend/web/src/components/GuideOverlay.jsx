@@ -10,7 +10,11 @@ const TOOLTIP_MARGIN = 16;
 const TOOLTIP_MIN_HEIGHT = 180;
 
 function getTooltipPlacement(targetEl) {
-  if (!targetEl) return { style: { top: '50%', left: '50%', transform: 'translate(-50%, -50%)' }, arrow: 'none' };
+  if (!targetEl)
+    return {
+      style: { top: '50%', left: '50%', transform: 'translate(-50%, -50%)' },
+      arrow: 'none',
+    };
 
   const rect = targetEl.getBoundingClientRect();
   const winW = window.innerWidth;
@@ -21,20 +25,38 @@ function getTooltipPlacement(targetEl) {
   const spaceBelow = winH - rect.bottom;
   const spaceAbove = rect.top;
 
-  const clampTop = (top) => Math.max(TOOLTIP_MARGIN, Math.min(top, winH - TOOLTIP_MIN_HEIGHT - TOOLTIP_MARGIN));
-  const clampLeft = (left) => Math.max(TOOLTIP_MARGIN, Math.min(left, winW - TOOLTIP_WIDTH - TOOLTIP_MARGIN));
+  const clampTop = (top) =>
+    Math.max(TOOLTIP_MARGIN, Math.min(top, winH - TOOLTIP_MIN_HEIGHT - TOOLTIP_MARGIN));
+  const clampLeft = (left) =>
+    Math.max(TOOLTIP_MARGIN, Math.min(left, winW - TOOLTIP_WIDTH - TOOLTIP_MARGIN));
 
   if (spaceLeft > TOOLTIP_WIDTH + TOOLTIP_MARGIN) {
-    return { style: { top: clampTop(rect.top), left: rect.left - TOOLTIP_WIDTH - TOOLTIP_MARGIN }, arrow: 'right' };
+    return {
+      style: { top: clampTop(rect.top), left: rect.left - TOOLTIP_WIDTH - TOOLTIP_MARGIN },
+      arrow: 'right',
+    };
   }
   if (spaceRight > TOOLTIP_WIDTH + TOOLTIP_MARGIN) {
     return { style: { top: clampTop(rect.top), left: rect.right + TOOLTIP_MARGIN }, arrow: 'left' };
   }
   if (spaceBelow > TOOLTIP_MIN_HEIGHT + TOOLTIP_MARGIN) {
-    return { style: { top: rect.bottom + TOOLTIP_MARGIN, left: clampLeft(rect.left + rect.width / 2 - TOOLTIP_WIDTH / 2) }, arrow: 'top' };
+    return {
+      style: {
+        top: rect.bottom + TOOLTIP_MARGIN,
+        left: clampLeft(rect.left + rect.width / 2 - TOOLTIP_WIDTH / 2),
+      },
+      arrow: 'top',
+    };
   }
   if (spaceAbove > TOOLTIP_MIN_HEIGHT + TOOLTIP_MARGIN) {
-    return { style: { top: rect.top - TOOLTIP_MARGIN - 10, left: clampLeft(rect.left + rect.width / 2 - TOOLTIP_WIDTH / 2), transform: 'translateY(-100%)' }, arrow: 'bottom' };
+    return {
+      style: {
+        top: rect.top - TOOLTIP_MARGIN - 10,
+        left: clampLeft(rect.left + rect.width / 2 - TOOLTIP_WIDTH / 2),
+        transform: 'translateY(-100%)',
+      },
+      arrow: 'bottom',
+    };
   }
   return { style: { top: '50%', left: '50%', transform: 'translate(-50%, -50%)' }, arrow: 'none' };
 }
@@ -42,14 +64,21 @@ function getTooltipPlacement(targetEl) {
 // All step types that trigger an async action before (or instead of) showing a tooltip
 const ACTIONABLE_TYPES = [
   'search_nodes',
-  'create_node', 'delete_node', 'show_node_detail', 'update_node',
-  'create_edge', 'delete_edge',
+  'create_node',
+  'delete_node',
+  'show_node_detail',
+  'update_node',
+  'create_edge',
+  'delete_edge',
   'load_saved_view',
-  'clear_visualization', 'clear',
+  'clear_visualization',
+  'clear',
   'focus_node',
   'fill_chat_input',
   'fill_search_input',
-  'minimize_chat', 'maximize_chat', 'toggle_chat',
+  'minimize_chat',
+  'maximize_chat',
+  'toggle_chat',
 ];
 
 function GuideOverlay() {
@@ -67,16 +96,26 @@ function GuideOverlay() {
   const currentStep = steps[currentStepIndex];
   const isLastStep = currentStepIndex >= steps.length - 1;
 
-  const stepText = language === 'sv' && currentStep?.text_sv ? currentStep.text_sv : (currentStep?.text || '');
-  const inputLabel = language === 'sv' && currentStep?.input_label_sv ? currentStep.input_label_sv : (currentStep?.input_label || '');
-  const inputPlaceholder = language === 'sv' && currentStep?.input_placeholder_sv ? currentStep.input_placeholder_sv : (currentStep?.input_placeholder || '');
+  const stepText =
+    language === 'sv' && currentStep?.text_sv ? currentStep.text_sv : currentStep?.text || '';
+  const inputLabel =
+    language === 'sv' && currentStep?.input_label_sv
+      ? currentStep.input_label_sv
+      : currentStep?.input_label || '';
+  const inputPlaceholder =
+    language === 'sv' && currentStep?.input_placeholder_sv
+      ? currentStep.input_placeholder_sv
+      : currentStep?.input_placeholder || '';
 
   // Reposition tooltip whenever step changes
   useEffect(() => {
     if (!isActive || !currentStep) return;
     const target = currentStep.target || 'center';
     if (target === 'center') {
-      setPlacement({ style: { top: '50%', left: '50%', transform: 'translate(-50%, -50%)' }, arrow: 'none' });
+      setPlacement({
+        style: { top: '50%', left: '50%', transform: 'translate(-50%, -50%)' },
+        arrow: 'none',
+      });
       return;
     }
     const el = document.getElementById('guide-target-' + target);
@@ -107,7 +146,8 @@ function GuideOverlay() {
   useEffect(() => {
     if (!isActive || !currentStep) return;
 
-    const action = currentStep.action || (ACTIONABLE_TYPES.includes(currentStep.type) ? currentStep.type : null);
+    const action =
+      currentStep.action || (ACTIONABLE_TYPES.includes(currentStep.type) ? currentStep.type : null);
     if (!action) return;
 
     let cancelled = false;
@@ -127,10 +167,13 @@ function GuideOverlay() {
           if (!cancelled && result.nodes?.length > 0) {
             const s = useGraphStore.getState();
             const allEdges = [...s.edges, ...(result.edges || [])];
-            s.addNodesToVisualization(positionNewNodes(result.nodes, s.nodes, allEdges), result.edges || []);
+            s.addNodesToVisualization(
+              positionNewNodes(result.nodes, s.nodes, allEdges),
+              result.edges || []
+            );
           }
 
-        // ── Node CRUD ────────────────────────────────────────────────────
+          // ── Node CRUD ────────────────────────────────────────────────────
         } else if (action === 'create_node') {
           const nodeType = currentStep.node_type;
           const nodeData = currentStep.node_data || {};
@@ -140,7 +183,6 @@ function GuideOverlay() {
             const s = useGraphStore.getState();
             s.addNodesToVisualization(positionNewNodes([nodeWithId], s.nodes, s.edges), []);
           }
-
         } else if (action === 'update_node') {
           const nodeId = currentStep.node_id;
           const updates = currentStep.node_data || {};
@@ -148,18 +190,16 @@ function GuideOverlay() {
             await api.updateNode(nodeId, updates);
             if (!cancelled) {
               const s = useGraphStore.getState();
-              const updatedNodes = s.nodes.map(n => n.id === nodeId ? { ...n, ...updates } : n);
+              const updatedNodes = s.nodes.map((n) => (n.id === nodeId ? { ...n, ...updates } : n));
               s.updateVisualization(updatedNodes, s.edges);
             }
           }
-
         } else if (action === 'delete_node') {
           const nodeId = currentStep.node_id;
           if (nodeId && !cancelled) {
             await api.deleteNodes([nodeId], true);
             if (!cancelled) useGraphStore.getState().removeNode(nodeId);
           }
-
         } else if (action === 'show_node_detail') {
           const nodeId = currentStep.node_id;
           if (nodeId && !cancelled) {
@@ -169,17 +209,15 @@ function GuideOverlay() {
             }
           }
 
-        // ── Edge CRUD ────────────────────────────────────────────────────
+          // ── Edge CRUD ────────────────────────────────────────────────────
         } else if (action === 'create_edge') {
-          const result = await api.addEdge(
-            currentStep.source_id,
-            currentStep.target_id,
-            { type: currentStep.edge_type, label: currentStep.edge_label }
-          );
+          const result = await api.addEdge(currentStep.source_id, currentStep.target_id, {
+            type: currentStep.edge_type,
+            label: currentStep.edge_label,
+          });
           if (!cancelled && result.success && result.edge) {
             useGraphStore.getState().addNodesToVisualization([], [result.edge]);
           }
-
         } else if (action === 'delete_edge') {
           const edgeId = currentStep.edge_id;
           if (edgeId && !cancelled) {
@@ -187,17 +225,19 @@ function GuideOverlay() {
             if (!cancelled) useGraphStore.getState().removeEdge(edgeId);
           }
 
-        // ── Saved view ───────────────────────────────────────────────────
+          // ── Saved view ───────────────────────────────────────────────────
         } else if (action === 'load_saved_view') {
           const nameOrId = currentStep.view_name || currentStep.node_id;
           if (nameOrId && !cancelled) {
             const result = await api.searchGraph(nameOrId, { nodeTypes: ['SavedView'], limit: 10 });
-            const viewNode = result.nodes?.find(n => n.id === nameOrId || n.name === nameOrId);
+            const viewNode = result.nodes?.find((n) => n.id === nameOrId || n.name === nameOrId);
             if (!cancelled && viewNode) {
               const nodeIds = viewNode.metadata?.node_ids || [];
               if (nodeIds.length > 0) {
-                const details = await Promise.all(nodeIds.map(id => api.getNodeDetails(id).catch(() => null)));
-                const loadedNodes = details.filter(d => d?.success).map(d => d.node);
+                const details = await Promise.all(
+                  nodeIds.map((id) => api.getNodeDetails(id).catch(() => null))
+                );
+                const loadedNodes = details.filter((d) => d?.success).map((d) => d.node);
                 const savedEdges = viewNode.metadata?.edges || [];
                 if (!cancelled) {
                   const s = useGraphStore.getState();
@@ -208,15 +248,14 @@ function GuideOverlay() {
             }
           }
 
-        // ── Visualization control ─────────────────────────────────────────
+          // ── Visualization control ─────────────────────────────────────────
         } else if (action === 'clear_visualization' || action === 'clear') {
           if (!cancelled) useGraphStore.getState().clearVisualization();
-
         } else if (action === 'focus_node') {
           const nodeId = currentStep.node_id;
           if (!cancelled && nodeId) useGraphStore.getState().setFocusNodeId(nodeId);
 
-        // ── UI fill actions ───────────────────────────────────────────────
+          // ── UI fill actions ───────────────────────────────────────────────
         } else if (action === 'fill_chat_input') {
           if (!cancelled) {
             useGraphStore.getState().setGuideChatInput({
@@ -225,7 +264,6 @@ function GuideOverlay() {
               auto_send: currentStep.auto_send === true,
             });
           }
-
         } else if (action === 'fill_search_input') {
           if (!cancelled) {
             useGraphStore.getState().setGuideSearchInput({
@@ -234,17 +272,14 @@ function GuideOverlay() {
             });
           }
 
-        // ── Chat panel ────────────────────────────────────────────────────
+          // ── Chat panel ────────────────────────────────────────────────────
         } else if (action === 'minimize_chat') {
           if (!cancelled) useGraphStore.getState().setChatPanelOpen(false);
-
         } else if (action === 'maximize_chat') {
           if (!cancelled) useGraphStore.getState().setChatPanelOpen(true);
-
         } else if (action === 'toggle_chat') {
           if (!cancelled) useGraphStore.getState().toggleChatPanel();
         }
-
       } catch (err) {
         console.error('[GuideOverlay] Action error:', err);
         if (!cancelled) setActionError(err.message);
@@ -254,7 +289,9 @@ function GuideOverlay() {
     };
 
     executeAction();
-    return () => { cancelled = true; };
+    return () => {
+      cancelled = true;
+    };
   }, [currentStepIndex, isActive]); // eslint-disable-line react-hooks/exhaustive-deps
 
   const handleNext = useCallback(() => {
@@ -264,18 +301,22 @@ function GuideOverlay() {
     advanceGuide();
   }, [currentStep, inputValue, setGuideStepInput, advanceGuide]);
 
-  const handleKeyDown = useCallback((e) => {
-    if (e.key === 'Enter') {
-      e.preventDefault();
-      handleNext();
-    } else if (e.key === 'Escape') {
-      stopGuide();
-    }
-  }, [handleNext, stopGuide]);
+  const handleKeyDown = useCallback(
+    (e) => {
+      if (e.key === 'Enter') {
+        e.preventDefault();
+        handleNext();
+      } else if (e.key === 'Escape') {
+        stopGuide();
+      }
+    },
+    [handleNext, stopGuide]
+  );
 
   if (!isActive || !activeGuide || !currentStep) return null;
 
-  const guideName = language === 'sv' && activeGuide.name_sv ? activeGuide.name_sv : (activeGuide.name || '');
+  const guideName =
+    language === 'sv' && activeGuide.name_sv ? activeGuide.name_sv : activeGuide.name || '';
 
   return (
     <>

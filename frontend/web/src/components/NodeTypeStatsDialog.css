@@ -13,8 +13,12 @@
 }
 
 @keyframes ntsOverlayIn {
-  from { opacity: 0; }
-  to { opacity: 1; }
+  from {
+    opacity: 0;
+  }
+  to {
+    opacity: 1;
+  }
 }
 
 .nts-dialog {
@@ -66,7 +70,9 @@
   align-items: center;
   padding: 4px;
   border-radius: 4px;
-  transition: color 0.15s, background 0.15s;
+  transition:
+    color 0.15s,
+    background 0.15s;
 }
 
 .nts-dialog-close:hover {

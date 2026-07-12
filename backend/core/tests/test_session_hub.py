@@ -4,10 +4,6 @@ Tests for the ephemeral realtime layer (step 2 + step 3 claims) in
 presence roster/colour assignment, and selection-claim TTL/release.
 """
 
-import asyncio
-
-import pytest
-
 from backend.core.session_hub import ClaimMap, InProcessEventBus, PresenceRegistry
 
 

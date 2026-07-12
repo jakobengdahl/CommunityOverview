@@ -1,0 +1,33 @@
+# Ruff configuration — lint + format for the Python backend and scripts.
+#
+# Ruff replaces black as the formatter (black defaults are preserved: double
+# quotes, 88-column wrapping) and adds a mechanical lint layer. CI runs
+# `ruff check` and `ruff format --check` over `backend/` and `scripts/` as a
+# separate, non-required job (see .github/workflows/ci.yml).
+#
+# Scope note: `services/mcp_oauth_gateway/` is a separately packaged component
+# with its own pinned dependency set and isolated CI job; it is intentionally
+# excluded here and tracked under STRUCTURE_REVIEW item C3.
+
+[tool.ruff]
+target-version = "py311"
+# Keep a bare `ruff check` consistent with what CI lints: backend + scripts.
+extend-exclude = [
+    "services",
+    "frontend",
+    "packages",
+    "node_modules",
+    "data",
+    "config",
+]
+
+[tool.ruff.lint]
+# Ruff's default select (pyflakes F + high-value pycodestyle E) catches the
+# highest-signal, lowest-noise problems: unused imports (F401), undefined
+# names (F821), redefinitions (F811), unused variables (F841). Line-length
+# (E501) is deliberately not enforced — the formatter handles wrapping.
+select = ["E4", "E7", "E9", "F"]
+
+[tool.ruff.format]
+# Black-compatible defaults.
+quote-style = "double"

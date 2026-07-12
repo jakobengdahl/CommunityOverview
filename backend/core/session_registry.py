@@ -40,7 +40,7 @@ import time
 import re
 from typing import Dict, Any, Optional, AsyncIterator
 
-SESSION_ID_RE = re.compile(r'^\d{4}-\d{4}$')
+SESSION_ID_RE = re.compile(r"^\d{4}-\d{4}$")
 _SESSION_TTL = 3600  # seconds — sessions not updated for this long are evicted
 
 
@@ -167,7 +167,9 @@ class SessionRegistry:
     def cleanup_stale(self) -> int:
         """Remove sessions not updated within SESSION_TTL seconds.  Returns eviction count."""
         cutoff = time.monotonic() - _SESSION_TTL
-        stale = [sid for sid, entry in self._sessions.items() if entry["last_seen"] < cutoff]
+        stale = [
+            sid for sid, entry in self._sessions.items() if entry["last_seen"] < cutoff
+        ]
         for sid in stale:
             del self._sessions[sid]
         return len(stale)

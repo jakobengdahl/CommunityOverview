@@ -158,7 +158,12 @@ describe('graphStore', () => {
         schema: {
           node_types: {
             Actor: { fields: ['name'], description: 'Actors', color: '#3B82F6', static: false },
-            Initiative: { fields: ['name', 'summary'], description: 'Initiatives', color: '#10B981', static: false },
+            Initiative: {
+              fields: ['name', 'summary'],
+              description: 'Initiatives',
+              color: '#10B981',
+              static: false,
+            },
           },
         },
       });
@@ -193,8 +198,8 @@ describe('graphStore', () => {
       const relTypes = useGraphStore.getState().getRelationshipTypes();
 
       expect(relTypes).toHaveLength(2);
-      expect(relTypes.map(r => r.type)).toContain('BELONGS_TO');
-      expect(relTypes.map(r => r.type)).toContain('IMPLEMENTS');
+      expect(relTypes.map((r) => r.type)).toContain('BELONGS_TO');
+      expect(relTypes.map((r) => r.type)).toContain('IMPLEMENTS');
     });
   });
 
@@ -315,5 +320,4 @@ describe('graphStore', () => {
       expect(useGraphStore.getState().federationDepth).toBe(2);
     });
   });
-
 });

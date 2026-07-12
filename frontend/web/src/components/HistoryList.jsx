@@ -12,8 +12,12 @@ import './HistoryList.css';
 /** Map a dotted event type ("node.create") to its i18n key segment. */
 function eventKey(eventType) {
   const KNOWN = new Set([
-    'node.create', 'node.update', 'node.delete',
-    'edge.create', 'edge.update', 'edge.delete',
+    'node.create',
+    'node.update',
+    'node.delete',
+    'edge.create',
+    'edge.update',
+    'edge.delete',
   ]);
   return KNOWN.has(eventType) ? eventType.replace('.', '_') : 'unknown';
 }
@@ -33,7 +37,9 @@ function HistoryDiff({ entry, t }) {
           <span className="history-diff-before" title={t('history.before')}>
             {formatValue(before)}
           </span>
-          <span className="history-diff-arrow" aria-hidden="true">→</span>
+          <span className="history-diff-arrow" aria-hidden="true">
+            →
+          </span>
           <span className="history-diff-after" title={t('history.after')}>
             {formatValue(after)}
           </span>
@@ -69,10 +75,10 @@ function HistoryEntry({ entry, t, language }) {
         </time>
       </div>
       <div className="history-entry-entity">
-        {entry.entity_type && (
-          <span className="history-entity-type">{entry.entity_type}</span>
-        )}
-        <span className="history-entity-name" title={entry.entity_id}>{name}</span>
+        {entry.entity_type && <span className="history-entity-type">{entry.entity_type}</span>}
+        <span className="history-entity-name" title={entry.entity_id}>
+          {name}
+        </span>
       </div>
       {isUpdate(entry) && <HistoryDiff entry={entry} t={t} />}
       <div className="history-entry-meta">

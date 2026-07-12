@@ -16,6 +16,7 @@ from backend.agents.scheduler import AgentScheduler, _build_payload
 # Helpers
 # ---------------------------------------------------------------------------
 
+
 def make_config(
     agent_id: str = "agent-1",
     schedule: AgentSchedule | None = None,
@@ -41,8 +42,8 @@ def make_worker(agent_id: str = "agent-1") -> MagicMock:
 # AgentSchedule.from_dict
 # ---------------------------------------------------------------------------
 
-class TestAgentScheduleFromDict:
 
+class TestAgentScheduleFromDict:
     def test_parse_integer_day_and_time_string(self):
         sched = AgentSchedule.from_dict(
             {"day_of_week": 1, "time": "14:00", "timezone": "Europe/Stockholm"}
@@ -67,8 +68,14 @@ class TestAgentScheduleFromDict:
         assert sched.minute == 15
 
     def test_weekday_name_case_insensitive(self):
-        assert AgentSchedule.from_dict({"day_of_week": "MONDAY", "time": "10:00"}) is not None
-        assert AgentSchedule.from_dict({"day_of_week": "Monday", "time": "10:00"}) is not None
+        assert (
+            AgentSchedule.from_dict({"day_of_week": "MONDAY", "time": "10:00"})
+            is not None
+        )
+        assert (
+            AgentSchedule.from_dict({"day_of_week": "Monday", "time": "10:00"})
+            is not None
+        )
 
     def test_default_timezone_is_utc(self):
         sched = AgentSchedule.from_dict({"day_of_week": 0, "time": "10:00"})
@@ -82,21 +89,31 @@ class TestAgentScheduleFromDict:
         assert AgentSchedule.from_dict({"time": "10:00"}) is None
 
     def test_returns_none_for_invalid_day_name(self):
-        assert AgentSchedule.from_dict({"day_of_week": "funday", "time": "10:00"}) is None
+        assert (
+            AgentSchedule.from_dict({"day_of_week": "funday", "time": "10:00"}) is None
+        )
 
     def test_returns_none_for_out_of_range_day(self):
         assert AgentSchedule.from_dict({"day_of_week": 7, "time": "10:00"}) is None
 
     def test_returns_none_for_invalid_hour(self):
-        assert AgentSchedule.from_dict({"day_of_week": 0, "hour": 25, "minute": 0}) is None
+        assert (
+            AgentSchedule.from_dict({"day_of_week": 0, "hour": 25, "minute": 0}) is None
+        )
 
     def test_returns_none_for_invalid_minute(self):
-        assert AgentSchedule.from_dict({"day_of_week": 0, "hour": 10, "minute": 60}) is None
+        assert (
+            AgentSchedule.from_dict({"day_of_week": 0, "hour": 10, "minute": 60})
+            is None
+        )
 
     def test_returns_none_for_invalid_timezone(self):
-        assert AgentSchedule.from_dict(
-            {"day_of_week": 0, "time": "10:00", "timezone": "Not/AZone"}
-        ) is None
+        assert (
+            AgentSchedule.from_dict(
+                {"day_of_week": 0, "time": "10:00", "timezone": "Not/AZone"}
+            )
+            is None
+        )
 
     def test_valid_iana_timezone_accepted(self):
         sched = AgentSchedule.from_dict(
@@ -145,10 +162,11 @@ class TestAgentScheduleFromDict:
 # AgentConfig.schedule field
 # ---------------------------------------------------------------------------
 
-class TestAgentConfigSchedule:
 
+class TestAgentConfigSchedule:
     def test_schedule_is_none_when_not_in_metadata(self, sample_agent_node):
         from backend.agents.config import AgentConfig
+
         config = AgentConfig.from_node(sample_agent_node)
         assert config.schedule is None
 
@@ -159,6 +177,7 @@ class TestAgentConfigSchedule:
             "timezone": "Europe/Stockholm",
         }
         from backend.agents.config import AgentConfig
+
         config = AgentConfig.from_node(sample_agent_node)
         assert config.schedule is not None
         assert config.schedule.day_of_week == 4
@@ -168,6 +187,7 @@ class TestAgentConfigSchedule:
     def test_to_dict_includes_schedule(self, sample_agent_node):
         sample_agent_node.metadata["schedule"] = {"day_of_week": 0, "time": "10:00"}
         from backend.agents.config import AgentConfig
+
         config = AgentConfig.from_node(sample_agent_node)
         d = config.to_dict()
         assert d["schedule"] is not None
@@ -175,6 +195,7 @@ class TestAgentConfigSchedule:
 
     def test_to_dict_schedule_none_when_not_set(self, sample_agent_node):
         from backend.agents.config import AgentConfig
+
         config = AgentConfig.from_node(sample_agent_node)
         assert config.to_dict()["schedule"] is None
 
@@ -183,8 +204,8 @@ class TestAgentConfigSchedule:
 # AgentScheduler
 # ---------------------------------------------------------------------------
 
-class TestAgentSchedulerRegistration:
 
+class TestAgentSchedulerRegistration:
     def test_register_agent_with_schedule(self):
         scheduler = AgentScheduler()
         config = make_config(schedule=AgentSchedule(day_of_week=0, hour=9, minute=0))
@@ -216,8 +237,8 @@ class TestAgentSchedulerRegistration:
 # AgentScheduler._check_and_fire
 # ---------------------------------------------------------------------------
 
-class TestAgentSchedulerFiring:
 
+class TestAgentSchedulerFiring:
     def test_fires_when_time_matches(self):
         """Fires the worker when current time matches the schedule."""
         scheduler = AgentScheduler()
@@ -354,7 +375,9 @@ class TestAgentSchedulerFiring:
 
     def test_unknown_timezone_falls_back_to_utc(self):
         scheduler = AgentScheduler()
-        sched = AgentSchedule(day_of_week=0, hour=10, minute=30, timezone="Invalid/Zone")
+        sched = AgentSchedule(
+            day_of_week=0, hour=10, minute=30, timezone="Invalid/Zone"
+        )
         config = make_config(schedule=sched)
         worker = make_worker()
         scheduler.register("agent-1", config, worker)
@@ -363,7 +386,8 @@ class TestAgentSchedulerFiring:
 
         with unittest.mock.patch("backend.agents.scheduler.datetime") as mock_dt:
             mock_dt.now.side_effect = lambda tz_arg=None: (
-                monday_1030_utc.astimezone(tz_arg) if tz_arg and str(tz_arg) != "Invalid/Zone"
+                monday_1030_utc.astimezone(tz_arg)
+                if tz_arg and str(tz_arg) != "Invalid/Zone"
                 else monday_1030_utc
             )
             # ZoneInfoNotFoundError is raised inside scheduler; it should catch and use UTC
@@ -377,10 +401,12 @@ class TestAgentSchedulerFiring:
 # _build_payload
 # ---------------------------------------------------------------------------
 
-class TestBuildPayload:
 
+class TestBuildPayload:
     def test_payload_structure(self):
-        sched = AgentSchedule(day_of_week=1, hour=14, minute=0, timezone="Europe/Stockholm")
+        sched = AgentSchedule(
+            day_of_week=1, hour=14, minute=0, timezone="Europe/Stockholm"
+        )
         config = make_config(schedule=sched)
         fired_at = datetime(2026, 7, 7, 14, 0, 0, tzinfo=ZoneInfo("Europe/Stockholm"))
         payload = _build_payload(config, fired_at)

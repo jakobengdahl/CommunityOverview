@@ -41,13 +41,21 @@ function initialValue(field) {
   return '';
 }
 
-export default function CollectionForm({ form, onSubmit, disabled = false, submitted = false, labels }) {
+export default function CollectionForm({
+  form,
+  onSubmit,
+  disabled = false,
+  submitted = false,
+  labels,
+}) {
   const L = { ...DEFAULT_LABELS, ...(labels || {}) };
   const fields = Array.isArray(form?.fields) ? form.fields : [];
 
   const [values, setValues] = useState(() => {
     const init = {};
-    fields.forEach((f) => { init[f.id] = initialValue(f); });
+    fields.forEach((f) => {
+      init[f.id] = initialValue(f);
+    });
     return init;
   });
   // Sliders carry a default midpoint value, so a required slider would otherwise
@@ -122,7 +130,9 @@ export default function CollectionForm({ form, onSubmit, disabled = false, submi
             step={field.step}
             placeholder={field.placeholder || ''}
             disabled={lock}
-            onChange={(e) => setValue(field.id, e.target.value === '' ? '' : Number(e.target.value))}
+            onChange={(e) =>
+              setValue(field.id, e.target.value === '' ? '' : Number(e.target.value))
+            }
           />
         );
       case 'radio':
@@ -166,9 +176,13 @@ export default function CollectionForm({ form, onSubmit, disabled = false, submi
             disabled={lock}
             onChange={(e) => setValue(field.id, e.target.value)}
           >
-            <option value="" disabled>—</option>
+            <option value="" disabled>
+              —
+            </option>
             {(field.options || []).map(normalizeOption).map((opt, i) => (
-              <option key={i} value={opt.value}>{opt.label}</option>
+              <option key={i} value={opt.value}>
+                {opt.label}
+              </option>
             ))}
           </select>
         );
@@ -228,7 +242,12 @@ export default function CollectionForm({ form, onSubmit, disabled = false, submi
         <div key={field.id} className="cf-field">
           <label className="cf-label">
             {field.label}
-            {field.required && <span className="cf-required" aria-hidden="true"> *</span>}
+            {field.required && (
+              <span className="cf-required" aria-hidden="true">
+                {' '}
+                *
+              </span>
+            )}
           </label>
           {renderField(field)}
         </div>
@@ -242,7 +261,7 @@ export default function CollectionForm({ form, onSubmit, disabled = false, submi
         onClick={handleSubmit}
         disabled={disabled || submitted}
       >
-        {submitted ? L.submitted : (form?.submit_label || L.submit)}
+        {submitted ? L.submitted : form?.submit_label || L.submit}
       </button>
     </div>
   );

@@ -36,11 +36,16 @@ export function overlayToFlowNode(overlay) {
     return {
       ...base,
       data: { text: overlay.text || '', color: overlay.color, fontSize: overlay.fontSize },
-      style: overlay.size ? { width: overlay.size.w, height: overlay.size.h } : { width: 200, height: 140 },
+      style: overlay.size
+        ? { width: overlay.size.w, height: overlay.size.h }
+        : { width: 200, height: 140 },
     };
   }
   if (overlay.kind === 'label') {
-    return { ...base, data: { text: overlay.text || '', color: overlay.color, fontSize: overlay.fontSize } };
+    return {
+      ...base,
+      data: { text: overlay.text || '', color: overlay.color, fontSize: overlay.fontSize },
+    };
   }
   // arrow / line: endpoints carry independent head symbols and optional anchors.
   const data = {
@@ -68,7 +73,12 @@ export function flowNodeToOverlay(node) {
     };
   }
   if (node.type === 'label') {
-    return { ...base, text: node.data?.text || '', color: node.data?.color, fontSize: node.data?.fontSize };
+    return {
+      ...base,
+      text: node.data?.text || '',
+      color: node.data?.color,
+      fontSize: node.data?.fontSize,
+    };
   }
   const out = {
     ...base,

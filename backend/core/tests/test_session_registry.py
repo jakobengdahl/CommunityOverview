@@ -9,7 +9,7 @@ import asyncio
 import time
 import pytest
 
-from backend.core.session_registry import SessionRegistry, SESSION_ID_RE
+from backend.core.session_registry import SessionRegistry
 
 
 class TestSessionIdValidation:
@@ -98,7 +98,6 @@ class TestPushCommandSync:
         assert not queue.empty()
         cmd = queue.get_nowait()
         assert cmd == {"type": "hello", "value": 42}
-
 
     @pytest.mark.asyncio
     async def test_push_delivers_via_threadsafe_path(self):

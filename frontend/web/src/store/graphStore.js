@@ -62,13 +62,18 @@ function getLanguagePolicyText(presentation, language = 'en', t) {
   const policy = presentation?.language_policy;
   if (!policy) return '';
 
-  const description = language === 'sv'
-    ? (policy.description_sv || policy.description_en)
-    : (policy.description_en || policy.description_sv);
+  const description =
+    language === 'sv'
+      ? policy.description_sv || policy.description_en
+      : policy.description_en || policy.description_sv;
 
   if (!description) return '';
 
-  const label = t ? t('welcome.language_policy_label') : (language === 'sv' ? 'Språkpolicy' : 'Language policy');
+  const label = t
+    ? t('welcome.language_policy_label')
+    : language === 'sv'
+      ? 'Språkpolicy'
+      : 'Language policy';
   return `**${label}:** ${description}`;
 }
 
@@ -103,9 +108,7 @@ function createWelcomeMessage(presentation, t, language = 'en') {
     const uploadHint = t('welcome.upload_hint');
     const privacyNotice = t('welcome.privacy_notice');
 
-    const exampleLines = Array.isArray(examples)
-      ? examples.map(e => `• "${e}"`).join('\n')
-      : '';
+    const exampleLines = Array.isArray(examples) ? examples.map((e) => `• "${e}"`).join('\n') : '';
 
     return {
       role: 'assistant',
@@ -164,8 +167,8 @@ const useGraphStore = create((set, get) => ({
   chatMessages: [DEFAULT_WELCOME_MESSAGE],
 
   // Expert agents
-  availableExperts: [],   // All expert agents from config
-  activeExperts: [],      // Currently active expert agent IDs
+  availableExperts: [], // All expert agents from config
+  activeExperts: [], // Currently active expert agent IDs
 
   // Interactive guide state
   guide: {
@@ -177,8 +180,8 @@ const useGraphStore = create((set, get) => ({
   },
 
   // Guide-driven UI control (set by guide actions, consumed by components)
-  guideChatInput: null,    // { text, animated, auto_send } — fills chat textarea
-  guideSearchInput: null,  // { text, animated } — fills search bar
+  guideChatInput: null, // { text, animated, auto_send } — fills chat textarea
+  guideSearchInput: null, // { text, animated } — fills search bar
 
   // Incremented whenever the search box or chat input is focused, so GraphCanvas
   // can close any open context menu (they live outside the canvas's own click-away area)
@@ -201,8 +204,8 @@ const useGraphStore = create((set, get) => ({
 
   updateVisualization: (nodes, edges, highlightIds = []) => {
     // Ensure uniqueness for nodes and edges
-    const uniqueNodes = Array.from(new Map(nodes.map(n => [n.id, n])).values());
-    const uniqueEdges = Array.from(new Map(edges.map(e => [e.id, e])).values());
+    const uniqueNodes = Array.from(new Map(nodes.map((n) => [n.id, n])).values());
+    const uniqueEdges = Array.from(new Map(edges.map((e) => [e.id, e])).values());
 
     set({
       nodes: uniqueNodes,
@@ -220,27 +223,25 @@ const useGraphStore = create((set, get) => ({
     // Create maps from existing items for uniqueness check
     // We use a Map to ensure that if a node comes in that already exists,
     // we assume the existing one is fine (or we could update it, but here we just dedup).
-    const nodeMap = new Map(nodes.map(n => [n.id, n]));
-    const edgeMap = new Map(edges.map(e => [e.id, e]));
+    const nodeMap = new Map(nodes.map((n) => [n.id, n]));
+    const edgeMap = new Map(edges.map((e) => [e.id, e]));
 
     // Add new items to the map (this handles duplicates within newNodes too)
-    newNodes.forEach(node => {
+    newNodes.forEach((node) => {
       if (!nodeMap.has(node.id)) {
         nodeMap.set(node.id, node);
       }
     });
 
-    newEdges.forEach(edge => {
+    newEdges.forEach((edge) => {
       if (!edgeMap.has(edge.id)) {
         edgeMap.set(edge.id, edge);
       }
     });
 
     // Calculate which IDs are actually new for highlighting
-    const existingNodeIds = new Set(nodes.map(n => n.id));
-    const actuallyNewNodeIds = newNodes
-      .filter(n => !existingNodeIds.has(n.id))
-      .map(n => n.id);
+    const existingNodeIds = new Set(nodes.map((n) => n.id));
+    const actuallyNewNodeIds = newNodes.filter((n) => !existingNodeIds.has(n.id)).map((n) => n.id);
 
     set({
       nodes: Array.from(nodeMap.values()),
@@ -251,13 +252,13 @@ const useGraphStore = create((set, get) => ({
 
   removeEdge: (edgeId) => {
     const { edges } = get();
-    set({ edges: edges.filter(edge => edge.id !== edgeId) });
+    set({ edges: edges.filter((edge) => edge.id !== edgeId) });
   },
 
   // Update fields of a single edge in place without touching nodes or groups.
   updateEdgeData: (edgeId, updates) => {
     const { edges } = get();
-    set({ edges: edges.map(edge => edge.id === edgeId ? { ...edge, ...updates } : edge) });
+    set({ edges: edges.map((edge) => (edge.id === edgeId ? { ...edge, ...updates } : edge)) });
   },
 
   clearVisualization: () => {
@@ -285,7 +286,9 @@ const useGraphStore = create((set, get) => ({
 
   setNodeMarks: (marks) => {
     const marksMap = {};
-    (marks || []).forEach(m => { marksMap[m.node_id] = { color: m.color, label: m.label || '' }; });
+    (marks || []).forEach((m) => {
+      marksMap[m.node_id] = { color: m.color, label: m.label || '' };
+    });
     set({ nodeMarks: marksMap });
   },
 
@@ -294,7 +297,7 @@ const useGraphStore = create((set, get) => ({
   toggleNodeVisibility: (nodeId) => {
     const { hiddenNodeIds } = get();
     if (hiddenNodeIds.includes(nodeId)) {
-      set({ hiddenNodeIds: hiddenNodeIds.filter(id => id !== nodeId) });
+      set({ hiddenNodeIds: hiddenNodeIds.filter((id) => id !== nodeId) });
     } else {
       set({ hiddenNodeIds: [...hiddenNodeIds, nodeId] });
     }
@@ -305,7 +308,7 @@ const useGraphStore = create((set, get) => ({
   toggleEdgeVisibility: (edgeId) => {
     const { hiddenEdgeIds } = get();
     if (hiddenEdgeIds.includes(edgeId)) {
-      set({ hiddenEdgeIds: hiddenEdgeIds.filter(id => id !== edgeId) });
+      set({ hiddenEdgeIds: hiddenEdgeIds.filter((id) => id !== edgeId) });
     } else {
       set({ hiddenEdgeIds: [...hiddenEdgeIds, edgeId] });
     }
@@ -355,9 +358,10 @@ const useGraphStore = create((set, get) => ({
     const { chatMessages } = get();
 
     // Replace the welcome message if it's the first message
-    const updatedMessages = chatMessages.length > 0 && chatMessages[0].id === 'welcome'
-      ? [welcomeMessage, ...chatMessages.slice(1)]
-      : chatMessages;
+    const updatedMessages =
+      chatMessages.length > 0 && chatMessages[0].id === 'welcome'
+        ? [welcomeMessage, ...chatMessages.slice(1)]
+        : chatMessages;
 
     set({
       presentation,
@@ -436,7 +440,7 @@ const useGraphStore = create((set, get) => ({
   updateChatMessage: (id, patch) => {
     const { chatMessages } = get();
     set({
-      chatMessages: chatMessages.map(m => (m.id === id ? { ...m, ...patch } : m)),
+      chatMessages: chatMessages.map((m) => (m.id === id ? { ...m, ...patch } : m)),
     });
   },
 
@@ -471,17 +475,18 @@ const useGraphStore = create((set, get) => ({
 
   toggleExpertAgent: (agentId, language) => {
     const { activeExperts, availableExperts, addChatMessage } = get();
-    const agent = availableExperts.find(a => a.id === agentId);
+    const agent = availableExperts.find((a) => a.id === agentId);
     if (!agent) return;
 
     const isActive = activeExperts.includes(agentId);
     if (isActive) {
       // Remove expert
-      set({ activeExperts: activeExperts.filter(id => id !== agentId) });
-      const agentName = language === 'sv' ? agent.name : (agent.name_en || agent.name);
-      const leaveMsg = language === 'sv'
-        ? `${agentName} har lämnat diskussionen.`
-        : `${agentName} has left the discussion.`;
+      set({ activeExperts: activeExperts.filter((id) => id !== agentId) });
+      const agentName = language === 'sv' ? agent.name : agent.name_en || agent.name;
+      const leaveMsg =
+        language === 'sv'
+          ? `${agentName} har lämnat diskussionen.`
+          : `${agentName} has left the discussion.`;
       addChatMessage({
         role: 'expert',
         expertId: agentId,
@@ -494,8 +499,8 @@ const useGraphStore = create((set, get) => ({
     } else {
       // Add expert
       set({ activeExperts: [...activeExperts, agentId] });
-      const agentName = language === 'sv' ? agent.name : (agent.name_en || agent.name);
-      const introText = language === 'sv' ? agent.intro_sv : (agent.intro_en || agent.intro_sv);
+      const agentName = language === 'sv' ? agent.name : agent.name_en || agent.name;
+      const introText = language === 'sv' ? agent.intro_sv : agent.intro_en || agent.intro_sv;
       // Intro message visible to user
       addChatMessage({
         role: 'expert',
@@ -516,31 +521,33 @@ const useGraphStore = create((set, get) => ({
   },
 
   // Chat panel actions
-  toggleChatPanel: () => set(state => ({ chatPanelOpen: !state.chatPanelOpen })),
+  toggleChatPanel: () => set((state) => ({ chatPanelOpen: !state.chatPanelOpen })),
   setChatPanelOpen: (open) => set({ chatPanelOpen: open }),
 
   // Guide actions
-  startGuide: (guideDefinition) => set({
-    guide: {
-      isActive: true,
-      activeGuide: guideDefinition,
-      currentStepIndex: 0,
-      userInputs: {},
-      isExecutingAction: false,
-    },
-  }),
+  startGuide: (guideDefinition) =>
+    set({
+      guide: {
+        isActive: true,
+        activeGuide: guideDefinition,
+        currentStepIndex: 0,
+        userInputs: {},
+        isExecutingAction: false,
+      },
+    }),
 
-  stopGuide: () => set({
-    guide: {
-      isActive: false,
-      activeGuide: null,
-      currentStepIndex: 0,
-      userInputs: {},
-      isExecutingAction: false,
-    },
-    guideChatInput: null,
-    guideSearchInput: null,
-  }),
+  stopGuide: () =>
+    set({
+      guide: {
+        isActive: false,
+        activeGuide: null,
+        currentStepIndex: 0,
+        userInputs: {},
+        isExecutingAction: false,
+      },
+      guideChatInput: null,
+      guideSearchInput: null,
+    }),
 
   advanceGuide: () => {
     set((state) => {
@@ -587,8 +594,8 @@ const useGraphStore = create((set, get) => ({
   removeNode: (nodeId) => {
     const { nodes, edges } = get();
     set({
-      nodes: nodes.filter(n => n.id !== nodeId),
-      edges: edges.filter(e => e.source !== nodeId && e.target !== nodeId),
+      nodes: nodes.filter((n) => n.id !== nodeId),
+      edges: edges.filter((e) => e.source !== nodeId && e.target !== nodeId),
     });
   },
 }));

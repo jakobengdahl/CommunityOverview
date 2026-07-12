@@ -30,6 +30,7 @@ from typing import Optional
 from fastapi import FastAPI
 from fastapi.responses import JSONResponse
 from fastapi.staticfiles import StaticFiles
+
 # FastMCP is imported here (not only in mcp_mount) so it stays patchable as
 # backend.api_host.server.FastMCP in tests that stub the MCP transport.
 from mcp.server.fastmcp import FastMCP
@@ -42,7 +43,11 @@ from backend.core import GraphStorage
 from backend.service import GraphService, create_rest_router, register_mcp_tools
 from backend.ui import ChatService, DocumentService, create_ui_router
 from backend.agents import AgentRegistry, AgentsSettings
-from backend.federation import FederationManager, load_federation_config, summarize_federation_config
+from backend.federation import (
+    FederationManager,
+    load_federation_config,
+    summarize_federation_config,
+)
 
 from .config import AppConfig
 from .diagnostics import build_startup_diagnostics, emit_startup_diagnostics_log
@@ -143,8 +148,7 @@ def create_app(
         if not agent_registry.is_agent_subscription(subscription_id):
             return False
         return agent_registry.enqueue_for_subscription(
-            subscription_id,
-            event.to_webhook_payload()
+            subscription_id, event.to_webhook_payload()
         )
 
     graph_storage.set_agent_delivery_callback(agent_delivery_callback)
@@ -191,7 +195,9 @@ def create_app(
     # channel below is kept only to deliver MCP visualization pushes to the browser
     # (design §3.8) — the browser no longer uploads canvas state, MCP tools read it
     # from this store.
-    sessions_dir = config.sessions_dir or str(config.get_graph_path().parent / "sessions")
+    sessions_dir = config.sessions_dir or str(
+        config.get_graph_path().parent / "sessions"
+    )
     session_store = SessionStore(FileSessionPersistenceBackend(sessions_dir))
     session_manager = SessionManager(session_store)
     app.state.session_store = session_store
@@ -210,6 +216,7 @@ def create_app(
     # is safe regardless of whether the caller is inside an async context).
     try:
         from backend.config_loader import get_expert_agent_configs, get_skills_config
+
         _expert_configs = get_expert_agent_configs()
         if any(e.skills_urls for e in _expert_configs):
             chat_service.load_expert_skills_sync(_expert_configs, get_skills_config())
@@ -308,21 +315,21 @@ def _mount_static_files(app: FastAPI, config: AppConfig) -> None:
         @app.get("/web/{path:path}")
         async def web_placeholder(path: str) -> JSONResponse:
             return JSONResponse(
-                {"error": "Web app not built", "path": str(web_path)},
-                status_code=404
+                {"error": "Web app not built", "path": str(web_path)}, status_code=404
             )
 
     # Mount widget static files
     widget_path = Path(config.widget_static_path)
     if widget_path.exists() and widget_path.is_dir():
-        app.mount("/widget", StaticFiles(directory=str(widget_path), html=True), name="widget")
+        app.mount(
+            "/widget", StaticFiles(directory=str(widget_path), html=True), name="widget"
+        )
     else:
         # Create fallback route that returns a placeholder
         @app.get("/widget/{path:path}")
         async def widget_placeholder(path: str) -> JSONResponse:
             return JSONResponse(
-                {"error": "Widget not built", "path": str(widget_path)},
-                status_code=404
+                {"error": "Widget not built", "path": str(widget_path)}, status_code=404
             )
 
 

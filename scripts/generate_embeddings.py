@@ -36,7 +36,9 @@ def generate_embeddings(graph_path=DEFAULT_GRAPH_PATH):
 
 
 if __name__ == "__main__":
-    parser = argparse.ArgumentParser(description="Generate embeddings for a graph file.")
+    parser = argparse.ArgumentParser(
+        description="Generate embeddings for a graph file."
+    )
     parser.add_argument(
         "--graph-file",
         default=DEFAULT_GRAPH_PATH,

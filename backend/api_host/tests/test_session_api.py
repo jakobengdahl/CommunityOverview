@@ -96,22 +96,34 @@ class TestSessionLookupRateLimit:
         client = TestClient(app)
 
         # Real client A (last entry, added by the trusted proxy) — first guess ok.
-        assert client.get(
-            "/api/sessions/9999-9999", headers={"X-Forwarded-For": "1.1.1.1"}
-        ).status_code == 404
+        assert (
+            client.get(
+                "/api/sessions/9999-9999", headers={"X-Forwarded-For": "1.1.1.1"}
+            ).status_code
+            == 404
+        )
         # Client B — a different real IP has an independent bucket.
-        assert client.get(
-            "/api/sessions/9999-9998", headers={"X-Forwarded-For": "2.2.2.2"}
-        ).status_code == 404
+        assert (
+            client.get(
+                "/api/sessions/9999-9998", headers={"X-Forwarded-For": "2.2.2.2"}
+            ).status_code
+            == 404
+        )
         # Client A again — its bucket is now exhausted.
-        assert client.get(
-            "/api/sessions/9999-9997", headers={"X-Forwarded-For": "1.1.1.1"}
-        ).status_code == 429
+        assert (
+            client.get(
+                "/api/sessions/9999-9997", headers={"X-Forwarded-For": "1.1.1.1"}
+            ).status_code
+            == 429
+        )
         # A spoofed leading entry does not change A's key, so still throttled.
-        assert client.get(
-            "/api/sessions/9999-9996",
-            headers={"X-Forwarded-For": "9.9.9.9, 1.1.1.1"},
-        ).status_code == 429
+        assert (
+            client.get(
+                "/api/sessions/9999-9996",
+                headers={"X-Forwarded-For": "9.9.9.9, 1.1.1.1"},
+            ).status_code
+            == 429
+        )
 
 
 class TestSessionOps:
@@ -124,7 +136,11 @@ class TestSessionOps:
                 "base_seq": 0,
                 "ops": [
                     {"op": "nodes_added", "node_ids": ["node-1", "node-2"]},
-                    {"op": "node_moved", "node_id": "node-1", "position": {"x": 5, "y": 6}},
+                    {
+                        "op": "node_moved",
+                        "node_id": "node-1",
+                        "position": {"x": 5, "y": 6},
+                    },
                 ],
             },
         )
@@ -154,7 +170,10 @@ class TestSessionOps:
         sid = test_app.post("/api/sessions", json={}).json()["id"]
         resp = test_app.post(
             f"/api/sessions/{sid}/ops",
-            json={"client_id": "c1", "ops": [{"op": "node_moved", "node_id": "a", "position": {"x": "no"}}]},
+            json={
+                "client_id": "c1",
+                "ops": [{"op": "node_moved", "node_id": "a", "position": {"x": "no"}}],
+            },
         )
         assert resp.status_code == 400
 
@@ -166,7 +185,12 @@ class TestResolve:
         # node-1 exists in the sample graph fixture
         test_app.post(
             f"/api/sessions/{sid}/ops",
-            json={"client_id": "c1", "ops": [{"op": "nodes_added", "node_ids": ["node-1", "does-not-exist"]}]},
+            json={
+                "client_id": "c1",
+                "ops": [
+                    {"op": "nodes_added", "node_ids": ["node-1", "does-not-exist"]}
+                ],
+            },
         )
         resp = test_app.get(f"/api/sessions/{sid}?resolve=true")
         assert resp.status_code == 200
@@ -185,7 +209,10 @@ class TestOpBatchBodyCap:
         positions = {f"node-{i}": {"x": i, "y": i} for i in range(20000)}
         resp = test_app.post(
             f"/api/sessions/{sid}/ops",
-            json={"client_id": "c1", "ops": [{"op": "layout_applied", "positions": positions}]},
+            json={
+                "client_id": "c1",
+                "ops": [{"op": "layout_applied", "positions": positions}],
+            },
         )
         assert resp.status_code == 413
 
@@ -193,10 +220,17 @@ class TestOpBatchBodyCap:
         """The transitional full-state PUT and the legacy PATCH shim are gone."""
         sid = test_app.post("/api/sessions", json={}).json()["id"]
         # No route for .../state anymore → 404 (path unregistered), never 2xx.
-        assert test_app.put(f"/api/sessions/{sid}/state", json={"state": {}}).status_code in (404, 405)
-        assert test_app.patch(f"/sessions/{sid}/state", json={}).status_code in (404, 405)
+        assert test_app.put(
+            f"/api/sessions/{sid}/state", json={"state": {}}
+        ).status_code in (404, 405)
+        assert test_app.patch(f"/sessions/{sid}/state", json={}).status_code in (
+            404,
+            405,
+        )
 
-    def test_missing_required_field_returns_422_with_structured_detail(self, test_app: TestClient):
+    def test_missing_required_field_returns_422_with_structured_detail(
+        self, test_app: TestClient
+    ):
         """The ops body is now parsed manually (for the pre-parse byte cap); a
         missing required field must still 422 with a FastAPI-shaped error list."""
         sid = test_app.post("/api/sessions", json={}).json()["id"]

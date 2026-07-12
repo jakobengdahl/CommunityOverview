@@ -90,12 +90,8 @@ function RecentActivityDrawer({ open, onClose }) {
       </div>
 
       <div className="activity-drawer-body">
-        {error && (
-          <div className="activity-drawer-error">{t('history.error')}</div>
-        )}
-        {isEmpty && (
-          <div className="activity-drawer-empty">{t('history.empty')}</div>
-        )}
+        {error && <div className="activity-drawer-error">{t('history.error')}</div>}
+        {isEmpty && <div className="activity-drawer-empty">{t('history.empty')}</div>}
         {entries.length > 0 && <HistoryList entries={entries} />}
         {loading && entries.length === 0 && (
           <div className="activity-drawer-loading">{t('history.loading')}</div>

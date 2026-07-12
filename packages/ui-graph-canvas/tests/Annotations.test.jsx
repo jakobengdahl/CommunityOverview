@@ -17,17 +17,20 @@ vi.mock('reactflow', () => ({
 }));
 
 const labels = {
-  color: 'Colour', delete: 'Delete', notePlaceholder: 'Note', labelPlaceholder: 'Label',
-  textSize: 'Text size', arrowStartHead: 'Start arrowhead', arrowEndHead: 'End arrowhead',
+  color: 'Colour',
+  delete: 'Delete',
+  notePlaceholder: 'Note',
+  labelPlaceholder: 'Label',
+  textSize: 'Text size',
+  arrowStartHead: 'Start arrowhead',
+  arrowEndHead: 'End arrowhead',
 };
 
 function renderWithContext(ui, notifyChange = vi.fn()) {
   return {
     notifyChange,
     ...render(
-      <AnnotationContext.Provider value={{ notifyChange, labels }}>
-        {ui}
-      </AnnotationContext.Provider>
+      <AnnotationContext.Provider value={{ notifyChange, labels }}>{ui}</AnnotationContext.Provider>
     ),
   };
 }
@@ -47,7 +50,9 @@ describe('NoteNode', () => {
   });
 
   it('commits edited text and notifies on blur', () => {
-    const { notifyChange } = renderWithContext(<NoteNode id="note-1" data={{ text: '' }} selected />);
+    const { notifyChange } = renderWithContext(
+      <NoteNode id="note-1" data={{ text: '' }} selected />
+    );
     fireEvent.doubleClick(screen.getByText('Note'));
     const input = screen.getByRole('textbox');
     fireEvent.change(input, { target: { value: 'Remember this' } });
@@ -61,7 +66,9 @@ describe('NoteNode', () => {
   });
 
   it('deletes itself and notifies from the context menu', () => {
-    const { notifyChange } = renderWithContext(<NoteNode id="note-1" data={{ text: 'x' }} selected />);
+    const { notifyChange } = renderWithContext(
+      <NoteNode id="note-1" data={{ text: 'x' }} selected />
+    );
     fireEvent.contextMenu(screen.getByText('x'));
     fireEvent.click(screen.getByRole('button', { name: /delete/i }));
     expect(notifyChange).toHaveBeenCalledTimes(1);
@@ -70,7 +77,9 @@ describe('NoteNode', () => {
   });
 
   it('changes the note text size from the context menu', () => {
-    const { notifyChange } = renderWithContext(<NoteNode id="note-1" data={{ text: 'x' }} selected />);
+    const { notifyChange } = renderWithContext(
+      <NoteNode id="note-1" data={{ text: 'x' }} selected />
+    );
     fireEvent.contextMenu(screen.getByText('x'));
     const sizeButtons = document.querySelectorAll('.size-button');
     expect(sizeButtons.length).toBe(4);
@@ -85,7 +94,9 @@ describe('LabelNode', () => {
   beforeEach(() => vi.clearAllMocks());
 
   it('commits edited text on Enter', () => {
-    const { notifyChange } = renderWithContext(<LabelNode id="label-1" data={{ text: '' }} selected />);
+    const { notifyChange } = renderWithContext(
+      <LabelNode id="label-1" data={{ text: '' }} selected />
+    );
     fireEvent.doubleClick(screen.getByText('Label'));
     const input = screen.getByRole('textbox');
     fireEvent.change(input, { target: { value: 'Region A' } });
@@ -97,7 +108,9 @@ describe('LabelNode', () => {
   });
 
   it('recolours from the context menu', () => {
-    const { notifyChange } = renderWithContext(<LabelNode id="label-1" data={{ text: 'x' }} selected />);
+    const { notifyChange } = renderWithContext(
+      <LabelNode id="label-1" data={{ text: 'x' }} selected />
+    );
     fireEvent.contextMenu(screen.getByText('x'));
     const colorButtons = document.querySelectorAll('.color-button');
     expect(colorButtons.length).toBeGreaterThan(0);
@@ -107,7 +120,9 @@ describe('LabelNode', () => {
   });
 
   it('changes the label text size from the context menu', () => {
-    const { notifyChange } = renderWithContext(<LabelNode id="label-1" data={{ text: 'x' }} selected />);
+    const { notifyChange } = renderWithContext(
+      <LabelNode id="label-1" data={{ text: 'x' }} selected />
+    );
     fireEvent.contextMenu(screen.getByText('x'));
     const sizeButtons = document.querySelectorAll('.size-button');
     expect(sizeButtons.length).toBe(4);
@@ -122,12 +137,16 @@ describe('ArrowNode', () => {
   beforeEach(() => vi.clearAllMocks());
 
   it('renders an arrow line', () => {
-    const { container } = renderWithContext(<ArrowNode id="arrow-1" data={{ dx: 160, dy: 0 }} selected={false} />);
+    const { container } = renderWithContext(
+      <ArrowNode id="arrow-1" data={{ dx: 160, dy: 0 }} selected={false} />
+    );
     expect(container.querySelectorAll('line').length).toBeGreaterThan(0);
   });
 
   it('draws a head at the end by default, none at the start', () => {
-    const { container } = renderWithContext(<ArrowNode id="arrow-1" data={{ dx: 160, dy: 0 }} selected={false} />);
+    const { container } = renderWithContext(
+      <ArrowNode id="arrow-1" data={{ dx: 160, dy: 0 }} selected={false} />
+    );
     const visible = container.querySelectorAll('line')[1];
     expect(visible.getAttribute('marker-end')).toBe('url(#graph-arrow-head-arrow-1)');
     expect(visible.getAttribute('marker-start')).toBeNull();
@@ -135,7 +154,11 @@ describe('ArrowNode', () => {
 
   it('renders a plain line when both heads are off', () => {
     const { container } = renderWithContext(
-      <ArrowNode id="arrow-1" data={{ dx: 160, dy: 0, startArrow: false, endArrow: false }} selected={false} />
+      <ArrowNode
+        id="arrow-1"
+        data={{ dx: 160, dy: 0, startArrow: false, endArrow: false }}
+        selected={false}
+      />
     );
     const visible = container.querySelectorAll('line')[1];
     expect(visible.getAttribute('marker-end')).toBeNull();
@@ -143,12 +166,16 @@ describe('ArrowNode', () => {
   });
 
   it('shows two endpoint handles when selected', () => {
-    const { container } = renderWithContext(<ArrowNode id="arrow-1" data={{ dx: 160, dy: 0 }} selected />);
+    const { container } = renderWithContext(
+      <ArrowNode id="arrow-1" data={{ dx: 160, dy: 0 }} selected />
+    );
     expect(container.querySelectorAll('circle.graph-arrow-handle').length).toBe(2);
   });
 
   it('toggles the start head from the context menu', () => {
-    const { notifyChange } = renderWithContext(<ArrowNode id="arrow-1" data={{ dx: 160, dy: 0, endArrow: true }} selected={false} />);
+    const { notifyChange } = renderWithContext(
+      <ArrowNode id="arrow-1" data={{ dx: 160, dy: 0, endArrow: true }} selected={false} />
+    );
     fireEvent.contextMenu(document.querySelector('.graph-arrow-node'));
     const toggle = screen.getByText('Start arrowhead');
     fireEvent.click(toggle);

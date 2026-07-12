@@ -64,12 +64,14 @@ class WebhookHandler(BaseHTTPRequestHandler):
         sub_name = subscription.get("name", "unknown")
 
         # Store event
-        WebhookHandler.events_received.append({
-            "timestamp": datetime.now().isoformat(),
-            "event_type": event_type,
-            "entity_type": entity_type,
-            "entity_id": entity_id,
-        })
+        WebhookHandler.events_received.append(
+            {
+                "timestamp": datetime.now().isoformat(),
+                "event_type": event_type,
+                "entity_type": entity_type,
+                "entity_id": entity_id,
+            }
+        )
 
         # Print formatted output
         print("\n" + "=" * 60)
@@ -91,7 +93,11 @@ class WebhookHandler(BaseHTTPRequestHandler):
                 after = entity_data["after"]
                 print(f"Name:         {after.get('name', 'N/A')}")
                 if after.get("description"):
-                    desc = after["description"][:100] + "..." if len(after.get("description", "")) > 100 else after.get("description", "")
+                    desc = (
+                        after["description"][:100] + "..."
+                        if len(after.get("description", "")) > 100
+                        else after.get("description", "")
+                    )
                     print(f"Description:  {desc}")
 
             if entity_data.get("patch"):
@@ -143,16 +149,14 @@ def main():
         description="Webhook listener for testing event subscriptions"
     )
     parser.add_argument(
-        "--port", "-p",
-        type=int,
-        default=9000,
-        help="Port to listen on (default: 9000)"
+        "--port", "-p", type=int, default=9000, help="Port to listen on (default: 9000)"
     )
     parser.add_argument(
-        "--host", "-H",
+        "--host",
+        "-H",
         type=str,
         default="0.0.0.0",
-        help="Host to bind to (default: 0.0.0.0)"
+        help="Host to bind to (default: 0.0.0.0)",
     )
     args = parser.parse_args()
 

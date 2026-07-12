@@ -15,7 +15,11 @@ function SimpleFloatingEdge({ id, source, target, markerEnd, style }) {
     return null;
   }
 
-  const { sx, sy, tx, ty, sourcePos, targetPos } = getEdgeParams(sourceNode, targetNode, nodeInternals);
+  const { sx, sy, tx, ty, sourcePos, targetPos } = getEdgeParams(
+    sourceNode,
+    targetNode,
+    nodeInternals
+  );
 
   const [edgePath] = getBezierPath({
     sourceX: sx,
@@ -29,13 +33,7 @@ function SimpleFloatingEdge({ id, source, target, markerEnd, style }) {
   // interactionWidth renders an invisible wider hit-path so edges are easy to
   // click/right-click without thickening the visible stroke.
   return (
-    <BaseEdge
-      id={id}
-      path={edgePath}
-      markerEnd={markerEnd}
-      style={style}
-      interactionWidth={24}
-    />
+    <BaseEdge id={id} path={edgePath} markerEnd={markerEnd} style={style} interactionWidth={24} />
   );
 }
 

@@ -29,7 +29,7 @@ function readIndex() {
   try {
     const raw = window.localStorage.getItem(INDEX_KEY);
     const parsed = raw ? JSON.parse(raw) : [];
-    return Array.isArray(parsed) ? parsed.filter(e => e && e.id) : [];
+    return Array.isArray(parsed) ? parsed.filter((e) => e && e.id) : [];
   } catch {
     return [];
   }
@@ -56,7 +56,7 @@ export function purgeLegacySnapshots() {
       const key = window.localStorage.key(i);
       if (key && key.startsWith(LEGACY_SNAPSHOT_PREFIX)) toRemove.push(key);
     }
-    toRemove.forEach(key => window.localStorage.removeItem(key));
+    toRemove.forEach((key) => window.localStorage.removeItem(key));
   } catch {
     // ignore — purging is best-effort cleanup
   }
@@ -74,11 +74,11 @@ export function listSessions() {
  * Whether the session is present in the recents index.
  */
 export function hasSession(id) {
-  return readIndex().some(e => e.id === id);
+  return readIndex().some((e) => e.id === id);
 }
 
 function upsertEntry(index, id, patch) {
-  const existing = index.find(e => e.id === id);
+  const existing = index.find((e) => e.id === id);
   if (existing) {
     Object.assign(existing, patch);
     return index;
@@ -98,7 +98,7 @@ export function touchSession(id, patch = {}) {
   while (index.length > MAX_SESSIONS) {
     const victim = [...index].sort((a, b) => (a.updatedAt || 0) - (b.updatedAt || 0))[0];
     if (!victim) break;
-    index = index.filter(e => e.id !== victim.id);
+    index = index.filter((e) => e.id !== victim.id);
   }
   writeIndex(index);
 }
@@ -109,7 +109,7 @@ export function touchSession(id, patch = {}) {
  */
 export function renameSession(id, name) {
   const index = readIndex();
-  const entry = index.find(e => e.id === id);
+  const entry = index.find((e) => e.id === id);
   if (!entry) return;
   entry.name = name?.trim() || null;
   writeIndex(index);
@@ -119,7 +119,7 @@ export function renameSession(id, name) {
  * Remove a session from the recents list (e.g. after it is deleted).
  */
 export function removeSession(id) {
-  writeIndex(readIndex().filter(e => e.id !== id));
+  writeIndex(readIndex().filter((e) => e.id !== id));
 }
 
 purgeLegacySnapshots();

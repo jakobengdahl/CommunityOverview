@@ -5,7 +5,6 @@ Tests that the FastAPI application is properly configured and
 all REST API endpoints function correctly.
 """
 
-import pytest
 import os
 from pathlib import Path
 from unittest.mock import patch
@@ -59,9 +58,12 @@ class TestHealthAndRoot:
 
     def test_info_endpoint_llm_available_with_key(self, app_config):
         """Info endpoint reports llm_available=True when API key is set."""
-        with patch.dict(os.environ, {"ANTHROPIC_API_KEY": "sk-ant-test", "LLM_PROVIDER": "claude"}):
+        with patch.dict(
+            os.environ, {"ANTHROPIC_API_KEY": "sk-ant-test", "LLM_PROVIDER": "claude"}
+        ):
             from backend.api_host import create_app
-            with patch('backend.ui.chat_logic.create_provider'):
+
+            with patch("backend.ui.chat_logic.create_provider"):
                 app = create_app(app_config)
             client = TestClient(app)
             response = client.get("/info")
@@ -75,6 +77,7 @@ class TestHealthAndRoot:
             os.environ.pop("ANTHROPIC_API_KEY", None)
             os.environ.pop("OPENAI_API_KEY", None)
             from backend.api_host import create_app
+
             app = create_app(app_config)
             client = TestClient(app)
             response = client.get("/info")
@@ -109,7 +112,9 @@ class TestHealthAndRoot:
         assert data["checks"]["event_delivery"]["status"] == "ok"
         assert data["warnings"] == []
 
-    def test_startup_diagnostics_endpoint_is_safe_and_structured(self, test_app: TestClient):
+    def test_startup_diagnostics_endpoint_is_safe_and_structured(
+        self, test_app: TestClient
+    ):
         """Startup diagnostics expose safe summaries without filesystem path leakage."""
         response = test_app.get("/diagnostics/startup")
         assert response.status_code == 200
@@ -173,18 +178,27 @@ class TestHealthAndRoot:
         caplog,
     ):
         """App startup emits structured diagnostics for operability tooling."""
-        with patch("backend.ui.chat_logic.create_provider", return_value=mock_llm_provider):
+        with patch(
+            "backend.ui.chat_logic.create_provider", return_value=mock_llm_provider
+        ):
             with patch.dict(os.environ, {"ANTHROPIC_API_KEY": "test-key"}):
                 with caplog.at_level("INFO"):
                     app = create_app(app_config)
 
         startup_logs = [
-            record.message for record in caplog.records if record.message.startswith("startup_diagnostics ")
+            record.message
+            for record in caplog.records
+            if record.message.startswith("startup_diagnostics ")
         ]
         assert len(startup_logs) == 1
         assert '"status": "ready"' in startup_logs[0]
         assert '"dangling_edge_count": 0' in startup_logs[0]
-        assert app.state.startup_diagnostics["checks"]["graph_storage"]["integrity"]["status"] == "ok"
+        assert (
+            app.state.startup_diagnostics["checks"]["graph_storage"]["integrity"][
+                "status"
+            ]
+            == "ok"
+        )
 
     def test_public_operability_endpoints_do_not_expose_tenant_identifiers(
         self,
@@ -197,7 +211,9 @@ class TestHealthAndRoot:
         monkeypatch.setenv("COMMUNITYOVERVIEW_TENANT_NAME", "Highly Sensitive Tenant")
         monkeypatch.setenv("COMMUNITYOVERVIEW_ENVIRONMENT", "staging")
 
-        with patch("backend.ui.chat_logic.create_provider", return_value=mock_llm_provider):
+        with patch(
+            "backend.ui.chat_logic.create_provider", return_value=mock_llm_provider
+        ):
             with patch.dict(os.environ, {"ANTHROPIC_API_KEY": "test-key"}):
                 client = TestClient(create_app(app_config))
 
@@ -227,7 +243,9 @@ class TestHealthAndRoot:
         info_response = client.get("/info")
         assert info_response.status_code == 200
         info_data = info_response.json()
-        assert info_data["operability"]["config_context"] == startup_data["config_context"]
+        assert (
+            info_data["operability"]["config_context"] == startup_data["config_context"]
+        )
         assert "tenant_id" not in info_data["operability"]["config_context"]
         assert "tenant_name" not in info_data["operability"]["config_context"]
         assert "tenant-secret-123" not in info_response.text
@@ -247,9 +265,13 @@ class TestHealthAndRoot:
         )
         degraded_graph_storage = GraphStorage(str(graph_path))
 
-        with patch("backend.ui.chat_logic.create_provider", return_value=mock_llm_provider):
+        with patch(
+            "backend.ui.chat_logic.create_provider", return_value=mock_llm_provider
+        ):
             with patch.dict(os.environ, {"ANTHROPIC_API_KEY": "test-key"}):
-                client = TestClient(create_app(app_config, graph_storage=degraded_graph_storage))
+                client = TestClient(
+                    create_app(app_config, graph_storage=degraded_graph_storage)
+                )
 
         response = client.get("/ready")
         assert response.status_code == 200
@@ -275,8 +297,7 @@ class TestSearchEndpoints:
     def test_search_graph_with_type_filter(self, test_app: TestClient):
         """Search with node type filter."""
         response = test_app.post(
-            "/api/search",
-            json={"query": "test", "node_types": ["Actor"]}
+            "/api/search", json={"query": "test", "node_types": ["Actor"]}
         )
         assert response.status_code == 200
         data = response.json()
@@ -286,8 +307,7 @@ class TestSearchEndpoints:
     def test_search_graph_with_type_and_limit(self, test_app: TestClient):
         """Search with type filter and limit."""
         response = test_app.post(
-            "/api/search",
-            json={"query": "test", "node_types": ["Actor"], "limit": 10}
+            "/api/search", json={"query": "test", "node_types": ["Actor"], "limit": 10}
         )
         assert response.status_code == 200
         data = response.json()
@@ -296,10 +316,7 @@ class TestSearchEndpoints:
 
     def test_search_graph_with_limit(self, test_app: TestClient):
         """Search respects limit parameter."""
-        response = test_app.post(
-            "/api/search",
-            json={"query": "test", "limit": 1}
-        )
+        response = test_app.post("/api/search", json={"query": "test", "limit": 1})
         assert response.status_code == 200
         data = response.json()
         assert len(data["nodes"]) <= 1
@@ -329,10 +346,7 @@ class TestNodeEndpoints:
 
     def test_get_related_nodes(self, test_app: TestClient):
         """Get related nodes for a node."""
-        response = test_app.post(
-            "/api/nodes/node-1/related",
-            json={"depth": 1}
-        )
+        response = test_app.post("/api/nodes/node-1/related", json={"depth": 1})
         assert response.status_code == 200
         data = response.json()
         assert "nodes" in data
@@ -340,10 +354,7 @@ class TestNodeEndpoints:
 
     def test_get_related_nodes_with_depth(self, test_app: TestClient):
         """Get related nodes with increased depth."""
-        response = test_app.post(
-            "/api/nodes/node-1/related",
-            json={"depth": 2}
-        )
+        response = test_app.post("/api/nodes/node-1/related", json={"depth": 2})
         assert response.status_code == 200
         data = response.json()
         # Should find more nodes with depth 2
@@ -355,12 +366,9 @@ class TestNodeEndpoints:
             "type": "Actor",
             "name": "New Organization",
             "description": "A newly added organization",
-            "communities": ["NewCommunity"]
+            "communities": ["NewCommunity"],
         }
-        response = test_app_empty_graph.post(
-            "/api/nodes",
-            json={"nodes": [new_node]}
-        )
+        response = test_app_empty_graph.post("/api/nodes", json={"nodes": [new_node]})
         assert response.status_code == 200
         data = response.json()
         assert data["success"] is True
@@ -370,13 +378,10 @@ class TestNodeEndpoints:
         """Add nodes with edges."""
         nodes = [
             {"type": "Actor", "name": "Org A", "communities": []},
-            {"type": "Initiative", "name": "Project A", "communities": []}
+            {"type": "Initiative", "name": "Project A", "communities": []},
         ]
         # Note: edges will use generated IDs, so we test without them first
-        response = test_app_empty_graph.post(
-            "/api/nodes",
-            json={"nodes": nodes}
-        )
+        response = test_app_empty_graph.post("/api/nodes", json={"nodes": nodes})
         assert response.status_code == 200
         data = response.json()
         assert len(data["added_node_ids"]) == 2
@@ -385,7 +390,7 @@ class TestNodeEndpoints:
         """Update an existing node."""
         response = test_app.patch(
             "/api/nodes/node-1",
-            json={"updates": {"description": "Updated description"}}
+            json={"updates": {"description": "Updated description"}},
         )
         assert response.status_code == 200
         data = response.json()
@@ -399,26 +404,21 @@ class TestNodeEndpoints:
     def test_update_node_not_found(self, test_app: TestClient):
         """Update non-existent node returns 404."""
         response = test_app.patch(
-            "/api/nodes/nonexistent",
-            json={"updates": {"description": "test"}}
+            "/api/nodes/nonexistent", json={"updates": {"description": "test"}}
         )
         assert response.status_code == 404
 
     def test_delete_nodes_requires_confirmation(self, test_app: TestClient):
         """Delete without confirmation fails."""
         response = test_app.request(
-            "DELETE",
-            "/api/nodes",
-            json={"node_ids": ["node-1"], "confirmed": False}
+            "DELETE", "/api/nodes", json={"node_ids": ["node-1"], "confirmed": False}
         )
         assert response.status_code == 400
 
     def test_delete_nodes_with_confirmation(self, test_app: TestClient):
         """Delete with confirmation succeeds."""
         response = test_app.request(
-            "DELETE",
-            "/api/nodes",
-            json={"node_ids": ["node-3"], "confirmed": True}
+            "DELETE", "/api/nodes", json={"node_ids": ["node-3"], "confirmed": True}
         )
         assert response.status_code == 200
         data = response.json()
@@ -452,7 +452,9 @@ class TestNodeEndpoints:
         assert data["success"] is True
         assert data["deleted_edge_id"] == "edge-1"
 
-        edge_delete_events = [event for event in captured_events if event.entity.id == "edge-1"]
+        edge_delete_events = [
+            event for event in captured_events if event.entity.id == "edge-1"
+        ]
         assert len(edge_delete_events) == 1
         event = edge_delete_events[0]
         assert event.origin.event_origin == "mcp"
@@ -466,8 +468,7 @@ class TestSimilarityEndpoints:
     def test_find_similar_nodes(self, test_app: TestClient):
         """Find similar nodes by name."""
         response = test_app.post(
-            "/api/similar",
-            json={"name": "Test Org", "threshold": 0.5}
+            "/api/similar", json={"name": "Test Org", "threshold": 0.5}
         )
         assert response.status_code == 200
         data = response.json()
@@ -477,7 +478,7 @@ class TestSimilarityEndpoints:
         """Find similar nodes filtered by type."""
         response = test_app.post(
             "/api/similar",
-            json={"name": "Test", "node_type": "Actor", "threshold": 0.3}
+            json={"name": "Test", "node_type": "Actor", "threshold": 0.3},
         )
         assert response.status_code == 200
         data = response.json()
@@ -488,7 +489,7 @@ class TestSimilarityEndpoints:
         """Batch similarity search."""
         response = test_app.post(
             "/api/similar/batch",
-            json={"names": ["Test Org", "Test Proj"], "threshold": 0.3}
+            json={"names": ["Test Org", "Test Proj"], "threshold": 0.3},
         )
         assert response.status_code == 200
         data = response.json()
@@ -537,9 +538,15 @@ class TestStatisticsEndpoints:
 
     def test_get_capabilities(self, test_app: TestClient):
         """Get capability manifest via REST."""
-        test_config_path = str(Path(__file__).resolve().parents[3] / "config" / "test" / "schema_config.json")
+        test_config_path = str(
+            Path(__file__).resolve().parents[3]
+            / "config"
+            / "test"
+            / "schema_config.json"
+        )
         os.environ["SCHEMA_FILE"] = test_config_path
         from backend import config_loader
+
         config_loader.reset_loader()
 
         response = test_app.get("/api/capabilities")
@@ -626,10 +633,7 @@ class TestExecuteToolEndpoint:
         """Execute search_graph tool directly."""
         response = test_app.post(
             "/execute_tool",
-            json={
-                "tool_name": "search_graph",
-                "arguments": {"query": "test"}
-            }
+            json={"tool_name": "search_graph", "arguments": {"query": "test"}},
         )
         assert response.status_code == 200
         data = response.json()
@@ -638,11 +642,7 @@ class TestExecuteToolEndpoint:
     def test_execute_tool_not_found(self, test_app: TestClient):
         """Execute non-safe unknown tool is blocked before tool lookup in unauthenticated mode."""
         response = test_app.post(
-            "/execute_tool",
-            json={
-                "tool_name": "nonexistent_tool",
-                "arguments": {}
-            }
+            "/execute_tool", json={"tool_name": "nonexistent_tool", "arguments": {}}
         )
         assert response.status_code == 403
 
@@ -652,11 +652,7 @@ class TestExecuteToolEndpoint:
         os.environ["COMMUNITYOVERVIEW_ENABLED_EXTENSIONS"] = "federation,analytics"
 
         response = test_app.post(
-            "/execute_tool",
-            json={
-                "tool_name": "get_runtime_info",
-                "arguments": {}
-            }
+            "/execute_tool", json={"tool_name": "get_runtime_info", "arguments": {}}
         )
         assert response.status_code == 200
         assert response.json() == {
@@ -666,10 +662,7 @@ class TestExecuteToolEndpoint:
 
     def test_execute_tool_no_name(self, test_app: TestClient):
         """Execute tool without name returns 400."""
-        response = test_app.post(
-            "/execute_tool",
-            json={"arguments": {}}
-        )
+        response = test_app.post("/execute_tool", json={"arguments": {}})
         assert response.status_code == 400
 
 
@@ -692,9 +685,12 @@ class TestUiCapabilitiesEndpoint:
 
     def test_capabilities_llm_available_true_when_key_set(self, app_config):
         """llm_available is True when ANTHROPIC_API_KEY is configured."""
-        with patch.dict(os.environ, {"ANTHROPIC_API_KEY": "sk-ant-test", "LLM_PROVIDER": "claude"}):
+        with patch.dict(
+            os.environ, {"ANTHROPIC_API_KEY": "sk-ant-test", "LLM_PROVIDER": "claude"}
+        ):
             from backend.api_host import create_app
-            with patch('backend.ui.chat_logic.create_provider'):
+
+            with patch("backend.ui.chat_logic.create_provider"):
                 app = create_app(app_config)
             client = TestClient(app)
             response = client.get("/ui/capabilities")
@@ -708,6 +704,7 @@ class TestUiCapabilitiesEndpoint:
             os.environ.pop("ANTHROPIC_API_KEY", None)
             os.environ.pop("OPENAI_API_KEY", None)
             from backend.api_host import create_app
+
             app = create_app(app_config)
             client = TestClient(app)
             response = client.get("/ui/capabilities")
@@ -720,7 +717,8 @@ class TestUiCapabilitiesEndpoint:
         with patch.dict(os.environ, env_patch):
             os.environ.pop("ANTHROPIC_API_KEY", None)
             from backend.api_host import create_app
-            with patch('backend.ui.chat_logic.create_provider'):
+
+            with patch("backend.ui.chat_logic.create_provider"):
                 app = create_app(app_config)
             client = TestClient(app)
             response = client.get("/ui/capabilities")
@@ -746,9 +744,12 @@ class TestStartupDiagnosticsLlmCheck:
 
     def test_startup_diagnostics_llm_status_ok_with_key(self, app_config):
         """LLM check status is 'ok' when a key is configured."""
-        with patch.dict(os.environ, {"ANTHROPIC_API_KEY": "sk-ant-test", "LLM_PROVIDER": "claude"}):
+        with patch.dict(
+            os.environ, {"ANTHROPIC_API_KEY": "sk-ant-test", "LLM_PROVIDER": "claude"}
+        ):
             from backend.api_host import create_app
-            with patch('backend.ui.chat_logic.create_provider'):
+
+            with patch("backend.ui.chat_logic.create_provider"):
                 app = create_app(app_config)
             client = TestClient(app)
             response = client.get("/diagnostics/startup")
@@ -763,6 +764,7 @@ class TestStartupDiagnosticsLlmCheck:
             os.environ.pop("ANTHROPIC_API_KEY", None)
             os.environ.pop("OPENAI_API_KEY", None)
             from backend.api_host import create_app
+
             app = create_app(app_config)
             client = TestClient(app)
             response = client.get("/diagnostics/startup")

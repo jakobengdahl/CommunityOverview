@@ -50,7 +50,9 @@ describe('ChatPanel', () => {
 
       expect(screen.getByText('Graph assistant')).toBeInTheDocument();
       // Should not have the full chat input
-      expect(screen.queryByPlaceholderText(/question|fråga|action|åtgärd/i)).not.toBeInTheDocument();
+      expect(
+        screen.queryByPlaceholderText(/question|fråga|action|åtgärd/i)
+      ).not.toBeInTheDocument();
     });
 
     it('toggles between open and minimized when collapse button clicked', () => {
@@ -60,7 +62,9 @@ describe('ChatPanel', () => {
       fireEvent.click(screen.getByTitle('Minimize'));
 
       // Now should be in minimized state
-      expect(screen.queryByPlaceholderText(/question|fråga|action|åtgärd/i)).not.toBeInTheDocument();
+      expect(
+        screen.queryByPlaceholderText(/question|fråga|action|åtgärd/i)
+      ).not.toBeInTheDocument();
     });
   });
 
@@ -214,7 +218,9 @@ describe('ChatPanel', () => {
       await user.click(screen.getByRole('button', { name: /send|skicka/i }));
 
       await waitFor(() => {
-        expect(screen.getByText(/similar nodes found|liknande noder hittades/i)).toBeInTheDocument();
+        expect(
+          screen.getByText(/similar nodes found|liknande noder hittades/i)
+        ).toBeInTheDocument();
         expect(screen.getByText(/AI Strategy.*85%/)).toBeInTheDocument();
       });
     });
@@ -279,7 +285,9 @@ describe('ChatPanel', () => {
       await user.click(screen.getByRole('button', { name: /send|skicka/i }));
 
       await waitFor(() => {
-        expect(screen.getAllByText(/confirm deletion|bekräfta borttagning/i).length).toBeGreaterThan(0);
+        expect(
+          screen.getAllByText(/confirm deletion|bekräfta borttagning/i).length
+        ).toBeGreaterThan(0);
         expect(screen.getByText(/Node 1/)).toBeInTheDocument();
         expect(screen.getByText(/Node 2/)).toBeInTheDocument();
         expect(screen.getByText(/cannot be undone|kan inte ångras/i)).toBeInTheDocument();
@@ -353,7 +361,10 @@ describe('ChatPanel', () => {
         expect(screen.getByText('report.pdf')).toBeInTheDocument();
       });
 
-      await user.type(screen.getByPlaceholderText(/describe what you want to do|beskriv vad du vill göra/i), 'Analyze this');
+      await user.type(
+        screen.getByPlaceholderText(/describe what you want to do|beskriv vad du vill göra/i),
+        'Analyze this'
+      );
       await user.click(screen.getByRole('button', { name: /send|skicka/i }));
 
       await waitFor(() => {
@@ -412,9 +423,7 @@ describe('ChatPanel', () => {
   describe('Message display', () => {
     it('displays user messages on the right', () => {
       useGraphStore.setState({
-        chatMessages: [
-          { id: 1, role: 'user', content: 'Hello', timestamp: new Date() },
-        ],
+        chatMessages: [{ id: 1, role: 'user', content: 'Hello', timestamp: new Date() }],
         chatPanelOpen: true,
       });
 
@@ -426,9 +435,7 @@ describe('ChatPanel', () => {
 
     it('displays assistant messages on the left', () => {
       useGraphStore.setState({
-        chatMessages: [
-          { id: 1, role: 'assistant', content: 'Hi there', timestamp: new Date() },
-        ],
+        chatMessages: [{ id: 1, role: 'assistant', content: 'Hi there', timestamp: new Date() }],
         chatPanelOpen: true,
       });
 
@@ -441,9 +448,7 @@ describe('ChatPanel', () => {
     it('formats timestamps correctly', () => {
       const testDate = new Date('2024-01-15T10:30:00');
       useGraphStore.setState({
-        chatMessages: [
-          { id: 1, role: 'user', content: 'Test', timestamp: testDate },
-        ],
+        chatMessages: [{ id: 1, role: 'user', content: 'Test', timestamp: testDate }],
         chatPanelOpen: true,
       });
 
@@ -456,17 +461,25 @@ describe('ChatPanel', () => {
   describe('Collection form', () => {
     it('renders an assistant present_form and submits structured answers', async () => {
       useGraphStore.setState({
-        chatMessages: [{
-          id: 'form-msg',
-          role: 'assistant',
-          content: 'Please answer:',
-          form: {
-            title: 'Q1',
-            fields: [
-              { id: 'role', label: 'Role', type: 'radio', options: ['Manager', 'Analyst'], required: true },
-            ],
+        chatMessages: [
+          {
+            id: 'form-msg',
+            role: 'assistant',
+            content: 'Please answer:',
+            form: {
+              title: 'Q1',
+              fields: [
+                {
+                  id: 'role',
+                  label: 'Role',
+                  type: 'radio',
+                  options: ['Manager', 'Analyst'],
+                  required: true,
+                },
+              ],
+            },
           },
-        }],
+        ],
         chatPanelOpen: true,
       });
 

@@ -10,10 +10,8 @@ This module does NOT create graph objects directly.
 """
 
 from typing import List, Dict, Any, Optional
-from fastapi import APIRouter, UploadFile, File, Form, HTTPException, Depends, Request
-from fastapi.responses import JSONResponse
+from fastapi import APIRouter, UploadFile, File, Form, HTTPException
 from pydantic import BaseModel, Field, field_validator
-import json
 
 from .chat_service import ChatService
 from .document_service import DocumentService
@@ -21,19 +19,29 @@ from .document_service import DocumentService
 
 # ==================== Request/Response Models ====================
 
+
 class ChatMessage(BaseModel):
     """A single chat message."""
+
     role: str = Field(..., description="Message role: 'user' or 'assistant'")
     content: Any = Field(..., description="Message content (string or content blocks)")
 
 
 class ChatRequest(BaseModel):
     """Request body for /chat endpoint."""
+
     messages: List[ChatMessage] = Field(..., description="Conversation history")
     api_key: Optional[str] = Field(None, description="Optional API key override")
-    provider: Optional[str] = Field(None, description="Optional provider: 'claude' or 'openai'")
-    federation_depth: Optional[int] = Field(None, ge=1, le=9, description="Optional federated search depth")
-    expert_agent_id: Optional[str] = Field(None, description="Optional expert agent ID — injects the agent's persona and skills into the system prompt")
+    provider: Optional[str] = Field(
+        None, description="Optional provider: 'claude' or 'openai'"
+    )
+    federation_depth: Optional[int] = Field(
+        None, ge=1, le=9, description="Optional federated search depth"
+    )
+    expert_agent_id: Optional[str] = Field(
+        None,
+        description="Optional expert agent ID — injects the agent's persona and skills into the system prompt",
+    )
     skills_context: Optional[str] = Field(
         None,
         description=(
@@ -41,7 +49,11 @@ class ChatRequest(BaseModel):
             " — injected as extra system context for this request only"
         ),
     )
-    collection_short_name: Optional[str] = Field(None, pattern=r'^[a-z0-9][a-z0-9-]{0,98}[a-z0-9]$|^[a-z0-9]$', description="AKC short name — server resolves prompt server-side")
+    collection_short_name: Optional[str] = Field(
+        None,
+        pattern=r"^[a-z0-9][a-z0-9-]{0,98}[a-z0-9]$|^[a-z0-9]$",
+        description="AKC short name — server resolves prompt server-side",
+    )
     visible_node_ids: Optional[List[str]] = Field(
         None,
         description="IDs of nodes currently displayed in the browser canvas",
@@ -65,16 +77,24 @@ class ChatRequest(BaseModel):
 
 class SimpleChatRequest(BaseModel):
     """Simplified chat request with just a message."""
+
     message: str = Field(..., description="User's message")
-    conversation_id: Optional[str] = Field(None, description="Optional conversation ID for context")
+    conversation_id: Optional[str] = Field(
+        None, description="Optional conversation ID for context"
+    )
     api_key: Optional[str] = Field(None, description="Optional API key override")
-    provider: Optional[str] = Field(None, description="Optional provider: 'claude' or 'openai'")
-    federation_depth: Optional[int] = Field(None, ge=1, le=9, description="Optional federated search depth")
+    provider: Optional[str] = Field(
+        None, description="Optional provider: 'claude' or 'openai'"
+    )
+    federation_depth: Optional[int] = Field(
+        None, ge=1, le=9, description="Optional federated search depth"
+    )
     expert_agent_id: Optional[str] = Field(None, description="Optional expert agent ID")
 
 
 class ChatResponse(BaseModel):
     """Response from /chat endpoint."""
+
     content: str = Field(..., description="LLM response text")
     toolUsed: Optional[str] = Field(None, description="Name of tool used (if any)")
     toolResult: Optional[Any] = Field(None, description="Result from tool (if any)")
@@ -82,6 +102,7 @@ class ChatResponse(BaseModel):
 
 class UploadResponse(BaseModel):
     """Response from /upload endpoint."""
+
     success: bool
     filename: Optional[str] = None
     text: Optional[str] = None
@@ -93,19 +114,28 @@ class UploadResponse(BaseModel):
 
 class ProposeNodesRequest(BaseModel):
     """Request for /propose-nodes endpoint."""
+
     text: str = Field(..., description="Text to extract nodes from")
-    node_type: Optional[str] = Field(None, description="Optional node type to focus on (Actor, Initiative, etc.)")
-    communities: Optional[List[str]] = Field(None, description="Optional communities to associate with nodes")
+    node_type: Optional[str] = Field(
+        None, description="Optional node type to focus on (Actor, Initiative, etc.)"
+    )
+    communities: Optional[List[str]] = Field(
+        None, description="Optional communities to associate with nodes"
+    )
     api_key: Optional[str] = Field(None, description="Optional API key override")
-    provider: Optional[str] = Field(None, description="Optional provider: 'claude' or 'openai'")
-    federation_depth: Optional[int] = Field(None, ge=1, le=9, description="Optional federated search depth")
+    provider: Optional[str] = Field(
+        None, description="Optional provider: 'claude' or 'openai'"
+    )
+    federation_depth: Optional[int] = Field(
+        None, ge=1, le=9, description="Optional federated search depth"
+    )
 
 
 # ==================== Router Factory ====================
 
+
 def create_ui_router(
-    chat_service: ChatService,
-    document_service: Optional[DocumentService] = None
+    chat_service: ChatService, document_service: Optional[DocumentService] = None
 ) -> APIRouter:
     """
     Create the UI backend router with chat and upload endpoints.
@@ -158,7 +188,7 @@ def create_ui_router(
             return ChatResponse(
                 content=result.get("content", ""),
                 toolUsed=result.get("toolUsed"),
-                toolResult=result.get("toolResult")
+                toolResult=result.get("toolResult"),
             )
         except Exception as e:
             raise HTTPException(status_code=500, detail=str(e))
@@ -189,7 +219,7 @@ def create_ui_router(
             return ChatResponse(
                 content=result.get("content", ""),
                 toolUsed=result.get("toolUsed"),
-                toolResult=result.get("toolResult")
+                toolResult=result.get("toolResult"),
             )
         except Exception as e:
             raise HTTPException(status_code=500, detail=str(e))
@@ -220,7 +250,7 @@ def create_ui_router(
                 communities=request.communities,
                 api_key=request.api_key,
                 provider=request.provider,
-                federation_depth=request.federation_depth
+                federation_depth=request.federation_depth,
             )
             return result
         except Exception as e:
@@ -234,7 +264,7 @@ def create_ui_router(
         message: Optional[str] = Form(None),
         analyze: bool = Form(True),
         api_key: Optional[str] = Form(None),
-        provider: Optional[str] = Form(None)
+        provider: Optional[str] = Form(None),
     ) -> UploadResponse:
         """
         Upload and optionally analyze a document.
@@ -261,15 +291,14 @@ def create_ui_router(
 
             # Process the upload and extract text
             result = await document_service.process_upload(
-                file_content=content,
-                filename=file.filename or "unknown"
+                file_content=content, filename=file.filename or "unknown"
             )
 
             if not result["success"]:
                 return UploadResponse(
                     success=False,
                     error=result.get("error"),
-                    filename=result.get("filename")
+                    filename=result.get("filename"),
                 )
 
             response = UploadResponse(
@@ -277,24 +306,27 @@ def create_ui_router(
                 filename=result.get("filename"),
                 text=result.get("text"),
                 char_count=result.get("char_count"),
-                word_count=result.get("word_count")
+                word_count=result.get("word_count"),
             )
 
             # Optionally analyze with LLM
             if analyze and result.get("text"):
-                user_message = message or "Please analyze this document and summarize its main points."
+                user_message = (
+                    message
+                    or "Please analyze this document and summarize its main points."
+                )
 
                 chat_result = chat_service.process_chat_request(
                     user_message=user_message,
                     document_context=result["text"],
                     api_key=api_key,
-                    provider=provider
+                    provider=provider,
                 )
 
                 response.chat_response = ChatResponse(
                     content=chat_result.get("content", ""),
                     toolUsed=chat_result.get("toolUsed"),
-                    toolResult=chat_result.get("toolResult")
+                    toolResult=chat_result.get("toolResult"),
                 )
 
             return response
@@ -303,9 +335,7 @@ def create_ui_router(
             raise HTTPException(status_code=500, detail=str(e))
 
     @router.post("/upload/extract")
-    async def extract_only(
-        file: UploadFile = File(...)
-    ) -> Dict[str, Any]:
+    async def extract_only(file: UploadFile = File(...)) -> Dict[str, Any]:
         """
         Extract text from a document without LLM analysis.
 
@@ -322,8 +352,7 @@ def create_ui_router(
             content = await file.read()
 
             result = await document_service.process_upload(
-                file_content=content,
-                filename=file.filename or "unknown"
+                file_content=content, filename=file.filename or "unknown"
             )
 
             return result
@@ -343,6 +372,7 @@ def create_ui_router(
         no API keys are configured.
         """
         from backend.llm.llm_providers import get_llm_availability
+
         llm = get_llm_availability()
         return {
             "llm_available": llm["available"],
@@ -371,7 +401,7 @@ def create_ui_router(
         """
         return {
             "formats": list(document_service.SUPPORTED_EXTENSIONS),
-            "max_size_mb": document_service.MAX_FILE_SIZE / 1024 / 1024
+            "max_size_mb": document_service.MAX_FILE_SIZE / 1024 / 1024,
         }
 
     return router

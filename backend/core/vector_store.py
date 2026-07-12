@@ -14,9 +14,7 @@ Imports are deferred (lazy) so the module loads fast and so the absence of the
 optional ML stack surfaces only when embedding generation is actually attempted.
 """
 
-import pickle
 from typing import List, Dict, Optional, Tuple, Any
-from pathlib import Path
 
 from .models import Node
 
@@ -30,6 +28,7 @@ def _ensure_numpy():
     global _np
     if _np is None:
         import numpy as np
+
         _np = np
     return _np
 
@@ -39,6 +38,7 @@ def _ensure_sentence_transformers():
     global _SentenceTransformer
     if _SentenceTransformer is None:
         from sentence_transformers import SentenceTransformer
+
         _SentenceTransformer = SentenceTransformer
     return _SentenceTransformer
 
@@ -68,7 +68,9 @@ class VectorStore:
         self.model_name = model_name
         self.model = None
         self.embeddings: Dict[str, Any] = {}  # node_id -> embedding (numpy array)
-        self.node_ids: List[str] = []  # ordered list of node ids corresponding to embeddings matrix
+        self.node_ids: List[
+            str
+        ] = []  # ordered list of node ids corresponding to embeddings matrix
         self.embedding_matrix: Optional[Any] = None  # numpy array
 
     def _load_model(self):
@@ -119,14 +121,18 @@ class VectorStore:
         np = _ensure_numpy()
         self.node_ids = list(self.embeddings.keys())
         # Stack embeddings into a matrix
-        self.embedding_matrix = np.vstack([self.embeddings[nid] for nid in self.node_ids])
+        self.embedding_matrix = np.vstack(
+            [self.embeddings[nid] for nid in self.node_ids]
+        )
 
     def _get_text_representation(self, node: Node) -> str:
         """Create a text representation of the node for embedding"""
         # Combine name, aliases, description, summary, and tags
         # Tags and aliases are important for similarity search
-        tags_text = " ".join(node.tags) if hasattr(node, 'tags') and node.tags else ""
-        aliases_text = " ".join(node.aliases) if hasattr(node, 'aliases') and node.aliases else ""
+        tags_text = " ".join(node.tags) if hasattr(node, "tags") and node.tags else ""
+        aliases_text = (
+            " ".join(node.aliases) if hasattr(node, "aliases") and node.aliases else ""
+        )
         text = f"{node.name}. {aliases_text}. {node.description or ''}. {node.summary or ''}. {tags_text}"
         return text.strip()
 
@@ -181,7 +187,13 @@ class VectorStore:
         if changed:
             self._update_matrix()
 
-    def search(self, query_text: str = None, query_node: Node = None, limit: int = 5, threshold: float = 0.0) -> List[Tuple[str, float]]:
+    def search(
+        self,
+        query_text: str = None,
+        query_node: Node = None,
+        limit: int = 5,
+        threshold: float = 0.0,
+    ) -> List[Tuple[str, float]]:
         """
         Search for similar nodes.
         Can search by query text or by existing node.
@@ -210,7 +222,9 @@ class VectorStore:
             else:
                 return []
         except ImportError as e:
-            print(f"Warning: semantic search unavailable (embedding model not installed): {e}")
+            print(
+                f"Warning: semantic search unavailable (embedding model not installed): {e}"
+            )
             return []
 
         # Reshape to (1, embedding_dim); handle both list and array inputs

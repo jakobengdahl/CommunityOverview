@@ -27,7 +27,7 @@ export function groupsToAnnotations(viewGroups, parentIds) {
   for (const [nodeId, groupId] of Object.entries(parentIds || {})) {
     (membersByGroup[groupId] = membersByGroup[groupId] || []).push(nodeId);
   }
-  return (viewGroups || []).map(g => ({
+  return (viewGroups || []).map((g) => ({
     id: g.id,
     kind: 'group',
     position: g.position || { x: 0, y: 0 },
@@ -47,21 +47,35 @@ export function annotationsToOverlays(annotations) {
   for (const a of annotations || []) {
     if (a?.kind === 'note') {
       out.push({
-        id: a.id, kind: 'note', position: a.position || { x: 0, y: 0 },
-        text: a.text || '', color: a.color, fontSize: a.fontSize, size: a.size,
+        id: a.id,
+        kind: 'note',
+        position: a.position || { x: 0, y: 0 },
+        text: a.text || '',
+        color: a.color,
+        fontSize: a.fontSize,
+        size: a.size,
       });
     } else if (a?.kind === 'label') {
       out.push({
-        id: a.id, kind: 'label', position: a.position || { x: 0, y: 0 },
-        text: a.text || '', color: a.style?.color, fontSize: a.style?.fontSize,
+        id: a.id,
+        kind: 'label',
+        position: a.position || { x: 0, y: 0 },
+        text: a.text || '',
+        color: a.style?.color,
+        fontSize: a.style?.fontSize,
       });
     } else if (a?.kind === 'arrow') {
       const from = a.from || a.position || { x: 0, y: 0 };
       const to = a.to || { x: from.x + 160, y: from.y };
       const overlay = {
-        id: a.id, kind: 'arrow', position: { x: from.x, y: from.y },
-        dx: to.x - from.x, dy: to.y - from.y, color: a.style?.color,
-        startArrow: a.startArrow ?? false, endArrow: a.endArrow ?? true,
+        id: a.id,
+        kind: 'arrow',
+        position: { x: from.x, y: from.y },
+        dx: to.x - from.x,
+        dy: to.y - from.y,
+        color: a.style?.color,
+        startArrow: a.startArrow ?? false,
+        endArrow: a.endArrow ?? true,
       };
       if (a.startAnchor) overlay.startAnchor = a.startAnchor;
       if (a.endAnchor) overlay.endAnchor = a.endAnchor;
@@ -72,17 +86,25 @@ export function annotationsToOverlays(annotations) {
 }
 
 export function overlaysToAnnotations(overlays) {
-  return (overlays || []).map(o => {
+  return (overlays || []).map((o) => {
     if (o.kind === 'note') {
       return {
-        id: o.id, kind: 'note', position: o.position || { x: 0, y: 0 },
-        text: o.text || '', color: o.color, fontSize: o.fontSize, size: o.size,
+        id: o.id,
+        kind: 'note',
+        position: o.position || { x: 0, y: 0 },
+        text: o.text || '',
+        color: o.color,
+        fontSize: o.fontSize,
+        size: o.size,
       };
     }
     if (o.kind === 'label') {
       return {
-        id: o.id, kind: 'label', position: o.position || { x: 0, y: 0 },
-        text: o.text || '', style: { color: o.color, fontSize: o.fontSize },
+        id: o.id,
+        kind: 'label',
+        position: o.position || { x: 0, y: 0 },
+        text: o.text || '',
+        style: { color: o.color, fontSize: o.fontSize },
       };
     }
     // arrow: store both endpoints as absolute points (design 3.1)
@@ -90,10 +112,14 @@ export function overlaysToAnnotations(overlays) {
     const dx = o.dx ?? 160;
     const dy = o.dy ?? 0;
     const ann = {
-      id: o.id, kind: 'arrow', position: { x: from.x, y: from.y },
-      from: { x: from.x, y: from.y }, to: { x: from.x + dx, y: from.y + dy },
+      id: o.id,
+      kind: 'arrow',
+      position: { x: from.x, y: from.y },
+      from: { x: from.x, y: from.y },
+      to: { x: from.x + dx, y: from.y + dy },
       style: { color: o.color },
-      startArrow: o.startArrow ?? false, endArrow: o.endArrow ?? true,
+      startArrow: o.startArrow ?? false,
+      endArrow: o.endArrow ?? true,
     };
     if (o.startAnchor) ann.startAnchor = o.startAnchor;
     if (o.endAnchor) ann.endAnchor = o.endAnchor;

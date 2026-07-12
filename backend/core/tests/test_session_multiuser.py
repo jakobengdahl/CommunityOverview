@@ -52,10 +52,19 @@ class TestTwoClientsOneSession:
         await _drain(sub_b)
 
         # A adds two nodes and moves one — both clients receive both ops in order.
-        await mgr.apply_ops(sid, "A", 0, [
-            {"op": "nodes_added", "node_ids": ["node-1", "node-2"]},
-            {"op": "node_moved", "node_id": "node-1", "position": {"x": 10, "y": 20}},
-        ])
+        await mgr.apply_ops(
+            sid,
+            "A",
+            0,
+            [
+                {"op": "nodes_added", "node_ids": ["node-1", "node-2"]},
+                {
+                    "op": "node_moved",
+                    "node_id": "node-1",
+                    "position": {"x": 10, "y": 20},
+                },
+            ],
+        )
         assert _ops(await _drain(sub_a)) == ["nodes_added", "node_moved"]
         assert _ops(await _drain(sub_b)) == ["nodes_added", "node_moved"]
 
@@ -65,18 +74,38 @@ class TestTwoClientsOneSession:
         assert state["positions"]["node-1"] == {"x": 10.0, "y": 20.0}
 
         # B creates a sticky note; A receives it with a server-assigned id.
-        await mgr.apply_ops(sid, "B", 0, [
-            {"op": "annotation_created", "annotation": {"kind": "note", "text": "hi", "position": {"x": 1, "y": 2}}},
-        ])
+        await mgr.apply_ops(
+            sid,
+            "B",
+            0,
+            [
+                {
+                    "op": "annotation_created",
+                    "annotation": {
+                        "kind": "note",
+                        "text": "hi",
+                        "position": {"x": 1, "y": 2},
+                    },
+                },
+            ],
+        )
         a_events = await _drain(sub_a)
-        created = [e for e in a_events if e.get("op", {}).get("op") == "annotation_created"]
+        created = [
+            e for e in a_events if e.get("op", {}).get("op") == "annotation_created"
+        ]
         assert len(created) == 1
         assert isinstance(created[0]["op"]["annotation"]["id"], str)
         await _drain(sub_b)
 
         # A selects node-1 → advisory claim; B sees the marker, server tracks it.
-        await mgr.apply_ops(sid, "A", 0, [{"op": "selection_claimed", "element_ids": ["node-1"]}])
-        b_claim = [e for e in await _drain(sub_b) if e.get("op", {}).get("op") == "selection_claimed"]
+        await mgr.apply_ops(
+            sid, "A", 0, [{"op": "selection_claimed", "element_ids": ["node-1"]}]
+        )
+        b_claim = [
+            e
+            for e in await _drain(sub_b)
+            if e.get("op", {}).get("op") == "selection_claimed"
+        ]
         assert b_claim and b_claim[0]["op"]["element_ids"] == ["node-1"]
         assert mgr.claimed_elements(sid) == ["node-1"]
         await _drain(sub_a)
@@ -94,7 +123,9 @@ class TestTwoClientsOneSession:
         await _drain(sub_a)
 
         # A works while B is disconnected.
-        await mgr.apply_ops(sid, "A", 0, [{"op": "nodes_added", "node_ids": ["node-1"]}])
+        await mgr.apply_ops(
+            sid, "A", 0, [{"op": "nodes_added", "node_ids": ["node-1"]}]
+        )
         seq_before = mgr.get_session(sid).seq
 
         # B (re)connects passing its last-known seq: gets the missed op, not a
@@ -105,10 +136,14 @@ class TestTwoClientsOneSession:
         assert catch_up["seq"] == seq_before
 
     async def test_reconnect_falls_back_to_snapshot_when_ring_trimmed(self):
-        mgr = SessionManager(SessionStore(InMemorySessionPersistenceBackend(), ring_size=2))
+        mgr = SessionManager(
+            SessionStore(InMemorySessionPersistenceBackend(), ring_size=2)
+        )
         sid = mgr.create_session().id
         for i in range(5):
-            await mgr.apply_ops(sid, "A", 0, [{"op": "nodes_added", "node_ids": [f"n{i}"]}])
+            await mgr.apply_ops(
+                sid, "A", 0, [{"op": "nodes_added", "node_ids": [f"n{i}"]}]
+            )
 
         # A client stuck at seq 0 cannot be served from a 2-entry ring → snapshot.
         catch_up = mgr.catch_up(sid, 0)
@@ -123,7 +158,9 @@ class TestTwoClientsOneSession:
         await _drain(sub_a)
         await _drain(sub_b)
 
-        await mgr.apply_ops(sid, "A", 0, [{"op": "selection_claimed", "element_ids": ["node-1"]}])
+        await mgr.apply_ops(
+            sid, "A", 0, [{"op": "selection_claimed", "element_ids": ["node-1"]}]
+        )
         assert mgr.claimed_elements(sid) == ["node-1"]
 
         # A leaves: its claim is released and B is told, so no element freezes.

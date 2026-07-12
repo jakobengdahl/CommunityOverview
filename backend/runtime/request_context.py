@@ -60,13 +60,34 @@ def _resolve_request_actor_context(
     env_actor_type = _clean_string(os.getenv(ACTOR_TYPE_ENV))
     env_auth_source = _clean_string(os.getenv(AUTH_SOURCE_ENV))
 
-    resolved_actor_id = _clean_string(actor_id) or normalized_headers.get(ACTOR_ID_HEADER, "") or env_actor_id
-    resolved_actor_type = _clean_string(actor_type) or normalized_headers.get(ACTOR_TYPE_HEADER, "") or env_actor_type
-    resolved_auth_source = _clean_string(auth_source) or normalized_headers.get(AUTH_SOURCE_HEADER, "") or env_auth_source
+    resolved_actor_id = (
+        _clean_string(actor_id)
+        or normalized_headers.get(ACTOR_ID_HEADER, "")
+        or env_actor_id
+    )
+    resolved_actor_type = (
+        _clean_string(actor_type)
+        or normalized_headers.get(ACTOR_TYPE_HEADER, "")
+        or env_actor_type
+    )
+    resolved_auth_source = (
+        _clean_string(auth_source)
+        or normalized_headers.get(AUTH_SOURCE_HEADER, "")
+        or env_auth_source
+    )
 
-    source = "override" if any(_clean_string(value) for value in (actor_id, actor_type, auth_source)) else "request"
-    if source == "request" and not any(normalized_headers.get(name, "") for name in (ACTOR_ID_HEADER, ACTOR_TYPE_HEADER, AUTH_SOURCE_HEADER)):
-        source = _source_from_values(env_actor_id, env_actor_type, env_auth_source, preferred="environment")
+    source = (
+        "override"
+        if any(_clean_string(value) for value in (actor_id, actor_type, auth_source))
+        else "request"
+    )
+    if source == "request" and not any(
+        normalized_headers.get(name, "")
+        for name in (ACTOR_ID_HEADER, ACTOR_TYPE_HEADER, AUTH_SOURCE_HEADER)
+    ):
+        source = _source_from_values(
+            env_actor_id, env_actor_type, env_auth_source, preferred="environment"
+        )
 
     is_authenticated = bool(resolved_actor_id)
     if not resolved_auth_source:
@@ -134,13 +155,36 @@ def _resolve_request_scope_context(
     env_workspace_kind = _clean_string(os.getenv(WORKSPACE_KIND_ENV))
     env_graph_id = _clean_string(os.getenv(GRAPH_SCOPE_ID_ENV))
 
-    resolved_workspace_id = _clean_string(workspace_id) or normalized_headers.get(WORKSPACE_ID_HEADER, "") or env_workspace_id
-    resolved_workspace_kind = _clean_string(workspace_kind) or normalized_headers.get(WORKSPACE_KIND_HEADER, "") or env_workspace_kind
-    resolved_graph_id = _clean_string(graph_id) or normalized_headers.get(GRAPH_SCOPE_ID_HEADER, "") or env_graph_id
+    resolved_workspace_id = (
+        _clean_string(workspace_id)
+        or normalized_headers.get(WORKSPACE_ID_HEADER, "")
+        or env_workspace_id
+    )
+    resolved_workspace_kind = (
+        _clean_string(workspace_kind)
+        or normalized_headers.get(WORKSPACE_KIND_HEADER, "")
+        or env_workspace_kind
+    )
+    resolved_graph_id = (
+        _clean_string(graph_id)
+        or normalized_headers.get(GRAPH_SCOPE_ID_HEADER, "")
+        or env_graph_id
+    )
 
-    source = "override" if any(_clean_string(value) for value in (workspace_id, workspace_kind, graph_id)) else "request"
-    if source == "request" and not any(normalized_headers.get(name, "") for name in (WORKSPACE_ID_HEADER, WORKSPACE_KIND_HEADER, GRAPH_SCOPE_ID_HEADER)):
-        source = _source_from_values(env_workspace_id, env_workspace_kind, env_graph_id, preferred="environment")
+    source = (
+        "override"
+        if any(
+            _clean_string(value) for value in (workspace_id, workspace_kind, graph_id)
+        )
+        else "request"
+    )
+    if source == "request" and not any(
+        normalized_headers.get(name, "")
+        for name in (WORKSPACE_ID_HEADER, WORKSPACE_KIND_HEADER, GRAPH_SCOPE_ID_HEADER)
+    ):
+        source = _source_from_values(
+            env_workspace_id, env_workspace_kind, env_graph_id, preferred="environment"
+        )
 
     workspace_selected = bool(resolved_workspace_id)
     graph_selected = bool(resolved_graph_id)

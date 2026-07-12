@@ -18,10 +18,16 @@ from datetime import datetime, timezone
 from collections import Counter
 
 from backend.core import (
-    GraphStorage, Node, Edge, NodeType, RelationshipType,
-    SimilarNode, GraphStats, AddNodesResult, DeleteNodesResult, NODE_COLORS,
-    get_node_type_names, get_relationship_type_names, get_node_color,
-    EventContext, EventAttribution, EventActorAttribution, EventScopeAttribution,
+    GraphStorage,
+    Node,
+    Edge,
+    NodeType,
+    RelationshipType,
+    GraphStats,
+    EventContext,
+    EventAttribution,
+    EventActorAttribution,
+    EventScopeAttribution,
 )
 
 from backend import config_loader
@@ -35,18 +41,20 @@ from backend.runtime.authorization import (
     build_graph_authorization_context,
 )
 from backend.federation import FederationManager
+from .serializers import (
+    serialize_node,
+    serialize_nodes,
+    serialize_edge,
+    serialize_edges,
+    serialize_similar_nodes,
+    serialize_graph_stats,
+    serialize_add_result,
+    serialize_delete_result,
+    serialize_delete_edges_result,
+)
 
 # Initialize logger
 logger = logging.getLogger(__name__)
-
-from .serializers import (
-    serialize_node, serialize_nodes,
-    serialize_edge, serialize_edges,
-    serialize_similar_node, serialize_similar_nodes,
-    serialize_graph_stats, serialize_add_result, serialize_delete_result,
-    serialize_delete_edges_result,
-    serialize_to_json
-)
 
 
 # Node type descriptions for metadata
@@ -58,7 +66,7 @@ NODE_TYPE_DESCRIPTIONS = {
     NodeType.LEGISLATION: "Laws and directives (NIS2, GDPR, etc.)",
     NodeType.THEME: "Themes (AI, data strategies, etc.)",
     NodeType.SAVED_VIEW: "Saved graph view snapshots for quick navigation",
-    NodeType.VISUALIZATION_VIEW: "Saved graph view snapshots (legacy)"
+    NodeType.VISUALIZATION_VIEW: "Saved graph view snapshots (legacy)",
 }
 
 # Relationship type descriptions
@@ -68,7 +76,7 @@ RELATIONSHIP_TYPE_DESCRIPTIONS = {
     RelationshipType.PRODUCES: "Produces (initiative produces resource/capability)",
     RelationshipType.GOVERNED_BY: "Governed by (initiative governed by legislation)",
     RelationshipType.RELATES_TO: "Relates to (general connection)",
-    RelationshipType.PART_OF: "Part of (component is part of larger whole)"
+    RelationshipType.PART_OF: "Part of (component is part of larger whole)",
 }
 
 
@@ -103,7 +111,9 @@ class GraphService:
         self._federation_manager = federation_manager
         self._authorization_hook = authorization_hook or DefaultGraphAuthorizationHook()
 
-    def _evaluate_graph_access(self, *, action: str, target: str) -> GraphAuthorizationDecision:
+    def _evaluate_graph_access(
+        self, *, action: str, target: str
+    ) -> GraphAuthorizationDecision:
         """Evaluate the configured authorization seam for graph reads and mutations."""
         return self._authorization_hook.evaluate(
             build_graph_authorization_context(action=action, target=target)
@@ -133,7 +143,9 @@ class GraphService:
     def _node_graph_id(node: Node) -> str:
         return str(((node.metadata or {}).get("origin_graph_id") or "")).strip()
 
-    def _is_node_visible(self, node: Optional[Node], graph_access: GraphAccessNarrowing) -> bool:
+    def _is_node_visible(
+        self, node: Optional[Node], graph_access: GraphAccessNarrowing
+    ) -> bool:
         if node is None:
             return False
         return graph_access.matches(graph_id=self._node_graph_id(node))
@@ -145,21 +157,30 @@ class GraphService:
         edges: List[Edge],
         graph_access: GraphAccessNarrowing,
     ) -> tuple[List[Node], List[Edge]]:
-        visible_nodes = [node for node in nodes if self._is_node_visible(node, graph_access)]
+        visible_nodes = [
+            node for node in nodes if self._is_node_visible(node, graph_access)
+        ]
         visible_node_ids = {node.id for node in visible_nodes}
         visible_edges = [
-            edge for edge in edges
+            edge
+            for edge in edges
             if edge.source in visible_node_ids and edge.target in visible_node_ids
         ]
         return visible_nodes, visible_edges
 
-    def _authorize_graph_access(self, *, action: str, target: str) -> Optional[Dict[str, Any]]:
+    def _authorize_graph_access(
+        self, *, action: str, target: str
+    ) -> Optional[Dict[str, Any]]:
         decision = self._evaluate_graph_access(action=action, target=target)
         if decision.allowed:
             return None
-        return self._build_access_denied_result(action=action, target=target, decision=decision)
+        return self._build_access_denied_result(
+            action=action, target=target, decision=decision
+        )
 
-    def _get_visible_local_graph_stats(self, graph_access: GraphAccessNarrowing) -> GraphStats:
+    def _get_visible_local_graph_stats(
+        self, graph_access: GraphAccessNarrowing
+    ) -> GraphStats:
         visible_nodes, visible_edges = self._filter_nodes_and_edges(
             nodes=self._storage.get_all_nodes(),
             edges=self._storage.get_all_edges(),
@@ -176,19 +197,30 @@ class GraphService:
             last_updated=datetime.now(timezone.utc),
         )
 
-    def _get_visible_federation_graph_display_names(self, graph_access: GraphAccessNarrowing) -> Dict[str, str]:
+    def _get_visible_federation_graph_display_names(
+        self, graph_access: GraphAccessNarrowing
+    ) -> Dict[str, str]:
         local_graph_name = self._storage.get_graph_name()
         graph_display_names: Dict[str, str] = {}
         if graph_access.matches(graph_id=""):
             graph_display_names["local"] = local_graph_name
         if self._federation_manager and self._federation_manager.enabled:
-            for graph_id, display_name in self._federation_manager.get_graph_display_names().items():
+            for (
+                graph_id,
+                display_name,
+            ) in self._federation_manager.get_graph_display_names().items():
                 if graph_access.matches(graph_id=graph_id):
                     graph_display_names[graph_id] = display_name
         return graph_display_names
 
-    def _get_federated_search_limit(self, minimum_limit: int, graph_access: GraphAccessNarrowing) -> int:
-        if not self._federation_manager or not self._federation_manager.enabled or not graph_access.enabled:
+    def _get_federated_search_limit(
+        self, minimum_limit: int, graph_access: GraphAccessNarrowing
+    ) -> int:
+        if (
+            not self._federation_manager
+            or not self._federation_manager.enabled
+            or not graph_access.enabled
+        ):
             return minimum_limit
         return max(
             minimum_limit,
@@ -206,7 +238,9 @@ class GraphService:
         total_edges: int,
     ) -> Dict[str, Any]:
         """Build a public-safe export boundary summary for restore/admin workflows."""
-        request_context = build_graph_authorization_context(action=GRAPH_ACTION_READ, target=target)
+        request_context = build_graph_authorization_context(
+            action=GRAPH_ACTION_READ, target=target
+        )
         selection_summary = self.get_request_graph_selection_info(
             workspace_id=request_context.scope.get("workspace_id"),
             workspace_kind=request_context.scope.get("workspace_kind"),
@@ -243,7 +277,9 @@ class GraphService:
 
     def _build_mutation_attribution(self, *, target: str) -> Optional[EventAttribution]:
         """Build generic actor/scope attribution for mutation results and events."""
-        context = build_graph_authorization_context(action=GRAPH_ACTION_MUTATE, target=target)
+        context = build_graph_authorization_context(
+            action=GRAPH_ACTION_MUTATE, target=target
+        )
         attribution = EventAttribution(
             actor=EventActorAttribution(
                 actor_id=context.actor.get("actor_id", ""),
@@ -282,7 +318,9 @@ class GraphService:
         )
 
     @staticmethod
-    def _attach_mutation_attribution(response: Dict[str, Any], event_context: Optional[EventContext]) -> Dict[str, Any]:
+    def _attach_mutation_attribution(
+        response: Dict[str, Any], event_context: Optional[EventContext]
+    ) -> Dict[str, Any]:
         """Attach audit-friendly attribution metadata to mutation responses when available."""
         if event_context and event_context.attribution:
             response["attribution"] = event_context.attribution.to_dict()
@@ -315,7 +353,9 @@ class GraphService:
         Returns:
             Dict with matching nodes, connecting edges, and search metadata
         """
-        decision = self._evaluate_graph_access(action=GRAPH_ACTION_READ, target="search_graph")
+        decision = self._evaluate_graph_access(
+            action=GRAPH_ACTION_READ, target="search_graph"
+        )
         if not decision.allowed:
             return self._build_access_denied_result(
                 action=GRAPH_ACTION_READ,
@@ -334,11 +374,14 @@ class GraphService:
         local_results = self._storage.search_nodes(
             query=query,
             node_types=type_filters,
-            limit=max(limit, self._storage.get_stats().total_nodes) if decision.graph_access.enabled else limit,
+            limit=max(limit, self._storage.get_stats().total_nodes)
+            if decision.graph_access.enabled
+            else limit,
         )
 
         visible_local_results = [
-            node for node in local_results
+            node
+            for node in local_results
             if self._is_node_visible(node, decision.graph_access)
         ][:limit]
         logger.info(f"SEARCH: Found {len(visible_local_results)} visible local results")
@@ -358,7 +401,9 @@ class GraphService:
                 federated = self._federation_manager.search_nodes(
                     query=query,
                     node_types=node_types,
-                    limit=self._get_federated_search_limit(remaining, decision.graph_access),
+                    limit=self._get_federated_search_limit(
+                        remaining, decision.graph_access
+                    ),
                     max_depth=federation_depth,
                 )
                 federated_nodes = federated["nodes"]
@@ -376,7 +421,8 @@ class GraphService:
             visible_nodes = visible_nodes[:limit]
             visible_node_ids = {node.id for node in visible_nodes}
             visible_edges = [
-                edge for edge in visible_edges
+                edge
+                for edge in visible_edges
                 if edge.source in visible_node_ids and edge.target in visible_node_ids
             ]
 
@@ -389,7 +435,9 @@ class GraphService:
             seen_edge_ids.add(edge.id)
             deduped_edges.append(edge)
 
-        visible_federated_nodes = [node for node in visible_nodes if self._node_graph_id(node)]
+        visible_federated_nodes = [
+            node for node in visible_nodes if self._node_graph_id(node)
+        ]
 
         result = {
             "nodes": serialize_nodes(visible_nodes),
@@ -400,14 +448,19 @@ class GraphService:
                 "node_types": node_types,
             },
             "federation": {
-                "included": bool(self._federation_manager and self._federation_manager.enabled),
+                "included": bool(
+                    self._federation_manager and self._federation_manager.enabled
+                ),
                 "federated_nodes": len(visible_federated_nodes),
-                "federated_edges": len([
-                    edge for edge in deduped_edges
-                    if (edge.metadata or {}).get("origin_graph_id")
-                ]),
+                "federated_edges": len(
+                    [
+                        edge
+                        for edge in deduped_edges
+                        if (edge.metadata or {}).get("origin_graph_id")
+                    ]
+                ),
                 "depth": federation_depth,
-            }
+            },
         }
 
         # Include action if specified (for frontend to know how to display results)
@@ -426,7 +479,9 @@ class GraphService:
         Returns:
             Dict with node data or error
         """
-        decision = self._evaluate_graph_access(action=GRAPH_ACTION_READ, target="get_node_details")
+        decision = self._evaluate_graph_access(
+            action=GRAPH_ACTION_READ, target="get_node_details"
+        )
         if not decision.allowed:
             return self._build_access_denied_result(
                 action=GRAPH_ACTION_READ,
@@ -437,21 +492,15 @@ class GraphService:
         node = self._storage.get_node(node_id)
 
         if not node or not self._is_node_visible(node, decision.graph_access):
-            return {
-                "success": False,
-                "error": f"Node with ID {node_id} not found"
-            }
+            return {"success": False, "error": f"Node with ID {node_id} not found"}
 
-        return {
-            "success": True,
-            "node": serialize_node(node)
-        }
+        return {"success": True, "node": serialize_node(node)}
 
     def get_related_nodes(
         self,
         node_id: str,
         relationship_types: Optional[List[str]] = None,
-        depth: int = 1
+        depth: int = 1,
     ) -> Dict[str, Any]:
         """
         Get nodes connected to the given node.
@@ -464,7 +513,9 @@ class GraphService:
         Returns:
             Dict with nodes and edges
         """
-        decision = self._evaluate_graph_access(action=GRAPH_ACTION_READ, target="get_related_nodes")
+        decision = self._evaluate_graph_access(
+            action=GRAPH_ACTION_READ, target="get_related_nodes"
+        )
         if not decision.allowed:
             return self._build_access_denied_result(
                 action=GRAPH_ACTION_READ,
@@ -474,10 +525,7 @@ class GraphService:
 
         node = self._storage.get_node(node_id)
         if not self._is_node_visible(node, decision.graph_access):
-            return {
-                "success": False,
-                "error": f"Node with ID {node_id} not found"
-            }
+            return {"success": False, "error": f"Node with ID {node_id} not found"}
 
         # Convert relationship_types to enum
         rel_filters = None
@@ -485,14 +533,12 @@ class GraphService:
             rel_filters = [RelationshipType(r) for r in relationship_types]
 
         result = self._storage.get_related_nodes(
-            node_id=node_id,
-            relationship_types=rel_filters,
-            depth=depth
+            node_id=node_id, relationship_types=rel_filters, depth=depth
         )
 
         visible_nodes, visible_edges = self._filter_nodes_and_edges(
-            nodes=result['nodes'],
-            edges=result['edges'],
+            nodes=result["nodes"],
+            edges=result["edges"],
             graph_access=decision.graph_access,
         )
 
@@ -501,7 +547,7 @@ class GraphService:
             "edges": serialize_edges(visible_edges),
             "total_nodes": len(visible_nodes),
             "total_edges": len(visible_edges),
-            "depth": depth
+            "depth": depth,
         }
 
     # ==================== Similarity Operations ====================
@@ -511,7 +557,7 @@ class GraphService:
         name: str,
         node_type: Optional[str] = None,
         threshold: float = 0.7,
-        limit: int = 5
+        limit: int = 5,
     ) -> Dict[str, Any]:
         """
         Find similar nodes based on name (for duplicate detection).
@@ -528,16 +574,13 @@ class GraphService:
         type_filter = NodeType.from_string(node_type) if node_type else None
 
         similar = self._storage.find_similar_nodes(
-            name=name,
-            node_type=type_filter,
-            threshold=threshold,
-            limit=limit
+            name=name, node_type=type_filter, threshold=threshold, limit=limit
         )
 
         return {
             "similar_nodes": serialize_similar_nodes(similar),
             "total": len(similar),
-            "search_name": name
+            "search_name": name,
         }
 
     def find_similar_nodes_batch(
@@ -545,7 +588,7 @@ class GraphService:
         names: List[str],
         node_type: Optional[str] = None,
         threshold: float = 0.7,
-        limit: int = 5
+        limit: int = 5,
     ) -> Dict[str, Any]:
         """
         Find similar nodes for multiple names at once (batch processing).
@@ -564,10 +607,7 @@ class GraphService:
         type_filter = NodeType.from_string(node_type) if node_type else None
 
         results = self._storage.find_similar_nodes_batch(
-            names=names,
-            node_type=type_filter,
-            threshold=threshold,
-            limit=limit
+            names=names, node_type=type_filter, threshold=threshold, limit=limit
         )
 
         # Format results for JSON
@@ -575,13 +615,13 @@ class GraphService:
         for name, similar_list in results.items():
             formatted_results[name] = {
                 "similar_nodes": serialize_similar_nodes(similar_list),
-                "total": len(similar_list)
+                "total": len(similar_list),
             }
 
         return {
             "results": formatted_results,
             "total_searched": len(names),
-            "message": f"Searched for {len(names)} names"
+            "message": f"Searched for {len(names)} names",
         }
 
     # ==================== CRUD Operations ====================
@@ -607,7 +647,9 @@ class GraphService:
         Returns:
             Dict with result (added_node_ids, added_edge_ids, success, message)
         """
-        denied = self._authorize_graph_access(action=GRAPH_ACTION_MUTATE, target="add_nodes")
+        denied = self._authorize_graph_access(
+            action=GRAPH_ACTION_MUTATE, target="add_nodes"
+        )
         if denied:
             denied.setdefault("added_node_ids", [])
             denied.setdefault("added_edge_ids", [])
@@ -617,18 +659,30 @@ class GraphService:
         # Any key not in the Node model is a schema-defined extra field — fold it into metadata
         # so it is persisted without requiring model changes.
         _NODE_MODEL_FIELDS = {
-            'id', 'type', 'name', 'description', 'summary',
-            'tags', 'subtypes', 'aliases', 'metadata', 'embedding', 'created_at', 'updated_at',
+            "id",
+            "type",
+            "name",
+            "description",
+            "summary",
+            "tags",
+            "subtypes",
+            "aliases",
+            "metadata",
+            "embedding",
+            "created_at",
+            "updated_at",
         }
         try:
             node_objects = []
             for n in nodes:
                 node_dict = dict(n)
-                extra = {k: v for k, v in node_dict.items() if k not in _NODE_MODEL_FIELDS}
+                extra = {
+                    k: v for k, v in node_dict.items() if k not in _NODE_MODEL_FIELDS
+                }
                 if extra:
-                    meta = dict(node_dict.get('metadata') or {})
+                    meta = dict(node_dict.get("metadata") or {})
                     meta.update(extra)
-                    node_dict['metadata'] = meta
+                    node_dict["metadata"] = meta
                     for k in extra:
                         node_dict.pop(k)
                 node_objects.append(Node(**node_dict))
@@ -638,7 +692,7 @@ class GraphService:
                 "success": False,
                 "message": f"Error validating input: {str(e)}",
                 "added_node_ids": [],
-                "added_edge_ids": []
+                "added_edge_ids": [],
             }
 
         event_context = self._build_event_context(
@@ -648,7 +702,9 @@ class GraphService:
             event_correlation_id=event_correlation_id,
         )
 
-        result = self._storage.add_nodes(node_objects, edge_objects, event_context=event_context)
+        result = self._storage.add_nodes(
+            node_objects, edge_objects, event_context=event_context
+        )
 
         # Build response with serialized result and the actual nodes/edges for visualization
         response = serialize_add_result(result)
@@ -657,15 +713,13 @@ class GraphService:
         if result.success:
             # Fetch the added nodes to get their full data (including generated IDs)
             added_nodes = [
-                self._storage.get_node(node_id)
-                for node_id in result.added_node_ids
+                self._storage.get_node(node_id) for node_id in result.added_node_ids
             ]
             added_nodes = [n for n in added_nodes if n is not None]
 
             # Fetch the added edges
             added_edges = [
-                self._storage.edges.get(edge_id)
-                for edge_id in result.added_edge_ids
+                self._storage.edges.get(edge_id) for edge_id in result.added_edge_ids
             ]
             added_edges = [e for e in added_edges if e is not None]
 
@@ -686,7 +740,9 @@ class GraphService:
         event_correlation_id: Optional[str] = None,
     ) -> Dict[str, Any]:
         """Clone a federated cached node into the local graph and link lineage."""
-        decision = self._evaluate_graph_access(action=GRAPH_ACTION_MUTATE, target="adopt_federated_node")
+        decision = self._evaluate_graph_access(
+            action=GRAPH_ACTION_MUTATE, target="adopt_federated_node"
+        )
         if not decision.allowed:
             denied = self._build_access_denied_result(
                 action=GRAPH_ACTION_MUTATE,
@@ -729,7 +785,9 @@ class GraphService:
             denied.setdefault("added_edge_ids", [])
             return denied
 
-        graph_cfg = self._federation_manager.get_graph_config_for_node(federated_node_id)
+        graph_cfg = self._federation_manager.get_graph_config_for_node(
+            federated_node_id
+        )
         if graph_cfg and not graph_cfg.capabilities.allow_adopt:
             return {
                 "success": False,
@@ -755,14 +813,16 @@ class GraphService:
                     }
 
         metadata = dict(source_node.metadata or {})
-        metadata.update({
-            "is_adopted": True,
-            "adopted_from": {
-                "federated_node_id": source_node.id,
-                "origin_graph_id": source_node.metadata.get("origin_graph_id"),
-                "origin_node_id": source_node.metadata.get("origin_node_id"),
-            },
-        })
+        metadata.update(
+            {
+                "is_adopted": True,
+                "adopted_from": {
+                    "federated_node_id": source_node.id,
+                    "origin_graph_id": source_node.metadata.get("origin_graph_id"),
+                    "origin_node_id": source_node.metadata.get("origin_node_id"),
+                },
+            }
+        )
 
         local_node = Node(
             type=source_node.type_str,
@@ -813,21 +873,26 @@ class GraphService:
         if self._storage.get_node(source_reference.id) is None:
             nodes_to_add.append(source_reference)
 
-        result = self._storage.add_nodes(nodes_to_add, [lineage_edge], event_context=event_context)
+        result = self._storage.add_nodes(
+            nodes_to_add, [lineage_edge], event_context=event_context
+        )
 
         if not result.success:
             return serialize_add_result(result)
 
-        return self._attach_mutation_attribution({
-            "success": True,
-            "message": "Federated node adopted into local graph",
-            "adopted_node": serialize_node(local_node),
-            "source_node": serialize_node(source_node),
-            "lineage_edge": serialize_edge(lineage_edge),
-            "added_node_ids": result.added_node_ids,
-            "added_edge_ids": result.added_edge_ids,
-            "action": "add_to_visualization",
-        }, event_context)
+        return self._attach_mutation_attribution(
+            {
+                "success": True,
+                "message": "Federated node adopted into local graph",
+                "adopted_node": serialize_node(local_node),
+                "source_node": serialize_node(source_node),
+                "lineage_edge": serialize_edge(lineage_edge),
+                "added_node_ids": result.added_node_ids,
+                "added_edge_ids": result.added_edge_ids,
+                "action": "add_to_visualization",
+            },
+            event_context,
+        )
 
     def update_node(
         self,
@@ -850,7 +915,9 @@ class GraphService:
         Returns:
             Dict with updated node or error
         """
-        denied = self._authorize_graph_access(action=GRAPH_ACTION_MUTATE, target="update_node")
+        denied = self._authorize_graph_access(
+            action=GRAPH_ACTION_MUTATE, target="update_node"
+        )
         if denied:
             return denied
 
@@ -861,21 +928,23 @@ class GraphService:
             event_correlation_id=event_correlation_id,
         )
 
-        updated_node = self._storage.update_node(node_id, updates, event_context=event_context)
+        updated_node = self._storage.update_node(
+            node_id, updates, event_context=event_context
+        )
 
         if not updated_node:
-            return {
-                "success": False,
-                "error": f"Node with ID {node_id} not found"
-            }
+            return {"success": False, "error": f"Node with ID {node_id} not found"}
 
         # Return the updated node with action for frontend to refresh visualization
-        return self._attach_mutation_attribution({
-            "success": True,
-            "node": serialize_node(updated_node),
-            "nodes": [serialize_node(updated_node)],
-            "action": "update_in_visualization"
-        }, event_context)
+        return self._attach_mutation_attribution(
+            {
+                "success": True,
+                "node": serialize_node(updated_node),
+                "nodes": [serialize_node(updated_node)],
+                "action": "update_in_visualization",
+            },
+            event_context,
+        )
 
     def delete_nodes(
         self,
@@ -900,7 +969,9 @@ class GraphService:
         Returns:
             Dict with result (deleted_node_ids, affected_edge_ids, success, message)
         """
-        denied = self._authorize_graph_access(action=GRAPH_ACTION_MUTATE, target="delete_nodes")
+        denied = self._authorize_graph_access(
+            action=GRAPH_ACTION_MUTATE, target="delete_nodes"
+        )
         if denied:
             denied.setdefault("deleted_node_ids", [])
             denied.setdefault("affected_edge_ids", [])
@@ -913,8 +984,12 @@ class GraphService:
             event_correlation_id=event_correlation_id,
         )
 
-        result = self._storage.delete_nodes(node_ids, confirmed, event_context=event_context)
-        return self._attach_mutation_attribution(serialize_delete_result(result), event_context)
+        result = self._storage.delete_nodes(
+            node_ids, confirmed, event_context=event_context
+        )
+        return self._attach_mutation_attribution(
+            serialize_delete_result(result), event_context
+        )
 
     # ==================== Edge CRUD Operations ====================
 
@@ -943,7 +1018,9 @@ class GraphService:
         Returns:
             Dict with added edge or error
         """
-        denied = self._authorize_graph_access(action=GRAPH_ACTION_MUTATE, target="add_edge")
+        denied = self._authorize_graph_access(
+            action=GRAPH_ACTION_MUTATE, target="add_edge"
+        )
         if denied:
             return denied
 
@@ -969,14 +1046,20 @@ class GraphService:
 
         edge_id = self._storage.add_edge(edge, event_context=event_context)
         if not edge_id:
-            return {"success": False, "message": "Could not add edge (source or target not found)"}
+            return {
+                "success": False,
+                "message": "Could not add edge (source or target not found)",
+            }
 
-        return self._attach_mutation_attribution({
-            "success": True,
-            "edge": serialize_edge(edge),
-            "edges": [serialize_edge(edge)],
-            "action": "add_to_visualization",
-        }, event_context)
+        return self._attach_mutation_attribution(
+            {
+                "success": True,
+                "edge": serialize_edge(edge),
+                "edges": [serialize_edge(edge)],
+                "action": "add_to_visualization",
+            },
+            event_context,
+        )
 
     def update_edge(
         self,
@@ -999,7 +1082,9 @@ class GraphService:
         Returns:
             Dict with updated edge or error
         """
-        denied = self._authorize_graph_access(action=GRAPH_ACTION_MUTATE, target="update_edge")
+        denied = self._authorize_graph_access(
+            action=GRAPH_ACTION_MUTATE, target="update_edge"
+        )
         if denied:
             return denied
 
@@ -1010,15 +1095,20 @@ class GraphService:
             event_correlation_id=event_correlation_id,
         )
 
-        updated_edge = self._storage.update_edge(edge_id, updates, event_context=event_context)
+        updated_edge = self._storage.update_edge(
+            edge_id, updates, event_context=event_context
+        )
 
         if not updated_edge:
             return {"success": False, "error": f"Edge with ID {edge_id} not found"}
 
-        return self._attach_mutation_attribution({
-            "success": True,
-            "edge": serialize_edge(updated_edge),
-        }, event_context)
+        return self._attach_mutation_attribution(
+            {
+                "success": True,
+                "edge": serialize_edge(updated_edge),
+            },
+            event_context,
+        )
 
     def delete_edge(
         self,
@@ -1039,7 +1129,9 @@ class GraphService:
         Returns:
             Dict with success status
         """
-        denied = self._authorize_graph_access(action=GRAPH_ACTION_MUTATE, target="delete_edge")
+        denied = self._authorize_graph_access(
+            action=GRAPH_ACTION_MUTATE, target="delete_edge"
+        )
         if denied:
             return denied
 
@@ -1055,7 +1147,9 @@ class GraphService:
         if not deleted:
             return {"success": False, "error": f"Edge with ID {edge_id} not found"}
 
-        return self._attach_mutation_attribution({"success": True, "deleted_edge_id": edge_id}, event_context)
+        return self._attach_mutation_attribution(
+            {"success": True, "deleted_edge_id": edge_id}, event_context
+        )
 
     def delete_edges(
         self,
@@ -1066,7 +1160,9 @@ class GraphService:
         event_correlation_id: Optional[str] = None,
     ) -> Dict[str, Any]:
         """Delete up to 50 edges in a single operation. Requires confirmed=True."""
-        denied = self._authorize_graph_access(action=GRAPH_ACTION_MUTATE, target="delete_edges")
+        denied = self._authorize_graph_access(
+            action=GRAPH_ACTION_MUTATE, target="delete_edges"
+        )
         if denied:
             denied.setdefault("deleted_edge_ids", [])
             return denied
@@ -1093,7 +1189,9 @@ class GraphService:
         )
 
         result = self._storage.delete_edges(edge_ids, event_context=event_context)
-        return self._attach_mutation_attribution(serialize_delete_edges_result(result), event_context)
+        return self._attach_mutation_attribution(
+            serialize_delete_edges_result(result), event_context
+        )
 
     # ==================== Statistics & Metadata ====================
 
@@ -1104,7 +1202,9 @@ class GraphService:
         Returns:
             Dict with statistics (total_nodes, total_edges, nodes_by_type)
         """
-        decision = self._evaluate_graph_access(action=GRAPH_ACTION_READ, target="get_graph_stats")
+        decision = self._evaluate_graph_access(
+            action=GRAPH_ACTION_READ, target="get_graph_stats"
+        )
         if not decision.allowed:
             return self._build_access_denied_result(
                 action=GRAPH_ACTION_READ,
@@ -1119,9 +1219,13 @@ class GraphService:
         )
 
         local_graph_name = self._storage.get_graph_name()
-        visible_graph_display_names = self._get_visible_federation_graph_display_names(decision.graph_access)
+        visible_graph_display_names = self._get_visible_federation_graph_display_names(
+            decision.graph_access
+        )
         federation_info: Dict[str, Any] = {
-            "local_graph_name": local_graph_name if "local" in visible_graph_display_names else "",
+            "local_graph_name": local_graph_name
+            if "local" in visible_graph_display_names
+            else "",
             "max_selectable_depth": 1,
             "selectable_depth_levels": [1],
             "search_has_multiple_graphs": False,
@@ -1131,7 +1235,9 @@ class GraphService:
         if self._federation_manager and self._federation_manager.enabled:
             total_graph_count = len(visible_graph_display_names)
             federation_info = {
-                "local_graph_name": local_graph_name if "local" in visible_graph_display_names else "",
+                "local_graph_name": local_graph_name
+                if "local" in visible_graph_display_names
+                else "",
                 "max_selectable_depth": self._federation_manager.get_max_selectable_depth(),
                 "selectable_depth_levels": self._federation_manager.get_selectable_depth_levels(),
                 "search_has_multiple_graphs": total_graph_count > 1,
@@ -1145,7 +1251,9 @@ class GraphService:
 
     def get_graph_history(self, limit: int = 50, offset: int = 0) -> Dict[str, Any]:
         """Return recent graph mutation history (newest first)."""
-        decision = self._evaluate_graph_access(action=GRAPH_ACTION_READ, target="get_graph_history")
+        decision = self._evaluate_graph_access(
+            action=GRAPH_ACTION_READ, target="get_graph_history"
+        )
         if not decision.allowed:
             return self._build_access_denied_result(
                 action=GRAPH_ACTION_READ,
@@ -1162,9 +1270,13 @@ class GraphService:
             "offset": offset,
         }
 
-    def get_node_history(self, node_id: str, limit: int = 50, offset: int = 0) -> Dict[str, Any]:
+    def get_node_history(
+        self, node_id: str, limit: int = 50, offset: int = 0
+    ) -> Dict[str, Any]:
         """Return mutation history for a single node (newest first)."""
-        decision = self._evaluate_graph_access(action=GRAPH_ACTION_READ, target="get_node_history")
+        decision = self._evaluate_graph_access(
+            action=GRAPH_ACTION_READ, target="get_node_history"
+        )
         if not decision.allowed:
             return self._build_access_denied_result(
                 action=GRAPH_ACTION_READ,
@@ -1182,9 +1294,13 @@ class GraphService:
             "offset": offset,
         }
 
-    def get_edge_history(self, edge_id: str, limit: int = 50, offset: int = 0) -> Dict[str, Any]:
+    def get_edge_history(
+        self, edge_id: str, limit: int = 50, offset: int = 0
+    ) -> Dict[str, Any]:
         """Return mutation history for a single edge (newest first)."""
-        decision = self._evaluate_graph_access(action=GRAPH_ACTION_READ, target="get_edge_history")
+        decision = self._evaluate_graph_access(
+            action=GRAPH_ACTION_READ, target="get_edge_history"
+        )
         if not decision.allowed:
             return self._build_access_denied_result(
                 action=GRAPH_ACTION_READ,
@@ -1213,13 +1329,15 @@ class GraphService:
         node_types = []
 
         for type_name, type_config in schema.get("node_types", {}).items():
-            node_types.append({
-                "type": type_name,
-                "color": type_config.get("color", "#9CA3AF"),
-                "description": type_config.get("description", ""),
-                "fields": type_config.get("fields", []),
-                "static": type_config.get("static", False)
-            })
+            node_types.append(
+                {
+                    "type": type_name,
+                    "color": type_config.get("color", "#9CA3AF"),
+                    "description": type_config.get("description", ""),
+                    "fields": type_config.get("fields", []),
+                    "static": type_config.get("static", False),
+                }
+            )
 
         return {"node_types": node_types}
 
@@ -1247,10 +1365,9 @@ class GraphService:
         relationship_types = []
 
         for type_name, type_config in schema.get("relationship_types", {}).items():
-            relationship_types.append({
-                "type": type_name,
-                "description": type_config.get("description", "")
-            })
+            relationship_types.append(
+                {"type": type_name, "description": type_config.get("description", "")}
+            )
 
         return {"relationship_types": relationship_types}
 
@@ -1297,16 +1414,22 @@ class GraphService:
         auth_source: Optional[str] = None,
     ) -> Dict[str, Any]:
         """Get the public request actor context with optional request-safe overrides."""
-        return config_loader.get_request_actor_info() if not any([
-            headers,
-            actor_id,
-            actor_type,
-            auth_source,
-        ]) else config_loader.get_public_request_actor_context(
-            headers=headers,
-            actor_id=actor_id,
-            actor_type=actor_type,
-            auth_source=auth_source,
+        return (
+            config_loader.get_request_actor_info()
+            if not any(
+                [
+                    headers,
+                    actor_id,
+                    actor_type,
+                    auth_source,
+                ]
+            )
+            else config_loader.get_public_request_actor_context(
+                headers=headers,
+                actor_id=actor_id,
+                actor_type=actor_type,
+                auth_source=auth_source,
+            )
         )
 
     def get_request_scope_info(
@@ -1318,16 +1441,22 @@ class GraphService:
         graph_id: Optional[str] = None,
     ) -> Dict[str, Any]:
         """Get the public request scope context with optional request-safe overrides."""
-        return config_loader.get_request_scope_info() if not any([
-            headers,
-            workspace_id,
-            workspace_kind,
-            graph_id,
-        ]) else config_loader.get_public_request_scope_context(
-            headers=headers,
-            workspace_id=workspace_id,
-            workspace_kind=workspace_kind,
-            graph_id=graph_id,
+        return (
+            config_loader.get_request_scope_info()
+            if not any(
+                [
+                    headers,
+                    workspace_id,
+                    workspace_kind,
+                    graph_id,
+                ]
+            )
+            else config_loader.get_public_request_scope_context(
+                headers=headers,
+                workspace_id=workspace_id,
+                workspace_kind=workspace_kind,
+                graph_id=graph_id,
+            )
         )
 
     def get_request_graph_selection_info(
@@ -1339,16 +1468,22 @@ class GraphService:
         graph_id: Optional[str] = None,
     ) -> Dict[str, Any]:
         """Get the public graph/workspace selection summary with optional safe overrides."""
-        return config_loader.get_request_graph_selection_info() if not any([
-            headers,
-            workspace_id,
-            workspace_kind,
-            graph_id,
-        ]) else config_loader.get_public_request_graph_selection_context(
-            headers=headers,
-            workspace_id=workspace_id,
-            workspace_kind=workspace_kind,
-            graph_id=graph_id,
+        return (
+            config_loader.get_request_graph_selection_info()
+            if not any(
+                [
+                    headers,
+                    workspace_id,
+                    workspace_kind,
+                    graph_id,
+                ]
+            )
+            else config_loader.get_public_request_graph_selection_context(
+                headers=headers,
+                workspace_id=workspace_id,
+                workspace_kind=workspace_kind,
+                graph_id=graph_id,
+            )
         )
 
     # ==================== Saved Views ====================
@@ -1370,7 +1505,7 @@ class GraphService:
         return {
             "action": "save_view",
             "name": name,
-            "message": f"Ready to save view '{name}'. Client will capture current visualization state."
+            "message": f"Ready to save view '{name}'. Client will capture current visualization state.",
         }
 
     def resolve_session_nodes(self, node_ids: List[str]) -> Dict[str, Any]:
@@ -1381,7 +1516,9 @@ class GraphService:
         the same access/visibility filtering. ``group-*`` ids are session-local
         annotations, not graph nodes, and are skipped.
         """
-        decision = self._evaluate_graph_access(action=GRAPH_ACTION_READ, target="resolve_session_nodes")
+        decision = self._evaluate_graph_access(
+            action=GRAPH_ACTION_READ, target="resolve_session_nodes"
+        )
         if not decision.allowed:
             return self._build_access_denied_result(
                 action=GRAPH_ACTION_READ,
@@ -1415,7 +1552,9 @@ class GraphService:
         Returns:
             The nodes and edges to display with position data
         """
-        decision = self._evaluate_graph_access(action=GRAPH_ACTION_READ, target="get_saved_view")
+        decision = self._evaluate_graph_access(
+            action=GRAPH_ACTION_READ, target="get_saved_view"
+        )
         if not decision.allowed:
             return self._build_access_denied_result(
                 action=GRAPH_ACTION_READ,
@@ -1427,19 +1566,19 @@ class GraphService:
         results = self._storage.search_nodes(
             query=name,
             node_types=[NodeType.SAVED_VIEW, NodeType.VISUALIZATION_VIEW],
-            limit=max(100, self._storage.get_stats().total_nodes) if decision.graph_access.enabled else 1,
+            limit=max(100, self._storage.get_stats().total_nodes)
+            if decision.graph_access.enabled
+            else 1,
         )
 
         visible_views = [
-            view for view in results
+            view
+            for view in results
             if view.name == name and self._is_node_visible(view, decision.graph_access)
         ]
 
         if not visible_views:
-            return {
-                "success": False,
-                "error": f"View '{name}' not found."
-            }
+            return {"success": False, "error": f"View '{name}' not found."}
 
         view_node = visible_views[0]
 
@@ -1449,30 +1588,27 @@ class GraphService:
         hidden_node_ids = []
 
         # Try new format first
-        view_data = view_node.metadata.get('view_data', {})
-        if view_data and 'nodes' in view_data:
-            node_position_data = view_data.get('nodes', [])
-            hidden_node_ids = view_data.get('hidden_nodes', [])
+        view_data = view_node.metadata.get("view_data", {})
+        if view_data and "nodes" in view_data:
+            node_position_data = view_data.get("nodes", [])
+            hidden_node_ids = view_data.get("hidden_nodes", [])
             position_map = {
-                item['id']: item.get('position')
+                item["id"]: item.get("position")
                 for item in node_position_data
                 if isinstance(item, dict)
             }
             node_ids = list(position_map.keys())
         # Fall back to old format
-        elif 'node_ids' in view_node.metadata:
-            node_ids = view_node.metadata.get('node_ids', [])
-            position_map = view_node.metadata.get('positions', {})
-            hidden_node_ids = view_node.metadata.get('hidden_nodes', [])
+        elif "node_ids" in view_node.metadata:
+            node_ids = view_node.metadata.get("node_ids", [])
+            position_map = view_node.metadata.get("positions", {})
+            hidden_node_ids = view_node.metadata.get("hidden_nodes", [])
         else:
-            return {
-                "success": False,
-                "error": f"View '{name}' contains no nodes."
-            }
+            return {"success": False, "error": f"View '{name}' contains no nodes."}
 
         # Filter out group IDs (frontend-only concept)
-        actual_node_ids = [nid for nid in node_ids if not nid.startswith('group-')]
-        group_ids = [nid for nid in node_ids if nid.startswith('group-')]
+        actual_node_ids = [nid for nid in node_ids if not nid.startswith("group-")]
+        group_ids = [nid for nid in node_ids if nid.startswith("group-")]
 
         # Fetch all the actual nodes
         visible_node_ids = []
@@ -1486,16 +1622,14 @@ class GraphService:
         if not nodes:
             return {
                 "success": False,
-                "error": f"No nodes could be loaded from view '{name}'. The referenced nodes may have been deleted."
+                "error": f"No nodes could be loaded from view '{name}'. The referenced nodes may have been deleted.",
             }
 
         # Get all edges between these nodes
-        edges = serialize_edges(
-            self._storage.get_edges_between_nodes(visible_node_ids)
-        )
+        edges = serialize_edges(self._storage.get_edges_between_nodes(visible_node_ids))
 
         # Extract group data for frontend - prefer full metadata if available
-        saved_groups = view_node.metadata.get('groups', [])
+        saved_groups = view_node.metadata.get("groups", [])
         if saved_groups:
             # Use full group metadata (includes label, color, style)
             group_data = saved_groups
@@ -1505,22 +1639,21 @@ class GraphService:
             for group_id in group_ids:
                 group_position = position_map.get(group_id)
                 if group_position:
-                    group_data.append({
-                        "id": group_id,
-                        "position": group_position
-                    })
+                    group_data.append({"id": group_id, "position": group_position})
 
         # Extract parentId mapping (which nodes belong to which groups)
         visible_node_id_set = set(visible_node_ids)
         filtered_position_map = {
             item_id: position
             for item_id, position in position_map.items()
-            if item_id in visible_node_id_set or item_id.startswith('group-')
+            if item_id in visible_node_id_set or item_id.startswith("group-")
         }
-        filtered_hidden_node_ids = [node_id for node_id in hidden_node_ids if node_id in visible_node_id_set]
+        filtered_hidden_node_ids = [
+            node_id for node_id in hidden_node_ids if node_id in visible_node_id_set
+        ]
         parent_ids = {
             node_id: group_id
-            for node_id, group_id in view_node.metadata.get('parentIds', {}).items()
+            for node_id, group_id in view_node.metadata.get("parentIds", {}).items()
             if node_id in visible_node_id_set
         }
 
@@ -1532,8 +1665,8 @@ class GraphService:
             "hidden_node_ids": filtered_hidden_node_ids,
             "groups": group_data,
             "parentIds": parent_ids,
-            "annotations": view_node.metadata.get('annotations', []),
-            "action": "load_visualization"
+            "annotations": view_node.metadata.get("annotations", []),
+            "action": "load_visualization",
         }
 
     def list_saved_views(self) -> Dict[str, Any]:
@@ -1543,7 +1676,9 @@ class GraphService:
         Returns:
             List of all SavedView nodes with their names and summaries
         """
-        decision = self._evaluate_graph_access(action=GRAPH_ACTION_READ, target="list_saved_views")
+        decision = self._evaluate_graph_access(
+            action=GRAPH_ACTION_READ, target="list_saved_views"
+        )
         if not decision.allowed:
             return self._build_access_denied_result(
                 action=GRAPH_ACTION_READ,
@@ -1554,7 +1689,7 @@ class GraphService:
         views = self._storage.search_nodes(
             query="",
             node_types=[NodeType.SAVED_VIEW, NodeType.VISUALIZATION_VIEW],
-            limit=100
+            limit=100,
         )
 
         view_list = []
@@ -1562,33 +1697,34 @@ class GraphService:
             if not self._is_node_visible(view, decision.graph_access):
                 continue
 
-            if 'node_ids' in view.metadata:
-                referenced_node_ids = view.metadata.get('node_ids', [])
+            if "node_ids" in view.metadata:
+                referenced_node_ids = view.metadata.get("node_ids", [])
             else:
                 referenced_node_ids = [
-                    item.get('id')
-                    for item in view.metadata.get('view_data', {}).get('nodes', [])
+                    item.get("id")
+                    for item in view.metadata.get("view_data", {}).get("nodes", [])
                     if isinstance(item, dict)
                 ]
-            node_count = len([
-                node_id for node_id in referenced_node_ids
-                if not str(node_id).startswith('group-')
-                and self._is_node_visible(self._storage.get_node(node_id), decision.graph_access)
-            ])
+            node_count = len(
+                [
+                    node_id
+                    for node_id in referenced_node_ids
+                    if not str(node_id).startswith("group-")
+                    and self._is_node_visible(
+                        self._storage.get_node(node_id), decision.graph_access
+                    )
+                ]
+            )
             view_info = {
                 "name": view.name,
                 "description": view.description,
                 "summary": view.summary,
                 "created_at": view.created_at.isoformat() if view.created_at else None,
-                "node_count": node_count
+                "node_count": node_count,
             }
             view_list.append(view_info)
 
-        return {
-            "success": True,
-            "views": view_list,
-            "total": len(view_list)
-        }
+        return {"success": True, "views": view_list, "total": len(view_list)}
 
     # ==================== Export ====================
 
@@ -1599,7 +1735,9 @@ class GraphService:
         Returns:
             Graph data plus a sanitized boundary summary for restore/admin workflows.
         """
-        decision = self._evaluate_graph_access(action=GRAPH_ACTION_READ, target="export_graph")
+        decision = self._evaluate_graph_access(
+            action=GRAPH_ACTION_READ, target="export_graph"
+        )
         if not decision.allowed:
             return self._build_access_denied_result(
                 action=GRAPH_ACTION_READ,

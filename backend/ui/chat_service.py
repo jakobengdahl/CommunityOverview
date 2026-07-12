@@ -14,14 +14,12 @@ consistency and proper validation.
 from typing import List, Dict, Any, Optional, Callable
 import asyncio
 import logging
-import os
 import json
-import inspect
 import re
 from datetime import datetime, timezone
 
 from backend.ui.chat_logic import ChatProcessor
-from backend.llm.llm_providers import create_provider, LLMProvider
+from backend.llm.llm_providers import create_provider
 from backend.service import GraphService
 
 logger = logging.getLogger(__name__)
@@ -69,7 +67,7 @@ class ChatService:
         # Expert agent registry — populated by load_expert_skills() at startup.
         self._expert_contexts: Dict[str, str] = {}
         # Stage 1: skill metadata (frontmatter only, no body content).
-        self._expert_skills: Dict[str, List] = {}       # List[SkillMetadata]
+        self._expert_skills: Dict[str, List] = {}  # List[SkillMetadata]
         # Stage 2: full skill content, populated lazily on first _build_expert_context call.
         self._expert_skills_full: Dict[str, List] = {}  # List[SkillDefinition]
         # Shared SkillsLoader instance — holds the raw-text cache for Stage 1→2 promotion.
@@ -105,7 +103,6 @@ class ChatService:
             "get_presentation": self._graph_service.get_presentation,
         }
 
-
     def _search_graph_tool(
         self,
         query: str,
@@ -114,7 +111,11 @@ class ChatService:
         action: Optional[str] = None,
         federation_depth: Optional[int] = None,
     ) -> Dict[str, Any]:
-        effective_depth = federation_depth if federation_depth is not None else self._current_federation_depth
+        effective_depth = (
+            federation_depth
+            if federation_depth is not None
+            else self._current_federation_depth
+        )
         return self._graph_service.search_graph(
             query=query,
             node_types=node_types,
@@ -161,14 +162,18 @@ class ChatService:
             if expert.skills_urls:
                 try:
                     # Stage 1: frontmatter only (text cached for Stage 2)
-                    metas = await self._skills_loader.load_metadata_from_urls(expert.skills_urls)
+                    metas = await self._skills_loader.load_metadata_from_urls(
+                        expert.skills_urls
+                    )
                     self._expert_skills[expert.id] = metas
                     # Stage 2: full content — uses text cache, no extra HTTP requests
                     full_skills = await self._skills_loader.load_full_skills(metas)
                     self._expert_skills_full[expert.id] = full_skills
                     logger.info(
                         "Expert %s: loaded %d skill(s) from %d URL(s)",
-                        expert.id, len(full_skills), len(expert.skills_urls),
+                        expert.id,
+                        len(full_skills),
+                        len(expert.skills_urls),
                     )
                 except Exception as exc:
                     logger.warning("Expert %s: skills load failed: %s", expert.id, exc)
@@ -281,7 +286,11 @@ class ChatService:
                     if any_permitted:
                         lines.append("PERMITTED OPERATIONS:")
                         for node_type, ops in perm_entries:
-                            allowed = [op for op in ("create", "update", "delete") if ops.get(op)]
+                            allowed = [
+                                op
+                                for op in ("create", "update", "delete")
+                                if ops.get(op)
+                            ]
                             if allowed:
                                 lines.append(f"- {node_type}: {', '.join(allowed)}")
                     else:
@@ -327,10 +336,13 @@ class ChatService:
                 logger.warning(
                     "AKC short_name %r not found in %d ActiveKnowledgeCollection node(s). "
                     "Collection may exceed the search limit of 500.",
-                    short_name, len(nodes),
+                    short_name,
+                    len(nodes),
                 )
         except Exception:
-            logger.warning("Failed to resolve AKC short_name %r", short_name, exc_info=True)
+            logger.warning(
+                "Failed to resolve AKC short_name %r", short_name, exc_info=True
+            )
             # Fail-closed: resolution error → deny all writes rather than fall through
             # to unconstrained mode. Empty perms installs enforced wrappers that block
             # every add/update/delete regardless of node type.
@@ -360,7 +372,8 @@ class ChatService:
 
         def add_nodes_enforced(nodes, edges=None, **kwargs):
             untyped = [
-                i for i, n in enumerate(nodes)
+                i
+                for i, n in enumerate(nodes)
                 if not isinstance(n.get("type"), str) or not n.get("type")
             ]
             if untyped:
@@ -371,10 +384,9 @@ class ChatService:
                         "Each node must specify a type."
                     ),
                 }
-            forbidden = sorted({
-                n["type"] for n in nodes
-                if not perms.get(n["type"], {}).get("create")
-            })
+            forbidden = sorted(
+                {n["type"] for n in nodes if not perms.get(n["type"], {}).get("create")}
+            )
             if forbidden:
                 return {
                     "success": False,
@@ -457,9 +469,14 @@ class ChatService:
         collection_id = info.get("id")
         collection_name = info.get("name") or short_name
 
-        def save_collection_response(answers, respondent_label=None, form_title=None, **kwargs):
+        def save_collection_response(
+            answers, respondent_label=None, form_title=None, **kwargs
+        ):
             if not isinstance(answers, list):
-                return {"success": False, "error": "answers must be a list of {field_id, value} objects."}
+                return {
+                    "success": False,
+                    "error": "answers must be a list of {field_id, value} objects.",
+                }
 
             normalized = []
             for a in answers:
@@ -468,12 +485,14 @@ class ChatService:
                 field_id = a.get("field_id") or a.get("id")
                 if not field_id or "value" not in a:
                     continue
-                normalized.append({
-                    "field_id": str(field_id),
-                    "label": a.get("label"),
-                    "type": a.get("type"),
-                    "value": a.get("value"),
-                })
+                normalized.append(
+                    {
+                        "field_id": str(field_id),
+                        "label": a.get("label"),
+                        "type": a.get("type"),
+                        "value": a.get("value"),
+                    }
+                )
             if not normalized:
                 return {
                     "success": False,
@@ -526,7 +545,7 @@ class ChatService:
     def _sanitize_id(node_id: str) -> str:
         """Truncate at first C0/DEL control character to prevent prompt injection via node IDs."""
         for i, ch in enumerate(node_id):
-            if ch < '\x20' or ch == '\x7f':
+            if ch < "\x20" or ch == "\x7f":
                 return node_id[:i]
         return node_id
 
@@ -619,7 +638,9 @@ class ChatService:
 
         self._current_federation_depth = federation_depth
         try:
-            expert_context = self._build_expert_context(expert_agent_id) if expert_agent_id else None
+            expert_context = (
+                self._build_expert_context(expert_agent_id) if expert_agent_id else None
+            )
             if effective_prefix and expert_context:
                 extra_context = f"{effective_prefix}\n\n{expert_context}"
             else:
@@ -704,10 +725,7 @@ User's question: {user_message}"""
             full_message = user_message
 
         # Add current user message
-        messages.append({
-            "role": "user",
-            "content": full_message
-        })
+        messages.append({"role": "user", "content": full_message})
 
         return self.process_message(
             messages=messages,
@@ -727,7 +745,7 @@ User's question: {user_message}"""
         return {
             "provider": self._processor.provider_type,
             "available_tools": list(self._tools_map.keys()),
-            "graph_stats": self._graph_service.get_graph_stats()
+            "graph_stats": self._graph_service.get_graph_stats(),
         }
 
     def propose_nodes_from_text(
@@ -737,7 +755,7 @@ User's question: {user_message}"""
         communities: Optional[List[str]] = None,
         api_key: Optional[str] = None,
         provider: Optional[str] = None,
-        federation_depth: Optional[int] = None
+        federation_depth: Optional[int] = None,
     ) -> Dict[str, Any]:
         """
         Extract and propose nodes from text using LLM analysis.
@@ -767,7 +785,9 @@ User's question: {user_message}"""
 
         community_instruction = ""
         if communities:
-            community_instruction = f"Associate extracted nodes with communities: {', '.join(communities)}"
+            community_instruction = (
+                f"Associate extracted nodes with communities: {', '.join(communities)}"
+            )
 
         extraction_prompt = f"""Analyze the following text and extract relevant entities that should be added to the knowledge graph.
 
@@ -807,7 +827,7 @@ Respond with ONLY a JSON array of extracted entities, no other text. Example for
                     "success": False,
                     "error": "No API key available",
                     "proposed_nodes": [],
-                    "similar_existing": {}
+                    "similar_existing": {},
                 }
 
             llm_provider = create_provider(key_to_use, provider_to_use)
@@ -816,7 +836,7 @@ Respond with ONLY a JSON array of extracted entities, no other text. Example for
                 messages=messages,
                 system_prompt="You are a precise entity extraction assistant. Extract entities from text and return them as a JSON array.",
                 tools=[],
-                max_tokens=4096
+                max_tokens=4096,
             )
 
             # Extract JSON from response
@@ -826,13 +846,13 @@ Respond with ONLY a JSON array of extracted entities, no other text. Example for
                     response_text += block.get("text", "")
 
             # Find JSON array in response
-            json_match = re.search(r'\[[\s\S]*\]', response_text)
+            json_match = re.search(r"\[[\s\S]*\]", response_text)
             if not json_match:
                 return {
                     "success": False,
                     "error": "Could not parse entity extraction result",
                     "proposed_nodes": [],
-                    "similar_existing": {}
+                    "similar_existing": {},
                 }
 
             proposed_nodes = json.loads(json_match.group())
@@ -840,16 +860,15 @@ Respond with ONLY a JSON array of extracted entities, no other text. Example for
             # Add communities to each node if specified
             if communities:
                 for node in proposed_nodes:
-                    node['communities'] = communities
+                    node["communities"] = communities
 
             # Check for similar existing nodes using batch search
             if proposed_nodes:
-                names = [node.get('name', '') for node in proposed_nodes if node.get('name')]
+                names = [
+                    node.get("name", "") for node in proposed_nodes if node.get("name")
+                ]
                 similar_results = self._graph_service.find_similar_nodes_batch(
-                    names=names,
-                    node_type=node_type,
-                    threshold=0.7,
-                    limit=3
+                    names=names, node_type=node_type, threshold=0.7, limit=3
                 )
             else:
                 similar_results = {"results": {}}
@@ -859,7 +878,7 @@ Respond with ONLY a JSON array of extracted entities, no other text. Example for
                 "proposed_nodes": proposed_nodes,
                 "similar_existing": similar_results.get("results", {}),
                 "requires_confirmation": True,
-                "message": f"Found {len(proposed_nodes)} potential entities. Please review before adding."
+                "message": f"Found {len(proposed_nodes)} potential entities. Please review before adding.",
             }
 
         except Exception as e:
@@ -867,5 +886,5 @@ Respond with ONLY a JSON array of extracted entities, no other text. Example for
                 "success": False,
                 "error": str(e),
                 "proposed_nodes": [],
-                "similar_existing": {}
+                "similar_existing": {},
             }

@@ -7,7 +7,6 @@ Verifies that:
 - Temporary file handling is correct
 """
 
-import pytest
 import tempfile
 import os
 from pathlib import Path
@@ -34,7 +33,7 @@ class TestDocumentServiceExtraction:
 
     def test_extract_text_unsupported_format(self, document_service):
         """Should return error for unsupported formats."""
-        with tempfile.NamedTemporaryFile(suffix='.xyz', delete=False) as f:
+        with tempfile.NamedTemporaryFile(suffix=".xyz", delete=False) as f:
             f.write(b"test")
             path = f.name
 
@@ -52,12 +51,11 @@ class TestDocumentServiceUpload:
     def test_save_upload_creates_file(self, document_service):
         """save_upload should create a file in the upload directory."""
         import asyncio
+
         content = b"Test file content"
         filename = "test_upload.txt"
 
-        result = asyncio.run(
-            document_service.save_upload(content, filename)
-        )
+        result = asyncio.run(document_service.save_upload(content, filename))
 
         assert result["success"]
         assert result["file_path"]
@@ -69,12 +67,11 @@ class TestDocumentServiceUpload:
     def test_save_upload_rejects_unsupported_format(self, document_service):
         """save_upload should reject unsupported file formats."""
         import asyncio
+
         content = b"Test content"
         filename = "test.xyz"
 
-        result = asyncio.run(
-            document_service.save_upload(content, filename)
-        )
+        result = asyncio.run(document_service.save_upload(content, filename))
 
         assert not result["success"]
         assert "unsupported" in result["error"].lower()
@@ -82,13 +79,12 @@ class TestDocumentServiceUpload:
     def test_save_upload_rejects_large_files(self, document_service):
         """save_upload should reject files exceeding size limit."""
         import asyncio
+
         # Create content larger than max size
         content = b"x" * (document_service.MAX_FILE_SIZE + 1)
         filename = "large.txt"
 
-        result = asyncio.run(
-            document_service.save_upload(content, filename)
-        )
+        result = asyncio.run(document_service.save_upload(content, filename))
 
         assert not result["success"]
         assert "too large" in result["error"].lower()
@@ -96,12 +92,11 @@ class TestDocumentServiceUpload:
     def test_process_upload_extracts_and_cleans_up(self, document_service):
         """process_upload should extract text and clean up temp file."""
         import asyncio
+
         content = b"This is test content for extraction."
         filename = "test_extract.txt"
 
-        result = asyncio.run(
-            document_service.process_upload(content, filename)
-        )
+        result = asyncio.run(document_service.process_upload(content, filename))
 
         assert result["success"]
         assert "test content" in result["text"].lower()
@@ -119,7 +114,7 @@ class TestDocumentServiceFileSanitization:
 
     def test_sanitize_filename_replaces_unsafe_chars(self, document_service):
         """Should replace unsafe characters."""
-        result = document_service._sanitize_filename("file<>:\"|?*.txt")
+        result = document_service._sanitize_filename('file<>:"|?*.txt')
         # Should not contain any of these characters
         for char in '<>:"|?*':
             assert char not in result
@@ -131,6 +126,7 @@ class TestDocumentServiceFileSanitization:
         # Results might be different due to timestamp (or same if called fast)
         # Both should start with digits
         assert result1[0].isdigit()
+        assert result2[0].isdigit()
 
 
 class TestDocumentServiceCleanup:
@@ -144,6 +140,7 @@ class TestDocumentServiceCleanup:
 
         # Set modification time to be old (2 days ago)
         import time
+
         old_time = time.time() - (48 * 3600)
         os.utime(old_file, (old_time, old_time))
 

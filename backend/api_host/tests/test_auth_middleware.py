@@ -7,7 +7,6 @@ import json
 import os
 import tempfile
 
-import pytest
 from unittest.mock import patch
 
 from fastapi.testclient import TestClient
@@ -51,9 +50,7 @@ class TestMcpBasicAuth:
 
     def test_mcp_basic_auth_blocks_mcp_without_creds(self):
         """MCP endpoint returns 401 when mcp_basic_auth is on and no creds provided."""
-        client, path = self._make_client(
-            mcp_basic_auth=True, auth_password="secret"
-        )
+        client, path = self._make_client(mcp_basic_auth=True, auth_password="secret")
         try:
             resp = client.get("/mcp")
             assert resp.status_code == 401
@@ -62,9 +59,7 @@ class TestMcpBasicAuth:
 
     def test_mcp_basic_auth_blocks_execute_tool_without_creds(self):
         """/execute_tool returns 401 when mcp_basic_auth is on and no creds."""
-        client, path = self._make_client(
-            mcp_basic_auth=True, auth_password="secret"
-        )
+        client, path = self._make_client(mcp_basic_auth=True, auth_password="secret")
         try:
             resp = client.post("/execute_tool", json={"tool_name": "x"})
             assert resp.status_code == 401
@@ -73,9 +68,7 @@ class TestMcpBasicAuth:
 
     def test_mcp_basic_auth_allows_api_without_creds(self):
         """/api endpoints pass through without auth in MCP-only mode."""
-        client, path = self._make_client(
-            mcp_basic_auth=True, auth_password="secret"
-        )
+        client, path = self._make_client(mcp_basic_auth=True, auth_password="secret")
         try:
             resp = client.get("/api/search", params={"query": "test"})
             # Should NOT be 401 — the request reaches the actual endpoint
@@ -85,9 +78,7 @@ class TestMcpBasicAuth:
 
     def test_mcp_basic_auth_allows_web_without_creds(self):
         """/web endpoints pass through without auth in MCP-only mode."""
-        client, path = self._make_client(
-            mcp_basic_auth=True, auth_password="secret"
-        )
+        client, path = self._make_client(mcp_basic_auth=True, auth_password="secret")
         try:
             resp = client.get("/web/")
             assert resp.status_code != 401
@@ -96,9 +87,7 @@ class TestMcpBasicAuth:
 
     def test_mcp_basic_auth_allows_health_without_creds(self):
         """/health always passes through."""
-        client, path = self._make_client(
-            mcp_basic_auth=True, auth_password="secret"
-        )
+        client, path = self._make_client(mcp_basic_auth=True, auth_password="secret")
         try:
             resp = client.get("/health")
             assert resp.status_code == 200
@@ -107,9 +96,7 @@ class TestMcpBasicAuth:
 
     def test_mcp_basic_auth_allows_ready_without_creds(self):
         """/ready always passes through."""
-        client, path = self._make_client(
-            mcp_basic_auth=True, auth_password="secret"
-        )
+        client, path = self._make_client(mcp_basic_auth=True, auth_password="secret")
         try:
             resp = client.get("/ready")
             assert resp.status_code == 200
@@ -118,9 +105,7 @@ class TestMcpBasicAuth:
 
     def test_mcp_basic_auth_allows_startup_diagnostics_without_creds(self):
         """/diagnostics/startup always passes through."""
-        client, path = self._make_client(
-            mcp_basic_auth=True, auth_password="secret"
-        )
+        client, path = self._make_client(mcp_basic_auth=True, auth_password="secret")
         try:
             resp = client.get("/diagnostics/startup")
             assert resp.status_code == 200
@@ -129,13 +114,9 @@ class TestMcpBasicAuth:
 
     def test_mcp_basic_auth_accepts_valid_creds_on_mcp(self):
         """MCP endpoint succeeds with correct credentials."""
-        client, path = self._make_client(
-            mcp_basic_auth=True, auth_password="secret"
-        )
+        client, path = self._make_client(mcp_basic_auth=True, auth_password="secret")
         try:
-            resp = client.get(
-                "/mcp", headers=_auth_header("admin", "secret")
-            )
+            resp = client.get("/mcp", headers=_auth_header("admin", "secret"))
             # Should not be 401 — auth passed, endpoint responds normally
             assert resp.status_code != 401
         finally:
@@ -143,13 +124,9 @@ class TestMcpBasicAuth:
 
     def test_mcp_basic_auth_rejects_wrong_password(self):
         """MCP endpoint returns 401 with wrong password."""
-        client, path = self._make_client(
-            mcp_basic_auth=True, auth_password="secret"
-        )
+        client, path = self._make_client(mcp_basic_auth=True, auth_password="secret")
         try:
-            resp = client.get(
-                "/mcp", headers=_auth_header("admin", "wrong")
-            )
+            resp = client.get("/mcp", headers=_auth_header("admin", "wrong"))
             assert resp.status_code == 401
         finally:
             os.unlink(path)
@@ -165,9 +142,7 @@ class TestAuthEnabledTakesPrecedence:
 
     def test_auth_enabled_blocks_api_without_creds(self):
         """/api requires auth when auth_enabled=True."""
-        client, path = self._make_client(
-            auth_enabled=True, auth_password="secret"
-        )
+        client, path = self._make_client(auth_enabled=True, auth_password="secret")
         try:
             resp = client.get("/api/search", params={"query": "test"})
             assert resp.status_code == 401
@@ -176,9 +151,7 @@ class TestAuthEnabledTakesPrecedence:
 
     def test_auth_enabled_blocks_mcp_without_creds(self):
         """/mcp requires auth when auth_enabled=True."""
-        client, path = self._make_client(
-            auth_enabled=True, auth_password="secret"
-        )
+        client, path = self._make_client(auth_enabled=True, auth_password="secret")
         try:
             resp = client.get("/mcp")
             assert resp.status_code == 401
@@ -187,9 +160,7 @@ class TestAuthEnabledTakesPrecedence:
 
     def test_auth_enabled_allows_health(self):
         """/health is always exempt."""
-        client, path = self._make_client(
-            auth_enabled=True, auth_password="secret"
-        )
+        client, path = self._make_client(auth_enabled=True, auth_password="secret")
         try:
             resp = client.get("/health")
             assert resp.status_code == 200
@@ -198,9 +169,7 @@ class TestAuthEnabledTakesPrecedence:
 
     def test_auth_enabled_allows_ready(self):
         """/ready is always exempt."""
-        client, path = self._make_client(
-            auth_enabled=True, auth_password="secret"
-        )
+        client, path = self._make_client(auth_enabled=True, auth_password="secret")
         try:
             resp = client.get("/ready")
             assert resp.status_code == 200
@@ -209,9 +178,7 @@ class TestAuthEnabledTakesPrecedence:
 
     def test_auth_enabled_allows_startup_diagnostics(self):
         """/diagnostics/startup is always exempt."""
-        client, path = self._make_client(
-            auth_enabled=True, auth_password="secret"
-        )
+        client, path = self._make_client(auth_enabled=True, auth_password="secret")
         try:
             resp = client.get("/diagnostics/startup")
             assert resp.status_code == 200
@@ -240,9 +207,7 @@ class TestAuthEnabledTakesPrecedence:
         (invalid format) before starting the infinite SSE generator, which
         proves the request reached the handler rather than being 401'd.
         """
-        client, path = self._make_client(
-            auth_enabled=True, auth_password="secret"
-        )
+        client, path = self._make_client(auth_enabled=True, auth_password="secret")
         try:
             resp = client.get("/sessions/not-valid/stream")
             assert resp.status_code == 400
@@ -254,11 +219,11 @@ class TestAuthEnabledTakesPrecedence:
         exempt (design §3.9, alternative A). An invalid id returns 400 — proving
         the request reached the handler rather than being 401'd by the middleware
         (and avoiding the infinite SSE generator a valid id would start)."""
-        client, path = self._make_client(
-            auth_enabled=True, auth_password="secret"
-        )
+        client, path = self._make_client(auth_enabled=True, auth_password="secret")
         try:
-            resp = client.get("/api/sessions/not-valid/stream", params={"client_id": "c1"})
+            resp = client.get(
+                "/api/sessions/not-valid/stream", params={"client_id": "c1"}
+            )
             assert resp.status_code == 400
         finally:
             os.unlink(path)
@@ -266,9 +231,7 @@ class TestAuthEnabledTakesPrecedence:
     def test_shared_session_ops_still_guarded(self):
         """Only the stream is bypassed — the fetch-reachable ops endpoint (which
         can send an Authorization header) still requires auth."""
-        client, path = self._make_client(
-            auth_enabled=True, auth_password="secret"
-        )
+        client, path = self._make_client(auth_enabled=True, auth_password="secret")
         try:
             resp = client.post(
                 "/api/sessions/1234-5678/ops",
@@ -318,9 +281,7 @@ class TestLogoutRoutes:
         Returns 401 (not 403) to clear browser's cached Basic Auth credentials."""
         with patch.dict(os.environ, {}, clear=False):
             os.environ.pop("LOGOUT_REDIRECT_URL", None)
-            client, path = self._make_client(
-                auth_enabled=True, auth_password="secret"
-            )
+            client, path = self._make_client(auth_enabled=True, auth_password="secret")
             try:
                 resp = client.get("/auth/logout", follow_redirects=False)
                 assert resp.status_code == 401
@@ -331,9 +292,7 @@ class TestLogoutRoutes:
 
     def test_logged_out_page_exempt_from_auth_enabled(self):
         """/logged-out must render without credentials when auth_enabled."""
-        client, path = self._make_client(
-            auth_enabled=True, auth_password="secret"
-        )
+        client, path = self._make_client(auth_enabled=True, auth_password="secret")
         try:
             resp = client.get("/logged-out")
             assert resp.status_code == 200
@@ -364,10 +323,7 @@ class TestLogoutRoutes:
             try:
                 resp = client.get("/auth/logout", follow_redirects=False)
                 assert resp.status_code == 302
-                assert (
-                    resp.headers["location"]
-                    == "/_gcp_iap/clear_login_cookie"
-                )
+                assert resp.headers["location"] == "/_gcp_iap/clear_login_cookie"
             finally:
                 os.unlink(path)
 
@@ -381,10 +337,7 @@ class TestLogoutRoutes:
             try:
                 resp = client.get("/auth/logout", follow_redirects=False)
                 assert resp.status_code == 302
-                assert (
-                    resp.headers["location"]
-                    == "https://example.com/sign-out"
-                )
+                assert resp.headers["location"] == "https://example.com/sign-out"
             finally:
                 os.unlink(path)
 
@@ -400,10 +353,7 @@ class TestLogoutRoutes:
             try:
                 resp = client.get("/auth/logout", follow_redirects=False)
                 assert resp.status_code == 302
-                assert (
-                    resp.headers["location"]
-                    == "https://custom.example.com/bye"
-                )
+                assert resp.headers["location"] == "https://custom.example.com/bye"
             finally:
                 os.unlink(path)
 
@@ -413,15 +363,10 @@ class TestLogoutRoutes:
             os.environ,
             {"LOGOUT_REDIRECT_URL": "https://custom.example.com/bye"},
         ):
-            client, path = self._make_client(
-                auth_enabled=True, auth_password="secret"
-            )
+            client, path = self._make_client(auth_enabled=True, auth_password="secret")
             try:
                 resp = client.get("/auth/logout", follow_redirects=False)
                 assert resp.status_code == 302
-                assert (
-                    resp.headers["location"]
-                    == "https://custom.example.com/bye"
-                )
+                assert resp.headers["location"] == "https://custom.example.com/bye"
             finally:
                 os.unlink(path)

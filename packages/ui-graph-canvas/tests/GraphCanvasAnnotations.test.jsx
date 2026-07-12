@@ -31,7 +31,9 @@ vi.mock('reactflow', () => {
       setCenter: vi.fn(),
       getViewport: () => ({ x: 0, y: 0, zoom: 1 }),
     }),
-    useOnSelectionChange: ({ onChange }) => { hoisted.selectionOnChange = onChange; },
+    useOnSelectionChange: ({ onChange }) => {
+      hoisted.selectionOnChange = onChange;
+    },
     Background: () => <div data-testid="background" />,
     Controls: () => <div data-testid="controls" />,
     MiniMap: () => <div data-testid="minimap" />,
@@ -103,16 +105,38 @@ describe('GraphCanvas annotation creation', () => {
     fireEvent.click(screen.getByRole('button', { name: /add arrow/i }));
     const arrow = findCreatedNode('arrow');
     expect(arrow).toBeTruthy();
-    expect(arrow.data).toEqual({ dx: 160, dy: 0, color: undefined, startArrow: false, endArrow: true });
+    expect(arrow.data).toEqual({
+      dx: 160,
+      dy: 0,
+      color: undefined,
+      startArrow: false,
+      endArrow: true,
+    });
     expect(arrow.position).toEqual({ x: 10, y: 20 });
   });
 
   it('includes annotations in the save-view snapshot', () => {
     const onSaveView = vi.fn();
     const overlayNodes = [
-      { id: 'note-1', type: 'note', position: { x: 5, y: 6 }, data: { text: 'hi', color: '#FEF08A' }, style: { width: 200, height: 140 } },
-      { id: 'label-1', type: 'label', position: { x: 7, y: 8 }, data: { text: 'L', color: '#fff' } },
-      { id: 'arrow-1', type: 'arrow', position: { x: 1, y: 2 }, data: { dx: 100, dy: 40, color: '#fff' } },
+      {
+        id: 'note-1',
+        type: 'note',
+        position: { x: 5, y: 6 },
+        data: { text: 'hi', color: '#FEF08A' },
+        style: { width: 200, height: 140 },
+      },
+      {
+        id: 'label-1',
+        type: 'label',
+        position: { x: 7, y: 8 },
+        data: { text: 'L', color: '#fff' },
+      },
+      {
+        id: 'arrow-1',
+        type: 'arrow',
+        position: { x: 1, y: 2 },
+        data: { dx: 100, dy: 40, color: '#fff' },
+      },
     ];
     // useNodesState returns the initial nodes array unchanged in this mock, so
     // seed it via a custom implementation for this test.
@@ -139,7 +163,13 @@ describe('GraphCanvas annotation creation', () => {
         edges={[]}
         onAnnotationsRestored={onAnnotationsRestored}
         annotationsToRestore={[
-          { id: 'note-9', kind: 'note', position: { x: 2, y: 3 }, text: 'restored', size: { w: 200, h: 140 } },
+          {
+            id: 'note-9',
+            kind: 'note',
+            position: { x: 2, y: 3 },
+            text: 'restored',
+            size: { w: 200, h: 140 },
+          },
         ]}
       />
     );
@@ -154,7 +184,12 @@ describe('GraphCanvas annotation creation', () => {
     const onHideMultiple = vi.fn();
     const onAnnotationChange = vi.fn();
     render(
-      <GraphCanvas nodes={[]} edges={[]} onHideMultiple={onHideMultiple} onAnnotationChange={onAnnotationChange} />
+      <GraphCanvas
+        nodes={[]}
+        edges={[]}
+        onHideMultiple={onHideMultiple}
+        onAnnotationChange={onAnnotationChange}
+      />
     );
     act(() => {
       hoisted.selectionOnChange({ nodes: [{ id: 'note-1', type: 'note' }], edges: [] });
@@ -166,7 +201,9 @@ describe('GraphCanvas annotation creation', () => {
     const removed = hoisted.setNodes.mock.calls.some((call) => {
       if (typeof call[0] !== 'function') return false;
       try {
-        return call[0]([{ id: 'note-1', type: 'note' }, { id: 'keep' }]).every((n) => n.id !== 'note-1');
+        return call[0]([{ id: 'note-1', type: 'note' }, { id: 'keep' }]).every(
+          (n) => n.id !== 'note-1'
+        );
       } catch {
         return false;
       }

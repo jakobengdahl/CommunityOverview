@@ -33,7 +33,9 @@ def get_tenant_config_dir() -> str:
     return normalize_config_path(raw_value)
 
 
-def _resolve_default_path(default_relative_path: str, *, allow_cwd_fallback: bool) -> str:
+def _resolve_default_path(
+    default_relative_path: str, *, allow_cwd_fallback: bool
+) -> str:
     default_path = get_project_root() / default_relative_path
     if default_path.exists() or not allow_cwd_fallback:
         return str(default_path)
@@ -66,7 +68,9 @@ def resolve_config_path(
 
     if tenant_config_dir:
         return {
-            "path": normalize_config_path(str(Path(tenant_config_dir) / tenant_filename)),
+            "path": normalize_config_path(
+                str(Path(tenant_config_dir) / tenant_filename)
+            ),
             "source": "tenant_config_dir",
             "tenant_config_dir": tenant_config_dir,
         }

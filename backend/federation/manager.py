@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import json
 import threading
 import time
 from dataclasses import dataclass, field
@@ -30,7 +29,16 @@ class FederatedGraphCache:
 class FederationManager:
     """Maintains cached read-models for configured federated graphs."""
 
-    def __init__(self, config: FederationFileConfig, on_node_event: Optional[Callable[[str, Optional[Node], Optional[Node]], None]] = None, on_edge_event: Optional[Callable[[str, Optional[Edge], Optional[Edge]], None]] = None):
+    def __init__(
+        self,
+        config: FederationFileConfig,
+        on_node_event: Optional[
+            Callable[[str, Optional[Node], Optional[Node]], None]
+        ] = None,
+        on_edge_event: Optional[
+            Callable[[str, Optional[Edge], Optional[Edge]], None]
+        ] = None,
+    ):
         self._config = config
         self._on_node_event = on_node_event
         self._on_edge_event = on_edge_event
@@ -60,7 +68,8 @@ class FederationManager:
             return
 
         scheduled_graphs = [
-            graph for graph in self._config.federation.graphs
+            graph
+            for graph in self._config.federation.graphs
             if graph.enabled and graph.sync.mode == "scheduled"
         ]
         if not scheduled_graphs:
@@ -91,7 +100,8 @@ class FederationManager:
             return
 
         graphs_to_sync = [
-            graph for graph in self._config.federation.graphs
+            graph
+            for graph in self._config.federation.graphs
             if graph.enabled and graph.sync.on_startup
         ]
 
@@ -100,7 +110,9 @@ class FederationManager:
 
         async def run_sync():
             async with httpx.AsyncClient() as client:
-                coros = [self.sync_graph(graph.graph_id, client) for graph in graphs_to_sync]
+                coros = [
+                    self.sync_graph(graph.graph_id, client) for graph in graphs_to_sync
+                ]
                 await asyncio.gather(*coros)
 
         try:
@@ -109,7 +121,9 @@ class FederationManager:
         except RuntimeError:
             asyncio.run(run_sync())
 
-    async def sync_graph(self, graph_id: str, client: Optional[httpx.AsyncClient] = None) -> Dict[str, Any]:
+    async def sync_graph(
+        self, graph_id: str, client: Optional[httpx.AsyncClient] = None
+    ) -> Dict[str, Any]:
         graph = self._get_graph_config(graph_id)
         if graph is None:
             return {"success": False, "error": f"Unknown graph_id: {graph_id}"}
@@ -119,7 +133,9 @@ class FederationManager:
 
         graph_json_url = graph.endpoints.graph_json_url
         if not graph_json_url:
-            self._set_degraded(graph_id, "graph_json_url is missing; only MCP/GUI configured")
+            self._set_degraded(
+                graph_id, "graph_json_url is missing; only MCP/GUI configured"
+            )
             return {"success": False, "error": "No graph_json_url configured"}
 
         timeout_s = max(0.1, self._config.federation.default_timeout_ms / 1000.0)
@@ -163,7 +179,9 @@ class FederationManager:
             return {"success": False, "graph_id": graph.graph_id, "error": str(exc)}
 
     async def sync_all(self) -> Dict[str, Any]:
-        enabled_graphs = [graph.graph_id for graph in self._config.federation.graphs if graph.enabled]
+        enabled_graphs = [
+            graph.graph_id for graph in self._config.federation.graphs if graph.enabled
+        ]
         if not enabled_graphs:
             return {"success": True, "results": []}
 
@@ -172,7 +190,9 @@ class FederationManager:
             results = await asyncio.gather(*coros)
 
         return {
-            "success": all(r.get("success", False) for r in results) if results else True,
+            "success": all(r.get("success", False) for r in results)
+            if results
+            else True,
             "results": list(results),
         }
 
@@ -245,7 +265,10 @@ class FederationManager:
                 score += 400
 
         # Secondary — description / summary matching (lowest)
-        if query_lower in (node.description or "").lower() or query_lower in (node.summary or "").lower():
+        if (
+            query_lower in (node.description or "").lower()
+            or query_lower in (node.summary or "").lower()
+        ):
             score += 200
 
         return score
@@ -305,14 +328,16 @@ class FederationManager:
         if matched_node_ids:
             for cache in caches:
                 for edge in cache.edges.values():
-                    if edge.source in matched_node_ids or edge.target in matched_node_ids:
+                    if (
+                        edge.source in matched_node_ids
+                        or edge.target in matched_node_ids
+                    ):
                         matched_edges.append(edge)
 
         return {
             "nodes": matched_nodes,
             "edges": matched_edges,
         }
-
 
     def get_cached_node(self, federated_node_id: str) -> Optional[Node]:
         """Fetch a federated cached node by its synthetic ID."""
@@ -323,8 +348,9 @@ class FederationManager:
                     return node
         return None
 
-
-    def get_graph_config_for_node(self, federated_node_id: str) -> Optional[FederationGraphConfig]:
+    def get_graph_config_for_node(
+        self, federated_node_id: str
+    ) -> Optional[FederationGraphConfig]:
         """Resolve source graph config for a cached federated node ID."""
         node = self.get_cached_node(federated_node_id)
         if node is None:
@@ -333,7 +359,6 @@ class FederationManager:
         if not origin_graph_id:
             return None
         return self._get_graph_config(origin_graph_id)
-
 
     def get_max_selectable_depth(self) -> int:
         """Return effective max depth users may select for federated search."""
@@ -350,7 +375,6 @@ class FederationManager:
             max_depth = min(max_depth, max(per_graph_limits))
 
         return max(1, max_depth)
-
 
     def get_selectable_depth_levels(self) -> List[int]:
         """Return effective selectable depth levels for UI/runtime controls."""
@@ -376,7 +400,9 @@ class FederationManager:
         with self._lock:
             return {
                 "enabled": self.enabled,
-                "scheduler_running": bool(self._scheduler_thread and self._scheduler_thread.is_alive()),
+                "scheduler_running": bool(
+                    self._scheduler_thread and self._scheduler_thread.is_alive()
+                ),
                 "graphs": [
                     {
                         "graph_id": entry.graph_id,
@@ -410,20 +436,25 @@ class FederationManager:
 
                 next_at = self._next_sync_at.get(graph.graph_id)
                 if next_at is None:
-                    self._next_sync_at[graph.graph_id] = now + graph.sync.interval_seconds
+                    self._next_sync_at[graph.graph_id] = (
+                        now + graph.sync.interval_seconds
+                    )
                     continue
 
                 if now >= next_at:
                     graphs_to_sync.append(graph.graph_id)
-                    self._next_sync_at[graph.graph_id] = now + graph.sync.interval_seconds
+                    self._next_sync_at[graph.graph_id] = (
+                        now + graph.sync.interval_seconds
+                    )
 
             if graphs_to_sync:
                 loop.run_until_complete(_run_sync(graphs_to_sync))
 
         loop.close()
 
-
-    def _emit_node_events(self, previous_nodes: Dict[str, Node], current_nodes: Dict[str, Node]) -> None:
+    def _emit_node_events(
+        self, previous_nodes: Dict[str, Node], current_nodes: Dict[str, Node]
+    ) -> None:
         if not self._on_node_event:
             return
 
@@ -442,8 +473,9 @@ class FederationManager:
             if old.to_dict() != new.to_dict():
                 self._on_node_event("update", old, new)
 
-
-    def _emit_edge_events(self, previous_edges: Dict[str, Edge], current_edges: Dict[str, Edge]) -> None:
+    def _emit_edge_events(
+        self, previous_edges: Dict[str, Edge], current_edges: Dict[str, Edge]
+    ) -> None:
         if not self._on_edge_event:
             return
 
@@ -492,15 +524,17 @@ class FederationManager:
             id_mapping[str(origin_node_id)] = federated_node_id
 
             metadata = dict(source_node.get("metadata") or {})
-            metadata.update({
-                "origin_graph_id": graph.graph_id,
-                "origin_graph_name": graph.display_name,
-                "origin_node_id": origin_node_id,
-                "federation_distance": 1,
-                "federation_path": [graph.graph_id],
-                "sync_state": "fresh",
-                "is_federated": True,
-            })
+            metadata.update(
+                {
+                    "origin_graph_id": graph.graph_id,
+                    "origin_graph_name": graph.display_name,
+                    "origin_node_id": origin_node_id,
+                    "federation_distance": 1,
+                    "federation_path": [graph.graph_id],
+                    "sync_state": "fresh",
+                    "is_federated": True,
+                }
+            )
 
             node_payload = {
                 "id": federated_node_id,
@@ -522,7 +556,7 @@ class FederationManager:
             if not source or not target:
                 continue
 
-            edge_id = f"federated::{graph.graph_id}::{source_edge.get('id', f'{source}->{target}') }"
+            edge_id = f"federated::{graph.graph_id}::{source_edge.get('id', f'{source}->{target}')}"
             edge_payload = {
                 "id": edge_id,
                 "source": source,

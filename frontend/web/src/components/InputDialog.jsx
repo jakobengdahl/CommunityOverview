@@ -45,11 +45,7 @@ function InputDialog({
 
   return (
     <div className="input-dialog-overlay" onClick={onCancel}>
-      <div
-        className="input-dialog"
-        onClick={(e) => e.stopPropagation()}
-        onKeyDown={handleKeyDown}
-      >
+      <div className="input-dialog" onClick={(e) => e.stopPropagation()} onKeyDown={handleKeyDown}>
         <div className="input-dialog-header">
           <h3>{title}</h3>
         </div>
@@ -68,11 +64,7 @@ function InputDialog({
         </div>
 
         <div className="input-dialog-actions">
-          <button
-            className="input-dialog-button cancel"
-            onClick={onCancel}
-            disabled={isLoading}
-          >
+          <button className="input-dialog-button cancel" onClick={onCancel} disabled={isLoading}>
             {cancelText}
           </button>
           <button

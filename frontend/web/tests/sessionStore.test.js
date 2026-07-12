@@ -33,7 +33,7 @@ describe('sessionStore (recents index)', () => {
     sessionStore.touchSession('2222-2222');
 
     const sessions = sessionStore.listSessions();
-    expect(sessions.map(s => s.id)).toEqual(['2222-2222', '1111-1111']);
+    expect(sessions.map((s) => s.id)).toEqual(['2222-2222', '1111-1111']);
   });
 
   it('renames only an existing entry and keeps it on later touches', () => {
@@ -76,13 +76,13 @@ describe('sessionStore (recents index)', () => {
       // Pin a strictly increasing timestamp so eviction order is deterministic:
       // the just-touched entry stays newest until the next iteration edits it.
       const index = JSON.parse(window.localStorage.getItem('graph_sessions_index'));
-      index.find(e => e.id === id).updatedAt = 1000 + i;
+      index.find((e) => e.id === id).updatedAt = 1000 + i;
       window.localStorage.setItem('graph_sessions_index', JSON.stringify(index));
     }
 
     const sessions = sessionStore.listSessions();
     expect(sessions).toHaveLength(50);
-    expect(sessions.some(s => s.id === '0000-0000')).toBe(false);
-    expect(sessions.some(s => s.id === '0050-0000')).toBe(true);
+    expect(sessions.some((s) => s.id === '0000-0000')).toBe(false);
+    expect(sessions.some((s) => s.id === '0050-0000')).toBe(true);
   });
 });

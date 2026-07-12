@@ -26,14 +26,24 @@ describe('CollectKioskView form flow', () => {
         action: 'present_form',
         form: {
           title: 'Q1',
-          fields: [{ id: 'role', label: 'Role', type: 'radio', options: ['Manager', 'Analyst'], required: true }],
+          fields: [
+            {
+              id: 'role',
+              label: 'Role',
+              type: 'radio',
+              options: ['Manager', 'Analyst'],
+              required: true,
+            },
+          ],
         },
       },
     };
     // First call: kickstart returns the form. Second call: submission acknowledgement.
-    api.sendChatMessage
-      .mockResolvedValueOnce(formResponse)
-      .mockResolvedValueOnce({ content: 'Saved, thank you.', toolUsed: 'save_collection_response', toolResult: null });
+    api.sendChatMessage.mockResolvedValueOnce(formResponse).mockResolvedValueOnce({
+      content: 'Saved, thank you.',
+      toolUsed: 'save_collection_response',
+      toolResult: null,
+    });
 
     render(<CollectKioskView shortName="survey" />);
 

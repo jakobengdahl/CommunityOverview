@@ -27,7 +27,9 @@
   color: #ddd;
   font-size: 0.8rem;
   cursor: pointer;
-  transition: background 0.15s, border-color 0.15s;
+  transition:
+    background 0.15s,
+    border-color 0.15s;
 }
 
 .entity-history-load-more:hover:not(:disabled) {

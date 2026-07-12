@@ -61,8 +61,14 @@ def test_durable_write_for_each_mutation_type(storage):
     # node.create (x2) via add_nodes
     _seed_two_nodes(storage)
     # edge.create
-    storage.add_edge(Edge(id="edge-1", source="actor-1", target="actor-2",
-                          type=RelationshipType.RELATES_TO))
+    storage.add_edge(
+        Edge(
+            id="edge-1",
+            source="actor-1",
+            target="actor-2",
+            type=RelationshipType.RELATES_TO,
+        )
+    )
     # node.update
     storage.update_node("actor-1", {"description": "updated"})
     # edge.update
@@ -105,8 +111,14 @@ def test_node_history_filtering(storage):
 
 def test_edge_history_filtering(storage):
     _seed_two_nodes(storage)
-    storage.add_edge(Edge(id="edge-1", source="actor-1", target="actor-2",
-                          type=RelationshipType.RELATES_TO))
+    storage.add_edge(
+        Edge(
+            id="edge-1",
+            source="actor-1",
+            target="actor-2",
+            type=RelationshipType.RELATES_TO,
+        )
+    )
     storage.update_edge("edge-1", {"label": "linked"})
 
     edge_hist = storage.get_edge_history("edge-1")
@@ -144,7 +156,9 @@ def test_origin_and_attribution_persisted(storage):
             actor=EventActorAttribution(actor_id="user-1", actor_type="user"),
         ),
     )
-    storage.add_nodes([Node(id="actor-1", type=NodeType.ACTOR, name="A")], [], event_context=ctx)
+    storage.add_nodes(
+        [Node(id="actor-1", type=NodeType.ACTOR, name="A")], [], event_context=ctx
+    )
 
     entry = storage.get_node_history("actor-1")[0]
     assert entry["event_origin"] == "web-ui"
@@ -170,7 +184,9 @@ def test_before_after_patch_captured(storage):
 
 def test_ai_action_detected_for_agent_origin(storage):
     ctx = EventContext(event_origin="agent:collector-7")
-    storage.add_nodes([Node(id="actor-1", type=NodeType.ACTOR, name="A")], [], event_context=ctx)
+    storage.add_nodes(
+        [Node(id="actor-1", type=NodeType.ACTOR, name="A")], [], event_context=ctx
+    )
 
     entry = storage.get_node_history("actor-1")[0]
     assert entry["is_ai_action"] is True
@@ -182,10 +198,13 @@ def test_derive_is_ai_action_rules():
     assert derive_is_ai_action("web-ui") is False
     assert derive_is_ai_action("system") is False
     assert derive_is_ai_action(None) is False
-    assert derive_is_ai_action(
-        "web-ui",
-        EventAttribution(actor=EventActorAttribution(actor_type="agent")),
-    ) is True
+    assert (
+        derive_is_ai_action(
+            "web-ui",
+            EventAttribution(actor=EventActorAttribution(actor_type="agent")),
+        )
+        is True
+    )
     assert derive_is_ai_action("web-ui", {"actor": {"actor_type": "ai"}}) is True
 
 
@@ -231,7 +250,11 @@ def test_max_events_cap_keeps_newest_and_paginates():
 
             recent = st.get_recent_history(limit=100)
             assert [e["entity_id"] for e in recent] == [
-                "n-11", "n-10", "n-9", "n-8", "n-7",
+                "n-11",
+                "n-10",
+                "n-9",
+                "n-8",
+                "n-7",
             ]
 
             # Pagination still works over the trimmed, newest-first view.
@@ -253,12 +276,20 @@ def test_compaction_preserves_records_appended_after_trim():
             for i in range(5):
                 st.add_nodes([Node(id=f"n-{i}", type=NodeType.ACTOR, name=f"N{i}")], [])
             # After the first burst only the newest 3 remain.
-            assert [e["entity_id"] for e in st.get_recent_history()] == ["n-4", "n-3", "n-2"]
+            assert [e["entity_id"] for e in st.get_recent_history()] == [
+                "n-4",
+                "n-3",
+                "n-2",
+            ]
 
             # Records appended after the trim are not lost; the window slides.
             for i in range(5, 8):
                 st.add_nodes([Node(id=f"n-{i}", type=NodeType.ACTOR, name=f"N{i}")], [])
-            assert [e["entity_id"] for e in st.get_recent_history()] == ["n-7", "n-6", "n-5"]
+            assert [e["entity_id"] for e in st.get_recent_history()] == [
+                "n-7",
+                "n-6",
+                "n-5",
+            ]
         finally:
             st.flush()
 
@@ -300,10 +331,19 @@ def test_unparseable_or_missing_timestamp_is_retained():
             os.path.join(tmpdir, "graph.history.ndjson"),
             max_age_days=1,
         )
-        old = (datetime.now(timezone.utc) - timedelta(days=5)).isoformat().replace("+00:00", "Z")
+        old = (
+            (datetime.now(timezone.utc) - timedelta(days=5))
+            .isoformat()
+            .replace("+00:00", "Z")
+        )
         store.append_record(_record("bad-ts", "not-a-date"))
         store.append_record(
-            {"event_id": "e", "entity_id": "no-ts", "entity_kind": "node", "event_type": "node.create"}
+            {
+                "event_id": "e",
+                "entity_id": "no-ts",
+                "entity_kind": "node",
+                "event_type": "node.create",
+            }
         )
         store.append_record(_record("old", old))
 

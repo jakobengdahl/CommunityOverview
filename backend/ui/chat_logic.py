@@ -1,4 +1,4 @@
-from typing import List, Dict, Any, Callable
+from typing import List, Dict, Callable
 import os
 import json
 import logging
@@ -36,10 +36,16 @@ def _build_system_prompt() -> str:
         desc = type_config.get("description", "")
         # Map color to name for readability
         color_names = {
-            "#3B82F6": "blue", "#A855F7": "purple", "#10B981": "green",
-            "#F97316": "orange", "#FBBF24": "yellow", "#EF4444": "red",
-            "#14B8A6": "teal", "#6366F1": "indigo", "#D946EF": "fuchsia",
-            "#6B7280": "gray"
+            "#3B82F6": "blue",
+            "#A855F7": "purple",
+            "#10B981": "green",
+            "#F97316": "orange",
+            "#FBBF24": "yellow",
+            "#EF4444": "red",
+            "#14B8A6": "teal",
+            "#6366F1": "indigo",
+            "#D946EF": "fuchsia",
+            "#6B7280": "gray",
         }
         color_name = color_names.get(color, "")
         node_types_section += f"- {type_name} ({color_name}): {desc}\n"
@@ -67,7 +73,7 @@ def _build_system_prompt() -> str:
         node_types_section=node_types_section,
         relationship_types_section=rel_types_section,
         language_policy_section=language_policy_section,
-        prompt_suffix=prompt_suffix
+        prompt_suffix=prompt_suffix,
     )
 
 
@@ -422,6 +428,7 @@ User: "Lagg till ett nytt projekt om cybersakerhet" (CREATE new node)
 Always be helpful, transparent, and data-driven in your responses while minimizing API calls.
 """
 
+
 class ChatProcessor:
     def __init__(self, tools_map: Dict[str, Callable]):
         # Auto-detect provider based on available API keys
@@ -444,7 +451,7 @@ class ChatProcessor:
 
         # Build system prompt dynamically from configuration
         self.system_prompt = _build_system_prompt()
-        logger.info(f"Loaded system prompt from schema configuration")
+        logger.info("Loaded system prompt from schema configuration")
 
     def _detect_provider(self) -> str:
         """
@@ -463,7 +470,9 @@ class ChatProcessor:
                 logger.info(f"Provider explicitly set via LLM_PROVIDER: {provider}")
                 return provider
             else:
-                logger.warning(f"Invalid LLM_PROVIDER value '{explicit_provider}', falling back to auto-detection")
+                logger.warning(
+                    f"Invalid LLM_PROVIDER value '{explicit_provider}', falling back to auto-detection"
+                )
 
         # Auto-detect based on available API keys
         has_openai = bool(os.getenv("OPENAI_API_KEY"))
@@ -471,7 +480,9 @@ class ChatProcessor:
 
         if has_openai and has_claude:
             # Both keys available - prefer OpenAI (more cost-effective)
-            logger.info("Both API keys found, auto-selecting OpenAI (more cost-effective)")
+            logger.info(
+                "Both API keys found, auto-selecting OpenAI (more cost-effective)"
+            )
             return "openai"
         elif has_openai:
             logger.info("OPENAI_API_KEY found, auto-selecting OpenAI provider")
@@ -483,7 +494,6 @@ class ChatProcessor:
             # No keys found, default to claude
             logger.info("No API keys found in environment, defaulting to Claude")
             return "claude"
-
 
     def _generate_tool_definitions(self) -> List[Dict]:
         """
@@ -500,26 +510,26 @@ class ChatProcessor:
                     "properties": {
                         "query": {
                             "type": "string",
-                            "description": "Search text to find matching nodes"
+                            "description": "Search text to find matching nodes",
                         },
                         "node_types": {
                             "type": "array",
                             "items": {"type": "string"},
-                            "description": "Optional: Filter by node types (Actor, Initiative, Legislation, Goal, Event, etc.)"
+                            "description": "Optional: Filter by node types (Actor, Initiative, Legislation, Goal, Event, etc.)",
                         },
                         "limit": {
                             "type": "integer",
                             "description": "Max number of results",
-                            "default": 50
+                            "default": 50,
                         },
                         "action": {
                             "type": "string",
                             "enum": ["add_to_visualization", "replace_visualization"],
-                            "description": "Optional: 'add_to_visualization' to ADD results to current view (for 'lagg till X'), or 'replace_visualization' (default) to REPLACE current view (for 'visa X')"
-                        }
+                            "description": "Optional: 'add_to_visualization' to ADD results to current view (for 'lagg till X'), or 'replace_visualization' (default) to REPLACE current view (for 'visa X')",
+                        },
                     },
-                    "required": ["query"]
-                }
+                    "required": ["query"],
+                },
             },
             {
                 "name": "get_related_nodes",
@@ -529,21 +539,21 @@ class ChatProcessor:
                     "properties": {
                         "node_id": {
                             "type": "string",
-                            "description": "ID of the starting node"
+                            "description": "ID of the starting node",
                         },
                         "depth": {
                             "type": "number",
                             "description": "How many hops from the starting node (default 1)",
-                            "default": 1
+                            "default": 1,
                         },
-                         "relationship_types": {
+                        "relationship_types": {
                             "type": "array",
                             "items": {"type": "string"},
-                            "description": "Optional: Filter by relationship types"
-                        }
+                            "description": "Optional: Filter by relationship types",
+                        },
                     },
-                    "required": ["node_id"]
-                }
+                    "required": ["node_id"],
+                },
             },
             {
                 "name": "find_similar_nodes",
@@ -553,24 +563,21 @@ class ChatProcessor:
                     "properties": {
                         "name": {
                             "type": "string",
-                            "description": "The name to search for similar nodes"
+                            "description": "The name to search for similar nodes",
                         },
                         "node_type": {
                             "type": "string",
-                            "description": "Optional: Node type to filter on (Actor, Initiative, etc.)"
+                            "description": "Optional: Node type to filter on (Actor, Initiative, etc.)",
                         },
                         "threshold": {
                             "type": "number",
                             "description": "Similarity threshold 0.0-1.0 (default 0.7)",
-                            "default": 0.7
+                            "default": 0.7,
                         },
-                        "limit": {
-                            "type": "integer",
-                            "default": 5
-                        }
+                        "limit": {"type": "integer", "default": 5},
                     },
-                    "required": ["name"]
-                }
+                    "required": ["name"],
+                },
             },
             {
                 "name": "find_similar_nodes_batch",
@@ -581,25 +588,25 @@ class ChatProcessor:
                         "names": {
                             "type": "array",
                             "items": {"type": "string"},
-                            "description": "List of names to search for similar nodes"
+                            "description": "List of names to search for similar nodes",
                         },
                         "node_type": {
                             "type": "string",
-                            "description": "Optional: Node type to filter on (Actor, Initiative, etc.)"
+                            "description": "Optional: Node type to filter on (Actor, Initiative, etc.)",
                         },
                         "threshold": {
                             "type": "number",
                             "description": "Similarity threshold 0.0-1.0 (default 0.7)",
-                            "default": 0.7
+                            "default": 0.7,
                         },
                         "limit": {
                             "type": "integer",
                             "description": "Max results per name (default 5)",
-                            "default": 5
-                        }
+                            "default": 5,
+                        },
                     },
-                    "required": ["names"]
-                }
+                    "required": ["names"],
+                },
             },
             {
                 "name": "add_nodes",
@@ -612,29 +619,58 @@ class ChatProcessor:
                             "items": {
                                 "type": "object",
                                 "properties": {
-                                    "type": {"type": "string", "description": "Node type (required)"},
-                                    "name": {"type": "string", "description": "Node name (required, 1-200 chars)"},
-                                    "description": {"type": "string", "description": "Description (optional, max 2000 chars)"},
-                                    "summary": {"type": "string", "description": "Short summary for visualization (optional, max 300 chars)"},
-                                    "tags": {"type": "array", "items": {"type": "string"}, "description": "Tags for categorization"},
-                                    "subtypes": {"type": "array", "items": {"type": "string"}, "description": "Sub-classifications within the node type (optional, use existing subtypes when possible)"}
-                                }
-                            }
+                                    "type": {
+                                        "type": "string",
+                                        "description": "Node type (required)",
+                                    },
+                                    "name": {
+                                        "type": "string",
+                                        "description": "Node name (required, 1-200 chars)",
+                                    },
+                                    "description": {
+                                        "type": "string",
+                                        "description": "Description (optional, max 2000 chars)",
+                                    },
+                                    "summary": {
+                                        "type": "string",
+                                        "description": "Short summary for visualization (optional, max 300 chars)",
+                                    },
+                                    "tags": {
+                                        "type": "array",
+                                        "items": {"type": "string"},
+                                        "description": "Tags for categorization",
+                                    },
+                                    "subtypes": {
+                                        "type": "array",
+                                        "items": {"type": "string"},
+                                        "description": "Sub-classifications within the node type (optional, use existing subtypes when possible)",
+                                    },
+                                },
+                            },
                         },
                         "edges": {
                             "type": "array",
                             "items": {
                                 "type": "object",
                                 "properties": {
-                                    "source": {"type": "string", "description": "Source node ID or name"},
-                                    "target": {"type": "string", "description": "Target node ID or name"},
-                                    "type": {"type": "string", "description": "Relationship type (optional, defaults to RELATES_TO)"}
-                                }
-                            }
-                        }
+                                    "source": {
+                                        "type": "string",
+                                        "description": "Source node ID or name",
+                                    },
+                                    "target": {
+                                        "type": "string",
+                                        "description": "Target node ID or name",
+                                    },
+                                    "type": {
+                                        "type": "string",
+                                        "description": "Relationship type (optional, defaults to RELATES_TO)",
+                                    },
+                                },
+                            },
+                        },
                     },
-                    "required": ["nodes", "edges"]
-                }
+                    "required": ["nodes", "edges"],
+                },
             },
             {
                 "name": "propose_new_node",
@@ -645,19 +681,16 @@ class ChatProcessor:
                         "node": {
                             "type": "object",
                             "description": "The node to propose",
-                            "additionalProperties": True
+                            "additionalProperties": True,
                         },
                         "similar_nodes": {
                             "type": "array",
                             "description": "List of similar nodes found",
-                            "items": {
-                                "type": "object",
-                                "additionalProperties": True
-                            }
-                        }
+                            "items": {"type": "object", "additionalProperties": True},
+                        },
                     },
-                    "required": ["node", "similar_nodes"]
-                }
+                    "required": ["node", "similar_nodes"],
+                },
             },
             {
                 "name": "update_node",
@@ -667,16 +700,16 @@ class ChatProcessor:
                     "properties": {
                         "node_id": {
                             "type": "string",
-                            "description": "ID of the node to update"
+                            "description": "ID of the node to update",
                         },
                         "updates": {
                             "type": "object",
                             "description": "Fields to update",
-                            "additionalProperties": True
-                        }
+                            "additionalProperties": True,
+                        },
                     },
-                    "required": ["node_id", "updates"]
-                }
+                    "required": ["node_id", "updates"],
+                },
             },
             {
                 "name": "delete_nodes",
@@ -687,16 +720,16 @@ class ChatProcessor:
                         "node_ids": {
                             "type": "array",
                             "items": {"type": "string"},
-                            "description": "List of node IDs to delete"
+                            "description": "List of node IDs to delete",
                         },
                         "confirmed": {
                             "type": "boolean",
                             "description": "Must be True to execute deletion",
-                            "default": False
-                        }
+                            "default": False,
+                        },
                     },
-                    "required": ["node_ids"]
-                }
+                    "required": ["node_ids"],
+                },
             },
             {
                 "name": "delete_edges",
@@ -707,24 +740,21 @@ class ChatProcessor:
                         "edge_ids": {
                             "type": "array",
                             "items": {"type": "string"},
-                            "description": "List of edge IDs to delete (max 50)"
+                            "description": "List of edge IDs to delete (max 50)",
                         },
                         "confirmed": {
                             "type": "boolean",
                             "description": "Must be True to execute deletion",
-                            "default": False
-                        }
+                            "default": False,
+                        },
                     },
-                    "required": ["edge_ids"]
-                }
+                    "required": ["edge_ids"],
+                },
             },
             {
                 "name": "list_node_types",
                 "description": "List all allowed node types.",
-                "input_schema": {
-                    "type": "object",
-                    "properties": {}
-                }
+                "input_schema": {"type": "object", "properties": {}},
             },
             {
                 "name": "get_subtypes",
@@ -734,10 +764,10 @@ class ChatProcessor:
                     "properties": {
                         "node_type": {
                             "type": "string",
-                            "description": "Optional: filter subtypes for a specific node type (e.g. 'Actor')"
+                            "description": "Optional: filter subtypes for a specific node type (e.g. 'Actor')",
                         }
-                    }
-                }
+                    },
+                },
             },
             {
                 "name": "save_view",
@@ -747,11 +777,11 @@ class ChatProcessor:
                     "properties": {
                         "name": {
                             "type": "string",
-                            "description": "Name for the saved view"
+                            "description": "Name for the saved view",
                         }
                     },
-                    "required": ["name"]
-                }
+                    "required": ["name"],
+                },
             },
             {
                 "name": "get_saved_view",
@@ -761,27 +791,21 @@ class ChatProcessor:
                     "properties": {
                         "name": {
                             "type": "string",
-                            "description": "Name of the saved view to load"
+                            "description": "Name of the saved view to load",
                         }
                     },
-                    "required": ["name"]
-                }
+                    "required": ["name"],
+                },
             },
             {
                 "name": "list_saved_views",
                 "description": "List all saved views stored in the graph. Use this when user asks what saved views/visualizations exist in the database.",
-                "input_schema": {
-                    "type": "object",
-                    "properties": {}
-                }
+                "input_schema": {"type": "object", "properties": {}},
             },
             {
                 "name": "clear_visualization",
                 "description": "Clear the current visualization, removing all nodes and edges from the canvas. Use this when the user wants to clear, reset, or empty the visualization (Swedish: 'töm', 'rensa', 'ta bort allt från'). This does NOT delete nodes from the database - it only clears the visual display.",
-                "input_schema": {
-                    "type": "object",
-                    "properties": {}
-                }
+                "input_schema": {"type": "object", "properties": {}},
             },
             {
                 "name": "mark_nodes",
@@ -797,23 +821,23 @@ class ChatProcessor:
                                 "properties": {
                                     "node_id": {
                                         "type": "string",
-                                        "description": "ID of the node to mark"
+                                        "description": "ID of the node to mark",
                                     },
                                     "color": {
                                         "type": "string",
-                                        "description": "CSS color (e.g. '#EF4444' red, '#F97316' orange, '#FBBF24' yellow, '#10B981' green, '#3B82F6' blue)"
+                                        "description": "CSS color (e.g. '#EF4444' red, '#F97316' orange, '#FBBF24' yellow, '#10B981' green, '#3B82F6' blue)",
                                     },
                                     "label": {
                                         "type": "string",
-                                        "description": "Short label shown in the legend (e.g. 'High priority', 'Needs review', 'Confirmed')"
-                                    }
+                                        "description": "Short label shown in the legend (e.g. 'High priority', 'Needs review', 'Confirmed')",
+                                    },
                                 },
-                                "required": ["node_id", "color"]
-                            }
+                                "required": ["node_id", "color"],
+                            },
                         }
                     },
-                    "required": ["marks"]
-                }
+                    "required": ["marks"],
+                },
             },
             {
                 "name": "present_form",
@@ -829,20 +853,44 @@ class ChatProcessor:
                 "input_schema": {
                     "type": "object",
                     "properties": {
-                        "title": {"type": "string", "description": "Optional short heading for the form"},
-                        "description": {"type": "string", "description": "Optional helper text shown above the fields"},
-                        "submit_label": {"type": "string", "description": "Optional label for the submit button (default 'Submit')"},
+                        "title": {
+                            "type": "string",
+                            "description": "Optional short heading for the form",
+                        },
+                        "description": {
+                            "type": "string",
+                            "description": "Optional helper text shown above the fields",
+                        },
+                        "submit_label": {
+                            "type": "string",
+                            "description": "Optional label for the submit button (default 'Submit')",
+                        },
                         "fields": {
                             "type": "array",
                             "description": "The input fields to render, in order.",
                             "items": {
                                 "type": "object",
                                 "properties": {
-                                    "id": {"type": "string", "description": "Stable machine key for the field (e.g. 'role'). Reused when saving the answer."},
-                                    "label": {"type": "string", "description": "Question text shown to the user"},
+                                    "id": {
+                                        "type": "string",
+                                        "description": "Stable machine key for the field (e.g. 'role'). Reused when saving the answer.",
+                                    },
+                                    "label": {
+                                        "type": "string",
+                                        "description": "Question text shown to the user",
+                                    },
                                     "type": {
                                         "type": "string",
-                                        "enum": ["text", "textarea", "number", "radio", "checkbox", "select", "slider", "boolean"],
+                                        "enum": [
+                                            "text",
+                                            "textarea",
+                                            "number",
+                                            "radio",
+                                            "checkbox",
+                                            "select",
+                                            "slider",
+                                            "boolean",
+                                        ],
                                         "description": "Control type. radio/select = one choice; checkbox = multiple choices; slider = bounded number.",
                                     },
                                     "options": {
@@ -850,11 +898,26 @@ class ChatProcessor:
                                         "description": "Choices for radio/checkbox/select. Each item may be a string or {value, label}.",
                                         "items": {"type": ["string", "object"]},
                                     },
-                                    "min": {"type": "number", "description": "Minimum for slider/number"},
-                                    "max": {"type": "number", "description": "Maximum for slider/number"},
-                                    "step": {"type": "number", "description": "Step for slider/number"},
-                                    "required": {"type": "boolean", "description": "Whether an answer is mandatory"},
-                                    "placeholder": {"type": "string", "description": "Placeholder for text/number fields"},
+                                    "min": {
+                                        "type": "number",
+                                        "description": "Minimum for slider/number",
+                                    },
+                                    "max": {
+                                        "type": "number",
+                                        "description": "Maximum for slider/number",
+                                    },
+                                    "step": {
+                                        "type": "number",
+                                        "description": "Step for slider/number",
+                                    },
+                                    "required": {
+                                        "type": "boolean",
+                                        "description": "Whether an answer is mandatory",
+                                    },
+                                    "placeholder": {
+                                        "type": "string",
+                                        "description": "Placeholder for text/number fields",
+                                    },
                                 },
                                 "required": ["id", "label", "type"],
                             },
@@ -881,16 +944,33 @@ class ChatProcessor:
                             "items": {
                                 "type": "object",
                                 "properties": {
-                                    "field_id": {"type": "string", "description": "Matches the form field 'id' (or a stable key you choose)"},
-                                    "label": {"type": "string", "description": "Human-readable question text"},
-                                    "type": {"type": "string", "description": "Field type (radio, checkbox, slider, text, etc.)"},
-                                    "value": {"description": "The submitted value: string, number, boolean, or array for multi-select"},
+                                    "field_id": {
+                                        "type": "string",
+                                        "description": "Matches the form field 'id' (or a stable key you choose)",
+                                    },
+                                    "label": {
+                                        "type": "string",
+                                        "description": "Human-readable question text",
+                                    },
+                                    "type": {
+                                        "type": "string",
+                                        "description": "Field type (radio, checkbox, slider, text, etc.)",
+                                    },
+                                    "value": {
+                                        "description": "The submitted value: string, number, boolean, or array for multi-select"
+                                    },
                                 },
                                 "required": ["field_id", "value"],
                             },
                         },
-                        "respondent_label": {"type": "string", "description": "Optional label identifying the respondent (only if publicly appropriate — never store personal data without consent)"},
-                        "form_title": {"type": "string", "description": "Optional title of the form these answers came from"},
+                        "respondent_label": {
+                            "type": "string",
+                            "description": "Optional label identifying the respondent (only if publicly appropriate — never store personal data without consent)",
+                        },
+                        "form_title": {
+                            "type": "string",
+                            "description": "Optional title of the form these answers came from",
+                        },
                     },
                     "required": ["answers"],
                 },
@@ -898,22 +978,25 @@ class ChatProcessor:
             {
                 "name": "get_schema",
                 "description": "Get the complete schema configuration including all node types with their fields, colors, and descriptions, as well as all relationship types.",
-                "input_schema": {
-                    "type": "object",
-                    "properties": {}
-                }
+                "input_schema": {"type": "object", "properties": {}},
             },
             {
                 "name": "get_presentation",
                 "description": "Get the presentation configuration for the UI including colors, introduction text, and prompt settings.",
-                "input_schema": {
-                    "type": "object",
-                    "properties": {}
-                }
-            }
+                "input_schema": {"type": "object", "properties": {}},
+            },
         ]
 
-    def process_message(self, messages: List[Dict], api_key: str = None, provider: str = None, extra_context: str = None, skills_override: str = None, tools_override: Dict[str, Callable] = None, visualization_context: str = None) -> Dict:
+    def process_message(
+        self,
+        messages: List[Dict],
+        api_key: str = None,
+        provider: str = None,
+        extra_context: str = None,
+        skills_override: str = None,
+        tools_override: Dict[str, Callable] = None,
+        visualization_context: str = None,
+    ) -> Dict:
         """
         Process a message history, call LLM, handle tools, return final response.
 
@@ -943,7 +1026,7 @@ class ChatProcessor:
                 return {
                     "content": f"❌ Error: No API key available. Please set {provider_name}_API_KEY environment variable or provide your own key in settings.",
                     "toolUsed": None,
-                    "toolResult": None
+                    "toolResult": None,
                 }
 
             # Create provider with the appropriate key
@@ -955,24 +1038,34 @@ class ChatProcessor:
             # 3. skill overrides (skills_override) — recency precedence for behavioral overrides
             # 4. visualization_context comes last — most immediate situational snapshot
             active_system_prompt = (
-                f"{extra_context}\n\n{self.system_prompt}" if extra_context else self.system_prompt
+                f"{extra_context}\n\n{self.system_prompt}"
+                if extra_context
+                else self.system_prompt
             )
             if skills_override:
                 active_system_prompt = f"{active_system_prompt}\n\n{skills_override}"
             if visualization_context:
-                active_system_prompt = f"{active_system_prompt}\n\n{visualization_context}"
+                active_system_prompt = (
+                    f"{active_system_prompt}\n\n{visualization_context}"
+                )
 
             # First call to LLM
             response = llm_provider.create_completion(
                 messages=messages,
                 system_prompt=active_system_prompt,
                 tools=self.tool_definitions,
-                max_tokens=4096
+                max_tokens=4096,
             )
 
             # Check if tool use
             if response.stop_reason == "tool_use":
-                return self._handle_tool_use(messages, response, llm_provider, system_prompt=active_system_prompt, tools_override=tools_override)
+                return self._handle_tool_use(
+                    messages,
+                    response,
+                    llm_provider,
+                    system_prompt=active_system_prompt,
+                    tools_override=tools_override,
+                )
 
             # Just text response
             # Extract text from content blocks
@@ -984,7 +1077,7 @@ class ChatProcessor:
             return {
                 "content": text_content if text_content else "No text response from AI",
                 "toolUsed": None,
-                "toolResult": None
+                "toolResult": None,
             }
 
         except Exception as e:
@@ -993,16 +1086,24 @@ class ChatProcessor:
 
             # Provide user-friendly message for rate limits
             if "rate_limit" in error_msg.lower() or "429" in error_msg:
-                error_msg = ("API rate limit reached. This happens when many nodes are processed simultaneously. "
-                            "Try again in ~60 seconds, or request fewer nodes at a time (5-10).")
+                error_msg = (
+                    "API rate limit reached. This happens when many nodes are processed simultaneously. "
+                    "Try again in ~60 seconds, or request fewer nodes at a time (5-10)."
+                )
 
-            return {
-                "content": error_msg,
-                "toolUsed": None,
-                "toolResult": None
-            }
+            return {"content": error_msg, "toolUsed": None, "toolResult": None}
 
-    def _handle_tool_use(self, messages: List[Dict], response, provider: LLMProvider, accumulated_nodes=None, accumulated_edges=None, system_prompt: str = None, tools_override: Dict[str, Callable] = None, pending_form=None) -> Dict:
+    def _handle_tool_use(
+        self,
+        messages: List[Dict],
+        response,
+        provider: LLMProvider,
+        accumulated_nodes=None,
+        accumulated_edges=None,
+        system_prompt: str = None,
+        tools_override: Dict[str, Callable] = None,
+        pending_form=None,
+    ) -> Dict:
         """Handle tool use with support for tool chaining and result aggregation.
 
         pending_form carries a present_form action result across tool-chaining
@@ -1013,18 +1114,24 @@ class ChatProcessor:
             accumulated_nodes = []
         if accumulated_edges is None:
             accumulated_edges = []
-        active_system_prompt = system_prompt if system_prompt is not None else self.system_prompt
+        active_system_prompt = (
+            system_prompt if system_prompt is not None else self.system_prompt
+        )
         effective_tools = {**self.tools_map, **(tools_override or {})}
 
         # Find ALL tool_use blocks (LLM can request multiple tools in parallel)
-        tool_uses = [block for block in response.content if isinstance(block, dict) and block.get("type") == "tool_use"]
+        tool_uses = [
+            block
+            for block in response.content
+            if isinstance(block, dict) and block.get("type") == "tool_use"
+        ]
 
         if not tool_uses:
             # No tool uses found, shouldn't happen but handle gracefully
             return {
                 "content": "No tool uses found in response",
                 "toolUsed": None,
-                "toolResult": None
+                "toolResult": None,
             }
 
         # Execute all tools
@@ -1047,7 +1154,7 @@ class ChatProcessor:
                 tool_result = {
                     "proposed_node": tool_input.get("node"),
                     "similar_nodes": tool_input.get("similar_nodes"),
-                    "requires_approval": True
+                    "requires_approval": True,
                 }
 
             # Special case for clear_visualization - signals frontend to clear the canvas
@@ -1055,14 +1162,14 @@ class ChatProcessor:
                 tool_result = {
                     "action": "clear_visualization",
                     "success": True,
-                    "message": "Visualization cleared"
+                    "message": "Visualization cleared",
                 }
 
             # Special case for mark_nodes - signals frontend to apply color overlays
             elif tool_name == "mark_nodes":
                 tool_result = {
                     "action": "mark_nodes",
-                    "marks": tool_input.get("marks", [])
+                    "marks": tool_input.get("marks", []),
                 }
 
             # Special case for present_form - signals frontend to render input widgets.
@@ -1085,7 +1192,9 @@ class ChatProcessor:
 
                     # Check signature
                     sig = inspect.signature(func)
-                    valid_args = {k: v for k, v in tool_input.items() if k in sig.parameters}
+                    valid_args = {
+                        k: v for k, v in tool_input.items() if k in sig.parameters
+                    }
 
                     tool_result = func(**valid_args)
                 except Exception as e:
@@ -1097,61 +1206,83 @@ class ChatProcessor:
             if tool_result and isinstance(tool_result, dict):
                 if "nodes" in tool_result and isinstance(tool_result["nodes"], list):
                     # Add unique nodes (avoid duplicates by ID)
-                    existing_ids = {n.get("id") for n in accumulated_nodes if isinstance(n, dict) and "id" in n}
+                    existing_ids = {
+                        n.get("id")
+                        for n in accumulated_nodes
+                        if isinstance(n, dict) and "id" in n
+                    }
                     for node in tool_result["nodes"]:
-                        if isinstance(node, dict) and node.get("id") not in existing_ids:
+                        if (
+                            isinstance(node, dict)
+                            and node.get("id") not in existing_ids
+                        ):
                             accumulated_nodes.append(node)
                             existing_ids.add(node.get("id"))
 
                 if "edges" in tool_result and isinstance(tool_result["edges"], list):
                     # Add unique edges (avoid duplicates by ID)
-                    existing_edge_ids = {e.get("id") for e in accumulated_edges if isinstance(e, dict) and "id" in e}
+                    existing_edge_ids = {
+                        e.get("id")
+                        for e in accumulated_edges
+                        if isinstance(e, dict) and "id" in e
+                    }
                     for edge in tool_result["edges"]:
-                        if isinstance(edge, dict) and edge.get("id") not in existing_edge_ids:
+                        if (
+                            isinstance(edge, dict)
+                            and edge.get("id") not in existing_edge_ids
+                        ):
                             accumulated_edges.append(edge)
                             existing_edge_ids.add(edge.get("id"))
 
             # Preserve a present_form action so a later node/edge-returning tool in
             # the same turn (or a subsequent chained tool) cannot drop the form spec.
-            if isinstance(tool_result, dict) and tool_result.get("action") == "present_form":
+            if (
+                isinstance(tool_result, dict)
+                and tool_result.get("action") == "present_form"
+            ):
                 pending_form = tool_result
 
             # Store tool result with its ID for the response
-            tool_results.append({
-                "tool_use_id": tool_id,
-                "result": tool_result
-            })
+            tool_results.append({"tool_use_id": tool_id, "result": tool_result})
 
         # Send the results back to LLM
-        messages.append({
-            "role": "assistant",
-            "content": response.content
-        })
+        messages.append({"role": "assistant", "content": response.content})
 
         # Add all tool results in a single user message
-        messages.append({
-            "role": "user",
-            "content": [
-                {
-                    "type": "tool_result",
-                    "tool_use_id": tr["tool_use_id"],
-                    "content": json.dumps(tr["result"], default=str)
-                }
-                for tr in tool_results
-            ]
-        })
+        messages.append(
+            {
+                "role": "user",
+                "content": [
+                    {
+                        "type": "tool_result",
+                        "tool_use_id": tr["tool_use_id"],
+                        "content": json.dumps(tr["result"], default=str),
+                    }
+                    for tr in tool_results
+                ],
+            }
+        )
 
         final_response = provider.create_completion(
             messages=messages,
             system_prompt=active_system_prompt,
             tools=self.tool_definitions,
-            max_tokens=4096
+            max_tokens=4096,
         )
 
         # Check if LLM wants to use another tool (tool chaining)
         if final_response.stop_reason == "tool_use":
             # LLM wants to use another tool - continue recursively with accumulated data
-            return self._handle_tool_use(messages, final_response, provider, accumulated_nodes, accumulated_edges, system_prompt=active_system_prompt, tools_override=tools_override, pending_form=pending_form)
+            return self._handle_tool_use(
+                messages,
+                final_response,
+                provider,
+                accumulated_nodes,
+                accumulated_edges,
+                system_prompt=active_system_prompt,
+                tools_override=tools_override,
+                pending_form=pending_form,
+            )
 
         # Extract text from response (handle multiple text blocks)
         final_text = ""
@@ -1183,5 +1314,5 @@ class ChatProcessor:
         return {
             "content": final_text,
             "toolUsed": last_tool_name,  # Return the name of the last tool executed
-            "toolResult": final_tool_result
+            "toolResult": final_tool_result,
         }

@@ -2,8 +2,7 @@
 Tests for MCP loader and tool namespacing.
 """
 
-import pytest
-from unittest.mock import MagicMock, patch
+from unittest.mock import patch
 
 from backend.agents.config import MCPIntegration, MCPTransport
 from backend.agents.mcp_loader import MCPLoader, NamespacedTool
@@ -15,8 +14,18 @@ class TestMCPLoader:
     def test_init_with_integrations(self):
         """Test initializing loader with integrations."""
         integrations = [
-            MCPIntegration(id="GRAPH", name="Graph API", transport=MCPTransport.HTTP, url="http://localhost:8000/mcp"),
-            MCPIntegration(id="FS", name="FileSystem", transport=MCPTransport.STDIO, command=["node", "mcp-fs"]),
+            MCPIntegration(
+                id="GRAPH",
+                name="Graph API",
+                transport=MCPTransport.HTTP,
+                url="http://localhost:8000/mcp",
+            ),
+            MCPIntegration(
+                id="FS",
+                name="FileSystem",
+                transport=MCPTransport.STDIO,
+                command=["node", "mcp-fs"],
+            ),
         ]
 
         loader = MCPLoader(integrations)
@@ -50,21 +59,21 @@ class TestMCPLoader:
                 original_name="search_graph",
                 namespaced_name="GRAPH__search_graph",
                 description="Search the graph",
-                input_schema={}
+                input_schema={},
             ),
             "GRAPH__update_node": NamespacedTool(
                 integration_id="GRAPH",
                 original_name="update_node",
                 namespaced_name="GRAPH__update_node",
                 description="Update a node",
-                input_schema={}
+                input_schema={},
             ),
             "WEB__fetch": NamespacedTool(
                 integration_id="WEB",
                 original_name="fetch",
                 namespaced_name="WEB__fetch",
                 description="Fetch a URL",
-                input_schema={}
+                input_schema={},
             ),
         }
 
@@ -88,21 +97,21 @@ class TestMCPLoader:
                 original_name="search_graph",
                 namespaced_name="GRAPH__search_graph",
                 description="Search",
-                input_schema={}
+                input_schema={},
             ),
             "WEB__fetch": NamespacedTool(
                 integration_id="WEB",
                 original_name="fetch",
                 namespaced_name="WEB__fetch",
                 description="Fetch",
-                input_schema={}
+                input_schema={},
             ),
             "FS__read_file": NamespacedTool(
                 integration_id="FS",
                 original_name="read_file",
                 namespaced_name="FS__read_file",
                 description="Read file",
-                input_schema={}
+                input_schema={},
             ),
         }
 
@@ -131,7 +140,7 @@ class TestToolNamespacing:
                 input_schema={
                     "type": "object",
                     "properties": {"query": {"type": "string"}},
-                }
+                },
             )
         }
 
@@ -162,7 +171,7 @@ class TestToolNamespacing:
                 original_name="update_node",
                 namespaced_name="GRAPH__update_node",
                 description="Update a node",
-                input_schema=original_schema
+                input_schema=original_schema,
             )
         }
 
@@ -177,7 +186,12 @@ class TestToolExecutor:
     def test_create_tool_executor_graph_integration(self, mock_service):
         """Test creating a tool executor for GRAPH integration."""
         integrations = [
-            MCPIntegration(id="GRAPH", name="Graph API", transport=MCPTransport.HTTP, url="http://localhost:8000/mcp")
+            MCPIntegration(
+                id="GRAPH",
+                name="Graph API",
+                transport=MCPTransport.HTTP,
+                url="http://localhost:8000/mcp",
+            )
         ]
         loader = MCPLoader(integrations)
 
@@ -189,7 +203,12 @@ class TestToolExecutor:
     def test_executor_routes_to_graph_service(self, mock_service):
         """Test that executor routes GRAPH tools to graph service."""
         integrations = [
-            MCPIntegration(id="GRAPH", name="Graph API", transport=MCPTransport.HTTP, url="http://localhost:8000/mcp")
+            MCPIntegration(
+                id="GRAPH",
+                name="Graph API",
+                transport=MCPTransport.HTTP,
+                url="http://localhost:8000/mcp",
+            )
         ]
         loader = MCPLoader(integrations)
 
@@ -200,14 +219,14 @@ class TestToolExecutor:
                 original_name="search_graph",
                 namespaced_name="GRAPH__search_graph",
                 description="Search",
-                input_schema={}
+                input_schema={},
             )
         }
 
         executor = loader.create_tool_executor(graph_service=mock_service)
 
         # Call the executor with a GRAPH tool
-        result = executor("GRAPH__search_graph", {"query": "test"})
+        executor("GRAPH__search_graph", {"query": "test"})
 
         # Should have called the mock service
         assert len(mock_service.search_calls) == 1
@@ -225,7 +244,12 @@ class TestToolExecutor:
     def test_executor_parses_namespaced_name(self, mock_service):
         """Test that executor correctly parses namespaced tool names."""
         integrations = [
-            MCPIntegration(id="GRAPH", name="Graph API", transport=MCPTransport.HTTP, url="http://localhost:8000/mcp")
+            MCPIntegration(
+                id="GRAPH",
+                name="Graph API",
+                transport=MCPTransport.HTTP,
+                url="http://localhost:8000/mcp",
+            )
         ]
         loader = MCPLoader(integrations)
 
@@ -236,21 +260,26 @@ class TestToolExecutor:
                 original_name="update_node",
                 namespaced_name="GRAPH__update_node",
                 description="Update",
-                input_schema={}
+                input_schema={},
             )
         }
 
         executor = loader.create_tool_executor(graph_service=mock_service)
 
         # Test with namespaced name
-        result = executor("GRAPH__update_node", {"node_id": "node-1", "name": "New Name"})
+        executor("GRAPH__update_node", {"node_id": "node-1", "name": "New Name"})
 
         assert len(mock_service.update_calls) == 1
 
     def test_executor_routes_delete_edges_to_graph_service(self, mock_service):
         """Bulk edge deletion tool should route to GraphService.delete_edges."""
         integrations = [
-            MCPIntegration(id="GRAPH", name="Graph API", transport=MCPTransport.HTTP, url="http://localhost:8000/mcp")
+            MCPIntegration(
+                id="GRAPH",
+                name="Graph API",
+                transport=MCPTransport.HTTP,
+                url="http://localhost:8000/mcp",
+            )
         ]
         loader = MCPLoader(integrations)
 
@@ -260,7 +289,7 @@ class TestToolExecutor:
                 original_name="delete_edges",
                 namespaced_name="GRAPH__delete_edges",
                 description="Delete edges",
-                input_schema={}
+                input_schema={},
             )
         }
 
@@ -281,7 +310,7 @@ class TestMCPLoaderLifecycle:
             id="GRAPH",
             name="Graph API",
             transport=MCPTransport.HTTP,
-            url="http://localhost:8000/mcp"
+            url="http://localhost:8000/mcp",
         )
         loader = MCPLoader([integration])
 
@@ -296,7 +325,7 @@ class TestMCPLoaderLifecycle:
             id="GRAPH",
             name="Graph API",
             transport=MCPTransport.HTTP,
-            url="http://localhost:8000/mcp"
+            url="http://localhost:8000/mcp",
         )
         loader = MCPLoader([integration])
 
@@ -311,7 +340,7 @@ class TestMCPLoaderLifecycle:
             id="GRAPH",
             name="Graph API",
             transport=MCPTransport.HTTP,
-            url="http://localhost:8000/mcp"
+            url="http://localhost:8000/mcp",
         )
         loader = MCPLoader([integration])
 
@@ -321,7 +350,9 @@ class TestMCPLoaderLifecycle:
         assert "GRAPH__get_tenant_context" in tool_names
 
         tenant_context_tool = next(
-            tool for tool in tools if tool.namespaced_name == "GRAPH__get_tenant_context"
+            tool
+            for tool in tools
+            if tool.namespaced_name == "GRAPH__get_tenant_context"
         )
         assert tenant_context_tool.original_name == "get_tenant_context"
         assert tenant_context_tool.input_schema == {"type": "object", "properties": {}}
@@ -332,7 +363,7 @@ class TestMCPLoaderLifecycle:
             id="GRAPH",
             name="Graph API",
             transport=MCPTransport.HTTP,
-            url="http://localhost:8000/mcp"
+            url="http://localhost:8000/mcp",
         )
         loader = MCPLoader([integration])
 
@@ -342,7 +373,9 @@ class TestMCPLoaderLifecycle:
         assert "GRAPH__get_config_context" in tool_names
 
         config_context_tool = next(
-            tool for tool in tools if tool.namespaced_name == "GRAPH__get_config_context"
+            tool
+            for tool in tools
+            if tool.namespaced_name == "GRAPH__get_config_context"
         )
         assert config_context_tool.original_name == "get_config_context"
         assert config_context_tool.input_schema == {"type": "object", "properties": {}}
@@ -353,15 +386,21 @@ class TestMCPLoaderLifecycle:
             id="GRAPH",
             name="Graph API",
             transport=MCPTransport.HTTP,
-            url="http://localhost:8000/mcp"
+            url="http://localhost:8000/mcp",
         )
         loader = MCPLoader([integration])
 
         tools = loader._get_graph_mcp_tools(integration)
 
-        actor_tool = next(tool for tool in tools if tool.namespaced_name == "GRAPH__get_request_actor")
+        actor_tool = next(
+            tool for tool in tools if tool.namespaced_name == "GRAPH__get_request_actor"
+        )
         assert actor_tool.original_name == "get_request_actor"
-        assert set(actor_tool.input_schema["properties"].keys()) == {"actor_id", "actor_type", "auth_source"}
+        assert set(actor_tool.input_schema["properties"].keys()) == {
+            "actor_id",
+            "actor_type",
+            "auth_source",
+        }
 
     def test_connect_graph_includes_get_request_scope_tool(self):
         """GRAPH discovery inventory includes get_request_scope."""
@@ -369,15 +408,21 @@ class TestMCPLoaderLifecycle:
             id="GRAPH",
             name="Graph API",
             transport=MCPTransport.HTTP,
-            url="http://localhost:8000/mcp"
+            url="http://localhost:8000/mcp",
         )
         loader = MCPLoader([integration])
 
         tools = loader._get_graph_mcp_tools(integration)
 
-        scope_tool = next(tool for tool in tools if tool.namespaced_name == "GRAPH__get_request_scope")
+        scope_tool = next(
+            tool for tool in tools if tool.namespaced_name == "GRAPH__get_request_scope"
+        )
         assert scope_tool.original_name == "get_request_scope"
-        assert set(scope_tool.input_schema["properties"].keys()) == {"workspace_id", "workspace_kind", "graph_id"}
+        assert set(scope_tool.input_schema["properties"].keys()) == {
+            "workspace_id",
+            "workspace_kind",
+            "graph_id",
+        }
 
     def test_connect_graph_includes_get_request_selection_tool(self):
         """GRAPH discovery inventory includes get_request_selection."""
@@ -385,20 +430,33 @@ class TestMCPLoaderLifecycle:
             id="GRAPH",
             name="Graph API",
             transport=MCPTransport.HTTP,
-            url="http://localhost:8000/mcp"
+            url="http://localhost:8000/mcp",
         )
         loader = MCPLoader([integration])
 
         tools = loader._get_graph_mcp_tools(integration)
 
-        selection_tool = next(tool for tool in tools if tool.namespaced_name == "GRAPH__get_request_selection")
+        selection_tool = next(
+            tool
+            for tool in tools
+            if tool.namespaced_name == "GRAPH__get_request_selection"
+        )
         assert selection_tool.original_name == "get_request_selection"
-        assert set(selection_tool.input_schema["properties"].keys()) == {"workspace_id", "workspace_kind", "graph_id"}
+        assert set(selection_tool.input_schema["properties"].keys()) == {
+            "workspace_id",
+            "workspace_kind",
+            "graph_id",
+        }
 
     def test_connect_all_returns_tool_map(self):
         """Test that connect_all returns a map of tools per integration."""
         integrations = [
-            MCPIntegration(id="GRAPH", name="Graph API", transport=MCPTransport.HTTP, url="http://localhost:8000/mcp")
+            MCPIntegration(
+                id="GRAPH",
+                name="Graph API",
+                transport=MCPTransport.HTTP,
+                url="http://localhost:8000/mcp",
+            )
         ]
         loader = MCPLoader(integrations)
 
@@ -409,7 +467,7 @@ class TestMCPLoaderLifecycle:
                 original_name="search_graph",
                 namespaced_name="GRAPH__search_graph",
                 description="Search",
-                input_schema={}
+                input_schema={},
             )
         ]
 
@@ -428,7 +486,7 @@ class TestMCPLoaderLifecycle:
                 original_name="test",
                 namespaced_name="GRAPH__test",
                 description="test",
-                input_schema={}
+                input_schema={},
             )
         }
 
@@ -442,9 +500,7 @@ class TestMCPLoaderLifecycle:
         # Use an input that exploits prefix startswith vulnerability
         # E.g., if base_path is /tmp/agent-workspace,
         # /tmp/agent-workspace-secret starts with /tmp/agent-workspace
-        input_args = {
-            "path": "../agent-workspace-secret/secret.txt"
-        }
+        input_args = {"path": "../agent-workspace-secret/secret.txt"}
 
         result = loader._execute_fs_tool("read_file", input_args)
 

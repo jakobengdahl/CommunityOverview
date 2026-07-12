@@ -21,10 +21,7 @@ export function serverStateToMirror(state, resolvedNodeIds) {
     positions: s.positions || {},
     hidden_node_ids: s.hidden_node_ids || [],
     hidden_edge_ids: s.hidden_edge_ids || [],
-    annotations: [
-      ...groupsToAnnotations(groups, parentIds),
-      ...overlaysToAnnotations(overlays),
-    ],
+    annotations: [...groupsToAnnotations(groups, parentIds), ...overlaysToAnnotations(overlays)],
   };
 }
 
@@ -60,65 +57,77 @@ export function useSharedSession({
 }) {
   // Load a session's canvas content from the server (resolved node refs +
   // layout + group annotations) onto the store.
-  const applyServerSession = useCallback((payload) => {
-    const state = payload?.state || {};
-    const resolved = payload?.resolved || {};
-    // Validate the resolved shape before the first mutating call so a malformed
-    // payload fails atomically (see assertArrayField).
-    const loadedNodes = assertArrayField(resolved.nodes, 'nodes');
-    const resolvedEdges = assertArrayField(resolved.edges, 'edges');
-    clearVisualization();
-    if (loadedNodes.length) {
-      const positioned = loadedNodes.map(n =>
-        state.positions?.[n.id] ? { ...n, _savedPosition: state.positions[n.id] } : n
-      );
-      addNodesToVisualization(positioned, resolvedEdges);
-    }
-    if (state.hidden_node_ids?.length) setHiddenNodeIds(state.hidden_node_ids);
-    if (state.hidden_edge_ids?.length) setHiddenEdgeIds(state.hidden_edge_ids);
-    const { groups, parentIds } = annotationsToGroups(state.annotations);
-    if (groups.length) setPendingGroups({ groups, parentIds });
-    const overlays = annotationsToOverlays(state.annotations);
-    if (overlays.length) setPendingAnnotations(overlays);
-  }, [clearVisualization, addNodesToVisualization, setHiddenNodeIds,
-      setHiddenEdgeIds, setPendingGroups, setPendingAnnotations]);
+  const applyServerSession = useCallback(
+    (payload) => {
+      const state = payload?.state || {};
+      const resolved = payload?.resolved || {};
+      // Validate the resolved shape before the first mutating call so a malformed
+      // payload fails atomically (see assertArrayField).
+      const loadedNodes = assertArrayField(resolved.nodes, 'nodes');
+      const resolvedEdges = assertArrayField(resolved.edges, 'edges');
+      clearVisualization();
+      if (loadedNodes.length) {
+        const positioned = loadedNodes.map((n) =>
+          state.positions?.[n.id] ? { ...n, _savedPosition: state.positions[n.id] } : n
+        );
+        addNodesToVisualization(positioned, resolvedEdges);
+      }
+      if (state.hidden_node_ids?.length) setHiddenNodeIds(state.hidden_node_ids);
+      if (state.hidden_edge_ids?.length) setHiddenEdgeIds(state.hidden_edge_ids);
+      const { groups, parentIds } = annotationsToGroups(state.annotations);
+      if (groups.length) setPendingGroups({ groups, parentIds });
+      const overlays = annotationsToOverlays(state.annotations);
+      if (overlays.length) setPendingAnnotations(overlays);
+    },
+    [
+      clearVisualization,
+      addNodesToVisualization,
+      setHiddenNodeIds,
+      setHiddenEdgeIds,
+      setPendingGroups,
+      setPendingAnnotations,
+    ]
+  );
 
-  const loadSessionFromServer = useCallback(async (targetId, { eagerConnect = false } = {}) => {
-    try {
-      const payload = await api.getSession(targetId, { resolve: true });
-      // Compute the sync baseline before touching the canvas: it runs the same
-      // annotation-transform logic applyServerSession does internally, and
-      // applyServerSession itself validates the resolved shape before its first
-      // mutating call, so if malformed server data would throw, it throws here —
-      // before clearVisualization() — leaving the current canvas untouched and
-      // this as a clean "switch failed" rather than a half-applied one.
-      const resolvedIds = (payload?.resolved?.nodes || []).map(n => n.id);
-      const baselineMirror = serverStateToMirror(payload?.state, resolvedIds);
-      applyServerSession(payload);
-      // Connect the realtime stream for this existing session and seed the sync
-      // baseline from its state so later edits diff against what the server holds.
-      // Best-effort from here on: the canvas above already loaded correctly, so a
-      // sync-connect failure must not be reported as a failed switch.
+  const loadSessionFromServer = useCallback(
+    async (targetId, { eagerConnect = false } = {}) => {
       try {
-        ensureSyncConnected(targetId)?.setBaseline(baselineMirror);
-      } catch (syncError) {
-        console.error('Error connecting sync client:', syncError);
-      }
-    } catch (error) {
-      // Session does not exist server-side yet — new / not-yet-saved share URL.
-      if (error?.status === 404) {
-        clearVisualization();
-        if (eagerConnect) {
-          ensureSyncConnected(targetId)?.setBaseline({});
-        } else if (syncRef.current && syncRef.current.sessionId === targetId) {
-          syncRef.current.setBaseline({});
+        const payload = await api.getSession(targetId, { resolve: true });
+        // Compute the sync baseline before touching the canvas: it runs the same
+        // annotation-transform logic applyServerSession does internally, and
+        // applyServerSession itself validates the resolved shape before its first
+        // mutating call, so if malformed server data would throw, it throws here —
+        // before clearVisualization() — leaving the current canvas untouched and
+        // this as a clean "switch failed" rather than a half-applied one.
+        const resolvedIds = (payload?.resolved?.nodes || []).map((n) => n.id);
+        const baselineMirror = serverStateToMirror(payload?.state, resolvedIds);
+        applyServerSession(payload);
+        // Connect the realtime stream for this existing session and seed the sync
+        // baseline from its state so later edits diff against what the server holds.
+        // Best-effort from here on: the canvas above already loaded correctly, so a
+        // sync-connect failure must not be reported as a failed switch.
+        try {
+          ensureSyncConnected(targetId)?.setBaseline(baselineMirror);
+        } catch (syncError) {
+          console.error('Error connecting sync client:', syncError);
         }
-      } else {
-        console.error('Error loading session:', error);
-        throw error;
+      } catch (error) {
+        // Session does not exist server-side yet — new / not-yet-saved share URL.
+        if (error?.status === 404) {
+          clearVisualization();
+          if (eagerConnect) {
+            ensureSyncConnected(targetId)?.setBaseline({});
+          } else if (syncRef.current && syncRef.current.sessionId === targetId) {
+            syncRef.current.setBaseline({});
+          }
+        } else {
+          console.error('Error loading session:', error);
+          throw error;
+        }
       }
-    }
-  }, [applyServerSession, clearVisualization, ensureSyncConnected, syncRef]);
+    },
+    [applyServerSession, clearVisualization, ensureSyncConnected, syncRef]
+  );
 
   return { applyServerSession, loadSessionFromServer };
 }

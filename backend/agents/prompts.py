@@ -158,7 +158,13 @@ def build_agent_system_prompt(
     if task_prompt:
         task_section = f"\n\n--- YOUR TASK ---\n{task_prompt}\n--- END TASK ---"
 
-    return BASE_AGENT_PROMPT + tools_section + schema_section + skills_section + task_section
+    return (
+        BASE_AGENT_PROMPT
+        + tools_section
+        + schema_section
+        + skills_section
+        + task_section
+    )
 
 
 def build_event_user_message(event_payload: dict) -> str:
@@ -172,6 +178,7 @@ def build_event_user_message(event_payload: dict) -> str:
         Formatted user message for the LLM
     """
     import json
+
     event_json = json.dumps(event_payload, indent=2, default=str)
     return f"""Process the following event:
 

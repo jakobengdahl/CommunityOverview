@@ -2,10 +2,8 @@
 Tests for event delivery worker.
 """
 
-import pytest
 import time
-from unittest.mock import MagicMock, patch, Mock
-from datetime import datetime
+from unittest.mock import patch, Mock
 
 from backend.core.events.models import (
     Event,
@@ -13,7 +11,6 @@ from backend.core.events.models import (
     EntityKind,
     EventContext,
     EntityData,
-    DeliveryResult,
     DeliveryStatus,
     SubscriptionInfo,
 )
@@ -66,14 +63,14 @@ class TestDeliveryWorker:
 
         # Private/local IPv6
         assert is_safe_url("http://[::1]/hook") is False
-        assert is_safe_url("http://[fc00::1]/hook") is False        # ULA (private)
-        assert is_safe_url("http://[fe80::1]/hook") is False        # link-local
+        assert is_safe_url("http://[fc00::1]/hook") is False  # ULA (private)
+        assert is_safe_url("http://[fe80::1]/hook") is False  # link-local
 
         # RFC 6598 Carrier-Grade NAT (not classified as private by ipaddress)
         assert is_safe_url("http://100.64.0.1") is False
         assert is_safe_url("http://100.127.255.254") is False
 
-    @patch('backend.core.events.delivery.socket.getaddrinfo')
+    @patch("backend.core.events.delivery.socket.getaddrinfo")
     def test_delivery_worker_ssrf_blocked(self, mock_getaddrinfo):
         """Test that SSRF attempts are blocked and marked as failed."""
         # Mock DNS resolution to return a local IPv4 address
@@ -82,7 +79,7 @@ class TestDeliveryWorker:
         results = []
         worker = DeliveryWorker(
             max_attempts=1,  # Should fail immediately without retries
-            on_result=lambda r: results.append(r)
+            on_result=lambda r: results.append(r),
         )
         worker.start()
 
@@ -99,7 +96,7 @@ class TestDeliveryWorker:
         finally:
             worker.stop(wait=True)
 
-    @patch('backend.core.events.delivery.socket.getaddrinfo')
+    @patch("backend.core.events.delivery.socket.getaddrinfo")
     def test_ssrf_blocked_never_retried(self, mock_getaddrinfo):
         """SSRF-blocked deliveries must be dropped immediately with no retries.
 
@@ -157,8 +154,8 @@ class TestDeliveryWorker:
         finally:
             worker.stop(wait=True)
 
-    @patch('backend.core.events.delivery.is_safe_url', return_value=True)
-    @patch('backend.core.events.delivery.requests.post')
+    @patch("backend.core.events.delivery.is_safe_url", return_value=True)
+    @patch("backend.core.events.delivery.requests.post")
     def test_successful_delivery(self, mock_post, mock_safe_url):
         """Test successful webhook delivery."""
         mock_response = Mock()
@@ -182,8 +179,8 @@ class TestDeliveryWorker:
         finally:
             worker.stop(wait=True)
 
-    @patch('backend.core.events.delivery.is_safe_url', return_value=True)
-    @patch('backend.core.events.delivery.requests.post')
+    @patch("backend.core.events.delivery.is_safe_url", return_value=True)
+    @patch("backend.core.events.delivery.requests.post")
     def test_failed_delivery_with_retry(self, mock_post, mock_safe_url):
         """Test that failed deliveries are retried."""
         # Fail twice, then succeed
@@ -217,8 +214,8 @@ class TestDeliveryWorker:
         finally:
             worker.stop(wait=True)
 
-    @patch('backend.core.events.delivery.is_safe_url', return_value=True)
-    @patch('backend.core.events.delivery.requests.post')
+    @patch("backend.core.events.delivery.is_safe_url", return_value=True)
+    @patch("backend.core.events.delivery.requests.post")
     def test_max_retries_exceeded(self, mock_post, mock_safe_url):
         """Test that events are dropped after max retries."""
         # Always fail
@@ -246,11 +243,12 @@ class TestDeliveryWorker:
         finally:
             worker.stop(wait=True)
 
-    @patch('backend.core.events.delivery.is_safe_url', return_value=True)
-    @patch('backend.core.events.delivery.requests.post')
+    @patch("backend.core.events.delivery.is_safe_url", return_value=True)
+    @patch("backend.core.events.delivery.requests.post")
     def test_timeout_handling(self, mock_post, mock_safe_url):
         """Test that timeouts are handled correctly."""
         import requests
+
         mock_post.side_effect = requests.Timeout("Connection timed out")
 
         results = []
@@ -272,8 +270,8 @@ class TestDeliveryWorker:
         finally:
             worker.stop(wait=True)
 
-    @patch('backend.core.events.delivery.is_safe_url', return_value=True)
-    @patch('backend.core.events.delivery.requests.post')
+    @patch("backend.core.events.delivery.is_safe_url", return_value=True)
+    @patch("backend.core.events.delivery.requests.post")
     def test_webhook_payload_format(self, mock_post, mock_safe_url):
         """Test that webhook receives correct payload format."""
         mock_response = Mock(status_code=200)

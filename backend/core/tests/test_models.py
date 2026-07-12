@@ -7,9 +7,16 @@ from datetime import datetime, timezone
 import uuid
 
 from backend.core.models import (
-    Node, Edge, NodeType, RelationshipType,
-    SimilarNode, GraphStats, AddNodesResult, DeleteNodesResult,
-    NODE_COLORS, _parse_datetime
+    Node,
+    Edge,
+    NodeType,
+    RelationshipType,
+    SimilarNode,
+    GraphStats,
+    AddNodesResult,
+    DeleteNodesResult,
+    NODE_COLORS,
+    _parse_datetime,
 )
 
 
@@ -38,13 +45,15 @@ class TestParseDatetime:
     def test_node_from_dict_naive_timestamps_are_aware(self):
         """A node loaded from pre-migration JSON must not mix naive and aware
         datetimes — otherwise comparing created_at across nodes raises TypeError."""
-        legacy = Node.from_dict({
-            "id": "node-1",
-            "type": "Actor",
-            "name": "Legacy",
-            "created_at": "2024-01-01T00:00:00",
-            "updated_at": "2024-01-01T00:00:00",
-        })
+        legacy = Node.from_dict(
+            {
+                "id": "node-1",
+                "type": "Actor",
+                "name": "Legacy",
+                "created_at": "2024-01-01T00:00:00",
+                "updated_at": "2024-01-01T00:00:00",
+            }
+        )
         fresh = Node(type="Actor", name="Fresh")
 
         assert legacy.created_at.tzinfo is not None
@@ -58,8 +67,15 @@ class TestNodeType:
     def test_node_types_exist(self):
         """Verify all expected node types exist"""
         expected_types = [
-            "Actor", "Initiative", "Capability",
-            "Resource", "Legislation", "Theme", "Goal", "Event", "SavedView"
+            "Actor",
+            "Initiative",
+            "Capability",
+            "Resource",
+            "Legislation",
+            "Theme",
+            "Goal",
+            "Event",
+            "SavedView",
         ]
         for type_name in expected_types:
             assert NodeType(type_name) is not None
@@ -82,8 +98,13 @@ class TestRelationshipType:
     def test_relationship_types_exist(self):
         """Verify all expected relationship types exist"""
         expected_types = [
-            "BELONGS_TO", "IMPLEMENTS", "PRODUCES",
-            "GOVERNED_BY", "RELATES_TO", "PART_OF", "AIMS_FOR"
+            "BELONGS_TO",
+            "IMPLEMENTS",
+            "PRODUCES",
+            "GOVERNED_BY",
+            "RELATES_TO",
+            "PART_OF",
+            "AIMS_FOR",
         ]
         for type_name in expected_types:
             assert RelationshipType(type_name) is not None
@@ -117,7 +138,7 @@ class TestNode:
             description="A test initiative description",
             summary="Test summary",
             tags=["tag1", "tag2"],
-            metadata={"key": "value"}
+            metadata={"key": "value"},
         )
 
         assert node.id == "test-id-123"
@@ -129,54 +150,50 @@ class TestNode:
 
     def test_node_to_dict(self):
         """Test converting node to dictionary"""
-        node = Node(
-            type=NodeType.ACTOR,
-            name="Test Actor",
-            tags=["governance"]
-        )
+        node = Node(type=NodeType.ACTOR, name="Test Actor", tags=["governance"])
 
         data = node.to_dict()
 
-        assert data['name'] == "Test Actor"
-        assert data['type'] == "Actor"
-        assert data['tags'] == ["governance"]
-        assert isinstance(data['created_at'], str)  # ISO format string
+        assert data["name"] == "Test Actor"
+        assert data["type"] == "Actor"
+        assert data["tags"] == ["governance"]
+        assert isinstance(data["created_at"], str)  # ISO format string
 
     def test_node_from_dict(self):
         """Test creating node from dictionary"""
         data = {
-            'id': 'test-id',
-            'type': 'Actor',
-            'name': 'Test Actor',
-            'description': 'Test description',
-            'summary': 'Summary',
-            'tags': ['tag1'],
-            'metadata': {},
-            'created_at': '2024-01-01T00:00:00',
-            'updated_at': '2024-01-01T00:00:00'
+            "id": "test-id",
+            "type": "Actor",
+            "name": "Test Actor",
+            "description": "Test description",
+            "summary": "Summary",
+            "tags": ["tag1"],
+            "metadata": {},
+            "created_at": "2024-01-01T00:00:00",
+            "updated_at": "2024-01-01T00:00:00",
         }
 
         node = Node.from_dict(data)
 
-        assert node.id == 'test-id'
-        assert node.name == 'Test Actor'
+        assert node.id == "test-id"
+        assert node.name == "Test Actor"
         assert node.type == NodeType.ACTOR
         assert isinstance(node.created_at, datetime)
 
     def test_node_from_dict_accepts_zulu_timestamps(self):
         """Test creating node from dictionary with UTC Z suffix timestamps."""
         data = {
-            'id': 'test-id',
-            'type': 'Actor',
-            'name': 'Test Actor',
-            'created_at': '2024-01-01T00:00:00Z',
-            'updated_at': '2024-01-01T00:00:00Z'
+            "id": "test-id",
+            "type": "Actor",
+            "name": "Test Actor",
+            "created_at": "2024-01-01T00:00:00Z",
+            "updated_at": "2024-01-01T00:00:00Z",
         }
 
         node = Node.from_dict(data)
 
-        assert node.created_at.isoformat().startswith('2024-01-01T00:00:00')
-        assert node.updated_at.isoformat().startswith('2024-01-01T00:00:00')
+        assert node.created_at.isoformat().startswith("2024-01-01T00:00:00")
+        assert node.updated_at.isoformat().startswith("2024-01-01T00:00:00")
 
     def test_node_get_color(self):
         """Test getting node color"""
@@ -196,7 +213,7 @@ class TestNode:
         node = Node(
             type=NodeType.ACTOR,
             name="Test Agency",
-            subtypes=["Government agency", "Regulatory body"]
+            subtypes=["Government agency", "Regulatory body"],
         )
 
         assert node.subtypes == ["Government agency", "Regulatory body"]
@@ -208,23 +225,19 @@ class TestNode:
 
     def test_node_subtypes_in_to_dict(self):
         """Test that subtypes are included in to_dict"""
-        node = Node(
-            type=NodeType.ACTOR,
-            name="Test",
-            subtypes=["Municipality"]
-        )
+        node = Node(type=NodeType.ACTOR, name="Test", subtypes=["Municipality"])
         data = node.to_dict()
-        assert data['subtypes'] == ["Municipality"]
+        assert data["subtypes"] == ["Municipality"]
 
     def test_node_subtypes_from_dict(self):
         """Test that subtypes are loaded from dict"""
         data = {
-            'id': 'test-id',
-            'type': 'Actor',
-            'name': 'Test Actor',
-            'subtypes': ["Government agency"],
-            'created_at': '2024-01-01T00:00:00',
-            'updated_at': '2024-01-01T00:00:00'
+            "id": "test-id",
+            "type": "Actor",
+            "name": "Test Actor",
+            "subtypes": ["Government agency"],
+            "created_at": "2024-01-01T00:00:00",
+            "updated_at": "2024-01-01T00:00:00",
         }
         node = Node.from_dict(data)
         assert node.subtypes == ["Government agency"]
@@ -232,11 +245,11 @@ class TestNode:
     def test_node_subtypes_missing_from_dict(self):
         """Test that missing subtypes in dict defaults to empty list"""
         data = {
-            'id': 'test-id',
-            'type': 'Actor',
-            'name': 'Test Actor',
-            'created_at': '2024-01-01T00:00:00',
-            'updated_at': '2024-01-01T00:00:00'
+            "id": "test-id",
+            "type": "Actor",
+            "name": "Test Actor",
+            "created_at": "2024-01-01T00:00:00",
+            "updated_at": "2024-01-01T00:00:00",
         }
         node = Node.from_dict(data)
         assert node.subtypes == []
@@ -257,11 +270,7 @@ class TestEdge:
 
     def test_create_edge_minimal(self):
         """Test creating an edge with minimal fields"""
-        edge = Edge(
-            source="node-1",
-            target="node-2",
-            type=RelationshipType.BELONGS_TO
-        )
+        edge = Edge(source="node-1", target="node-2", type=RelationshipType.BELONGS_TO)
 
         assert edge.source == "node-1"
         assert edge.target == "node-2"
@@ -275,45 +284,45 @@ class TestEdge:
             source="node-1",
             target="node-2",
             type=RelationshipType.IMPLEMENTS,
-            metadata={"weight": 1.0}
+            metadata={"weight": 1.0},
         )
 
         data = edge.to_dict()
 
-        assert data['source'] == "node-1"
-        assert data['target'] == "node-2"
-        assert data['type'] == "IMPLEMENTS"
-        assert data['metadata'] == {"weight": 1.0}
+        assert data["source"] == "node-1"
+        assert data["target"] == "node-2"
+        assert data["type"] == "IMPLEMENTS"
+        assert data["metadata"] == {"weight": 1.0}
 
     def test_edge_from_dict(self):
         """Test creating edge from dictionary"""
         data = {
-            'id': 'edge-1',
-            'source': 'node-1',
-            'target': 'node-2',
-            'type': 'RELATES_TO',
-            'metadata': {},
-            'created_at': '2024-01-01T00:00:00'
+            "id": "edge-1",
+            "source": "node-1",
+            "target": "node-2",
+            "type": "RELATES_TO",
+            "metadata": {},
+            "created_at": "2024-01-01T00:00:00",
         }
 
         edge = Edge.from_dict(data)
 
-        assert edge.id == 'edge-1'
+        assert edge.id == "edge-1"
         assert edge.type == RelationshipType.RELATES_TO
 
     def test_edge_from_dict_accepts_zulu_timestamp(self):
         """Test creating edge from dictionary with UTC Z suffix timestamp."""
         data = {
-            'id': 'edge-1',
-            'source': 'node-1',
-            'target': 'node-2',
-            'type': 'RELATES_TO',
-            'created_at': '2024-01-01T00:00:00Z'
+            "id": "edge-1",
+            "source": "node-1",
+            "target": "node-2",
+            "type": "RELATES_TO",
+            "created_at": "2024-01-01T00:00:00Z",
         }
 
         edge = Edge.from_dict(data)
 
-        assert edge.created_at.isoformat().startswith('2024-01-01T00:00:00')
+        assert edge.created_at.isoformat().startswith("2024-01-01T00:00:00")
 
 
 class TestSimilarNode:
@@ -323,9 +332,7 @@ class TestSimilarNode:
         """Test creating a SimilarNode result"""
         node = Node(type=NodeType.ACTOR, name="Test")
         similar = SimilarNode(
-            node=node,
-            similarity_score=0.85,
-            match_reason="Name similarity: 85%"
+            node=node, similarity_score=0.85, match_reason="Name similarity: 85%"
         )
 
         assert similar.node == node
@@ -352,7 +359,7 @@ class TestGraphStats:
             total_nodes=100,
             total_edges=150,
             nodes_by_type={"Actor": 50, "Initiative": 30},
-            last_updated=datetime.now(timezone.utc)
+            last_updated=datetime.now(timezone.utc),
         )
 
         assert stats.total_nodes == 100
@@ -369,7 +376,7 @@ class TestAddNodesResult:
             added_node_ids=["node-1", "node-2"],
             added_edge_ids=["edge-1"],
             success=True,
-            message="Added 2 nodes and 1 edge"
+            message="Added 2 nodes and 1 edge",
         )
 
         assert result.success is True
@@ -382,7 +389,7 @@ class TestAddNodesResult:
             added_node_ids=[],
             added_edge_ids=[],
             success=False,
-            message="Duplicate node ID"
+            message="Duplicate node ID",
         )
 
         assert result.success is False
@@ -398,7 +405,7 @@ class TestDeleteNodesResult:
             deleted_node_ids=["node-1"],
             affected_edge_ids=["edge-1", "edge-2"],
             success=True,
-            message="Deleted 1 node and 2 edges"
+            message="Deleted 1 node and 2 edges",
         )
 
         assert result.success is True
