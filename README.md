@@ -63,8 +63,10 @@ See [docs/USER_GUIDE.md](./docs/USER_GUIDE.md) for a full user-facing walkthroug
     config.py                     # Server configuration
   /core                           # Core graph data structures
     storage.py                    # NetworkX graph operations
+    storage_backends.py           # Persistence backend abstraction
     models.py                     # Node/Edge data models
     vector_store.py               # Similarity search
+    /events                       # Graph mutation event / webhook system
   /service                        # Graph service layer
     service.py                    # High-level graph operations
     rest_api.py                   # REST API router
@@ -83,6 +85,11 @@ See [docs/USER_GUIDE.md](./docs/USER_GUIDE.md) for a full user-facing walkthroug
     config_context.py             # Config path resolution context
   /skills                         # Skills loader system
     loader.py                     # SkillsLoader — fetches/parses SKILL.md files
+  /agents                         # Agent execution (event- and schedule-triggered)
+  /federation                     # Federated graph cache and search
+  /tests                          # Cross-cutting backend tests
+  config_loader.py                # Schema and config loading
+  document_processor.py           # Document text extraction
 /config                           # Configuration profiles
   /default                        # Default profile (base, always required)
     schema_config.json            # Node types, relationships, presentation
@@ -116,8 +123,11 @@ See [docs/USER_GUIDE.md](./docs/USER_GUIDE.md) for a full user-facing walkthroug
   /widget                         # ChatGPT embeddable widget
 /packages                         # Shared packages
   /ui-graph-canvas                # Shared React Flow component
+/services                         # Standalone auxiliary services
+  /mcp_oauth_gateway              # OAuth 2.1 gateway wrapping the MCP endpoint
 /scripts                          # Utility scripts
-/docs                             # Documentation
+/docs                             # Documentation (see docs/README.md for a status-tagged index)
+  README.md                       # Documentation index: current / design / historical
   DATA_MANAGEMENT.md              # Graph data management guide
   EVENT_SUBSCRIPTIONS.md          # Webhook/event system docs
   PROFILES.md                     # Configuration profiles guide

@@ -520,18 +520,24 @@ outsized cost.
 
 ### D1. Realign the architecture docs with the tree
 
-- **Problem:** the DEVELOPMENT.md architecture overview omits
-  `backend/federation/`, `backend/agents/`, `backend/skills/`,
-  `backend/core/events/` and all the flat modules, and still lists
-  `backend/graph.json` as the data file. README's project structure omits
-  `services/mcp_oauth_gateway`. The two "enablement plan" docs and
-  `docs/sprint_documentation/` mix design-proposal and historical material into
-  the same namespace as current-state guides with no status marking.
-- **Proposed change:** update both structure trees (after B3/C1 land, or as
-  part of them); add a `docs/README.md` index that tags every doc as
-  **current** / **design (target state)** / **historical**, and move
-  `sprint_documentation/` under a clearly historical heading. This lets an
-  agent session skip stale material instead of reconciling it.
+- **Problem (partly resolved en route by B3/C1):** the `backend/DEVELOPMENT.md`
+  architecture tree portion of this problem is **already fixed** — B3 (PR #224)
+  added `federation/`, `agents/`, `skills/`, `llm/`, `runtime/` to the tree and
+  C1 (PR #223) removed the stale `backend/graph.json` data-file line, so that
+  tree now matches the package layout. What remained: README's project structure
+  omitted `services/mcp_oauth_gateway` (and several backend packages —
+  `agents/`, `federation/`, `tests/`, `core/events/`), and the two "enablement
+  plan" docs plus `docs/sprint_documentation/` mixed design-proposal and
+  historical material into the same namespace as current-state guides with no
+  status marking.
+- **Proposed change:** bring README's project structure up to date with the tree
+  (add `services/mcp_oauth_gateway` and the missing backend packages/modules);
+  add a `docs/README.md` index that tags every doc as **current** /
+  **design (target state)** / **historical**, with `sprint_documentation/`
+  under the historical heading. This lets an agent session skip stale material
+  instead of reconciling it. (The `DEVELOPMENT.md` tree needed no further change
+  — B3/C1 already realigned it; the remaining `config_loader.py` /
+  `document_processor.py` root modules are tracked separately under B6.)
 - **Effort:** S–M
 
 ### D2. Keep CLAUDE.md, CI, and reality in one truth
@@ -599,7 +605,7 @@ summary instead.
 | 14 | C4 Node 18 → 20 build image | XS | — | done (PR #233) |
 | 15 | C5 security scanning in CI | S | A1 | done (PR #234) — CodeQL default setup still *(owner action)* |
 | 16 | C6 start-script consolidation | S | — | done (PR #235) |
-| 17 | D1 docs realignment + index | S–M | B3, C1 | open |
+| 17 | D1 docs realignment + index | S–M | B3, C1 | done (PR #236) |
 | 18 | D2 CLAUDE.md truth verification pass | XS | A1, A2, A4 | open |
 | 19 | B4 service.py / storage.py split | L | A1, next feature touching them | open |
 | 20 | C7 commit root lockfile for reproducible frontend CI | S | A1 | open |
@@ -624,6 +630,24 @@ summary instead.
    same branch.
 
 ## Completed
+
+- **[2026-07-12] D1 — status-tagged docs index + README structure realignment
+  (PR #236).** Added `docs/README.md`, an index tagging every document as
+  **current** (present-system guides/process docs), **design (target state)**
+  (the runtime/extension/plugin enablement plans) or **historical**
+  (`sprint_documentation/`, `expert-agents-implementation-plan.md`,
+  `MIGRATION_NOTES.md`), so a session can skip stale material instead of
+  reconciling it — all 20 indexed docs verified present with resolving links.
+  Brought README's `## Project Structure` up to date with the tree: added the
+  omitted top-level `services/mcp_oauth_gateway`, the backend packages `agents/`,
+  `federation/`, `tests/`, `core/events/`, plus `storage_backends.py` and the two
+  root modules (`config_loader.py`, `document_processor.py`), and a pointer to the
+  new index. The `backend/DEVELOPMENT.md` tree needed no change — B3 (#224) had
+  already added federation/agents/skills/llm/runtime and C1 (#223) removed the
+  stale `graph.json` data-file line — so the D1 item text was corrected to reflect
+  that and scope the item to the README + index work. `config_loader.py` /
+  `document_processor.py` relocation stays tracked under B6. Docs-only, no code
+  change.
 
 - **[2026-07-12] C6 — root start scripts consolidated under `scripts/` (PR #235).**
   Kept `start-dev.sh` at the repo root as the canonical entry point and moved the
