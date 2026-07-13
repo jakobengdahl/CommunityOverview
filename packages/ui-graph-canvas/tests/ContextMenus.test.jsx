@@ -72,7 +72,12 @@ describe('NodeContextMenu', () => {
     const onEdit = vi.fn();
     const onClose = vi.fn();
     render(
-      <NodeContextMenu menu={{ x: 0, y: 0, node }} labels={labels} onEdit={onEdit} onClose={onClose} />
+      <NodeContextMenu
+        menu={{ x: 0, y: 0, node }}
+        labels={labels}
+        onEdit={onEdit}
+        onClose={onClose}
+      />
     );
     fireEvent.click(screen.getByRole('button', { name: /edit/i }));
     expect(onEdit).toHaveBeenCalledWith('n1', node.data);
@@ -102,13 +107,22 @@ describe('NodeContextMenu', () => {
       node_types: {
         Actor: {
           context_menu: [
-            { label: 'Search', icon: '🔎', action: { type: 'open_url', url: 'https://x.test/?q={label}' } },
+            {
+              label: 'Search',
+              icon: '🔎',
+              action: { type: 'open_url', url: 'https://x.test/?q={label}' },
+            },
           ],
         },
       },
     };
     render(
-      <NodeContextMenu menu={{ x: 0, y: 0, node }} labels={labels} schema={schema} onClose={onClose} />
+      <NodeContextMenu
+        menu={{ x: 0, y: 0, node }}
+        labels={labels}
+        schema={schema}
+        onClose={onClose}
+      />
     );
     fireEvent.click(screen.getByRole('button', { name: /search/i }));
     expect(openSpy).toHaveBeenCalledWith(
@@ -200,7 +214,9 @@ describe('EdgeContextMenu', () => {
   ];
 
   it('renders nothing when menu is null', () => {
-    const { container } = render(<EdgeContextMenu menu={null} labels={labels} relationshipTypes={[]} />);
+    const { container } = render(
+      <EdgeContextMenu menu={null} labels={labels} relationshipTypes={[]} />
+    );
     expect(container.querySelector('.edge-context-menu')).toBeNull();
   });
 

@@ -322,9 +322,7 @@ export function PaneContextMenu({ menu, labels: cml, menuRef, createAnnotation }
       className="graph-context-menu pane-context-menu"
       style={{ left: menu.x, top: menu.y }}
     >
-      <button onClick={() => createAnnotation('note', menu.flowPosition)}>
-        📝 {cml.addNote}
-      </button>
+      <button onClick={() => createAnnotation('note', menu.flowPosition)}>📝 {cml.addNote}</button>
       <button onClick={() => createAnnotation('label', menu.flowPosition)}>
         🏷️ {cml.addLabel}
       </button>

@@ -632,7 +632,7 @@ summary instead.
 | 9 | C2 lint gates | M | A1 | done (PR #227) |
 | 10 | A3 step 2 (stream token scheme) | M | A3 step 1 | decided 2026-07-13 — won't-fix in core, routed to SaaS tier (see A3 Decision 2026-07-13) |
 | 11 | B1 remaining slices | M×2 | B1 slice 1 | in progress (slice 3/4, PR #240) |
-| 12 | B5 GraphCanvas decomposition | M | — | in progress (slice 1/2, PR #230) |
+| 12 | B5 GraphCanvas decomposition | M | — | done — slice 1 (PR #230) + slice 2 (PR #241) |
 | 13 | C3 HTTP client + dependency policy | S–M | — | done — slice 1 (PR #232) + slice 2 (PR #239) |
 | 14 | C4 Node 18 → 20 build image | XS | — | done (PR #233) |
 | 15 | C5 security scanning in CI | S | A1 | done (PR #234) — CodeQL default setup still *(owner action)* |
@@ -653,14 +653,13 @@ deliberately deferred until a feature next forces a change in `service.py` /
 prioritized list of unblocked, decision-clear work instead (all dependencies met,
 all owner decisions now recorded above):
 
-1. **B5 slice 2 — context-menu extraction from `GraphCanvas.jsx` (row 12).** Pure
-   extraction; the `contextMenuLabels` props contract already exists.
-2. **B1 slice 4 — chat/proposal wiring into a container (row 11).** The last B1
+1. **B1 slice 4 — chat/proposal wiring into a container (row 11).** The last B1
    slice; behaviour-preserving extraction.
 
-*(B1 slice 3 — dialog orchestration out of `App.jsx` — done in PR #240; row 11 is
-now at slice 3/4. C3 slice 2 — gateway `httpx2` + `python-jose`→`pyjwt` — done in
-PR #239; row 13 is fully done.)*
+*(B5 slice 2 — context-menu extraction from `GraphCanvas.jsx` — done in PR #241;
+row 12 is fully done, B5 complete. B1 slice 3 — dialog orchestration out of
+`App.jsx` — done in PR #240; row 11 is now at slice 3/4. C3 slice 2 — gateway
+`httpx2` + `python-jose`→`pyjwt` — done in PR #239; row 13 is fully done.)*
 
 ### How a session updates this document
 
@@ -681,6 +680,21 @@ PR #239; row 13 is fully done.)*
    same branch.
 
 ## Completed
+
+- **[2026-07-13] B5 slice 2 — context menus extracted from `GraphCanvas.jsx` into
+  `ContextMenus.jsx` (PR #241).** Moved the four inline context menus (node,
+  multi-node, edge, pane) out of the `GraphCanvasInner` render body into a dedicated
+  presentational module `packages/ui-graph-canvas/src/components/ContextMenus.jsx`,
+  together with the `buildContextMenuUrl` helper they solely consumed. `GraphCanvas`
+  keeps the menu open/close state and every action callback, passing each component
+  its descriptor plus an `onClose` closer; each returns `null` when closed, so the
+  old `{menu && (...)}` guards became internal. Behaviour-preserving — no route,
+  prop-contract, or DOM/class changes; `GraphCanvas.jsx` shrinks 248 lines
+  (1589 → 1341). Added `ContextMenus.test.jsx` (17 tests) covering null-render,
+  positioning, conditional buttons, handler-then-`onClose` wiring, schema
+  `open_url`/`callback` custom items, the edge type picker and `buildContextMenuUrl`.
+  Canvas suite green (9 files / 96 tests = 79 + 17 new); web 223, widget 56. B5 is
+  now fully complete (slice 1 = PR #230, slice 2 = PR #241).
 
 - **[2026-07-13] B1 slice 3 — dialog orchestration extracted from `App.jsx` into
   `AppDialogs` (PR #240).** Moved the ~14-dialog modal/overlay render stack (create
