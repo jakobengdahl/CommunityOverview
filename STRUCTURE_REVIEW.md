@@ -611,7 +611,7 @@ summary instead.
 | 17 | D1 docs realignment + index | S–M | B3, C1 | done (PR #236) |
 | 18 | D2 CLAUDE.md truth verification pass | XS | A1, A2, A4 | open |
 | 19 | B4 service.py / storage.py split | L | A1, next feature touching them | open |
-| 20 | C7 commit root lockfile for reproducible frontend CI | S | A1 | open |
+| 20 | C7 reproducible frontend CI (`npm ci` + lockfile) | S | A1 | done (PR #237) |
 | 21 | B6 home `config_loader.py` + `document_processor.py` | S | B3 | open |
 
 ### How a session updates this document
@@ -633,6 +633,20 @@ summary instead.
    same branch.
 
 ## Completed
+
+- **[2026-07-13] C7 — reproducible frontend CI via `npm ci` + tracked lockfile
+  (PR #237).** The "commit a root lockfile" half of C7 was already stale — a root
+  `package-lock.json` had been committed before the C2 lint work — so the item
+  text was corrected. The real remaining gap: both frontend CI jobs
+  (`frontend-tests`, `frontend-lint`) still ran `npm install`, which re-resolves
+  fresh transitive versions each run and ignores the committed lockfile, and
+  neither `setup-node` step enabled the lockfile-keyed npm cache. Switched both
+  jobs to `npm ci --no-audit --no-fund` (installs exactly the lockfile, fails
+  loudly on `package.json` drift) and enabled `cache: 'npm'` on both. CI-YAML +
+  docs only, no source change. Verified `npm ci --dry-run` clean (lockfile in
+  sync) and the full unit suite green on the `npm ci`-installed tree (canvas 79 /
+  web 213 / widget 56 = 348 tests). Added a one-line reproducible-install note to
+  `backend/DEVELOPMENT.md`'s CI section.
 
 - **[2026-07-12] D1 — status-tagged docs index + README structure realignment
   (PR #236).** Added `docs/README.md`, an index tagging every document as
