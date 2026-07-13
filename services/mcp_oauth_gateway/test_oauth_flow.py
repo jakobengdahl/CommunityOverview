@@ -4,13 +4,17 @@ Tests for the MCP OAuth Gateway – focus on redirect_uri handling.
 Uses unittest.mock to isolate from Google OIDC and config env vars.
 """
 
+import asyncio
 import hashlib
 import base64
 import importlib
 import os
 import sys
+import time
 import unittest
 from unittest.mock import AsyncMock, patch, MagicMock
+
+import jwt
 
 # Set required env vars before importing config (it reads them at import time)
 os.environ.setdefault("GOOGLE_OAUTH_CLIENT_ID", "test-client-id")
@@ -224,6 +228,97 @@ class TestAuthModuleRedirectUri(unittest.TestCase):
 
         token = auth.exchange_code_for_token(code, verifier, "")
         assert token is None
+
+
+class TestGatewayJwt(unittest.TestCase):
+    """Round-trip tests for the gateway's JWT minting and verification.
+
+    These guard the python-jose -> PyJWT migration: the gateway signs its own
+    access tokens (HS256) and verifies them on every proxied request, so a
+    regression here silently breaks all authenticated access.
+    """
+
+    def test_issued_token_validates_and_carries_claims(self):
+        verifier, challenge = _make_pkce_pair()
+        code = auth.issue_auth_code("alice@example.com", challenge, "https://app/cb")
+        token = auth.exchange_code_for_token(code, verifier, "https://app/cb")
+        assert token is not None
+
+        claims = auth.validate_token(token)
+        assert claims is not None
+        assert claims["sub"] == "alice@example.com"
+        assert claims["aud"] == config.PUBLIC_BASE_URL
+
+    def test_validate_token_rejects_wrong_signing_key(self):
+        verifier, challenge = _make_pkce_pair()
+        code = auth.issue_auth_code("bob@example.com", challenge, "https://app/cb")
+        token = auth.exchange_code_for_token(code, verifier, "https://app/cb")
+
+        with patch.object(config, "GW_JWT_SIGNING_KEY", "a-different-signing-key-32-chars!!"):
+            assert auth.validate_token(token) is None
+
+    def test_validate_token_rejects_expired_token(self):
+        past = int(time.time()) - 10
+        claims = {
+            "sub": "alice@example.com",
+            "aud": config.PUBLIC_BASE_URL,
+            "iat": past - 60,
+            "exp": past,
+        }
+        expired = jwt.encode(claims, config.GW_JWT_SIGNING_KEY, algorithm=config.JWT_ALGORITHM)
+        assert auth.validate_token(expired) is None
+
+    def test_validate_token_rejects_wrong_audience(self):
+        now = int(time.time())
+        claims = {
+            "sub": "alice@example.com",
+            "aud": "https://someone-else.example.com",
+            "iat": now,
+            "exp": now + 3600,
+        }
+        token = jwt.encode(claims, config.GW_JWT_SIGNING_KEY, algorithm=config.JWT_ALGORITHM)
+        assert auth.validate_token(token) is None
+
+    def test_validate_token_rejects_garbage(self):
+        assert auth.validate_token("not-a-jwt") is None
+
+    def test_exchange_google_code_reads_unverified_email(self):
+        """exchange_google_code decodes Google's id_token without verifying its
+        signature (Google already validated the code) and returns the email."""
+        id_token = jwt.encode(
+            {"email": "alice@example.com", "email_verified": True},
+            "google-side-key-not-known-to-gateway",
+            algorithm="HS256",
+        )
+        mock_resp = MagicMock(status_code=200)
+        mock_resp.json.return_value = {"id_token": id_token}
+
+        mock_client = AsyncMock()
+        mock_client.post.return_value = mock_resp
+        mock_client.__aenter__.return_value = mock_client
+        mock_client.__aexit__.return_value = False
+
+        with patch("auth.httpx.AsyncClient", return_value=mock_client):
+            email = asyncio.run(auth.exchange_google_code("google-auth-code"))
+        assert email == "alice@example.com"
+
+    def test_exchange_google_code_rejects_unverified_email(self):
+        id_token = jwt.encode(
+            {"email": "alice@example.com", "email_verified": False},
+            "google-side-key",
+            algorithm="HS256",
+        )
+        mock_resp = MagicMock(status_code=200)
+        mock_resp.json.return_value = {"id_token": id_token}
+
+        mock_client = AsyncMock()
+        mock_client.post.return_value = mock_resp
+        mock_client.__aenter__.return_value = mock_client
+        mock_client.__aexit__.return_value = False
+
+        with patch("auth.httpx.AsyncClient", return_value=mock_client):
+            email = asyncio.run(auth.exchange_google_code("google-auth-code"))
+        assert email is None
 
 
 class TestCorsConfiguration(unittest.TestCase):

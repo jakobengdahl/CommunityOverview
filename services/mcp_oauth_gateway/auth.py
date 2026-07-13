@@ -16,8 +16,9 @@ import uuid
 from dataclasses import dataclass, field
 from typing import Dict, Optional
 
-import httpx
-from jose import JWTError, jwt
+import httpx2 as httpx
+import jwt
+from jwt import PyJWTError
 
 import config
 
@@ -127,10 +128,11 @@ async def exchange_google_code(google_code: str) -> Optional[str]:
 
     # Decode without verification (Google already validated the code)
     # The signature is verified implicitly because only Google could produce
-    # a valid code; for additional security, pass options={"verify_signature": False}
+    # a valid code. Disabling signature verification also disables the exp/aud
+    # claim checks in PyJWT, matching the old get_unverified_claims behaviour.
     try:
-        claims = jwt.get_unverified_claims(id_token)
-    except JWTError as exc:
+        claims = jwt.decode(id_token, options={"verify_signature": False})
+    except PyJWTError as exc:
         logger.warning("Could not decode Google ID token: %s", exc)
         return None
 
@@ -240,6 +242,6 @@ def validate_token(token: str) -> Optional[Dict]:
             audience=config.PUBLIC_BASE_URL,
         )
         return claims
-    except JWTError as exc:
+    except PyJWTError as exc:
         logger.debug("Token validation failed: %s", exc)
         return None

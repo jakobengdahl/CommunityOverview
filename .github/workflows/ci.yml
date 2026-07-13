@@ -122,7 +122,7 @@ jobs:
           cache: 'pip'
 
       - name: Install dependencies
-        run: pip install -r services/mcp_oauth_gateway/requirements.txt pytest
+        run: pip install -r services/mcp_oauth_gateway/requirements-dev.txt
 
       - name: Run gateway tests
         run: pytest test_oauth_flow.py -q
