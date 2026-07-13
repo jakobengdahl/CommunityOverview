@@ -499,9 +499,10 @@ cluster. Decompose them behavior-preservingly, one slice per PR.
 
 ### C7. Commit a root lockfile so frontend CI is reproducible
 
-- **Problem (premise partly corrected — PR #227 note):** a root
-  `package-lock.json` **is** now tracked (committed before the C2 lint work), so
-  the "no lockfile is tracked" half of the original premise is stale. What
+- **Problem (premise partly stale — first flagged in the C2/PR #227 note,
+  corrected here):** a root `package-lock.json` **is** now tracked (committed
+  before the C2 lint work), so the "no lockfile is tracked" half of the original
+  premise is stale. What
   remained true: the two frontend CI jobs (`frontend-tests`, `frontend-lint`)
   still ran `npm install`, which resolves fresh transitive versions on every run
   and ignores the committed lockfile, and neither `setup-node` step enabled the
