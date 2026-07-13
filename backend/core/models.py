@@ -24,7 +24,7 @@ def _get_config_loader():
     """Lazy load config_loader to avoid circular imports."""
     global _config_loader
     if _config_loader is None:
-        from backend import config_loader
+        from backend.config import config_loader
 
         _config_loader = config_loader
     return _config_loader

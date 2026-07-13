@@ -75,6 +75,7 @@ See [docs/USER_GUIDE.md](./docs/USER_GUIDE.md) for a full user-facing walkthroug
     chat_service.py               # LLM chat with tool execution
     chat_logic.py                 # Chat processing logic
     document_service.py           # Document parsing
+    document_processor.py         # Document text extraction (PDF/Word/text)
     rest_api.py                   # Chat REST endpoints
   /llm                            # LLM provider abstraction
     llm_providers.py              # LLM provider abstraction
@@ -85,11 +86,11 @@ See [docs/USER_GUIDE.md](./docs/USER_GUIDE.md) for a full user-facing walkthroug
     config_context.py             # Config path resolution context
   /skills                         # Skills loader system
     loader.py                     # SkillsLoader — fetches/parses SKILL.md files
+  /config                         # Schema/config loading
+    config_loader.py              # Schema and config loading
   /agents                         # Agent execution (event- and schedule-triggered)
   /federation                     # Federated graph cache and search
   /tests                          # Cross-cutting backend tests
-  config_loader.py                # Schema and config loading
-  document_processor.py           # Document text extraction
 /config                           # Configuration profiles
   /default                        # Default profile (base, always required)
     schema_config.json            # Node types, relationships, presentation

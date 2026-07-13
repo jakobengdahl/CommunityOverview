@@ -13,7 +13,7 @@ from backend.core import GraphStorage
 from backend.llm.llm_providers import get_llm_availability
 from backend.agents import AgentRegistry
 from backend.federation import FederationManager
-from backend import config_loader
+from backend.config import config_loader
 
 from .config import AppConfig
 

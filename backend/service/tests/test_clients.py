@@ -21,7 +21,7 @@ from backend.service import GraphService, create_rest_router, register_mcp_tools
 @pytest.fixture(autouse=True)
 def reset_config_loader():
     """Reset shared config loader state between tests."""
-    from backend import config_loader
+    from backend.config import config_loader
 
     config_loader.reset_loader()
     yield
@@ -193,7 +193,7 @@ class TestRESTAPIClient:
             / "schema_config.json"
         )
         os.environ["SCHEMA_FILE"] = test_config_path
-        from backend import config_loader
+        from backend.config import config_loader
 
         config_loader.reset_loader()
 
@@ -380,7 +380,7 @@ class TestMCPClient:
             / "schema_config.json"
         )
         os.environ["SCHEMA_FILE"] = test_config_path
-        from backend import config_loader
+        from backend.config import config_loader
 
         config_loader.reset_loader()
 

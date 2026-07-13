@@ -30,7 +30,7 @@ from backend.core import (
     EventScopeAttribution,
 )
 
-from backend import config_loader
+from backend.config import config_loader
 from backend.runtime.authorization import (
     GRAPH_ACTION_MUTATE,
     GRAPH_ACTION_READ,

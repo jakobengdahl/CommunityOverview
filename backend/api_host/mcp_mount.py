@@ -11,7 +11,7 @@ from fastapi import FastAPI
 from fastapi.responses import JSONResponse
 from starlette.datastructures import Headers
 
-from backend import config_loader
+from backend.config import config_loader
 from backend.llm.language_policy import format_language_policy_for_prompt
 from backend.runtime.authorization import use_request_authorization
 
