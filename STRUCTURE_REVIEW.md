@@ -631,7 +631,7 @@ summary instead.
 | 8 | B1 decompose App.jsx (slice 1: shared-session hook) | M | — | done (PR #226) |
 | 9 | C2 lint gates | M | A1 | done (PR #227) |
 | 10 | A3 step 2 (stream token scheme) | M | A3 step 1 | decided 2026-07-13 — won't-fix in core, routed to SaaS tier (see A3 Decision 2026-07-13) |
-| 11 | B1 remaining slices | M×2 | B1 slice 1 | in progress (slice 2/4, PR #229) |
+| 11 | B1 remaining slices | M×2 | B1 slice 1 | in progress (slice 3/4, PR #240) |
 | 12 | B5 GraphCanvas decomposition | M | — | in progress (slice 1/2, PR #230) |
 | 13 | C3 HTTP client + dependency policy | S–M | — | done — slice 1 (PR #232) + slice 2 (PR #239) |
 | 14 | C4 Node 18 → 20 build image | XS | — | done (PR #233) |
@@ -653,14 +653,14 @@ deliberately deferred until a feature next forces a change in `service.py` /
 prioritized list of unblocked, decision-clear work instead (all dependencies met,
 all owner decisions now recorded above):
 
-1. **B1 slice 3 — dialog orchestration out of `App.jsx` (row 11).** Pure
-   behaviour-preserving extraction, no decision; shrinks the biggest god file.
-2. **B5 slice 2 — context-menu extraction from `GraphCanvas.jsx` (row 12).** Pure
+1. **B5 slice 2 — context-menu extraction from `GraphCanvas.jsx` (row 12).** Pure
    extraction; the `contextMenuLabels` props contract already exists.
-3. **B1 slice 4 — chat/proposal wiring into a container (row 11).** After slice 3.
+2. **B1 slice 4 — chat/proposal wiring into a container (row 11).** The last B1
+   slice; behaviour-preserving extraction.
 
-*(C3 slice 2 — gateway `httpx2` + `python-jose`→`pyjwt` — done in PR #239; row 13
-is now fully done.)*
+*(B1 slice 3 — dialog orchestration out of `App.jsx` — done in PR #240; row 11 is
+now at slice 3/4. C3 slice 2 — gateway `httpx2` + `python-jose`→`pyjwt` — done in
+PR #239; row 13 is fully done.)*
 
 ### How a session updates this document
 
@@ -681,6 +681,28 @@ is now fully done.)*
    same branch.
 
 ## Completed
+
+- **[2026-07-13] B1 slice 3 — dialog orchestration extracted from `App.jsx` into
+  `AppDialogs` (PR #240).** Moved the ~14-dialog modal/overlay render stack (create
+  node, edit node, node detail, edit edge, delete node/nodes, save view, settings,
+  connect/rename/delete session, subscription/skill/agent/AKC, and the AKC intro
+  overlay) out of the `App.jsx` return into a dedicated presentational registry
+  component, `frontend/web/src/components/AppDialogs.jsx`. `App.jsx` shrinks 159
+  lines (1901 → 1742). Behaviour-preserving: `AppDialogs` opens/closes nothing on
+  its own — `App` bundles the modal open/close (and edit-target) state into a
+  `dialogs` object and passes it plus the dialog handlers, so every transition still
+  flows through the state and callbacks `App` owns. The state stays in `App` on
+  purpose: the double-Escape canvas-clear guard and `SessionDrawer`'s `suspendEscape`
+  derive from these flags *together with* the store-driven `editingNode`/`detailNode`
+  and the AKC overlay, and keeping the `useState` in `App` preserves React's static
+  stability guarantee for the setters (relocating them behind a hook boundary
+  injected ~15 spurious `react-hooks/exhaustive-deps` warnings for no behavioural
+  gain). The `notification` toast is not a dialog and stays in `App`; DOM order
+  relative to the stack is immaterial (z-index 1000 < dialogs 2000 < AKC 3000).
+  Added `AppDialogs.test.jsx` (10 tests) covering registry routing and callback
+  wiring; full frontend suite green (web 223 = 213 + 10 new, canvas 79, widget 56).
+  App.jsx lint counts unchanged vs `dev`. B1 slice 4 (chat/proposal wiring) remains
+  open under row 11.
 
 - **[2026-07-13] C3 slice 2 — OAuth gateway migrated to `httpx2` + PyJWT
   (PR #239).** Closed the remaining C3 sub-parts for `services/mcp_oauth_gateway/`
