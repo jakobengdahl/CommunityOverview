@@ -613,7 +613,7 @@ summary instead.
 | 18 | D2 CLAUDE.md truth verification pass | XS | A1, A2, A4 | open |
 | 19 | B4 service.py / storage.py split | L | A1, next feature touching them | open |
 | 20 | C7 reproducible frontend CI (`npm ci` + lockfile) | S | A1 | done (PR #237) |
-| 21 | B6 home `config_loader.py` + `document_processor.py` | S | B3 | open |
+| 21 | B6 home `config_loader.py` + `document_processor.py` | S | B3 | done (PR #238) |
 
 ### How a session updates this document
 
@@ -634,6 +634,24 @@ summary instead.
    same branch.
 
 ## Completed
+
+- **[2026-07-13] B6 — `config_loader.py` and `document_processor.py` homed into
+  packages (PR #238).** Relocated the last two flat modules at `backend/` root,
+  completing the B3 "root contains only packages" clause: `config_loader.py` →
+  new **`backend/config/`** package and `document_processor.py` →
+  **`backend/ui/`** (its sole consumer). config_loader's home was the B6 design
+  decision — `backend/config/` was chosen over `backend/core/` because
+  config_loader imports `backend.runtime.*` and (mid-module, cycle-breaking)
+  `backend.skills.loader`, so homing it in the lowest layer would invert the
+  layering; a neutral `backend/config/` package avoids that, and no reverse edge
+  exists so no new cycle. document_processor kept as its own file rather than
+  folded into `document_service.py`. Pure relocation — no logic/route/signature
+  changes; all importers and both import idioms rewritten; the `core.models` /
+  `core.storage` config_loader imports stay lazy. README project tree and the
+  CLAUDE.md Key Files entry updated. `pytest backend/ -q` 944 passed / 16 skipped
+  (baseline unchanged); ruff check + format clean. Opened as a **draft pending
+  Jakob's sign-off on the config_loader home** (B6 requires surfacing the
+  destination before moving) since the interactive channel was unavailable.
 
 - **[2026-07-13] C7 — reproducible frontend CI via `npm ci` + tracked lockfile
   (PR #237).** The "commit a root lockfile" half of C7 was already stale — a root

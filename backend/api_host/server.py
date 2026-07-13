@@ -215,7 +215,10 @@ def create_app(
     # Runs once synchronously at startup (a new event loop is created so this
     # is safe regardless of whether the caller is inside an async context).
     try:
-        from backend.config.config_loader import get_expert_agent_configs, get_skills_config
+        from backend.config.config_loader import (
+            get_expert_agent_configs,
+            get_skills_config,
+        )
 
         _expert_configs = get_expert_agent_configs()
         if any(e.skills_urls for e in _expert_configs):
