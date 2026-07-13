@@ -269,4 +269,17 @@ describe('PaneContextMenu', () => {
     expect(createAnnotation).toHaveBeenNthCalledWith(2, 'label', flowPosition);
     expect(createAnnotation).toHaveBeenNthCalledWith(3, 'arrow', flowPosition);
   });
+
+  it('attaches the forwarded menuRef to the menu element (outside-click dismiss relies on it)', () => {
+    const menuRef = { current: null };
+    render(
+      <PaneContextMenu
+        menu={{ x: 0, y: 0, flowPosition: { x: 0, y: 0 } }}
+        labels={labels}
+        menuRef={menuRef}
+        createAnnotation={vi.fn()}
+      />
+    );
+    expect(menuRef.current).toBe(document.querySelector('.pane-context-menu'));
+  });
 });
