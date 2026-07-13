@@ -499,16 +499,19 @@ cluster. Decompose them behavior-preservingly, one slice per PR.
 
 ### C7. Commit a root lockfile so frontend CI is reproducible
 
-- **Problem:** no `package-lock.json` is tracked for the npm workspaces, so the
-  frontend CI job introduced in A1 uses `npm install` and resolves fresh
-  transitive versions on every run. This defeats the reproducibility the safety
-  net is meant to provide — a green run does not guarantee the next run installs
-  the same tree, and it prevents `setup-node`'s npm cache (which keys off a
-  lockfile) from working. Discovered while implementing A1 (2026-07-11).
-- **Proposed change:** generate and commit a root `package-lock.json`, switch the
-  frontend CI job from `npm install` to `npm ci`, and enable `cache: 'npm'` on
-  `setup-node`. Verify the committed lockfile installs the same versions the
-  suite currently passes on.
+- **Problem (premise partly corrected — PR #227 note):** a root
+  `package-lock.json` **is** now tracked (committed before the C2 lint work), so
+  the "no lockfile is tracked" half of the original premise is stale. What
+  remained true: the two frontend CI jobs (`frontend-tests`, `frontend-lint`)
+  still ran `npm install`, which resolves fresh transitive versions on every run
+  and ignores the committed lockfile, and neither `setup-node` step enabled the
+  npm cache (which keys off a lockfile). So a green run still did not guarantee
+  the next run installed the same tree.
+- **Proposed change:** switch both frontend CI jobs from `npm install` to
+  `npm ci` (installs exactly the tracked lockfile, failing loudly if it drifts
+  from `package.json`) and enable `cache: 'npm'` on their `setup-node` steps.
+  Verify the committed lockfile installs the same versions the suite currently
+  passes on. (The "generate and commit a lockfile" step is already done.)
 - **Effort:** S
 
 ---
