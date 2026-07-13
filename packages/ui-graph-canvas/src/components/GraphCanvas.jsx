@@ -20,6 +20,12 @@ import LabelNode from './LabelNode';
 import ArrowNode from './ArrowNode';
 import { AnnotationContext } from './AnnotationContext';
 import SimpleFloatingEdge from './SimpleFloatingEdge';
+import {
+  NodeContextMenu,
+  MultiNodeContextMenu,
+  EdgeContextMenu,
+  PaneContextMenu,
+} from './ContextMenus';
 import { useRemotePositions } from '../hooks/useRemotePositions';
 import {
   applyLayout,
@@ -44,22 +50,6 @@ import {
   resolveAnchoredArrow,
 } from '../utils/annotations';
 import './GraphCanvas.css';
-
-/**
- * Build a URL from a template string, substituting {field} or [field] tokens
- * with URI-encoded values from the node's data object. Returns null if the
- * template is not a valid http/https URL after substitution.
- */
-function buildContextMenuUrl(urlTemplate, nodeData) {
-  if (typeof urlTemplate !== 'string') return null;
-  const trimmed = urlTemplate.trim();
-  if (!/^https?:\/\//i.test(trimmed)) return null;
-  return trimmed.replace(/\{(\w+)\}|\[(\w+)\]/g, (_match, curlyKey, bracketKey) => {
-    const key = curlyKey || bracketKey;
-    const value = nodeData[key] ?? '';
-    return encodeURIComponent(String(value));
-  });
-}
 
 /**
  * Ensure parent (group) nodes appear before their children in the array.
@@ -1284,286 +1274,48 @@ function GraphCanvasInner({
           )}
         </div>
 
-        {nodeContextMenu && (
-          <div
-            className="graph-context-menu node-context-menu"
-            style={{ left: nodeContextMenu.x, top: nodeContextMenu.y }}
-          >
-            {onEdit && (
-              <button
-                onClick={() => {
-                  onEdit(nodeContextMenu.node.id, nodeContextMenu.node.data);
-                  setNodeContextMenu(null);
-                }}
-              >
-                ✏️ {cml.edit}
-              </button>
-            )}
-            {onHide && (
-              <button
-                onClick={() => {
-                  onHide(nodeContextMenu.node.id);
-                  setNodeContextMenu(null);
-                }}
-              >
-                👁️ {cml.hide}
-              </button>
-            )}
-            {onExpand && (
-              <button
-                onClick={() => {
-                  onExpand(nodeContextMenu.node.id, nodeContextMenu.node.data);
-                  setNodeContextMenu(null);
-                }}
-              >
-                🔍 {cml.expand}
-              </button>
-            )}
-            <button
-              onClick={() => {
-                const nodeType =
-                  nodeContextMenu.node.data?.nodeType || nodeContextMenu.node.data?.type;
-                selectNodesByType([nodeType]);
-              }}
-            >
-              🎯 {cml.selectSameType}
-            </button>
-            {(() => {
-              const nodeType =
-                nodeContextMenu.node.data?.nodeType || nodeContextMenu.node.data?.type;
-              const customItems = schema?.node_types?.[nodeType]?.context_menu;
-              if (!Array.isArray(customItems) || customItems.length === 0) return null;
-              const nodeData = nodeContextMenu.node.data || {};
-              const items = customItems
-                .map((item, idx) => {
-                  if (!item?.label || !item?.action) return null;
-                  if (item.action.type === 'open_url') {
-                    const url = buildContextMenuUrl(item.action.url, nodeData);
-                    if (!url) return null;
-                    return (
-                      <button
-                        key={idx}
-                        onClick={() => {
-                          window.open(url, '_blank', 'noopener,noreferrer');
-                          setNodeContextMenu(null);
-                        }}
-                      >
-                        {item.icon ? `${item.icon} ` : '🔗 '}
-                        {item.label}
-                      </button>
-                    );
-                  }
-                  if (item.action.type === 'callback') {
-                    const actionName = item.action.name;
-                    if (!actionName || !onContextMenuAction) return null;
-                    return (
-                      <button
-                        key={idx}
-                        onClick={() => {
-                          onContextMenuAction(actionName, nodeContextMenu.node.id, nodeData);
-                          setNodeContextMenu(null);
-                        }}
-                      >
-                        {item.icon ? `${item.icon} ` : '⚡ '}
-                        {item.label}
-                      </button>
-                    );
-                  }
-                  return null;
-                })
-                .filter(Boolean);
-              if (items.length === 0) return null;
-              return (
-                <>
-                  {items}
-                  <div className="context-menu-separator"></div>
-                </>
-              );
-            })()}
-            {onDelete && (
-              <>
-                <div className="context-menu-separator"></div>
-                <button
-                  className="context-menu-danger"
-                  onClick={() => {
-                    onDelete(nodeContextMenu.node.id);
-                    setNodeContextMenu(null);
-                  }}
-                >
-                  🗑️ {cml.delete}
-                </button>
-              </>
-            )}
-          </div>
-        )}
+        <NodeContextMenu
+          menu={nodeContextMenu}
+          labels={cml}
+          schema={schema}
+          onEdit={onEdit}
+          onHide={onHide}
+          onExpand={onExpand}
+          onDelete={onDelete}
+          onContextMenuAction={onContextMenuAction}
+          selectNodesByType={selectNodesByType}
+          onClose={() => setNodeContextMenu(null)}
+        />
 
-        {multiNodeContextMenu && (
-          <div
-            className="graph-context-menu node-context-menu multi-node-context-menu"
-            style={{ left: multiNodeContextMenu.x, top: multiNodeContextMenu.y }}
-          >
-            <div className="context-menu-header">
-              {cml.nodesSelected.replace('{count}', multiNodeContextMenu.nodes.length)}
-            </div>
-            {onShowOnly && (
-              <button
-                onClick={() => {
-                  const nodeIds = multiNodeContextMenu.nodes.map((n) => n.id);
-                  onShowOnly(nodeIds);
-                  setMultiNodeContextMenu(null);
-                }}
-              >
-                🔍 {cml.showOnly}
-              </button>
-            )}
-            <button
-              onClick={() => {
-                const types = multiNodeContextMenu.nodes.map(
-                  (n) => n.data?.nodeType || n.data?.type
-                );
-                selectNodesByType(types);
-              }}
-            >
-              🎯 {cml.selectSameType}
-            </button>
-            {(onHideMultiple || onHide) && (
-              <button
-                onClick={() => {
-                  const nodeIds = multiNodeContextMenu.nodes.map((n) => n.id);
-                  if (onHideMultiple) {
-                    onHideMultiple(nodeIds);
-                  } else if (onHide) {
-                    nodeIds.forEach((id) => onHide(id));
-                  }
-                  setMultiNodeContextMenu(null);
-                }}
-              >
-                👁️ {cml.hideAll}
-              </button>
-            )}
-            {(onDeleteMultiple || onDelete) && (
-              <>
-                <div className="context-menu-separator"></div>
-                <button
-                  className="context-menu-danger"
-                  onClick={() => {
-                    const nodeIds = multiNodeContextMenu.nodes.map((n) => n.id);
-                    if (onDeleteMultiple) {
-                      onDeleteMultiple(nodeIds);
-                    } else if (onDelete) {
-                      nodeIds.forEach((id) => onDelete(id));
-                    }
-                    setMultiNodeContextMenu(null);
-                  }}
-                >
-                  🗑️ {cml.deleteAll}
-                </button>
-              </>
-            )}
-          </div>
-        )}
+        <MultiNodeContextMenu
+          menu={multiNodeContextMenu}
+          labels={cml}
+          onShowOnly={onShowOnly}
+          onHide={onHide}
+          onHideMultiple={onHideMultiple}
+          onDelete={onDelete}
+          onDeleteMultiple={onDeleteMultiple}
+          selectNodesByType={selectNodesByType}
+          onClose={() => setMultiNodeContextMenu(null)}
+        />
 
-        {edgeContextMenu && (
-          <div
-            className="graph-context-menu edge-context-menu"
-            style={{ left: edgeContextMenu.x, top: edgeContextMenu.y }}
-          >
-            <div className="context-menu-header">
-              {edgeContextMenu.edge.label || edgeContextMenu.edge.data?.type || 'Connection'}
-            </div>
-            {onSetEdgeType &&
-              relationshipTypes.length > 0 &&
-              (() => {
-                const currentType =
-                  edgeContextMenu.edge.label || edgeContextMenu.edge.data?.type || '';
-                const isGeneral = !currentType || currentType === 'RELATES_TO';
-                const setType = (type) => {
-                  onSetEdgeType(edgeContextMenu.edge.id, type);
-                  setEdgeContextMenu(null);
-                };
-                return (
-                  <>
-                    <div className="context-menu-subheader">{cml.changeType}</div>
-                    <div className="edge-type-list">
-                      <button
-                        className={isGeneral ? 'edge-type-active' : ''}
-                        onClick={() => setType('RELATES_TO')}
-                      >
-                        {isGeneral ? '✓ ' : ''}
-                        {cml.generalConnection}
-                      </button>
-                      {relationshipTypes
-                        .filter((rt) => rt.type !== 'RELATES_TO')
-                        .map((rt) => (
-                          <button
-                            key={rt.type}
-                            title={rt.description || undefined}
-                            className={currentType === rt.type ? 'edge-type-active' : ''}
-                            onClick={() => setType(rt.type)}
-                          >
-                            {currentType === rt.type ? '✓ ' : ''}
-                            {rt.type}
-                          </button>
-                        ))}
-                    </div>
-                    <div className="context-menu-separator"></div>
-                  </>
-                );
-              })()}
-            {onEditEdge && (
-              <button
-                onClick={() => {
-                  onEditEdge(edgeContextMenu.edge.id, edgeContextMenu.edge);
-                  setEdgeContextMenu(null);
-                }}
-              >
-                ✏️ {cml.edit}
-              </button>
-            )}
-            {onHideEdge && (
-              <button
-                onClick={() => {
-                  onHideEdge(edgeContextMenu.edge.id);
-                  setEdgeContextMenu(null);
-                }}
-              >
-                👁️ {cml.hide}
-              </button>
-            )}
-            {onDeleteEdge && (
-              <>
-                <div className="context-menu-separator"></div>
-                <button
-                  className="context-menu-danger"
-                  onClick={() => {
-                    onDeleteEdge(edgeContextMenu.edge.id);
-                    setEdgeContextMenu(null);
-                  }}
-                >
-                  🗑️ {cml.delete}
-                </button>
-              </>
-            )}
-          </div>
-        )}
+        <EdgeContextMenu
+          menu={edgeContextMenu}
+          labels={cml}
+          relationshipTypes={relationshipTypes}
+          onSetEdgeType={onSetEdgeType}
+          onEditEdge={onEditEdge}
+          onHideEdge={onHideEdge}
+          onDeleteEdge={onDeleteEdge}
+          onClose={() => setEdgeContextMenu(null)}
+        />
 
-        {paneContextMenu && (
-          <div
-            ref={paneMenuRef}
-            className="graph-context-menu pane-context-menu"
-            style={{ left: paneContextMenu.x, top: paneContextMenu.y }}
-          >
-            <button onClick={() => createAnnotation('note', paneContextMenu.flowPosition)}>
-              📝 {cml.addNote}
-            </button>
-            <button onClick={() => createAnnotation('label', paneContextMenu.flowPosition)}>
-              🏷️ {cml.addLabel}
-            </button>
-            <button onClick={() => createAnnotation('arrow', paneContextMenu.flowPosition)}>
-              ➡️ {cml.addArrow}
-            </button>
-          </div>
-        )}
+        <PaneContextMenu
+          menu={paneContextMenu}
+          labels={cml}
+          menuRef={paneMenuRef}
+          createAnnotation={createAnnotation}
+        />
 
         {notification && (
           <div className={`graph-notification graph-notification-${notification.type}`}>
