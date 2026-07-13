@@ -6,7 +6,7 @@ This module is part of graph_core - the core graph storage layer.
 It contains data models without any MCP, API, or external service dependencies.
 
 Node and relationship types are loaded from the schema configuration file.
-See backend/config_loader.py for configuration loading.
+See backend/config/config_loader.py for configuration loading.
 """
 
 from enum import Enum
