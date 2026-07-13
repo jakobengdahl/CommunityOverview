@@ -1,6 +1,10 @@
+# The gateway is a separately-deployed, security-sensitive component, so it
+# deliberately exact-pins its runtime dependencies for reproducible builds. This
+# is an intentional exception to the backend's ">=" minimum-pin policy (see
+# STRUCTURE_REVIEW.md C3); do not relax these to ranges.
 fastapi==0.115.5
 uvicorn[standard]==0.32.1
-httpx==0.28.0
-python-jose[cryptography]==3.3.0
+httpx2==2.5.0
+PyJWT[crypto]==2.10.1
 itsdangerous==2.2.0
 python-multipart

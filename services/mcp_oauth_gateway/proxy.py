@@ -11,7 +11,7 @@ import logging
 import urllib.parse
 from typing import AsyncIterator
 
-import httpx
+import httpx2 as httpx
 from fastapi import Request
 from fastapi.responses import StreamingResponse, Response
 
