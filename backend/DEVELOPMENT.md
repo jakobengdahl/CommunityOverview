@@ -304,6 +304,8 @@ kept separate so a failure points at the layer that broke:
   is downloaded in CI.
 - **Frontend tests** — `npm run test:unit` across the web, widget, and canvas
   workspaces. Playwright e2e is intentionally excluded from the required path.
+  Dependencies install with `npm ci` against the tracked root `package-lock.json`
+  so the workspace tree is reproducible run-to-run (cached via `setup-node`).
 - **Gateway tests** — the MCP OAuth gateway suite, run in isolation with its own
   pinned dependencies.
 
