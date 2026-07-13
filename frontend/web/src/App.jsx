@@ -1,5 +1,5 @@
 import { useState, useCallback, useEffect, useLayoutEffect, useMemo, useRef } from 'react';
-import { GraphCanvas, positionNewNodes } from '@community-graph/ui-graph-canvas';
+import { GraphCanvas } from '@community-graph/ui-graph-canvas';
 import '@community-graph/ui-graph-canvas/styles';
 import useGraphStore from './store/graphStore';
 import { useI18n } from './i18n';
@@ -22,6 +22,7 @@ import {
 } from './utils/sessionAnnotations';
 import { serverStateToMirror, useSharedSession } from './hooks/useSharedSession';
 import { useSyncConnection } from './hooks/useSyncConnection';
+import { useToolResultCommands } from './hooks/useToolResultCommands';
 import './App.css';
 
 const _urlParams = new URLSearchParams(window.location.search);
@@ -155,12 +156,14 @@ function App() {
     opStreamReady,
   } = useSyncConnection(sessionId);
   const applyServerSessionRef = useRef(null);
-  // Bounded recent-command-id history for MCP push dedup (R5) — a small LRU
-  // rather than a single last-applied slot, and keyed by the server-assigned
-  // command_id rather than payload content, so a later *legitimately* repeated
-  // command (e.g. an agent re-adds a node a user just removed) is never
-  // mistaken for the same broadcast delivered twice.
-  const appliedCommandIdsRef = useRef([]);
+  // MCP tool-result push application (external AI agent commands → canvas) and
+  // the legacy SSE push stream. The op-stream `command` events are wired below
+  // through syncHandlersRef and route through this same applyToolResultCommand.
+  const applyToolResultCommand = useToolResultCommands({
+    sessionId,
+    opStreamReady,
+    latestViewport,
+  });
 
   // Apply a single remote op incrementally onto the local store + canvas. This
   // touches only the entities the op names, so a concurrent local edit is never
@@ -388,85 +391,6 @@ function App() {
     document.addEventListener('keydown', handleKeyDown, true);
     return () => document.removeEventListener('keydown', handleKeyDown, true);
   }, [clearVisualization]);
-
-  // Apply an MCP tool-result command to the canvas. Shared by the legacy push
-  // stream and the op-protocol stream's `command` events (design §3.8, R5) so
-  // an AI agent's pushes look identical regardless of which channel delivered
-  // them. Deduped by command_id against recently applied ids: during the
-  // handover from the legacy stream to the op stream (or a brief overlap
-  // window) the same MCP push can be broadcast on both.
-  const applyToolResultCommand = useCallback((toolResult, commandId) => {
-    if (!toolResult) return;
-    if (commandId) {
-      if (appliedCommandIdsRef.current.includes(commandId)) return;
-      appliedCommandIdsRef.current.push(commandId);
-      if (appliedCommandIdsRef.current.length > 20) appliedCommandIdsRef.current.shift();
-    }
-
-    const {
-      nodes: currentNodes,
-      edges: currentEdges,
-      addNodesToVisualization: addNodes,
-      updateVisualization: updateViz,
-      clearVisualization: clearViz,
-    } = useGraphStore.getState();
-
-    const filtered = (toolResult.nodes || []).filter(
-      (n) => n.type !== 'Community' && n.data?.type !== 'Community'
-    );
-
-    if (toolResult.action === 'add_to_visualization') {
-      if (filtered.length > 0) {
-        const allEdges = [...currentEdges, ...(toolResult.edges || [])];
-        const vp = latestViewport.current;
-        const viewportCenter = vp
-          ? {
-              x: (window.innerWidth / 2 - vp.x) / vp.zoom,
-              y: (window.innerHeight / 2 - vp.y) / vp.zoom,
-            }
-          : null;
-        const positioned = positionNewNodes(filtered, currentNodes, allEdges, { viewportCenter });
-        addNodes(positioned, toolResult.edges || []);
-      }
-    } else if (
-      toolResult.action === 'load_visualization' ||
-      toolResult.action === 'clear_visualization'
-    ) {
-      clearViz();
-      if (filtered.length > 0) {
-        updateViz(filtered, toolResult.edges || []);
-      }
-    } else if (filtered.length > 0) {
-      updateViz(filtered, toolResult.edges || []);
-    }
-  }, []);
-
-  // ── Visualization session: legacy SSE connection ────────────────────────
-  // Opens the single-consumer push stream so external AI clients can push
-  // visualization commands to this browser window via MCP, until the
-  // op-protocol stream takes over. Once the op stream has connected for this
-  // session (`opStreamReady`), its broadcast `command` events replace this
-  // channel — reaching every collaborator, not just whichever browser wins the
-  // legacy stream's single queue (design §3.8, R5) — so this stream is closed
-  // and not reopened while that holds.
-  useEffect(() => {
-    if (opStreamReady) return undefined;
-    const evtSource = new EventSource(api.getVisualizationStreamUrl(sessionId));
-    evtSource.onmessage = (e) => {
-      try {
-        const cmd = JSON.parse(e.data);
-        if (cmd.type === 'ping' || cmd.type === 'connected') return;
-        if (cmd.type !== 'tool_result' || !cmd.result) return;
-        applyToolResultCommand(cmd.result, cmd.command_id);
-      } catch (err) {
-        console.error('[Session SSE] parse error:', err);
-      }
-    };
-    evtSource.onerror = () => {
-      // Browser auto-reconnects on SSE errors; no manual retry needed.
-    };
-    return () => evtSource.close();
-  }, [sessionId, opStreamReady, applyToolResultCommand]);
 
   // ── Session bootstrap (once) ────────────────────────────────────────────
   // Reflect the initial session id in the URL and, when it came from a

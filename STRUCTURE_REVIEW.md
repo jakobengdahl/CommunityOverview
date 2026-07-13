@@ -631,7 +631,7 @@ summary instead.
 | 8 | B1 decompose App.jsx (slice 1: shared-session hook) | M | — | done (PR #226) |
 | 9 | C2 lint gates | M | A1 | done (PR #227) |
 | 10 | A3 step 2 (stream token scheme) | M | A3 step 1 | decided 2026-07-13 — won't-fix in core, routed to SaaS tier (see A3 Decision 2026-07-13) |
-| 11 | B1 remaining slices | M×2 | B1 slice 1 | in progress (slice 3/4, PR #240) |
+| 11 | B1 remaining slices | M×2 | B1 slice 1 | done — slice 1 (PR #226) + slice 2 (PR #229) + slice 3 (PR #240) + slice 4 (PR #242); B1 complete |
 | 12 | B5 GraphCanvas decomposition | M | — | done — slice 1 (PR #230) + slice 2 (PR #241) |
 | 13 | C3 HTTP client + dependency policy | S–M | — | done — slice 1 (PR #232) + slice 2 (PR #239) |
 | 14 | C4 Node 18 → 20 build image | XS | — | done (PR #233) |
@@ -645,21 +645,35 @@ summary instead.
 
 ### Recommended next pickups (2026-07-13)
 
-The two remaining plain-`open` rows are both gated: **D2** (row 18) depends on the
-**A4** owner action (branch protection — deferred, the owner will configure it
-later) and cannot be verified against a real setting until then; **B4** (row 19) is
-deliberately deferred until a feature next forces a change in `service.py` /
-`storage.py`. So a session should **not** stall on those — pick from this
-prioritized list of unblocked, decision-clear work instead (all dependencies met,
-all owner decisions now recorded above):
+With B1 slice 4 done (PR #242) the backlog has **no unblocked, decision-clear
+rows left** — every remaining row is gated on an owner action or deliberately
+deferred:
 
-1. **B1 slice 4 — chat/proposal wiring into a container (row 11).** The last B1
-   slice; behaviour-preserving extraction.
+- **A4** (row 3) — *(owner action)*: branch protection on `dev` + repo-wide
+  auto-merge. A session cannot make repo-settings changes; the owner configures
+  this. Everything gated on A4 waits on it.
+- **D2** (row 18, `open`) — depends on **A4**: it is the verification pass that
+  confirms `CLAUDE.md`, CI, and reality agree, and it cannot be checked against
+  the real auto-merge/branch-protection setting until A4 lands. Do **not** run it
+  before A4.
+- **B4** (row 19, `open`) — deliberately deferred until a feature next forces a
+  change in `service.py` / `storage.py` (the split needs a real change to ride
+  along with, per the item text). Not a standalone pickup.
+- **A3 step 2** (row 10) — decided 2026-07-13: won't-fix in core, routed to the
+  SaaS tier. Closed.
+- **C5 CodeQL** (row 15) and **A4** are the only remaining *(owner action)* items.
 
-*(B5 slice 2 — context-menu extraction from `GraphCanvas.jsx` — done in PR #241;
-row 12 is fully done, B5 complete. B1 slice 3 — dialog orchestration out of
-`App.jsx` — done in PR #240; row 11 is now at slice 3/4. C3 slice 2 — gateway
-`httpx2` + `python-jose`→`pyjwt` — done in PR #239; row 13 is fully done.)*
+So the next session should **not** start a code slice from this backlog on its
+own — the productive next step is the **A4 owner action** (Jakob enables
+*Allow auto-merge* and adds a required-check branch-protection rule on `dev`),
+after which **D2** becomes runnable. If a feature lands that touches
+`service.py` / `storage.py`, **B4** unblocks as a ride-along.
+
+*(B1 slice 4 — chat/proposal push wiring out of `App.jsx` into
+`useToolResultCommands` — done in PR #242; row 11 is fully done, B1 complete.
+B5 slice 2 — context-menu extraction from `GraphCanvas.jsx` — done in PR #241;
+row 12 fully done. C3 slice 2 — gateway `httpx2` + `python-jose`→`pyjwt` — done
+in PR #239; row 13 fully done.)*
 
 ### How a session updates this document
 
@@ -680,6 +694,28 @@ row 12 is fully done, B5 complete. B1 slice 3 — dialog orchestration out of
    same branch.
 
 ## Completed
+
+- **[2026-07-13] B1 slice 4 — MCP tool-result push wiring extracted from `App.jsx`
+  into `useToolResultCommands` (PR #242).** Moved the chat/proposal *push* channel
+  (external AI agents pushing visualization commands via MCP) out of the `App.jsx`
+  god component into `frontend/web/src/hooks/useToolResultCommands.js`: the
+  bounded recent-command-id dedup LRU (`appliedCommandIdsRef`, R5), the
+  `applyToolResultCommand` apply-to-canvas logic (`add_to_visualization` /
+  `load_visualization` / `clear_visualization` / fallback replace, with `Community`
+  filtering and viewport-centre positioning), and the legacy single-consumer SSE
+  push-stream effect. `App.jsx` shrinks 86 lines and drops the now-unused
+  `positionNewNodes` import. Behaviour-preserving: the op-protocol stream's
+  broadcast `command` events stay wired in `App.jsx` via `syncHandlersRef`
+  (`useSyncConnection`'s domain) and route through the same `applyToolResultCommand`
+  the hook returns, so an agent's pushes look identical regardless of delivery
+  channel; no route, prop-contract, or DOM change. `latestViewport` stays an
+  App-owned ref, passed into the hook. Added `useToolResultCommands.test.jsx`
+  (13 tests): null no-op, command_id dedup + distinct-id re-apply, positioning +
+  `Community` filtering, viewport-centre computation, clear-then-replace,
+  unrecognised-action fallback, and the legacy SSE open/skip-when-op-ready/
+  close-on-unmount + message-filtering paths. Web suite green (236 = 223 + 13 new;
+  canvas/widget untouched). **B1 is now fully complete** (slice 1 = PR #226,
+  slice 2 = PR #229, slice 3 = PR #240, slice 4 = PR #242).
 
 - **[2026-07-13] B5 slice 2 — context menus extracted from `GraphCanvas.jsx` into
   `ContextMenus.jsx` (PR #241).** Moved the four inline context menus (node,
