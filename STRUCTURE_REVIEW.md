@@ -202,6 +202,19 @@ drift found en route (auto-create described as `POST /api/sessions` vs the actua
 lazy client-side create) is corrected in this same PR to keep the design doc
 internally consistent.
 
+**Decision (2026-07-13) — option (c): defer real per-session authorization to the
+SaaS/premium tier; no further change in the open core.** The two core alternatives
+each cost more than they return here: (a) authenticated-`POST`-first creation is a
+full rewrite of the client-generated-id + share-by-8-digit-code lifecycle for a
+threat (an internet-exposed instance running *with auth off*) that pilot
+deployments do not have; (b) joiners-only token-gating adds complexity yet does not
+meet the original DoD and is worthless when Basic Auth is off. Per-session
+authorization also fits the commercial value model naturally. **Resolution:** step 1
+(per-source rate limit + same-origin CORS, PR #222) is the shipped open-core
+mitigation; row 10 is closed as *won't-fix in core, routed to the SaaS tier* rather
+than left as an open owner action. If a future core-only deployment ever needs it,
+option (b) is the cheapest partial add and can be reopened as a new item.
+
 ### A4. Protect `dev` and make the required checks real
 
 - **Problem:** `CLAUDE.md` itself documents that auto-merge cannot arm because
@@ -456,7 +469,20 @@ cluster. Decompose them behavior-preservingly, one slice per PR.
     `encode`, `decode`, `JWTError`). These belong together in a gateway-focused
     session with explicit owner sign-off on the pin-policy and JWT-library
     questions.
-- **Effort:** S–M (slice 1 S; slice 2 S–M + decision)
+    - **Decision (2026-07-13) — slice 2 is unblocked and ready to execute:**
+      - **(a) `httpx==0.28.0` → `httpx2`:** do it (mechanical, behaviour-preserving,
+        same as slice 1).
+      - **(b) relax the exact pins toward `>=`:** **no** — keep the gateway's exact
+        pins. It is a separately-deployed, security-sensitive component where
+        reproducibility is deliberate; the repo's `>=` policy applies to the app
+        backend, not the gateway. Document the exception instead of relaxing.
+      - **(c) `python-jose` → `pyjwt`:** do it. `python-jose 3.3.0` carries
+        CVE-2024-33663/33664 and is effectively unmaintained; `pyjwt` is maintained
+        and already present in the environment. Security-sensitive — cover
+        `encode`/`decode`/`get_unverified_claims`/`JWTError` with tests.
+      Sign-off is recorded here, so the next session can run slice 2 directly as a
+      gateway-focused branch (do (a)+(c), keep pins per (b)).
+- **Effort:** S–M (slice 1 S; slice 2 S–M, decision recorded 2026-07-13)
 
 ### C4. Upgrade the frontend build image off Node 18
 
@@ -602,10 +628,10 @@ summary instead.
 | 7 | B2 decompose server.py | M | A1 | done (PR #225) |
 | 8 | B1 decompose App.jsx (slice 1: shared-session hook) | M | — | done (PR #226) |
 | 9 | C2 lint gates | M | A1 | done (PR #227) |
-| 10 | A3 step 2 (stream token scheme) | M | A3 step 1 | open *(owner action — design decision; see A3 Update 2026-07-12, PR #228)* |
+| 10 | A3 step 2 (stream token scheme) | M | A3 step 1 | decided 2026-07-13 — won't-fix in core, routed to SaaS tier (see A3 Decision 2026-07-13) |
 | 11 | B1 remaining slices | M×2 | B1 slice 1 | in progress (slice 2/4, PR #229) |
 | 12 | B5 GraphCanvas decomposition | M | — | in progress (slice 1/2, PR #230) |
-| 13 | C3 HTTP client + dependency policy | S–M | — | in progress (slice 1/2, PR #232) |
+| 13 | C3 HTTP client + dependency policy | S–M | — | slice 1 done (PR #232); slice 2 decided 2026-07-13, ready — gateway httpx2 + jose→pyjwt, keep pins |
 | 14 | C4 Node 18 → 20 build image | XS | — | done (PR #233) |
 | 15 | C5 security scanning in CI | S | A1 | done (PR #234) — CodeQL default setup still *(owner action)* |
 | 16 | C6 start-script consolidation | S | — | done (PR #235) |
@@ -613,7 +639,28 @@ summary instead.
 | 18 | D2 CLAUDE.md truth verification pass | XS | A1, A2, A4 | open |
 | 19 | B4 service.py / storage.py split | L | A1, next feature touching them | open |
 | 20 | C7 reproducible frontend CI (`npm ci` + lockfile) | S | A1 | done (PR #237) |
-| 21 | B6 home `config_loader.py` + `document_processor.py` | S | B3 | open |
+| 21 | B6 home `config_loader.py` + `document_processor.py` | S | B3 | done (PR #238) |
+
+### Recommended next pickups (2026-07-13)
+
+The two remaining plain-`open` rows are both gated: **D2** (row 18) depends on the
+**A4** owner action (branch protection — deferred, the owner will configure it
+later) and cannot be verified against a real setting until then; **B4** (row 19) is
+deliberately deferred until a feature next forces a change in `service.py` /
+`storage.py`. So a session should **not** stall on those — pick from this
+prioritized list of unblocked, decision-clear work instead (all dependencies met,
+all owner decisions now recorded above):
+
+1. **C3 slice 2 — gateway `httpx2` + `python-jose`→`pyjwt` (row 13).** Now unblocked
+   (decision 2026-07-13): do (a) `httpx==0.28.0`→`httpx2` and (c) the jose→pyjwt
+   swap, keep the exact pins (b). Highest value — closes the known
+   `python-jose` CVEs. Self-contained gateway-focused branch; treat the JWT change
+   as security-sensitive and test `encode`/`decode`/`get_unverified_claims`.
+2. **B1 slice 3 — dialog orchestration out of `App.jsx` (row 11).** Pure
+   behaviour-preserving extraction, no decision; shrinks the biggest god file.
+3. **B5 slice 2 — context-menu extraction from `GraphCanvas.jsx` (row 12).** Pure
+   extraction; the `contextMenuLabels` props contract already exists.
+4. **B1 slice 4 — chat/proposal wiring into a container (row 11).** After slice 3.
 
 ### How a session updates this document
 
@@ -634,6 +681,25 @@ summary instead.
    same branch.
 
 ## Completed
+
+- **[2026-07-13] B6 — `config_loader.py` and `document_processor.py` homed into
+  packages (PR #238).** Relocated the last two flat modules at `backend/` root,
+  completing the B3 "root contains only packages" clause: `config_loader.py` →
+  new **`backend/config/`** package and `document_processor.py` →
+  **`backend/ui/`** (its sole consumer). config_loader's home was the B6 design
+  decision — `backend/config/` was chosen over `backend/core/` because
+  config_loader imports `backend.runtime.*` and (mid-module, cycle-breaking)
+  `backend.skills.loader`, so homing it in the lowest layer would invert the
+  layering; a neutral `backend/config/` package avoids that, and no reverse edge
+  exists so no new cycle. document_processor kept as its own file rather than
+  folded into `document_service.py`. Pure relocation — no logic/route/signature
+  changes; all importers and both import idioms rewritten; the `core.models` /
+  `core.storage` config_loader imports stay lazy. README project tree and the
+  CLAUDE.md Key Files entry updated. `pytest backend/ -q` 944 passed / 16 skipped
+  (baseline unchanged); ruff check + format clean. The config_loader-home design
+  decision (B6 requires surfacing it before moving) was ratified by the owner on
+  2026-07-13 — `backend/config/` over `backend/core/` for the layering reason
+  above — so the PR was taken out of draft and merged.
 
 - **[2026-07-13] C7 — reproducible frontend CI via `npm ci` + tracked lockfile
   (PR #237).** The "commit a root lockfile" half of C7 was already stale — a root

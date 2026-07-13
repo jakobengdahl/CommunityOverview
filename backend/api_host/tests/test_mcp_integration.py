@@ -101,7 +101,7 @@ class TestMCPToolsConsistency:
             / "schema_config.json"
         )
         os.environ["SCHEMA_FILE"] = test_config_path
-        from backend import config_loader
+        from backend.config import config_loader
 
         config_loader.reset_loader()
 

@@ -15,7 +15,7 @@ import tempfile
 from typing import Optional, Dict, Any
 from pathlib import Path
 
-from backend.document_processor import DocumentProcessor
+from backend.ui.document_processor import DocumentProcessor
 
 
 class DocumentService:

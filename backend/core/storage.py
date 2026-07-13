@@ -163,7 +163,7 @@ class GraphStorage:
     def _build_type_searchable_text(self) -> None:
         """Build a lookup of node type -> searchable text including localized labels."""
         try:
-            from backend.config_loader import get_schema
+            from backend.config.config_loader import get_schema
 
             schema = get_schema()
             for type_name, type_config in schema.get("node_types", {}).items():

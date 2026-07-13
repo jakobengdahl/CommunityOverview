@@ -21,7 +21,7 @@ from backend.api_host import create_app, AppConfig
 @pytest.fixture(autouse=True)
 def reset_config_loader():
     """Reset shared config loader state between tests."""
-    from backend import config_loader
+    from backend.config import config_loader
 
     config_loader.reset_loader()
     yield

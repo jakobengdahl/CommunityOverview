@@ -588,7 +588,7 @@ only other language with full coverage today.
 | `backend/service/service.py` | GraphService orchestration layer |
 | `backend/service/rest_api.py` | REST API routes |
 | `backend/service/mcp_tools.py` | MCP tool definitions |
-| `backend/config_loader.py` | Schema and config loading |
+| `backend/config/config_loader.py` | Schema and config loading |
 | `config/default/schema_config.json` | Node types, relationships, labels (multilingual) — breaking-change surface |
 | `config/default/federation_config.json` | Federation topology |
 | `.github/workflows/ci.yml` | CI: tests on PRs, Docker build on preview/main push |
