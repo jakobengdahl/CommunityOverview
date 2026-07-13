@@ -469,7 +469,8 @@ cluster. Decompose them behavior-preservingly, one slice per PR.
     `encode`, `decode`, `JWTError`). These belong together in a gateway-focused
     session with explicit owner sign-off on the pin-policy and JWT-library
     questions.
-    - **Decision (2026-07-13) — slice 2 is unblocked and ready to execute:**
+    - **Decision (2026-07-13) — slice 2 is unblocked and ready to execute
+      [done in PR #239]:**
       - **(a) `httpx==0.28.0` → `httpx2`:** do it (mechanical, behaviour-preserving,
         same as slice 1).
       - **(b) relax the exact pins toward `>=`:** **no** — keep the gateway's exact
@@ -481,7 +482,8 @@ cluster. Decompose them behavior-preservingly, one slice per PR.
         and already present in the environment. Security-sensitive — cover
         `encode`/`decode`/`get_unverified_claims`/`JWTError` with tests.
       Sign-off is recorded here, so the next session can run slice 2 directly as a
-      gateway-focused branch (do (a)+(c), keep pins per (b)).
+      gateway-focused branch (do (a)+(c), keep pins per (b)). **Executed in PR #239**
+      exactly as decided; see the Completed entry.
 - **Effort:** S–M (slice 1 S; slice 2 S–M, decision recorded 2026-07-13)
 
 ### C4. Upgrade the frontend build image off Node 18
@@ -631,7 +633,7 @@ summary instead.
 | 10 | A3 step 2 (stream token scheme) | M | A3 step 1 | decided 2026-07-13 — won't-fix in core, routed to SaaS tier (see A3 Decision 2026-07-13) |
 | 11 | B1 remaining slices | M×2 | B1 slice 1 | in progress (slice 2/4, PR #229) |
 | 12 | B5 GraphCanvas decomposition | M | — | in progress (slice 1/2, PR #230) |
-| 13 | C3 HTTP client + dependency policy | S–M | — | slice 1 done (PR #232); slice 2 decided 2026-07-13, ready — gateway httpx2 + jose→pyjwt, keep pins |
+| 13 | C3 HTTP client + dependency policy | S–M | — | done — slice 1 (PR #232) + slice 2 (PR #239) |
 | 14 | C4 Node 18 → 20 build image | XS | — | done (PR #233) |
 | 15 | C5 security scanning in CI | S | A1 | done (PR #234) — CodeQL default setup still *(owner action)* |
 | 16 | C6 start-script consolidation | S | — | done (PR #235) |
@@ -651,16 +653,14 @@ deliberately deferred until a feature next forces a change in `service.py` /
 prioritized list of unblocked, decision-clear work instead (all dependencies met,
 all owner decisions now recorded above):
 
-1. **C3 slice 2 — gateway `httpx2` + `python-jose`→`pyjwt` (row 13).** Now unblocked
-   (decision 2026-07-13): do (a) `httpx==0.28.0`→`httpx2` and (c) the jose→pyjwt
-   swap, keep the exact pins (b). Highest value — closes the known
-   `python-jose` CVEs. Self-contained gateway-focused branch; treat the JWT change
-   as security-sensitive and test `encode`/`decode`/`get_unverified_claims`.
-2. **B1 slice 3 — dialog orchestration out of `App.jsx` (row 11).** Pure
+1. **B1 slice 3 — dialog orchestration out of `App.jsx` (row 11).** Pure
    behaviour-preserving extraction, no decision; shrinks the biggest god file.
-3. **B5 slice 2 — context-menu extraction from `GraphCanvas.jsx` (row 12).** Pure
+2. **B5 slice 2 — context-menu extraction from `GraphCanvas.jsx` (row 12).** Pure
    extraction; the `contextMenuLabels` props contract already exists.
-4. **B1 slice 4 — chat/proposal wiring into a container (row 11).** After slice 3.
+3. **B1 slice 4 — chat/proposal wiring into a container (row 11).** After slice 3.
+
+*(C3 slice 2 — gateway `httpx2` + `python-jose`→`pyjwt` — done in PR #239; row 13
+is now fully done.)*
 
 ### How a session updates this document
 
@@ -681,6 +681,28 @@ all owner decisions now recorded above):
    same branch.
 
 ## Completed
+
+- **[2026-07-13] C3 slice 2 — OAuth gateway migrated to `httpx2` + PyJWT
+  (PR #239).** Closed the remaining C3 sub-parts for `services/mcp_oauth_gateway/`
+  per the 2026-07-13 decisions: (a) swapped the runtime HTTP client from
+  `httpx==0.28.0` to `httpx2` (`import httpx2 as httpx` in `auth.py`/`proxy.py`),
+  matching the backend; (c) replaced the unmaintained `python-jose 3.3.0`
+  (CVE-2024-33663/33664) with maintained `PyJWT[crypto]` for JWT minting/verification
+  — `get_unverified_claims` → `jwt.decode(..., options={"verify_signature": False})`
+  (which in PyJWT also waives exp/aud checks and the `algorithms` arg, matching the
+  old no-verification read), `encode`/`decode` signatures unchanged, `JWTError` →
+  `PyJWTError`; (b) kept the gateway's exact version pins (`httpx2==2.5.0`,
+  `PyJWT[crypto]==2.10.1`) — deliberate reproducibility exception to the backend's
+  `>=` policy, now documented in `requirements.txt` rather than relaxed. starlette's
+  `TestClient` imports the literal `httpx`, no longer a runtime dep, so added a
+  `requirements-dev.txt` (test-only `httpx` + `pytest`) and pointed the CI
+  `gateway-tests` job at it (the Dockerfile installs only `requirements.txt`, so the
+  runtime image never pulls `httpx`). Added `TestGatewayJwt` covering the
+  security-sensitive paths: sign→verify round-trip, wrong-key/expired/wrong-audience/
+  garbage rejection, and the Google id_token unverified-claim decode + unverified-email
+  rejection. `pytest test_oauth_flow.py -q` → 24 passed (17 + 7 new) on a clean
+  install of the new dev requirements. Pure dependency migration — no gateway logic,
+  flow, or route change. Review loop clean in one round.
 
 - **[2026-07-13] B6 — `config_loader.py` and `document_processor.py` homed into
   packages (PR #238).** Relocated the last two flat modules at `backend/` root,
