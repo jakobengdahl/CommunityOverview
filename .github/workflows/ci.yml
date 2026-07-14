@@ -123,8 +123,8 @@ jobs:
   # ---------------------------------------------------------------------------
   # Lint gates – mechanical correctness checks (unused imports, undefined
   # names, React rules-of-hooks). These jobs are intentionally NOT listed in
-  # the build job's `needs`, so a lint failure never blocks a build or merge.
-  # They are non-required until `dev` gets a branch-protection rule marking
+  # the build job's `needs`, so a lint failure never blocks image publication.
+  # On `dev` PRs they are still merge-blocking because branch protection marks
   # them required (STRUCTURE_REVIEW item A4). Config: root pyproject.toml
   # (ruff), eslint.config.mjs + .prettierrc.json (JS workspaces).
   # ---------------------------------------------------------------------------

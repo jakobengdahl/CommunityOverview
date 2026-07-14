@@ -12,12 +12,10 @@
 # Reporting-first / non-blocking: each audit step uses `continue-on-error`, so a
 # finding shows a red step and a job summary but never fails the workflow or
 # blocks a merge. Once the baseline is understood these can be flipped to
-# blocking (drop `continue-on-error`) and marked required via `dev` branch
-# protection (STRUCTURE_REVIEW A4) — the same rollout path as the lint gates.
+# blocking and then added to branch protection if desired.
 #
 # CodeQL is intentionally NOT configured here: it is enabled via GitHub's
-# "default setup" in repository Security settings (owner action, see C5), not
-# through a committed workflow.
+# repository-level default setup, not through a committed workflow.
 # =============================================================================
 
 name: Security Scan

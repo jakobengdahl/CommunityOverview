@@ -500,8 +500,8 @@ cluster. Decompose them behavior-preservingly, one slice per PR.
   scanning relies on GitHub defaults.
 - **Proposed change:** add a scheduled + PR-triggered job running `pip-audit`
   against the requirements files and `npm audit --omit=dev` per workspace;
-  enable CodeQL default setup in repo settings (owner action). Non-blocking
-  reporting first.
+  enable CodeQL default setup at the repository level. Non-blocking reporting
+  first.
 - **Effort:** S
 - **Note (PR #234):** the `pip-audit` + `npm audit` reporting is delivered as a
   dedicated `.github/workflows/security-scan.yml` (pull-request + weekly
@@ -511,8 +511,8 @@ cluster. Decompose them behavior-preservingly, one slice per PR.
   lockfile covers all three workspaces, so one root `npm audit --omit=dev`
   reports across web/widget/canvas; `requirements-ml.txt` is skipped (its torch
   extra-index is slow/fragile to resolve and adds no default-install coverage).
-  **CodeQL default setup remains an owner action** — it is enabled in the repo
-  Security settings, not via a committed workflow.
+  CodeQL default setup is also now enabled at the repository level (2026-07-14),
+  still intentionally outside the committed workflow files.
 
 ### C6. Consolidate the root start scripts
 
@@ -615,15 +615,15 @@ the review session.
 This table is the source of truth for progress. A session working through this
 backlog updates the **Status** column in the same PR that implements the item:
 `open` → `in progress (slice X/Y, PR #N)` → `done (PR #N)`. Items marked
-*(owner action)* are repo-settings changes only Jakob can make — a session may
-prepare and document them but must not block on them; note them in the session
-summary instead.
+*(owner action)* are repo-settings changes that may require repository-admin
+permissions; if a session cannot perform them directly, it should prepare and
+document them and note them in the session summary instead.
 
 | # | Item | Effort | Depends on | Status |
 |---|------|--------|-----------|--------|
 | 1 | A2 ML deps out of base requirements | M | — | done (PR #220) |
 | 2 | A1 full test suite in CI | M | A2 | done (PR #221) |
-| 3 | A4 protect `dev` + auto-merge | XS | A1 | open *(owner action)* |
+| 3 | A4 protect `dev` + auto-merge | XS | A1 | done — PR #243 removed `paths-ignore`; repo setting `Allow auto-merge` and `dev` branch protection enabled 2026-07-14 |
 | 4 | A3 session-ID hardening, step 1 (rate limit + CORS) | S–M | — | done (PR #222) |
 | 5 | C1 stale data removal + script fix | S | — | done (PR #223) |
 | 6 | B3 home the flat backend modules | M | A1 | done (PR #224) |
@@ -635,39 +635,29 @@ summary instead.
 | 12 | B5 GraphCanvas decomposition | M | — | done — slice 1 (PR #230) + slice 2 (PR #241) |
 | 13 | C3 HTTP client + dependency policy | S–M | — | done — slice 1 (PR #232) + slice 2 (PR #239) |
 | 14 | C4 Node 18 → 20 build image | XS | — | done (PR #233) |
-| 15 | C5 security scanning in CI | S | A1 | done (PR #234) — CodeQL default setup still *(owner action)* |
+| 15 | C5 security scanning in CI | S | A1 | done (PR #234) + CodeQL default setup enabled 2026-07-14 |
 | 16 | C6 start-script consolidation | S | — | done (PR #235) |
 | 17 | D1 docs realignment + index | S–M | B3, C1 | done (PR #236) |
-| 18 | D2 CLAUDE.md truth verification pass | XS | A1, A2, A4 | open |
+| 18 | D2 CLAUDE.md truth verification pass | XS | A1, A2, A4 | done — post-A4/C5 truth pass verified and docs updated 2026-07-14 |
 | 19 | B4 service.py / storage.py split | L | A1, next feature touching them | open |
 | 20 | C7 reproducible frontend CI (`npm ci` + lockfile) | S | A1 | done (PR #237) |
 | 21 | B6 home `config_loader.py` + `document_processor.py` | S | B3 | done (PR #238) |
 
-### Recommended next pickups (2026-07-13)
+### Recommended next pickups (2026-07-14)
 
-With B1 slice 4 done (PR #242) the backlog has **no unblocked, decision-clear
-rows left** — every remaining row is gated on an owner action or deliberately
-deferred:
+After A4 was completed on 2026-07-14, this verification pass (D2) was run and
+CodeQL default setup was enabled, so the backlog has **no unblocked standalone
+rows left**.
 
-- **A4** (row 3) — *(owner action)*: branch protection on `dev` + repo-wide
-  auto-merge. A session cannot make repo-settings changes; the owner configures
-  this. Everything gated on A4 waits on it.
-- **D2** (row 18, `open`) — depends on **A4**: it is the verification pass that
-  confirms `CLAUDE.md`, CI, and reality agree, and it cannot be checked against
-  the real auto-merge/branch-protection setting until A4 lands. Do **not** run it
-  before A4.
+Remaining non-done row:
+
 - **B4** (row 19, `open`) — deliberately deferred until a feature next forces a
   change in `service.py` / `storage.py` (the split needs a real change to ride
   along with, per the item text). Not a standalone pickup.
-- **A3 step 2** (row 10) — decided 2026-07-13: won't-fix in core, routed to the
-  SaaS tier. Closed.
-- **C5 CodeQL** (row 15) and **A4** are the only remaining *(owner action)* items.
 
-So the next session should **not** start a code slice from this backlog on its
-own — the productive next step is the **A4 owner action** (Jakob enables
-*Allow auto-merge* and adds a required-check branch-protection rule on `dev`),
-after which **D2** becomes runnable. If a feature lands that touches
-`service.py` / `storage.py`, **B4** unblocks as a ride-along.
+So the next session should **not** start a backlog refactor slice from this file
+on its own. Wait for a feature/bugfix that naturally touches `service.py` or
+`storage.py`, then execute **B4** as the ride-along structural split in that PR.
 
 *(B1 slice 4 — chat/proposal push wiring out of `App.jsx` into
 `useToolResultCommands` — done in PR #242; row 11 is fully done, B1 complete.
@@ -859,9 +849,9 @@ in PR #239; row 13 fully done.)*
   (its pytorch extra-index is slow/fragile to resolve and adds no coverage beyond
   the default install). Verified locally: `npm audit --omit=dev` flags the tracked
   `lodash` advisory and the gateway `pip-audit` surfaces the known
-  `python-jose 3.3.0` CVEs (aligning with C3). **CodeQL default setup is left as an
-  owner action** (enabled in repo Security settings, not a committed workflow), so
-  row 15 tracks it as a remaining *(owner action)*.
+  `python-jose 3.3.0` CVEs (aligning with C3). CodeQL default setup stayed out of
+  the repo workflow files by design; it was later enabled at the repository level
+  on 2026-07-14.
 
 - **[2026-07-12] C4 — frontend build image upgraded off Node 18 (PR #233).** Bumped
   the `Dockerfile` frontend builder stage from `node:18-alpine` (EOL April 2025) to
@@ -950,8 +940,8 @@ in PR #239; row 13 fully done.)*
   three JS workspaces. `react-hooks/rules-of-hooks` is an error; the newer
   React-Compiler-era advisories are warnings so the baseline stays green. Two CI
   jobs (`python-lint`, `frontend-lint`) run the gates but are intentionally left
-  out of the `build` job's `needs`, so they are **non-required** until `dev`
-  branch protection lands (A4). Delivered as three separated commits — tooling
+  out of the `build` job's `needs`, so they do not gate image publication; they
+  later became required merge checks on `dev` when A4 landed on 2026-07-14.
   config, manual residual fixes (F821 forward-ref `TYPE_CHECKING` imports, two
   E402, dead-assignment removals; no behaviour change), and a pure autofix sweep
   (137 ruff fixes + `ruff format`, `eslint --fix` + `prettier --write`). Backend
