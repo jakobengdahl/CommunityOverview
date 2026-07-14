@@ -308,16 +308,16 @@ or all-outgoing changes.
 When the review loop is clean, merge the PR to `dev` autonomously:
 
 ```bash
-GH_TOKEN=$(cat ~/.gh_token) gh pr merge <number> \
+gh pr merge <number> \
   --repo jakobengdahl/CommunityOverview \
   --squash \
   --subject "<feat|fix|...>: <title> (#<number>)" \
   --delete-branch
 ```
 
-In this environment there is no `gh` CLI — use the GitHub MCP tools to mark the
-PR ready (if it was opened as a draft) and squash-merge it. If the merge tool
-can't delete the branch, leave it for the owner to remove manually.
+If `gh` is unavailable in the active environment, use the equivalent GitHub
+API/MCP merge path instead. If the merge tool cannot delete the branch, leave it
+for the owner to remove manually.
 
 #### Waiting for CI before merge — never poll with a scheduled self-wakeup
 
@@ -326,40 +326,31 @@ CI takes a few minutes. **Do not** bridge that wait with a scheduled self-wakeup
 a *new* turn, which spawns a redundant approval/confirmation for Jakob — the exact
 "double approval" to avoid.
 
-In this remote environment there is **no `gh` CLI and no shell path to CI status** —
-CI state is observable only through the GitHub MCP tools and through the
-`subscribe_pr_activity` webhooks, which deliver **CI failures and the merge event but
-never CI success**. A shell `Monitor`/`until` loop therefore cannot watch CI here.
-Given that, the only clean "merge on green, notify when done, no extra approval" path
-is GitHub-native auto-merge:
+Prefer GitHub-native auto-merge whenever the base branch is protected and has
+required checks:
 
-1. **GitHub auto-merge (the intended path — requires a protected base branch).**
-   - Mark the PR ready (if draft), then call `enable_pr_auto_merge` (squash).
-   - `subscribe_pr_activity` for the PR, then **end the turn**.
-   - GitHub merges the moment CI is green and delivers a `merged` webhook (which
-     also auto-unsubscribes) — report that back to Jakob when it arrives. On a
-     CI-**failure** webhook, diagnose, fix, and push; auto-merge re-arms itself.
-   - Zero further action, self-notifying, no scheduled wakeup.
+1. **Protected base branch with required checks (the intended path).**
+   - Mark the PR ready (if draft), then enable auto-merge (squash).
+   - Subscribe to PR activity if that tooling exists in the current environment,
+     then end the turn.
+   - GitHub merges the moment CI is green. On a CI failure or review comment,
+     fix the branch and re-enable auto-merge if needed.
 
-2. **Unprotected base branch (auto-merge cannot arm).** `enable_pr_auto_merge`
-   fails when the PR is already mergeable (an unprotected branch with no required
-   check is *always* immediately mergeable), so auto-merge is simply unavailable.
-   In that case:
-   - Check CI once with `get_check_runs`. If it is already green, merge now and
-     report.
-   - If CI is still pending, **do not** poll it with a scheduled wakeup. Leave the
-     PR open and subscribed and tell Jakob it is green-pending — he can merge, or
-     (better) protect the branch so option 1 handles it next time.
+2. **Base branch without effective required checks.**
+   - Auto-merge may be unavailable or pointless because the PR is already
+     immediately mergeable.
+   - In that case, check CI once; if it is already green, merge now and report.
+   - If CI is still pending, do **not** poll it with a scheduled wakeup.
 
-Either way, `subscribe_pr_activity` so a CI failure or later review comment wakes
-this session, and **do not** additionally schedule a self-wakeup for the same PR.
-
-> **Required one-time setup for option 1 (strongly recommended):** enabling
-> *Allow auto-merge* in repo settings is **not sufficient on its own** — an
-> unprotected branch is always immediately mergeable, so auto-merge never arms. Also
-> add a branch-protection rule on `dev` that makes the `Run Tests` check
-> **required**. With both in place, every `dev` PR merges automatically on green and
-> notifies via the merge webhook, with no polling and no second approval.
+Current repo state (verified 2026-07-14):
+- repo setting **Allow auto-merge** is enabled
+- `dev` branch protection is enabled with strict required checks:
+  - `Backend tests`
+  - `Frontend tests`
+  - `Gateway tests`
+  - `Python lint (ruff)`
+  - `Frontend lint (eslint + prettier)`
+- admins are also subject to that protection
 
 Merge only when **all** of the following are true:
 
@@ -506,10 +497,10 @@ npm run format                      # Prettier (JS/JSX in the workspaces)
 ```
 
 Config lives in root `pyproject.toml` (ruff), `eslint.config.mjs`, and
-`.prettierrc.json`. The lint jobs are **non-required** until `dev` gets branch
-protection (STRUCTURE_REVIEW A4); a lint failure is a signal, not a merge
-blocker, for now. `react-hooks/rules-of-hooks` violations are errors — treat
-them as real bugs. `services/mcp_oauth_gateway/` is outside the ruff scope.
+`.prettierrc.json`. On `dev` PRs, the lint jobs are part of the branch-protection
+required checks (STRUCTURE_REVIEW A4), so a lint failure is a real merge blocker.
+`react-hooks/rules-of-hooks` violations are errors — treat them as real bugs.
+`services/mcp_oauth_gateway/` is outside the ruff scope.
 
 ---
 
