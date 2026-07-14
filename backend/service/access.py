@@ -84,9 +84,7 @@ def node_graph_id(node: Node) -> str:
     return str(((node.metadata or {}).get("origin_graph_id") or "")).strip()
 
 
-def is_node_visible(
-    node: Optional[Node], graph_access: GraphAccessNarrowing
-) -> bool:
+def is_node_visible(node: Optional[Node], graph_access: GraphAccessNarrowing) -> bool:
     if node is None:
         return False
     return graph_access.matches(graph_id=node_graph_id(node))

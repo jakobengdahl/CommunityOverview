@@ -79,7 +79,9 @@ class GraphService:
         )
 
     def get_node_details(self, node_id: str) -> Dict[str, Any]:
-        return queries.get_node_details(self._storage, self._authorization_hook, node_id)
+        return queries.get_node_details(
+            self._storage, self._authorization_hook, node_id
+        )
 
     def get_related_nodes(
         self,

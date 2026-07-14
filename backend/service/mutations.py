@@ -59,7 +59,9 @@ def add_nodes(
     event_session_id: Optional[str] = None,
     event_correlation_id: Optional[str] = None,
 ) -> Dict[str, Any]:
-    denied = access.authorize_graph_access(hook, action=GRAPH_ACTION_MUTATE, target="add_nodes")
+    denied = access.authorize_graph_access(
+        hook, action=GRAPH_ACTION_MUTATE, target="add_nodes"
+    )
     if denied:
         denied.setdefault("added_node_ids", [])
         denied.setdefault("added_edge_ids", [])
@@ -118,7 +120,9 @@ def update_node(
     event_session_id: Optional[str] = None,
     event_correlation_id: Optional[str] = None,
 ) -> Dict[str, Any]:
-    denied = access.authorize_graph_access(hook, action=GRAPH_ACTION_MUTATE, target="update_node")
+    denied = access.authorize_graph_access(
+        hook, action=GRAPH_ACTION_MUTATE, target="update_node"
+    )
     if denied:
         return denied
 
@@ -169,7 +173,9 @@ def delete_nodes(
     )
 
     result = storage.delete_nodes(node_ids, confirmed, event_context=event_context)
-    return access.attach_mutation_attribution(serialize_delete_result(result), event_context)
+    return access.attach_mutation_attribution(
+        serialize_delete_result(result), event_context
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -188,7 +194,9 @@ def add_edge(
     event_session_id: Optional[str] = None,
     event_correlation_id: Optional[str] = None,
 ) -> Dict[str, Any]:
-    denied = access.authorize_graph_access(hook, action=GRAPH_ACTION_MUTATE, target="add_edge")
+    denied = access.authorize_graph_access(
+        hook, action=GRAPH_ACTION_MUTATE, target="add_edge"
+    )
     if denied:
         return denied
 
@@ -483,7 +491,9 @@ def adopt_federated_node(
     if storage.get_node(source_reference.id) is None:
         nodes_to_add.append(source_reference)
 
-    result = storage.add_nodes(nodes_to_add, [lineage_edge], event_context=event_context)
+    result = storage.add_nodes(
+        nodes_to_add, [lineage_edge], event_context=event_context
+    )
 
     if not result.success:
         return serialize_add_result(result)

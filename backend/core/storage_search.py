@@ -281,7 +281,12 @@ def find_similar_nodes_batch(
     """
     return {
         name: find_similar_nodes(
-            nodes, vector_store, name, node_type=node_type, threshold=threshold, limit=limit
+            nodes,
+            vector_store,
+            name,
+            node_type=node_type,
+            threshold=threshold,
+            limit=limit,
         )
         for name in names
     }

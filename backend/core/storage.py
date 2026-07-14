@@ -320,13 +320,17 @@ class GraphStorage:
         self, node_id: str, limit: int = 50, offset: int = 0
     ) -> List[Dict[str, Any]]:
         """Return mutation history for a single node id, newest first."""
-        return storage_history.get_node_history(self._history_store, node_id, limit, offset)
+        return storage_history.get_node_history(
+            self._history_store, node_id, limit, offset
+        )
 
     def get_edge_history(
         self, edge_id: str, limit: int = 50, offset: int = 0
     ) -> List[Dict[str, Any]]:
         """Return mutation history for a single edge id, newest first."""
-        return storage_history.get_edge_history(self._history_store, edge_id, limit, offset)
+        return storage_history.get_edge_history(
+            self._history_store, edge_id, limit, offset
+        )
 
     def load(self) -> None:
         """
@@ -485,7 +489,9 @@ class GraphStorage:
         self.load()
 
     def _score_node_match(self, node: "Node", query_lower: str) -> int:
-        return storage_search.score_node_match(node, query_lower, self._type_searchable_text)
+        return storage_search.score_node_match(
+            node, query_lower, self._type_searchable_text
+        )
 
     def search_nodes(
         self, query: str, node_types: Optional[List[NodeType]] = None, limit: int = 50

@@ -39,7 +39,9 @@ def search_graph(
     action: Optional[str] = None,
     federation_depth: Optional[int] = None,
 ) -> Dict[str, Any]:
-    decision = access.evaluate_graph_access(hook, action=GRAPH_ACTION_READ, target="search_graph")
+    decision = access.evaluate_graph_access(
+        hook, action=GRAPH_ACTION_READ, target="search_graph"
+    )
     if not decision.allowed:
         return access.build_access_denied_result(
             action=GRAPH_ACTION_READ, target="search_graph", decision=decision
@@ -382,7 +384,9 @@ def list_node_types() -> Dict[str, Any]:
     return {"node_types": node_types}
 
 
-def get_subtypes(storage: "GraphStorage", node_type: Optional[str] = None) -> Dict[str, Any]:
+def get_subtypes(
+    storage: "GraphStorage", node_type: Optional[str] = None
+) -> Dict[str, Any]:
     return {"subtypes": storage.get_subtypes_by_node_type(node_type)}
 
 
