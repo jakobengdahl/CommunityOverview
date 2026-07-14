@@ -97,11 +97,6 @@ Effort scale: XS = single-line fix · S = up to ~30 lines / one file · M = mult
 - **Context:** Discovered during review of `claude/active-collector-gui-inputs-0qj15m`
 - **Issue:** `toolResult` carries a single `action`. If the LLM calls `present_form` in the same turn as another pure-action tool (`mark_nodes`, `clear_visualization`, `start_guide`, `save_view`), the overlay makes `present_form` win and the other action is dropped (the frontend dispatches on `action ===`). Node/edge-returning tools are unaffected (their data rides in `nodes`/`edges`). This is an inherent single-`action` channel limitation, not specific to present_form; very rare in practice. A general fix would let the response carry multiple actions.
 - **Effort:** M
-- **File(s):** `frontend/web/src/components/CreateActiveKnowledgeCollectionDialog.jsx:6` (`EXCLUDED_TYPES`)
-- **Context:** Discovered during `claude/active-collector-gui-inputs-0qj15m`
-- **Issue:** `get_schema` returns all node types including system ones, and the AKC permissions table filters only via `EXCLUDED_TYPES`, which omits `Skill`. So `Skill` (a system type users never create in a collection) shows up as a create/update/delete row in the collection permissions table. `CollectionResponse` was added to `EXCLUDED_TYPES` in this branch; `Skill` should likely be excluded too, but it is pre-existing and out of scope here. Consider excluding all `category: system` types generically instead of maintaining a hardcoded list.
-- **Effort:** XS
-
 ### [2026-06-30] `t()` fallback pattern in FloatingHeader.jsx silently breaks
 - **File(s):** `frontend/web/src/components/FloatingHeader.jsx:134,140` — *note: as of `claude/session-sidebar-nav-sfs73g` these occurrences are gone (menu moved to `SettingsDialog.jsx`, which calls `t()` without the `|| 'fallback'` pattern). The general `t()`-returns-key-on-miss behaviour described below still applies to the hook contract.*
 - **Context:** Discovered during i18n audit / docs session
@@ -131,6 +126,10 @@ Effort scale: XS = single-line fix · S = up to ~30 lines / one file · M = mult
 ## Fixed
 
 *(resolved entries moved here after merge, for reference)*
+
+### [2026-07-14] Fixed in PR #246 (`codex/small-fix-skill-exclusion`)
+
+- **`Skill` leaked into the Active Knowledge Collection permissions table and could survive edit-mode save** — `frontend/web/src/components/CreateActiveKnowledgeCollectionDialog.jsx`, `frontend/web/src/components/CreateActiveKnowledgeCollectionDialog.test.jsx`. Added `Skill` to the excluded system types list and sanitized `node_type_permissions` both when loading edit-mode metadata and when submitting, so excluded types are neither shown nor preserved in saved metadata. Added focused regression coverage for both rendering and edit-mode save behavior.
 
 ### [2026-07-12] Fixed while extracting the remote-position logic (STRUCTURE_REVIEW B5 slice 1)
 
