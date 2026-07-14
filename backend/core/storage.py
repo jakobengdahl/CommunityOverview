@@ -23,7 +23,6 @@ from typing import List, Dict, Optional, Any, TYPE_CHECKING, Callable
 from datetime import datetime, timezone
 import networkx as nx
 from pathlib import Path
-from rapidfuzz.distance import Levenshtein
 
 from .models import (
     Node,
@@ -38,13 +37,17 @@ from .models import (
 )
 from .storage_backends import FileGraphPersistenceBackend, GraphPersistenceBackend
 from .vector_store import VectorStore
+from . import storage_search
+from . import storage_history
+from . import storage_events
 
 # Event system imports
-from .events.models import Event, EventType, EntityKind, EventContext, EntityData
+from .events.models import EventType, EntityKind, EventContext
 
 if TYPE_CHECKING:
     from .events.dispatcher import EventDispatcher
     from .events.delivery import DeliveryWorker
+    from .events.models import Event
     from .history_store import GraphHistoryStore
 
 
@@ -138,7 +141,7 @@ class GraphStorage:
         self._event_dispatcher: Optional["EventDispatcher"] = None
         self._delivery_worker: Optional["DeliveryWorker"] = None
         self._events_enabled = False
-        self._system_listeners: List[Callable[[Event], None]] = []
+        self._system_listeners: List[Callable[["Event"], None]] = []
 
         self.load()
 
@@ -177,20 +180,7 @@ class GraphStorage:
             pass
 
     def _build_searchable_text(self, node: "Node") -> str:
-        """Build searchable text for a node, including type name and localized labels."""
-        tags_text = " ".join(node.tags) if hasattr(node, "tags") and node.tags else ""
-        subtypes_text = (
-            " ".join(node.subtypes)
-            if hasattr(node, "subtypes") and node.subtypes
-            else ""
-        )
-        aliases_text = (
-            " ".join(node.aliases) if hasattr(node, "aliases") and node.aliases else ""
-        )
-        type_text = self._type_searchable_text.get(
-            str(node.type), str(node.type).lower()
-        )
-        return f"{node.name} {node.description} {node.summary} {tags_text} {subtypes_text} {aliases_text} {type_text}".lower()
+        return storage_search.build_searchable_text(node, self._type_searchable_text)
 
     def add_system_listener(self, listener: Callable[["Event"], None]) -> None:
         """
@@ -281,71 +271,20 @@ class GraphStorage:
         after: Optional[Dict[str, Any]] = None,
         context: Optional[EventContext] = None,
     ) -> None:
-        """
-        Emit a graph mutation event.
-
-        Args:
-            event_type: Type of event (create, update, delete)
-            entity_kind: Node or edge
-            entity_id: ID of the entity
-            entity_type: Type of the entity (node type or relationship type)
-            before: Entity state before mutation (for updates/deletes)
-            after: Entity state after mutation (for creates/updates)
-            context: Event context for tracking and loop prevention
-        """
-        # Create event object
-        # Build patch for updates
-        patch_data = None
-        if before and after and event_type == EventType.NODE_UPDATE:
-            patch_data = {}
-            for key in after:
-                if key not in before or before.get(key) != after.get(key):
-                    patch_data[key] = after[key]
-
-        event = Event(
-            event_type=event_type,
-            origin=context or EventContext(),
-            entity=EntityData(
-                kind=entity_kind,
-                id=entity_id,
-                type=entity_type,
-                before=before,
-                after=after,
-                patch=patch_data,
-            ),
+        """Emit a graph mutation event.  Delegates to storage_events."""
+        storage_events.emit_event(
+            self._history_store,
+            self._system_listeners,
+            self._events_enabled,
+            self._event_dispatcher,
+            event_type,
+            entity_kind,
+            entity_id,
+            entity_type,
+            before=before,
+            after=after,
+            context=context,
         )
-
-        # Persist to durable history first (independent of webhook delivery).
-        # History is an audit trail, so it must be written even when the event
-        # system is disabled. Never let a history failure break the mutation.
-        if self._history_store is not None:
-            try:
-                self._history_store.append_event(event)
-            except Exception as e:
-                print(f"Warning: Failed to persist mutation history: {e}")
-
-        # Notify system listeners (always, even if events disabled for webhooks)
-        for listener in self._system_listeners:
-            try:
-                listener(event)
-            except Exception as e:
-                print(f"Error in system listener: {e}")
-
-        if not self._events_enabled or not self._event_dispatcher:
-            print(
-                f"EVENT: Skipped (events_enabled={self._events_enabled}, dispatcher={self._event_dispatcher is not None})"
-            )
-            return
-
-        print(
-            f"EVENT: Emitting {event_type.value} for {entity_kind.value} {entity_id} ({entity_type})"
-        )
-
-        # Dispatch asynchronously (non-blocking)
-        try:
-            self._event_dispatcher.dispatch(event)
-        except Exception as e:
-            print(f"Warning: Failed to dispatch event: {e}")
 
     def emit_federated_node_event(
         self,
@@ -355,28 +294,8 @@ class GraphStorage:
         event_origin: str = "federation-sync",
     ) -> None:
         """Emit an event for federated cache changes so subscriptions can react."""
-        operation_map = {
-            "create": EventType.NODE_CREATE,
-            "update": EventType.NODE_UPDATE,
-            "delete": EventType.NODE_DELETE,
-        }
-        event_type = operation_map.get(operation)
-        if event_type is None:
-            return
-
-        entity_node = node_after or node_before
-        if entity_node is None:
-            return
-
-        context = EventContext(event_origin=event_origin)
-        self._emit_event(
-            event_type=event_type,
-            entity_kind=EntityKind.NODE,
-            entity_id=entity_node.id,
-            entity_type=entity_node.type_str,
-            before=node_before.to_dict() if node_before else None,
-            after=node_after.to_dict() if node_after else None,
-            context=context,
+        storage_events.emit_federated_node_event(
+            self._emit_event, operation, node_before, node_after, event_origin
         )
 
     def emit_federated_edge_event(
@@ -387,62 +306,30 @@ class GraphStorage:
         event_origin: str = "federation-sync",
     ) -> None:
         """Emit an event for federated cache edge changes."""
-        operation_map = {
-            "create": EventType.EDGE_CREATE,
-            "update": EventType.EDGE_UPDATE
-            if hasattr(EventType, "EDGE_UPDATE")
-            else EventType.EDGE_CREATE,
-            "delete": EventType.EDGE_DELETE,
-        }
-        event_type = operation_map.get(operation)
-        if event_type is None:
-            return
-
-        entity_edge = edge_after or edge_before
-        if entity_edge is None:
-            return
-
-        context = EventContext(event_origin=event_origin)
-        self._emit_event(
-            event_type=event_type,
-            entity_kind=EntityKind.EDGE,
-            entity_id=entity_edge.id,
-            entity_type=entity_edge.type_str,
-            before=edge_before.to_dict() if edge_before else None,
-            after=edge_after.to_dict() if edge_after else None,
-            context=context,
+        storage_events.emit_federated_edge_event(
+            self._emit_event, operation, edge_before, edge_after, event_origin
         )
 
     def get_recent_history(
         self, limit: int = 50, offset: int = 0
     ) -> List[Dict[str, Any]]:
-        """Return recent graph mutation history, newest first.
-
-        Returns an empty list when durable history is unavailable (non
-        file-backed backends).
-        """
-        if self._history_store is None:
-            return []
-        return self._history_store.get_recent(limit=limit, offset=offset)
+        """Return recent graph mutation history, newest first.  Delegates to storage_history."""
+        return storage_history.get_recent_history(self._history_store, limit, offset)
 
     def get_node_history(
         self, node_id: str, limit: int = 50, offset: int = 0
     ) -> List[Dict[str, Any]]:
         """Return mutation history for a single node id, newest first."""
-        if self._history_store is None:
-            return []
-        return self._history_store.get_entity_history(
-            node_id, kind=EntityKind.NODE.value, limit=limit, offset=offset
+        return storage_history.get_node_history(
+            self._history_store, node_id, limit, offset
         )
 
     def get_edge_history(
         self, edge_id: str, limit: int = 50, offset: int = 0
     ) -> List[Dict[str, Any]]:
         """Return mutation history for a single edge id, newest first."""
-        if self._history_store is None:
-            return []
-        return self._history_store.get_entity_history(
-            edge_id, kind=EntityKind.EDGE.value, limit=limit, offset=offset
+        return storage_history.get_edge_history(
+            self._history_store, edge_id, limit, offset
         )
 
     def load(self) -> None:
@@ -602,118 +489,22 @@ class GraphStorage:
         self.load()
 
     def _score_node_match(self, node: "Node", query_lower: str) -> int:
-        """Score how well a node matches a query. Higher = better match.
-
-        Name matches use large base values (300 000–500 000) so that any
-        name-tier match always outranks secondary signals (type/tags/description)
-        regardless of how many secondary signals accumulate.  Aliases are
-        alternative names and score in a dedicated band (200 000–250 000) that
-        sits just below real-name matches but above every secondary signal.
-        Secondary signals use values up to ~1 850, well below the 100 000-point
-        gap between tiers.
-        """
-        score = 0
-        name_lower = (node.name or "").lower()
-
-        # Primary tier — a node's own name (500 000–300 000) or an alias, whichever
-        # is stronger. Name and alias are combined with max(), not summed, so an
-        # alias can never lift a node past another node's stronger real-name match:
-        # every alias score (≤250 000) stays below every name score (≥300 000), and
-        # a node that already matches on its name ignores its aliases entirely.
-        name_score = 0
-        if name_lower == query_lower:
-            name_score = 500_000
-        elif name_lower.startswith(query_lower):
-            name_score = 400_000
-        elif query_lower in name_lower:
-            name_score = 300_000
-
-        # Alias sub-tier — synonyms rank as second-class names: below any real-name
-        # match but above type/tag/description signals.
-        alias_score = 0
-        if node.aliases:
-            aliases_lower = [a.lower() for a in node.aliases]
-            if query_lower in aliases_lower:
-                alias_score = 250_000
-            elif any(a.startswith(query_lower) for a in aliases_lower):
-                alias_score = 220_000
-            elif any(query_lower in a for a in aliases_lower):
-                alias_score = 200_000
-
-        score += max(name_score, alias_score)
-
-        # Secondary — type matching (including localized labels)
-        type_key = str(node.type)
-        type_name_lower = type_key.lower()
-        type_text = self._type_searchable_text.get(type_key, type_name_lower)
-        if type_name_lower == query_lower:
-            score += 700
-        elif type_name_lower.startswith(query_lower):
-            score += 650
-        elif query_lower in type_text:
-            score += 600
-
-        # Secondary — tag matching
-        if node.tags:
-            tags_lower = [t.lower() for t in node.tags]
-            if query_lower in tags_lower:
-                score += 500
-            elif any(query_lower in t for t in tags_lower):
-                score += 450
-
-        # Secondary — subtype matching
-        if node.subtypes:
-            if any(query_lower in s.lower() for s in node.subtypes):
-                score += 400
-
-        # Secondary — description / summary matching (lowest)
-        if (
-            query_lower in (node.description or "").lower()
-            or query_lower in (node.summary or "").lower()
-        ):
-            score += 200
-
-        return score
+        return storage_search.score_node_match(
+            node, query_lower, self._type_searchable_text
+        )
 
     def search_nodes(
         self, query: str, node_types: Optional[List[NodeType]] = None, limit: int = 50
     ) -> List[Node]:
-        """
-        Search nodes based on text query.
-        Matches against name, description, summary, tags, subtypes, and node type (including
-        localized labels). Results are ranked so that name matches rank above type matches,
-        which rank above description/tag matches.
-        Empty query or '*' returns all nodes (subject to filtering and limit).
-        """
-        query_lower = query.lower().strip()
-        results = []
-
-        # Handle wildcard or empty query
-        match_all = query_lower == "" or query_lower == "*"
-
-        for node in self.nodes.values():
-            # Filter by node type
-            if node_types and node.type not in node_types:
-                continue
-
-            if not match_all:
-                searchable_text = self._searchable_text_cache.get(node.id)
-                if searchable_text is None:
-                    # Fallback just in case cache wasn't populated
-                    searchable_text = self._build_searchable_text(node)
-                    self._searchable_text_cache[node.id] = searchable_text
-
-                if query_lower not in searchable_text:
-                    continue
-
-            results.append(node)
-
-        if not match_all:
-            results.sort(
-                key=lambda n: self._score_node_match(n, query_lower), reverse=True
-            )
-
-        return results[:limit]
+        """Search nodes based on text query.  Delegates to storage_search."""
+        return storage_search.search_nodes(
+            self.nodes,
+            self._searchable_text_cache,
+            self._type_searchable_text,
+            query,
+            node_types,
+            limit,
+        )
 
     def get_node(self, node_id: str) -> Optional[Node]:
         """Get a specific node"""
@@ -733,51 +524,10 @@ class GraphStorage:
         relationship_types: Optional[List[RelationshipType]] = None,
         depth: int = 1,
     ) -> Dict[str, Any]:
-        """
-        Get nodes connected to the given node
-        Returns both nodes and edges
-        """
-        if node_id not in self.nodes:
-            return {"nodes": [], "edges": []}
-
-        visited_nodes = set([node_id])
-        visited_edges = set()
-        current_layer = {node_id}
-
-        for _ in range(depth):
-            next_layer = set()
-
-            for curr_id in current_layer:
-                # Outgoing edges
-                for _, target, edge_id, edge_data in self.graph.out_edges(
-                    curr_id, keys=True, data=True
-                ):
-                    edge = edge_data["data"]
-                    if relationship_types and edge.type not in relationship_types:
-                        continue
-                    visited_edges.add(edge_id)
-                    if target not in visited_nodes:
-                        visited_nodes.add(target)
-                        next_layer.add(target)
-
-                # Incoming edges
-                for source, _, edge_id, edge_data in self.graph.in_edges(
-                    curr_id, keys=True, data=True
-                ):
-                    edge = edge_data["data"]
-                    if relationship_types and edge.type not in relationship_types:
-                        continue
-                    visited_edges.add(edge_id)
-                    if source not in visited_nodes:
-                        visited_nodes.add(source)
-                        next_layer.add(source)
-
-            current_layer = next_layer
-
-        return {
-            "nodes": [self.nodes[nid] for nid in visited_nodes if nid in self.nodes],
-            "edges": [self.edges[eid] for eid in visited_edges if eid in self.edges],
-        }
+        """Get nodes connected to the given node.  Delegates to storage_search."""
+        return storage_search.get_related_nodes(
+            self.nodes, self.edges, self.graph, node_id, relationship_types, depth
+        )
 
     def find_similar_nodes(
         self,
@@ -786,71 +536,10 @@ class GraphStorage:
         threshold: float = 0.7,
         limit: int = 5,
     ) -> List[SimilarNode]:
-        """
-        Find similar nodes based on Levenshtein distance AND vector embeddings
-        Used for duplicate detection
-        """
-        results = []
-        seen_node_ids = set()
-
-        # 1. Levenshtein Search (Exact string matching)
-        name_lower = name.lower()
-
-        for node in self.nodes.values():
-            # Filter by type if specified
-            if node_type and node.type != node_type:
-                continue
-
-            # Calculate similarity with Levenshtein
-            node_name_lower = node.name.lower()
-            distance = Levenshtein.distance(name_lower, node_name_lower)
-            max_len = max(len(name_lower), len(node_name_lower))
-
-            if max_len == 0:
-                similarity = 1.0
-            else:
-                similarity = 1.0 - (distance / max_len)
-
-            if similarity >= threshold:
-                results.append(
-                    SimilarNode(
-                        node=node,
-                        similarity_score=round(similarity, 2),
-                        match_reason=f"Name similarity: {int(similarity * 100)}%",
-                    )
-                )
-                seen_node_ids.add(node.id)
-
-        # 2. Vector Search (Semantic similarity)
-        # Lower threshold for vector search to catch semantic matches that might have different names
-        vector_threshold = max(0.4, threshold - 0.2)
-        vector_results = self.vector_store.search(
-            query_text=name, limit=limit, threshold=vector_threshold
+        """Find similar nodes by name (Levenshtein + vector).  Delegates to storage_search."""
+        return storage_search.find_similar_nodes(
+            self.nodes, self.vector_store, name, node_type, threshold, limit
         )
-
-        for node_id, score in vector_results:
-            if node_id in seen_node_ids:
-                continue
-
-            node = self.nodes.get(node_id)
-            if not node:
-                continue
-
-            if node_type and node.type != node_type:
-                continue
-
-            results.append(
-                SimilarNode(
-                    node=node,
-                    similarity_score=round(score, 2),
-                    match_reason=f"Semantic similarity: {int(score * 100)}%",
-                )
-            )
-            seen_node_ids.add(node_id)
-
-        # Sort by similarity score
-        results.sort(key=lambda x: x.similarity_score, reverse=True)
-        return results[:limit]
 
     def find_similar_nodes_batch(
         self,
@@ -859,21 +548,10 @@ class GraphStorage:
         threshold: float = 0.7,
         limit: int = 5,
     ) -> Dict[str, List[SimilarNode]]:
-        """
-        Find similar nodes for multiple names at once (batch processing)
-        Returns a dictionary mapping each name to its similar nodes
-
-        This is much more efficient than calling find_similar_nodes multiple times
-        as it processes all names in one go.
-        """
-        results = {}
-
-        for name in names:
-            results[name] = self.find_similar_nodes(
-                name=name, node_type=node_type, threshold=threshold, limit=limit
-            )
-
-        return results
+        """Batch variant of find_similar_nodes.  Delegates to storage_search."""
+        return storage_search.find_similar_nodes_batch(
+            self.nodes, self.vector_store, names, node_type, threshold, limit
+        )
 
     def add_nodes(
         self,
