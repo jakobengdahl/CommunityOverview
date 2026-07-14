@@ -353,6 +353,18 @@ cluster. Decompose them behavior-preservingly, one slice per PR.
   this refactor needs full CI coverage as the safety net.
 - **Effort:** L (2–3 PR slices). Lower urgency than B1–B3; do when a feature
   next forces a change in these files.
+- **Done (PR #TBD):** Service layer split complete.
+  `backend/service/{access,queries,mutations,views}.py` contain the extracted
+  pure/standalone functions; `GraphService` is now a ~300-line thin facade
+  delegating every public method.  Storage split into three focused helper
+  modules — `backend/core/storage_search.py` (search/similarity/traversal,
+  288 lines), `backend/core/storage_events.py` (event build+dispatch logic,
+  164 lines), `backend/core/storage_history.py` (history read helpers, 52
+  lines); `GraphStorage` delegates to all three.  Stateful CRUD and
+  persistence I/O remain in `storage.py` (1 210 lines, down from 1 316) —
+  they share the RLock/executor state and cannot be cleanly separated without
+  passing the full object.  All public signatures preserved; full backend
+  suite green (944 passed).
 
 ### B5. Split `packages/ui-graph-canvas/src/components/GraphCanvas.jsx` (1 589)
 
@@ -639,25 +651,16 @@ document them and note them in the session summary instead.
 | 16 | C6 start-script consolidation | S | — | done (PR #235) |
 | 17 | D1 docs realignment + index | S–M | B3, C1 | done (PR #236) |
 | 18 | D2 CLAUDE.md truth verification pass | XS | A1, A2, A4 | done (PR #244) — post-A4/C5 truth pass verified and docs updated 2026-07-14 |
-| 19 | B4 service.py / storage.py split | L | A1, next feature touching them | open |
+| 19 | B4 service.py / storage.py split | L | A1, next feature touching them | done (branch claude/b4-split-service-storage) |
 | 20 | C7 reproducible frontend CI (`npm ci` + lockfile) | S | A1 | done (PR #237) |
 | 21 | B6 home `config_loader.py` + `document_processor.py` | S | B3 | done (PR #238) |
 
 ### Recommended next pickups (2026-07-14)
 
 After A4 was completed on 2026-07-14, this verification pass (D2) was run and
-CodeQL default setup was enabled, so the backlog has **no unblocked standalone
-rows left**.
-
-Remaining non-done row:
-
-- **B4** (row 19, `open`) — deliberately deferred until a feature next forces a
-  change in `service.py` / `storage.py` (the split needs a real change to ride
-  along with, per the item text). Not a standalone pickup.
-
-So the next session should **not** start a backlog refactor slice from this file
-on its own. Wait for a feature/bugfix that naturally touches `service.py` or
-`storage.py`, then execute **B4** as the ride-along structural split in that PR.
+CodeQL default setup was enabled.  B4 (service/storage split) was completed
+2026-07-14 on branch `claude/b4-split-service-storage`.  The backlog now has
+**no open rows**.
 
 *(B1 slice 4 — chat/proposal push wiring out of `App.jsx` into
 `useToolResultCommands` — done in PR #242; row 11 is fully done, B1 complete.
