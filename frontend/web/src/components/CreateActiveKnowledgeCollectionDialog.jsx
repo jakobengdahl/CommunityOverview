@@ -8,9 +8,16 @@ const EXCLUDED_TYPES = [
   'VisualizationView',
   'EventSubscription',
   'Agent',
+  'Skill',
   'ActiveKnowledgeCollection',
   'CollectionResponse',
 ];
+
+function filterExcludedPermissions(nodeTypePermissions = {}) {
+  return Object.fromEntries(
+    Object.entries(nodeTypePermissions).filter(([type]) => !EXCLUDED_TYPES.includes(type))
+  );
+}
 
 /**
  * Dialog for creating/editing an ActiveKnowledgeCollection node.
@@ -64,7 +71,7 @@ export default function CreateActiveKnowledgeCollectionDialog({ onClose, onSave,
       setPrompt(meta.prompt || '');
 
       if (meta.node_type_permissions) {
-        setNodeTypePermissions(meta.node_type_permissions);
+        setNodeTypePermissions(filterExcludedPermissions(meta.node_type_permissions));
       }
     }
   }, [initialData]);
@@ -162,7 +169,7 @@ export default function CreateActiveKnowledgeCollectionDialog({ onClose, onSave,
         short_name: shortName.trim(),
         introduction_text: introductionText.trim(),
         prompt: prompt.trim(),
-        node_type_permissions: nodeTypePermissions,
+        node_type_permissions: filterExcludedPermissions(nodeTypePermissions),
       },
     };
 
