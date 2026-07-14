@@ -25,10 +25,6 @@ name: Security Scan
 on:
   pull_request:
     branches: [main, preview, dev]
-    paths-ignore:
-      - '**.md'
-      - 'docs/**'
-      - 'SMALL_FIXES.md'
   schedule:
     # Weekly, Monday 06:00 UTC – re-audits unchanged deps against fresh advisories.
     - cron: '0 6 * * 1'
