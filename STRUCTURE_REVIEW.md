@@ -638,7 +638,7 @@ document them and note them in the session summary instead.
 | 15 | C5 security scanning in CI | S | A1 | done (PR #234) + CodeQL default setup enabled 2026-07-14 |
 | 16 | C6 start-script consolidation | S | — | done (PR #235) |
 | 17 | D1 docs realignment + index | S–M | B3, C1 | done (PR #236) |
-| 18 | D2 CLAUDE.md truth verification pass | XS | A1, A2, A4 | done — post-A4/C5 truth pass verified and docs updated 2026-07-14 |
+| 18 | D2 CLAUDE.md truth verification pass | XS | A1, A2, A4 | done (PR #244) — post-A4/C5 truth pass verified and docs updated 2026-07-14 |
 | 19 | B4 service.py / storage.py split | L | A1, next feature touching them | open |
 | 20 | C7 reproducible frontend CI (`npm ci` + lockfile) | S | A1 | done (PR #237) |
 | 21 | B6 home `config_loader.py` + `document_processor.py` | S | B3 | done (PR #238) |
