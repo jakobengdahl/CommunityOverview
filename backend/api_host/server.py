@@ -243,7 +243,7 @@ def create_app(
     # (registered below) so that sync MCP tools can push commands thread-safely.
     session_registry = SessionRegistry()
     app.state.session_registry = session_registry
-    register_session_stream(app, session_registry)
+    register_session_stream(app, session_registry, session_manager=session_manager)
 
     # Initialize FastMCP with dynamic instructions built from schema configuration
     mcp = FastMCP(

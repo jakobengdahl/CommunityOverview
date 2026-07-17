@@ -126,6 +126,99 @@ class TestSessionLookupRateLimit:
         )
 
 
+class TestLegacyStreamRateLimit:
+    """The legacy /sessions/{id}/stream endpoint applies the same lookup rate limit."""
+
+    @staticmethod
+    def _shrink_bucket(test_app: TestClient, capacity: float) -> None:
+        from backend.core.session_manager import _TokenBucket
+
+        mgr = test_app.app.state.session_manager
+        mgr._lookup_bucket = _TokenBucket(capacity, 0.0)
+
+    @staticmethod
+    def _stub_legacy_stream(test_app: TestClient) -> None:
+        async def _single_event_stream(_session_id):
+            yield {"type": "ping"}
+
+        test_app.app.state.session_registry.stream = _single_event_stream
+
+    def test_legacy_stream_returns_429_when_exhausted(self, test_app: TestClient):
+        self._shrink_bucket(test_app, capacity=0)
+        resp = test_app.get("/sessions/1234-5678/stream")
+        assert resp.status_code == 429
+
+    def test_legacy_stream_returns_429_when_bucket_was_spent_by_api_lookup(
+        self, test_app: TestClient
+    ):
+        self._shrink_bucket(test_app, capacity=1)
+        assert test_app.get("/api/sessions/9999-9999").status_code == 404
+        assert test_app.get("/sessions/1234-5678/stream").status_code == 429
+
+    def test_legacy_stream_allows_request_within_budget(self, test_app: TestClient):
+        self._shrink_bucket(test_app, capacity=1)
+        self._stub_legacy_stream(test_app)
+        resp = test_app.get("/sessions/1234-5678/stream")
+        assert resp.status_code == 200
+
+    def test_legacy_stream_rate_limit_keys_on_real_client_behind_proxy(
+        self, temp_graph_file, temp_static_dirs
+    ):
+        """Per-IP budget applies; clients cannot spoof X-Forwarded-For."""
+        import os
+        from unittest.mock import patch
+        from backend.api_host import create_app, AppConfig
+        from backend.core.session_manager import _TokenBucket
+
+        web_path, widget_path = temp_static_dirs
+        config = AppConfig(
+            graph_file=temp_graph_file,
+            web_static_path=web_path,
+            widget_static_path=widget_path,
+            auth_enabled=False,
+            trusted_proxy_hops=1,
+        )
+        with patch("backend.ui.chat_logic.create_provider"):
+            with patch.dict(os.environ, {"ANTHROPIC_API_KEY": "test-key"}):
+                app = create_app(config)
+        app.state.session_manager._lookup_bucket = _TokenBucket(1.0, 0.0)
+
+        async def _single_event_stream(_session_id):
+            yield {"type": "ping"}
+
+        app.state.session_registry.stream = _single_event_stream
+        client = TestClient(app)
+
+        assert (
+            client.get(
+                "/sessions/1111-1111/stream", headers={"X-Forwarded-For": "1.1.1.1"}
+            ).status_code
+            == 200
+        )
+        assert (
+            client.get(
+                "/sessions/2222-2222/stream", headers={"X-Forwarded-For": "2.2.2.2"}
+            ).status_code
+            == 200
+        )
+        # Client A is now exhausted.
+        assert (
+            client.get(
+                "/sessions/3333-3333/stream",
+                headers={"X-Forwarded-For": "1.1.1.1"},
+            ).status_code
+            == 429
+        )
+        # Spoofed leading entry doesn't change A's key — still throttled.
+        assert (
+            client.get(
+                "/sessions/4444-4444/stream",
+                headers={"X-Forwarded-For": "9.9.9.9, 1.1.1.1"},
+            ).status_code
+            == 429
+        )
+
+
 class TestSessionOps:
     def test_apply_ops_updates_state(self, test_app: TestClient):
         sid = test_app.post("/api/sessions", json={}).json()["id"]

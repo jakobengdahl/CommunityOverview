@@ -14,6 +14,7 @@ from fastapi.responses import JSONResponse, StreamingResponse
 from starlette.requests import Request
 
 from backend.core.session_registry import SessionRegistry
+from backend.service.rest_api import _lookup_rate_key
 
 logger = logging.getLogger(__name__)
 
@@ -21,7 +22,11 @@ logger = logging.getLogger(__name__)
 SESSION_MAX_COUNT = 10_000  # cap auto-created sessions to limit unauthenticated DoS
 
 
-def register_session_stream(app: FastAPI, session_registry: SessionRegistry) -> None:
+def register_session_stream(
+    app: FastAPI,
+    session_registry: SessionRegistry,
+    session_manager=None,
+) -> None:
     """Register the session-registry startup lifecycle and the SSE stream route."""
 
     @app.on_event("startup")
@@ -47,6 +52,15 @@ def register_session_stream(app: FastAPI, session_registry: SessionRegistry) -> 
         """
         if not session_registry.is_valid_session_id(session_id):
             return JSONResponse({"error": "invalid session_id format"}, status_code=400)
+
+        if session_manager is not None:
+            from backend.core.session_manager import RateLimited
+
+            try:
+                session_manager.check_lookup_rate(_lookup_rate_key(request))
+            except RateLimited:
+                return JSONResponse({"error": "rate limit exceeded"}, status_code=429)
+
         if (
             session_id not in session_registry._sessions
             and session_registry.session_count >= SESSION_MAX_COUNT
