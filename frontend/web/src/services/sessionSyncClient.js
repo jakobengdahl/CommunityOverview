@@ -498,7 +498,11 @@ export class SessionSyncClient {
         // The connection was never opened (e.g. a 429 handshake rejection): the
         // browser closes the EventSource permanently (readyState CLOSED) and will
         // not auto-reconnect. Tear it down and schedule a backoff reconnect.
-        try { source.close(); } catch { /* ignore */ }
+        try {
+          source.close();
+        } catch {
+          /* ignore */
+        }
         this._source = null;
         this._scheduleReconnect();
       }
