@@ -314,6 +314,29 @@ describe('Server-backed session lifecycle', () => {
     expect(useGraphStore.getState().nodes[0]._savedPosition).toEqual({ x: 5, y: 6 });
   });
 
+  it('drawer name-refresh does not overwrite a locally kept name with a null server name (R7)', async () => {
+    // A session renamed locally before the server ever materialised it (or
+    // simply one the server hasn't got a name for) must keep its local name
+    // when the drawer's periodic refresh sees `name: null` from the server.
+    sessionStore.touchSession('5555-6666');
+    sessionStore.renameSession('5555-6666', 'My local name');
+    api.listServerSessions.mockResolvedValueOnce({
+      sessions: [{ id: '5555-6666', name: null }],
+    });
+
+    renderApp();
+    fireEvent.click(screen.getByTitle('Menu'));
+
+    await waitFor(() => {
+      expect(api.listServerSessions).toHaveBeenCalled();
+    });
+
+    expect(screen.getByText('My local name')).toBeInTheDocument();
+    expect(sessionStore.listSessions().find((s) => s.id === '5555-6666').name).toBe(
+      'My local name'
+    );
+  });
+
   it('a real load failure (non-404) shows an error notice and stays on the current session', async () => {
     // Distinguishes an actual backend/network error from a 404 ("session
     // doesn't exist yet", handled elsewhere as a normal empty session): only

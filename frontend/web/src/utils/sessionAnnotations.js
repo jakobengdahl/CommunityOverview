@@ -13,6 +13,7 @@ export function annotationsToGroups(annotations) {
     groups.push({
       id: a.id,
       label: a.label || 'Group',
+      description: a.description || '',
       position: a.position || { x: 0, y: 0 },
       style: a.size ? { width: a.size.w, height: a.size.h } : undefined,
       color: a.color,
@@ -32,6 +33,7 @@ export function groupsToAnnotations(viewGroups, parentIds) {
     kind: 'group',
     position: g.position || { x: 0, y: 0 },
     label: g.label || '',
+    description: g.description || '',
     color: g.color,
     size: g.style ? { w: g.style.width, h: g.style.height } : undefined,
     member_node_ids: membersByGroup[g.id] || [],
