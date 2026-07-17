@@ -22,12 +22,6 @@ Effort scale: XS = single-line fix · S = up to ~30 lines / one file · M = mult
 ## Open
 
 
-### [2026-07-11] No per-collection opt-out for persisting CollectionResponse
-- **File(s):** `backend/ui/chat_service.py` (`process_message`, response-tool install gate)
-- **Context:** Discovered during review of `claude/active-collector-gui-inputs-0qj15m`
-- **Issue:** `save_collection_response` is installed for every *resolved* collection (gated only on `collection_short_name and effective_prefix is not None`), independent of `node_type_permissions`. This is intentional — response-collecting is the collection's purpose and the write target type is hardcoded to `CollectionResponse` (no type-injection risk) — but an owner who configures a purely informational, read-only collection has no way to disable response persistence. Consider an explicit per-collection `collect_responses` flag (default on) if that use case materialises.
-- **Effort:** S
-
 ### [2026-07-11] present_form action wins over a co-occurring pure-action tool
 - **File(s):** `backend/ui/chat_logic.py` (`_handle_tool_use` final `pending_form` overlay)
 - **Context:** Discovered during review of `claude/active-collector-gui-inputs-0qj15m`
@@ -66,6 +60,10 @@ Effort scale: XS = single-line fix · S = up to ~30 lines / one file · M = mult
 ### [2026-07-11] Fixed in pending PR (`fix/small-fixes-user-guide`)
 
 - **USER_GUIDE says double-click opens the edit dialog** — `docs/USER_GUIDE.md` (section 2.3 and Agents section). Double-clicking a node opens the *detail* dialog (`NodeDetailDialog`), from which Edit is a button — not the edit dialog directly. Section 2.3 wording was already correct; corrected the Agents section (line 186) which still implied double-click edits directly.
+
+### [2026-07-17] Fixed in branch `fix/small-fixes-collection-response-optout` (PR pending)
+
+- **No per-collection opt-out for persisting CollectionResponse** — `backend/ui/chat_service.py`. Added `collect_responses` flag (default `true`) to `ActiveKnowledgeCollection` metadata. When set to `false`, `_resolve_collection` omits the `save_collection_response` instruction from the collection-mode system prompt and returns `False` in the 3-tuple; `process_message` gates tool installation on the flag, so no `CollectionResponse` node can be created for that session. Permission enforcement is unchanged. Focused regression tests added in `backend/ui/tests/test_chat_service.py` (`TestCollectResponsesOptOut`).
 
 ### [2026-07-17] Fixed in branch `fix/small-fixes-tokenbucket-eviction`
 

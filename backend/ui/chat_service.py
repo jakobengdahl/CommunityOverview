@@ -58,7 +58,8 @@ class ChatService:
         self._processor = ChatProcessor(self._tools_map)
         self._current_federation_depth: Optional[int] = None
         # Cache for resolved AKC configs — avoids repeated 500-node scans within a session.
-        # Keyed by short_name; value is (prefix, perms) tuple from _resolve_collection.
+        # Keyed by short_name; value is (prefix, perms, collect_responses) from
+        # _resolve_collection.
         self._collection_cache: Dict[str, tuple] = {}
         # Identity of the resolved AKC node, keyed by short_name: {"id", "name"}.
         # Used by save_collection_response to link responses back to their collection.
@@ -239,15 +240,17 @@ class ChatService:
         return self._processor.provider_type
 
     def _resolve_collection(self, short_name: str) -> tuple:
-        """Resolve an AKC short_name → (system_prompt_prefix, permissions_dict).
+        """Resolve an AKC short_name → (system_prompt_prefix, permissions_dict, collect_responses).
 
         Returns:
-          - (prefix, perms) on success — both non-None; perms may be {} if no permissions
-            are configured (enforced tools still installed, all writes denied).
-          - (None, None) when short_name is not found — no enforcement applied.
+          - (prefix, perms, collect_responses) on success — `prefix` and `perms` are
+            non-None; `perms` may be {} if no permissions are configured (enforced tools
+            still installed, all writes denied). `collect_responses` defaults to True
+            unless the collection metadata sets `collect_responses` to false.
+          - (None, None, True) when short_name is not found — no enforcement applied.
             Not cached so a collection created after first miss is picked up immediately.
-          - ("", {}) on exception — fail-closed; enforced tools installed, all writes denied.
-            Not cached so transient errors are retried on the next message.
+          - ("", {}, True) on exception — fail-closed; enforced tools installed, all
+            writes denied. Not cached so transient errors are retried on the next message.
 
         permissions_dict maps node_type → {"create": bool, "update": bool, "delete": bool}.
         Successful lookups are cached on this instance to avoid repeated 500-node scans.
@@ -304,18 +307,31 @@ class ChatService:
                         "are not listed, or perform operations not permitted for a given type."
                     )
 
+                    collect_responses = meta.get("collect_responses", True)
+                    if collect_responses is None:
+                        collect_responses = True
+
                     lines.append("")
-                    lines.append(
-                        "STRUCTURED INPUT: When a question has a fixed set of choices or a bounded "
-                        "numeric range, prefer the present_form tool to render radio buttons, "
-                        "checkboxes, sliders, or dropdowns instead of asking for free text — it "
-                        "makes answering easier and keeps the data consistent. After the user "
-                        "submits a form (or answers the equivalent questions), call "
-                        "save_collection_response with one entry per answered field so the "
-                        "submission is stored in a consistent, aggregatable shape. Reuse each "
-                        "field's id when saving. Do not ask for personal data unless the "
-                        "collection instructions explicitly require it."
-                    )
+                    if collect_responses:
+                        lines.append(
+                            "STRUCTURED INPUT: When a question has a fixed set of choices or a bounded "
+                            "numeric range, prefer the present_form tool to render radio buttons, "
+                            "checkboxes, sliders, or dropdowns instead of asking for free text — it "
+                            "makes answering easier and keeps the data consistent. After the user "
+                            "submits a form (or answers the equivalent questions), call "
+                            "save_collection_response with one entry per answered field so the "
+                            "submission is stored in a consistent, aggregatable shape. Reuse each "
+                            "field's id when saving. Do not ask for personal data unless the "
+                            "collection instructions explicitly require it."
+                        )
+                    else:
+                        lines.append(
+                            "STRUCTURED INPUT: When a question has a fixed set of choices or a bounded "
+                            "numeric range, prefer the present_form tool to render radio buttons, "
+                            "checkboxes, sliders, or dropdowns instead of asking for free text — it "
+                            "makes answering easier and keeps the data consistent. Do not ask for "
+                            "personal data unless the collection instructions explicitly require it."
+                        )
 
                     lines.append("")
                     lines.append(
@@ -328,7 +344,7 @@ class ChatService:
                         "Do not mention or repeat '[COLLECTION_START]' in your response."
                     )
 
-                    result_tuple = ("\n".join(lines), perms)
+                    result_tuple = ("\n".join(lines), perms, bool(collect_responses))
                     self._collection_cache[short_name] = result_tuple
                     return result_tuple
 
@@ -346,8 +362,8 @@ class ChatService:
             # Fail-closed: resolution error → deny all writes rather than fall through
             # to unconstrained mode. Empty perms installs enforced wrappers that block
             # every add/update/delete regardless of node type.
-            return ("", {})
-        return None, None
+            return ("", {}, True)
+        return (None, None, True)
 
     def _make_enforced_tools(self, perms: dict) -> dict:
         """Return a tools_map overlay that enforces node_type_permissions at call time."""
@@ -630,10 +646,10 @@ class ChatService:
             - toolUsed: Name of the last tool used (if any)
             - toolResult: Result from the tool (if any)
         """
-        effective_prefix, collection_perms = (
+        effective_prefix, collection_perms, collect_responses = (
             self._resolve_collection(collection_short_name)
             if collection_short_name
-            else (None, None)
+            else (None, None, True)
         )
 
         self._current_federation_depth = federation_depth
@@ -657,7 +673,13 @@ class ChatService:
             # Install save_collection_response only within an active (resolved or
             # fail-closed) collection session — effective_prefix is None only when the
             # short_name did not resolve, in which case storing a response is meaningless.
-            if collection_short_name and effective_prefix is not None:
+            # Also omit the tool when the collection has opted out of response persistence
+            # via metadata.collect_responses = false.
+            if (
+                collection_short_name
+                and effective_prefix is not None
+                and collect_responses
+            ):
                 tools_override = {
                     **(tools_override or {}),
                     **self._make_collection_response_tool(collection_short_name),
