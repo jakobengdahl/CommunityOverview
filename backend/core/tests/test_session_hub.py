@@ -151,6 +151,35 @@ class TestPresenceRegistry:
         assert p.count("1234-5678") == 0
         assert p.roster("1234-5678") == []
 
+    def test_reconnect_refcount_leave_returns_none_while_sibling_open(self):
+        """Fast reconnect: first leave must not remove the roster entry."""
+        p = PresenceRegistry()
+        p.join("1234-5678", "c1", "Alice")  # old connection
+        p.join("1234-5678", "c1", "Alice")  # new connection (same client_id)
+        result = p.leave("1234-5678", "c1")  # old connection closes
+        assert result is None  # sibling still open — keep roster
+        assert p.count("1234-5678") == 1
+        assert any(m["client_id"] == "c1" for m in p.roster("1234-5678"))
+
+    def test_reconnect_refcount_leave_returns_member_when_last(self):
+        """Last connection closing must return the member so callers broadcast presence_left."""
+        p = PresenceRegistry()
+        p.join("1234-5678", "c1", "Alice")
+        p.join("1234-5678", "c1", "Alice")
+        p.leave("1234-5678", "c1")  # first connection
+        member = p.leave("1234-5678", "c1")  # second (last) connection
+        assert member is not None
+        assert member["client_id"] == "c1"
+        assert p.count("1234-5678") == 0
+        assert p.roster("1234-5678") == []
+
+    def test_reconnect_color_preserved_across_second_join(self):
+        """Color assigned on first join must survive a concurrent join for same client."""
+        p = PresenceRegistry()
+        m1 = p.join("1234-5678", "c1", "Alice")
+        m2 = p.join("1234-5678", "c1", "Alice")
+        assert m1["color"] == m2["color"]
+
 
 class TestClaimMap:
     def test_claim_and_snapshot(self):

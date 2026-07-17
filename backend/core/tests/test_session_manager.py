@@ -386,6 +386,52 @@ class TestLifecycle:
         assert mgr.claims.snapshot(s.id) == {}
         assert mgr.roster(s.id) == []
 
+    async def test_reconnect_race_old_disconnect_does_not_clobber_new_connection(self):
+        """Fast reconnect: closing the old SSE must not remove presence/claims.
+
+        Sequence:
+          1. c1 connects (old SSE)           → join count = 1
+          2. c1 claims n1
+          3. c1 reconnects (new SSE)         → join count = 2
+          4. old SSE closes                  → join count = 1 → no roster teardown
+          5. Roster still shows c1; claims still intact; no presence_left emitted
+          6. new SSE closes                  → join count = 0 → roster torn down
+        """
+        mgr = _manager()
+        s = mgr.create_session()
+
+        # Step 1 — old connection
+        sub_old, _ = mgr.connect(s.id, "c1", "Alice")
+        await _drain(sub_old)
+
+        # Step 2 — c1 claims an element
+        await mgr.apply_ops(
+            s.id, "c1", 0, [{"op": "selection_claimed", "element_ids": ["n1"]}]
+        )
+        await _drain(sub_old)
+
+        # Step 3 — new connection opens before old one tears down
+        sub_new, _ = mgr.connect(s.id, "c1", "Alice")
+        await _drain(sub_old)
+        await _drain(sub_new)
+
+        # Step 4 — old SSE closes
+        mgr.disconnect(s.id, "c1", sub_old)
+
+        # Step 5 — roster and claims must survive; no presence_left on sub_new
+        assert {m["client_id"] for m in mgr.roster(s.id)} == {"c1"}
+        assert mgr.claims.snapshot(s.id) == {"n1": "c1"}
+        new_events = await _drain(sub_new)
+        assert not any(e.get("type") == "presence_left" for e in new_events)
+        assert not any(
+            e.get("op", {}).get("op") == "selection_released" for e in new_events
+        )
+
+        # Step 6 — last connection closes; now everything is torn down
+        mgr.disconnect(s.id, "c1", sub_new)
+        assert mgr.roster(s.id) == []
+        assert mgr.claims.snapshot(s.id) == {}
+
     async def test_delete_broadcasts(self):
         mgr = _manager()
         s = mgr.create_session()

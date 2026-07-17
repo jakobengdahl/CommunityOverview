@@ -182,3 +182,60 @@ class TestTwoClientsOneSession:
         deleted = [e for e in events if e["type"] == "session_deleted"]
         assert deleted and deleted[0]["deleted_by"] == "A"
         assert mgr.get_session(sid) is None
+
+    async def test_reconnect_race_does_not_clobber_roster_or_claims(self):
+        """Fast reconnect: closing the old connection must not evict the client.
+
+        Two-client session.  A's old SSE closes after the new one is open;
+        B must never see a spurious presence_left for A, and A's claims must
+        survive until the new SSE closes.
+        """
+        mgr = _manager()
+        sid = mgr.create_session().id
+
+        # A joins with old connection; B joins.
+        sub_a_old, _ = mgr.connect(sid, "A", "Alice")
+        sub_b, _ = mgr.connect(sid, "B", "Bob")
+        await _drain(sub_a_old)
+        await _drain(sub_b)
+
+        # A claims a node.
+        await mgr.apply_ops(
+            sid, "A", 0, [{"op": "selection_claimed", "element_ids": ["node-1"]}]
+        )
+        await _drain(sub_a_old)
+        await _drain(sub_b)
+
+        # A reconnects: new SSE opens before old one closes.
+        sub_a_new, _ = mgr.connect(sid, "A", "Alice")
+        await _drain(sub_a_old)
+        await _drain(sub_b)
+        await _drain(sub_a_new)
+
+        # Old SSE tears down.
+        mgr.disconnect(sid, "A", sub_a_old)
+
+        # B must NOT have received presence_left or selection_released for A.
+        b_events = await _drain(sub_b)
+        assert not any(
+            e.get("type") == "presence_left" and e.get("client_id") == "A"
+            for e in b_events
+        )
+        assert not any(
+            e.get("op", {}).get("op") == "selection_released" for e in b_events
+        )
+
+        # Roster still has both A and B; claim is intact.
+        roster_ids = {m["client_id"] for m in mgr.roster(sid)}
+        assert roster_ids == {"A", "B"}
+        assert mgr.claimed_elements(sid) == ["node-1"]
+
+        # New SSE closes — now A truly departs.
+        mgr.disconnect(sid, "A", sub_a_new)
+        b_final = await _drain(sub_b)
+        assert any(
+            e.get("type") == "presence_left" and e.get("client_id") == "A"
+            for e in b_final
+        )
+        assert {m["client_id"] for m in mgr.roster(sid)} == {"B"}
+        assert mgr.claimed_elements(sid) == []
