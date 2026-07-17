@@ -5,12 +5,14 @@ claim ops, catch-up vs snapshot, rate limiting, batch caps, and the
 presence/claim lifecycle on connect/disconnect.
 """
 
+import asyncio
 import threading
 
 import pytest
 
 from backend.core.session_hub import InProcessEventBus
 from backend.core.session_store import (
+    FileSessionPersistenceBackend,
     InMemorySessionPersistenceBackend,
     OpError,
     SessionStore,
@@ -361,7 +363,7 @@ class TestResyncTranslation:
         # rather than let it crash the SSE response.
         mgr = _manager()
         s = mgr.create_session()
-        mgr.delete_session(s.id)
+        await mgr.delete_session(s.id)
         with pytest.raises(SessionNotFound):
             _resolve_stream_event({"type": "resync"}, mgr, s.id)
 
@@ -437,7 +439,7 @@ class TestLifecycle:
         s = mgr.create_session()
         sub, _ = mgr.connect(s.id, "c1", "A")
         await _drain(sub)
-        assert mgr.delete_session(s.id, deleted_by="c1") is True
+        assert await mgr.delete_session(s.id, deleted_by="c1") is True
         events = await _drain(sub)
         assert events[0]["type"] == "session_deleted"
         assert events[0]["deleted_by"] == "c1"
@@ -588,3 +590,141 @@ class TestTokenBucketEviction:
             bucket.consume("x", 1.0)
         # No sweep should have fired since max time elapsed (30) < sweep_interval (50)
         assert sweep_count[0] == 0
+
+
+class TestRenameSession:
+    """R7/R8: rename materialises an unsaved session and is a real, sequenced op."""
+
+    async def test_rename_materialises_a_session_that_was_never_created(self):
+        mgr = _manager()
+        sid = "1234-5678"
+        assert mgr.get_session(sid) is None
+        session = await mgr.rename_session(sid, "Team map")
+        assert session.name == "Team map"
+        assert mgr.get_session(sid) is not None
+
+    async def test_rename_bumps_seq_and_enters_ring_buffer(self):
+        """A reconnecting client's since_seq catch-up must observe the rename,
+        not just a full snapshot (R8: session_renamed was a documented but
+        unreachable STATE_OP before this)."""
+        mgr = _manager()
+        s = mgr.create_session()
+        seq_before = s.seq
+        await mgr.rename_session(s.id, "Renamed", client_id="A")
+        assert s.seq == seq_before + 1
+        missed = mgr.store.ops_since(s.id, seq_before)
+        assert missed is not None
+        assert [op["op"] for op in missed] == ["session_renamed"]
+
+    async def test_rename_broadcasts_as_a_sequenced_op(self):
+        mgr = _manager()
+        s = mgr.create_session()
+        sub, _ = mgr.connect(s.id, "A", "Alice")
+        await _drain(sub)
+        await mgr.rename_session(s.id, "Renamed", client_id="A")
+        events = await _drain(sub)
+        renamed = [e for e in events if e.get("op", {}).get("op") == "session_renamed"]
+        assert len(renamed) == 1
+        assert renamed[0]["op"]["name"] == "Renamed"
+        assert renamed[0]["seq"] == s.seq
+
+    async def test_rename_rejects_a_full_session_store(self):
+        mgr = _manager(max_sessions=0)
+        with pytest.raises(SessionLimitReached):
+            await mgr.rename_session("9999-9999", "x")
+
+
+class TestDeleteRenameLocking:
+    """R10: delete must not race an in-flight apply_ops batch for the same session."""
+
+    async def test_delete_waits_for_inflight_persist_and_does_not_resurrect(self):
+        store = SessionStore(InMemorySessionPersistenceBackend())
+        mgr = SessionManager(store)
+        s = mgr.create_session()
+        sid = s.id
+
+        entered = threading.Event()
+        proceed = threading.Event()
+        original_persist = store.persist
+
+        def slow_persist(session):
+            entered.set()
+            proceed.wait(timeout=2)
+            original_persist(session)
+
+        store.persist = slow_persist
+
+        apply_task = asyncio.create_task(
+            mgr.apply_ops(sid, "c1", 0, [{"op": "nodes_added", "node_ids": ["a"]}])
+        )
+        # Wait (off the loop thread) until apply_ops is inside persist() —
+        # it runs via asyncio.to_thread, so the loop is free to run the
+        # delete task concurrently while this is blocked.
+        await asyncio.to_thread(entered.wait, 2)
+
+        delete_task = asyncio.create_task(mgr.delete_session(sid))
+        await asyncio.sleep(0.05)
+        assert not delete_task.done()  # blocked on the same per-session lock
+
+        proceed.set()
+        await apply_task
+        assert await delete_task is True
+        # The delete that ran after the batch committed must be the final
+        # word — no resurrection from a stale in-flight `Session` reference
+        # persisting after the delete. get_session() re-loads from the
+        # backend when not cached in memory, so this proves the persistence
+        # layer has nothing lingering either.
+        assert mgr.get_session(sid) is None
+
+    async def test_apply_ops_does_not_resurrect_after_concurrent_delete(self):
+        """The other ordering: a delete can win the per-session lock and
+        complete *between* apply_ops's pre-lock existence check and the point
+        where apply_ops itself acquires the lock. The re-fetch inside the
+        lock (not the outer check) is what must catch this — the outer check
+        alone already passed by the time this race happens."""
+        store = SessionStore(InMemorySessionPersistenceBackend())
+        mgr = SessionManager(store)
+        s = mgr.create_session()
+        sid = s.id
+
+        lock = mgr._lock(sid)
+        await lock.acquire()
+        try:
+            apply_task = asyncio.create_task(
+                mgr.apply_ops(sid, "c1", 0, [{"op": "nodes_added", "node_ids": ["a"]}])
+            )
+            await asyncio.sleep(
+                0.05
+            )  # let it pass the pre-lock check, then block on the lock
+            assert not apply_task.done()
+
+            # Simulate a concurrent delete_session that already ran to
+            # completion while apply_ops was waiting for this same lock
+            # (delete_session needs this exact lock in production; the test
+            # holds it directly to control the interleaving deterministically).
+            store.delete(sid)
+        finally:
+            lock.release()
+
+        with pytest.raises(SessionNotFound):
+            await apply_task
+        assert mgr.get_session(sid) is None
+
+
+class TestSessionLimitAcrossRestart:
+    """R13: max_sessions must be enforced against persisted files, not just
+    the in-memory map (SessionStore-level counting is covered directly in
+    test_session_store.py) — a fresh SessionManager over a directory that
+    already has max_sessions files must refuse to grow it further."""
+
+    async def test_get_or_create_rejects_when_disk_already_at_cap(self, tmp_path):
+        backend = FileSessionPersistenceBackend(tmp_path)
+        SessionManager(SessionStore(backend), max_sessions=2).create_session()
+        SessionManager(SessionStore(backend), max_sessions=2).create_session()
+
+        # A "restarted" manager (fresh in-memory map, same directory) must see
+        # the cap is already reached — this is what the unauthenticated
+        # stream endpoint's get_or_create relies on to stop growth.
+        restarted = SessionManager(SessionStore(backend), max_sessions=2)
+        with pytest.raises(SessionLimitReached):
+            restarted.get_or_create("9998-0001")
