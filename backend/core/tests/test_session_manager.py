@@ -5,6 +5,8 @@ claim ops, catch-up vs snapshot, rate limiting, batch caps, and the
 presence/claim lifecycle on connect/disconnect.
 """
 
+import threading
+
 import pytest
 
 from backend.core.session_hub import InProcessEventBus
@@ -207,6 +209,56 @@ class TestApplyOps:
         after = mgr.get_session(s.id)
         assert after.state["node_refs"] == ["keep"]
         assert after.seq == 1
+
+    async def test_persist_runs_off_event_loop_thread(self):
+        """persist() must be called from a worker thread, not the event loop thread.
+
+        FileSessionPersistenceBackend.save does a blocking fsync; running it on
+        the event loop stalls all other coroutines. asyncio.to_thread ensures it
+        executes in the default ThreadPoolExecutor instead.
+        """
+        event_loop_thread = threading.current_thread()
+        persist_threads: list[threading.Thread] = []
+
+        store = SessionStore(InMemorySessionPersistenceBackend())
+        original_persist = store.persist
+
+        def _capturing_persist(session):
+            persist_threads.append(threading.current_thread())
+            original_persist(session)
+
+        store.persist = _capturing_persist
+        mgr = SessionManager(store)
+        s = mgr.create_session()
+        await mgr.apply_ops(s.id, "c1", 0, [{"op": "nodes_added", "node_ids": ["a"]}])
+
+        assert len(persist_threads) == 1
+        assert persist_threads[0] is not event_loop_thread
+
+    async def test_persist_failure_via_thread_rolls_back(self):
+        """A persistence error raised in the worker thread must still roll back state."""
+        store = SessionStore(InMemorySessionPersistenceBackend())
+        mgr = SessionManager(store)
+        s = mgr.create_session()
+        sub, _ = mgr.connect(s.id, "c1", "A")
+        await _drain(sub)
+
+        def _boom(session):
+            raise OSError("simulated fsync failure from worker thread")
+
+        store.persist = _boom
+        with pytest.raises(OSError):
+            await mgr.apply_ops(
+                s.id,
+                "c1",
+                0,
+                [{"op": "nodes_added", "node_ids": ["x"]}],
+            )
+        after = mgr.get_session(s.id)
+        assert after.seq == 0
+        assert after.state["node_refs"] == []
+        assert store.ops_since(s.id, 0) == []
+        assert await _drain(sub) == []
 
 
 class TestClaimOps:
