@@ -21,18 +21,17 @@ Effort scale: XS = single-line fix · S = up to ~30 lines / one file · M = mult
 
 ## Open
 
-
-### [2026-07-04] Two concurrent connections for the same client_id clobber presence/claims
-- **File(s):** `backend/core/session_hub.py` (`PresenceRegistry.leave`, `ClaimMap.release_all`), `backend/core/session_manager.py` (`disconnect`)
-- **Context:** Discovered during review of `claude/multi-user-sessions-step-3-ojk3mi`
-- **Issue:** Presence and claims are keyed by `client_id`. On a fast reconnect (old SSE not yet torn down), both connections share one roster entry and one claim owner; when the first closes, `disconnect` removes the roster entry and releases all of that client's claims even though the second connection is still live, so the still-connected client briefly vanishes from the roster and loses selection markers until its next heartbeat/claim. Mirrors the legacy registry's documented single-consumer limitation. Address with the presence UI in step 7 (e.g. per-connection tokens or refcounting per client_id).
-- **Effort:** M
+*(no open items)*
 
 ---
 
 ## Fixed
 
 *(resolved entries moved here after merge, for reference)*
+
+### [2026-07-04] Fixed in branch `fix/small-fixes-session-presence-reconnect`
+
+- **Two concurrent connections for the same client_id clobber presence/claims** — `backend/core/session_hub.py` (`PresenceRegistry`), `backend/core/session_manager.py` (`disconnect`). Added a `_conn_counts` ref-count dict to `PresenceRegistry`: `join()` increments, `leave()` decrements and returns the member only when the count hits 0 (last live connection for that client_id). `SessionManager.disconnect()` now calls `presence.leave()` first and only triggers `claims.release_all()` + `presence_left` broadcast when `leave()` confirms all connections are gone. On a fast reconnect the old SSE closing silently decrements the count while the new SSE keeps the roster entry and claims intact. Regression tests added in `test_session_hub.py` (3 unit tests on `PresenceRegistry`), `test_session_manager.py` (full 6-step reconnect race), and `test_session_multiuser.py` (two-client integration scenario).
 
 ### [2026-06-30] Fixed in branch `fix/small-fixes-floatingheader-fallback`
 

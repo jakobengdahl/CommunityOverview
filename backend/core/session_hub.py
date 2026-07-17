@@ -152,11 +152,20 @@ def _drain(queue: asyncio.Queue) -> None:
 
 
 class PresenceRegistry:
-    """Ephemeral roster of connected clients, keyed by session then client."""
+    """Ephemeral roster of connected clients, keyed by session then client.
+
+    A client may have more than one live connection at the same time (fast
+    reconnect: new SSE opens before the old one is torn down).  A ref-count
+    per ``(session_id, client_id)`` pair tracks how many connections are
+    currently open.  The roster entry and colour slot are only freed when the
+    last connection for that client departs.
+    """
 
     def __init__(self) -> None:
         self._rosters: Dict[str, Dict[str, Dict[str, Any]]] = {}
         self._color_cursor: Dict[str, int] = {}
+        # session_id -> client_id -> number of live connections
+        self._conn_counts: Dict[str, Dict[str, int]] = {}
 
     def _assign_color(self, session_id: str, roster: Dict[str, Dict[str, Any]]) -> str:
         used = {m["color"] for m in roster.values()}
@@ -175,6 +184,7 @@ class PresenceRegistry:
         self, session_id: str, client_id: str, display_name: Optional[str]
     ) -> Dict[str, Any]:
         roster = self._rosters.setdefault(session_id, {})
+        counts = self._conn_counts.setdefault(session_id, {})
         existing = roster.get(client_id)
         color = (
             existing["color"] if existing else self._assign_color(session_id, roster)
@@ -185,9 +195,26 @@ class PresenceRegistry:
             "color": color,
         }
         roster[client_id] = member
+        counts[client_id] = counts.get(client_id, 0) + 1
         return member
 
     def leave(self, session_id: str, client_id: str) -> Optional[Dict[str, Any]]:
+        """Decrement the connection ref-count for ``client_id``.
+
+        Returns the roster member dict only when the **last** live connection
+        for this client has closed (count → 0), so callers can broadcast
+        ``presence_left`` exactly once.  Returns ``None`` when other connections
+        are still open or the client was not registered.
+        """
+        counts = self._conn_counts.get(session_id, {})
+        count = counts.get(client_id, 0)
+        if count > 1:
+            counts[client_id] = count - 1
+            return None  # sibling connection still open — keep the roster entry
+        # count == 0 (not tracked) or count == 1 (last connection) → fully depart
+        counts.pop(client_id, None)
+        if not counts:
+            self._conn_counts.pop(session_id, None)
         roster = self._rosters.get(session_id)
         if not roster:
             return None

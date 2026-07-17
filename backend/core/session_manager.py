@@ -400,22 +400,27 @@ class SessionManager:
         self, session_id: str, client_id: str, subscription: Subscription
     ) -> None:
         self.bus.unsubscribe(subscription)
-        released = self.claims.release_all(session_id, client_id)
-        if released:
-            self.bus.publish(
-                session_id,
-                {
-                    "type": "op",
-                    "client_id": client_id,
-                    "op": {
-                        "op": "selection_released",
-                        "client_id": client_id,
-                        "element_ids": released,
-                    },
-                },
-            )
+        # presence.leave() returns the member only when the *last* live
+        # connection for this client_id has closed.  On a fast reconnect the
+        # old SSE closes while the new one is already open; in that case leave()
+        # returns None and we must not release claims or broadcast presence_left,
+        # because the still-open sibling connection owns both.
         member = self.presence.leave(session_id, client_id)
         if member is not None:
+            released = self.claims.release_all(session_id, client_id)
+            if released:
+                self.bus.publish(
+                    session_id,
+                    {
+                        "type": "op",
+                        "client_id": client_id,
+                        "op": {
+                            "op": "selection_released",
+                            "client_id": client_id,
+                            "element_ids": released,
+                        },
+                    },
+                )
             self.bus.publish(
                 session_id, {"type": "presence_left", "client_id": client_id}
             )
