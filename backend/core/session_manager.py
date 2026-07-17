@@ -83,20 +83,40 @@ class SessionLimitReached(Exception):
     pass
 
 
+_DEFAULT_BUCKET_IDLE_TTL = 3600.0  # evict a key after 1 h of silence
+_DEFAULT_BUCKET_SWEEP_INTERVAL = 300.0  # run the eviction sweep at most every 5 min
+
+
 class _TokenBucket:
-    """Per-client token bucket bounding ops/second."""
+    """Per-client token bucket bounding ops/second.
+
+    Idle entries (no consume() call for ``idle_ttl`` seconds) are evicted in a
+    periodic sweep so the internal dicts don't grow without bound under rotating
+    client keys (e.g. the per-IP lookup bucket).
+    """
 
     def __init__(
-        self, capacity: float, refill_per_sec: float, *, time_fn=time.monotonic
+        self,
+        capacity: float,
+        refill_per_sec: float,
+        *,
+        time_fn=time.monotonic,
+        idle_ttl: float = _DEFAULT_BUCKET_IDLE_TTL,
+        sweep_interval: float = _DEFAULT_BUCKET_SWEEP_INTERVAL,
     ) -> None:
         self._capacity = capacity
         self._refill = refill_per_sec
         self._time = time_fn
         self._tokens: Dict[str, float] = {}
         self._last: Dict[str, float] = {}
+        self._idle_ttl = idle_ttl
+        self._sweep_interval = sweep_interval
+        self._last_sweep: float = 0.0
 
     def consume(self, client_id: str, amount: float) -> bool:
         now = self._time()
+        if now - self._last_sweep >= self._sweep_interval:
+            self._evict(now)
         tokens = self._tokens.get(client_id, self._capacity)
         last = self._last.get(client_id, now)
         tokens = min(self._capacity, tokens + (now - last) * self._refill)
@@ -106,6 +126,14 @@ class _TokenBucket:
             return False
         self._tokens[client_id] = tokens - amount
         return True
+
+    def _evict(self, now: float) -> None:
+        cutoff = now - self._idle_ttl
+        stale = [k for k, t in self._last.items() if t < cutoff]
+        for k in stale:
+            del self._tokens[k]
+            del self._last[k]
+        self._last_sweep = now
 
 
 class SessionManager:
