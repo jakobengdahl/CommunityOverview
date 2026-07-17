@@ -175,11 +175,19 @@ Target outcomes:
 - stable APIs for setup, status inspection, and lifecycle automation where appropriate
 - event hooks for important graph or config mutations
 - minimal coupling between the core runtime and external orchestration
+- distinct read-only status surfaces and mutation surfaces so external consumers can be scoped to only what they need
+- structured action context on admin mutations (actor class, idempotency key, correlation keys) so external audit consumers receive navigable records without parsing log text
 
 Likely core changes:
 - clearer admin-safe API boundaries
 - event publication points for important lifecycle changes
 - documented contracts for external automation to interact with the core
+- a structured action context model for admin mutations
+
+For the detailed seam design covering request actor classes, correlation keys,
+idempotency-friendly mutation paths, read-only export surfaces, handoff/event hooks,
+audit-friendly action context, and the credential separation pattern, see
+[EXTERNAL_ADMIN_AND_AUTOMATION_SEAMS.md](./EXTERNAL_ADMIN_AND_AUTOMATION_SEAMS.md).
 
 ---
 
@@ -214,6 +222,15 @@ Focus:
 - health/readiness improvements
 - logging and metrics hooks
 - data lifecycle and restore-friendly interfaces
+
+### Workstream 6: External admin and automation seams
+Focus:
+- request actor class model (human admin, system actor, scheduled actor)
+- action context on admin mutations (idempotency key, trigger ref, correlation keys)
+- read-only status and export surface, distinct from mutation paths
+- outbound event hooks with well-structured payloads
+- audit record minimum field set for external consumer navigability
+- see [EXTERNAL_ADMIN_AND_AUTOMATION_SEAMS.md](./EXTERNAL_ADMIN_AND_AUTOMATION_SEAMS.md) for the full seam design
 
 ---
 
