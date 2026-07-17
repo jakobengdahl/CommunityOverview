@@ -28,11 +28,6 @@ Effort scale: XS = single-line fix · S = up to ~30 lines / one file · M = mult
 - **Issue:** `toolResult` carries a single `action`. If the LLM calls `present_form` in the same turn as another pure-action tool (`mark_nodes`, `clear_visualization`, `start_guide`, `save_view`), the overlay makes `present_form` win and the other action is dropped (the frontend dispatches on `action ===`). Node/edge-returning tools are unaffected (their data rides in `nodes`/`edges`). This is an inherent single-`action` channel limitation, not specific to present_form; very rare in practice. A general fix would let the response carry multiple actions.
 - **Effort:** M
 
-### [2026-07-04] Shared-session persistence is a synchronous fsync on the event loop
-- **File(s):** `backend/core/session_manager.py` (`apply_ops` → `store.persist`), `backend/core/session_store.py` (`FileSessionPersistenceBackend.save`)
-- **Context:** Discovered during review of `claude/multi-user-sessions-step-3-ojk3mi`
-- **Issue:** `apply_ops` persists synchronously (atomic temp+rename with `fsync`) once per batch, inside the async handler. Design §3.3 specifies "debounced write-behind, flush ≤ 1 s". Correctness is fine (writes are atomic; batches are naturally debounced at the client's 100 ms flush), but under concurrent load the fsync blocks the event loop and works against the <500 ms round-trip target. Fix: move to a debounced write-behind flush (background task, coalescing per session) or offload the fsync via `asyncio.to_thread`. Perf optimization, not a bug.
-- **Effort:** M
 
 ### [2026-07-04] Two concurrent connections for the same client_id clobber presence/claims
 - **File(s):** `backend/core/session_hub.py` (`PresenceRegistry.leave`, `ClaimMap.release_all`), `backend/core/session_manager.py` (`disconnect`)
@@ -65,6 +60,10 @@ Effort scale: XS = single-line fix · S = up to ~30 lines / one file · M = mult
 ### [2026-07-17] Fixed in branch `fix/small-fixes-mcp-hub-threadsafe`
 
 - **MCP hub mirror lacked cross-thread delivery safety** — `backend/core/session_hub.py` (`InProcessEventBus`). Each subscription now records the event loop that created its queue, the subscriber registry is protected by a lock, and `publish()` fans out per subscriber: direct delivery on the current loop, `call_soon_threadsafe(...)` onto a different live loop, and dead-loop subscribers are pruned. The resync-overflow behavior is unchanged. Focused regression tests cover the on-loop fast path, cross-thread delivery, and subscribers attached to different event loops.
+
+### [2026-07-17] Fixed in branch `fix/small-fixes-session-fsync`
+
+- **Shared-session persistence blocked the event loop with a synchronous fsync** — `backend/core/session_manager.py` (`apply_ops`). Changed the single `self.store.persist(session)` call to `await asyncio.to_thread(self.store.persist, session)` so the blocking `fsync` in `FileSessionPersistenceBackend.save` runs in the default `ThreadPoolExecutor` instead of on the event loop. The per-session `asyncio.Lock` is still held during the await, so no other coroutine can observe a partially-applied batch; if the thread raises, the existing `except` block rolls back in-memory state and the ring buffer exactly as before. Two focused regression tests added: one verifies `persist` is called from a non-event-loop thread, and one verifies that a worker-thread `OSError` still rolls back state and suppresses broadcast.
 
 ### [2026-07-17] Fixed in pending PR (`fix/small-fixes-session-429`)
 

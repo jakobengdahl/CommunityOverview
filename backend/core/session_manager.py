@@ -321,7 +321,7 @@ class SessionManager:
                         state_changed = True
                         pending.append(("state", result))
                 if state_changed:
-                    self.store.persist(session)
+                    await asyncio.to_thread(self.store.persist, session)
             except Exception:
                 session.state = saved_state
                 session.seq = saved_seq
