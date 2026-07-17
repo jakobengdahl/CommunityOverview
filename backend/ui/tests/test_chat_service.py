@@ -1304,3 +1304,128 @@ class TestCollectResponsesOptOut:
         assert found.get("nodes", []) == [], (
             "no CollectionResponse should be created when collect_responses=False"
         )
+
+
+# ---------------------------------------------------------------------------
+# Extra-actions: pure-action tools co-occurring with present_form
+# ---------------------------------------------------------------------------
+
+
+class TestExtraActionsWithPresentForm:
+    """Regression: pure-action tools alongside present_form must not be dropped.
+
+    When the LLM calls present_form + mark_nodes (or clear_visualization, etc.)
+    in the same turn, the backend must emit the co-occurring action in
+    toolResult.extra_actions so the frontend can execute it while the form
+    still renders.
+    """
+
+    def test_present_form_and_mark_nodes_emit_extra_actions(self, chat_service):
+        """mark_nodes co-occurring with present_form appears in extra_actions."""
+        service, mock_llm = chat_service
+        mock_llm.mock_tool_calls = [
+            {
+                "name": "present_form",
+                "input": {
+                    "fields": [
+                        {
+                            "id": "role",
+                            "label": "Role",
+                            "type": "radio",
+                            "options": ["A", "B"],
+                        }
+                    ]
+                },
+            },
+            {
+                "name": "mark_nodes",
+                "input": {
+                    "marks": [
+                        {"node_id": "n1", "color": "#EF4444", "label": "High priority"}
+                    ]
+                },
+            },
+        ]
+        mock_llm.mock_text_response = "Please fill in the form."
+
+        result = service.process_message(messages=[{"role": "user", "content": "go"}])
+
+        tr = result["toolResult"]
+        assert tr["action"] == "present_form", "present_form must win the action slot"
+        assert tr["form"]["fields"][0]["id"] == "role"
+        extra = tr.get("extra_actions", [])
+        assert len(extra) == 1, "mark_nodes must appear in extra_actions"
+        assert extra[0]["action"] == "mark_nodes"
+        assert extra[0]["marks"][0]["node_id"] == "n1"
+
+    def test_present_form_and_clear_visualization_emit_extra_actions(
+        self, chat_service
+    ):
+        """clear_visualization co-occurring with present_form appears in extra_actions."""
+        service, mock_llm = chat_service
+        mock_llm.mock_tool_calls = [
+            {
+                "name": "clear_visualization",
+                "input": {},
+            },
+            {
+                "name": "present_form",
+                "input": {"fields": [{"id": "q", "label": "Q", "type": "text"}]},
+            },
+        ]
+        mock_llm.mock_text_response = "Canvas cleared; please fill in the form."
+
+        result = service.process_message(
+            messages=[{"role": "user", "content": "start"}]
+        )
+
+        tr = result["toolResult"]
+        assert tr["action"] == "present_form"
+        extra = tr.get("extra_actions", [])
+        assert any(e["action"] == "clear_visualization" for e in extra)
+
+    def test_pure_action_alone_has_no_extra_actions(self, chat_service):
+        """Without present_form, pure-action tools must NOT emit extra_actions."""
+        service, mock_llm = chat_service
+        mock_llm.mock_tool_calls = [
+            {
+                "name": "mark_nodes",
+                "input": {"marks": [{"node_id": "n1", "color": "#10B981"}]},
+            }
+        ]
+        mock_llm.mock_text_response = "Marked."
+
+        result = service.process_message(messages=[{"role": "user", "content": "mark"}])
+
+        tr = result["toolResult"]
+        assert tr["action"] == "mark_nodes"
+        assert "extra_actions" not in tr, (
+            "extra_actions must not appear without present_form"
+        )
+
+    def test_present_form_with_node_results_and_mark_nodes(self, chat_service):
+        """present_form + search_graph + mark_nodes: nodes, form, and extra_actions all survive."""
+        service, mock_llm = chat_service
+        service.graph_service.add_nodes(
+            nodes=[{"type": "Actor", "name": "Agency X"}], edges=[]
+        )
+        mock_llm.mock_tool_calls = [
+            {"name": "search_graph", "input": {"query": "Agency X"}},
+            {
+                "name": "present_form",
+                "input": {"fields": [{"id": "ok", "label": "OK?", "type": "boolean"}]},
+            },
+            {
+                "name": "mark_nodes",
+                "input": {"marks": [{"node_id": "x", "color": "#3B82F6"}]},
+            },
+        ]
+        mock_llm.mock_text_response = "Results, form, and marks all in one turn."
+
+        result = service.process_message(messages=[{"role": "user", "content": "go"}])
+
+        tr = result["toolResult"]
+        assert tr["action"] == "present_form"
+        assert any(n.get("name") == "Agency X" for n in tr.get("nodes", []))
+        extra = tr.get("extra_actions", [])
+        assert any(e["action"] == "mark_nodes" for e in extra)

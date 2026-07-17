@@ -458,6 +458,93 @@ describe('ChatPanel', () => {
     });
   });
 
+  describe('extra_actions alongside present_form', () => {
+    it('executes mark_nodes from extra_actions while the form still renders', async () => {
+      const setNodeMarksSpy = vi.fn();
+      useGraphStore.setState({ setNodeMarks: setNodeMarksSpy });
+
+      api.sendChatMessage.mockResolvedValueOnce({
+        content: 'Please fill in the form.',
+        toolUsed: 'present_form',
+        toolResult: {
+          action: 'present_form',
+          form: {
+            fields: [{ id: 'role', label: 'Role', type: 'radio', options: ['A', 'B'] }],
+          },
+          extra_actions: [
+            { action: 'mark_nodes', marks: [{ node_id: 'n1', color: '#EF4444', label: 'High' }] },
+          ],
+        },
+      });
+
+      render(<ChatPanel />);
+      const user = userEvent.setup();
+
+      await user.type(screen.getByPlaceholderText(/question|fråga|action|åtgärd/i), 'go');
+      await user.click(screen.getByRole('button', { name: /send|skicka/i }));
+
+      await waitFor(() => {
+        // Form must still render
+        expect(screen.getByText('Role')).toBeInTheDocument();
+        // mark_nodes side-effect must have run
+        expect(setNodeMarksSpy).toHaveBeenCalledWith([
+          { node_id: 'n1', color: '#EF4444', label: 'High' },
+        ]);
+      });
+    });
+
+    it('executes clear_visualization from extra_actions while the form still renders', async () => {
+      const clearSpy = vi.fn();
+      useGraphStore.setState({
+        nodes: [{ id: 'n1' }],
+        clearVisualization: clearSpy,
+      });
+
+      api.sendChatMessage.mockResolvedValueOnce({
+        content: 'Canvas cleared. Please answer:',
+        toolUsed: 'present_form',
+        toolResult: {
+          action: 'present_form',
+          form: {
+            fields: [{ id: 'q', label: 'Q', type: 'text' }],
+          },
+          extra_actions: [{ action: 'clear_visualization', success: true }],
+        },
+      });
+
+      render(<ChatPanel />);
+      const user = userEvent.setup();
+
+      await user.type(screen.getByPlaceholderText(/question|fråga|action|åtgärd/i), 'start');
+      await user.click(screen.getByRole('button', { name: /send|skicka/i }));
+
+      await waitFor(() => {
+        // Form must still render
+        expect(screen.getByText('Q')).toBeInTheDocument();
+        // clear_visualization side-effect must have run
+        expect(clearSpy).toHaveBeenCalled();
+      });
+    });
+
+    it('does not fail when extra_actions is absent (backward compatibility)', async () => {
+      api.sendChatMessage.mockResolvedValueOnce({
+        content: 'Marks applied.',
+        toolUsed: 'mark_nodes',
+        toolResult: { action: 'mark_nodes', marks: [] },
+      });
+
+      render(<ChatPanel />);
+      const user = userEvent.setup();
+
+      await user.type(screen.getByPlaceholderText(/question|fråga|action|åtgärd/i), 'mark');
+      await user.click(screen.getByRole('button', { name: /send|skicka/i }));
+
+      await waitFor(() => {
+        expect(screen.getByText('Marks applied.')).toBeInTheDocument();
+      });
+    });
+  });
+
   describe('Collection form', () => {
     it('renders an assistant present_form and submits structured answers', async () => {
       useGraphStore.setState({

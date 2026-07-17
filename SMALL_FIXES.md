@@ -22,13 +22,6 @@ Effort scale: XS = single-line fix · S = up to ~30 lines / one file · M = mult
 ## Open
 
 
-### [2026-07-11] present_form action wins over a co-occurring pure-action tool
-- **File(s):** `backend/ui/chat_logic.py` (`_handle_tool_use` final `pending_form` overlay)
-- **Context:** Discovered during review of `claude/active-collector-gui-inputs-0qj15m`
-- **Issue:** `toolResult` carries a single `action`. If the LLM calls `present_form` in the same turn as another pure-action tool (`mark_nodes`, `clear_visualization`, `start_guide`, `save_view`), the overlay makes `present_form` win and the other action is dropped (the frontend dispatches on `action ===`). Node/edge-returning tools are unaffected (their data rides in `nodes`/`edges`). This is an inherent single-`action` channel limitation, not specific to present_form; very rare in practice. A general fix would let the response carry multiple actions.
-- **Effort:** M
-
-
 ### [2026-07-04] Two concurrent connections for the same client_id clobber presence/claims
 - **File(s):** `backend/core/session_hub.py` (`PresenceRegistry.leave`, `ClaimMap.release_all`), `backend/core/session_manager.py` (`disconnect`)
 - **Context:** Discovered during review of `claude/multi-user-sessions-step-3-ojk3mi`
@@ -48,6 +41,10 @@ Effort scale: XS = single-line fix · S = up to ~30 lines / one file · M = mult
 ### [2026-07-11] Fixed in pending PR (`fix/small-fixes-user-guide`)
 
 - **USER_GUIDE says double-click opens the edit dialog** — `docs/USER_GUIDE.md` (section 2.3 and Agents section). Double-clicking a node opens the *detail* dialog (`NodeDetailDialog`), from which Edit is a button — not the edit dialog directly. Section 2.3 wording was already correct; corrected the Agents section (line 186) which still implied double-click edits directly.
+
+### [2026-07-17] Fixed in branch `fix/small-fixes-prune-obsolete-open-items`
+
+- **`present_form` action wins over a co-occurring pure-action tool** — `backend/ui/chat_logic.py` (`_handle_tool_use`), `frontend/web/src/components/ChatPanel.jsx` (`applyToolResultSideEffects`). Added `pending_extra_actions` accumulator that collects pure-action tool results (`mark_nodes`, `clear_visualization`, `start_guide`, `save_view`) during the tool-execution loop. When `present_form` is also present in the same turn, these are emitted as `toolResult.extra_actions` rather than being dropped by the `pending_form` overlay. The frontend's `applyToolResultSideEffects` now iterates over `extra_actions` and applies each after the main action, so the form still renders while the co-occurring side effects execute. Existing callers that read `toolResult.action` are unaffected. Four backend regression tests added in `TestExtraActionsWithPresentForm`; three frontend tests added in `ChatPanel.test.jsx`.
 
 ### [2026-07-17] Fixed in branch `fix/small-fixes-collection-response-optout` (PR pending)
 
