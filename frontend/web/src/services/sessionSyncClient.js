@@ -499,7 +499,7 @@ export class SessionSyncClient {
     this._startPruneTimer();
     const params = new URLSearchParams({ client_id: this.clientId });
     if (this.displayName) params.set('name', this.displayName);
-    if (this._seq > 0) params.set('since_seq', String(this._seq));
+    if (this._appliedSeq > 0) params.set('since_seq', String(this._appliedSeq));
     const url = `${this.streamUrl}?${params.toString()}`;
     const source = new this._EventSource(url);
     source.onmessage = (e) => {
