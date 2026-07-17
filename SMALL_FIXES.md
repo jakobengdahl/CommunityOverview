@@ -21,19 +21,6 @@ Effort scale: XS = single-line fix · S = up to ~30 lines / one file · M = mult
 
 ## Open
 
-### [2026-07-12] Webhook SSRF check is not re-applied across redirects
-- **File(s):** `backend/core/events/delivery.py:56` (`is_safe_url`), `:246` (`httpx.post`)
-- **Context:** Discovered during `claude/structure-backlog-next-jlkplr` (STRUCTURE_REVIEW C3 slice 1, requests→httpx2)
-- **Issue:** `is_safe_url` validates only the *original* webhook URL; the delivery
-  request follows redirects (`follow_redirects=True`, preserving the previous
-  `requests` behaviour), so a webhook whose host is public but 3xx-redirects to an
-  internal/reserved IP bypasses the SSRF guard. httpx exposes redirect history via
-  `response.history` / an event hook, so the fix is to re-run `is_safe_url` on each
-  redirect target (or disable redirect-following for webhook delivery, which is the
-  more common posture for outbound webhooks). Left behaviour-preserving in this
-  slice to keep it a pure client swap.
-- **Effort:** S
-
 ### [2026-07-11] Session-lookup `429` on the SSE handshake can leave the EventSource dead
 - **File(s):** `frontend/web/src/services/sessionSyncClient.js:460` (`connect`/`onerror`)
 - **Context:** Discovered during `claude/structure-backlog-next-e9w7tx` (STRUCTURE_REVIEW A3 step 1 review)
@@ -126,6 +113,10 @@ Effort scale: XS = single-line fix · S = up to ~30 lines / one file · M = mult
 ## Fixed
 
 *(resolved entries moved here after merge, for reference)*
+
+### [2026-07-17] Fixed in PR #247 (`fix/small-fixes-webhook-ssrf`)
+
+- **Webhook SSRF check was not re-applied across redirects** — `backend/core/events/delivery.py`, `backend/core/events/tests/test_delivery.py`. Webhook delivery now re-validates every redirect target with `is_safe_url()`, resolves relative redirects against the current URL, preserves normal redirect method semantics (`301/302/303 -> GET`, `307/308` keep POST), and drops both blocked redirect targets and redirect loops without retrying. Added focused regressions for blocked internal redirects, safe redirects, safe relative redirects, and redirect-limit handling.
 
 ### [2026-07-14] Fixed in PR #246 (`codex/small-fix-skill-exclusion`)
 
