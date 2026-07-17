@@ -752,7 +752,7 @@ branch. Ordered by severity within each group. Effort uses the
   rename through `apply_ops` (`session_renamed` is already a STATE_OP — today
   unreachable, no client emits it) would fix both this and the op's dead-path
   status. **Effort:** S.
-- **R9 — Terminally rejected ops are dropped silently.** The sync client
+- **Fixed** (`claude/session-r7-r9-r12-r15`) **R9 — Terminally rejected ops are dropped silently.** The sync client
   supports an `onDropped` handler, but `App.jsx` does not wire it
   (`App.jsx:1235-1256`), so a 400/413 drop (annotation limit, oversized
   `layout_applied`) leaves canvas state that silently never persists. The
@@ -776,7 +776,7 @@ branch. Ordered by severity within each group. Effort uses the
   new state server-side. Distinguish 404 from other errors (retry/back off
   instead of clearing). **File(s):** `frontend/web/src/App.jsx:1220-1228`.
   **Effort:** S.
-- **R12 — Group `description` is silently lost.** The canvas keeps a
+- **Fixed** (`claude/session-r7-r9-r12-r15`) **R12 — Group `description` is silently lost.** The canvas keeps a
   description on group nodes, but `groupsToAnnotations` drops it, and both the
   restore path and remote upserts hardcode `description: ''`
   (`App.jsx:65-79`, `GraphCanvas.jsx:878,949`). Under the old localStorage
@@ -800,7 +800,7 @@ branch. Ordered by severity within each group. Effort uses the
   8 — manually drawn edges persist in the graph itself since PR #186. Removed
   the field from the model and §3.1.
   **File(s):** `backend/core/session_store.py:77`. **Effort:** XS.
-- **R15 — Duplicate/stale event delivery is tolerated but unguarded.** Events
+- **Fixed** (`claude/session-r7-r9-r12-r15`) **R15 — Duplicate/stale event delivery is tolerated but unguarded.** Events
   published between the stream's `connect` (subscribe) and the `catch_up`
   computation are delivered twice (once inside the snapshot/catch-up, once as
   queued events), and a late POST response can move `_seq` backwards past a
@@ -809,6 +809,16 @@ branch. Ordered by severity within each group. Effort uses the
   sequenced ops in `_handleEvent` would make the invariant robust instead of
   incidental. **File(s):**
   `frontend/web/src/services/sessionSyncClient.js:596-611`. **Effort:** XS.
+  **Implementation note:** the guard is keyed on a new `_appliedSeq` (highest
+  seq actually applied from a stream event), not `_seq` — `_flush()` also
+  advances `_seq` optimistically to the ops-POST response's `body.seq` (the
+  server's global seq right after the batch lands), which can already be ahead
+  of a concurrent op whose broadcast is still in flight on the separate SSE
+  connection; guarding on `_seq` there would have silently and permanently
+  dropped that op instead of applying it once delivered (review caught this
+  during the fix, regression test added). A related, narrower pre-existing gap
+  in `since_seq` on *reconnect* (not touched by this fix) is logged in
+  `SMALL_FIXES.md`.
 
 ### 8.4 Already tracked elsewhere
 

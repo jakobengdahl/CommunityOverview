@@ -184,6 +184,7 @@
     "session_deleted": "Sessionen togs bort — startade en ny",
     "session_deleted_remote": "Sessionen togs bort av en annan användare — startade en ny",
     "connect_error": "Kunde inte läsa in sessionen",
+    "change_not_saved": "En ändring kunde inte sparas — uppdaterar sessionen",
     "settings": "Inställningar"
   },
   "settings": {

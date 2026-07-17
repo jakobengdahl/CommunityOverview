@@ -69,6 +69,7 @@ export function useSyncConnection(sessionId) {
           onSessionRenamed: (...a) => syncHandlersRef.current.onSessionRenamed?.(...a),
           onSessionDeleted: (...a) => syncHandlersRef.current.onSessionDeleted?.(...a),
           onCommand: (...a) => syncHandlersRef.current.onCommand?.(...a),
+          onDropped: (...a) => syncHandlersRef.current.onDropped?.(...a),
         },
       });
       // Connect before installing: if connect() throws (e.g. new EventSource on a

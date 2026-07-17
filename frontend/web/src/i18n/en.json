@@ -184,6 +184,7 @@
     "session_deleted": "Session deleted — started a new one",
     "session_deleted_remote": "This session was deleted by another user — started a new one",
     "connect_error": "Could not load session",
+    "change_not_saved": "A change could not be saved — refreshing session",
     "settings": "Settings"
   },
   "settings": {

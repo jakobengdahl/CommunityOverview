@@ -668,6 +668,7 @@ function GraphCanvasInner({
           .map((g) => ({
             id: g.id,
             label: g.data.label,
+            description: g.data.description,
             position: g.position,
             style: g.style,
             color: g.data.color,
@@ -949,7 +950,11 @@ function GraphCanvasInner({
         id: g.id,
         type: 'group',
         position: g.position,
-        data: { label: g.label || 'Group', description: '', color: g.color || '#646cff' },
+        data: {
+          label: g.label || 'Group',
+          description: g.description || '',
+          color: g.color || '#646cff',
+        },
         style: g.style || { width: 300, height: 200 },
       }));
       const groupIdSet = new Set(groups.map((g) => g.id));
@@ -1064,7 +1069,11 @@ function GraphCanvasInner({
           id: g.id,
           type: 'group',
           position: g.position || { x: 0, y: 0 },
-          data: { label: g.label || 'Group', description: '', color: g.color || '#646cff' },
+          data: {
+            label: g.label || 'Group',
+            description: g.description || '',
+            color: g.color || '#646cff',
+          },
           style: g.style || { width: 300, height: 200 },
         };
         const members = new Set(op.members || []);
