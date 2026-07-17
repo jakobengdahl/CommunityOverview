@@ -1103,17 +1103,25 @@ class ChatProcessor:
         system_prompt: str = None,
         tools_override: Dict[str, Callable] = None,
         pending_form=None,
+        pending_extra_actions=None,
     ) -> Dict:
         """Handle tool use with support for tool chaining and result aggregation.
 
         pending_form carries a present_form action result across tool-chaining
         recursion so the form spec survives even when later tools return nodes/edges
         (which would otherwise take over final_tool_result and drop the form).
+
+        pending_extra_actions carries pure-action tool results (mark_nodes,
+        clear_visualization, start_guide, save_view) that co-occur with present_form
+        in the same turn.  They are emitted as toolResult.extra_actions so the
+        frontend can execute them without losing the form.
         """
         if accumulated_nodes is None:
             accumulated_nodes = []
         if accumulated_edges is None:
             accumulated_edges = []
+        if pending_extra_actions is None:
+            pending_extra_actions = []
         active_system_prompt = (
             system_prompt if system_prompt is not None else self.system_prompt
         )
@@ -1242,6 +1250,17 @@ class ChatProcessor:
             ):
                 pending_form = tool_result
 
+            # Collect pure-action tools (mark_nodes, clear_visualization, start_guide,
+            # save_view, …) that co-occur with present_form.  When present_form wins
+            # the single toolResult.action slot these would otherwise be silently
+            # dropped; they are emitted as toolResult.extra_actions instead.
+            elif (
+                isinstance(tool_result, dict)
+                and tool_result.get("action")
+                and "nodes" not in tool_result
+            ):
+                pending_extra_actions.append(tool_result)
+
             # Store tool result with its ID for the response
             tool_results.append({"tool_use_id": tool_id, "result": tool_result})
 
@@ -1282,6 +1301,7 @@ class ChatProcessor:
                 system_prompt=active_system_prompt,
                 tools_override=tools_override,
                 pending_form=pending_form,
+                pending_extra_actions=pending_extra_actions,
             )
 
         # Extract text from response (handle multiple text blocks)
@@ -1310,6 +1330,10 @@ class ChatProcessor:
                 final_tool_result = {**final_tool_result, **pending_form}
             else:
                 final_tool_result = pending_form
+            # Carry any co-occurring pure-action tools so the frontend can execute
+            # them while still rendering the form (see toolResult.extra_actions).
+            if pending_extra_actions:
+                final_tool_result["extra_actions"] = list(pending_extra_actions)
 
         return {
             "content": final_text,

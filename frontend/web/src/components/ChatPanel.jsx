@@ -196,6 +196,15 @@ function ChatPanel({ collectionShortName }) {
       const filteredNodes = filterCommunityNodes(toolResult.nodes);
       updateVisualization(filteredNodes, toolResult.edges || []);
     }
+
+    // Execute any pure-action tools that co-occurred with present_form in the same
+    // turn.  The backend emits them as extra_actions so they are not dropped when
+    // present_form wins the single toolResult.action slot.
+    if (toolResult.extra_actions && toolResult.extra_actions.length > 0) {
+      for (const extra of toolResult.extra_actions) {
+        await applyToolResultSideEffects(extra);
+      }
+    }
   };
 
   const handleSend = async () => {
