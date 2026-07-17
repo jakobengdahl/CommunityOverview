@@ -70,6 +70,16 @@ def is_safe_url(url: str) -> bool:
         if not hostname:
             return False
 
+        # If the hostname is already an IP literal, validate it directly instead
+        # of going through DNS resolution.
+        try:
+            literal_ip = ipaddress.ip_address(hostname)
+        except ValueError:
+            literal_ip = None
+
+        if literal_ip is not None:
+            return _is_safe_ip(literal_ip)
+
         # Resolve hostname — getaddrinfo returns both A and AAAA records.
         # We check every resolved address so that a hostname that has both a
         # public IPv4 and an internal IPv6 (or vice-versa) is still rejected.
@@ -89,6 +99,13 @@ def is_safe_url(url: str) -> bool:
     except (ValueError, socket.gaierror, OSError, Exception) as e:
         logger.warning(f"URL validation failed for {url}: {e}")
         return False
+
+
+_MAX_REDIRECTS = 10
+
+
+class _SSRFRedirectBlocked(Exception):
+    """Raised when a redirect target fails the SSRF check."""
 
 
 class DeliveryItem:
@@ -241,21 +258,15 @@ class DeliveryWorker:
 
             # Prepare payload
             payload = event.to_webhook_payload()
+            headers = {
+                "Content-Type": "application/json",
+                "User-Agent": "CommunityGraph-Events/1.0",
+                "X-Event-ID": event.event_id,
+                "X-Event-Type": event.event_type.value,
+            }
 
-            # Make HTTP request. follow_redirects=True preserves the redirect
-            # behaviour of the previous requests-based client (httpx does not
-            # follow redirects by default).
-            response = httpx.post(
-                webhook_url,
-                json=payload,
-                headers={
-                    "Content-Type": "application/json",
-                    "User-Agent": "CommunityGraph-Events/1.0",
-                    "X-Event-ID": event.event_id,
-                    "X-Event-Type": event.event_type.value,
-                },
-                timeout=self._timeout,
-                follow_redirects=True,
+            response = self._post_with_redirect_ssrf_check(
+                webhook_url, payload, headers
             )
 
             # Check response
@@ -284,6 +295,52 @@ class DeliveryWorker:
                 )
                 return
 
+        except _SSRFRedirectBlocked as e:
+            error_message = str(e)
+            logger.error(
+                f"SSRF blocked (redirect): event {event.event_id} to {webhook_url}. {error_message}"
+            )
+            if self._on_result:
+                result = DeliveryResult(
+                    event_id=event.event_id,
+                    subscription_id=event.subscription.id
+                    if event.subscription
+                    else "",
+                    webhook_url=webhook_url,
+                    status=DeliveryStatus.DROPPED,
+                    attempt=attempt,
+                    max_attempts=self._max_attempts,
+                    error_message=error_message,
+                )
+                try:
+                    self._on_result(result)
+                except Exception as cb_exc:
+                    logger.error(f"Error in result callback: {cb_exc}")
+            return
+
+        except httpx.TooManyRedirects:
+            error_message = "Exceeded redirect limit"
+            logger.error(
+                f"Redirect loop blocked: event {event.event_id} to {webhook_url}. {error_message}"
+            )
+            if self._on_result:
+                result = DeliveryResult(
+                    event_id=event.event_id,
+                    subscription_id=event.subscription.id
+                    if event.subscription
+                    else "",
+                    webhook_url=webhook_url,
+                    status=DeliveryStatus.DROPPED,
+                    attempt=attempt,
+                    max_attempts=self._max_attempts,
+                    error_message=error_message,
+                )
+                try:
+                    self._on_result(result)
+                except Exception as cb_exc:
+                    logger.error(f"Error in result callback: {cb_exc}")
+            return
+
         except httpx.TimeoutException:
             self._handle_failure(
                 item,
@@ -311,6 +368,46 @@ class DeliveryWorker:
                 self._on_result(result)
             except Exception as e:
                 logger.error(f"Error in result callback: {e}")
+
+    def _post_with_redirect_ssrf_check(
+        self, url: str, payload: dict, headers: dict
+    ) -> httpx.Response:
+        """POST to url, following redirects while re-applying the SSRF check at each hop."""
+        redirect_headers = {
+            key: value
+            for key, value in headers.items()
+            if key.lower() not in ("content-type", "content-length", "transfer-encoding")
+        }
+        current_method = "POST"
+        current_url = url
+
+        with httpx.Client(timeout=self._timeout, follow_redirects=False) as client:
+            for _ in range(_MAX_REDIRECTS):
+                if current_method == "POST":
+                    response = client.post(
+                        current_url,
+                        json=payload,
+                        headers=headers,
+                        follow_redirects=False,
+                    )
+                else:
+                    response = client.get(
+                        current_url,
+                        headers=redirect_headers,
+                        follow_redirects=False,
+                    )
+                if not response.is_redirect:
+                    return response
+                location = str(response.headers.get("location", ""))
+                next_url = urllib.parse.urljoin(current_url, location)
+                if not is_safe_url(next_url):
+                    raise _SSRFRedirectBlocked(
+                        f"Blocked redirect to restricted address: {next_url}"
+                    )
+                if response.status_code in (301, 302, 303):
+                    current_method = "GET"
+                current_url = next_url
+        raise httpx.TooManyRedirects("Exceeded redirect limit", request=None)
 
     def _handle_failure(
         self,
