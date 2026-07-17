@@ -69,6 +69,24 @@ class TestPersistence:
         assert not (tmp_path / "sessions" / f"{session.id}.json").exists()
         assert store.delete(session.id) is False
 
+    def test_manual_edges_is_not_a_state_field(self, tmp_path):
+        """R14: manual_edges was dead (no op wrote it; manual edges persist in
+        the graph itself since PR #186) and has been removed from the model."""
+        store = _store(tmp_path)
+        session = store.create()
+        assert "manual_edges" not in session.state
+
+    def test_loading_a_pre_r14_file_with_manual_edges_is_tolerated(self, tmp_path):
+        """A session file persisted before R14 may still carry the now-removed
+        key; loading it must not fail, and the stale key is simply dropped."""
+        backend = FileSessionPersistenceBackend(tmp_path)
+        session = Session(id="1111-3333")
+        raw = session.to_dict()
+        raw["state"]["manual_edges"] = [{"id": "e1", "source": "a", "target": "b"}]
+        backend.save(raw)
+        restored = Session.from_dict(backend.load("1111-3333"))
+        assert "manual_edges" not in restored.state
+
     def test_list_meta_sorted(self, tmp_path):
         store = _store(tmp_path)
         a = store.create("a")
@@ -77,6 +95,33 @@ class TestPersistence:
         ids = {m["id"] for m in metas}
         assert {a.id, b.id} <= ids
         assert all("state" not in m for m in metas)
+
+    def test_list_meta_cache_reflects_a_rename(self, tmp_path):
+        """R13: list_meta caches the backend scan but must not serve a stale
+        name after a rename invalidates it."""
+        store = _store(tmp_path)
+        a = store.create("a")
+        store.list_meta()  # populate the cache
+        store.rename(a.id, "renamed")
+        names = {m["id"]: m["name"] for m in store.list_meta()}
+        assert names[a.id] == "renamed"
+
+    def test_session_count_counts_disk_files_not_just_in_memory(self, tmp_path):
+        """R13: the cap must survive a restart (D13: no eviction, so session
+        files outlive the process) — not reset to 0 with an empty in-memory map."""
+        store = _store(tmp_path)
+        store.create()
+        store.create()
+        restarted = _store(tmp_path)  # fresh in-memory map, same directory
+        assert restarted.session_count() == 2
+
+    def test_session_count_updates_on_create_and_delete(self, tmp_path):
+        store = _store(tmp_path)
+        a = store.create()
+        store.create()
+        assert store.session_count() == 2
+        store.delete(a.id)
+        assert store.session_count() == 1
 
 
 class TestGetOrCreate:

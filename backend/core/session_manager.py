@@ -211,24 +211,60 @@ class SessionManager:
     def list_sessions(self) -> List[Dict[str, Any]]:
         return self.store.list_meta()
 
-    def rename_session(self, session_id: str, name: Optional[str]) -> Optional[Session]:
-        session = self.store.rename(session_id, name)
-        if session is not None:
-            self.bus.publish(
-                session_id,
-                {"type": "session_renamed", "name": name, "seq": session.seq},
-            )
-        return session
+    async def rename_session(
+        self, session_id: str, name: Optional[str], client_id: Optional[str] = None
+    ) -> Session:
+        """Rename a session, materialising it if it only exists client-side.
 
-    def delete_session(self, session_id: str, deleted_by: Optional[str] = None) -> bool:
-        existed = self.store.delete(session_id)
+        Routed through ``apply_ops`` as a ``session_renamed`` state op (R8)
+        instead of writing the store directly: this gives the rename a
+        ``seq`` and a ring-buffer entry, so a client reconnecting via the
+        ``since_seq`` catch-up path (not just a full snapshot) observes it —
+        previously the op was a documented-but-unreachable STATE_OP with no
+        emitter. Routing through the same locked/rollback-safe path as any
+        other op also closes the rename-vs-in-flight-batch race (R10).
+        ``get_or_create`` first (R7): a PATCH for a session id that only
+        exists in the browser's URL/recents (never saved server-side) must
+        still take effect rather than 404, or the name is lost the moment the
+        session later materialises with a null server name.
+        """
+        self.get_or_create(session_id)
+        await self.apply_ops(
+            session_id,
+            client_id or "rest",
+            None,
+            [
+                {"op": "session_renamed", "name": name},
+            ],
+        )
+        return self.store.get(session_id)
+
+    async def delete_session(
+        self, session_id: str, deleted_by: Optional[str] = None
+    ) -> bool:
+        # Same per-session lock apply_ops uses (R10): without it, an in-flight
+        # apply_ops batch that already holds a `Session` reference can persist()
+        # after this delete, resurrecting the file on disk.
+        #
+        # The lock object is deliberately *not* popped from `self._locks` here
+        # (unlike the pre-R10 code): popping it right after release would let a
+        # concurrent waiter that already holds a reference to this exact lock
+        # object (obtained via `_lock()` before the pop) go on to acquire it
+        # after a *different*, newly created lock has taken over serialising
+        # this session_id (e.g. a rename that recreated the session in between)
+        # — two coroutines then mutate the same session under two different
+        # locks, defeating mutual exclusion. Leaving stale lock objects behind
+        # is a bounded, harmless memory cost (one small `asyncio.Lock` per
+        # session_id ever deleted); `max_sessions` already bounds how many
+        # sessions can exist at once.
+        async with self._lock(session_id):
+            existed = self.store.delete(session_id)
         if existed:
             # Broadcast before tearing down so connected clients get the notice.
             self.bus.publish(
                 session_id,
                 {"type": "session_deleted", "deleted_by": deleted_by},
             )
-        self._locks.pop(session_id, None)
         return existed
 
     def roster(self, session_id: str) -> List[Dict[str, Any]]:
@@ -271,8 +307,7 @@ class SessionManager:
         if not self._bucket.consume(client_id, max(1, len(ops))):
             raise RateLimited()
 
-        session = self.store.get(session_id)
-        if session is None:
+        if self.store.get(session_id) is None:
             raise SessionNotFound()
 
         # Reject a malformed batch up front, before any op is applied or
@@ -292,6 +327,14 @@ class SessionManager:
                 raise OpError(f"unknown op: {op_type!r}")
 
         async with self._lock(session_id):
+            # Re-fetch inside the lock rather than reusing the check above
+            # (R10): `delete_session` takes this same per-session lock, so if
+            # it ran between that check and here, the session is gone and this
+            # batch must not resurrect it via persist() below.
+            session = self.store.get(session_id)
+            if session is None:
+                raise SessionNotFound()
+
             # Snapshot for rollback. persist() is inside the protected region so
             # a persistence-layer failure (disk full, IO error) rolls back too —
             # otherwise in-memory state/seq/ring would advance while disk and all

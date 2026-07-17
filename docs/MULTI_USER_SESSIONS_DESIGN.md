@@ -84,8 +84,7 @@ Session {
     node_refs: [node_id],      # graph nodes shown in this session (references only)
     positions: { node_id: {x, y} },
     hidden_node_ids: [..], hidden_edge_ids: [..],
-    annotations: [ Annotation ],
-    manual_edges: [ {id, source, target, label, type} ]   # session-local edges if any
+    annotations: [ Annotation ]
   }
 }
 
@@ -736,14 +735,17 @@ branch. Ordered by severity within each group. Effort uses the
 
 ### 8.2 Smaller correctness / UX gaps
 
-- **R7 — Renaming an unmaterialised session loses the name.**
+- **Fixed** (`claude/session-r8-r10-r13-r14`) **R7 — Renaming an unmaterialised session loses the name.**
   `handleRenameSession` PATCHes the server and swallows the 404
   (`App.jsx:1312-1318`); when the session later materialises (name = null) the
   drawer's name-refresh overwrites the locally kept name with null
   (`App.jsx:516-531` writes `s.name` unconditionally). Either materialise on
   rename (get-or-create semantics for PATCH) or skip null server names in the
-  refresh. **Effort:** S.
-- **R8 — Renames are invisible to catch-up.** `SessionManager.rename_session`
+  refresh. Fixed via the first option (`SessionManager.rename_session` now
+  calls `get_or_create` before applying the rename); the null-name refresh
+  guard is added separately as defense in depth in the frontend/sync PR.
+  **Effort:** S.
+- **Fixed** (`claude/session-r8-r10-r13-r14`) **R8 — Renames are invisible to catch-up.** `SessionManager.rename_session`
   (`session_manager.py:141`) publishes a live event but does not bump `seq` or
   enter the ring buffer, so a client that reconnects through the `catch_up`
   (ops) path misses a rename that happened while it was away. Routing the REST
@@ -759,7 +761,7 @@ branch. Ordered by severity within each group. Effort uses the
   rejection. Wire `onDropped` to a notification + resync, and consider
   chunking flushes. **File(s):** `frontend/web/src/App.jsx`,
   `frontend/web/src/services/sessionSyncClient.js:513-558`. **Effort:** S.
-- **R10 — Delete/rename race with in-flight op batches.**
+- **Fixed** (`claude/session-r8-r10-r13-r14`) **R10 — Delete/rename race with in-flight op batches.**
   `delete_session` (`session_manager.py:150`) mutates the store without taking
   the per-session asyncio lock and pops the lock object; an in-flight
   `apply_ops` that already fetched the `Session` can `persist()` after the
@@ -767,7 +769,7 @@ branch. Ordered by severity within each group. Effort uses the
   rename during a failing batch is reverted by the batch's rollback
   (`saved_name`). Take the per-session lock in `delete_session` /
   `rename_session`. **Effort:** S.
-- **R11 — Network errors treated like "session does not exist".**
+- **Fixed** (PR #212, `fix: session switch drops queued ops and misreports load errors`) **R11 — Network errors treated like "session does not exist".**
   `loadSessionFromServer`'s catch clears the canvas and resets the baseline to
   empty for *any* failure; after a transient backend blip on an existing
   session, subsequent edits diff against an empty baseline and union stale +
@@ -784,7 +786,7 @@ branch. Ordered by severity within each group. Effort uses the
 
 ### 8.3 Hardening / cleanup
 
-- **R13 — `max_sessions` cap is in-memory only.** `SessionStore.session_count`
+- **Fixed** (`claude/session-r8-r10-r13-r14`) **R13 — `max_sessions` cap is in-memory only.** `SessionStore.session_count`
   counts the in-memory map, which starts empty on every restart while session
   files persist (D13: no eviction), so the unauthenticated stream endpoint
   (auth-bypassed by design) can grow `data/sessions/` beyond the cap across
@@ -792,11 +794,11 @@ branch. Ordered by severity within each group. Effort uses the
   `GET /api/sessions` / drawer open. Count the backend's files (cache the
   count) and consider a cheap meta cache. **File(s):**
   `backend/core/session_store.py:396-430`. **Effort:** S.
-- **R14 — `manual_edges` is a dead session-state field.** Present in the
+- **Fixed** (`claude/session-r8-r10-r13-r14`) **R14 — `manual_edges` is a dead session-state field.** Present in the
   `Session` model (§3.1) but no op writes it, the sync client's mirror ignores
   it, and the full-state PUT that could have populated it was removed in step
-  8 — manually drawn edges persist in the graph itself since PR #186. Remove
-  the field from the model and §3.1, or wire ops for session-local edges.
+  8 — manually drawn edges persist in the graph itself since PR #186. Removed
+  the field from the model and §3.1.
   **File(s):** `backend/core/session_store.py:77`. **Effort:** XS.
 - **R15 — Duplicate/stale event delivery is tolerated but unguarded.** Events
   published between the stream's `connect` (subscribe) and the `catch_up`
@@ -810,11 +812,11 @@ branch. Ordered by severity within each group. Effort uses the
 
 ### 8.4 Already tracked elsewhere
 
-Related issues found (or re-confirmed) during this review that were already
-logged as open entries in `SMALL_FIXES.md` — not repeated above: the MCP hub
-mirror's missing cross-thread delivery (2026-07-04), presence/claims clobbering
-for two concurrent connections with one `client_id` (2026-07-04 — also hit by
-two *tabs* sharing the localStorage `client_id`, not just fast reconnects),
-the synchronous fsync on the event loop (2026-07-04), the post-parse op-batch
-byte cap (2026-07-06), the remote-added node (0,0) race (2026-07-05), and the
-teardown flush in `_forceSingle` mode (2026-07-05).
+Related issues found (or re-confirmed) during this review that were logged as
+entries in `SMALL_FIXES.md` — not repeated above. All are now **Fixed** (see
+`SMALL_FIXES.md`'s Fixed section for the branch/PR that resolved each): the
+MCP hub mirror's missing cross-thread delivery, presence/claims clobbering for
+two concurrent connections with one `client_id` (also hit by two *tabs*
+sharing the localStorage `client_id`, not just fast reconnects), the
+synchronous fsync on the event loop, the post-parse op-batch byte cap, the
+remote-added node (0,0) race, and the teardown flush in `_forceSingle` mode.
