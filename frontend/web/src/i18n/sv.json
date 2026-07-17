@@ -254,5 +254,13 @@
     "saving": "Sparar...",
     "save": "Spara",
     "cancel": "Avbryt"
+  },
+  "edit_edge": {
+    "title": "Redigera koppling",
+    "connection": "Koppling",
+    "type": "Typ",
+    "no_type": "Ingen specifik typ",
+    "label_field": "Etikett",
+    "label_placeholder": "Valfri etikett för den här kopplingen..."
   }
 }
