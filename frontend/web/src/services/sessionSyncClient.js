@@ -306,6 +306,7 @@ export class SessionSyncClient {
     this._source = null;
     this._flushTimer = null;
     this._retryTimer = null;
+    this._reconnectTimer = null;
     this._closed = false;
     this._flushing = false;
     this._forceSingle = false;
@@ -492,9 +493,17 @@ export class SessionSyncClient {
       this._handleEvent(data);
     };
     source.onerror = () => {
-      // EventSource reconnects on its own; mark not-ready so ops re-buffer until
-      // the reopened stream confirms the session again with a fresh event.
       this._ready = false;
+      if (source.readyState === 2) {
+        // The connection was never opened (e.g. a 429 handshake rejection): the
+        // browser closes the EventSource permanently (readyState CLOSED) and will
+        // not auto-reconnect. Tear it down and schedule a backoff reconnect.
+        try { source.close(); } catch { /* ignore */ }
+        this._source = null;
+        this._scheduleReconnect();
+      }
+      // readyState 0 (CONNECTING) means a drop of an already-open stream; the
+      // browser is already retrying, so native reconnect will recover — no action.
     };
     this._source = source;
   }
@@ -633,6 +642,17 @@ export class SessionSyncClient {
     );
   }
 
+  _scheduleReconnect() {
+    if (this._reconnectTimer || this._closed) return;
+    this._reconnectTimer = setTimeout(
+      () => {
+        this._reconnectTimer = null;
+        this.connect();
+      },
+      Math.max(2000, this.flushIntervalMs * 8)
+    );
+  }
+
   _handleEvent(data) {
     switch (data.type) {
       case 'snapshot':
@@ -734,6 +754,10 @@ export class SessionSyncClient {
     if (this._retryTimer) {
       clearTimeout(this._retryTimer);
       this._retryTimer = null;
+    }
+    if (this._reconnectTimer) {
+      clearTimeout(this._reconnectTimer);
+      this._reconnectTimer = null;
     }
     this._stopRenewTimer();
     if (this._pruneTimer) {

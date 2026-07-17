@@ -13,16 +13,21 @@ class FakeEventSource {
     this.onmessage = null;
     this.onerror = null;
     this.closed = false;
+    this.readyState = 1; // OPEN — stream connected successfully
     FakeEventSource.instances.push(this);
   }
   emit(obj) {
     this.onmessage?.({ data: JSON.stringify(obj) });
   }
-  error() {
+  // terminal=false simulates a transient drop of an open stream (native reconnect);
+  // terminal=true simulates a handshake-level failure (e.g. 429, readyState CLOSED).
+  error(terminal = false) {
+    if (terminal) this.readyState = 2;
     this.onerror?.();
   }
   close() {
     this.closed = true;
+    this.readyState = 2;
   }
 }
 FakeEventSource.instances = [];
@@ -489,6 +494,69 @@ describe('SessionSyncClient', () => {
     await flush();
     expect(fetchImpl.calls).toHaveLength(0);
     expect(FakeEventSource.instances[0].closed).toBe(true);
+  });
+
+  it('schedules a backoff reconnect when the handshake is rejected (readyState CLOSED)', () => {
+    vi.useFakeTimers();
+    try {
+      const { client } = makeClient();
+      client.connect();
+      expect(FakeEventSource.instances).toHaveLength(1);
+
+      // Simulate a 429 handshake failure: EventSource moves to readyState CLOSED.
+      FakeEventSource.instances[0].error(true);
+
+      // The dead source must be torn down immediately.
+      expect(client.connected).toBe(false);
+      expect(FakeEventSource.instances[0].closed).toBe(true);
+
+      // No new connection yet — reconnect is on a backoff timer.
+      expect(FakeEventSource.instances).toHaveLength(1);
+
+      // After the backoff fires a fresh EventSource is opened.
+      vi.advanceTimersByTime(5000);
+      expect(FakeEventSource.instances).toHaveLength(2);
+      expect(client.connected).toBe(true);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('does not schedule a backoff reconnect for transient errors on an open stream', () => {
+    vi.useFakeTimers();
+    try {
+      const { client } = makeClient();
+      client.connect();
+      const es = FakeEventSource.instances[0];
+      es.emit({ type: 'snapshot', seq: 0, session: { state: {} } });
+
+      // Transient drop on already-open stream — native reconnect handles it.
+      es.error(false);
+
+      // Source is still registered (browser is reconnecting natively).
+      expect(client.connected).toBe(true);
+      // No new EventSource is created by our code.
+      vi.advanceTimersByTime(5000);
+      expect(FakeEventSource.instances).toHaveLength(1);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('cancels the scheduled backoff reconnect when close() is called', () => {
+    vi.useFakeTimers();
+    try {
+      const { client } = makeClient();
+      client.connect();
+      FakeEventSource.instances[0].error(true); // schedules reconnect
+      client.close();
+
+      // Reconnect timer was cancelled; no new connection fires.
+      vi.advanceTimersByTime(5000);
+      expect(FakeEventSource.instances).toHaveLength(1);
+    } finally {
+      vi.useRealTimers();
+    }
   });
 });
 
