@@ -39,12 +39,6 @@ Effort scale: XS = single-line fix · S = up to ~30 lines / one file · M = mult
 - **Issue:** `apply_ops` persists synchronously (atomic temp+rename with `fsync`) once per batch, inside the async handler. Design §3.3 specifies "debounced write-behind, flush ≤ 1 s". Correctness is fine (writes are atomic; batches are naturally debounced at the client's 100 ms flush), but under concurrent load the fsync blocks the event loop and works against the <500 ms round-trip target. Fix: move to a debounced write-behind flush (background task, coalescing per session) or offload the fsync via `asyncio.to_thread`. Perf optimization, not a bug.
 - **Effort:** M
 
-### [2026-07-04] MCP hub mirror lacks the cross-thread delivery the legacy registry has
-- **File(s):** `backend/service/mcp_tools.py` (`_push_to_session`), `backend/core/session_manager.py` (`push_command`), `backend/core/session_hub.py` (`InProcessEventBus.publish`)
-- **Context:** Discovered during review of `claude/multi-user-sessions-step-3-ojk3mi`
-- **Issue:** The legacy `SessionRegistry.push_command_sync` falls back to `call_soon_threadsafe` for callers off the event-loop thread; the new hub mirror uses `queue.put_nowait` directly, which is not thread-safe on an `asyncio.Queue`. FastMCP runs tools on the loop thread today, so this is fine in practice, and the `try/except` in `_push_to_session` swallows any error — but the mirror would silently drop the message if a tool ever ran in a threadpool. Revisit when MCP moves fully onto the hub (step 6): give the bus an event-loop reference and a `call_soon_threadsafe` publish path.
-- **Effort:** S
-
 ### [2026-07-04] Two concurrent connections for the same client_id clobber presence/claims
 - **File(s):** `backend/core/session_hub.py` (`PresenceRegistry.leave`, `ClaimMap.release_all`), `backend/core/session_manager.py` (`disconnect`)
 - **Context:** Discovered during review of `claude/multi-user-sessions-step-3-ojk3mi`
@@ -68,6 +62,10 @@ Effort scale: XS = single-line fix · S = up to ~30 lines / one file · M = mult
 ### [2026-07-17] Fixed in branch `fix/small-fixes-tokenbucket-eviction`
 
 - **`_TokenBucket` per-key state grew unbounded** — `backend/core/session_manager.py`, `backend/core/tests/test_session_manager.py`. Added periodic idle-key eviction to `_TokenBucket` so stale `client_id` / IP entries are removed after a long silence instead of accumulating forever under rotating keys. The sweep is consume-triggered and rate-limited by a sweep interval, so normal active clients keep the same effective behavior while stale lookup-bucket state is reclaimed. Added focused tests for stale-key eviction, active-key survival, evicted-key reset-to-fresh behavior, and sweep-interval gating.
+
+### [2026-07-17] Fixed in branch `fix/small-fixes-mcp-hub-threadsafe`
+
+- **MCP hub mirror lacked cross-thread delivery safety** — `backend/core/session_hub.py` (`InProcessEventBus`). Each subscription now records the event loop that created its queue, the subscriber registry is protected by a lock, and `publish()` fans out per subscriber: direct delivery on the current loop, `call_soon_threadsafe(...)` onto a different live loop, and dead-loop subscribers are pruned. The resync-overflow behavior is unchanged. Focused regression tests cover the on-loop fast path, cross-thread delivery, and subscribers attached to different event loops.
 
 ### [2026-07-17] Fixed in pending PR (`fix/small-fixes-session-429`)
 

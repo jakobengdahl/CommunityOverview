@@ -23,6 +23,7 @@ from __future__ import annotations
 
 import asyncio
 import itertools
+import threading
 import time
 from typing import Any, Dict, List, Optional, Protocol
 
@@ -56,6 +57,10 @@ class Subscription:
         self.session_id = session_id
         self.sub_id = sub_id
         self.queue: asyncio.Queue = asyncio.Queue(maxsize=maxsize)
+        try:
+            self.loop: Optional[asyncio.AbstractEventLoop] = asyncio.get_running_loop()
+        except RuntimeError:
+            self.loop = None
         self.needs_resync = False
 
     async def get(self) -> Dict[str, Any]:
@@ -79,35 +84,63 @@ class InProcessEventBus:
         self._queue_max = queue_max
         self._subscribers: Dict[str, Dict[int, Subscription]] = {}
         self._ids = itertools.count()
+        self._lock = threading.Lock()
 
     def subscribe(self, session_id: str) -> Subscription:
         sub = Subscription(session_id, next(self._ids), self._queue_max)
-        self._subscribers.setdefault(session_id, {})[sub.sub_id] = sub
+        with self._lock:
+            self._subscribers.setdefault(session_id, {})[sub.sub_id] = sub
         return sub
 
     def unsubscribe(self, subscription: Subscription) -> None:
-        subs = self._subscribers.get(subscription.session_id)
-        if subs is not None:
-            subs.pop(subscription.sub_id, None)
-            if not subs:
-                self._subscribers.pop(subscription.session_id, None)
+        with self._lock:
+            subs = self._subscribers.get(subscription.session_id)
+            if subs is not None:
+                subs.pop(subscription.sub_id, None)
+                if not subs:
+                    self._subscribers.pop(subscription.session_id, None)
 
     def subscriber_count(self, session_id: str) -> int:
-        return len(self._subscribers.get(session_id, {}))
+        with self._lock:
+            return len(self._subscribers.get(session_id, {}))
+
+    def _publish_to_subscriber(self, sub: Subscription, event: Dict[str, Any]) -> None:
+        """Deliver a single event to one subscriber on that subscriber's loop thread."""
+        try:
+            sub.queue.put_nowait(event)
+        except asyncio.QueueFull:
+            # Slow consumer: drop the backlog and force a snapshot resync so
+            # one stalled client cannot back-pressure the whole session.
+            _drain(sub.queue)
+            sub.needs_resync = True
+            try:
+                sub.queue.put_nowait({"type": "resync"})
+            except asyncio.QueueFull:
+                pass
 
     def publish(self, session_id: str, event: Dict[str, Any]) -> None:
-        for sub in list(self._subscribers.get(session_id, {}).values()):
+        try:
+            current_loop = asyncio.get_running_loop()
+        except RuntimeError:
+            current_loop = None
+
+        with self._lock:
+            subscribers = list(self._subscribers.get(session_id, {}).values())
+
+        for sub in subscribers:
+            loop = sub.loop
+            if loop is None or loop is current_loop:
+                self._publish_to_subscriber(sub, event)
+                continue
+            if loop.is_closed():
+                self.unsubscribe(sub)
+                continue
             try:
-                sub.queue.put_nowait(event)
-            except asyncio.QueueFull:
-                # Slow consumer: drop the backlog and force a snapshot resync so
-                # one stalled client cannot back-pressure the whole session.
-                _drain(sub.queue)
-                sub.needs_resync = True
-                try:
-                    sub.queue.put_nowait({"type": "resync"})
-                except asyncio.QueueFull:
-                    pass
+                loop.call_soon_threadsafe(self._publish_to_subscriber, sub, event)
+            except RuntimeError:
+                # The subscriber loop shut down after we snapshotted it; prune the
+                # dead subscription instead of surfacing a cross-thread shutdown race.
+                self.unsubscribe(sub)
 
 
 def _drain(queue: asyncio.Queue) -> None:

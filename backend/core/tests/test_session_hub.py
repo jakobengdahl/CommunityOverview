@@ -4,6 +4,9 @@ Tests for the ephemeral realtime layer (step 2 + step 3 claims) in
 presence roster/colour assignment, and selection-claim TTL/release.
 """
 
+import asyncio
+import threading
+
 from backend.core.session_hub import ClaimMap, InProcessEventBus, PresenceRegistry
 
 
@@ -41,6 +44,85 @@ class TestInProcessEventBus:
             drained.append(a.queue.get_nowait())
         assert a.needs_resync is True
         assert drained[-1] == {"type": "resync"}
+
+    def test_publish_on_loop_delivers_normally(self):
+        """Fast path: publish from the event-loop thread delivers the event."""
+
+        async def _run():
+            bus = InProcessEventBus()
+            sub = bus.subscribe("loop-session")
+            bus.publish("loop-session", {"type": "op", "n": 42})
+            event = sub.queue.get_nowait()
+            assert event == {"type": "op", "n": 42}
+
+        asyncio.run(_run())
+
+    def test_publish_from_off_loop_thread_delivers(self):
+        """Cross-thread path: publish via call_soon_threadsafe reaches subscriber."""
+        received: list = []
+        ready = threading.Event()
+        done = threading.Event()
+        bus = InProcessEventBus()
+
+        async def _subscriber():
+            sub = bus.subscribe("cross-thread")
+            ready.set()  # loop captured; safe for main thread to publish now
+            event = await asyncio.wait_for(sub.get(), timeout=2.0)
+            received.append(event)
+            done.set()
+
+        loop = asyncio.new_event_loop()
+        t = threading.Thread(target=loop.run_until_complete, args=(_subscriber(),))
+        t.start()
+
+        ready.wait(timeout=2.0)
+        # Main thread is not the event-loop thread — this exercises call_soon_threadsafe.
+        bus.publish("cross-thread", {"type": "op", "n": 7})
+
+        done.wait(timeout=2.0)
+        t.join(timeout=3.0)
+        loop.close()
+
+        assert received == [{"type": "op", "n": 7}]
+
+    def test_publish_handles_subscribers_from_different_loops(self):
+        """Each subscriber should receive via its own event loop when they differ."""
+        bus = InProcessEventBus()
+        background_ready = threading.Event()
+        background_done = threading.Event()
+        results = {"background": [], "main": []}
+
+        async def _background_subscriber():
+            sub = bus.subscribe("mixed-loops")
+            background_ready.set()
+            event = await asyncio.wait_for(sub.get(), timeout=2.0)
+            results["background"].append(event)
+            background_done.set()
+
+        background_loop = asyncio.new_event_loop()
+        background_thread = threading.Thread(
+            target=background_loop.run_until_complete,
+            args=(_background_subscriber(),),
+        )
+        background_thread.start()
+        background_ready.wait(timeout=2.0)
+
+        async def _main_loop_subscriber():
+            sub = bus.subscribe("mixed-loops")
+            bus.publish("mixed-loops", {"type": "op", "n": 99})
+            event = await asyncio.wait_for(sub.get(), timeout=2.0)
+            results["main"].append(event)
+
+        asyncio.run(_main_loop_subscriber())
+
+        background_done.wait(timeout=2.0)
+        background_thread.join(timeout=3.0)
+        background_loop.close()
+
+        assert results == {
+            "background": [{"type": "op", "n": 99}],
+            "main": [{"type": "op", "n": 99}],
+        }
 
 
 class TestPresenceRegistry:
