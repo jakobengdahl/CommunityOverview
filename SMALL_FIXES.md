@@ -21,17 +21,17 @@ Effort scale: XS = single-line fix · S = up to ~30 lines / one file · M = mult
 
 ## Open
 
-### [2026-07-17] `since_seq` on reconnect can be inflated past what the client has actually received
-- **File(s):** `frontend/web/src/services/sessionSyncClient.js` (`connect()`'s `since_seq` param, `_flush()`'s `this._seq = body.seq`)
-- **Context:** Discovered during review of `claude/session-r7-r9-r12-r15` (R15 fix)
-- **Issue:** `_flush()` advances `_seq` to the ops-POST response's `body.seq` — the server's *global* seq right after the batch lands, which can already include a concurrent op from another client whose broadcast hasn't reached this client yet (separate SSE connection, no ordering guarantee vs. the POST response). `connect()` sends that same `_seq` as `since_seq` on every (re)connect. If a genuine disconnect/reconnect happens in that narrow window, the server's `ops_since(since_seq)` sees `since_seq >= session.seq` and returns an empty missed-ops list — `catch_up`'s handler only triggers `onResync` when `data.ops.length > 0`, so the reconnect silently reports "you're caught up" without ever delivering the op this client genuinely never received. R15 (already fixed) closes the equivalent problem for *live* delivery via a separate `_appliedSeq` tracker used only for the duplicate/stale-op guard; that tracker isn't wired into `since_seq` because the existing `advances seq from the ops POST response` test (`sessionSyncClient.test.js`) encodes `_seq`'s current eager-advance contract, and changing what `since_seq` reports needs a decision on whether `since_seq` should use `_appliedSeq` instead (simplest fix) or something else. Narrow race (needs an actual disconnect/reconnect in the gap between a POST ack and the concurrent op's broadcast), but a real, silent divergence.
-- **Effort:** S
+*(no open items)*
 
 ---
 
 ## Fixed
 
 *(resolved entries moved here after merge, for reference)*
+
+### [2026-07-17] Fixed in branch `fix/small-fixes-since-seq-reconnect`
+
+- **`since_seq` on reconnect inflated past what the client actually received** — `frontend/web/src/services/sessionSyncClient.js` (`connect()`). Changed the `since_seq` URL parameter from `this._seq` to `this._appliedSeq`. `_seq` is eagerly advanced by the ops POST response to the server's global seq at the moment the batch commits — this can include a concurrent op from another client whose SSE broadcast hasn't reached this client yet. Using it as `since_seq` caused the server's `ops_since` to return an empty list on reconnect, silently dropping the un-delivered op. `_appliedSeq` (introduced by R15) tracks only what the SSE stream has actually delivered (snapshot, catch_up, op events), so using it as `since_seq` guarantees the server replays any op this client genuinely hasn't seen. Two regression tests added: one covering the POST-inflated race and one covering the stream-applied-seq happy path.
 
 ### [2026-07-04] Fixed in branch `fix/small-fixes-session-presence-reconnect`
 

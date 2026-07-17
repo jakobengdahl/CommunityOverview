@@ -625,6 +625,64 @@ describe('SessionSyncClient', () => {
     expect(client.seq).toBe(6);
   });
 
+  it('reconnect since_seq reflects applied stream events, not the POST-inflated _seq', async () => {
+    // Scenario: our own ops POST response advances _seq to 11, but a concurrent op
+    // at seq 10 from another client hasn't arrived on the SSE stream yet.
+    // If a disconnect/reconnect happens in that gap and uses _seq (11) as since_seq,
+    // the server's ops_since(11) returns nothing — the missing seq-10 op is silently
+    // dropped forever. since_seq must use _appliedSeq (highest seq actually delivered
+    // from the stream) so the server's catch_up includes seq 10.
+    const fetchImpl = makeFetch([
+      { ok: true, status: 200, json: async () => ({ applied: [], seq: 11 }) },
+    ]);
+    const { client } = makeClient({ fetchImpl });
+    client.connect();
+    const es = FakeEventSource.instances[0];
+    es.emit({ type: 'snapshot', seq: 9, session: { state: {} } });
+
+    // Our own op is assigned seq 11 by the server — _seq advances to 11 via POST
+    // response, but _appliedSeq stays at 9 (no stream event for 10 or 11 yet).
+    client.syncState({ node_refs: ['mine'] });
+    await flush();
+    expect(client.seq).toBe(11); // _seq = 11 (POST-inflated)
+
+    // Disconnect: terminal error tears down the source and nulls _source.
+    es.error(true);
+    expect(client.connected).toBe(false);
+
+    // Reconnect (bypassing the backoff timer — we fire connect() directly as the
+    // timer callback would).
+    client.connect();
+
+    expect(FakeEventSource.instances).toHaveLength(2);
+    const reconnectUrl = new URL(FakeEventSource.instances[1].url, 'http://x');
+    // Must use _appliedSeq (9), not _seq (11), so the server replays seq 10.
+    expect(reconnectUrl.searchParams.get('since_seq')).toBe('9');
+  });
+
+  it('reconnect since_seq tracks the highest seq delivered by the stream, including remote ops', () => {
+    const { client } = makeClient();
+    client.connect();
+    const es = FakeEventSource.instances[0];
+    es.emit({ type: 'snapshot', seq: 5, session: { state: {} } });
+
+    // A remote op at seq 6 arrives via the stream — _appliedSeq advances to 6.
+    es.emit({
+      type: 'op',
+      client_id: 'client-other',
+      op: { op: 'nodes_added', node_ids: ['a'] },
+      seq: 6,
+    });
+
+    // Disconnect and reconnect.
+    es.error(true);
+    client.connect();
+
+    expect(FakeEventSource.instances).toHaveLength(2);
+    const reconnectUrl = new URL(FakeEventSource.instances[1].url, 'http://x');
+    expect(reconnectUrl.searchParams.get('since_seq')).toBe('6');
+  });
+
   it('still applies a concurrent op whose broadcast arrives after our own POST response advanced _seq ahead of it (R15)', async () => {
     // Two clients editing at once: another client's op lands at seq 10 and its
     // broadcast is in flight; our own op is assigned seq 11 by the server, and
