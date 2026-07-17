@@ -37,7 +37,7 @@ Effort scale: XS = single-line fix · S = up to ~30 lines / one file · M = mult
 
 - **`t()` fallback pattern silently breaks** — `frontend/web/src/i18n/index.jsx`. Added a `fallback` parameter (3rd argument) to `t()` in both the `I18nProvider` callback and the outside-provider fallback in `useI18n()`. When a key is absent and a fallback is supplied, `t(key, params, fallback)` now returns the fallback string instead of the key name. Without a fallback the existing behaviour (return key name, dev-mode `console.warn`) is unchanged. Focused regression test added in `frontend/web/tests/FloatingHeader.test.jsx` verifying that `t('nonexistent.key', undefined, 'Expected Fallback')` returns `'Expected Fallback'` and that omitting the fallback still returns the key name (backward-compatible).
 
-### [2026-07-11] Fixed in pending PR (`fix/small-fixes-user-guide`)
+### [2026-07-11] Fixed in branch `fix/small-fixes-user-guide`
 
 - **USER_GUIDE says double-click opens the edit dialog** — `docs/USER_GUIDE.md` (section 2.3 and Agents section). Double-clicking a node opens the *detail* dialog (`NodeDetailDialog`), from which Edit is a button — not the edit dialog directly. Section 2.3 wording was already correct; corrected the Agents section (line 186) which still implied double-click edits directly.
 
@@ -61,7 +61,7 @@ Effort scale: XS = single-line fix · S = up to ~30 lines / one file · M = mult
 
 - **Shared-session persistence blocked the event loop with a synchronous fsync** — `backend/core/session_manager.py` (`apply_ops`). Changed the single `self.store.persist(session)` call to `await asyncio.to_thread(self.store.persist, session)` so the blocking `fsync` in `FileSessionPersistenceBackend.save` runs in the default `ThreadPoolExecutor` instead of on the event loop. The per-session `asyncio.Lock` is still held during the await, so no other coroutine can observe a partially-applied batch; if the thread raises, the existing `except` block rolls back in-memory state and the ring buffer exactly as before. Two focused regression tests added: one verifies `persist` is called from a non-event-loop thread, and one verifies that a worker-thread `OSError` still rolls back state and suppresses broadcast.
 
-### [2026-07-17] Fixed in pending PR (`fix/small-fixes-session-429`)
+### [2026-07-17] Fixed in branch `fix/small-fixes-session-429`
 
 - **Session-lookup `429` on the SSE handshake left the EventSource dead** — `frontend/web/src/services/sessionSyncClient.js` (`connect`/`onerror`), `frontend/web/tests/sessionSyncClient.test.js`. The `onerror` handler now checks `source.readyState`: if it is `CLOSED` (2), the connection was permanently rejected (e.g. 429 rate-limit on the initial handshake) and the browser won't auto-reconnect; the handler tears down the dead source and schedules a backoff reconnect via `_scheduleReconnect()`. A non-closed error (readyState 0 — CONNECTING) is a transient drop of an already-open stream where native reconnect handles recovery, unchanged. `close()` cancels the reconnect timer. Three focused regression tests added.
 
