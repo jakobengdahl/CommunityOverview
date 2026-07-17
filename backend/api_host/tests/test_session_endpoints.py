@@ -16,6 +16,8 @@ Covers:
 - Invalid session ID rejection
 """
 
+import asyncio
+
 from fastapi.testclient import TestClient
 
 
@@ -27,8 +29,13 @@ def _open_browser(test_app: TestClient, session_id: str) -> None:
     so we materialise the registry entry directly. The file-backed store lives in
     a shared temp dir, so first clear any session a previous run left on disk to
     keep the id a clean slate.
+
+    ``delete_session`` is async (R10: it takes the same per-session lock as
+    ``apply_ops`` to avoid a delete/in-flight-batch race) but this helper is
+    called from plain sync test functions, so it is run to completion via a
+    throwaway event loop rather than awaited.
     """
-    test_app.app.state.session_manager.delete_session(session_id)
+    asyncio.run(test_app.app.state.session_manager.delete_session(session_id))
     test_app.app.state.session_registry.get_or_create(session_id)
 
 

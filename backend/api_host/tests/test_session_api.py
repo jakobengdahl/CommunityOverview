@@ -37,6 +37,21 @@ class TestSessionCrud:
         assert resp.status_code == 200
         assert resp.json()["name"] == "renamed"
 
+    def test_rename_materialises_a_session_that_was_never_created(
+        self, test_app: TestClient
+    ):
+        """R7: PATCH for an id that only exists client-side (never POSTed) must
+        materialise it rather than 404, or the name is lost once it later saves
+        with a null server name."""
+        sid = "9999-9997"
+        test_app.delete(
+            f"/api/sessions/{sid}"
+        )  # clean slate (shared temp dir across test runs)
+        resp = test_app.patch(f"/api/sessions/{sid}", json={"name": "renamed"})
+        assert resp.status_code == 200
+        assert resp.json()["name"] == "renamed"
+        assert test_app.get(f"/api/sessions/{sid}").status_code == 200
+
     def test_delete(self, test_app: TestClient):
         sid = test_app.post("/api/sessions", json={}).json()["id"]
         resp = test_app.delete(f"/api/sessions/{sid}")

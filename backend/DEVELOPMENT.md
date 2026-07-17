@@ -357,7 +357,7 @@ node content is rehydrated from the graph on load via `?resolve=true`.
 | POST | `/api/sessions` | Create a new shared session (server-assigned `DDDD-DDDD` id) |
 | GET | `/api/sessions` | List session metadata |
 | GET | `/api/sessions/{id}` | Get a session (meta + state + presence roster); `?resolve=true` also returns rehydrated nodes/edges |
-| PATCH | `/api/sessions/{id}` | Rename a session |
+| PATCH | `/api/sessions/{id}` | Rename a session (`{name, client_id?}`). get-or-create: materialises the session server-side if it only existed client-side. Routed through the op protocol as a `session_renamed` state op, so the rename is sequenced and visible to `since_seq` catch-up, not just a full snapshot — design §8.2 R7/R8 |
 | DELETE | `/api/sessions/{id}` | Delete a session (`?client_id=` names the deleter in the broadcast) |
 | POST | `/api/sessions/{id}/ops` | Apply an ordered op batch (`{client_id, base_seq, ops}` → `{applied, seq}`); server-ordered LWW, monotonic `seq`. Bounded per batch by op count (≤ 500) **and** body size (≤ 256 KB → `413`), plus a per-client token bucket (200 burst, 100 ops/s refill → `429`) — design §3.9 |
 | GET | `/api/sessions/{id}/stream` | SSE fan-out: presence, applied ops, claims, and broadcast MCP commands (`{"type": "command", ...}` — every connected client applies these, not just one browser). Query `client_id`, `name`, `since_seq` (op catch-up or full-snapshot fallback). A slow consumer whose queue overflows is sent a fresh full snapshot rather than diverging. EventSource-opened, so it bypasses Basic Auth (protected by the unguessable session id — design §3.9) |
