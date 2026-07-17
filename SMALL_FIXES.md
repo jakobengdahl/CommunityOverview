@@ -21,15 +21,6 @@ Effort scale: XS = single-line fix · S = up to ~30 lines / one file · M = mult
 
 ## Open
 
-### [2026-07-11] Legacy `/sessions/{id}/stream` MCP-push channel is auth-bypassed but not rate-limited
-- **File(s):** `backend/api_host/server.py:605` (`/sessions/{session_id}/stream`), bypass at `server.py:366`
-- **Context:** Discovered during `claude/structure-backlog-next-e9w7tx` (STRUCTURE_REVIEW A3 step 1 review)
-- **Issue:** A3 step 1 throttles the new `/api/sessions` lookup endpoints but the
-  legacy visualization-push channel exposes the same `get_or_create`/enumeration
-  oracle over the identical `\d{4}-\d{4}` space with no `check_lookup_rate`. It is
-  slated for removal (design §3.8); until then it is the same weakness left
-  unthrottled. Apply the same lookup rate limit, or prioritise its removal.
-- **Effort:** S
 
 ### [2026-07-11] No per-collection opt-out for persisting CollectionResponse
 - **File(s):** `backend/ui/chat_service.py` (`process_message`, response-tool install gate)
@@ -87,6 +78,10 @@ Effort scale: XS = single-line fix · S = up to ~30 lines / one file · M = mult
 ### [2026-07-17] Fixed in branch `fix/small-fixes-edit-edge-i18n`
 
 - **`EditEdgeDialog` hardcoded English strings** — `frontend/web/src/components/EditEdgeDialog.jsx`. All remaining hardcoded UI strings (`Edit Connection`, `Connection`, `Type`, `No specific type`, `Label`, placeholder text) replaced with `t()` calls. Delete/Cancel/Save reuse existing `context_menu.delete`/`common.cancel`/`common.save` keys. New `edit_edge.*` keys added to `en.json` and `sv.json`. Focused test added in `EditEdgeDialog.test.jsx`.
+
+### [2026-07-17] Fixed in branch `fix/small-fixes-legacy-stream-rate-limit`
+
+- **Legacy `/sessions/{id}/stream` MCP-push channel lacked lookup rate limiting** — `backend/api_host/session_stream.py`, `backend/service/rest_api.py`, `backend/api_host/tests/test_session_api.py`. The legacy auth-bypassed SSE route now applies the same per-source lookup throttling as `/api/sessions`, reusing the trusted-proxy-aware client-IP key helper so exhausted guesses return `429 rate limit exceeded` before the infinite stream starts. Added focused regression coverage for exhausted budget, allowed budget, and trusted-proxy anti-spoof behavior.
 
 ### [2026-07-17] Fixed in PR #247 (`fix/small-fixes-webhook-ssrf`)
 

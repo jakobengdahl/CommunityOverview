@@ -31,6 +31,30 @@ from backend.runtime.authorization import use_request_authorization
 from .service import GraphService
 
 
+def _lookup_rate_key(http_request: Request) -> str:
+    """Return the real client IP to key the lookup rate limit on.
+
+    Directly reached (``trusted_proxy_hops == 0``): the socket peer. Behind
+    ``N`` trusted proxies: the ``N``-th entry from the right of
+    ``X-Forwarded-For`` — the address the outermost trusted proxy recorded.
+    Client-supplied entries sit further left and are ignored, so the key
+    cannot be spoofed to mint a fresh per-source budget.
+    """
+    direct = http_request.client.host if http_request.client else "unknown"
+    config = getattr(http_request.app.state, "config", None)
+    trusted_hops = getattr(config, "trusted_proxy_hops", 0) or 0
+    if trusted_hops <= 0:
+        return direct
+    forwarded = http_request.headers.get("x-forwarded-for")
+    if not forwarded:
+        return direct
+    parts = [p.strip() for p in forwarded.split(",") if p.strip()]
+    if not parts:
+        return direct
+    idx = max(0, len(parts) - trusted_hops)
+    return parts[idx]
+
+
 # ==================== Request/Response Models ====================
 
 
@@ -618,29 +642,6 @@ def _register_session_endpoints(
             session_manager.check_lookup_rate(_lookup_rate_key(http_request))
         except RateLimited:
             raise HTTPException(status_code=429, detail="rate limit exceeded")
-
-    def _lookup_rate_key(http_request: Request) -> str:
-        """Return the real client IP to key the lookup rate limit on.
-
-        Directly reached (``trusted_proxy_hops == 0``): the socket peer. Behind
-        ``N`` trusted proxies: the ``N``-th entry from the right of
-        ``X-Forwarded-For`` — the address the outermost trusted proxy recorded.
-        Client-supplied entries sit further left and are ignored, so the key
-        cannot be spoofed to mint a fresh per-source budget.
-        """
-        direct = http_request.client.host if http_request.client else "unknown"
-        config = getattr(http_request.app.state, "config", None)
-        trusted_hops = getattr(config, "trusted_proxy_hops", 0) or 0
-        if trusted_hops <= 0:
-            return direct
-        forwarded = http_request.headers.get("x-forwarded-for")
-        if not forwarded:
-            return direct
-        parts = [p.strip() for p in forwarded.split(",") if p.strip()]
-        if not parts:
-            return direct
-        idx = max(0, len(parts) - trusted_hops)
-        return parts[idx]
 
     def _session_payload(session, *, resolve: bool, manager) -> Dict[str, Any]:
         payload = session.to_dict()
