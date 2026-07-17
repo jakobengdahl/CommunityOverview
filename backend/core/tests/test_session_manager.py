@@ -19,6 +19,7 @@ from backend.core.session_manager import (
     SessionLimitReached,
     SessionManager,
     SessionNotFound,
+    _TokenBucket,
 )
 from backend.service.rest_api import _resolve_stream_event
 
@@ -405,3 +406,87 @@ class TestOpBatchByteCap:
                 ],
             )
         assert mgr.get_session(s.id).state["node_refs"] == ["keep"]
+
+
+class TestTokenBucketEviction:
+    """Idle keys are evicted so per-key state does not grow without bound."""
+
+    async def test_idle_key_is_evicted_after_ttl(self):
+        # t=0: key "a" makes one consume call (seeds _last["a"] = 0)
+        # t=51: sweep fires (51 >= 50), eviction cutoff = 51 - 100 = -49 → "a" is NOT stale yet
+        # t=102: another consume on "b" triggers sweep; cutoff = 102 - 100 = 2 > 0 → "a" evicted
+        bucket = _TokenBucket(
+            capacity=10.0,
+            refill_per_sec=1.0,
+            time_fn=iter([0, 51, 102]).__next__,
+            idle_ttl=100.0,
+            sweep_interval=50.0,
+        )
+        bucket.consume("a", 1.0)  # t=0, seeds "a"
+        bucket.consume("b", 1.0)  # t=51, sweep fires; cutoff=-49, "a" not stale
+        assert "a" in bucket._last
+
+        bucket.consume("b", 1.0)  # t=102, sweep fires; cutoff=2 > 0, "a" evicted
+        assert "a" not in bucket._last
+        assert "a" not in bucket._tokens
+
+    async def test_active_key_is_not_evicted(self):
+        # Both "a" and "b" consume at t=0 and t=102; "a" is touched within TTL
+        times = [0, 0, 80, 102]
+        it = iter(times)
+        bucket = _TokenBucket(
+            capacity=10.0,
+            refill_per_sec=1.0,
+            time_fn=lambda: next(it),
+            idle_ttl=100.0,
+            sweep_interval=50.0,
+        )
+        bucket.consume("a", 1.0)  # t=0
+        bucket.consume("b", 1.0)  # t=0
+        bucket.consume("a", 1.0)  # t=80, refreshes "a"._last
+        bucket.consume(
+            "b", 1.0
+        )  # t=102, sweep fires; cutoff=2; old "b" state is evicted, then recreated for the current consume call
+        assert bucket._last["a"] == 80
+        assert bucket._last["b"] == 102
+
+    async def test_evicted_key_restarts_at_full_capacity(self):
+        # After "a" is evicted and returns, it should start at full capacity
+        # not at the partially-depleted level it had before eviction.
+        times = [0, 200, 200]
+        it = iter(times)
+        bucket = _TokenBucket(
+            capacity=10.0,
+            refill_per_sec=0.0,  # no refill, so depletion is visible
+            time_fn=lambda: next(it),
+            idle_ttl=100.0,
+            sweep_interval=50.0,
+        )
+        bucket.consume("a", 7.0)  # t=0: remaining = 3
+        # t=200: sweep fires (200 >= 50), cutoff=100; "a" last=0 < 100 → evicted
+        # then "a" is looked up with no entry → starts at capacity=10
+        result = bucket.consume("a", 9.0)  # t=200: 10 - 9 = 1 left, should succeed
+        assert result is True
+
+    async def test_sweep_interval_limits_sweep_frequency(self):
+        """Sweep does not fire on every call — only once per sweep_interval."""
+        sweep_count = [0]
+        times = [0, 10, 20, 30]  # all < sweep_interval=50
+        it = iter(times)
+
+        class CountingSweepBucket(_TokenBucket):
+            def _evict(self, now):
+                sweep_count[0] += 1
+                super()._evict(now)
+
+        bucket = CountingSweepBucket(
+            capacity=10.0,
+            refill_per_sec=1.0,
+            time_fn=lambda: next(it),
+            idle_ttl=100.0,
+            sweep_interval=50.0,
+        )
+        for _ in range(4):
+            bucket.consume("x", 1.0)
+        # No sweep should have fired since max time elapsed (30) < sweep_interval (50)
+        assert sweep_count[0] == 0

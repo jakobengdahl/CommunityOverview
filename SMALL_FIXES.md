@@ -21,17 +21,6 @@ Effort scale: XS = single-line fix · S = up to ~30 lines / one file · M = mult
 
 ## Open
 
-### [2026-07-11] `_TokenBucket` per-key state grows unbounded
-- **File(s):** `backend/core/session_manager.py:81` (`_TokenBucket._tokens`/`._last`)
-- **Context:** Discovered during `claude/structure-backlog-next-e9w7tx` (STRUCTURE_REVIEW A3 step 1 review)
-- **Issue:** The token-bucket dicts are never evicted. The ops bucket is keyed on
-  `client_id` (bounded by live sessions), but the new lookup bucket is keyed on
-  client IP — an attacker rotating source IPs both defeats the per-IP limit and
-  inflates the dicts without bound (memory pressure). Add idle eviction or an LRU
-  size cap. (The per-IP-rotation weakness itself is inherent to IP rate limiting;
-  A3 step 2's high-entropy stream token is the real remedy.)
-- **Effort:** S
-
 ### [2026-07-11] Legacy `/sessions/{id}/stream` MCP-push channel is auth-bypassed but not rate-limited
 - **File(s):** `backend/api_host/server.py:605` (`/sessions/{session_id}/stream`), bypass at `server.py:366`
 - **Context:** Discovered during `claude/structure-backlog-next-e9w7tx` (STRUCTURE_REVIEW A3 step 1 review)
@@ -86,6 +75,10 @@ Effort scale: XS = single-line fix · S = up to ~30 lines / one file · M = mult
 ### [2026-07-11] Fixed in pending PR (`fix/small-fixes-user-guide`)
 
 - **USER_GUIDE says double-click opens the edit dialog** — `docs/USER_GUIDE.md` (section 2.3 and Agents section). Double-clicking a node opens the *detail* dialog (`NodeDetailDialog`), from which Edit is a button — not the edit dialog directly. Section 2.3 wording was already correct; corrected the Agents section (line 186) which still implied double-click edits directly.
+
+### [2026-07-17] Fixed in branch `fix/small-fixes-tokenbucket-eviction`
+
+- **`_TokenBucket` per-key state grew unbounded** — `backend/core/session_manager.py`, `backend/core/tests/test_session_manager.py`. Added periodic idle-key eviction to `_TokenBucket` so stale `client_id` / IP entries are removed after a long silence instead of accumulating forever under rotating keys. The sweep is consume-triggered and rate-limited by a sweep interval, so normal active clients keep the same effective behavior while stale lookup-bucket state is reclaimed. Added focused tests for stale-key eviction, active-key survival, evicted-key reset-to-fresh behavior, and sweep-interval gating.
 
 ### [2026-07-17] Fixed in pending PR (`fix/small-fixes-session-429`)
 
