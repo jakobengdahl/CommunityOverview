@@ -27,11 +27,6 @@ Effort scale: XS = single-line fix · S = up to ~30 lines / one file · M = mult
 - **Context:** Discovered during review of `claude/active-collector-gui-inputs-0qj15m`
 - **Issue:** `toolResult` carries a single `action`. If the LLM calls `present_form` in the same turn as another pure-action tool (`mark_nodes`, `clear_visualization`, `start_guide`, `save_view`), the overlay makes `present_form` win and the other action is dropped (the frontend dispatches on `action ===`). Node/edge-returning tools are unaffected (their data rides in `nodes`/`edges`). This is an inherent single-`action` channel limitation, not specific to present_form; very rare in practice. A general fix would let the response carry multiple actions.
 - **Effort:** M
-### [2026-06-30] `t()` fallback pattern in FloatingHeader.jsx silently breaks
-- **File(s):** `frontend/web/src/components/FloatingHeader.jsx:134,140` — *note: as of `claude/session-sidebar-nav-sfs73g` these occurrences are gone (menu moved to `SettingsDialog.jsx`, which calls `t()` without the `|| 'fallback'` pattern). The general `t()`-returns-key-on-miss behaviour described below still applies to the hook contract.*
-- **Context:** Discovered during i18n audit / docs session
-- **Issue:** Code uses `t('key') || 'fallback'` expecting a null/undefined return when a key is missing, but `t()` returns the key name as a string (truthy) when no translation is found. The `|| 'fallback'` branch never fires. The two immediately affected keys (`menu.view_section`, `menu.show_minimap`) were fixed by adding them to the JSON files. Any future missing key will silently show its key name in the UI. Fix: either update the fallback pattern to use `t('key') === 'key' ? 'fallback' : t('key')`, or make `t()` return null on a miss (breaking change to the hook contract).
-- **Effort:** S
 
 ### [2026-07-04] Shared-session persistence is a synchronous fsync on the event loop
 - **File(s):** `backend/core/session_manager.py` (`apply_ops` → `store.persist`), `backend/core/session_store.py` (`FileSessionPersistenceBackend.save`)
@@ -50,6 +45,10 @@ Effort scale: XS = single-line fix · S = up to ~30 lines / one file · M = mult
 ## Fixed
 
 *(resolved entries moved here after merge, for reference)*
+
+### [2026-06-30] Fixed in branch `fix/small-fixes-floatingheader-fallback`
+
+- **`t()` fallback pattern silently breaks** — `frontend/web/src/i18n/index.jsx`. Added a `fallback` parameter (3rd argument) to `t()` in both the `I18nProvider` callback and the outside-provider fallback in `useI18n()`. When a key is absent and a fallback is supplied, `t(key, params, fallback)` now returns the fallback string instead of the key name. Without a fallback the existing behaviour (return key name, dev-mode `console.warn`) is unchanged. Focused regression test added in `frontend/web/tests/FloatingHeader.test.jsx` verifying that `t('nonexistent.key', undefined, 'Expected Fallback')` returns `'Expected Fallback'` and that omitting the fallback still returns the key name (backward-compatible).
 
 ### [2026-07-11] Fixed in pending PR (`fix/small-fixes-user-guide`)
 
