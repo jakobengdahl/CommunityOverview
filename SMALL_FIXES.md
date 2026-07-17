@@ -51,15 +51,6 @@ Effort scale: XS = single-line fix · S = up to ~30 lines / one file · M = mult
   migrated to `t()` with matching keys added to `en.json`/`sv.json`.
 - **Effort:** S
 
-### [2026-07-11] USER_GUIDE says double-click opens the edit dialog
-- **File(s):** `docs/USER_GUIDE.md` (section 2.3)
-- **Context:** Discovered during `claude/graph-history-ui`
-- **Issue:** Double-clicking a node actually opens the *detail* dialog
-  (`NodeDetailDialog`), from which Edit is a button — not the edit dialog
-  directly. Updated the wording in this branch to match; noting here in case the
-  screenshot/flow descriptions elsewhere assume the old behaviour.
-- **Effort:** XS
-
 ### [2026-07-11] No per-collection opt-out for persisting CollectionResponse
 - **File(s):** `backend/ui/chat_service.py` (`process_message`, response-tool install gate)
 - **Context:** Discovered during review of `claude/active-collector-gui-inputs-0qj15m`
@@ -100,6 +91,10 @@ Effort scale: XS = single-line fix · S = up to ~30 lines / one file · M = mult
 ## Fixed
 
 *(resolved entries moved here after merge, for reference)*
+
+### [2026-07-11] Fixed in pending PR (`fix/small-fixes-user-guide`)
+
+- **USER_GUIDE says double-click opens the edit dialog** — `docs/USER_GUIDE.md` (section 2.3 and Agents section). Double-clicking a node opens the *detail* dialog (`NodeDetailDialog`), from which Edit is a button — not the edit dialog directly. Section 2.3 wording was already correct; corrected the Agents section (line 186) which still implied double-click edits directly.
 
 ### [2026-07-17] Fixed in pending PR (`fix/small-fixes-session-429`)
 

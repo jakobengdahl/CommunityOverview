@@ -183,8 +183,8 @@ dragging the Agent icon from the toolbar.
 **Event trigger** — filter which node types cause the agent to react (leave empty to
 react to all node type changes).
 
-Agents appear as Agent nodes in the graph and can be edited by double-clicking or
-via the right-click menu.
+Agents appear as Agent nodes in the graph. Double-clicking opens the detail dialog
+where you can click **Edit**; right-click gives the same options via the context menu.
 
 ---
 
