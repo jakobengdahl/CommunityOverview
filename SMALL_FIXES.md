@@ -21,19 +21,6 @@ Effort scale: XS = single-line fix · S = up to ~30 lines / one file · M = mult
 
 ## Open
 
-### [2026-07-11] Session-lookup `429` on the SSE handshake can leave the EventSource dead
-- **File(s):** `frontend/web/src/services/sessionSyncClient.js:460` (`connect`/`onerror`)
-- **Context:** Discovered during `claude/structure-backlog-next-e9w7tx` (STRUCTURE_REVIEW A3 step 1 review)
-- **Issue:** The stream handshake can now return `429` (lookup rate limit). Per
-  the WHATWG spec a non-2xx *initial* EventSource response fails the connection
-  and does **not** auto-reconnect (only a drop of an already-open 200 stream
-  does). `onerror` only sets `_ready = false` and relies on native reconnect, so
-  a handshake `429` leaves a dead stream until a manual page reload. Low impact
-  in practice — per-client keying (60 burst + 2/s) means only an abusive client
-  hits it — but the client should schedule a backoff reconnect when the handshake
-  is rejected rather than assuming the browser recovers.
-- **Effort:** S
-
 ### [2026-07-11] `_TokenBucket` per-key state grows unbounded
 - **File(s):** `backend/core/session_manager.py:81` (`_TokenBucket._tokens`/`._last`)
 - **Context:** Discovered during `claude/structure-backlog-next-e9w7tx` (STRUCTURE_REVIEW A3 step 1 review)
@@ -113,6 +100,10 @@ Effort scale: XS = single-line fix · S = up to ~30 lines / one file · M = mult
 ## Fixed
 
 *(resolved entries moved here after merge, for reference)*
+
+### [2026-07-17] Fixed in pending PR (`fix/small-fixes-session-429`)
+
+- **Session-lookup `429` on the SSE handshake left the EventSource dead** — `frontend/web/src/services/sessionSyncClient.js` (`connect`/`onerror`), `frontend/web/tests/sessionSyncClient.test.js`. The `onerror` handler now checks `source.readyState`: if it is `CLOSED` (2), the connection was permanently rejected (e.g. 429 rate-limit on the initial handshake) and the browser won't auto-reconnect; the handler tears down the dead source and schedules a backoff reconnect via `_scheduleReconnect()`. A non-closed error (readyState 0 — CONNECTING) is a transient drop of an already-open stream where native reconnect handles recovery, unchanged. `close()` cancels the reconnect timer. Three focused regression tests added.
 
 ### [2026-07-17] Fixed in PR #247 (`fix/small-fixes-webhook-ssrf`)
 
