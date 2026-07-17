@@ -1328,14 +1328,21 @@ class TestExtraActionsWithPresentForm:
                 "name": "present_form",
                 "input": {
                     "fields": [
-                        {"id": "role", "label": "Role", "type": "radio", "options": ["A", "B"]}
+                        {
+                            "id": "role",
+                            "label": "Role",
+                            "type": "radio",
+                            "options": ["A", "B"],
+                        }
                     ]
                 },
             },
             {
                 "name": "mark_nodes",
                 "input": {
-                    "marks": [{"node_id": "n1", "color": "#EF4444", "label": "High priority"}]
+                    "marks": [
+                        {"node_id": "n1", "color": "#EF4444", "label": "High priority"}
+                    ]
                 },
             },
         ]
@@ -1351,7 +1358,9 @@ class TestExtraActionsWithPresentForm:
         assert extra[0]["action"] == "mark_nodes"
         assert extra[0]["marks"][0]["node_id"] == "n1"
 
-    def test_present_form_and_clear_visualization_emit_extra_actions(self, chat_service):
+    def test_present_form_and_clear_visualization_emit_extra_actions(
+        self, chat_service
+    ):
         """clear_visualization co-occurring with present_form appears in extra_actions."""
         service, mock_llm = chat_service
         mock_llm.mock_tool_calls = [
@@ -1361,14 +1370,14 @@ class TestExtraActionsWithPresentForm:
             },
             {
                 "name": "present_form",
-                "input": {
-                    "fields": [{"id": "q", "label": "Q", "type": "text"}]
-                },
+                "input": {"fields": [{"id": "q", "label": "Q", "type": "text"}]},
             },
         ]
         mock_llm.mock_text_response = "Canvas cleared; please fill in the form."
 
-        result = service.process_message(messages=[{"role": "user", "content": "start"}])
+        result = service.process_message(
+            messages=[{"role": "user", "content": "start"}]
+        )
 
         tr = result["toolResult"]
         assert tr["action"] == "present_form"
@@ -1390,7 +1399,9 @@ class TestExtraActionsWithPresentForm:
 
         tr = result["toolResult"]
         assert tr["action"] == "mark_nodes"
-        assert "extra_actions" not in tr, "extra_actions must not appear without present_form"
+        assert "extra_actions" not in tr, (
+            "extra_actions must not appear without present_form"
+        )
 
     def test_present_form_with_node_results_and_mark_nodes(self, chat_service):
         """present_form + search_graph + mark_nodes: nodes, form, and extra_actions all survive."""
