@@ -809,6 +809,16 @@ branch. Ordered by severity within each group. Effort uses the
   sequenced ops in `_handleEvent` would make the invariant robust instead of
   incidental. **File(s):**
   `frontend/web/src/services/sessionSyncClient.js:596-611`. **Effort:** XS.
+  **Implementation note:** the guard is keyed on a new `_appliedSeq` (highest
+  seq actually applied from a stream event), not `_seq` — `_flush()` also
+  advances `_seq` optimistically to the ops-POST response's `body.seq` (the
+  server's global seq right after the batch lands), which can already be ahead
+  of a concurrent op whose broadcast is still in flight on the separate SSE
+  connection; guarding on `_seq` there would have silently and permanently
+  dropped that op instead of applying it once delivered (review caught this
+  during the fix, regression test added). A related, narrower pre-existing gap
+  in `since_seq` on *reconnect* (not touched by this fix) is logged in
+  `SMALL_FIXES.md`.
 
 ### 8.4 Already tracked elsewhere
 

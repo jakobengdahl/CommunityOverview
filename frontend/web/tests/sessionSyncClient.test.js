@@ -624,6 +624,40 @@ describe('SessionSyncClient', () => {
     expect(onRemoteOps).toHaveBeenCalledTimes(1);
     expect(client.seq).toBe(6);
   });
+
+  it('still applies a concurrent op whose broadcast arrives after our own POST response advanced _seq ahead of it (R15)', async () => {
+    // Two clients editing at once: another client's op lands at seq 10 and its
+    // broadcast is in flight; our own op is assigned seq 11 by the server, and
+    // the POST response for it (a separate HTTP round-trip from the SSE
+    // stream) arrives *before* the other client's seq-10 broadcast does. The
+    // dedup guard must not mistake "our own _seq is already past 10" for
+    // "we've already applied 10" — that op was never delivered to us yet.
+    const onRemoteOps = vi.fn();
+    const fetchImpl = makeFetch([
+      { ok: true, status: 200, json: async () => ({ applied: [], seq: 11 }) },
+    ]);
+    const { client } = makeClient({ fetchImpl, handlers: { onRemoteOps } });
+    client.connect();
+    const es = FakeEventSource.instances[0];
+    es.emit({ type: 'snapshot', seq: 9, session: { state: {} } });
+
+    client.syncState({ node_refs: ['mine'] });
+    await flush();
+    expect(client.seq).toBe(11); // advanced eagerly by the POST response
+
+    // The other client's earlier (lower-seq) op now arrives over the still-open
+    // SSE stream — it must still be applied, not dropped as "stale".
+    es.emit({
+      type: 'op',
+      client_id: 'client-other',
+      op: { op: 'nodes_added', node_ids: ['theirs'] },
+      seq: 10,
+    });
+    expect(onRemoteOps).toHaveBeenCalledTimes(1);
+    expect(onRemoteOps).toHaveBeenCalledWith([{ op: 'nodes_added', node_ids: ['theirs'] }], {
+      clientId: 'client-other',
+    });
+  });
 });
 
 // ── Presence + selection claims (design step 7) ────────────────────────────

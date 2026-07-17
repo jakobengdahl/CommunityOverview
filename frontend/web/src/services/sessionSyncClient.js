@@ -310,6 +310,17 @@ export class SessionSyncClient {
     this._baseline = EMPTY_MIRROR;
     this._queue = [];
     this._seq = 0;
+    // Highest seq actually applied from a stream event (snapshot/catch_up/op),
+    // as opposed to `_seq` — which `_flush` also optimistically advances to the
+    // POST response's `body.seq`, the server's *global* seq right after our
+    // batch landed. That global value can be ahead of what our own SSE stream
+    // has delivered yet (a concurrent op from another client that committed
+    // just before ours, whose broadcast is still in flight on a different HTTP
+    // connection). The R15 duplicate/stale guard must dedupe against what we've
+    // actually seen, not that optimistic ceiling, or a legitimately-not-yet-
+    // -received op arriving after our own POST response would be silently
+    // dropped forever instead of applied late.
+    this._appliedSeq = 0;
     this._ready = false; // stream has delivered its first event (session exists)
     this._hadSnapshot = false;
     this._source = null;
@@ -697,7 +708,10 @@ export class SessionSyncClient {
   _handleEvent(data) {
     switch (data.type) {
       case 'snapshot':
-        if (typeof data.seq === 'number') this._seq = data.seq;
+        if (typeof data.seq === 'number') {
+          this._seq = data.seq;
+          this._appliedSeq = data.seq; // a snapshot brings the baseline fully up to date
+        }
         this._ready = true;
         this._seedPresence(data.roster, data.claims);
         if (!this._hadSnapshot) {
@@ -710,7 +724,10 @@ export class SessionSyncClient {
         this._flushSoon();
         break;
       case 'catch_up':
-        if (typeof data.seq === 'number') this._seq = data.seq;
+        if (typeof data.seq === 'number') {
+          this._seq = data.seq;
+          this._appliedSeq = data.seq; // onResync below reloads state fully up to this seq
+        }
         this._ready = true;
         this._hadSnapshot = true;
         this._seedPresence(data.roster, data.claims);
@@ -728,13 +745,18 @@ export class SessionSyncClient {
           // Duplicate/stale delivery is tolerated but was previously
           // unguarded (R15): events published between the stream's connect
           // (subscribe) and the catch-up computation are delivered twice
-          // (once inside the snapshot/catch-up, once as a queued event), and
-          // a late POST response could otherwise move `_seq` backwards past a
-          // newer broadcast seq already applied. Re-applying is idempotent
-          // either way, but an explicit guard makes the invariant robust
-          // instead of incidental.
-          if (data.seq <= this._seq) return;
-          this._seq = data.seq;
+          // (once inside the snapshot/catch-up, once as a queued event).
+          // Guard against `_appliedSeq` (what this client has actually applied
+          // from the stream) rather than `_seq`: `_flush()` also advances
+          // `_seq` optimistically to the POST response's `body.seq` — the
+          // server's global seq right after our own batch landed, which can
+          // already be ahead of a concurrent op whose broadcast is still in
+          // flight on the separate SSE connection. Guarding on `_seq` there
+          // would silently and permanently drop that op instead of applying
+          // it (a touch late) once it arrives.
+          if (data.seq <= this._appliedSeq) return;
+          this._appliedSeq = data.seq;
+          if (data.seq > this._seq) this._seq = data.seq;
         }
         // Claim ops are ephemeral (advisory soft-locks, never sequenced state).
         // Track other clients' claims for presence markers; our own echoes need
