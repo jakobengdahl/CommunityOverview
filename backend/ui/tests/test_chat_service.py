@@ -460,13 +460,14 @@ class TestResolveCollection:
             "search_graph",
             return_value={"nodes": [akc_node], "edges": [], "total": 1},
         ):
-            prefix, perms = service._resolve_collection("test-coll")
+            prefix, perms, collect_responses = service._resolve_collection("test-coll")
 
         assert prefix is not None
         assert "COLLECTION MODE INSTRUCTIONS" in prefix
         assert "INITIALIZATION" in prefix
         assert perms["Actor"]["create"] is True
         assert perms["Initiative"]["create"] is False
+        assert collect_responses is True
 
     def test_returns_none_when_not_found(self, graph_service, mock_llm_provider):
         from backend.ui import ChatService
@@ -484,11 +485,12 @@ class TestResolveCollection:
             "search_graph",
             return_value={"nodes": [], "edges": [], "total": 0},
         ):
-            prefix, perms = service._resolve_collection("missing")
+            prefix, perms, collect_responses = service._resolve_collection("missing")
 
         assert prefix is None
         # None = no collection found; distinct from {} = found but no permissions configured
         assert perms is None
+        assert collect_responses is True
 
     def test_all_false_permissions_shows_none_in_prompt(
         self, graph_service, mock_llm_provider
@@ -513,11 +515,14 @@ class TestResolveCollection:
             "search_graph",
             return_value={"nodes": [akc_node], "edges": [], "total": 1},
         ):
-            prefix, perms = service._resolve_collection("no-ops-coll")
+            prefix, perms, collect_responses = service._resolve_collection(
+                "no-ops-coll"
+            )
 
         assert prefix is not None
         assert "PERMITTED OPERATIONS: none" in prefix
         assert perms == all_false_perms
+        assert collect_responses is True
 
     def test_exception_during_resolution_fails_closed(
         self, graph_service, mock_llm_provider
@@ -537,13 +542,14 @@ class TestResolveCollection:
             "search_graph",
             side_effect=RuntimeError("graph unavailable"),
         ):
-            prefix, perms = service._resolve_collection("any-coll")
+            prefix, perms, collect_responses = service._resolve_collection("any-coll")
 
         # Exception → fail-closed: empty-perms sentinel, not (None, None)
         assert perms is not None, (
             "exception path must not return None (would be fail-open)"
         )
         assert perms == {}
+        assert collect_responses is True
 
     def test_guards_against_null_permission_entries(
         self, graph_service, mock_llm_provider
@@ -569,10 +575,11 @@ class TestResolveCollection:
             return_value={"nodes": [akc_node], "edges": [], "total": 1},
         ):
             # Should not raise
-            prefix, perms = service._resolve_collection("null-coll")
+            prefix, perms, collect_responses = service._resolve_collection("null-coll")
 
         assert perms["Actor"] == {}  # null → empty dict
         assert perms["Initiative"]["create"] is True
+        assert collect_responses is True
 
 
 class TestMakeEnforcedTools:
@@ -1150,3 +1157,150 @@ class TestSaveCollectionResponse:
             query="", node_types=["CollectionResponse"], limit=10
         )
         assert found.get("nodes", []) == []
+
+
+class TestCollectResponsesOptOut:
+    """Tests for per-collection collect_responses=false opt-out."""
+
+    def _make_service(self, graph_service, mock_llm_provider):
+        from backend.ui import ChatService
+
+        with (
+            patch(
+                "backend.ui.chat_logic.create_provider", return_value=mock_llm_provider
+            ),
+            patch.dict(os.environ, {"ANTHROPIC_API_KEY": "test-key"}),
+        ):
+            service = ChatService(graph_service)
+            service._processor.provider_type = "mock"
+            service._processor.default_api_key = "test-key"
+        return service
+
+    def _akc_node(self, short_name, collect_responses):
+        return {
+            "id": f"akc-{short_name}",
+            "name": short_name,
+            "type": "ActiveKnowledgeCollection",
+            "metadata": {
+                "short_name": short_name,
+                "prompt": "Collect data.",
+                "node_type_permissions": {},
+                "collect_responses": collect_responses,
+            },
+        }
+
+    def test_resolve_returns_false_when_flag_is_false(
+        self, graph_service, mock_llm_provider
+    ):
+        service = self._make_service(graph_service, mock_llm_provider)
+        akc = self._akc_node("no-collect", False)
+        with patch.object(
+            service._graph_service,
+            "search_graph",
+            return_value={"nodes": [akc], "edges": [], "total": 1},
+        ):
+            prefix, perms, collect_responses = service._resolve_collection("no-collect")
+
+        assert prefix is not None
+        assert collect_responses is False
+
+    def test_resolve_omits_save_instruction_when_flag_is_false(
+        self, graph_service, mock_llm_provider
+    ):
+        service = self._make_service(graph_service, mock_llm_provider)
+        akc = self._akc_node("no-collect", False)
+        with patch.object(
+            service._graph_service,
+            "search_graph",
+            return_value={"nodes": [akc], "edges": [], "total": 1},
+        ):
+            prefix, _, _ = service._resolve_collection("no-collect")
+
+        assert "save_collection_response" not in prefix
+        assert "present_form" in prefix
+
+    def test_resolve_includes_save_instruction_when_flag_is_true(
+        self, graph_service, mock_llm_provider
+    ):
+        service = self._make_service(graph_service, mock_llm_provider)
+        akc = self._akc_node("yes-collect", True)
+        with patch.object(
+            service._graph_service,
+            "search_graph",
+            return_value={"nodes": [akc], "edges": [], "total": 1},
+        ):
+            prefix, _, collect_responses = service._resolve_collection("yes-collect")
+
+        assert collect_responses is True
+        assert "save_collection_response" in prefix
+        assert "present_form" in prefix
+
+    def test_resolve_includes_save_instruction_when_flag_absent(
+        self, graph_service, mock_llm_provider
+    ):
+        """Missing collect_responses key defaults to True (opt-in by default)."""
+        node = {
+            "id": "akc-default",
+            "name": "default",
+            "type": "ActiveKnowledgeCollection",
+            "metadata": {
+                "short_name": "default",
+                "prompt": "Collect data.",
+                "node_type_permissions": {},
+            },
+        }
+        service = self._make_service(graph_service, mock_llm_provider)
+        with patch.object(
+            service._graph_service,
+            "search_graph",
+            return_value={"nodes": [node], "edges": [], "total": 1},
+        ):
+            prefix, _, collect_responses = service._resolve_collection("default")
+
+        assert collect_responses is True
+        assert "save_collection_response" in prefix
+
+    def test_process_message_does_not_install_tool_when_opt_out(
+        self, graph_service, mock_llm_provider
+    ):
+        """When collect_responses=False the LLM can call save_collection_response
+        but the tool is not registered, so no CollectionResponse node is created."""
+        service = self._make_service(graph_service, mock_llm_provider)
+        _add_akc(
+            graph_service,
+            "readonly",
+            perms={"Actor": {"create": True, "update": False, "delete": False}},
+        )
+        # Patch the AKC node stored in the graph to carry collect_responses=False
+        original_search = service._graph_service.search_graph
+
+        def patched_search(query="", node_types=None, **kwargs):
+            result = original_search(query=query, node_types=node_types, **kwargs)
+            if node_types == ["ActiveKnowledgeCollection"]:
+                for n in result.get("nodes", []):
+                    if n.get("metadata", {}).get("short_name") == "readonly":
+                        n["metadata"]["collect_responses"] = False
+            return result
+
+        mock_llm_provider.mock_tool_calls = [
+            {
+                "name": "save_collection_response",
+                "input": {"answers": [{"field_id": "q1", "value": "yes"}]},
+            }
+        ]
+        mock_llm_provider.mock_text_response = "noted"
+
+        with patch.object(
+            service._graph_service, "search_graph", side_effect=patched_search
+        ):
+            service.process_message(
+                messages=[{"role": "user", "content": "answer"}],
+                collection_short_name="readonly",
+            )
+
+        found = service._graph_service.search_graph(
+            query="", node_types=["CollectionResponse"], limit=10
+        )
+        assert found.get("nodes", []) == [], (
+            "no CollectionResponse should be created when collect_responses=False"
+        )
