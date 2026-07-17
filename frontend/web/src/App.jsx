@@ -417,7 +417,12 @@ function App() {
         if (cancelled) return;
         let changed = false;
         for (const s of serverSessions || []) {
-          if (sessionStore.hasSession(s.id)) {
+          // A null server name means the session hasn't materialised with a
+          // name yet (or was never renamed) — never overwrite a locally kept
+          // name with it (R7). The backend now materialises on rename
+          // (get-or-create), so this is defense in depth for any session
+          // renamed before that fix, or one that simply has no name.
+          if (s.name != null && sessionStore.hasSession(s.id)) {
             sessionStore.renameSession(s.id, s.name);
             changed = true;
           }
@@ -1252,6 +1257,15 @@ function App() {
         if (command?.type === 'tool_result' && command.result) {
           applyToolResultCommand(command.result, command.command_id);
         }
+      },
+      // A 400/413 drop is terminal (malformed op, or a hard limit like the
+      // annotation cap or an oversized layout_applied) — the op's effect
+      // stays in the local canvas but will never persist or reach
+      // collaborators. Surface it and resync so the canvas converges back to
+      // whatever the server actually holds instead of silently drifting (R9).
+      onDropped: () => {
+        showNotification('error', t('sessions.change_not_saved'));
+        resyncFromServer(sessionId);
       },
     };
   }, [

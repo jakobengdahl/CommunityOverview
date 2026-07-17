@@ -750,7 +750,7 @@ branch. Ordered by severity within each group. Effort uses the
   rename through `apply_ops` (`session_renamed` is already a STATE_OP — today
   unreachable, no client emits it) would fix both this and the op's dead-path
   status. **Effort:** S.
-- **R9 — Terminally rejected ops are dropped silently.** The sync client
+- **Fixed** (`claude/session-r7-r9-r12-r15`) **R9 — Terminally rejected ops are dropped silently.** The sync client
   supports an `onDropped` handler, but `App.jsx` does not wire it
   (`App.jsx:1235-1256`), so a 400/413 drop (annotation limit, oversized
   `layout_applied`) leaves canvas state that silently never persists. The
@@ -774,7 +774,7 @@ branch. Ordered by severity within each group. Effort uses the
   new state server-side. Distinguish 404 from other errors (retry/back off
   instead of clearing). **File(s):** `frontend/web/src/App.jsx:1220-1228`.
   **Effort:** S.
-- **R12 — Group `description` is silently lost.** The canvas keeps a
+- **Fixed** (`claude/session-r7-r9-r12-r15`) **R12 — Group `description` is silently lost.** The canvas keeps a
   description on group nodes, but `groupsToAnnotations` drops it, and both the
   restore path and remote upserts hardcode `description: ''`
   (`App.jsx:65-79`, `GraphCanvas.jsx:878,949`). Under the old localStorage
@@ -798,7 +798,7 @@ branch. Ordered by severity within each group. Effort uses the
   8 — manually drawn edges persist in the graph itself since PR #186. Remove
   the field from the model and §3.1, or wire ops for session-local edges.
   **File(s):** `backend/core/session_store.py:77`. **Effort:** XS.
-- **R15 — Duplicate/stale event delivery is tolerated but unguarded.** Events
+- **Fixed** (`claude/session-r7-r9-r12-r15`) **R15 — Duplicate/stale event delivery is tolerated but unguarded.** Events
   published between the stream's `connect` (subscribe) and the `catch_up`
   computation are delivered twice (once inside the snapshot/catch-up, once as
   queued events), and a late POST response can move `_seq` backwards past a

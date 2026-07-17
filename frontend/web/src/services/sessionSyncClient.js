@@ -32,6 +32,15 @@ const POSITION_EPSILON = 0.5;
 // initial materialisation within the server's per-batch op cap.
 const LAYOUT_BATCH_THRESHOLD = 20;
 
+// Mirror the server's per-batch caps (design §3.9) so an oversized queue is
+// chunked proactively (R9) instead of only after the server rejects a
+// too-large batch and the client falls back to one-op-at-a-time recovery.
+// Kept comfortably under the server's actual limits (500 ops / 256 KB) to
+// leave margin for JSON encoding differences between JSON.stringify and the
+// server's json.dumps.
+const MAX_OPS_PER_BATCH = 500;
+const MAX_BATCH_BYTES = 240 * 1024;
+
 // Selection claims are advisory soft-locks (design 3.5). The server expires a
 // claim 30 s after its last renewal; the local client renews well inside that
 // window and mirrors the same TTL so a departed collaborator's marker never
@@ -586,14 +595,42 @@ export class SessionSyncClient {
     if (this._queue.length) this._scheduleFlush();
   }
 
+  /**
+   * Take the next batch to send from the front of the queue. In `_forceSingle`
+   * recovery mode, one op at a time (unchanged). Otherwise, chunk proactively
+   * against the server's per-batch op-count and byte caps (§3.9, R9): sending
+   * everything in one request and only reacting to a `413`/one-at-a-time
+   * fallback after the fact wastes a round-trip on an oversized queue (a bulk
+   * layout_applied plus a burst of annotation edits, say) and needlessly
+   * degrades to single-op sends for the whole backlog.
+   */
+  _takeBatch() {
+    if (this._forceSingle) return this._queue.splice(0, 1);
+    const limit = Math.min(this._queue.length, MAX_OPS_PER_BATCH);
+    const batch = [];
+    let bytes = 0;
+    for (let i = 0; i < limit; i++) {
+      const opBytes = JSON.stringify(this._queue[i]).length;
+      if (batch.length > 0 && bytes + opBytes > MAX_BATCH_BYTES) break;
+      batch.push(this._queue[i]);
+      bytes += opBytes;
+    }
+    // A single op over the byte cap still gets attempted alone (the server
+    // will 413 it, and the existing terminal-rejection path drops it via
+    // onDropped) rather than silently stalling the queue forever.
+    if (batch.length === 0 && this._queue.length > 0) batch.push(this._queue[0]);
+    this._queue.splice(0, batch.length);
+    return batch;
+  }
+
   async _flush({ bypassReady = false } = {}) {
     if (this._flushing || this._closed) return;
     if ((!this._ready && !bypassReady) || !this._queue.length || !this._fetch) return;
     this._flushing = true;
     // After a rejected multi-op batch, resend one op at a time so a single bad
     // op can't take valid ops down with it (the server applies a batch
-    // all-or-nothing). Otherwise send the whole queue as one batch.
-    const batch = this._forceSingle ? this._queue.splice(0, 1) : this._queue.splice(0);
+    // all-or-nothing). Otherwise chunk the queue against the server's caps.
+    const batch = this._takeBatch();
     try {
       const resp = await this._fetch(this.opsUrl, {
         method: 'POST',
@@ -687,7 +724,18 @@ export class SessionSyncClient {
         break;
       case 'op': {
         const op = data.op || {};
-        if (typeof data.seq === 'number') this._seq = data.seq;
+        if (typeof data.seq === 'number') {
+          // Duplicate/stale delivery is tolerated but was previously
+          // unguarded (R15): events published between the stream's connect
+          // (subscribe) and the catch-up computation are delivered twice
+          // (once inside the snapshot/catch-up, once as a queued event), and
+          // a late POST response could otherwise move `_seq` backwards past a
+          // newer broadcast seq already applied. Re-applying is idempotent
+          // either way, but an explicit guard makes the invariant robust
+          // instead of incidental.
+          if (data.seq <= this._seq) return;
+          this._seq = data.seq;
+        }
         // Claim ops are ephemeral (advisory soft-locks, never sequenced state).
         // Track other clients' claims for presence markers; our own echoes need
         // no tracking since the local user sees their own selection natively.

@@ -143,6 +143,22 @@ describe('useSyncConnection.ensureSyncConnected', () => {
     expect(result.current.opStreamReady).toBe(true);
     expect(appOnReady).toHaveBeenCalledWith('payload');
   });
+
+  it('delegates onDropped to the latest handler in syncHandlersRef (R9)', () => {
+    const { result } = renderHook(() => useSyncConnection('1111-2222'));
+    const appOnDropped = vi.fn();
+    result.current.syncHandlersRef.current = { onDropped: appOnDropped };
+
+    let client;
+    act(() => {
+      client = result.current.ensureSyncConnected('1111-2222');
+    });
+    act(() => {
+      client.handlers.onDropped([{ op: 'annotation_created' }], 400);
+    });
+
+    expect(appOnDropped).toHaveBeenCalledWith([{ op: 'annotation_created' }], 400);
+  });
 });
 
 describe('useSyncConnection teardown', () => {

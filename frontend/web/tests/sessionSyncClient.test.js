@@ -558,6 +558,72 @@ describe('SessionSyncClient', () => {
       vi.useRealTimers();
     }
   });
+
+  it('proactively chunks an oversized queue against the server batch caps (R9)', async () => {
+    const fetchImpl = makeFetch([
+      { ok: true, status: 200, json: async () => ({ seq: 500 }) },
+      { ok: true, status: 200, json: async () => ({ seq: 600 }) },
+    ]);
+    const { client } = makeClient({ fetchImpl });
+    client.connect();
+    FakeEventSource.instances[0].emit({ type: 'snapshot', seq: 0, session: { state: {} } });
+
+    // 600 distinct annotation_created ops — one op per annotation id — well
+    // over the server's 500-op-per-batch cap but nowhere near the byte cap.
+    const annotations = Array.from({ length: 600 }, (_, i) => ({
+      id: `ann-${i}`,
+      kind: 'note',
+      text: 'x',
+      position: { x: 0, y: 0 },
+    }));
+    client.syncState({ annotations });
+
+    // Let the debounced flush chain run to completion (each flush's `finally`
+    // reschedules the next one while the queue is non-empty).
+    await new Promise((r) => setTimeout(r, 50));
+
+    expect(fetchImpl.calls).toHaveLength(2);
+    expect(fetchImpl.calls[0].body.ops).toHaveLength(500);
+    expect(fetchImpl.calls[1].body.ops).toHaveLength(100);
+  });
+
+  it('ignores a duplicate or stale sequenced op event (R15)', () => {
+    const onRemoteOps = vi.fn();
+    const { client } = makeClient({ handlers: { onRemoteOps } });
+    client.connect();
+    const es = FakeEventSource.instances[0];
+    es.emit({ type: 'snapshot', seq: 5, session: { state: {} } });
+
+    es.emit({
+      type: 'op',
+      client_id: 'client-other',
+      op: { op: 'nodes_added', node_ids: ['a'] },
+      seq: 6,
+    });
+    expect(onRemoteOps).toHaveBeenCalledTimes(1);
+    expect(client.seq).toBe(6);
+
+    // A duplicate delivery of the same seq (e.g. queued before catch-up and
+    // replayed again by catch-up) must not be re-applied.
+    es.emit({
+      type: 'op',
+      client_id: 'client-other',
+      op: { op: 'nodes_added', node_ids: ['a'] },
+      seq: 6,
+    });
+    expect(onRemoteOps).toHaveBeenCalledTimes(1);
+    expect(client.seq).toBe(6);
+
+    // A stale seq (older than what's already applied) is ignored too.
+    es.emit({
+      type: 'op',
+      client_id: 'client-other',
+      op: { op: 'nodes_added', node_ids: ['b'] },
+      seq: 4,
+    });
+    expect(onRemoteOps).toHaveBeenCalledTimes(1);
+    expect(client.seq).toBe(6);
+  });
 });
 
 // ── Presence + selection claims (design step 7) ────────────────────────────
