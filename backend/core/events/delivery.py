@@ -303,9 +303,7 @@ class DeliveryWorker:
             if self._on_result:
                 result = DeliveryResult(
                     event_id=event.event_id,
-                    subscription_id=event.subscription.id
-                    if event.subscription
-                    else "",
+                    subscription_id=event.subscription.id if event.subscription else "",
                     webhook_url=webhook_url,
                     status=DeliveryStatus.DROPPED,
                     attempt=attempt,
@@ -326,9 +324,7 @@ class DeliveryWorker:
             if self._on_result:
                 result = DeliveryResult(
                     event_id=event.event_id,
-                    subscription_id=event.subscription.id
-                    if event.subscription
-                    else "",
+                    subscription_id=event.subscription.id if event.subscription else "",
                     webhook_url=webhook_url,
                     status=DeliveryStatus.DROPPED,
                     attempt=attempt,
@@ -376,7 +372,8 @@ class DeliveryWorker:
         redirect_headers = {
             key: value
             for key, value in headers.items()
-            if key.lower() not in ("content-type", "content-length", "transfer-encoding")
+            if key.lower()
+            not in ("content-type", "content-length", "transfer-encoding")
         }
         current_method = "POST"
         current_url = url

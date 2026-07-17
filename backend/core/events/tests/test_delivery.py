@@ -231,7 +231,9 @@ class TestDeliveryWorker:
     def test_max_retries_exceeded(self, mock_client_cls, mock_safe_url):
         """Test that events are dropped after max retries."""
         # Always fail
-        mock_response = Mock(status_code=500, text="Server Error", is_redirect=False, headers={})
+        mock_response = Mock(
+            status_code=500, text="Server Error", is_redirect=False, headers={}
+        )
 
         mock_client = Mock()
         mock_client.__enter__ = Mock(return_value=mock_client)
@@ -334,10 +336,11 @@ class TestDeliveryWorker:
         finally:
             worker.stop(wait=True)
 
-
     @patch("backend.core.events.delivery.socket.getaddrinfo")
     @patch("backend.core.events.delivery.httpx.Client")
-    def test_ssrf_blocked_on_redirect_to_private_ip(self, mock_client_cls, mock_getaddrinfo):
+    def test_ssrf_blocked_on_redirect_to_private_ip(
+        self, mock_client_cls, mock_getaddrinfo
+    ):
         """Redirect to a private/internal address must be rejected (SSRF via redirect)."""
         # Initial URL resolves to a public IP — passes the pre-request check
         mock_getaddrinfo.return_value = [(None, None, None, None, ("93.184.216.34", 0))]
@@ -377,7 +380,9 @@ class TestDeliveryWorker:
 
     @patch("backend.core.events.delivery.socket.getaddrinfo")
     @patch("backend.core.events.delivery.httpx.Client")
-    def test_ssrf_blocked_on_redirect_never_retried(self, mock_client_cls, mock_getaddrinfo):
+    def test_ssrf_blocked_on_redirect_never_retried(
+        self, mock_client_cls, mock_getaddrinfo
+    ):
         """An SSRF-blocked redirect must be dropped with no retries, same as initial block."""
         mock_getaddrinfo.return_value = [(None, None, None, None, ("93.184.216.34", 0))]
 
@@ -453,7 +458,9 @@ class TestDeliveryWorker:
 
     @patch("backend.core.events.delivery.socket.getaddrinfo")
     @patch("backend.core.events.delivery.httpx.Client")
-    def test_safe_relative_redirect_is_followed(self, mock_client_cls, mock_getaddrinfo):
+    def test_safe_relative_redirect_is_followed(
+        self, mock_client_cls, mock_getaddrinfo
+    ):
         """A safe relative redirect should be resolved against the current URL and followed."""
         mock_getaddrinfo.return_value = [(None, None, None, None, ("93.184.216.34", 0))]
 
@@ -487,13 +494,18 @@ class TestDeliveryWorker:
 
             assert len(results) == 1
             assert results[0].status == DeliveryStatus.SUCCESS
-            assert mock_client.post.call_args_list[1].args[0] == "http://example.com/v2/hook"
+            assert (
+                mock_client.post.call_args_list[1].args[0]
+                == "http://example.com/v2/hook"
+            )
         finally:
             worker.stop(wait=True)
 
     @patch("backend.core.events.delivery.socket.getaddrinfo")
     @patch("backend.core.events.delivery.httpx.Client")
-    def test_redirect_limit_is_dropped_without_retry(self, mock_client_cls, mock_getaddrinfo):
+    def test_redirect_limit_is_dropped_without_retry(
+        self, mock_client_cls, mock_getaddrinfo
+    ):
         """Redirect loops should be dropped, not retried forever as transient failures."""
         mock_getaddrinfo.return_value = [(None, None, None, None, ("93.184.216.34", 0))]
 
