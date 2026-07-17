@@ -254,5 +254,13 @@
     "saving": "Saving...",
     "save": "Save",
     "cancel": "Cancel"
+  },
+  "edit_edge": {
+    "title": "Edit Connection",
+    "connection": "Connection",
+    "type": "Type",
+    "no_type": "No specific type",
+    "label_field": "Label",
+    "label_placeholder": "Optional label for this connection..."
   }
 }

@@ -62,7 +62,7 @@ function EditEdgeDialog({ edge, nodes, onClose, onSave, onDelete }) {
       <div className="edit-dialog" onClick={(e) => e.stopPropagation()}>
         <header className="edit-dialog-header">
           <div className="edit-dialog-header-title">
-            <h2>Edit Connection</h2>
+            <h2>{t('edit_edge.title')}</h2>
           </div>
           <button className="close-button" onClick={onClose}>
             x
@@ -99,16 +99,16 @@ function EditEdgeDialog({ edge, nodes, onClose, onSave, onDelete }) {
         ) : (
           <form onSubmit={handleSubmit}>
             <div className="form-group">
-              <label>Connection</label>
+              <label>{t('edit_edge.connection')}</label>
               <div style={{ color: '#aaa', fontSize: '0.9rem', padding: '8px 0' }}>
                 {sourceName} &rarr; {targetName}
               </div>
             </div>
 
             <div className="form-group">
-              <label htmlFor="edge-type">Type</label>
+              <label htmlFor="edge-type">{t('edit_edge.type')}</label>
               <select id="edge-type" name="type" value={formData.type} onChange={handleChange}>
-                <option value="">No specific type</option>
+                <option value="">{t('edit_edge.no_type')}</option>
                 {relationshipTypes.map((rt) => (
                   <option key={rt.type || rt} value={rt.type || rt}>
                     {rt.type || rt}
@@ -119,14 +119,14 @@ function EditEdgeDialog({ edge, nodes, onClose, onSave, onDelete }) {
             </div>
 
             <div className="form-group">
-              <label htmlFor="edge-label">Label</label>
+              <label htmlFor="edge-label">{t('edit_edge.label_field')}</label>
               <input
                 type="text"
                 id="edge-label"
                 name="label"
                 value={formData.label}
                 onChange={handleChange}
-                placeholder="Optional label for this connection..."
+                placeholder={t('edit_edge.label_placeholder')}
               />
             </div>
 
@@ -138,14 +138,14 @@ function EditEdgeDialog({ edge, nodes, onClose, onSave, onDelete }) {
                   style={{ color: '#ef4444', borderColor: '#ef4444', marginRight: 'auto' }}
                   onClick={handleDelete}
                 >
-                  Delete
+                  {t('context_menu.delete')}
                 </button>
               )}
               <button type="button" className="secondary" onClick={onClose}>
-                Cancel
+                {t('common.cancel')}
               </button>
               <button type="submit" className="primary">
-                Save
+                {t('common.save')}
               </button>
             </div>
           </form>

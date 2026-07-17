@@ -42,15 +42,6 @@ Effort scale: XS = single-line fix · S = up to ~30 lines / one file · M = mult
   unthrottled. Apply the same lookup rate limit, or prioritise its removal.
 - **Effort:** S
 
-### [2026-07-11] `EditEdgeDialog` uses hardcoded English strings instead of i18n
-- **File(s):** `frontend/web/src/components/EditEdgeDialog.jsx` (`Edit Connection`, `Connection`, `Type`, `Label`, `Delete`, `Cancel`, `Save`, placeholder text)
-- **Context:** Discovered during `claude/graph-history-ui`
-- **Issue:** Unlike other dialogs, `EditEdgeDialog` does not use `useI18n()` for its
-  existing labels — they are hardcoded in English, so the edge editor is not
-  translated. (The History tab added in this branch does use i18n.) Should be
-  migrated to `t()` with matching keys added to `en.json`/`sv.json`.
-- **Effort:** S
-
 ### [2026-07-11] No per-collection opt-out for persisting CollectionResponse
 - **File(s):** `backend/ui/chat_service.py` (`process_message`, response-tool install gate)
 - **Context:** Discovered during review of `claude/active-collector-gui-inputs-0qj15m`
@@ -99,6 +90,10 @@ Effort scale: XS = single-line fix · S = up to ~30 lines / one file · M = mult
 ### [2026-07-17] Fixed in pending PR (`fix/small-fixes-session-429`)
 
 - **Session-lookup `429` on the SSE handshake left the EventSource dead** — `frontend/web/src/services/sessionSyncClient.js` (`connect`/`onerror`), `frontend/web/tests/sessionSyncClient.test.js`. The `onerror` handler now checks `source.readyState`: if it is `CLOSED` (2), the connection was permanently rejected (e.g. 429 rate-limit on the initial handshake) and the browser won't auto-reconnect; the handler tears down the dead source and schedules a backoff reconnect via `_scheduleReconnect()`. A non-closed error (readyState 0 — CONNECTING) is a transient drop of an already-open stream where native reconnect handles recovery, unchanged. `close()` cancels the reconnect timer. Three focused regression tests added.
+
+### [2026-07-17] Fixed in branch `fix/small-fixes-edit-edge-i18n`
+
+- **`EditEdgeDialog` hardcoded English strings** — `frontend/web/src/components/EditEdgeDialog.jsx`. All remaining hardcoded UI strings (`Edit Connection`, `Connection`, `Type`, `No specific type`, `Label`, placeholder text) replaced with `t()` calls. Delete/Cancel/Save reuse existing `context_menu.delete`/`common.cancel`/`common.save` keys. New `edit_edge.*` keys added to `en.json` and `sv.json`. Focused test added in `EditEdgeDialog.test.jsx`.
 
 ### [2026-07-17] Fixed in PR #247 (`fix/small-fixes-webhook-ssrf`)
 
