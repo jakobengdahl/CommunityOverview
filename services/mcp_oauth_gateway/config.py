@@ -52,6 +52,20 @@ CORS_ALLOWED_ORIGINS: List[str] = [o.strip() for o in _raw_cors_origins.split(",
 GOOGLE_AUTH_URL = "https://accounts.google.com/o/oauth2/v2/auth"
 GOOGLE_TOKEN_URL = "https://oauth2.googleapis.com/token"
 GOOGLE_USERINFO_URL = "https://openidconnect.googleapis.com/v1/userinfo"
+GOOGLE_JWKS_URL = "https://www.googleapis.com/oauth2/v3/certs"
+GOOGLE_ISSUERS = ("https://accounts.google.com", "accounts.google.com")
+
+# Redirect-URI origins the gateway is allowed to send authorization codes to.
+# Comma-separated list of scheme://host[:port] prefixes (e.g.
+# "https://chatgpt.com,https://claude.ai"). When EMPTY the gateway keeps its
+# permissive legacy behaviour (any redirect_uri accepted) but logs a warning —
+# set this in production to close the authorization-code interception vector.
+# Loopback redirect URIs (127.0.0.1 / localhost, RFC 8252) are always allowed
+# for local development regardless of this setting.
+_raw_allowed_redirect_origins: str = _optional("ALLOWED_REDIRECT_ORIGINS", "")
+ALLOWED_REDIRECT_ORIGINS: List[str] = [
+    o.strip().rstrip("/") for o in _raw_allowed_redirect_origins.split(",") if o.strip()
+]
 
 # Authorization code TTL in seconds
 AUTH_CODE_TTL_SECONDS: int = 300  # 5 minutes

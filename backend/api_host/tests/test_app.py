@@ -625,6 +625,27 @@ class TestExportEndpoints:
         assert data["export_boundary"]["export_kind"] == "full"
         assert data["export_boundary"]["selection_mode"] == "default"
 
+    def test_export_graph_error_hides_traceback(self, test_app: TestClient):
+        """A failing export returns a generic 500 with no traceback leaked."""
+        graph_service = test_app.app.state.graph_service
+        original = graph_service.export_graph
+
+        def _boom():
+            raise RuntimeError("secret internal detail at /srv/app/file.py")
+
+        graph_service.export_graph = _boom
+        try:
+            response = test_app.get("/export_graph")
+        finally:
+            graph_service.export_graph = original
+
+        assert response.status_code == 500
+        data = response.json()
+        assert data["error"] == "internal error"
+        assert "request_id" in data
+        assert "traceback" not in data
+        assert "secret internal detail" not in response.text
+
 
 class TestExecuteToolEndpoint:
     """Tests for direct tool execution endpoint."""
@@ -664,6 +685,30 @@ class TestExecuteToolEndpoint:
         """Execute tool without name returns 400."""
         response = test_app.post("/execute_tool", json={"arguments": {}})
         assert response.status_code == 400
+
+    def test_execute_tool_error_hides_traceback(self, test_app: TestClient):
+        """A tool that raises returns a generic 500 with no traceback leaked."""
+        tools_map = test_app.app.state.tools_map
+
+        def _boom(**_kwargs):
+            raise RuntimeError("secret internal detail at /srv/app/file.py")
+
+        original = tools_map.get("get_graph_stats")
+        tools_map["get_graph_stats"] = _boom
+        try:
+            response = test_app.post(
+                "/execute_tool", json={"tool_name": "get_graph_stats", "arguments": {}}
+            )
+        finally:
+            tools_map["get_graph_stats"] = original
+
+        assert response.status_code == 500
+        data = response.json()
+        assert data["error"] == "internal error"
+        assert "request_id" in data
+        assert "traceback" not in data
+        # The exception message must not surface to the client.
+        assert "secret internal detail" not in response.text
 
 
 class TestUiCapabilitiesEndpoint:
