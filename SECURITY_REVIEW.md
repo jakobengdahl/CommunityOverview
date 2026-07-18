@@ -38,7 +38,7 @@ risk depends on deployment configuration.
 | 6 | Low | Supply chain | All HTTP (incl. the gateway) uses `httpx2`, an off-mainstream package | S |
 | 7 | Low | Gateway | Unbounded in-memory DCR store; auth-code/DCR stores not replica-shared | S |
 | 8 | Low | API host | `/export_graph` lacks the read-allow-list gate `/execute_tool` has when auth is inactive | S |
-| 9 | Info | All repos | Add dependency + SAST + secret scanning to CI; confirm branch protection | S |
+| 9 | Info | All repos | Dependency + CodeQL scanning already exist (advisory); close the remaining gaps — Python SAST, secret scanning, promote-to-blocking | S |
 
 Effort key: XS = single line · S = ≤ ~30 lines / one file · M = multi-file or logic-heavy.
 
@@ -386,26 +386,41 @@ No decision required — this is a straight hardening fix. Effort S.
 
 - **Observations:** No hardcoded secrets found; `.env*` is gitignored; deploy
   workflows are `workflow_dispatch`-only and delegate real deployment to the infra
-  repo; CORS and auth defaults are safe. CI runs tests + ruff/eslint but no
-  security scanning.
+  repo; CORS and auth defaults are safe. Security scanning already exists and is
+  broader than a first pass suggests: `.github/workflows/security-scan.yml` runs
+  `pip-audit` over `backend/requirements.txt`, `backend/requirements-dev.txt` and
+  the gateway requirements, plus `npm audit --omit=dev` over the JS workspaces, on
+  every PR to `main`/`preview`/`dev` and on a weekly schedule; **CodeQL** runs via
+  GitHub's repository-level default setup (`Analyze (python|javascript-typescript|
+  actions)`). All of these passed on this PR. The dependency-audit steps are
+  deliberately **advisory** (`continue-on-error: true`) so a fresh upstream advisory
+  never blocks a merge (documented intent: flip to blocking once the baseline is
+  understood).
+- **Remaining gaps (this is what #9 is really about):** no Python **SAST** (e.g.
+  `bandit`), no explicit **secret scanning** in CI (GitHub secret scanning / push
+  protection status is a repo setting to confirm, not a committed workflow), and
+  the dependency audits are still advisory rather than required checks.
 
 **Remediation (session-ready):**
 
-1. Add a CI job (`.github/workflows/ci.yml`) running `pip-audit` against
-   `backend/requirements*.txt` and `services/mcp_oauth_gateway/requirements.txt`,
-   and `npm audit --audit-level=high` for the frontend workspaces. Start
-   non-blocking (report-only) to establish a baseline, then promote to required.
-2. Add a Python SAST pass with `bandit -r backend services` (tuned to skip test
-   dirs) as a non-required job first.
-3. Enable GitHub secret scanning + push protection on all three repos, or add a
-   `gitleaks` CI step if that is preferred over the GitHub-native feature.
-4. Confirm branch protection + required checks on `dev` (documented in CLAUDE.md as
-   already enabled) and mirror an equivalent policy on the SaaS/corp `main` branches.
+1. Add a Python SAST pass with `bandit -r backend services` (configured to skip
+   `*/tests/` and known false positives) as a new job in `security-scan.yml`,
+   non-blocking to start.
+2. Confirm GitHub **secret scanning + push protection** is enabled on all three
+   repos (repo Settings → Code security). If a committed control is preferred, add
+   a `gitleaks` step to `security-scan.yml` instead of/alongside the native feature.
+3. Once the `pip-audit`/`npm audit` baseline is clean, drop `continue-on-error`
+   from those steps and add them to `dev` branch protection so a newly-introduced
+   vulnerable dependency actually blocks a merge.
+4. Mirror an equivalent `security-scan.yml` (dependency audit + SAST for any
+   Python validators) and branch protection onto the SaaS/corp `main` branches.
 
 **Decision — required vs. advisory scanners.** Making `pip-audit`/`bandit` required
-can block merges on an upstream CVE with no fix available. Recommendation: land them
-as **advisory** (non-required) first, triage the initial noise into `SMALL_FIXES.md`,
-then promote the dependency-audit job to required once the baseline is clean.
+can block merges on an upstream CVE with no fix available. The repo already made the
+right initial call (advisory first — see the `security-scan.yml` header comment).
+Recommendation: keep the advisory posture, triage the current baseline into
+`SMALL_FIXES.md`, then promote the **dependency-audit** job to required once clean;
+keep `bandit` advisory longer since SAST tends to be noisier.
 
 ---
 
@@ -423,7 +438,8 @@ that code.
 ## What was NOT covered
 
 - No dynamic/DAST testing or live exploitation was performed.
-- No dependency CVE scan was run (recommended as CI tooling — finding #9).
+- No dependency CVE scan was run *as part of this review* — the repo's own CI
+  already runs `pip-audit` + `npm audit` (see finding #9), which passed on this PR.
 - Third-party package internals (including `httpx2`) were not audited beyond the
   provenance flag in #6.
 - The frontend was checked for obvious sinks (`dangerouslySetInnerHTML`,
