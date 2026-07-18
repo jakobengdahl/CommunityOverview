@@ -132,3 +132,28 @@ jobs:
             -x '*/tests/*,*/test_*.py' \
             -ll 2>&1 | tee -a "$GITHUB_STEP_SUMMARY"
           echo '```' >> "$GITHUB_STEP_SUMMARY"
+
+  # ---------------------------------------------------------------------------
+  # gitleaks – secret scanning over the full git history. Complements GitHub's
+  # native secret scanning (a repo setting) with a committed, self-contained
+  # check via the maintained gitleaks-action (which manages the binary version).
+  # Reporting-first like the jobs above: continue-on-error keeps a hit from
+  # failing the workflow — it surfaces in the step annotations / logs instead.
+  # Promote to blocking (and add to branch protection) once history is clean.
+  # ---------------------------------------------------------------------------
+  gitleaks:
+    name: gitleaks (secret scan)
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+        with:
+          # Full history so gitleaks scans every commit, not just the tip.
+          fetch-depth: 0
+
+      - name: Run gitleaks (non-blocking)
+        continue-on-error: true
+        uses: gitleaks/gitleaks-action@v2
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
