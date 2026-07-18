@@ -16,13 +16,23 @@ class TestSessionIdValidation:
     """is_valid_session_id behaves correctly for all formats."""
 
     def test_valid_format_accepted(self):
+        # Legacy two-group form stays valid for previously-shared URLs.
         assert SessionRegistry.is_valid_session_id("8244-1742")
         assert SessionRegistry.is_valid_session_id("0000-0000")
         assert SessionRegistry.is_valid_session_id("9999-9999")
 
+    def test_four_group_format_accepted(self):
+        # New wider form (~10^16 space) is what fresh sessions use.
+        assert SessionRegistry.is_valid_session_id("8244-1742-0031-9998")
+        assert SessionRegistry.is_valid_session_id("0000-0000-0000-0000")
+
+    def test_three_groups_rejected(self):
+        assert not SessionRegistry.is_valid_session_id("1234-5678-9012")
+
     def test_too_many_digits_rejected(self):
         assert not SessionRegistry.is_valid_session_id("12345-1234")
         assert not SessionRegistry.is_valid_session_id("1234-12345")
+        assert not SessionRegistry.is_valid_session_id("1234-5678-9012-34567")
 
     def test_too_few_digits_rejected(self):
         assert not SessionRegistry.is_valid_session_id("123-1234")

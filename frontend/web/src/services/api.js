@@ -525,14 +525,14 @@ export async function getCollectConfig(shortName) {
 
 /**
  * Generate a cryptographically-random visualization session ID.
- * Format: "DDDD-DDDD" (two groups of four decimal digits).
+ * Format: "DDDD-DDDD-DDDD-DDDD" (four groups of four decimal digits, ~10^16
+ * address space) so an unauthenticated caller cannot feasibly enumerate live
+ * sessions. The backend still accepts the two-group legacy form for old URLs.
  * @returns {string}
  */
 export function generateVisualizationSessionId() {
-  const buf = crypto.getRandomValues(new Uint16Array(2));
-  const a = String(buf[0] % 10000).padStart(4, '0');
-  const b = String(buf[1] % 10000).padStart(4, '0');
-  return `${a}-${b}`;
+  const buf = crypto.getRandomValues(new Uint16Array(4));
+  return Array.from(buf, (n) => String(n % 10000).padStart(4, '0')).join('-');
 }
 
 /**

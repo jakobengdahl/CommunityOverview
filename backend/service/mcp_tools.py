@@ -542,7 +542,7 @@ def register_mcp_tools(
         if not session_registry.is_valid_session_id(visualization_session_id):
             return {
                 "success": False,
-                "error": "Invalid session ID format — expected DDDD-DDDD",
+                "error": "Invalid session ID format — expected DDDD-DDDD-DDDD-DDDD",
             }
         if not session_registry.session_exists(visualization_session_id):
             return {
@@ -583,7 +583,7 @@ def register_mcp_tools(
         if not session_registry.is_valid_session_id(session_id):
             return {
                 "connected": False,
-                "error": "Invalid session ID format — expected DDDD-DDDD",
+                "error": "Invalid session ID format — expected DDDD-DDDD-DDDD-DDDD",
             }
         if not session_registry.session_exists(session_id):
             return {
@@ -623,7 +623,7 @@ def register_mcp_tools(
         if not session_registry:
             return {"error": "Session registry not available"}
         if not session_registry.is_valid_session_id(session_id):
-            return {"error": "Invalid session ID format — expected DDDD-DDDD"}
+            return {"error": "Invalid session ID format — expected DDDD-DDDD-DDDD-DDDD"}
         if not session_registry.session_exists(session_id):
             return {
                 "error": (
