@@ -27,11 +27,20 @@ def _store(tmp_path) -> SessionStore:
 
 class TestSessionIdValidation:
     def test_valid_and_invalid(self):
-        assert is_valid_session_id("1234-5678")
+        assert is_valid_session_id("1234-5678")  # legacy two-group form
+        assert is_valid_session_id("1234-5678-9012-3456")  # new four-group form
         assert not is_valid_session_id("12-34")
+        assert not is_valid_session_id("1234-5678-9012")  # three groups
         assert not is_valid_session_id("abcd-1234")
         assert not is_valid_session_id("../etc")
         assert not is_valid_session_id(None)
+
+    def test_new_ids_use_four_group_form(self, tmp_path):
+        store = _store(tmp_path)
+        for _ in range(20):
+            session = store.create()
+            assert is_valid_session_id(session.id)
+            assert len(session.id.split("-")) == 4
 
 
 class TestPersistence:

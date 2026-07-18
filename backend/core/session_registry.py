@@ -40,7 +40,9 @@ import time
 import re
 from typing import Dict, Any, Optional, AsyncIterator
 
-SESSION_ID_RE = re.compile(r"^\d{4}-\d{4}$")
+# Grouped-digit id DDDD-DDDD-DDDD-DDDD (four groups); the two-group legacy form
+# DDDD-DDDD is still accepted so older visualization-session URLs keep working.
+SESSION_ID_RE = re.compile(r"^\d{4}-\d{4}(?:-\d{4}-\d{4})?$")
 _SESSION_TTL = 3600  # seconds — sessions not updated for this long are evicted
 
 

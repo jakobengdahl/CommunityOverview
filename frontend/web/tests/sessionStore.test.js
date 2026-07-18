@@ -8,7 +8,9 @@ describe('sessionStore (recents index)', () => {
   });
 
   it('validates session id format', () => {
-    expect(sessionStore.isValidSessionId('1234-5678')).toBe(true);
+    expect(sessionStore.isValidSessionId('1234-5678')).toBe(true); // legacy
+    expect(sessionStore.isValidSessionId('1234-5678-9012-3456')).toBe(true); // new
+    expect(sessionStore.isValidSessionId('1234-5678-9012')).toBe(false);
     expect(sessionStore.isValidSessionId('12345678')).toBe(false);
     expect(sessionStore.isValidSessionId('abcd-efgh')).toBe(false);
     expect(sessionStore.isValidSessionId('')).toBe(false);
