@@ -35,7 +35,7 @@ risk depends on deployment configuration.
 | 3 | Medium | API host | 500 handlers leak full tracebacks / `print_exc` on `/execute_tool` and `/export_graph` | S |
 | 4 | Medium | Gateway | 60-day access-token TTL with no revocation path | M |
 | 5 | Medium | API host | Shared-session read/write endpoints bypass auth, guarded only by an 8-digit id | M |
-| 6 | Low | Supply chain | All HTTP (incl. the gateway) uses `httpx2`, an off-mainstream package | S |
+| 6 | Low → resolved | Supply chain | `httpx2` investigated — legitimate (Pydantic's `httpx` continuation); no action needed | — |
 | 7 | Low | Gateway | Unbounded in-memory DCR store; auth-code/DCR stores not replica-shared | S |
 | 8 | Low | API host | `/export_graph` lacks the read-allow-list gate `/execute_tool` has when auth is inactive | S |
 | 9 | Info | All repos | Dependency + CodeQL scanning already exist (advisory); close the remaining gaps — Python SAST, secret scanning, promote-to-blocking | S |
@@ -277,41 +277,30 @@ No decision required — this is a straight hardening fix. Effort S.
 
 ---
 
-### 6. All HTTP uses `httpx2`, an off-mainstream package (Low — supply chain)
+### 6. All HTTP uses `httpx2` (Low — supply chain) — RESOLVED: provenance confirmed
 
 - **Files:** `backend/requirements.txt` (`httpx2>=2.0.0`),
   `services/mcp_oauth_gateway/requirements.txt` (`httpx2==2.5.0`), imported as
   `import httpx2 as httpx` across federation, skills loader, agents, and the
   gateway proxy/auth.
-- **Issue:** The mainstream, widely-audited HTTP client is `httpx` (encode/httpx).
-  `httpx2` is a different, far less prominent PyPI package, and it carries **all**
-  outbound HTTP including the security-sensitive OAuth token exchange. This is a
-  concentrated supply-chain dependency on a low-profile package (and, if it were
-  ever unclaimed/removed, a potential dependency-confusion surface).
-
-**Remediation (session-ready):**
-
-1. First, **establish provenance** — this is an investigation, not a blind swap.
-   Check the `httpx2` PyPI project page (publisher, upload history, source repo,
-   download counts) and why it was chosen over `httpx` (search git history /
-   `STRUCTURE_REVIEW.md` for the rationale). Record the finding in the PR.
-2. If `httpx2` is a deliberate, maintained choice: pin it **by hash** in both
-   requirements files (`--hash=sha256:...` via a compiled `requirements.lock` or
-   `pip-compile --generate-hashes`) so a compromised re-publish cannot slip in. The
-   gateway already exact-pins by version; extend to hash pinning there.
-3. If provenance is weak or the reason no longer holds: migrate to `httpx`. The
-   code aliases `import httpx2 as httpx`, so the change is mostly the requirement
-   line plus verifying API parity (`AsyncClient`, `.stream`, `http2=` kwarg usage in
-   `proxy.py`). Run the full backend + gateway suites afterwards.
-
-**Decision — keep-and-pin vs. migrate.**
-- *Keep + hash-pin:* lowest churn, but you retain a dependency on a niche package;
-  acceptable if provenance checks out.
-- *Migrate to `httpx`:* removes the concentration risk and aligns with the
-  ecosystem, at the cost of a dependency swap and re-test.
-- Recommendation: do step 1 regardless; prefer migration to `httpx` unless there is
-  a concrete, documented reason `httpx2` is required. Either way, hash-pinning is
-  the non-negotiable part for the security-sensitive gateway.
+- **Original concern:** `httpx2` looked like an off-mainstream package carrying
+  **all** outbound HTTP including the OAuth token exchange, raising a
+  supply-chain / dependency-confusion question.
+- **Investigation result (2026-07-18, PyPI):** `httpx2` is **legitimate and
+  reputable**, not a typosquat. It is the continuation of `httpx` under
+  **Pydantic's** stewardship (author Tom Christie — the original `httpx`/`encode`
+  author; maintainer Pydantic Services Inc.; source
+  `https://github.com/pydantic/httpx2`; BSD-3-Clause). Pydantic picked up
+  `httpx` stewardship under the `httpx2` name because upstream `httpx` activity
+  slowed. The project's newness (first release 2026) is why it was unfamiliar —
+  it postdates this reviewer's knowledge cutoff. `pydantic` is already a core
+  dependency of this codebase, so this does not add a new trust root.
+- **Conclusion:** No code change required. The concentration/typosquat concern is
+  withdrawn; this is a maintained package from a trusted vendor.
+- **Optional hardening (not required):** the gateway already exact-pins `httpx2`
+  by version. If defence-in-depth against a compromised re-publish is later
+  wanted, add `--hash=` pinning (via `pip-compile --generate-hashes`) to the
+  gateway requirements. Tracked as an optional item, not a fix.
 
 ---
 
