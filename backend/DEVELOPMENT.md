@@ -367,6 +367,28 @@ MCP query tools read visible nodes / selection from the shared-session store
 (the step-4 `PUT /api/sessions/{id}/state` full-state save and the legacy
 `PATCH /sessions/{id}/state` upload were removed in step 8 — design §3.8).
 
+### Authentication and the unauthenticated read surface
+
+Authentication is opt-in. It is active only when a password (`AUTH_PASSWORD`) or
+bearer token (`AUTH_BEARER_TOKEN`) is configured together with an activation flag
+(`AUTH_ENABLED` or `MCP_BASIC_AUTH`). See `backend/api_host/middleware.py`.
+
+When auth is **active**, the middleware guards all endpoints except the public
+health/readiness/info routes and the id-protected session SSE streams.
+
+When auth is **not** active (the default standalone posture), the instance is an
+open read/write surface by design:
+
+- The REST graph endpoints, `/execute_tool` (limited to the read-only
+  `SAFE_TOOLS` allow-list in `backend/api_host/tool_routes.py`), **and the full
+  graph export** (`GET /api/export` and `GET /export_graph`) are all reachable
+  without credentials.
+- A full graph export is therefore an **unauthenticated read on an
+  auth-disabled instance**, consistent with the other `SAFE_TOOLS` reads. This is
+  intentional for open/standalone deployments. If a deployment must keep graph
+  contents private, enable authentication — do not rely on export being
+  privileged while other reads are open.
+
 Legacy MCP visualization-push channel (single-consumer; delivers AI-pushed
 visualization commands to the browser). The browser opens this only until the
 op-protocol stream above has connected for the session, since that stream's
