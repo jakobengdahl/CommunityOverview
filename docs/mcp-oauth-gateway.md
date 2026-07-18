@@ -122,4 +122,7 @@ gcloud run deploy mcp-gateway-esam-prod \
 - The `TEST_USERS` allowlist is enforced after successful Google login – a valid Google
   account that is not in the list receives HTTP 403.
 - The Dynamic Client Registration store (`/register`) is bounded (size cap + TTL) so the
-  open endpoint cannot exhaust memory.
+  open endpoint cannot exhaust memory, and `/register` is rate-limited per client IP
+  (token bucket) so it cannot be flooded. Behind Cloud Run the client IP is taken from
+  the right-most `X-Forwarded-For` entry (the proxy-appended address) so the key cannot
+  be spoofed.

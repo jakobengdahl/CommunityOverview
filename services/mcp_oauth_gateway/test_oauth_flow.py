@@ -505,10 +505,15 @@ class TestAllowListRevocation(unittest.TestCase):
 class TestDcrStoreBounds(unittest.TestCase):
     """The DCR store must not grow without bound."""
 
-    def test_expired_registration_is_pruned(self):
+    def setUp(self):
         import main
 
         main.dcr_clients.clear()
+        main._register_buckets.clear()
+
+    def test_expired_registration_is_pruned(self):
+        import main
+
         main.dcr_clients["old"] = {
             "client_id": "old",
             "client_id_issued_at": 0,
@@ -521,12 +526,67 @@ class TestDcrStoreBounds(unittest.TestCase):
     def test_store_stays_capped(self):
         import main
 
-        main.dcr_clients.clear()
-        for _ in range(main.MAX_DCR_CLIENTS + 25):
-            resp = client.post("/register", json={"redirect_uris": ["https://a/cb"]})
+        # Each registration comes from a distinct client IP so the per-IP
+        # /register rate limit does not trip during this store-cap check.
+        for i in range(main.MAX_DCR_CLIENTS + 25):
+            resp = client.post(
+                "/register",
+                json={"redirect_uris": ["https://a/cb"]},
+                headers={"X-Forwarded-For": f"10.0.{i // 256}.{i % 256}"},
+            )
             assert resp.status_code == 201
         assert len(main.dcr_clients) <= main.MAX_DCR_CLIENTS
         main.dcr_clients.clear()
+
+
+class TestRegisterRateLimit(unittest.TestCase):
+    """The unauthenticated /register endpoint is rate-limited per client IP."""
+
+    def setUp(self):
+        import main
+
+        main.dcr_clients.clear()
+        main._register_buckets.clear()
+
+    def test_burst_from_one_ip_is_eventually_throttled(self):
+        import main
+
+        headers = {"X-Forwarded-For": "203.0.113.7"}
+        body = {"redirect_uris": ["https://a/cb"]}
+        # The burst capacity worth of requests succeed...
+        for _ in range(int(main.REGISTER_RATE_CAPACITY)):
+            assert client.post("/register", json=body, headers=headers).status_code == 201
+        # ...the next one, before the bucket refills, is throttled.
+        assert client.post("/register", json=body, headers=headers).status_code == 429
+
+    def test_separate_ips_have_independent_budgets(self):
+        body = {"redirect_uris": ["https://a/cb"]}
+        # Exhaust one IP's budget.
+        for _ in range(50):
+            client.post("/register", json=body, headers={"X-Forwarded-For": "198.51.100.1"})
+        # A different IP is unaffected.
+        resp = client.post(
+            "/register", json=body, headers={"X-Forwarded-For": "198.51.100.2"}
+        )
+        assert resp.status_code == 201
+
+    def test_rightmost_forwarded_for_entry_is_used(self):
+        # A spoofed left-most entry must not create a fresh budget: keying on the
+        # right-most (proxy-appended) entry means both requests share a bucket.
+        body = {"redirect_uris": ["https://a/cb"]}
+        for _ in range(25):  # exhaust the burst budget (capacity 20)
+            client.post(
+                "/register",
+                json=body,
+                headers={"X-Forwarded-For": "1.2.3.4, 203.0.113.9"},
+            )
+        # Same real client (right-most 203.0.113.9), different spoofed left-most.
+        resp = client.post(
+            "/register",
+            json=body,
+            headers={"X-Forwarded-For": "9.9.9.9, 203.0.113.9"},
+        )
+        assert resp.status_code == 429
 
 
 if __name__ == "__main__":
