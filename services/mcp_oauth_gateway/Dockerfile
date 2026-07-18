@@ -5,9 +5,11 @@ ENV PYTHONUNBUFFERED=1
 
 WORKDIR /app
 
-# Install dependencies first so Docker can cache this layer
+# Install dependencies first so Docker can cache this layer.
+# --require-hashes fails the build if requirements.txt ever loses its hash
+# pins, so the image only ever ships hash-verified dependencies.
 COPY requirements.txt .
-RUN pip install --no-cache-dir -r requirements.txt
+RUN pip install --no-cache-dir --require-hashes -r requirements.txt
 
 # Copy application source
 COPY . .

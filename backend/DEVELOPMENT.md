@@ -354,7 +354,7 @@ node content is rehydrated from the graph on load via `?resolve=true`.
 
 | Method | Endpoint | Description |
 |--------|----------|-------------|
-| POST | `/api/sessions` | Create a new shared session (server-assigned `DDDD-DDDD` id) |
+| POST | `/api/sessions` | Create a new shared session (server-assigned `DDDD-DDDD-DDDD-DDDD` id) |
 | GET | `/api/sessions` | List session metadata |
 | GET | `/api/sessions/{id}` | Get a session (meta + state + presence roster); `?resolve=true` also returns rehydrated nodes/edges |
 | PATCH | `/api/sessions/{id}` | Rename a session (`{name, client_id?}`). get-or-create: materialises the session server-side if it only existed client-side. Routed through the op protocol as a `session_renamed` state op, so the rename is sequenced and visible to `since_seq` catch-up, not just a full snapshot — design §8.2 R7/R8 |

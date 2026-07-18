@@ -33,9 +33,11 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Deque, Dict, List, Optional, Protocol
 
-# Session IDs keep the historical DDDD-DDDD shape so they interoperate with the
-# legacy connect-by-ID flow and the existing SSE plumbing.
-SESSION_ID_RE = re.compile(r"^\d{4}-\d{4}$")
+# Session IDs use the grouped-digit shape DDDD-DDDD-DDDD-DDDD (four groups,
+# ~10^16 address space) so an unauthenticated caller cannot feasibly enumerate
+# live sessions. The two-group legacy form DDDD-DDDD is still accepted so
+# previously-shared session URLs keep resolving.
+SESSION_ID_RE = re.compile(r"^\d{4}-\d{4}(?:-\d{4}-\d{4})?$")
 
 _ANNOTATION_KINDS = {"group", "note", "label", "arrow"}
 _DEFAULT_MAX_ANNOTATIONS = 2000
@@ -354,7 +356,7 @@ class SessionStore:
 
     def _new_id(self) -> str:
         for _ in range(100):
-            candidate = f"{secrets.randbelow(10000):04d}-{secrets.randbelow(10000):04d}"
+            candidate = "-".join(f"{secrets.randbelow(10000):04d}" for _ in range(4))
             if (
                 candidate not in self._sessions
                 and self._backend.load(candidate) is None

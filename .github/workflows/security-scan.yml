@@ -98,3 +98,37 @@ jobs:
         run: |
           echo "## npm audit (--omit=dev, all workspaces)" >> "$GITHUB_STEP_SUMMARY"
           npm audit --omit=dev 2>&1 | tee -a "$GITHUB_STEP_SUMMARY"
+
+  # ---------------------------------------------------------------------------
+  # bandit – Python static application security testing (SAST). Scans the
+  # backend and gateway source for common insecure patterns. Test directories
+  # are excluded (asserts and fixtures produce noise). Reporting-first like the
+  # audits above: -ll limits to medium+ severity and the step never fails the
+  # build, so a finding shows in the job summary without blocking a merge.
+  # ---------------------------------------------------------------------------
+  bandit:
+    name: bandit (Python SAST)
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+          cache: 'pip'
+
+      - name: Install bandit
+        run: pip install bandit
+
+      - name: Run bandit (medium+ severity, non-blocking)
+        continue-on-error: true
+        run: |
+          echo "## bandit (backend + services, medium+ severity)" >> "$GITHUB_STEP_SUMMARY"
+          echo '```' >> "$GITHUB_STEP_SUMMARY"
+          bandit -r backend services \
+            -x '*/tests/*,*/test_*.py' \
+            -ll 2>&1 | tee -a "$GITHUB_STEP_SUMMARY"
+          echo '```' >> "$GITHUB_STEP_SUMMARY"

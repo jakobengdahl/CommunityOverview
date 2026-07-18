@@ -45,7 +45,13 @@ in real time:
 
 ## 2. Current state (facts)
 
-Two "session" concepts coexist today, keyed by the same `DDDD-DDDD` ID format:
+Two "session" concepts coexist today, keyed by the same grouped-digit ID
+format. New IDs use four groups (`DDDD-DDDD-DDDD-DDDD`, ~10^16 address space);
+the legacy two-group form `DDDD-DDDD` is still accepted so previously-shared
+URLs keep resolving. The wider space is a deliberate hardening: the session
+CRUD/stream endpoints bypass the auth middleware and are protected only by the
+unguessable ID plus per-source lookup rate limiting (D7 / §3.9), so the ID must
+be large enough that enumeration is infeasible even under that rate limit.
 
 | Concern | Where | Notes |
 |---|---|---|
@@ -76,7 +82,7 @@ A session is stored **outside the graph** in a new session store:
 
 ```
 Session {
-  id: "DDDD-DDDD",            # unchanged format, crypto-random
+  id: "DDDD-DDDD-DDDD-DDDD",  # crypto-random (legacy DDDD-DDDD still accepted)
   name: string | null,
   created_at, updated_at: iso8601,
   seq: int,                    # monotonic revision, incremented per applied op

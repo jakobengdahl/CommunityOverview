@@ -19,7 +19,9 @@ const LEGACY_SNAPSHOT_PREFIX = 'graph_session_snapshot_';
 // Cap the personal recents list so it cannot grow unbounded. Oldest first.
 const MAX_SESSIONS = 50;
 
-export const SESSION_ID_PATTERN = /^\d{4}-\d{4}$/;
+// Four grouped-digit form DDDD-DDDD-DDDD-DDDD (~10^16 space); the two-group
+// legacy form DDDD-DDDD stays valid so previously-shared URLs keep resolving.
+export const SESSION_ID_PATTERN = /^\d{4}-\d{4}(?:-\d{4}-\d{4})?$/;
 
 export function isValidSessionId(id) {
   return typeof id === 'string' && SESSION_ID_PATTERN.test(id);
