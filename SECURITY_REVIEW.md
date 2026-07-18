@@ -4,11 +4,14 @@ Date: 2026-07-18
 Scope: `CommunityOverview` (public core), `CommunityOverview-SaaS`, `Community-Overview-corp`.
 Method: manual source review of the backend API host, the graph REST/MCP surface,
 the OAuth gateway, the frontend, CI/deploy workflows, and dependency pins. No
-dynamic testing or dependency CVE scanning was run — see "Recommended tooling".
+dynamic testing or dependency CVE scanning was run — see finding #9.
 
 This is an action-tracking report. Each finding has a severity, the concrete
-location, why it matters, and a proposed fix. Nothing here has been changed in
-code; fixes should be scoped as their own branches/PRs per the workflow.
+location, why it matters, and a **session-ready remediation**: enough detail that
+a single Claude Code session can pick it up, implement it, and open a PR. Where a
+fix requires a judgement call, the remediation spells out the **decision, its
+consequences, and a recommendation**. Nothing here has been changed in code — each
+fix should be its own branch/PR per the standard workflow.
 
 ## Summary
 
@@ -21,116 +24,258 @@ every credential is read from an environment variable, and `.env*` is gitignored
 
 The findings below are mostly in the OAuth gateway (`services/mcp_oauth_gateway/`)
 and a few information-disclosure / hardening gaps in the API host. None is an
-unauthenticated remote-code-execution class bug; the highest-impact items are
-around OAuth token/redirect handling and an unauthenticated data-exposure surface
-that depends on deployment configuration.
+unauthenticated remote-code-execution class bug; the highest-impact items concern
+OAuth token/redirect handling and an unauthenticated data-exposure surface whose
+risk depends on deployment configuration.
 
-| # | Severity | Area | Finding |
-|---|----------|------|---------|
-| 1 | High | Gateway | `redirect_uri` is never validated against the registered client → auth-code interception / open redirect |
-| 2 | Medium | Gateway | Google ID token decoded with `verify_signature=False` (also disables `aud`/`exp`); OIDC `nonce` generated but never checked |
-| 3 | Medium | API host | 500 handlers leak full tracebacks / `print_exc` to the client on `/execute_tool` and `/export_graph` |
-| 4 | Medium | Gateway | 60-day access-token TTL with no revocation path |
-| 5 | Medium | API host | Shared-session read/write endpoints bypass auth, guarded only by an 8-digit ID (100M space) |
-| 6 | Low | Supply chain | All HTTP traffic (incl. the security-sensitive gateway) uses `httpx2`, an off-mainstream package — verify provenance |
-| 7 | Low | Gateway | In-memory auth-code and DCR stores are unbounded for DCR and not shared across replicas |
-| 8 | Low | API host | `/export_graph` has no read-tool allow-list gate when auth is inactive |
-| 9 | Info | Both repos | Verify branch protection / secret-scanning is enabled; add automated dependency + SAST scanning to CI |
+| # | Severity | Area | Finding | Effort |
+|---|----------|------|---------|--------|
+| 1 | High | Gateway | `redirect_uri` never validated against the registered client → auth-code interception / open redirect | M |
+| 2 | Medium | Gateway | Google ID token decoded with `verify_signature=False` (skips `aud`/`exp`); OIDC `nonce` unused | M |
+| 3 | Medium | API host | 500 handlers leak full tracebacks / `print_exc` on `/execute_tool` and `/export_graph` | S |
+| 4 | Medium | Gateway | 60-day access-token TTL with no revocation path | M |
+| 5 | Medium | API host | Shared-session read/write endpoints bypass auth, guarded only by an 8-digit id | M |
+| 6 | Low | Supply chain | All HTTP (incl. the gateway) uses `httpx2`, an off-mainstream package | S |
+| 7 | Low | Gateway | Unbounded in-memory DCR store; auth-code/DCR stores not replica-shared | S |
+| 8 | Low | API host | `/export_graph` lacks the read-allow-list gate `/execute_tool` has when auth is inactive | S |
+| 9 | Info | All repos | Add dependency + SAST + secret scanning to CI; confirm branch protection | S |
+
+Effort key: XS = single line · S = ≤ ~30 lines / one file · M = multi-file or logic-heavy.
 
 ---
 
-## Findings
+## Findings and remediations
 
 ### 1. `redirect_uri` is not validated against the registered client (High)
 
 - **Files:** `services/mcp_oauth_gateway/main.py:147` (`/authorize`),
-  `services/mcp_oauth_gateway/main.py:191` (`/callback`),
-  `services/mcp_oauth_gateway/auth.py:165` (`issue_auth_code`).
+  `main.py:191` (`/callback`), `services/mcp_oauth_gateway/auth.py:165`
+  (`issue_auth_code`), `auth.py:182` (`exchange_code_for_token`).
 - **Issue:** `/authorize` accepts any `redirect_uri` from the query string,
-  round-trips it through the Google `state`, and `/callback` redirects the
-  browser to that value with a freshly issued authorization `code`. The
-  `redirect_uris` recorded at Dynamic Client Registration (`/register`) are never
-  consulted, and there is no allow-list of permitted redirect targets. An attacker
-  who lures an allow-listed user through `/authorize?...&redirect_uri=https://evil`
+  round-trips it through the Google `state`, and `/callback` redirects the browser
+  to that value with a freshly issued authorization `code`. The `redirect_uris`
+  recorded at Dynamic Client Registration (`/register`) are never consulted, and
+  there is no allow-list of permitted redirect targets. An attacker who lures an
+  allow-listed user through `/authorize?...&redirect_uri=https://evil.example`
   receives the authorization code at their own endpoint.
-- **Why it matters:** This is the classic OAuth open-redirect / code-interception
-  vector. PKCE reduces (but does not eliminate) the impact: the code is bound to a
-  `code_challenge` the attacker also controls when they initiate the flow, so a
-  mix-up/redirect attack can still yield a usable token for the victim's identity.
-- **Fix:** Validate `redirect_uri` against a configured allow-list (and/or the
-  `redirect_uris` registered for the presented `client_id`) in `/authorize`, and
-  reject unknown values with `400`. Persist the validated `redirect_uri` in the
-  server-side flow state rather than trusting the callback round-trip.
+- **Why it matters:** Classic OAuth open-redirect / authorization-code interception.
+  PKCE limits but does not remove the impact (mix-up and malicious-client variants
+  remain), and the code + `state` are enough to complete a login as the victim in
+  several attack shapes.
 
-### 2. Google ID token signature is not verified; `nonce` unused (Medium)
+**Remediation (session-ready):**
 
-- **File:** `services/mcp_oauth_gateway/auth.py:134` (and `nonce` at
-  `main.py:180`).
-- **Issue:** `exchange_google_code` decodes the ID token with
-  `jwt.decode(id_token, options={"verify_signature": False})`. The docstring argues
-  this is safe because the code came from Google over TLS, but disabling signature
-  verification also disables `exp` and `aud` validation, and the `email_verified`
-  decision is then made on unverified claims. Separately, a `nonce` is generated in
-  `/authorize` and sent to Google but never checked against the returned token.
-- **Why it matters:** Defence-in-depth: any future refactor that lets an
-  externally-influenced token reach this path (caching, a second IdP, a test seam)
-  would trust forged claims. `aud`/`exp`/`nonce` checks are the standard OIDC
-  guarantees and cost little.
-- **Fix:** Verify the ID token against Google's JWKS (`aud` = client id, issuer =
-  `accounts.google.com`, `exp` enforced) using the `PyJWT[crypto]` +
-  `PyJWKClient` already available, and validate the returned `nonce` matches the
-  one issued for the flow.
+1. Add a redirect allow-list config value in `config.py`, e.g.
+   `ALLOWED_REDIRECT_URIS: List[str]` read from an env var
+   (`ALLOWED_REDIRECT_URIS`, comma-separated). Support exact-match URIs; if
+   prefix/wildcard matching is needed for local dev, gate it behind an explicit
+   `ALLOW_LOOPBACK_REDIRECTS=true` that only permits `http://127.0.0.1:*` and
+   `http://localhost:*` (RFC 8252 §7.3).
+2. In `/authorize` (`main.py:147`), after the PKCE checks, reject any
+   `redirect_uri` not on the allow-list (or, if `client_id` is present and known in
+   `dcr_clients`, not in that client's registered `redirect_uris`) with
+   `HTTPException(400, "redirect_uri not permitted")`. Validate **before**
+   redirecting to Google.
+3. In `/callback` (`main.py:191`), re-validate the `redirect_uri` decoded from
+   `state` against the same allow-list before issuing the code — the state value is
+   attacker-influenced and must not be trusted blindly.
+4. Add tests in `test_oauth_flow.py`: (a) a disallowed `redirect_uri` → 400 at
+   `/authorize`; (b) a tampered `redirect_uri` in the callback state → 400; (c) an
+   allow-listed URI still completes the happy path.
+
+**Decision — how strict should matching be?**
+- *Option A (recommended): exact-match allow-list from env, plus RFC 8252 loopback
+  exception behind a flag.* Consequence: any new client redirect URI is a config
+  change (small ops overhead) but the interception vector is closed and the policy
+  is auditable. Best fit for an allow-listed, small-user-base gateway.
+- *Option B: trust the `redirect_uris` registered via `/register`.* Consequence:
+  self-service, but `/register` is unauthenticated (finding #7), so an attacker can
+  register their own malicious redirect and defeat the check. Only viable if
+  `/register` is locked down first. **Not recommended** on its own.
+- Recommendation: ship Option A now; revisit Option B only after #7 restricts
+  registration.
+
+---
+
+### 2. Google ID token signature not verified; `nonce` unused (Medium)
+
+- **File:** `services/mcp_oauth_gateway/auth.py:100-149` (`exchange_google_code`,
+  `verify_signature=False` at `:134`); `nonce` generated at `main.py:180` and
+  never checked.
+- **Issue:** The ID token is decoded with
+  `jwt.decode(id_token, options={"verify_signature": False})`, which also disables
+  `exp` and `aud` validation. The `email_verified`/`email` decision is then made on
+  unverified claims. The OIDC `nonce` is generated and sent to Google but never
+  validated against the returned token.
+- **Why it matters:** Defence-in-depth. The token currently comes straight from
+  Google's token endpoint over TLS, so today the exposure is low — but any refactor
+  that introduces caching, a second IdP, or a test seam would silently trust forged
+  claims. `aud`/`exp`/`nonce` are cheap, standard OIDC guarantees.
+
+**Remediation (session-ready):**
+
+1. `PyJWT[crypto]` is already pinned in the gateway requirements, so use
+   `jwt.PyJWKClient("https://www.googleapis.com/oauth2/v3/certs")` to fetch Google's
+   signing keys (construct it once at module load; it caches keys internally).
+2. Replace the unverified decode in `exchange_google_code` with a verified one:
+   ```python
+   signing_key = _google_jwks.get_signing_key_from_jwt(id_token)
+   claims = jwt.decode(
+       id_token,
+       signing_key.key,
+       algorithms=["RS256"],
+       audience=config.GOOGLE_OAUTH_CLIENT_ID,
+       issuer=["https://accounts.google.com", "accounts.google.com"],
+   )
+   ```
+   Keep the existing `email` / `email_verified` handling after verification.
+3. Thread the `nonce` through the flow: store the issued `nonce` in the server-side
+   flow state (see #4/#7 for where flow state should live) and assert
+   `claims.get("nonce") == expected_nonce` in the callback.
+4. Handle `PyJWKClientError` / `PyJWTError` by returning `None` (same failure shape
+   as today) and logging a warning.
+5. Tests: a token with a bad signature, wrong `aud`, expired `exp`, or mismatched
+   `nonce` must all be rejected; a valid Google-signed token still passes. Mock the
+   JWKS client so tests stay offline (CI has no network to Google).
+
+**Decision — network dependency on Google JWKS in tests/CI.**
+- Verifying signatures means production must reach Google's JWKS endpoint (it
+  already reaches Google's token endpoint, so no new egress). Consequence: mock the
+  JWKS client in tests so CI stays hermetic. Recommendation: proceed — the JWKS
+  fetch is cached and the added assurance is worth it.
+
+---
 
 ### 3. Full tracebacks returned / printed on server errors (Medium — info disclosure)
 
 - **File:** `backend/api_host/tool_routes.py:98` (`traceback.print_exc()`) and
-  `:114-116` (`{"error": str(e), "traceback": error_trace}` returned to the client
-  with `status_code=500`).
-- **Issue:** The `/export_graph` handler serialises the full Python traceback into
-  the HTTP response body, and `/execute_tool` prints stack traces to stdout. This
-  leaks internal file paths, dependency versions, and code structure to any caller
-  that can trigger a 500. `print_exc` is also on the CLAUDE.md "never stage debug
-  artifacts" list.
-- **Fix:** Log the traceback server-side (`logger.exception(...)`) and return a
-  generic `{"error": "internal error"}` with a correlation id. Remove the
-  `traceback` field from the response and the `print_exc()` call.
+  `:114-116` (`{"error": str(e), "traceback": error_trace}` returned with
+  `status_code=500`).
+- **Issue:** `/export_graph` serialises the full Python traceback into the HTTP
+  response body; `/execute_tool` prints stack traces to stdout. This leaks internal
+  file paths, dependency versions, and code structure to any caller that can
+  trigger a 500. `print_exc` is also on the CLAUDE.md "never stage debug artifacts"
+  list, so it is a lint/policy violation as well.
+
+**Remediation (session-ready):**
+
+1. In `tool_routes.py`, replace `traceback.print_exc()` (`:98`) with
+   `logger.exception("execute_tool failed for %s", tool_name)`.
+2. In the `/export_graph` handler (`:113-116`), remove the `traceback` field and
+   the `traceback.format_exc()` call; return
+   `JSONResponse({"error": "internal error", "request_id": <id>}, status_code=500)`
+   and `logger.exception(...)` server-side. Drop the now-unused
+   `import traceback` at `:5` if nothing else needs it.
+3. Optionally generate a short `request_id` (`secrets.token_hex(8)`) and log it
+   alongside the exception so an operator can correlate a user-reported error to the
+   server log without exposing internals.
+4. Grep the rest of the backend for the same pattern
+   (`grep -rn "traceback.format_exc\|print_exc\|traceback.*response" backend/`) and
+   fix any sibling handlers so the response contract is consistent.
+5. Test: force an exception in an executed tool and assert the response body
+   contains no `traceback`/file-path substring and status is 500.
+
+No decision required — this is a straight hardening fix. Effort S.
+
+---
 
 ### 4. 60-day access-token TTL, no revocation (Medium)
 
 - **File:** `services/mcp_oauth_gateway/config.py:61`
-  (`ACCESS_TOKEN_TTL_SECONDS = 60 * 24 * 3600`).
-- **Issue:** Gateway JWTs live 60 days, and because they are stateless HMAC tokens
-  there is no way to revoke one before expiry (removing a user from `TEST_USERS`
-  does not invalidate already-issued tokens). A leaked token grants two months of
-  access.
-- **Why it matters:** The comment explains the long TTL avoids re-auth after Cloud
-  Run scale-to-zero, which is a real UX need — but the trade-off is a large
-  exposure window with no kill switch.
-- **Fix:** Issue a short-lived access token (minutes–hours) plus a refresh token,
-  or add a server-side token version / `jti` deny-list keyed on the user so the
-  allow-list change takes effect. At minimum, re-check `is_user_allowed(sub)` on
-  every proxied request in `_require_valid_token` so de-listing is enforced live.
+  (`ACCESS_TOKEN_TTL_SECONDS = 60 * 24 * 3600`); validation at
+  `auth.py:232` (`validate_token`), enforcement at `main.py:321`
+  (`_require_valid_token`).
+- **Issue:** Gateway JWTs live 60 days and are stateless HMAC tokens, so there is
+  no way to revoke one before expiry. Removing a user from `TEST_USERS` does **not**
+  invalidate already-issued tokens — a de-listed or leaked token keeps working for
+  up to two months. The long TTL exists to survive Cloud Run scale-to-zero without
+  re-auth (a real UX need), so simply shortening it regresses that.
+
+**Remediation (session-ready):** two complementary layers; do at least layer A.
+
+- **Layer A — live allow-list re-check (small, high value).** In
+  `_require_valid_token` (`main.py:321`), after `auth.validate_token` succeeds,
+  call `auth.is_user_allowed(claims["sub"])` and raise `401` if the user is no
+  longer allow-listed. Consequence: de-listing takes effect on the next request
+  even with long-lived tokens; cost is one set-membership check per proxied
+  request. Add a test: a valid token whose `sub` was removed from `TEST_USERS` is
+  rejected.
+- **Layer B — refresh-token model (larger).** Shorten `ACCESS_TOKEN_TTL_SECONDS`
+  to minutes/hours and issue a longer-lived refresh token at `/token`, adding a
+  `grant_type=refresh_token` branch. This restores the reconnect UX while shrinking
+  the access-token exposure window.
+
+**Decision — how far to go on revocation.**
+- *Option 1 (recommended first step): keep the long-lived access token but add
+  Layer A.* Consequence: no client changes, no new endpoints; de-listing works
+  immediately; a leaked token of a still-allowed user remains valid until expiry.
+  Good cost/benefit for the current small allow-listed audience.
+- *Option 2: Layer A + a `jti` deny-list* (store revoked token ids, checked in
+  `validate_token`). Consequence: enables per-token revocation, but reintroduces
+  server-side state that must be shared across replicas (ties into #7). Adopt when
+  per-token revocation becomes a real requirement.
+- *Option 3: full short-lived access + refresh tokens (Layer B).* Consequence:
+  standards-aligned and smallest exposure window, but the most client/flow work and
+  more moving parts. Recommended target state once the gateway has more than a
+  handful of users.
+- Recommendation: implement Layer A now (this PR-sized change), and record Options
+  2/3 as roadmap items in the SaaS repo.
+
+---
 
 ### 5. Shared-session endpoints bypass auth, guarded only by an 8-digit id (Medium)
 
 - **Files:** `backend/api_host/middleware.py:64-76` (auth bypass for `/sessions/`
-  and `/api/sessions/*/stream`), `backend/core/session_store.py:356`
-  (`_new_id` → `NNNN-NNNN`, ~10^8 space), session CRUD/ops in
-  `backend/service/rest_api.py:662-832`.
+  and `/api/sessions/*/stream`), `backend/core/session_store.py:38`
+  (`SESSION_ID_RE = ^\d{4}-\d{4}$`) and `:356` (`_new_id`, ~10^8 space),
+  session CRUD/ops/stream in `backend/service/rest_api.py:662-832`, rate limiter in
+  `backend/core/session_manager.py:170` (`check_lookup_rate`) with defaults
+  `lookup_bucket_capacity=60`, `lookup_refill_per_sec=2` (`:66-67`).
 - **Issue:** Shared multi-user sessions are readable and mutable
-  (`GET/PATCH/DELETE /api/sessions/{id}`, `POST .../ops`, SSE stream) without any
+  (`GET/PATCH/DELETE /api/sessions/{id}`, `POST .../ops`, SSE stream) with **no**
   Authorization header — by design, because `EventSource` cannot send one. The only
-  protection is an unguessable 8-digit session id plus per-IP lookup rate limiting
-  (`_rate_limit_lookup`). 100M ids is a modest space for a determined enumerator,
-  and the session state carries graph node references.
-- **Why it matters:** On an instance where the main graph is otherwise
-  authenticated, this side channel can leak or corrupt session-scoped graph
-  selections to an unauthenticated party who guesses/enumerates an id.
-- **Fix:** The rate limiter is the right mitigation — confirm it is enabled and
-  low-threshold by default, key it on the pre-proxy client IP correctly (see
-  `_lookup_rate_key` / `TRUSTED_PROXY_HOPS`), and consider widening the id to a
-  full `secrets.token_urlsafe` value. Document the trust model explicitly in
-  `docs/MULTI_USER_SESSIONS_DESIGN.md`.
+  protection is an unguessable 8-digit id plus per-IP lookup rate limiting. With the
+  current bucket (2 guesses/sec sustained per key, burst 60), a single source needs
+  a long time to hit a *specific* id, but hitting *any* live session out of a
+  populated store is far cheaper, and a distributed source multiplies the rate. The
+  session state carries graph node references, so a hit leaks or lets an attacker
+  mutate session-scoped graph selections.
+- **Why it matters:** On an instance where the main graph is authenticated, this is
+  an unauthenticated side channel into session-scoped data. The rate limit is the
+  right idea but the id is the weak part of the design.
+
+**Remediation (session-ready):**
+
+1. **Widen the id (main mitigation).** Change `_new_id` (`session_store.py:356`) to
+   `secrets.token_urlsafe(16)` (≈128 bits) and update `SESSION_ID_RE` (`:38`) to
+   match the new alphabet (`^[A-Za-z0-9_-]{16,}$`). This makes enumeration
+   infeasible regardless of rate limiting. **Migration:** existing `NNNN-NNNN` ids
+   in `data/sessions/` must keep resolving — either broaden the regex to accept
+   *both* the legacy and new formats, or add a one-time migration; document the
+   choice in the PR. This is the breaking-surface consideration to call out.
+2. **Keep and verify the rate limit.** Confirm `check_lookup_rate` is called on
+   every auth-bypassed session endpoint (it is, on `GET` and stream; verify
+   `PATCH`/`DELETE`/`ops` paths too) and that the client key is the real client IP —
+   review `_lookup_rate_key` in `rest_api.py:34` together with `TRUSTED_PROXY_HOPS`
+   so that behind Cloud Run the key is the client, not a shared proxy address (a
+   shared key collapses everyone into one bucket). Consider lowering
+   `lookup_refill_per_sec` if step 1 is deferred.
+3. **Tests:** id format round-trips through create → get → stream; legacy id still
+   resolves (if kept); rate-limit returns 429 after the bucket is drained.
+
+**Decision — widen the id vs. rely on the rate limit alone.**
+- *Option A (recommended): widen to a 128-bit token.* Consequence: closes the
+  enumeration risk permanently; requires a small migration/regex change for legacy
+  ids. The ids also appear in shareable URLs (they are meant to be shared), so a
+  longer id is slightly less pretty but semantically unchanged.
+- *Option B: keep the short id, only tighten the rate limit.* Consequence: no
+  migration, but the id space is still small and a distributed attacker can churn
+  through it; you are trading a permanent fix for a tunable one. **Not recommended**
+  as the primary control.
+- Recommendation: Option A, accepting both id formats during a transition window.
+  Document the trust model explicitly in `docs/MULTI_USER_SESSIONS_DESIGN.md`.
+
+---
 
 ### 6. All HTTP uses `httpx2`, an off-mainstream package (Low — supply chain)
 
@@ -139,39 +284,103 @@ that depends on deployment configuration.
   `import httpx2 as httpx` across federation, skills loader, agents, and the
   gateway proxy/auth.
 - **Issue:** The mainstream, widely-audited HTTP client is `httpx` (encode/httpx).
-  `httpx2` is a different, far less prominent PyPI package and is used for **all**
+  `httpx2` is a different, far less prominent PyPI package, and it carries **all**
   outbound HTTP including the security-sensitive OAuth token exchange. This is a
-  concentrated supply-chain dependency on a low-profile package.
-- **Fix:** Confirm `httpx2` is the intended, vetted dependency (pin by hash, review
-  the publisher and source). If it is a fork chosen for a specific reason, document
-  that reason; otherwise migrate to `httpx`. The gateway already hash-pins-by-version
-  — extend that to full hash pinning for this package.
+  concentrated supply-chain dependency on a low-profile package (and, if it were
+  ever unclaimed/removed, a potential dependency-confusion surface).
+
+**Remediation (session-ready):**
+
+1. First, **establish provenance** — this is an investigation, not a blind swap.
+   Check the `httpx2` PyPI project page (publisher, upload history, source repo,
+   download counts) and why it was chosen over `httpx` (search git history /
+   `STRUCTURE_REVIEW.md` for the rationale). Record the finding in the PR.
+2. If `httpx2` is a deliberate, maintained choice: pin it **by hash** in both
+   requirements files (`--hash=sha256:...` via a compiled `requirements.lock` or
+   `pip-compile --generate-hashes`) so a compromised re-publish cannot slip in. The
+   gateway already exact-pins by version; extend to hash pinning there.
+3. If provenance is weak or the reason no longer holds: migrate to `httpx`. The
+   code aliases `import httpx2 as httpx`, so the change is mostly the requirement
+   line plus verifying API parity (`AsyncClient`, `.stream`, `http2=` kwarg usage in
+   `proxy.py`). Run the full backend + gateway suites afterwards.
+
+**Decision — keep-and-pin vs. migrate.**
+- *Keep + hash-pin:* lowest churn, but you retain a dependency on a niche package;
+  acceptable if provenance checks out.
+- *Migrate to `httpx`:* removes the concentration risk and aligns with the
+  ecosystem, at the cost of a dependency swap and re-test.
+- Recommendation: do step 1 regardless; prefer migration to `httpx` unless there is
+  a concrete, documented reason `httpx2` is required. Either way, hash-pinning is
+  the non-negotiable part for the security-sensitive gateway.
+
+---
 
 ### 7. In-memory DCR/auth-code stores: unbounded DCR, not replica-shared (Low)
 
 - **Files:** `services/mcp_oauth_gateway/main.py:62` (`dcr_clients`),
   `services/mcp_oauth_gateway/auth.py:44` (`_code_store`).
-- **Issue:** `dcr_clients` grows without bound and without TTL — an open
-  `/register` endpoint lets anyone add entries indefinitely (memory-growth DoS).
-  Auth codes are pruned, but both stores are per-process, so behind more than one
-  Cloud Run instance a code issued on one replica cannot be redeemed on another
-  (correctness, and it pushes operators toward sticky sessions).
-- **Fix:** Add a size cap + TTL to `dcr_clients` (or require the endpoint be
-  reachable only during onboarding), and move both stores to a shared backend
-  (or accept single-instance operation and document it).
+- **Issue:** `dcr_clients` grows without bound and without TTL — the unauthenticated
+  `/register` endpoint (`main.py:76`) lets anyone add entries indefinitely
+  (memory-growth DoS, and it feeds the redirect-trust option rejected in #1). Auth
+  codes are pruned, but both stores are per-process, so behind more than one Cloud
+  Run instance a code issued on one replica cannot be redeemed on another
+  (correctness; also pushes operators toward sticky sessions).
+
+**Remediation (session-ready):**
+
+1. Bound `dcr_clients`: add a max-entries cap and a TTL (evict oldest / expired on
+   insert), mirroring `_prune_expired_codes`. Add a `client_id_expires_at` and drop
+   stale registrations.
+2. Consider requiring the `/register` endpoint to be reachable only during
+   onboarding, or rate-limit it per IP (reuse the token-bucket pattern from
+   `session_manager.py`).
+3. For multi-instance correctness, either (a) document and enforce single-instance
+   operation for the gateway (min instances = max instances = 1), or (b) move
+   `_code_store` and `dcr_clients` to a shared store (Redis/Firestore). Auth codes
+   are short-lived (5 min TTL), so single-instance is a legitimate, low-cost choice.
+
+**Decision — shared state vs. single instance.**
+- *Single instance (recommended near-term):* zero new infra; the 5-minute code TTL
+  and OAuth flow tolerate it. Consequence: the gateway cannot horizontally scale,
+  which is fine at current volume. Document it in the deploy contract.
+- *Shared store:* enables scale-out and per-token revocation (ties into #4 Option
+  2), at the cost of a Redis/Firestore dependency and its own security surface.
+  Adopt when the gateway needs more than one instance.
+- Recommendation: bound `dcr_clients` now (always correct), and pick single-instance
+  operation until scale demands a shared store.
+
+---
 
 ### 8. `/export_graph` has no read-allow-list gate when auth is inactive (Low)
 
-- **File:** `backend/api_host/tool_routes.py:101` vs the `SAFE_TOOLS` gate at
-  `:74-81`.
-- **Issue:** `/execute_tool` refuses non-safe tools when `auth_active` is false,
-  but the sibling `/export_graph` endpoint has no equivalent check — on an instance
-  with auth disabled it dumps the entire graph unauthenticated. This may be
-  intended for fully-open standalone instances, but it is inconsistent with the
-  `/execute_tool` gate and easy to overlook.
-- **Fix:** Decide the intended posture and make it explicit: either gate
-  `/export_graph` behind `auth_active` (like unsafe tools) or document that export
-  is a public read on open instances, consistent with `SAFE_TOOLS`.
+- **File:** `backend/api_host/tool_routes.py:101` (`/export_graph`) vs. the
+  `SAFE_TOOLS` gate at `:74-81` (`/execute_tool`).
+- **Issue:** `/execute_tool` refuses non-safe tools when `auth_active` is false, but
+  the sibling `/export_graph` endpoint has no equivalent check — on an instance with
+  auth disabled it dumps the entire graph unauthenticated. This may be intended for
+  fully-open standalone instances, but it is inconsistent with `/execute_tool` and
+  easy to overlook when hardening a deployment.
+
+**Remediation (session-ready):** decide the intended posture, then make it explicit.
+
+- *If export should follow the same rule as unsafe tools:* add the `auth_active`
+  guard to `/export_graph` (return 403 when `not auth_active`), matching
+  `/execute_tool`. Add a test for both auth-inactive (403) and auth-active (200)
+  cases.
+- *If export is deliberately a public read on open instances:* add `export_graph`
+  to the conceptual read-safe set, and document in `backend/DEVELOPMENT.md` that a
+  full graph export is unauthenticated on auth-disabled instances so operators can
+  make an informed choice.
+
+**Decision — is a full graph export "read-safe"?**
+- A whole-graph dump is materially more sensitive than a scoped `search_graph`, so
+  treating it like the other `SAFE_TOOLS` reads is arguably too permissive.
+- Recommendation: **gate it behind `auth_active`** (treat export as privileged) and
+  document the choice. This is the safer default and keeps the two endpoints
+  consistent; operators who truly want open export can still disable auth-scoping
+  deliberately.
+
+---
 
 ### 9. CI / repo hardening (Info)
 
@@ -179,13 +388,24 @@ that depends on deployment configuration.
   workflows are `workflow_dispatch`-only and delegate real deployment to the infra
   repo; CORS and auth defaults are safe. CI runs tests + ruff/eslint but no
   security scanning.
-- **Fix / recommended tooling:**
-  - Add dependency vulnerability scanning (`pip-audit` for backend + gateway,
-    `npm audit`/Dependabot for the frontend) as a CI job.
-  - Add a Python SAST pass (`bandit`) and secret scanning (GitHub secret scanning
-    / `gitleaks`) to CI.
-  - Confirm branch protection + required checks on `dev` (documented in CLAUDE.md)
-    and enable GitHub secret scanning + push protection on all three repos.
+
+**Remediation (session-ready):**
+
+1. Add a CI job (`.github/workflows/ci.yml`) running `pip-audit` against
+   `backend/requirements*.txt` and `services/mcp_oauth_gateway/requirements.txt`,
+   and `npm audit --audit-level=high` for the frontend workspaces. Start
+   non-blocking (report-only) to establish a baseline, then promote to required.
+2. Add a Python SAST pass with `bandit -r backend services` (tuned to skip test
+   dirs) as a non-required job first.
+3. Enable GitHub secret scanning + push protection on all three repos, or add a
+   `gitleaks` CI step if that is preferred over the GitHub-native feature.
+4. Confirm branch protection + required checks on `dev` (documented in CLAUDE.md as
+   already enabled) and mirror an equivalent policy on the SaaS/corp `main` branches.
+
+**Decision — required vs. advisory scanners.** Making `pip-audit`/`bandit` required
+can block merges on an upstream CVE with no fix available. Recommendation: land them
+as **advisory** (non-required) first, triage the initial noise into `SMALL_FIXES.md`,
+then promote the dependency-audit job to required once the baseline is clean.
 
 ---
 
@@ -195,15 +415,16 @@ that depends on deployment configuration.
 / contract repos: YAML prototypes, validators (`scripts/validate_*.py`), and graph
 JSON. No executable service code, no dynamic input handling, and no secrets were
 found — placeholder values only, consistent with their stated policy. The
-`scripts/validate_*.py` files use `json`/`yaml.safe_load`-style parsing over
-in-repo files, not untrusted input. The main cross-cutting recommendation for
-these repos is #9 (secret scanning / branch protection).
+`scripts/validate_*.py` files parse in-repo files, not untrusted input. The main
+cross-cutting recommendation for these repos is #9 (secret scanning / branch
+protection). When the SaaS repo grows real services, revisit this review against
+that code.
 
 ## What was NOT covered
 
 - No dynamic/DAST testing or live exploitation was performed.
 - No dependency CVE scan was run (recommended as CI tooling — finding #9).
-- Third-party package internals (including `httpx2`) were not audited beyond
-  provenance flagging.
-- Frontend was reviewed for obvious sinks (`dangerouslySetInnerHTML`, `innerHTML`,
-  `eval` — none found) but not exhaustively for DOM XSS.
+- Third-party package internals (including `httpx2`) were not audited beyond the
+  provenance flag in #6.
+- The frontend was checked for obvious sinks (`dangerouslySetInnerHTML`,
+  `innerHTML`, `eval` — none found) but not exhaustively for DOM XSS.
