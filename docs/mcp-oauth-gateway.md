@@ -77,6 +77,7 @@ The change takes effect within a few seconds (no redeployment needed).
 | `PUBLIC_BASE_URL` | Yes | Public URL of this gateway, e.g. `https://mcp.esam.communityoverview.example.com` |
 | `ALLOWED_REDIRECT_ORIGINS` | No | Comma-separated `scheme://host[:port]` prefixes the gateway may send authorization codes to, e.g. `https://chatgpt.com,https://claude.ai`. When unset the gateway accepts any `redirect_uri` (legacy behaviour) but logs a warning — **set this in production** to prevent authorization-code interception. Loopback URIs are always allowed. |
 | `GATEWAY_API_KEY` | No | Optional static bearer token for non-OAuth clients |
+| `TRUSTED_PROXY_HOPS` | No | Trusted reverse-proxy hops in front of `/register` for client-IP extraction from `X-Forwarded-For` (default `1` for direct Cloud Run; set `2` behind an external load balancer) |
 | `PORT` | No | TCP port (default `8080`) |
 
 ---
@@ -123,6 +124,8 @@ gcloud run deploy mcp-gateway-esam-prod \
   account that is not in the list receives HTTP 403.
 - The Dynamic Client Registration store (`/register`) is bounded (size cap + TTL) so the
   open endpoint cannot exhaust memory, and `/register` is rate-limited per client IP
-  (token bucket) so it cannot be flooded. Behind Cloud Run the client IP is taken from
-  the right-most `X-Forwarded-For` entry (the proxy-appended address) so the key cannot
+  (token bucket, with the bucket map itself hard-capped) so it cannot be flooded. The
+  client IP is read as the `TRUSTED_PROXY_HOPS`-th entry from the right of
+  `X-Forwarded-For` (default 1 for a direct Cloud Run ingress; set 2 behind an external
+  load balancer), so client-supplied entries further left are ignored and the key cannot
   be spoofed.

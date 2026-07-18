@@ -588,6 +588,65 @@ class TestRegisterRateLimit(unittest.TestCase):
         )
         assert resp.status_code == 429
 
+    def test_trusted_proxy_hops_selects_entry_from_the_right(self):
+        # With two trusted hops the real client is the 2nd-from-right entry, so a
+        # rotating right-most (e.g. a load-balancer IP) does not create fresh
+        # budgets for the same client.
+        import main
+
+        body = {"redirect_uris": ["https://a/cb"]}
+        with patch.object(config, "TRUSTED_PROXY_HOPS", 2):
+            for _ in range(25):  # exhaust the budget for client 100.64.0.5
+                client.post(
+                    "/register",
+                    json=body,
+                    headers={"X-Forwarded-For": "1.1.1.1, 100.64.0.5, 10.0.0.1"},
+                )
+            # Same real client (2nd-from-right 100.64.0.5), different LB IP right-most.
+            resp = client.post(
+                "/register",
+                json=body,
+                headers={"X-Forwarded-For": "1.1.1.1, 100.64.0.5, 10.0.0.2"},
+            )
+        assert resp.status_code == 429
+
+
+class TestRegisterBucketBounds(unittest.TestCase):
+    """The rate-limiter's own state must not grow without bound."""
+
+    def setUp(self):
+        import main
+
+        main._register_buckets.clear()
+
+    def test_prune_hard_caps_the_map_under_a_fresh_flood(self):
+        import main
+        import time as _time
+
+        now = _time.monotonic()
+        # Simulate an active many-IP flood: every bucket is fresh (not idle), so
+        # idle eviction frees nothing and the hard cap must kick in.
+        for i in range(main._MAX_REGISTER_BUCKETS + 500):
+            main._register_buckets[f"ip-{i}"] = (0.0, now)
+        main._prune_register_buckets(now)
+        assert len(main._register_buckets) < main._MAX_REGISTER_BUCKETS
+        main._register_buckets.clear()
+
+    def test_prune_drops_idle_buckets_first(self):
+        import main
+        import time as _time
+
+        now = _time.monotonic()
+        # Fill to the cap with idle entries plus a few fresh ones.
+        for i in range(main._MAX_REGISTER_BUCKETS):
+            main._register_buckets[f"idle-{i}"] = (5.0, now - main._REGISTER_BUCKET_IDLE_TTL - 10)
+        main._register_buckets["fresh"] = (5.0, now)
+        main._prune_register_buckets(now)
+        # The fresh key survives; idle keys are reclaimed.
+        assert "fresh" in main._register_buckets
+        assert len(main._register_buckets) < main._MAX_REGISTER_BUCKETS
+        main._register_buckets.clear()
+
 
 if __name__ == "__main__":
     unittest.main()
