@@ -21,20 +21,17 @@ Effort scale: XS = single-line fix · S = up to ~30 lines / one file · M = mult
 
 ## Open
 
-### [2026-07-18] bandit flags MD5 slug fallback as weak-hash (B324)
-- **File(s):** `backend/skills/loader.py:862`
-- **Context:** Discovered during `claude/ci-bandit-sast` (SECURITY_REVIEW.md #9)
-- **Issue:** `hashlib.md5(name.encode()).hexdigest()[:8]` is a non-security slug
-  fallback, but bandit reports it as a High-severity weak-hash use. Pass
-  `usedforsecurity=False` to `hashlib.md5(...)` to make the non-security intent
-  explicit and clear the bandit High finding. Not a real vulnerability.
-- **Effort:** XS
+*(no open items)*
 
 ---
 
 ## Fixed
 
 *(resolved entries moved here after merge, for reference)*
+
+### [2026-07-18] Fixed in branch `claude/fix-bandit-md5-slug`
+
+- **bandit flagged the MD5 slug fallback as weak-hash (B324)** — `backend/skills/loader.py:862`. The `hashlib.md5(name.encode())` call derives a stable slug fallback, not a security digest. Passed `usedforsecurity=False` so the non-security intent is explicit, clearing the bandit High finding. No behaviour change (the digest value is unchanged). Surfaced by the advisory bandit job added in SECURITY_REVIEW.md #9.
 
 ### [2026-07-17] Fixed in branch `fix/small-fixes-since-seq-reconnect`
 

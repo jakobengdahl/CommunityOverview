@@ -859,7 +859,9 @@ def _name_from_url(url: str) -> str:
 def _make_id(name: str) -> str:
     """Create a stable lowercase-hyphenated ID from a name."""
     slug = re.sub(r"[^a-z0-9]+", "-", name.lower()).strip("-")
-    return slug or hashlib.md5(name.encode()).hexdigest()[:8]
+    # md5 here derives a stable slug fallback, not a security digest; mark it so
+    # (usedforsecurity=False) to reflect intent and clear the bandit B324 flag.
+    return slug or hashlib.md5(name.encode(), usedforsecurity=False).hexdigest()[:8]
 
 
 def _parse_yaml_simple(text: str) -> Dict[str, Any]:
