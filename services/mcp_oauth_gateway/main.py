@@ -67,6 +67,70 @@ dcr_clients: dict[str, dict] = {}
 MAX_DCR_CLIENTS = 1000
 DCR_CLIENT_TTL_SECONDS = 30 * 24 * 3600  # 30 days
 
+# Per-client-IP token-bucket rate limit on the unauthenticated /register
+# endpoint so it cannot be flooded (the store cap above bounds memory; this
+# bounds request rate). Legitimate MCP clients register once per connection, so
+# a generous budget never affects them.
+REGISTER_RATE_CAPACITY = 20.0  # burst
+REGISTER_RATE_REFILL_PER_SEC = 0.2  # ~12 registrations/min sustained
+_REGISTER_BUCKET_IDLE_TTL = 3600.0  # drop an IP's bucket after 1 h of silence
+# Hard ceiling on the bucket map so the limiter's own state cannot be grown
+# without bound by a many-IP (distributed) flood, where idle eviction alone
+# frees nothing because every bucket is fresh. Mirrors the dcr_clients cap.
+_MAX_REGISTER_BUCKETS = 20_000
+
+_register_buckets: dict[str, tuple[float, float]] = {}  # ip -> (tokens, last_ts)
+
+
+def _client_ip(request: Request) -> str:
+    """Best-effort client IP for rate limiting.
+
+    The real client IP is read as the ``TRUSTED_PROXY_HOPS``-th entry from the
+    right of ``X-Forwarded-For`` — the address the outermost trusted proxy
+    recorded. Client-supplied entries sit further left and are ignored, so the
+    key cannot be spoofed to mint a fresh budget. Falls back to the socket peer
+    for direct/local execution where no ``X-Forwarded-For`` header is present.
+    """
+    forwarded = request.headers.get("x-forwarded-for", "")
+    parts = [p.strip() for p in forwarded.split(",") if p.strip()]
+    if parts:
+        hops = max(1, config.TRUSTED_PROXY_HOPS)
+        return parts[max(0, len(parts) - hops)]
+    return request.client.host if request.client else "unknown"
+
+
+def _prune_register_buckets(now: float) -> None:
+    """Bound the bucket map: drop idle keys, then hard-evict oldest if still over."""
+    if len(_register_buckets) < _MAX_REGISTER_BUCKETS:
+        return
+    cutoff = now - _REGISTER_BUCKET_IDLE_TTL
+    for stale in [ip for ip, (_, ts) in _register_buckets.items() if ts < cutoff]:
+        del _register_buckets[stale]
+    if len(_register_buckets) >= _MAX_REGISTER_BUCKETS:
+        # Active many-IP flood: nothing is idle, so evict oldest-seen first.
+        overflow = len(_register_buckets) - _MAX_REGISTER_BUCKETS + 1
+        for ip, _entry in sorted(
+            _register_buckets.items(), key=lambda kv: kv[1][1]
+        )[:overflow]:
+            del _register_buckets[ip]
+
+
+def _check_register_rate(request: Request) -> None:
+    """Consume one token for the caller's IP, raising 429 when the budget is spent."""
+    now = time.monotonic()
+    _prune_register_buckets(now)
+
+    ip = _client_ip(request)
+    tokens, last = _register_buckets.get(ip, (REGISTER_RATE_CAPACITY, now))
+    tokens = min(
+        REGISTER_RATE_CAPACITY,
+        tokens + (now - last) * REGISTER_RATE_REFILL_PER_SEC,
+    )
+    if tokens < 1.0:
+        _register_buckets[ip] = (tokens, now)
+        raise HTTPException(status_code=429, detail="registration rate limit exceeded")
+    _register_buckets[ip] = (tokens - 1.0, now)
+
 
 def _prune_dcr_clients() -> None:
     """Drop expired registrations and enforce the size cap (oldest-first)."""
@@ -132,11 +196,15 @@ class ClientRegistrationRequest(BaseModel):
 
 
 @app.post("/register")
-async def register_client(body: ClientRegistrationRequest) -> JSONResponse:
+async def register_client(
+    request: Request, body: ClientRegistrationRequest
+) -> JSONResponse:
     """Register a new OAuth client dynamically (RFC 7591).
 
     No client_secret is issued – PKCE (S256) is the security mechanism.
     """
+    _check_register_rate(request)
+
     if not body.redirect_uris:
         raise HTTPException(status_code=400, detail="redirect_uris is required and must not be empty")
 

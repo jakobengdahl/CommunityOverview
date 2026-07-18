@@ -43,6 +43,15 @@ PUBLIC_BASE_URL: str = _required("PUBLIC_BASE_URL").rstrip("/")
 # TCP port the server listens on
 PORT: int = int(_optional("PORT", "8080"))
 
+# Number of trusted reverse-proxy hops in front of /register, used to pick the
+# real client IP from X-Forwarded-For for rate limiting. 1 (default) suits a
+# direct Cloud Run *.run.app ingress, where the real client is the right-most
+# XFF entry. Behind an additional Google external HTTPS load balancer set 2 (the
+# LB appends the client IP, then Cloud Run appends the LB/GFE IP). The key is
+# read as the Nth entry from the right, so client-supplied entries further left
+# are ignored and cannot be spoofed to mint a fresh rate-limit budget.
+TRUSTED_PROXY_HOPS: int = int(_optional("TRUSTED_PROXY_HOPS", "1"))
+
 # Comma-separated list of allowed CORS origins (default: wildcard).
 # When set to specific origins, credentials are allowed; when wildcard, credentials are disabled.
 _raw_cors_origins: str = _optional("CORS_ALLOWED_ORIGINS", "*")
