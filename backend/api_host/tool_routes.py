@@ -2,7 +2,7 @@
 
 import json
 import logging
-import traceback
+import secrets
 from typing import Any, Optional
 
 from fastapi import FastAPI
@@ -59,6 +59,7 @@ def register_tool_routes(
     @app.post("/execute_tool")
     async def execute_tool_endpoint(request: Request) -> JSONResponse:
         """Execute a graph tool directly by name."""
+        body: Any = {}
         try:
             body = await request.json()
             tool_name = body.get("tool_name")
@@ -94,9 +95,19 @@ def register_tool_routes(
                 return access_denied_response
 
             return JSONResponse(json.loads(json.dumps(result, default=json_serializer)))
-        except Exception as e:
-            traceback.print_exc()
-            return JSONResponse({"error": str(e)}, status_code=500)
+        except Exception:
+            # Log the full detail server-side; return only a correlation id so
+            # internal paths / stack frames are never disclosed to the caller.
+            request_id = secrets.token_hex(8)
+            logger.exception(
+                "execute_tool failed (request_id=%s, tool=%s)",
+                request_id,
+                body.get("tool_name") if isinstance(body, dict) else None,
+            )
+            return JSONResponse(
+                {"error": "internal error", "request_id": request_id},
+                status_code=500,
+            )
 
     @app.get("/export_graph")
     async def export_graph_endpoint(request: Request) -> JSONResponse:
@@ -110,8 +121,12 @@ def register_tool_routes(
                 return access_denied_response
 
             return JSONResponse(result)
-        except Exception as e:
-            error_trace = traceback.format_exc()
+        except Exception:
+            # Never return the traceback to the client (leaks internal paths and
+            # code structure); log it server-side against a correlation id.
+            request_id = secrets.token_hex(8)
+            logger.exception("export_graph failed (request_id=%s)", request_id)
             return JSONResponse(
-                {"error": str(e), "traceback": error_trace}, status_code=500
+                {"error": "internal error", "request_id": request_id},
+                status_code=500,
             )
