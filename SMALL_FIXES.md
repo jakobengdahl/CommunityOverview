@@ -31,7 +31,7 @@ Effort scale: XS = single-line fix · S = up to ~30 lines / one file · M = mult
 
 ### [2026-07-18] Fixed in branch `claude/fix-bandit-md5-slug`
 
-- **bandit flagged the MD5 slug fallback as weak-hash (B324)** — `backend/skills/loader.py:862`. The `hashlib.md5(name.encode())` call derives a stable slug fallback, not a security digest. Passed `usedforsecurity=False` so the non-security intent is explicit, clearing the bandit High finding. No behaviour change (the digest value is unchanged). Surfaced by the advisory bandit job added in SECURITY_REVIEW.md #9.
+- **bandit flagged the MD5 slug fallback as weak-hash (B324)** — `backend/skills/loader.py` (`_make_id`). The `hashlib.md5(name.encode())` call derives a stable slug fallback, not a security digest. Passed `usedforsecurity=False` so the non-security intent is explicit, clearing the bandit High finding. No behaviour change (the digest value is unchanged). Surfaced by the advisory bandit job added in SECURITY_REVIEW.md #9.
 
 ### [2026-07-17] Fixed in branch `fix/small-fixes-since-seq-reconnect`
 
