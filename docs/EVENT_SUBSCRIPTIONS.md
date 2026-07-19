@@ -98,6 +98,7 @@ Events are delivered as JSON POST requests:
 ```json
 {
   "event_id": "550e8400-e29b-41d4-a716-446655440000",
+  "schema_version": "1.0",
   "event_type": "node.create",
   "occurred_at": "2024-01-15T10:30:00.000000Z",
   "origin": {
@@ -125,6 +126,11 @@ Events are delivered as JSON POST requests:
   }
 }
 ```
+
+The top-level `schema_version` identifies the shape of the event envelope.
+Subscribers should treat it as a contract version: additive changes keep the
+same major version, while a backwards-incompatible change bumps it and is
+accompanied by a migration note.
 
 ### HTTP Headers
 

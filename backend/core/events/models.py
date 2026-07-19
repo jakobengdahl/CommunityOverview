@@ -12,6 +12,12 @@ from pydantic import BaseModel, Field
 import uuid
 
 
+# Version of the mutation event envelope emitted to subscribers. Bump this when
+# the event payload shape changes so external consumers can negotiate/adapt.
+# Backwards-incompatible changes require a major bump and a migration note.
+EVENT_SCHEMA_VERSION = "1.0"
+
+
 class EventType(str, Enum):
     """Types of graph mutation events."""
 
@@ -187,6 +193,10 @@ class Event(BaseModel):
     """
 
     event_id: str = Field(default_factory=lambda: str(uuid.uuid4()))
+    schema_version: str = Field(
+        default=EVENT_SCHEMA_VERSION,
+        description="Version of the event envelope shape, for subscriber negotiation",
+    )
     event_type: EventType
     occurred_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
 
@@ -203,6 +213,7 @@ class Event(BaseModel):
         """Convert to the webhook payload format."""
         return {
             "event_id": self.event_id,
+            "schema_version": self.schema_version,
             "event_type": self.event_type.value,
             "occurred_at": self.occurred_at.isoformat().replace("+00:00", "Z"),
             "origin": self.origin.to_dict(),

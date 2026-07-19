@@ -6,6 +6,7 @@ import pytest
 from datetime import datetime, timezone
 
 from backend.core.events.models import (
+    EVENT_SCHEMA_VERSION,
     Event,
     EventType,
     EntityKind,
@@ -182,6 +183,7 @@ class TestEvent:
         payload = event.to_webhook_payload()
 
         assert payload["event_id"] == event.event_id
+        assert payload["schema_version"] == EVENT_SCHEMA_VERSION
         assert payload["event_type"] == "node.update"
         assert "occurred_at" in payload
         occurred_at = payload["occurred_at"]
