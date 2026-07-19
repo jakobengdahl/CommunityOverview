@@ -21,7 +21,11 @@ Effort scale: XS = single-line fix · S = up to ~30 lines / one file · M = mult
 
 ## Open
 
-*(no open items)*
+### [2026-07-19] Scheduled-trigger envelope omits `schema_version`
+- **File(s):** `backend/agents/scheduler.py:161` (`_build_payload`), test in `backend/agents/tests/test_scheduler.py:406`
+- **Context:** Discovered during `claude/saas-v1-slice-test-w6i7zp` (event envelope versioning)
+- **Issue:** `_build_payload` hand-builds a `scheduled_trigger` payload in the same envelope family (`event_id`/`event_type`/`occurred_at`/`origin`/`entity`) consumed by the same agent path (`build_event_user_message`), but does not carry the new top-level `schema_version`. This is an internal agent-processing message, not an external webhook delivery, so it is intentionally out of the versioned webhook contract for now. If the version stamp should apply to every envelope a consumer might read, extend it here and assert it in `test_payload_structure`.
+- **Effort:** XS
 
 ---
 
