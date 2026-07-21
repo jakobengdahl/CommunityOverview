@@ -181,7 +181,7 @@ Cloud Run is stateless. For persistent data, use Cloud Storage:
 
 ```bash
 # Create bucket
-gsutil mb -l europe-north1 gs://your-project-data
+gcloud storage buckets create gs://your-project-data --location=europe-north1
 
 # Mount via Cloud Run (requires 2nd gen)
 gcloud run deploy communityoverview \
