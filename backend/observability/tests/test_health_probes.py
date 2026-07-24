@@ -36,7 +36,7 @@ class TestCheckDeep:
         ):
             result = check_deep()
         assert result["status"] == "degraded"
-        assert "boom" in result["detail"]
+        assert "boom" not in result["detail"]
 
 
 class TestCheckStorage:
@@ -94,9 +94,26 @@ class TestCheckSecretStore:
                 "google.cloud.secretmanager.SecretManagerServiceClient"
             ) as client_cls:
                 client_cls.return_value.get_secret.side_effect = Exception(
-                    "permission denied"
+                    "permission denied: projects/test-project/secrets/cw-saas-db-password"
                 )
                 result = check_secret_store("cw-saas-session-signing-key")
 
         assert result["status"] == "degraded"
-        assert "permission denied" in result["detail"]
+        assert "permission denied" not in result["detail"]
+        assert "test-project" not in result["detail"]
+
+    def test_never_calls_access_secret_version(self):
+        """hc-13 must only call GetSecret — AccessSecretVersion would fail against
+        prod's cw-saas-db-password, which intentionally has zero versions."""
+        with patch("google.auth.default", return_value=(MagicMock(), "test-project")):
+            with patch(
+                "google.cloud.secretmanager.SecretManagerServiceClient"
+            ) as client_cls:
+                client_cls.return_value.get_secret.return_value = MagicMock()
+                check_secret_store("cw-saas-db-password")
+
+                client = client_cls.return_value
+                client.get_secret.assert_called_once_with(
+                    name="projects/test-project/secrets/cw-saas-db-password"
+                )
+                client.access_secret_version.assert_not_called()

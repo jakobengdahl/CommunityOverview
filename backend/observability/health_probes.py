@@ -27,9 +27,9 @@ def check_deep(**startup_diagnostics_kwargs: Any) -> Dict[str, Any]:
 
     try:
         diagnostics = build_startup_diagnostics(**startup_diagnostics_kwargs)
-    except Exception as exc:  # pragma: no cover - defensive, probes must not raise
+    except Exception:  # pragma: no cover - defensive, probes must not raise
         logger.exception("hc-03 deep probe raised")
-        return {"status": "degraded", "detail": str(exc)}
+        return {"status": "degraded", "detail": "deep probe raised an exception"}
 
     if diagnostics["status"] != "ready":
         return {"status": "degraded", "detail": diagnostics["checks"]}
@@ -59,14 +59,14 @@ def check_storage(graph_storage: Any) -> Dict[str, Any]:
                 "detail": "storage round-trip content mismatch",
             }
         return {"status": "ok", "detail": None}
-    except Exception as exc:
+    except Exception:
         logger.exception("hc-07 storage probe failed")
-        return {"status": "degraded", "detail": str(exc)}
+        return {"status": "degraded", "detail": "storage probe raised an exception"}
     finally:
         try:
             probe_path.unlink(missing_ok=True)
         except OSError:
-            pass
+            logger.warning("hc-07 storage probe failed to clean up %s", probe_path)
 
 
 def check_secret_store(secret_id: Optional[str]) -> Dict[str, Any]:
@@ -91,6 +91,9 @@ def check_secret_store(secret_id: Optional[str]) -> Dict[str, Any]:
         client = secretmanager.SecretManagerServiceClient()
         client.get_secret(name=f"projects/{project_id}/secrets/{secret_id}")
         return {"status": "ok", "detail": None}
-    except Exception as exc:
+    except Exception:
         logger.exception("hc-13 secret store probe failed")
-        return {"status": "degraded", "detail": str(exc)}
+        return {
+            "status": "degraded",
+            "detail": "secret store probe raised an exception",
+        }

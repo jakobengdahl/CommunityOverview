@@ -69,8 +69,8 @@ class TestHealthzStorage:
 
 
 class TestHealthzSecrets:
-    def test_skipped_when_unconfigured(self, test_app: TestClient):
-        os.environ.pop("SECRET_STORE_HEALTH_CHECK_SECRET_ID", None)
+    def test_skipped_when_unconfigured(self, test_app: TestClient, monkeypatch):
+        monkeypatch.delenv("SECRET_STORE_HEALTH_CHECK_SECRET_ID", raising=False)
         response = test_app.get("/healthz/secrets")
         assert response.status_code == 200
         assert response.json()["status"] == "skipped"

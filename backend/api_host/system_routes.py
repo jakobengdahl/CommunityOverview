@@ -6,6 +6,7 @@ redirect, logout handling, and the API info endpoint.
 
 import logging
 import os
+import time
 from pathlib import Path
 from typing import Any, Dict
 
@@ -172,16 +173,29 @@ def register_system_routes(
         """Alias of /ready — matches the hc-02 contract's endpoint_pattern."""
         return await readiness_check()
 
+    _healthz_deep_cache: Dict[str, Any] = {"result": None, "checked_at": 0.0}
+    _HEALTHZ_DEEP_CACHE_SECONDS = 5.0
+
     @app.get("/healthz/deep")
     async def healthz_deep() -> JSONResponse:
-        """hc-03: live end-to-end smoke check (config, graph storage, LLM key)."""
-        result = check_deep(
-            config=config,
-            graph_storage=graph_storage,
-            federation_summary=federation_summary,
-            federation_manager=federation_manager,
-            agent_registry=app.state.agent_registry,
-        )
+        """hc-03: live end-to-end smoke check (config, graph storage, LLM key).
+
+        Cached for a few seconds — this re-runs the O(edges) graph integrity
+        scan, and the endpoint is unauthenticated by design (hc-03 contract),
+        so an uncached version would let a request loop turn cheap probing
+        into repeated full-graph scans.
+        """
+        now = time.monotonic()
+        if now - _healthz_deep_cache["checked_at"] >= _HEALTHZ_DEEP_CACHE_SECONDS:
+            _healthz_deep_cache["result"] = check_deep(
+                config=config,
+                graph_storage=graph_storage,
+                federation_summary=federation_summary,
+                federation_manager=federation_manager,
+                agent_registry=app.state.agent_registry,
+            )
+            _healthz_deep_cache["checked_at"] = now
+        result = _healthz_deep_cache["result"]
         status_code = 200 if result["status"] == "ok" else 503
         return JSONResponse(status_code=status_code, content=result)
 
