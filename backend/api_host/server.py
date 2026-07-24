@@ -51,6 +51,7 @@ from backend.federation import (
 
 from .config import AppConfig
 from .diagnostics import build_startup_diagnostics, emit_startup_diagnostics_log
+from .logging_config import configure_root_logging
 from .middleware import add_auth_middleware, add_cors_middleware, compute_auth_active
 from .mcp_mount import build_mcp_instructions, mount_mcp
 from .session_stream import register_session_stream
@@ -78,6 +79,8 @@ def create_app(
     """
     if config is None:
         config = AppConfig.from_env()
+
+    configure_root_logging(config.log_format)
 
     app = FastAPI(
         title="Community Knowledge Graph",
