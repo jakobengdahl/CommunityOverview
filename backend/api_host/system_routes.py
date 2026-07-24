@@ -4,6 +4,7 @@ Favicon/redirect helpers, liveness/readiness/startup diagnostics, the root
 redirect, logout handling, and the API info endpoint.
 """
 
+import asyncio
 import logging
 import os
 import time
@@ -175,17 +176,22 @@ def register_system_routes(
 
     _HEALTHZ_CACHE_SECONDS = 5.0
 
-    def _cached_probe(cache: Dict[str, Any], compute: Any) -> Dict[str, Any]:
+    async def _cached_probe(cache: Dict[str, Any], compute: Any) -> Dict[str, Any]:
         """Re-run `compute` at most once per `_HEALTHZ_CACHE_SECONDS`.
 
         The /healthz/* probes are unauthenticated by design (hc-02/03/07/13
         contract) but do real work — a graph scan, a storage round-trip, a
         Secret Manager call. Without this, a request loop against any of them
         turns cheap probing into repeated expensive/billed backend calls.
+
+        `compute` runs via asyncio.to_thread: check_secret_store makes a real
+        synchronous network call to Secret Manager, and running that directly
+        on the event loop would stall every other request this process is
+        serving for as long as that call takes.
         """
         now = time.monotonic()
         if now - cache["checked_at"] >= _HEALTHZ_CACHE_SECONDS:
-            cache["result"] = compute()
+            cache["result"] = await asyncio.to_thread(compute)
             cache["checked_at"] = now
         return cache["result"]
 
@@ -196,7 +202,7 @@ def register_system_routes(
     @app.get("/healthz/deep")
     async def healthz_deep() -> JSONResponse:
         """hc-03: live end-to-end smoke check (config, graph storage, LLM key)."""
-        result = _cached_probe(
+        result = await _cached_probe(
             _healthz_deep_cache,
             lambda: check_deep(
                 config=config,
@@ -212,7 +218,7 @@ def register_system_routes(
     @app.get("/healthz/storage")
     async def healthz_storage() -> JSONResponse:
         """hc-07: real write+read+delete probe against the graph storage backend."""
-        result = _cached_probe(
+        result = await _cached_probe(
             _healthz_storage_cache, lambda: check_storage(graph_storage)
         )
         status_code = 200 if result["status"] == "ok" else 503
@@ -221,7 +227,7 @@ def register_system_routes(
     @app.get("/healthz/secrets")
     async def healthz_secrets() -> JSONResponse:
         """hc-13: confirms Secret Manager is reachable for the configured secret."""
-        result = _cached_probe(
+        result = await _cached_probe(
             _healthz_secrets_cache,
             lambda: check_secret_store(
                 os.environ.get("SECRET_STORE_HEALTH_CHECK_SECRET_ID")
