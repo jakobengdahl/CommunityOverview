@@ -51,6 +51,10 @@ def add_auth_middleware(app: FastAPI, config: AppConfig) -> None:
         if request.url.path in [
             "/health",
             PUBLIC_READINESS_PATH,
+            "/readyz",
+            "/healthz/deep",
+            "/healthz/storage",
+            "/healthz/secrets",
             "/info",
             PUBLIC_STARTUP_DIAGNOSTICS_PATH,
             "/auth/logout",
