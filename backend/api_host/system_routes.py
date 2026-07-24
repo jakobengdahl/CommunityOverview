@@ -14,6 +14,11 @@ from fastapi.responses import JSONResponse, RedirectResponse, FileResponse, HTML
 from fastapi import Path as FastAPIPath
 
 from backend.llm.llm_providers import get_llm_availability
+from backend.observability.health_probes import (
+    check_deep,
+    check_secret_store,
+    check_storage,
+)
 
 from .config import AppConfig
 from .diagnostics import PUBLIC_READINESS_PATH, PUBLIC_STARTUP_DIAGNOSTICS_PATH
@@ -161,6 +166,40 @@ def register_system_routes(
     async def startup_diagnostics() -> Dict[str, Any]:
         """Structured startup diagnostics safe for public operability introspection."""
         return app.state.startup_diagnostics
+
+    @app.get("/readyz")
+    async def readyz() -> Dict[str, Any]:
+        """Alias of /ready — matches the hc-02 contract's endpoint_pattern."""
+        return await readiness_check()
+
+    @app.get("/healthz/deep")
+    async def healthz_deep() -> JSONResponse:
+        """hc-03: live end-to-end smoke check (config, graph storage, LLM key)."""
+        result = check_deep(
+            config=config,
+            graph_storage=graph_storage,
+            federation_summary=federation_summary,
+            federation_manager=federation_manager,
+            agent_registry=app.state.agent_registry,
+        )
+        status_code = 200 if result["status"] == "ok" else 503
+        return JSONResponse(status_code=status_code, content=result)
+
+    @app.get("/healthz/storage")
+    async def healthz_storage() -> JSONResponse:
+        """hc-07: real write+read+delete probe against the graph storage backend."""
+        result = check_storage(graph_storage)
+        status_code = 200 if result["status"] == "ok" else 503
+        return JSONResponse(status_code=status_code, content=result)
+
+    @app.get("/healthz/secrets")
+    async def healthz_secrets() -> JSONResponse:
+        """hc-13: confirms Secret Manager is reachable for the configured secret."""
+        result = check_secret_store(
+            os.environ.get("SECRET_STORE_HEALTH_CHECK_SECRET_ID")
+        )
+        status_code = 200 if result["status"] in {"ok", "skipped"} else 503
+        return JSONResponse(status_code=status_code, content=result)
 
     @app.get("/")
     async def root() -> RedirectResponse:
