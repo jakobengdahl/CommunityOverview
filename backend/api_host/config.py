@@ -98,6 +98,9 @@ class AppConfig:
         default_factory=lambda: os.getenv("CONFIG_PROFILE", "default")
     )
 
+    # Logging configuration
+    log_format: str = field(default_factory=lambda: os.getenv("LOG_FORMAT", "text"))
+
     def __post_init__(self):
         """Resolve default static paths relative to this package."""
         if self.web_static_path is None:
