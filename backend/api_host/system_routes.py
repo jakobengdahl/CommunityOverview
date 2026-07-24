@@ -173,44 +173,59 @@ def register_system_routes(
         """Alias of /ready — matches the hc-02 contract's endpoint_pattern."""
         return await readiness_check()
 
+    _HEALTHZ_CACHE_SECONDS = 5.0
+
+    def _cached_probe(cache: Dict[str, Any], compute: Any) -> Dict[str, Any]:
+        """Re-run `compute` at most once per `_HEALTHZ_CACHE_SECONDS`.
+
+        The /healthz/* probes are unauthenticated by design (hc-02/03/07/13
+        contract) but do real work — a graph scan, a storage round-trip, a
+        Secret Manager call. Without this, a request loop against any of them
+        turns cheap probing into repeated expensive/billed backend calls.
+        """
+        now = time.monotonic()
+        if now - cache["checked_at"] >= _HEALTHZ_CACHE_SECONDS:
+            cache["result"] = compute()
+            cache["checked_at"] = now
+        return cache["result"]
+
     _healthz_deep_cache: Dict[str, Any] = {"result": None, "checked_at": 0.0}
-    _HEALTHZ_DEEP_CACHE_SECONDS = 5.0
+    _healthz_storage_cache: Dict[str, Any] = {"result": None, "checked_at": 0.0}
+    _healthz_secrets_cache: Dict[str, Any] = {"result": None, "checked_at": 0.0}
 
     @app.get("/healthz/deep")
     async def healthz_deep() -> JSONResponse:
-        """hc-03: live end-to-end smoke check (config, graph storage, LLM key).
-
-        Cached for a few seconds — this re-runs the O(edges) graph integrity
-        scan, and the endpoint is unauthenticated by design (hc-03 contract),
-        so an uncached version would let a request loop turn cheap probing
-        into repeated full-graph scans.
-        """
-        now = time.monotonic()
-        if now - _healthz_deep_cache["checked_at"] >= _HEALTHZ_DEEP_CACHE_SECONDS:
-            _healthz_deep_cache["result"] = check_deep(
+        """hc-03: live end-to-end smoke check (config, graph storage, LLM key)."""
+        result = _cached_probe(
+            _healthz_deep_cache,
+            lambda: check_deep(
                 config=config,
                 graph_storage=graph_storage,
                 federation_summary=federation_summary,
                 federation_manager=federation_manager,
                 agent_registry=app.state.agent_registry,
-            )
-            _healthz_deep_cache["checked_at"] = now
-        result = _healthz_deep_cache["result"]
+            ),
+        )
         status_code = 200 if result["status"] == "ok" else 503
         return JSONResponse(status_code=status_code, content=result)
 
     @app.get("/healthz/storage")
     async def healthz_storage() -> JSONResponse:
         """hc-07: real write+read+delete probe against the graph storage backend."""
-        result = check_storage(graph_storage)
+        result = _cached_probe(
+            _healthz_storage_cache, lambda: check_storage(graph_storage)
+        )
         status_code = 200 if result["status"] == "ok" else 503
         return JSONResponse(status_code=status_code, content=result)
 
     @app.get("/healthz/secrets")
     async def healthz_secrets() -> JSONResponse:
         """hc-13: confirms Secret Manager is reachable for the configured secret."""
-        result = check_secret_store(
-            os.environ.get("SECRET_STORE_HEALTH_CHECK_SECRET_ID")
+        result = _cached_probe(
+            _healthz_secrets_cache,
+            lambda: check_secret_store(
+                os.environ.get("SECRET_STORE_HEALTH_CHECK_SECRET_ID")
+            ),
         )
         status_code = 200 if result["status"] in {"ok", "skipped"} else 503
         return JSONResponse(status_code=status_code, content=result)
