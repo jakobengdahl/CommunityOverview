@@ -1,180 +1,84 @@
-import { useState, useRef, useEffect } from 'react';
-import { createPortal } from 'react-dom';
-import { List, Feather, Download, Map, BoxArrowRight } from 'react-bootstrap-icons';
-import useGraphStore from '../store/graphStore';
+import { List, Feather, XCircle } from 'react-bootstrap-icons';
 import { useI18n } from '../i18n';
-import { COLOR_MAP } from './FloatingToolbar';
-import NodeTypeStatsDialog from './NodeTypeStatsDialog';
 import './FloatingHeader.css';
 
-const MAX_INLINE_TYPES = 5;
+const MAX_VISIBLE_DOTS = 5;
 
-function FloatingHeader({ stats, title = 'Community Graph View', onExportGraph, sessionId }) {
-  const { t, language, setLanguage } = useI18n();
-  const { showMinimap, setShowMinimap } = useGraphStore();
-  const [menuOpen, setMenuOpen] = useState(false);
-  const [dropdownLeft, setDropdownLeft] = useState(null);
-  const [statsDialogOpen, setStatsDialogOpen] = useState(false);
-  const menuRef = useRef(null);
+function initialFor(name) {
+  const trimmed = (name || '').trim();
+  return trimmed ? trimmed[0].toUpperCase() : '?';
+}
 
-  useEffect(() => {
-    const handleClickOutside = (e) => {
-      if (menuRef.current && !menuRef.current.contains(e.target)) {
-        setMenuOpen(false);
-      }
-    };
-    if (menuOpen) {
-      // Use capture phase to catch clicks before ReactFlow stops propagation
-      document.addEventListener('mousedown', handleClickOutside, true);
-    }
-    return () => document.removeEventListener('mousedown', handleClickOutside, true);
-  }, [menuOpen]);
+/**
+ * Presence roster: one coloured dot per connected collaborator (design 3.5).
+ * Only shown once at least one other user is present so a solo session stays
+ * uncluttered.
+ */
+function PresenceRoster({ roster, currentClientId, t }) {
+  const members = Array.isArray(roster) ? roster : [];
+  const others = members.filter((m) => m.client_id !== currentClientId);
+  if (others.length === 0) return null;
 
-  // Calculate dropdown left position to avoid overlapping the toolbar
-  useEffect(() => {
-    if (menuOpen) {
-      const toolbar = document.querySelector('.floating-toolbar');
-      if (toolbar) {
-        const rect = toolbar.getBoundingClientRect();
-        setDropdownLeft(rect.right + 8);
-      }
-    }
-  }, [menuOpen]);
+  // Show self first, then others; cap the visible dots and summarise the rest.
+  const ordered = [...members.filter((m) => m.client_id === currentClientId), ...others];
+  const visible = ordered.slice(0, MAX_VISIBLE_DOTS);
+  const overflow = ordered.length - visible.length;
 
   return (
-    <div className="floating-header" id="guide-target-header" ref={menuRef}>
+    <div className="floating-header-presence" aria-label={t('presence.collaborators')}>
+      {visible.map((m) => {
+        const isSelf = m.client_id === currentClientId;
+        const label = isSelf ? `${m.display_name} (${t('presence.you')})` : m.display_name;
+        return (
+          <span
+            key={m.client_id}
+            className={`floating-header-presence-dot${isSelf ? ' is-self' : ''}`}
+            style={{ backgroundColor: m.color }}
+            title={label}
+          >
+            {initialFor(m.display_name)}
+          </span>
+        );
+      })}
+      {overflow > 0 && (
+        <span className="floating-header-presence-more" title={t('presence.collaborators')}>
+          +{overflow}
+        </span>
+      )}
+    </div>
+  );
+}
+
+function FloatingHeader({ title, sessionId, roster, currentClientId, onClear, onToggleDrawer }) {
+  const { t } = useI18n();
+  const heading = title || t('header.title');
+  return (
+    <div className="floating-header" id="guide-target-header">
       <div className="floating-header-bar">
         <Feather size={18} className="floating-header-app-icon" />
         <button
           className="floating-header-hamburger"
-          onClick={() => setMenuOpen(!menuOpen)}
-          title="Menu"
+          onClick={() => onToggleDrawer?.()}
+          title={t('header.menu')}
         >
           <List size={20} />
         </button>
-        <span className="floating-header-title">{title}</span>
+        <span className="floating-header-title">{heading}</span>
         {sessionId && (
-          <span className="floating-header-session-id" title="Session ID — share with an external AI to connect it to this window">
+          <span className="floating-header-session-id" title={t('header.session_id_tooltip')}>
             {sessionId}
           </span>
         )}
+        <PresenceRoster roster={roster} currentClientId={currentClientId} t={t} />
+        <button
+          className="floating-header-clear"
+          onClick={() => onClear?.()}
+          title={t('header.clear_canvas_tooltip')}
+          aria-label={t('header.clear_canvas_aria')}
+        >
+          <XCircle size={15} />
+        </button>
       </div>
-
-      {statsDialogOpen && stats?.nodes_by_type && createPortal(
-        <NodeTypeStatsDialog
-          nodesByType={stats.nodes_by_type}
-          onClose={() => setStatsDialogOpen(false)}
-        />,
-        document.body
-      )}
-
-      {menuOpen && (
-        <div className="floating-header-dropdown" style={dropdownLeft ? { left: dropdownLeft } : undefined}>
-          {stats ? (
-            <>
-              <div className="floating-header-stats-summary">
-                <div className="floating-header-stat">
-                  <span className="floating-header-stat-value">{stats.total_nodes || 0}</span>
-                  <span className="floating-header-stat-label">Nodes</span>
-                </div>
-                <div className="floating-header-stat">
-                  <span className="floating-header-stat-value">{stats.total_edges || 0}</span>
-                  <span className="floating-header-stat-label">Edges</span>
-                </div>
-              </div>
-
-              {stats.nodes_by_type && Object.keys(stats.nodes_by_type).length > 0 && (
-                <div className="floating-header-type-list">
-                  <div className="floating-header-type-list-header">
-                    <span className="floating-header-section-title">Nodes by type</span>
-                    {Object.keys(stats.nodes_by_type).length > MAX_INLINE_TYPES && (
-                      <button
-                        className="floating-header-type-details-btn"
-                        aria-haspopup="dialog"
-                        aria-label="Show all node types"
-                        onClick={() => { setStatsDialogOpen(true); setMenuOpen(false); }}
-                      >
-                        Details
-                      </button>
-                    )}
-                  </div>
-                  {Object.entries(stats.nodes_by_type)
-                    .sort(([, a], [, b]) => b - a)
-                    .slice(0, MAX_INLINE_TYPES)
-                    .map(([type, count]) => (
-                      <div key={type} className="floating-header-type-row">
-                        <span
-                          className="floating-header-type-dot"
-                          style={{ backgroundColor: COLOR_MAP[type] || '#9CA3AF' }}
-                        />
-                        <span className="floating-header-type-name">{type}</span>
-                        <span className="floating-header-type-count">{count}</span>
-                      </div>
-                    ))}
-                </div>
-              )}
-
-              <div className="floating-header-section-divider" />
-              <div className="floating-header-section-title">{t('menu.view_section') || 'View'}</div>
-              <button
-                className="floating-header-menu-item"
-                onClick={() => setShowMinimap(!showMinimap)}
-              >
-                <Map size={14} />
-                <span>{t('menu.show_minimap') || 'Show minimap'}</span>
-                <span className={`floating-header-toggle${showMinimap ? ' active' : ''}`} />
-              </button>
-
-              <div className="floating-header-section-divider" />
-              <div className="floating-header-section-title">{t('menu.language_section') || 'Language'}</div>
-              <button
-                className="floating-header-menu-item"
-                onClick={() => setLanguage('en')}
-              >
-                <span>{t('menu.language_en') || 'English'}</span>
-                <span className={`floating-header-toggle${language === 'en' ? ' active' : ''}`} />
-              </button>
-              <button
-                className="floating-header-menu-item"
-                onClick={() => setLanguage('sv')}
-              >
-                <span>{t('menu.language_sv') || 'Svenska'}</span>
-                <span className={`floating-header-toggle${language === 'sv' ? ' active' : ''}`} />
-              </button>
-
-              <div className="floating-header-section-divider" />
-              <div className="floating-header-section-title">Admin</div>
-              <button
-                className="floating-header-menu-item"
-                onClick={() => {
-                  onExportGraph?.();
-                  setMenuOpen(false);
-                }}
-              >
-                <Download size={14} />
-                <span>{t('menu.export_graph')}</span>
-              </button>
-            </>
-          ) : (
-            <div className="floating-header-placeholder">Loading stats...</div>
-          )}
-
-          {/* Logout is always shown — redirect is harmless regardless of
-              AUTH_ENABLED. Backend routes /auth/logout and /logged-out are
-              exempt from auth middleware so the user never gets stuck. */}
-          <div className="floating-header-section-divider" />
-          <button
-            className="floating-header-menu-item floating-header-menu-item-logout"
-            onClick={() => {
-              setMenuOpen(false);
-              window.location.href = '/auth/logout';
-            }}
-          >
-            <BoxArrowRight size={14} />
-            <span>{t('menu.logout')}</span>
-          </button>
-        </div>
-      )}
     </div>
   );
 }

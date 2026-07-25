@@ -69,7 +69,9 @@ async function apiFetch(url, options = {}) {
 
   if (!response.ok) {
     const errorData = await response.json().catch(() => ({}));
-    throw new Error(errorData.error || `HTTP error: ${response.status}`);
+    const error = new Error(errorData.error || `HTTP error: ${response.status}`);
+    error.status = response.status;
+    throw error;
   }
 
   return response.json();
@@ -237,6 +239,45 @@ export async function deleteEdge(edgeId) {
   return apiFetch(`${API_BASE}/edges/${encodeURIComponent(edgeId)}`, {
     method: 'DELETE',
   });
+}
+
+/**
+ * Get recent graph mutation history (newest first).
+ * @param {Object} options - { limit, offset }
+ * @returns {Promise<{success: boolean, entries: Array, count: number, limit: number, offset: number}>}
+ */
+export async function getGraphHistory(options = {}) {
+  const limit = options.limit ?? 50;
+  const offset = options.offset ?? 0;
+  return apiFetch(`${API_BASE}/history?limit=${limit}&offset=${offset}`);
+}
+
+/**
+ * Get mutation history for a single node (newest first).
+ * @param {string} nodeId - Node ID
+ * @param {Object} options - { limit, offset }
+ * @returns {Promise<{success: boolean, node_id: string, entries: Array, count: number}>}
+ */
+export async function getNodeHistory(nodeId, options = {}) {
+  const limit = options.limit ?? 50;
+  const offset = options.offset ?? 0;
+  return apiFetch(
+    `${API_BASE}/nodes/${encodeURIComponent(nodeId)}/history?limit=${limit}&offset=${offset}`
+  );
+}
+
+/**
+ * Get mutation history for a single edge (newest first).
+ * @param {string} edgeId - Edge ID
+ * @param {Object} options - { limit, offset }
+ * @returns {Promise<{success: boolean, edge_id: string, entries: Array, count: number}>}
+ */
+export async function getEdgeHistory(edgeId, options = {}) {
+  const limit = options.limit ?? 50;
+  const offset = options.offset ?? 0;
+  return apiFetch(
+    `${API_BASE}/edges/${encodeURIComponent(edgeId)}/history?limit=${limit}&offset=${offset}`
+  );
 }
 
 /**
@@ -484,14 +525,14 @@ export async function getCollectConfig(shortName) {
 
 /**
  * Generate a cryptographically-random visualization session ID.
- * Format: "DDDD-DDDD" (two groups of four decimal digits).
+ * Format: "DDDD-DDDD-DDDD-DDDD" (four groups of four decimal digits, ~10^16
+ * address space) so an unauthenticated caller cannot feasibly enumerate live
+ * sessions. The backend still accepts the two-group legacy form for old URLs.
  * @returns {string}
  */
 export function generateVisualizationSessionId() {
-  const buf = crypto.getRandomValues(new Uint16Array(2));
-  const a = String(buf[0] % 10000).padStart(4, '0');
-  const b = String(buf[1] % 10000).padStart(4, '0');
-  return `${a}-${b}`;
+  const buf = crypto.getRandomValues(new Uint16Array(4));
+  return Array.from(buf, (n) => String(n % 10000).padStart(4, '0')).join('-');
 }
 
 /**
@@ -507,16 +548,131 @@ export function getVisualizationStreamUrl(sessionId) {
 }
 
 /**
- * Upload the current canvas state to the backend session registry.
- * Called on connect and whenever the visible node list changes.
+ * Return the realtime op-protocol SSE stream URL for a shared session
+ * (design step 6). Distinct from the legacy MCP-push stream above: this one
+ * carries applied ops, presence and claims from the fan-out hub.
  *
- * @param {string} sessionId - Visualization session ID
- * @param {{visible_node_ids: string[], selected_node_ids: string[], node_count: number}} state
- * @returns {Promise<{ok: boolean}>}
+ * @param {string} sessionId
+ * @returns {string}
  */
-export async function updateSessionState(sessionId, state) {
-  return apiFetch(`${getPathRoot()}/sessions/${encodeURIComponent(sessionId)}/state`, {
-    method: 'PATCH',
-    body: JSON.stringify(state),
+export function getSessionStreamUrl(sessionId) {
+  return `${SESSIONS_BASE()}/${encodeURIComponent(sessionId)}/stream`;
+}
+
+// Stable per-browser client id for shared-session presence and op attribution
+// (design 3.4). Kept in localStorage so it survives reloads.
+const CLIENT_ID_KEY = 'graph_client_id';
+let _clientId = null;
+
+export function getClientId() {
+  if (_clientId) return _clientId;
+  try {
+    _clientId = window.localStorage.getItem(CLIENT_ID_KEY);
+  } catch {
+    _clientId = null;
+  }
+  if (!_clientId) {
+    _clientId = 'client-' + Math.random().toString(36).slice(2, 10);
+    try {
+      window.localStorage.setItem(CLIENT_ID_KEY, _clientId);
+    } catch {
+      // ignore storage errors — a per-tab id is still usable
+    }
+  }
+  return _clientId;
+}
+
+// User-editable presence name shown to collaborators in a shared session
+// (design 3.4). When unset the server assigns a "Guest-<n>" default.
+const DISPLAY_NAME_KEY = 'graph_display_name';
+
+export function getDisplayName() {
+  try {
+    return window.localStorage.getItem(DISPLAY_NAME_KEY) || null;
+  } catch {
+    return null;
+  }
+}
+
+export function setDisplayName(name) {
+  const trimmed = (name || '').trim();
+  try {
+    if (trimmed) window.localStorage.setItem(DISPLAY_NAME_KEY, trimmed);
+    else window.localStorage.removeItem(DISPLAY_NAME_KEY);
+  } catch {
+    // ignore storage errors
+  }
+}
+
+const SESSIONS_BASE = () => `${API_BASE}/sessions`;
+
+/**
+ * Create a new server-side shared session (server-assigned id).
+ * @param {string|null} name
+ * @returns {Promise<Object>} session payload (meta + state + roster)
+ */
+export async function createSession(name = null) {
+  return apiFetch(SESSIONS_BASE(), {
+    method: 'POST',
+    body: JSON.stringify({ name: name || null }),
   });
+}
+
+/**
+ * List server-side session metadata (used to refresh recent-session names).
+ * @returns {Promise<{sessions: Array}>}
+ */
+export async function listServerSessions() {
+  return apiFetch(SESSIONS_BASE());
+}
+
+/**
+ * Get a server-side session. With resolve=true the node references are
+ * rehydrated to full node objects (+ edges) for loading onto the canvas.
+ * @param {string} sessionId
+ * @param {{resolve?: boolean}} options
+ * @returns {Promise<Object>}
+ */
+export async function getSession(sessionId, { resolve = false } = {}) {
+  const suffix = resolve ? '?resolve=true' : '';
+  return apiFetch(`${SESSIONS_BASE()}/${encodeURIComponent(sessionId)}${suffix}`);
+}
+
+/**
+ * Rename a server-side session (or clear the name with null/empty).
+ * @param {string} sessionId
+ * @param {string|null} name
+ * @returns {Promise<Object>}
+ */
+export async function renameServerSession(sessionId, name) {
+  return apiFetch(`${SESSIONS_BASE()}/${encodeURIComponent(sessionId)}`, {
+    method: 'PATCH',
+    body: JSON.stringify({ name: name || null }),
+  });
+}
+
+/**
+ * Delete a server-side session. The optional client id names the deleter in
+ * the broadcast so connected clients can show "deleted by <name>".
+ * @param {string} sessionId
+ * @param {string} [clientId]
+ * @returns {Promise<{deleted: boolean, id: string}>}
+ */
+export async function deleteServerSession(sessionId, clientId) {
+  const suffix = clientId ? `?client_id=${encodeURIComponent(clientId)}` : '';
+  return apiFetch(`${SESSIONS_BASE()}/${encodeURIComponent(sessionId)}${suffix}`, {
+    method: 'DELETE',
+  });
+}
+
+/**
+ * Return the op-batch POST URL for a shared session (design step 6).
+ * The sync client posts here directly so it can react to HTTP status codes
+ * (429 backoff, 400 drop); hence a URL builder rather than a fetch helper.
+ *
+ * @param {string} sessionId
+ * @returns {string}
+ */
+export function getSessionOpsUrl(sessionId) {
+  return `${SESSIONS_BASE()}/${encodeURIComponent(sessionId)}/ops`;
 }

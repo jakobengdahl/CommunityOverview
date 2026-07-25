@@ -51,7 +51,11 @@ export function I18nProvider({ children, defaultLanguage }) {
   const [language, setLanguageState] = useState(() => {
     const detected = detectLanguage();
     // If a defaultLanguage from backend config is provided and no URL/localStorage override
-    if (defaultLanguage && !new URLSearchParams(window.location.search).get('lang') && !localStorage.getItem('app_language')) {
+    if (
+      defaultLanguage &&
+      !new URLSearchParams(window.location.search).get('lang') &&
+      !localStorage.getItem('app_language')
+    ) {
       return SUPPORTED_LANGUAGES.includes(defaultLanguage) ? defaultLanguage : detected;
     }
     return detected;
@@ -66,31 +70,41 @@ export function I18nProvider({ children, defaultLanguage }) {
 
   // Update language when backend config provides a default (only if no user override)
   useEffect(() => {
-    if (defaultLanguage && !localStorage.getItem('app_language') && !new URLSearchParams(window.location.search).get('lang')) {
+    if (
+      defaultLanguage &&
+      !localStorage.getItem('app_language') &&
+      !new URLSearchParams(window.location.search).get('lang')
+    ) {
       if (SUPPORTED_LANGUAGES.includes(defaultLanguage)) {
         setLanguageState(defaultLanguage);
       }
     }
   }, [defaultLanguage]);
 
-  const t = useCallback((key, params) => {
-    const value = getNestedValue(translations[language], key)
-      ?? getNestedValue(translations[DEFAULT_LANGUAGE], key)
-      ?? key;
+  const t = useCallback(
+    (key, params, fallback) => {
+      const value =
+        getNestedValue(translations[language], key) ??
+        getNestedValue(translations[DEFAULT_LANGUAGE], key);
 
-    if (typeof value === 'string') {
-      return interpolate(value, params);
-    }
-    return value; // arrays, objects returned as-is
-  }, [language]);
+      if (value === undefined) {
+        if (import.meta.env.DEV) {
+          console.warn(`[i18n] Missing translation key: "${key}"`);
+        }
+        return fallback ?? key;
+      }
+
+      if (typeof value === 'string') {
+        return interpolate(value, params);
+      }
+      return value; // arrays, objects returned as-is
+    },
+    [language]
+  );
 
   const value = { language, setLanguage, t, supportedLanguages: SUPPORTED_LANGUAGES };
 
-  return (
-    <I18nContext.Provider value={value}>
-      {children}
-    </I18nContext.Provider>
-  );
+  return <I18nContext.Provider value={value}>{children}</I18nContext.Provider>;
 }
 
 /**
@@ -108,8 +122,9 @@ export function useI18n() {
     return {
       language: DEFAULT_LANGUAGE,
       setLanguage: () => {},
-      t: (key, params) => {
-        const value = getNestedValue(translations[DEFAULT_LANGUAGE], key) ?? key;
+      t: (key, params, fallback) => {
+        const value = getNestedValue(translations[DEFAULT_LANGUAGE], key);
+        if (value === undefined) return fallback ?? key;
         return typeof value === 'string' ? interpolate(value, params) : value;
       },
       supportedLanguages: SUPPORTED_LANGUAGES,

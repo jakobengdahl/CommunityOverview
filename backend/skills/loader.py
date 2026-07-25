@@ -64,14 +64,17 @@ DEFAULT_MAX_BODY_CHARS = 8_000
 
 class SkillsConfig(BaseModel):
     """Configuration for the skills loading system."""
+
     skills_dir: str = "config/default/skills"
     allow_external_skills: bool = True
-    trusted_domains: List[str] = Field(default_factory=lambda: [
-        "github.com",
-        "raw.githubusercontent.com",
-        "agentskills.io",
-        "api.github.com",
-    ])
+    trusted_domains: List[str] = Field(
+        default_factory=lambda: [
+            "github.com",
+            "raw.githubusercontent.com",
+            "agentskills.io",
+            "api.github.com",
+        ]
+    )
     cache_ttl_seconds: int = 3600
     max_skill_content_bytes: int = DEFAULT_MAX_CONTENT_BYTES
     max_skill_body_chars: int = DEFAULT_MAX_BODY_CHARS
@@ -89,6 +92,7 @@ class SkillMetadata(BaseModel):
 
     Compatible with agentskills.io standard and Claude Code extensions.
     """
+
     id: str
     name: str
     description: str
@@ -96,7 +100,9 @@ class SkillMetadata(BaseModel):
     when_to_use: Optional[str] = None
     effort: Optional[str] = None
     license: Optional[str] = None
-    resources: List[str] = Field(default_factory=list)   # Stage 3: external resource URLs declared in frontmatter
+    resources: List[str] = Field(
+        default_factory=list
+    )  # Stage 3: external resource URLs declared in frontmatter
     extra: Dict[str, Any] = Field(default_factory=dict)  # other frontmatter fields
     source_url: str
     loaded_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
@@ -108,13 +114,14 @@ class SkillDefinition(BaseModel):
 
     Compatible with agentskills.io standard and Claude Code extensions.
     """
+
     id: str
     name: str
     description: str
-    content: str                          # Markdown body — the actual prompt text
+    content: str  # Markdown body — the actual prompt text
     allowed_tools: List[str] = Field(default_factory=list)
-    when_to_use: Optional[str] = None     # Claude Code / agentskills.io extension
-    effort: Optional[str] = None          # Claude Code extension
+    when_to_use: Optional[str] = None  # Claude Code / agentskills.io extension
+    effort: Optional[str] = None  # Claude Code extension
     license: Optional[str] = None
     metadata: Dict[str, str] = Field(default_factory=dict)
     source_url: str
@@ -183,14 +190,18 @@ class SkillsLoader:
                         seen_ids.add(skill.id)
                         results.append(skill)
                     else:
-                        logger.debug("Skipping duplicate skill id=%s from %s", skill.id, url)
+                        logger.debug(
+                            "Skipping duplicate skill id=%s from %s", skill.id, url
+                        )
                 logger.info("Loaded %d skill(s) from %s", len(skills), url)
             except Exception as exc:
                 logger.warning("Failed to load skills from %s: %s", url, exc)
 
         return results
 
-    async def load_from_dir(self, skills_dir: Optional[str] = None) -> List[SkillDefinition]:
+    async def load_from_dir(
+        self, skills_dir: Optional[str] = None
+    ) -> List[SkillDefinition]:
         """
         Load skills from a local directory of SKILL.md files.
 
@@ -242,7 +253,9 @@ class SkillsLoader:
                 logger.warning("Failed to load skill metadata from %s: %s", url, exc)
         return results
 
-    async def load_metadata_from_dir(self, skills_dir: Optional[str] = None) -> List[SkillMetadata]:
+    async def load_metadata_from_dir(
+        self, skills_dir: Optional[str] = None
+    ) -> List[SkillMetadata]:
         """
         Stage 1: Load skill frontmatter from a local directory of SKILL.md files.
 
@@ -264,7 +277,9 @@ class SkillsLoader:
                     logger.debug("Loaded local skill metadata: %s", meta.name)
             except Exception as exc:
                 logger.warning("Failed to load metadata from %s: %s", skill_md, exc)
-        logger.info("Loaded metadata for %d local skill(s) from %s", len(results), dir_path)
+        logger.info(
+            "Loaded metadata for %d local skill(s) from %s", len(results), dir_path
+        )
         return results
 
     async def _load_metadata_single(self, url: str) -> List[SkillMetadata]:
@@ -289,7 +304,9 @@ class SkillsLoader:
         if not owner_repo:
             raise ValueError(f"Cannot parse GitHub repo from URL: {url}")
         owner, repo = owner_repo
-        tree_url = f"https://api.github.com/repos/{owner}/{repo}/git/trees/HEAD?recursive=1"
+        tree_url = (
+            f"https://api.github.com/repos/{owner}/{repo}/git/trees/HEAD?recursive=1"
+        )
         try:
             tree_json = await self._fetch_text(tree_url, headers=self._github_headers())
         except httpx.HTTPStatusError as exc:
@@ -307,7 +324,9 @@ class SkillsLoader:
                 if meta:
                     metas.append(meta)
             except Exception as exc:
-                logger.warning("Skipping %s metadata in %s/%s: %s", path, owner, repo, exc)
+                logger.warning(
+                    "Skipping %s metadata in %s/%s: %s", path, owner, repo, exc
+                )
         return metas
 
     async def _load_metadata_agentskills_io(self, url: str) -> List[SkillMetadata]:
@@ -325,7 +344,9 @@ class SkillsLoader:
                     if meta:
                         metas.append(meta)
                 except Exception as exc:
-                    logger.warning("agentskills.io metadata: failed %s: %s", raw_url, exc)
+                    logger.warning(
+                        "agentskills.io metadata: failed %s: %s", raw_url, exc
+                    )
             if metas:
                 return metas
             meta = self._parse_skill_md_metadata(page, source_url=url)
@@ -334,7 +355,9 @@ class SkillsLoader:
             logger.warning("agentskills.io metadata fetch failed for %s: %s", url, exc)
         return []
 
-    def _parse_skill_md_metadata(self, text: str, source_url: str) -> Optional[SkillMetadata]:
+    def _parse_skill_md_metadata(
+        self, text: str, source_url: str
+    ) -> Optional[SkillMetadata]:
         """
         Parse only the YAML frontmatter from a SKILL.md file.
 
@@ -346,7 +369,9 @@ class SkillsLoader:
             raw_name = _name_from_url(source_url)
             name = self._sanitize(raw_name)
             if not name:
-                logger.warning("Skill name from URL rejected by sanitizer: %s", source_url)
+                logger.warning(
+                    "Skill name from URL rejected by sanitizer: %s", source_url
+                )
                 return None
             return SkillMetadata(
                 id=_make_id(name),
@@ -366,11 +391,17 @@ class SkillsLoader:
             return None
         raw_name = fm.get("name", "").strip()
         if not raw_name:
-            logger.debug("Skipping skill in %s: missing required 'name' field", source_url)
+            logger.debug(
+                "Skipping skill in %s: missing required 'name' field", source_url
+            )
             return None
         name = self._sanitize(raw_name)
         if not name:
-            logger.warning("Skill '%s' in %s rejected: name contains injection pattern", raw_name, source_url)
+            logger.warning(
+                "Skill '%s' in %s rejected: name contains injection pattern",
+                raw_name,
+                source_url,
+            )
             return None
         description = self._sanitize(fm.get("description", "").strip())
         allowed_tools_raw = fm.get("allowed-tools", fm.get("allowed_tools", ""))
@@ -386,7 +417,11 @@ class SkillsLoader:
         else:
             resources = []
         raw_meta = fm.get("metadata", {})
-        extra = {str(k): str(v) for k, v in raw_meta.items()} if isinstance(raw_meta, dict) else {}
+        extra = (
+            {str(k): str(v) for k, v in raw_meta.items()}
+            if isinstance(raw_meta, dict)
+            else {}
+        )
         skill_id = extra.get("id") or _make_id(name)
         when_to_use_raw = fm.get("when-to-use") or fm.get("when_to_use")
         when_to_use = self._sanitize(when_to_use_raw) if when_to_use_raw else None
@@ -407,7 +442,9 @@ class SkillsLoader:
     # Progressive loading — Stage 2: full content (body/instructions)
     # ------------------------------------------------------------------
 
-    async def load_full_skill(self, metadata: SkillMetadata) -> Optional[SkillDefinition]:
+    async def load_full_skill(
+        self, metadata: SkillMetadata
+    ) -> Optional[SkillDefinition]:
         """
         Stage 2: Load the full SKILL.md body for a previously loaded SkillMetadata.
 
@@ -430,16 +467,22 @@ class SkillsLoader:
                 self._text_cache[source_url] = (text, datetime.now(timezone.utc))
                 return self._parse_skill_md(text, source_url)
             except Exception as exc:
-                logger.warning("Failed to load full skill from local path %s: %s", source_url, exc)
+                logger.warning(
+                    "Failed to load full skill from local path %s: %s", source_url, exc
+                )
                 return None
         try:
             text = await self._fetch_text(source_url)
             return self._parse_skill_md(text, source_url)
         except Exception as exc:
-            logger.warning("Failed to load full skill content from %s: %s", source_url, exc)
+            logger.warning(
+                "Failed to load full skill content from %s: %s", source_url, exc
+            )
             return None
 
-    async def load_full_skills(self, metadatas: List[SkillMetadata]) -> List[SkillDefinition]:
+    async def load_full_skills(
+        self, metadatas: List[SkillMetadata]
+    ) -> List[SkillDefinition]:
         """
         Stage 2 batch: Upgrade multiple SkillMetadata objects to SkillDefinition.
 
@@ -491,7 +534,11 @@ class SkillsLoader:
         except Exception:
             return _UrlType.DIRECT_FILE
 
-        if hostname == "agentskills.io" and "/skills/" in parsed.path and not url.endswith("SKILL.md"):
+        if (
+            hostname == "agentskills.io"
+            and "/skills/" in parsed.path
+            and not url.endswith("SKILL.md")
+        ):
             return _UrlType.AGENTSKILLS_IO
         if hostname == "github.com" and not url.endswith(".md"):
             path_parts = parsed.path.strip("/").split("/")
@@ -517,7 +564,9 @@ class SkillsLoader:
                 return
         raise ValueError(f"Domain not in trusted_domains allowlist: {url}")
 
-    async def _fetch_text(self, url: str, headers: Optional[Dict[str, str]] = None) -> str:
+    async def _fetch_text(
+        self, url: str, headers: Optional[Dict[str, str]] = None
+    ) -> str:
         """Fetch URL and return text, with size guard and raw-text caching.
 
         Checks Content-Length before buffering to avoid receiving a large
@@ -577,7 +626,9 @@ class SkillsLoader:
             raise ValueError(f"Cannot parse GitHub repo from URL: {url}")
 
         owner, repo = owner_repo
-        tree_url = f"https://api.github.com/repos/{owner}/{repo}/git/trees/HEAD?recursive=1"
+        tree_url = (
+            f"https://api.github.com/repos/{owner}/{repo}/git/trees/HEAD?recursive=1"
+        )
 
         try:
             tree_json = await self._fetch_text(tree_url, headers=self._github_headers())
@@ -626,7 +677,9 @@ class SkillsLoader:
                     if skill:
                         skills.append(skill)
                 except Exception as exc:
-                    logger.warning("agentskills.io: failed to fetch raw link %s: %s", raw_url, exc)
+                    logger.warning(
+                        "agentskills.io: failed to fetch raw link %s: %s", raw_url, exc
+                    )
             if skills:
                 return skills
 
@@ -655,7 +708,7 @@ class SkillsLoader:
                 id=_make_id(name),
                 name=name,
                 description="",
-                content=sanitized[:self._config.max_skill_body_chars],
+                content=sanitized[: self._config.max_skill_body_chars],
                 source_url=source_url,
             )
 
@@ -675,11 +728,17 @@ class SkillsLoader:
 
         raw_name = fm.get("name", "").strip()
         if not raw_name:
-            logger.debug("Skipping skill in %s: missing required 'name' field", source_url)
+            logger.debug(
+                "Skipping skill in %s: missing required 'name' field", source_url
+            )
             return None
         name = self._sanitize(raw_name)
         if not name:
-            logger.warning("Skill '%s' from %s rejected: name contains injection pattern", raw_name, source_url)
+            logger.warning(
+                "Skill '%s' from %s rejected: name contains injection pattern",
+                raw_name,
+                source_url,
+            )
             return None
 
         description = self._sanitize(fm.get("description", "").strip())
@@ -694,7 +753,11 @@ class SkillsLoader:
             allowed_tools = str(allowed_tools_raw).split() if allowed_tools_raw else []
 
         raw_meta = fm.get("metadata", {})
-        meta = {str(k): str(v) for k, v in raw_meta.items()} if isinstance(raw_meta, dict) else {}
+        meta = (
+            {str(k): str(v) for k, v in raw_meta.items()}
+            if isinstance(raw_meta, dict)
+            else {}
+        )
 
         skill_id = meta.get("id") or _make_id(name)
 
@@ -703,7 +766,11 @@ class SkillsLoader:
         # Reject the entire skill if a non-empty body was wiped by the sanitizer
         # (injection pattern detected — not just a skill with no body at all)
         if body_stripped and not sanitized_body:
-            logger.warning("Skill '%s' from %s rejected: body contains injection pattern", name, source_url)
+            logger.warning(
+                "Skill '%s' from %s rejected: body contains injection pattern",
+                name,
+                source_url,
+            )
             return None
         if not sanitized_body and not description:
             logger.debug("Skipping skill '%s': no content", name)
@@ -717,7 +784,7 @@ class SkillsLoader:
             id=skill_id,
             name=name,
             description=description,
-            content=sanitized_body[:self._config.max_skill_body_chars],
+            content=sanitized_body[: self._config.max_skill_body_chars],
             allowed_tools=allowed_tools,
             when_to_use=when_to_use,
             effort=fm.get("effort"),
@@ -745,6 +812,7 @@ class SkillsLoader:
 # ---------------------------------------------------------------------------
 # Module-level helpers
 # ---------------------------------------------------------------------------
+
 
 def _normalise_url(url: str) -> str:
     """Normalise a URL for use as a cache key (strip trailing slashes)."""
@@ -791,7 +859,9 @@ def _name_from_url(url: str) -> str:
 def _make_id(name: str) -> str:
     """Create a stable lowercase-hyphenated ID from a name."""
     slug = re.sub(r"[^a-z0-9]+", "-", name.lower()).strip("-")
-    return slug or hashlib.md5(name.encode()).hexdigest()[:8]
+    # md5 here derives a stable slug fallback, not a security digest; mark it so
+    # (usedforsecurity=False) to reflect intent and clear the bandit B324 flag.
+    return slug or hashlib.md5(name.encode(), usedforsecurity=False).hexdigest()[:8]
 
 
 def _parse_yaml_simple(text: str) -> Dict[str, Any]:
@@ -805,12 +875,12 @@ def _parse_yaml_simple(text: str) -> Dict[str, Any]:
     """
     try:
         import yaml
+
         return yaml.safe_load(text) or {}
     except ImportError:
         pass
 
     result: Dict[str, Any] = {}
-    current_key: Optional[str] = None
     current_map: Optional[Dict[str, str]] = None
 
     for line in text.splitlines():
@@ -825,7 +895,6 @@ def _parse_yaml_simple(text: str) -> Dict[str, Any]:
             v = v.strip().strip('"').strip("'")
 
             if indent == 0:
-                current_key = k
                 if v:
                     result[k] = v
                     current_map = None

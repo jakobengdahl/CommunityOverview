@@ -5,13 +5,9 @@ Tests that MCP tools return the same data as REST API endpoints,
 ensuring consistency across both interfaces.
 """
 
-import pytest
-import json
 import os
 from pathlib import Path
 from fastapi.testclient import TestClient
-
-from backend.api_host import create_app, AppConfig
 
 
 class TestMCPToolsConsistency:
@@ -26,7 +22,7 @@ class TestMCPToolsConsistency:
         # Search via execute_tool (MCP tool)
         mcp_response = test_app.post(
             "/execute_tool",
-            json={"tool_name": "search_graph", "arguments": {"query": "test"}}
+            json={"tool_name": "search_graph", "arguments": {"query": "test"}},
         )
         mcp_data = mcp_response.json()
 
@@ -49,7 +45,7 @@ class TestMCPToolsConsistency:
         # Get via MCP tool
         mcp_response = test_app.post(
             "/execute_tool",
-            json={"tool_name": "get_node_details", "arguments": {"node_id": "node-1"}}
+            json={"tool_name": "get_node_details", "arguments": {"node_id": "node-1"}},
         )
         mcp_data = mcp_response.json()
 
@@ -66,8 +62,7 @@ class TestMCPToolsConsistency:
 
         # Get via MCP tool
         mcp_response = test_app.post(
-            "/execute_tool",
-            json={"tool_name": "get_graph_stats", "arguments": {}}
+            "/execute_tool", json={"tool_name": "get_graph_stats", "arguments": {}}
         )
         mcp_data = mcp_response.json()
 
@@ -86,7 +81,7 @@ class TestMCPToolsConsistency:
         # Search via MCP tool
         mcp_response = test_app.post(
             "/execute_tool",
-            json={"tool_name": "find_similar_nodes", "arguments": params}
+            json={"tool_name": "find_similar_nodes", "arguments": params},
         )
         mcp_data = mcp_response.json()
 
@@ -99,9 +94,15 @@ class TestMCPToolsConsistency:
 
     def test_capabilities_consistency(self, test_app: TestClient):
         """Capabilities are consistent between REST and the registered MCP tool."""
-        test_config_path = str(Path(__file__).resolve().parents[3] / "config" / "test" / "schema_config.json")
+        test_config_path = str(
+            Path(__file__).resolve().parents[3]
+            / "config"
+            / "test"
+            / "schema_config.json"
+        )
         os.environ["SCHEMA_FILE"] = test_config_path
-        from backend import config_loader
+        from backend.config import config_loader
+
         config_loader.reset_loader()
 
         rest_response = test_app.get("/api/capabilities")
@@ -120,7 +121,7 @@ class TestMCPToolsAvailability:
         """search_graph tool is available."""
         response = test_app.post(
             "/execute_tool",
-            json={"tool_name": "search_graph", "arguments": {"query": "x"}}
+            json={"tool_name": "search_graph", "arguments": {"query": "x"}},
         )
         assert response.status_code == 200
         assert "nodes" in response.json()
@@ -129,7 +130,7 @@ class TestMCPToolsAvailability:
         """get_node_details tool is available."""
         response = test_app.post(
             "/execute_tool",
-            json={"tool_name": "get_node_details", "arguments": {"node_id": "node-1"}}
+            json={"tool_name": "get_node_details", "arguments": {"node_id": "node-1"}},
         )
         assert response.status_code == 200
         assert response.json()["node"]["id"] == "node-1"
@@ -142,9 +143,9 @@ class TestMCPToolsAvailability:
                 "tool_name": "add_nodes",
                 "arguments": {
                     "nodes": [{"type": "Actor", "name": "X", "communities": []}],
-                    "edges": []
-                }
-            }
+                    "edges": [],
+                },
+            },
         )
         assert response.status_code == 403
         assert "requires authentication" in response.json()["error"]
@@ -155,8 +156,8 @@ class TestMCPToolsAvailability:
             "/execute_tool",
             json={
                 "tool_name": "delete_nodes",
-                "arguments": {"node_ids": ["x"], "confirmed": False}
-            }
+                "arguments": {"node_ids": ["x"], "confirmed": False},
+            },
         )
         assert response.status_code == 403
         assert "requires authentication" in response.json()["error"]
@@ -165,10 +166,7 @@ class TestMCPToolsAvailability:
         """find_similar_nodes tool is available."""
         response = test_app.post(
             "/execute_tool",
-            json={
-                "tool_name": "find_similar_nodes",
-                "arguments": {"name": "test"}
-            }
+            json={"tool_name": "find_similar_nodes", "arguments": {"name": "test"}},
         )
         assert response.status_code == 200
         assert "similar_nodes" in response.json()
@@ -176,8 +174,7 @@ class TestMCPToolsAvailability:
     def test_get_graph_stats_tool_available(self, test_app: TestClient):
         """get_graph_stats tool is available."""
         response = test_app.post(
-            "/execute_tool",
-            json={"tool_name": "get_graph_stats", "arguments": {}}
+            "/execute_tool", json={"tool_name": "get_graph_stats", "arguments": {}}
         )
         assert response.status_code == 200
         assert "total_nodes" in response.json()
@@ -185,8 +182,7 @@ class TestMCPToolsAvailability:
     def test_get_capabilities_tool_available(self, test_app: TestClient):
         """get_capabilities tool is available."""
         response = test_app.post(
-            "/execute_tool",
-            json={"tool_name": "get_capabilities", "arguments": {}}
+            "/execute_tool", json={"tool_name": "get_capabilities", "arguments": {}}
         )
         assert response.status_code == 200
         assert "capabilities" in response.json()
@@ -225,10 +221,16 @@ class TestMCPEndpointAvailability:
         """GET /mcp with Accept: text/event-stream is routed to transport, not info JSON."""
         # The SSE/Streamable transport handles this; we just verify it's not the browser info.
         # Use stream=True so the client does not wait for a full response body.
-        with test_app.stream("GET", "/mcp", headers={"Accept": "text/event-stream"}) as resp:
+        with test_app.stream(
+            "GET", "/mcp", headers={"Accept": "text/event-stream"}
+        ) as resp:
             ct = resp.headers.get("content-type", "")
             # Must NOT be the plain JSON info response
-            assert "application/json" not in ct or resp.status_code != 200 or ct.startswith("text/event-stream")
+            assert (
+                "application/json" not in ct
+                or resp.status_code != 200
+                or ct.startswith("text/event-stream")
+            )
 
     def test_get_mcp_info_mentions_streamable_endpoints(self, test_app: TestClient):
         """GET /mcp info JSON documents the Streamable HTTP endpoints when available."""
@@ -247,7 +249,7 @@ class TestMCPToolsWithEdgeCases:
         """Search with empty query should work or return error."""
         response = test_app.post(
             "/execute_tool",
-            json={"tool_name": "search_graph", "arguments": {"query": ""}}
+            json={"tool_name": "search_graph", "arguments": {"query": ""}},
         )
         # Should return some response (empty results or error), not crash
         assert response.status_code in [200, 400]
@@ -258,8 +260,8 @@ class TestMCPToolsWithEdgeCases:
             "/execute_tool",
             json={
                 "tool_name": "get_node_details",
-                "arguments": {"node_id": "nonexistent-id"}
-            }
+                "arguments": {"node_id": "nonexistent-id"},
+            },
         )
         data = response.json()
         # Should indicate node not found
@@ -273,9 +275,9 @@ class TestMCPToolsWithEdgeCases:
                 "tool_name": "add_nodes",
                 "arguments": {
                     "nodes": [{"type": "InvalidType", "name": "Bad Node"}],
-                    "edges": []
-                }
-            }
+                    "edges": [],
+                },
+            },
         )
         # Should handle gracefully - either return validation error or auth rejection
         assert response.status_code in [200, 400, 403, 500]
@@ -292,8 +294,8 @@ class TestMCPToolsWithEdgeCases:
             "/execute_tool",
             json={
                 "tool_name": "delete_nodes",
-                "arguments": {"node_ids": ["node-1"], "confirmed": False}
-            }
+                "arguments": {"node_ids": ["node-1"], "confirmed": False},
+            },
         )
         data = response.json()
         # Should indicate confirmation required or auth requirement for mutating tools

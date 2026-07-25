@@ -1,0 +1,15 @@
+.graph-arrow-node {
+  cursor: move;
+}
+
+.graph-arrow-node.selected svg line:last-of-type {
+  filter: drop-shadow(0 0 3px rgba(255, 255, 255, 0.7));
+}
+
+.graph-arrow-handle {
+  cursor: grab;
+}
+
+.graph-arrow-handle:active {
+  cursor: grabbing;
+}

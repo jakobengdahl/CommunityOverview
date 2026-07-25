@@ -1,7 +1,5 @@
 """Targeted tests for public request actor/scope context seams."""
 
-import pytest
-
 
 class TestRequestActorService:
     def test_defaults_are_standalone_safe(self, empty_service, monkeypatch):
@@ -20,16 +18,20 @@ class TestRequestActorService:
             "source": "default",
         }
 
-    def test_request_headers_override_environment_defaults(self, empty_service, monkeypatch):
+    def test_request_headers_override_environment_defaults(
+        self, empty_service, monkeypatch
+    ):
         monkeypatch.setenv("COMMUNITYOVERVIEW_ACTOR_ID", "env-actor")
         monkeypatch.setenv("COMMUNITYOVERVIEW_ACTOR_TYPE", "service")
         monkeypatch.setenv("COMMUNITYOVERVIEW_AUTH_SOURCE", "gateway")
 
-        result = empty_service.get_request_actor_info(headers={
-            "x-communityoverview-actor-id": "header-actor",
-            "x-communityoverview-actor-type": "member",
-            "x-communityoverview-auth-source": "proxy",
-        })
+        result = empty_service.get_request_actor_info(
+            headers={
+                "x-communityoverview-actor-id": "header-actor",
+                "x-communityoverview-actor-type": "member",
+                "x-communityoverview-auth-source": "proxy",
+            }
+        )
 
         assert result == {
             "actor_type": "member",
@@ -40,17 +42,19 @@ class TestRequestActorService:
         }
 
     def test_internal_seam_still_resolves_rich_actor_context(self, monkeypatch):
-        from backend.request_context import get_request_actor_context
+        from backend.runtime.request_context import get_request_actor_context
 
         monkeypatch.setenv("COMMUNITYOVERVIEW_ACTOR_ID", "env-actor")
         monkeypatch.setenv("COMMUNITYOVERVIEW_ACTOR_TYPE", "service")
         monkeypatch.setenv("COMMUNITYOVERVIEW_AUTH_SOURCE", "gateway")
 
-        result = get_request_actor_context(headers={
-            "x-communityoverview-actor-id": "header-actor",
-            "x-communityoverview-actor-type": "member",
-            "x-communityoverview-auth-source": "proxy",
-        })
+        result = get_request_actor_context(
+            headers={
+                "x-communityoverview-actor-id": "header-actor",
+                "x-communityoverview-actor-type": "member",
+                "x-communityoverview-auth-source": "proxy",
+            }
+        )
 
         assert result == {
             "actor_id": "header-actor",
@@ -80,7 +84,9 @@ class TestRequestScopeService:
             "source": "default",
         }
 
-    def test_explicit_override_wins_over_headers_and_environment(self, empty_service, monkeypatch):
+    def test_explicit_override_wins_over_headers_and_environment(
+        self, empty_service, monkeypatch
+    ):
         monkeypatch.setenv("COMMUNITYOVERVIEW_WORKSPACE_ID", "env-workspace")
         monkeypatch.setenv("COMMUNITYOVERVIEW_WORKSPACE_KIND", "team")
         monkeypatch.setenv("COMMUNITYOVERVIEW_GRAPH_SCOPE_ID", "env-graph")
@@ -107,7 +113,7 @@ class TestRequestScopeService:
         }
 
     def test_internal_seam_still_resolves_rich_scope_context(self, monkeypatch):
-        from backend.request_context import get_request_scope_context
+        from backend.runtime.request_context import get_request_scope_context
 
         monkeypatch.setenv("COMMUNITYOVERVIEW_WORKSPACE_ID", "env-workspace")
         monkeypatch.setenv("COMMUNITYOVERVIEW_WORKSPACE_KIND", "team")
@@ -136,8 +142,12 @@ class TestRequestScopeService:
             "has_selection": True,
         }
 
-    def test_graph_selection_seam_remains_non_sensitive_and_tracks_mode(self, monkeypatch):
-        from backend.request_context import get_public_request_graph_selection_context
+    def test_graph_selection_seam_remains_non_sensitive_and_tracks_mode(
+        self, monkeypatch
+    ):
+        from backend.runtime.request_context import (
+            get_public_request_graph_selection_context,
+        )
 
         monkeypatch.setenv("COMMUNITYOVERVIEW_WORKSPACE_KIND", "team")
 

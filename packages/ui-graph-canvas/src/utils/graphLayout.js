@@ -25,7 +25,7 @@ export function getLayoutedElements(nodes, edges, direction = 'TB') {
     ranker: 'tight-tree',
     marginx: 50,
     marginy: 50,
-    acyclicer: 'greedy'
+    acyclicer: 'greedy',
   });
 
   nodes.forEach((node) => {
@@ -164,16 +164,16 @@ function getBoundingBox(nodes) {
     return { minX: 0, minY: 0, maxX: 800, maxY: 600 };
   }
 
-  const positions = nodes.filter(n => n.position).map(n => n.position);
+  const positions = nodes.filter((n) => n.position).map((n) => n.position);
   if (positions.length === 0) {
     return { minX: 0, minY: 0, maxX: 800, maxY: 600 };
   }
 
   return {
-    minX: Math.min(...positions.map(p => p.x)),
-    minY: Math.min(...positions.map(p => p.y)),
-    maxX: Math.max(...positions.map(p => p.x)),
-    maxY: Math.max(...positions.map(p => p.y)),
+    minX: Math.min(...positions.map((p) => p.x)),
+    minY: Math.min(...positions.map((p) => p.y)),
+    maxX: Math.max(...positions.map((p) => p.x)),
+    maxY: Math.max(...positions.map((p) => p.y)),
   };
 }
 
@@ -294,7 +294,7 @@ function getNodeType(node) {
 function computeOrigin(existingNodes, viewportCenter) {
   if (viewportCenter) return viewportCenter;
   const bbox = getBoundingBox(existingNodes);
-  if (existingNodes.filter(n => n.position).length > 0) {
+  if (existingNodes.filter((n) => n.position).length > 0) {
     return {
       x: (bbox.minX + bbox.maxX) / 2,
       y: (bbox.minY + bbox.maxY) / 2,
@@ -319,14 +319,14 @@ function gridLayoutAt(nodes, center) {
 }
 
 function hierarchicalLayout(nodes, crossTypeEdges, nodeTypeMap, origin) {
-  const sourceTypes = new Set(crossTypeEdges.map(e => nodeTypeMap.get(e.source)));
-  const targetTypes = new Set(crossTypeEdges.map(e => nodeTypeMap.get(e.target)));
+  const sourceTypes = new Set(crossTypeEdges.map((e) => nodeTypeMap.get(e.source)));
+  const targetTypes = new Set(crossTypeEdges.map((e) => nodeTypeMap.get(e.target)));
 
   // Root types: appear as source but not as target in cross-type edges
-  const rootTypes = [...sourceTypes].filter(t => !targetTypes.has(t));
+  const rootTypes = [...sourceTypes].filter((t) => !targetTypes.has(t));
   if (rootTypes.length === 0) return gridLayoutAt(nodes, origin);
 
-  const parentNodes = nodes.filter(n => rootTypes.includes(nodeTypeMap.get(n.id)));
+  const parentNodes = nodes.filter((n) => rootTypes.includes(nodeTypeMap.get(n.id)));
 
   // parent id → [child ids]
   const childrenOf = new Map();
@@ -364,14 +364,15 @@ function hierarchicalLayout(nodes, crossTypeEdges, nodeTypeMap, origin) {
 
     // Skip children already placed under a previous parent (multi-parent edges)
     const children = [...new Set(childrenOf.get(parent.id) || [])]
-      .map(id => nodes.find(n => n.id === id))
+      .map((id) => nodes.find((n) => n.id === id))
       .filter(Boolean)
-      .filter(child => !placedIds.has(child.id));
+      .filter((child) => !placedIds.has(child.id));
 
     if (children.length > 0) {
-      const cols = children.length <= CHILD_GRID_THRESHOLD
-        ? children.length
-        : Math.ceil(Math.sqrt(children.length));
+      const cols =
+        children.length <= CHILD_GRID_THRESHOLD
+          ? children.length
+          : Math.ceil(Math.sqrt(children.length));
       const childStartX = parentX - ((cols - 1) * CHILD_HSPACING) / 2;
 
       children.forEach((child, j) => {
@@ -390,7 +391,7 @@ function hierarchicalLayout(nodes, crossTypeEdges, nodeTypeMap, origin) {
   }
 
   // Any nodes not yet placed (orphans from non-root, non-child types)
-  const orphans = nodes.filter(n => !placedIds.has(n.id));
+  const orphans = nodes.filter((n) => !placedIds.has(n.id));
   if (orphans.length > 0) {
     const orphanOrigin = { x: origin.x, y: origin.y + CHILD_VOFFSET * 3 };
     positioned.push(...gridLayoutAt(orphans, orphanOrigin));
@@ -402,10 +403,10 @@ function hierarchicalLayout(nodes, crossTypeEdges, nodeTypeMap, origin) {
 function resolveOverlaps(positioned, existingPositions) {
   const result = [];
   for (const node of positioned) {
-    const allOccupied = [...existingPositions, ...result.map(n => n.position)];
+    const allOccupied = [...existingPositions, ...result.map((n) => n.position)];
     let { x, y } = node.position;
     for (let attempt = 0; attempt < 20; attempt++) {
-      if (!allOccupied.some(pos => nodesOverlap({ x, y }, pos, OVERLAP_MIN_DIST))) break;
+      if (!allOccupied.some((pos) => nodesOverlap({ x, y }, pos, OVERLAP_MIN_DIST))) break;
       const angle = attempt * 0.7;
       const dist = 180 + attempt * 55;
       x = node.position.x + dist * Math.cos(angle);
@@ -417,11 +418,11 @@ function resolveOverlaps(positioned, existingPositions) {
 }
 
 function layoutBatch(nodes, edges, origin) {
-  const nodeTypeMap = new Map(nodes.map(n => [n.id, getNodeType(n)]));
-  const nodeIds = new Set(nodes.map(n => n.id));
-  const internalEdges = edges.filter(e => nodeIds.has(e.source) && nodeIds.has(e.target));
+  const nodeTypeMap = new Map(nodes.map((n) => [n.id, getNodeType(n)]));
+  const nodeIds = new Set(nodes.map((n) => n.id));
+  const internalEdges = edges.filter((e) => nodeIds.has(e.source) && nodeIds.has(e.target));
   const crossTypeEdges = internalEdges.filter(
-    e => nodeTypeMap.get(e.source) !== nodeTypeMap.get(e.target)
+    (e) => nodeTypeMap.get(e.source) !== nodeTypeMap.get(e.target)
   );
   const uniqueTypes = new Set(nodeTypeMap.values());
 
@@ -449,7 +450,7 @@ export function positionNewNodes(newNodes, existingNodes, edges = [], options = 
   const { viewportCenter = null } = options;
   if (newNodes.length === 0) return newNodes;
 
-  const existingPositions = existingNodes.filter(n => n.position).map(n => n.position);
+  const existingPositions = existingNodes.filter((n) => n.position).map((n) => n.position);
   const origin = computeOrigin(existingNodes, viewportCenter);
 
   // No existing nodes: run full batch layout
@@ -459,12 +460,12 @@ export function positionNewNodes(newNodes, existingNodes, edges = [], options = 
   }
 
   // Analyse the incoming batch
-  const newNodeIds = new Set(newNodes.map(n => n.id));
-  const nodeTypeMap = new Map(newNodes.map(n => [n.id, getNodeType(n)]));
+  const newNodeIds = new Set(newNodes.map((n) => n.id));
+  const nodeTypeMap = new Map(newNodes.map((n) => [n.id, getNodeType(n)]));
   const uniqueTypes = new Set(nodeTypeMap.values());
-  const internalEdges = edges.filter(e => newNodeIds.has(e.source) && newNodeIds.has(e.target));
+  const internalEdges = edges.filter((e) => newNodeIds.has(e.source) && newNodeIds.has(e.target));
   const crossTypeEdges = internalEdges.filter(
-    e => nodeTypeMap.get(e.source) !== nodeTypeMap.get(e.target)
+    (e) => nodeTypeMap.get(e.source) !== nodeTypeMap.get(e.target)
   );
 
   // Use batch layout when there are multiple types with relationships or many nodes
@@ -475,20 +476,21 @@ export function positionNewNodes(newNodes, existingNodes, edges = [], options = 
   }
 
   // Small addition: try to place near connected existing nodes
-  const existingNodeMap = new Map(existingNodes.map(n => [n.id, n]));
+  const existingNodeMap = new Map(existingNodes.map((n) => [n.id, n]));
   const positionedNodes = [];
 
   for (const node of newNodes) {
     const connectedEdges = edges.filter(
-      e => (e.source === node.id || e.target === node.id) &&
-           (existingNodeMap.has(e.source) || existingNodeMap.has(e.target))
+      (e) =>
+        (e.source === node.id || e.target === node.id) &&
+        (existingNodeMap.has(e.source) || existingNodeMap.has(e.target))
     );
 
     let position;
 
     if (connectedEdges.length > 0) {
       const connectedPositions = connectedEdges
-        .map(e => {
+        .map((e) => {
           const connectedId = e.source === node.id ? e.target : e.source;
           return existingNodeMap.get(connectedId)?.position;
         })
@@ -515,10 +517,10 @@ export function positionNewNodes(newNodes, existingNodes, edges = [], options = 
       };
     }
 
-    const allOccupied = [...existingPositions, ...positionedNodes.map(n => n.position)];
+    const allOccupied = [...existingPositions, ...positionedNodes.map((n) => n.position)];
     let { x, y } = position;
     for (let attempt = 0; attempt < 15; attempt++) {
-      if (!allOccupied.some(pos => nodesOverlap({ x, y }, pos, OVERLAP_MIN_DIST))) break;
+      if (!allOccupied.some((pos) => nodesOverlap({ x, y }, pos, OVERLAP_MIN_DIST))) break;
       const angle = attempt * 0.8;
       const dist = 180 + attempt * 60;
       x = position.x + dist * Math.cos(angle);

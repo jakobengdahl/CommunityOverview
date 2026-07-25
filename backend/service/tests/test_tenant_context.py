@@ -78,10 +78,9 @@ class TestTenantContextMcpTool:
 
     def test_tool_via_execute_tool_endpoint(self, app_client):
         client, _ = app_client
-        response = client.post("/execute_tool", json={
-            "tool_name": "get_tenant_context",
-            "arguments": {}
-        })
+        response = client.post(
+            "/execute_tool", json={"tool_name": "get_tenant_context", "arguments": {}}
+        )
         assert response.status_code == 200
         result = response.json()
         assert "tenant_id" in result
@@ -94,10 +93,9 @@ class TestTenantContextMcpTool:
 
         client, _ = app_client
         # Unauthenticated call must succeed (app has auth_enabled=False, safe tools accessible)
-        response = client.post("/execute_tool", json={
-            "tool_name": "get_tenant_context",
-            "arguments": {}
-        })
+        response = client.post(
+            "/execute_tool", json={"tool_name": "get_tenant_context", "arguments": {}}
+        )
         assert response.status_code == 200
 
     def test_tool_env_override_via_execute_tool(self, app_client, monkeypatch):
@@ -105,10 +103,9 @@ class TestTenantContextMcpTool:
         monkeypatch.setenv("COMMUNITYOVERVIEW_ENVIRONMENT", "staging")
 
         client, _ = app_client
-        response = client.post("/execute_tool", json={
-            "tool_name": "get_tenant_context",
-            "arguments": {}
-        })
+        response = client.post(
+            "/execute_tool", json={"tool_name": "get_tenant_context", "arguments": {}}
+        )
         assert response.status_code == 200
         result = response.json()
         assert result["tenant_id"] == "mcp-tenant"

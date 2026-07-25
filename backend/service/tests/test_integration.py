@@ -5,11 +5,9 @@ These tests verify that GraphService correctly integrates with GraphStorage
 and that data flows correctly through all layers.
 """
 
-import pytest
-import tempfile
 import os
 
-from backend.core import GraphStorage, Node, Edge, NodeType, RelationshipType
+from backend.core import GraphStorage, NodeType, RelationshipType
 from backend.service import GraphService
 
 
@@ -24,8 +22,7 @@ class TestGraphServiceIntegration:
 
         # Add via service
         result = service.add_nodes(
-            nodes=[{"type": "Actor", "name": "Test Actor"}],
-            edges=[]
+            nodes=[{"type": "Actor", "name": "Test Actor"}], edges=[]
         )
         assert result["success"] is True
 
@@ -44,7 +41,7 @@ class TestGraphServiceIntegration:
         service1 = GraphService(storage1)
         service1.add_nodes(
             nodes=[{"id": "persist-1", "type": "Actor", "name": "Persistent Node"}],
-            edges=[]
+            edges=[],
         )
 
         # Wait for background save to complete
@@ -67,8 +64,7 @@ class TestGraphServiceIntegration:
 
         # Create
         add_result = service.add_nodes(
-            nodes=[{"id": "crud-1", "type": "Actor", "name": "CRUD Test"}],
-            edges=[]
+            nodes=[{"id": "crud-1", "type": "Actor", "name": "CRUD Test"}], edges=[]
         )
         assert add_result["success"] is True
         assert "crud-1" in storage.nodes
@@ -93,9 +89,9 @@ class TestGraphServiceIntegration:
         service.add_nodes(
             nodes=[
                 {"type": "Actor", "name": "Searchable Actor One"},
-                {"type": "Actor", "name": "Searchable Actor Two"}
+                {"type": "Actor", "name": "Searchable Actor Two"},
             ],
-            edges=[]
+            edges=[],
         )
 
         # Search should find them
@@ -121,12 +117,12 @@ class TestGraphServiceIntegration:
             nodes=[
                 {"id": "n1", "type": "Actor", "name": "Actor"},
                 {"id": "n2", "type": "Initiative", "name": "Initiative"},
-                {"id": "n3", "type": "Capability", "name": "Capability"}
+                {"id": "n3", "type": "Capability", "name": "Capability"},
             ],
             edges=[
                 {"source": "n1", "target": "n2", "type": "BELONGS_TO"},
-                {"source": "n2", "target": "n3", "type": "PART_OF"}
-            ]
+                {"source": "n2", "target": "n3", "type": "PART_OF"},
+            ],
         )
 
         # Verify relationships via service
@@ -157,9 +153,9 @@ class TestGraphServiceIntegration:
             nodes=[
                 {"type": "Actor", "name": "Actor 1"},
                 {"type": "Actor", "name": "Actor 2"},
-                {"type": "Initiative", "name": "Initiative 1"}
+                {"type": "Initiative", "name": "Initiative 1"},
             ],
-            edges=[]
+            edges=[],
         )
 
         # Verify stats updated
@@ -176,7 +172,7 @@ class TestGraphCoreCompatibility:
         """Test that string node types are correctly converted to NodeType."""
         result = empty_service.add_nodes(
             nodes=[{"type": "Actor", "name": "Test"}],  # String type
-            edges=[]
+            edges=[],
         )
         assert result["success"] is True
 
@@ -189,9 +185,11 @@ class TestGraphCoreCompatibility:
         empty_service.add_nodes(
             nodes=[
                 {"id": "n1", "type": "Actor", "name": "A1"},
-                {"id": "n2", "type": "Initiative", "name": "I1"}
+                {"id": "n2", "type": "Initiative", "name": "I1"},
             ],
-            edges=[{"source": "n1", "target": "n2", "type": "BELONGS_TO"}]  # String type
+            edges=[
+                {"source": "n1", "target": "n2", "type": "BELONGS_TO"}
+            ],  # String type
         )
 
         # Verify internal representation uses enum
@@ -201,16 +199,14 @@ class TestGraphCoreCompatibility:
     def test_dynamic_node_type_accepted(self, empty_service):
         """Test that dynamic node types are accepted."""
         result = empty_service.add_nodes(
-            nodes=[{"type": "CustomType", "name": "Test"}],
-            edges=[]
+            nodes=[{"type": "CustomType", "name": "Test"}], edges=[]
         )
         assert result["success"] is True
 
     def test_empty_name_rejected(self, empty_service):
         """Test that empty name is rejected."""
         result = empty_service.add_nodes(
-            nodes=[{"type": "Actor", "name": ""}],
-            edges=[]
+            nodes=[{"type": "Actor", "name": ""}], edges=[]
         )
         assert result["success"] is False
 
@@ -219,16 +215,14 @@ class TestGraphCoreCompatibility:
         metadata = {
             "custom_field": "custom_value",
             "nested": {"key": "value"},
-            "list_field": [1, 2, 3]
+            "list_field": [1, 2, 3],
         }
 
         empty_service.add_nodes(
-            nodes=[{
-                "type": "Actor",
-                "name": "Node With Metadata",
-                "metadata": metadata
-            }],
-            edges=[]
+            nodes=[
+                {"type": "Actor", "name": "Node With Metadata", "metadata": metadata}
+            ],
+            edges=[],
         )
 
         # Get via service
@@ -242,12 +236,14 @@ class TestGraphCoreCompatibility:
     def test_tags_handling(self, empty_service):
         """Test that tags are properly handled."""
         empty_service.add_nodes(
-            nodes=[{
-                "type": "Actor",
-                "name": "Tagged Node",
-                "tags": ["tag1", "tag2", "tag3"]
-            }],
-            edges=[]
+            nodes=[
+                {
+                    "type": "Actor",
+                    "name": "Tagged Node",
+                    "tags": ["tag1", "tag2", "tag3"],
+                }
+            ],
+            edges=[],
         )
 
         # Search by tag should work
@@ -267,10 +263,7 @@ class TestConcurrentModifications:
 
         # Add many nodes in quick succession
         for i in range(50):
-            service.add_nodes(
-                nodes=[{"type": "Actor", "name": f"Actor {i}"}],
-                edges=[]
-            )
+            service.add_nodes(nodes=[{"type": "Actor", "name": f"Actor {i}"}], edges=[])
 
         # Verify all were added
         stats = service.get_graph_stats()
@@ -284,8 +277,7 @@ class TestConcurrentModifications:
 
         # Add initial data
         service.add_nodes(
-            nodes=[{"id": "base", "type": "Actor", "name": "Base Node"}],
-            edges=[]
+            nodes=[{"id": "base", "type": "Actor", "name": "Base Node"}], edges=[]
         )
 
         # Interleave reads and writes
@@ -295,10 +287,7 @@ class TestConcurrentModifications:
             service.get_node_details("base")
 
             # Write
-            service.add_nodes(
-                nodes=[{"type": "Actor", "name": f"Node {i}"}],
-                edges=[]
-            )
+            service.add_nodes(nodes=[{"type": "Actor", "name": f"Node {i}"}], edges=[])
 
             # Read again
             service.get_graph_stats()

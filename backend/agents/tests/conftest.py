@@ -10,8 +10,7 @@ from dataclasses import dataclass
 def pytest_configure(config):
     """Configure custom markers."""
     config.addinivalue_line(
-        "markers",
-        "slow: marks tests as slow (LLM calls, network dependent)"
+        "markers", "slow: marks tests as slow (LLM calls, network dependent)"
     )
 
 

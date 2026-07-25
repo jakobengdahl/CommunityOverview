@@ -3,9 +3,7 @@ Tests for agent worker.
 """
 
 import pytest
-from unittest.mock import MagicMock, patch
-import queue
-import time
+from unittest.mock import MagicMock
 
 from backend.agents.config import AgentConfig, AgentsSettings, AgentPrompts
 from backend.agents.worker import AgentWorker, ProcessingResult

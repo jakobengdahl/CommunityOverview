@@ -31,12 +31,7 @@ describe('InputDialog', () => {
 
   it('confirm button is disabled when input is empty', () => {
     render(
-      <InputDialog
-        title="Test"
-        confirmText="Save"
-        onConfirm={onConfirm}
-        onCancel={onCancel}
-      />
+      <InputDialog title="Test" confirmText="Save" onConfirm={onConfirm} onCancel={onCancel} />
     );
     const btn = screen.getByText('Save');
     expect(btn.disabled).toBe(true);
@@ -44,12 +39,7 @@ describe('InputDialog', () => {
 
   it('confirm button enables after typing', () => {
     render(
-      <InputDialog
-        title="Test"
-        confirmText="Save"
-        onConfirm={onConfirm}
-        onCancel={onCancel}
-      />
+      <InputDialog title="Test" confirmText="Save" onConfirm={onConfirm} onCancel={onCancel} />
     );
     const input = screen.getByRole('textbox');
     fireEvent.change(input, { target: { value: 'my view' } });
@@ -59,12 +49,7 @@ describe('InputDialog', () => {
 
   it('calls onConfirm with trimmed value when confirm button clicked', () => {
     render(
-      <InputDialog
-        title="Test"
-        confirmText="Save"
-        onConfirm={onConfirm}
-        onCancel={onCancel}
-      />
+      <InputDialog title="Test" confirmText="Save" onConfirm={onConfirm} onCancel={onCancel} />
     );
     const input = screen.getByRole('textbox');
     fireEvent.change(input, { target: { value: '  hello  ' } });
@@ -74,12 +59,7 @@ describe('InputDialog', () => {
 
   it('calls onConfirm on Enter key', () => {
     render(
-      <InputDialog
-        title="Test"
-        confirmText="Save"
-        onConfirm={onConfirm}
-        onCancel={onCancel}
-      />
+      <InputDialog title="Test" confirmText="Save" onConfirm={onConfirm} onCancel={onCancel} />
     );
     const input = screen.getByRole('textbox');
     fireEvent.change(input, { target: { value: 'my name' } });
@@ -88,13 +68,7 @@ describe('InputDialog', () => {
   });
 
   it('calls onCancel on Escape key', () => {
-    render(
-      <InputDialog
-        title="Test"
-        onConfirm={onConfirm}
-        onCancel={onCancel}
-      />
-    );
+    render(<InputDialog title="Test" onConfirm={onConfirm} onCancel={onCancel} />);
     const input = screen.getByRole('textbox');
     fireEvent.keyDown(input, { key: 'Escape' });
     expect(onCancel).toHaveBeenCalled();
@@ -102,25 +76,14 @@ describe('InputDialog', () => {
 
   it('calls onCancel when cancel button clicked', () => {
     render(
-      <InputDialog
-        title="Test"
-        cancelText="Cancel"
-        onConfirm={onConfirm}
-        onCancel={onCancel}
-      />
+      <InputDialog title="Test" cancelText="Cancel" onConfirm={onConfirm} onCancel={onCancel} />
     );
     fireEvent.click(screen.getByText('Cancel'));
     expect(onCancel).toHaveBeenCalled();
   });
 
   it('calls onCancel when overlay is clicked', () => {
-    render(
-      <InputDialog
-        title="Test"
-        onConfirm={onConfirm}
-        onCancel={onCancel}
-      />
-    );
+    render(<InputDialog title="Test" onConfirm={onConfirm} onCancel={onCancel} />);
     const overlay = document.querySelector('.input-dialog-overlay');
     fireEvent.click(overlay);
     expect(onCancel).toHaveBeenCalled();

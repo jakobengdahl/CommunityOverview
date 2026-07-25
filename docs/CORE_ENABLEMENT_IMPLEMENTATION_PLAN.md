@@ -7,6 +7,7 @@
 **Related documents:**
 - [CORE_RUNTIME_AND_EXTENSION_ENABLEMENT.md](./CORE_RUNTIME_AND_EXTENSION_ENABLEMENT.md) — broader runtime and extension enablement context
 - [PLUGIN_RUNTIME_CORE_ENABLEMENT.md](./PLUGIN_RUNTIME_CORE_ENABLEMENT.md) — detailed plugin runtime requirements (manifest parsing, scope enforcement, API versioning, hook registry, migration runner, testability, failure behavior)
+- [EXTERNAL_ADMIN_AND_AUTOMATION_SEAMS.md](./EXTERNAL_ADMIN_AND_AUTOMATION_SEAMS.md) — generic seam design for external admin/control layers and external automation layers
 
 **Tech Stack:** Python, FastAPI, Pydantic, existing `config_loader`, `GraphService`, REST router, MCP tool registration, pytest.
 
@@ -94,6 +95,33 @@ Embedding systems and extended deployment layers need audit-friendly mutation at
 
 ---
 
+### Priority 4b: External admin and automation seam surfaces
+
+**Why this belongs alongside operability hooks**
+Once actor attribution (Priority 3) is in place, the core should expose the generic
+seam surfaces that let external admin and automation layers integrate without policy
+leakage. This is distinct from the internal operability hooks (Priority 4) but shares
+the same foundation.
+
+**Target outcome**
+- admin mutation endpoints accept a structured action context (actor class, actor id,
+  idempotency key, trigger ref, correlation keys)
+- a distinct read-only status surface exists, separable from mutation paths
+- outbound event hook points publish well-structured payloads that external automation
+  can consume
+- audit records include the minimum field set defined in
+  [EXTERNAL_ADMIN_AND_AUTOMATION_SEAMS.md](./EXTERNAL_ADMIN_AND_AUTOMATION_SEAMS.md)
+- standalone defaults remain no-op for all of the above
+
+**Suggested first slice**
+- define and thread the action context block through the first admin mutation endpoint
+  as a proof of pattern
+- expose a minimal read-only status endpoint that is explicitly separate from the
+  mutation router
+- add structured audit log output for the action context fields
+
+---
+
 ### Priority 4: Operability hooks
 
 **Why this matters**
@@ -117,7 +145,8 @@ Reliable health signals, restore boundaries, and machine-readable diagnostics ma
 1. implement request actor and scope foundation
 2. implement authorization hook seam
 3. implement actor attribution for writes and events
-4. improve operability hooks
+4. implement external admin and automation seam surfaces (action context, read-only status, event hooks)
+5. improve operability hooks
 
 ---
 
@@ -142,6 +171,9 @@ This plan is succeeding when:
 - external deployment layers can pass actor, workspace, and graph context through stable contracts
 - future authorization logic can attach without forking core
 - mutation flows can later emit audit-friendly metadata without invasive rewrites
+- external admin mutation paths carry structured action context (actor class, idempotency key, correlation keys) without requiring a built-in policy layer
+- a read-only status surface is explicitly distinct from mutation paths and can be scoped to a narrower credential
+- outbound event hooks publish well-structured payloads that external automation can consume without parsing internal log formats
 - extension integrations can attach through stable APIs rather than patches
 - public artifacts remain free of private roadmap or product-specific detail
 - the plugin runtime requirements in [PLUGIN_RUNTIME_CORE_ENABLEMENT.md](./PLUGIN_RUNTIME_CORE_ENABLEMENT.md) can be implemented incrementally on top of the foundation built here

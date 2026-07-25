@@ -47,7 +47,9 @@ test.describe('Chat Panel', () => {
     await page.click('.chat-send-button');
 
     // User message should appear
-    await expect(page.locator('.chat-message.user').first()).toContainText('What nodes are in the graph');
+    await expect(page.locator('.chat-message.user').first()).toContainText(
+      'What nodes are in the graph'
+    );
 
     // Wait for response (may take time due to API call)
     await expect(page.locator('.chat-message.assistant').first()).toBeVisible({ timeout: 30000 });
@@ -243,6 +245,8 @@ test.describe('Chat Error Handling', () => {
     await page.click('.chat-send-button');
 
     // Error message should appear
-    await expect(page.locator('.chat-message.assistant')).toContainText(/error/i, { timeout: 10000 });
+    await expect(page.locator('.chat-message.assistant')).toContainText(/error/i, {
+      timeout: 10000,
+    });
   });
 });

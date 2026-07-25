@@ -6,7 +6,7 @@ This module is part of graph_core - the core graph storage layer.
 It contains data models without any MCP, API, or external service dependencies.
 
 Node and relationship types are loaded from the schema configuration file.
-See backend/config_loader.py for configuration loading.
+See backend/config/config_loader.py for configuration loading.
 """
 
 from enum import Enum
@@ -24,16 +24,25 @@ def _get_config_loader():
     """Lazy load config_loader to avoid circular imports."""
     global _config_loader
     if _config_loader is None:
-        from backend import config_loader
+        from backend.config import config_loader
+
         _config_loader = config_loader
     return _config_loader
 
 
 def _parse_datetime(value: Any) -> Any:
-    """Parse ISO datetime strings, including UTC Z suffix, from graph JSON."""
+    """Parse ISO datetime strings, including UTC Z suffix, from graph JSON.
+
+    Timezone-naive strings — persisted before the utcnow()->now(timezone.utc)
+    migration — are treated as UTC so every in-memory datetime stays aware and
+    comparable with datetimes created after the migration.
+    """
     if isinstance(value, str):
-        normalized = value[:-1] + '+00:00' if value.endswith('Z') else value
-        return datetime.fromisoformat(normalized)
+        normalized = value[:-1] + "+00:00" if value.endswith("Z") else value
+        parsed = datetime.fromisoformat(normalized)
+        if parsed.tzinfo is None:
+            parsed = parsed.replace(tzinfo=timezone.utc)
+        return parsed
     return value
 
 
@@ -71,6 +80,7 @@ class NodeType(str, Enum):
     Note: New code should use string types and validate with is_valid_node_type().
     This enum is kept for compatibility with existing code.
     """
+
     ACTOR = "Actor"
     INITIATIVE = "Initiative"
     CAPABILITY = "Capability"
@@ -84,7 +94,7 @@ class NodeType(str, Enum):
     VISUALIZATION_VIEW = "VisualizationView"
 
     @classmethod
-    def from_string(cls, value: str) -> Union['NodeType', str]:
+    def from_string(cls, value: str) -> Union["NodeType", str]:
         """
         Convert a string to NodeType if it's a known type, otherwise return the string.
         This allows handling of dynamic types defined in config.
@@ -104,6 +114,7 @@ class RelationshipType(str, Enum):
 
     Note: New code should use string types and validate with is_valid_relationship_type().
     """
+
     BELONGS_TO = "BELONGS_TO"
     IMPLEMENTS = "IMPLEMENTS"
     PRODUCES = "PRODUCES"
@@ -113,7 +124,7 @@ class RelationshipType(str, Enum):
     AIMS_FOR = "AIMS_FOR"
 
     @classmethod
-    def from_string(cls, value: str) -> Union['RelationshipType', str]:
+    def from_string(cls, value: str) -> Union["RelationshipType", str]:
         """
         Convert a string to RelationshipType if known, otherwise return the string.
         """
@@ -149,20 +160,25 @@ NODE_COLORS = {
 
 class Node(BaseModel):
     """Base model for a node in the graph"""
+
     id: str = Field(default_factory=lambda: str(uuid.uuid4()))
     type: Union[NodeType, str]  # Accept both enum and string types
     name: str = Field(..., min_length=1, max_length=200)
     description: str = Field(default="", max_length=2000)
     summary: str = Field(default="", max_length=300)  # For visualization
     tags: List[str] = Field(default_factory=list)  # Searchable tags for categorization
-    subtypes: List[str] = Field(default_factory=list)  # Sub-classifications within the node type
+    subtypes: List[str] = Field(
+        default_factory=list
+    )  # Sub-classifications within the node type
+    aliases: List[str] = Field(
+        default_factory=list
+    )  # Alternative names/synonyms; matched in search
     metadata: Dict[str, Any] = Field(default_factory=dict)
     embedding: Optional[List[float]] = None  # For future vector search
     created_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
     updated_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
 
-
-    @field_validator('type', mode='before')
+    @field_validator("type", mode="before")
     @classmethod
     def validate_type(cls, v):
         """Validate and normalize node type. Accepts any string for forward/backward compatibility."""
@@ -186,18 +202,18 @@ class Node(BaseModel):
         """Convert to dict for JSON storage"""
         data = self.model_dump()
         # Ensure type is stored as string
-        data['type'] = self.type_str
-        data['created_at'] = self.created_at.isoformat()
-        data['updated_at'] = self.updated_at.isoformat()
+        data["type"] = self.type_str
+        data["created_at"] = self.created_at.isoformat()
+        data["updated_at"] = self.updated_at.isoformat()
         return data
 
     @classmethod
-    def from_dict(cls, data: dict) -> 'Node':
+    def from_dict(cls, data: dict) -> "Node":
         """Create from dict (JSON)"""
-        if isinstance(data.get('created_at'), str):
-            data['created_at'] = _parse_datetime(data['created_at'])
-        if isinstance(data.get('updated_at'), str):
-            data['updated_at'] = _parse_datetime(data['updated_at'])
+        if isinstance(data.get("created_at"), str):
+            data["created_at"] = _parse_datetime(data["created_at"])
+        if isinstance(data.get("updated_at"), str):
+            data["updated_at"] = _parse_datetime(data["updated_at"])
         return cls(**data)
 
     def get_color(self) -> str:
@@ -207,16 +223,18 @@ class Node(BaseModel):
 
 class Edge(BaseModel):
     """Model for an edge (relationship) between nodes"""
+
     id: str = Field(default_factory=lambda: str(uuid.uuid4()))
     source: str  # Node ID
     target: str  # Node ID
-    type: Union[RelationshipType, str] = Field(default=RelationshipType.RELATES_TO)  # Optional, defaults to general connection
+    type: Union[RelationshipType, str] = Field(
+        default=RelationshipType.RELATES_TO
+    )  # Optional, defaults to general connection
     label: str = Field(default="")  # Optional free-text label for the connection
     metadata: Dict[str, Any] = Field(default_factory=dict)
     created_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
 
-
-    @field_validator('type', mode='before')
+    @field_validator("type", mode="before")
     @classmethod
     def validate_type(cls, v):
         """Validate and normalize relationship type. Defaults to RELATES_TO if empty/None."""
@@ -231,32 +249,39 @@ class Edge(BaseModel):
             except ValueError:
                 # Accept any string as a free-form relationship type
                 return v
-        raise ValueError(f"Relationship type must be string or RelationshipType, got {type(v)}")
+        raise ValueError(
+            f"Relationship type must be string or RelationshipType, got {type(v)}"
+        )
 
     @property
     def type_str(self) -> str:
         """Get the type as a string (works with both enum and string types)."""
-        return self.type.value if isinstance(self.type, RelationshipType) else str(self.type)
+        return (
+            self.type.value
+            if isinstance(self.type, RelationshipType)
+            else str(self.type)
+        )
 
     def to_dict(self) -> dict:
         data = self.model_dump()
         # Ensure type is stored as string
-        data['type'] = self.type_str
-        data['created_at'] = self.created_at.isoformat()
+        data["type"] = self.type_str
+        data["created_at"] = self.created_at.isoformat()
         return data
 
     @classmethod
-    def from_dict(cls, data: dict) -> 'Edge':
-        if isinstance(data.get('created_at'), str):
-            data['created_at'] = _parse_datetime(data['created_at'])
+    def from_dict(cls, data: dict) -> "Edge":
+        if isinstance(data.get("created_at"), str):
+            data["created_at"] = _parse_datetime(data["created_at"])
         # Handle legacy data without label field
-        if 'label' not in data:
-            data['label'] = ""
+        if "label" not in data:
+            data["label"] = ""
         return cls(**data)
 
 
 class SimilarNode(BaseModel):
     """Model for similarity search results"""
+
     node: Node
     similarity_score: float = Field(..., ge=0.0, le=1.0)
     match_reason: str = ""
@@ -264,15 +289,16 @@ class SimilarNode(BaseModel):
 
 class GraphStats(BaseModel):
     """Statistics for the graph"""
+
     total_nodes: int
     total_edges: int
     nodes_by_type: Dict[str, int]
     last_updated: datetime
 
 
-
 class ProposedNodesResult(BaseModel):
     """Result from propose_nodes_from_text"""
+
     proposed_nodes: List[Node]
     proposed_edges: List[Edge]
     similar_existing: List[SimilarNode]
@@ -280,6 +306,7 @@ class ProposedNodesResult(BaseModel):
 
 class AddNodesResult(BaseModel):
     """Result from add_nodes operation"""
+
     added_node_ids: List[str]
     added_edge_ids: List[str]
     success: bool
@@ -288,6 +315,7 @@ class AddNodesResult(BaseModel):
 
 class DeleteNodesResult(BaseModel):
     """Result from delete_nodes operation"""
+
     deleted_node_ids: List[str]
     affected_edge_ids: List[str]  # Edges that were also removed
     success: bool
@@ -296,6 +324,7 @@ class DeleteNodesResult(BaseModel):
 
 class DeleteEdgesResult(BaseModel):
     """Result from delete_edges operation"""
+
     deleted_edge_ids: List[str]
     success: bool
     message: str = ""

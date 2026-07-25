@@ -2,8 +2,7 @@
 Tests for event routing integration between dispatcher and agent registry.
 """
 
-import pytest
-from unittest.mock import MagicMock, patch
+from unittest.mock import MagicMock
 
 from backend.core.events.models import (
     Event,
@@ -13,7 +12,7 @@ from backend.core.events.models import (
     EntityData,
 )
 from backend.core.events.dispatcher import EventDispatcher
-from backend.agents.config import AgentsSettings, MCPIntegration
+from backend.agents.config import AgentsSettings
 from backend.agents.registry import AgentRegistry
 
 
@@ -202,8 +201,7 @@ class TestRegistryAsAgentCallback:
             if not registry.is_agent_subscription(subscription_id):
                 return False
             return registry.enqueue_for_subscription(
-                subscription_id,
-                event.to_webhook_payload()
+                subscription_id, event.to_webhook_payload()
             )
 
         # Create dispatcher and wire up
@@ -234,8 +232,7 @@ class TestRegistryAsAgentCallback:
             if not registry.is_agent_subscription(subscription_id):
                 return False
             return registry.enqueue_for_subscription(
-                subscription_id,
-                event.to_webhook_payload()
+                subscription_id, event.to_webhook_payload()
             )
 
         # Track webhook calls

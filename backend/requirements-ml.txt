@@ -1,5 +1,21 @@
-# DEPRECATED - ML dependencies are now in requirements.txt
-# This file is kept for backward compatibility only
+# Optional ML dependencies for semantic embedding generation.
 #
-# The main requirements.txt now includes optimized CPU-only ML packages
-# to reduce disk usage while maintaining full functionality
+# The base install (requirements.txt) runs the full app, including semantic
+# *search* over pre-computed embeddings (via numpy). Installing this file adds
+# the ability to *generate* embeddings from text with sentence-transformers.
+# Without it, embedding generation is skipped gracefully (name-based similarity
+# still works) — see backend/core/vector_store.py.
+#
+# Install (on top of the base requirements):
+#   pip install -r backend/requirements.txt -r backend/requirements-ml.txt
+#
+# PyTorch is installed CPU-only (much smaller than the CUDA build). The extra
+# index below is why these packages live here and not in requirements.txt: it
+# makes `pip install` reach download.pytorch.org, which fails on PyPI-only
+# networks and would otherwise block the base install.
+--extra-index-url https://download.pytorch.org/whl/cpu
+torch>=2.0.0
+
+# Sentence transformers for generating semantic embeddings (uses the CPU-only
+# PyTorch installed above).
+sentence-transformers>=2.2.0

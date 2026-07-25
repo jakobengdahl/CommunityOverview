@@ -9,20 +9,30 @@ import asyncio
 import time
 import pytest
 
-from backend.core.session_registry import SessionRegistry, SESSION_ID_RE
+from backend.core.session_registry import SessionRegistry
 
 
 class TestSessionIdValidation:
     """is_valid_session_id behaves correctly for all formats."""
 
     def test_valid_format_accepted(self):
+        # Legacy two-group form stays valid for previously-shared URLs.
         assert SessionRegistry.is_valid_session_id("8244-1742")
         assert SessionRegistry.is_valid_session_id("0000-0000")
         assert SessionRegistry.is_valid_session_id("9999-9999")
 
+    def test_four_group_format_accepted(self):
+        # New wider form (~10^16 space) is what fresh sessions use.
+        assert SessionRegistry.is_valid_session_id("8244-1742-0031-9998")
+        assert SessionRegistry.is_valid_session_id("0000-0000-0000-0000")
+
+    def test_three_groups_rejected(self):
+        assert not SessionRegistry.is_valid_session_id("1234-5678-9012")
+
     def test_too_many_digits_rejected(self):
         assert not SessionRegistry.is_valid_session_id("12345-1234")
         assert not SessionRegistry.is_valid_session_id("1234-12345")
+        assert not SessionRegistry.is_valid_session_id("1234-5678-9012-34567")
 
     def test_too_few_digits_rejected(self):
         assert not SessionRegistry.is_valid_session_id("123-1234")
@@ -70,32 +80,6 @@ class TestSessionLifecycle:
         assert reg.session_count == 2
 
 
-class TestStateManagement:
-    """update_state / get_state."""
-
-    def test_get_state_returns_none_for_unknown(self):
-        reg = SessionRegistry()
-        assert reg.get_state("9999-9999") is None
-
-    def test_update_state_returns_false_for_unknown(self):
-        reg = SessionRegistry()
-        assert reg.update_state("9999-9999", {"visible_node_ids": []}) is False
-
-    def test_update_and_get_state_roundtrip(self):
-        reg = SessionRegistry()
-        reg.get_or_create("1234-5678")
-        state = {"visible_node_ids": ["a", "b"], "node_count": 2}
-        assert reg.update_state("1234-5678", state)
-        assert reg.get_state("1234-5678") == state
-
-    def test_update_state_replaces_previous(self):
-        reg = SessionRegistry()
-        reg.get_or_create("1234-5678")
-        reg.update_state("1234-5678", {"visible_node_ids": ["a"]})
-        reg.update_state("1234-5678", {"visible_node_ids": ["b", "c"]})
-        assert reg.get_state("1234-5678") == {"visible_node_ids": ["b", "c"]}
-
-
 class TestPushCommandSync:
     """push_command_sync via the running event loop."""
 
@@ -124,7 +108,6 @@ class TestPushCommandSync:
         assert not queue.empty()
         cmd = queue.get_nowait()
         assert cmd == {"type": "hello", "value": 42}
-
 
     @pytest.mark.asyncio
     async def test_push_delivers_via_threadsafe_path(self):

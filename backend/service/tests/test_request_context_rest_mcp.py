@@ -8,7 +8,11 @@ from fastapi.testclient import TestClient
 
 from backend.api_host import create_app
 from backend.api_host.config import AppConfig
-from backend.authorization import GraphAccessNarrowing, GraphAuthorizationContext, GraphAuthorizationDecision
+from backend.runtime.authorization import (
+    GraphAccessNarrowing,
+    GraphAuthorizationContext,
+    GraphAuthorizationDecision,
+)
 from backend.core import Edge, Node, NodeType
 from backend.federation.config import FederationFileConfig
 from backend.federation.manager import FederationManager
@@ -38,7 +42,9 @@ class CaptureAuthorizationHook:
         self.allow = allow
         self.seen_contexts = []
 
-    def evaluate(self, context: GraphAuthorizationContext) -> GraphAuthorizationDecision:
+    def evaluate(
+        self, context: GraphAuthorizationContext
+    ) -> GraphAuthorizationDecision:
         self.seen_contexts.append(context)
         if self.allow:
             return GraphAuthorizationDecision(allowed=True)
@@ -54,12 +60,16 @@ class SelectionAwareNarrowingHook:
     def __init__(self):
         self.seen_contexts = []
 
-    def evaluate(self, context: GraphAuthorizationContext) -> GraphAuthorizationDecision:
+    def evaluate(
+        self, context: GraphAuthorizationContext
+    ) -> GraphAuthorizationDecision:
         self.seen_contexts.append(context)
         selected_graph_id = context.scope.get("graph_id", "")
         workspace_id = context.scope.get("workspace_id", "")
         if not selected_graph_id or not workspace_id:
-            return GraphAuthorizationDecision(allowed=True, mode="selection-aware", source="test")
+            return GraphAuthorizationDecision(
+                allowed=True, mode="selection-aware", source="test"
+            )
         return GraphAuthorizationDecision(
             allowed=True,
             mode="selection-aware",
@@ -85,39 +95,51 @@ def _install_multi_graph_fixture(app):
                 id="alpha-ref",
                 type=NodeType.ACTOR,
                 name="Alpha export",
-                metadata={"origin_graph_id": "graph-alpha", "is_federated_reference": True},
+                metadata={
+                    "origin_graph_id": "graph-alpha",
+                    "is_federated_reference": True,
+                },
             ),
             Node(
                 id="beta-ref",
                 type=NodeType.ACTOR,
                 name="Beta export",
-                metadata={"origin_graph_id": "graph-beta", "is_federated_reference": True},
+                metadata={
+                    "origin_graph_id": "graph-beta",
+                    "is_federated_reference": True,
+                },
             ),
         ],
         [Edge(source="alpha-ref", target="beta-ref", type="RELATES_TO")],
     )
 
-    config = FederationFileConfig.model_validate({
-        "federation": {
-            "enabled": True,
-            "graphs": [
-                {
-                    "graph_id": "graph-alpha",
-                    "display_name": "Alpha",
-                    "enabled": True,
-                    "capabilities": {"allow_adopt": True},
-                    "endpoints": {"graph_json_url": "https://example.invalid/alpha.json"},
-                },
-                {
-                    "graph_id": "graph-beta",
-                    "display_name": "Beta",
-                    "enabled": True,
-                    "capabilities": {"allow_adopt": True},
-                    "endpoints": {"graph_json_url": "https://example.invalid/beta.json"},
-                },
-            ],
+    config = FederationFileConfig.model_validate(
+        {
+            "federation": {
+                "enabled": True,
+                "graphs": [
+                    {
+                        "graph_id": "graph-alpha",
+                        "display_name": "Alpha",
+                        "enabled": True,
+                        "capabilities": {"allow_adopt": True},
+                        "endpoints": {
+                            "graph_json_url": "https://example.invalid/alpha.json"
+                        },
+                    },
+                    {
+                        "graph_id": "graph-beta",
+                        "display_name": "Beta",
+                        "enabled": True,
+                        "capabilities": {"allow_adopt": True},
+                        "endpoints": {
+                            "graph_json_url": "https://example.invalid/beta.json"
+                        },
+                    },
+                ],
+            }
         }
-    })
+    )
     manager = FederationManager(config)
     for graph, node_id, name in (
         (config.federation.graphs[0], "remote-1", "Alpha result"),
@@ -240,10 +262,17 @@ class TestRequestContextMcpTools:
         client, app = app_client
         assert "get_request_actor" in app.state.tools_map
 
-        response = client.post("/execute_tool", json={
-            "tool_name": "get_request_actor",
-            "arguments": {"actor_id": "mcp-actor", "actor_type": "member", "auth_source": "test"},
-        })
+        response = client.post(
+            "/execute_tool",
+            json={
+                "tool_name": "get_request_actor",
+                "arguments": {
+                    "actor_id": "mcp-actor",
+                    "actor_type": "member",
+                    "auth_source": "test",
+                },
+            },
+        )
         assert response.status_code == 200
         assert response.json() == {
             "actor_type": "member",
@@ -257,14 +286,17 @@ class TestRequestContextMcpTools:
         client, app = app_client
         assert "get_request_scope" in app.state.tools_map
 
-        response = client.post("/execute_tool", json={
-            "tool_name": "get_request_scope",
-            "arguments": {
-                "workspace_id": "workspace-mcp",
-                "workspace_kind": "team",
-                "graph_id": "graph-mcp",
+        response = client.post(
+            "/execute_tool",
+            json={
+                "tool_name": "get_request_scope",
+                "arguments": {
+                    "workspace_id": "workspace-mcp",
+                    "workspace_kind": "team",
+                    "graph_id": "graph-mcp",
+                },
             },
-        })
+        )
         assert response.status_code == 200
         assert response.json() == {
             "workspace_kind": "team",
@@ -280,14 +312,17 @@ class TestRequestContextMcpTools:
         client, app = app_client
         assert "get_request_selection" in app.state.tools_map
 
-        response = client.post("/execute_tool", json={
-            "tool_name": "get_request_selection",
-            "arguments": {
-                "workspace_id": "workspace-mcp",
-                "workspace_kind": "team",
-                "graph_id": "graph-mcp",
+        response = client.post(
+            "/execute_tool",
+            json={
+                "tool_name": "get_request_selection",
+                "arguments": {
+                    "workspace_id": "workspace-mcp",
+                    "workspace_kind": "team",
+                    "graph_id": "graph-mcp",
+                },
             },
-        })
+        )
         assert response.status_code == 200
         assert response.json() == {
             "workspace_kind": "team",
@@ -306,7 +341,9 @@ class TestRequestContextMcpTools:
         assert "get_request_scope" in result["available_tools"]
         assert "get_request_selection" in result["available_tools"]
 
-    def test_mcp_transport_request_binds_request_authorization_headers(self, tmp_path, monkeypatch):
+    def test_mcp_transport_request_binds_request_authorization_headers(
+        self, tmp_path, monkeypatch
+    ):
         for var in (
             "COMMUNITYOVERVIEW_ACTOR_ID",
             "COMMUNITYOVERVIEW_ACTOR_TYPE",
@@ -326,8 +363,13 @@ class TestRequestContextMcpTools:
             response = JSONResponse(result)
             await response(scope, receive, send)
 
-        with patch("backend.api_host.server.FastMCP.sse_app", return_value=fake_mcp_transport_app):
-            config = AppConfig(auth_enabled=False, graph_file=str(tmp_path / "graph.json"))
+        with patch(
+            "backend.api_host.server.FastMCP.sse_app",
+            return_value=fake_mcp_transport_app,
+        ):
+            config = AppConfig(
+                auth_enabled=False, graph_file=str(tmp_path / "graph.json")
+            )
             app = create_app(config)
             holder["app"] = app
             app.state.graph_service._authorization_hook = hook
@@ -448,31 +490,41 @@ class TestAuthorizationHookRestAndMcp:
         monkeypatch.setenv("COMMUNITYOVERVIEW_AUTHORIZATION_MODE", "read-only")
         client, _ = app_client
 
-        response = client.post("/api/nodes", json={
-            "nodes": [{"type": "Actor", "name": "Blocked via REST"}],
-            "edges": [],
-        })
+        response = client.post(
+            "/api/nodes",
+            json={
+                "nodes": [{"type": "Actor", "name": "Blocked via REST"}],
+                "edges": [],
+            },
+        )
 
         assert response.status_code == 403
         assert "mutations are disabled" in response.json()["detail"].lower()
 
-    def test_execute_tool_read_is_blocked_in_deny_all_mode(self, app_client, monkeypatch):
+    def test_execute_tool_read_is_blocked_in_deny_all_mode(
+        self, app_client, monkeypatch
+    ):
         monkeypatch.setenv("COMMUNITYOVERVIEW_AUTHORIZATION_MODE", "deny-all")
         client, _ = app_client
 
-        response = client.post("/execute_tool", json={
-            "tool_name": "search_graph",
-            "arguments": {
-                "query": "",
-                "limit": 5,
+        response = client.post(
+            "/execute_tool",
+            json={
+                "tool_name": "search_graph",
+                "arguments": {
+                    "query": "",
+                    "limit": 5,
+                },
             },
-        })
+        )
 
         assert response.status_code == 403
         assert response.json()["error_code"] == "access_denied"
         assert response.json()["authorization"]["action"] == "read"
 
-    def test_rest_read_remains_permitted_in_read_only_mode(self, app_client, monkeypatch):
+    def test_rest_read_remains_permitted_in_read_only_mode(
+        self, app_client, monkeypatch
+    ):
         monkeypatch.setenv("COMMUNITYOVERVIEW_AUTHORIZATION_MODE", "read-only")
         client, _ = app_client
 
@@ -481,7 +533,9 @@ class TestAuthorizationHookRestAndMcp:
         assert response.status_code == 200
         assert "nodes" in response.json()
 
-    def test_export_graph_uses_request_bound_authorization_and_returns_403(self, app_client):
+    def test_export_graph_uses_request_bound_authorization_and_returns_403(
+        self, app_client
+    ):
         client, app = app_client
         hook = CaptureAuthorizationHook(allow=False)
         app.state.graph_service._authorization_hook = hook

@@ -7,6 +7,11 @@ short ID generated in the browser (e.g. "8244-1742") and backed by an
 asyncio.Queue.  The browser holds an SSE connection open; when an MCP
 tool pushes a command to the queue the browser receives it immediately.
 
+This registry is the MCP *push* channel only.  Session *state* (what the
+browser is showing) is owned by the shared-session store
+(``core.session_store``); MCP query tools read it from there.  A registry
+entry simply signals that a browser is connected to receive pushes.
+
 Thread-safety notes
 -------------------
 asyncio.Queue is not thread-safe across threads.  FastMCP calls sync
@@ -35,7 +40,9 @@ import time
 import re
 from typing import Dict, Any, Optional, AsyncIterator
 
-SESSION_ID_RE = re.compile(r'^\d{4}-\d{4}$')
+# Grouped-digit id DDDD-DDDD-DDDD-DDDD (four groups); the two-group legacy form
+# DDDD-DDDD is still accepted so older visualization-session URLs keep working.
+SESSION_ID_RE = re.compile(r"^\d{4}-\d{4}(?:-\d{4}-\d{4})?$")
 _SESSION_TTL = 3600  # seconds — sessions not updated for this long are evicted
 
 
@@ -71,7 +78,6 @@ class SessionRegistry:
         if session_id not in self._sessions:
             self._sessions[session_id] = {
                 "queue": asyncio.Queue(),
-                "state": {},
                 "created_at": time.monotonic(),
                 "last_seen": time.monotonic(),
             }
@@ -83,26 +89,6 @@ class SessionRegistry:
 
     def session_exists(self, session_id: str) -> bool:
         return session_id in self._sessions
-
-    # ------------------------------------------------------------------
-    # State management
-    # ------------------------------------------------------------------
-
-    def update_state(self, session_id: str, state: Dict[str, Any]) -> bool:
-        """Persist the browser's current canvas state.  Returns False if session unknown."""
-        if session_id not in self._sessions:
-            return False
-        self._sessions[session_id]["state"] = state
-        self._touch(session_id)
-        return True
-
-    def get_state(self, session_id: str) -> Optional[Dict[str, Any]]:
-        """Return the last known canvas state, or None if the session does not exist."""
-        entry = self._sessions.get(session_id)
-        if entry is None:
-            return None
-        self._touch(session_id)
-        return entry["state"]
 
     # ------------------------------------------------------------------
     # Command delivery
@@ -156,8 +142,8 @@ class SessionRegistry:
         connection closes and the StreamingResponse is cancelled).
 
         Re-looks up the queue on each iteration so that a TTL eviction followed
-        by a browser state re-upload (which re-creates the session) doesn't leave
-        this generator blocked on an orphaned queue.
+        by a reconnect (which re-creates the session) doesn't leave this generator
+        blocked on an orphaned queue.
         """
         self.get_or_create(session_id)
         while True:
@@ -183,7 +169,9 @@ class SessionRegistry:
     def cleanup_stale(self) -> int:
         """Remove sessions not updated within SESSION_TTL seconds.  Returns eviction count."""
         cutoff = time.monotonic() - _SESSION_TTL
-        stale = [sid for sid, entry in self._sessions.items() if entry["last_seen"] < cutoff]
+        stale = [
+            sid for sid, entry in self._sessions.items() if entry["last_seen"] < cutoff
+        ]
         for sid in stale:
             del self._sessions[sid]
         return len(stale)

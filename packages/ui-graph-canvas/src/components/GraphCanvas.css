@@ -6,6 +6,17 @@
   overflow: hidden;
 }
 
+/* Applied to <body> while multi-selecting nodes (shift/ctrl-drag). Prevents the
+   browser from highlighting surrounding UI text (session id, search terms,
+   labels) as an accidental side effect of the modifier-click. */
+body.graph-suppress-selection,
+body.graph-suppress-selection * {
+  -webkit-user-select: none;
+  -moz-user-select: none;
+  -ms-user-select: none;
+  user-select: none;
+}
+
 .graph-canvas-controls {
   position: absolute;
   top: 10px;
@@ -44,7 +55,7 @@
 }
 
 .graph-load-more-button {
-  background: #3B82F6;
+  background: #3b82f6;
   color: white;
   border: none;
   padding: 4px 12px;
@@ -55,7 +66,7 @@
 }
 
 .graph-load-more-button:hover {
-  background: #2563EB;
+  background: #2563eb;
 }
 
 .graph-context-menu {
@@ -109,7 +120,7 @@
 }
 
 .context-menu-danger {
-  color: #EF4444 !important;
+  color: #ef4444 !important;
 }
 
 .context-menu-danger:hover {
@@ -118,14 +129,33 @@
 
 /* Multi-node context menu */
 .multi-node-context-menu .context-menu-header {
-  color: #FBBF24;
+  color: #fbbf24;
   background: #1a1a1a;
 }
 
 /* Edge context menu */
 .edge-context-menu .context-menu-header {
-  color: #60A5FA;
+  color: #60a5fa;
   background: #1a1a1a;
+}
+
+.context-menu-subheader {
+  padding: 6px 12px 2px;
+  font-size: 11px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  color: #888;
+}
+
+.edge-type-list {
+  max-height: 220px;
+  overflow-y: auto;
+}
+
+.edge-type-list button.edge-type-active {
+  color: #60a5fa;
+  font-weight: 600;
 }
 
 /* Selected edge styling */
@@ -168,27 +198,27 @@
 }
 
 .graph-notification-success {
-  border-color: #10B981;
+  border-color: #10b981;
 }
 
 .graph-notification-success span:first-child {
-  color: #10B981;
+  color: #10b981;
 }
 
 .graph-notification-info {
-  border-color: #3B82F6;
+  border-color: #3b82f6;
 }
 
 .graph-notification-info span:first-child {
-  color: #3B82F6;
+  color: #3b82f6;
 }
 
 .graph-notification-error {
-  border-color: #EF4444;
+  border-color: #ef4444;
 }
 
 .graph-notification-error span:first-child {
-  color: #EF4444;
+  color: #ef4444;
 }
 
 .graph-notification button {
@@ -290,7 +320,6 @@
   background: #4f46e5;
   color: #ffffff;
 }
-
 
 @media (max-width: 1200px) {
   .federation-depth-control {

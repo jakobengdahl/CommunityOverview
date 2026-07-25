@@ -14,14 +14,12 @@ consistency and proper validation.
 from typing import List, Dict, Any, Optional, Callable
 import asyncio
 import logging
-import os
 import json
-import inspect
 import re
-from datetime import datetime
+from datetime import datetime, timezone
 
-from backend.chat_logic import ChatProcessor
-from backend.llm_providers import create_provider, LLMProvider
+from backend.ui.chat_logic import ChatProcessor
+from backend.llm.llm_providers import create_provider
 from backend.service import GraphService
 
 logger = logging.getLogger(__name__)
@@ -60,13 +58,17 @@ class ChatService:
         self._processor = ChatProcessor(self._tools_map)
         self._current_federation_depth: Optional[int] = None
         # Cache for resolved AKC configs — avoids repeated 500-node scans within a session.
-        # Keyed by short_name; value is (prefix, perms) tuple from _resolve_collection.
+        # Keyed by short_name; value is (prefix, perms, collect_responses) from
+        # _resolve_collection.
         self._collection_cache: Dict[str, tuple] = {}
+        # Identity of the resolved AKC node, keyed by short_name: {"id", "name"}.
+        # Used by save_collection_response to link responses back to their collection.
+        self._collection_nodes: Dict[str, Dict[str, Any]] = {}
 
         # Expert agent registry — populated by load_expert_skills() at startup.
         self._expert_contexts: Dict[str, str] = {}
         # Stage 1: skill metadata (frontmatter only, no body content).
-        self._expert_skills: Dict[str, List] = {}       # List[SkillMetadata]
+        self._expert_skills: Dict[str, List] = {}  # List[SkillMetadata]
         # Stage 2: full skill content, populated lazily on first _build_expert_context call.
         self._expert_skills_full: Dict[str, List] = {}  # List[SkillDefinition]
         # Shared SkillsLoader instance — holds the raw-text cache for Stage 1→2 promotion.
@@ -102,7 +104,6 @@ class ChatService:
             "get_presentation": self._graph_service.get_presentation,
         }
 
-
     def _search_graph_tool(
         self,
         query: str,
@@ -111,7 +112,11 @@ class ChatService:
         action: Optional[str] = None,
         federation_depth: Optional[int] = None,
     ) -> Dict[str, Any]:
-        effective_depth = federation_depth if federation_depth is not None else self._current_federation_depth
+        effective_depth = (
+            federation_depth
+            if federation_depth is not None
+            else self._current_federation_depth
+        )
         return self._graph_service.search_graph(
             query=query,
             node_types=node_types,
@@ -158,14 +163,18 @@ class ChatService:
             if expert.skills_urls:
                 try:
                     # Stage 1: frontmatter only (text cached for Stage 2)
-                    metas = await self._skills_loader.load_metadata_from_urls(expert.skills_urls)
+                    metas = await self._skills_loader.load_metadata_from_urls(
+                        expert.skills_urls
+                    )
                     self._expert_skills[expert.id] = metas
                     # Stage 2: full content — uses text cache, no extra HTTP requests
                     full_skills = await self._skills_loader.load_full_skills(metas)
                     self._expert_skills_full[expert.id] = full_skills
                     logger.info(
                         "Expert %s: loaded %d skill(s) from %d URL(s)",
-                        expert.id, len(full_skills), len(expert.skills_urls),
+                        expert.id,
+                        len(full_skills),
+                        len(expert.skills_urls),
                     )
                 except Exception as exc:
                     logger.warning("Expert %s: skills load failed: %s", expert.id, exc)
@@ -231,15 +240,17 @@ class ChatService:
         return self._processor.provider_type
 
     def _resolve_collection(self, short_name: str) -> tuple:
-        """Resolve an AKC short_name → (system_prompt_prefix, permissions_dict).
+        """Resolve an AKC short_name → (system_prompt_prefix, permissions_dict, collect_responses).
 
         Returns:
-          - (prefix, perms) on success — both non-None; perms may be {} if no permissions
-            are configured (enforced tools still installed, all writes denied).
-          - (None, None) when short_name is not found — no enforcement applied.
+          - (prefix, perms, collect_responses) on success — `prefix` and `perms` are
+            non-None; `perms` may be {} if no permissions are configured (enforced tools
+            still installed, all writes denied). `collect_responses` defaults to True
+            unless the collection metadata sets `collect_responses` to false.
+          - (None, None, True) when short_name is not found — no enforcement applied.
             Not cached so a collection created after first miss is picked up immediately.
-          - ("", {}) on exception — fail-closed; enforced tools installed, all writes denied.
-            Not cached so transient errors are retried on the next message.
+          - ("", {}, True) on exception — fail-closed; enforced tools installed, all
+            writes denied. Not cached so transient errors are retried on the next message.
 
         permissions_dict maps node_type → {"create": bool, "update": bool, "delete": bool}.
         Successful lookups are cached on this instance to avoid repeated 500-node scans.
@@ -256,6 +267,10 @@ class ChatService:
                 meta = node.get("metadata") or {}
                 if meta.get("short_name") == short_name:
                     found = True
+                    self._collection_nodes[short_name] = {
+                        "id": node.get("id"),
+                        "name": node.get("name") or short_name,
+                    }
                     raw_perms = meta.get("node_type_permissions") or {}
                     # Guard against individual null entries in the permissions dict
                     perms = {k: (v or {}) for k, v in raw_perms.items()}
@@ -274,7 +289,11 @@ class ChatService:
                     if any_permitted:
                         lines.append("PERMITTED OPERATIONS:")
                         for node_type, ops in perm_entries:
-                            allowed = [op for op in ("create", "update", "delete") if ops.get(op)]
+                            allowed = [
+                                op
+                                for op in ("create", "update", "delete")
+                                if ops.get(op)
+                            ]
                             if allowed:
                                 lines.append(f"- {node_type}: {', '.join(allowed)}")
                     else:
@@ -288,6 +307,32 @@ class ChatService:
                         "are not listed, or perform operations not permitted for a given type."
                     )
 
+                    collect_responses = meta.get("collect_responses", True)
+                    if collect_responses is None:
+                        collect_responses = True
+
+                    lines.append("")
+                    if collect_responses:
+                        lines.append(
+                            "STRUCTURED INPUT: When a question has a fixed set of choices or a bounded "
+                            "numeric range, prefer the present_form tool to render radio buttons, "
+                            "checkboxes, sliders, or dropdowns instead of asking for free text — it "
+                            "makes answering easier and keeps the data consistent. After the user "
+                            "submits a form (or answers the equivalent questions), call "
+                            "save_collection_response with one entry per answered field so the "
+                            "submission is stored in a consistent, aggregatable shape. Reuse each "
+                            "field's id when saving. Do not ask for personal data unless the "
+                            "collection instructions explicitly require it."
+                        )
+                    else:
+                        lines.append(
+                            "STRUCTURED INPUT: When a question has a fixed set of choices or a bounded "
+                            "numeric range, prefer the present_form tool to render radio buttons, "
+                            "checkboxes, sliders, or dropdowns instead of asking for free text — it "
+                            "makes answering easier and keeps the data consistent. Do not ask for "
+                            "personal data unless the collection instructions explicitly require it."
+                        )
+
                     lines.append("")
                     lines.append(
                         "INITIALIZATION: If the very first user turn in the conversation "
@@ -299,7 +344,7 @@ class ChatService:
                         "Do not mention or repeat '[COLLECTION_START]' in your response."
                     )
 
-                    result_tuple = ("\n".join(lines), perms)
+                    result_tuple = ("\n".join(lines), perms, bool(collect_responses))
                     self._collection_cache[short_name] = result_tuple
                     return result_tuple
 
@@ -307,15 +352,18 @@ class ChatService:
                 logger.warning(
                     "AKC short_name %r not found in %d ActiveKnowledgeCollection node(s). "
                     "Collection may exceed the search limit of 500.",
-                    short_name, len(nodes),
+                    short_name,
+                    len(nodes),
                 )
         except Exception:
-            logger.warning("Failed to resolve AKC short_name %r", short_name, exc_info=True)
+            logger.warning(
+                "Failed to resolve AKC short_name %r", short_name, exc_info=True
+            )
             # Fail-closed: resolution error → deny all writes rather than fall through
             # to unconstrained mode. Empty perms installs enforced wrappers that block
             # every add/update/delete regardless of node type.
-            return ("", {})
-        return None, None
+            return ("", {}, True)
+        return (None, None, True)
 
     def _make_enforced_tools(self, perms: dict) -> dict:
         """Return a tools_map overlay that enforces node_type_permissions at call time."""
@@ -340,7 +388,8 @@ class ChatService:
 
         def add_nodes_enforced(nodes, edges=None, **kwargs):
             untyped = [
-                i for i, n in enumerate(nodes)
+                i
+                for i, n in enumerate(nodes)
                 if not isinstance(n.get("type"), str) or not n.get("type")
             ]
             if untyped:
@@ -351,10 +400,9 @@ class ChatService:
                         "Each node must specify a type."
                     ),
                 }
-            forbidden = sorted({
-                n["type"] for n in nodes
-                if not perms.get(n["type"], {}).get("create")
-            })
+            forbidden = sorted(
+                {n["type"] for n in nodes if not perms.get(n["type"], {}).get("create")}
+            )
             if forbidden:
                 return {
                     "success": False,
@@ -424,11 +472,96 @@ class ChatService:
             "delete_edges": delete_edges_enforced,
         }
 
+    def _make_collection_response_tool(self, short_name: str) -> dict:
+        """Return a tools_map overlay with a save_collection_response bound to this collection.
+
+        The response is stored as a CollectionResponse node whose metadata carries a flat
+        answers list plus a reference to the owning collection (short_name + id), so responses
+        can later be aggregated into simple statistics. The collection reference lives in
+        metadata (authoritative for aggregation); an edge to the collection node is added
+        best-effort for graph navigation.
+        """
+        info = self._collection_nodes.get(short_name) or {}
+        collection_id = info.get("id")
+        collection_name = info.get("name") or short_name
+
+        def save_collection_response(
+            answers, respondent_label=None, form_title=None, **kwargs
+        ):
+            if not isinstance(answers, list):
+                return {
+                    "success": False,
+                    "error": "answers must be a list of {field_id, value} objects.",
+                }
+
+            normalized = []
+            for a in answers:
+                if not isinstance(a, dict):
+                    continue
+                field_id = a.get("field_id") or a.get("id")
+                if not field_id or "value" not in a:
+                    continue
+                normalized.append(
+                    {
+                        "field_id": str(field_id),
+                        "label": a.get("label"),
+                        "type": a.get("type"),
+                        "value": a.get("value"),
+                    }
+                )
+            if not normalized:
+                return {
+                    "success": False,
+                    "error": "No valid answers provided — each answer needs a field_id and a value.",
+                }
+
+            submitted_at = datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
+
+            def _fmt(v):
+                return ", ".join(str(x) for x in v) if isinstance(v, list) else str(v)
+
+            summary = "; ".join(
+                f"{a['label'] or a['field_id']}: {_fmt(a['value'])}" for a in normalized
+            )[:300]
+
+            node = {
+                "type": "CollectionResponse",
+                "name": f"{collection_name} — response {submitted_at}"[:200],
+                "summary": summary,
+                "metadata": {
+                    "collection_short_name": short_name,
+                    "collection_id": collection_id,
+                    "form_title": form_title,
+                    "respondent_label": respondent_label,
+                    "answers": normalized,
+                    "submitted_at": submitted_at,
+                },
+            }
+            edges = []
+            if collection_id:
+                edges.append({"source": node["name"], "target": collection_id})
+
+            result = self._graph_service.add_nodes(nodes=[node], edges=edges)
+            if result.get("success"):
+                added = result.get("added_node_ids") or []
+                return {
+                    "action": "collection_response_saved",
+                    "success": True,
+                    "response_id": added[0] if added else None,
+                    "answer_count": len(normalized),
+                }
+            return {
+                "success": False,
+                "error": result.get("message") or "Failed to save collection response.",
+            }
+
+        return {"save_collection_response": save_collection_response}
+
     @staticmethod
     def _sanitize_id(node_id: str) -> str:
         """Truncate at first C0/DEL control character to prevent prompt injection via node IDs."""
         for i, ch in enumerate(node_id):
-            if ch < '\x20' or ch == '\x7f':
+            if ch < "\x20" or ch == "\x7f":
                 return node_id[:i]
         return node_id
 
@@ -513,15 +646,17 @@ class ChatService:
             - toolUsed: Name of the last tool used (if any)
             - toolResult: Result from the tool (if any)
         """
-        effective_prefix, collection_perms = (
+        effective_prefix, collection_perms, collect_responses = (
             self._resolve_collection(collection_short_name)
             if collection_short_name
-            else (None, None)
+            else (None, None, True)
         )
 
         self._current_federation_depth = federation_depth
         try:
-            expert_context = self._build_expert_context(expert_agent_id) if expert_agent_id else None
+            expert_context = (
+                self._build_expert_context(expert_agent_id) if expert_agent_id else None
+            )
             if effective_prefix and expert_context:
                 extra_context = f"{effective_prefix}\n\n{expert_context}"
             else:
@@ -535,6 +670,20 @@ class ChatService:
                 if collection_perms is not None
                 else None
             )
+            # Install save_collection_response only within an active (resolved or
+            # fail-closed) collection session — effective_prefix is None only when the
+            # short_name did not resolve, in which case storing a response is meaningless.
+            # Also omit the tool when the collection has opted out of response persistence
+            # via metadata.collect_responses = false.
+            if (
+                collection_short_name
+                and effective_prefix is not None
+                and collect_responses
+            ):
+                tools_override = {
+                    **(tools_override or {}),
+                    **self._make_collection_response_tool(collection_short_name),
+                }
 
             visualization_context = self._format_visualization_context(
                 visible_node_ids, selected_node_ids
@@ -598,10 +747,7 @@ User's question: {user_message}"""
             full_message = user_message
 
         # Add current user message
-        messages.append({
-            "role": "user",
-            "content": full_message
-        })
+        messages.append({"role": "user", "content": full_message})
 
         return self.process_message(
             messages=messages,
@@ -621,7 +767,7 @@ User's question: {user_message}"""
         return {
             "provider": self._processor.provider_type,
             "available_tools": list(self._tools_map.keys()),
-            "graph_stats": self._graph_service.get_graph_stats()
+            "graph_stats": self._graph_service.get_graph_stats(),
         }
 
     def propose_nodes_from_text(
@@ -631,7 +777,7 @@ User's question: {user_message}"""
         communities: Optional[List[str]] = None,
         api_key: Optional[str] = None,
         provider: Optional[str] = None,
-        federation_depth: Optional[int] = None
+        federation_depth: Optional[int] = None,
     ) -> Dict[str, Any]:
         """
         Extract and propose nodes from text using LLM analysis.
@@ -661,7 +807,9 @@ User's question: {user_message}"""
 
         community_instruction = ""
         if communities:
-            community_instruction = f"Associate extracted nodes with communities: {', '.join(communities)}"
+            community_instruction = (
+                f"Associate extracted nodes with communities: {', '.join(communities)}"
+            )
 
         extraction_prompt = f"""Analyze the following text and extract relevant entities that should be added to the knowledge graph.
 
@@ -701,7 +849,7 @@ Respond with ONLY a JSON array of extracted entities, no other text. Example for
                     "success": False,
                     "error": "No API key available",
                     "proposed_nodes": [],
-                    "similar_existing": {}
+                    "similar_existing": {},
                 }
 
             llm_provider = create_provider(key_to_use, provider_to_use)
@@ -710,7 +858,7 @@ Respond with ONLY a JSON array of extracted entities, no other text. Example for
                 messages=messages,
                 system_prompt="You are a precise entity extraction assistant. Extract entities from text and return them as a JSON array.",
                 tools=[],
-                max_tokens=4096
+                max_tokens=4096,
             )
 
             # Extract JSON from response
@@ -720,13 +868,13 @@ Respond with ONLY a JSON array of extracted entities, no other text. Example for
                     response_text += block.get("text", "")
 
             # Find JSON array in response
-            json_match = re.search(r'\[[\s\S]*\]', response_text)
+            json_match = re.search(r"\[[\s\S]*\]", response_text)
             if not json_match:
                 return {
                     "success": False,
                     "error": "Could not parse entity extraction result",
                     "proposed_nodes": [],
-                    "similar_existing": {}
+                    "similar_existing": {},
                 }
 
             proposed_nodes = json.loads(json_match.group())
@@ -734,16 +882,15 @@ Respond with ONLY a JSON array of extracted entities, no other text. Example for
             # Add communities to each node if specified
             if communities:
                 for node in proposed_nodes:
-                    node['communities'] = communities
+                    node["communities"] = communities
 
             # Check for similar existing nodes using batch search
             if proposed_nodes:
-                names = [node.get('name', '') for node in proposed_nodes if node.get('name')]
+                names = [
+                    node.get("name", "") for node in proposed_nodes if node.get("name")
+                ]
                 similar_results = self._graph_service.find_similar_nodes_batch(
-                    names=names,
-                    node_type=node_type,
-                    threshold=0.7,
-                    limit=3
+                    names=names, node_type=node_type, threshold=0.7, limit=3
                 )
             else:
                 similar_results = {"results": {}}
@@ -753,7 +900,7 @@ Respond with ONLY a JSON array of extracted entities, no other text. Example for
                 "proposed_nodes": proposed_nodes,
                 "similar_existing": similar_results.get("results", {}),
                 "requires_confirmation": True,
-                "message": f"Found {len(proposed_nodes)} potential entities. Please review before adding."
+                "message": f"Found {len(proposed_nodes)} potential entities. Please review before adding.",
             }
 
         except Exception as e:
@@ -761,5 +908,5 @@ Respond with ONLY a JSON array of extracted entities, no other text. Example for
                 "success": False,
                 "error": str(e),
                 "proposed_nodes": [],
-                "similar_existing": {}
+                "similar_existing": {},
             }

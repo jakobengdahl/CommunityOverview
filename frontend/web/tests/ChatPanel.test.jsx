@@ -50,7 +50,9 @@ describe('ChatPanel', () => {
 
       expect(screen.getByText('Graph assistant')).toBeInTheDocument();
       // Should not have the full chat input
-      expect(screen.queryByPlaceholderText(/question|fråga|action|åtgärd/i)).not.toBeInTheDocument();
+      expect(
+        screen.queryByPlaceholderText(/question|fråga|action|åtgärd/i)
+      ).not.toBeInTheDocument();
     });
 
     it('toggles between open and minimized when collapse button clicked', () => {
@@ -60,7 +62,9 @@ describe('ChatPanel', () => {
       fireEvent.click(screen.getByTitle('Minimize'));
 
       // Now should be in minimized state
-      expect(screen.queryByPlaceholderText(/question|fråga|action|åtgärd/i)).not.toBeInTheDocument();
+      expect(
+        screen.queryByPlaceholderText(/question|fråga|action|åtgärd/i)
+      ).not.toBeInTheDocument();
     });
   });
 
@@ -214,7 +218,9 @@ describe('ChatPanel', () => {
       await user.click(screen.getByRole('button', { name: /send|skicka/i }));
 
       await waitFor(() => {
-        expect(screen.getByText(/similar nodes found|liknande noder hittades/i)).toBeInTheDocument();
+        expect(
+          screen.getByText(/similar nodes found|liknande noder hittades/i)
+        ).toBeInTheDocument();
         expect(screen.getByText(/AI Strategy.*85%/)).toBeInTheDocument();
       });
     });
@@ -279,7 +285,9 @@ describe('ChatPanel', () => {
       await user.click(screen.getByRole('button', { name: /send|skicka/i }));
 
       await waitFor(() => {
-        expect(screen.getAllByText(/confirm deletion|bekräfta borttagning/i).length).toBeGreaterThan(0);
+        expect(
+          screen.getAllByText(/confirm deletion|bekräfta borttagning/i).length
+        ).toBeGreaterThan(0);
         expect(screen.getByText(/Node 1/)).toBeInTheDocument();
         expect(screen.getByText(/Node 2/)).toBeInTheDocument();
         expect(screen.getByText(/cannot be undone|kan inte ångras/i)).toBeInTheDocument();
@@ -353,7 +361,10 @@ describe('ChatPanel', () => {
         expect(screen.getByText('report.pdf')).toBeInTheDocument();
       });
 
-      await user.type(screen.getByPlaceholderText(/describe what you want to do|beskriv vad du vill göra/i), 'Analyze this');
+      await user.type(
+        screen.getByPlaceholderText(/describe what you want to do|beskriv vad du vill göra/i),
+        'Analyze this'
+      );
       await user.click(screen.getByRole('button', { name: /send|skicka/i }));
 
       await waitFor(() => {
@@ -412,9 +423,7 @@ describe('ChatPanel', () => {
   describe('Message display', () => {
     it('displays user messages on the right', () => {
       useGraphStore.setState({
-        chatMessages: [
-          { id: 1, role: 'user', content: 'Hello', timestamp: new Date() },
-        ],
+        chatMessages: [{ id: 1, role: 'user', content: 'Hello', timestamp: new Date() }],
         chatPanelOpen: true,
       });
 
@@ -426,9 +435,7 @@ describe('ChatPanel', () => {
 
     it('displays assistant messages on the left', () => {
       useGraphStore.setState({
-        chatMessages: [
-          { id: 1, role: 'assistant', content: 'Hi there', timestamp: new Date() },
-        ],
+        chatMessages: [{ id: 1, role: 'assistant', content: 'Hi there', timestamp: new Date() }],
         chatPanelOpen: true,
       });
 
@@ -441,15 +448,148 @@ describe('ChatPanel', () => {
     it('formats timestamps correctly', () => {
       const testDate = new Date('2024-01-15T10:30:00');
       useGraphStore.setState({
-        chatMessages: [
-          { id: 1, role: 'user', content: 'Test', timestamp: testDate },
-        ],
+        chatMessages: [{ id: 1, role: 'user', content: 'Test', timestamp: testDate }],
         chatPanelOpen: true,
       });
 
       render(<ChatPanel />);
 
       expect(screen.getByText(/10:30/)).toBeInTheDocument();
+    });
+  });
+
+  describe('extra_actions alongside present_form', () => {
+    it('executes mark_nodes from extra_actions while the form still renders', async () => {
+      const setNodeMarksSpy = vi.fn();
+      useGraphStore.setState({ setNodeMarks: setNodeMarksSpy });
+
+      api.sendChatMessage.mockResolvedValueOnce({
+        content: 'Please fill in the form.',
+        toolUsed: 'present_form',
+        toolResult: {
+          action: 'present_form',
+          form: {
+            fields: [{ id: 'role', label: 'Role', type: 'radio', options: ['A', 'B'] }],
+          },
+          extra_actions: [
+            { action: 'mark_nodes', marks: [{ node_id: 'n1', color: '#EF4444', label: 'High' }] },
+          ],
+        },
+      });
+
+      render(<ChatPanel />);
+      const user = userEvent.setup();
+
+      await user.type(screen.getByPlaceholderText(/question|fråga|action|åtgärd/i), 'go');
+      await user.click(screen.getByRole('button', { name: /send|skicka/i }));
+
+      await waitFor(() => {
+        // Form must still render
+        expect(screen.getByText('Role')).toBeInTheDocument();
+        // mark_nodes side-effect must have run
+        expect(setNodeMarksSpy).toHaveBeenCalledWith([
+          { node_id: 'n1', color: '#EF4444', label: 'High' },
+        ]);
+      });
+    });
+
+    it('executes clear_visualization from extra_actions while the form still renders', async () => {
+      const clearSpy = vi.fn();
+      useGraphStore.setState({
+        nodes: [{ id: 'n1' }],
+        clearVisualization: clearSpy,
+      });
+
+      api.sendChatMessage.mockResolvedValueOnce({
+        content: 'Canvas cleared. Please answer:',
+        toolUsed: 'present_form',
+        toolResult: {
+          action: 'present_form',
+          form: {
+            fields: [{ id: 'q', label: 'Q', type: 'text' }],
+          },
+          extra_actions: [{ action: 'clear_visualization', success: true }],
+        },
+      });
+
+      render(<ChatPanel />);
+      const user = userEvent.setup();
+
+      await user.type(screen.getByPlaceholderText(/question|fråga|action|åtgärd/i), 'start');
+      await user.click(screen.getByRole('button', { name: /send|skicka/i }));
+
+      await waitFor(() => {
+        // Form must still render
+        expect(screen.getByText('Q')).toBeInTheDocument();
+        // clear_visualization side-effect must have run
+        expect(clearSpy).toHaveBeenCalled();
+      });
+    });
+
+    it('does not fail when extra_actions is absent (backward compatibility)', async () => {
+      api.sendChatMessage.mockResolvedValueOnce({
+        content: 'Marks applied.',
+        toolUsed: 'mark_nodes',
+        toolResult: { action: 'mark_nodes', marks: [] },
+      });
+
+      render(<ChatPanel />);
+      const user = userEvent.setup();
+
+      await user.type(screen.getByPlaceholderText(/question|fråga|action|åtgärd/i), 'mark');
+      await user.click(screen.getByRole('button', { name: /send|skicka/i }));
+
+      await waitFor(() => {
+        expect(screen.getByText('Marks applied.')).toBeInTheDocument();
+      });
+    });
+  });
+
+  describe('Collection form', () => {
+    it('renders an assistant present_form and submits structured answers', async () => {
+      useGraphStore.setState({
+        chatMessages: [
+          {
+            id: 'form-msg',
+            role: 'assistant',
+            content: 'Please answer:',
+            form: {
+              title: 'Q1',
+              fields: [
+                {
+                  id: 'role',
+                  label: 'Role',
+                  type: 'radio',
+                  options: ['Manager', 'Analyst'],
+                  required: true,
+                },
+              ],
+            },
+          },
+        ],
+        chatPanelOpen: true,
+      });
+
+      api.sendChatMessage.mockResolvedValue({
+        content: 'Saved, thank you.',
+        toolUsed: 'save_collection_response',
+        toolResult: null,
+      });
+
+      render(<ChatPanel collectionShortName="feedback" />);
+
+      expect(screen.getByText('Q1')).toBeInTheDocument();
+      fireEvent.click(screen.getByLabelText('Manager'));
+      fireEvent.click(screen.getByRole('button', { name: 'Submit' }));
+
+      await waitFor(() => expect(api.sendChatMessage).toHaveBeenCalledTimes(1));
+
+      const history = api.sendChatMessage.mock.calls[0][0];
+      const lastMsg = history[history.length - 1];
+      expect(lastMsg.role).toBe('user');
+      expect(lastMsg.content).toContain('save_collection_response');
+      expect(lastMsg.content).toContain('"field_id":"role"');
+      expect(lastMsg.content).toContain('Manager');
     });
   });
 });

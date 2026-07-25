@@ -6,19 +6,16 @@ from backend.federation.config import FederationFileConfig
 from backend.federation.manager import FederationManager
 import socketserver
 
+
 class ThreadingHTTPServer(socketserver.ThreadingMixIn, HTTPServer):
     daemon_threads = True
+
 
 class MockHandler(BaseHTTPRequestHandler):
     def do_GET(self):
         # Simulate network latency
         time.sleep(0.1)
-        payload = {
-            "nodes": [
-                {"id": "n1", "type": "Actor", "name": "A"}
-            ],
-            "edges": []
-        }
+        payload = {"nodes": [{"id": "n1", "type": "Actor", "name": "A"}], "edges": []}
         body = json.dumps(payload).encode("utf-8")
         self.send_response(200)
         self.send_header("Content-Type", "application/json")
@@ -32,11 +29,13 @@ class MockHandler(BaseHTTPRequestHandler):
     def log_message(self, format, *args):
         pass
 
+
 def start_server():
     server = ThreadingHTTPServer(("127.0.0.1", 0), MockHandler)
     thread = threading.Thread(target=server.serve_forever, daemon=True)
     thread.start()
     return server
+
 
 def run_benchmark():
     server = start_server()
@@ -44,21 +43,23 @@ def run_benchmark():
 
     graphs = []
     for i in range(20):
-        graphs.append({
-            "graph_id": f"graph-{i}",
-            "display_name": f"Graph {i}",
-            "enabled": True,
-            "endpoints": {
-                "graph_json_url": f"http://127.0.0.1:{port}/graph.json"
+        graphs.append(
+            {
+                "graph_id": f"graph-{i}",
+                "display_name": f"Graph {i}",
+                "enabled": True,
+                "endpoints": {"graph_json_url": f"http://127.0.0.1:{port}/graph.json"},
             }
-        })
+        )
 
-    config = FederationFileConfig.model_validate({
-        "federation": {
-            "enabled": True,
-            "graphs": graphs,
+    config = FederationFileConfig.model_validate(
+        {
+            "federation": {
+                "enabled": True,
+                "graphs": graphs,
+            }
         }
-    })
+    )
 
     manager = FederationManager(config)
 
@@ -79,6 +80,7 @@ def run_benchmark():
 
     print(f"Time taken: {end_t - start_t:.3f} seconds")
     print(f"Success: {result.get('success')}")
+
 
 if __name__ == "__main__":
     run_benchmark()

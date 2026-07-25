@@ -7,9 +7,6 @@ Verifies that:
 - Graph mutations go through GraphService
 """
 
-import pytest
-from unittest.mock import patch
-import json
 import io
 
 
@@ -23,9 +20,9 @@ class TestChatEndpoint:
         mock_llm.mock_tool_calls = []
         mock_llm.mock_text_response = "Hello! How can I help you with the graph?"
 
-        response = client.post("/ui/chat", json={
-            "messages": [{"role": "user", "content": "Hello"}]
-        })
+        response = client.post(
+            "/ui/chat", json={"messages": [{"role": "user", "content": "Hello"}]}
+        )
 
         assert response.status_code == 200
         data = response.json()
@@ -38,8 +35,15 @@ class TestChatEndpoint:
 
         # Add a test node first
         graph_service.add_nodes(
-            nodes=[{"id": "api-test-1", "name": "API Test Node", "type": "Actor", "description": "Test"}],
-            edges=[]
+            nodes=[
+                {
+                    "id": "api-test-1",
+                    "name": "API Test Node",
+                    "type": "Actor",
+                    "description": "Test",
+                }
+            ],
+            edges=[],
         )
 
         mock_llm.mock_tool_calls = [
@@ -47,9 +51,10 @@ class TestChatEndpoint:
         ]
         mock_llm.mock_text_response = "Found the API Test Node."
 
-        response = client.post("/ui/chat", json={
-            "messages": [{"role": "user", "content": "Search for API Test"}]
-        })
+        response = client.post(
+            "/ui/chat",
+            json={"messages": [{"role": "user", "content": "Search for API Test"}]},
+        )
 
         assert response.status_code == 200
         data = response.json()
@@ -64,16 +69,24 @@ class TestChatEndpoint:
             {
                 "name": "add_nodes",
                 "input": {
-                    "nodes": [{"id": "chat-added-1", "name": "Chat Added Node", "type": "Initiative", "description": "Added via chat"}],
-                    "edges": []
-                }
+                    "nodes": [
+                        {
+                            "id": "chat-added-1",
+                            "name": "Chat Added Node",
+                            "type": "Initiative",
+                            "description": "Added via chat",
+                        }
+                    ],
+                    "edges": [],
+                },
             }
         ]
         mock_llm.mock_text_response = "Added the node."
 
-        response = client.post("/ui/chat", json={
-            "messages": [{"role": "user", "content": "Add a new initiative"}]
-        })
+        response = client.post(
+            "/ui/chat",
+            json={"messages": [{"role": "user", "content": "Add a new initiative"}]},
+        )
 
         assert response.status_code == 200
 
@@ -93,9 +106,9 @@ class TestSimpleChatEndpoint:
         mock_llm.mock_tool_calls = []
         mock_llm.mock_text_response = "Here are the graph statistics..."
 
-        response = client.post("/ui/chat/simple", json={
-            "message": "What are the graph stats?"
-        })
+        response = client.post(
+            "/ui/chat/simple", json={"message": "What are the graph stats?"}
+        )
 
         assert response.status_code == 200
         data = response.json()
@@ -118,7 +131,7 @@ class TestUploadEndpoint:
         response = client.post(
             "/ui/upload",
             files={"file": ("test.txt", io.BytesIO(file_content), "text/plain")},
-            data={"analyze": "true", "message": "What is this about?"}
+            data={"analyze": "true", "message": "What is this about?"},
         )
 
         assert response.status_code == 200
@@ -138,7 +151,7 @@ class TestUploadEndpoint:
         response = client.post(
             "/ui/upload",
             files={"file": ("project.txt", io.BytesIO(file_content), "text/plain")},
-            data={"analyze": "true"}
+            data={"analyze": "true"},
         )
 
         assert response.status_code == 200
@@ -155,7 +168,7 @@ class TestUploadEndpoint:
 
         response = client.post(
             "/ui/upload/extract",
-            files={"file": ("extract.txt", io.BytesIO(file_content), "text/plain")}
+            files={"file": ("extract.txt", io.BytesIO(file_content), "text/plain")},
         )
 
         assert response.status_code == 200
@@ -173,8 +186,14 @@ class TestUploadEndpoint:
 
         response = client.post(
             "/ui/upload",
-            files={"file": ("test.xyz", io.BytesIO(file_content), "application/octet-stream")},
-            data={"analyze": "false"}
+            files={
+                "file": (
+                    "test.xyz",
+                    io.BytesIO(file_content),
+                    "application/octet-stream",
+                )
+            },
+            data={"analyze": "false"},
         )
 
         assert response.status_code == 200
@@ -220,8 +239,15 @@ class TestGraphServiceRouting:
 
         # Add node via GraphService
         graph_service.add_nodes(
-            nodes=[{"id": "routing-test-1", "name": "Routing Test", "type": "Actor", "description": "Test"}],
-            edges=[]
+            nodes=[
+                {
+                    "id": "routing-test-1",
+                    "name": "Routing Test",
+                    "type": "Actor",
+                    "description": "Test",
+                }
+            ],
+            edges=[],
         )
 
         # Search via chat
@@ -230,15 +256,18 @@ class TestGraphServiceRouting:
         ]
         mock_llm.mock_text_response = "Found the node."
 
-        response = client.post("/ui/chat", json={
-            "messages": [{"role": "user", "content": "Search Routing Test"}]
-        })
+        response = client.post(
+            "/ui/chat",
+            json={"messages": [{"role": "user", "content": "Search Routing Test"}]},
+        )
 
         assert response.status_code == 200
         data = response.json()
         # Tool result should contain the node we added (check for nodes list or total)
         tool_result = data["toolResult"]
-        assert tool_result.get("total", 0) >= 1 or len(tool_result.get("nodes", [])) >= 1
+        assert (
+            tool_result.get("total", 0) >= 1 or len(tool_result.get("nodes", [])) >= 1
+        )
 
     def test_chat_update_uses_graph_service(self, fastapi_test_client):
         """Update operations should use GraphService."""
@@ -246,22 +275,33 @@ class TestGraphServiceRouting:
 
         # Add node
         graph_service.add_nodes(
-            nodes=[{"id": "update-test-1", "name": "Update Test", "type": "Actor", "description": "Original"}],
-            edges=[]
+            nodes=[
+                {
+                    "id": "update-test-1",
+                    "name": "Update Test",
+                    "type": "Actor",
+                    "description": "Original",
+                }
+            ],
+            edges=[],
         )
 
         # Update via chat
         mock_llm.mock_tool_calls = [
             {
                 "name": "update_node",
-                "input": {"node_id": "update-test-1", "updates": {"description": "Updated via chat"}}
+                "input": {
+                    "node_id": "update-test-1",
+                    "updates": {"description": "Updated via chat"},
+                },
             }
         ]
         mock_llm.mock_text_response = "Updated."
 
-        response = client.post("/ui/chat", json={
-            "messages": [{"role": "user", "content": "Update the node"}]
-        })
+        response = client.post(
+            "/ui/chat",
+            json={"messages": [{"role": "user", "content": "Update the node"}]},
+        )
 
         assert response.status_code == 200
 
@@ -275,8 +315,15 @@ class TestGraphServiceRouting:
 
         # Add node
         graph_service.add_nodes(
-            nodes=[{"id": "delete-test-1", "name": "Delete Test", "type": "Actor", "description": "To delete"}],
-            edges=[]
+            nodes=[
+                {
+                    "id": "delete-test-1",
+                    "name": "Delete Test",
+                    "type": "Actor",
+                    "description": "To delete",
+                }
+            ],
+            edges=[],
         )
 
         # Verify it exists
@@ -284,13 +331,17 @@ class TestGraphServiceRouting:
 
         # Delete via chat
         mock_llm.mock_tool_calls = [
-            {"name": "delete_nodes", "input": {"node_ids": ["delete-test-1"], "confirmed": True}}
+            {
+                "name": "delete_nodes",
+                "input": {"node_ids": ["delete-test-1"], "confirmed": True},
+            }
         ]
         mock_llm.mock_text_response = "Deleted."
 
-        response = client.post("/ui/chat", json={
-            "messages": [{"role": "user", "content": "Delete the node"}]
-        })
+        response = client.post(
+            "/ui/chat",
+            json={"messages": [{"role": "user", "content": "Delete the node"}]},
+        )
 
         assert response.status_code == 200
 
@@ -309,11 +360,14 @@ class TestVisualizationContextEndpoint:
         mock_llm.mock_tool_calls = []
         mock_llm.mock_text_response = "I can see those nodes."
 
-        response = client.post("/ui/chat", json={
-            "messages": [{"role": "user", "content": "what do I see?"}],
-            "visible_node_ids": ["node-a", "node-b"],
-            "selected_node_ids": [],
-        })
+        response = client.post(
+            "/ui/chat",
+            json={
+                "messages": [{"role": "user", "content": "what do I see?"}],
+                "visible_node_ids": ["node-a", "node-b"],
+                "selected_node_ids": [],
+            },
+        )
 
         assert response.status_code == 200
         assert mock_llm.received_system_prompts, "LLM was never called"
@@ -329,9 +383,12 @@ class TestVisualizationContextEndpoint:
         mock_llm.mock_tool_calls = []
         mock_llm.mock_text_response = "Sure!"
 
-        response = client.post("/ui/chat", json={
-            "messages": [{"role": "user", "content": "hello"}],
-        })
+        response = client.post(
+            "/ui/chat",
+            json={
+                "messages": [{"role": "user", "content": "hello"}],
+            },
+        )
 
         assert response.status_code == 200
         assert mock_llm.received_system_prompts, "LLM was never called"

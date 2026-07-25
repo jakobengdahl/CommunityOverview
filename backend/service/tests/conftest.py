@@ -12,7 +12,6 @@ import pytest
 import tempfile
 import os
 from typing import Generator
-from unittest.mock import patch, MagicMock
 
 from backend.core import GraphStorage, Node, Edge, NodeType, RelationshipType
 from backend.service import GraphService
@@ -22,12 +21,14 @@ from backend.service import GraphService
 # This fixture mocks the embedding model to avoid network requests during tests.
 # The mock returns random-ish but deterministic embeddings based on input text.
 
+
 class MockSentenceTransformer:
     """Mock SentenceTransformer that generates deterministic embeddings without network."""
 
     def __init__(self, model_name=None):
         self.model_name = model_name
         import numpy as np
+
         self._np = np
 
     def encode(self, texts, convert_to_numpy=True, show_progress_bar=False):
@@ -39,7 +40,9 @@ class MockSentenceTransformer:
         for text in texts:
             # Create deterministic embedding based on text content
             self._np.random.seed(abs(hash(text)) % (2**32))
-            embedding = self._np.random.rand(384).astype(self._np.float32)  # MiniLM dimension
+            embedding = self._np.random.rand(384).astype(
+                self._np.float32
+            )  # MiniLM dimension
             embeddings.append(embedding)
         result = self._np.array(embeddings)
         return result[0] if is_single else result
@@ -103,7 +106,7 @@ def sample_nodes() -> list:
             name="Skatteverket",
             description="Swedish Tax Agency",
             summary="Tax authority",
-            tags=["government", "tax"]
+            tags=["government", "tax"],
         ),
         Node(
             id="actor-2",
@@ -111,7 +114,7 @@ def sample_nodes() -> list:
             name="Bolagsverket",
             description="Swedish Companies Registration Office",
             summary="Company registration",
-            tags=["government", "registration"]
+            tags=["government", "registration"],
         ),
         Node(
             id="init-1",
@@ -119,14 +122,14 @@ def sample_nodes() -> list:
             name="Digital First",
             description="A digital transformation initiative",
             summary="Digital transformation",
-            tags=["digital", "transformation"]
+            tags=["digital", "transformation"],
         ),
         Node(
             id="community-1",
             type=NodeType.CAPABILITY,
             name="eSam",
             description="eGovernment collaboration community",
-            summary="eGov community"
+            summary="eGov community",
         ),
         Node(
             id="legislation-1",
@@ -134,7 +137,7 @@ def sample_nodes() -> list:
             name="GDPR",
             description="General Data Protection Regulation",
             summary="Data protection law",
-            tags=["privacy", "data"]
+            tags=["privacy", "data"],
         ),
     ]
 
@@ -147,31 +150,33 @@ def sample_edges() -> list:
             id="edge-1",
             source="actor-1",
             target="init-1",
-            type=RelationshipType.BELONGS_TO
+            type=RelationshipType.BELONGS_TO,
         ),
         Edge(
             id="edge-2",
             source="actor-2",
             target="init-1",
-            type=RelationshipType.BELONGS_TO
+            type=RelationshipType.BELONGS_TO,
         ),
         Edge(
             id="edge-3",
             source="init-1",
             target="community-1",
-            type=RelationshipType.PART_OF
+            type=RelationshipType.PART_OF,
         ),
         Edge(
             id="edge-4",
             source="init-1",
             target="legislation-1",
-            type=RelationshipType.GOVERNED_BY
+            type=RelationshipType.GOVERNED_BY,
         ),
     ]
 
 
 @pytest.fixture
-def populated_storage(empty_storage: GraphStorage, sample_nodes: list, sample_edges: list) -> GraphStorage:
+def populated_storage(
+    empty_storage: GraphStorage, sample_nodes: list, sample_edges: list
+) -> GraphStorage:
     """Create a GraphStorage populated with sample data."""
     empty_storage.add_nodes(sample_nodes, sample_edges)
     return empty_storage
@@ -197,14 +202,16 @@ def saved_view_node() -> Node:
             "positions": {
                 "actor-1": {"x": 100, "y": 100},
                 "actor-2": {"x": 200, "y": 100},
-                "init-1": {"x": 150, "y": 200}
-            }
-        }
+                "init-1": {"x": 150, "y": 200},
+            },
+        },
     )
 
 
 @pytest.fixture
-def service_with_view(populated_storage: GraphStorage, saved_view_node: Node) -> GraphService:
+def service_with_view(
+    populated_storage: GraphStorage, saved_view_node: Node
+) -> GraphService:
     """Create a GraphService with a saved view."""
     populated_storage.add_nodes([saved_view_node], [])
     return GraphService(populated_storage)

@@ -11,7 +11,9 @@ function InputDialog({
   defaultValue = '',
   confirmText = 'Save',
   cancelText = 'Cancel',
+  loadingText = 'Saving...',
   isLoading = false,
+  allowEmpty = false,
   onConfirm,
   onCancel,
 }) {
@@ -24,28 +26,26 @@ function InputDialog({
     inputRef.current?.select();
   }, []);
 
+  const canSubmit = (allowEmpty || value.trim()) && !isLoading;
+
   // Handle keyboard events
   const handleKeyDown = (e) => {
     if (e.key === 'Escape' && !isLoading) {
       onCancel();
-    } else if (e.key === 'Enter' && value.trim() && !isLoading) {
+    } else if (e.key === 'Enter' && canSubmit) {
       onConfirm(value.trim());
     }
   };
 
   const handleSubmit = () => {
-    if (value.trim() && !isLoading) {
+    if (canSubmit) {
       onConfirm(value.trim());
     }
   };
 
   return (
     <div className="input-dialog-overlay" onClick={onCancel}>
-      <div
-        className="input-dialog"
-        onClick={(e) => e.stopPropagation()}
-        onKeyDown={handleKeyDown}
-      >
+      <div className="input-dialog" onClick={(e) => e.stopPropagation()} onKeyDown={handleKeyDown}>
         <div className="input-dialog-header">
           <h3>{title}</h3>
         </div>
@@ -64,19 +64,15 @@ function InputDialog({
         </div>
 
         <div className="input-dialog-actions">
-          <button
-            className="input-dialog-button cancel"
-            onClick={onCancel}
-            disabled={isLoading}
-          >
+          <button className="input-dialog-button cancel" onClick={onCancel} disabled={isLoading}>
             {cancelText}
           </button>
           <button
             className="input-dialog-button primary"
             onClick={handleSubmit}
-            disabled={!value.trim() || isLoading}
+            disabled={!canSubmit}
           >
-            {isLoading ? 'Sparar...' : confirmText}
+            {isLoading ? loadingText : confirmText}
           </button>
         </div>
       </div>

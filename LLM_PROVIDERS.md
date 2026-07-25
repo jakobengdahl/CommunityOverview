@@ -18,7 +18,7 @@ To enable AI features later, set the appropriate API key and restart the server.
 
 ## Supported Providers
 
-- **Claude** (Anthropic) - Uses Claude Sonnet 4.5
+- **Claude** (Anthropic) - Uses `claude-sonnet-4-5` by default (see `backend/llm/llm_providers.py`)
 - **OpenAI** - Uses GPT-4o (configurable), or any OpenAI-compatible endpoint via `OPENAI_BASE_URL`
 
 ## Configuration
@@ -238,16 +238,14 @@ To test with different providers:
 ```bash
 export LLM_PROVIDER=claude
 export ANTHROPIC_API_KEY=your-key
-cd mcp-server
-python server.py
+uvicorn backend.api_host.server:get_app --factory --port 8000
 ```
 
 ### Test with OpenAI
 ```bash
 export LLM_PROVIDER=openai
 export OPENAI_API_KEY=your-key
-cd mcp-server
-python server.py
+uvicorn backend.api_host.server:get_app --factory --port 8000
 ```
 
 ### Test Frontend Override
@@ -293,22 +291,3 @@ python server.py
 
 **Recommendation:** For cost-effective operations with similar quality, GPT-4o is recommended.
 
-## Future Enhancements
-
-Potential additions:
-- Support for additional native providers (Gemini, etc.)
-- Automatic fallback between providers
-- Cost tracking per provider
-- Performance metrics comparison
-
-## Files Modified
-
-Key files in this implementation:
-
-- `mcp-server/llm_providers.py` - Provider abstraction layer
-- `mcp-server/chat_logic.py` - ChatProcessor with provider support
-- `mcp-server/server.py` - HTTP endpoint handling
-- `mcp-server/requirements.txt` - Dependencies
-- `frontend/src/store/graphStore.js` - State management
-- `frontend/src/components/Header.jsx` - Settings UI
-- `frontend/src/services/api.js` - API client

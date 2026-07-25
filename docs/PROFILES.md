@@ -127,32 +127,23 @@ Each node type has the following fields:
 | `ui_form` | No | Specialized creation dialog. `"skill"` opens the SKILL.md-compatible form |
 | `context_menu` | No | Array of extra items for the right-click context menu (see below) |
 
-**Available icon names** (from [Bootstrap Icons](https://icons.getbootstrap.com/)):
+Every node — regardless of its type or its `fields` list — also carries a
+universal `aliases` field: a list of alternative names/synonyms. Aliases are
+editable in every node editor and are matched during search (ranked just below
+a node's real name, above tags and descriptions), so a node can be found by an
+abbreviation or alternate spelling. You do not need to list `aliases` in a
+node type's `fields` array; it is always available, just like `tags` and
+`subtypes`.
 
-| Icon Name | Visual | Suggested For |
-|-----------|--------|---------------|
-| `PersonFill` | 👤 | People, organizations |
-| `RocketTakeoffFill` | 🚀 | Projects, initiatives |
-| `DatabaseFill` | 🗄️ | Datasets, data sources |
-| `LightningFill` | ⚡ | Capabilities, skills |
-| `FileEarmarkTextFill` | 📄 | Resources, documents |
-| `ShieldFillCheck` | 🛡️ | Legislation, compliance |
-| `TagsFill` | 🏷️ | Themes, categories |
-| `TrophyFill` | 🏆 | Goals, objectives |
-| `CalendarEventFill` | 📅 | Events, milestones |
-| `ExclamationTriangleFill` | ⚠️ | Risks, warnings |
-| `PinAngleFill` | 📌 | Anchor points, stable items |
-| `ClipboardDataFill` | 📋 | Surveys, investigations |
-| `PeopleFill` | 👥 | Populations, groups |
-| `Sliders` | 🎚️ | Variables, measurements |
-| `ListOl` | 📝 | Value sets, code lists |
-| `Diagram3Fill` | 🔀 | Classifications, taxonomies |
-| `CpuFill` | 💻 | Agents, AI |
-| `BellFill` | 🔔 | Notifications, webhooks |
-| `BookmarkFill` | 🔖 | Saved views |
-| `FolderFill` | 📁 | Groups, folders |
+See [`docs/ICONS.md`](ICONS.md) for the full, up-to-date list of icon names
+you can choose from — grouped by theme (people & organizations, statistics,
+documents, security, technology, and more) — plus the process for
+registering an icon that isn't in that list yet.
 
-To add support for additional icons, add the import to `frontend/web/src/components/FloatingToolbar.jsx` in the `ICON_REGISTRY` object.
+Icons can only be selected from names already registered in
+`frontend/web/src/components/FloatingToolbar.jsx` (`ICON_REGISTRY`) — this
+list is fixed at deployment time, so a config alone cannot introduce a brand
+new icon; see `docs/ICONS.md` for how to add one.
 
 #### Context menu items
 

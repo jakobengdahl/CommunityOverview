@@ -20,7 +20,12 @@ from .config import AgentConfig, AgentsSettings
 from .prompts import build_agent_system_prompt, build_event_user_message
 from .llm_client import LLMClient
 from .mcp_loader import MCPLoader
-from backend.skills.loader import SkillDefinition, SkillMetadata, SkillsConfig, SkillsLoader
+from backend.skills.loader import (
+    SkillDefinition,
+    SkillMetadata,
+    SkillsConfig,
+    SkillsLoader,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -28,6 +33,7 @@ logger = logging.getLogger(__name__)
 @dataclass
 class EventItem:
     """An event queued for processing."""
+
     event_id: str
     payload: Dict[str, Any]
     enqueued_at: datetime = field(default_factory=lambda: datetime.now(timezone.utc))
@@ -36,6 +42,7 @@ class EventItem:
 @dataclass
 class ProcessingResult:
     """Result of processing an event."""
+
     event_id: str
     agent_id: str
     success: bool
@@ -184,8 +191,8 @@ class AgentWorker:
         with self._lock:
             self.config = new_config
             self._llm_client = None
-            self._skills_loader = None   # Reset so a fresh loader is created
-            self._cached_skills = None   # Force skill reload on next event
+            self._skills_loader = None  # Reset so a fresh loader is created
+            self._cached_skills = None  # Force skill reload on next event
             logger.info(f"Agent {self.agent_id}: Configuration reloaded")
 
     def _load_skills(self) -> List[SkillDefinition]:
@@ -233,7 +240,9 @@ class AgentWorker:
                         f"Agent {self.config.name}: Loaded {len(url_skills)} skill(s) from URLs"
                     )
                 except Exception as exc:
-                    logger.warning(f"Agent {self.config.name}: Skills URL load failed: {exc}")
+                    logger.warning(
+                        f"Agent {self.config.name}: Skills URL load failed: {exc}"
+                    )
 
             # Stage 1 → Stage 2 for local skills directory
             try:
@@ -256,7 +265,9 @@ class AgentWorker:
                         f"Agent {self.config.name}: Loaded {added} skill(s) from local dir"
                     )
             except Exception as exc:
-                logger.warning(f"Agent {self.config.name}: Local skills dir load failed: {exc}")
+                logger.warning(
+                    f"Agent {self.config.name}: Local skills dir load failed: {exc}"
+                )
         finally:
             loop.close()
 
@@ -268,14 +279,22 @@ class AgentWorker:
                     if not node:
                         logger.debug("Skill node %s not found in graph", node_id)
                         continue
-                    node_type = node.type.value if hasattr(node.type, "value") else str(node.type)
+                    node_type = (
+                        node.type.value
+                        if hasattr(node.type, "value")
+                        else str(node.type)
+                    )
                     if node_type != "Skill":
-                        logger.warning("Node %s is type %s, expected Skill", node_id, node_type)
+                        logger.warning(
+                            "Node %s is type %s, expected Skill", node_id, node_type
+                        )
                         continue
                     meta = node.metadata or {}
                     content = meta.get("content", "")
                     if not content:
-                        logger.debug("Skill node %s has no content in metadata", node_id)
+                        logger.debug(
+                            "Skill node %s has no content in metadata", node_id
+                        )
                         continue
                     skill = SkillDefinition(
                         id=node.id,
@@ -345,7 +364,9 @@ class AgentWorker:
                 try:
                     schema = self.graph_service.get_schema()
                 except Exception as e:
-                    logger.warning(f"Agent {self.config.name}: Could not load schema: {e}")
+                    logger.warning(
+                        f"Agent {self.config.name}: Could not load schema: {e}"
+                    )
 
             # Load skills lazily (once per config lifecycle)
             if self._cached_skills is None:
@@ -430,7 +451,9 @@ class AgentWorker:
             if text:
                 # Truncate long reasoning for console readability
                 display_text = text[:500] + "..." if len(text) > 500 else text
-                logger.info(f"Agent {agent_name} [turn {turn_num}] reasoning: {display_text}")
+                logger.info(
+                    f"Agent {agent_name} [turn {turn_num}] reasoning: {display_text}"
+                )
 
             for tc in tool_calls:
                 tc_name = tc.get("name", "?")
@@ -438,7 +461,9 @@ class AgentWorker:
                 input_summary = json.dumps(tc_input, default=str, ensure_ascii=False)
                 if len(input_summary) > 300:
                     input_summary = input_summary[:300] + "..."
-                logger.info(f"Agent {agent_name} [turn {turn_num}] tool call: {tc_name}({input_summary})")
+                logger.info(
+                    f"Agent {agent_name} [turn {turn_num}] tool call: {tc_name}({input_summary})"
+                )
 
         final = result.get("final_response")
         if final:
@@ -446,7 +471,9 @@ class AgentWorker:
             logger.info(f"Agent {agent_name} final response: {display_final}")
 
         if not result.get("success"):
-            logger.warning(f"Agent {agent_name} execution failed: {result.get('error', 'unknown')}")
+            logger.warning(
+                f"Agent {agent_name} execution failed: {result.get('error', 'unknown')}"
+            )
 
     def _create_llm_client(self) -> LLMClient:
         """Create the LLM client."""
@@ -508,10 +535,12 @@ class AgentWorker:
         trace = llm_result.get("trace", [])
         for turn in trace:
             for tc in turn.get("tool_calls", []):
-                actions.append({
-                    "tool": tc.get("name"),
-                    "input": tc.get("input"),
-                })
+                actions.append(
+                    {
+                        "tool": tc.get("name"),
+                        "input": tc.get("input"),
+                    }
+                )
 
         return ProcessingResult(
             event_id=event_id,
@@ -535,6 +564,8 @@ class AgentWorker:
             "queue_size": self.queue_size,
             "events_processed": self.events_processed,
             "events_failed": self.events_failed,
-            "last_event_at": self.last_event_at.isoformat() if self.last_event_at else None,
+            "last_event_at": self.last_event_at.isoformat()
+            if self.last_event_at
+            else None,
             "mcp_integrations": self.config.mcp_integration_ids,
         }

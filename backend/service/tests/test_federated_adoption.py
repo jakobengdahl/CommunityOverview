@@ -13,20 +13,24 @@ def _service_with_cached_federated_node(tmp_path):
     graph_file.write_text(json.dumps({"nodes": [], "edges": []}), encoding="utf-8")
     storage = GraphStorage(str(graph_file))
 
-    config = FederationFileConfig.model_validate({
-        "federation": {
-            "enabled": True,
-            "graphs": [
-                {
-                    "graph_id": "esam-main",
-                    "display_name": "eSam",
-                    "enabled": True,
-                    "capabilities": {"allow_adopt": True},
-                    "endpoints": {"graph_json_url": "https://example.invalid/graph.json"},
-                }
-            ],
+    config = FederationFileConfig.model_validate(
+        {
+            "federation": {
+                "enabled": True,
+                "graphs": [
+                    {
+                        "graph_id": "esam-main",
+                        "display_name": "eSam",
+                        "enabled": True,
+                        "capabilities": {"allow_adopt": True},
+                        "endpoints": {
+                            "graph_json_url": "https://example.invalid/graph.json"
+                        },
+                    }
+                ],
+            }
         }
-    })
+    )
 
     manager = FederationManager(config)
     cache_nodes, _ = manager._build_cache(
@@ -42,12 +46,17 @@ def _service_with_cached_federated_node(tmp_path):
 def test_adopt_federated_node_creates_local_clone(tmp_path):
     service = _service_with_cached_federated_node(tmp_path)
 
-    result = service.adopt_federated_node("federated::esam-main::remote-1", local_name="Local clone")
+    result = service.adopt_federated_node(
+        "federated::esam-main::remote-1", local_name="Local clone"
+    )
 
     assert result["success"] is True
     assert result["adopted_node"]["name"] == "Local clone"
     assert result["adopted_node"]["metadata"]["is_adopted"] is True
-    assert result["adopted_node"]["metadata"]["adopted_from"]["origin_graph_id"] == "esam-main"
+    assert (
+        result["adopted_node"]["metadata"]["adopted_from"]["origin_graph_id"]
+        == "esam-main"
+    )
     assert result["lineage_edge"]["metadata"]["is_federated_lineage"] is True
     assert len(result["added_edge_ids"]) == 1
 
@@ -63,7 +72,9 @@ def test_adopt_federated_node_requires_existing_cached_node(tmp_path):
 def test_adopt_reuses_existing_reference_node_when_forcing_new_copy(tmp_path):
     service = _service_with_cached_federated_node(tmp_path)
 
-    first = service.adopt_federated_node("federated::esam-main::remote-1", local_name="First")
+    first = service.adopt_federated_node(
+        "federated::esam-main::remote-1", local_name="First"
+    )
     second = service.adopt_federated_node(
         "federated::esam-main::remote-1", local_name="Second", create_new_copy=True
     )
@@ -76,8 +87,12 @@ def test_adopt_reuses_existing_reference_node_when_forcing_new_copy(tmp_path):
 def test_adopt_returns_existing_when_already_adopted(tmp_path):
     service = _service_with_cached_federated_node(tmp_path)
 
-    first = service.adopt_federated_node("federated::esam-main::remote-1", local_name="First")
-    second = service.adopt_federated_node("federated::esam-main::remote-1", local_name="Second")
+    first = service.adopt_federated_node(
+        "federated::esam-main::remote-1", local_name="First"
+    )
+    second = service.adopt_federated_node(
+        "federated::esam-main::remote-1", local_name="Second"
+    )
 
     assert first["success"] is True
     assert second["success"] is True
@@ -89,7 +104,9 @@ def test_adopt_returns_existing_when_already_adopted(tmp_path):
 def test_adopt_can_force_new_copy(tmp_path):
     service = _service_with_cached_federated_node(tmp_path)
 
-    first = service.adopt_federated_node("federated::esam-main::remote-1", local_name="First")
+    first = service.adopt_federated_node(
+        "federated::esam-main::remote-1", local_name="First"
+    )
     second = service.adopt_federated_node(
         "federated::esam-main::remote-1", local_name="Second", create_new_copy=True
     )
@@ -105,20 +122,24 @@ def test_adopt_blocked_by_capability_policy(tmp_path):
     graph_file.write_text(json.dumps({"nodes": [], "edges": []}), encoding="utf-8")
     storage = GraphStorage(str(graph_file))
 
-    config = FederationFileConfig.model_validate({
-        "federation": {
-            "enabled": True,
-            "graphs": [
-                {
-                    "graph_id": "esam-main",
-                    "display_name": "eSam",
-                    "enabled": True,
-                    "capabilities": {"allow_adopt": False},
-                    "endpoints": {"graph_json_url": "https://example.invalid/graph.json"},
-                }
-            ],
+    config = FederationFileConfig.model_validate(
+        {
+            "federation": {
+                "enabled": True,
+                "graphs": [
+                    {
+                        "graph_id": "esam-main",
+                        "display_name": "eSam",
+                        "enabled": True,
+                        "capabilities": {"allow_adopt": False},
+                        "endpoints": {
+                            "graph_json_url": "https://example.invalid/graph.json"
+                        },
+                    }
+                ],
+            }
         }
-    })
+    )
 
     manager = FederationManager(config)
     cache_nodes, _ = manager._build_cache(

@@ -23,10 +23,7 @@ describe('SubtypeInput', () => {
 
     it('renders existing subtypes as chips', () => {
       render(
-        <SubtypeInput
-          value={['Government agency', 'Municipality']}
-          onChange={mockOnChange}
-        />
+        <SubtypeInput value={['Government agency', 'Municipality']} onChange={mockOnChange} />
       );
       expect(screen.getByText('Government agency')).toBeInTheDocument();
       expect(screen.getByText('Municipality')).toBeInTheDocument();
@@ -46,9 +43,7 @@ describe('SubtypeInput', () => {
   describe('Adding subtypes', () => {
     it('adds subtype on Enter key', async () => {
       const user = userEvent.setup();
-      render(
-        <SubtypeInput value={[]} onChange={mockOnChange} existingSubtypes={[]} />
-      );
+      render(<SubtypeInput value={[]} onChange={mockOnChange} existingSubtypes={[]} />);
 
       const input = screen.getByRole('textbox');
       await user.type(input, 'Government agency');
@@ -59,9 +54,7 @@ describe('SubtypeInput', () => {
 
     it('adds subtype on comma', async () => {
       const user = userEvent.setup();
-      render(
-        <SubtypeInput value={[]} onChange={mockOnChange} existingSubtypes={[]} />
-      );
+      render(<SubtypeInput value={[]} onChange={mockOnChange} existingSubtypes={[]} />);
 
       const input = screen.getByRole('textbox');
       await user.type(input, 'Municipality');
@@ -72,9 +65,7 @@ describe('SubtypeInput', () => {
 
     it('does not add empty subtype', async () => {
       const user = userEvent.setup();
-      render(
-        <SubtypeInput value={[]} onChange={mockOnChange} existingSubtypes={[]} />
-      );
+      render(<SubtypeInput value={[]} onChange={mockOnChange} existingSubtypes={[]} />);
 
       const input = screen.getByRole('textbox');
       await user.keyboard('{Enter}');
@@ -85,11 +76,7 @@ describe('SubtypeInput', () => {
     it('does not add duplicate subtype', async () => {
       const user = userEvent.setup();
       render(
-        <SubtypeInput
-          value={['Government agency']}
-          onChange={mockOnChange}
-          existingSubtypes={[]}
-        />
+        <SubtypeInput value={['Government agency']} onChange={mockOnChange} existingSubtypes={[]} />
       );
 
       const input = screen.getByRole('textbox');
@@ -124,10 +111,7 @@ describe('SubtypeInput', () => {
     it('removes subtype when clicking remove button', async () => {
       const user = userEvent.setup();
       render(
-        <SubtypeInput
-          value={['Government agency', 'Municipality']}
-          onChange={mockOnChange}
-        />
+        <SubtypeInput value={['Government agency', 'Municipality']} onChange={mockOnChange} />
       );
 
       const removeButtons = screen.getAllByText('×');
@@ -139,10 +123,7 @@ describe('SubtypeInput', () => {
     it('removes last subtype on Backspace when input is empty', async () => {
       const user = userEvent.setup();
       render(
-        <SubtypeInput
-          value={['Government agency', 'Municipality']}
-          onChange={mockOnChange}
-        />
+        <SubtypeInput value={['Government agency', 'Municipality']} onChange={mockOnChange} />
       );
 
       const input = screen.getByRole('textbox');

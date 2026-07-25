@@ -12,10 +12,9 @@ import json
 import logging
 import subprocess
 import threading
-import queue
 from typing import List, Dict, Any, Optional, Callable
 from dataclasses import dataclass, field
-import requests
+import httpx2 as httpx
 
 from .config import MCPIntegration, MCPTransport
 
@@ -24,7 +23,6 @@ logger = logging.getLogger(__name__)
 
 def _summarize_args(args: Dict[str, Any], max_len: int = 200) -> str:
     """Summarize tool arguments for logging (truncate long values)."""
-    import json
 
     try:
         text = json.dumps(args, default=str, ensure_ascii=False)
@@ -38,6 +36,7 @@ def _summarize_args(args: Dict[str, Any], max_len: int = 200) -> str:
 @dataclass
 class NamespacedTool:
     """A tool with its integration namespace."""
+
     integration_id: str
     original_name: str
     namespaced_name: str  # e.g., "GRAPH__search_graph"
@@ -48,6 +47,7 @@ class NamespacedTool:
 @dataclass
 class MCPConnection:
     """Active connection to an MCP server."""
+
     integration: MCPIntegration
     tools: List[NamespacedTool] = field(default_factory=list)
     process: Optional[subprocess.Popen] = None
@@ -152,7 +152,7 @@ class MCPLoader:
 
             # Try info endpoint
             info_url = f"{base_url}/info"
-            response = requests.get(info_url, timeout=5)
+            response = httpx.get(info_url, timeout=5, follow_redirects=True)
             if response.status_code == 200:
                 info = response.json()
                 # Our graph MCP includes tools in the info endpoint
@@ -160,7 +160,12 @@ class MCPLoader:
                     # We know our graph MCP tools
                     tools = self._get_graph_mcp_tools(integration)
 
-        except requests.RequestException as e:
+        except (httpx.RequestError, httpx.InvalidURL, ValueError) as e:
+            # requests folded both a non-JSON-body decode error and a malformed-URL
+            # error into RequestException, so both were swallowed-and-logged here.
+            # httpx surfaces them as a plain ValueError (json.JSONDecodeError) and
+            # httpx.InvalidURL respectively — neither is an httpx.RequestError, so
+            # they are listed explicitly to preserve that behaviour.
             logger.warning(f"Could not query {integration.id} info: {e}")
 
         # If no tools discovered, use known tools for GRAPH integration
@@ -180,140 +185,278 @@ class MCPLoader:
         """Get the known tools for the GRAPH MCP integration."""
         # These match the tools registered in mcp_tools.py
         graph_tools = [
-            ("search_graph", "Search nodes in the graph by text query. Use node_types from the schema to filter (e.g. 'Actor', 'Initiative', 'Goal', 'Event').", {
-                "type": "object",
-                "properties": {
-                    "query": {"type": "string", "description": "Search query (matches name, description, summary, tags)"},
-                    "node_types": {"type": "array", "items": {"type": "string"}, "description": "Filter by node types as defined in the schema (e.g. Actor, Initiative, Goal, Event, Resource)"},
-                    "limit": {"type": "integer", "default": 50, "description": "Max results"},
-                },
-                "required": ["query"],
-            }),
-            ("get_node_details", "Get full details for a specific node by ID", {
-                "type": "object",
-                "properties": {
-                    "node_id": {"type": "string", "description": "Node ID (UUID)"},
-                },
-                "required": ["node_id"],
-            }),
-            ("get_related_nodes", "Get nodes related to a specific node", {
-                "type": "object",
-                "properties": {
-                    "node_id": {"type": "string", "description": "Node ID (UUID)"},
-                    "max_depth": {"type": "integer", "default": 1},
-                },
-                "required": ["node_id"],
-            }),
-            ("add_nodes", "Add new nodes and edges to the graph. Both 'nodes' and 'edges' are required (use [] for edges if none needed).", {
-                "type": "object",
-                "properties": {
-                    "nodes": {
-                        "type": "array",
-                        "description": "Nodes to add. Each: {type, name, description, tags?}",
-                        "items": {
-                            "type": "object",
-                            "properties": {
-                                "type": {"type": "string", "description": "Node type from schema (e.g. Actor, Initiative, Goal, Event, Resource)"},
-                                "name": {"type": "string"},
-                                "description": {"type": "string"},
-                                "tags": {"type": "array", "items": {"type": "string"}},
-                            },
-                            "required": ["type", "name"],
+            (
+                "search_graph",
+                "Search nodes in the graph by text query. Use node_types from the schema to filter (e.g. 'Actor', 'Initiative', 'Goal', 'Event').",
+                {
+                    "type": "object",
+                    "properties": {
+                        "query": {
+                            "type": "string",
+                            "description": "Search query (matches name, description, summary, tags)",
+                        },
+                        "node_types": {
+                            "type": "array",
+                            "items": {"type": "string"},
+                            "description": "Filter by node types as defined in the schema (e.g. Actor, Initiative, Goal, Event, Resource)",
+                        },
+                        "limit": {
+                            "type": "integer",
+                            "default": 50,
+                            "description": "Max results",
                         },
                     },
-                    "edges": {
-                        "type": "array",
-                        "description": "Edges to add. Each: {source, target, type}. Use [] if no edges.",
-                        "items": {
-                            "type": "object",
-                            "properties": {
-                                "source": {"type": "string", "description": "Source node ID or name"},
-                                "target": {"type": "string", "description": "Target node ID or name"},
-                                "type": {"type": "string", "description": "Relationship type from schema (e.g. PRODUCES, BELONGS_TO, AIMS_FOR, RELATES_TO)"},
+                    "required": ["query"],
+                },
+            ),
+            (
+                "get_node_details",
+                "Get full details for a specific node by ID",
+                {
+                    "type": "object",
+                    "properties": {
+                        "node_id": {"type": "string", "description": "Node ID (UUID)"},
+                    },
+                    "required": ["node_id"],
+                },
+            ),
+            (
+                "get_related_nodes",
+                "Get nodes related to a specific node",
+                {
+                    "type": "object",
+                    "properties": {
+                        "node_id": {"type": "string", "description": "Node ID (UUID)"},
+                        "max_depth": {"type": "integer", "default": 1},
+                    },
+                    "required": ["node_id"],
+                },
+            ),
+            (
+                "add_nodes",
+                "Add new nodes and edges to the graph. Both 'nodes' and 'edges' are required (use [] for edges if none needed).",
+                {
+                    "type": "object",
+                    "properties": {
+                        "nodes": {
+                            "type": "array",
+                            "description": "Nodes to add. Each: {type, name, description, tags?}",
+                            "items": {
+                                "type": "object",
+                                "properties": {
+                                    "type": {
+                                        "type": "string",
+                                        "description": "Node type from schema (e.g. Actor, Initiative, Goal, Event, Resource)",
+                                    },
+                                    "name": {"type": "string"},
+                                    "description": {"type": "string"},
+                                    "tags": {
+                                        "type": "array",
+                                        "items": {"type": "string"},
+                                    },
+                                },
+                                "required": ["type", "name"],
                             },
-                            "required": ["source", "target", "type"],
+                        },
+                        "edges": {
+                            "type": "array",
+                            "description": "Edges to add. Each: {source, target, type}. Use [] if no edges.",
+                            "items": {
+                                "type": "object",
+                                "properties": {
+                                    "source": {
+                                        "type": "string",
+                                        "description": "Source node ID or name",
+                                    },
+                                    "target": {
+                                        "type": "string",
+                                        "description": "Target node ID or name",
+                                    },
+                                    "type": {
+                                        "type": "string",
+                                        "description": "Relationship type from schema (e.g. PRODUCES, BELONGS_TO, AIMS_FOR, RELATES_TO)",
+                                    },
+                                },
+                                "required": ["source", "target", "type"],
+                            },
+                        },
+                    },
+                    "required": ["nodes", "edges"],
+                },
+            ),
+            (
+                "update_node",
+                "Update an existing node's properties",
+                {
+                    "type": "object",
+                    "properties": {
+                        "node_id": {
+                            "type": "string",
+                            "description": "Node ID (UUID) to update",
+                        },
+                        "updates": {
+                            "type": "object",
+                            "description": "Fields to update: {name?, description?, summary?, tags?}",
+                        },
+                    },
+                    "required": ["node_id", "updates"],
+                },
+            ),
+            (
+                "delete_nodes",
+                "Delete nodes from the graph",
+                {
+                    "type": "object",
+                    "properties": {
+                        "node_ids": {
+                            "type": "array",
+                            "items": {"type": "string"},
+                            "description": "Node IDs to delete",
+                        },
+                        "confirmed": {"type": "boolean", "default": False},
+                    },
+                    "required": ["node_ids"],
+                },
+            ),
+            (
+                "delete_edges",
+                "Delete edges from the graph (max 50 at a time)",
+                {
+                    "type": "object",
+                    "properties": {
+                        "edge_ids": {
+                            "type": "array",
+                            "items": {"type": "string"},
+                            "description": "Edge IDs to delete",
+                        },
+                    },
+                    "required": ["edge_ids"],
+                },
+            ),
+            (
+                "find_similar_nodes",
+                "Find nodes with similar names (fuzzy match)",
+                {
+                    "type": "object",
+                    "properties": {
+                        "name": {"type": "string", "description": "Name to search for"},
+                        "node_type": {
+                            "type": "string",
+                            "description": "Filter by node type from schema",
+                        },
+                        "threshold": {
+                            "type": "number",
+                            "default": 0.7,
+                            "description": "Similarity threshold 0-1",
+                        },
+                        "limit": {"type": "integer", "default": 5},
+                    },
+                    "required": ["name"],
+                },
+            ),
+            (
+                "get_graph_stats",
+                "Get graph statistics (node counts, etc.)",
+                {
+                    "type": "object",
+                    "properties": {},
+                },
+            ),
+            (
+                "get_capabilities",
+                "Get the capability manifest exposed to clients.",
+                {
+                    "type": "object",
+                    "properties": {},
+                },
+            ),
+            (
+                "get_runtime_info",
+                "Get the runtime mode and enabled extensions exposed to clients.",
+                {
+                    "type": "object",
+                    "properties": {},
+                },
+            ),
+            (
+                "get_tenant_context",
+                "Get the tenant identifier, tenant name, and deployment environment exposed to clients.",
+                {
+                    "type": "object",
+                    "properties": {},
+                },
+            ),
+            (
+                "get_config_context",
+                "Get the effective config scope and non-sensitive config source metadata exposed to clients.",
+                {
+                    "type": "object",
+                    "properties": {},
+                },
+            ),
+            (
+                "get_request_actor",
+                "Get the public request actor context. Safe optional overrides can simulate request identity inputs.",
+                {
+                    "type": "object",
+                    "properties": {
+                        "actor_id": {
+                            "type": "string",
+                            "description": "Optional actor identifier override",
+                        },
+                        "actor_type": {
+                            "type": "string",
+                            "description": "Optional actor type override",
+                        },
+                        "auth_source": {
+                            "type": "string",
+                            "description": "Optional auth source override",
                         },
                     },
                 },
-                "required": ["nodes", "edges"],
-            }),
-            ("update_node", "Update an existing node's properties", {
-                "type": "object",
-                "properties": {
-                    "node_id": {"type": "string", "description": "Node ID (UUID) to update"},
-                    "updates": {"type": "object", "description": "Fields to update: {name?, description?, summary?, tags?}"},
+            ),
+            (
+                "get_request_scope",
+                "Get the public workspace and graph scope context. Safe optional overrides can simulate request scope inputs.",
+                {
+                    "type": "object",
+                    "properties": {
+                        "workspace_id": {
+                            "type": "string",
+                            "description": "Optional workspace identifier override",
+                        },
+                        "workspace_kind": {
+                            "type": "string",
+                            "description": "Optional workspace kind override",
+                        },
+                        "graph_id": {
+                            "type": "string",
+                            "description": "Optional graph scope identifier override",
+                        },
+                    },
                 },
-                "required": ["node_id", "updates"],
-            }),
-            ("delete_nodes", "Delete nodes from the graph", {
-                "type": "object",
-                "properties": {
-                    "node_ids": {"type": "array", "items": {"type": "string"}, "description": "Node IDs to delete"},
-                    "confirmed": {"type": "boolean", "default": False},
+            ),
+            (
+                "get_request_selection",
+                "Get the public graph/workspace selection summary. Safe optional overrides can simulate request selection inputs.",
+                {
+                    "type": "object",
+                    "properties": {
+                        "workspace_id": {
+                            "type": "string",
+                            "description": "Optional workspace identifier override",
+                        },
+                        "workspace_kind": {
+                            "type": "string",
+                            "description": "Optional workspace kind override",
+                        },
+                        "graph_id": {
+                            "type": "string",
+                            "description": "Optional graph scope identifier override",
+                        },
+                    },
                 },
-                "required": ["node_ids"],
-            }),
-            ("delete_edges", "Delete edges from the graph (max 50 at a time)", {
-                "type": "object",
-                "properties": {
-                    "edge_ids": {"type": "array", "items": {"type": "string"}, "description": "Edge IDs to delete"},
-                },
-                "required": ["edge_ids"],
-            }),
-            ("find_similar_nodes", "Find nodes with similar names (fuzzy match)", {
-                "type": "object",
-                "properties": {
-                    "name": {"type": "string", "description": "Name to search for"},
-                    "node_type": {"type": "string", "description": "Filter by node type from schema"},
-                    "threshold": {"type": "number", "default": 0.7, "description": "Similarity threshold 0-1"},
-                    "limit": {"type": "integer", "default": 5},
-                },
-                "required": ["name"],
-            }),
-            ("get_graph_stats", "Get graph statistics (node counts, etc.)", {
-                "type": "object",
-                "properties": {},
-            }),
-            ("get_capabilities", "Get the capability manifest exposed to clients.", {
-                "type": "object",
-                "properties": {},
-            }),
-            ("get_runtime_info", "Get the runtime mode and enabled extensions exposed to clients.", {
-                "type": "object",
-                "properties": {},
-            }),
-            ("get_tenant_context", "Get the tenant identifier, tenant name, and deployment environment exposed to clients.", {
-                "type": "object",
-                "properties": {},
-            }),
-            ("get_config_context", "Get the effective config scope and non-sensitive config source metadata exposed to clients.", {
-                "type": "object",
-                "properties": {},
-            }),
-            ("get_request_actor", "Get the public request actor context. Safe optional overrides can simulate request identity inputs.", {
-                "type": "object",
-                "properties": {
-                    "actor_id": {"type": "string", "description": "Optional actor identifier override"},
-                    "actor_type": {"type": "string", "description": "Optional actor type override"},
-                    "auth_source": {"type": "string", "description": "Optional auth source override"},
-                },
-            }),
-            ("get_request_scope", "Get the public workspace and graph scope context. Safe optional overrides can simulate request scope inputs.", {
-                "type": "object",
-                "properties": {
-                    "workspace_id": {"type": "string", "description": "Optional workspace identifier override"},
-                    "workspace_kind": {"type": "string", "description": "Optional workspace kind override"},
-                    "graph_id": {"type": "string", "description": "Optional graph scope identifier override"},
-                },
-            }),
-            ("get_request_selection", "Get the public graph/workspace selection summary. Safe optional overrides can simulate request selection inputs.", {
-                "type": "object",
-                "properties": {
-                    "workspace_id": {"type": "string", "description": "Optional workspace identifier override"},
-                    "workspace_kind": {"type": "string", "description": "Optional workspace kind override"},
-                    "graph_id": {"type": "string", "description": "Optional graph scope identifier override"},
-                },
-            }),
+            ),
         ]
 
         return [
@@ -335,7 +478,9 @@ class MCPLoader:
         In production, this would use proper MCP protocol.
         """
         if not integration.command:
-            raise ValueError(f"No command configured for stdio integration {integration.id}")
+            raise ValueError(
+                f"No command configured for stdio integration {integration.id}"
+            )
 
         # For PoC, we'll define known tools for common MCP servers
         # In a full implementation, we'd use the MCP protocol to discover tools
@@ -370,14 +515,19 @@ class MCPLoader:
                     "type": "object",
                     "properties": {
                         "url": {"type": "string", "description": "URL to fetch"},
-                        "max_length": {"type": "integer", "description": "Max content length"},
+                        "max_length": {
+                            "type": "integer",
+                            "description": "Max content length",
+                        },
                     },
                     "required": ["url"],
                 },
             ),
         ]
 
-    def _get_filesystem_mcp_tools(self, integration: MCPIntegration) -> List[NamespacedTool]:
+    def _get_filesystem_mcp_tools(
+        self, integration: MCPIntegration
+    ) -> List[NamespacedTool]:
         """Get tools for the Filesystem MCP server."""
         return [
             NamespacedTool(
@@ -402,7 +552,10 @@ class MCPLoader:
                     "type": "object",
                     "properties": {
                         "path": {"type": "string", "description": "File path"},
-                        "content": {"type": "string", "description": "Content to write"},
+                        "content": {
+                            "type": "string",
+                            "description": "Content to write",
+                        },
                     },
                     "required": ["path", "content"],
                 },
@@ -422,7 +575,9 @@ class MCPLoader:
             ),
         ]
 
-    def _get_search_mcp_tools(self, integration: MCPIntegration) -> List[NamespacedTool]:
+    def _get_search_mcp_tools(
+        self, integration: MCPIntegration
+    ) -> List[NamespacedTool]:
         """Get tools for the Brave Search MCP server."""
         return [
             NamespacedTool(
@@ -434,7 +589,11 @@ class MCPLoader:
                     "type": "object",
                     "properties": {
                         "query": {"type": "string", "description": "Search query"},
-                        "count": {"type": "integer", "description": "Number of results", "default": 10},
+                        "count": {
+                            "type": "integer",
+                            "description": "Number of results",
+                            "default": 10,
+                        },
                     },
                     "required": ["query"],
                 },
@@ -461,7 +620,8 @@ class MCPLoader:
         """
         with self._lock:
             return [
-                tool for tool in self._tools_cache.values()
+                tool
+                for tool in self._tools_cache.values()
                 if tool.integration_id in integration_ids
             ]
 
@@ -563,7 +723,12 @@ class MCPLoader:
             return {"error": "Graph service not available"}
 
         # Add agent origin for event tracking
-        if agent_id and tool_name in ("add_nodes", "update_node", "delete_nodes", "delete_edges"):
+        if agent_id and tool_name in (
+            "add_nodes",
+            "update_node",
+            "delete_nodes",
+            "delete_edges",
+        ):
             input_args["event_origin"] = f"agent:{agent_id}"
 
         # Ensure add_nodes always has both required args
@@ -598,7 +763,7 @@ class MCPLoader:
                 return {"error": "URL required"}
 
             try:
-                response = requests.get(url, timeout=30)
+                response = httpx.get(url, timeout=30, follow_redirects=True)
                 response.raise_for_status()
 
                 # Simple HTML to text conversion
@@ -625,6 +790,7 @@ class MCPLoader:
         """Execute a FS/Filesystem integration tool."""
         # For PoC, implement basic file operations in /tmp/agent-workspace
         import os
+
         base_path = "/tmp/agent-workspace"
         os.makedirs(base_path, exist_ok=True)
 
@@ -668,6 +834,7 @@ class MCPLoader:
     ) -> Any:
         """Execute a SEARCH/Brave integration tool."""
         import os
+
         api_key = os.environ.get("BRAVE_API_KEY")
         if not api_key:
             return {"error": "Brave API key not configured"}
@@ -680,11 +847,12 @@ class MCPLoader:
             count = input_args.get("count", 10)
 
             try:
-                response = requests.get(
+                response = httpx.get(
                     "https://api.search.brave.com/res/v1/web/search",
                     params={"q": query, "count": count},
                     headers={"X-Subscription-Token": api_key},
                     timeout=10,
+                    follow_redirects=True,
                 )
                 response.raise_for_status()
                 data = response.json()
@@ -692,11 +860,13 @@ class MCPLoader:
                 # Extract relevant results
                 results = []
                 for item in data.get("web", {}).get("results", [])[:count]:
-                    results.append({
-                        "title": item.get("title"),
-                        "url": item.get("url"),
-                        "description": item.get("description"),
-                    })
+                    results.append(
+                        {
+                            "title": item.get("title"),
+                            "url": item.get("url"),
+                            "description": item.get("description"),
+                        }
+                    )
 
                 return {"query": query, "results": results}
 

@@ -2,7 +2,7 @@
 
 AI-powered knowledge sharing for communities with graph visualization, conversational chat, and intelligent document analysis.
 
-![Screenshot of Community Knowledge Sharing application](docs/images/screenshot.png)
+![Screenshot of Community Knowledge Sharing application](docs/images/ui-overview.png)
 
 ## Overview
 
@@ -12,19 +12,40 @@ This system helps organizations avoid overlapping investments by making visible:
 - Connections between actors, legislation, and themes
 
 **Key Features:**
-- **AI-Powered Chat:** Natural language interface with Claude or OpenAI for exploring and managing the knowledge graph
-- **Multi-Provider Support:** Switch between Claude (Anthropic) and OpenAI backends
-- **Multi-Language Support:** English and Swedish UI with language selectable via URL or startup
-- **Document Upload:** Upload PDF, Word, or text documents for automatic entity extraction
-- **Interactive Visualization:** React Flow graph with drag-and-drop, zoom, and pan
-- **Node Proposals:** LLM suggests entities with duplicate detection, user confirms before adding
-- **Node Marking:** AI assistant can annotate nodes with colors and labels (e.g. highlight by priority or impact) — session-only, never persisted
-- **AI Skills:** Profile-configurable SKILL.md instructions injected into the agent's system prompt; ships with generic impact analysis; ESS profile adds GSIM lineage and change-impact skills
-- **Skill Node Type:** Create and manage SKILL.md-compatible skill definitions directly in the graph using a dedicated form
-- **Schema-driven Context Menu:** Add custom right-click actions per node type via `schema_config.json` — open URLs with node field substitution or fire named callbacks
-- **ChatGPT Widget:** Embeddable widget for use in ChatGPT or other interfaces
-- **Save Views:** Create and share custom graph views
-- **Data Management:** Example datasets with easy loading from files or URLs
+
+*Graph & visualization*
+- **Interactive canvas:** React Flow graph with drag-and-drop, zoom, pan, and node groups
+- **Schema-driven node types:** Node types, colours, icons, and fields are all profile-configurable — no code changes needed
+- **Subtypes:** Optional sub-classification tags on any node type, with autocomplete from existing values
+- **Save views:** Snapshot and restore named canvas views, stored as nodes in the graph
+- **Schema-driven context menu:** Add custom right-click actions per node type via `schema_config.json` — open URLs with node field substitution or fire named callbacks
+- **Interactive guides:** Step-by-step onboarding tours triggered via URL parameter or AI assistant
+
+*AI chat & intelligence*
+- **AI-powered chat:** Natural language interface (Claude or OpenAI) for exploring and managing the graph
+- **Multi-provider support:** Switch between Claude (Anthropic), OpenAI, and any OpenAI-compatible endpoint (Ollama, Groq, Azure, etc.)
+- **Document upload:** Upload PDF, Word, or text documents for automatic entity extraction
+- **Node proposals:** LLM suggests entities with duplicate detection; user confirms before any node is added
+- **Node marking:** AI assistant can annotate nodes with colours and labels (session-only, never persisted)
+- **Markdown rendering:** Chat responses render Markdown (bold, lists, tables, code blocks)
+- **AI Skills:** Profile-configurable SKILL.md instructions injected into the agent system prompt; ships with generic impact analysis; ESS profile adds GSIM lineage and change-impact skills
+- **Skill node type:** Create and manage SKILL.md-compatible skill definitions directly in the graph
+
+*Integration & extensibility*
+- **MCP server:** Full Model Context Protocol support — connect Claude, ChatGPT, or any MCP-compatible AI client directly to the graph
+- **ChatGPT widget:** Embeddable widget for use in ChatGPT or other interfaces
+- **Event subscriptions & webhooks:** Receive HTTP POST notifications when nodes are created, updated, or deleted
+- **AI agent system:** Event-triggered and schedule-triggered agents that act on graph mutations or run on a cron schedule
+- **Federation:** Connect to multiple remote graph instances with configurable depth, provenance labels, and node adoption
+
+*Operations & deployment*
+- **Runs without LLM keys:** Graph API and MCP server work without any API key; AI chat is simply hidden
+- **Multi-language:** English and Swedish UI, selectable via URL, startup flag, or schema config
+- **Authentication:** Basic Auth for all endpoints or MCP-only (for Cloud Run + IAP setups)
+- **Profile system:** Run with different metadata models, AI prompts, and seed data per deployment profile
+- **Data management:** Example datasets with easy loading from local files or URLs
+
+See [docs/USER_GUIDE.md](./docs/USER_GUIDE.md) for a full user-facing walkthrough.
 
 **Tech Stack:**
 - **Frontend:** React + React Flow + Zustand (monorepo with npm workspaces)
@@ -42,20 +63,34 @@ This system helps organizations avoid overlapping investments by making visible:
     config.py                     # Server configuration
   /core                           # Core graph data structures
     storage.py                    # NetworkX graph operations
+    storage_backends.py           # Persistence backend abstraction
     models.py                     # Node/Edge data models
     vector_store.py               # Similarity search
+    /events                       # Graph mutation event / webhook system
   /service                        # Graph service layer
     service.py                    # High-level graph operations
     rest_api.py                   # REST API router
     mcp_tools.py                  # MCP tool definitions
   /ui                             # Chat and document handling
     chat_service.py               # LLM chat with tool execution
+    chat_logic.py                 # Chat processing logic
     document_service.py           # Document parsing
+    document_processor.py         # Document text extraction (PDF/Word/text)
     rest_api.py                   # Chat REST endpoints
-  llm_providers.py                # LLM provider abstraction
-  chat_logic.py                   # Chat processing logic
+  /llm                            # LLM provider abstraction
+    llm_providers.py              # LLM provider abstraction
+    language_policy.py            # Language-policy prompt helpers
+  /runtime                        # Request/authorization/config runtime context
+    authorization.py              # Graph authorization context
+    request_context.py            # Actor/scope request context
+    config_context.py             # Config path resolution context
   /skills                         # Skills loader system
     loader.py                     # SkillsLoader — fetches/parses SKILL.md files
+  /config                         # Schema/config loading
+    config_loader.py              # Schema and config loading
+  /agents                         # Agent execution (event- and schedule-triggered)
+  /federation                     # Federated graph cache and search
+  /tests                          # Cross-cutting backend tests
 /config                           # Configuration profiles
   /default                        # Default profile (base, always required)
     schema_config.json            # Node types, relationships, presentation
@@ -89,8 +124,11 @@ This system helps organizations avoid overlapping investments by making visible:
   /widget                         # ChatGPT embeddable widget
 /packages                         # Shared packages
   /ui-graph-canvas                # Shared React Flow component
+/services                         # Standalone auxiliary services
+  /mcp_oauth_gateway              # OAuth 2.1 gateway wrapping the MCP endpoint
 /scripts                          # Utility scripts
-/docs                             # Documentation
+/docs                             # Documentation (see docs/README.md for a status-tagged index)
+  README.md                       # Documentation index: current / design / historical
   DATA_MANAGEMENT.md              # Graph data management guide
   EVENT_SUBSCRIPTIONS.md          # Webhook/event system docs
   PROFILES.md                     # Configuration profiles guide
@@ -258,7 +296,7 @@ Profiles allow you to run the application with different metadata models, node t
 #   test           - Minimal config for testing
 ```
 
-For cloud environments (SSPCloud), run `./start-sprint.sh` — it auto-installs all dependencies
+For cloud environments (SSPCloud), run `./scripts/start-sprint.sh` — it auto-installs all dependencies
 and loads the `stat-metadata` profile. See [docs/SSPCloud-setup.md](./docs/SSPCloud-setup.md).
 
 Each profile can contain:

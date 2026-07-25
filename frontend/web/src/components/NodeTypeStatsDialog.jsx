@@ -33,7 +33,9 @@ function NodeTypeStatsDialog({ nodesByType, onClose }) {
         tabIndex={-1}
       >
         <div className="nts-dialog-header">
-          <span id="nts-dialog-title" className="nts-dialog-title">Nodes by type</span>
+          <span id="nts-dialog-title" className="nts-dialog-title">
+            Nodes by type
+          </span>
           <button className="nts-dialog-close" onClick={onClose} aria-label="Close">
             <XLg size={14} />
           </button>
@@ -53,7 +55,9 @@ function NodeTypeStatsDialog({ nodesByType, onClose }) {
         </div>
 
         <div className="nts-dialog-footer">
-          <button className="nts-dialog-ok" onClick={onClose}>OK</button>
+          <button className="nts-dialog-ok" onClick={onClose}>
+            OK
+          </button>
         </div>
       </div>
     </div>

@@ -1,7 +1,7 @@
 import { useState, useEffect, useRef, useCallback } from 'react';
 import { Search } from 'react-bootstrap-icons';
 import useGraphStore from '../store/graphStore';
-import { ICON_MAP, COLOR_MAP } from './FloatingToolbar';
+import { resolveIcon, COLOR_MAP } from './FloatingToolbar';
 import * as api from '../services/api';
 import './FloatingSearch.css';
 import { useI18n } from '../i18n';
@@ -20,6 +20,7 @@ function FloatingSearch() {
     schema,
     guideSearchInput,
     clearGuideSearchInput,
+    requestCloseMenus,
   } = useGraphStore();
 
   const [query, setQuery] = useState('');
@@ -31,31 +32,38 @@ function FloatingSearch() {
   const containerRef = useRef(null);
   const debounceRef = useRef(null);
 
-  const getTypeLabel = useCallback((nodeType) => {
-    const labels = schema?.node_types?.[nodeType]?.labels;
-    if (labels && language && labels[language]) {
-      return labels[language];
-    }
-    return nodeType;
-  }, [schema, language]);
+  const getTypeLabel = useCallback(
+    (nodeType) => {
+      const labels = schema?.node_types?.[nodeType]?.labels;
+      if (labels && language && labels[language]) {
+        return labels[language];
+      }
+      return nodeType;
+    },
+    [schema, language]
+  );
 
   const graphDisplayNames = stats?.federation?.graph_display_names || {};
   const showGraphPrefix = Boolean(stats?.federation?.search_has_multiple_graphs);
   const effectiveMaxDepth = Math.max(1, stats?.federation?.max_selectable_depth || 1);
 
-  const getResultLabel = useCallback((node) => {
-    if (!showGraphPrefix) {
-      return node.name;
-    }
+  const getResultLabel = useCallback(
+    (node) => {
+      if (!showGraphPrefix) {
+        return node.name;
+      }
 
-    const originGraphId = node.metadata?.origin_graph_id;
-    const originGraphName = node.metadata?.origin_graph_name
-      || (originGraphId ? graphDisplayNames[originGraphId] : null)
-      || graphDisplayNames.local
-      || 'Local';
+      const originGraphId = node.metadata?.origin_graph_id;
+      const originGraphName =
+        node.metadata?.origin_graph_name ||
+        (originGraphId ? graphDisplayNames[originGraphId] : null) ||
+        graphDisplayNames.local ||
+        'Local';
 
-    return `${originGraphName}: ${node.name}`;
-  }, [graphDisplayNames, showGraphPrefix]);
+      return `${originGraphName}: ${node.name}`;
+    },
+    [graphDisplayNames, showGraphPrefix]
+  );
 
   // Debounced search
   useEffect(() => {
@@ -71,7 +79,7 @@ function FloatingSearch() {
       try {
         const result = await api.searchGraph(query, { limit: 10, federationDepth });
         const nodes = (result.nodes || []).filter(
-          n => n.type !== 'Community' && n.type !== 'VisualizationView'
+          (n) => n.type !== 'Community' && n.type !== 'VisualizationView'
         );
         setResults(nodes);
         setSelectedIndex(0);
@@ -133,108 +141,122 @@ function FloatingSearch() {
     return () => clearInterval(interval);
   }, [guideSearchInput]); // eslint-disable-line react-hooks/exhaustive-deps
 
-  const selectResult = useCallback(async (node) => {
-    // SavedView: clear canvas and load the saved view's nodes with positions and edges
-    if (node.type === 'SavedView') {
-      try {
-        const nodeIds = node.metadata?.node_ids || [];
-        const positions = node.metadata?.positions || {};
-        const savedEdges = node.metadata?.edges || [];
-        const savedEdgeIds = new Set(node.metadata?.edge_ids || []);
-        const savedGroups = node.metadata?.groups || [];
-        const savedParentIds = node.metadata?.parentIds || {};
-        if (nodeIds.length > 0) {
-          clearVisualization();
-          const details = await Promise.all(
-            nodeIds.map(id => api.getNodeDetails(id).catch(() => null))
-          );
-          const loadedNodes = details.filter(d => d?.success).map(d => {
-            const n = d.node;
-            if (positions[n.id]) {
-              return { ...n, _savedPosition: positions[n.id] };
-            }
-            return n;
-          });
-          if (loadedNodes.length > 0) {
-            let edgesToLoad = [];
-            if (savedEdges.length > 0) {
-              // Use saved edges directly
-              edgesToLoad = savedEdges;
-            } else {
-              // Discover edges between loaded nodes
-              const loadedIds = new Set(loadedNodes.map(n => n.id));
-              for (const d of details) {
-                if (d?.edges) {
-                  const relevant = d.edges.filter(
-                    e => loadedIds.has(e.source) && loadedIds.has(e.target) &&
-                      (savedEdgeIds.size === 0 || savedEdgeIds.has(e.id))
-                  );
-                  edgesToLoad.push(...relevant);
+  const selectResult = useCallback(
+    async (node) => {
+      // SavedView: clear canvas and load the saved view's nodes with positions and edges
+      if (node.type === 'SavedView') {
+        try {
+          const nodeIds = node.metadata?.node_ids || [];
+          const positions = node.metadata?.positions || {};
+          const savedEdges = node.metadata?.edges || [];
+          const savedEdgeIds = new Set(node.metadata?.edge_ids || []);
+          const savedGroups = node.metadata?.groups || [];
+          const savedParentIds = node.metadata?.parentIds || {};
+          if (nodeIds.length > 0) {
+            clearVisualization();
+            const details = await Promise.all(
+              nodeIds.map((id) => api.getNodeDetails(id).catch(() => null))
+            );
+            const loadedNodes = details
+              .filter((d) => d?.success)
+              .map((d) => {
+                const n = d.node;
+                if (positions[n.id]) {
+                  return { ...n, _savedPosition: positions[n.id] };
+                }
+                return n;
+              });
+            if (loadedNodes.length > 0) {
+              let edgesToLoad = [];
+              if (savedEdges.length > 0) {
+                // Use saved edges directly
+                edgesToLoad = savedEdges;
+              } else {
+                // Discover edges between loaded nodes
+                const loadedIds = new Set(loadedNodes.map((n) => n.id));
+                for (const d of details) {
+                  if (d?.edges) {
+                    const relevant = d.edges.filter(
+                      (e) =>
+                        loadedIds.has(e.source) &&
+                        loadedIds.has(e.target) &&
+                        (savedEdgeIds.size === 0 || savedEdgeIds.has(e.id))
+                    );
+                    edgesToLoad.push(...relevant);
+                  }
                 }
               }
-            }
-            const edgeMap = new Map(edgesToLoad.map(e => [e.id, e]));
-            addNodesToVisualization(loadedNodes, Array.from(edgeMap.values()));
+              const edgeMap = new Map(edgesToLoad.map((e) => [e.id, e]));
+              addNodesToVisualization(loadedNodes, Array.from(edgeMap.values()));
 
-            // Restore groups if any were saved
-            if (savedGroups.length > 0) {
-              setPendingGroups({ groups: savedGroups, parentIds: savedParentIds });
+              // Restore groups if any were saved
+              if (savedGroups.length > 0) {
+                setPendingGroups({ groups: savedGroups, parentIds: savedParentIds });
+              }
             }
           }
+        } catch (err) {
+          console.error('Error loading saved view:', err);
         }
-      } catch (err) {
-        console.error('Error loading saved view:', err);
+        setQuery('');
+        setResults([]);
+        setShowDropdown(false);
+        return;
       }
+
+      const existsInViz = vizNodes.some((n) => n.id === node.id);
+      const isHidden = hiddenNodeIds.includes(node.id);
+
+      if (existsInViz && !isHidden) {
+        setFocusNodeId(node.id);
+      } else if (existsInViz && isHidden) {
+        const { toggleNodeVisibility } = useGraphStore.getState();
+        toggleNodeVisibility(node.id);
+        setTimeout(() => setFocusNodeId(node.id), 100);
+      } else {
+        // Add node and fetch edges connecting it to existing visualization nodes
+        addNodesToVisualization([node], []);
+        try {
+          const related = await api.getRelatedNodes(node.id, { depth: 1 });
+          if (related.edges && related.edges.length > 0) {
+            const vizNodeIds = new Set(vizNodes.map((n) => n.id));
+            vizNodeIds.add(node.id);
+            const relevantEdges = related.edges.filter(
+              (e) => vizNodeIds.has(e.source) && vizNodeIds.has(e.target)
+            );
+            if (relevantEdges.length > 0) {
+              addNodesToVisualization([], relevantEdges);
+            }
+          }
+        } catch (err) {
+          console.error('Error loading edges for node:', err);
+        }
+        setTimeout(() => setFocusNodeId(node.id), 100);
+      }
+
       setQuery('');
       setResults([]);
       setShowDropdown(false);
-      return;
-    }
-
-    const existsInViz = vizNodes.some(n => n.id === node.id);
-    const isHidden = hiddenNodeIds.includes(node.id);
-
-    if (existsInViz && !isHidden) {
-      setFocusNodeId(node.id);
-    } else if (existsInViz && isHidden) {
-      const { toggleNodeVisibility } = useGraphStore.getState();
-      toggleNodeVisibility(node.id);
-      setTimeout(() => setFocusNodeId(node.id), 100);
-    } else {
-      // Add node and fetch edges connecting it to existing visualization nodes
-      addNodesToVisualization([node], []);
-      try {
-        const related = await api.getRelatedNodes(node.id, { depth: 1 });
-        if (related.edges && related.edges.length > 0) {
-          const vizNodeIds = new Set(vizNodes.map(n => n.id));
-          vizNodeIds.add(node.id);
-          const relevantEdges = related.edges.filter(
-            e => vizNodeIds.has(e.source) && vizNodeIds.has(e.target)
-          );
-          if (relevantEdges.length > 0) {
-            addNodesToVisualization([], relevantEdges);
-          }
-        }
-      } catch (err) {
-        console.error('Error loading edges for node:', err);
-      }
-      setTimeout(() => setFocusNodeId(node.id), 100);
-    }
-
-    setQuery('');
-    setResults([]);
-    setShowDropdown(false);
-  }, [vizNodes, hiddenNodeIds, addNodesToVisualization, clearVisualization, setFocusNodeId, setPendingGroups]);
+    },
+    [
+      vizNodes,
+      hiddenNodeIds,
+      addNodesToVisualization,
+      clearVisualization,
+      setFocusNodeId,
+      setPendingGroups,
+    ]
+  );
 
   const handleKeyDown = (e) => {
     if (!showDropdown) return;
 
     if (e.key === 'ArrowDown') {
       e.preventDefault();
-      setSelectedIndex(prev => Math.min(prev + 1, results.length - 1));
+      setSelectedIndex((prev) => Math.min(prev + 1, results.length - 1));
     } else if (e.key === 'ArrowUp') {
       e.preventDefault();
-      setSelectedIndex(prev => Math.max(prev - 1, 0));
+      setSelectedIndex((prev) => Math.max(prev - 1, 0));
     } else if (e.key === 'Enter') {
       e.preventDefault();
       if (results[selectedIndex]) {
@@ -260,13 +282,17 @@ function FloatingSearch() {
           onChange={(e) => setQuery(e.target.value)}
           onKeyDown={handleKeyDown}
           onFocus={() => {
+            requestCloseMenus();
             if (results.length > 0) setShowDropdown(true);
           }}
         />
         {isLoading && <div className="floating-search-spinner" />}
       </div>
       {effectiveMaxDepth > 1 && (
-        <div className="floating-search-depth-indicator" title={t('federation.depth_indicator_tooltip')}>
+        <div
+          className="floating-search-depth-indicator"
+          title={t('federation.depth_indicator_tooltip')}
+        >
           {t('federation.depth_indicator', { current: federationDepth, max: effectiveMaxDepth })}
         </div>
       )}
@@ -274,9 +300,10 @@ function FloatingSearch() {
       {showDropdown && results.length > 0 && (
         <div className="floating-search-dropdown">
           {results.map((node, index) => {
-            const Icon = ICON_MAP[node.type];
+            const Icon = resolveIcon(node.type, schema);
             const color = COLOR_MAP[node.type] || '#9CA3AF';
-            const isInViz = vizNodes.some(n => n.id === node.id) && !hiddenNodeIds.includes(node.id);
+            const isInViz =
+              vizNodes.some((n) => n.id === node.id) && !hiddenNodeIds.includes(node.id);
 
             return (
               <button
@@ -285,21 +312,13 @@ function FloatingSearch() {
                 onClick={() => selectResult(node)}
                 onMouseEnter={() => setSelectedIndex(index)}
               >
-                <span
-                  className="floating-search-result-dot"
-                  style={{ backgroundColor: color }}
-                />
+                <span className="floating-search-result-dot" style={{ backgroundColor: color }} />
                 {Icon && <Icon size={14} style={{ color, flexShrink: 0 }} />}
                 <span className="floating-search-result-name">{getResultLabel(node)}</span>
-                <span
-                  className="floating-search-result-type"
-                  style={{ color }}
-                >
+                <span className="floating-search-result-type" style={{ color }}>
                   {getTypeLabel(node.type)}
                 </span>
-                {isInViz && (
-                  <span className="floating-search-result-badge">in view</span>
-                )}
+                {isInViz && <span className="floating-search-result-badge">in view</span>}
               </button>
             );
           })}

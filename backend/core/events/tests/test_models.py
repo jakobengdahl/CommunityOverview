@@ -6,6 +6,7 @@ import pytest
 from datetime import datetime, timezone
 
 from backend.core.events.models import (
+    EVENT_SCHEMA_VERSION,
     Event,
     EventType,
     EntityKind,
@@ -62,8 +63,19 @@ class TestEventContext:
         ctx = EventContext(
             event_origin="web-ui",
             attribution=EventAttribution(
-                actor=EventActorAttribution(actor_id="member-1", actor_type="member", is_authenticated=True, auth_source="gateway", source="request"),
-                scope=EventScopeAttribution(workspace_id="workspace-1", workspace_kind="team", graph_id="graph-1", source="request"),
+                actor=EventActorAttribution(
+                    actor_id="member-1",
+                    actor_type="member",
+                    is_authenticated=True,
+                    auth_source="gateway",
+                    source="request",
+                ),
+                scope=EventScopeAttribution(
+                    workspace_id="workspace-1",
+                    workspace_kind="team",
+                    graph_id="graph-1",
+                    source="request",
+                ),
             ),
         )
 
@@ -143,8 +155,19 @@ class TestEvent:
                 event_origin="mcp",
                 event_session_id="s1",
                 attribution=EventAttribution(
-                    actor=EventActorAttribution(actor_id="member-1", actor_type="member", is_authenticated=True, auth_source="gateway", source="request"),
-                    scope=EventScopeAttribution(workspace_id="workspace-1", workspace_kind="team", graph_id="graph-1", source="request"),
+                    actor=EventActorAttribution(
+                        actor_id="member-1",
+                        actor_type="member",
+                        is_authenticated=True,
+                        auth_source="gateway",
+                        source="request",
+                    ),
+                    scope=EventScopeAttribution(
+                        workspace_id="workspace-1",
+                        workspace_kind="team",
+                        graph_id="graph-1",
+                        source="request",
+                    ),
                 ),
             ),
             entity=EntityData(
@@ -160,6 +183,7 @@ class TestEvent:
         payload = event.to_webhook_payload()
 
         assert payload["event_id"] == event.event_id
+        assert payload["schema_version"] == EVENT_SCHEMA_VERSION
         assert payload["event_type"] == "node.update"
         assert "occurred_at" in payload
         occurred_at = payload["occurred_at"]

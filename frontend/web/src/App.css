@@ -3,6 +3,7 @@
   width: 100vw;
   height: 100vh;
   overflow: hidden;
+  --session-drawer-width: 280px;
 }
 
 .app-canvas {
@@ -44,15 +45,15 @@
 }
 
 .app-notification-success {
-  border-color: #10B981;
+  border-color: #10b981;
 }
 
 .app-notification-info {
-  border-color: #3B82F6;
+  border-color: #3b82f6;
 }
 
 .app-notification-error {
-  border-color: #EF4444;
+  border-color: #ef4444;
 }
 
 .app-notification button {
@@ -68,7 +69,6 @@
 .app-notification button:hover {
   color: #999;
 }
-
 
 .app-a11y-depth-live {
   position: absolute;

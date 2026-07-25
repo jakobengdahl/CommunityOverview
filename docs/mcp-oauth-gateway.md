@@ -75,6 +75,9 @@ The change takes effect within a few seconds (no redeployment needed).
 | `TEST_USERS` | Yes | Comma-separated allowed emails, e.g. `a@gmail.com,b@scb.se` |
 | `UPSTREAM_MCP_BASE_URL` | Yes | URL of the CommunityOverview instance, e.g. `https://communityoverview-esam-prod-xxx.run.app` |
 | `PUBLIC_BASE_URL` | Yes | Public URL of this gateway, e.g. `https://mcp.esam.communityoverview.example.com` |
+| `ALLOWED_REDIRECT_ORIGINS` | No | Comma-separated `scheme://host[:port]` prefixes the gateway may send authorization codes to, e.g. `https://chatgpt.com,https://claude.ai`. When unset the gateway accepts any `redirect_uri` (legacy behaviour) but logs a warning — **set this in production** to prevent authorization-code interception. Loopback URIs are always allowed. |
+| `GATEWAY_API_KEY` | No | Optional static bearer token for non-OAuth clients |
+| `TRUSTED_PROXY_HOPS` | No | Trusted reverse-proxy hops in front of `/register` for client-IP extraction from `X-Forwarded-For` (default `1` for direct Cloud Run; set `2` behind an external load balancer) |
 | `PORT` | No | TCP port (default `8080`) |
 
 ---
@@ -105,9 +108,24 @@ gcloud run deploy mcp-gateway-esam-prod \
 - **PKCE S256 is mandatory.** Requests without `code_challenge` / `code_challenge_method=S256`
   are rejected with HTTP 400.
 - Authorization codes are single-use and expire after **5 minutes**.
-- Gateway JWTs expire after **30 minutes**.
-- `redirect_uri` is validated at the token endpoint: the value must match the one sent in the
-  original authorization request (per RFC 6749 §4.1.3). External OAuth clients may use their
-  own callback URLs.
+- Gateway JWTs are long-lived (see `ACCESS_TOKEN_TTL_SECONDS`). Because they are stateless,
+  they cannot be revoked before expiry — but the `TEST_USERS` allowlist is re-checked on
+  **every** proxied request, so removing a user takes effect immediately even for a token
+  that has not yet expired.
+- **`redirect_uri` is validated in two places.** At `/authorize` (and re-validated at
+  `/callback`) it must be a loopback URI or match `ALLOWED_REDIRECT_ORIGINS` when that is
+  configured; at the token endpoint it must additionally match the value from the original
+  authorization request (RFC 6749 §4.1.3). Configure `ALLOWED_REDIRECT_ORIGINS` in production
+  so the gateway does not hand authorization codes to arbitrary callback URLs.
+- **Google ID tokens are cryptographically verified.** The token returned from Google's token
+  endpoint has its signature checked against Google's JWKS and its `aud` / `iss` / `exp`
+  claims enforced, and the OIDC `nonce` issued at `/authorize` must be echoed back.
 - The `TEST_USERS` allowlist is enforced after successful Google login – a valid Google
   account that is not in the list receives HTTP 403.
+- The Dynamic Client Registration store (`/register`) is bounded (size cap + TTL) so the
+  open endpoint cannot exhaust memory, and `/register` is rate-limited per client IP
+  (token bucket, with the bucket map itself hard-capped) so it cannot be flooded. The
+  client IP is read as the `TRUSTED_PROXY_HOPS`-th entry from the right of
+  `X-Forwarded-For` (default 1 for a direct Cloud Run ingress; set 2 behind an external
+  load balancer), so client-supplied entries further left are ignored and the key cannot
+  be spoofed.

@@ -4,19 +4,21 @@ import './CreateSubscriptionDialog.css';
 export default function CreateSkillDialog({ nodeType = 'Skill', onClose, onSave, initialData }) {
   const isEditing = !!initialData;
 
-  const [name, setName]             = useState('');
+  const [name, setName] = useState('');
   const [description, setDescription] = useState('');
-  const [whenToUse, setWhenToUse]   = useState('');
-  const [content, setContent]       = useState('');
-  const [sourceUrl, setSourceUrl]   = useState('');
+  const [aliases, setAliases] = useState('');
+  const [whenToUse, setWhenToUse] = useState('');
+  const [content, setContent] = useState('');
+  const [sourceUrl, setSourceUrl] = useState('');
   const [allowedTools, setAllowedTools] = useState('');
-  const [version, setVersion]       = useState('');
-  const [effort, setEffort]         = useState('');
+  const [version, setVersion] = useState('');
+  const [effort, setEffort] = useState('');
 
   useEffect(() => {
     if (!initialData) return;
     setName(initialData.name || '');
     setDescription(initialData.description || '');
+    setAliases((initialData.aliases || []).join(', '));
     const m = initialData.metadata || {};
     setWhenToUse(m.when_to_use || '');
     setContent(m.content || '');
@@ -30,12 +32,20 @@ export default function CreateSkillDialog({ nodeType = 'Skill', onClose, onSave,
     e.preventDefault();
     if (!name.trim()) return;
 
+    const aliasList = aliases
+      .split(',')
+      .map((a) => a.trim())
+      .filter(Boolean);
+
     const metadata = {
       ...(initialData?.metadata || {}),
       when_to_use: whenToUse.trim(),
       content: content.trim(),
       source_url: sourceUrl.trim(),
-      allowed_tools: allowedTools.split(',').map(t => t.trim()).filter(Boolean),
+      allowed_tools: allowedTools
+        .split(',')
+        .map((t) => t.trim())
+        .filter(Boolean),
       version: version.trim(),
       effort: effort.trim(),
     };
@@ -47,6 +57,7 @@ export default function CreateSkillDialog({ nodeType = 'Skill', onClose, onSave,
           name: name.trim(),
           description: description.trim(),
           summary: whenToUse.trim().slice(0, 120) || name.trim(),
+          aliases: aliasList,
           metadata,
         },
       });
@@ -56,6 +67,7 @@ export default function CreateSkillDialog({ nodeType = 'Skill', onClose, onSave,
         type: nodeType,
         description: description.trim(),
         summary: whenToUse.trim().slice(0, 120) || name.trim(),
+        aliases: aliasList,
         metadata,
         communities: [],
       });
@@ -65,7 +77,7 @@ export default function CreateSkillDialog({ nodeType = 'Skill', onClose, onSave,
 
   return (
     <div className="dialog-overlay" onClick={onClose}>
-      <div className="dialog-content subscription-dialog" onClick={e => e.stopPropagation()}>
+      <div className="dialog-content subscription-dialog" onClick={(e) => e.stopPropagation()}>
         <h2>{isEditing ? `Edit ${nodeType}` : `Create ${nodeType}`}</h2>
         <p className="dialog-description">
           Defines reusable instructions for an AI agent. Compatible with the SKILL.md format.
@@ -81,7 +93,7 @@ export default function CreateSkillDialog({ nodeType = 'Skill', onClose, onSave,
                 id="skill-name"
                 type="text"
                 value={name}
-                onChange={e => setName(e.target.value)}
+                onChange={(e) => setName(e.target.value)}
                 placeholder="E.g. 'Graph analysis'"
                 required
               />
@@ -92,9 +104,20 @@ export default function CreateSkillDialog({ nodeType = 'Skill', onClose, onSave,
               <textarea
                 id="skill-description"
                 value={description}
-                onChange={e => setDescription(e.target.value)}
+                onChange={(e) => setDescription(e.target.value)}
                 placeholder="Short description of what this skill does"
                 rows={2}
+              />
+            </div>
+
+            <div className="form-group">
+              <label htmlFor="skill-aliases">Aliases / synonyms (comma-separated)</label>
+              <input
+                id="skill-aliases"
+                type="text"
+                value={aliases}
+                onChange={(e) => setAliases(e.target.value)}
+                placeholder="alternative name, abbreviation, synonym"
               />
             </div>
 
@@ -103,7 +126,7 @@ export default function CreateSkillDialog({ nodeType = 'Skill', onClose, onSave,
               <textarea
                 id="skill-when"
                 value={whenToUse}
-                onChange={e => setWhenToUse(e.target.value)}
+                onChange={(e) => setWhenToUse(e.target.value)}
                 placeholder="Describe the situations where the agent should apply this skill"
                 rows={3}
               />
@@ -118,7 +141,7 @@ export default function CreateSkillDialog({ nodeType = 'Skill', onClose, onSave,
               <textarea
                 id="skill-content"
                 value={content}
-                onChange={e => setContent(e.target.value)}
+                onChange={(e) => setContent(e.target.value)}
                 placeholder={`## Steps\n1. ...\n2. ...\n\n## Output format\n...`}
                 rows={10}
                 style={{ fontFamily: 'monospace', fontSize: '0.85rem' }}
@@ -136,7 +159,7 @@ export default function CreateSkillDialog({ nodeType = 'Skill', onClose, onSave,
                 id="skill-source-url"
                 type="text"
                 value={sourceUrl}
-                onChange={e => setSourceUrl(e.target.value)}
+                onChange={(e) => setSourceUrl(e.target.value)}
                 placeholder="https://github.com/org/repo/blob/main/SKILL.md"
               />
               <small>Optional: URL to the original SKILL.md file or GitHub repo.</small>
@@ -148,7 +171,7 @@ export default function CreateSkillDialog({ nodeType = 'Skill', onClose, onSave,
                 id="skill-tools"
                 type="text"
                 value={allowedTools}
-                onChange={e => setAllowedTools(e.target.value)}
+                onChange={(e) => setAllowedTools(e.target.value)}
                 placeholder="search_graph, get_related_nodes, add_nodes"
               />
             </div>
@@ -160,7 +183,7 @@ export default function CreateSkillDialog({ nodeType = 'Skill', onClose, onSave,
                   id="skill-version"
                   type="text"
                   value={version}
-                  onChange={e => setVersion(e.target.value)}
+                  onChange={(e) => setVersion(e.target.value)}
                   placeholder="1.0.0"
                 />
               </div>
@@ -169,8 +192,15 @@ export default function CreateSkillDialog({ nodeType = 'Skill', onClose, onSave,
                 <select
                   id="skill-effort"
                   value={effort}
-                  onChange={e => setEffort(e.target.value)}
-                  style={{ width: '100%', padding: '0.4rem 0.5rem', borderRadius: '4px', border: '1px solid #444', background: '#2a2a2a', color: 'inherit' }}
+                  onChange={(e) => setEffort(e.target.value)}
+                  style={{
+                    width: '100%',
+                    padding: '0.4rem 0.5rem',
+                    borderRadius: '4px',
+                    border: '1px solid #444',
+                    background: '#2a2a2a',
+                    color: 'inherit',
+                  }}
                 >
                   <option value="">— unset —</option>
                   <option value="low">Low</option>
@@ -182,7 +212,9 @@ export default function CreateSkillDialog({ nodeType = 'Skill', onClose, onSave,
           </div>
 
           <div className="dialog-actions">
-            <button type="button" className="btn-secondary" onClick={onClose}>Cancel</button>
+            <button type="button" className="btn-secondary" onClick={onClose}>
+              Cancel
+            </button>
             <button type="submit" className="btn-primary">
               {isEditing ? 'Save changes' : `Create ${nodeType}`}
             </button>

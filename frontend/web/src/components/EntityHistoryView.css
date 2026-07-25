@@ -1,0 +1,43 @@
+.entity-history {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.entity-history-empty,
+.entity-history-loading {
+  color: #666;
+  font-size: 0.82rem;
+  font-style: italic;
+  padding: 6px 2px;
+}
+
+.entity-history-error {
+  color: #e06c6c;
+  font-size: 0.82rem;
+  padding: 6px 2px;
+}
+
+.entity-history-load-more {
+  align-self: center;
+  padding: 6px 14px;
+  background: rgba(255, 255, 255, 0.06);
+  border: 1px solid #444;
+  border-radius: 6px;
+  color: #ddd;
+  font-size: 0.8rem;
+  cursor: pointer;
+  transition:
+    background 0.15s,
+    border-color 0.15s;
+}
+
+.entity-history-load-more:hover:not(:disabled) {
+  background: rgba(255, 255, 255, 0.12);
+  border-color: #646cff;
+}
+
+.entity-history-load-more:disabled {
+  opacity: 0.6;
+  cursor: default;
+}

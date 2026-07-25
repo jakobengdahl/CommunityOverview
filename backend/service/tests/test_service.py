@@ -4,9 +4,7 @@ Unit tests for GraphService.
 Tests the business logic layer in isolation.
 """
 
-import pytest
 from backend.service import GraphService
-from backend.core import Node, Edge, NodeType, RelationshipType
 
 
 class TestGraphServiceSearch:
@@ -23,15 +21,14 @@ class TestGraphServiceSearch:
 
     def test_search_graph_with_type_filter(self, populated_service: GraphService):
         """Test filtering search by node type."""
-        result = populated_service.search_graph(
-            query="",
-            node_types=["Actor"]
-        )
+        result = populated_service.search_graph(query="", node_types=["Actor"])
 
         assert result["total"] >= 1
         assert all(n["type"] == "Actor" for n in result["nodes"])
 
-    def test_search_graph_returns_all_with_empty_query(self, populated_service: GraphService):
+    def test_search_graph_returns_all_with_empty_query(
+        self, populated_service: GraphService
+    ):
         """Test that empty query returns all nodes."""
         result = populated_service.search_graph(query="")
 
@@ -84,12 +81,12 @@ class TestGraphServiceSearch:
         node_ids = [n["id"] for n in result["nodes"]]
         assert "community-1" in node_ids
 
-    def test_get_related_nodes_with_relationship_filter(self, populated_service: GraphService):
+    def test_get_related_nodes_with_relationship_filter(
+        self, populated_service: GraphService
+    ):
         """Test filtering related nodes by relationship type."""
         result = populated_service.get_related_nodes(
-            "init-1",
-            relationship_types=["GOVERNED_BY"],
-            depth=1
+            "init-1", relationship_types=["GOVERNED_BY"], depth=1
         )
 
         # Should only find legislation-1 via GOVERNED_BY
@@ -107,7 +104,7 @@ class TestGraphServiceSimilarity:
         """Test finding similar nodes by name."""
         result = populated_service.find_similar_nodes(
             name="Skatteverk",  # Similar to "Skatteverket"
-            threshold=0.5
+            threshold=0.5,
         )
 
         assert "similar_nodes" in result
@@ -116,9 +113,7 @@ class TestGraphServiceSimilarity:
     def test_find_similar_nodes_with_type_filter(self, populated_service: GraphService):
         """Test filtering similar nodes by type."""
         result = populated_service.find_similar_nodes(
-            name="Digital",
-            node_type="Initiative",
-            threshold=0.3
+            name="Digital", node_type="Initiative", threshold=0.3
         )
 
         # All results should be initiatives
@@ -128,8 +123,7 @@ class TestGraphServiceSimilarity:
     def test_find_similar_nodes_batch(self, populated_service: GraphService):
         """Test batch similarity search."""
         result = populated_service.find_similar_nodes_batch(
-            names=["Skatteverk", "Bolagsverket", "Unknown"],
-            threshold=0.5
+            names=["Skatteverk", "Bolagsverket", "Unknown"], threshold=0.5
         )
 
         assert "results" in result
@@ -144,13 +138,7 @@ class TestGraphServiceCRUD:
 
     def test_add_nodes(self, empty_service: GraphService):
         """Test adding nodes."""
-        nodes = [
-            {
-                "type": "Actor",
-                "name": "New Actor",
-                "description": "A new actor"
-            }
-        ]
+        nodes = [{"type": "Actor", "name": "New Actor", "description": "A new actor"}]
         result = empty_service.add_nodes(nodes=nodes, edges=[])
 
         assert result["success"] is True
@@ -160,11 +148,9 @@ class TestGraphServiceCRUD:
         """Test adding nodes with edges."""
         nodes = [
             {"id": "n1", "type": "Actor", "name": "Actor 1"},
-            {"id": "n2", "type": "Initiative", "name": "Init 1"}
+            {"id": "n2", "type": "Initiative", "name": "Init 1"},
         ]
-        edges = [
-            {"source": "n1", "target": "n2", "type": "BELONGS_TO"}
-        ]
+        edges = [{"source": "n1", "target": "n2", "type": "BELONGS_TO"}]
         result = empty_service.add_nodes(nodes=nodes, edges=edges)
 
         assert result["success"] is True
@@ -173,9 +159,7 @@ class TestGraphServiceCRUD:
 
     def test_add_nodes_dynamic_type_accepted(self, empty_service: GraphService):
         """Dynamic node types are accepted (schema is permissive)."""
-        nodes = [
-            {"type": "CustomType", "name": "Test"}
-        ]
+        nodes = [{"type": "CustomType", "name": "Test"}]
         result = empty_service.add_nodes(nodes=nodes, edges=[])
 
         assert result["success"] is True
@@ -185,7 +169,7 @@ class TestGraphServiceCRUD:
         """Test updating a node."""
         result = populated_service.update_node(
             "actor-1",
-            {"description": "Updated description", "tags": ["updated", "tax"]}
+            {"description": "Updated description", "tags": ["updated", "tax"]},
         )
 
         assert result["success"] is True
@@ -232,7 +216,14 @@ class TestGraphServiceCRUD:
                 {"id": "actor-1", "type": "Actor", "name": "Actor 1"},
                 {"id": "init-1", "type": "Initiative", "name": "Initiative 1"},
             ],
-            edges=[{"id": "edge-1", "source": "actor-1", "target": "init-1", "type": "RELATES_TO"}],
+            edges=[
+                {
+                    "id": "edge-1",
+                    "source": "actor-1",
+                    "target": "init-1",
+                    "type": "RELATES_TO",
+                }
+            ],
         )
 
         result = empty_service.delete_edge("edge-1")
@@ -249,8 +240,18 @@ class TestGraphServiceCRUD:
                 {"id": "res-1", "type": "Resource", "name": "Resource 1"},
             ],
             edges=[
-                {"id": "edge-1", "source": "actor-1", "target": "init-1", "type": "RELATES_TO"},
-                {"id": "edge-2", "source": "init-1", "target": "res-1", "type": "RELATES_TO"},
+                {
+                    "id": "edge-1",
+                    "source": "actor-1",
+                    "target": "init-1",
+                    "type": "RELATES_TO",
+                },
+                {
+                    "id": "edge-2",
+                    "source": "init-1",
+                    "target": "res-1",
+                    "type": "RELATES_TO",
+                },
             ],
         )
 
@@ -261,15 +262,21 @@ class TestGraphServiceCRUD:
 
     def test_delete_edges_max_limit(self, empty_service: GraphService):
         """Test that edge deletion is limited to 50 edges."""
-        result = empty_service.delete_edges([f"edge-{i}" for i in range(60)], confirmed=True)
+        result = empty_service.delete_edges(
+            [f"edge-{i}" for i in range(60)], confirmed=True
+        )
 
         assert result["success"] is False
         assert "Max 50" in result["message"]
 
-    def test_delete_edges_limit_checked_before_confirmation(self, empty_service: GraphService):
+    def test_delete_edges_limit_checked_before_confirmation(
+        self, empty_service: GraphService
+    ):
         """Max-limit error must take precedence over the confirmation prompt."""
         # confirmed=False — before the fix, this returned the confirmation error.
-        result = empty_service.delete_edges([f"edge-{i}" for i in range(60)], confirmed=False)
+        result = empty_service.delete_edges(
+            [f"edge-{i}" for i in range(60)], confirmed=False
+        )
 
         assert result["success"] is False
         assert "Max 50" in result["message"], (
@@ -419,7 +426,9 @@ class TestGraphServiceTenantContext:
 class TestGraphServiceConfigContext:
     """Tests for get_config_context via GraphService."""
 
-    def test_returns_effective_config_context(self, empty_service: GraphService, monkeypatch, tmp_path):
+    def test_returns_effective_config_context(
+        self, empty_service: GraphService, monkeypatch, tmp_path
+    ):
         tenant_dir = tmp_path / "tenant-config"
         tenant_dir.mkdir()
         monkeypatch.setenv("COMMUNITYOVERVIEW_TENANT_CONFIG_DIR", str(tenant_dir))

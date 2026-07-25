@@ -1,16 +1,25 @@
 """Focused tests for export boundary behavior."""
 
-from backend.authorization import GraphAccessNarrowing, GraphAuthorizationContext, GraphAuthorizationDecision, use_request_authorization
+from backend.runtime.authorization import (
+    GraphAccessNarrowing,
+    GraphAuthorizationContext,
+    GraphAuthorizationDecision,
+    use_request_authorization,
+)
 from backend.core import Edge, GraphStorage, Node, NodeType
 from backend.service import GraphService
 
 
 class SelectionAwareNarrowingHook:
-    def evaluate(self, context: GraphAuthorizationContext) -> GraphAuthorizationDecision:
+    def evaluate(
+        self, context: GraphAuthorizationContext
+    ) -> GraphAuthorizationDecision:
         selected_graph_id = context.scope.get("graph_id", "")
         workspace_id = context.scope.get("workspace_id", "")
         if not selected_graph_id or not workspace_id:
-            return GraphAuthorizationDecision(allowed=True, mode="selection-aware", source="test")
+            return GraphAuthorizationDecision(
+                allowed=True, mode="selection-aware", source="test"
+            )
         return GraphAuthorizationDecision(
             allowed=True,
             mode="selection-aware",
@@ -23,7 +32,9 @@ class SelectionAwareNarrowingHook:
         )
 
 
-def _build_service(empty_storage: GraphStorage, authorization_hook=None) -> GraphService:
+def _build_service(
+    empty_storage: GraphStorage, authorization_hook=None
+) -> GraphService:
     empty_storage.add_nodes(
         [
             Node(id="local-1", type=NodeType.ACTOR, name="Local export"),
@@ -31,13 +42,19 @@ def _build_service(empty_storage: GraphStorage, authorization_hook=None) -> Grap
                 id="alpha-1",
                 type=NodeType.ACTOR,
                 name="Alpha export",
-                metadata={"origin_graph_id": "graph-alpha", "is_federated_reference": True},
+                metadata={
+                    "origin_graph_id": "graph-alpha",
+                    "is_federated_reference": True,
+                },
             ),
             Node(
                 id="beta-1",
                 type=NodeType.ACTOR,
                 name="Beta export",
-                metadata={"origin_graph_id": "graph-beta", "is_federated_reference": True},
+                metadata={
+                    "origin_graph_id": "graph-beta",
+                    "is_federated_reference": True,
+                },
             ),
         ],
         [Edge(source="alpha-1", target="beta-1", type="RELATES_TO")],
@@ -46,12 +63,18 @@ def _build_service(empty_storage: GraphStorage, authorization_hook=None) -> Grap
 
 
 class TestExportBoundaries:
-    def test_standalone_export_remains_full_and_sanitized(self, empty_storage: GraphStorage):
+    def test_standalone_export_remains_full_and_sanitized(
+        self, empty_storage: GraphStorage
+    ):
         service = _build_service(empty_storage)
 
         result = service.export_graph()
 
-        assert [node["name"] for node in result["nodes"]] == ["Local export", "Alpha export", "Beta export"]
+        assert [node["name"] for node in result["nodes"]] == [
+            "Local export",
+            "Alpha export",
+            "Beta export",
+        ]
         assert result["total_nodes"] == 3
         assert result["total_edges"] == 1
         assert result["export_boundary"] == {
@@ -75,8 +98,12 @@ class TestExportBoundaries:
             },
         }
 
-    def test_request_bound_export_is_narrowed_without_leaking_ids(self, empty_storage: GraphStorage):
-        service = _build_service(empty_storage, authorization_hook=SelectionAwareNarrowingHook())
+    def test_request_bound_export_is_narrowed_without_leaking_ids(
+        self, empty_storage: GraphStorage
+    ):
+        service = _build_service(
+            empty_storage, authorization_hook=SelectionAwareNarrowingHook()
+        )
 
         with use_request_authorization(
             workspace_id="workspace-secret",

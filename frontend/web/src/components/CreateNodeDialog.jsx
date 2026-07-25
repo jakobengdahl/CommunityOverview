@@ -5,7 +5,15 @@ import SubtypeInput from './SubtypeInput';
 import './CreateNodeDialog.css';
 
 // Fields always shown via dedicated form controls — never repeated as extra fields
-const BASE_FIELDS = new Set(['name', 'description', 'summary', 'tags', 'subtypes', 'metadata']);
+const BASE_FIELDS = new Set([
+  'name',
+  'description',
+  'summary',
+  'tags',
+  'subtypes',
+  'aliases',
+  'metadata',
+]);
 
 const FIELD_LABELS = {
   start_date: 'Start date',
@@ -17,21 +25,22 @@ const FIELD_LABELS = {
 };
 
 function formatFieldLabel(field) {
-  return FIELD_LABELS[field] || field.replace(/_/g, ' ').replace(/\b\w/g, c => c.toUpperCase());
+  return FIELD_LABELS[field] || field.replace(/_/g, ' ').replace(/\b\w/g, (c) => c.toUpperCase());
 }
 
 function CreateNodeDialog({ nodeType, onClose, onSave }) {
   const { getNodeColor, getNodeTypeConfig } = useGraphStore();
   const color = getNodeColor(nodeType);
   const typeConfig = getNodeTypeConfig(nodeType);
-  const extraFields = (typeConfig?.fields || []).filter(f => !BASE_FIELDS.has(f));
+  const extraFields = (typeConfig?.fields || []).filter((f) => !BASE_FIELDS.has(f));
 
   const [formData, setFormData] = useState({
     name: '',
     description: '',
     summary: '',
     tags: '',
-    ...Object.fromEntries(extraFields.map(f => [f, ''])),
+    aliases: '',
+    ...Object.fromEntries(extraFields.map((f) => [f, ''])),
   });
   const [subtypes, setSubtypes] = useState([]);
   const [existingSubtypes, setExistingSubtypes] = useState([]);
@@ -40,8 +49,9 @@ function CreateNodeDialog({ nodeType, onClose, onSave }) {
 
   // Fetch existing subtypes for this node type
   useEffect(() => {
-    api.getSubtypes(nodeType)
-      .then(data => {
+    api
+      .getSubtypes(nodeType)
+      .then((data) => {
         setExistingSubtypes(data.subtypes?.[nodeType] || []);
       })
       .catch(() => {});
@@ -49,7 +59,7 @@ function CreateNodeDialog({ nodeType, onClose, onSave }) {
 
   const handleChange = (e) => {
     const { name, value } = e.target;
-    setFormData(prev => ({ ...prev, [name]: value }));
+    setFormData((prev) => ({ ...prev, [name]: value }));
   };
 
   const handleSubmit = async (e) => {
@@ -65,7 +75,14 @@ function CreateNodeDialog({ nodeType, onClose, onSave }) {
         type: nodeType,
         description: formData.description.trim(),
         summary: formData.summary.trim(),
-        tags: formData.tags.split(',').map(t => t.trim()).filter(Boolean),
+        tags: formData.tags
+          .split(',')
+          .map((t) => t.trim())
+          .filter(Boolean),
+        aliases: formData.aliases
+          .split(',')
+          .map((a) => a.trim())
+          .filter(Boolean),
       };
 
       if (subtypes.length > 0) {
@@ -96,23 +113,24 @@ function CreateNodeDialog({ nodeType, onClose, onSave }) {
   };
 
   useEffect(() => {
-    const handleEsc = (e) => { if (e.key === 'Escape') onClose(); };
+    const handleEsc = (e) => {
+      if (e.key === 'Escape') onClose();
+    };
     document.addEventListener('keydown', handleEsc);
     return () => document.removeEventListener('keydown', handleEsc);
   }, [onClose]);
 
   return (
     <div className="create-node-overlay" onClick={onClose}>
-      <div className="create-node-dialog" onClick={e => e.stopPropagation()}>
+      <div className="create-node-dialog" onClick={(e) => e.stopPropagation()}>
         <header className="create-node-header">
           <div className="create-node-header-title">
-            <span
-              className="create-node-type-dot"
-              style={{ backgroundColor: color }}
-            />
+            <span className="create-node-type-dot" style={{ backgroundColor: color }} />
             <h2>Create {nodeType}</h2>
           </div>
-          <button className="close-button" onClick={onClose}>×</button>
+          <button className="close-button" onClick={onClose}>
+            ×
+          </button>
         </header>
 
         <form onSubmit={handleSubmit}>
@@ -175,7 +193,19 @@ function CreateNodeDialog({ nodeType, onClose, onSave }) {
             />
           </div>
 
-          {extraFields.map(field => {
+          <div className="form-group">
+            <label htmlFor="create-aliases">Aliases / synonyms (comma-separated)</label>
+            <input
+              type="text"
+              id="create-aliases"
+              name="aliases"
+              value={formData.aliases}
+              onChange={handleChange}
+              placeholder="alternative name, abbreviation, synonym"
+            />
+          </div>
+
+          {extraFields.map((field) => {
             const isDateField = field.includes('date');
             const useDateTime = isDateField && nodeType === 'Event';
             const label = formatFieldLabel(field);
@@ -194,9 +224,7 @@ function CreateNodeDialog({ nodeType, onClose, onSave }) {
             );
           })}
 
-          {error && (
-            <div className="create-node-error">{error}</div>
-          )}
+          {error && <div className="create-node-error">{error}</div>}
 
           <div className="form-actions">
             <button type="button" className="secondary" onClick={onClose}>

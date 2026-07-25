@@ -74,12 +74,7 @@ describe('ConfirmDialog', () => {
 
   it('calls onCancel when overlay is clicked', () => {
     render(
-      <ConfirmDialog
-        title="Test"
-        message="Message"
-        onConfirm={onConfirm}
-        onCancel={onCancel}
-      />
+      <ConfirmDialog title="Test" message="Message" onConfirm={onConfirm} onCancel={onCancel} />
     );
     const overlay = document.querySelector('.confirm-dialog-overlay');
     fireEvent.click(overlay);
@@ -88,12 +83,7 @@ describe('ConfirmDialog', () => {
 
   it('calls onConfirm on Enter key', () => {
     render(
-      <ConfirmDialog
-        title="Test"
-        message="Message"
-        onConfirm={onConfirm}
-        onCancel={onCancel}
-      />
+      <ConfirmDialog title="Test" message="Message" onConfirm={onConfirm} onCancel={onCancel} />
     );
     const dialog = document.querySelector('.confirm-dialog');
     fireEvent.keyDown(dialog, { key: 'Enter' });
@@ -102,12 +92,7 @@ describe('ConfirmDialog', () => {
 
   it('calls onCancel on Escape key', () => {
     render(
-      <ConfirmDialog
-        title="Test"
-        message="Message"
-        onConfirm={onConfirm}
-        onCancel={onCancel}
-      />
+      <ConfirmDialog title="Test" message="Message" onConfirm={onConfirm} onCancel={onCancel} />
     );
     const dialog = document.querySelector('.confirm-dialog');
     fireEvent.keyDown(dialog, { key: 'Escape' });

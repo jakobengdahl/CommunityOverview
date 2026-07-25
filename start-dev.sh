@@ -197,23 +197,39 @@ fi
 export GRAPH_FILE="$ACTIVE_DATA"
 
 # =====================
-# Node.js Check
+# Node.js Check / Auto-install
 # =====================
 
-# Always source nvm first so nvm-managed node versions are in PATH.
+# Source nvm so nvm-managed node versions are in PATH.
 # In environments like SSPCloud, node is managed via nvm but not in PATH
-# until nvm is sourced.
+# until nvm is sourced. The || true prevents set -e from exiting when
+# nvm.sh itself returns non-zero (e.g. no default node version set yet).
 export NVM_DIR="${NVM_DIR:-$HOME/.nvm}"
-[ -s "$NVM_DIR/nvm.sh" ] && \. "$NVM_DIR/nvm.sh"
+[ -s "$NVM_DIR/nvm.sh" ] && \. "$NVM_DIR/nvm.sh" || true
 
 if ! command -v node &> /dev/null; then
-    echo -e "${RED}Error: Node.js is not installed or not in PATH.${NC}"
-    echo -e "Install it via nvm (no root required):"
-    echo -e "  curl -o- https://raw.githubusercontent.com/nvm-sh/nvm/v0.39.7/install.sh | bash"
-    echo -e "  source ~/.bashrc  # or ~/.zshrc"
-    echo -e "  nvm install 20"
-    echo -e "Then re-run this script."
-    exit 1
+    echo -e "${YELLOW}Node.js not found — installing automatically via nvm...${NC}"
+
+    # Install nvm if not already present
+    if [ ! -s "$NVM_DIR/nvm.sh" ]; then
+        echo "Installing nvm..."
+        curl -fsSL https://raw.githubusercontent.com/nvm-sh/nvm/v0.39.7/install.sh | bash
+        export NVM_DIR="${NVM_DIR:-$HOME/.nvm}"
+        \. "$NVM_DIR/nvm.sh" || true
+    fi
+
+    # Install and activate Node.js 20
+    echo "Installing Node.js 20 (this may take a minute)..."
+    nvm install 20
+    nvm use 20
+
+    if ! command -v node &> /dev/null; then
+        echo -e "${RED}Error: Node.js installation failed. Install it manually:${NC}"
+        echo -e "  nvm install 20"
+        exit 1
+    fi
+
+    echo -e "${GREEN}Node.js $(node --version) installed.${NC}"
 fi
 
 # =====================

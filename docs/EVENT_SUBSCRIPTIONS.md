@@ -98,6 +98,7 @@ Events are delivered as JSON POST requests:
 ```json
 {
   "event_id": "550e8400-e29b-41d4-a716-446655440000",
+  "schema_version": "1.0",
   "event_type": "node.create",
   "occurred_at": "2024-01-15T10:30:00.000000Z",
   "origin": {
@@ -125,6 +126,11 @@ Events are delivered as JSON POST requests:
   }
 }
 ```
+
+The top-level `schema_version` identifies the shape of the event envelope.
+Subscribers should treat it as a contract version: additive changes keep the
+same major version, while a backwards-incompatible change bumps it and is
+accompanied by a migration note.
 
 ### HTTP Headers
 
@@ -230,8 +236,8 @@ MCP tools automatically set `event_origin` to "mcp" and accept optional session/
 ## Web UI
 
 Right-click on the graph canvas to access:
-- **"Skapa webhook-prenumeration"**: Create an EventSubscription node
-- **"Skapa agent"**: Create an Agent with its EventSubscription
+- **"Create webhook subscription"**: Creates an EventSubscription node
+- **"Create agent"**: Creates an Agent with its EventSubscription
 
 The web UI automatically generates a unique session ID per browser session.
 

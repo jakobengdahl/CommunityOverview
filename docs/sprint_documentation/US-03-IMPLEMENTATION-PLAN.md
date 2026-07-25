@@ -44,7 +44,7 @@ of data flow (so forward traversal = `out_edges`):
   `MEASURES`, `USES_CODE_LIST` as-is.
 
 **Seed example lineage** into `config/stockholmsprint/graph.json` (the source copied to
-`data/active/graph.json` by `start-sprint.sh`). Extend the existing LFS chain so a published
+`data/active/graph.json` by `scripts/start-sprint.sh`). Extend the existing LFS chain so a published
 Output DataSet has: one or more Input DataSets → a `ProcessStep` (with `metadata` describing the
 methodological choices: classification applied, transformation) → the Output DataSet, which already
 fans out `HAS_STRUCTURE → DataStructure → HAS_VARIABLE → InstanceVariable → USES_CODE_LIST → CodeList`.
@@ -184,7 +184,7 @@ in `FloatingHeader`.
 
 ## Verification
 
-1. **Run the sprint profile:** `./start-sprint.sh` (loads `stockholmsprint`, copies seed graph to
+1. **Run the sprint profile:** `./scripts/start-sprint.sh` (loads `stockholmsprint`, copies seed graph to
    `data/active/graph.json`); open `http://localhost:8000/web/`. Ensure `ANTHROPIC_API_KEY` (or
    `OPENAI_API_KEY`) is set so explanations are live; otherwise confirm the templated fallback.
 2. **Lineage:** select the published LFS Output DataSet → confirm the Input → ProcessStep → Output

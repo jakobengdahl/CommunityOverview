@@ -56,11 +56,9 @@ from .serializers import (
 __all__ = [
     # Core service
     "GraphService",
-
     # Protocol adapters
     "create_rest_router",
     "register_mcp_tools",
-
     # Serialization utilities
     "json_serializer",
     "serialize_to_json",

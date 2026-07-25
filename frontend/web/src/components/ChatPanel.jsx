@@ -1,5 +1,12 @@
 import { useState, useEffect, useRef, useMemo } from 'react';
-import { ChatDotsFill, ChevronRight, ChevronLeft, XCircleFill, Robot, Mortarboard } from 'react-bootstrap-icons';
+import {
+  ChatDotsFill,
+  ChevronRight,
+  ChevronLeft,
+  XCircleFill,
+  Robot,
+  Mortarboard,
+} from 'react-bootstrap-icons';
 import ReactMarkdown from 'react-markdown';
 import remarkGfm from 'remark-gfm';
 import remarkMath from 'remark-math';
@@ -10,7 +17,19 @@ import { useI18n } from '../i18n';
 import * as api from '../services/api';
 import { positionNewNodes } from '@community-graph/ui-graph-canvas';
 import ExpertAgentSelector from './ExpertAgentSelector';
+import CollectionForm from './CollectionForm';
 import './ChatPanel.css';
+
+/** Extract a present_form spec from a chat response, or null if none. */
+const formFromResponse = (response) =>
+  response?.toolResult?.action === 'present_form' ? response.toolResult.form : null;
+
+/** Render one answer value for the human-readable summary. */
+const formatAnswerValue = (value) => {
+  if (Array.isArray(value)) return value.join(', ');
+  if (typeof value === 'boolean') return value ? 'Yes' : 'No';
+  return String(value ?? '');
+};
 
 /** Max characters of node context to include with a message to the LLM */
 const MAX_SELECTION_CONTEXT_CHARS = 6000;
@@ -29,6 +48,7 @@ function ChatPanel({ collectionShortName }) {
   const {
     chatMessages,
     addChatMessage,
+    updateChatMessage,
     nodes,
     edges,
     addNodesToVisualization,
@@ -48,6 +68,7 @@ function ChatPanel({ collectionShortName }) {
     guideChatInput,
     clearGuideChatInput,
     getNodeColor,
+    requestCloseMenus,
   } = useGraphStore();
 
   const { t, language } = useI18n();
@@ -104,9 +125,86 @@ function ChatPanel({ collectionShortName }) {
   }, [guideChatInput]); // eslint-disable-line react-hooks/exhaustive-deps
 
   const filterCommunityNodes = (nodeList) => {
-    return nodeList.filter(n =>
-      n.type !== 'Community' && n.data?.type !== 'Community'
-    );
+    return nodeList.filter((n) => n.type !== 'Community' && n.data?.type !== 'Community');
+  };
+
+  // Apply the visualization side-effects a chat response's toolResult implies
+  // (save view, clear, add/replace/update nodes, marks, guides). Shared by the
+  // typed-message path (handleSend) and the form-submit path (handleSubmitForm)
+  // so both entry points behave identically.
+  const applyToolResultSideEffects = async (toolResult) => {
+    if (!toolResult) return;
+    if (toolResult.action === 'save_view' || toolResult.action === 'save_visualization') {
+      const viewName = toolResult.name;
+      const currentNodes = useGraphStore.getState().nodes;
+      const viewNode = {
+        name: viewName,
+        type: 'SavedView',
+        description: t('notifications.saved_view_description', { name: viewName }),
+        summary: t('notifications.saved_view_summary', { count: currentNodes.length }),
+        metadata: { node_ids: currentNodes.map((n) => n.id) },
+        communities: [],
+      };
+      try {
+        await api.addNodes([viewNode], []);
+      } catch (err) {
+        console.error('[ChatPanel] Failed to save view:', err);
+      }
+    } else if (toolResult.action === 'clear_visualization') {
+      clearVisualization();
+    } else if (toolResult.action === 'load_visualization') {
+      if (toolResult.nodes && toolResult.nodes.length > 0) {
+        const filteredNodes = filterCommunityNodes(toolResult.nodes);
+        updateVisualization(filteredNodes, toolResult.edges || []);
+      }
+    } else if (toolResult.action === 'add_to_visualization') {
+      if (toolResult.nodes && toolResult.nodes.length > 0) {
+        const filteredNodes = filterCommunityNodes(toolResult.nodes);
+        const currentNodes = useGraphStore.getState().nodes;
+        const allEdges = [...edges, ...(toolResult.edges || [])];
+        const positionedNodes = positionNewNodes(filteredNodes, currentNodes, allEdges);
+        addNodesToVisualization(positionedNodes, toolResult.edges || []);
+      }
+    } else if (toolResult.action === 'update_in_visualization') {
+      if (toolResult.nodes && toolResult.nodes.length > 0) {
+        const {
+          nodes: currentNodes,
+          edges: currentEdges,
+          updateVisualization: update,
+        } = useGraphStore.getState();
+        const updatedNodeIds = new Set(toolResult.nodes.map((n) => n.id));
+        const mergedNodes = currentNodes.map((n) =>
+          updatedNodeIds.has(n.id) ? toolResult.nodes.find((un) => un.id === n.id) : n
+        );
+        const newNodes = toolResult.nodes.filter((n) => !currentNodes.some((cn) => cn.id === n.id));
+        update([...mergedNodes, ...newNodes], currentEdges);
+      }
+    } else if (toolResult.action === 'mark_nodes') {
+      useGraphStore.getState().setNodeMarks(toolResult.marks || []);
+    } else if (toolResult.action === 'start_guide') {
+      const guideId = toolResult.guide_id;
+      const guides = useGraphStore.getState().presentation?.guides || [];
+      const guide = guides.find((g) => g.id === guideId);
+      if (guide) {
+        startGuide(guide);
+      } else {
+        console.warn(
+          `[ChatPanel] start_guide: guide "${guideId}" not found in presentation config`
+        );
+      }
+    } else if (toolResult.nodes && toolResult.nodes.length > 0) {
+      const filteredNodes = filterCommunityNodes(toolResult.nodes);
+      updateVisualization(filteredNodes, toolResult.edges || []);
+    }
+
+    // Execute any pure-action tools that co-occurred with present_form in the same
+    // turn.  The backend emits them as extra_actions so they are not dropped when
+    // present_form wins the single toolResult.action slot.
+    if (toolResult.extra_actions && toolResult.extra_actions.length > 0) {
+      for (const extra of toolResult.extra_actions) {
+        await applyToolResultSideEffects(extra);
+      }
+    }
   };
 
   const handleSend = async () => {
@@ -115,7 +213,10 @@ function ChatPanel({ collectionShortName }) {
     let messageContent = inputValue.trim();
 
     if (uploadedFile) {
-      const fileContext = t('chat.file_context', { filename: uploadedFile.filename, text: uploadedFile.text });
+      const fileContext = t('chat.file_context', {
+        filename: uploadedFile.filename,
+        text: uploadedFile.text,
+      });
       messageContent = messageContent
         ? messageContent + fileContext
         : t('chat.analyze_document', { fileContext });
@@ -125,9 +226,7 @@ function ChatPanel({ collectionShortName }) {
     const skillsContext = buildSkillsContext();
     // Append regular selected-node context to the user message (not shown in chat bubble)
     const selectionContext = buildSelectionContext();
-    const messageForLLM = selectionContext
-      ? messageContent + selectionContext
-      : messageContent;
+    const messageForLLM = selectionContext ? messageContent + selectionContext : messageContent;
 
     const activeSkillNodes = (selectedGraphNodes || []).filter(isSkillNode);
     const userMessage = {
@@ -139,7 +238,7 @@ function ChatPanel({ collectionShortName }) {
       hasSelection: selectedGraphNodes.length > 0,
       selectionCount: selectedGraphNodes.length,
       activeSkillCount: activeSkillNodes.length,
-      activeSkillNames: activeSkillNodes.map(n => n.name || n.label || '?'),
+      activeSkillNames: activeSkillNodes.map((n) => n.name || n.label || '?'),
     };
     addChatMessage(userMessage);
     setInputValue('');
@@ -149,115 +248,48 @@ function ChatPanel({ collectionShortName }) {
 
     try {
       const conversationMessages = chatMessages
-        .filter(m => m.role !== 'system' && m.id !== 'welcome')
-        .map(m => ({ role: m.role, content: m.content }));
+        .filter((m) => m.role !== 'system' && m.id !== 'welcome')
+        .map((m) => ({ role: m.role, content: m.llmContent ?? m.content }));
 
       conversationMessages.push({ role: 'user', content: messageForLLM });
 
       const response = await api.sendChatMessage(conversationMessages, null, {
         federationDepth,
-        expertAgentId: activeExperts.length > 0 ? activeExperts[activeExperts.length - 1] : undefined,
+        expertAgentId:
+          activeExperts.length > 0 ? activeExperts[activeExperts.length - 1] : undefined,
         skillsContext: skillsContext || undefined,
         collectionShortName,
-        visibleNodeIds: nodes.map(n => n.id),
-        selectedNodeIds: selectedGraphNodes.map(n => n.id),
+        visibleNodeIds: nodes.map((n) => n.id),
+        selectedNodeIds: selectedGraphNodes.map((n) => n.id),
       });
 
       console.log('[ChatPanel] Response:', response);
 
       const toolResult = response.toolResult;
 
-      if (toolResult) {
-        if (toolResult.action === 'save_view' || toolResult.action === 'save_visualization') {
-          const viewName = toolResult.name;
-          const currentNodes = useGraphStore.getState().nodes;
-
-          const viewNode = {
-            name: viewName,
-            type: 'SavedView',
-            description: t('notifications.saved_view_description', { name: viewName }),
-            summary: t('notifications.saved_view_summary', { count: currentNodes.length }),
-            metadata: {
-              node_ids: currentNodes.map(n => n.id),
-            },
-            communities: [],
-          };
-
-          try {
-            await api.addNodes([viewNode], []);
-          } catch (err) {
-            console.error('[ChatPanel] Failed to save view:', err);
-          }
-        }
-        else if (toolResult.action === 'clear_visualization') {
-          clearVisualization();
-        }
-        else if (toolResult.action === 'load_visualization') {
-          if (toolResult.nodes && toolResult.nodes.length > 0) {
-            const filteredNodes = filterCommunityNodes(toolResult.nodes);
-            updateVisualization(filteredNodes, toolResult.edges || []);
-          }
-        }
-        else if (toolResult.action === 'add_to_visualization') {
-          if (toolResult.nodes && toolResult.nodes.length > 0) {
-            const filteredNodes = filterCommunityNodes(toolResult.nodes);
-            const currentNodes = useGraphStore.getState().nodes;
-            const allEdges = [...edges, ...(toolResult.edges || [])];
-            const positionedNodes = positionNewNodes(filteredNodes, currentNodes, allEdges);
-            addNodesToVisualization(positionedNodes, toolResult.edges || []);
-          }
-        }
-        else if (toolResult.action === 'update_in_visualization') {
-          if (toolResult.nodes && toolResult.nodes.length > 0) {
-            const { nodes: currentNodes, edges: currentEdges, updateVisualization } = useGraphStore.getState();
-            const updatedNodeIds = new Set(toolResult.nodes.map(n => n.id));
-            const mergedNodes = currentNodes.map(n =>
-              updatedNodeIds.has(n.id)
-                ? toolResult.nodes.find(un => un.id === n.id)
-                : n
-            );
-            const newNodes = toolResult.nodes.filter(n =>
-              !currentNodes.some(cn => cn.id === n.id)
-            );
-            updateVisualization([...mergedNodes, ...newNodes], currentEdges);
-          }
-        }
-        else if (toolResult.action === 'mark_nodes') {
-          useGraphStore.getState().setNodeMarks(toolResult.marks || []);
-        }
-        else if (toolResult.action === 'start_guide') {
-          const guideId = toolResult.guide_id;
-          const guides = useGraphStore.getState().presentation?.guides || [];
-          const guide = guides.find(g => g.id === guideId);
-          if (guide) {
-            startGuide(guide);
-          } else {
-            console.warn(`[ChatPanel] start_guide: guide "${guideId}" not found in presentation config`);
-          }
-        }
-        else if (toolResult.nodes && toolResult.nodes.length > 0) {
-          const filteredNodes = filterCommunityNodes(toolResult.nodes);
-          updateVisualization(filteredNodes, toolResult.edges || []);
-        }
-      }
+      await applyToolResultSideEffects(toolResult);
 
       const assistantMessage = {
         role: 'assistant',
         content: response.content,
         timestamp: new Date(),
         toolUsed: response.toolUsed,
-        proposal: toolResult?.proposed_node ? {
-          node: toolResult.proposed_node,
-          similar_nodes: toolResult.similar_nodes || [],
-        } : null,
-        deleteConfirmation: toolResult?.requires_confirmation ? {
-          nodes_to_delete: toolResult.nodes_to_delete,
-          affected_edges: toolResult.affected_edges,
-          node_ids: toolResult.node_ids,
-        } : null,
+        proposal: toolResult?.proposed_node
+          ? {
+              node: toolResult.proposed_node,
+              similar_nodes: toolResult.similar_nodes || [],
+            }
+          : null,
+        deleteConfirmation: toolResult?.requires_confirmation
+          ? {
+              nodes_to_delete: toolResult.nodes_to_delete,
+              affected_edges: toolResult.affected_edges,
+              node_ids: toolResult.node_ids,
+            }
+          : null,
+        form: formFromResponse(response),
       };
       addChatMessage(assistantMessage);
-
     } catch (err) {
       console.error('[ChatPanel] Error:', err);
       addChatMessage({
@@ -324,11 +356,16 @@ function ChatPanel({ collectionShortName }) {
 
     try {
       const conversationMessages = chatMessages
-        .filter(m => m.id !== 'welcome')
-        .map(m => ({ role: m.role, content: m.content }));
+        .filter((m) => m.id !== 'welcome')
+        .map((m) => ({ role: m.role, content: m.llmContent ?? m.content }));
       conversationMessages.push({ role: 'user', content: msg });
 
-      const response = await api.sendChatMessage(conversationMessages, null, { federationDepth, expertAgentId: activeExperts.length > 0 ? activeExperts[activeExperts.length - 1] : undefined, collectionShortName });
+      const response = await api.sendChatMessage(conversationMessages, null, {
+        federationDepth,
+        expertAgentId:
+          activeExperts.length > 0 ? activeExperts[activeExperts.length - 1] : undefined,
+        collectionShortName,
+      });
 
       if (response.toolResult?.nodes) {
         const filteredNodes = filterCommunityNodes(response.toolResult.nodes);
@@ -362,11 +399,16 @@ function ChatPanel({ collectionShortName }) {
 
     try {
       const conversationMessages = chatMessages
-        .filter(m => m.id !== 'welcome')
-        .map(m => ({ role: m.role, content: m.content }));
+        .filter((m) => m.id !== 'welcome')
+        .map((m) => ({ role: m.role, content: m.llmContent ?? m.content }));
       conversationMessages.push({ role: 'user', content: msg });
 
-      const response = await api.sendChatMessage(conversationMessages, null, { federationDepth, expertAgentId: activeExperts.length > 0 ? activeExperts[activeExperts.length - 1] : undefined, collectionShortName });
+      const response = await api.sendChatMessage(conversationMessages, null, {
+        federationDepth,
+        expertAgentId:
+          activeExperts.length > 0 ? activeExperts[activeExperts.length - 1] : undefined,
+        collectionShortName,
+      });
       addChatMessage({
         role: 'assistant',
         content: response.content,
@@ -386,16 +428,23 @@ function ChatPanel({ collectionShortName }) {
 
     try {
       const conversationMessages = chatMessages
-        .filter(m => m.id !== 'welcome')
-        .map(m => ({ role: m.role, content: m.content }));
+        .filter((m) => m.id !== 'welcome')
+        .map((m) => ({ role: m.role, content: m.llmContent ?? m.content }));
       conversationMessages.push({ role: 'user', content: msg });
 
-      const response = await api.sendChatMessage(conversationMessages, null, { federationDepth, expertAgentId: activeExperts.length > 0 ? activeExperts[activeExperts.length - 1] : undefined, collectionShortName });
+      const response = await api.sendChatMessage(conversationMessages, null, {
+        federationDepth,
+        expertAgentId:
+          activeExperts.length > 0 ? activeExperts[activeExperts.length - 1] : undefined,
+        collectionShortName,
+      });
 
       if (deleteConfirmation.node_ids) {
         const deletedIds = new Set(deleteConfirmation.node_ids);
-        const newNodes = nodes.filter(n => !deletedIds.has(n.id));
-        const newEdges = edges.filter(e => !deletedIds.has(e.source) && !deletedIds.has(e.target));
+        const newNodes = nodes.filter((n) => !deletedIds.has(n.id));
+        const newEdges = edges.filter(
+          (e) => !deletedIds.has(e.source) && !deletedIds.has(e.target)
+        );
         updateVisualization(newNodes, newEdges);
       }
 
@@ -424,13 +473,65 @@ function ChatPanel({ collectionShortName }) {
     });
   };
 
+  const handleSubmitForm = async (messageId, answers) => {
+    if (isProcessing) return;
+
+    updateChatMessage(messageId, { formSubmitted: true });
+
+    const readable = answers
+      .map((a) => `- ${a.label || a.field_id}: ${formatAnswerValue(a.value)}`)
+      .join('\n');
+    const llmContent =
+      `[Form answers submitted]\n${readable}\n\n` +
+      `Structured answers to store with save_collection_response: ${JSON.stringify(answers)}`;
+
+    // Persist llmContent on the message so the structured payload (not just the
+    // human-readable summary) survives into later turns' history — matching the
+    // kiosk, and keeping the answers aggregatable if the save is deferred.
+    addChatMessage({ role: 'user', content: readable, llmContent, timestamp: new Date() });
+    setIsProcessing(true);
+
+    try {
+      const conversationMessages = chatMessages
+        .filter((m) => m.role !== 'system' && m.id !== 'welcome')
+        .map((m) => ({ role: m.role, content: m.llmContent ?? m.content }));
+      conversationMessages.push({ role: 'user', content: llmContent });
+
+      const response = await api.sendChatMessage(conversationMessages, null, {
+        federationDepth,
+        expertAgentId:
+          activeExperts.length > 0 ? activeExperts[activeExperts.length - 1] : undefined,
+        collectionShortName,
+      });
+
+      await applyToolResultSideEffects(response.toolResult);
+
+      addChatMessage({
+        role: 'assistant',
+        content: response.content,
+        timestamp: new Date(),
+        toolUsed: response.toolUsed,
+        form: formFromResponse(response),
+      });
+    } catch (err) {
+      addChatMessage({
+        role: 'assistant',
+        content: t('chat.error_prefix', { message: err.message }),
+        timestamp: new Date(),
+      });
+      setError(err.message);
+    } finally {
+      setIsProcessing(false);
+    }
+  };
+
   // Summarize selected nodes — skill nodes and regular nodes are split so the UI
   // can show skill nodes as active "persona" chips separate from the node-type chips.
   const selectionSummary = useMemo(() => {
     if (!selectedGraphNodes || selectedGraphNodes.length === 0) return null;
 
     const skillNodes = selectedGraphNodes.filter(isSkillNode);
-    const regularNodes = selectedGraphNodes.filter(n => !isSkillNode(n));
+    const regularNodes = selectedGraphNodes.filter((n) => !isSkillNode(n));
 
     const byType = {};
     for (const node of regularNodes) {
@@ -441,13 +542,13 @@ function ChatPanel({ collectionShortName }) {
 
     return {
       total: selectedGraphNodes.length,
-      skillNodes: skillNodes.map(n => ({ id: n.id, name: n.name || n.label || '?' })),
+      skillNodes: skillNodes.map((n) => ({ id: n.id, name: n.name || n.label || '?' })),
       regularCount: regularNodes.length,
       types: Object.entries(byType).map(([type, nodes]) => ({
         type,
         count: nodes.length,
         color: getNodeColor(type),
-        names: nodes.map(n => n.name || n.label || '?').slice(0, 3),
+        names: nodes.map((n) => n.name || n.label || '?').slice(0, 3),
       })),
     };
   }, [selectedGraphNodes]);
@@ -487,7 +588,7 @@ function ChatPanel({ collectionShortName }) {
 
   // Build context string for selected non-Skill nodes to append to the user message.
   const buildSelectionContext = () => {
-    const regularNodes = (selectedGraphNodes || []).filter(n => !isSkillNode(n));
+    const regularNodes = (selectedGraphNodes || []).filter((n) => !isSkillNode(n));
     if (regularNodes.length === 0) return '';
 
     let context = '\n\n[Selected nodes in the visualization:]\n';
@@ -541,14 +642,20 @@ function ChatPanel({ collectionShortName }) {
 
   // Expanded state
   return (
-    <div className={`chat-panel-floating${!showMinimap ? ' minimap-hidden' : ''}`} id="guide-target-chat">
+    <div
+      className={`chat-panel-floating${!showMinimap ? ' minimap-hidden' : ''}`}
+      id="guide-target-chat"
+    >
       <div className="chat-header">
         <div className="chat-header-left" onClick={toggleChatPanel} style={{ cursor: 'pointer' }}>
           <ChatDotsFill size={16} />
           <h3>Graph assistant</h3>
           {effectiveMaxDepth > 1 && (
             <span className="chat-depth-indicator" title={t('federation.depth_indicator_tooltip')}>
-              {t('federation.depth_indicator', { current: federationDepth, max: effectiveMaxDepth })}
+              {t('federation.depth_indicator', {
+                current: federationDepth,
+                max: effectiveMaxDepth,
+              })}
             </span>
           )}
         </div>
@@ -558,149 +665,189 @@ function ChatPanel({ collectionShortName }) {
       </div>
 
       <div className="chat-messages">
-        {chatMessages.filter(m => !m.expertJoinNotification).map((msg, idx) => (
-          <div
-            key={msg.id || idx}
-            className={`chat-message ${msg.role}${msg.role === 'expert' ? ' expert-message' : ''}${msg.isSystemEvent ? ' expert-system-event' : ''}`}
-            style={msg.role === 'expert' ? { '--expert-color': msg.expertColor || '#9CA3AF' } : undefined}
-          >
-            {msg.role === 'expert' && !msg.isSystemEvent && (
-              <div className="expert-message-header">
-                <Robot size={11} style={{ color: msg.expertColor }} />
-                <span className="expert-message-name" style={{ color: msg.expertColor }}>{msg.expertName}</span>
-              </div>
-            )}
-            <div className="message-content">
-              {(msg.role === 'assistant' || msg.role === 'expert') ? (
-                <ReactMarkdown
-                  remarkPlugins={[remarkGfm, remarkMath]}
-                  rehypePlugins={[rehypeKatex]}
-                >
-                  {msg.content}
-                </ReactMarkdown>
-              ) : msg.content}
-
-              {msg.role === 'user' && msg.activeSkillCount > 0 && (
-                <div className="message-skill-tag">
-                  <Mortarboard size={10} />
-                  {msg.activeSkillNames.join(', ')}
+        {chatMessages
+          .filter((m) => !m.expertJoinNotification)
+          .map((msg, idx) => (
+            <div
+              key={msg.id || idx}
+              className={`chat-message ${msg.role}${msg.role === 'expert' ? ' expert-message' : ''}${msg.isSystemEvent ? ' expert-system-event' : ''}`}
+              style={
+                msg.role === 'expert'
+                  ? { '--expert-color': msg.expertColor || '#9CA3AF' }
+                  : undefined
+              }
+            >
+              {msg.role === 'expert' && !msg.isSystemEvent && (
+                <div className="expert-message-header">
+                  <Robot size={11} style={{ color: msg.expertColor }} />
+                  <span className="expert-message-name" style={{ color: msg.expertColor }}>
+                    {msg.expertName}
+                  </span>
                 </div>
               )}
+              <div className="message-content">
+                {msg.role === 'assistant' || msg.role === 'expert' ? (
+                  <ReactMarkdown
+                    remarkPlugins={[remarkGfm, remarkMath]}
+                    rehypePlugins={[rehypeKatex]}
+                  >
+                    {msg.content}
+                  </ReactMarkdown>
+                ) : (
+                  msg.content
+                )}
 
-              {msg.role === 'user' && idx === chatMessages.length - 1 && isProcessing && (
-                <div className="message-loading">
-                  <div className="loading-dots">
-                    <span></span>
-                    <span></span>
-                    <span></span>
+                {msg.role === 'user' && msg.activeSkillCount > 0 && (
+                  <div className="message-skill-tag">
+                    <Mortarboard size={10} />
+                    {msg.activeSkillNames.join(', ')}
                   </div>
-                  <span className="loading-text">{t('chat.processing')}</span>
-                </div>
-              )}
+                )}
 
-              {msg.proposal && (
-                <div className="proposal-card">
-                  <h4>{t('proposal.title')}</h4>
-                  <div className="proposal-details">
-                    <p><strong>{t('proposal.type')}</strong> {msg.proposal.node.type}</p>
-                    <p><strong>{t('proposal.name')}</strong> {msg.proposal.node.name}</p>
-                    <p><strong>{t('proposal.description')}</strong> {msg.proposal.node.description}</p>
-                    {msg.proposal.node.communities?.length > 0 && (
-                      <p><strong>Communities:</strong> {msg.proposal.node.communities.join(', ')}</p>
+                {msg.role === 'user' && idx === chatMessages.length - 1 && isProcessing && (
+                  <div className="message-loading">
+                    <div className="loading-dots">
+                      <span></span>
+                      <span></span>
+                      <span></span>
+                    </div>
+                    <span className="loading-text">{t('chat.processing')}</span>
+                  </div>
+                )}
+
+                {msg.proposal && (
+                  <div className="proposal-card">
+                    <h4>{t('proposal.title')}</h4>
+                    <div className="proposal-details">
+                      <p>
+                        <strong>{t('proposal.type')}</strong> {msg.proposal.node.type}
+                      </p>
+                      <p>
+                        <strong>{t('proposal.name')}</strong> {msg.proposal.node.name}
+                      </p>
+                      <p>
+                        <strong>{t('proposal.description')}</strong> {msg.proposal.node.description}
+                      </p>
+                      {msg.proposal.node.communities?.length > 0 && (
+                        <p>
+                          <strong>Communities:</strong> {msg.proposal.node.communities.join(', ')}
+                        </p>
+                      )}
+                    </div>
+
+                    {msg.proposal.similar_nodes?.length > 0 && (
+                      <div className="similar-nodes-warning">
+                        <p>
+                          <strong>{t('proposal.similar_found')}</strong>
+                        </p>
+                        <ul>
+                          {msg.proposal.similar_nodes.map((sim, i) => (
+                            <li key={i}>
+                              {sim.node?.name || sim.name} (
+                              {Math.round((sim.similarity_score || sim.score) * 100)}% match)
+                            </li>
+                          ))}
+                        </ul>
+                      </div>
                     )}
-                  </div>
 
-                  {msg.proposal.similar_nodes?.length > 0 && (
-                    <div className="similar-nodes-warning">
-                      <p><strong>{t('proposal.similar_found')}</strong></p>
+                    <div className="proposal-actions">
+                      <button
+                        className="approve-button"
+                        onClick={() => handleApproveProposal(msg.proposal)}
+                        disabled={isProcessing}
+                      >
+                        {t('proposal.approve')}
+                      </button>
+                      <button
+                        className="reject-button"
+                        onClick={() => handleRejectProposal(msg.proposal)}
+                        disabled={isProcessing}
+                      >
+                        {t('proposal.reject')}
+                      </button>
+                    </div>
+                  </div>
+                )}
+
+                {msg.deleteConfirmation && (
+                  <div className="delete-card">
+                    <h4>{t('delete_confirmation.title')}</h4>
+                    <div className="proposal-details">
+                      <p>
+                        <strong>{t('delete_confirmation.nodes_to_delete')}</strong>
+                      </p>
                       <ul>
-                        {msg.proposal.similar_nodes.map((sim, i) => (
+                        {msg.deleteConfirmation.nodes_to_delete?.map((node, i) => (
                           <li key={i}>
-                            {sim.node?.name || sim.name} ({Math.round((sim.similarity_score || sim.score) * 100)}% match)
+                            {node.name} ({node.type})
                           </li>
                         ))}
                       </ul>
+                      <p>
+                        <strong>{t('delete_confirmation.affected_edges')}</strong>{' '}
+                        {msg.deleteConfirmation.affected_edges?.length || 0}
+                      </p>
                     </div>
-                  )}
 
-                  <div className="proposal-actions">
-                    <button
-                      className="approve-button"
-                      onClick={() => handleApproveProposal(msg.proposal)}
-                      disabled={isProcessing}
-                    >
-                      {t('proposal.approve')}
-                    </button>
-                    <button
-                      className="reject-button"
-                      onClick={() => handleRejectProposal(msg.proposal)}
-                      disabled={isProcessing}
-                    >
-                      {t('proposal.reject')}
-                    </button>
-                  </div>
-                </div>
-              )}
+                    <div className="similar-nodes-warning">
+                      <p>
+                        <strong>{t('delete_confirmation.warning')}</strong>
+                      </p>
+                    </div>
 
-              {msg.deleteConfirmation && (
-                <div className="delete-card">
-                  <h4>{t('delete_confirmation.title')}</h4>
-                  <div className="proposal-details">
-                    <p><strong>{t('delete_confirmation.nodes_to_delete')}</strong></p>
-                    <ul>
-                      {msg.deleteConfirmation.nodes_to_delete?.map((node, i) => (
-                        <li key={i}>{node.name} ({node.type})</li>
-                      ))}
-                    </ul>
-                    <p><strong>{t('delete_confirmation.affected_edges')}</strong> {msg.deleteConfirmation.affected_edges?.length || 0}</p>
+                    <div className="proposal-actions">
+                      <button
+                        className="reject-button"
+                        onClick={() => handleConfirmDelete(msg.deleteConfirmation)}
+                        disabled={isProcessing}
+                      >
+                        {t('delete_confirmation.confirm')}
+                      </button>
+                      <button
+                        className="approve-button"
+                        onClick={handleCancelDelete}
+                        disabled={isProcessing}
+                      >
+                        {t('delete_confirmation.cancel')}
+                      </button>
+                    </div>
                   </div>
+                )}
 
-                  <div className="similar-nodes-warning">
-                    <p><strong>{t('delete_confirmation.warning')}</strong></p>
-                  </div>
-
-                  <div className="proposal-actions">
-                    <button
-                      className="reject-button"
-                      onClick={() => handleConfirmDelete(msg.deleteConfirmation)}
-                      disabled={isProcessing}
-                    >
-                      {t('delete_confirmation.confirm')}
-                    </button>
-                    <button
-                      className="approve-button"
-                      onClick={handleCancelDelete}
-                      disabled={isProcessing}
-                    >
-                      {t('delete_confirmation.cancel')}
-                    </button>
-                  </div>
-                </div>
-              )}
+                {msg.form && (
+                  <CollectionForm
+                    form={msg.form}
+                    submitted={!!msg.formSubmitted}
+                    disabled={isProcessing}
+                    onSubmit={(answers) => handleSubmitForm(msg.id, answers)}
+                    labels={{
+                      submit: t('chat.form_submit'),
+                      submitted: t('chat.form_submitted'),
+                      requiredHint: t('chat.form_required'),
+                    }}
+                  />
+                )}
+              </div>
+              <div className="message-timestamp">{formatTime(msg.timestamp)}</div>
             </div>
-            <div className="message-timestamp">
-              {formatTime(msg.timestamp)}
-            </div>
-          </div>
-        ))}
+          ))}
         <div ref={messagesEndRef} />
       </div>
 
-      {error && (
-        <div className="chat-error">
-          {error}
-        </div>
-      )}
+      {error && <div className="chat-error">{error}</div>}
 
       <div className="chat-input-container">
         {selectionSummary && (
           <div className="selection-indicator">
             <div className="selection-indicator-content">
               {selectionSummary.skillNodes.length > 0 && (
-                <div className={`skill-nodes-indicator${selectionSummary.regularCount > 0 ? ' has-regular-nodes' : ''}`}>
+                <div
+                  className={`skill-nodes-indicator${selectionSummary.regularCount > 0 ? ' has-regular-nodes' : ''}`}
+                >
                   <Mortarboard size={11} className="skill-nodes-icon" />
                   <span className="skill-nodes-label">Skills active:</span>
-                  {selectionSummary.skillNodes.map(skill => (
+                  {selectionSummary.skillNodes.map((skill) => (
                     <span key={skill.id} className="skill-node-chip">
                       {skill.name}
                     </span>
@@ -755,13 +902,16 @@ function ChatPanel({ collectionShortName }) {
           value={inputValue}
           onChange={(e) => setInputValue(e.target.value)}
           onKeyPress={handleKeyPress}
-          placeholder={uploadedFile
-            ? t('chat.placeholder_with_file')
-            : selectionSummary?.skillNodes?.length > 0
-              ? `Skill${selectionSummary.skillNodes.length > 1 ? 's' : ''} active: ${selectionSummary.skillNodes.map(s => s.name).join(', ')} — ask a question...`
-              : selectionSummary
-                ? t('chat.placeholder_with_selection')
-                : t('chat.placeholder')}
+          onFocus={requestCloseMenus}
+          placeholder={
+            uploadedFile
+              ? t('chat.placeholder_with_file')
+              : selectionSummary?.skillNodes?.length > 0
+                ? `Skill${selectionSummary.skillNodes.length > 1 ? 's' : ''} active: ${selectionSummary.skillNodes.map((s) => s.name).join(', ')} — ask a question...`
+                : selectionSummary
+                  ? t('chat.placeholder_with_selection')
+                  : t('chat.placeholder')
+          }
           rows={3}
           disabled={isProcessing}
         />
@@ -770,12 +920,16 @@ function ChatPanel({ collectionShortName }) {
           <div className="active-experts-indicator">
             <Robot size={11} className="active-experts-icon" />
             <span className="active-experts-label">
-              {activeExperts.map(id => {
-                const agent = availableExperts.find(a => a.id === id);
+              {activeExperts.map((id) => {
+                const agent = availableExperts.find((a) => a.id === id);
                 if (!agent) return null;
-                const name = language === 'sv' ? agent.name : (agent.name_en || agent.name);
+                const name = language === 'sv' ? agent.name : agent.name_en || agent.name;
                 return (
-                  <span key={id} className="active-expert-chip" style={{ borderColor: agent.color }}>
+                  <span
+                    key={id}
+                    className="active-expert-chip"
+                    style={{ borderColor: agent.color }}
+                  >
                     <span className="active-expert-dot" style={{ backgroundColor: agent.color }} />
                     {name}
                   </span>

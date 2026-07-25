@@ -10,10 +10,8 @@ This ensures the service works correctly from the perspective of actual consumer
 """
 
 import pytest
-import tempfile
 import os
 from pathlib import Path
-from typing import Dict, Any
 from unittest.mock import Mock, MagicMock
 
 from backend.core import GraphStorage, Node, NodeType
@@ -23,7 +21,7 @@ from backend.service import GraphService, create_rest_router, register_mcp_tools
 @pytest.fixture(autouse=True)
 def reset_config_loader():
     """Reset shared config loader state between tests."""
-    from backend import config_loader
+    from backend.config import config_loader
 
     config_loader.reset_loader()
     yield
@@ -34,6 +32,7 @@ def reset_config_loader():
 
 
 # ==================== REST API Client Tests ====================
+
 
 class TestRESTAPIClient:
     """Tests simulating REST API client behavior."""
@@ -75,8 +74,14 @@ class TestRESTAPIClient:
             Node(id="api-2", type=NodeType.INITIATIVE, name="API Initiative"),
         ]
         from backend.core import Edge, RelationshipType
+
         edges = [
-            Edge(id="api-e1", source="api-1", target="api-2", type=RelationshipType.BELONGS_TO)
+            Edge(
+                id="api-e1",
+                source="api-1",
+                target="api-2",
+                type=RelationshipType.BELONGS_TO,
+            )
         ]
         storage.add_nodes(nodes, edges)
 
@@ -91,8 +96,7 @@ class TestRESTAPIClient:
     def test_search_endpoint(self, populated_api_client):
         """Test POST /api/graph/search endpoint."""
         response = populated_api_client.post(
-            "/api/graph/search",
-            json={"query": "API Actor"}
+            "/api/graph/search", json={"query": "API Actor"}
         )
         assert response.status_code == 200
         data = response.json()
@@ -116,10 +120,7 @@ class TestRESTAPIClient:
         """Test POST /api/graph/nodes endpoint."""
         response = api_client.post(
             "/api/graph/nodes",
-            json={
-                "nodes": [{"type": "Actor", "name": "New REST Actor"}],
-                "edges": []
-            }
+            json={"nodes": [{"type": "Actor", "name": "New REST Actor"}], "edges": []},
         )
         assert response.status_code == 200
         data = response.json()
@@ -130,7 +131,7 @@ class TestRESTAPIClient:
         """Test PATCH /api/graph/nodes/{id} endpoint."""
         response = populated_api_client.patch(
             "/api/graph/nodes/api-1",
-            json={"updates": {"description": "Updated via REST"}}
+            json={"updates": {"description": "Updated via REST"}},
         )
         assert response.status_code == 200
         data = response.json()
@@ -142,7 +143,7 @@ class TestRESTAPIClient:
         response = populated_api_client.request(
             "DELETE",
             "/api/graph/nodes",
-            json={"node_ids": ["api-1"], "confirmed": True}
+            json={"node_ids": ["api-1"], "confirmed": True},
         )
         assert response.status_code == 200
         data = response.json()
@@ -177,8 +178,7 @@ class TestRESTAPIClient:
     def test_similarity_endpoint(self, populated_api_client):
         """Test POST /api/graph/similar endpoint."""
         response = populated_api_client.post(
-            "/api/graph/similar",
-            json={"name": "API Act", "threshold": 0.5}
+            "/api/graph/similar", json={"name": "API Act", "threshold": 0.5}
         )
         assert response.status_code == 200
         data = response.json()
@@ -186,9 +186,15 @@ class TestRESTAPIClient:
 
     def test_capabilities_endpoint(self, api_client):
         """Test GET /api/graph/capabilities endpoint."""
-        test_config_path = str(Path(__file__).resolve().parents[3] / "config" / "test" / "schema_config.json")
+        test_config_path = str(
+            Path(__file__).resolve().parents[3]
+            / "config"
+            / "test"
+            / "schema_config.json"
+        )
         os.environ["SCHEMA_FILE"] = test_config_path
-        from backend import config_loader
+        from backend.config import config_loader
+
         config_loader.reset_loader()
 
         response = api_client.get("/api/graph/capabilities")
@@ -215,7 +221,7 @@ class TestRESTAPIClient:
         """Test POST /api/graph/similar/batch endpoint."""
         response = populated_api_client.post(
             "/api/graph/similar/batch",
-            json={"names": ["API Actor", "Unknown"], "threshold": 0.5}
+            json={"names": ["API Actor", "Unknown"], "threshold": 0.5},
         )
         assert response.status_code == 200
         data = response.json()
@@ -224,6 +230,7 @@ class TestRESTAPIClient:
 
 
 # ==================== MCP Client Tests ====================
+
 
 class TestMCPClient:
     """Tests simulating MCP client behavior (LLM tool calls)."""
@@ -254,8 +261,14 @@ class TestMCPClient:
             Node(id="mcp-2", type=NodeType.INITIATIVE, name="MCP Initiative"),
         ]
         from backend.core import Edge, RelationshipType
+
         edges = [
-            Edge(id="mcp-e1", source="mcp-1", target="mcp-2", type=RelationshipType.BELONGS_TO)
+            Edge(
+                id="mcp-e1",
+                source="mcp-1",
+                target="mcp-2",
+                type=RelationshipType.BELONGS_TO,
+            )
         ]
         storage.add_nodes(nodes, edges)
 
@@ -296,8 +309,7 @@ class TestMCPClient:
         """Test MCP add_nodes tool."""
         tools_map, service = mcp_tools
         result = tools_map["add_nodes"](
-            nodes=[{"type": "Actor", "name": "MCP Added Actor"}],
-            edges=[]
+            nodes=[{"type": "Actor", "name": "MCP Added Actor"}], edges=[]
         )
 
         assert result["success"] is True
@@ -309,8 +321,7 @@ class TestMCPClient:
         """Test MCP update_node tool."""
         tools_map, _ = populated_mcp_tools
         result = tools_map["update_node"](
-            node_id="mcp-1",
-            updates={"description": "Updated via MCP"}
+            node_id="mcp-1", updates={"description": "Updated via MCP"}
         )
 
         assert result["success"] is True
@@ -319,10 +330,7 @@ class TestMCPClient:
     def test_mcp_delete_nodes(self, populated_mcp_tools):
         """Test MCP delete_nodes tool."""
         tools_map, service = populated_mcp_tools
-        result = tools_map["delete_nodes"](
-            node_ids=["mcp-1"],
-            confirmed=True
-        )
+        result = tools_map["delete_nodes"](node_ids=["mcp-1"], confirmed=True)
 
         assert result["success"] is True
         # Verify deletion
@@ -332,10 +340,7 @@ class TestMCPClient:
     def test_mcp_find_similar_nodes(self, populated_mcp_tools):
         """Test MCP find_similar_nodes tool."""
         tools_map, _ = populated_mcp_tools
-        result = tools_map["find_similar_nodes"](
-            name="MCP Act",
-            threshold=0.5
-        )
+        result = tools_map["find_similar_nodes"](name="MCP Act", threshold=0.5)
 
         assert "similar_nodes" in result
 
@@ -343,8 +348,7 @@ class TestMCPClient:
         """Test MCP find_similar_nodes_batch tool."""
         tools_map, _ = populated_mcp_tools
         result = tools_map["find_similar_nodes_batch"](
-            names=["MCP Actor", "Unknown"],
-            threshold=0.5
+            names=["MCP Actor", "Unknown"], threshold=0.5
         )
 
         assert "results" in result
@@ -369,9 +373,15 @@ class TestMCPClient:
 
     def test_mcp_get_capabilities(self, mcp_tools):
         """Test MCP get_capabilities tool."""
-        test_config_path = str(Path(__file__).resolve().parents[3] / "config" / "test" / "schema_config.json")
+        test_config_path = str(
+            Path(__file__).resolve().parents[3]
+            / "config"
+            / "test"
+            / "schema_config.json"
+        )
         os.environ["SCHEMA_FILE"] = test_config_path
-        from backend import config_loader
+        from backend.config import config_loader
+
         config_loader.reset_loader()
 
         tools_map, _ = mcp_tools
@@ -471,6 +481,7 @@ class TestMCPClient:
 
 # ==================== Multi-Client Tests ====================
 
+
 class TestMultiClientScenarios:
     """Tests simulating multiple clients interacting with the same service."""
 
@@ -487,8 +498,7 @@ class TestMultiClientScenarios:
 
         # Client 1 (MCP) adds a node
         mcp_tools["add_nodes"](
-            nodes=[{"id": "shared-1", "type": "Actor", "name": "Shared Node"}],
-            edges=[]
+            nodes=[{"id": "shared-1", "type": "Actor", "name": "Shared Node"}], edges=[]
         )
 
         # Client 2 should see the node
@@ -511,28 +521,26 @@ class TestMultiClientScenarios:
 
         # Step 2: LLM adds the new node
         add_result = tools["add_nodes"](
-            nodes=[{
-                "type": "Actor",
-                "name": "Skatteverket",
-                "description": "Swedish Tax Agency",
-                "tags": ["government", "tax"]
-            }],
-            edges=[]
+            nodes=[
+                {
+                    "type": "Actor",
+                    "name": "Skatteverket",
+                    "description": "Swedish Tax Agency",
+                    "tags": ["government", "tax"],
+                }
+            ],
+            edges=[],
         )
         assert add_result["success"] is True
 
         # Step 3: LLM searches for related concepts
-        search_result = tools["search_graph"](
-            query="tax",
-            node_types=["Actor"]
-        )
+        search_result = tools["search_graph"](query="tax", node_types=["Actor"])
         assert search_result["total"] >= 1
 
         # Step 4: LLM updates the node with more info
         node_id = add_result["added_node_ids"][0]
         tools["update_node"](
-            node_id=node_id,
-            updates={"tags": ["government", "tax", "swedish"]}
+            node_id=node_id, updates={"tags": ["government", "tax", "swedish"]}
         )
 
         # Step 5: LLM gets final node details
@@ -565,22 +573,21 @@ class TestMultiClientScenarios:
         response = client.post(
             "/api/graph/nodes",
             json={
-                "nodes": [{
-                    "type": "Actor",
-                    "name": "User Added Node",
-                    "description": "Added via frontend"
-                }],
-                "edges": []
-            }
+                "nodes": [
+                    {
+                        "type": "Actor",
+                        "name": "User Added Node",
+                        "description": "Added via frontend",
+                    }
+                ],
+                "edges": [],
+            },
         )
         assert response.status_code == 200
         node_id = response.json()["added_node_ids"][0]
 
         # Step 3: User searches for the node
-        response = client.post(
-            "/api/graph/search",
-            json={"query": "User Added"}
-        )
+        response = client.post("/api/graph/search", json={"query": "User Added"})
         assert response.status_code == 200
         assert response.json()["total"] == 1
 
@@ -591,7 +598,7 @@ class TestMultiClientScenarios:
         # Step 5: User updates the node
         response = client.patch(
             f"/api/graph/nodes/{node_id}",
-            json={"updates": {"summary": "Updated via frontend"}}
+            json={"updates": {"summary": "Updated via frontend"}},
         )
         assert response.status_code == 200
 

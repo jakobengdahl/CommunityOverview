@@ -5,6 +5,7 @@ __pycache__/
 *.so
 .Python
 venv/
+.venv/
 env/
 ENV/
 *.egg-info/
@@ -63,7 +64,11 @@ test_embeddings_integration.pkl
 # Active graph data (managed by start-dev.sh)
 data/active/graph.json
 
-# Federated test data (managed by start-federated-dev.sh)
+# Stale runtime graph data (must not be tracked; see STRUCTURE_REVIEW.md C1)
+/graph.json
+/backend/graph.json
+
+# Federated test data (managed by scripts/start-federated-dev.sh)
 data/federated-a/
 data/federated-b/
 data/federated-*/
