@@ -1,33 +1,35 @@
-# Federated Graph Design Proposal
+# Federated Graph Design
 
-## Background
+## Overview
 
-The current service handles one active graph instance and already supports three main interaction modes:
+The service supports one active local graph and can federate with other graph instances, while keeping the user workflow simple and stable. The federation implementation follows the hybrid local-cache model described below (Option C).
+
+The local graph is the authoritative source. External graphs are fetched on startup and on a configurable sync interval, then cached locally. Search and traversal merge local and cached results. See the **Practical verification guide** at the bottom of this document to validate the current implementation.
+
+Three interaction modes are supported:
 
 - GUI (web)
 - MCP tools
 - Direct file (`graph.json`)
 
-This proposal extends the platform so one graph can **federate** with other graph instances, while keeping the user workflow simple and stable.
+## Design goals
 
-## Goals
-
-- Let administrators define external graph connections through startup configuration only.
-- Keep end-user workflows unchanged: they still work in “their graph”, but search/analysis can include connected graphs.
-- Make ownership and distance clear (local graph vs external graph, 1 hop, 2 hops, etc.).
-- Support different capabilities per external graph endpoint:
+- Administrators define external graph connections through startup configuration only — not via GUI or chat.
+- End-user workflows remain unchanged: they still work in “their graph”, but search/analysis can include connected graphs.
+- Ownership and distance are explicit (local graph vs external graph, 1 hop, 2 hops, etc.).
+- Different capabilities per external graph endpoint:
   - file URL (`graph.json`) = read-only
   - MCP endpoint = read/write depending on credentials and policy
   - GUI URL = informational/deep-link only
-- Prevent instability when one or more external graphs are unavailable.
-- Allow controlled federation depth (max number of hops).
-- Enable subscriptions to include federated changes when explicitly configured.
+- Instability when one or more external graphs are unavailable does not affect local operations.
+- Controlled federation depth (max number of hops).
+- Subscriptions can optionally include federated changes.
 
-## Non-goals (initial release)
+## Non-goals
 
 - Full distributed transactions across graphs.
 - Guaranteed real-time consistency between all connected graphs.
-- Allowing GUI/chat users to modify federation topology at runtime.
+- GUI/chat users modifying federation topology at runtime.
 
 ## Design alternatives
 
@@ -234,47 +236,28 @@ Even though federation is transparent, users must see provenance:
 - Audit log for cross-graph writes and adoptions.
 - Optional allowlist for reachable federation domains.
 
-## Implementation plan (phased)
+## Implementation status
 
-### Phase 0: Foundations and contracts
+### Implemented (Phases 0–3)
 
-1. Define federation config schema and validation.
-2. Add internal data model fields for provenance + sync state.
-3. Add feature flag and safe no-op defaults.
+- Federation config schema and validation (`config/default/federation_config.json`)
+- Provenance model: `origin_graph_id`, `federation_distance`, `sync_state`, `last_synced_at`
+- Read-only connector for remote `graph.json` fetch
+- Local cache store for external snapshots
+- Search/traversal merges local + cached results with depth budget enforcement
+- Provenance metadata in REST and MCP responses
+- UI depth selector and source-graph badges
+- Startup and scheduled sync with configurable interval
+- Timeouts, circuit breaker, per-graph health states (`healthy`/`degraded`/`offline`)
+- `GET /federation/status` diagnostics endpoint
+- `POST /federation/sync` on-demand sync endpoint
+- Node adoption: `POST /api/federation/adopt` clones a federated node into the local graph
+- Federated event subscriptions (`scope: local_and_federated`)
 
-### Phase 1: Read-only federation MVP
+### Remaining / future work
 
-1. Implement connector for remote `graph.json` fetch.
-2. Add local cache store for external snapshots.
-3. Extend search/traversal to merge local + cached with depth limit.
-4. Expose provenance metadata in REST and MCP responses.
-5. Add UI indicators for source graph and distance.
-
-### Phase 2: Sync and resilience hardening
-
-1. Add scheduled/on-startup sync worker.
-2. Add timeouts, retries, circuit breaker, and health states.
-3. Add observability: logs/metrics for sync latency, failure rate, stale age.
-4. Add admin diagnostics endpoint for federation status.
-
-### Phase 3: Adoption and cross-graph linking
-
-1. Implement adopt/clone workflow and lineage edges.
-2. Add policy checks for what can be adopted.
-3. Support linking local nodes to adopted nodes naturally in UI/API.
-4. Add conflict handling strategy when source node changes.
-
-### Phase 4: MCP-enabled advanced federation
-
-1. Implement MCP connector with scoped credentials.
-2. Enable controlled cross-graph writes where policy allows.
-3. Add write audit trail and rollback strategy for failed remote writes.
-
-### Phase 5: Federated subscriptions
-
-1. Extend EventSubscription filter schema with federation scope.
-2. Emit subscription events for federated updates (sync/live).
-3. Prevent loops using origin/session metadata across graphs.
+- **Phase 4 (MCP federation):** controlled cross-graph writes via MCP connector with scoped credentials
+- **Phase 5 (advanced subscriptions):** live-remote event sources beyond sync-engine events
 
 ## Critical acceptance criteria
 
@@ -285,17 +268,17 @@ Even though federation is transparent, users must see provenance:
 - Subscription triggers can explicitly include/exclude federated sources.
 - Federation topology is not mutable from GUI/chat-assistant/MCP user flows.
 
-## Suggested execution checklist
+## Implementation checklist
 
-- [ ] JSON schema for `federation_config.json` + validation tests.
-- [ ] Connector interface abstraction (`GraphConnector`: file, MCP).
-- [ ] Cache storage design (versioning + TTL + stale markers).
-- [ ] Query planner merge strategy and ranking adjustments.
-- [ ] Provenance fields surfaced in API contracts.
-- [ ] UI labels/filters for provenance and hop count.
-- [ ] Sync scheduler with resilience primitives.
-- [ ] Federated subscription schema + compatibility migration.
-- [ ] Audit and security review (secrets, write controls, domain allowlist).
+- [x] JSON schema for `federation_config.json` + validation tests.
+- [x] Connector interface abstraction (`GraphConnector`: file).
+- [x] Cache storage design (versioning + TTL + stale markers).
+- [x] Query planner merge strategy and ranking adjustments.
+- [x] Provenance fields surfaced in API contracts.
+- [x] UI labels/filters for provenance and hop count.
+- [x] Sync scheduler with resilience primitives.
+- [x] Federated subscription schema + compatibility migration.
+- [ ] MCP connector with scoped credentials (Phase 4).
 - [ ] Load/failure testing with multiple simulated remote graphs.
 
 

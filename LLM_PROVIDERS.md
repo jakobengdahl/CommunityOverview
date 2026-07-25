@@ -2,9 +2,23 @@
 
 This project supports multiple LLM providers, allowing you to choose between Claude (Anthropic) and OpenAI (GPT-4) as your AI backend. The OpenAI provider also works with any OpenAI-compatible API, including self-hosted models (Ollama, vLLM), managed inference services (Azure OpenAI, Groq, Together AI), and proxies like OpenWebUI.
 
+## Running without LLM keys
+
+The application starts and runs fully without any LLM API keys configured. When no
+key is detected at startup:
+
+- The **MCP server** is available for external agents and tools (no key required).
+- The **graph REST API** is fully operational.
+- The **background agent workers** remain inactive (`AGENTS_ENABLED` defaults to `false`).
+- The built-in **AI chat assistant is hidden** in the web UI — the frontend queries
+  `GET /ui/capabilities` during startup and only renders the chat panel when
+  `llm_available: true` is returned.
+
+To enable AI features later, set the appropriate API key and restart the server.
+
 ## Supported Providers
 
-- **Claude** (Anthropic) - Uses Claude Sonnet 4.5
+- **Claude** (Anthropic) - Uses `claude-sonnet-4-5` by default (see `backend/llm/llm_providers.py`)
 - **OpenAI** - Uses GPT-4o (configurable), or any OpenAI-compatible endpoint via `OPENAI_BASE_URL`
 
 ## Configuration
@@ -224,16 +238,14 @@ To test with different providers:
 ```bash
 export LLM_PROVIDER=claude
 export ANTHROPIC_API_KEY=your-key
-cd mcp-server
-python server.py
+uvicorn backend.api_host.server:get_app --factory --port 8000
 ```
 
 ### Test with OpenAI
 ```bash
 export LLM_PROVIDER=openai
 export OPENAI_API_KEY=your-key
-cd mcp-server
-python server.py
+uvicorn backend.api_host.server:get_app --factory --port 8000
 ```
 
 ### Test Frontend Override
@@ -279,22 +291,3 @@ python server.py
 
 **Recommendation:** For cost-effective operations with similar quality, GPT-4o is recommended.
 
-## Future Enhancements
-
-Potential additions:
-- Support for additional native providers (Gemini, etc.)
-- Automatic fallback between providers
-- Cost tracking per provider
-- Performance metrics comparison
-
-## Files Modified
-
-Key files in this implementation:
-
-- `mcp-server/llm_providers.py` - Provider abstraction layer
-- `mcp-server/chat_logic.py` - ChatProcessor with provider support
-- `mcp-server/server.py` - HTTP endpoint handling
-- `mcp-server/requirements.txt` - Dependencies
-- `frontend/src/store/graphStore.js` - State management
-- `frontend/src/components/Header.jsx` - Settings UI
-- `frontend/src/services/api.js` - API client

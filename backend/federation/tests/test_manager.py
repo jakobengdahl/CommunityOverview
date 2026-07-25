@@ -5,6 +5,7 @@ import threading
 import pytest
 from http.server import BaseHTTPRequestHandler, HTTPServer
 
+from backend.core.models import Node, NodeType
 from backend.federation.config import FederationFileConfig
 from backend.federation.manager import FederationManager
 
@@ -48,22 +49,24 @@ async def test_sync_and_search_remote_graph_json():
     server = _start_server()
     try:
         port = server.server_address[1]
-        config = FederationFileConfig.model_validate({
-            "federation": {
-                "enabled": True,
-                "max_traversal_depth": 1,
-                "graphs": [
-                    {
-                        "graph_id": "esam-main",
-                        "display_name": "eSam",
-                        "enabled": True,
-                        "endpoints": {
-                            "graph_json_url": f"http://127.0.0.1:{port}/graph.json"
-                        },
-                    }
-                ],
+        config = FederationFileConfig.model_validate(
+            {
+                "federation": {
+                    "enabled": True,
+                    "max_traversal_depth": 1,
+                    "graphs": [
+                        {
+                            "graph_id": "esam-main",
+                            "display_name": "eSam",
+                            "enabled": True,
+                            "endpoints": {
+                                "graph_json_url": f"http://127.0.0.1:{port}/graph.json"
+                            },
+                        }
+                    ],
+                }
             }
-        })
+        )
 
         manager = FederationManager(config)
         sync = await manager.sync_all()
@@ -81,21 +84,23 @@ async def test_sync_and_search_remote_graph_json():
 
 @pytest.mark.asyncio
 async def test_sync_degrades_when_unreachable_url():
-    config = FederationFileConfig.model_validate({
-        "federation": {
-            "enabled": True,
-            "graphs": [
-                {
-                    "graph_id": "broken",
-                    "display_name": "Broken",
-                    "enabled": True,
-                    "endpoints": {
-                        "graph_json_url": "http://127.0.0.1:1/graph.json"
-                    },
-                }
-            ],
+    config = FederationFileConfig.model_validate(
+        {
+            "federation": {
+                "enabled": True,
+                "graphs": [
+                    {
+                        "graph_id": "broken",
+                        "display_name": "Broken",
+                        "enabled": True,
+                        "endpoints": {
+                            "graph_json_url": "http://127.0.0.1:1/graph.json"
+                        },
+                    }
+                ],
+            }
         }
-    })
+    )
 
     manager = FederationManager(config)
     sync = await manager.sync_all()
@@ -105,28 +110,77 @@ async def test_sync_degrades_when_unreachable_url():
     assert status["graphs"][0]["status"] == "degraded"
 
 
+def test_score_node_match_alias_beats_description():
+    """A federated node matched only via an alias must outrank a description-only match."""
+    alias_node = Node(
+        id="a",
+        type=NodeType.ACTOR,
+        name="Unrelated",
+        description="unrelated",
+        aliases=["esam"],
+    )
+    desc_node = Node(
+        id="d",
+        type=NodeType.ACTOR,
+        name="Another",
+        description="part of the esam network",
+    )
+    alias_score = FederationManager._score_node_match(alias_node, "esam")
+    desc_score = FederationManager._score_node_match(desc_node, "esam")
+    assert alias_score > desc_score
+
+
+def test_score_node_match_real_name_beats_alias():
+    """A real-name match must outrank an alias-only match in federated search too."""
+    name_node = Node(id="n", type=NodeType.ACTOR, name="Nordic esam", description="x")
+    alias_node = Node(
+        id="a", type=NodeType.ACTOR, name="Unrelated", description="x", aliases=["esam"]
+    )
+    assert FederationManager._score_node_match(
+        name_node, "esam"
+    ) > FederationManager._score_node_match(alias_node, "esam")
+
+
+def test_score_node_match_alias_does_not_lift_above_stronger_name():
+    """A federated node matching on both name (contains) and an exact alias must not
+    outscore a node whose name is an exact match — name and alias combine with max()."""
+    name_plus_alias = Node(
+        id="x",
+        type=NodeType.ACTOR,
+        name="Global esam network",
+        description="x",
+        aliases=["esam"],
+    )
+    exact_name = Node(id="y", type=NodeType.ACTOR, name="esam", description="x")
+    assert FederationManager._score_node_match(
+        exact_name, "esam"
+    ) > FederationManager._score_node_match(name_plus_alias, "esam")
+
+
 def test_scheduler_starts_for_scheduled_graph():
-    config = FederationFileConfig.model_validate({
-        "federation": {
-            "enabled": True,
-            "graphs": [
-                {
-                    "graph_id": "sched",
-                    "display_name": "Scheduled",
-                    "enabled": True,
-                    "sync": {
-                        "mode": "scheduled",
-                        "interval_seconds": 10,
-                        "on_startup": False,
-                        "on_demand": True
-                    },
-                    "endpoints": {
-                        "graph_json_url": "http://127.0.0.1:1/graph.json"
-                    },
-                }
-            ],
+    config = FederationFileConfig.model_validate(
+        {
+            "federation": {
+                "enabled": True,
+                "graphs": [
+                    {
+                        "graph_id": "sched",
+                        "display_name": "Scheduled",
+                        "enabled": True,
+                        "sync": {
+                            "mode": "scheduled",
+                            "interval_seconds": 10,
+                            "on_startup": False,
+                            "on_demand": True,
+                        },
+                        "endpoints": {
+                            "graph_json_url": "http://127.0.0.1:1/graph.json"
+                        },
+                    }
+                ],
+            }
         }
-    })
+    )
 
     manager = FederationManager(config)
     manager.start()
@@ -140,25 +194,29 @@ def test_scheduler_starts_for_scheduled_graph():
 def test_sync_emits_node_events_for_cache_changes():
     events = []
 
-    config = FederationFileConfig.model_validate({
-        "federation": {
-            "enabled": True,
-            "graphs": [
-                {
-                    "graph_id": "esam-main",
-                    "display_name": "eSam",
-                    "enabled": True,
-                    "endpoints": {
-                        "graph_json_url": "https://example.invalid/graph.json"
-                    },
-                }
-            ],
+    config = FederationFileConfig.model_validate(
+        {
+            "federation": {
+                "enabled": True,
+                "graphs": [
+                    {
+                        "graph_id": "esam-main",
+                        "display_name": "eSam",
+                        "enabled": True,
+                        "endpoints": {
+                            "graph_json_url": "https://example.invalid/graph.json"
+                        },
+                    }
+                ],
+            }
         }
-    })
+    )
 
     manager = FederationManager(
         config,
-        on_node_event=lambda op, before, after: events.append((op, before.id if before else None, after.id if after else None)),
+        on_node_event=lambda op, before, after: events.append(
+            (op, before.id if before else None, after.id if after else None)
+        ),
     )
 
     graph = config.federation.graphs[0]
@@ -170,7 +228,10 @@ def test_sync_emits_node_events_for_cache_changes():
     )
     second_nodes, _ = manager._build_cache(
         graph,
-        [{"id": "remote-1", "type": "Actor", "name": "Version Two"}, {"id": "remote-2", "type": "Actor", "name": "New"}],
+        [
+            {"id": "remote-1", "type": "Actor", "name": "Version Two"},
+            {"id": "remote-2", "type": "Actor", "name": "New"},
+        ],
         [],
     )
 
@@ -178,44 +239,58 @@ def test_sync_emits_node_events_for_cache_changes():
     manager._emit_node_events(first_nodes, second_nodes)
 
     assert ("create", None, "federated::esam-main::remote-1") in events
-    assert ("update", "federated::esam-main::remote-1", "federated::esam-main::remote-1") in events
+    assert (
+        "update",
+        "federated::esam-main::remote-1",
+        "federated::esam-main::remote-1",
+    ) in events
     assert ("create", None, "federated::esam-main::remote-2") in events
 
 
 def test_sync_emits_edge_events_for_cache_changes():
     edge_events = []
 
-    config = FederationFileConfig.model_validate({
-        "federation": {
-            "enabled": True,
-            "graphs": [
-                {
-                    "graph_id": "esam-main",
-                    "display_name": "eSam",
-                    "enabled": True,
-                    "endpoints": {
-                        "graph_json_url": "https://example.invalid/graph.json"
-                    },
-                }
-            ],
+    config = FederationFileConfig.model_validate(
+        {
+            "federation": {
+                "enabled": True,
+                "graphs": [
+                    {
+                        "graph_id": "esam-main",
+                        "display_name": "eSam",
+                        "enabled": True,
+                        "endpoints": {
+                            "graph_json_url": "https://example.invalid/graph.json"
+                        },
+                    }
+                ],
+            }
         }
-    })
+    )
 
     manager = FederationManager(
         config,
-        on_edge_event=lambda op, before, after: edge_events.append((op, before.id if before else None, after.id if after else None)),
+        on_edge_event=lambda op, before, after: edge_events.append(
+            (op, before.id if before else None, after.id if after else None)
+        ),
     )
 
     graph = config.federation.graphs[0]
     _, first_edges = manager._build_cache(
         graph,
-        [{"id": "n1", "type": "Actor", "name": "A"}, {"id": "n2", "type": "Actor", "name": "B"}],
+        [
+            {"id": "n1", "type": "Actor", "name": "A"},
+            {"id": "n2", "type": "Actor", "name": "B"},
+        ],
         [{"id": "e1", "source": "n1", "target": "n2", "type": "RELATES_TO"}],
     )
 
     _, second_edges = manager._build_cache(
         graph,
-        [{"id": "n1", "type": "Actor", "name": "A"}, {"id": "n2", "type": "Actor", "name": "B"}],
+        [
+            {"id": "n1", "type": "Actor", "name": "A"},
+            {"id": "n2", "type": "Actor", "name": "B"},
+        ],
         [{"id": "e1", "source": "n1", "target": "n2", "type": "PART_OF"}],
     )
 
@@ -223,5 +298,11 @@ def test_sync_emits_edge_events_for_cache_changes():
     manager._emit_edge_events(first_edges, second_edges)
 
     # create on first sync + delete/create replace semantics on update
-    assert any(evt[0] == "create" and evt[2] == "federated::esam-main::e1" for evt in edge_events)
-    assert any(evt[0] == "delete" and evt[1] == "federated::esam-main::e1" for evt in edge_events)
+    assert any(
+        evt[0] == "create" and evt[2] == "federated::esam-main::e1"
+        for evt in edge_events
+    )
+    assert any(
+        evt[0] == "delete" and evt[1] == "federated::esam-main::e1"
+        for evt in edge_events
+    )

@@ -11,13 +11,16 @@ import './CreateSubscriptionDialog.css';
  * - filters: { target: { entity_kind, node_types }, operations, keywords }
  * - delivery: { webhook_url, ignore_origins, ignore_session_ids }
  */
-export default function CreateSubscriptionDialog({ onClose, onSave }) {
+export default function CreateSubscriptionDialog({ onClose, onSave, initialData }) {
   const schema = useGraphStore((state) => state.schema);
   const { t } = useI18n();
+
+  const isEditing = !!initialData;
 
   // Basic info
   const [name, setName] = useState('');
   const [description, setDescription] = useState('');
+  const [aliases, setAliases] = useState('');
 
   // Filter settings
   const [selectedNodeTypes, setSelectedNodeTypes] = useState([]);
@@ -32,14 +35,38 @@ export default function CreateSubscriptionDialog({ onClose, onSave }) {
   const [webhookUrl, setWebhookUrl] = useState('');
   const [ignoreOrigins, setIgnoreOrigins] = useState('');
 
+  // Populate form when editing an existing subscription
+  useEffect(() => {
+    if (!initialData) return;
+    setName(initialData.name || '');
+    setDescription(initialData.description || '');
+    setAliases((initialData.aliases || []).join(', '));
+    const filters = initialData.metadata?.filters || {};
+    const delivery = initialData.metadata?.delivery || {};
+    if (filters.target?.node_types) setSelectedNodeTypes(filters.target.node_types);
+    if (filters.operations) {
+      setOperations({
+        create: filters.operations.includes('create'),
+        update: filters.operations.includes('update'),
+        delete: filters.operations.includes('delete'),
+      });
+    }
+    if (filters.keywords?.any) setKeywords(filters.keywords.any.join(', '));
+    const url = delivery.webhook_url || '';
+    setWebhookUrl(url.startsWith('internal://') ? '' : url);
+    if (delivery.ignore_origins) setIgnoreOrigins(delivery.ignore_origins.join(', '));
+  }, [initialData]);
+
   // Get available node types from schema
   const nodeTypes = schema?.node_types
-    ? Object.keys(schema.node_types).filter(t => !['SavedView', 'VisualizationView', 'EventSubscription', 'Agent'].includes(t))
+    ? Object.keys(schema.node_types).filter(
+        (t) => !['SavedView', 'VisualizationView', 'EventSubscription', 'Agent'].includes(t)
+      )
     : [];
 
   const handleToggleNodeType = (type) => {
     if (selectedNodeTypes.includes(type)) {
-      setSelectedNodeTypes(selectedNodeTypes.filter(t => t !== type));
+      setSelectedNodeTypes(selectedNodeTypes.filter((t) => t !== type));
     } else {
       setSelectedNodeTypes([...selectedNodeTypes, type]);
     }
@@ -58,44 +85,70 @@ export default function CreateSubscriptionDialog({ onClose, onSave }) {
     }
 
     // Build the subscription node
-    const activeOps = Object.entries(operations).filter(([_, v]) => v).map(([k]) => k).join(', ');
-    const subscriptionNode = {
-      id: crypto.randomUUID(),
-      name: name.trim(),
-      type: 'EventSubscription',
-      description: description.trim() || t('subscription_dialog.webhook_description', { name }),
-      summary: t('subscription_dialog.webhook_summary', { events: activeOps }),
-      metadata: {
-        filters: {
-          target: {
-            entity_kind: 'node',
-            node_types: selectedNodeTypes,
-          },
-          operations: Object.entries(operations).filter(([_, v]) => v).map(([k]) => k),
-          keywords: {
-            any: keywords.split(',').map(k => k.trim()).filter(k => k),
-          },
-        },
-        delivery: {
-          webhook_url: webhookUrl.trim(),
-          ignore_origins: ignoreOrigins.split(',').map(o => o.trim()).filter(o => o),
-          ignore_session_ids: [],
+    const aliasList = aliases
+      .split(',')
+      .map((a) => a.trim())
+      .filter(Boolean);
+    const activeOps = Object.entries(operations)
+      .filter(([_, v]) => v)
+      .map(([k]) => k)
+      .join(', ');
+    const metadata = {
+      ...(initialData?.metadata || {}),
+      filters: {
+        target: { entity_kind: 'node', node_types: selectedNodeTypes },
+        operations: Object.entries(operations)
+          .filter(([_, v]) => v)
+          .map(([k]) => k),
+        keywords: {
+          any: keywords
+            .split(',')
+            .map((k) => k.trim())
+            .filter((k) => k),
         },
       },
-      communities: [],
+      delivery: {
+        ...(initialData?.metadata?.delivery || {}),
+        webhook_url: webhookUrl.trim(),
+        ignore_origins: ignoreOrigins
+          .split(',')
+          .map((o) => o.trim())
+          .filter((o) => o),
+        ignore_session_ids: initialData?.metadata?.delivery?.ignore_session_ids || [],
+      },
     };
 
-    onSave(subscriptionNode);
+    if (isEditing) {
+      onSave({
+        id: initialData.id,
+        updates: {
+          name: name.trim(),
+          description: description.trim() || t('subscription_dialog.webhook_description', { name }),
+          summary: t('subscription_dialog.webhook_summary', { events: activeOps }),
+          aliases: aliasList,
+          metadata,
+        },
+      });
+    } else {
+      onSave({
+        id: crypto.randomUUID(),
+        name: name.trim(),
+        type: 'EventSubscription',
+        description: description.trim() || t('subscription_dialog.webhook_description', { name }),
+        summary: t('subscription_dialog.webhook_summary', { events: activeOps }),
+        aliases: aliasList,
+        metadata,
+        communities: [],
+      });
+    }
     onClose();
   };
 
   return (
     <div className="dialog-overlay" onClick={onClose}>
-      <div className="dialog-content subscription-dialog" onClick={e => e.stopPropagation()}>
-        <h2>{t('subscription_dialog.title')}</h2>
-        <p className="dialog-description">
-          {t('subscription_dialog.description')}
-        </p>
+      <div className="dialog-content subscription-dialog" onClick={(e) => e.stopPropagation()}>
+        <h2>{isEditing ? t('subscription_dialog.title_edit') : t('subscription_dialog.title')}</h2>
+        <p className="dialog-description">{t('subscription_dialog.description')}</p>
 
         <form onSubmit={handleSubmit}>
           <div className="form-section">
@@ -107,7 +160,7 @@ export default function CreateSubscriptionDialog({ onClose, onSave }) {
                 id="sub-name"
                 type="text"
                 value={name}
-                onChange={e => setName(e.target.value)}
+                onChange={(e) => setName(e.target.value)}
                 placeholder={t('subscription_dialog.name_placeholder')}
                 required
               />
@@ -118,9 +171,20 @@ export default function CreateSubscriptionDialog({ onClose, onSave }) {
               <textarea
                 id="sub-description"
                 value={description}
-                onChange={e => setDescription(e.target.value)}
+                onChange={(e) => setDescription(e.target.value)}
                 placeholder={t('subscription_dialog.description_placeholder')}
                 rows={2}
+              />
+            </div>
+
+            <div className="form-group">
+              <label htmlFor="sub-aliases">{t('subscription_dialog.aliases_label')}</label>
+              <input
+                id="sub-aliases"
+                type="text"
+                value={aliases}
+                onChange={(e) => setAliases(e.target.value)}
+                placeholder={t('subscription_dialog.aliases_placeholder')}
               />
             </div>
           </div>
@@ -131,7 +195,7 @@ export default function CreateSubscriptionDialog({ onClose, onSave }) {
             <div className="form-group">
               <label>{t('subscription_dialog.node_types_label')}</label>
               <div className="checkbox-group node-types-grid">
-                {nodeTypes.map(type => (
+                {nodeTypes.map((type) => (
                   <label key={type} className="checkbox-label">
                     <input
                       type="checkbox"
@@ -180,7 +244,7 @@ export default function CreateSubscriptionDialog({ onClose, onSave }) {
                 id="sub-keywords"
                 type="text"
                 value={keywords}
-                onChange={e => setKeywords(e.target.value)}
+                onChange={(e) => setKeywords(e.target.value)}
                 placeholder={t('subscription_dialog.keywords_placeholder')}
               />
               <small>{t('subscription_dialog.keywords_hint')}</small>
@@ -196,19 +260,21 @@ export default function CreateSubscriptionDialog({ onClose, onSave }) {
                 id="sub-webhook"
                 type="url"
                 value={webhookUrl}
-                onChange={e => setWebhookUrl(e.target.value)}
+                onChange={(e) => setWebhookUrl(e.target.value)}
                 placeholder="https://example.com/webhook"
                 required
               />
             </div>
 
             <div className="form-group">
-              <label htmlFor="sub-ignore-origins">{t('subscription_dialog.ignore_origins_label')}</label>
+              <label htmlFor="sub-ignore-origins">
+                {t('subscription_dialog.ignore_origins_label')}
+              </label>
               <input
                 id="sub-ignore-origins"
                 type="text"
                 value={ignoreOrigins}
-                onChange={e => setIgnoreOrigins(e.target.value)}
+                onChange={(e) => setIgnoreOrigins(e.target.value)}
                 placeholder={t('subscription_dialog.ignore_origins_placeholder')}
               />
               <small>{t('subscription_dialog.ignore_origins_hint')}</small>
@@ -220,7 +286,7 @@ export default function CreateSubscriptionDialog({ onClose, onSave }) {
               {t('subscription_dialog.cancel')}
             </button>
             <button type="submit" className="btn-primary">
-              {t('subscription_dialog.submit')}
+              {isEditing ? t('subscription_dialog.submit_edit') : t('subscription_dialog.submit')}
             </button>
           </div>
         </form>

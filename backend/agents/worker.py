@@ -12,7 +12,7 @@ import logging
 import queue
 import threading
 import time
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import Dict, Any, Optional, List, Callable
 from dataclasses import dataclass, field
 
@@ -20,6 +20,12 @@ from .config import AgentConfig, AgentsSettings
 from .prompts import build_agent_system_prompt, build_event_user_message
 from .llm_client import LLMClient
 from .mcp_loader import MCPLoader
+from backend.skills.loader import (
+    SkillDefinition,
+    SkillMetadata,
+    SkillsConfig,
+    SkillsLoader,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -27,14 +33,16 @@ logger = logging.getLogger(__name__)
 @dataclass
 class EventItem:
     """An event queued for processing."""
+
     event_id: str
     payload: Dict[str, Any]
-    enqueued_at: datetime = field(default_factory=datetime.utcnow)
+    enqueued_at: datetime = field(default_factory=lambda: datetime.now(timezone.utc))
 
 
 @dataclass
 class ProcessingResult:
     """Result of processing an event."""
+
     event_id: str
     agent_id: str
     success: bool
@@ -65,6 +73,8 @@ class AgentWorker:
         mcp_loader: MCPLoader,
         graph_service: Optional[Any] = None,
         on_result: Optional[Callable[[ProcessingResult], None]] = None,
+        skills_config: Optional[SkillsConfig] = None,
+        graph_storage: Optional[Any] = None,
     ):
         """
         Initialize the agent worker.
@@ -73,14 +83,18 @@ class AgentWorker:
             config: Agent configuration
             settings: Global agent settings
             mcp_loader: MCP loader for tool access
-            graph_service: GraphService for graph operations
+            graph_service: GraphService for agent tool calls
             on_result: Optional callback for processing results
+            skills_config: SkillsConfig for the skills loader
+            graph_storage: GraphStorage for reading linked Skill nodes
         """
         self.config = config
         self.settings = settings
         self.mcp_loader = mcp_loader
         self.graph_service = graph_service
         self.on_result = on_result
+        self._skills_config = skills_config or SkillsConfig()
+        self._graph_storage = graph_storage
 
         # Event queue
         self._queue: queue.Queue[Optional[EventItem]] = queue.Queue()
@@ -92,6 +106,12 @@ class AgentWorker:
 
         # LLM client (created on demand)
         self._llm_client: Optional[LLMClient] = None
+
+        # Shared skills loader — created once, persists its internal cache across events
+        self._skills_loader: Optional[SkillsLoader] = None
+
+        # Cached skills (loaded once per config, reset on reload_config)
+        self._cached_skills: Optional[List[SkillDefinition]] = None
 
         # Statistics
         self.events_processed = 0
@@ -170,9 +190,132 @@ class AgentWorker:
         """
         with self._lock:
             self.config = new_config
-            # Reset LLM client to pick up any changes
             self._llm_client = None
+            self._skills_loader = None  # Reset so a fresh loader is created
+            self._cached_skills = None  # Force skill reload on next event
             logger.info(f"Agent {self.agent_id}: Configuration reloaded")
+
+    def _load_skills(self) -> List[SkillDefinition]:
+        """
+        Load skills from configured URLs, local skills_dir, and linked Skill graph nodes.
+
+        Called once on first event (or after reload_config) and the result
+        is cached for the lifetime of the current config.
+
+        Creates a dedicated event loop (asyncio.new_event_loop) instead of
+        asyncio.run() so this is safe to call from threads that may already
+        have a running loop or nested calls.
+        """
+        import asyncio
+
+        skills: List[SkillDefinition] = []
+        seen_ids: set = set()  # deduplication key across all three source types
+
+        # Get or create the shared loader under the worker lock to avoid a data
+        # race with reload_config(), which nulls self._skills_loader from a
+        # different thread while this method may be mid-execution.
+        with self._lock:
+            if self._skills_loader is None:
+                self._skills_loader = SkillsLoader(self._skills_config)
+            loader = self._skills_loader
+
+        loop = asyncio.new_event_loop()
+        try:
+            # Stage 1 → Stage 2 progressive loading for URL-based skills.
+            # Metadata (frontmatter) is fetched first; raw text is cached by
+            # the loader so the Stage 2 full-content parse adds no HTTP round-trips.
+            if self.config.skills_urls:
+                try:
+                    url_metas: List[SkillMetadata] = loop.run_until_complete(
+                        loader.load_metadata_from_urls(self.config.skills_urls)
+                    )
+                    url_skills = loop.run_until_complete(
+                        loader.load_full_skills(url_metas)
+                    )
+                    for s in url_skills:
+                        if s.id not in seen_ids:
+                            seen_ids.add(s.id)
+                            skills.append(s)
+                    logger.info(
+                        f"Agent {self.config.name}: Loaded {len(url_skills)} skill(s) from URLs"
+                    )
+                except Exception as exc:
+                    logger.warning(
+                        f"Agent {self.config.name}: Skills URL load failed: {exc}"
+                    )
+
+            # Stage 1 → Stage 2 for local skills directory
+            try:
+                local_metas: List[SkillMetadata] = loop.run_until_complete(
+                    loader.load_metadata_from_dir()
+                )
+                local_skills = loop.run_until_complete(
+                    loader.load_full_skills(local_metas)
+                )
+                added = 0
+                for s in local_skills:
+                    if s.id not in seen_ids:
+                        seen_ids.add(s.id)
+                        skills.append(s)
+                        added += 1
+                    else:
+                        logger.debug("Skipping duplicate local skill id=%s", s.id)
+                if added:
+                    logger.info(
+                        f"Agent {self.config.name}: Loaded {added} skill(s) from local dir"
+                    )
+            except Exception as exc:
+                logger.warning(
+                    f"Agent {self.config.name}: Local skills dir load failed: {exc}"
+                )
+        finally:
+            loop.close()
+
+        # Load from linked Skill nodes in the graph
+        if self.config.skill_node_ids and self._graph_storage:
+            for node_id in self.config.skill_node_ids:
+                try:
+                    node = self._graph_storage.get_node(node_id)
+                    if not node:
+                        logger.debug("Skill node %s not found in graph", node_id)
+                        continue
+                    node_type = (
+                        node.type.value
+                        if hasattr(node.type, "value")
+                        else str(node.type)
+                    )
+                    if node_type != "Skill":
+                        logger.warning(
+                            "Node %s is type %s, expected Skill", node_id, node_type
+                        )
+                        continue
+                    meta = node.metadata or {}
+                    content = meta.get("content", "")
+                    if not content:
+                        logger.debug(
+                            "Skill node %s has no content in metadata", node_id
+                        )
+                        continue
+                    skill = SkillDefinition(
+                        id=node.id,
+                        name=node.name,
+                        description=node.description or "",
+                        content=content[: self._skills_config.max_skill_body_chars],
+                        allowed_tools=meta.get("allowed_tools", []),
+                        when_to_use=meta.get("when_to_use"),
+                        effort=meta.get("effort"),
+                        source_url=meta.get("source_url", f"graph://skill/{node.id}"),
+                    )
+                    if skill.id not in seen_ids:
+                        seen_ids.add(skill.id)
+                        skills.append(skill)
+                        logger.debug("Loaded Skill node: %s", node.name)
+                    else:
+                        logger.debug("Skipping duplicate graph skill id=%s", skill.id)
+                except Exception as exc:
+                    logger.warning("Failed to load Skill node %s: %s", node_id, exc)
+
+        return skills
 
     def _process_loop(self) -> None:
         """Main processing loop."""
@@ -221,13 +364,20 @@ class AgentWorker:
                 try:
                     schema = self.graph_service.get_schema()
                 except Exception as e:
-                    logger.warning(f"Agent {self.config.name}: Could not load schema: {e}")
+                    logger.warning(
+                        f"Agent {self.config.name}: Could not load schema: {e}"
+                    )
+
+            # Load skills lazily (once per config lifecycle)
+            if self._cached_skills is None:
+                self._cached_skills = self._load_skills()
 
             # Build system prompt
             system_prompt = build_agent_system_prompt(
                 task_prompt=self.config.prompts.task_prompt,
                 available_tools=tool_names,
                 schema=schema,
+                skills=self._cached_skills or None,
             )
 
             # Build user message with event
@@ -259,7 +409,7 @@ class AgentWorker:
             )
 
             self.events_processed += 1
-            self.last_event_at = datetime.utcnow()
+            self.last_event_at = datetime.now(timezone.utc)
 
             logger.info(
                 f"Agent {self.config.name}: Event {event_id} processed - "
@@ -301,7 +451,9 @@ class AgentWorker:
             if text:
                 # Truncate long reasoning for console readability
                 display_text = text[:500] + "..." if len(text) > 500 else text
-                logger.info(f"Agent {agent_name} [turn {turn_num}] reasoning: {display_text}")
+                logger.info(
+                    f"Agent {agent_name} [turn {turn_num}] reasoning: {display_text}"
+                )
 
             for tc in tool_calls:
                 tc_name = tc.get("name", "?")
@@ -309,7 +461,9 @@ class AgentWorker:
                 input_summary = json.dumps(tc_input, default=str, ensure_ascii=False)
                 if len(input_summary) > 300:
                     input_summary = input_summary[:300] + "..."
-                logger.info(f"Agent {agent_name} [turn {turn_num}] tool call: {tc_name}({input_summary})")
+                logger.info(
+                    f"Agent {agent_name} [turn {turn_num}] tool call: {tc_name}({input_summary})"
+                )
 
         final = result.get("final_response")
         if final:
@@ -317,7 +471,9 @@ class AgentWorker:
             logger.info(f"Agent {agent_name} final response: {display_final}")
 
         if not result.get("success"):
-            logger.warning(f"Agent {agent_name} execution failed: {result.get('error', 'unknown')}")
+            logger.warning(
+                f"Agent {agent_name} execution failed: {result.get('error', 'unknown')}"
+            )
 
     def _create_llm_client(self) -> LLMClient:
         """Create the LLM client."""
@@ -379,10 +535,12 @@ class AgentWorker:
         trace = llm_result.get("trace", [])
         for turn in trace:
             for tc in turn.get("tool_calls", []):
-                actions.append({
-                    "tool": tc.get("name"),
-                    "input": tc.get("input"),
-                })
+                actions.append(
+                    {
+                        "tool": tc.get("name"),
+                        "input": tc.get("input"),
+                    }
+                )
 
         return ProcessingResult(
             event_id=event_id,
@@ -406,6 +564,8 @@ class AgentWorker:
             "queue_size": self.queue_size,
             "events_processed": self.events_processed,
             "events_failed": self.events_failed,
-            "last_event_at": self.last_event_at.isoformat() if self.last_event_at else None,
+            "last_event_at": self.last_event_at.isoformat()
+            if self.last_event_at
+            else None,
             "mcp_integrations": self.config.mcp_integration_ids,
         }

@@ -65,12 +65,8 @@ class TestStaticFilesWithAdditionalContent:
             (web_dir / "index.html").write_text(
                 "<!DOCTYPE html><html><body>Main App</body></html>"
             )
-            (web_dir / "app.js").write_text(
-                "console.log('App loaded');"
-            )
-            (web_dir / "styles.css").write_text(
-                "body { margin: 0; }"
-            )
+            (web_dir / "app.js").write_text("console.log('App loaded');")
+            (web_dir / "styles.css").write_text("body { margin: 0; }")
 
             # Create subdirectory
             assets_dir = web_dir / "assets"
@@ -85,9 +81,7 @@ class TestStaticFilesWithAdditionalContent:
             (widget_dir / "index.html").write_text(
                 "<!DOCTYPE html><html><body>Widget</body></html>"
             )
-            (widget_dir / "widget.js").write_text(
-                "console.log('Widget loaded');"
-            )
+            (widget_dir / "widget.js").write_text("console.log('Widget loaded');")
 
             # Create empty graph file
             graph_file = Path(temp_dir) / "graph.json"
@@ -171,17 +165,31 @@ class TestStaticFilesNotBuilt:
         assert "not built" in data["error"].lower()
 
 
+@pytest.mark.skipif(
+    not (
+        Path(__file__).parent.parent.parent / "apps" / "web" / "dist" / "index.html"
+    ).exists(),
+    reason="Frontend dist not built",
+)
 class TestStaticFilesWithRealPaths:
     """Tests using the actual static file paths in apps directory."""
 
     def test_real_web_index_exists(self):
         """Verify real web index.html exists for actual deployment."""
-        web_index = Path(__file__).parent.parent.parent / "apps" / "web" / "dist" / "index.html"
+        web_index = (
+            Path(__file__).parent.parent.parent / "apps" / "web" / "dist" / "index.html"
+        )
         assert web_index.exists(), f"Web index not found at {web_index}"
 
     def test_real_widget_index_exists(self):
         """Verify real widget index.html exists for actual deployment."""
-        widget_index = Path(__file__).parent.parent.parent / "apps" / "widget" / "dist" / "index.html"
+        widget_index = (
+            Path(__file__).parent.parent.parent
+            / "apps"
+            / "widget"
+            / "dist"
+            / "index.html"
+        )
         assert widget_index.exists(), f"Widget index not found at {widget_index}"
 
     def test_real_static_files_served(self):
@@ -190,7 +198,7 @@ class TestStaticFilesWithRealPaths:
         base_dir = Path(__file__).parent.parent.parent
 
         # Create a temporary graph file
-        with tempfile.NamedTemporaryFile(mode='w', suffix='.json', delete=False) as f:
+        with tempfile.NamedTemporaryFile(mode="w", suffix=".json", delete=False) as f:
             f.write('{"nodes": [], "edges": []}')
             graph_path = f.name
 
@@ -216,4 +224,5 @@ class TestStaticFilesWithRealPaths:
 
         finally:
             import os
+
             os.unlink(graph_path)

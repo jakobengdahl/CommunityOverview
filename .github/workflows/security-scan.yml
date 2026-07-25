@@ -1,0 +1,159 @@
+# =============================================================================
+# Security Scan – dependency vulnerability reporting
+# =============================================================================
+# Runs pip-audit over the Python requirement files and `npm audit` over the
+# JS workspaces to surface known-vulnerable dependencies (STRUCTURE_REVIEW C5).
+#
+# Triggers:
+#   - pull_request : catches vulnerable dependencies introduced by a change
+#   - schedule     : catches newly-disclosed advisories against unchanged deps
+#   - workflow_dispatch : on-demand manual run
+#
+# Reporting-first / non-blocking: each audit step uses `continue-on-error`, so a
+# finding shows a red step and a job summary but never fails the workflow or
+# blocks a merge. Once the baseline is understood these can be flipped to
+# blocking and then added to branch protection if desired.
+#
+# CodeQL is intentionally NOT configured here: it is enabled via GitHub's
+# repository-level default setup, not through a committed workflow.
+# =============================================================================
+
+name: Security Scan
+
+on:
+  pull_request:
+    branches: [main, preview, dev]
+  schedule:
+    # Weekly, Monday 06:00 UTC – re-audits unchanged deps against fresh advisories.
+    - cron: '0 6 * * 1'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  # ---------------------------------------------------------------------------
+  # pip-audit – Python dependency advisories.
+  # Audits the requirement files directly (no install), so the heavy ML stack
+  # is not resolved here. requirements-ml.txt is intentionally skipped: it
+  # pulls torch from the pytorch extra index (see its header comment), which is
+  # slow and network-fragile to resolve; the base + dev + gateway files cover
+  # every dependency shipped in the default install.
+  # ---------------------------------------------------------------------------
+  pip-audit:
+    name: pip-audit (Python deps)
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+          cache: 'pip'
+
+      - name: Install pip-audit
+        run: pip install pip-audit
+
+      - name: Audit backend base requirements
+        continue-on-error: true
+        run: |
+          echo "## pip-audit — backend/requirements.txt" >> "$GITHUB_STEP_SUMMARY"
+          pip-audit -r backend/requirements.txt -f markdown 2>&1 | tee -a "$GITHUB_STEP_SUMMARY"
+
+      - name: Audit backend dev requirements
+        continue-on-error: true
+        run: |
+          echo "## pip-audit — backend/requirements-dev.txt" >> "$GITHUB_STEP_SUMMARY"
+          pip-audit -r backend/requirements-dev.txt -f markdown 2>&1 | tee -a "$GITHUB_STEP_SUMMARY"
+
+      - name: Audit gateway requirements
+        continue-on-error: true
+        run: |
+          echo "## pip-audit — services/mcp_oauth_gateway/requirements.txt" >> "$GITHUB_STEP_SUMMARY"
+          pip-audit -r services/mcp_oauth_gateway/requirements.txt -f markdown 2>&1 | tee -a "$GITHUB_STEP_SUMMARY"
+
+  # ---------------------------------------------------------------------------
+  # npm audit – JS dependency advisories. The root lockfile covers all three
+  # workspaces, so a single root audit reports across web, widget and canvas.
+  # --omit=dev limits the report to dependencies that ship at runtime.
+  # ---------------------------------------------------------------------------
+  npm-audit:
+    name: npm audit (JS deps)
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set up Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      - name: Audit production dependencies
+        continue-on-error: true
+        run: |
+          echo "## npm audit (--omit=dev, all workspaces)" >> "$GITHUB_STEP_SUMMARY"
+          npm audit --omit=dev 2>&1 | tee -a "$GITHUB_STEP_SUMMARY"
+
+  # ---------------------------------------------------------------------------
+  # bandit – Python static application security testing (SAST). Scans the
+  # backend and gateway source for common insecure patterns. Test directories
+  # are excluded (asserts and fixtures produce noise). Reporting-first like the
+  # audits above: -ll limits to medium+ severity and the step never fails the
+  # build, so a finding shows in the job summary without blocking a merge.
+  # ---------------------------------------------------------------------------
+  bandit:
+    name: bandit (Python SAST)
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+          cache: 'pip'
+
+      - name: Install bandit
+        run: pip install bandit
+
+      - name: Run bandit (medium+ severity, non-blocking)
+        continue-on-error: true
+        run: |
+          echo "## bandit (backend + services, medium+ severity)" >> "$GITHUB_STEP_SUMMARY"
+          echo '```' >> "$GITHUB_STEP_SUMMARY"
+          bandit -r backend services \
+            -x '*/tests/*,*/test_*.py' \
+            -ll 2>&1 | tee -a "$GITHUB_STEP_SUMMARY"
+          echo '```' >> "$GITHUB_STEP_SUMMARY"
+
+  # ---------------------------------------------------------------------------
+  # gitleaks – secret scanning over the full git history. Complements GitHub's
+  # native secret scanning (a repo setting) with a committed, self-contained
+  # check via the maintained gitleaks-action (which manages the binary version).
+  # Reporting-first like the jobs above: continue-on-error keeps a hit from
+  # failing the workflow — it surfaces in the step annotations / logs instead.
+  # Promote to blocking (and add to branch protection) once history is clean.
+  # ---------------------------------------------------------------------------
+  gitleaks:
+    name: gitleaks (secret scan)
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+        with:
+          # Full history so gitleaks scans every commit, not just the tip.
+          fetch-depth: 0
+
+      - name: Run gitleaks (non-blocking)
+        continue-on-error: true
+        uses: gitleaks/gitleaks-action@v2
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

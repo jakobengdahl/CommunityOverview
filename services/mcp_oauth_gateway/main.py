@@ -44,10 +44,14 @@ logger = logging.getLogger(__name__)
 app = FastAPI(title="MCP OAuth Gateway", version="1.0.0")
 
 # CORS – required for browser-based MCP clients (MCPJam, ChatGPT plugin preview, etc.)
+# Credentials cannot be allowed when wildcard origins are used per the CORS spec;
+# a wildcard+credentials combination is a security risk on token endpoints.
+_cors_origins = config.CORS_ALLOWED_ORIGINS
+_allow_credentials = "*" not in _cors_origins
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
-    allow_credentials=True,
+    allow_origins=_cors_origins,
+    allow_credentials=_allow_credentials,
     allow_methods=["*"],
     allow_headers=["*"],
     expose_headers=["*"],
@@ -56,6 +60,128 @@ app.add_middleware(
 # In-memory Dynamic Client Registration store (RFC 7591)
 # Keyed by client_id → registration dict
 dcr_clients: dict[str, dict] = {}
+
+# Bounds on the DCR store so the unauthenticated /register endpoint cannot grow
+# it without limit (memory-growth DoS). Registrations expire after the TTL, and
+# the oldest are evicted once the cap is reached.
+MAX_DCR_CLIENTS = 1000
+DCR_CLIENT_TTL_SECONDS = 30 * 24 * 3600  # 30 days
+
+# Per-client-IP token-bucket rate limit on the unauthenticated /register
+# endpoint so it cannot be flooded (the store cap above bounds memory; this
+# bounds request rate). Legitimate MCP clients register once per connection, so
+# a generous budget never affects them.
+REGISTER_RATE_CAPACITY = 20.0  # burst
+REGISTER_RATE_REFILL_PER_SEC = 0.2  # ~12 registrations/min sustained
+_REGISTER_BUCKET_IDLE_TTL = 3600.0  # drop an IP's bucket after 1 h of silence
+# Hard ceiling on the bucket map so the limiter's own state cannot be grown
+# without bound by a many-IP (distributed) flood, where idle eviction alone
+# frees nothing because every bucket is fresh. Mirrors the dcr_clients cap.
+_MAX_REGISTER_BUCKETS = 20_000
+
+_register_buckets: dict[str, tuple[float, float]] = {}  # ip -> (tokens, last_ts)
+
+
+def _client_ip(request: Request) -> str:
+    """Best-effort client IP for rate limiting.
+
+    The real client IP is read as the ``TRUSTED_PROXY_HOPS``-th entry from the
+    right of ``X-Forwarded-For`` — the address the outermost trusted proxy
+    recorded. Client-supplied entries sit further left and are ignored, so the
+    key cannot be spoofed to mint a fresh budget. Falls back to the socket peer
+    for direct/local execution where no ``X-Forwarded-For`` header is present.
+    """
+    forwarded = request.headers.get("x-forwarded-for", "")
+    parts = [p.strip() for p in forwarded.split(",") if p.strip()]
+    if parts:
+        hops = max(1, config.TRUSTED_PROXY_HOPS)
+        return parts[max(0, len(parts) - hops)]
+    return request.client.host if request.client else "unknown"
+
+
+def _prune_register_buckets(now: float) -> None:
+    """Bound the bucket map: drop idle keys, then hard-evict oldest if still over."""
+    if len(_register_buckets) < _MAX_REGISTER_BUCKETS:
+        return
+    cutoff = now - _REGISTER_BUCKET_IDLE_TTL
+    for stale in [ip for ip, (_, ts) in _register_buckets.items() if ts < cutoff]:
+        del _register_buckets[stale]
+    if len(_register_buckets) >= _MAX_REGISTER_BUCKETS:
+        # Active many-IP flood: nothing is idle, so evict oldest-seen first.
+        overflow = len(_register_buckets) - _MAX_REGISTER_BUCKETS + 1
+        for ip, _entry in sorted(
+            _register_buckets.items(), key=lambda kv: kv[1][1]
+        )[:overflow]:
+            del _register_buckets[ip]
+
+
+def _check_register_rate(request: Request) -> None:
+    """Consume one token for the caller's IP, raising 429 when the budget is spent."""
+    now = time.monotonic()
+    _prune_register_buckets(now)
+
+    ip = _client_ip(request)
+    tokens, last = _register_buckets.get(ip, (REGISTER_RATE_CAPACITY, now))
+    tokens = min(
+        REGISTER_RATE_CAPACITY,
+        tokens + (now - last) * REGISTER_RATE_REFILL_PER_SEC,
+    )
+    if tokens < 1.0:
+        _register_buckets[ip] = (tokens, now)
+        raise HTTPException(status_code=429, detail="registration rate limit exceeded")
+    _register_buckets[ip] = (tokens - 1.0, now)
+
+
+def _prune_dcr_clients() -> None:
+    """Drop expired registrations and enforce the size cap (oldest-first)."""
+    now = int(time.time())
+    expired = [
+        cid
+        for cid, reg in dcr_clients.items()
+        if now >= reg.get("client_id_expires_at", 0)
+    ]
+    for cid in expired:
+        del dcr_clients[cid]
+
+    if len(dcr_clients) >= MAX_DCR_CLIENTS:
+        # Evict the oldest registrations until we are back under the cap.
+        ordered = sorted(
+            dcr_clients.items(), key=lambda kv: kv[1].get("client_id_issued_at", 0)
+        )
+        for cid, _reg in ordered[: len(dcr_clients) - MAX_DCR_CLIENTS + 1]:
+            del dcr_clients[cid]
+
+
+def _is_loopback_redirect(redirect_uri: str) -> bool:
+    """Return True for RFC 8252 loopback redirect URIs (localhost / 127.0.0.1)."""
+    host = urllib.parse.urlparse(redirect_uri).hostname or ""
+    return host in ("127.0.0.1", "::1", "localhost")
+
+
+def _redirect_uri_allowed(redirect_uri: str) -> bool:
+    """Return True when the gateway may send an auth code to *redirect_uri*.
+
+    Loopback URIs are always allowed (local dev). When
+    ``ALLOWED_REDIRECT_ORIGINS`` is configured, the URI must start with one of
+    the allowed scheme://host[:port] prefixes. When the list is empty the
+    gateway stays permissive (legacy behaviour) but logs a warning, so an
+    operator can lock this down without a code change.
+    """
+    if not redirect_uri:
+        return False
+    if _is_loopback_redirect(redirect_uri):
+        return True
+    if not config.ALLOWED_REDIRECT_ORIGINS:
+        logger.warning(
+            "ALLOWED_REDIRECT_ORIGINS is not set — accepting redirect_uri without "
+            "an allow-list. Set it in production to prevent auth-code interception."
+        )
+        return True
+    normalized = redirect_uri.rstrip("/")
+    return any(
+        normalized == origin or redirect_uri.startswith(origin + "/")
+        for origin in config.ALLOWED_REDIRECT_ORIGINS
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -70,13 +196,19 @@ class ClientRegistrationRequest(BaseModel):
 
 
 @app.post("/register")
-async def register_client(body: ClientRegistrationRequest) -> JSONResponse:
+async def register_client(
+    request: Request, body: ClientRegistrationRequest
+) -> JSONResponse:
     """Register a new OAuth client dynamically (RFC 7591).
 
     No client_secret is issued – PKCE (S256) is the security mechanism.
     """
+    _check_register_rate(request)
+
     if not body.redirect_uris:
         raise HTTPException(status_code=400, detail="redirect_uris is required and must not be empty")
+
+    _prune_dcr_clients()
 
     client_id = str(uuid.uuid4())
     issued_at = int(time.time())
@@ -84,6 +216,7 @@ async def register_client(body: ClientRegistrationRequest) -> JSONResponse:
     registration = {
         "client_id": client_id,
         "client_id_issued_at": issued_at,
+        "client_id_expires_at": issued_at + DCR_CLIENT_TTL_SECONDS,
         "redirect_uris": body.redirect_uris,
         "grant_types": body.grant_types,
         "token_endpoint_auth_method": body.token_endpoint_auth_method,
@@ -162,18 +295,27 @@ async def authorize(
             detail="Only code_challenge_method=S256 is supported",
         )
 
+    # Reject redirect targets the gateway is not allowed to send codes to.
+    if not _redirect_uri_allowed(redirect_uri):
+        raise HTTPException(status_code=400, detail="redirect_uri not permitted")
+
+    # A fresh nonce binds this authorization request to the returned ID token
+    # (OIDC replay defence); it is carried in the gateway state so the callback
+    # can assert the token echoes it back.
+    nonce = str(uuid.uuid4())
+
     # Encode gateway state so we can recover it in the callback.
-    # Format: <original_state>|<code_challenge>|<redirect_uri>
+    # Format: <original_state>|<code_challenge>|<redirect_uri>|<nonce>
     # All parts are URL-encoded individually to avoid delimiter collisions.
     gateway_state = "|".join(
         [
             urllib.parse.quote(state, safe=""),
             urllib.parse.quote(code_challenge, safe=""),
             urllib.parse.quote(redirect_uri, safe=""),
+            urllib.parse.quote(nonce, safe=""),
         ]
     )
 
-    nonce = str(uuid.uuid4())
     google_url = auth.build_google_auth_url(state=gateway_state, nonce=nonce)
 
     logger.info("Redirecting to Google for authorization (state prefix: %s...)", state[:8])
@@ -205,17 +347,23 @@ async def callback(
     if not code or not state:
         raise HTTPException(status_code=400, detail="Missing code or state from Google")
 
-    # Decode gateway state: <original_state>|<code_challenge>|<redirect_uri>
+    # Decode gateway state: <original_state>|<code_challenge>|<redirect_uri>|<nonce>
     parts = state.split("|")
-    if len(parts) != 3:
+    if len(parts) != 4:
         raise HTTPException(status_code=400, detail="Invalid state parameter")
 
     original_state = urllib.parse.unquote(parts[0])
     code_challenge = urllib.parse.unquote(parts[1])
     redirect_uri = urllib.parse.unquote(parts[2])
+    nonce = urllib.parse.unquote(parts[3])
 
-    # Exchange Google code for user's email
-    email = await auth.exchange_google_code(code)
+    # Re-validate the redirect target: the state is attacker-influenced, so the
+    # allow-list check at /authorize must not be trusted to carry through.
+    if not _redirect_uri_allowed(redirect_uri):
+        raise HTTPException(status_code=400, detail="redirect_uri not permitted")
+
+    # Exchange Google code for user's email, verifying the ID token nonce.
+    email = await auth.exchange_google_code(code, expected_nonce=nonce)
     if email is None:
         raise HTTPException(status_code=400, detail="Failed to retrieve user info from Google")
 
@@ -326,6 +474,14 @@ def _require_valid_token(request: Request) -> dict:
     claims = auth.validate_token(token)
     if claims is None:
         raise HTTPException(status_code=401, detail="Invalid or expired token")
+
+    # Re-check the allow-list on every request so removing a user from
+    # TEST_USERS revokes their access immediately, even though the gateway's
+    # access tokens are long-lived and otherwise non-revocable.
+    subject = claims.get("sub", "")
+    if not auth.is_user_allowed(subject):
+        logger.warning("Token subject %s is no longer allow-listed", subject)
+        raise HTTPException(status_code=401, detail="User is no longer authorized")
 
     return claims
 

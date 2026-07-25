@@ -6,9 +6,17 @@ Provides consistent serialization of graph objects for API responses.
 
 import json
 from datetime import datetime
-from typing import Any, Dict, List, Union
+from typing import Any, Dict, List
 
-from backend.core import Node, Edge, SimilarNode, GraphStats, AddNodesResult, DeleteNodesResult
+from backend.core import (
+    Node,
+    Edge,
+    SimilarNode,
+    GraphStats,
+    AddNodesResult,
+    DeleteNodesResult,
+    DeleteEdgesResult,
+)
 
 
 def json_serializer(obj: Any) -> Any:
@@ -38,7 +46,7 @@ def serialize_node(node: Node) -> Dict[str, Any]:
     Serialize a Node to a dictionary.
     Excludes large internal fields like 'embedding'.
     """
-    return serialize_to_json(node.model_dump(exclude={'embedding'}))
+    return serialize_to_json(node.model_dump(exclude={"embedding"}))
 
 
 def serialize_edge(edge: Edge) -> Dict[str, Any]:
@@ -61,7 +69,7 @@ def serialize_similar_node(similar: SimilarNode) -> Dict[str, Any]:
     return {
         "node": serialize_node(similar.node),
         "similarity_score": similar.similarity_score,
-        "match_reason": similar.match_reason
+        "match_reason": similar.match_reason,
     }
 
 
@@ -82,4 +90,9 @@ def serialize_add_result(result: AddNodesResult) -> Dict[str, Any]:
 
 def serialize_delete_result(result: DeleteNodesResult) -> Dict[str, Any]:
     """Serialize DeleteNodesResult to a dictionary."""
+    return result.model_dump()
+
+
+def serialize_delete_edges_result(result: DeleteEdgesResult) -> Dict[str, Any]:
+    """Serialize DeleteEdgesResult to a dictionary."""
     return result.model_dump()

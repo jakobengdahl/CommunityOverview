@@ -5,8 +5,6 @@ Replaces the previous PyMuPDF (fitz) dependency with the permissively-licensed
 pypdf library for extracting text content from PDF files.
 """
 
-from typing import Optional
-
 
 def extract_text_from_pdf_path(path: str) -> str:
     """

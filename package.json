@@ -19,6 +19,20 @@
     "test:python": "python -m pytest backend",
     "test:integration": "python -m pytest backend/service/tests/test_integration_rest_vs_mcp.py -v",
     "test:all": "npm run test:python && npm run test:unit",
-    "dev": "npm run dev -w @community-graph/web"
+    "dev": "npm run dev -w @community-graph/web",
+    "lint": "eslint \"frontend/**/*.{js,jsx}\" \"packages/**/*.{js,jsx}\"",
+    "lint:fix": "eslint --fix \"frontend/**/*.{js,jsx}\" \"packages/**/*.{js,jsx}\"",
+    "format": "prettier --write \"frontend/**/*.{js,jsx,css}\" \"packages/**/*.{js,jsx,css}\"",
+    "format:check": "prettier --check \"frontend/**/*.{js,jsx,css}\" \"packages/**/*.{js,jsx,css}\""
+  },
+  "devDependencies": {
+    "@eslint/js": "9.39.5",
+    "eslint": "9.39.5",
+    "eslint-config-prettier": "10.1.8",
+    "eslint-plugin-react": "7.37.5",
+    "eslint-plugin-react-hooks": "7.1.1",
+    "eslint-plugin-react-refresh": "0.5.3",
+    "globals": "17.7.0",
+    "prettier": "3.9.5"
   }
 }

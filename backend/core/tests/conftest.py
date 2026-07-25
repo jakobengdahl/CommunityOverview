@@ -9,7 +9,7 @@ def pytest_configure(config):
     """Configure custom markers"""
     config.addinivalue_line(
         "markers",
-        "slow: marks tests as slow (require model loading, deselect with '-m \"not slow\"')"
+        "slow: marks tests as slow (require model loading, deselect with '-m \"not slow\"')",
     )
 
 

@@ -15,23 +15,55 @@ Usage:
     tools_map = register_mcp_tools(mcp, service)
 """
 
+import secrets
 from typing import List, Optional, Dict, Any, Callable
 
 from .service import GraphService
 
 
-def register_mcp_tools(mcp, service: GraphService) -> Dict[str, Callable]:
+def register_mcp_tools(
+    mcp, service: GraphService, session_registry=None, session_manager=None
+) -> Dict[str, Callable]:
     """
     Register all GraphService methods as MCP tools.
 
     Args:
         mcp: FastMCP instance to register tools with
         service: GraphService instance to use for operations
+        session_registry: legacy single-consumer visualization push registry
+        session_manager: new shared-session manager; pushes are additionally
+            broadcast to its hub subscribers so an AI agent is just another
+            collaborator (design 3.8)
 
     Returns:
         Dict mapping tool names to their functions (for ChatProcessor)
     """
     tools_map = {}
+
+    def _push(session_id, tool_name, result):
+        _push_to_session(
+            session_registry, session_id, tool_name, result, session_manager
+        )
+
+    def _session_view_state(session_id):
+        """Return ``(visible_node_ids, selected_node_ids)`` as the server sees them.
+
+        Session state is server-owned (design §3.8): visible nodes come from the
+        shared-session store's node references, the current selection from the
+        advisory claim map. The browser no longer uploads canvas state — an MCP
+        tool reads the same state every collaborator converges on.
+        """
+        visible: list = []
+        selected: list = []
+        if session_manager is not None:
+            session = session_manager.get_session(session_id)
+            if session is not None:
+                hidden = set(session.state.get("hidden_node_ids", []))
+                visible = [
+                    n for n in session.state.get("node_refs", []) if n not in hidden
+                ]
+            selected = list(session_manager.claimed_elements(session_id))
+        return visible, selected
 
     def register_tool(func: Callable) -> Callable:
         """Register a function as both MCP tool and in tools_map."""
@@ -47,7 +79,8 @@ def register_mcp_tools(mcp, service: GraphService) -> Dict[str, Callable]:
         node_types: Optional[List[str]] = None,
         limit: int = 50,
         action: Optional[str] = None,
-        federation_depth: Optional[int] = None
+        federation_depth: Optional[int] = None,
+        visualization_session_id: Optional[str] = None,
     ) -> Dict[str, Any]:
         """
         Search for nodes in the graph based on text query
@@ -57,17 +90,21 @@ def register_mcp_tools(mcp, service: GraphService) -> Dict[str, Callable]:
             node_types: List of node types to filter on (Actor, Initiative, etc.)
             limit: Max number of results (default 50)
             action: Optional action for frontend ('add_to_visualization' to add to current view)
+            visualization_session_id: Optional browser session ID — when provided, the result
+                is pushed live to the connected browser window via SSE
 
         Returns:
             Dict with matching nodes and edges connecting them
         """
-        return service.search_graph(
+        result = service.search_graph(
             query=query,
             node_types=node_types,
             limit=limit,
             action=action,
-            federation_depth=federation_depth
+            federation_depth=federation_depth,
         )
+        _push(visualization_session_id, "search_graph", result)
+        return result
 
     @register_tool
     def get_node_details(node_id: str) -> Dict[str, Any]:
@@ -86,7 +123,8 @@ def register_mcp_tools(mcp, service: GraphService) -> Dict[str, Callable]:
     def get_related_nodes(
         node_id: str,
         relationship_types: Optional[List[str]] = None,
-        depth: int = 1
+        depth: int = 1,
+        visualization_session_id: Optional[str] = None,
     ) -> Dict[str, Any]:
         """
         Get nodes connected to the given node
@@ -95,15 +133,19 @@ def register_mcp_tools(mcp, service: GraphService) -> Dict[str, Callable]:
             node_id: ID of the starting node
             relationship_types: List of relationship types to filter on
             depth: How many hops from the starting node (default 1)
+            visualization_session_id: Optional browser session ID — when provided, the result
+                is pushed live to the connected browser window via SSE
 
         Returns:
             Dict with nodes and edges
         """
-        return service.get_related_nodes(
+        result = service.get_related_nodes(
             node_id=node_id,
             relationship_types=relationship_types,
-            depth=depth
+            depth=depth,
         )
+        _push(visualization_session_id, "get_related_nodes", result)
+        return result
 
     # ==================== Similarity Tools ====================
 
@@ -112,7 +154,7 @@ def register_mcp_tools(mcp, service: GraphService) -> Dict[str, Callable]:
         name: str,
         node_type: Optional[str] = None,
         threshold: float = 0.7,
-        limit: int = 5
+        limit: int = 5,
     ) -> Dict[str, Any]:
         """
         Find similar nodes based on name (for duplicate detection)
@@ -127,10 +169,7 @@ def register_mcp_tools(mcp, service: GraphService) -> Dict[str, Callable]:
             Dict with similar nodes and similarity scores
         """
         return service.find_similar_nodes(
-            name=name,
-            node_type=node_type,
-            threshold=threshold,
-            limit=limit
+            name=name, node_type=node_type, threshold=threshold, limit=limit
         )
 
     @register_tool
@@ -138,7 +177,7 @@ def register_mcp_tools(mcp, service: GraphService) -> Dict[str, Callable]:
         names: List[str],
         node_type: Optional[str] = None,
         threshold: float = 0.7,
-        limit: int = 5
+        limit: int = 5,
     ) -> Dict[str, Any]:
         """
         Find similar nodes for multiple names at once (batch processing)
@@ -157,10 +196,7 @@ def register_mcp_tools(mcp, service: GraphService) -> Dict[str, Callable]:
             Dict with results for each name
         """
         return service.find_similar_nodes_batch(
-            names=names,
-            node_type=node_type,
-            threshold=threshold,
-            limit=limit
+            names=names, node_type=node_type, threshold=threshold, limit=limit
         )
 
     # ==================== CRUD Tools ====================
@@ -181,6 +217,7 @@ def register_mcp_tools(mcp, service: GraphService) -> Dict[str, Callable]:
           - summary: optional, max 300 characters (short text for visualization)
           - tags: optional list of strings
           - subtypes: optional list of strings for sub-classification within the node type
+          - aliases: optional list of alternative names/synonyms; also matched in search
 
         Edge type is optional. If omitted, it defaults to "RELATES_TO".
 
@@ -213,7 +250,7 @@ def register_mcp_tools(mcp, service: GraphService) -> Dict[str, Callable]:
 
         Args:
             node_id: ID of the node to update
-            updates: Dict with fields to update (name, description, summary, tags, metadata)
+            updates: Dict with fields to update (name, description, summary, tags, aliases, metadata)
             event_session_id: Optional session ID for webhook loop prevention
             event_correlation_id: Optional correlation ID for chaining events
 
@@ -251,6 +288,33 @@ def register_mcp_tools(mcp, service: GraphService) -> Dict[str, Callable]:
         """
         return service.delete_nodes(
             node_ids=node_ids,
+            confirmed=confirmed,
+            event_origin="mcp",
+            event_session_id=event_session_id,
+            event_correlation_id=event_correlation_id,
+        )
+
+    @register_tool
+    def delete_edges(
+        edge_ids: List[str],
+        confirmed: bool = False,
+        event_session_id: Optional[str] = None,
+        event_correlation_id: Optional[str] = None,
+    ) -> Dict[str, Any]:
+        """
+        Delete edges from the graph (max 50 at a time)
+
+        Args:
+            edge_ids: List of edge IDs to delete
+            confirmed: Must be True to execute deletion
+            event_session_id: Optional session ID for webhook loop prevention
+            event_correlation_id: Optional correlation ID for chaining events
+
+        Returns:
+            Dict with result (deleted_edge_ids, success, message)
+        """
+        return service.delete_edges(
+            edge_ids=edge_ids,
             confirmed=confirmed,
             event_origin="mcp",
             event_session_id=event_session_id,
@@ -329,6 +393,72 @@ def register_mcp_tools(mcp, service: GraphService) -> Dict[str, Callable]:
         """
         return service.get_presentation()
 
+    @register_tool
+    def get_capabilities() -> Dict[str, Any]:
+        """Get the public capability manifest for client discovery."""
+        return service.get_capabilities()
+
+    @register_tool
+    def get_runtime_info() -> Dict[str, Any]:
+        """Get the public runtime metadata for deployment introspection."""
+        return service.get_runtime_info()
+
+    @register_tool
+    def get_tenant_context() -> Dict[str, Any]:
+        """Get the tenant/deployment context metadata.
+
+        Returns the tenant identifier, name, and deployment environment
+        for this CommunityOverview instance.
+
+        Returns:
+            Dict with tenant_id, tenant_name, and environment
+        """
+        return service.get_tenant_context()
+
+    @register_tool
+    def get_config_context() -> Dict[str, Any]:
+        """Get the effective config scope and non-sensitive config source metadata."""
+        return service.get_config_context()
+
+    @register_tool
+    def get_request_actor(
+        actor_id: Optional[str] = None,
+        actor_type: Optional[str] = None,
+        auth_source: Optional[str] = None,
+    ) -> Dict[str, Any]:
+        """Get the public request actor context with optional safe overrides."""
+        return service.get_request_actor_info(
+            actor_id=actor_id,
+            actor_type=actor_type,
+            auth_source=auth_source,
+        )
+
+    @register_tool
+    def get_request_scope(
+        workspace_id: Optional[str] = None,
+        workspace_kind: Optional[str] = None,
+        graph_id: Optional[str] = None,
+    ) -> Dict[str, Any]:
+        """Get the public workspace/graph scope context with optional safe overrides."""
+        return service.get_request_scope_info(
+            workspace_id=workspace_id,
+            workspace_kind=workspace_kind,
+            graph_id=graph_id,
+        )
+
+    @register_tool
+    def get_request_selection(
+        workspace_id: Optional[str] = None,
+        workspace_kind: Optional[str] = None,
+        graph_id: Optional[str] = None,
+    ) -> Dict[str, Any]:
+        """Get the public graph/workspace selection summary with optional safe overrides."""
+        return service.get_request_graph_selection_info(
+            workspace_id=workspace_id,
+            workspace_kind=workspace_kind,
+            graph_id=graph_id,
+        )
+
     # ==================== Saved Views Tools ====================
 
     @register_tool
@@ -350,7 +480,10 @@ def register_mcp_tools(mcp, service: GraphService) -> Dict[str, Callable]:
         return service.save_view(name)
 
     @register_tool
-    def get_saved_view(name: str) -> Dict[str, Any]:
+    def get_saved_view(
+        name: str,
+        visualization_session_id: Optional[str] = None,
+    ) -> Dict[str, Any]:
         """
         Get a saved view by name and load its content for display.
 
@@ -363,11 +496,15 @@ def register_mcp_tools(mcp, service: GraphService) -> Dict[str, Callable]:
 
         Args:
             name: Name of the saved view
+            visualization_session_id: Optional browser session ID — when provided, the view
+                is loaded live in the connected browser window via SSE
 
         Returns:
             The nodes and edges to display in the visualization, with position and hidden node data
         """
-        return service.get_saved_view(name)
+        result = service.get_saved_view(name)
+        _push(visualization_session_id, "get_saved_view", result)
+        return result
 
     @register_tool
     def list_saved_views() -> Dict[str, Any]:
@@ -383,4 +520,165 @@ def register_mcp_tools(mcp, service: GraphService) -> Dict[str, Callable]:
         """
         return service.list_saved_views()
 
+    # ==================== Visualization Session Tools ====================
+
+    @register_tool
+    def clear_visualization(visualization_session_id: str) -> Dict[str, Any]:
+        """
+        Clear all nodes, edges, and annotations from the visualization canvas.
+
+        Removes everything currently displayed in the browser window without
+        affecting the underlying graph data. Use this to start a fresh view.
+
+        Args:
+            visualization_session_id: The browser session ID shown in the header
+                (e.g. "8244-1742")
+
+        Returns:
+            Dict with success status and message
+        """
+        if not session_registry:
+            return {"success": False, "error": "Session registry not available"}
+        if not session_registry.is_valid_session_id(visualization_session_id):
+            return {
+                "success": False,
+                "error": "Invalid session ID format — expected DDDD-DDDD-DDDD-DDDD",
+            }
+        if not session_registry.session_exists(visualization_session_id):
+            return {
+                "success": False,
+                "error": (
+                    f"Session '{visualization_session_id}' not found. "
+                    "Call connect_to_visualization_session first to verify the session is open."
+                ),
+            }
+        result = {
+            "action": "clear_visualization",
+            "nodes": [],
+            "edges": [],
+            "success": True,
+        }
+        _push(visualization_session_id, "clear_visualization", result)
+        return {
+            "success": True,
+            "message": f"Canvas cleared in session '{visualization_session_id}'",
+        }
+
+    @register_tool
+    def connect_to_visualization_session(session_id: str) -> Dict[str, Any]:
+        """
+        Verify that a browser visualization session is open and ready.
+
+        Use this tool first to confirm the session ID before using the
+        visualization_session_id parameter in other tools.
+
+        Args:
+            session_id: The session ID shown in the browser header (e.g. "8244-1742")
+
+        Returns:
+            Dict with connected status and current canvas summary
+        """
+        if not session_registry:
+            return {"connected": False, "error": "Session registry not available"}
+        if not session_registry.is_valid_session_id(session_id):
+            return {
+                "connected": False,
+                "error": "Invalid session ID format — expected DDDD-DDDD-DDDD-DDDD",
+            }
+        if not session_registry.session_exists(session_id):
+            return {
+                "connected": False,
+                "message": (
+                    f"Session '{session_id}' not found. "
+                    "Open the application in a browser and use the displayed session ID."
+                ),
+            }
+        visible, _ = _session_view_state(session_id)
+        return {
+            "connected": True,
+            "session_id": session_id,
+            "message": (
+                f"Session '{session_id}' is active. "
+                "You can now pass visualization_session_id to search_graph, "
+                "get_related_nodes, get_saved_view, and clear_visualization."
+            ),
+            "visible_node_count": len(visible),
+        }
+
+    @register_tool
+    def get_visualization_session_state(session_id: str) -> Dict[str, Any]:
+        """
+        Get the current visualization state from an open browser session.
+
+        Returns the node IDs currently displayed and selected in the canvas.
+        Use this to understand what the user is looking at before deciding
+        which nodes to add or which view to load.
+
+        Args:
+            session_id: The session ID shown in the browser header (e.g. "8244-1742")
+
+        Returns:
+            Dict with visible_node_ids, selected_node_ids, and node_count
+        """
+        if not session_registry:
+            return {"error": "Session registry not available"}
+        if not session_registry.is_valid_session_id(session_id):
+            return {"error": "Invalid session ID format — expected DDDD-DDDD-DDDD-DDDD"}
+        if not session_registry.session_exists(session_id):
+            return {
+                "error": (
+                    f"Session '{session_id}' not found. "
+                    "Call connect_to_visualization_session first to verify the session is open."
+                )
+            }
+        visible, selected = _session_view_state(session_id)
+        return {
+            "session_id": session_id,
+            "visible_node_ids": visible,
+            "selected_node_ids": selected,
+            "node_count": len(visible),
+        }
+
     return tools_map
+
+
+def _push_to_session(
+    session_registry,
+    session_id: Optional[str],
+    tool_name: str,
+    result: Dict[str, Any],
+    session_manager=None,
+) -> None:
+    """Push *result* to a browser session if *session_id* is set.
+
+    When the result has nodes but no explicit *action*, defaults to
+    "add_to_visualization" so external AI tools add to the canvas rather
+    than silently replacing it.
+
+    The command goes to the legacy single-consumer registry (current frontend)
+    and, when a *session_manager* is supplied, is also broadcast to the new
+    shared-session hub so every connected collaborator receives it (design 3.8).
+    """
+    if not session_id:
+        return
+    command_result = dict(result)
+    if "action" not in command_result and command_result.get("nodes"):
+        command_result["action"] = "add_to_visualization"
+    # A unique id lets the browser dedupe the legacy stream and the hub
+    # broadcast delivering the same push during the handover between them
+    # (design §8.1 R5) without mistaking a later, genuinely repeated command
+    # for a duplicate of this one.
+    command = {
+        "type": "tool_result",
+        "tool": tool_name,
+        "result": command_result,
+        "command_id": secrets.token_hex(8),
+    }
+    if session_registry and session_registry.is_valid_session_id(session_id):
+        session_registry.push_command_sync(session_id, command)
+    if session_manager is not None:
+        try:
+            session_manager.push_command(session_id, command)
+        except Exception:
+            # Best-effort mirror to the hub; never break the legacy push path.
+            pass

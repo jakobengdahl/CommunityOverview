@@ -7,10 +7,7 @@ if the model is not available.
 """
 
 import pytest
-import tempfile
-import os
-from pathlib import Path
-from unittest.mock import Mock, patch
+from unittest.mock import patch
 import numpy as np
 
 from backend.core.vector_store import VectorStore
@@ -29,12 +26,27 @@ def temp_vector_store():
 def sample_nodes():
     """Create sample nodes for testing"""
     return [
-        Node(id="node-1", type=NodeType.ACTOR, name="Swedish Government",
-             description="The government of Sweden", tags=["government", "sweden"]),
-        Node(id="node-2", type=NodeType.ACTOR, name="Norwegian Government",
-             description="The government of Norway", tags=["government", "norway"]),
-        Node(id="node-3", type=NodeType.INITIATIVE, name="Digital Transformation",
-             description="A digital transformation initiative", tags=["digital", "technology"]),
+        Node(
+            id="node-1",
+            type=NodeType.ACTOR,
+            name="Swedish Government",
+            description="The government of Sweden",
+            tags=["government", "sweden"],
+        ),
+        Node(
+            id="node-2",
+            type=NodeType.ACTOR,
+            name="Norwegian Government",
+            description="The government of Norway",
+            tags=["government", "norway"],
+        ),
+        Node(
+            id="node-3",
+            type=NodeType.INITIATIVE,
+            name="Digital Transformation",
+            description="A digital transformation initiative",
+            tags=["digital", "technology"],
+        ),
     ]
 
 
@@ -64,7 +76,7 @@ class TestVectorStoreTextRepresentation:
             name="Test Actor",
             description="A test description",
             summary="Test summary",
-            tags=["tag1", "tag2"]
+            tags=["tag1", "tag2"],
         )
 
         text = temp_vector_store._get_text_representation(node)
@@ -175,9 +187,7 @@ class TestVectorStoreSearch:
         temp_vector_store.update_nodes_embeddings(sample_nodes)
 
         results = temp_vector_store.search(
-            query_text="government",
-            threshold=0.5,
-            limit=5
+            query_text="government", threshold=0.5, limit=5
         )
 
         # All results should be above threshold
@@ -267,6 +277,69 @@ class TestVectorStoreMatrix:
         assert temp_vector_store.node_ids == []
 
 
+class TestVectorStoreNumpySearch:
+    """Semantic search runs on numpy alone — no ML extras (torch /
+    sentence-transformers) required. Regression for STRUCTURE_REVIEW.md A2,
+    which moved those extras out of the base requirements."""
+
+    def _store_with_embeddings(self):
+        # Deterministic embeddings set directly on the nodes, so no embedding
+        # model is loaded at any point in these tests.
+        nodes = [
+            Node(id="n1", type=NodeType.ACTOR, name="A"),
+            Node(id="n2", type=NodeType.ACTOR, name="B"),
+            Node(id="n3", type=NodeType.ACTOR, name="C"),
+        ]
+        nodes[0].embedding = [1.0, 0.0, 0.0]
+        nodes[1].embedding = [0.9, 0.1, 0.0]
+        nodes[2].embedding = [0.0, 0.0, 1.0]
+        store = VectorStore()
+        store.rebuild_index(nodes)
+        return store, nodes
+
+    def test_cosine_similarity_matrix_matches_expected(self):
+        from backend.core.vector_store import _cosine_similarity_matrix
+
+        store, _ = self._store_with_embeddings()
+        query = np.array([[1.0, 0.0, 0.0]])
+        sims = _cosine_similarity_matrix(query, store.embedding_matrix)
+
+        assert sims.shape == (3,)
+        assert sims[0] == pytest.approx(1.0, abs=1e-6)  # identical vector
+        assert sims[2] == pytest.approx(0.0, abs=1e-6)  # orthogonal vector
+        assert sims[0] > sims[1] > sims[2]
+
+    def test_search_by_node_uses_numpy_only(self):
+        """Searching by an already-embedded node needs only numpy; the model
+        must never be loaded."""
+        store, nodes = self._store_with_embeddings()
+
+        with patch.object(
+            store, "_load_model", side_effect=AssertionError("model must not load")
+        ):
+            results = store.search(query_node=nodes[0], limit=5)
+
+        result_ids = [node_id for node_id, _ in results]
+        assert "n1" not in result_ids  # query node itself excluded
+        assert result_ids[0] == "n2"  # nearest neighbour ranked first
+
+    def test_search_by_text_degrades_when_model_missing(self):
+        """Query-text search embeds the query with the ML model; when that
+        model is unavailable, search returns no semantic hits instead of
+        raising."""
+        store, _ = self._store_with_embeddings()
+
+        def missing_model():
+            raise ImportError("No module named 'sentence_transformers'")
+
+        with patch.object(store, "_load_model", side_effect=missing_model):
+            results = store.search(query_text="anything", limit=5)
+
+        assert results == []
+
+
 # Skip slow tests by default, run with: pytest -m slow
 def pytest_configure(config):
-    config.addinivalue_line("markers", "slow: marks tests as slow (require model loading)")
+    config.addinivalue_line(
+        "markers", "slow: marks tests as slow (require model loading)"
+    )

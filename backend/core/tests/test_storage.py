@@ -6,10 +6,14 @@ import pytest
 import tempfile
 import os
 import json
-from pathlib import Path
 
 from backend.core import (
-    GraphStorage, Node, Edge, NodeType, RelationshipType
+    FileGraphPersistenceBackend,
+    GraphStorage,
+    Node,
+    Edge,
+    NodeType,
+    RelationshipType,
 )
 
 
@@ -21,6 +25,10 @@ def temp_storage():
         embeddings_path = os.path.join(tmpdir, "test_embeddings.pkl")
         storage = GraphStorage(json_path=json_path, embeddings_path=embeddings_path)
         yield storage
+        # Drain the background ThreadPoolExecutor before the TemporaryDirectory
+        # context manager removes tmpdir — otherwise the executor's in-flight
+        # write of test_graph.json races with directory deletion (OSError ENOTEMPTY).
+        storage.flush()
 
 
 @pytest.fixture
@@ -28,27 +36,80 @@ def storage_with_data(temp_storage):
     """Create a storage instance with sample data"""
     # Add some test nodes
     nodes = [
-        Node(id="actor-1", type=NodeType.ACTOR, name="Test Actor 1",
-             description="First test actor"),
-        Node(id="actor-2", type=NodeType.ACTOR, name="Test Actor 2",
-             description="Second test actor"),
-        Node(id="init-1", type=NodeType.INITIATIVE, name="Test Initiative",
-             description="A test initiative"),
-        Node(id="theme-1", type=NodeType.THEME, name="eSam",
-             description="eSam collaboration theme"),
+        Node(
+            id="actor-1",
+            type=NodeType.ACTOR,
+            name="Test Actor 1",
+            description="First test actor",
+        ),
+        Node(
+            id="actor-2",
+            type=NodeType.ACTOR,
+            name="Test Actor 2",
+            description="Second test actor",
+        ),
+        Node(
+            id="init-1",
+            type=NodeType.INITIATIVE,
+            name="Test Initiative",
+            description="A test initiative",
+        ),
+        Node(
+            id="theme-1",
+            type=NodeType.THEME,
+            name="eSam",
+            description="eSam collaboration theme",
+        ),
     ]
 
     edges = [
-        Edge(id="edge-1", source="actor-1", target="init-1",
-             type=RelationshipType.BELONGS_TO),
-        Edge(id="edge-2", source="actor-2", target="init-1",
-             type=RelationshipType.RELATES_TO),
-        Edge(id="edge-3", source="init-1", target="theme-1",
-             type=RelationshipType.PART_OF),
+        Edge(
+            id="edge-1",
+            source="actor-1",
+            target="init-1",
+            type=RelationshipType.BELONGS_TO,
+        ),
+        Edge(
+            id="edge-2",
+            source="actor-2",
+            target="init-1",
+            type=RelationshipType.RELATES_TO,
+        ),
+        Edge(
+            id="edge-3",
+            source="init-1",
+            target="theme-1",
+            type=RelationshipType.PART_OF,
+        ),
     ]
 
     temp_storage.add_nodes(nodes, edges)
+    temp_storage.flush()  # Wait for async save so tests that reload from disk see all data
     return temp_storage
+
+
+class InMemoryPersistenceBackend:
+    """Test backend used to verify GraphStorage persistence delegation."""
+
+    def __init__(self, initial_data=None, default_name="in-memory-graph"):
+        self.data = initial_data
+        self.default_name_value = default_name
+        self.load_calls = 0
+        self.save_calls = 0
+
+    def exists(self):
+        return self.data is not None
+
+    def load_graph_data(self):
+        self.load_calls += 1
+        return json.loads(json.dumps(self.data))
+
+    def save_graph_data(self, data):
+        self.save_calls += 1
+        self.data = json.loads(json.dumps(data))
+
+    def default_graph_name(self):
+        return self.default_name_value
 
 
 class TestGraphStorageInit:
@@ -103,8 +164,11 @@ class TestGraphStorageCRUD:
         node1 = Node(type=NodeType.ACTOR, name="Actor One")
         node2 = Node(type=NodeType.INITIATIVE, name="Initiative One")
         # Edge references nodes by name, not ID
-        edge = Edge(source="Actor One", target="Initiative One",
-                   type=RelationshipType.BELONGS_TO)
+        edge = Edge(
+            source="Actor One",
+            target="Initiative One",
+            type=RelationshipType.BELONGS_TO,
+        )
 
         result = temp_storage.add_nodes([node1, node2], [edge])
 
@@ -156,10 +220,9 @@ class TestGraphStorageCRUD:
 
     def test_update_node(self, storage_with_data):
         """Test updating a node"""
-        updated = storage_with_data.update_node("actor-1", {
-            "description": "Updated description",
-            "tags": ["new-tag"]
-        })
+        updated = storage_with_data.update_node(
+            "actor-1", {"description": "Updated description", "tags": ["new-tag"]}
+        )
 
         assert updated is not None
         assert updated.description == "Updated description"
@@ -188,6 +251,22 @@ class TestGraphStorageCRUD:
         assert "confirmed" in result.message.lower()
         # Node should still exist
         assert storage_with_data.get_node("actor-1") is not None
+
+    def test_delete_edge(self, storage_with_data):
+        """Test deleting a single edge."""
+        deleted = storage_with_data.delete_edge("edge-1")
+
+        assert deleted is True
+        assert "edge-1" not in storage_with_data.edges
+
+    def test_delete_edges_bulk(self, storage_with_data):
+        """Test deleting multiple edges in one call."""
+        result = storage_with_data.delete_edges(["edge-1", "edge-2"])
+
+        assert result.success is True
+        assert set(result.deleted_edge_ids) == {"edge-1", "edge-2"}
+        assert "edge-1" not in storage_with_data.edges
+        assert "edge-2" not in storage_with_data.edges
 
     def test_delete_max_10_nodes(self, storage_with_data):
         """Test that max 10 nodes can be deleted at once"""
@@ -240,6 +319,305 @@ class TestGraphStorageSearch:
 
         assert len(results1) == len(results2)
 
+    def test_search_matches_alias(self, temp_storage):
+        """A node is found when the query matches only one of its aliases."""
+        node = Node(
+            id="ec",
+            type=NodeType.ACTOR,
+            name="European Commission",
+            aliases=["EC", "EU Commission"],
+        )
+        temp_storage.add_nodes([node], [])
+        results = temp_storage.search_nodes("EU Commission")
+        assert any(n.id == "ec" for n in results)
+
+    def test_search_alias_case_insensitive(self, temp_storage):
+        """Alias matching ignores case."""
+        node = Node(
+            id="ec", type=NodeType.ACTOR, name="European Commission", aliases=["EC"]
+        )
+        temp_storage.add_nodes([node], [])
+        assert any(n.id == "ec" for n in temp_storage.search_nodes("ec"))
+
+    def test_update_node_sets_aliases(self, temp_storage):
+        """update_node persists aliases and they become searchable."""
+        node = Node(id="ec", type=NodeType.ACTOR, name="European Commission")
+        temp_storage.add_nodes([node], [])
+        temp_storage.update_node("ec", {"aliases": ["EC"]})
+        assert temp_storage.nodes["ec"].aliases == ["EC"]
+        assert any(n.id == "ec" for n in temp_storage.search_nodes("EC"))
+
+
+class TestSearchRanking:
+    """Tests for search result ranking/prioritization."""
+
+    @pytest.fixture
+    def ranking_storage(self, temp_storage):
+        """Storage with nodes designed to test ranking order."""
+        nodes = [
+            # Exact name match – should rank #1 when searching "esam"
+            Node(
+                id="exact",
+                type=NodeType.THEME,
+                name="eSam",
+                description="Unrelated description",
+            ),
+            # Name starts with query – should rank #2
+            Node(
+                id="prefix",
+                type=NodeType.THEME,
+                name="eSam collaboration",
+                description="Unrelated description",
+            ),
+            # Name contains query – should rank #3
+            Node(
+                id="contains",
+                type=NodeType.THEME,
+                name="Nordic eSam initiative",
+                description="Unrelated description",
+            ),
+            # Only description matches – should rank last
+            Node(
+                id="desc-only",
+                type=NodeType.ACTOR,
+                name="Unrelated actor",
+                description="This actor is part of the eSam network",
+            ),
+        ]
+        temp_storage.add_nodes(nodes, [])
+        return temp_storage
+
+    def test_exact_name_match_ranks_first(self, ranking_storage):
+        results = ranking_storage.search_nodes("esam")
+        assert results[0].id == "exact"
+
+    def test_name_prefix_ranks_before_name_contains(self, ranking_storage):
+        results = ranking_storage.search_nodes("esam")
+        ids = [n.id for n in results]
+        assert ids.index("prefix") < ids.index("contains")
+
+    def test_name_match_ranks_before_description_only(self, ranking_storage):
+        results = ranking_storage.search_nodes("esam")
+        ids = [n.id for n in results]
+        assert ids.index("exact") < ids.index("desc-only")
+
+    def test_name_contains_ranks_before_description_only(self, ranking_storage):
+        results = ranking_storage.search_nodes("esam")
+        ids = [n.id for n in results]
+        assert ids.index("contains") < ids.index("desc-only")
+
+    def test_type_match_ranks_above_description(self, temp_storage):
+        """A node whose type matches the query should rank above a description-only match."""
+        nodes = [
+            Node(
+                id="type-match",
+                type=NodeType.ACTOR,
+                name="Unrelated name",
+                description="something else",
+            ),
+            Node(
+                id="desc-match",
+                type=NodeType.THEME,
+                name="Another name",
+                description="actor responsible for this initiative",
+            ),
+        ]
+        temp_storage.add_nodes(nodes, [])
+        results = temp_storage.search_nodes("actor")
+        ids = [n.id for n in results]
+        assert ids.index("type-match") < ids.index("desc-match")
+
+    def test_ranking_respects_limit(self, ranking_storage):
+        """Ranked results still respect the limit parameter."""
+        results = ranking_storage.search_nodes("esam", limit=2)
+        assert len(results) == 2
+        # First result should still be the best match
+        assert results[0].id == "exact"
+
+    def test_score_node_match_exact_name(self, ranking_storage):
+        """_score_node_match returns the highest primary-tier score for an exact name match."""
+        node = ranking_storage.nodes["exact"]
+        score = ranking_storage._score_node_match(node, "esam")
+        assert score >= 500_000
+
+    def test_score_node_match_prefix_less_than_exact(self, ranking_storage):
+        exact_node = ranking_storage.nodes["exact"]
+        prefix_node = ranking_storage.nodes["prefix"]
+        exact_score = ranking_storage._score_node_match(exact_node, "esam")
+        prefix_score = ranking_storage._score_node_match(prefix_node, "esam")
+        assert exact_score > prefix_score
+
+    def test_exact_name_beats_prefix_plus_description(self, temp_storage):
+        """Exact name match must rank above prefix+description even though additive scores
+        would have exceeded 100 in the old single-band scheme (90+20=110 vs 100)."""
+        nodes = [
+            Node(id="exact", type=NodeType.THEME, name="esam", description="unrelated"),
+            # prefix + description hit — would score 110 with old scheme, should still lose
+            Node(
+                id="prefix-desc",
+                type=NodeType.THEME,
+                name="esam collaboration",
+                description="part of the esam network",
+            ),
+        ]
+        temp_storage.add_nodes(nodes, [])
+        results = temp_storage.search_nodes("esam")
+        assert results[0].id == "exact"
+
+    def test_exact_name_beats_multi_secondary_match(self, temp_storage):
+        """Exact name match must rank above a node with no name match but many
+        secondary hits (type + tags + description)."""
+        nodes = [
+            Node(id="exact", type=NodeType.ACTOR, name="esam", description="unrelated"),
+            Node(
+                id="multi",
+                type=NodeType.THEME,
+                name="Nordic collaboration",
+                description="part of the esam network",
+                tags=["esam"],
+                subtypes=["esam working group"],
+            ),
+        ]
+        temp_storage.add_nodes(nodes, [])
+        results = temp_storage.search_nodes("esam")
+        assert results[0].id == "exact"
+
+    def test_alias_match_ranks_above_description_only(self, temp_storage):
+        """An exact alias match must rank above a description-only hit."""
+        nodes = [
+            Node(
+                id="alias",
+                type=NodeType.ACTOR,
+                name="Unrelated name",
+                description="unrelated",
+                aliases=["esam"],
+            ),
+            Node(
+                id="desc",
+                type=NodeType.THEME,
+                name="Another unrelated name",
+                description="part of the esam network",
+            ),
+        ]
+        temp_storage.add_nodes(nodes, [])
+        results = temp_storage.search_nodes("esam")
+        ids = [n.id for n in results]
+        assert ids.index("alias") < ids.index("desc")
+
+    def test_real_name_ranks_above_alias(self, temp_storage):
+        """A node whose real name matches must rank above a node matching only via alias."""
+        nodes = [
+            Node(
+                id="name",
+                type=NodeType.THEME,
+                name="Nordic esam initiative",
+                description="unrelated",
+            ),
+            Node(
+                id="alias",
+                type=NodeType.ACTOR,
+                name="Unrelated name",
+                description="unrelated",
+                aliases=["esam"],
+            ),
+        ]
+        temp_storage.add_nodes(nodes, [])
+        results = temp_storage.search_nodes("esam")
+        ids = [n.id for n in results]
+        assert ids.index("name") < ids.index("alias")
+
+    def test_alias_does_not_lift_node_above_stronger_name_match(self, temp_storage):
+        """A node matching on both its name (contains) and an exact alias must not
+        outrank another node whose name is an exact match — alias and name score
+        are combined with max(), not summed."""
+        nodes = [
+            Node(
+                id="name-plus-alias",
+                type=NodeType.THEME,
+                name="Global esam network",
+                description="unrelated",
+                aliases=["esam"],
+            ),
+            Node(
+                id="exact-name",
+                type=NodeType.THEME,
+                name="esam",
+                description="unrelated",
+            ),
+        ]
+        temp_storage.add_nodes(nodes, [])
+        results = temp_storage.search_nodes("esam")
+        assert results[0].id == "exact-name"
+
+    def test_alias_match_beats_multi_secondary_match(self, temp_storage):
+        """An exact alias match must rank above a node with many secondary hits but no
+        name/alias match."""
+        nodes = [
+            Node(
+                id="alias",
+                type=NodeType.ACTOR,
+                name="Unrelated name",
+                description="unrelated",
+                aliases=["esam"],
+            ),
+            Node(
+                id="multi",
+                type=NodeType.THEME,
+                name="Nordic collaboration",
+                description="part of the esam network",
+                tags=["esam"],
+                subtypes=["esam working group"],
+            ),
+        ]
+        temp_storage.add_nodes(nodes, [])
+        results = temp_storage.search_nodes("esam")
+        assert results[0].id == "alias"
+
+    def test_subtype_match_ranks_above_description_only(self, temp_storage):
+        """A subtype hit (400 pts) should rank above a description-only hit (200 pts)."""
+        nodes = [
+            Node(
+                id="subtype",
+                type=NodeType.INITIATIVE,
+                name="Unrelated name",
+                description="unrelated",
+                subtypes=["esam working group"],
+            ),
+            Node(
+                id="desc",
+                type=NodeType.ACTOR,
+                name="Another unrelated name",
+                description="part of the esam network",
+            ),
+        ]
+        temp_storage.add_nodes(nodes, [])
+        results = temp_storage.search_nodes("esam")
+        ids = [n.id for n in results]
+        assert ids.index("subtype") < ids.index("desc")
+
+    def test_tag_exact_match_ranks_above_tag_substring(self, temp_storage):
+        """An exact tag match (500 pts) should rank above a partial tag match (450 pts)."""
+        nodes = [
+            Node(
+                id="exact-tag",
+                type=NodeType.THEME,
+                name="Unrelated name",
+                description="unrelated",
+                tags=["esam"],
+            ),
+            Node(
+                id="partial-tag",
+                type=NodeType.THEME,
+                name="Another unrelated name",
+                description="unrelated",
+                tags=["nordic-esam-initiative"],
+            ),
+        ]
+        temp_storage.add_nodes(nodes, [])
+        results = temp_storage.search_nodes("esam")
+        ids = [n.id for n in results]
+        assert ids.index("exact-tag") < ids.index("partial-tag")
+
 
 class TestGraphStorageRelated:
     """Tests for get_related_nodes"""
@@ -248,35 +626,33 @@ class TestGraphStorageRelated:
         """Test getting directly related nodes"""
         result = storage_with_data.get_related_nodes("actor-1", depth=1)
 
-        assert len(result['nodes']) >= 2  # actor-1 and init-1
-        assert len(result['edges']) >= 1  # edge-1
+        assert len(result["nodes"]) >= 2  # actor-1 and init-1
+        assert len(result["edges"]) >= 1  # edge-1
 
     def test_get_related_nodes_depth_2(self, storage_with_data):
         """Test getting nodes at depth 2"""
         result = storage_with_data.get_related_nodes("actor-1", depth=2)
 
         # Should reach theme-1 through init-1
-        node_ids = [n.id for n in result['nodes']]
+        node_ids = [n.id for n in result["nodes"]]
         assert "theme-1" in node_ids
 
     def test_get_related_nodes_filter_by_relationship(self, storage_with_data):
         """Test filtering by relationship type"""
         result = storage_with_data.get_related_nodes(
-            "actor-1",
-            relationship_types=[RelationshipType.BELONGS_TO],
-            depth=1
+            "actor-1", relationship_types=[RelationshipType.BELONGS_TO], depth=1
         )
 
         # Should only follow BELONGS_TO edges
-        edge_types = [e.type for e in result['edges']]
+        edge_types = [e.type for e in result["edges"]]
         assert all(t == RelationshipType.BELONGS_TO for t in edge_types)
 
     def test_get_related_nodes_not_found(self, storage_with_data):
         """Test getting related nodes for non-existent node"""
         result = storage_with_data.get_related_nodes("nonexistent")
 
-        assert len(result['nodes']) == 0
-        assert len(result['edges']) == 0
+        assert len(result["nodes"]) == 0
+        assert len(result["edges"]) == 0
 
 
 class TestGraphStorageSimilarity:
@@ -288,15 +664,13 @@ class TestGraphStorageSimilarity:
 
         assert len(results) >= 1
         # Check that results are SimilarNode objects
-        assert hasattr(results[0], 'similarity_score')
-        assert hasattr(results[0], 'match_reason')
+        assert hasattr(results[0], "similarity_score")
+        assert hasattr(results[0], "match_reason")
 
     def test_find_similar_filter_by_type(self, storage_with_data):
         """Test filtering similar nodes by type"""
         results = storage_with_data.find_similar_nodes(
-            "Test",
-            node_type=NodeType.INITIATIVE,
-            threshold=0.3
+            "Test", node_type=NodeType.INITIATIVE, threshold=0.3
         )
 
         # All results should be initiatives
@@ -348,7 +722,7 @@ class TestGraphStorageSubtypes:
             id="actor-sub-1",
             type=NodeType.ACTOR,
             name="Test Agency",
-            subtypes=["Government agency", "Regulatory body"]
+            subtypes=["Government agency", "Regulatory body"],
         )
         temp_storage.add_nodes([node], [])
         stored = temp_storage.get_node("actor-sub-1")
@@ -366,9 +740,21 @@ class TestGraphStorageSubtypes:
     def test_get_subtypes_by_node_type(self, temp_storage):
         """Test getting subtypes grouped by node type"""
         nodes = [
-            Node(id="s1", type=NodeType.ACTOR, name="A1", subtypes=["Government agency"]),
-            Node(id="s2", type=NodeType.ACTOR, name="A2", subtypes=["Municipality", "Government agency"]),
-            Node(id="s3", type=NodeType.INITIATIVE, name="I1", subtypes=["Research project"]),
+            Node(
+                id="s1", type=NodeType.ACTOR, name="A1", subtypes=["Government agency"]
+            ),
+            Node(
+                id="s2",
+                type=NodeType.ACTOR,
+                name="A2",
+                subtypes=["Municipality", "Government agency"],
+            ),
+            Node(
+                id="s3",
+                type=NodeType.INITIATIVE,
+                name="I1",
+                subtypes=["Research project"],
+            ),
             Node(id="s4", type=NodeType.ACTOR, name="A3"),  # No subtypes
         ]
         temp_storage.add_nodes(nodes, [])
@@ -382,8 +768,12 @@ class TestGraphStorageSubtypes:
     def test_get_subtypes_filtered_by_type(self, temp_storage):
         """Test filtering subtypes by a specific node type"""
         nodes = [
-            Node(id="f1", type=NodeType.ACTOR, name="A1", subtypes=["Government agency"]),
-            Node(id="f2", type=NodeType.INITIATIVE, name="I1", subtypes=["Pilot program"]),
+            Node(
+                id="f1", type=NodeType.ACTOR, name="A1", subtypes=["Government agency"]
+            ),
+            Node(
+                id="f2", type=NodeType.INITIATIVE, name="I1", subtypes=["Pilot program"]
+            ),
         ]
         temp_storage.add_nodes(nodes, [])
 
@@ -397,7 +787,7 @@ class TestGraphStorageSubtypes:
             id="search-sub-1",
             type=NodeType.ACTOR,
             name="Test Entity",
-            subtypes=["Steering group"]
+            subtypes=["Steering group"],
         )
         temp_storage.add_nodes([node], [])
 
@@ -405,15 +795,83 @@ class TestGraphStorageSubtypes:
         assert len(results) == 1
         assert results[0].id == "search-sub-1"
 
+    def test_get_stats_with_string_typed_nodes_does_not_crash(self, temp_storage):
+        """get_stats must not crash when nodes have string types (e.g. EventSubscription).
+
+        Config-defined node types such as EventSubscription and Agent are stored
+        as plain strings rather than NodeType enum members.  Before the fix,
+        calling node.type.value on a string raised AttributeError.
+        """
+        nodes = [
+            Node(id="sub-1", type="EventSubscription", name="My Subscription"),
+            Node(id="agent-1", type="Agent", name="My Agent"),
+            Node(id="actor-1", type=NodeType.ACTOR, name="An Actor"),
+        ]
+        temp_storage.add_nodes(nodes, [])
+
+        stats = temp_storage.get_stats()
+
+        assert stats.total_nodes == 3
+        assert stats.nodes_by_type.get("EventSubscription") == 1
+        assert stats.nodes_by_type.get("Agent") == 1
+        assert stats.nodes_by_type.get("Actor") == 1
+
 
 class TestGraphStoragePersistence:
     """Tests for data persistence"""
+
+    def test_uses_file_backend_by_default(self, temp_storage):
+        """Standalone mode should still default to the file-backed adapter."""
+        assert isinstance(
+            temp_storage._persistence_backend, FileGraphPersistenceBackend
+        )
+        assert temp_storage._persistence_backend.json_path == temp_storage.json_path
+
+    def test_persistence_backend_can_be_injected(self):
+        """GraphStorage should delegate load/save through the persistence seam."""
+        backend = InMemoryPersistenceBackend(
+            initial_data={
+                "nodes": [
+                    {
+                        "id": "persist-backend-1",
+                        "type": NodeType.ACTOR.value,
+                        "name": "Injected Backend Node",
+                        "description": "Loaded via custom backend",
+                        "summary": "",
+                        "tags": [],
+                        "subtypes": [],
+                        "metadata": {},
+                    }
+                ],
+                "edges": [],
+                "metadata": {"version": "1.0"},
+            }
+        )
+
+        storage = GraphStorage(persistence_backend=backend)
+
+        assert backend.load_calls == 1
+        assert storage.get_node("persist-backend-1") is not None
+        assert storage.get_graph_name() == "in-memory-graph"
+
+        storage.add_nodes(
+            [Node(id="persist-backend-2", type=NodeType.ACTOR, name="Saved Node")], []
+        )
+        storage.flush()  # Wait for async save before reading backend state
+
+        assert backend.save_calls >= 1
+        persisted_ids = {node["id"] for node in backend.data["nodes"]}
+        assert {"persist-backend-1", "persist-backend-2"}.issubset(persisted_ids)
+        assert backend.data["metadata"]["graph_name"] == "in-memory-graph"
 
     def test_save_and_reload(self, temp_storage):
         """Test that data persists across storage instances"""
         # Add data
         node = Node(id="persist-1", type=NodeType.ACTOR, name="Persistent Node")
         temp_storage.add_nodes([node], [])
+
+        # Flush pending async saves before reloading from disk
+        temp_storage.flush()
 
         # Get path before closing
         json_path = str(temp_storage.json_path)
@@ -428,14 +886,14 @@ class TestGraphStoragePersistence:
 
     def test_json_format(self, storage_with_data):
         """Test that JSON file has correct format"""
-        with open(storage_with_data.json_path, 'r') as f:
+        with open(storage_with_data.json_path, "r") as f:
             data = json.load(f)
 
-        assert 'nodes' in data
-        assert 'edges' in data
-        assert 'metadata' in data
-        assert 'version' in data['metadata']
-        assert 'last_updated' in data['metadata']
+        assert "nodes" in data
+        assert "edges" in data
+        assert "metadata" in data
+        assert "version" in data["metadata"]
+        assert "last_updated" in data["metadata"]
 
 
 class TestGraphStorageEdgeHelpers:
@@ -454,7 +912,6 @@ class TestGraphStorageEdgeHelpers:
 
         # init-1 has 3 edges: edge-1, edge-2 (incoming) and edge-3 (outgoing)
         assert len(edges) == 3
-
 
 
 class TestGraphStorageConcurrency:
@@ -488,7 +945,7 @@ class TestGraphStorageConcurrency:
                         id=node_id,
                         type=NodeType.ACTOR,
                         name=f"Thread {thread_id} Node {i}",
-                        description=f"Created by thread {thread_id}"
+                        description=f"Created by thread {thread_id}",
                     )
                     result = temp_storage.add_nodes([node], [])
                     if result.success:
@@ -516,19 +973,25 @@ class TestGraphStorageConcurrency:
         assert len(errors) == 0, f"Errors occurred: {errors}"
 
         expected_count = num_threads * nodes_per_thread
-        assert len(added_ids) == expected_count, \
+        assert len(added_ids) == expected_count, (
             f"Expected {expected_count} nodes added, got {len(added_ids)}"
+        )
 
         # Verify all nodes are actually in storage
         for node_id in added_ids:
-            assert temp_storage.get_node(node_id) is not None, \
+            assert temp_storage.get_node(node_id) is not None, (
                 f"Node {node_id} was added but not found in storage"
+            )
+
+        # Flush all pending async saves before reloading from disk
+        temp_storage.flush()
 
         # Verify persistence - reload and check
         json_path = str(temp_storage.json_path)
         reloaded = GraphStorage(json_path=json_path)
-        assert len(reloaded.nodes) == expected_count, \
+        assert len(reloaded.nodes) == expected_count, (
             f"After reload: expected {expected_count} nodes, got {len(reloaded.nodes)}"
+        )
 
     def test_concurrent_update_nodes_no_data_loss(self, temp_storage):
         """
@@ -541,10 +1004,7 @@ class TestGraphStorageConcurrency:
 
         # First add a node to update
         node = Node(
-            id="update-target",
-            type=NodeType.ACTOR,
-            name="Update Target",
-            tags=[]
+            id="update-target", type=NodeType.ACTOR, name="Update Target", tags=[]
         )
         temp_storage.add_nodes([node], [])
 
@@ -555,9 +1015,9 @@ class TestGraphStorageConcurrency:
         def update_worker(thread_id):
             try:
                 # Each thread adds its own tag
-                result = temp_storage.update_node("update-target", {
-                    "tags": [f"tag-{thread_id}"]
-                })
+                result = temp_storage.update_node(
+                    "update-target", {"tags": [f"tag-{thread_id}"]}
+                )
                 if result is None:
                     with lock:
                         errors.append(f"Thread {thread_id}: update returned None")
@@ -600,11 +1060,7 @@ class TestGraphStorageConcurrency:
         # First add some base nodes
         base_nodes = []
         for i in range(5):
-            node = Node(
-                id=f"base-{i}",
-                type=NodeType.ACTOR,
-                name=f"Base Node {i}"
-            )
+            node = Node(id=f"base-{i}", type=NodeType.ACTOR, name=f"Base Node {i}")
             base_nodes.append(node)
         temp_storage.add_nodes(base_nodes, [])
 
@@ -616,26 +1072,28 @@ class TestGraphStorageConcurrency:
         def mixed_worker(thread_id):
             try:
                 for _ in range(operations_per_thread):
-                    op = random.choice(['add', 'read', 'update', 'search'])
+                    op = random.choice(["add", "read", "update", "search"])
 
-                    if op == 'add':
+                    if op == "add":
                         node_id = f"mixed-{thread_id}-{uuid.uuid4().hex[:8]}"
-                        node = Node(id=node_id, type=NodeType.ACTOR, name=f"Mixed {node_id}")
+                        node = Node(
+                            id=node_id, type=NodeType.ACTOR, name=f"Mixed {node_id}"
+                        )
                         temp_storage.add_nodes([node], [])
 
-                    elif op == 'read':
+                    elif op == "read":
                         # Read a random base node
                         node_id = f"base-{random.randint(0, 4)}"
                         temp_storage.get_node(node_id)
 
-                    elif op == 'update':
+                    elif op == "update":
                         # Update a random base node
                         node_id = f"base-{random.randint(0, 4)}"
-                        temp_storage.update_node(node_id, {
-                            "description": f"Updated by thread {thread_id}"
-                        })
+                        temp_storage.update_node(
+                            node_id, {"description": f"Updated by thread {thread_id}"}
+                        )
 
-                    elif op == 'search':
+                    elif op == "search":
                         temp_storage.search_nodes("Node", limit=10)
 
                     # Small random delay to increase interleaving
@@ -668,7 +1126,9 @@ class TestGraphStorageConcurrency:
         # Verify graph is still loadable
         json_path = str(temp_storage.json_path)
         reloaded = GraphStorage(json_path=json_path)
-        assert len(reloaded.nodes) >= 5, "Graph is corrupted after concurrent operations"
+        assert len(reloaded.nodes) >= 5, (
+            "Graph is corrupted after concurrent operations"
+        )
 
     def test_atomic_save_prevents_corruption(self, temp_storage):
         """
@@ -693,19 +1153,22 @@ class TestGraphStorageConcurrency:
         def save_worker(thread_id):
             try:
                 for i in range(saves_per_thread):
-                    # Force a save
-                    temp_storage.save()
+                    # Force a save and wait for the background write to complete
+                    # before reading the file — save() is async.
+                    temp_storage.save().result()
 
                     # Immediately try to read and parse the JSON file
                     try:
-                        with open(temp_storage.json_path, 'r') as f:
+                        with open(temp_storage.json_path, "r") as f:
                             data = json_module.load(f)
                             # Verify structure is valid
-                            assert 'nodes' in data
-                            assert 'edges' in data
+                            assert "nodes" in data
+                            assert "edges" in data
                     except json_module.JSONDecodeError as e:
                         with lock:
-                            errors.append(f"Thread {thread_id} save {i}: JSON decode error - {e}")
+                            errors.append(
+                                f"Thread {thread_id} save {i}: JSON decode error - {e}"
+                            )
                     except Exception as e:
                         with lock:
                             errors.append(f"Thread {thread_id} save {i}: {e}")
@@ -729,9 +1192,9 @@ class TestGraphStorageConcurrency:
         assert len(errors) == 0, f"Corruption detected: {errors}"
 
         # Final verification
-        with open(temp_storage.json_path, 'r') as f:
+        with open(temp_storage.json_path, "r") as f:
             final_data = json_module.load(f)
-            assert len(final_data['nodes']) == 10
+            assert len(final_data["nodes"]) == 10
 
     def test_reload_during_concurrent_writes(self, temp_storage):
         """
@@ -746,15 +1209,18 @@ class TestGraphStorageConcurrency:
         errors = []
         lock = threading.Lock()
 
-        # Add initial data
+        # Add initial data and flush so the file is on disk before reader threads start
         node = Node(id="reload-test", type=NodeType.ACTOR, name="Reload Test")
         temp_storage.add_nodes([node], [])
+        temp_storage.flush()
 
         def writer_thread(thread_id):
             try:
                 for i in range(20):
                     node_id = f"writer-{thread_id}-{i}-{uuid.uuid4().hex[:8]}"
-                    node = Node(id=node_id, type=NodeType.ACTOR, name=f"Writer {thread_id}")
+                    node = Node(
+                        id=node_id, type=NodeType.ACTOR, name=f"Writer {thread_id}"
+                    )
                     temp_storage.add_nodes([node], [])
             except Exception as e:
                 with lock:

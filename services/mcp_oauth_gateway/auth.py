@@ -16,12 +16,25 @@ import uuid
 from dataclasses import dataclass, field
 from typing import Dict, Optional
 
-import httpx
-from jose import JWTError, jwt
+import httpx2 as httpx
+import jwt
+from jwt import PyJWKClient, PyJWTError
 
 import config
 
 logger = logging.getLogger(__name__)
+
+# Lazily-initialised JWKS client for verifying Google ID token signatures.
+# Constructed on first use (not at import) so tests can patch it and so a
+# transient DNS failure at import time never crashes the service.
+_google_jwks_client: Optional[PyJWKClient] = None
+
+
+def _get_google_jwks_client() -> PyJWKClient:
+    global _google_jwks_client
+    if _google_jwks_client is None:
+        _google_jwks_client = PyJWKClient(config.GOOGLE_JWKS_URL)
+    return _google_jwks_client
 
 # ---------------------------------------------------------------------------
 # In-memory authorization code store
@@ -96,8 +109,14 @@ def build_google_auth_url(
 # Google token exchange
 # ---------------------------------------------------------------------------
 
-async def exchange_google_code(google_code: str) -> Optional[str]:
+async def exchange_google_code(
+    google_code: str, expected_nonce: Optional[str] = None
+) -> Optional[str]:
     """Exchange Google authorization code for an ID token.
+
+    The ID token's signature is verified against Google's JWKS and its
+    ``aud`` / ``iss`` / ``exp`` claims are enforced. When ``expected_nonce`` is
+    supplied, the token's ``nonce`` claim must match it (OIDC replay defence).
 
     Returns the user's email address on success, or None on failure.
     """
@@ -125,13 +144,25 @@ async def exchange_google_code(google_code: str) -> Optional[str]:
         logger.warning("No id_token in Google response")
         return None
 
-    # Decode without verification (Google already validated the code)
-    # The signature is verified implicitly because only Google could produce
-    # a valid code; for additional security, pass options={"verify_signature": False}
+    # Verify the ID token's signature against Google's published keys and
+    # enforce the standard OIDC claims. This is defence-in-depth on top of the
+    # TLS-protected code exchange, and (unlike the previous unverified decode)
+    # gives us real aud/iss/exp guarantees.
     try:
-        claims = jwt.get_unverified_claims(id_token)
-    except JWTError as exc:
-        logger.warning("Could not decode Google ID token: %s", exc)
+        signing_key = _get_google_jwks_client().get_signing_key_from_jwt(id_token)
+        claims = jwt.decode(
+            id_token,
+            signing_key.key,
+            algorithms=["RS256"],
+            audience=config.GOOGLE_OAUTH_CLIENT_ID,
+            issuer=list(config.GOOGLE_ISSUERS),
+        )
+    except Exception as exc:
+        logger.warning("Could not verify Google ID token: %s", exc)
+        return None
+
+    if expected_nonce is not None and claims.get("nonce") != expected_nonce:
+        logger.warning("Google ID token nonce mismatch")
         return None
 
     email = claims.get("email")
@@ -240,6 +271,6 @@ def validate_token(token: str) -> Optional[Dict]:
             audience=config.PUBLIC_BASE_URL,
         )
         return claims
-    except JWTError as exc:
+    except PyJWTError as exc:
         logger.debug("Token validation failed: %s", exc)
         return None

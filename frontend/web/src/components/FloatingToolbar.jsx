@@ -21,7 +21,58 @@ import {
   Sliders,
   ListOl,
   Diagram3Fill,
+  StarFill,
   QuestionCircleFill,
+  CardChecklist,
+  InputCursorText,
+  ListCheck,
+  LightbulbFill,
+  GearFill,
+  CollectionFill,
+  FunnelFill,
+  // Additional icons available for node type configuration (see docs/ICONS.md)
+  GearWideConnected,
+  GlobeEuropeAfricaFill,
+  GeoAltFill,
+  MapFill,
+  BuildingFill,
+  BuildingsFill,
+  Bank,
+  BarChartFill,
+  PieChartFill,
+  GraphUpArrow,
+  FileEarmarkSpreadsheetFill,
+  FileEarmarkBarGraphFill,
+  FileEarmarkCodeFill,
+  JournalBookmarkFill,
+  BookFill,
+  Bookshelf,
+  ClipboardCheckFill,
+  Clipboard2DataFill,
+  ShieldLockFill,
+  ShieldFillExclamation,
+  LockFill,
+  KeyFill,
+  Robot,
+  MotherboardFill,
+  RouterFill,
+  ChatFill,
+  EnvelopeFill,
+  MegaphoneFill,
+  MortarboardFill,
+  AwardFill,
+  Bullseye,
+  FlagFill,
+  Diagram2Fill,
+  KanbanFill,
+  Boxes,
+  LayersFill,
+  GridFill,
+  CompassFill,
+  PuzzleFill,
+  BinocularsFill,
+  EyeFill,
+  Translate,
 } from 'react-bootstrap-icons';
 import useGraphStore from '../store/graphStore';
 import { useI18n } from '../i18n';
@@ -50,7 +101,57 @@ const ICON_REGISTRY = {
   Sliders,
   ListOl,
   Diagram3Fill,
+  StarFill,
   QuestionCircleFill,
+  CardChecklist,
+  InputCursorText,
+  ListCheck,
+  LightbulbFill,
+  GearFill,
+  CollectionFill,
+  FunnelFill,
+  GearWideConnected,
+  GlobeEuropeAfricaFill,
+  GeoAltFill,
+  MapFill,
+  BuildingFill,
+  BuildingsFill,
+  Bank,
+  BarChartFill,
+  PieChartFill,
+  GraphUpArrow,
+  FileEarmarkSpreadsheetFill,
+  FileEarmarkBarGraphFill,
+  FileEarmarkCodeFill,
+  JournalBookmarkFill,
+  BookFill,
+  Bookshelf,
+  ClipboardCheckFill,
+  Clipboard2DataFill,
+  ShieldLockFill,
+  ShieldFillExclamation,
+  LockFill,
+  KeyFill,
+  Robot,
+  MotherboardFill,
+  RouterFill,
+  ChatFill,
+  EnvelopeFill,
+  MegaphoneFill,
+  MortarboardFill,
+  AwardFill,
+  Bullseye,
+  FlagFill,
+  Diagram2Fill,
+  KanbanFill,
+  Boxes,
+  LayersFill,
+  GridFill,
+  CompassFill,
+  PuzzleFill,
+  BinocularsFill,
+  EyeFill,
+  Translate,
 };
 
 // Legacy fallback: maps node type name -> icon name (used when schema has no icon field)
@@ -66,12 +167,13 @@ const LEGACY_ICON_MAP = {
   Data: 'DatabaseFill',
   Dataset: 'DatabaseFill',
   Risk: 'ExclamationTriangleFill',
-  'Hållpunkt': 'PinAngleFill',
-  'Undersökning': 'ClipboardDataFill',
-  'Värdemängd': 'ListOl',
-  'Variabel': 'Sliders',
-  'Population': 'PeopleFill',
-  'Klassifikation': 'Diagram3Fill',
+  Hållpunkt: 'PinAngleFill',
+  Undersökning: 'ClipboardDataFill',
+  Värdemängd: 'ListOl',
+  Variabel: 'Sliders',
+  Population: 'PeopleFill',
+  Klassifikation: 'Diagram3Fill',
+  ActiveKnowledgeCollection: 'FunnelFill',
   Agent: 'CpuFill',
   EventSubscription: 'BellFill',
   SavedView: 'BookmarkFill',
@@ -90,12 +192,13 @@ const COLOR_MAP = {
   Data: '#06B6D4',
   Dataset: '#06B6D4',
   Risk: '#DC2626',
-  'Hållpunkt': '#8B5CF6',
-  'Undersökning': '#F97316',
-  'Värdemängd': '#FBBF24',
-  'Variabel': '#14B8A6',
-  'Population': '#EF4444',
-  'Klassifikation': '#84CC16',
+  Hållpunkt: '#8B5CF6',
+  Undersökning: '#F97316',
+  Värdemängd: '#FBBF24',
+  Variabel: '#14B8A6',
+  Population: '#EF4444',
+  Klassifikation: '#84CC16',
+  ActiveKnowledgeCollection: '#F59E0B',
   Agent: '#EC4899',
   EventSubscription: '#8B5CF6',
   SavedView: '#6B7280',
@@ -103,13 +206,21 @@ const COLOR_MAP = {
 };
 
 // System types always shown at the bottom (not from schema)
-const SYSTEM_TYPES = ['Agent', 'EventSubscription', 'Group'];
+const SYSTEM_TYPES = ['Agent', 'Skill', 'EventSubscription', 'ActiveKnowledgeCollection', 'Group'];
 const VIEW_TYPES = ['SavedView'];
 
 // Fallback order when schema hasn't loaded yet
 const FALLBACK_DOMAIN_ORDER = [
-  'Actor', 'Initiative', 'Capability', 'Resource', 'Legislation',
-  'Theme', 'Goal', 'Event', 'Data', 'Risk',
+  'Actor',
+  'Initiative',
+  'Capability',
+  'Resource',
+  'Legislation',
+  'Theme',
+  'Goal',
+  'Event',
+  'Data',
+  'Risk',
 ];
 
 /**
@@ -137,6 +248,7 @@ function FloatingToolbar({
   onCreateSubscription,
   onSaveView,
   onCreateGroup,
+  onCreateActiveKnowledgeCollection,
 }) {
   const { t } = useI18n();
   const [hoveredType, setHoveredType] = useState(null);
@@ -178,6 +290,8 @@ function FloatingToolbar({
       onSaveView?.();
     } else if (nodeType === 'Group') {
       onCreateGroup?.();
+    } else if (nodeType === 'ActiveKnowledgeCollection') {
+      onCreateActiveKnowledgeCollection?.();
     } else {
       onCreateNode?.(nodeType);
     }
@@ -217,7 +331,7 @@ function FloatingToolbar({
 
   return (
     <>
-      <div className="floating-toolbar">
+      <div className="floating-toolbar" id="guide-target-toolbar">
         {toolbarOrder.map((nodeType, index) => {
           if (nodeType === null) {
             return <div key={`sep-${index}`} className="floating-toolbar-separator" />;
@@ -230,7 +344,9 @@ function FloatingToolbar({
           return (
             <button
               key={nodeType}
-              ref={(el) => { buttonRefs.current[nodeType] = el; }}
+              ref={(el) => {
+                buttonRefs.current[nodeType] = el;
+              }}
               className="floating-toolbar-item"
               onClick={() => handleClick(nodeType)}
               onMouseEnter={() => handleMouseEnter(nodeType)}
@@ -244,23 +360,20 @@ function FloatingToolbar({
           );
         })}
       </div>
-      {hoveredType && tooltipPos && createPortal(
-        <div
-          className="floating-toolbar-tooltip"
-          style={{ top: tooltipPos.top, left: tooltipPos.left }}
-        >
-          {getTooltipLabel(hoveredType)}
-        </div>,
-        document.body
-      )}
+      {hoveredType &&
+        tooltipPos &&
+        createPortal(
+          <div
+            className="floating-toolbar-tooltip"
+            style={{ top: tooltipPos.top, left: tooltipPos.left }}
+          >
+            {getTooltipLabel(hoveredType)}
+          </div>,
+          document.body
+        )}
     </>
   );
 }
 
-// Export ICON_MAP as resolved components for backward compatibility
-const ICON_MAP = Object.fromEntries(
-  Object.entries(LEGACY_ICON_MAP).map(([k, v]) => [k, ICON_REGISTRY[v]])
-);
-
-export { ICON_MAP, COLOR_MAP, ICON_REGISTRY };
+export { resolveIcon, COLOR_MAP, ICON_REGISTRY };
 export default FloatingToolbar;

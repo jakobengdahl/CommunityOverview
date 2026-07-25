@@ -17,54 +17,38 @@ Event System:
 - Event context (origin, session_id) enables loop prevention
 """
 
-import json
-import os
-import sys
-import tempfile
 import threading
+from concurrent.futures import Future, ThreadPoolExecutor
 from typing import List, Dict, Optional, Any, TYPE_CHECKING, Callable
-from datetime import datetime
+from datetime import datetime, timezone
 import networkx as nx
 from pathlib import Path
-from rapidfuzz.distance import Levenshtein
 
 from .models import (
-    Node, Edge, NodeType, RelationshipType,
-    SimilarNode, GraphStats, AddNodesResult, DeleteNodesResult
+    Node,
+    Edge,
+    NodeType,
+    RelationshipType,
+    SimilarNode,
+    GraphStats,
+    AddNodesResult,
+    DeleteNodesResult,
+    DeleteEdgesResult,
 )
+from .storage_backends import FileGraphPersistenceBackend, GraphPersistenceBackend
 from .vector_store import VectorStore
+from . import storage_search
+from . import storage_history
+from . import storage_events
 
 # Event system imports
-from .events.models import (
-    Event, EventType, EntityKind, EventContext, EntityData
-)
+from .events.models import EventType, EntityKind, EventContext
 
 if TYPE_CHECKING:
     from .events.dispatcher import EventDispatcher
     from .events.delivery import DeliveryWorker
-
-
-# Cross-platform file locking
-if sys.platform == 'win32':
-    import msvcrt
-
-    def _lock_file(f, exclusive=True):
-        """Acquire file lock on Windows."""
-        msvcrt.locking(f.fileno(), msvcrt.LK_NBLCK if exclusive else msvcrt.LK_LOCK, 1)
-
-    def _unlock_file(f):
-        """Release file lock on Windows."""
-        msvcrt.locking(f.fileno(), msvcrt.LK_UNLCK, 1)
-else:
-    import fcntl
-
-    def _lock_file(f, exclusive=True):
-        """Acquire file lock on Unix."""
-        fcntl.flock(f, fcntl.LOCK_EX if exclusive else fcntl.LOCK_SH)
-
-    def _unlock_file(f):
-        """Release file lock on Unix."""
-        fcntl.flock(f, fcntl.LOCK_UN)
+    from .events.models import Event
+    from .history_store import GraphHistoryStore
 
 
 class GraphStorage:
@@ -77,27 +61,67 @@ class GraphStorage:
     - Writes are atomic (temp file + rename) to prevent corruption
     """
 
-    def __init__(self, json_path: str = "graph.json", embeddings_path: str = None):
+    def __init__(
+        self,
+        json_path: str = "graph.json",
+        embeddings_path: str = None,
+        persistence_backend: Optional[GraphPersistenceBackend] = None,
+        history_max_events: Optional[int] = None,
+        history_max_age_days: Optional[float] = None,
+        history_compaction_interval: Optional[int] = None,
+    ):
         """
         Initialize GraphStorage.
 
         Args:
-            json_path: Path to the JSON file for graph persistence
+            json_path: Path to the JSON file for graph persistence when using the
+                default file-backed persistence backend.
             embeddings_path: Path to the embeddings pickle file (Legacy/Deprecated).
                            New implementation stores embeddings in graph.json directly.
+            persistence_backend: Optional persistence backend adapter. Defaults to
+                the file-backed JSON backend to preserve standalone behavior.
+            history_max_events: Optional cap on retained history records. When set
+                (> 0), the history sidecar is compacted down to the newest N
+                records. Default None keeps unbounded history (current behaviour).
+            history_max_age_days: Optional cap on history record age in days. When
+                set (> 0), records older than the cutoff are dropped on compaction.
+                Default None applies no age-based retention.
+            history_compaction_interval: Optional number of appends between
+                compaction passes (throttle). Defaults to an amortised value when
+                retention is enabled; ignored when retention is disabled.
         """
-        self.json_path = Path(json_path)
+        self._persistence_backend = persistence_backend or FileGraphPersistenceBackend(
+            json_path
+        )
+        self.json_path = getattr(
+            self._persistence_backend, "json_path", Path(json_path)
+        )
+
+        # Durable append-only mutation history sidecar. Only enabled for the
+        # file-backed standalone backend, which owns a concrete json_path next
+        # to which the history NDJSON lives. Non-file backends own their own
+        # persistence and history strategy, so we leave this None there.
+        self._history_max_events = history_max_events
+        self._history_max_age_days = history_max_age_days
+        self._history_compaction_interval = history_compaction_interval
+        self._history_store = self._init_history_store()
 
         # Thread lock for in-memory data structure protection
         # RLock allows same thread to acquire lock multiple times (reentrant)
         self._lock = threading.RLock()
+
+        # Executor for background I/O operations (saving to disk)
+        # Using max_workers=1 to ensure sequential writes
+        self._io_executor = ThreadPoolExecutor(max_workers=1)
 
         # We initialize VectorStore without a storage path as it now holds state in memory
         # and relies on GraphStorage for persistence via graph.json
         self.vector_store = VectorStore()
         self.vector_store.preload_model()  # Start loading embedding model in background
 
-        self.graph = nx.MultiDiGraph()  # MultiDiGraph allows multiple edges between same nodes
+        self.graph = (
+            nx.MultiDiGraph()
+        )  # MultiDiGraph allows multiple edges between same nodes
         self.nodes: Dict[str, Node] = {}  # node_id -> Node
         self.edges: Dict[str, Edge] = {}  # edge_id -> Edge
 
@@ -110,36 +134,53 @@ class GraphStorage:
 
         self.graph_metadata: Dict[str, Any] = {
             "version": "1.0",
-            "graph_name": self.json_path.stem,
+            "graph_name": self._default_graph_name(),
         }
 
         # Event system (initialized lazily via setup_events())
         self._event_dispatcher: Optional["EventDispatcher"] = None
         self._delivery_worker: Optional["DeliveryWorker"] = None
         self._events_enabled = False
-        self._system_listeners: List[Callable[[Event], None]] = []
+        self._system_listeners: List[Callable[["Event"], None]] = []
 
         self.load()
+
+    def _default_graph_name(self) -> str:
+        """Return the backend-specific default graph name."""
+        return self._persistence_backend.default_graph_name()
+
+    def _init_history_store(self) -> Optional["GraphHistoryStore"]:
+        """Create the append-only history sidecar for file-backed standalone mode."""
+        if not isinstance(self._persistence_backend, FileGraphPersistenceBackend):
+            return None
+        from .history_store import GraphHistoryStore
+
+        history_path = self.json_path.with_name(self.json_path.stem + ".history.ndjson")
+        return GraphHistoryStore(
+            history_path,
+            max_events=self._history_max_events,
+            max_age_days=self._history_max_age_days,
+            compaction_interval=self._history_compaction_interval,
+        )
 
     def _build_type_searchable_text(self) -> None:
         """Build a lookup of node type -> searchable text including localized labels."""
         try:
-            from backend.config_loader import get_schema
+            from backend.config.config_loader import get_schema
+
             schema = get_schema()
             for type_name, type_config in schema.get("node_types", {}).items():
                 labels = type_config.get("labels", {})
                 label_values = " ".join(labels.values()) if labels else ""
-                self._type_searchable_text[type_name] = f"{type_name} {label_values}".lower().strip()
+                self._type_searchable_text[type_name] = (
+                    f"{type_name} {label_values}".lower().strip()
+                )
         except Exception:
             # Config not available; type matching will use type name only
             pass
 
     def _build_searchable_text(self, node: "Node") -> str:
-        """Build searchable text for a node, including type name and localized labels."""
-        tags_text = " ".join(node.tags) if hasattr(node, 'tags') and node.tags else ""
-        subtypes_text = " ".join(node.subtypes) if hasattr(node, 'subtypes') and node.subtypes else ""
-        type_text = self._type_searchable_text.get(str(node.type), str(node.type).lower())
-        return f"{node.name} {node.description} {node.summary} {tags_text} {subtypes_text} {type_text}".lower()
+        return storage_search.build_searchable_text(node, self._type_searchable_text)
 
     def add_system_listener(self, listener: Callable[["Event"], None]) -> None:
         """
@@ -209,13 +250,16 @@ class GraphStorage:
             self._event_dispatcher.set_agent_delivery_callback(callback)
 
     def shutdown_events(self) -> None:
-        """Shutdown the event system gracefully."""
+        """Shutdown the event system and I/O executor gracefully."""
         if self._delivery_worker:
             self._delivery_worker.stop(wait=True)
             self._delivery_worker = None
 
         self._event_dispatcher = None
         self._events_enabled = False
+
+        # Shut down I/O executor and wait for pending saves
+        self._io_executor.shutdown(wait=True)
 
     def _emit_event(
         self,
@@ -227,59 +271,20 @@ class GraphStorage:
         after: Optional[Dict[str, Any]] = None,
         context: Optional[EventContext] = None,
     ) -> None:
-        """
-        Emit a graph mutation event.
-
-        Args:
-            event_type: Type of event (create, update, delete)
-            entity_kind: Node or edge
-            entity_id: ID of the entity
-            entity_type: Type of the entity (node type or relationship type)
-            before: Entity state before mutation (for updates/deletes)
-            after: Entity state after mutation (for creates/updates)
-            context: Event context for tracking and loop prevention
-        """
-        # Create event object
-        # Build patch for updates
-        patch_data = None
-        if before and after and event_type == EventType.NODE_UPDATE:
-            patch_data = {}
-            for key in after:
-                if key not in before or before.get(key) != after.get(key):
-                    patch_data[key] = after[key]
-
-        event = Event(
-            event_type=event_type,
-            origin=context or EventContext(),
-            entity=EntityData(
-                kind=entity_kind,
-                id=entity_id,
-                type=entity_type,
-                before=before,
-                after=after,
-                patch=patch_data,
-            ),
+        """Emit a graph mutation event.  Delegates to storage_events."""
+        storage_events.emit_event(
+            self._history_store,
+            self._system_listeners,
+            self._events_enabled,
+            self._event_dispatcher,
+            event_type,
+            entity_kind,
+            entity_id,
+            entity_type,
+            before=before,
+            after=after,
+            context=context,
         )
-
-        # Notify system listeners (always, even if events disabled for webhooks)
-        for listener in self._system_listeners:
-            try:
-                listener(event)
-            except Exception as e:
-                print(f"Error in system listener: {e}")
-
-        if not self._events_enabled or not self._event_dispatcher:
-            print(f"EVENT: Skipped (events_enabled={self._events_enabled}, dispatcher={self._event_dispatcher is not None})")
-            return
-
-        print(f"EVENT: Emitting {event_type.value} for {entity_kind.value} {entity_id} ({entity_type})")
-
-        # Dispatch asynchronously (non-blocking)
-        try:
-            self._event_dispatcher.dispatch(event)
-        except Exception as e:
-            print(f"Warning: Failed to dispatch event: {e}")
-
 
     def emit_federated_node_event(
         self,
@@ -289,30 +294,9 @@ class GraphStorage:
         event_origin: str = "federation-sync",
     ) -> None:
         """Emit an event for federated cache changes so subscriptions can react."""
-        operation_map = {
-            "create": EventType.NODE_CREATE,
-            "update": EventType.NODE_UPDATE,
-            "delete": EventType.NODE_DELETE,
-        }
-        event_type = operation_map.get(operation)
-        if event_type is None:
-            return
-
-        entity_node = node_after or node_before
-        if entity_node is None:
-            return
-
-        context = EventContext(event_origin=event_origin)
-        self._emit_event(
-            event_type=event_type,
-            entity_kind=EntityKind.NODE,
-            entity_id=entity_node.id,
-            entity_type=entity_node.type_str,
-            before=node_before.to_dict() if node_before else None,
-            after=node_after.to_dict() if node_after else None,
-            context=context,
+        storage_events.emit_federated_node_event(
+            self._emit_event, operation, node_before, node_after, event_origin
         )
-
 
     def emit_federated_edge_event(
         self,
@@ -322,62 +306,67 @@ class GraphStorage:
         event_origin: str = "federation-sync",
     ) -> None:
         """Emit an event for federated cache edge changes."""
-        operation_map = {
-            "create": EventType.EDGE_CREATE,
-            "update": EventType.EDGE_UPDATE if hasattr(EventType, "EDGE_UPDATE") else EventType.EDGE_CREATE,
-            "delete": EventType.EDGE_DELETE,
-        }
-        event_type = operation_map.get(operation)
-        if event_type is None:
-            return
+        storage_events.emit_federated_edge_event(
+            self._emit_event, operation, edge_before, edge_after, event_origin
+        )
 
-        entity_edge = edge_after or edge_before
-        if entity_edge is None:
-            return
+    def get_recent_history(
+        self, limit: int = 50, offset: int = 0
+    ) -> List[Dict[str, Any]]:
+        """Return recent graph mutation history, newest first.  Delegates to storage_history."""
+        return storage_history.get_recent_history(self._history_store, limit, offset)
 
-        context = EventContext(event_origin=event_origin)
-        self._emit_event(
-            event_type=event_type,
-            entity_kind=EntityKind.EDGE,
-            entity_id=entity_edge.id,
-            entity_type=entity_edge.type_str,
-            before=edge_before.to_dict() if edge_before else None,
-            after=edge_after.to_dict() if edge_after else None,
-            context=context,
+    def get_node_history(
+        self, node_id: str, limit: int = 50, offset: int = 0
+    ) -> List[Dict[str, Any]]:
+        """Return mutation history for a single node id, newest first."""
+        return storage_history.get_node_history(
+            self._history_store, node_id, limit, offset
+        )
+
+    def get_edge_history(
+        self, edge_id: str, limit: int = 50, offset: int = 0
+    ) -> List[Dict[str, Any]]:
+        """Return mutation history for a single edge id, newest first."""
+        return storage_history.get_edge_history(
+            self._history_store, edge_id, limit, offset
         )
 
     def load(self) -> None:
         """
-        Load graph from JSON file.
+        Load graph from the configured persistence backend.
 
-        Thread-safe: Uses lock for in-memory updates and file lock for reading.
+        Thread-safe: Uses lock for in-memory updates.
         """
         with self._lock:
-            if not self.json_path.exists():
-                print(f"No graph file found at {self.json_path}, creating new empty graph")
-                self.save()
+            if not self._persistence_backend.exists():
+                print(
+                    f"No graph file found at {self.json_path}, creating new empty graph"
+                )
+                # Wait for the initial file write to complete so callers can
+                # immediately open the file (e.g. creating a second storage instance).
+                self.save().result()
                 return
 
             try:
-                # Use file locking to prevent reading while another process writes
-                with open(self.json_path, 'r', encoding='utf-8') as f:
-                    _lock_file(f, exclusive=False)  # Shared lock for reading
-                    try:
-                        data = json.load(f)
-                    finally:
-                        _unlock_file(f)
+                data = self._persistence_backend.load_graph_data()
 
-                metadata = data.get('metadata') if isinstance(data, dict) else None
+                metadata = data.get("metadata") if isinstance(data, dict) else None
                 if isinstance(metadata, dict):
                     self.graph_metadata = {
                         "version": metadata.get("version", "1.0"),
-                        "graph_name": metadata.get("graph_name") or self.json_path.stem,
-                        **{k: v for k, v in metadata.items() if k not in {"version", "graph_name"}},
+                        "graph_name": metadata.get("graph_name")
+                        or self._default_graph_name(),
+                        **{
+                            k: v
+                            for k, v in metadata.items()
+                            if k not in {"version", "graph_name"}
+                        },
                     }
                 else:
                     self.graph_metadata = {
                         "version": "1.0",
-                        "graph_name": self.json_path.stem,
+                        "graph_name": self._default_graph_name(),
                     }
 
                 # Clear existing data
@@ -389,97 +378,107 @@ class GraphStorage:
                 self._searchable_text_cache.clear()
 
                 # Load nodes
-                for node_data in data.get('nodes', []):
+                for node_data in data.get("nodes", []):
                     node = Node.from_dict(node_data)
                     self.nodes[node.id] = node
                     self.graph.add_node(node.id, data=node)
 
                     # Precompute searchable text
-                    self._searchable_text_cache[node.id] = self._build_searchable_text(node)
+                    self._searchable_text_cache[node.id] = self._build_searchable_text(
+                        node
+                    )
 
                 # Load edges
-                for edge_data in data.get('edges', []):
+                for edge_data in data.get("edges", []):
                     edge = Edge.from_dict(edge_data)
                     self.edges[edge.id] = edge
                     self.graph.add_edge(
-                        edge.source,
-                        edge.target,
-                        key=edge.id,
-                        data=edge
+                        edge.source, edge.target, key=edge.id, data=edge
                     )
 
                 # Rebuild vector store index from loaded nodes
                 self.vector_store.rebuild_index(list(self.nodes.values()))
 
-                print(f"Loaded {len(self.nodes)} nodes and {len(self.edges)} edges from {self.json_path}")
+                print(
+                    f"Loaded {len(self.nodes)} nodes and {len(self.edges)} edges from {self.json_path}"
+                )
 
             except Exception as e:
                 print(f"Error loading graph: {e}")
                 raise
 
-    def save(self) -> None:
+    def save(self) -> "Future[None]":
         """
-        Save graph to JSON file.
+        Save graph through the configured persistence backend.
+
+        Captures graph state while holding the lock, then offloads the actual
+        file I/O to a background thread to prevent blocking the event loop.
+        Returns the Future representing the background write — callers that
+        must know when the write completes can call .result() on it.
 
         Thread-safe: Uses lock for reading in-memory data.
-        Atomic: Writes to temp file first, then renames to prevent corruption.
-        File-locked: Uses OS-level locking to prevent concurrent writes.
         """
         with self._lock:
             data = {
-                'nodes': [node.to_dict() for node in self.nodes.values()],
-                'edges': [edge.to_dict() for edge in self.edges.values()],
-                'metadata': {
+                "nodes": [node.to_dict() for node in self.nodes.values()],
+                "edges": [edge.to_dict() for edge in self.edges.values()],
+                "metadata": {
                     **(self.graph_metadata or {}),
-                    'version': (self.graph_metadata or {}).get('version', '1.0'),
-                    'graph_name': (self.graph_metadata or {}).get('graph_name', self.json_path.stem),
-                    'last_updated': datetime.utcnow().isoformat()
-                }
+                    "version": (self.graph_metadata or {}).get("version", "1.0"),
+                    "graph_name": (self.graph_metadata or {}).get(
+                        "graph_name", self._default_graph_name()
+                    ),
+                    "last_updated": datetime.now(timezone.utc).isoformat(),
+                },
             }
+            node_count = len(self.nodes)
+            edge_count = len(self.edges)
 
-            # Create directory if it doesn't exist
-            self.json_path.parent.mkdir(parents=True, exist_ok=True)
+        # Offload blocking I/O to background thread to avoid blocking event loop.
+        # Returns the Future so callers that must wait (e.g. load()) can call .result().
+        return self._io_executor.submit(
+            self._do_save_to_disk, data, node_count, edge_count
+        )
 
-            # Atomic write: write to temp file, then rename
-            # This prevents corruption if the process is killed mid-write
-            temp_fd, temp_path = tempfile.mkstemp(
-                suffix='.json',
-                prefix='graph_',
-                dir=self.json_path.parent
+    def _do_save_to_disk(
+        self, data: Dict[str, Any], node_count: int, edge_count: int
+    ) -> None:
+        """
+        Internal method: delegate serialized graph data to the persistence backend.
+        Runs in the background executor so file I/O doesn't block the event loop.
+
+        Exceptions are intentionally re-raised so the ThreadPoolExecutor stores
+        them in the returned Future. Callers that call .result() (e.g. load())
+        will then receive the exception rather than a silent no-op.
+        """
+        try:
+            self._persistence_backend.save_graph_data(data)
+            print(
+                f"Saved {node_count} nodes and {edge_count} edges to {self.json_path}"
             )
+        except Exception as e:
+            print(f"Error saving graph to disk: {e}")
+            raise
 
-            try:
-                with os.fdopen(temp_fd, 'w', encoding='utf-8') as f:
-                    _lock_file(f, exclusive=True)  # Exclusive lock for writing
-                    try:
-                        json.dump(data, f, indent=2, ensure_ascii=False)
-                        f.flush()
-                        os.fsync(f.fileno())  # Ensure data is written to disk
-                    finally:
-                        _unlock_file(f)
+    def flush(self) -> None:
+        """
+        Wait for any pending background save operations to complete.
 
-                # Atomic rename (on most filesystems)
-                # On Windows, we need to remove the target first
-                if sys.platform == 'win32' and self.json_path.exists():
-                    os.replace(temp_path, self.json_path)
-                else:
-                    os.rename(temp_path, self.json_path)
+        Useful in tests and in code that reloads from disk immediately
+        after mutating the graph.
 
-                print(f"Saved {len(self.nodes)} nodes and {len(self.edges)} edges to {self.json_path}")
-
-            except Exception as e:
-                # Clean up temp file on error
-                if os.path.exists(temp_path):
-                    os.unlink(temp_path)
-                raise e
-
+        Correctness relies on max_workers=1 (FIFO task ordering). The no-op
+        submitted here will only run after all previously submitted saves.
+        """
+        # Submit a no-op sentinel and block until it runs — drains the queue.
+        self._io_executor.submit(lambda: None).result()
 
     def get_graph_name(self) -> str:
         """Return configured graph name from graph metadata."""
         name = (self.graph_metadata or {}).get("graph_name")
         if isinstance(name, str) and name.strip():
             return name.strip()
-        return self.json_path.stem
+        return self._default_graph_name()
 
     def reload(self) -> None:
         """
@@ -489,45 +488,23 @@ class GraphStorage:
         """
         self.load()
 
+    def _score_node_match(self, node: "Node", query_lower: str) -> int:
+        return storage_search.score_node_match(
+            node, query_lower, self._type_searchable_text
+        )
+
     def search_nodes(
-        self,
-        query: str,
-        node_types: Optional[List[NodeType]] = None,
-        limit: int = 50
+        self, query: str, node_types: Optional[List[NodeType]] = None, limit: int = 50
     ) -> List[Node]:
-        """
-        Search nodes based on text query
-        Matches against name, description, summary, and tags.
-        Empty query or '*' returns all nodes (subject to filtering and limit).
-        """
-        query_lower = query.lower().strip()
-        results = []
-
-        # Handle wildcard or empty query
-        match_all = query_lower == "" or query_lower == "*"
-
-        for node in self.nodes.values():
-            # Filter by node type
-            if node_types and node.type not in node_types:
-                continue
-
-            # Text matching including tags (if not matching all)
-            if not match_all:
-                searchable_text = self._searchable_text_cache.get(node.id)
-                if searchable_text is None:
-                    # Fallback just in case cache wasn't populated
-                    searchable_text = self._build_searchable_text(node)
-                    self._searchable_text_cache[node.id] = searchable_text
-
-                if query_lower not in searchable_text:
-                    continue
-
-            results.append(node)
-
-            if len(results) >= limit:
-                break
-
-        return results
+        """Search nodes based on text query.  Delegates to storage_search."""
+        return storage_search.search_nodes(
+            self.nodes,
+            self._searchable_text_cache,
+            self._type_searchable_text,
+            query,
+            node_types,
+            limit,
+        )
 
     def get_node(self, node_id: str) -> Optional[Node]:
         """Get a specific node"""
@@ -545,146 +522,36 @@ class GraphStorage:
         self,
         node_id: str,
         relationship_types: Optional[List[RelationshipType]] = None,
-        depth: int = 1
+        depth: int = 1,
     ) -> Dict[str, Any]:
-        """
-        Get nodes connected to the given node
-        Returns both nodes and edges
-        """
-        if node_id not in self.nodes:
-            return {'nodes': [], 'edges': []}
-
-        visited_nodes = set([node_id])
-        visited_edges = set()
-        current_layer = {node_id}
-
-        for _ in range(depth):
-            next_layer = set()
-
-            for curr_id in current_layer:
-                # Outgoing edges
-                for _, target, edge_id, edge_data in self.graph.out_edges(curr_id, keys=True, data=True):
-                    edge = edge_data['data']
-                    if relationship_types and edge.type not in relationship_types:
-                        continue
-                    visited_edges.add(edge_id)
-                    if target not in visited_nodes:
-                        visited_nodes.add(target)
-                        next_layer.add(target)
-
-                # Incoming edges
-                for source, _, edge_id, edge_data in self.graph.in_edges(curr_id, keys=True, data=True):
-                    edge = edge_data['data']
-                    if relationship_types and edge.type not in relationship_types:
-                        continue
-                    visited_edges.add(edge_id)
-                    if source not in visited_nodes:
-                        visited_nodes.add(source)
-                        next_layer.add(source)
-
-            current_layer = next_layer
-
-        return {
-            'nodes': [self.nodes[nid] for nid in visited_nodes if nid in self.nodes],
-            'edges': [self.edges[eid] for eid in visited_edges if eid in self.edges]
-        }
+        """Get nodes connected to the given node.  Delegates to storage_search."""
+        return storage_search.get_related_nodes(
+            self.nodes, self.edges, self.graph, node_id, relationship_types, depth
+        )
 
     def find_similar_nodes(
         self,
         name: str,
         node_type: Optional[NodeType] = None,
         threshold: float = 0.7,
-        limit: int = 5
+        limit: int = 5,
     ) -> List[SimilarNode]:
-        """
-        Find similar nodes based on Levenshtein distance AND vector embeddings
-        Used for duplicate detection
-        """
-        results = []
-        seen_node_ids = set()
-
-        # 1. Levenshtein Search (Exact string matching)
-        name_lower = name.lower()
-
-        for node in self.nodes.values():
-            # Filter by type if specified
-            if node_type and node.type != node_type:
-                continue
-
-            # Calculate similarity with Levenshtein
-            node_name_lower = node.name.lower()
-            distance = Levenshtein.distance(name_lower, node_name_lower)
-            max_len = max(len(name_lower), len(node_name_lower))
-
-            if max_len == 0:
-                similarity = 1.0
-            else:
-                similarity = 1.0 - (distance / max_len)
-
-            if similarity >= threshold:
-                results.append(SimilarNode(
-                    node=node,
-                    similarity_score=round(similarity, 2),
-                    match_reason=f"Name similarity: {int(similarity * 100)}%"
-                ))
-                seen_node_ids.add(node.id)
-
-        # 2. Vector Search (Semantic similarity)
-        # Lower threshold for vector search to catch semantic matches that might have different names
-        vector_threshold = max(0.4, threshold - 0.2)
-        vector_results = self.vector_store.search(
-            query_text=name,
-            limit=limit,
-            threshold=vector_threshold
+        """Find similar nodes by name (Levenshtein + vector).  Delegates to storage_search."""
+        return storage_search.find_similar_nodes(
+            self.nodes, self.vector_store, name, node_type, threshold, limit
         )
-
-        for node_id, score in vector_results:
-            if node_id in seen_node_ids:
-                continue
-
-            node = self.nodes.get(node_id)
-            if not node:
-                continue
-
-            if node_type and node.type != node_type:
-                continue
-
-            results.append(SimilarNode(
-                node=node,
-                similarity_score=round(score, 2),
-                match_reason=f"Semantic similarity: {int(score * 100)}%"
-            ))
-            seen_node_ids.add(node_id)
-
-        # Sort by similarity score
-        results.sort(key=lambda x: x.similarity_score, reverse=True)
-        return results[:limit]
 
     def find_similar_nodes_batch(
         self,
         names: List[str],
         node_type: Optional[NodeType] = None,
         threshold: float = 0.7,
-        limit: int = 5
+        limit: int = 5,
     ) -> Dict[str, List[SimilarNode]]:
-        """
-        Find similar nodes for multiple names at once (batch processing)
-        Returns a dictionary mapping each name to its similar nodes
-
-        This is much more efficient than calling find_similar_nodes multiple times
-        as it processes all names in one go.
-        """
-        results = {}
-
-        for name in names:
-            results[name] = self.find_similar_nodes(
-                name=name,
-                node_type=node_type,
-                threshold=threshold,
-                limit=limit
-            )
-
-        return results
+        """Batch variant of find_similar_nodes.  Delegates to storage_search."""
+        return storage_search.find_similar_nodes_batch(
+            self.nodes, self.vector_store, names, node_type, threshold, limit
+        )
 
     def add_nodes(
         self,
@@ -716,7 +583,7 @@ class GraphStorage:
                             added_node_ids=[],
                             added_edge_ids=[],
                             success=False,
-                            message=f"Node with ID {node.id} already exists"
+                            message=f"Node with ID {node.id} already exists",
                         )
 
                     self.nodes[node.id] = node
@@ -725,7 +592,9 @@ class GraphStorage:
                     nodes_to_embed.append(node)
 
                     # Precompute searchable text
-                    self._searchable_text_cache[node.id] = self._build_searchable_text(node)
+                    self._searchable_text_cache[node.id] = self._build_searchable_text(
+                        node
+                    )
 
                 # Generate embeddings for new nodes (non-blocking)
                 if nodes_to_embed:
@@ -754,14 +623,18 @@ class GraphStorage:
                         if source_id in name_to_id:
                             source_id = name_to_id[source_id]
                         else:
-                            raise ValueError(f"Source node '{edge.source}' does not exist (not found by ID or name)")
+                            raise ValueError(
+                                f"Source node '{edge.source}' does not exist (not found by ID or name)"
+                            )
 
                     # If target is not a valid ID, try to resolve it as a name
                     if target_id not in self.nodes:
                         if target_id in name_to_id:
                             target_id = name_to_id[target_id]
                         else:
-                            raise ValueError(f"Target node '{edge.target}' does not exist (not found by ID or name)")
+                            raise ValueError(
+                                f"Target node '{edge.target}' does not exist (not found by ID or name)"
+                            )
 
                     # Update edge with resolved IDs
                     edge.source = source_id
@@ -772,15 +645,12 @@ class GraphStorage:
                             added_node_ids=[],
                             added_edge_ids=[],
                             success=False,
-                            message=f"Edge with ID {edge.id} already exists"
+                            message=f"Edge with ID {edge.id} already exists",
                         )
 
                     self.edges[edge.id] = edge
                     self.graph.add_edge(
-                        edge.source,
-                        edge.target,
-                        key=edge.id,
-                        data=edge
+                        edge.source, edge.target, key=edge.id, data=edge
                     )
                     added_edge_ids.append(edge.id)
 
@@ -791,7 +661,11 @@ class GraphStorage:
                 for node_id in added_node_ids:
                     node = self.nodes.get(node_id)
                     if node:
-                        node_type = node.type.value if hasattr(node.type, 'value') else str(node.type)
+                        node_type = (
+                            node.type.value
+                            if hasattr(node.type, "value")
+                            else str(node.type)
+                        )
                         self._emit_event(
                             event_type=EventType.NODE_CREATE,
                             entity_kind=EntityKind.NODE,
@@ -806,7 +680,11 @@ class GraphStorage:
                 for edge_id in added_edge_ids:
                     edge = self.edges.get(edge_id)
                     if edge:
-                        edge_type = edge.type.value if hasattr(edge.type, 'value') else str(edge.type)
+                        edge_type = (
+                            edge.type.value
+                            if hasattr(edge.type, "value")
+                            else str(edge.type)
+                        )
                         self._emit_event(
                             event_type=EventType.EDGE_CREATE,
                             entity_kind=EntityKind.EDGE,
@@ -821,7 +699,7 @@ class GraphStorage:
                     added_node_ids=added_node_ids,
                     added_edge_ids=added_edge_ids,
                     success=True,
-                    message=f"Added {len(added_node_ids)} nodes and {len(added_edge_ids)} edges"
+                    message=f"Added {len(added_node_ids)} nodes and {len(added_edge_ids)} edges",
                 )
 
             except Exception as e:
@@ -829,7 +707,7 @@ class GraphStorage:
                     added_node_ids=[],
                     added_edge_ids=[],
                     success=False,
-                    message=f"Error during add: {str(e)}"
+                    message=f"Error during add: {str(e)}",
                 )
 
     def update_node(
@@ -858,21 +736,43 @@ class GraphStorage:
             before_state = node.to_dict()
 
             # Update allowed fields
-            allowed_fields = {'name', 'description', 'summary', 'tags', 'subtypes', 'metadata'}
+            allowed_fields = {
+                "name",
+                "description",
+                "summary",
+                "tags",
+                "subtypes",
+                "aliases",
+                "metadata",
+            }
+            reserved_fields = {"id", "type", "embedding", "created_at", "updated_at"}
             for key, value in updates.items():
                 if key in allowed_fields:
                     setattr(node, key, value)
+            # Fold schema-defined extra fields (anything outside the base model) into metadata
+            extra = {
+                k: v
+                for k, v in updates.items()
+                if k not in allowed_fields and k not in reserved_fields
+            }
+            if extra:
+                meta = dict(node.metadata or {})
+                meta.update(extra)
+                node.metadata = meta
 
-            node.updated_at = datetime.utcnow()
+            node.updated_at = datetime.now(timezone.utc)
 
             # Update in graph
-            self.graph.nodes[node_id]['data'] = node
+            self.graph.nodes[node_id]["data"] = node
 
             # Update searchable text cache
             self._searchable_text_cache[node.id] = self._build_searchable_text(node)
 
             # Update embedding if text fields or tags changed (non-blocking)
-            if any(k in updates for k in ['name', 'description', 'summary', 'tags']):
+            if any(
+                k in updates
+                for k in ["name", "description", "summary", "tags", "aliases"]
+            ):
                 try:
                     self.vector_store.update_node_embedding(node)
                 except Exception as embed_error:
@@ -882,7 +782,9 @@ class GraphStorage:
             self.save()
 
             # Emit update event
-            node_type = node.type.value if hasattr(node.type, 'value') else str(node.type)
+            node_type = (
+                node.type.value if hasattr(node.type, "value") else str(node.type)
+            )
             self._emit_event(
                 event_type=EventType.NODE_UPDATE,
                 entity_kind=EntityKind.NODE,
@@ -918,7 +820,7 @@ class GraphStorage:
                     deleted_node_ids=[],
                     affected_edge_ids=[],
                     success=False,
-                    message="Max 10 nodes can be deleted at a time. Contact admin for bulk deletion."
+                    message="Max 10 nodes can be deleted at a time. Contact admin for bulk deletion.",
                 )
 
             if not confirmed:
@@ -926,7 +828,7 @@ class GraphStorage:
                     deleted_node_ids=[],
                     affected_edge_ids=[],
                     success=False,
-                    message="Deletion requires confirmed=True parameter"
+                    message="Deletion requires confirmed=True parameter",
                 )
 
             deleted_node_ids = []
@@ -1003,7 +905,7 @@ class GraphStorage:
                     deleted_node_ids=deleted_node_ids,
                     affected_edge_ids=affected_edge_ids,
                     success=True,
-                    message=f"Deleted {len(deleted_node_ids)} nodes and {len(affected_edge_ids)} edges"
+                    message=f"Deleted {len(deleted_node_ids)} nodes and {len(affected_edge_ids)} edges",
                 )
 
             except Exception as e:
@@ -1011,7 +913,7 @@ class GraphStorage:
                     deleted_node_ids=[],
                     affected_edge_ids=[],
                     success=False,
-                    message=f"Error during deletion: {str(e)}"
+                    message=f"Error during deletion: {str(e)}",
                 )
 
     def get_stats(self) -> GraphStats:
@@ -1019,17 +921,21 @@ class GraphStorage:
         # Count nodes per type
         nodes_by_type = {}
         for node in self.nodes.values():
-            type_name = node.type.value if hasattr(node.type, 'value') else str(node.type)
+            type_name = (
+                node.type.value if hasattr(node.type, "value") else str(node.type)
+            )
             nodes_by_type[type_name] = nodes_by_type.get(type_name, 0) + 1
 
         return GraphStats(
             total_nodes=len(self.nodes),
             total_edges=len(self.edges),
             nodes_by_type=nodes_by_type,
-            last_updated=datetime.utcnow()
+            last_updated=datetime.now(timezone.utc),
         )
 
-    def get_subtypes_by_node_type(self, node_type: Optional[str] = None) -> Dict[str, List[str]]:
+    def get_subtypes_by_node_type(
+        self, node_type: Optional[str] = None
+    ) -> Dict[str, List[str]]:
         """Get all unique subtypes grouped by node type.
 
         Args:
@@ -1040,10 +946,12 @@ class GraphStorage:
         """
         result: Dict[str, set] = {}
         for node in self.nodes.values():
-            type_name = node.type.value if hasattr(node.type, 'value') else str(node.type)
+            type_name = (
+                node.type.value if hasattr(node.type, "value") else str(node.type)
+            )
             if node_type and type_name != node_type:
                 continue
-            if hasattr(node, 'subtypes') and node.subtypes:
+            if hasattr(node, "subtypes") and node.subtypes:
                 if type_name not in result:
                     result[type_name] = set()
                 result[type_name].update(node.subtypes)
@@ -1053,14 +961,16 @@ class GraphStorage:
         """Get all edges where both source and target are in the given node IDs"""
         node_id_set = set(node_ids)
         return [
-            edge for edge in self.edges.values()
+            edge
+            for edge in self.edges.values()
             if edge.source in node_id_set and edge.target in node_id_set
         ]
 
     def get_edges_for_node(self, node_id: str) -> List[Edge]:
         """Get all edges connected to a specific node"""
         return [
-            edge for edge in self.edges.values()
+            edge
+            for edge in self.edges.values()
             if edge.source == node_id or edge.target == node_id
         ]
 
@@ -1088,10 +998,10 @@ class GraphStorage:
             before_state = edge.to_dict()
 
             # Update allowed fields
-            allowed_fields = {'type', 'label', 'metadata'}
+            allowed_fields = {"type", "label", "metadata"}
             for key, value in updates.items():
                 if key in allowed_fields:
-                    if key == 'type' and (value is None or value == ""):
+                    if key == "type" and (value is None or value == ""):
                         value = "RELATES_TO"
                     setattr(edge, key, value)
 
@@ -1099,7 +1009,9 @@ class GraphStorage:
             self.save()
 
             # Emit update event
-            edge_type = edge.type.value if hasattr(edge.type, 'value') else str(edge.type)
+            edge_type = (
+                edge.type.value if hasattr(edge.type, "value") else str(edge.type)
+            )
             self._emit_event(
                 event_type=EventType.EDGE_UPDATE,
                 entity_kind=EntityKind.EDGE,
@@ -1135,7 +1047,9 @@ class GraphStorage:
 
             edge = self.edges[edge_id]
             before_state = edge.to_dict()
-            edge_type = edge.type.value if hasattr(edge.type, 'value') else str(edge.type)
+            edge_type = (
+                edge.type.value if hasattr(edge.type, "value") else str(edge.type)
+            )
 
             # Remove from graph
             try:
@@ -1161,6 +1075,59 @@ class GraphStorage:
             )
 
             return True
+
+    def delete_edges(
+        self,
+        edge_ids: List[str],
+        event_context: Optional[EventContext] = None,
+    ) -> DeleteEdgesResult:
+        """Delete edges by ID. Limit enforcement is the caller's responsibility."""
+        with self._lock:
+            deleted_edge_ids = []
+            edge_before_states: Dict[str, Dict[str, Any]] = {}
+
+            try:
+                for edge_id in edge_ids:
+                    edge = self.edges.get(edge_id)
+                    if edge is None:
+                        continue
+
+                    edge_before_states[edge_id] = edge.to_dict()
+
+                    try:
+                        self.graph.remove_edge(edge.source, edge.target, key=edge_id)
+                    except Exception:
+                        pass
+
+                    del self.edges[edge_id]
+                    deleted_edge_ids.append(edge_id)
+
+                self.save()
+
+                for edge_id in deleted_edge_ids:
+                    before_state = edge_before_states[edge_id]
+                    edge_type = before_state.get("type", "RELATES_TO")
+                    self._emit_event(
+                        event_type=EventType.EDGE_DELETE,
+                        entity_kind=EntityKind.EDGE,
+                        entity_id=edge_id,
+                        entity_type=edge_type,
+                        before=before_state,
+                        after=None,
+                        context=event_context,
+                    )
+
+                return DeleteEdgesResult(
+                    deleted_edge_ids=deleted_edge_ids,
+                    success=True,
+                    message=f"Deleted {len(deleted_edge_ids)} edges",
+                )
+            except Exception as e:
+                return DeleteEdgesResult(
+                    deleted_edge_ids=[],
+                    success=False,
+                    message=f"Error during edge deletion: {str(e)}",
+                )
 
     def add_edge(
         self,
@@ -1206,7 +1173,9 @@ class GraphStorage:
             self.save()
 
             # Emit create event
-            edge_type = edge.type.value if hasattr(edge.type, 'value') else str(edge.type)
+            edge_type = (
+                edge.type.value if hasattr(edge.type, "value") else str(edge.type)
+            )
             self._emit_event(
                 event_type=EventType.EDGE_CREATE,
                 entity_kind=EntityKind.EDGE,
@@ -1232,13 +1201,17 @@ class GraphStorage:
 
             if node_id in self.graph:
                 # Outgoing edges
-                for _, _, _, edge_data in self.graph.out_edges(node_id, keys=True, data=True):
-                    edge = edge_data['data']
+                for _, _, _, edge_data in self.graph.out_edges(
+                    node_id, keys=True, data=True
+                ):
+                    edge = edge_data["data"]
                     collected_edges[edge.id] = edge
 
                 # Incoming edges
-                for _, _, _, edge_data in self.graph.in_edges(node_id, keys=True, data=True):
-                    edge = edge_data['data']
+                for _, _, _, edge_data in self.graph.in_edges(
+                    node_id, keys=True, data=True
+                ):
+                    edge = edge_data["data"]
                     collected_edges[edge.id] = edge
 
         return list(collected_edges.values())

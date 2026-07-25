@@ -1,6 +1,7 @@
-import { memo, useState, useRef, useEffect } from 'react';
+import { memo, useState, useRef, useEffect, useContext } from 'react';
 import { createPortal } from 'react-dom';
 import { NodeResizer, useReactFlow } from 'reactflow';
+import { AnnotationContext } from './AnnotationContext';
 import './GroupNode.css';
 
 /**
@@ -20,6 +21,10 @@ function GroupNode({ id, data, selected }) {
   const groupRef = useRef(null);
   const contextMenuRef = useRef(null);
   const { setNodes } = useReactFlow();
+  // Groups are annotations (design 3.1); reuse the annotation change notifier so
+  // a rename, recolour, resize or delete schedules a session save (and, in a
+  // shared session, an op) the same way note/label/arrow edits do.
+  const { notifyChange } = useContext(AnnotationContext);
 
   useEffect(() => {
     if (isEditing && inputRef.current) {
@@ -47,12 +52,16 @@ function GroupNode({ id, data, selected }) {
     const timer = setTimeout(() => {
       document.addEventListener('mousedown', handleDismiss, true);
       document.addEventListener('contextmenu', handleDismiss, true);
+      // focusin covers keyboard-only navigation (Tab into search/chat inputs),
+      // which never produces a mousedown.
+      document.addEventListener('focusin', handleDismiss, true);
       document.addEventListener('keydown', handleKeyDown, true);
     }, 0);
     return () => {
       clearTimeout(timer);
       document.removeEventListener('mousedown', handleDismiss, true);
       document.removeEventListener('contextmenu', handleDismiss, true);
+      document.removeEventListener('focusin', handleDismiss, true);
       document.removeEventListener('keydown', handleKeyDown, true);
     };
   }, [contextMenu]);
@@ -68,7 +77,7 @@ function GroupNode({ id, data, selected }) {
 
   const handleLabelBlur = () => {
     setIsEditing(false);
-    if (editedLabel.trim()) {
+    if (editedLabel.trim() && editedLabel.trim() !== data.label) {
       setNodes((nds) =>
         nds.map((n) => {
           if (n.id === id) {
@@ -77,7 +86,8 @@ function GroupNode({ id, data, selected }) {
           return n;
         })
       );
-    } else {
+      notifyChange();
+    } else if (!editedLabel.trim()) {
       setEditedLabel(data.label || 'Group');
     }
   };
@@ -108,14 +118,15 @@ function GroupNode({ id, data, selected }) {
       })
     );
     setContextMenu(null);
+    notifyChange();
   };
 
   // Un-parent children and remove the group node from the canvas
   const removeGroupKeepChildren = () => {
     setNodes((nds) => {
-      const children = nds.filter(n => n.parentId === id);
-      const groupNode = nds.find(n => n.id === id);
-      const updatedChildren = children.map(child => ({
+      const children = nds.filter((n) => n.parentId === id);
+      const groupNode = nds.find((n) => n.id === id);
+      const updatedChildren = children.map((child) => ({
         ...child,
         parentId: undefined,
         extent: undefined,
@@ -126,12 +137,13 @@ function GroupNode({ id, data, selected }) {
       }));
 
       return nds
-        .filter(n => n.id !== id)
-        .map(n => {
-          const updated = updatedChildren.find(c => c.id === n.id);
+        .filter((n) => n.id !== id)
+        .map((n) => {
+          const updated = updatedChildren.find((c) => c.id === n.id);
           return updated || n;
         });
     });
+    notifyChange();
   };
 
   const handleHideGroup = () => {
@@ -150,6 +162,7 @@ function GroupNode({ id, data, selected }) {
       <NodeResizer
         minWidth={200}
         minHeight={150}
+        onResizeEnd={() => notifyChange()}
         isVisible={selected}
         lineStyle={{ stroke: data.color || '#646cff', strokeWidth: 4 }}
         handleStyle={{
@@ -165,7 +178,7 @@ function GroupNode({ id, data, selected }) {
         className="graph-group-node"
         style={{
           borderColor: data.color || '#646cff',
-          backgroundColor: `${data.color || '#646cff'}15`
+          backgroundColor: `${data.color || '#646cff'}15`,
         }}
       >
         <div
@@ -179,7 +192,7 @@ function GroupNode({ id, data, selected }) {
             <input
               ref={inputRef}
               type="text"
-              className="graph-group-label-input"
+              className="graph-group-label-input nodrag"
               value={editedLabel}
               onChange={handleLabelChange}
               onBlur={handleLabelBlur}
@@ -190,37 +203,36 @@ function GroupNode({ id, data, selected }) {
             <span className="graph-group-label">{data.label || 'Group'}</span>
           )}
         </div>
-        {data.description && (
-          <div className="graph-group-description">{data.description}</div>
-        )}
+        {data.description && <div className="graph-group-description">{data.description}</div>}
       </div>
 
-      {contextMenu && createPortal(
-        <div
-          ref={contextMenuRef}
-          className="graph-group-context-menu"
-          style={{ left: contextMenu.x, top: contextMenu.y }}
-        >
-          <div className="context-menu-title">Group Color</div>
-          <div className="context-menu-colors">
-            {colors.map((color) => (
-              <button
-                key={color}
-                className="color-button"
-                style={{ backgroundColor: color }}
-                onClick={() => handleChangeColor(color)}
-              />
-            ))}
-          </div>
-          <button className="context-menu-action" onClick={handleHideGroup}>
-            👁️ Hide Group
-          </button>
-          <button className="context-menu-delete" onClick={handleDeleteGroup}>
-            🗑️ Delete Group
-          </button>
-        </div>,
-        document.body
-      )}
+      {contextMenu &&
+        createPortal(
+          <div
+            ref={contextMenuRef}
+            className="graph-group-context-menu"
+            style={{ left: contextMenu.x, top: contextMenu.y }}
+          >
+            <div className="context-menu-title">Group Color</div>
+            <div className="context-menu-colors">
+              {colors.map((color) => (
+                <button
+                  key={color}
+                  className="color-button"
+                  style={{ backgroundColor: color }}
+                  onClick={() => handleChangeColor(color)}
+                />
+              ))}
+            </div>
+            <button className="context-menu-action" onClick={handleHideGroup}>
+              👁️ Hide Group
+            </button>
+            <button className="context-menu-delete" onClick={handleDeleteGroup}>
+              🗑️ Delete Group
+            </button>
+          </div>,
+          document.body
+        )}
     </>
   );
 }

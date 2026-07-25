@@ -35,25 +35,13 @@ describe('EditNodeDialog', () => {
 
   describe('Rendering', () => {
     it('renders the dialog with correct title', () => {
-      render(
-        <EditNodeDialog
-          node={mockNode}
-          onClose={mockOnClose}
-          onSave={mockOnSave}
-        />
-      );
+      render(<EditNodeDialog node={mockNode} onClose={mockOnClose} onSave={mockOnSave} />);
 
       expect(screen.getByText('Edit Actor')).toBeInTheDocument();
     });
 
     it('populates form with node data', () => {
-      render(
-        <EditNodeDialog
-          node={mockNode}
-          onClose={mockOnClose}
-          onSave={mockOnSave}
-        />
-      );
+      render(<EditNodeDialog node={mockNode} onClose={mockOnClose} onSave={mockOnSave} />);
 
       expect(screen.getByDisplayValue('Test Node')).toBeInTheDocument();
       expect(screen.getByDisplayValue('A test node description')).toBeInTheDocument();
@@ -62,20 +50,14 @@ describe('EditNodeDialog', () => {
     });
 
     it('shows default node types when schema not loaded', () => {
-      render(
-        <EditNodeDialog
-          node={mockNode}
-          onClose={mockOnClose}
-          onSave={mockOnSave}
-        />
-      );
+      render(<EditNodeDialog node={mockNode} onClose={mockOnClose} onSave={mockOnSave} />);
 
       const typeSelect = screen.getByLabelText('Type');
 
       // Default types should be present
       expect(typeSelect).toContainHTML('Actor');
       expect(typeSelect).toContainHTML('Initiative');
-      expect(typeSelect).toContainHTML('Community');
+      expect(typeSelect).toContainHTML('Capability');
       expect(typeSelect).toContainHTML('Resource');
     });
   });
@@ -109,13 +91,7 @@ describe('EditNodeDialog', () => {
         configLoaded: true,
       });
 
-      render(
-        <EditNodeDialog
-          node={mockNode}
-          onClose={mockOnClose}
-          onSave={mockOnSave}
-        />
-      );
+      render(<EditNodeDialog node={mockNode} onClose={mockOnClose} onSave={mockOnSave} />);
 
       const typeSelect = screen.getByLabelText('Type');
 
@@ -154,13 +130,7 @@ describe('EditNodeDialog', () => {
         configLoaded: true,
       });
 
-      render(
-        <EditNodeDialog
-          node={mockNode}
-          onClose={mockOnClose}
-          onSave={mockOnSave}
-        />
-      );
+      render(<EditNodeDialog node={mockNode} onClose={mockOnClose} onSave={mockOnSave} />);
 
       const typeSelect = screen.getByLabelText('Type');
 
@@ -169,18 +139,14 @@ describe('EditNodeDialog', () => {
 
       // Static types should not be in dropdown
       const options = screen.getAllByRole('option');
-      const optionTexts = options.map(o => o.textContent);
+      const optionTexts = options.map((o) => o.textContent);
       expect(optionTexts).not.toContain('SavedView');
       expect(optionTexts).not.toContain('VisualizationView');
     });
 
     it('updates dropdown when schema changes', async () => {
       const { rerender } = render(
-        <EditNodeDialog
-          node={mockNode}
-          onClose={mockOnClose}
-          onSave={mockOnSave}
-        />
+        <EditNodeDialog node={mockNode} onClose={mockOnClose} onSave={mockOnSave} />
       );
 
       // Initially default types
@@ -203,13 +169,7 @@ describe('EditNodeDialog', () => {
       });
 
       // Rerender to pick up state changes
-      rerender(
-        <EditNodeDialog
-          node={mockNode}
-          onClose={mockOnClose}
-          onSave={mockOnSave}
-        />
-      );
+      rerender(<EditNodeDialog node={mockNode} onClose={mockOnClose} onSave={mockOnSave} />);
 
       const typeSelect = screen.getByLabelText('Type');
       expect(typeSelect).toContainHTML('NewType');
@@ -218,39 +178,21 @@ describe('EditNodeDialog', () => {
 
   describe('Form interactions', () => {
     it('calls onClose when cancel button clicked', async () => {
-      render(
-        <EditNodeDialog
-          node={mockNode}
-          onClose={mockOnClose}
-          onSave={mockOnSave}
-        />
-      );
+      render(<EditNodeDialog node={mockNode} onClose={mockOnClose} onSave={mockOnSave} />);
 
       fireEvent.click(screen.getByText('Cancel'));
       expect(mockOnClose).toHaveBeenCalled();
     });
 
     it('calls onClose when close button clicked', async () => {
-      render(
-        <EditNodeDialog
-          node={mockNode}
-          onClose={mockOnClose}
-          onSave={mockOnSave}
-        />
-      );
+      render(<EditNodeDialog node={mockNode} onClose={mockOnClose} onSave={mockOnSave} />);
 
       fireEvent.click(screen.getByText('×'));
       expect(mockOnClose).toHaveBeenCalled();
     });
 
     it('calls onClose when overlay clicked', async () => {
-      render(
-        <EditNodeDialog
-          node={mockNode}
-          onClose={mockOnClose}
-          onSave={mockOnSave}
-        />
-      );
+      render(<EditNodeDialog node={mockNode} onClose={mockOnClose} onSave={mockOnSave} />);
 
       const overlay = document.querySelector('.edit-dialog-overlay');
       fireEvent.click(overlay);
@@ -258,13 +200,7 @@ describe('EditNodeDialog', () => {
     });
 
     it('calls onSave with form data when save button clicked', async () => {
-      render(
-        <EditNodeDialog
-          node={mockNode}
-          onClose={mockOnClose}
-          onSave={mockOnSave}
-        />
-      );
+      render(<EditNodeDialog node={mockNode} onClose={mockOnClose} onSave={mockOnSave} />);
       const user = userEvent.setup();
 
       // Change name
@@ -285,13 +221,7 @@ describe('EditNodeDialog', () => {
     });
 
     it('parses tags correctly', async () => {
-      render(
-        <EditNodeDialog
-          node={mockNode}
-          onClose={mockOnClose}
-          onSave={mockOnSave}
-        />
-      );
+      render(<EditNodeDialog node={mockNode} onClose={mockOnClose} onSave={mockOnSave} />);
       const user = userEvent.setup();
 
       // Update tags
@@ -309,13 +239,7 @@ describe('EditNodeDialog', () => {
     });
 
     it('handles empty tags correctly', async () => {
-      render(
-        <EditNodeDialog
-          node={mockNode}
-          onClose={mockOnClose}
-          onSave={mockOnSave}
-        />
-      );
+      render(<EditNodeDialog node={mockNode} onClose={mockOnClose} onSave={mockOnSave} />);
       const user = userEvent.setup();
 
       // Clear tags
@@ -338,19 +262,18 @@ describe('EditNodeDialog', () => {
         schema: {
           node_types: {
             Actor: { fields: ['name'], description: 'Actors', color: '#3B82F6', static: false },
-            Initiative: { fields: ['name'], description: 'Initiatives', color: '#10B981', static: false },
+            Initiative: {
+              fields: ['name'],
+              description: 'Initiatives',
+              color: '#10B981',
+              static: false,
+            },
           },
         },
         configLoaded: true,
       });
 
-      render(
-        <EditNodeDialog
-          node={mockNode}
-          onClose={mockOnClose}
-          onSave={mockOnSave}
-        />
-      );
+      render(<EditNodeDialog node={mockNode} onClose={mockOnClose} onSave={mockOnSave} />);
       const user = userEvent.setup();
 
       const typeSelect = screen.getByLabelText('Type');
@@ -370,7 +293,12 @@ describe('EditNodeDialog', () => {
         schema: {
           node_types: {
             Actor: { fields: ['name'], description: 'Actors', color: '#3B82F6', static: false },
-            CustomType: { fields: ['name'], description: 'Custom', color: '#FF0000', static: false },
+            CustomType: {
+              fields: ['name'],
+              description: 'Custom',
+              color: '#FF0000',
+              static: false,
+            },
           },
         },
         configLoaded: true,
@@ -384,13 +312,7 @@ describe('EditNodeDialog', () => {
         },
       };
 
-      render(
-        <EditNodeDialog
-          node={customNode}
-          onClose={mockOnClose}
-          onSave={mockOnSave}
-        />
-      );
+      render(<EditNodeDialog node={customNode} onClose={mockOnClose} onSave={mockOnSave} />);
 
       const typeSelect = screen.getByLabelText('Type');
       expect(typeSelect).toHaveValue('CustomType');

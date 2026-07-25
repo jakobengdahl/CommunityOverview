@@ -18,13 +18,10 @@ The test sequence:
 import pytest
 import tempfile
 import os
-import json
-from typing import Dict, Any
 
 from fastapi.testclient import TestClient
 
-from backend.core import GraphStorage, NodeType
-from backend.service import GraphService, create_rest_router, register_mcp_tools
+from backend.core import NodeType
 from backend.api_host import create_app
 from backend.api_host.config import AppConfig
 
@@ -32,7 +29,7 @@ from backend.api_host.config import AppConfig
 @pytest.fixture
 def temp_dir():
     """Create a temporary directory for test files."""
-    with tempfile.TemporaryDirectory() as tmpdir:
+    with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as tmpdir:
         yield tmpdir
 
 
@@ -72,8 +69,18 @@ class TestRestVsMcpParity:
         """Step 1: Add two nodes and an edge via both interfaces."""
         # Define the same data for both
         nodes = [
-            {"id": "node-a", "type": "Actor", "name": "Organization Alpha", "description": "First org"},
-            {"id": "node-b", "type": "Initiative", "name": "Project Beta", "description": "First project"},
+            {
+                "id": "node-a",
+                "type": "Actor",
+                "name": "Organization Alpha",
+                "description": "First org",
+            },
+            {
+                "id": "node-b",
+                "type": "Initiative",
+                "name": "Project Beta",
+                "description": "First project",
+            },
         ]
         edges = [
             {"source": "node-a", "target": "node-b", "type": "BELONGS_TO"},
@@ -81,8 +88,7 @@ class TestRestVsMcpParity:
 
         # Execute via REST
         rest_result = dual_envs["rest_client"].post(
-            "/api/nodes",
-            json={"nodes": nodes, "edges": edges}
+            "/api/nodes", json={"nodes": nodes, "edges": edges}
         )
         assert rest_result.status_code == 200
         rest_data = rest_result.json()
@@ -106,7 +112,14 @@ class TestRestVsMcpParity:
     def test_step2_update_node(self, dual_envs):
         """Step 2: Update a node's description via both interfaces."""
         # First add a node to both
-        nodes = [{"id": "update-test", "type": "Actor", "name": "Update Test Node", "description": "Original"}]
+        nodes = [
+            {
+                "id": "update-test",
+                "type": "Actor",
+                "name": "Update Test Node",
+                "description": "Original",
+            }
+        ]
 
         dual_envs["rest_client"].post("/api/nodes", json={"nodes": nodes, "edges": []})
         dual_envs["mcp_tools"]["add_nodes"](nodes=nodes, edges=[])
@@ -114,20 +127,25 @@ class TestRestVsMcpParity:
         # Update via REST
         rest_result = dual_envs["rest_client"].patch(
             "/api/nodes/update-test",
-            json={"updates": {"description": "Updated via REST"}}
+            json={"updates": {"description": "Updated via REST"}},
         )
         assert rest_result.status_code == 200
 
         # Update via MCP
         mcp_result = dual_envs["mcp_tools"]["update_node"](
-            node_id="update-test",
-            updates={"description": "Updated via MCP"}
+            node_id="update-test", updates={"description": "Updated via MCP"}
         )
         assert mcp_result["success"] is True
 
         # Verify both updated correctly
-        assert dual_envs["rest_storage"].nodes["update-test"].description == "Updated via REST"
-        assert dual_envs["mcp_storage"].nodes["update-test"].description == "Updated via MCP"
+        assert (
+            dual_envs["rest_storage"].nodes["update-test"].description
+            == "Updated via REST"
+        )
+        assert (
+            dual_envs["mcp_storage"].nodes["update-test"].description
+            == "Updated via MCP"
+        )
 
     def test_step3_get_related_nodes(self, dual_envs):
         """Step 3: Expand/get related nodes via both interfaces."""
@@ -135,26 +153,29 @@ class TestRestVsMcpParity:
         nodes = [
             {"id": "center", "type": "Actor", "name": "Center Node"},
             {"id": "neighbor1", "type": "Initiative", "name": "Neighbor One"},
-            {"id": "neighbor2", "type": "Community", "name": "Neighbor Two"},
+            {"id": "neighbor2", "type": "Capability", "name": "Neighbor Two"},
         ]
         edges = [
             {"source": "center", "target": "neighbor1", "type": "BELONGS_TO"},
             {"source": "center", "target": "neighbor2", "type": "PART_OF"},
         ]
 
-        dual_envs["rest_client"].post("/api/nodes", json={"nodes": nodes, "edges": edges})
+        dual_envs["rest_client"].post(
+            "/api/nodes", json={"nodes": nodes, "edges": edges}
+        )
         dual_envs["mcp_tools"]["add_nodes"](nodes=nodes, edges=edges)
 
         # Get related via REST
         rest_result = dual_envs["rest_client"].post(
-            "/api/nodes/center/related",
-            json={"depth": 1}
+            "/api/nodes/center/related", json={"depth": 1}
         )
         assert rest_result.status_code == 200
         rest_related = rest_result.json()
 
         # Get related via MCP
-        mcp_related = dual_envs["mcp_tools"]["get_related_nodes"](node_id="center", depth=1)
+        mcp_related = dual_envs["mcp_tools"]["get_related_nodes"](
+            node_id="center", depth=1
+        )
 
         # Both should return same number of related nodes
         assert len(rest_related["nodes"]) == len(mcp_related["nodes"])
@@ -172,11 +193,18 @@ class TestRestVsMcpParity:
             {"id": "member1", "type": "Actor", "name": "Community Member 1"},
             {"id": "member2", "type": "Actor", "name": "Community Member 2"},
         ]
-        dual_envs["rest_client"].post("/api/nodes", json={"nodes": members, "edges": []})
+        dual_envs["rest_client"].post(
+            "/api/nodes", json={"nodes": members, "edges": []}
+        )
         dual_envs["mcp_tools"]["add_nodes"](nodes=members, edges=[])
 
         # Now create the community and edges
-        community = {"id": "comm1", "type": "Community", "name": "Test Community", "description": "A test community"}
+        community = {
+            "id": "comm1",
+            "type": "Capability",
+            "name": "Test Community",
+            "description": "A test community",
+        }
         comm_edges = [
             {"source": "member1", "target": "comm1", "type": "PART_OF"},
             {"source": "member2", "target": "comm1", "type": "PART_OF"},
@@ -184,20 +212,21 @@ class TestRestVsMcpParity:
 
         # REST
         rest_result = dual_envs["rest_client"].post(
-            "/api/nodes",
-            json={"nodes": [community], "edges": comm_edges}
+            "/api/nodes", json={"nodes": [community], "edges": comm_edges}
         )
         assert rest_result.status_code == 200
 
         # MCP
-        mcp_result = dual_envs["mcp_tools"]["add_nodes"](nodes=[community], edges=comm_edges)
+        mcp_result = dual_envs["mcp_tools"]["add_nodes"](
+            nodes=[community], edges=comm_edges
+        )
         assert mcp_result["success"] is True
 
         # Verify both have the community
         rest_comm = dual_envs["rest_storage"].nodes.get("comm1")
         mcp_comm = dual_envs["mcp_storage"].nodes.get("comm1")
-        assert rest_comm is not None and rest_comm.type == NodeType.COMMUNITY
-        assert mcp_comm is not None and mcp_comm.type == NodeType.COMMUNITY
+        assert rest_comm is not None and rest_comm.type == NodeType.CAPABILITY
+        assert mcp_comm is not None and mcp_comm.type == NodeType.CAPABILITY
 
         # Verify edges exist
         assert len(dual_envs["rest_storage"].edges) == 2
@@ -212,13 +241,14 @@ class TestRestVsMcpParity:
         ]
         edges = [{"source": "view-node1", "target": "view-node2", "type": "BELONGS_TO"}]
 
-        dual_envs["rest_client"].post("/api/nodes", json={"nodes": nodes, "edges": edges})
+        dual_envs["rest_client"].post(
+            "/api/nodes", json={"nodes": nodes, "edges": edges}
+        )
         dual_envs["mcp_tools"]["add_nodes"](nodes=nodes, edges=edges)
 
         # Save view via REST
         rest_result = dual_envs["rest_client"].post(
-            "/api/views/save",
-            json={"name": "Test View REST"}
+            "/api/views/save", json={"name": "Test View REST"}
         )
         assert rest_result.status_code == 200
 
@@ -238,7 +268,9 @@ class TestRestVsMcpParity:
         ]
         edges = [{"source": "delete-me", "target": "keep-me", "type": "RELATES_TO"}]
 
-        dual_envs["rest_client"].post("/api/nodes", json={"nodes": nodes, "edges": edges})
+        dual_envs["rest_client"].post(
+            "/api/nodes", json={"nodes": nodes, "edges": edges}
+        )
         dual_envs["mcp_tools"]["add_nodes"](nodes=nodes, edges=edges)
 
         # Verify initial state
@@ -247,15 +279,15 @@ class TestRestVsMcpParity:
 
         # Delete via REST
         rest_result = dual_envs["rest_client"].request(
-            "DELETE",
-            "/api/nodes",
-            json={"node_ids": ["delete-me"], "confirmed": True}
+            "DELETE", "/api/nodes", json={"node_ids": ["delete-me"], "confirmed": True}
         )
         assert rest_result.status_code == 200
         assert rest_result.json()["success"] is True
 
         # Delete via MCP
-        mcp_result = dual_envs["mcp_tools"]["delete_nodes"](node_ids=["delete-me"], confirmed=True)
+        mcp_result = dual_envs["mcp_tools"]["delete_nodes"](
+            node_ids=["delete-me"], confirmed=True
+        )
         assert mcp_result["success"] is True
 
         # Verify both have one node remaining
@@ -300,7 +332,9 @@ class TestFullSequence:
             {"id": "org-1", "type": "Actor", "name": "Swedish Tax Agency"},
             {"id": "org-2", "type": "Actor", "name": "Swedish Companies Registry"},
         ]
-        rest_add = ctx["client"].post("/api/nodes", json={"nodes": initial_nodes, "edges": []})
+        rest_add = ctx["client"].post(
+            "/api/nodes", json={"nodes": initial_nodes, "edges": []}
+        )
         assert rest_add.status_code == 200
         assert len(ctx["storage"].nodes) == 2
 
@@ -328,17 +362,25 @@ class TestFullSequence:
         assert mcp_search["nodes"][0]["name"] == "Swedish Tax Agency"
 
         # Step 5: Update via REST, verify via MCP
-        ctx["client"].patch("/api/nodes/org-1", json={"updates": {"description": "Updated by REST"}})
+        ctx["client"].patch(
+            "/api/nodes/org-1", json={"updates": {"description": "Updated by REST"}}
+        )
         mcp_details = ctx["tools"]["get_node_details"](node_id="org-1")
         assert mcp_details["node"]["description"] == "Updated by REST"
 
         # Step 6: Update via MCP, verify via REST
-        ctx["tools"]["update_node"](node_id="org-2", updates={"description": "Updated by MCP"})
+        ctx["tools"]["update_node"](
+            node_id="org-2", updates={"description": "Updated by MCP"}
+        )
         rest_details = ctx["client"].get("/api/nodes/org-2")
         assert rest_details.json()["node"]["description"] == "Updated by MCP"
 
         # Step 7: Create a community via MCP
-        community = {"id": "community-1", "type": "Community", "name": "Agency Community"}
+        community = {
+            "id": "community-1",
+            "type": "Capability",
+            "name": "Agency Community",
+        }
         comm_edges = [
             {"source": "org-1", "target": "community-1", "type": "PART_OF"},
             {"source": "org-2", "target": "community-1", "type": "PART_OF"},
@@ -359,9 +401,7 @@ class TestFullSequence:
 
         # Step 10: Delete via REST, verify via MCP
         ctx["client"].request(
-            "DELETE",
-            "/api/nodes",
-            json={"node_ids": ["init-1"], "confirmed": True}
+            "DELETE", "/api/nodes", json={"node_ids": ["init-1"], "confirmed": True}
         )
         mcp_stats_after = ctx["tools"]["get_graph_stats"]()
         assert mcp_stats_after["total_nodes"] == 3
@@ -409,7 +449,7 @@ class TestSavedViewsAsNodes:
                     "n2": {"x": 200, "y": 200},
                 },
                 "hidden_node_ids": [],
-            }
+            },
         }
         view_edges = [
             {"source": "view-test", "target": "n1", "type": "RELATES_TO"},
@@ -418,8 +458,7 @@ class TestSavedViewsAsNodes:
 
         # Add via REST
         result = ctx["client"].post(
-            "/api/nodes",
-            json={"nodes": [saved_view], "edges": view_edges}
+            "/api/nodes", json={"nodes": [saved_view], "edges": view_edges}
         )
         assert result.status_code == 200
 
@@ -487,7 +526,7 @@ class TestCommunitiesAsNodes:
         # Create community with membership edges
         community = {
             "id": "test-community",
-            "type": "Community",
+            "type": "Capability",
             "name": "Test Community",
             "description": "A test community",
         }
@@ -502,10 +541,12 @@ class TestCommunitiesAsNodes:
         # Verify it's a regular node
         community_node = ctx["storage"].nodes.get("test-community")
         assert community_node is not None
-        assert community_node.type == NodeType.COMMUNITY
+        assert community_node.type == NodeType.CAPABILITY
 
         # Verify we can get related nodes (members)
-        related = ctx["client"].post("/api/nodes/test-community/related", json={"depth": 1})
+        related = ctx["client"].post(
+            "/api/nodes/test-community/related", json={"depth": 1}
+        )
         related_names = {n["name"] for n in related.json()["nodes"]}
         assert "Member 1" in related_names
         assert "Member 2" in related_names
@@ -516,10 +557,16 @@ class TestCommunitiesAsNodes:
 
         # Setup
         members = [{"id": "gm1", "type": "Actor", "name": "Community Member"}]
-        community = {"id": "del-community", "type": "Community", "name": "Community To Delete"}
+        community = {
+            "id": "del-community",
+            "type": "Capability",
+            "name": "Community To Delete",
+        }
         edges = [{"source": "gm1", "target": "del-community", "type": "PART_OF"}]
 
-        ctx["client"].post("/api/nodes", json={"nodes": members + [community], "edges": edges})
+        ctx["client"].post(
+            "/api/nodes", json={"nodes": members + [community], "edges": edges}
+        )
 
         assert len(ctx["storage"].edges) == 1
 
@@ -554,17 +601,23 @@ class TestTimestampTracking:
         # Add node
         ctx["client"].post(
             "/api/nodes",
-            json={"nodes": [{"id": "ts-test", "type": "Actor", "name": "Timestamp Test"}], "edges": []}
+            json={
+                "nodes": [{"id": "ts-test", "type": "Actor", "name": "Timestamp Test"}],
+                "edges": [],
+            },
         )
 
         initial_updated = ctx["storage"].nodes["ts-test"].updated_at
 
         # Small delay to ensure time difference
         import time
+
         time.sleep(0.01)
 
         # Update
-        ctx["client"].patch("/api/nodes/ts-test", json={"updates": {"description": "Updated"}})
+        ctx["client"].patch(
+            "/api/nodes/ts-test", json={"updates": {"description": "Updated"}}
+        )
 
         new_updated = ctx["storage"].nodes["ts-test"].updated_at
         assert new_updated >= initial_updated
@@ -575,18 +628,23 @@ class TestTimestampTracking:
 
         # Add node via MCP
         ctx["tools"]["add_nodes"](
-            nodes=[{"id": "mcp-ts-test", "type": "Actor", "name": "MCP Timestamp Test"}],
-            edges=[]
+            nodes=[
+                {"id": "mcp-ts-test", "type": "Actor", "name": "MCP Timestamp Test"}
+            ],
+            edges=[],
         )
 
         initial_updated = ctx["storage"].nodes["mcp-ts-test"].updated_at
 
         # Small delay to ensure time difference
         import time
+
         time.sleep(0.01)
 
         # Update via MCP
-        ctx["tools"]["update_node"](node_id="mcp-ts-test", updates={"description": "MCP Updated"})
+        ctx["tools"]["update_node"](
+            node_id="mcp-ts-test", updates={"description": "MCP Updated"}
+        )
 
         new_updated = ctx["storage"].nodes["mcp-ts-test"].updated_at
         assert new_updated >= initial_updated

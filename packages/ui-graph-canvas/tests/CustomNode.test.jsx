@@ -48,4 +48,38 @@ describe('CustomNode tooltip', () => {
     expect(tooltip.style.left).toBe('110px');
     expect(tooltip.style.zIndex).toBe('99999');
   });
+
+  it('renders a remote-selection outline and name badge in the collaborator colour', () => {
+    render(
+      <CustomNode
+        id="node-1"
+        selected={false}
+        data={{
+          label: 'Node 1',
+          nodeType: 'Actor',
+          color: '#3B82F6',
+          remoteSelection: { color: '#e6194b', displayName: 'Ada' },
+        }}
+      />
+    );
+    const node = screen.getByText('Node 1').closest('.graph-custom-node');
+    expect(node.className).toContain('remote-selected');
+    expect(node.style.outline).toBe('2px solid #e6194b');
+    const badge = screen.getByText('Ada');
+    expect(badge.className).toContain('graph-node-remote-badge');
+    expect(badge.style.backgroundColor).toBe('rgb(230, 25, 75)');
+  });
+
+  it('has no remote marker when remoteSelection is absent', () => {
+    render(
+      <CustomNode
+        id="node-1"
+        selected={false}
+        data={{ label: 'Node 1', nodeType: 'Actor', color: '#3B82F6' }}
+      />
+    );
+    const node = screen.getByText('Node 1').closest('.graph-custom-node');
+    expect(node.className).not.toContain('remote-selected');
+    expect(node.style.outline).toBe('');
+  });
 });

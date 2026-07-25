@@ -50,16 +50,15 @@ from .serializers import (
     serialize_graph_stats,
     serialize_add_result,
     serialize_delete_result,
+    serialize_delete_edges_result,
 )
 
 __all__ = [
     # Core service
     "GraphService",
-
     # Protocol adapters
     "create_rest_router",
     "register_mcp_tools",
-
     # Serialization utilities
     "json_serializer",
     "serialize_to_json",
@@ -72,6 +71,7 @@ __all__ = [
     "serialize_graph_stats",
     "serialize_add_result",
     "serialize_delete_result",
+    "serialize_delete_edges_result",
 ]
 
 __version__ = "1.0.0"

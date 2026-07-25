@@ -4,15 +4,16 @@ import * as api from '../services/api';
 import SubtypeInput from './SubtypeInput';
 import './CreateNodeDialog.css';
 
-// Fields that certain node types have beyond the basic set
-const TYPE_EXTRA_FIELDS = {
-  Initiative: ['start_date', 'end_date'],
-  Resource: ['identifier'],
-  Legislation: ['effective_date'],
-  Goal: ['target_date'],
-  Event: ['start_date', 'end_date'],
-  Data: ['identifier'],
-};
+// Fields always shown via dedicated form controls — never repeated as extra fields
+const BASE_FIELDS = new Set([
+  'name',
+  'description',
+  'summary',
+  'tags',
+  'subtypes',
+  'aliases',
+  'metadata',
+]);
 
 const FIELD_LABELS = {
   start_date: 'Start date',
@@ -20,19 +21,26 @@ const FIELD_LABELS = {
   effective_date: 'Effective date',
   target_date: 'Target date',
   identifier: 'Resource link (URL)',
+  repo: 'Repository URL',
 };
 
+function formatFieldLabel(field) {
+  return FIELD_LABELS[field] || field.replace(/_/g, ' ').replace(/\b\w/g, (c) => c.toUpperCase());
+}
+
 function CreateNodeDialog({ nodeType, onClose, onSave }) {
-  const { getNodeColor } = useGraphStore();
+  const { getNodeColor, getNodeTypeConfig } = useGraphStore();
   const color = getNodeColor(nodeType);
-  const extraFields = TYPE_EXTRA_FIELDS[nodeType] || [];
+  const typeConfig = getNodeTypeConfig(nodeType);
+  const extraFields = (typeConfig?.fields || []).filter((f) => !BASE_FIELDS.has(f));
 
   const [formData, setFormData] = useState({
     name: '',
     description: '',
     summary: '',
     tags: '',
-    ...Object.fromEntries(extraFields.map(f => [f, ''])),
+    aliases: '',
+    ...Object.fromEntries(extraFields.map((f) => [f, ''])),
   });
   const [subtypes, setSubtypes] = useState([]);
   const [existingSubtypes, setExistingSubtypes] = useState([]);
@@ -41,8 +49,9 @@ function CreateNodeDialog({ nodeType, onClose, onSave }) {
 
   // Fetch existing subtypes for this node type
   useEffect(() => {
-    api.getSubtypes(nodeType)
-      .then(data => {
+    api
+      .getSubtypes(nodeType)
+      .then((data) => {
         setExistingSubtypes(data.subtypes?.[nodeType] || []);
       })
       .catch(() => {});
@@ -50,7 +59,7 @@ function CreateNodeDialog({ nodeType, onClose, onSave }) {
 
   const handleChange = (e) => {
     const { name, value } = e.target;
-    setFormData(prev => ({ ...prev, [name]: value }));
+    setFormData((prev) => ({ ...prev, [name]: value }));
   };
 
   const handleSubmit = async (e) => {
@@ -66,7 +75,14 @@ function CreateNodeDialog({ nodeType, onClose, onSave }) {
         type: nodeType,
         description: formData.description.trim(),
         summary: formData.summary.trim(),
-        tags: formData.tags.split(',').map(t => t.trim()).filter(Boolean),
+        tags: formData.tags
+          .split(',')
+          .map((t) => t.trim())
+          .filter(Boolean),
+        aliases: formData.aliases
+          .split(',')
+          .map((a) => a.trim())
+          .filter(Boolean),
       };
 
       if (subtypes.length > 0) {
@@ -97,23 +113,24 @@ function CreateNodeDialog({ nodeType, onClose, onSave }) {
   };
 
   useEffect(() => {
-    const handleEsc = (e) => { if (e.key === 'Escape') onClose(); };
+    const handleEsc = (e) => {
+      if (e.key === 'Escape') onClose();
+    };
     document.addEventListener('keydown', handleEsc);
     return () => document.removeEventListener('keydown', handleEsc);
   }, [onClose]);
 
   return (
     <div className="create-node-overlay" onClick={onClose}>
-      <div className="create-node-dialog" onClick={e => e.stopPropagation()}>
+      <div className="create-node-dialog" onClick={(e) => e.stopPropagation()}>
         <header className="create-node-header">
           <div className="create-node-header-title">
-            <span
-              className="create-node-type-dot"
-              style={{ backgroundColor: color }}
-            />
+            <span className="create-node-type-dot" style={{ backgroundColor: color }} />
             <h2>Create {nodeType}</h2>
           </div>
-          <button className="close-button" onClick={onClose}>×</button>
+          <button className="close-button" onClick={onClose}>
+            ×
+          </button>
         </header>
 
         <form onSubmit={handleSubmit}>
@@ -176,27 +193,38 @@ function CreateNodeDialog({ nodeType, onClose, onSave }) {
             />
           </div>
 
-          {extraFields.map(field => {
+          <div className="form-group">
+            <label htmlFor="create-aliases">Aliases / synonyms (comma-separated)</label>
+            <input
+              type="text"
+              id="create-aliases"
+              name="aliases"
+              value={formData.aliases}
+              onChange={handleChange}
+              placeholder="alternative name, abbreviation, synonym"
+            />
+          </div>
+
+          {extraFields.map((field) => {
             const isDateField = field.includes('date');
             const useDateTime = isDateField && nodeType === 'Event';
+            const label = formatFieldLabel(field);
             return (
               <div className="form-group" key={field}>
-                <label htmlFor={`create-${field}`}>{FIELD_LABELS[field] || field}</label>
+                <label htmlFor={`create-${field}`}>{label}</label>
                 <input
                   type={useDateTime ? 'datetime-local' : isDateField ? 'date' : 'text'}
                   id={`create-${field}`}
                   name={field}
-                  value={formData[field]}
+                  value={formData[field] || ''}
                   onChange={handleChange}
-                  placeholder={isDateField ? '' : `Enter ${FIELD_LABELS[field] || field}...`}
+                  placeholder={isDateField ? '' : `Enter ${label.toLowerCase()}...`}
                 />
               </div>
             );
           })}
 
-          {error && (
-            <div className="create-node-error">{error}</div>
-          )}
+          {error && <div className="create-node-error">{error}</div>}
 
           <div className="form-actions">
             <button type="button" className="secondary" onClick={onClose}>

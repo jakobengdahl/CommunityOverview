@@ -215,9 +215,7 @@ describe('mcpClient', () => {
         { id: 'n1', type: 'Actor', name: 'Node 1' },
         { id: 'n2', type: 'Initiative', name: 'Node 2' },
       ];
-      const edges = [
-        { source: 'n1', target: 'n2', type: 'BELONGS_TO' },
-      ];
+      const edges = [{ source: 'n1', target: 'n2', type: 'BELONGS_TO' }];
 
       await addNodes(nodes, edges);
 

@@ -1,5 +1,5 @@
 import { useCallback } from 'react';
-import { useStore, getBezierPath } from 'reactflow';
+import { useStore, getBezierPath, BaseEdge } from 'reactflow';
 import { getEdgeParams } from '../utils/graphLayout';
 
 /**
@@ -15,7 +15,11 @@ function SimpleFloatingEdge({ id, source, target, markerEnd, style }) {
     return null;
   }
 
-  const { sx, sy, tx, ty, sourcePos, targetPos } = getEdgeParams(sourceNode, targetNode, nodeInternals);
+  const { sx, sy, tx, ty, sourcePos, targetPos } = getEdgeParams(
+    sourceNode,
+    targetNode,
+    nodeInternals
+  );
 
   const [edgePath] = getBezierPath({
     sourceX: sx,
@@ -26,14 +30,10 @@ function SimpleFloatingEdge({ id, source, target, markerEnd, style }) {
     targetY: ty,
   });
 
+  // interactionWidth renders an invisible wider hit-path so edges are easy to
+  // click/right-click without thickening the visible stroke.
   return (
-    <path
-      id={id}
-      className="react-flow__edge-path"
-      d={edgePath}
-      markerEnd={markerEnd}
-      style={style}
-    />
+    <BaseEdge id={id} path={edgePath} markerEnd={markerEnd} style={style} interactionWidth={24} />
   );
 }
 

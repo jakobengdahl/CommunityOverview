@@ -2,7 +2,6 @@
 Tests for agent configuration models.
 """
 
-import pytest
 import os
 from unittest.mock import patch
 
@@ -101,9 +100,7 @@ class TestAgentConfig:
 
     def test_from_node_multiple_integrations(self, sample_agent_node):
         """Test AgentConfig with multiple MCP integrations."""
-        sample_agent_node.metadata["mcp_integration_ids"] = [
-            "GRAPH", "WEB", "SEARCH"
-        ]
+        sample_agent_node.metadata["mcp_integration_ids"] = ["GRAPH", "WEB", "SEARCH"]
 
         config = AgentConfig.from_node(sample_agent_node)
 
@@ -147,6 +144,7 @@ class TestAgentsSettings:
     def test_from_env_with_mcp_integrations_json(self):
         """Test loading MCP integrations from JSON environment variable."""
         import json
+
         integrations = [
             {"id": "CUSTOM", "transport": "http", "url": "http://custom.com/mcp"}
         ]

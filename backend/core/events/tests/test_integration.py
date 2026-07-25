@@ -7,6 +7,7 @@ These tests verify the complete flow:
 3. Verify the webhook receives the correct events
 """
 
+from unittest.mock import patch
 import json
 import time
 import threading
@@ -15,7 +16,7 @@ from http.server import HTTPServer, BaseHTTPRequestHandler
 from typing import List, Dict, Any, Optional
 import pytest
 
-from backend.core import GraphStorage, Node, Edge
+from backend.core import GraphStorage, Node
 from backend.core.events.models import EventContext
 
 
@@ -28,16 +29,16 @@ class WebhookHandler(BaseHTTPRequestHandler):
 
     def do_POST(self):
         """Handle POST requests (webhook calls)."""
-        content_length = int(self.headers.get('Content-Length', 0))
+        content_length = int(self.headers.get("Content-Length", 0))
         body = self.rfile.read(content_length)
 
         try:
-            payload = json.loads(body.decode('utf-8'))
+            payload = json.loads(body.decode("utf-8"))
             with self.lock:
                 self.received_events.append(payload)
             print(f"WEBHOOK: Received event - {payload.get('event_type')}")
             self.send_response(200)
-            self.send_header('Content-Type', 'application/json')
+            self.send_header("Content-Type", "application/json")
             self.end_headers()
             self.wfile.write(b'{"status": "ok"}')
         except Exception as e:
@@ -85,13 +86,10 @@ class WebhookServer:
         # Clear any previous events
         WebhookHandler.received_events = []
 
-        self.server = HTTPServer(('127.0.0.1', self.port), WebhookHandler)
+        self.server = HTTPServer(("127.0.0.1", self.port), WebhookHandler)
         self._actual_port = self.server.server_port
 
-        self.thread = threading.Thread(
-            target=self.server.serve_forever,
-            daemon=True
-        )
+        self.thread = threading.Thread(target=self.server.serve_forever, daemon=True)
         self.thread.start()
         print(f"WEBHOOK: Server started on port {self._actual_port}")
 
@@ -143,8 +141,10 @@ class TestEventIntegration:
         yield storage
         storage.shutdown_events()
 
-    def test_webhook_receives_node_create_event(self, storage):
+    @patch("backend.core.events.delivery.is_safe_url")
+    def test_webhook_receives_node_create_event(self, mock_is_safe_url, storage):
         """Test that creating a node triggers a webhook call."""
+        mock_is_safe_url.return_value = True
         with WebhookServer() as server:
             # Create an EventSubscription that listens for all node creates
             subscription = Node(
@@ -159,8 +159,8 @@ class TestEventIntegration:
                     },
                     "delivery": {
                         "webhook_url": server.url,
-                    }
-                }
+                    },
+                },
             )
             storage.add_nodes([subscription], [])
             server.clear_events()  # Clear the subscription creation event
@@ -181,18 +181,21 @@ class TestEventIntegration:
 
             # Find the Initiative create event
             initiative_events = [
-                e for e in events
-                if e.get('entity', {}).get('type') == 'Initiative'
+                e for e in events if e.get("entity", {}).get("type") == "Initiative"
             ]
-            assert len(initiative_events) == 1, f"Expected 1 Initiative event, got {len(initiative_events)}"
+            assert len(initiative_events) == 1, (
+                f"Expected 1 Initiative event, got {len(initiative_events)}"
+            )
 
             event = initiative_events[0]
-            assert event['event_type'] == 'node.create'
-            assert event['entity']['id'] == test_node.id
-            assert event['entity']['data']['after']['name'] == 'Test Initiative'
+            assert event["event_type"] == "node.create"
+            assert event["entity"]["id"] == test_node.id
+            assert event["entity"]["data"]["after"]["name"] == "Test Initiative"
 
-    def test_webhook_receives_node_update_event(self, storage):
+    @patch("backend.core.events.delivery.is_safe_url")
+    def test_webhook_receives_node_update_event(self, mock_is_safe_url, storage):
         """Test that updating a node triggers a webhook call."""
+        mock_is_safe_url.return_value = True
         with WebhookServer() as server:
             # Create subscription for update events
             subscription = Node(
@@ -206,8 +209,8 @@ class TestEventIntegration:
                     },
                     "delivery": {
                         "webhook_url": server.url,
-                    }
-                }
+                    },
+                },
             )
             storage.add_nodes([subscription], [])
 
@@ -229,13 +232,15 @@ class TestEventIntegration:
             assert len(events) >= 1, f"Expected at least 1 event, got {len(events)}"
 
             event = events[-1]  # Get the last event (the update)
-            assert event['event_type'] == 'node.update'
-            assert event['entity']['data']['before']['name'] == 'Original Name'
-            assert event['entity']['data']['after']['name'] == 'Updated Name'
-            assert event['entity']['data']['patch']['name'] == 'Updated Name'
+            assert event["event_type"] == "node.update"
+            assert event["entity"]["data"]["before"]["name"] == "Original Name"
+            assert event["entity"]["data"]["after"]["name"] == "Updated Name"
+            assert event["entity"]["data"]["patch"]["name"] == "Updated Name"
 
-    def test_webhook_receives_node_delete_event(self, storage):
+    @patch("backend.core.events.delivery.is_safe_url")
+    def test_webhook_receives_node_delete_event(self, mock_is_safe_url, storage):
         """Test that deleting a node triggers a webhook call."""
+        mock_is_safe_url.return_value = True
         with WebhookServer() as server:
             # Create subscription for delete events
             subscription = Node(
@@ -249,8 +254,8 @@ class TestEventIntegration:
                     },
                     "delivery": {
                         "webhook_url": server.url,
-                    }
-                }
+                    },
+                },
             )
             storage.add_nodes([subscription], [])
 
@@ -272,13 +277,15 @@ class TestEventIntegration:
             assert len(events) == 1, f"Expected 1 event, got {len(events)}"
 
             event = events[0]
-            assert event['event_type'] == 'node.delete'
-            assert event['entity']['id'] == test_node.id
-            assert event['entity']['data']['before']['name'] == 'Test Resource'
-            assert event['entity']['data']['after'] is None
+            assert event["event_type"] == "node.delete"
+            assert event["entity"]["id"] == test_node.id
+            assert event["entity"]["data"]["before"]["name"] == "Test Resource"
+            assert event["entity"]["data"]["after"] is None
 
-    def test_filter_by_node_type(self, storage):
+    @patch("backend.core.events.delivery.is_safe_url")
+    def test_filter_by_node_type(self, mock_is_safe_url, storage):
         """Test that subscriptions correctly filter by node type."""
+        mock_is_safe_url.return_value = True
         with WebhookServer() as server:
             # Create subscription that only listens for Initiative nodes
             subscription = Node(
@@ -292,8 +299,8 @@ class TestEventIntegration:
                     },
                     "delivery": {
                         "webhook_url": server.url,
-                    }
-                }
+                    },
+                },
             )
             storage.add_nodes([subscription], [])
             server.clear_events()
@@ -318,10 +325,12 @@ class TestEventIntegration:
             events = server.get_events(timeout=2.0)
 
             assert len(events) == 1, f"Expected 1 event, got {len(events)}"
-            assert events[0]['entity']['type'] == 'Initiative'
+            assert events[0]["entity"]["type"] == "Initiative"
 
-    def test_filter_by_keywords(self, storage):
+    @patch("backend.core.events.delivery.is_safe_url")
+    def test_filter_by_keywords(self, mock_is_safe_url, storage):
         """Test that subscriptions correctly filter by keywords."""
+        mock_is_safe_url.return_value = True
         with WebhookServer() as server:
             # Create subscription that only listens for nodes containing "AI"
             subscription = Node(
@@ -336,8 +345,8 @@ class TestEventIntegration:
                     },
                     "delivery": {
                         "webhook_url": server.url,
-                    }
-                }
+                    },
+                },
             )
             storage.add_nodes([subscription], [])
             server.clear_events()
@@ -363,15 +372,18 @@ class TestEventIntegration:
             # Verify only the AI node event was received (filter out EventSubscription events)
             events = server.get_events(timeout=2.0)
             initiative_events = [
-                e for e in events
-                if e.get('entity', {}).get('type') == 'Initiative'
+                e for e in events if e.get("entity", {}).get("type") == "Initiative"
             ]
 
-            assert len(initiative_events) == 1, f"Expected 1 Initiative event, got {len(initiative_events)}"
-            assert 'AI' in initiative_events[0]['entity']['data']['after']['name']
+            assert len(initiative_events) == 1, (
+                f"Expected 1 Initiative event, got {len(initiative_events)}"
+            )
+            assert "AI" in initiative_events[0]["entity"]["data"]["after"]["name"]
 
-    def test_loop_prevention_by_origin(self, storage):
+    @patch("backend.core.events.delivery.is_safe_url")
+    def test_loop_prevention_by_origin(self, mock_is_safe_url, storage):
         """Test that loop prevention blocks events from ignored origins."""
+        mock_is_safe_url.return_value = True
         with WebhookServer() as server:
             # Create subscription that ignores events from "mcp" origin
             subscription = Node(
@@ -386,8 +398,8 @@ class TestEventIntegration:
                     "delivery": {
                         "webhook_url": server.url,
                         "ignore_origins": ["mcp"],
-                    }
-                }
+                    },
+                },
             )
             storage.add_nodes([subscription], [])
             server.clear_events()
@@ -413,15 +425,21 @@ class TestEventIntegration:
             # Verify only the web-ui event was received (filter out EventSubscription events)
             events = server.get_events(timeout=2.0)
             initiative_events = [
-                e for e in events
-                if e.get('entity', {}).get('type') == 'Initiative'
+                e for e in events if e.get("entity", {}).get("type") == "Initiative"
             ]
 
-            assert len(initiative_events) == 1, f"Expected 1 Initiative event, got {len(initiative_events)}"
-            assert initiative_events[0]['entity']['data']['after']['name'] == 'Web Created Node'
+            assert len(initiative_events) == 1, (
+                f"Expected 1 Initiative event, got {len(initiative_events)}"
+            )
+            assert (
+                initiative_events[0]["entity"]["data"]["after"]["name"]
+                == "Web Created Node"
+            )
 
-    def test_multiple_subscriptions(self, storage):
+    @patch("backend.core.events.delivery.is_safe_url")
+    def test_multiple_subscriptions(self, mock_is_safe_url, storage):
         """Test that multiple subscriptions can receive the same event."""
+        mock_is_safe_url.return_value = True
         with WebhookServer() as server:
             # Create two subscriptions
             sub1 = Node(
@@ -435,8 +453,8 @@ class TestEventIntegration:
                     },
                     "delivery": {
                         "webhook_url": server.url,
-                    }
-                }
+                    },
+                },
             )
             sub2 = Node(
                 id=str(uuid.uuid4()),
@@ -449,8 +467,8 @@ class TestEventIntegration:
                     },
                     "delivery": {
                         "webhook_url": server.url,
-                    }
-                }
+                    },
+                },
             )
             storage.add_nodes([sub1, sub2], [])
             server.clear_events()
@@ -468,18 +486,23 @@ class TestEventIntegration:
 
             # Should get 2 events (one per subscription)
             initiative_events = [
-                e for e in events
-                if e.get('entity', {}).get('type') == 'Initiative'
+                e for e in events if e.get("entity", {}).get("type") == "Initiative"
             ]
-            assert len(initiative_events) == 2, f"Expected 2 Initiative events, got {len(initiative_events)}"
+            assert len(initiative_events) == 2, (
+                f"Expected 2 Initiative events, got {len(initiative_events)}"
+            )
 
             # Verify they have different subscription names
-            sub_names = {e.get('subscription', {}).get('name') for e in initiative_events}
-            assert 'Subscription 1' in sub_names
-            assert 'Subscription 2' in sub_names
+            sub_names = {
+                e.get("subscription", {}).get("name") for e in initiative_events
+            }
+            assert "Subscription 1" in sub_names
+            assert "Subscription 2" in sub_names
 
-    def test_event_includes_context(self, storage):
+    @patch("backend.core.events.delivery.is_safe_url")
+    def test_event_includes_context(self, mock_is_safe_url, storage):
         """Test that events include the original context."""
+        mock_is_safe_url.return_value = True
         with WebhookServer() as server:
             subscription = Node(
                 id=str(uuid.uuid4()),
@@ -492,8 +515,8 @@ class TestEventIntegration:
                     },
                     "delivery": {
                         "webhook_url": server.url,
-                    }
-                }
+                    },
+                },
             )
             storage.add_nodes([subscription], [])
             server.clear_events()
@@ -515,12 +538,11 @@ class TestEventIntegration:
 
             # Find the Initiative event
             initiative_events = [
-                e for e in events
-                if e.get('entity', {}).get('type') == 'Initiative'
+                e for e in events if e.get("entity", {}).get("type") == "Initiative"
             ]
             assert len(initiative_events) == 1
 
             event = initiative_events[0]
-            assert event['origin']['event_origin'] == 'web-ui'
-            assert event['origin']['event_session_id'] == 'session-123'
-            assert event['origin']['event_correlation_id'] == 'correlation-456'
+            assert event["origin"]["event_origin"] == "web-ui"
+            assert event["origin"]["event_session_id"] == "session-123"
+            assert event["origin"]["event_correlation_id"] == "correlation-456"

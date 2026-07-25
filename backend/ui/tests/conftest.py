@@ -10,15 +10,15 @@ Provides:
 
 import pytest
 import json
-from unittest.mock import MagicMock, patch, AsyncMock
+from unittest.mock import patch
 from typing import Dict, Any, List
 import tempfile
 import os
 
-from backend.core import GraphStorage, Node, Edge, NodeType
+from backend.core import GraphStorage
 from backend.service import GraphService
 from backend.ui import ChatService, DocumentService, create_ui_router
-from backend.llm_providers import LLMResponse
+from backend.llm.llm_providers import LLMResponse
 
 
 class MockLLMProvider:
@@ -33,36 +33,37 @@ class MockLLMProvider:
         self.mock_text_response: str = "Mock response from LLM"
         self.call_count = 0
         self.received_messages: List[List[Dict]] = []
+        self.received_system_prompts: List[str] = []
 
     def create_completion(
         self,
         messages: List[Dict],
         system_prompt: str,
         tools: List[Dict],
-        max_tokens: int = 4096
+        max_tokens: int = 4096,
     ) -> LLMResponse:
         """Return mock response with optional tool calls."""
         self.received_messages.append(messages)
+        self.received_system_prompts.append(system_prompt)
         self.call_count += 1
 
         # First call returns tool calls, subsequent calls return text
         if self.mock_tool_calls and self.call_count == 1:
             content = []
             for i, tool_call in enumerate(self.mock_tool_calls):
-                content.append({
-                    "type": "tool_use",
-                    "id": f"mock_tool_{i}",
-                    "name": tool_call["name"],
-                    "input": tool_call.get("input", {})
-                })
-            return LLMResponse(
-                content=content,
-                stop_reason="tool_use"
-            )
+                content.append(
+                    {
+                        "type": "tool_use",
+                        "id": f"mock_tool_{i}",
+                        "name": tool_call["name"],
+                        "input": tool_call.get("input", {}),
+                    }
+                )
+            return LLMResponse(content=content, stop_reason="tool_use")
         else:
             return LLMResponse(
                 content=[{"type": "text", "text": self.mock_text_response}],
-                stop_reason="end_turn"
+                stop_reason="end_turn",
             )
 
     def reset(self):
@@ -71,6 +72,7 @@ class MockLLMProvider:
         self.mock_text_response = "Mock response from LLM"
         self.call_count = 0
         self.received_messages = []
+        self.received_system_prompts = []
 
 
 class MockSentenceTransformer:
@@ -79,24 +81,28 @@ class MockSentenceTransformer:
     def __init__(self, model_name=None):
         self.model_name = model_name
         import numpy as np
+
         self._np = np
 
     def encode(self, texts, convert_to_numpy=True, show_progress_bar=False):
         """Generate mock embeddings based on text hash."""
-        if isinstance(texts, str):
+        is_single = isinstance(texts, str)
+        if is_single:
             texts = [texts]
         embeddings = []
         for text in texts:
             self._np.random.seed(abs(hash(text)) % (2**32))
             embedding = self._np.random.rand(384).astype(self._np.float32)
             embeddings.append(embedding)
-        return self._np.array(embeddings)
+        result = self._np.array(embeddings)
+        return result[0] if is_single else result
 
 
 @pytest.fixture(autouse=True)
 def mock_embedding_model():
     """Mock the embedding model to avoid network calls."""
-    import graph_core.vector_store as vs
+    import backend.core.vector_store as vs
+
     original_ensure = vs._ensure_sentence_transformers
 
     def mock_ensure():
@@ -112,10 +118,10 @@ def mock_embedding_model():
 @pytest.fixture
 def temp_graph_file():
     """Create a temporary file for graph storage."""
-    fd, path = tempfile.mkstemp(suffix='.json')
+    fd, path = tempfile.mkstemp(suffix=".json")
     os.close(fd)
     # Initialize with empty graph
-    with open(path, 'w') as f:
+    with open(path, "w") as f:
         json.dump({"nodes": [], "edges": []}, f)
     yield path
     # Cleanup
@@ -152,8 +158,8 @@ def chat_service(graph_service, mock_llm_provider):
     but the GraphService is real (in-memory).
     """
     # Patch BEFORE creating ChatService so ChatProcessor uses mock
-    with patch('chat_logic.create_provider', return_value=mock_llm_provider):
-        with patch.dict(os.environ, {'ANTHROPIC_API_KEY': 'test-key'}):
+    with patch("backend.ui.chat_logic.create_provider", return_value=mock_llm_provider):
+        with patch.dict(os.environ, {"ANTHROPIC_API_KEY": "test-key"}):
             service = ChatService(graph_service)
             service._processor.provider_type = "mock"
             service._processor.default_api_key = "test-key"
@@ -176,22 +182,18 @@ def sample_nodes(graph_service):
             "name": "Test Agency",
             "type": "Actor",
             "description": "A test government agency",
-            "communities": ["test-community"]
+            "communities": ["test-community"],
         },
         {
             "id": "test-initiative-1",
             "name": "Test Project",
             "type": "Initiative",
             "description": "A test project",
-            "communities": ["test-community"]
-        }
+            "communities": ["test-community"],
+        },
     ]
     edges = [
-        {
-            "source": "test-actor-1",
-            "target": "test-initiative-1",
-            "type": "BELONGS_TO"
-        }
+        {"source": "test-actor-1", "target": "test-initiative-1", "type": "BELONGS_TO"}
     ]
 
     graph_service.add_nodes(nodes, edges)
@@ -201,7 +203,7 @@ def sample_nodes(graph_service):
 @pytest.fixture
 def test_text_file():
     """Create a temporary text file for upload tests."""
-    with tempfile.NamedTemporaryFile(mode='w', suffix='.txt', delete=False) as f:
+    with tempfile.NamedTemporaryFile(mode="w", suffix=".txt", delete=False) as f:
         f.write("This is a test document.\n")
         f.write("It contains some sample text for testing.\n")
         f.write("The document mentions AI and digitalization.")
@@ -220,8 +222,8 @@ def fastapi_test_client(graph_service, mock_llm_provider):
     from fastapi.testclient import TestClient
 
     # Patch BEFORE creating ChatService
-    with patch('chat_logic.create_provider', return_value=mock_llm_provider):
-        with patch.dict(os.environ, {'ANTHROPIC_API_KEY': 'test-key'}):
+    with patch("backend.ui.chat_logic.create_provider", return_value=mock_llm_provider):
+        with patch.dict(os.environ, {"ANTHROPIC_API_KEY": "test-key"}):
             app = FastAPI()
 
             # Create services with mocked LLM

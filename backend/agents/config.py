@@ -10,9 +10,129 @@ from dataclasses import dataclass, field
 from typing import List, Dict, Any, Optional
 from enum import Enum
 
+_WEEKDAY_NAMES: Dict[str, int] = {
+    "monday": 0,
+    "tuesday": 1,
+    "wednesday": 2,
+    "thursday": 3,
+    "friday": 4,
+    "saturday": 5,
+    "sunday": 6,
+}
+_WEEKDAY_DISPLAY = [
+    "Monday",
+    "Tuesday",
+    "Wednesday",
+    "Thursday",
+    "Friday",
+    "Saturday",
+    "Sunday",
+]
+
+
+@dataclass
+class AgentSchedule:
+    """
+    Single time-based trigger for an agent.
+
+    day_of_week: 0=Monday … 6=Sunday
+    hour/minute: local time in the given timezone
+    """
+
+    day_of_week: int
+    hour: int
+    minute: int
+    timezone: str = "UTC"
+
+    @classmethod
+    def from_dict(cls, data: Dict[str, Any]) -> Optional["AgentSchedule"]:
+        """
+        Parse schedule from a metadata dict.  Returns None when data is missing
+        or contains invalid values — callers should treat None as "no schedule".
+
+        Accepted formats::
+
+            # integer weekday (0=Mon)
+            {"day_of_week": 1, "time": "14:00", "timezone": "Europe/Stockholm"}
+
+            # weekday name
+            {"day_of_week": "tuesday", "hour": 14, "minute": 0}
+        """
+        if not data:
+            return None
+
+        raw_day = data.get("day_of_week")
+        if raw_day is None:
+            return None
+        if isinstance(raw_day, str):
+            day = _WEEKDAY_NAMES.get(raw_day.lower())
+            if day is None:
+                return None
+        elif isinstance(raw_day, int):
+            day = raw_day
+        else:
+            return None
+
+        if not 0 <= day <= 6:
+            return None
+
+        raw_time = data.get("time")
+        if raw_time and isinstance(raw_time, str):
+            try:
+                parts = raw_time.split(":")
+                hour = int(parts[0])
+                minute = int(parts[1]) if len(parts) > 1 else 0
+            except (ValueError, IndexError):
+                return None
+        else:
+            try:
+                hour = int(data.get("hour", 0))
+                minute = int(data.get("minute", 0))
+            except (TypeError, ValueError):
+                return None
+
+        if not (0 <= hour <= 23 and 0 <= minute <= 59):
+            return None
+
+        tz_str = str(data.get("timezone", "UTC"))
+        try:
+            from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
+
+            ZoneInfo(tz_str)
+        except (ZoneInfoNotFoundError, KeyError):
+            return None
+
+        return cls(day_of_week=day, hour=hour, minute=minute, timezone=tz_str)
+
+    @property
+    def day_name(self) -> str:
+        return _WEEKDAY_DISPLAY[self.day_of_week]
+
+    def to_cron(self) -> str:
+        """
+        Return a standard 5-field cron expression for this schedule.
+
+        Cron day-of-week convention: 0=Sunday, 1=Monday … 6=Saturday.
+        Python weekday convention:   0=Monday … 6=Sunday.
+        Conversion: cron_dow = (python_dow + 1) % 7
+        """
+        cron_dow = (self.day_of_week + 1) % 7
+        return f"{self.minute} {self.hour} * * {cron_dow}"
+
+    def to_dict(self) -> Dict[str, Any]:
+        return {
+            "day_of_week": self.day_of_week,
+            "day_name": self.day_name,
+            "hour": self.hour,
+            "minute": self.minute,
+            "timezone": self.timezone,
+            "cron": self.to_cron(),
+        }
+
 
 class MCPTransport(str, Enum):
     """Transport type for MCP server connections."""
+
     HTTP = "http"  # HTTP/SSE transport
     STDIO = "stdio"  # stdio transport (subprocess)
 
@@ -32,6 +152,7 @@ class MCPIntegration:
         env: Environment variables to pass to stdio subprocess
         enabled: Whether this integration is active
     """
+
     id: str
     name: str
     description: str = ""
@@ -58,6 +179,7 @@ class MCPIntegration:
 @dataclass
 class AgentPrompts:
     """Prompts configuration for an agent."""
+
     task_prompt: str = ""
 
     @classmethod
@@ -74,13 +196,19 @@ class AgentConfig:
 
     Parsed from Agent node metadata in the graph.
     """
+
     agent_id: str
     name: str
     enabled: bool = True
     subscription_id: Optional[str] = None
     mcp_integration_ids: List[str] = field(default_factory=list)
     prompts: AgentPrompts = field(default_factory=AgentPrompts)
-    tool_allowlist: Optional[List[str]] = None  # Future: specific tool restrictions
+    tool_allowlist: Optional[List[str]] = None
+    # Skills: URLs to SKILL.md files or GitHub repos (loaded at runtime)
+    skills_urls: List[str] = field(default_factory=list)
+    # Skill node IDs in the graph (linked via USES_SKILL edges)
+    skill_node_ids: List[str] = field(default_factory=list)
+    schedule: Optional[AgentSchedule] = None
 
     @classmethod
     def from_node(cls, node: Any) -> "AgentConfig":
@@ -108,6 +236,9 @@ class AgentConfig:
             mcp_integration_ids=metadata.get("mcp_integration_ids", []),
             prompts=AgentPrompts.from_dict(prompts_data),
             tool_allowlist=metadata.get("tool_allowlist"),
+            skills_urls=metadata.get("skills_urls", []),
+            skill_node_ids=metadata.get("skill_node_ids", []),
+            schedule=AgentSchedule.from_dict(metadata.get("schedule") or {}),
         )
 
     def to_dict(self) -> Dict[str, Any]:
@@ -120,6 +251,9 @@ class AgentConfig:
             "mcp_integration_ids": self.mcp_integration_ids,
             "prompts": {"task_prompt": self.prompts.task_prompt},
             "tool_allowlist": self.tool_allowlist,
+            "skills_urls": self.skills_urls,
+            "skill_node_ids": self.skill_node_ids,
+            "schedule": self.schedule.to_dict() if self.schedule else None,
         }
 
 
@@ -130,7 +264,13 @@ class AgentsSettings:
 
     Loaded from environment variables and/or config file.
     """
+
     enabled: bool = False
+    # scheduler_enabled: run the in-process time-based scheduler.
+    # Keep False (default) when the deployment platform can scale to zero —
+    # use POST /agents/{id}/trigger from an external scheduler (e.g. GCP Cloud
+    # Scheduler) instead.
+    scheduler_enabled: bool = False
     llm_provider: str = "openai"  # "openai" or "anthropic"
     llm_model: Optional[str] = None  # If None, uses provider default
     openai_api_key: Optional[str] = None
@@ -146,6 +286,9 @@ class AgentsSettings:
 
         Environment variables:
             AGENTS_ENABLED: "true" or "false" (default: false)
+            AGENTS_SCHEDULER_ENABLED: "true" or "false" (default: false).
+                Keep false on scale-to-zero deployments; use the external
+                POST /agents/{id}/trigger endpoint instead.
             LLM_PROVIDER: "openai" or "anthropic" (default: openai)
             LLM_MODEL: Model name (optional, uses provider default)
             OPENAI_API_KEY: OpenAI API key
@@ -157,6 +300,11 @@ class AgentsSettings:
         # Parse enabled flag
         enabled_str = os.environ.get("AGENTS_ENABLED", "false").lower()
         enabled = enabled_str in ("true", "1", "yes")
+
+        scheduler_enabled_str = os.environ.get(
+            "AGENTS_SCHEDULER_ENABLED", "false"
+        ).lower()
+        scheduler_enabled = scheduler_enabled_str in ("true", "1", "yes")
 
         # Get LLM settings (share with chat service)
         llm_provider = os.environ.get("LLM_PROVIDER", "openai").lower()
@@ -193,6 +341,7 @@ class AgentsSettings:
 
         return cls(
             enabled=enabled,
+            scheduler_enabled=scheduler_enabled,
             llm_provider=llm_provider,
             llm_model=llm_model,
             openai_api_key=openai_api_key,
@@ -213,47 +362,60 @@ class AgentsSettings:
 
         # GRAPH: Internal graph MCP (always available via local endpoint)
         port = os.environ.get("PORT", "8000")
-        integrations.append(MCPIntegration(
-            id="GRAPH",
-            name="Graph API",
-            description="Read and write to the knowledge graph",
-            transport=MCPTransport.HTTP,
-            url=f"http://localhost:{port}/mcp/sse",
-            enabled=True,
-        ))
+        integrations.append(
+            MCPIntegration(
+                id="GRAPH",
+                name="Graph API",
+                description="Read and write to the knowledge graph",
+                transport=MCPTransport.HTTP,
+                url=f"http://localhost:{port}/mcp/sse",
+                enabled=True,
+            )
+        )
 
         # WEB: Fetch MCP server for web content
-        integrations.append(MCPIntegration(
-            id="WEB",
-            name="Web Fetch",
-            description="Fetch and convert web content",
-            transport=MCPTransport.STDIO,
-            command=["npx", "-y", "@anthropic/fetch-mcp"],
-            enabled=True,
-        ))
+        integrations.append(
+            MCPIntegration(
+                id="WEB",
+                name="Web Fetch",
+                description="Fetch and convert web content",
+                transport=MCPTransport.STDIO,
+                command=["npx", "-y", "@anthropic/fetch-mcp"],
+                enabled=True,
+            )
+        )
 
         # FS: Filesystem MCP server
-        integrations.append(MCPIntegration(
-            id="FS",
-            name="Filesystem",
-            description="Read and write files",
-            transport=MCPTransport.STDIO,
-            command=["npx", "-y", "@anthropic/filesystem-mcp", "/tmp/agent-workspace"],
-            enabled=True,
-        ))
+        integrations.append(
+            MCPIntegration(
+                id="FS",
+                name="Filesystem",
+                description="Read and write files",
+                transport=MCPTransport.STDIO,
+                command=[
+                    "npx",
+                    "-y",
+                    "@anthropic/filesystem-mcp",
+                    "/tmp/agent-workspace",
+                ],
+                enabled=True,
+            )
+        )
 
         # SEARCH: Brave Search MCP (only if API key is available)
         brave_api_key = os.environ.get("BRAVE_API_KEY")
         if brave_api_key:
-            integrations.append(MCPIntegration(
-                id="SEARCH",
-                name="Brave Search",
-                description="Search the web using Brave Search",
-                transport=MCPTransport.STDIO,
-                command=["npx", "-y", "@anthropic/brave-search-mcp"],
-                env={"BRAVE_API_KEY": brave_api_key},
-                enabled=True,
-            ))
+            integrations.append(
+                MCPIntegration(
+                    id="SEARCH",
+                    name="Brave Search",
+                    description="Search the web using Brave Search",
+                    transport=MCPTransport.STDIO,
+                    command=["npx", "-y", "@anthropic/brave-search-mcp"],
+                    env={"BRAVE_API_KEY": brave_api_key},
+                    enabled=True,
+                )
+            )
 
         return integrations
 
@@ -272,6 +434,7 @@ class AgentsSettings:
         """Convert to dictionary for API responses (excludes secrets)."""
         return {
             "enabled": self.enabled,
+            "scheduler_enabled": self.scheduler_enabled,
             "llm_provider": self.llm_provider,
             "llm_model": self.llm_model,
             "max_agent_turns": self.max_agent_turns,

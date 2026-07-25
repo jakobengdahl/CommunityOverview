@@ -148,10 +148,9 @@
   color: inherit;
 }
 
-.expert-selector-dot {
-  width: 8px;
-  height: 8px;
-  border-radius: 50%;
+.expert-selector-icon {
+  display: flex;
+  align-items: center;
   flex-shrink: 0;
 }
 

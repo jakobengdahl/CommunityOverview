@@ -22,11 +22,15 @@ Usage:
 """
 
 from .models import (
+    EVENT_SCHEMA_VERSION,
     Event,
     EventType,
     EntityKind,
     EventContext,
     EventOrigin,
+    EventAttribution,
+    EventActorAttribution,
+    EventScopeAttribution,
     DeliveryResult,
     DeliveryStatus,
     SubscriptionFilters,
@@ -38,12 +42,16 @@ from .dispatcher import EventDispatcher
 from .delivery import DeliveryWorker
 
 __all__ = [
+    "EVENT_SCHEMA_VERSION",
     # Models
     "Event",
     "EventType",
     "EntityKind",
     "EventContext",
     "EventOrigin",
+    "EventAttribution",
+    "EventActorAttribution",
+    "EventScopeAttribution",
     "DeliveryResult",
     "DeliveryStatus",
     "SubscriptionFilters",

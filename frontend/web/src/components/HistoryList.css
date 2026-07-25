@@ -1,0 +1,141 @@
+.history-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.history-empty {
+  color: #666;
+  font-size: 0.8rem;
+  font-style: italic;
+  padding: 10px 4px;
+}
+
+.history-entry {
+  padding: 9px 10px;
+  border: 1px solid #2d3748;
+  border-radius: 7px;
+  background: rgba(255, 255, 255, 0.03);
+  display: flex;
+  flex-direction: column;
+  gap: 5px;
+}
+
+.history-entry-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
+.history-event-type {
+  font-size: 0.8rem;
+  font-weight: 600;
+  color: #cbd5e1;
+}
+
+.history-event-edge {
+  color: #a0aec0;
+}
+
+.history-ai-badge {
+  font-size: 0.62rem;
+  font-weight: 700;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  color: #0b1020;
+  background: #7dd3fc;
+  border-radius: 4px;
+  padding: 1px 5px;
+}
+
+.history-time {
+  margin-left: auto;
+  font-size: 0.72rem;
+  color: #7a8699;
+  white-space: nowrap;
+}
+
+.history-entry-entity {
+  display: flex;
+  align-items: baseline;
+  gap: 7px;
+  min-width: 0;
+}
+
+.history-entity-type {
+  font-size: 0.68rem;
+  color: #646cff;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  flex-shrink: 0;
+}
+
+.history-entity-name {
+  font-size: 0.83rem;
+  color: #e2e8f0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.history-diff {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+  padding: 5px 8px;
+  background: rgba(0, 0, 0, 0.22);
+  border-radius: 5px;
+}
+
+.history-diff-row {
+  display: flex;
+  align-items: baseline;
+  gap: 6px;
+  font-size: 0.75rem;
+  min-width: 0;
+}
+
+.history-diff-field {
+  color: #94a3b8;
+  flex-shrink: 0;
+  font-family: ui-monospace, 'SFMono-Regular', Consolas, 'Courier New', monospace;
+}
+
+.history-diff-before {
+  color: #e06c6c;
+  text-decoration: line-through;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  max-width: 40%;
+}
+
+.history-diff-arrow {
+  color: #666;
+  flex-shrink: 0;
+}
+
+.history-diff-after {
+  color: #7ec27e;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  max-width: 40%;
+}
+
+.history-entry-meta {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 0.68rem;
+  color: #6b7688;
+  flex-wrap: wrap;
+}
+
+.history-entry-origin {
+  font-family: ui-monospace, 'SFMono-Regular', Consolas, 'Courier New', monospace;
+}

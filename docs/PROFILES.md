@@ -11,7 +11,18 @@ config/
     federation_config.json    # Federation topology
     .env.example              # Template for environment variables
     .env                      # Secrets (git-ignored)
-  scb/                        # Example: SCB (Statistics Sweden) profile
+    skills/                   # Skills loaded for all profiles (fallback)
+      impact-analysis/        # Generic graph dependency impact analysis
+        SKILL.md
+  stat-metadata/              # European Statistical System metadata profile
+    schema_config.json        # ESS node types (NSIs, programmes, datasets, variables…)
+    graph.json                # ESS seed data
+    skills/                   # ESS-specific skills (supplement default skills)
+      graph-analysis/         # Generic graph pattern analysis
+        SKILL.md
+      gsim-lineage-impact/    # GSIM lineage tracing and change impact assessment
+        SKILL.md
+  scb/                        # SCB (Statistics Sweden) profile
     schema_config.json        # Custom metadata model
     .env                      # Profile-specific secrets (git-ignored)
   test/                       # Test profile
@@ -113,33 +124,54 @@ Each node type has the following fields:
 | `color` | No | Hex color code for UI display. Defaults to `#9CA3AF` (gray) |
 | `icon` | No | Bootstrap Icon name for the toolbar (e.g. `"DatabaseFill"`, `"PeopleFill"`) |
 | `static` | No | If `true`, nodes of this type cannot be created via the chat. Used for system types |
+| `ui_form` | No | Specialized creation dialog. `"skill"` opens the SKILL.md-compatible form |
+| `context_menu` | No | Array of extra items for the right-click context menu (see below) |
 
-**Available icon names** (from [Bootstrap Icons](https://icons.getbootstrap.com/)):
+Every node — regardless of its type or its `fields` list — also carries a
+universal `aliases` field: a list of alternative names/synonyms. Aliases are
+editable in every node editor and are matched during search (ranked just below
+a node's real name, above tags and descriptions), so a node can be found by an
+abbreviation or alternate spelling. You do not need to list `aliases` in a
+node type's `fields` array; it is always available, just like `tags` and
+`subtypes`.
 
-| Icon Name | Visual | Suggested For |
-|-----------|--------|---------------|
-| `PersonFill` | 👤 | People, organizations |
-| `RocketTakeoffFill` | 🚀 | Projects, initiatives |
-| `DatabaseFill` | 🗄️ | Datasets, data sources |
-| `LightningFill` | ⚡ | Capabilities, skills |
-| `FileEarmarkTextFill` | 📄 | Resources, documents |
-| `ShieldFillCheck` | 🛡️ | Legislation, compliance |
-| `TagsFill` | 🏷️ | Themes, categories |
-| `TrophyFill` | 🏆 | Goals, objectives |
-| `CalendarEventFill` | 📅 | Events, milestones |
-| `ExclamationTriangleFill` | ⚠️ | Risks, warnings |
-| `PinAngleFill` | 📌 | Anchor points, stable items |
-| `ClipboardDataFill` | 📋 | Surveys, investigations |
-| `PeopleFill` | 👥 | Populations, groups |
-| `Sliders` | 🎚️ | Variables, measurements |
-| `ListOl` | 📝 | Value sets, code lists |
-| `Diagram3Fill` | 🔀 | Classifications, taxonomies |
-| `CpuFill` | 💻 | Agents, AI |
-| `BellFill` | 🔔 | Notifications, webhooks |
-| `BookmarkFill` | 🔖 | Saved views |
-| `FolderFill` | 📁 | Groups, folders |
+See [`docs/ICONS.md`](ICONS.md) for the full, up-to-date list of icon names
+you can choose from — grouped by theme (people & organizations, statistics,
+documents, security, technology, and more) — plus the process for
+registering an icon that isn't in that list yet.
 
-To add support for additional icons, add the import to `frontend/web/src/components/FloatingToolbar.jsx` in the `ICON_REGISTRY` object.
+Icons can only be selected from names already registered in
+`frontend/web/src/components/FloatingToolbar.jsx` (`ICON_REGISTRY`) — this
+list is fixed at deployment time, so a config alone cannot introduce a brand
+new icon; see `docs/ICONS.md` for how to add one.
+
+#### Context menu items
+
+You can add custom right-click menu items per node type using `context_menu`. Each item has a `label`, an optional `icon` (emoji), and an `action`:
+
+```json
+{
+  "MyNodeType": {
+    "context_menu": [
+      {
+        "label": "Open in tool",
+        "icon": "🔗",
+        "action": { "type": "open_url", "url": "https://example.com/{identifier}" }
+      },
+      {
+        "label": "Run analysis",
+        "icon": "⚡",
+        "action": { "type": "callback", "name": "run_analysis" }
+      }
+    ]
+  }
+}
+```
+
+| Action type | Description |
+|-------------|-------------|
+| `open_url` | Opens a URL in a new tab. Use `{field}` in the URL to substitute node field values. |
+| `callback` | Fires `onContextMenuAction(name, nodeId, nodeData)` in `App.jsx`. Wire new actions there. |
 
 ### 4. Define relationship types
 
@@ -183,6 +215,92 @@ The presentation section controls the UI and AI behavior:
 | `prompt_prefix` | Injected at the start of the AI system prompt |
 | `prompt_suffix` | Appended to the AI system prompt |
 | `default_language` | Default UI language (`"en"` or `"sv"`) |
+| `skills_config` | Skills loader settings (see below) |
+
+#### Skills configuration
+
+Skills are SKILL.md-format instructions injected into the AI agent's system prompt at startup. They tell the agent *how* to perform specific tasks.
+
+**Default skills** live in `config/default/skills/` and are always loaded (for every profile). **Profile skills** are loaded in addition when that profile is active. Set `skills_config.skills_dir` in the profile's `schema_config.json` to point to the profile's skills directory:
+
+```json
+{
+  "presentation": {
+    "skills_config": {
+      "skills_dir": "config/my-profile/skills"
+    }
+  }
+}
+```
+
+Structure the directory as `skills/<skill-name>/SKILL.md`. Each file uses YAML frontmatter + Markdown body:
+
+```markdown
+---
+name: My Skill
+description: Short description of what this skill does.
+when-to-use: Use when the user asks to do X.
+allowed-tools: search_graph get_related_nodes add_nodes
+effort: low
+version: "1.0"
+---
+
+## Steps
+1. ...
+
+## Output format
+...
+```
+
+| Frontmatter field | Description |
+|-------------------|-------------|
+| `name` | Required. Human-readable skill name |
+| `description` | Short summary shown in skill listings |
+| `when-to-use` | Instructs the AI when to activate this skill |
+| `allowed-tools` | Space-separated list of tool names the skill may use |
+| `effort` | `low`, `medium`, or `high` — indicates task complexity |
+| `version` | Version string for tracking changes |
+
+**Full `skills_config` options:**
+
+```json
+{
+  "skills_config": {
+    "skills_dir": "config/my-profile/skills",
+    "allow_external_skills": true,
+    "trusted_domains": ["github.com", "raw.githubusercontent.com", "agentskills.io"],
+    "cache_ttl_seconds": 3600,
+    "max_skill_content_bytes": 50000,
+    "max_skill_body_chars": 8000
+  }
+}
+```
+
+Skills can also be loaded from external URLs via `skills_urls` on expert agent configs, or fetched from GitHub repos by pointing to the repo URL.
+
+**Shipped skills:**
+
+| Skill | Profile | Description |
+|-------|---------|-------------|
+| Impact Analysis | default (all profiles) | Traces which nodes depend on a given node and assesses what would be affected by a change. Uses standard graph tools only. |
+| Graph Analysis | stat-metadata | Analyses graph patterns, clusters, hub nodes, and non-obvious connections. |
+| GSIM Lineage & Change Impact | stat-metadata | Traces data lineage through the GSIM metadata chain and assesses impact of classification/code list version changes. Uses `get_lineage`, `assess_change_impact`, `get_impact_report`. |
+
+#### Skill node type and creation form
+
+Any schema node type with `"ui_form": "skill"` uses the SKILL.md-compatible creation dialog instead of the generic node form. The dialog provides fields for name, description, when-to-use, content (Markdown body), source URL, allowed tools, version, and effort.
+
+```json
+{
+  "Skill": {
+    "ui_form": "skill",
+    "category": "system",
+    "fields": ["name", "description", "summary", "metadata"]
+  }
+}
+```
+
+Skills created this way are stored in the graph as nodes. Agent workers automatically discover linked Skill nodes and include their content in the system prompt.
 
 ### 6. Add environment variables (optional)
 

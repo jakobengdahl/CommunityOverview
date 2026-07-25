@@ -121,8 +121,8 @@
 .graph-group-context-menu .context-menu-delete {
   width: 100%;
   background: transparent;
-  border: 1px solid #EF4444;
-  color: #EF4444;
+  border: 1px solid #ef4444;
+  color: #ef4444;
   padding: 6px 12px;
   border-radius: 4px;
   cursor: pointer;
@@ -131,7 +131,7 @@
 }
 
 .graph-group-context-menu .context-menu-delete:hover {
-  background: #EF4444;
+  background: #ef4444;
   color: white;
 }
 

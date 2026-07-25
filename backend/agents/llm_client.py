@@ -7,15 +7,17 @@ Reuses the existing LLM provider infrastructure.
 
 import json
 import logging
-from typing import List, Dict, Any, Optional, Callable
+from typing import List, Dict, Any, Optional, Callable, TYPE_CHECKING
 from dataclasses import dataclass
 
-from backend.llm_providers import (
+if TYPE_CHECKING:
+    from .config import AgentsSettings
+
+from backend.llm.llm_providers import (
     LLMProvider,
     LLMResponse,
     ClaudeProvider,
     OpenAIProvider,
-    create_provider,
 )
 
 logger = logging.getLogger(__name__)
@@ -24,6 +26,7 @@ logger = logging.getLogger(__name__)
 @dataclass
 class ToolCall:
     """Represents a tool call from the LLM."""
+
     id: str
     name: str
     input: Dict[str, Any]
@@ -32,6 +35,7 @@ class ToolCall:
 @dataclass
 class AgentTurn:
     """Result of a single agent turn."""
+
     text_response: Optional[str]
     tool_calls: List[ToolCall]
     stop_reason: str
@@ -130,11 +134,13 @@ class LLMClient:
             if block.get("type") == "text":
                 text_response = block.get("text", "")
             elif block.get("type") == "tool_use":
-                tool_calls.append(ToolCall(
-                    id=block.get("id", ""),
-                    name=block.get("name", ""),
-                    input=block.get("input", {}),
-                ))
+                tool_calls.append(
+                    ToolCall(
+                        id=block.get("id", ""),
+                        name=block.get("name", ""),
+                        input=block.get("input", {}),
+                    )
+                )
 
         # Determine if the turn is complete
         is_complete = response.stop_reason != "tool_use" and len(tool_calls) == 0
@@ -213,55 +219,69 @@ class LLMClient:
             for tc in turn.tool_calls:
                 try:
                     result = tool_executor(tc.name, tc.input)
-                    tool_results.append({
-                        "tool_use_id": tc.id,
-                        "name": tc.name,
-                        "result": result,
-                        "is_error": False,
-                    })
+                    tool_results.append(
+                        {
+                            "tool_use_id": tc.id,
+                            "name": tc.name,
+                            "result": result,
+                            "is_error": False,
+                        }
+                    )
                 except Exception as e:
                     logger.warning(f"Tool {tc.name} failed: {e}")
-                    tool_results.append({
-                        "tool_use_id": tc.id,
-                        "name": tc.name,
-                        "result": {"error": str(e)},
-                        "is_error": True,
-                    })
+                    tool_results.append(
+                        {
+                            "tool_use_id": tc.id,
+                            "name": tc.name,
+                            "result": {"error": str(e)},
+                            "is_error": True,
+                        }
+                    )
 
             # Add assistant message with tool calls
             assistant_content = []
             if turn.text_response:
-                assistant_content.append({
-                    "type": "text",
-                    "text": turn.text_response,
-                })
+                assistant_content.append(
+                    {
+                        "type": "text",
+                        "text": turn.text_response,
+                    }
+                )
             for tc in turn.tool_calls:
-                assistant_content.append({
-                    "type": "tool_use",
-                    "id": tc.id,
-                    "name": tc.name,
-                    "input": tc.input,
-                })
+                assistant_content.append(
+                    {
+                        "type": "tool_use",
+                        "id": tc.id,
+                        "name": tc.name,
+                        "input": tc.input,
+                    }
+                )
 
-            messages.append({
-                "role": "assistant",
-                "content": assistant_content,
-            })
+            messages.append(
+                {
+                    "role": "assistant",
+                    "content": assistant_content,
+                }
+            )
 
             # Add tool results
             user_content = []
             for tr in tool_results:
-                user_content.append({
-                    "type": "tool_result",
-                    "tool_use_id": tr["tool_use_id"],
-                    "content": json.dumps(tr["result"], default=str),
-                    "is_error": tr["is_error"],
-                })
+                user_content.append(
+                    {
+                        "type": "tool_result",
+                        "tool_use_id": tr["tool_use_id"],
+                        "content": json.dumps(tr["result"], default=str),
+                        "is_error": tr["is_error"],
+                    }
+                )
 
-            messages.append({
-                "role": "user",
-                "content": user_content,
-            })
+            messages.append(
+                {
+                    "role": "user",
+                    "content": user_content,
+                }
+            )
 
         # Max turns reached
         return {
@@ -283,7 +303,6 @@ def create_llm_client_from_settings(settings: "AgentsSettings") -> LLMClient:
     Returns:
         Configured LLMClient
     """
-    from .config import AgentsSettings
 
     return LLMClient(
         provider=settings.llm_provider,

@@ -158,7 +158,12 @@ describe('graphStore', () => {
         schema: {
           node_types: {
             Actor: { fields: ['name'], description: 'Actors', color: '#3B82F6', static: false },
-            Initiative: { fields: ['name', 'summary'], description: 'Initiatives', color: '#10B981', static: false },
+            Initiative: {
+              fields: ['name', 'summary'],
+              description: 'Initiatives',
+              color: '#10B981',
+              static: false,
+            },
           },
         },
       });
@@ -193,8 +198,25 @@ describe('graphStore', () => {
       const relTypes = useGraphStore.getState().getRelationshipTypes();
 
       expect(relTypes).toHaveLength(2);
-      expect(relTypes.map(r => r.type)).toContain('BELONGS_TO');
-      expect(relTypes.map(r => r.type)).toContain('IMPLEMENTS');
+      expect(relTypes.map((r) => r.type)).toContain('BELONGS_TO');
+      expect(relTypes.map((r) => r.type)).toContain('IMPLEMENTS');
+    });
+  });
+
+  describe('edge actions', () => {
+    it('removes an edge by id', () => {
+      useGraphStore.setState({
+        edges: [
+          { id: 'edge-1', source: 'a', target: 'b', type: 'RELATES_TO' },
+          { id: 'edge-2', source: 'b', target: 'c', type: 'RELATES_TO' },
+        ],
+      });
+
+      useGraphStore.getState().removeEdge('edge-1');
+
+      expect(useGraphStore.getState().edges).toEqual([
+        { id: 'edge-2', source: 'b', target: 'c', type: 'RELATES_TO' },
+      ]);
     });
   });
 
@@ -259,6 +281,23 @@ describe('graphStore', () => {
     });
   });
 
+  describe('LLM availability', () => {
+    it('initializes llmAvailable as null', () => {
+      useGraphStore.setState({ llmAvailable: null });
+      expect(useGraphStore.getState().llmAvailable).toBeNull();
+    });
+
+    it('setLlmAvailable sets llmAvailable to true', () => {
+      useGraphStore.getState().setLlmAvailable(true);
+      expect(useGraphStore.getState().llmAvailable).toBe(true);
+    });
+
+    it('setLlmAvailable sets llmAvailable to false', () => {
+      useGraphStore.getState().setLlmAvailable(false);
+      expect(useGraphStore.getState().llmAvailable).toBe(false);
+    });
+  });
+
   describe('Federation depth persistence', () => {
     it('persists federation depth to localStorage when updated', () => {
       const setItemSpy = vi.spyOn(window.localStorage.__proto__, 'setItem');
@@ -281,5 +320,4 @@ describe('graphStore', () => {
       expect(useGraphStore.getState().federationDepth).toBe(2);
     });
   });
-
 });
