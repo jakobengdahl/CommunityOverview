@@ -5,6 +5,7 @@ SSE / Streamable-HTTP transports so browser requests are routed correctly, and
 mounts them at ``/mcp``.
 """
 
+import contextlib
 import logging
 
 from fastapi import FastAPI
@@ -99,6 +100,21 @@ def bind_request_authorization_to_asgi_app(asgi_app):
     return request_bound_app
 
 
+def _mount_relative_path(scope) -> str:
+    """Return the request path relative to the mount this handler is served from.
+
+    Starlette keeps the full path in ``scope["path"]`` and the mount prefix in
+    ``scope["root_path"]``; sub-applications derive their own route path the same
+    way. A bare mount hit (``/mcp``) normalises to ``/`` so it is treated as the
+    transport root rather than as an empty sub-path.
+    """
+    path = scope.get("path", "") or ""
+    root_path = scope.get("root_path", "") or ""
+    if root_path and path.startswith(root_path):
+        path = path[len(root_path):]
+    return path or "/"
+
+
 class MCPBrowserHandler:
     """ASGI shim routing /mcp requests to the correct MCP transport.
 
@@ -107,43 +123,59 @@ class MCPBrowserHandler:
     transport, and returns a helpful info payload for plain browser GETs.
     """
 
-    def __init__(self, sse_app, streamable_app=None, tools_map=None):
+    def __init__(self, sse_app, streamable_app=None, tools_map=None, streamable_ready=None):
         self.sse_app = sse_app
         self.streamable_app = streamable_app
         self.tools_map = tools_map or {}
+        # Streamable HTTP needs its session manager running. Until it is, route
+        # to the legacy transport instead of raising "Task group is not
+        # initialized" at the client.
+        self._streamable_ready = streamable_ready or (lambda: True)
+
+    def _streamable(self):
+        if self.streamable_app is not None and self._streamable_ready():
+            return self.streamable_app
+        return None
 
     async def __call__(self, scope, receive, send):
         if scope["type"] != "http":
             await self.sse_app(scope, receive, send)
             return
 
-        path = scope.get("path", "")
+        # Starlette leaves scope["path"] as the full request path and records the
+        # mount prefix in scope["root_path"], so the path relative to this mount
+        # has to be derived — comparing scope["path"] against "/" would never
+        # match and every Streamable HTTP request would fall through to the
+        # legacy SSE app, which answers 404 for them.
+        path = _mount_relative_path(scope)
         method = scope.get("method", "GET")
-        is_root = path in ("", "/")
+        is_root = path == "/"
 
         mcp_logger = logging.getLogger("mcp.server")
         if not mcp_logger.handlers:
             logging.basicConfig()
-        mcp_logger.info(f"MCP Request: {method} /mcp{path}")
+        mcp_logger.info(f"MCP Request: {method} {scope.get('path', '')}")
 
         headers = dict(scope.get("headers", []))
         accept_header = headers.get(b"accept", b"").decode("utf-8", errors="ignore")
 
+        streamable = self._streamable()
+
         # POST to the mount root (/mcp) → Streamable HTTP transport
-        if method == "POST" and is_root and self.streamable_app:
-            await self.streamable_app(scope, receive, send)
+        if method == "POST" and is_root and streamable:
+            await streamable(scope, receive, send)
             return
 
         # DELETE for session termination (Streamable HTTP)
-        if method == "DELETE" and self.streamable_app:
-            await self.streamable_app(scope, receive, send)
+        if method == "DELETE" and streamable:
+            await streamable(scope, receive, send)
             return
 
         # GET /mcp with Accept: text/event-stream → Streamable HTTP SSE channel
         # (new spec: server opens SSE stream for server-initiated messages)
         if method == "GET" and is_root and "text/event-stream" in accept_header:
-            if self.streamable_app:
-                await self.streamable_app(scope, receive, send)
+            if streamable:
+                await streamable(scope, receive, send)
             else:
                 await self.sse_app(scope, receive, send)
             return
@@ -197,10 +229,61 @@ def mount_mcp(app: FastAPI, mcp, tools_map) -> None:
     # Try to create Streamable HTTP app (requires mcp ≥ 1.8).
     # If the installed version doesn't support it, fall back to SSE-only.
     try:
+        # FastMCP mounts its Streamable HTTP handler at settings.streamable_http_path
+        # ("/mcp" by default). This whole app is itself mounted at /mcp, so the
+        # handler sees the already-stripped path "/" and the default would never
+        # match — every POST /mcp answered 404. Serve it from the mount root.
+        try:
+            mcp.settings.streamable_http_path = "/"
+        except (AttributeError, ValueError):
+            logger.warning(
+                "Could not set streamable_http_path; Streamable HTTP may not respond "
+                "on /mcp with this mcp version."
+            )
         mcp_streamable_app = bind_request_authorization_to_asgi_app(
             mcp.streamable_http_app()
         )
     except (AttributeError, TypeError):
         mcp_streamable_app = None
 
-    app.mount("/mcp", MCPBrowserHandler(mcp_sse_app, mcp_streamable_app, tools_map))
+    streamable_state = {"started": False}
+    if mcp_streamable_app is not None:
+        _attach_streamable_session_lifecycle(app, mcp, streamable_state)
+
+    app.mount(
+        "/mcp",
+        MCPBrowserHandler(
+            mcp_sse_app,
+            mcp_streamable_app,
+            tools_map,
+            streamable_ready=lambda: streamable_state["started"],
+        ),
+    )
+
+
+def _attach_streamable_session_lifecycle(app: FastAPI, mcp, state: dict) -> None:
+    """Run the Streamable HTTP session manager for the lifetime of *app*.
+
+    FastMCP starts that manager from its own app's lifespan. We mount the app
+    instead of running it, so the lifespan never fires and the first request
+    fails with "Task group is not initialized". Tie it to this app's lifecycle.
+    """
+    stack = contextlib.AsyncExitStack()
+
+    async def _start() -> None:
+        try:
+            await stack.enter_async_context(mcp.session_manager.run())
+            state["started"] = True
+            logger.info("Streamable HTTP session manager started")
+        except Exception:  # noqa: BLE001 - never block startup over a transport
+            logger.exception(
+                "Could not start the Streamable HTTP session manager; "
+                "only the legacy SSE transport will work."
+            )
+
+    async def _stop() -> None:
+        state["started"] = False
+        await stack.aclose()
+
+    app.router.on_startup.append(_start)
+    app.router.on_shutdown.append(_stop)

@@ -304,3 +304,81 @@ class TestMCPToolsWithEdgeCases:
             or "confirm" in str(data).lower()
             or "requires authentication" in str(data).lower()
         )
+
+
+class TestStreamableHttpTransport:
+    """The MCP spec ≥ 2025-03-26 transport served at POST /mcp."""
+
+    def _client(self, app_config, mock_llm_provider):
+        from unittest.mock import patch
+
+        from backend.api_host.server import create_app
+
+        with patch(
+            "backend.ui.chat_logic.create_provider", return_value=mock_llm_provider
+        ):
+            with patch.dict(os.environ, {"ANTHROPIC_API_KEY": "test-key"}):
+                # The context manager matters: the Streamable HTTP session manager
+                # is started from the app's lifespan.
+                return TestClient(create_app(app_config))
+
+    def _initialize(self, client: TestClient, path: str):
+        return client.post(
+            path,
+            json={
+                "jsonrpc": "2.0",
+                "id": 1,
+                "method": "initialize",
+                "params": {
+                    "protocolVersion": "2025-03-26",
+                    "capabilities": {},
+                    "clientInfo": {"name": "test", "version": "1.0"},
+                },
+            },
+            headers={"Accept": "application/json, text/event-stream"},
+        )
+
+    def test_initialize_over_streamable_http(self, app_config, mock_llm_provider):
+        with self._client(app_config, mock_llm_provider) as client:
+            response = self._initialize(client, "/mcp/")
+
+        assert response.status_code == 200
+        assert response.headers.get("mcp-session-id")
+        assert '"protocolVersion"' in response.text
+
+    def test_bare_mount_path_also_works(self, app_config, mock_llm_provider):
+        """Clients POST to /mcp without a trailing slash."""
+        with self._client(app_config, mock_llm_provider) as client:
+            response = self._initialize(client, "/mcp")
+
+        assert response.status_code == 200
+        assert response.headers.get("mcp-session-id")
+
+    def test_browser_get_still_returns_the_info_payload(
+        self, app_config, mock_llm_provider
+    ):
+        with self._client(app_config, mock_llm_provider) as client:
+            response = client.get("/mcp", headers={"Accept": "application/json"})
+
+        assert response.status_code == 200
+        assert response.json()["transports"]["streamable_http"] == "/mcp"
+
+
+class TestMountRelativePath:
+    """Path handling for the mounted MCP app."""
+
+    def test_strips_the_mount_prefix(self):
+        from backend.api_host.mcp_mount import _mount_relative_path
+
+        assert _mount_relative_path({"path": "/mcp/sse", "root_path": "/mcp"}) == "/sse"
+
+    def test_bare_mount_path_normalises_to_root(self):
+        from backend.api_host.mcp_mount import _mount_relative_path
+
+        assert _mount_relative_path({"path": "/mcp", "root_path": "/mcp"}) == "/"
+        assert _mount_relative_path({"path": "/mcp/", "root_path": "/mcp"}) == "/"
+
+    def test_survives_a_missing_root_path(self):
+        from backend.api_host.mcp_mount import _mount_relative_path
+
+        assert _mount_relative_path({"path": "/sse"}) == "/sse"
