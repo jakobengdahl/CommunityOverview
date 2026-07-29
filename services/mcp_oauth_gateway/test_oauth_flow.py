@@ -114,6 +114,49 @@ class TestGatewayProxyAuth(unittest.TestCase):
         mock_validate.assert_called_once_with("static-test-api-key")
 
 
+class TestStreamableHttpTransport(unittest.TestCase):
+    """POST/GET/DELETE /mcp — Streamable HTTP transport (MCP ≥ 2025-03-26)."""
+
+    def test_post_mcp_requires_auth(self):
+        resp = client.post("/mcp", json={"jsonrpc": "2.0", "id": 1, "method": "initialize"})
+        assert resp.status_code == 401
+
+    def test_post_mcp_is_proxied_when_authorized(self):
+        with patch("proxy.proxy_streamable_http",
+                   new=AsyncMock(return_value=MagicMock(status_code=200))) as proxied:
+            resp = client.post(
+                "/mcp",
+                headers={"Authorization": "Bearer static-test-api-key"},
+                json={"jsonrpc": "2.0", "id": 1, "method": "initialize"},
+            )
+        assert resp.status_code == 200
+        proxied.assert_awaited_once()
+
+    def test_get_and_delete_mcp_are_proxied(self):
+        for method in ("get", "delete"):
+            with patch("proxy.proxy_streamable_http",
+                       new=AsyncMock(return_value=MagicMock(status_code=200))) as proxied:
+                resp = getattr(client, method)(
+                    "/mcp", headers={"Authorization": "Bearer static-test-api-key"}
+                )
+            assert resp.status_code == 200, method
+            proxied.assert_awaited_once()
+
+    def test_session_id_header_survives_the_response_filter(self):
+        import httpx2 as httpx
+
+        import proxy as proxy_module
+
+        headers = httpx.Headers({
+            "content-type": "application/json",
+            "content-length": "12",
+            "mcp-session-id": "abc-123",
+        })
+        filtered = proxy_module._response_headers(headers)
+        assert filtered["mcp-session-id"] == "abc-123"
+        assert "content-length" not in {k.lower() for k in filtered}
+
+
 class TestAuthorizeEndpoint(unittest.TestCase):
     """Tests for GET /authorize."""
 
