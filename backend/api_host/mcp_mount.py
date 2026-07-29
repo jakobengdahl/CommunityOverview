@@ -111,7 +111,7 @@ def _mount_relative_path(scope) -> str:
     path = scope.get("path", "") or ""
     root_path = scope.get("root_path", "") or ""
     if root_path and path.startswith(root_path):
-        path = path[len(root_path):]
+        path = path[len(root_path) :]
     return path or "/"
 
 
@@ -123,7 +123,9 @@ class MCPBrowserHandler:
     transport, and returns a helpful info payload for plain browser GETs.
     """
 
-    def __init__(self, sse_app, streamable_app=None, tools_map=None, streamable_ready=None):
+    def __init__(
+        self, sse_app, streamable_app=None, tools_map=None, streamable_ready=None
+    ):
         self.sse_app = sse_app
         self.streamable_app = streamable_app
         self.tools_map = tools_map or {}
