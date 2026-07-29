@@ -5,6 +5,40 @@ It is safe to commit and expose publicly — it contains no secrets.
 
 ---
 
+## MCP-first planning
+
+Planning — goals, initiatives, activities, decisions, dependencies, priorities —
+is maintained in a private planning graph, not in this repository. This repo holds
+code, ADRs, technical contracts and code-near documentation, and must not grow a
+parallel plan with its own status.
+
+The planning graph is reached over MCP. Its endpoint is **not** configured here:
+Jakob supplies it through the MCP client configuration (a private `.mcp.json` or an
+equivalent connector entry). If no such server is configured in the session, there
+is nothing to connect to and the rest of this section does not apply.
+
+When a planning MCP server *is* configured:
+
+1. Connect and read the current goals, initiatives, activities, decisions and
+   dependencies before planning anything.
+2. Then look at this repo, its issues and open PRs.
+3. Create and update planning **in the graph**, not in repo files.
+4. Do the code work here through a branch and a PR.
+5. Write the PR, commit SHA, implementation evidence and verification results back
+   onto the relevant graph nodes.
+6. Keep ADRs and technical contracts here, and link them from the graph.
+7. Never maintain planning status in both places.
+8. Do not write secrets or sensitive working material into the graph; use
+   correlation IDs on writes and avoid event loops.
+9. If the graph is unreachable, do not start a standalone plan here — record the
+   interruption and resume when it is available again.
+
+The planning graph is private and this repository is public: never name private
+deployments, hosts, tenants or commercial plans in files, commits or PR bodies
+here. Describe general technical enablement only.
+
+---
+
 ## Feature Planning & Routing
 
 When Jakob wants to think through a feature, discuss it naturally — he does not
