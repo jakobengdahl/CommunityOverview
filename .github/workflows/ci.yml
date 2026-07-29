@@ -201,14 +201,16 @@ jobs:
       - name: Checkout code
         uses: actions/checkout@v4
 
-      # Determine release channel based on the ref that triggered this run.
-      # channel=dev  → pushed to preview branch (deploys preview/dev env in infra)
-      # channel=prod → pushed to main or a version tag
+      # Determine release channel from the ref that triggered this run. The
+      # channel names the deployment environment, not the branch: `dev` is a
+      # branch where features land and never a deployment target.
+      # channel=preview → pushed to the preview branch  → preview instances
+      # channel=prod    → pushed to main or a version tag → production
       - name: Determine release channel
         id: channel
         run: |
           if [[ "${GITHUB_REF}" == "refs/heads/preview" ]]; then
-            echo "channel=dev" >> "$GITHUB_OUTPUT"
+            echo "channel=preview" >> "$GITHUB_OUTPUT"
           else
             echo "channel=prod" >> "$GITHUB_OUTPUT"
           fi

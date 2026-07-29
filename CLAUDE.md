@@ -61,15 +61,18 @@ All repo-managed content (docs, comments, PR bodies) remains in English.
 ## Branch & Environment Strategy
 
 ```
-main        ← production deployments (pilots)
+main        ← deploys to the prod environment (pilots)
   ↑
-preview     ← staging deployments; periodic merge from dev for integration testing
+preview     ← deploys to the preview environment; periodic merge from dev
   ↑
-dev         ← integration branch; all features land here first
+dev         ← integration branch; all features land here first. Deploys nowhere.
   ↑
 feature/*   ← one branch per task; PR always targets dev
 claude/*    ← branches created by Claude agents (same rules apply)
 ```
+
+Environments are named **preview** and **prod**. `dev` is a branch, never an
+environment — a release channel or deploy target called "dev" is a naming bug.
 
 **Do not merge into `main` or `preview` on your own initiative.** Those merges are
 deployment actions, done infrequently by the project owner:
