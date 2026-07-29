@@ -142,6 +142,56 @@ class TestStreamableHttpTransport(unittest.TestCase):
             assert resp.status_code == 200, method
             proxied.assert_awaited_once()
 
+    def test_upstream_is_asked_for_the_trailing_slash_path(self):
+        """The bare mount path would 307 to /mcp/ carrying the upstream's own host."""
+        import proxy as proxy_module
+
+        captured = {}
+
+        def fake_build_request(method, url, **kwargs):
+            captured["method"] = method
+            captured["url"] = url
+            return MagicMock()
+
+        upstream_resp = MagicMock()
+        upstream_resp.headers = {"content-type": "application/json"}
+        upstream_resp.status_code = 200
+        upstream_resp.aread = AsyncMock(return_value=b"{}")
+        upstream_resp.aclose = AsyncMock()
+
+        with patch.object(proxy_module._client, "build_request", side_effect=fake_build_request):
+            with patch.object(proxy_module._client, "send",
+                              new=AsyncMock(return_value=upstream_resp)):
+                request = MagicMock()
+                request.method = "POST"
+                request.query_params = {}
+                request.headers = {}
+                request.body = AsyncMock(return_value=b"{}")
+                asyncio.run(proxy_module.proxy_streamable_http(request))
+
+        assert captured["url"] == config.UPSTREAM_MCP_BASE_URL + "/mcp/"
+
+    def test_redirect_to_the_upstream_host_is_rewritten_to_the_gateway(self):
+        import httpx2 as httpx
+
+        import proxy as proxy_module
+
+        upstream = config.UPSTREAM_MCP_BASE_URL.rstrip("/")
+        headers = httpx.Headers({"location": f"{upstream}/mcp/?session_id=abc"})
+        filtered = proxy_module._response_headers(headers)
+        assert filtered["location"] == (
+            config.PUBLIC_BASE_URL.rstrip("/") + "/mcp/?session_id=abc"
+        )
+
+    def test_redirect_to_an_unrelated_host_is_left_alone(self):
+        import httpx2 as httpx
+
+        import proxy as proxy_module
+
+        headers = httpx.Headers({"location": "https://example.com/elsewhere"})
+        filtered = proxy_module._response_headers(headers)
+        assert filtered["location"] == "https://example.com/elsewhere"
+
     def test_session_id_header_survives_the_response_filter(self):
         import httpx2 as httpx
 
