@@ -5,6 +5,35 @@ It is safe to commit and expose publicly — it contains no secrets.
 
 ---
 
+## MCP-first planning
+
+Planning for this product — goals, initiatives, activities, decisions,
+dependencies, priorities — lives in the **Corp graph**, which is the system of
+record. This repository holds code, ADRs, technical contracts and code-near
+documentation. It must not grow a parallel plan with its own status.
+
+Before planning anything:
+
+1. Connect to the Corp graph over MCP (`https://mcp.corp.communityoverview.tjoo.se`;
+   dev: `https://mcp-preview.corp.communityoverview.tjoo.se`) and read the current
+   goals, initiatives, activities, decisions and dependencies.
+2. Then look at this repo, its issues and open PRs.
+3. Create and update planning **in the graph**, not in repo files.
+4. Do the code work here through a branch and a PR.
+5. Write the PR, commit SHA, implementation evidence and verification results back
+   onto the relevant graph nodes.
+6. Keep ADRs and technical contracts here, and link them from the graph.
+7. Never maintain planning status in both places.
+8. Do not write secrets or sensitive working material into the graph; use
+   correlation IDs on writes and avoid event loops.
+9. If MCP is unavailable, do not start a standalone plan here — record the
+   interruption and resume when the graph is reachable.
+
+The Corp graph is private; this repository stays public. Only general technical
+enablement is described in commits and PR bodies here.
+
+---
+
 ## Feature Planning & Routing
 
 When Jakob wants to think through a feature, discuss it naturally — he does not
