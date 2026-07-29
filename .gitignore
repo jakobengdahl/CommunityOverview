@@ -61,8 +61,11 @@ embeddings.pkl
 test_embeddings.pkl
 test_embeddings_integration.pkl
 
-# Active graph data (managed by start-dev.sh)
+# Active graph data and everything the running app writes beside it —
+# session state and mutation history are local runtime output, never source.
 data/active/graph.json
+data/active/graph.history.ndjson
+data/active/sessions/
 
 # Stale runtime graph data (must not be tracked; see STRUCTURE_REVIEW.md C1)
 /graph.json

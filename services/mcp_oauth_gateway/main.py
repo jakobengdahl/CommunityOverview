@@ -486,6 +486,33 @@ def _require_valid_token(request: Request) -> dict:
     return claims
 
 
+# POST|GET|DELETE /mcp – Streamable HTTP transport (MCP spec ≥ 2025-03-26).
+# ChatGPT custom connectors and current Claude clients use this transport; the
+# legacy /mcp/sse routes below stay for older clients.
+@app.post("/mcp")
+async def mcp_streamable_post(request: Request):
+    """Proxy POST /mcp to the upstream Streamable HTTP endpoint (auth required)."""
+    claims = _require_valid_token(request)
+    logger.info("MCP streamable POST from sub=%s", claims.get("sub"))
+    return await proxy.proxy_streamable_http(request)
+
+
+@app.get("/mcp")
+async def mcp_streamable_get(request: Request):
+    """Proxy GET /mcp (server-initiated SSE channel) to the upstream (auth required)."""
+    claims = _require_valid_token(request)
+    logger.info("MCP streamable GET from sub=%s", claims.get("sub"))
+    return await proxy.proxy_streamable_http(request)
+
+
+@app.delete("/mcp")
+async def mcp_streamable_delete(request: Request):
+    """Proxy DELETE /mcp (session termination) to the upstream (auth required)."""
+    claims = _require_valid_token(request)
+    logger.info("MCP streamable DELETE from sub=%s", claims.get("sub"))
+    return await proxy.proxy_streamable_http(request)
+
+
 # GET /sse – legacy SSE proxy
 @app.get("/sse")
 async def sse_proxy(request: Request):

@@ -136,6 +136,62 @@ async def proxy_post(request: Request) -> Response:
     )
 
 
+async def proxy_streamable_http(request: Request) -> Response:
+    """Forward a Streamable HTTP (MCP spec ≥2025-03-26) request to the upstream.
+
+    The upstream answers POST /mcp either with a single JSON body or with an SSE
+    stream, depending on the request. Both are relayed as-is; the SSE case is
+    streamed so a long-running tool call is not buffered. ``Mcp-Session-Id`` is
+    forwarded in both directions so the client keeps its session.
+
+    The trailing slash matters: the upstream mounts the MCP app at ``/mcp``, and
+    Starlette answers a request for the bare mount path with a 307 to ``/mcp/``.
+    That redirect carries the upstream's own host, which would send the client
+    straight past the gateway, so the gateway asks for ``/mcp/`` up front.
+    """
+    upstream_url = config.UPSTREAM_MCP_BASE_URL + "/mcp/"
+    params = dict(request.query_params)
+    headers = _forward_headers(request)
+    body = await request.body()
+
+    logger.info("Proxying %s /mcp (streamable http) to %s", request.method, upstream_url)
+
+    if request.method in ("GET", "DELETE"):
+        upstream_req = _client.build_request(
+            request.method, upstream_url, params=params, headers=headers
+        )
+    else:
+        upstream_req = _client.build_request(
+            "POST", upstream_url, params=params, headers=headers, content=body
+        )
+
+    upstream_resp = await _client.send(upstream_req, stream=True)
+    content_type = upstream_resp.headers.get("content-type", "")
+
+    if "text/event-stream" not in content_type:
+        payload = await upstream_resp.aread()
+        await upstream_resp.aclose()
+        return Response(
+            content=payload,
+            status_code=upstream_resp.status_code,
+            headers=_response_headers(upstream_resp.headers),
+        )
+
+    async def relay() -> AsyncIterator[bytes]:
+        try:
+            async for chunk in upstream_resp.aiter_bytes():
+                yield chunk
+        finally:
+            await upstream_resp.aclose()
+
+    return StreamingResponse(
+        relay(),
+        status_code=upstream_resp.status_code,
+        media_type="text/event-stream",
+        headers=_response_headers(upstream_resp.headers),
+    )
+
+
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
@@ -162,6 +218,35 @@ def _forward_headers(request: Request) -> dict:
         for k, v in request.headers.items()
         if k.lower() not in _HOP_BY_HOP
     }
+
+
+def _response_headers(headers) -> dict:
+    """Copy upstream response headers, dropping the ones the ASGI server owns.
+
+    ``Mcp-Session-Id`` is deliberately kept: Streamable HTTP clients read it
+    from the initialize response and send it back on every later request.
+
+    A ``Location`` pointing at the upstream is rewritten to the gateway's own
+    origin. Following such a redirect would take the client around the gateway
+    to an origin it cannot authenticate against, and would disclose the internal
+    service URL.
+    """
+    dropped = {"content-length", "content-encoding", "transfer-encoding", "connection"}
+    result = {k: v for k, v in headers.items() if k.lower() not in dropped}
+
+    location = next((v for k, v in result.items() if k.lower() == "location"), None)
+    if location:
+        upstream_host = urllib.parse.urlparse(config.UPSTREAM_MCP_BASE_URL).hostname
+        parsed = urllib.parse.urlparse(location)
+        if parsed.hostname and parsed.hostname == upstream_host:
+            rewritten = config.PUBLIC_BASE_URL.rstrip("/") + parsed.path
+            if parsed.query:
+                rewritten += "?" + parsed.query
+            logger.info("Rewrote upstream redirect %s → %s", location, rewritten)
+            for key in list(result):
+                if key.lower() == "location":
+                    result[key] = rewritten
+    return result
 
 
 def _rewrite_endpoint_event(raw: bytes) -> bytes:
