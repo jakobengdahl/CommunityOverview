@@ -158,6 +158,16 @@ NODE_COLORS = {
 }
 
 
+# Text-field length limits, enforced on every write. The graph is rejected at load
+# time if any node exceeds these (Node.from_dict validates), so the write paths must
+# enforce them too — otherwise an over-limit update silently persists and bricks the
+# next graph load. Scalar limits mirror the Field(max_length=...) below; the list
+# limits cover tags/aliases, which have no per-field max_length.
+FIELD_LIMITS = {"name": 200, "description": 2000, "summary": 300}
+LIST_FIELD_TOTAL_LIMIT = 2000  # total characters across all tags / all aliases
+LIST_FIELD_ITEM_LIMIT = 200  # per individual tag / alias
+
+
 class Node(BaseModel):
     """Base model for a node in the graph"""
 
@@ -192,6 +202,27 @@ class Node(BaseModel):
                 # Accept any string type (config-defined or legacy)
                 return v
         raise ValueError(f"Node type must be string or NodeType, got {type(v)}")
+
+    @field_validator("tags", "aliases")
+    @classmethod
+    def _limit_list_text(cls, v, info):
+        """Bound tags/aliases so an over-large write can't brick the graph at load.
+
+        name/description/summary are already capped by Field(max_length=...); tags and
+        aliases have no such cap, so enforce a per-item and a total-length limit here.
+        """
+        total = sum(len(str(item)) for item in v)
+        if total > LIST_FIELD_TOTAL_LIMIT:
+            raise ValueError(
+                f"{info.field_name} total length {total} exceeds "
+                f"{LIST_FIELD_TOTAL_LIMIT} characters"
+            )
+        for item in v:
+            if len(str(item)) > LIST_FIELD_ITEM_LIMIT:
+                raise ValueError(
+                    f"{info.field_name} entry exceeds {LIST_FIELD_ITEM_LIMIT} characters"
+                )
+        return v
 
     @property
     def type_str(self) -> str:

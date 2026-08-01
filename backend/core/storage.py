@@ -746,9 +746,18 @@ class GraphStorage:
                 "metadata",
             }
             reserved_fields = {"id", "type", "embedding", "created_at", "updated_at"}
+
+            # Build the candidate state and validate it through the model BEFORE
+            # mutating the live node. setattr on a pydantic model does not re-run
+            # field validators, so without this an over-limit field (e.g. a
+            # description longer than 2000 chars, or oversized tags/aliases) would
+            # silently bypass the model's limits on write and only fail at the next
+            # graph load — bricking startup. Validating a candidate first means an
+            # invalid update is rejected here, atomically, with the live node untouched.
+            candidate = node.to_dict()
             for key, value in updates.items():
                 if key in allowed_fields:
-                    setattr(node, key, value)
+                    candidate[key] = value
             # Fold schema-defined extra fields (anything outside the base model) into metadata
             extra = {
                 k: v
@@ -756,9 +765,18 @@ class GraphStorage:
                 if k not in allowed_fields and k not in reserved_fields
             }
             if extra:
-                meta = dict(node.metadata or {})
+                meta = dict(candidate.get("metadata") or {})
                 meta.update(extra)
-                node.metadata = meta
+                candidate["metadata"] = meta
+
+            try:
+                validated = Node.from_dict(candidate)
+            except Exception as exc:
+                raise ValueError(f"Invalid node update: {exc}") from exc
+
+            # Apply the validated field values to the live node.
+            for key in allowed_fields:
+                setattr(node, key, getattr(validated, key))
 
             node.updated_at = datetime.now(timezone.utc)
 
