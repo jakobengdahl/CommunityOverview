@@ -134,7 +134,9 @@ def update_node(
     )
 
     try:
-        updated_node = storage.update_node(node_id, updates, event_context=event_context)
+        updated_node = storage.update_node(
+            node_id, updates, event_context=event_context
+        )
     except ValueError as e:
         return {"success": False, "error": f"Error validating input: {e}"}
     if not updated_node:

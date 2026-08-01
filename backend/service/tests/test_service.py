@@ -188,9 +188,7 @@ class TestGraphServiceCRUD:
     ):
         """An over-limit field update is rejected with a clean error, not a 500 or a
         silently-persisted value that would fail the next graph load."""
-        result = populated_service.update_node(
-            "actor-1", {"description": "x" * 2001}
-        )
+        result = populated_service.update_node("actor-1", {"description": "x" * 2001})
 
         assert result["success"] is False
         assert "error" in result
