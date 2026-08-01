@@ -1286,3 +1286,42 @@ class TestGraphStorageIncidentEdges:
         """Test with non-existent node"""
         edges = storage_with_data.get_incident_edges(["nonexistent"])
         assert len(edges) == 0
+
+
+class TestUpdateNodeFieldLimits:
+    """update_node must validate field limits on write, not silently bypass them.
+
+    Regression: update_node used setattr, which does not re-run pydantic field
+    validators, so an over-limit description/tags/aliases update persisted and only
+    failed at the next graph load. It must be rejected atomically instead.
+    """
+
+    def _seed(self, storage):
+        storage.add_nodes(
+            [Node(id="n-1", type=NodeType.ACTOR, name="Seed", description="ok")], []
+        )
+
+    def test_update_over_limit_description_rejected_and_no_mutation(self, temp_storage):
+        self._seed(temp_storage)
+        with pytest.raises(ValueError):
+            temp_storage.update_node("n-1", {"description": "x" * 2001})
+        # live node untouched
+        assert temp_storage.get_node("n-1").description == "ok"
+
+    def test_update_over_limit_tags_rejected(self, temp_storage):
+        self._seed(temp_storage)
+        with pytest.raises(ValueError):
+            temp_storage.update_node("n-1", {"tags": ["x" * 100] * 25})
+        assert temp_storage.get_node("n-1").tags == []
+
+    def test_valid_update_applies(self, temp_storage):
+        self._seed(temp_storage)
+        node = temp_storage.update_node(
+            "n-1", {"description": "y" * 2000, "tags": ["a", "b"]}
+        )
+        assert node is not None
+        assert len(node.description) == 2000
+        assert node.tags == ["a", "b"]
+
+    def test_update_missing_node_returns_none(self, temp_storage):
+        assert temp_storage.update_node("nope", {"description": "x"}) is None

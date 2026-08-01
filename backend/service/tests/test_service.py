@@ -183,6 +183,19 @@ class TestGraphServiceCRUD:
         assert result["success"] is False
         assert "error" in result
 
+    def test_update_node_over_limit_returns_clean_error(
+        self, populated_service: GraphService
+    ):
+        """An over-limit field update is rejected with a clean error, not a 500 or a
+        silently-persisted value that would fail the next graph load."""
+        result = populated_service.update_node(
+            "actor-1", {"description": "x" * 2001}
+        )
+
+        assert result["success"] is False
+        assert "error" in result
+        assert "validating input" in result["error"].lower()
+
     def test_delete_nodes(self, populated_service: GraphService):
         """Test deleting nodes."""
         result = populated_service.delete_nodes(["actor-1"], confirmed=True)

@@ -133,7 +133,10 @@ def update_node(
         event_correlation_id=event_correlation_id,
     )
 
-    updated_node = storage.update_node(node_id, updates, event_context=event_context)
+    try:
+        updated_node = storage.update_node(node_id, updates, event_context=event_context)
+    except ValueError as e:
+        return {"success": False, "error": f"Error validating input: {e}"}
     if not updated_node:
         return {"success": False, "error": f"Node with ID {node_id} not found"}
 
