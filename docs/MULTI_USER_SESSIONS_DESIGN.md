@@ -17,6 +17,12 @@ the open core. Each implementation step below is sized to be executed by one
 development session as one branch + one PR against `dev`, following the Standard
 Development Workflow in `CLAUDE.md`. Update the step status table as steps complete.
 
+**Related contract:** the MCP-facing session **lifecycle, ownership seam and
+canonical deep-link** semantics (assistant-created sessions, CRUD tools and the
+server-generated `?session=<id>` URL) are specified in
+[`MCP_SESSION_LIFECYCLE_CONTRACT.md`](MCP_SESSION_LIFECYCLE_CONTRACT.md). The
+session-store data model here remains authoritative where the two overlap.
+
 ---
 
 ## 1. Goal
