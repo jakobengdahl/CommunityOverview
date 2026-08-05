@@ -27,6 +27,7 @@ from backend.core.session_manager import (
     SessionLimitReached,
     SessionNotFound,
 )
+from backend.config.config_loader import build_session_url
 from backend.runtime.authorization import GRAPH_ACTION_MUTATE, GRAPH_ACTION_READ
 from . import access
 from .service import GraphService
@@ -870,9 +871,9 @@ def register_mcp_tools(
             "node_count": len(session.state.get("node_refs", [])),
             "capabilities": ["read"]
             + (["rename", "delete", "layout"] if mutate_allowed else []),
-            # Populated by the deep-link slice (task-implement-session-deeplinks);
-            # the assistant must never construct a URL itself (contract §5).
-            "session_url": None,
+            # Server-owned canonical link (contract §5); None when no public base
+            # URL is configured. The assistant must never construct one itself.
+            "session_url": build_session_url(session.id),
         }
 
     def _project_meta(meta: Dict[str, Any], *, mutate_allowed: bool) -> Dict[str, Any]:
@@ -893,7 +894,7 @@ def register_mcp_tools(
             "revision": meta.get("seq"),
             "capabilities": ["read"]
             + (["rename", "delete", "layout"] if mutate_allowed else []),
-            "session_url": None,
+            "session_url": build_session_url(meta["id"]),
         }
 
     @register_tool

@@ -559,6 +559,42 @@ def get_tenant_context() -> Dict[str, Any]:
     }
 
 
+PUBLIC_BASE_URL_ENV = "COMMUNITYOVERVIEW_PUBLIC_BASE_URL"
+
+
+def get_public_base_url() -> str:
+    """Externally reachable base URL used to build shareable links, or "".
+
+    Set per environment/tenant in hosted deployments (scheme + host + optional
+    base path). Unset in standalone/local use, in which case link builders
+    return ``None`` rather than emitting a guessed or ``localhost`` URL.
+    """
+    return os.getenv(PUBLIC_BASE_URL_ENV, "").strip()
+
+
+def build_session_url(session_id: str) -> Optional[str]:
+    """Canonical direct link to a visualization session, or ``None``.
+
+    Keeps the established ``?session=<id>`` form the frontend reads and reflects,
+    with the server owning the base URL so an assistant never guesses a host
+    (see ``docs/MCP_SESSION_LIFECYCLE_CONTRACT.md`` §5). Returns ``None`` when no
+    public base URL is configured.
+    """
+    from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
+
+    base = get_public_base_url()
+    if not base or not session_id:
+        return None
+    parts = urlsplit(base)
+    query = dict(parse_qsl(parts.query))
+    query["session"] = session_id
+    # Preserve any base path; ensure a "/" path when the base is a bare origin so
+    # the result is "https://host/?session=<id>" rather than "https://host?...".
+    return urlunsplit(
+        (parts.scheme, parts.netloc, parts.path or "/", urlencode(query), "")
+    )
+
+
 def _get_resolved_config_context() -> Dict[str, Any]:
     """Get internal config resolution details, including resolved filesystem paths."""
     schema_context = resolve_schema_config_path_info(DEFAULT_CONFIG_PATH)

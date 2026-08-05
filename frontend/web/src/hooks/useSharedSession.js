@@ -90,7 +90,7 @@ export function useSharedSession({
   );
 
   const loadSessionFromServer = useCallback(
-    async (targetId, { eagerConnect = false } = {}) => {
+    async (targetId, { eagerConnect = false, onMissing = null } = {}) => {
       try {
         const payload = await api.getSession(targetId, { resolve: true });
         // Compute the sync baseline before touching the canvas: it runs the same
@@ -120,6 +120,12 @@ export function useSharedSession({
           } else if (syncRef.current && syncRef.current.sessionId === targetId) {
             syncRef.current.setBaseline({});
           }
+          // A 404 is ambiguous: a brand-new session materialises on first save,
+          // but a *deep link* to a session that was deleted or never existed
+          // should not silently present an empty canvas as if it were valid
+          // (contract §5.3). The caller opts in to that notice via onMissing;
+          // the empty-session fallback above still runs so nothing breaks.
+          onMissing?.(targetId);
         } else {
           console.error('Error loading session:', error);
           throw error;

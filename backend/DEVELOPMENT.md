@@ -437,8 +437,10 @@ tenancy), names are non-unique with a server default, rename is op-routed (it
 reaches reconnecting clients via catch-up), and deletion is a confirmed hard
 delete that notifies connected browsers. Each tool returns a session-resource
 projection (`session_id`, `name`, `lifecycle_state`, timestamps, `revision`,
-`capabilities`); `owner`/`workspace`/`session_url` are reserved and populated by
-later slices (hosted ownership, deep-link generation).
+`capabilities`, `session_url`). `session_url` is the server-built canonical
+`?session=<id>` link (from `COMMUNITYOVERVIEW_PUBLIC_BASE_URL`; `null` when
+unconfigured) so an assistant can hand the user a direct link without guessing a
+host. `owner`/`workspace` remain reserved and are populated by the hosted layer.
 
 ### UI Backend Endpoints
 
