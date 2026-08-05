@@ -457,6 +457,21 @@ class SessionStore:
             self._backend.save(session.to_dict())
             self._meta_cache = None
 
+    def persist_snapshot(self, snapshot: Dict[str, Any]) -> None:
+        """Persist a pre-serialised, fully-detached session dict.
+
+        ``persist`` reads ``session.state`` lazily inside the call, so when the
+        caller offloads it to a worker thread (``apply_ops`` does) the worker
+        iterates live state the event loop may still be mutating — a cross-thread
+        data race the moment a second, loop-thread writer (e.g. the synchronous
+        MCP ``apply_layout`` path) touches the same session during the flush. A
+        snapshot deep-copied on the loop thread hands the worker an immutable
+        object, so the two writers never share mutable state.
+        """
+        with self._lock:
+            self._backend.save(snapshot)
+            self._meta_cache = None
+
     def session_count(self) -> int:
         """Number of sessions that exist, on disk or in memory (R13).
 

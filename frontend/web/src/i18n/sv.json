@@ -163,6 +163,7 @@
     "close": "Stäng menyn",
     "new_session": "Starta ny session",
     "new_session_started": "Ny session startad",
+    "link_not_found": "Sessionslänken kunde inte hittas — den kan ha tagits bort eller upphört att gälla.",
     "search_sessions": "Sök bland tidigare sessioner",
     "search_placeholder": "Sök på namn eller ID...",
     "connect_session": "Anslut till session (via ID)",

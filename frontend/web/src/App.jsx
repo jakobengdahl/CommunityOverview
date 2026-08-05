@@ -401,7 +401,13 @@ function App() {
     const urlSession = _urlParams.get('session');
     if (sessionStore.isValidSessionId(urlSession)) {
       sessionStore.touchSession(urlSession);
-      loadSessionFromServer(urlSession, { eagerConnect: true });
+      // This id came in via a ?session= deep link, so a 404 means the linked
+      // session is gone/expired (not a brand-new local one) — surface it rather
+      // than silently opening an empty canvas (contract §5.3).
+      loadSessionFromServer(urlSession, {
+        eagerConnect: true,
+        onMissing: () => showNotification('info', t('sessions.link_not_found')),
+      });
     }
     setSessionsVersion((v) => v + 1);
   }, []); // eslint-disable-line react-hooks/exhaustive-deps

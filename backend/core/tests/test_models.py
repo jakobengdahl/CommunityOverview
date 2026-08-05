@@ -411,3 +411,45 @@ class TestDeleteNodesResult:
         assert result.success is True
         assert len(result.deleted_node_ids) == 1
         assert len(result.affected_edge_ids) == 2
+
+
+class TestFieldLimits:
+    """Text-field length limits must be enforced on construction (and thus on write)."""
+
+    def test_description_over_limit_rejected(self):
+        with pytest.raises(Exception):
+            Node(type=NodeType.ACTOR, name="n", description="x" * 2001)
+
+    def test_description_at_limit_ok(self):
+        node = Node(type=NodeType.ACTOR, name="n", description="x" * 2000)
+        assert len(node.description) == 2000
+
+    def test_name_over_limit_rejected(self):
+        with pytest.raises(Exception):
+            Node(type=NodeType.ACTOR, name="x" * 201)
+
+    def test_summary_over_limit_rejected(self):
+        with pytest.raises(Exception):
+            Node(type=NodeType.ACTOR, name="n", summary="x" * 301)
+
+    def test_tags_total_over_limit_rejected(self):
+        # many small tags summing past the total limit
+        with pytest.raises(ValueError):
+            Node(type=NodeType.ACTOR, name="n", tags=["x" * 100] * 25)
+
+    def test_tag_item_over_limit_rejected(self):
+        with pytest.raises(ValueError):
+            Node(type=NodeType.ACTOR, name="n", tags=["x" * 201])
+
+    def test_aliases_total_over_limit_rejected(self):
+        with pytest.raises(ValueError):
+            Node(type=NodeType.ACTOR, name="n", aliases=["x" * 100] * 25)
+
+    def test_reasonable_tags_and_aliases_ok(self):
+        node = Node(
+            type=NodeType.ACTOR,
+            name="n",
+            tags=["infra", "saas", "m2-s1"],
+            aliases=["alt name", "synonym"],
+        )
+        assert node.tags == ["infra", "saas", "m2-s1"]

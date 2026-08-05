@@ -411,6 +411,36 @@ broadcast `command` events reach every collaborator instead of just one:
 | `delete_nodes` | Delete nodes by ID |
 | `get_graph_stats` | Get graph statistics |
 | `save_view` | Save a named view (creates SavedView node) |
+| `get_visualization_layout` | Read every node's model-space position in an open session (for an agent to compute a new arrangement) |
+| `apply_visualization_layout` | Move nodes in an open session by absolute positions or deltas; applied atomically and mirrored live to all connected browsers |
+| `create_visualization_session` | Create a new empty session (optional non-unique name; server assigns a default when omitted) |
+| `list_visualization_sessions` | List existing sessions, most recently updated first |
+| `get_visualization_session` | Inspect one session's resource metadata (incl. node count) |
+| `rename_visualization_session` | Set or clear a session's display name |
+| `delete_visualization_session` | Permanently delete a session — requires `confirm=true` |
+
+`get_visualization_layout` / `apply_visualization_layout` operate on a shared
+visualization session (the `SessionManager` op protocol), so an AI agent
+rearranging the canvas is just another collaborator. Coordinates are model space
+(zoom/pan independent, pixels at zoom 1, `x`/`y` = node top-left). `apply_*`
+carries the move as one `layout_applied` op with a monotonic `revision`;
+pass the `revision` from a prior read as `expected_revision` for optimistic
+concurrency. Node width/height are not server-owned, so the read tool advertises
+an `assumed_node_size` for collision-free spacing instead.
+
+The `*_visualization_session` CRUD tools manage session *resources* (as opposed
+to inspecting/laying out an already-open one). They implement the versioned
+contract in [`docs/MCP_SESSION_LIFECYCLE_CONTRACT.md`](../docs/MCP_SESSION_LIFECYCLE_CONTRACT.md):
+every call is gated by the service authorization hook (permissive/anonymous by
+default in the open core; the hosted layer swaps the hook in to enforce
+tenancy), names are non-unique with a server default, rename is op-routed (it
+reaches reconnecting clients via catch-up), and deletion is a confirmed hard
+delete that notifies connected browsers. Each tool returns a session-resource
+projection (`session_id`, `name`, `lifecycle_state`, timestamps, `revision`,
+`capabilities`, `session_url`). `session_url` is the server-built canonical
+`?session=<id>` link (from `COMMUNITYOVERVIEW_PUBLIC_BASE_URL`; `null` when
+unconfigured) so an assistant can hand the user a direct link without guessing a
+host. `owner`/`workspace` remain reserved and are populated by the hosted layer.
 
 ### UI Backend Endpoints
 

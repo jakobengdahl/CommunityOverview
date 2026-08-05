@@ -796,3 +796,53 @@ class TestConfigContext:
         assert "tenant_config_dir" not in result
         assert "schema_config_path" not in result
         assert "federation_config_path" not in result
+
+
+class TestBuildSessionUrl:
+    """Canonical ?session=<id> deep-link construction (contract §5)."""
+
+    @pytest.fixture(autouse=True)
+    def _clear_base_url(self):
+        from backend.config.config_loader import PUBLIC_BASE_URL_ENV
+
+        os.environ.pop(PUBLIC_BASE_URL_ENV, None)
+        yield
+        os.environ.pop(PUBLIC_BASE_URL_ENV, None)
+
+    def test_none_when_unconfigured(self):
+        from backend.config.config_loader import build_session_url
+
+        assert build_session_url("1234-5678-9012-3456") is None
+
+    def test_bare_origin_gets_root_path(self):
+        from backend.config.config_loader import PUBLIC_BASE_URL_ENV, build_session_url
+
+        os.environ[PUBLIC_BASE_URL_ENV] = "https://app.example.test"
+        assert (
+            build_session_url("1234-5678")
+            == "https://app.example.test/?session=1234-5678"
+        )
+
+    def test_trailing_slash_is_not_doubled(self):
+        from backend.config.config_loader import PUBLIC_BASE_URL_ENV, build_session_url
+
+        os.environ[PUBLIC_BASE_URL_ENV] = "https://app.example.test/"
+        assert (
+            build_session_url("1234-5678")
+            == "https://app.example.test/?session=1234-5678"
+        )
+
+    def test_base_path_is_preserved(self):
+        from backend.config.config_loader import PUBLIC_BASE_URL_ENV, build_session_url
+
+        os.environ[PUBLIC_BASE_URL_ENV] = "https://example.test/app"
+        assert (
+            build_session_url("1234-5678")
+            == "https://example.test/app?session=1234-5678"
+        )
+
+    def test_empty_session_id_is_none(self):
+        from backend.config.config_loader import PUBLIC_BASE_URL_ENV, build_session_url
+
+        os.environ[PUBLIC_BASE_URL_ENV] = "https://app.example.test"
+        assert build_session_url("") is None

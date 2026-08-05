@@ -57,6 +57,16 @@ class GraphService:
         """Access the underlying storage (for advanced use cases)."""
         return self._storage
 
+    @property
+    def authorization_hook(self) -> GraphAuthorizationHook:
+        """The active authorization hook.
+
+        Exposed so surfaces that authorize outside the node/edge CRUD path
+        (e.g. the MCP visualization-session tools) evaluate against the *same*
+        hook instance the hosted layer swaps in, rather than a fresh default.
+        """
+        return self._authorization_hook
+
     # ==================== Search Operations ====================
 
     def search_graph(
