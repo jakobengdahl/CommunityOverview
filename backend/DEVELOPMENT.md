@@ -411,6 +411,17 @@ broadcast `command` events reach every collaborator instead of just one:
 | `delete_nodes` | Delete nodes by ID |
 | `get_graph_stats` | Get graph statistics |
 | `save_view` | Save a named view (creates SavedView node) |
+| `get_visualization_layout` | Read every node's model-space position in an open session (for an agent to compute a new arrangement) |
+| `apply_visualization_layout` | Move nodes in an open session by absolute positions or deltas; applied atomically and mirrored live to all connected browsers |
+
+`get_visualization_layout` / `apply_visualization_layout` operate on a shared
+visualization session (the `SessionManager` op protocol), so an AI agent
+rearranging the canvas is just another collaborator. Coordinates are model space
+(zoom/pan independent, pixels at zoom 1, `x`/`y` = node top-left). `apply_*`
+carries the move as one `layout_applied` op with a monotonic `revision`;
+pass the `revision` from a prior read as `expected_revision` for optimistic
+concurrency. Node width/height are not server-owned, so the read tool advertises
+an `assumed_node_size` for collision-free spacing instead.
 
 ### UI Backend Endpoints
 

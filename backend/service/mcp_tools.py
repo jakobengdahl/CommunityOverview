@@ -18,7 +18,26 @@ Usage:
 import secrets
 from typing import List, Optional, Dict, Any, Callable
 
+from backend.core.session_store import OpError, is_valid_session_id
+from backend.core.session_manager import (
+    LayoutBusy,
+    OpBatchTooLarge,
+    RateLimited,
+    RevisionConflict,
+    SessionNotFound,
+)
 from .service import GraphService
+
+# Server-owned session state records node x/y but not rendered node dimensions
+# (design §3.8: the browser no longer uploads canvas geometry). Agents still need
+# a size to space nodes without overlap, so the layout tools advertise this
+# assumed default — model-space units at zoom 1, matching the canvas node box.
+_ASSUMED_NODE_SIZE = {"width": 220, "height": 120}
+
+# Stable client id the shared-session op protocol attributes MCP layout writes to,
+# so an AI agent is just another collaborator (design 3.8) and rate limiting /
+# presence group all its writes together.
+_MCP_LAYOUT_CLIENT_ID = "mcp-agent"
 
 
 def register_mcp_tools(
@@ -637,6 +656,172 @@ def register_mcp_tools(
             "visible_node_ids": visible,
             "selected_node_ids": selected,
             "node_count": len(visible),
+        }
+
+    @register_tool
+    def get_visualization_layout(session_id: str) -> Dict[str, Any]:
+        """
+        Read the geometry of every node in an open visualization session.
+
+        Returns each node's model-space position so an AI agent can compute a new
+        arrangement (a left-to-right DAG, a grid, swimlanes) and then call
+        ``apply_visualization_layout`` to move them.
+
+        Geometry contract (read this before computing positions):
+        - Coordinates are **model space**: independent of the user's zoom and pan,
+          in pixels at zoom 1. Origin is (0, 0); +x is right, +y is down.
+        - ``x``/``y`` is the node's **top-left** corner (React Flow convention).
+        - Node width/height are not server-owned, so they are not returned per
+          node. Use ``assumed_node_size`` to leave collision-free spacing.
+        - ``revision`` is a monotonic counter. Pass it back as
+          ``expected_revision`` to ``apply_visualization_layout`` for optimistic
+          concurrency (the write is rejected if someone else changed the session
+          in between). A node with no recorded position yet has ``x``/``y`` null.
+        - The connected users' viewports are not reported; prefer placing nodes
+          relative to their related nodes over guessing where a viewport is,
+          especially when several clients are connected.
+
+        Args:
+            session_id: The session ID shown in the browser header (e.g. "8244-1742")
+
+        Returns:
+            Dict with revision, node_count, nodes (id/x/y/hidden), assumed_node_size
+        """
+        if session_manager is None:
+            return {"error": "Session manager not available"}
+        if not is_valid_session_id(session_id):
+            return {"error": "Invalid session ID format — expected DDDD-DDDD-DDDD-DDDD"}
+        session = session_manager.get_session(session_id)
+        if session is None:
+            return {
+                "error": (
+                    f"Session '{session_id}' not found. "
+                    "Call connect_to_visualization_session first to verify the session is open."
+                )
+            }
+        positions = session.state.get("positions", {})
+        hidden = set(session.state.get("hidden_node_ids", []))
+        nodes = []
+        for node_id in session.state.get("node_refs", []):
+            pos = positions.get(node_id)
+            nodes.append(
+                {
+                    "id": node_id,
+                    "x": pos["x"] if pos else None,
+                    "y": pos["y"] if pos else None,
+                    "hidden": node_id in hidden,
+                }
+            )
+        return {
+            "session_id": session_id,
+            "revision": session.seq,
+            "node_count": len(nodes),
+            "nodes": nodes,
+            "assumed_node_size": _ASSUMED_NODE_SIZE,
+            "coordinate_space": "model-space, pixels at zoom 1, x/y = node top-left",
+            "connected_clients": session_manager.connected_count(session_id),
+        }
+
+    @register_tool
+    def apply_visualization_layout(
+        session_id: str,
+        positions: Optional[Dict[str, Any]] = None,
+        deltas: Optional[Dict[str, Any]] = None,
+        expected_revision: Optional[int] = None,
+        animate: bool = True,
+        duration_ms: int = 400,
+        easing: str = "ease-in-out",
+    ) -> Dict[str, Any]:
+        """
+        Move nodes in a visualization session by setting their positions.
+
+        The whole batch is applied as one atomic operation and mirrored live to
+        every connected browser, so a bulk re-layout arrives as a single change
+        rather than node-by-node jumps.
+
+        Args:
+            session_id: The session ID shown in the browser header (e.g. "8244-1742")
+            positions: Absolute targets ``{node_id: {"x": <n>, "y": <n>}}`` in the
+                model space described by ``get_visualization_layout``.
+            deltas: Relative moves ``{node_id: {"dx": <n>, "dy": <n>}}`` from each
+                node's current position. Provide exactly one of positions/deltas.
+            expected_revision: If given, the write is rejected unless it equals the
+                session's current ``revision`` (optimistic concurrency). Read it
+                from ``get_visualization_layout`` first.
+            animate: Hint for the canvas to tween the move rather than snap it.
+            duration_ms: Animation duration hint in milliseconds.
+            easing: Animation easing hint (e.g. "ease-in-out", "linear").
+
+        Returns:
+            Dict with success, moved (node count), and the new revision. On a
+            concurrency clash returns success=false with the current revision so
+            the caller can re-read and retry.
+        """
+        if session_manager is None:
+            return {"success": False, "error": "Session manager not available"}
+        if not is_valid_session_id(session_id):
+            return {
+                "success": False,
+                "error": "Invalid session ID format — expected DDDD-DDDD-DDDD-DDDD",
+            }
+        animation = {
+            "animate": bool(animate),
+            "duration_ms": duration_ms,
+            "easing": easing,
+        }
+        try:
+            result = session_manager.apply_layout(
+                session_id,
+                _MCP_LAYOUT_CLIENT_ID,
+                positions=positions,
+                deltas=deltas,
+                expected_revision=expected_revision,
+                animation=animation,
+            )
+        except RevisionConflict as exc:
+            return {
+                "success": False,
+                "error": "revision_conflict",
+                "message": (
+                    "The session changed since you read it; re-read the layout "
+                    "and retry with the current revision."
+                ),
+                "expected_revision": exc.expected,
+                "current_revision": exc.actual,
+            }
+        except LayoutBusy:
+            return {
+                "success": False,
+                "error": "busy",
+                "message": "Another change is being applied to this session; retry.",
+            }
+        except RateLimited:
+            return {
+                "success": False,
+                "error": "rate_limited",
+                "message": "Too many layout writes; slow down and retry.",
+            }
+        except OpBatchTooLarge:
+            return {
+                "success": False,
+                "error": "too_large",
+                "message": "Too many nodes in one layout write; split into batches.",
+            }
+        except SessionNotFound:
+            return {
+                "success": False,
+                "error": (
+                    f"Session '{session_id}' not found. "
+                    "Call connect_to_visualization_session first to verify the session is open."
+                ),
+            }
+        except OpError as exc:
+            return {"success": False, "error": str(exc)}
+        return {
+            "success": True,
+            "session_id": session_id,
+            "moved": result["moved"],
+            "revision": result["revision"],
         }
 
     return tools_map
