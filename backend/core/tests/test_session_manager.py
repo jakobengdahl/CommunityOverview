@@ -18,8 +18,10 @@ from backend.core.session_store import (
     SessionStore,
 )
 from backend.core.session_manager import (
+    LayoutBusy,
     OpBatchTooLarge,
     RateLimited,
+    RevisionConflict,
     SessionLimitReached,
     SessionManager,
     SessionNotFound,
@@ -66,10 +68,10 @@ class TestApplyOps:
         mgr = SessionManager(store)
         s = mgr.create_session()
         calls = {"n": 0}
-        original = store.persist
-        store.persist = lambda session: (
+        original = store.persist_snapshot
+        store.persist_snapshot = lambda snapshot: (
             calls.__setitem__("n", calls["n"] + 1),
-            original(session),
+            original(snapshot),
         )[1]
         await mgr.apply_ops(
             s.id,
@@ -166,10 +168,10 @@ class TestApplyOps:
         sub, _ = mgr.connect(s.id, "c1", "A")
         await _drain(sub)
 
-        def _boom(session):
+        def _boom(snapshot):
             raise OSError("disk full")
 
-        store.persist = _boom
+        store.persist_snapshot = _boom
         with pytest.raises(OSError):
             await mgr.apply_ops(
                 s.id,
@@ -223,13 +225,13 @@ class TestApplyOps:
         persist_threads: list[threading.Thread] = []
 
         store = SessionStore(InMemorySessionPersistenceBackend())
-        original_persist = store.persist
+        original_persist = store.persist_snapshot
 
-        def _capturing_persist(session):
+        def _capturing_persist(snapshot):
             persist_threads.append(threading.current_thread())
-            original_persist(session)
+            original_persist(snapshot)
 
-        store.persist = _capturing_persist
+        store.persist_snapshot = _capturing_persist
         mgr = SessionManager(store)
         s = mgr.create_session()
         await mgr.apply_ops(s.id, "c1", 0, [{"op": "nodes_added", "node_ids": ["a"]}])
@@ -245,10 +247,10 @@ class TestApplyOps:
         sub, _ = mgr.connect(s.id, "c1", "A")
         await _drain(sub)
 
-        def _boom(session):
+        def _boom(snapshot):
             raise OSError("simulated fsync failure from worker thread")
 
-        store.persist = _boom
+        store.persist_snapshot = _boom
         with pytest.raises(OSError):
             await mgr.apply_ops(
                 s.id,
@@ -645,14 +647,14 @@ class TestDeleteRenameLocking:
 
         entered = threading.Event()
         proceed = threading.Event()
-        original_persist = store.persist
+        original_persist = store.persist_snapshot
 
-        def slow_persist(session):
+        def slow_persist(snapshot):
             entered.set()
             proceed.wait(timeout=2)
-            original_persist(session)
+            original_persist(snapshot)
 
-        store.persist = slow_persist
+        store.persist_snapshot = slow_persist
 
         apply_task = asyncio.create_task(
             mgr.apply_ops(sid, "c1", 0, [{"op": "nodes_added", "node_ids": ["a"]}])
@@ -728,3 +730,198 @@ class TestSessionLimitAcrossRestart:
         restarted = SessionManager(SessionStore(backend), max_sessions=2)
         with pytest.raises(SessionLimitReached):
             restarted.get_or_create("9998-0001")
+
+
+class TestApplyLayout:
+    """The synchronous MCP layout write path (``apply_layout``)."""
+
+    async def test_absolute_positions_apply_and_broadcast(self):
+        mgr = _manager()
+        s = mgr.create_session()
+        sub, _ = mgr.connect(s.id, "c1", "A")
+        await _drain(sub)
+        res = mgr.apply_layout(
+            s.id,
+            "mcp-agent",
+            positions={"a": {"x": 10, "y": 20}, "b": {"x": 30, "y": 40}},
+        )
+        assert res["moved"] == 2
+        assert res["revision"] == s.seq == 1
+        assert s.state["positions"] == {
+            "a": {"x": 10.0, "y": 20.0},
+            "b": {"x": 30.0, "y": 40.0},
+        }
+        events = await _drain(sub)
+        assert len(events) == 1
+        assert events[0]["op"]["op"] == "layout_applied"
+        assert events[0]["seq"] == 1
+
+    async def test_deltas_resolve_against_current_positions(self):
+        mgr = _manager()
+        s = mgr.create_session()
+        mgr.apply_layout(s.id, "mcp-agent", positions={"a": {"x": 100, "y": 100}})
+        mgr.apply_layout(s.id, "mcp-agent", deltas={"a": {"dx": 5, "dy": -10}})
+        assert s.state["positions"]["a"] == {"x": 105.0, "y": 90.0}
+
+    async def test_delta_for_unknown_node_starts_at_origin(self):
+        mgr = _manager()
+        s = mgr.create_session()
+        mgr.apply_layout(s.id, "mcp-agent", deltas={"ghost": {"dx": 7, "dy": 8}})
+        assert s.state["positions"]["ghost"] == {"x": 7.0, "y": 8.0}
+
+    async def test_requires_exactly_one_of_positions_or_deltas(self):
+        mgr = _manager()
+        s = mgr.create_session()
+        with pytest.raises(OpError):
+            mgr.apply_layout(s.id, "mcp-agent")
+        with pytest.raises(OpError):
+            mgr.apply_layout(
+                s.id,
+                "mcp-agent",
+                positions={"a": {"x": 1, "y": 1}},
+                deltas={"a": {"dx": 1, "dy": 1}},
+            )
+
+    async def test_expected_revision_conflict(self):
+        mgr = _manager()
+        s = mgr.create_session()
+        mgr.apply_layout(s.id, "mcp-agent", positions={"a": {"x": 1, "y": 1}})
+        with pytest.raises(RevisionConflict) as exc:
+            mgr.apply_layout(
+                s.id,
+                "mcp-agent",
+                positions={"a": {"x": 2, "y": 2}},
+                expected_revision=0,
+            )
+        assert exc.value.expected == 0
+        assert exc.value.actual == 1
+        # The rejected write left the position untouched.
+        assert s.state["positions"]["a"] == {"x": 1.0, "y": 1.0}
+
+    async def test_matching_expected_revision_applies(self):
+        mgr = _manager()
+        s = mgr.create_session()
+        res = mgr.apply_layout(
+            s.id, "mcp-agent", positions={"a": {"x": 9, "y": 9}}, expected_revision=0
+        )
+        assert res["revision"] == 1
+
+    async def test_busy_when_session_lock_held(self):
+        mgr = _manager()
+        s = mgr.create_session()
+        async with mgr._lock(s.id):
+            with pytest.raises(LayoutBusy):
+                mgr.apply_layout(s.id, "mcp-agent", positions={"a": {"x": 1, "y": 1}})
+
+    async def test_unknown_session_raises(self):
+        mgr = _manager()
+        with pytest.raises(SessionNotFound):
+            mgr.apply_layout(
+                "9999-9999", "mcp-agent", positions={"a": {"x": 1, "y": 1}}
+            )
+
+    async def test_invalid_position_rolls_back(self):
+        mgr = _manager()
+        s = mgr.create_session()
+        mgr.apply_layout(s.id, "mcp-agent", positions={"a": {"x": 1, "y": 1}})
+        seq_before = s.seq
+        with pytest.raises(OpError):
+            mgr.apply_layout(s.id, "mcp-agent", positions={"b": {"x": "nope", "y": 0}})
+        assert s.seq == seq_before
+        assert "b" not in s.state["positions"]
+
+    async def test_persist_failure_rolls_back_and_does_not_broadcast(self):
+        mgr = _manager()
+        s = mgr.create_session()
+        sub, _ = mgr.connect(s.id, "c1", "A")
+        await _drain(sub)
+        seq_before = s.seq
+
+        def boom(_session):
+            raise IOError("disk full")
+
+        mgr.store.persist = boom
+        with pytest.raises(IOError):
+            mgr.apply_layout(s.id, "mcp-agent", positions={"a": {"x": 1, "y": 1}})
+        assert s.seq == seq_before
+        assert "a" not in s.state["positions"]
+        assert await _drain(sub) == []
+
+    async def test_animation_hint_rides_the_broadcast(self):
+        mgr = _manager()
+        s = mgr.create_session()
+        sub, _ = mgr.connect(s.id, "c1", "A")
+        await _drain(sub)
+        mgr.apply_layout(
+            s.id,
+            "mcp-agent",
+            positions={"a": {"x": 1, "y": 1}},
+            animation={"animate": True, "duration_ms": 250, "easing": "linear"},
+        )
+        events = await _drain(sub)
+        assert events[0]["op"]["animation"] == {
+            "animate": True,
+            "duration_ms": 250,
+            "easing": "linear",
+        }
+
+    async def test_batch_too_large_by_count(self):
+        mgr = _manager(max_ops_per_batch=2)
+        s = mgr.create_session()
+        with pytest.raises(OpBatchTooLarge):
+            mgr.apply_layout(
+                s.id,
+                "mcp-agent",
+                positions={
+                    "a": {"x": 1, "y": 1},
+                    "b": {"x": 2, "y": 2},
+                    "c": {"x": 3, "y": 3},
+                },
+            )
+
+    async def test_refuses_during_real_inflight_batch_and_preserves_seq_order(self):
+        """The scenario the design exists for: a layout write attempted while an
+        apply_ops batch is genuinely mid-persist (lock held across the to_thread
+        await) must refuse — and the batch's lower-seq ops must still broadcast in
+        order afterwards, never dropped by the client seq-gate."""
+        store = SessionStore(InMemorySessionPersistenceBackend())
+        mgr = SessionManager(store)
+        s = mgr.create_session()
+        sub, _ = mgr.connect(s.id, "c1", "A")
+        await _drain(sub)
+
+        entered = threading.Event()
+        proceed = threading.Event()
+        original = store.persist_snapshot
+
+        def slow_persist(snapshot):
+            entered.set()
+            proceed.wait(timeout=2)
+            original(snapshot)
+
+        store.persist_snapshot = slow_persist
+        apply_task = asyncio.create_task(
+            mgr.apply_ops(
+                s.id,
+                "c1",
+                0,
+                [
+                    {"op": "nodes_added", "node_ids": ["a"]},
+                    {"op": "node_moved", "node_id": "a", "position": {"x": 1, "y": 1}},
+                ],
+            )
+        )
+        # Wait off the loop thread until apply_ops is inside persist with the
+        # per-session lock held.
+        await asyncio.to_thread(entered.wait, 2)
+
+        with pytest.raises(LayoutBusy):
+            mgr.apply_layout(s.id, "mcp-agent", positions={"a": {"x": 9, "y": 9}})
+
+        proceed.set()
+        await apply_task
+        events = await _drain(sub)
+        assert [e["op"]["op"] for e in events] == ["nodes_added", "node_moved"]
+        assert [e["seq"] for e in events] == [1, 2]
+        # The refused layout write left no trace.
+        assert s.state["positions"]["a"] == {"x": 1.0, "y": 1.0}
