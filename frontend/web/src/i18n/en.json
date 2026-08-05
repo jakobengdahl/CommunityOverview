@@ -163,6 +163,7 @@
     "close": "Close menu",
     "new_session": "Start new session",
     "new_session_started": "New session started",
+    "link_not_found": "That session link could not be found — it may have been deleted or expired.",
     "search_sessions": "Search previous sessions",
     "search_placeholder": "Search by name or ID...",
     "connect_session": "Connect to session (via ID)",

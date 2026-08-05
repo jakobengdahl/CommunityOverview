@@ -20,6 +20,7 @@ from backend.core.session_store import (
     InMemorySessionPersistenceBackend,
     SessionStore,
 )
+from backend.config.config_loader import PUBLIC_BASE_URL_ENV
 from backend.runtime.authorization import AUTHORIZATION_MODE_ENV
 from backend.service import GraphService, register_mcp_tools
 
@@ -38,8 +39,11 @@ def crud_tools(tmp_path):
 
 
 class TestCreate:
-    def test_default_name_and_projection_shape(self, crud_tools):
+    def test_default_name_and_projection_shape(self, crud_tools, monkeypatch):
         tools_map, _ = crud_tools
+        # No public base URL configured => session_url is null (see TestSessionUrl
+        # for the configured case).
+        monkeypatch.delenv(PUBLIC_BASE_URL_ENV, raising=False)
         result = tools_map["create_visualization_session"]()
 
         assert result["success"] is True
@@ -51,7 +55,6 @@ class TestCreate:
         assert session["node_count"] == 0
         # Open core is permissive: full capabilities are granted.
         assert session["capabilities"] == ["read", "rename", "delete", "layout"]
-        # The URL is the deep-link slice's job; the assistant never guesses one.
         assert session["session_url"] is None
 
     def test_explicit_name_is_used(self, crud_tools):
@@ -65,6 +68,36 @@ class TestCreate:
         b = tools_map["create_visualization_session"](name="Same")["session"]
         assert a["session_id"] != b["session_id"]
         assert a["name"] == b["name"] == "Same"
+
+
+class TestSessionUrl:
+    def test_null_when_no_base_url_configured(self, crud_tools, monkeypatch):
+        tools_map, _ = crud_tools
+        monkeypatch.delenv(PUBLIC_BASE_URL_ENV, raising=False)
+        created = tools_map["create_visualization_session"]()["session"]
+        assert created["session_url"] is None
+
+    def test_canonical_url_when_base_configured(self, crud_tools, monkeypatch):
+        tools_map, _ = crud_tools
+        monkeypatch.setenv(PUBLIC_BASE_URL_ENV, "https://app.example.test")
+        result = tools_map["create_visualization_session"]()
+        sid = result["session"]["session_id"]
+        # Keeps the established ?session=<id> form on the configured origin.
+        assert (
+            result["session"]["session_url"]
+            == f"https://app.example.test/?session={sid}"
+        )
+
+        # get and list project the same URL.
+        got = tools_map["get_visualization_session"](session_id=sid)
+        assert (
+            got["session"]["session_url"] == f"https://app.example.test/?session={sid}"
+        )
+        listed = tools_map["list_visualization_sessions"]()["sessions"]
+        assert any(
+            s["session_url"] == f"https://app.example.test/?session={sid}"
+            for s in listed
+        )
 
 
 class TestListAndGet:
