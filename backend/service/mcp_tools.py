@@ -737,7 +737,10 @@ def register_mcp_tools(
 
         The whole batch is applied as one atomic operation and mirrored live to
         every connected browser, so a bulk re-layout arrives as a single change
-        rather than node-by-node jumps.
+        rather than node-by-node jumps. The canvas currently applies the move
+        immediately; the animation fields below are a forward-compatible hint
+        that animated transitions (a later change) will honour — they do not tween
+        the move today.
 
         Args:
             session_id: The session ID shown in the browser header (e.g. "8244-1742")
@@ -748,9 +751,11 @@ def register_mcp_tools(
             expected_revision: If given, the write is rejected unless it equals the
                 session's current ``revision`` (optimistic concurrency). Read it
                 from ``get_visualization_layout`` first.
-            animate: Hint for the canvas to tween the move rather than snap it.
-            duration_ms: Animation duration hint in milliseconds.
-            easing: Animation easing hint (e.g. "ease-in-out", "linear").
+            animate: Forward-compatible hint that the move should be tweened once
+                animated transitions land (the move is applied immediately today).
+            duration_ms: Animation duration hint in milliseconds (see ``animate``).
+            easing: Animation easing hint, e.g. "ease-in-out", "linear" (see
+                ``animate``).
 
         Returns:
             Dict with success, moved (node count), and the new revision. On a

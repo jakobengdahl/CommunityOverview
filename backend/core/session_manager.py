@@ -462,6 +462,10 @@ class SessionManager:
 
         Exactly one of ``positions`` (absolute targets) or ``deltas`` (dx/dy from
         the current server-owned position, unknown ⇒ origin) must be given.
+
+        Persistence is synchronous here (not offloaded like apply_ops): a
+        file-backend fsync briefly stalls the loop. That is the deliberate price
+        of lock-free atomicity, and layout writes are infrequent (agent-driven).
         """
         if not is_valid_session_id(session_id):
             raise SessionNotFound()

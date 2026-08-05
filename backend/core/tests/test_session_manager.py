@@ -878,3 +878,50 @@ class TestApplyLayout:
                     "c": {"x": 3, "y": 3},
                 },
             )
+
+    async def test_refuses_during_real_inflight_batch_and_preserves_seq_order(self):
+        """The scenario the design exists for: a layout write attempted while an
+        apply_ops batch is genuinely mid-persist (lock held across the to_thread
+        await) must refuse — and the batch's lower-seq ops must still broadcast in
+        order afterwards, never dropped by the client seq-gate."""
+        store = SessionStore(InMemorySessionPersistenceBackend())
+        mgr = SessionManager(store)
+        s = mgr.create_session()
+        sub, _ = mgr.connect(s.id, "c1", "A")
+        await _drain(sub)
+
+        entered = threading.Event()
+        proceed = threading.Event()
+        original = store.persist_snapshot
+
+        def slow_persist(snapshot):
+            entered.set()
+            proceed.wait(timeout=2)
+            original(snapshot)
+
+        store.persist_snapshot = slow_persist
+        apply_task = asyncio.create_task(
+            mgr.apply_ops(
+                s.id,
+                "c1",
+                0,
+                [
+                    {"op": "nodes_added", "node_ids": ["a"]},
+                    {"op": "node_moved", "node_id": "a", "position": {"x": 1, "y": 1}},
+                ],
+            )
+        )
+        # Wait off the loop thread until apply_ops is inside persist with the
+        # per-session lock held.
+        await asyncio.to_thread(entered.wait, 2)
+
+        with pytest.raises(LayoutBusy):
+            mgr.apply_layout(s.id, "mcp-agent", positions={"a": {"x": 9, "y": 9}})
+
+        proceed.set()
+        await apply_task
+        events = await _drain(sub)
+        assert [e["op"]["op"] for e in events] == ["nodes_added", "node_moved"]
+        assert [e["seq"] for e in events] == [1, 2]
+        # The refused layout write left no trace.
+        assert s.state["positions"]["a"] == {"x": 1.0, "y": 1.0}
