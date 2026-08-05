@@ -285,6 +285,90 @@ class SessionManager:
             )
         return existed
 
+    def rename_session_sync(
+        self, session_id: str, name: Optional[str], client_id: Optional[str] = None
+    ) -> Session:
+        """Rename a session **synchronously** (the MCP tool path).
+
+        The async ``rename_session`` routes through ``apply_ops`` so the rename
+        gets a ``seq`` + ring entry and reaches a client reconnecting via
+        ``since_seq`` catch-up (R8). MCP tools are synchronous — they cannot
+        await — so this mirrors ``apply_layout`` instead: it emits the same
+        ``session_renamed`` state op inline on the event-loop thread (atomic
+        w.r.t. every coroutine on a single-threaded loop) and refuses with
+        ``LayoutBusy`` when an ``apply_ops`` batch holds the lock, so it never
+        assigns a ``seq`` that batch has not broadcast yet (the same seq-ordering
+        rule ``apply_layout`` documents).
+
+        ``get_or_create`` first (R7): a rename for an id that only exists in a
+        browser URL/recents must materialise it rather than raise, matching the
+        async path and the REST ``PATCH``.
+        """
+        if not is_valid_session_id(session_id):
+            raise SessionNotFound()
+        if name is not None and not isinstance(name, str):
+            raise OpError("'name' must be a string or null")
+        self.get_or_create(session_id)
+        if self._lock(session_id).locked():
+            raise LayoutBusy()
+        session = self.store.get(session_id)
+        if session is None:
+            raise SessionNotFound()
+
+        op = {"op": "session_renamed", "name": name, "client_id": client_id or "rest"}
+        saved_state = copy.deepcopy(session.state)
+        saved_seq = session.seq
+        saved_name = session.name
+        saved_updated_at = session.updated_at
+        ring = self.store.ring(session_id)
+        saved_ring = list(ring) if ring is not None else None
+        try:
+            applied = self.store.apply_state_op(session, op)
+            self.store.persist(session)
+        except Exception:
+            session.state = saved_state
+            session.seq = saved_seq
+            session.name = saved_name
+            session.updated_at = saved_updated_at
+            if ring is not None and saved_ring is not None:
+                ring.clear()
+                ring.extend(saved_ring)
+            raise
+
+        self.bus.publish(
+            session_id,
+            {
+                "type": "op",
+                "client_id": op["client_id"],
+                "op": applied,
+                "seq": applied["seq"],
+            },
+        )
+        return session
+
+    def delete_session_sync(
+        self, session_id: str, deleted_by: Optional[str] = None
+    ) -> bool:
+        """Delete a session **synchronously** (the MCP tool path).
+
+        The async ``delete_session`` takes the per-session lock to stop an
+        in-flight ``apply_ops`` batch from resurrecting the file via ``persist()``
+        after the delete. A sync tool cannot await that lock, so — like
+        ``apply_layout`` — it refuses with ``LayoutBusy`` when the lock is held and
+        otherwise deletes inline on the event-loop thread, where no coroutine can
+        interleave. Stale lock objects are left in ``self._locks`` for the same
+        reason ``delete_session`` documents.
+        """
+        if self._lock(session_id).locked():
+            raise LayoutBusy()
+        existed = self.store.delete(session_id)
+        if existed:
+            self.bus.publish(
+                session_id,
+                {"type": "session_deleted", "deleted_by": deleted_by},
+            )
+        return existed
+
     def roster(self, session_id: str) -> List[Dict[str, Any]]:
         return self.presence.roster(session_id)
 
