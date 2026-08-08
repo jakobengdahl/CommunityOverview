@@ -1015,7 +1015,10 @@ class ChatProcessor:
             effective_profile_id = model_profile_id if selection_enabled else None
             resolution = resolve_profile_reference(profiles, effective_profile_id)
             if resolution.profile is None:
-                return None, f"❌ Error: {resolution.error or 'no model profile available'}"
+                return (
+                    None,
+                    f"❌ Error: {resolution.error or 'no model profile available'}",
+                )
             try:
                 llm_provider = create_provider_from_profile(
                     resolution.profile, api_key_override=api_key

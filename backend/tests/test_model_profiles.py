@@ -14,11 +14,25 @@ from backend.config.model_profiles import (
 
 
 def test_model_profiles_require_single_enabled_default():
-    with pytest.raises(ValidationError, match="Multiple model profiles marked as default"):
+    with pytest.raises(
+        ValidationError, match="Multiple model profiles marked as default"
+    ):
         ModelProfilesConfig(
             profiles=[
-                ModelProfile(id="fast", name="Fast", provider="openai", model="gpt-4o", default=True),
-                ModelProfile(id="deep", name="Deep", provider="claude", model="claude-sonnet-4-5", default=True),
+                ModelProfile(
+                    id="fast",
+                    name="Fast",
+                    provider="openai",
+                    model="gpt-4o",
+                    default=True,
+                ),
+                ModelProfile(
+                    id="deep",
+                    name="Deep",
+                    provider="claude",
+                    model="claude-sonnet-4-5",
+                    default=True,
+                ),
             ]
         )
 
@@ -36,8 +50,12 @@ def test_model_profile_rejects_inline_secret_like_credential_ref():
 
 def test_resolve_profile_reference_inherits_default_and_rejects_disabled():
     profiles = [
-        ModelProfile(id="fast", name="Fast", provider="openai", model="gpt-4o", default=True),
-        ModelProfile(id="off", name="Off", provider="openai", model="gpt-4o-mini", enabled=False),
+        ModelProfile(
+            id="fast", name="Fast", provider="openai", model="gpt-4o", default=True
+        ),
+        ModelProfile(
+            id="off", name="Off", provider="openai", model="gpt-4o-mini", enabled=False
+        ),
     ]
 
     inherited = resolve_profile_reference(profiles, None)
@@ -59,9 +77,10 @@ def test_create_provider_from_profile_uses_credential_ref_without_exposing_secre
         credential_ref="LOCAL_LLM_API_KEY",
     )
 
-    with patch.dict(os.environ, {"LOCAL_LLM_API_KEY": "test-secret"}, clear=False), patch(
-        "backend.llm.llm_providers.OpenAIProvider"
-    ) as provider_cls:
+    with (
+        patch.dict(os.environ, {"LOCAL_LLM_API_KEY": "test-secret"}, clear=False),
+        patch("backend.llm.llm_providers.OpenAIProvider") as provider_cls,
+    ):
         create_provider_from_profile(profile)
 
     provider_cls.assert_called_once_with(
@@ -78,5 +97,8 @@ def test_create_provider_from_profile_requires_configured_credential():
         credential_ref="MISSING_PROFILE_KEY",
     )
 
-    with patch.dict(os.environ, {}, clear=True), pytest.raises(MissingCredentialError, match="MISSING_PROFILE_KEY"):
+    with (
+        patch.dict(os.environ, {}, clear=True),
+        pytest.raises(MissingCredentialError, match="MISSING_PROFILE_KEY"),
+    ):
         create_provider_from_profile(profile)

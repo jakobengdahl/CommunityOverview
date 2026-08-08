@@ -11,7 +11,11 @@ from dataclasses import dataclass, field
 from typing import List, Dict, Any, Optional
 from enum import Enum
 
-from backend.config.model_profiles import ModelProfile, ProfileResolution, resolve_profile_reference
+from backend.config.model_profiles import (
+    ModelProfile,
+    ProfileResolution,
+    resolve_profile_reference,
+)
 
 logger = logging.getLogger(__name__)
 

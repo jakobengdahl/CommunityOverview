@@ -222,11 +222,20 @@ class TestChatServiceConversation:
             credential_ref="EXTRACTOR_API_KEY",
         )
 
-        with patch("backend.config.config_loader.get_model_profiles", return_value=[profile]), patch(
-            "backend.config.config_loader.get_model_profile_selection_enabled", return_value=True
-        ), patch(
-            "backend.ui.chat_logic.create_provider_from_profile", return_value=mock_llm
-        ) as create_from_profile:
+        with (
+            patch(
+                "backend.config.config_loader.get_model_profiles",
+                return_value=[profile],
+            ),
+            patch(
+                "backend.config.config_loader.get_model_profile_selection_enabled",
+                return_value=True,
+            ),
+            patch(
+                "backend.ui.chat_logic.create_provider_from_profile",
+                return_value=mock_llm,
+            ) as create_from_profile,
+        ):
             result = service.propose_nodes_from_text(
                 text="Agency X runs a test initiative.",
                 model_profile_id="extractor",
