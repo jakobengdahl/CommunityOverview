@@ -407,6 +407,9 @@ export async function sendChatMessage(messages, documentContext = null, options 
   if (options.federationDepth) {
     body.federation_depth = options.federationDepth;
   }
+  if (options.modelProfileId) {
+    body.model_profile_id = options.modelProfileId;
+  }
   if (options.expertAgentId) {
     body.expert_agent_id = options.expertAgentId;
   }
@@ -454,9 +457,10 @@ export async function sendSimpleChatMessage(message, documentContext = null, opt
  * @param {boolean} analyze - Whether to analyze with LLM (default: false, just extract text)
  * @returns {Promise<{success: boolean, filename: string, text: string, analysis?: string}>}
  */
-export async function uploadFile(file, analyze = false) {
+export async function uploadFile(file, analyze = false, options = {}) {
   const formData = new FormData();
   formData.append('file', file);
+  if (options.modelProfileId) formData.append('model_profile_id', options.modelProfileId);
 
   const endpoint = analyze ? `${UI_API_BASE}/upload` : `${UI_API_BASE}/upload/extract`;
 
@@ -511,6 +515,7 @@ export async function proposeNodesFromText(text, options = {}) {
       text,
       node_type: options.nodeType,
       communities: options.communities,
+      model_profile_id: options.modelProfileId,
     }),
   });
 }

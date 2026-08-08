@@ -6,9 +6,14 @@ Defines settings for agents, MCP integrations, and global agent system configura
 
 import os
 import json
+import logging
 from dataclasses import dataclass, field
 from typing import List, Dict, Any, Optional
 from enum import Enum
+
+from backend.config.model_profiles import ModelProfile, ProfileResolution, resolve_profile_reference
+
+logger = logging.getLogger(__name__)
 
 _WEEKDAY_NAMES: Dict[str, int] = {
     "monday": 0,
@@ -209,6 +214,10 @@ class AgentConfig:
     # Skill node IDs in the graph (linked via USES_SKILL edges)
     skill_node_ids: List[str] = field(default_factory=list)
     schedule: Optional[AgentSchedule] = None
+    # Explicit model profile id (see backend/config/model_profiles.py). When
+    # None, the agent inherits the application default profile — or, when no
+    # profiles are configured at all, the legacy AgentsSettings LLM fields.
+    model_profile_id: Optional[str] = None
 
     @classmethod
     def from_node(cls, node: Any) -> "AgentConfig":
@@ -239,6 +248,7 @@ class AgentConfig:
             skills_urls=metadata.get("skills_urls", []),
             skill_node_ids=metadata.get("skill_node_ids", []),
             schedule=AgentSchedule.from_dict(metadata.get("schedule") or {}),
+            model_profile_id=metadata.get("model_profile_id"),
         )
 
     def to_dict(self) -> Dict[str, Any]:
@@ -254,6 +264,7 @@ class AgentConfig:
             "skills_urls": self.skills_urls,
             "skill_node_ids": self.skill_node_ids,
             "schedule": self.schedule.to_dict() if self.schedule else None,
+            "model_profile_id": self.model_profile_id,
         }
 
 
@@ -278,6 +289,14 @@ class AgentsSettings:
     mcp_integrations: List[MCPIntegration] = field(default_factory=list)
     max_agent_turns: int = 10  # Max LLM turns per event processing
     event_timeout: float = 60.0  # Timeout for processing a single event
+    # Named model profiles (see backend/config/model_profiles.py). Empty by
+    # default — that is the legacy single-provider mode using the fields
+    # above (llm_provider / llm_model / openai_api_key / anthropic_api_key).
+    model_profiles: List[ModelProfile] = field(default_factory=list)
+
+    def resolve_model_profile(self, profile_id: Optional[str]) -> ProfileResolution:
+        """Resolve an agent's (optional) explicit model_profile_id against configured profiles."""
+        return resolve_profile_reference(self.model_profiles, profile_id)
 
     @classmethod
     def from_env(cls) -> "AgentsSettings":
@@ -339,6 +358,16 @@ class AgentsSettings:
         if not mcp_integrations:
             mcp_integrations = cls._get_default_integrations()
 
+        # Model profiles live in schema_config.json, not environment variables.
+        # Import lazily to avoid a module import cycle at startup.
+        try:
+            from backend.config import config_loader
+
+            model_profiles = config_loader.get_model_profiles()
+        except Exception as exc:
+            print(f"Warning: Failed to load model profiles for agents: {exc}")
+            model_profiles = []
+
         return cls(
             enabled=enabled,
             scheduler_enabled=scheduler_enabled,
@@ -349,6 +378,7 @@ class AgentsSettings:
             mcp_integrations=mcp_integrations,
             max_agent_turns=int(os.environ.get("AGENTS_MAX_TURNS", "10")),
             event_timeout=float(os.environ.get("AGENTS_EVENT_TIMEOUT", "60")),
+            model_profiles=model_profiles,
         )
 
     @staticmethod

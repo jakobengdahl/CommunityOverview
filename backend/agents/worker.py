@@ -18,7 +18,7 @@ from dataclasses import dataclass, field
 
 from .config import AgentConfig, AgentsSettings
 from .prompts import build_agent_system_prompt, build_event_user_message
-from .llm_client import LLMClient
+from .llm_client import LLMClient, create_llm_client_from_settings
 from .mcp_loader import MCPLoader
 from backend.skills.loader import (
     SkillDefinition,
@@ -476,12 +476,9 @@ class AgentWorker:
             )
 
     def _create_llm_client(self) -> LLMClient:
-        """Create the LLM client."""
-        return LLMClient(
-            provider=self.settings.llm_provider,
-            model=self.settings.llm_model,
-            openai_api_key=self.settings.openai_api_key,
-            anthropic_api_key=self.settings.anthropic_api_key,
+        """Create the LLM client, resolving the agent's model profile if configured."""
+        return create_llm_client_from_settings(
+            self.settings, self.config.model_profile_id
         )
 
     def _parse_agent_response(

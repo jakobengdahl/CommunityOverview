@@ -61,6 +61,7 @@ function App() {
     setStats,
     llmAvailable,
     setLlmAvailable,
+    setModelProfilesCapability,
     editingNode,
     setEditingNode,
     closeEditingNode,
@@ -462,6 +463,7 @@ function App() {
         setConfig(schemaData, presentationData, t, language);
         setStats(statsData);
         setLlmAvailable(capabilitiesData.llm_available ?? false);
+        setModelProfilesCapability(capabilitiesData.model_profiles);
       } catch (error) {
         console.error('Error loading configuration:', error);
         api.getGraphStats().then(setStats).catch(console.error);
@@ -469,7 +471,7 @@ function App() {
       }
     };
     loadConfig();
-  }, [setConfig, setStats, setLlmAvailable, t, setLanguage, language]);
+  }, [setConfig, setStats, setLlmAvailable, setModelProfilesCapability, t, setLanguage, language]);
 
   useEffect(() => {
     if (!akcShortName) return;

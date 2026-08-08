@@ -26,6 +26,7 @@ from backend.runtime.request_context import (
     get_public_request_graph_selection_context,
     get_public_request_scope_context,
 )
+from backend.config.model_profiles import ModelProfile, ModelProfilesConfig
 
 logger = logging.getLogger(__name__)
 
@@ -292,6 +293,10 @@ class SchemaFileConfig(BaseModel):
     presentation: PresentationConfig = Field(default_factory=PresentationConfig)
     runtime: RuntimeMetadataConfig = Field(default_factory=RuntimeMetadataConfig)
     system: SystemConfig = Field(default_factory=SystemConfig)
+    # Named LLM/model profiles across providers (see docs/PROFILES.md). Empty
+    # by default — that is the legacy single-provider mode (LLM_PROVIDER /
+    # LLM_MODEL / OPENAI_API_KEY / ANTHROPIC_API_KEY environment variables).
+    model_profiles: ModelProfilesConfig = Field(default_factory=ModelProfilesConfig)
 
     model_config = ConfigDict(populate_by_name=True)
 
@@ -699,3 +704,51 @@ def get_expert_agent_configs() -> "List[ExpertAgentConfig]":
     """Get the list of ExpertAgentConfig objects from the presentation section."""
     loader = _get_loader()
     return loader.config.presentation.expert_agents
+
+
+def get_model_profiles() -> List[ModelProfile]:
+    """
+    Get all configured model profiles (enabled and disabled), in file order.
+
+    An empty list means no model profiles are configured — callers should fall
+    back to the legacy single-provider environment configuration.
+    """
+    loader = _get_loader()
+    return list(loader.config.model_profiles.profiles)
+
+
+def get_model_profile_selection_enabled() -> bool:
+    """Whether the chat UI may select a model profile other than the default."""
+    loader = _get_loader()
+    return loader.config.model_profiles.selection_enabled
+
+
+def get_model_profiles_public() -> Dict[str, Any]:
+    """
+    Get the public (non-secret) view of model profile configuration.
+
+    Only enabled profiles are exposed — disabled profiles are an
+    implementation/config detail, not a user-facing choice. credential_ref,
+    endpoint and options are omitted; they are server-side resolution details,
+    not needed by clients.
+    """
+    from backend.config.model_profiles import get_default_profile, get_enabled_profiles
+
+    loader = _get_loader()
+    profiles = loader.config.model_profiles.profiles
+    default_profile = get_default_profile(profiles)
+
+    return {
+        "selection_enabled": loader.config.model_profiles.selection_enabled,
+        "default_profile_id": default_profile.id if default_profile else None,
+        "profiles": [
+            {
+                "id": p.id,
+                "name": p.name,
+                "provider": p.provider,
+                "model": p.model,
+                "default": p.default,
+            }
+            for p in get_enabled_profiles(profiles)
+        ],
+    }

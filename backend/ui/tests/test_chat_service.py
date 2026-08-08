@@ -206,6 +206,37 @@ class TestChatServiceConversation:
         assert "Document content" in user_msg["content"]
         assert "AI and machine learning" in user_msg["content"]
 
+    def test_propose_nodes_uses_model_profile_resolution(self, chat_service):
+        """Node proposal extraction should use configured model profiles, not only legacy env keys."""
+        from backend.config.model_profiles import ModelProfile
+
+        service, mock_llm = chat_service
+        mock_llm.mock_text_response = '[{"type":"Actor","name":"Agency X","description":"Test agency","summary":"Agency X","tags":["test"],"subtypes":["Agency"]}]'
+
+        profile = ModelProfile(
+            id="extractor",
+            name="Extractor",
+            provider="openai",
+            model="gpt-4o-mini",
+            default=True,
+            credential_ref="EXTRACTOR_API_KEY",
+        )
+
+        with patch("backend.config.config_loader.get_model_profiles", return_value=[profile]), patch(
+            "backend.config.config_loader.get_model_profile_selection_enabled", return_value=True
+        ), patch(
+            "backend.ui.chat_logic.create_provider_from_profile", return_value=mock_llm
+        ) as create_from_profile:
+            result = service.propose_nodes_from_text(
+                text="Agency X runs a test initiative.",
+                model_profile_id="extractor",
+            )
+
+        assert result["success"] is True
+        assert result["proposed_nodes"][0]["name"] == "Agency X"
+        create_from_profile.assert_called_once()
+        assert create_from_profile.call_args.args[0].id == "extractor"
+
     def test_get_system_info(self, chat_service):
         """get_system_info should return provider and tools info."""
         service, _ = chat_service
