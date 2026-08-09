@@ -767,9 +767,12 @@ def register_mcp_tools(
         Coordinates are model space (zoom/pan independent, pixels at zoom 1,
         ``x``/``y`` = node top-left), exactly as ``get_visualization_layout``
         reports them. Only the nodes you name move; a write is a partial update of
-        the position map, not a replacement. The batch is capped at 500 moves and
-        256 KiB of payload — split a larger session across successive writes,
-        threading the returned ``revision`` into the next ``expected_revision``.
+        the position map, not a replacement. A batch is capped at 500 moves and
+        256 KiB of payload (``too_large`` above that), and each write also draws
+        from a per-client rate budget sized to the number of moves — so a single
+        very large arrange may return ``rate_limited`` before the hard cap. Either
+        way, split a large session across successive writes, threading the
+        returned ``revision`` into the next ``expected_revision``.
         Layout patterns (horizontal DAG, grid, swimlanes) and the full geometry
         contract are documented in
         ``docs/MCP_VISUALIZATION_LAYOUT_CONTRACT.md`` and ``backend/DEVELOPMENT.md``.
