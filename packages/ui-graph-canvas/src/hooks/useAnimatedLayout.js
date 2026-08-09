@@ -193,7 +193,9 @@ export function useAnimatedLayout({
       arrangingRef.current?.(false);
     }
     // The queue is consumed the moment its targets are registered; the tween now
-    // lives in the ref, so the parent can clear the channel for the next op(s).
-    appliedRef.current?.();
+    // lives in the ref. Report exactly the batches drained so the parent can
+    // clear *only* those — a batch appended in the pre-effect-flush window must
+    // survive rather than being clobbered by a blunt reset.
+    appliedRef.current?.(batches);
   }, [animatedLayout, setNodes, getNodes, step]);
 }

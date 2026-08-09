@@ -1551,7 +1551,16 @@ function App() {
           remotePositions={remotePositions}
           onRemotePositionsApplied={() => setRemotePositions(null)}
           animatedLayout={animatedLayout}
-          onAnimatedLayoutApplied={() => setAnimatedLayout(null)}
+          onAnimatedLayoutApplied={(drained) =>
+            setAnimatedLayout((prev) => {
+              // Clear only the batches the canvas actually drained: a new op
+              // enqueued between the drain and this reset must not be lost.
+              if (!prev || !drained || drained.length === 0) return prev || null;
+              const done = new Set(drained);
+              const rest = prev.filter((b) => !done.has(b));
+              return rest.length ? rest : null;
+            })
+          }
           animatedLayoutResetKey={sessionId}
           agentArrangingLabel={t('sessions.agent_arranging')}
           remoteAnnotationOps={remoteAnnotationOps}

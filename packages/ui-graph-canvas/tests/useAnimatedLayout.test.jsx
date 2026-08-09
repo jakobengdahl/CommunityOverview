@@ -266,6 +266,26 @@ describe('useAnimatedLayout', () => {
     expect(store.byId().a.position.x).toBe(before);
   });
 
+  it('reports exactly the drained batches so the parent clears only those', () => {
+    // The parent resets the channel by removing the reported batches, not by a
+    // blunt null — so a batch enqueued after the drain survives. The hook must
+    // therefore hand back the precise array it drained.
+    const store = nodeStore([{ id: 'a', position: { x: 0, y: 0 } }]);
+    const onApplied = vi.fn();
+    const queue = [{ positions: { a: { x: 1, y: 2 } }, animation: anim(), seq: 7 }];
+    renderHook(() =>
+      useAnimatedLayout({
+        animatedLayout: queue,
+        onAnimatedLayoutApplied: onApplied,
+        onAgentArrangingChange: vi.fn(),
+        setNodes: store.setNodes,
+        getNodes: store.getNodes,
+      })
+    );
+    expect(onApplied).toHaveBeenCalledTimes(1);
+    expect(onApplied.mock.calls[0][0]).toBe(queue); // same array reference drained
+  });
+
   it('applies nothing and reports done for an empty batch', () => {
     const store = nodeStore([]);
     const onApplied = vi.fn();
