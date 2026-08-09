@@ -670,6 +670,17 @@ def register_mcp_tools(
             "node_count": len(visible),
         }
 
+    # ==================== Visualization Layout (geometry) ====================
+    #
+    # These two tools let an assistant read node geometry and move nodes in an
+    # open session. They implement the versioned geometry/movement contract in
+    # docs/MCP_VISUALIZATION_LAYOUT_CONTRACT.md: coordinates are model space
+    # (pixels at zoom 1, x/y = node top-left), node width/height are not
+    # server-owned (an assumed_node_size is advertised for spacing), a write is
+    # one atomic layout_applied op with optimistic-concurrency and batch caps,
+    # and the animation fields are a forward-compatible hint carried on the
+    # broadcast op for the canvas to honor.
+
     @register_tool
     def get_visualization_layout(session_id: str) -> Dict[str, Any]:
         """
