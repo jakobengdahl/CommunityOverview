@@ -162,6 +162,7 @@
   },
   "sessions": {
     "title": "Sessions",
+    "agent_arranging": "Assistant is arranging the view…",
     "close": "Close menu",
     "new_session": "Start new session",
     "new_session_started": "New session started",

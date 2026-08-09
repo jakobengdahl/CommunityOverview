@@ -148,6 +148,8 @@ function App() {
     ensureSyncConnected,
     remotePositions,
     setRemotePositions,
+    animatedLayout,
+    setAnimatedLayout,
     remoteAnnotationOps,
     setRemoteAnnotationOps,
     roster,
@@ -238,7 +240,17 @@ function App() {
             setRemotePositions((prev) => ({ ...(prev || {}), [op.node_id]: op.position }));
           break;
         case 'layout_applied':
-          if (op.positions) setRemotePositions((prev) => ({ ...(prev || {}), ...op.positions }));
+          if (op.positions) {
+            // An MCP agent's arrange carries an animation hint (contract §9–§10):
+            // route it to the tweening channel so the whole batch moves as one
+            // coherent transition. A human bulk drag arrives without the hint and
+            // still applies instantly.
+            if (op.animation && op.animation.animate) {
+              setAnimatedLayout({ positions: op.positions, animation: op.animation, seq: op.seq });
+            } else {
+              setRemotePositions((prev) => ({ ...(prev || {}), ...op.positions }));
+            }
+          }
           break;
         case 'annotation_created':
         case 'annotation_updated': {
@@ -283,6 +295,7 @@ function App() {
       setHiddenNodeIds,
       setHiddenEdgeIds,
       setRemotePositions,
+      setAnimatedLayout,
       setRemoteAnnotationOps,
       syncRef,
     ]
@@ -1531,6 +1544,9 @@ function App() {
           onAnnotationChange={scheduleAutoSave}
           remotePositions={remotePositions}
           onRemotePositionsApplied={() => setRemotePositions(null)}
+          animatedLayout={animatedLayout}
+          onAnimatedLayoutApplied={() => setAnimatedLayout(null)}
+          agentArrangingLabel={t('sessions.agent_arranging')}
           remoteAnnotationOps={remoteAnnotationOps}
           onRemoteAnnotationsApplied={() => setRemoteAnnotationOps(null)}
           remoteSelections={remoteSelections}

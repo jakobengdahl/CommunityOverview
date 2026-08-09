@@ -366,6 +366,57 @@ body.graph-suppress-selection * {
   white-space: nowrap;
 }
 
+/* Non-interactive badge shown while an MCP agent is animating a layout. */
+.graph-agent-arranging {
+  position: absolute;
+  top: 10px;
+  left: 50%;
+  transform: translateX(-50%);
+  z-index: 7;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 6px 12px;
+  border-radius: 999px;
+  border: 1px solid rgba(255, 255, 255, 0.15);
+  background: rgba(24, 24, 24, 0.88);
+  backdrop-filter: blur(2px);
+  pointer-events: none;
+}
+
+.graph-agent-arranging-dot {
+  width: 9px;
+  height: 9px;
+  border-radius: 50%;
+  flex-shrink: 0;
+  background: #60a5fa;
+  animation: graph-agent-arranging-pulse 1s ease-in-out infinite;
+}
+
+.graph-agent-arranging-label {
+  font-size: 11px;
+  color: #d1d5db;
+  font-weight: 500;
+  letter-spacing: 0.02em;
+  white-space: nowrap;
+}
+
+@keyframes graph-agent-arranging-pulse {
+  0%,
+  100% {
+    opacity: 1;
+  }
+  50% {
+    opacity: 0.35;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .graph-agent-arranging-dot {
+    animation: none;
+  }
+}
+
 @media (prefers-color-scheme: light) {
   .graph-marks-legend {
     background: rgba(255, 255, 255, 0.92);
@@ -378,5 +429,14 @@ body.graph-suppress-selection * {
 
   .graph-marks-legend-dot {
     border-color: rgba(0, 0, 0, 0.2);
+  }
+
+  .graph-agent-arranging {
+    background: rgba(255, 255, 255, 0.92);
+    border-color: rgba(0, 0, 0, 0.12);
+  }
+
+  .graph-agent-arranging-label {
+    color: #374151;
   }
 }
