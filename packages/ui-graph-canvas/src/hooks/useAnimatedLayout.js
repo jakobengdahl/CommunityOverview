@@ -41,12 +41,16 @@ function clampDuration(value) {
  * each node's current position to the agent's target, so a correlated re-layout
  * reads as one coherent motion instead of node-by-node jumps.
  *
- * `animatedLayout` is a per-op command object `{ positions, animation, seq }`
- * where `positions` is the normalised **absolute** target map from the broadcast
- * and `animation` is the carried hint `{ animate, duration_ms, easing }`.
+ * `animatedLayout` is a **queue** of per-op command objects
+ * `{ positions, animation, seq }` (a single object is accepted too) where
+ * `positions` is the normalised **absolute** target map from the broadcast and
+ * `animation` is the carried hint `{ animate, duration_ms, easing }`. It is a
+ * queue, not a single slot, because two `layout_applied` ops delivered in one
+ * tick would otherwise coalesce (React batching) and drop the earlier batch —
+ * the exact split-arrange the merge below is meant to preserve.
  *
  * Supersede is **per node** (contract §9: a later op supersedes an in-flight
- * transition *for the same nodes*). Each incoming batch is folded into a single
+ * transition *for the same nodes*). Each queued batch is folded into a single
  * long-lived tween keyed by node id: a node named again restarts from its current
  * position toward the new target, while nodes from an earlier batch that this one
  * does not mention keep animating to their own targets. This matters because the
@@ -57,6 +61,11 @@ function clampDuration(value) {
  * exactly as `useRemotePositions` does, so grouped/child nodes are not double
  * offset. A node the user is dragging (`n.dragging`) is left untouched every
  * frame, so an agent layout never fights a concurrent drag.
+ *
+ * `resetKey` (e.g. the session id) hard-stops any in-flight tween when it
+ * changes: the command is consumed on ingest, so a null `animatedLayout` cannot
+ * itself signal "session switched" — without this a tween from the previous
+ * session would bleed onto the next session's nodes.
  */
 export function useAnimatedLayout({
   animatedLayout,
@@ -64,6 +73,7 @@ export function useAnimatedLayout({
   onAgentArrangingChange,
   setNodes,
   getNodes,
+  resetKey,
 }) {
   const rafRef = useRef(null);
   // nodeId -> { sx, sy, tx, ty, start, duration, ease }. Persists across commands
@@ -103,71 +113,87 @@ export function useAnimatedLayout({
     }
   }, [setNodes]);
 
+  const stopLoop = useCallback(() => {
+    if (rafRef.current) {
+      cancelAnimationFrame(rafRef.current);
+      rafRef.current = null;
+    }
+  }, []);
+
   // Cancel the frame loop on unmount (a superseded node is handled by merging,
   // not by tearing the loop down).
-  useEffect(
-    () => () => {
-      if (rafRef.current) {
-        cancelAnimationFrame(rafRef.current);
-        rafRef.current = null;
-      }
-    },
-    []
-  );
+  useEffect(() => stopLoop, [stopLoop]);
+
+  // Hard reset on session (or other) switch: drop any in-flight tween and its
+  // pending targets so they cannot bleed onto the next session's nodes, and clear
+  // the arranging indicator. Runs on mount too (a harmless clear of an empty map).
+  useEffect(() => {
+    stopLoop();
+    activeRef.current.clear();
+    arrangingRef.current?.(false);
+  }, [resetKey, stopLoop]);
 
   useEffect(() => {
     if (!animatedLayout) return;
-    const { positions, animation } = animatedLayout;
-    const targets = positions || {};
-    const ids = Object.keys(targets);
-    if (ids.length === 0) {
-      appliedRef.current?.();
-      return;
-    }
+    // Accept a queue of batches (single object tolerated); draining the whole
+    // queue is what keeps two same-tick ops from coalescing into one.
+    const batches = Array.isArray(animatedLayout) ? animatedLayout : [animatedLayout];
+    let registeredAnimation = false;
 
-    const wantsAnimation = !!(animation && animation.animate === true);
-    const duration = wantsAnimation
-      ? clampDuration(animation.duration_ms ?? DEFAULT_DURATION_MS)
-      : 0;
+    for (const batch of batches) {
+      const targets = (batch && batch.positions) || {};
+      const ids = Object.keys(targets);
+      if (ids.length === 0) continue;
 
-    if (!wantsAnimation || duration === 0 || prefersReducedMotion()) {
-      // Snap: drop any in-flight tween for these nodes and jump to the target,
-      // never disturbing a node the user is dragging.
-      ids.forEach((id) => activeRef.current.delete(id));
-      setNodes((nds) =>
-        nds.map((n) => {
-          const target = targets[n.id];
-          if (!target || n.dragging) return n;
-          return { ...n, position: { x: target.x, y: target.y } };
-        })
-      );
-      if (activeRef.current.size === 0) arrangingRef.current?.(false);
-      appliedRef.current?.();
-      return;
-    }
+      const animation = batch.animation;
+      const wantsAnimation = !!(animation && animation.animate === true);
+      const duration = wantsAnimation
+        ? clampDuration(animation.duration_ms ?? DEFAULT_DURATION_MS)
+        : 0;
 
-    // Fold this batch into the running tween: each named node restarts from its
-    // current live position toward the new target (per-node supersede).
-    const live = typeof getNodes === 'function' ? getNodes() : [];
-    const livePos = new Map(live.map((n) => [n.id, n.position]));
-    const ease = EASINGS[animation.easing] || EASINGS['ease-in-out'];
-    const startTime = now();
-    ids.forEach((id) => {
-      const start = livePos.get(id) || targets[id];
-      activeRef.current.set(id, {
-        sx: start.x,
-        sy: start.y,
-        tx: targets[id].x,
-        ty: targets[id].y,
-        start: startTime,
-        duration,
-        ease,
+      if (!wantsAnimation || duration === 0 || prefersReducedMotion()) {
+        // Snap: drop any in-flight tween for these nodes and jump to the target,
+        // never disturbing a node the user is dragging.
+        ids.forEach((id) => activeRef.current.delete(id));
+        setNodes((nds) =>
+          nds.map((n) => {
+            const target = targets[n.id];
+            if (!target || n.dragging) return n;
+            return { ...n, position: { x: target.x, y: target.y } };
+          })
+        );
+        continue;
+      }
+
+      // Fold this batch into the running tween: each named node restarts from its
+      // current live position toward the new target (per-node supersede).
+      const live = typeof getNodes === 'function' ? getNodes() : [];
+      const livePos = new Map(live.map((n) => [n.id, n.position]));
+      const ease = EASINGS[animation.easing] || EASINGS['ease-in-out'];
+      const startTime = now();
+      ids.forEach((id) => {
+        const start = livePos.get(id) || targets[id];
+        activeRef.current.set(id, {
+          sx: start.x,
+          sy: start.y,
+          tx: targets[id].x,
+          ty: targets[id].y,
+          start: startTime,
+          duration,
+          ease,
+        });
       });
-    });
-    arrangingRef.current?.(true);
-    if (rafRef.current == null) rafRef.current = requestAnimationFrame(step);
-    // The command is consumed the moment its targets are registered; the tween
-    // now lives in the ref, so the parent can clear the channel for the next op.
+      registeredAnimation = true;
+    }
+
+    if (registeredAnimation) {
+      arrangingRef.current?.(true);
+      if (rafRef.current == null) rafRef.current = requestAnimationFrame(step);
+    } else if (activeRef.current.size === 0) {
+      arrangingRef.current?.(false);
+    }
+    // The queue is consumed the moment its targets are registered; the tween now
+    // lives in the ref, so the parent can clear the channel for the next op(s).
     appliedRef.current?.();
   }, [animatedLayout, setNodes, getNodes, step]);
 }

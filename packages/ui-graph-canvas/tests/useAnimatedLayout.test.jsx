@@ -210,6 +210,62 @@ describe('useAnimatedLayout', () => {
     expect(store.byId().b.position).toEqual({ x: 0, y: 300 });
   });
 
+  it('drains a queue of two disjoint batches delivered together', () => {
+    // Two layout_applied ops in one delivery arrive as a queue (App merges them
+    // so React batching cannot drop the first). Both must animate to target.
+    const store = nodeStore([
+      { id: 'a', position: { x: 0, y: 0 } },
+      { id: 'b', position: { x: 0, y: 0 } },
+    ]);
+    renderHook(() =>
+      useAnimatedLayout({
+        animatedLayout: [
+          { positions: { a: { x: 100, y: 0 } }, animation: anim({ easing: 'linear' }), seq: 1 },
+          { positions: { b: { x: 0, y: 300 } }, animation: anim({ easing: 'linear' }), seq: 2 },
+        ],
+        onAnimatedLayoutApplied: vi.fn(),
+        onAgentArrangingChange: vi.fn(),
+        setNodes: store.setNodes,
+        getNodes: store.getNodes,
+      })
+    );
+    flushFrame(400);
+    expect(store.byId().a.position).toEqual({ x: 100, y: 0 });
+    expect(store.byId().b.position).toEqual({ x: 0, y: 300 });
+  });
+
+  it('cancels an in-flight tween and clears the indicator when resetKey changes', () => {
+    const store = nodeStore([{ id: 'a', position: { x: 0, y: 0 } }]);
+    const arranging = vi.fn();
+    const base = {
+      onAnimatedLayoutApplied: vi.fn(),
+      onAgentArrangingChange: arranging,
+      setNodes: store.setNodes,
+      getNodes: store.getNodes,
+    };
+    const { rerender } = renderHook((props) => useAnimatedLayout(props), {
+      initialProps: {
+        ...base,
+        animatedLayout: {
+          positions: { a: { x: 100, y: 0 } },
+          animation: anim({ easing: 'linear' }),
+          seq: 1,
+        },
+        resetKey: 'session-1',
+      },
+    });
+    flushFrame(200); // a mid-flight at ~50
+    expect(rafQueue.length).toBe(1); // loop is running
+    // Session switch: the channel is cleared (null) and the reset key changes.
+    rerender({ ...base, animatedLayout: null, resetKey: 'session-2' });
+    expect(rafQueue.length).toBe(0); // loop cancelled
+    expect(arranging).toHaveBeenLastCalledWith(false);
+    // A later frame (if any lingered) must not move the previous session's node.
+    const before = store.byId().a.position.x;
+    flushFrame(400);
+    expect(store.byId().a.position.x).toBe(before);
+  });
+
   it('applies nothing and reports done for an empty batch', () => {
     const store = nodeStore([]);
     const onApplied = vi.fn();

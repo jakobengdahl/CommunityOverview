@@ -122,6 +122,7 @@ function GraphCanvasInner({
   onRemotePositionsApplied,
   animatedLayout = null,
   onAnimatedLayoutApplied,
+  animatedLayoutResetKey = null,
   agentArrangingLabel = 'Assistant is arranging the view…',
   remoteAnnotationOps = null,
   onRemoteAnnotationsApplied,
@@ -1067,6 +1068,7 @@ function GraphCanvasInner({
     onAgentArrangingChange: setAgentArranging,
     setNodes,
     getNodes: getFlowNodes,
+    resetKey: animatedLayoutResetKey,
   });
 
   // Apply a queue of group/overlay annotation changes from other clients (design

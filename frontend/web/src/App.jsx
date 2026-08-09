@@ -246,7 +246,13 @@ function App() {
             // coherent transition. A human bulk drag arrives without the hint and
             // still applies instantly.
             if (op.animation && op.animation.animate) {
-              setAnimatedLayout({ positions: op.positions, animation: op.animation, seq: op.seq });
+              // Queue, don't replace: two layout_applied ops delivered in one
+              // tick (a split arrange) must both survive React's batching —
+              // replacing would drop all but the last (mirrors node_moved).
+              setAnimatedLayout((prev) => [
+                ...(prev || []),
+                { positions: op.positions, animation: op.animation, seq: op.seq },
+              ]);
             } else {
               setRemotePositions((prev) => ({ ...(prev || {}), ...op.positions }));
             }
@@ -1546,6 +1552,7 @@ function App() {
           onRemotePositionsApplied={() => setRemotePositions(null)}
           animatedLayout={animatedLayout}
           onAnimatedLayoutApplied={() => setAnimatedLayout(null)}
+          animatedLayoutResetKey={sessionId}
           agentArrangingLabel={t('sessions.agent_arranging')}
           remoteAnnotationOps={remoteAnnotationOps}
           onRemoteAnnotationsApplied={() => setRemoteAnnotationOps(null)}
