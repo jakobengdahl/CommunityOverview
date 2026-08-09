@@ -69,6 +69,10 @@ function ChatPanel({ collectionShortName }) {
     clearGuideChatInput,
     getNodeColor,
     requestCloseMenus,
+    modelProfiles,
+    modelProfileSelectionEnabled,
+    selectedModelProfileId,
+    setSelectedModelProfileId,
   } = useGraphStore();
 
   const { t, language } = useI18n();
@@ -255,6 +259,7 @@ function ChatPanel({ collectionShortName }) {
 
       const response = await api.sendChatMessage(conversationMessages, null, {
         federationDepth,
+        modelProfileId: selectedModelProfileId || undefined,
         expertAgentId:
           activeExperts.length > 0 ? activeExperts[activeExperts.length - 1] : undefined,
         skillsContext: skillsContext || undefined,
@@ -322,7 +327,9 @@ function ChatPanel({ collectionShortName }) {
     setError(null);
 
     try {
-      const result = await api.uploadFile(file, false);
+      const result = await api.uploadFile(file, false, {
+        modelProfileId: selectedModelProfileId || undefined,
+      });
       if (result.success && result.text) {
         setUploadedFile({
           filename: result.filename,
@@ -941,6 +948,27 @@ function ChatPanel({ collectionShortName }) {
 
         <div className="button-row">
           <ExpertAgentSelector />
+          {modelProfiles.length > 0 && (
+            <select
+              className="model-profile-select"
+              aria-label={t('chat.model_profile')}
+              value={selectedModelProfileId || ''}
+              onChange={(e) => setSelectedModelProfileId(e.target.value || null)}
+              disabled={isProcessing || !modelProfileSelectionEnabled}
+              title={
+                modelProfileSelectionEnabled
+                  ? t('chat.model_profile')
+                  : t('chat.model_profile_selection_disabled')
+              }
+            >
+              {modelProfiles.map((profile) => (
+                <option key={profile.id} value={profile.id}>
+                  {profile.name || profile.id}
+                  {profile.default ? ' (default)' : ''}
+                </option>
+              ))}
+            </select>
+          )}
           <input
             type="file"
             ref={fileInputRef}

@@ -1,4 +1,4 @@
-from typing import List, Dict, Callable
+from typing import List, Dict, Callable, Optional
 import os
 import json
 import logging
@@ -6,6 +6,10 @@ from dotenv import load_dotenv
 import inspect
 from backend.llm.llm_providers import create_provider, LLMProvider
 from backend.config import config_loader
+from backend.config.model_profiles import (
+    create_provider_from_profile,
+    resolve_profile_reference,
+)
 from backend.llm.language_policy import format_language_policy_for_prompt
 
 # Initialize logger
@@ -987,11 +991,61 @@ class ChatProcessor:
             },
         ]
 
+    def _resolve_llm_provider(
+        self,
+        api_key: Optional[str],
+        provider: Optional[str],
+        model_profile_id: Optional[str],
+    ):
+        """
+        Resolve which LLMProvider instance to use for this request.
+
+        When model profiles are configured (backend/config/model_profiles.py),
+        profile resolution takes precedence over the legacy provider/api_key
+        params — once profiles are configured they are the source of truth.
+        Falls back unchanged to the legacy single-provider path when no
+        profiles are configured.
+
+        Returns:
+            (llm_provider, error_message) — exactly one of the two is set.
+        """
+        profiles = config_loader.get_model_profiles()
+        if profiles:
+            selection_enabled = config_loader.get_model_profile_selection_enabled()
+            effective_profile_id = model_profile_id if selection_enabled else None
+            resolution = resolve_profile_reference(profiles, effective_profile_id)
+            if resolution.profile is None:
+                return (
+                    None,
+                    f"❌ Error: {resolution.error or 'no model profile available'}",
+                )
+            try:
+                llm_provider = create_provider_from_profile(
+                    resolution.profile, api_key_override=api_key
+                )
+            except Exception as e:
+                return None, f"❌ Error: {e}"
+            return llm_provider, None
+
+        # Legacy single-provider path
+        provider_to_use = provider if provider else self.provider_type
+        key_to_use = api_key if api_key else self.default_api_key
+
+        if not key_to_use:
+            provider_name = provider_to_use.upper()
+            return None, (
+                f"❌ Error: No API key available. Please set {provider_name}_API_KEY "
+                "environment variable or provide your own key in settings."
+            )
+
+        return create_provider(key_to_use, provider_to_use), None
+
     def process_message(
         self,
         messages: List[Dict],
         api_key: str = None,
         provider: str = None,
+        model_profile_id: str = None,
         extra_context: str = None,
         skills_override: str = None,
         tools_override: Dict[str, Callable] = None,
@@ -1003,7 +1057,11 @@ class ChatProcessor:
         Args:
             messages: Conversation history
             api_key: Optional API key to use instead of default
-            provider: Optional provider override ('claude' or 'openai')
+            provider: Optional provider override ('claude' or 'openai'). Ignored
+                when model profiles are configured — model_profile_id applies then.
+            model_profile_id: Optional explicit model profile id (see
+                backend/config/model_profiles.py). Only used when profiles are
+                configured; None inherits the application default profile.
             extra_context: Optional context prepended before the base system prompt
                 (expert agent persona — should be established before base instructions).
             tools_override: Optional dict of tool_name → callable that replaces entries
@@ -1015,22 +1073,11 @@ class ChatProcessor:
                 context and helps the AI decide between add vs. replace actions.
         """
         try:
-            # Use provided provider or fall back to configured provider
-            provider_to_use = provider if provider else self.provider_type
-
-            # Use provided API key or fall back to default
-            key_to_use = api_key if api_key else self.default_api_key
-
-            if not key_to_use:
-                provider_name = provider_to_use.upper()
-                return {
-                    "content": f"❌ Error: No API key available. Please set {provider_name}_API_KEY environment variable or provide your own key in settings.",
-                    "toolUsed": None,
-                    "toolResult": None,
-                }
-
-            # Create provider with the appropriate key
-            llm_provider = create_provider(key_to_use, provider_to_use)
+            llm_provider, error = self._resolve_llm_provider(
+                api_key, provider, model_profile_id
+            )
+            if error:
+                return {"content": error, "toolUsed": None, "toolResult": None}
 
             # Build per-request system prompt:
             # 1. expert persona (extra_context) comes first — establishes who the model is

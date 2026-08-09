@@ -36,7 +36,9 @@
     "delete_cancelled": "Deletion cancelled.",
     "selected_nodes": "{count} nodes selected",
     "clear_selection": "Clear selection",
-    "placeholder_with_selection": "Ask a question about the selected nodes..."
+    "placeholder_with_selection": "Ask a question about the selected nodes...",
+    "model_profile": "Model profile",
+    "model_profile_selection_disabled": "Model profile selection is disabled"
   },
   "detail": {
     "summary": "Summary",

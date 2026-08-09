@@ -12,6 +12,7 @@ from dataclasses import dataclass
 
 if TYPE_CHECKING:
     from .config import AgentsSettings
+    from backend.config.model_profiles import ModelProfile
 
 from backend.llm.llm_providers import (
     LLMProvider,
@@ -56,6 +57,7 @@ class LLMClient:
         model: Optional[str] = None,
         openai_api_key: Optional[str] = None,
         anthropic_api_key: Optional[str] = None,
+        llm_provider: Optional[LLMProvider] = None,
     ):
         """
         Initialize the LLM client.
@@ -65,12 +67,14 @@ class LLMClient:
             model: Model name (optional, uses provider default)
             openai_api_key: OpenAI API key
             anthropic_api_key: Anthropic API key
+            llm_provider: Optional pre-built LLMProvider instance (e.g. resolved
+                from a model profile). When given, it is used as-is instead of
+                building one from the key args above.
         """
         self.provider_name = provider
         self.model = model
 
-        # Create the underlying provider
-        self._provider = self._create_provider(
+        self._provider = llm_provider or self._create_provider(
             provider=provider,
             openai_api_key=openai_api_key,
             anthropic_api_key=anthropic_api_key,
@@ -293,16 +297,59 @@ class LLMClient:
         }
 
 
-def create_llm_client_from_settings(settings: "AgentsSettings") -> LLMClient:
+def create_llm_client_from_profile(
+    profile: "ModelProfile", api_key_override: Optional[str] = None
+) -> LLMClient:
+    """
+    Create an LLM client from a resolved model profile.
+
+    Args:
+        profile: The resolved ModelProfile to instantiate.
+        api_key_override: Optional caller-supplied API key that takes
+            precedence over the profile's credential_ref.
+
+    Raises:
+        MissingCredentialError: if no credential is available for the profile.
+        ValueError: if the profile's provider is not supported.
+    """
+    from backend.config.model_profiles import create_provider_from_profile
+
+    provider_instance = create_provider_from_profile(
+        profile, api_key_override=api_key_override
+    )
+    return LLMClient(
+        provider=profile.provider, model=profile.model, llm_provider=provider_instance
+    )
+
+
+def create_llm_client_from_settings(
+    settings: "AgentsSettings", model_profile_id: Optional[str] = None
+) -> LLMClient:
     """
     Create an LLM client from agent settings.
 
+    When settings.model_profiles is non-empty, model_profile_id (or the
+    application default profile, when None) is resolved and used. Otherwise
+    falls back unchanged to the legacy single-provider settings fields.
+
     Args:
         settings: AgentsSettings instance
+        model_profile_id: Optional explicit model profile id (usually an
+            agent's AgentConfig.model_profile_id). None inherits the default
+            profile when profiles are configured.
 
     Returns:
         Configured LLMClient
+
+    Raises:
+        ValueError: if model_profile_id (or the configured default) does not
+            resolve to a usable profile.
     """
+    resolution = settings.resolve_model_profile(model_profile_id)
+    if resolution.error:
+        raise ValueError(resolution.error)
+    if resolution.profile is not None:
+        return create_llm_client_from_profile(resolution.profile)
 
     return LLMClient(
         provider=settings.llm_provider,

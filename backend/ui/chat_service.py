@@ -19,7 +19,6 @@ import re
 from datetime import datetime, timezone
 
 from backend.ui.chat_logic import ChatProcessor
-from backend.llm.llm_providers import create_provider
 from backend.service import GraphService
 
 logger = logging.getLogger(__name__)
@@ -608,6 +607,7 @@ class ChatService:
         messages: List[Dict[str, Any]],
         api_key: Optional[str] = None,
         provider: Optional[str] = None,
+        model_profile_id: Optional[str] = None,
         federation_depth: Optional[int] = None,
         expert_agent_id: Optional[str] = None,
         skills_context: Optional[str] = None,
@@ -626,7 +626,11 @@ class ChatService:
         Args:
             messages: Conversation history as a list of message dicts
             api_key: Optional API key override (uses env var if not provided)
-            provider: Optional provider override ('claude' or 'openai')
+            provider: Optional provider override ('claude' or 'openai'). Ignored
+                once model profiles are configured (see model_profile_id).
+            model_profile_id: Optional explicit model profile id selected by the
+                caller (e.g. the chat UI). Only used when model profiles are
+                configured and selection_enabled — see backend/config/model_profiles.py.
             federation_depth: Optional federated search depth override
             expert_agent_id: Optional expert agent ID — when provided, the
                 agent's system_context and skills are prepended to the system
@@ -697,6 +701,7 @@ class ChatService:
                 messages=messages,
                 api_key=api_key,
                 provider=provider,
+                model_profile_id=model_profile_id,
                 extra_context=extra_context,
                 skills_override=skills_context or None,
                 tools_override=tools_override,
@@ -711,6 +716,7 @@ class ChatService:
         conversation_history: Optional[List[Dict[str, Any]]] = None,
         api_key: Optional[str] = None,
         provider: Optional[str] = None,
+        model_profile_id: Optional[str] = None,
         document_context: Optional[str] = None,
         federation_depth: Optional[int] = None,
         expert_agent_id: Optional[str] = None,
@@ -753,6 +759,7 @@ User's question: {user_message}"""
             messages=messages,
             api_key=api_key,
             provider=provider,
+            model_profile_id=model_profile_id,
             federation_depth=federation_depth,
             expert_agent_id=expert_agent_id,
         )
@@ -777,6 +784,7 @@ User's question: {user_message}"""
         communities: Optional[List[str]] = None,
         api_key: Optional[str] = None,
         provider: Optional[str] = None,
+        model_profile_id: Optional[str] = None,
         federation_depth: Optional[int] = None,
     ) -> Dict[str, Any]:
         """
@@ -840,19 +848,18 @@ Respond with ONLY a JSON array of extracted entities, no other text. Example for
         messages = [{"role": "user", "content": extraction_prompt}]
 
         try:
-            # Get LLM to extract entities
-            key_to_use = api_key if api_key else self._processor.default_api_key
-            provider_to_use = provider if provider else self._processor.provider_type
-
-            if not key_to_use:
+            # Resolve LLM the same way as chat requests: model profiles take
+            # precedence when configured, otherwise fall back to legacy provider/API-key fields.
+            llm_provider, error = self._processor._resolve_llm_provider(
+                api_key, provider, model_profile_id
+            )
+            if error:
                 return {
                     "success": False,
-                    "error": "No API key available",
+                    "error": error,
                     "proposed_nodes": [],
                     "similar_existing": {},
                 }
-
-            llm_provider = create_provider(key_to_use, provider_to_use)
 
             response = llm_provider.create_completion(
                 messages=messages,

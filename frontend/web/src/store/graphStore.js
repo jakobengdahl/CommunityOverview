@@ -193,6 +193,16 @@ const useGraphStore = create((set, get) => ({
   // LLM availability (null = not yet fetched, true/false = known)
   llmAvailable: null,
 
+  // Model profiles (see backend/config/model_profiles.py). Empty profiles list
+  // means no profiles are configured — the chat UI has nothing to select from
+  // and uses the legacy single-provider path implicitly.
+  modelProfiles: [],
+  defaultModelProfileId: null,
+  modelProfileSelectionEnabled: true,
+  // The profile the chat UI will send with the next request. Preselected to
+  // the default profile once capabilities are fetched.
+  selectedModelProfileId: null,
+
   // Loading states
   isLoading: false,
   configLoaded: false,
@@ -344,6 +354,22 @@ const useGraphStore = create((set, get) => ({
   setStats: (stats) => set({ stats }),
 
   setLlmAvailable: (available) => set({ llmAvailable: available }),
+
+  // Apply the /ui/capabilities "model_profiles" payload: stores the enabled
+  // profile list and preselects the default profile for the chat UI.
+  setModelProfilesCapability: (modelProfilesCapability) => {
+    const profiles = modelProfilesCapability?.profiles || [];
+    const defaultProfileId = modelProfilesCapability?.default_profile_id ?? null;
+    const selectionEnabled = modelProfilesCapability?.selection_enabled ?? true;
+    set({
+      modelProfiles: profiles,
+      defaultModelProfileId: defaultProfileId,
+      modelProfileSelectionEnabled: selectionEnabled,
+      selectedModelProfileId: defaultProfileId,
+    });
+  },
+
+  setSelectedModelProfileId: (profileId) => set({ selectedModelProfileId: profileId }),
 
   setLoading: (isLoading) => set({ isLoading }),
 

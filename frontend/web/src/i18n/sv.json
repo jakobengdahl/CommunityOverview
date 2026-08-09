@@ -36,7 +36,9 @@
     "delete_cancelled": "Borttagning avbruten.",
     "selected_nodes": "{count} noder markerade",
     "clear_selection": "Rensa markering",
-    "placeholder_with_selection": "Ställ en fråga om de markerade noderna..."
+    "placeholder_with_selection": "Ställ en fråga om de markerade noderna...",
+    "model_profile": "Modellprofil",
+    "model_profile_selection_disabled": "Val av modellprofil är inaktiverat"
   },
   "detail": {
     "summary": "Sammanfattning",

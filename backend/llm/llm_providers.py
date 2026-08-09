@@ -41,11 +41,16 @@ class LLMResponse:
 class ClaudeProvider(LLMProvider):
     """Anthropic Claude provider"""
 
-    def __init__(self, api_key: str):
+    def __init__(
+        self,
+        api_key: str,
+        model: Optional[str] = None,
+        base_url: Optional[str] = None,
+    ):
         from anthropic import Anthropic
 
-        self.client = Anthropic(api_key=api_key)
-        self.model = "claude-sonnet-4-5"
+        self.client = Anthropic(api_key=api_key, base_url=base_url)
+        self.model = model or "claude-sonnet-4-5"
 
     def create_completion(
         self,
@@ -90,14 +95,19 @@ class ClaudeProvider(LLMProvider):
 class OpenAIProvider(LLMProvider):
     """OpenAI provider — also works with any OpenAI-compatible API (Ollama, vLLM, Azure OpenAI, etc.)"""
 
-    def __init__(self, api_key: str):
+    def __init__(
+        self,
+        api_key: str,
+        model: Optional[str] = None,
+        base_url: Optional[str] = None,
+    ):
         from openai import OpenAI
 
-        base_url = os.getenv(
-            "OPENAI_BASE_URL"
-        )  # None = use SDK default (api.openai.com)
-        self.client = OpenAI(api_key=api_key, base_url=base_url)
-        self.model = os.getenv("OPENAI_MODEL", "gpt-4o")
+        # None = use SDK default (api.openai.com), unless overridden by caller
+        # or OPENAI_BASE_URL (legacy env-var configuration).
+        resolved_base_url = base_url or os.getenv("OPENAI_BASE_URL")
+        self.client = OpenAI(api_key=api_key, base_url=resolved_base_url)
+        self.model = model or os.getenv("OPENAI_MODEL", "gpt-4o")
         self._tool_calling = os.getenv("OPENAI_TOOL_CALLING", "true").lower() != "false"
 
     def create_completion(
@@ -297,27 +307,34 @@ def get_llm_availability() -> Dict[str, Any]:
     }
 
 
-def create_provider(api_key: str, provider_type: Optional[str] = None) -> LLMProvider:
+def create_provider(
+    api_key: str,
+    provider_type: Optional[str] = None,
+    model: Optional[str] = None,
+    base_url: Optional[str] = None,
+) -> LLMProvider:
     """
     Factory function to create the appropriate LLM provider.
 
     Args:
         api_key: API key for the provider
         provider_type: 'claude' or 'openai'. If None, uses LLM_PROVIDER env var (defaults to 'claude')
+        model: Optional explicit model name (overrides provider default / env var)
+        base_url: Optional explicit endpoint (overrides OPENAI_BASE_URL for 'openai')
 
     Returns:
         LLMProvider instance
 
     OpenAI-compatible APIs (Ollama, vLLM, Azure OpenAI, etc.) use provider_type='openai'
-    with the OPENAI_BASE_URL env var pointing at the custom endpoint.
+    with base_url (or the OPENAI_BASE_URL env var) pointing at the custom endpoint.
     """
     if provider_type is None:
         provider_type = os.getenv("LLM_PROVIDER", "claude").lower()
 
     if provider_type == "openai":
-        return OpenAIProvider(api_key)
+        return OpenAIProvider(api_key, model=model, base_url=base_url)
     elif provider_type == "claude":
-        return ClaudeProvider(api_key)
+        return ClaudeProvider(api_key, model=model, base_url=base_url)
     else:
         raise ValueError(
             f"Unknown provider type: {provider_type}. Supported: 'claude', 'openai'"
