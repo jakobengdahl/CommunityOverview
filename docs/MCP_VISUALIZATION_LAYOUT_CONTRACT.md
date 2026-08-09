@@ -199,14 +199,15 @@ What v1 implements, and what it deliberately reserves:
 ## 9. Animation seam
 
 The write tool accepts `animate` (default `true`), `duration_ms` (default `400`)
-and `easing` (default `"ease-in-out"`). These are a **forward-compatible hint**,
-not a behavioral guarantee in v1:
+and `easing` (default `"ease-in-out"`). These are a **hint** the canvas honors:
 
-- **Today:** the canvas applies the moved positions immediately; the hint is
-  carried but not yet tweened.
+- **Today:** the canvas tweens the batch from each node's current position to the
+  target over `duration_ms` with the given `easing`, so a correlated re-layout
+  reads as one coherent motion. A human bulk drag arrives *without* an animation
+  hint (§10) and is applied instantly.
 - **The seam:** the hint travels intact inside the broadcast op (§10), so the
-  canvas animation work (`task-frontend-animated-layout-transitions`) can honor
-  it *without a contract or tool change* — it reads `animation` off the
+  canvas animation (`task-frontend-animated-layout-transitions`) honors it
+  *without a contract or tool change* — it reads `animation` off the
   `layout_applied` op and tweens from the previous to the new positions.
 - **Reduced motion.** `prefers-reduced-motion` is a **client-side** decision:
   when set, the canvas must snap to the final positions regardless of the
@@ -239,9 +240,10 @@ A successful write broadcasts exactly one event to every connected client:
 - `positions` is the **normalised absolute** target map — deltas are resolved to
   absolute positions server-side before broadcast, so every client applies the
   same coordinates regardless of what it thought a node's prior position was.
-- `animation` is present when the write supplied animation fields; consumers that
-  do not animate ignore it (the current canvas merges `op.positions` and drops
-  the rest).
+- `animation` is present when the write supplied animation fields. The canvas
+  tweens the batch when the hint is present (routing it to the animation channel);
+  a consumer that does not animate can still ignore `animation` and apply
+  `op.positions` directly, so the field stays backward-compatible.
 - `seq` is the new revision and equals the `op.seq`; seq-gating clients
   (`sessionSyncClient`) apply the op in sequence and reconnecting clients replay
   it from the ring buffer via the `since_seq` catch-up path.

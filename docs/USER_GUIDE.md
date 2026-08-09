@@ -582,6 +582,14 @@ The canvas updates in real time — nodes appear, edges are drawn, and the layou
 adjusts automatically, all driven by the external AI without any manual work in
 the browser.
 
+When the assistant **arranges** the view — laying nodes out as a left-to-right
+flow, a grid, or swimlanes — the whole batch glides smoothly into place rather
+than jumping node by node, and a small *"Assistant is arranging the view…"* badge
+appears at the top of the canvas while it moves. You can keep dragging a node
+during an arrange; the assistant's layout leaves whatever you are holding
+untouched. If your system is set to **reduce motion**, the nodes snap straight to
+their final positions instead of animating.
+
 **Use cases:**
 
 - Use a powerful external assistant (e.g. a model with extended context or web access)

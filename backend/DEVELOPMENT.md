@@ -412,7 +412,7 @@ broadcast `command` events reach every collaborator instead of just one:
 | `get_graph_stats` | Get graph statistics |
 | `save_view` | Save a named view (creates SavedView node) |
 | `get_visualization_layout` | Read every node's model-space position in an open session (for an agent to compute a new arrangement) |
-| `apply_visualization_layout` | Move nodes in an open session by absolute positions or deltas; applied atomically and mirrored live to all connected browsers |
+| `apply_visualization_layout` | Move nodes in an open session by absolute positions or deltas; applied atomically, animated on the canvas, and mirrored live to all connected browsers |
 | `create_visualization_session` | Create a new empty session (optional non-unique name; server assigns a default when omitted) |
 | `list_visualization_sessions` | List existing sessions, most recently updated first |
 | `get_visualization_session` | Inspect one session's resource metadata (incl. node count) |
@@ -426,11 +426,60 @@ rearranging the canvas is just another collaborator. Coordinates are model space
 carries the move as one `layout_applied` op with a monotonic `revision`;
 pass the `revision` from a prior read as `expected_revision` for optimistic
 concurrency. Node width/height are not server-owned, so the read tool advertises
-an `assumed_node_size` for collision-free spacing instead. The full geometry and
-movement semantics — coordinate model, absolute vs. delta moves, atomic batching
-and caps, the animation seam and the `layout_applied` broadcast shape — are the
-versioned contract in
+an `assumed_node_size` for collision-free spacing instead. A write carries an
+animation hint (`animate`/`duration_ms`/`easing`); the canvas tweens the batch
+from the nodes' current positions to the targets, and a viewer who asked for
+reduced motion snaps to the final positions instead (a client-side decision — an
+agent just sends the hint it intends). The full geometry and movement semantics —
+coordinate model, absolute vs. delta moves, atomic batching and caps, the
+animation seam and the `layout_applied` broadcast shape — are the versioned
+contract in
 [`docs/MCP_VISUALIZATION_LAYOUT_CONTRACT.md`](../docs/MCP_VISUALIZATION_LAYOUT_CONTRACT.md).
+
+#### Arranging a session (agent recipes)
+
+Coordinates are model space with `x`/`y` at the node **top-left**, so spacing is
+computed from `assumed_node_size` (`{width, height}` from the read tool) plus a
+gap — offset by the full node size, not half, to leave a visible gutter. Read the
+layout first to get `assumed_node_size` and the current `revision`, then pass that
+`revision` as `expected_revision` on the write.
+
+- **Horizontal (left-to-right) DAG.** Rank each node by its longest path from a
+  root; `x = rank * (width + gap)` so every edge points rightward, and stack nodes
+  sharing a rank down the column: `y = slot_in_rank * (height + gap)`.
+
+  ```python
+  layout = get_visualization_layout(session_id=sid)
+  w = layout["assumed_node_size"]["width"]; h = layout["assumed_node_size"]["height"]
+  gap = 60
+  positions = {
+      node_id: {"x": rank[node_id] * (w + gap), "y": slot[node_id] * (h + gap)}
+      for node_id in ranks
+  }
+  apply_visualization_layout(session_id=sid, positions=positions,
+                             expected_revision=layout["revision"])
+  ```
+
+- **Grid.** Place N nodes in a `cols`-wide grid:
+  `x = (i % cols) * (width + gap)`, `y = (i // cols) * (height + gap)`.
+
+- **Swimlanes.** Give each lane (e.g. a node type or status) a fixed `y` band and
+  lay its members out along `x`: `y = lane_index * (height + lane_gap)`,
+  `x = position_in_lane * (width + gap)`. Lanes are pure geometry here — the
+  contract moves individual node positions and does not group them (§8).
+
+- **Create a named, shareable session from scratch** — never assume a hostname:
+
+  ```python
+  s = create_visualization_session(name="Q3 dependency map")
+  sid = s["session"]["session_id"]
+  # add nodes via search_graph/get_related_nodes with visualization_session_id=sid,
+  # then arrange with apply_visualization_layout as above, then:
+  link = s["session"]["session_url"]   # server-owned canonical link, or null
+  ```
+
+  Hand `session_url` to the user verbatim; it is `null` only when the deployment
+  has no public base URL configured.
 
 The `*_visualization_session` CRUD tools manage session *resources* (as opposed
 to inspecting/laying out an already-open one). They implement the versioned
