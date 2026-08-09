@@ -148,6 +148,8 @@ function App() {
     ensureSyncConnected,
     remotePositions,
     setRemotePositions,
+    animatedLayout,
+    setAnimatedLayout,
     remoteAnnotationOps,
     setRemoteAnnotationOps,
     roster,
@@ -238,7 +240,23 @@ function App() {
             setRemotePositions((prev) => ({ ...(prev || {}), [op.node_id]: op.position }));
           break;
         case 'layout_applied':
-          if (op.positions) setRemotePositions((prev) => ({ ...(prev || {}), ...op.positions }));
+          if (op.positions) {
+            // An MCP agent's arrange carries an animation hint (contract §9–§10):
+            // route it to the tweening channel so the whole batch moves as one
+            // coherent transition. A human bulk drag arrives without the hint and
+            // still applies instantly.
+            if (op.animation && op.animation.animate) {
+              // Queue, don't replace: two layout_applied ops delivered in one
+              // tick (a split arrange) must both survive React's batching —
+              // replacing would drop all but the last (mirrors node_moved).
+              setAnimatedLayout((prev) => [
+                ...(prev || []),
+                { positions: op.positions, animation: op.animation, seq: op.seq },
+              ]);
+            } else {
+              setRemotePositions((prev) => ({ ...(prev || {}), ...op.positions }));
+            }
+          }
           break;
         case 'annotation_created':
         case 'annotation_updated': {
@@ -283,6 +301,7 @@ function App() {
       setHiddenNodeIds,
       setHiddenEdgeIds,
       setRemotePositions,
+      setAnimatedLayout,
       setRemoteAnnotationOps,
       syncRef,
     ]
@@ -1531,6 +1550,19 @@ function App() {
           onAnnotationChange={scheduleAutoSave}
           remotePositions={remotePositions}
           onRemotePositionsApplied={() => setRemotePositions(null)}
+          animatedLayout={animatedLayout}
+          onAnimatedLayoutApplied={(drained) =>
+            setAnimatedLayout((prev) => {
+              // Clear only the batches the canvas actually drained: a new op
+              // enqueued between the drain and this reset must not be lost.
+              if (!prev || !drained || drained.length === 0) return prev || null;
+              const done = new Set(drained);
+              const rest = prev.filter((b) => !done.has(b));
+              return rest.length ? rest : null;
+            })
+          }
+          animatedLayoutResetKey={sessionId}
+          agentArrangingLabel={t('sessions.agent_arranging')}
           remoteAnnotationOps={remoteAnnotationOps}
           onRemoteAnnotationsApplied={() => setRemoteAnnotationOps(null)}
           remoteSelections={remoteSelections}

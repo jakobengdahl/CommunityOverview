@@ -297,6 +297,29 @@ describe('SessionSyncClient', () => {
     expect(client.seq).toBe(2);
   });
 
+  it('delivers an agent layout_applied op with its animation hint intact', () => {
+    // The canvas animation seam (contract §9-§10) depends on the animation hint
+    // and the originating client id surviving delivery: the frontend routes an
+    // op carrying `animation` to the tweening channel and shows an "agent is
+    // arranging" indicator for the reserved mcp-agent client.
+    const onRemoteOps = vi.fn();
+    const { client } = makeClient({ handlers: { onRemoteOps } });
+    client.connect();
+    const op = {
+      op: 'layout_applied',
+      positions: { a: { x: 10, y: 20 } },
+      animation: { animate: true, duration_ms: 400, easing: 'ease-in-out' },
+      seq: 3,
+    };
+    FakeEventSource.instances[0].emit({ type: 'op', client_id: 'mcp-agent', op, seq: 3 });
+    expect(onRemoteOps).toHaveBeenCalledWith([op], { clientId: 'mcp-agent' });
+    expect(onRemoteOps.mock.calls[0][0][0].animation).toEqual({
+      animate: true,
+      duration_ms: 400,
+      easing: 'ease-in-out',
+    });
+  });
+
   it('advances seq from the ops POST response', async () => {
     const fetchImpl = makeFetch([
       { ok: true, status: 200, json: async () => ({ applied: [], seq: 42 }) },

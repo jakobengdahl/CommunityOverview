@@ -162,6 +162,7 @@
   },
   "sessions": {
     "title": "Sessioner",
+    "agent_arranging": "Assistenten ordnar vyn …",
     "close": "Stäng menyn",
     "new_session": "Starta ny session",
     "new_session_started": "Ny session startad",

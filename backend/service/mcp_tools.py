@@ -760,30 +760,48 @@ def register_mcp_tools(
 
         The whole batch is applied as one atomic operation and mirrored live to
         every connected browser, so a bulk re-layout arrives as a single change
-        rather than node-by-node jumps. The canvas currently applies the move
-        immediately; the animation fields below are a forward-compatible hint
-        that animated transitions (a later change) will honour — they do not tween
-        the move today.
+        rather than node-by-node jumps. The canvas tweens the batch from the
+        nodes' current positions to the targets using the animation hint below,
+        so an arrange reads as one coherent motion.
+
+        Coordinates are model space (zoom/pan independent, pixels at zoom 1,
+        ``x``/``y`` = node top-left), exactly as ``get_visualization_layout``
+        reports them. Only the nodes you name move; a write is a partial update of
+        the position map, not a replacement. A batch is capped at 500 moves and
+        256 KiB of payload (``too_large`` above that), and each write also draws
+        from a per-client rate budget sized to the number of moves — so a single
+        very large arrange may return ``rate_limited`` before the hard cap. Either
+        way, split a large session across successive writes, threading the
+        returned ``revision`` into the next ``expected_revision``.
+        Layout patterns (horizontal DAG, grid, swimlanes) and the full geometry
+        contract are documented in
+        ``docs/MCP_VISUALIZATION_LAYOUT_CONTRACT.md`` and ``backend/DEVELOPMENT.md``.
 
         Args:
             session_id: The session ID shown in the browser header (e.g. "8244-1742")
             positions: Absolute targets ``{node_id: {"x": <n>, "y": <n>}}`` in the
                 model space described by ``get_visualization_layout``.
             deltas: Relative moves ``{node_id: {"dx": <n>, "dy": <n>}}`` from each
-                node's current position. Provide exactly one of positions/deltas.
+                node's current position (unknown ⇒ origin). Provide exactly one of
+                positions/deltas. Deltas are resolved to absolute positions before
+                broadcast, so every client applies identical coordinates.
             expected_revision: If given, the write is rejected unless it equals the
                 session's current ``revision`` (optimistic concurrency). Read it
-                from ``get_visualization_layout`` first.
-            animate: Forward-compatible hint that the move should be tweened once
-                animated transitions land (the move is applied immediately today).
-            duration_ms: Animation duration hint in milliseconds (see ``animate``).
-            easing: Animation easing hint, e.g. "ease-in-out", "linear" (see
-                ``animate``).
+                from ``get_visualization_layout`` first. Omit for last-write-wins.
+            animate: Whether the canvas should tween this move (default true). Send
+                the hint you intend; do not try to detect reduced motion yourself —
+                a viewer who asked for reduced motion snaps to the final positions
+                regardless (a client-side decision).
+            duration_ms: Tween duration in milliseconds (default 400).
+            easing: Tween easing, e.g. "ease-in-out" (default), "linear",
+                "ease-in", "ease-out".
 
         Returns:
             Dict with success, moved (node count), and the new revision. On a
             concurrency clash returns success=false with the current revision so
-            the caller can re-read and retry.
+            the caller can re-read and retry. Retryable errors: revision_conflict,
+            busy, rate_limited; change the request for too_large or a validation
+            error.
         """
         if session_manager is None:
             return {"success": False, "error": "Session manager not available"}
@@ -915,7 +933,8 @@ def register_mcp_tools(
 
         Use this to prepare a named session from scratch: create it, add nodes
         with the search/related tools (passing the returned session id as
-        ``visualization_session_id``), arrange it with
+        ``visualization_session_id``), inspect its geometry with
+        ``get_visualization_layout``, arrange it with
         ``apply_visualization_layout``, then hand the user its link.
 
         Args:
@@ -924,7 +943,11 @@ def register_mcp_tools(
 
         Returns:
             Dict with success and the session resource (session_id, name,
-            lifecycle_state, timestamps, revision, node_count, capabilities).
+            lifecycle_state, timestamps, revision, node_count, capabilities and
+            ``session_url``). ``session_url`` is the server-owned canonical direct
+            link — give that to the user as-is; never build a link from a hostname
+            yourself. It is null when no public base URL is configured for the
+            deployment.
         """
         if session_manager is None:
             return {"success": False, "error": "Session manager not available"}
