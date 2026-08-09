@@ -21,6 +21,12 @@ Effort scale: XS = single-line fix · S = up to ~30 lines / one file · M = mult
 
 ## Open
 
+### [2026-08-09] Visualization geometry/layout MCP tools bypass the authorization hook
+- **File(s):** `backend/service/mcp_tools.py:685` (`get_visualization_layout`), `:749` (`apply_visualization_layout`), `:640` (`get_visualization_session_state`)
+- **Context:** Discovered during `claude/task-test-assisted-session-creation-2kpz9b` (assistant-session end-to-end test)
+- **Issue:** The session *resource* CRUD tools (`create/list/get/rename/delete_visualization_session`) gate every call through `_authorize_session` (the seam the hosted layer swaps in for per-tenant enforcement), but the geometry read (`get_visualization_layout`, `get_visualization_session_state`) and the layout write (`apply_visualization_layout`) do not. Under the open-core permissive default this is invisible, but it is an inconsistency between parallel tool paths: in a `read-only`/`deny-all` (or hosted per-tenant) authorization mode an actor denied `get_visualization_session` can still read node geometry and, more importantly, *move nodes* via `apply_visualization_layout` — a mutation. The `TestUnauthorizedAccess` test documents the gap (it deliberately asserts only the CRUD mutations are denied). If the hook is meant to guard every session-touching tool, add `_authorize_session(GRAPH_ACTION_READ/MUTATE, ...)` to these three (mirroring the CRUD tools) and cover it in `test_assisted_session_creation.py`.
+- **Effort:** S
+
 ### [2026-07-19] Scheduled-trigger envelope omits `schema_version`
 - **File(s):** `backend/agents/scheduler.py:161` (`_build_payload`), test in `backend/agents/tests/test_scheduler.py:406`
 - **Context:** Discovered during `claude/saas-v1-slice-test-w6i7zp` (event envelope versioning)
