@@ -426,7 +426,11 @@ rearranging the canvas is just another collaborator. Coordinates are model space
 carries the move as one `layout_applied` op with a monotonic `revision`;
 pass the `revision` from a prior read as `expected_revision` for optimistic
 concurrency. Node width/height are not server-owned, so the read tool advertises
-an `assumed_node_size` for collision-free spacing instead.
+an `assumed_node_size` for collision-free spacing instead. The full geometry and
+movement semantics — coordinate model, absolute vs. delta moves, atomic batching
+and caps, the animation seam and the `layout_applied` broadcast shape — are the
+versioned contract in
+[`docs/MCP_VISUALIZATION_LAYOUT_CONTRACT.md`](../docs/MCP_VISUALIZATION_LAYOUT_CONTRACT.md).
 
 The `*_visualization_session` CRUD tools manage session *resources* (as opposed
 to inspecting/laying out an already-open one). They implement the versioned
