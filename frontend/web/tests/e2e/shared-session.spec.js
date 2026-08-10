@@ -131,9 +131,10 @@ test.describe('shared session — two users, one session', () => {
       timeout: 15000,
     });
 
-    // Open the drawer and trigger delete on the current session.
+    // Open the drawer and trigger delete on the current session via its ⋮ menu.
     await a.locator('.floating-header-hamburger').click();
-    await a.locator('.session-drawer-session.current .session-drawer-session-delete').click();
+    await a.locator('.session-drawer-session.current .session-context-menu-trigger').click();
+    await a.locator('.session-context-menu-item.danger').click();
 
     // The confirm dialog must mention that other users are connected (design 3.6).
     await expect(a.locator('text=/other user\\(s\\) are connected/i')).toBeVisible({
