@@ -75,6 +75,7 @@ class AgentWorker:
         on_result: Optional[Callable[[ProcessingResult], None]] = None,
         skills_config: Optional[SkillsConfig] = None,
         graph_storage: Optional[Any] = None,
+        run_recorder: Optional[Any] = None,
     ):
         """
         Initialize the agent worker.
@@ -87,6 +88,7 @@ class AgentWorker:
             on_result: Optional callback for processing results
             skills_config: SkillsConfig for the skills loader
             graph_storage: GraphStorage for reading linked Skill nodes
+            run_recorder: Optional AgentRunRecorder for durable run history
         """
         self.config = config
         self.settings = settings
@@ -95,6 +97,7 @@ class AgentWorker:
         self.on_result = on_result
         self._skills_config = skills_config or SkillsConfig()
         self._graph_storage = graph_storage
+        self._run_recorder = run_recorder
 
         # Event queue
         self._queue: queue.Queue[Optional[EventItem]] = queue.Queue()
@@ -347,6 +350,12 @@ class AgentWorker:
             f"(type: {event_payload.get('event_type', 'unknown')})"
         )
 
+        run_id = None
+        if self._run_recorder is not None:
+            run_id = self._run_recorder.record_start(
+                self.agent_id, self.config.name, event_payload
+            )
+
         try:
             # Ensure LLM client is ready
             if not self._llm_client:
@@ -431,6 +440,26 @@ class AgentWorker:
                 error=str(e),
                 processing_time_ms=(time.time() - start_time) * 1000,
             )
+
+        # Record the terminal outcome in durable run history.
+        if self._run_recorder is not None and run_id is not None:
+            if processing_result.success:
+                self._run_recorder.record_success(
+                    run_id,
+                    result={
+                        "handled": processing_result.handled,
+                        "summary": (processing_result.summary or "")[:500],
+                        "actions": len(processing_result.actions),
+                        "turns": processing_result.turns_used,
+                    },
+                )
+            else:
+                self._run_recorder.record_failure(
+                    run_id,
+                    processing_result.error
+                    or processing_result.summary
+                    or "processing failed",
+                )
 
         # Notify callback if set
         if self.on_result:

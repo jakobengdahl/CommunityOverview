@@ -16,6 +16,14 @@ from .config import AgentConfig, AgentsSettings
 from .worker import AgentWorker, ProcessingResult
 from .mcp_loader import MCPLoader
 from .scheduler import AgentScheduler
+from .run_history import AgentRunRecorder, STATUS_TO_STATE
+from .execution import (
+    ExecutionKind,
+    ExecutionStore,
+    InMemoryExecutionStore,
+    RetryPolicy,
+    SqliteExecutionStore,
+)
 from backend.skills.loader import SkillsConfig
 
 if TYPE_CHECKING:
@@ -42,6 +50,7 @@ class AgentRegistry:
         graph_storage: "GraphStorage",
         graph_service: "GraphService",
         skills_config: Optional[SkillsConfig] = None,
+        execution_store: Optional[ExecutionStore] = None,
     ):
         """
         Initialize the agent registry.
@@ -51,11 +60,27 @@ class AgentRegistry:
             graph_storage: GraphStorage for reading agent and skill nodes
             graph_service: GraphService for agent tool calls
             skills_config: Configuration for the skills loading system
+            execution_store: Store backing durable AgentRun history. When None,
+                one is created from settings.run_history_db (SQLite when set,
+                otherwise a volatile in-memory store). Injectable for tests.
         """
         self.settings = settings
         self._storage = graph_storage
         self._service = graph_service
         self._skills_config = skills_config or SkillsConfig()
+
+        # Durable AgentRun history sink. max_attempts=1 so a failed run is
+        # terminal (recorded as failed) rather than rescheduled — history
+        # records outcomes, it does not re-run work.
+        if execution_store is None:
+            history_policy = RetryPolicy(max_attempts=1)
+            if settings.run_history_db:
+                execution_store = SqliteExecutionStore(
+                    settings.run_history_db, retry_policy=history_policy
+                )
+            else:
+                execution_store = InMemoryExecutionStore(retry_policy=history_policy)
+        self._run_recorder = AgentRunRecorder(execution_store)
 
         # Active workers
         self._workers: Dict[str, AgentWorker] = {}
@@ -211,6 +236,7 @@ class AgentRegistry:
                 on_result=self._on_result,
                 skills_config=self._skills_config,
                 graph_storage=self._storage,
+                run_recorder=self._run_recorder,
             )
             worker.start()
             self._workers[config.agent_id] = worker
@@ -452,6 +478,41 @@ class AgentRegistry:
         """List all active worker agent IDs."""
         with self._lock:
             return list(self._workers.keys())
+
+    def list_runs(
+        self,
+        *,
+        agent_id: Optional[str] = None,
+        kind: Optional[str] = None,
+        status: Optional[str] = None,
+        limit: Optional[int] = None,
+    ) -> List[Dict[str, Any]]:
+        """
+        Return durable AgentRun history, newest-first.
+
+        ``kind`` filters by trigger ("scheduled" | "event"); ``status`` filters
+        by the AgentRun status vocabulary ("queued" | "running" | "succeeded" |
+        "failed" | "cancelled"). Unknown filter values yield an empty result.
+        """
+        kind_enum = None
+        if kind is not None:
+            try:
+                kind_enum = ExecutionKind(kind)
+            except ValueError:
+                return []
+        states = None
+        if status is not None:
+            state = STATUS_TO_STATE.get(status)
+            if state is None:
+                return []
+            states = [state]
+        return self._run_recorder.list_runs(
+            agent_id=agent_id, kind=kind_enum, states=states, limit=limit
+        )
+
+    def get_run(self, run_id: str) -> Optional[Dict[str, Any]]:
+        """Return a single AgentRun by id, or None."""
+        return self._run_recorder.get_run(run_id)
 
     def get_available_mcp_integrations(self) -> List[Dict[str, Any]]:
         """Get list of available MCP integrations for UI."""

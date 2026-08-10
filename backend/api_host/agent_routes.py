@@ -1,9 +1,9 @@
 """Federation and agent-system status endpoints for the api_host application."""
 
 import logging
-from typing import Any, Dict
+from typing import Any, Dict, List, Optional
 
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException, Query
 
 logger = logging.getLogger(__name__)
 
@@ -56,6 +56,35 @@ def register_agent_routes(
         needing to parse agent node metadata directly.
         """
         return agent_registry.get_schedules()
+
+    @app.get("/agents/runs")
+    async def agents_runs(
+        agent_id: Optional[str] = Query(None),
+        kind: Optional[str] = Query(None, description="Trigger: scheduled | event"),
+        status: Optional[str] = Query(
+            None,
+            description="queued | running | succeeded | failed | cancelled",
+        ),
+        limit: int = Query(100, ge=1, le=500),
+    ) -> List[Dict[str, Any]]:
+        """
+        List durable AgentRun history, newest-first.
+
+        Each run records the trigger, agent, status, timestamps, correlation,
+        attempts and terminal outcome, persisted behind the execution-store
+        seam so it survives a restart.
+        """
+        return agent_registry.list_runs(
+            agent_id=agent_id, kind=kind, status=status, limit=limit
+        )
+
+    @app.get("/agents/runs/{run_id}")
+    async def agents_run_detail(run_id: str) -> Dict[str, Any]:
+        """Get a single AgentRun by id."""
+        run = agent_registry.get_run(run_id)
+        if run is None:
+            raise HTTPException(status_code=404, detail=f"Run '{run_id}' not found")
+        return run
 
     @app.post("/agents/{agent_id}/trigger")
     async def agent_trigger(agent_id: str):

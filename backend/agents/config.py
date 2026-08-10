@@ -293,6 +293,10 @@ class AgentsSettings:
     mcp_integrations: List[MCPIntegration] = field(default_factory=list)
     max_agent_turns: int = 10  # Max LLM turns per event processing
     event_timeout: float = 60.0  # Timeout for processing a single event
+    # Durable AgentRun history: path to the SQLite file the run-history store
+    # writes to. When unset, run history is kept in a volatile in-memory store
+    # (lost on restart) so standalone/dev runs need no file.
+    run_history_db: Optional[str] = None
     # Named model profiles (see backend/config/model_profiles.py). Empty by
     # default — that is the legacy single-provider mode using the fields
     # above (llm_provider / llm_model / openai_api_key / anthropic_api_key).
@@ -319,6 +323,8 @@ class AgentsSettings:
             MCP_INTEGRATIONS: JSON array of integration configs (optional)
             AGENTS_MAX_TURNS: Max LLM turns per event (default: 10)
             AGENTS_EVENT_TIMEOUT: Event processing timeout in seconds (default: 60)
+            AGENTS_RUN_HISTORY_DB: Path to the SQLite file for durable AgentRun
+                history (optional; in-memory/volatile when unset)
         """
         # Parse enabled flag
         enabled_str = os.environ.get("AGENTS_ENABLED", "false").lower()
@@ -383,6 +389,7 @@ class AgentsSettings:
             max_agent_turns=int(os.environ.get("AGENTS_MAX_TURNS", "10")),
             event_timeout=float(os.environ.get("AGENTS_EVENT_TIMEOUT", "60")),
             model_profiles=model_profiles,
+            run_history_db=os.environ.get("AGENTS_RUN_HISTORY_DB") or None,
         )
 
     @staticmethod

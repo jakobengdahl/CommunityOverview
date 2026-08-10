@@ -261,9 +261,35 @@ In the server configuration (`backend/api_host/server.py`), add:
 storage.setup_events(enabled=True)
 ```
 
+## AgentRun History
+
+Each time an agent processes a trigger (a schedule firing or a matching graph
+event), the run is recorded as a durable **AgentRun** behind the execution-store
+seam ([`DURABLE_EXECUTION_CONTRACT.md`](DURABLE_EXECUTION_CONTRACT.md)). A run
+captures the trigger kind, agent, status (`running` → `succeeded` / `failed`),
+attempts, correlation/session/origin, timestamps, and a small terminal result or
+error. History survives a restart when a durable store is configured and can be
+swapped for a hosted store without changing the API or UI.
+
+This is a **history sink**: event delivery still uses the in-memory queue
+(below); recording history never blocks or breaks processing. The store backing
+history is chosen by `AGENTS_RUN_HISTORY_DB` — a SQLite file path for durable
+history, or an in-memory (volatile) store when unset.
+
+Read the history through the API:
+
+| Method | Endpoint | Description |
+|--------|----------|-------------|
+| GET | `/agents/runs` | List runs newest-first; filter by `agent_id`, `kind` (`scheduled`/`event`), `status`, `limit` |
+| GET | `/agents/runs/{run_id}` | Fetch a single run |
+
+In the web UI, open an agent for editing and choose **View run history**.
+
 ## Limitations (PoC)
 
-- **In-memory queue**: Events are not persisted; lost on restart
+- **In-memory delivery queue**: Events are delivered through an in-memory queue,
+  lost on restart. (AgentRun *history* is recorded durably — see above — but the
+  delivery queue itself is not yet wired to the durable store.)
 - **No guaranteed delivery**: Failed events are dropped after retries
 - **Single process**: Works within one process only
 - **Simple filtering**: No complex query expressions

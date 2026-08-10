@@ -103,6 +103,8 @@ function App() {
   const [editingSubscriptionData, setEditingSubscriptionData] = useState(null);
   const [showAgentDialog, setShowAgentDialog] = useState(false);
   const [editingAgentData, setEditingAgentData] = useState(null);
+  const [showAgentRunsDialog, setShowAgentRunsDialog] = useState(false);
+  const [agentRunsAgentId, setAgentRunsAgentId] = useState(null);
   const [createNodeType, setCreateNodeType] = useState(null);
   const [createGroupSignal, setCreateGroupSignal] = useState(0);
   const [saveViewSignal, setSaveViewSignal] = useState(0);
@@ -362,6 +364,7 @@ function App() {
       saveViewDialog ||
       showSubscriptionDialog ||
       showAgentDialog ||
+      showAgentRunsDialog ||
       skillDialogType ||
       showAKCDialog ||
       drawerOpen ||
@@ -380,6 +383,7 @@ function App() {
     saveViewDialog,
     showSubscriptionDialog,
     showAgentDialog,
+    showAgentRunsDialog,
     skillDialogType,
     showAKCDialog,
     drawerOpen,
@@ -1045,6 +1049,14 @@ function App() {
     setShowAgentDialog(true);
   }, []);
 
+  // Callback: View durable AgentRun history (optionally scoped to one agent)
+  const handleViewAgentRuns = useCallback((agentId = null) => {
+    setAgentRunsAgentId(agentId);
+    setShowAgentDialog(false);
+    setEditingAgentData(null);
+    setShowAgentRunsDialog(true);
+  }, []);
+
   // Save subscription node
   const handleSaveSubscription = useCallback(
     async (data) => {
@@ -1489,6 +1501,10 @@ function App() {
     setShowAgentDialog,
     editingAgentData,
     setEditingAgentData,
+    showAgentRunsDialog,
+    setShowAgentRunsDialog,
+    agentRunsAgentId,
+    onViewAgentRuns: handleViewAgentRuns,
     skillDialogType,
     setSkillDialogType,
     editingSkillData,
@@ -1646,6 +1662,7 @@ function App() {
             saveViewDialog ||
             showSubscriptionDialog ||
             showAgentDialog ||
+            showAgentRunsDialog ||
             skillDialogType ||
             showAKCDialog
           )

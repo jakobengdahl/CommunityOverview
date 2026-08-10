@@ -5,6 +5,7 @@ import InputDialog from './InputDialog';
 import CreateSubscriptionDialog from './CreateSubscriptionDialog';
 import CreateSkillDialog from './CreateSkillDialog';
 import CreateAgentDialog from './CreateAgentDialog';
+import AgentRunsDialog from './AgentRunsDialog';
 import CreateActiveKnowledgeCollectionDialog from './CreateActiveKnowledgeCollectionDialog';
 import EditEdgeDialog from './EditEdgeDialog';
 import NodeDetailDialog from './NodeDetailDialog';
@@ -65,6 +66,10 @@ function AppDialogs({
     setShowAgentDialog,
     editingAgentData,
     setEditingAgentData,
+    showAgentRunsDialog,
+    setShowAgentRunsDialog,
+    agentRunsAgentId,
+    onViewAgentRuns,
     skillDialogType,
     setSkillDialogType,
     editingSkillData,
@@ -237,7 +242,12 @@ function AppDialogs({
           }}
           onSave={onSaveAgent}
           initialData={editingAgentData}
+          onViewRuns={onViewAgentRuns}
         />
+      )}
+
+      {showAgentRunsDialog && (
+        <AgentRunsDialog agentId={agentRunsAgentId} onClose={() => setShowAgentRunsDialog(false)} />
       )}
 
       {showAKCDialog && (
