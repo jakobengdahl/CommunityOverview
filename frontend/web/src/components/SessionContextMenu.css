@@ -1,0 +1,86 @@
+.session-context-menu {
+  position: relative;
+  flex-shrink: 0;
+}
+
+.session-context-menu-trigger {
+  background: transparent;
+  border: none;
+  color: #666;
+  cursor: pointer;
+  padding: 6px 8px;
+  display: flex;
+  align-items: center;
+  border-radius: 6px;
+  opacity: 0;
+  transition:
+    color 0.15s,
+    opacity 0.15s;
+}
+
+.session-drawer-session:hover .session-context-menu-trigger,
+.session-context-menu-trigger.open,
+.session-context-menu-trigger:focus-visible {
+  opacity: 1;
+}
+
+.session-context-menu-trigger:hover,
+.session-context-menu-trigger.open {
+  color: #ccc;
+}
+
+.session-context-menu-dropdown {
+  position: absolute;
+  top: calc(100% + 2px);
+  right: 0;
+  z-index: 400;
+  min-width: 170px;
+  padding: 4px;
+  background: rgba(38, 38, 38, 0.98);
+  backdrop-filter: blur(12px);
+  -webkit-backdrop-filter: blur(12px);
+  border: 1px solid #444;
+  border-radius: 8px;
+  box-shadow: 0 6px 24px rgba(0, 0, 0, 0.45);
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+}
+
+.session-context-menu-item {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  width: 100%;
+  padding: 8px 10px;
+  background: transparent;
+  border: none;
+  border-radius: 6px;
+  color: #ccc;
+  font-size: 0.82rem;
+  cursor: pointer;
+  text-align: left;
+  transition:
+    background 0.15s,
+    color 0.15s;
+}
+
+.session-context-menu-item:hover:not(:disabled),
+.session-context-menu-item:focus-visible {
+  background: rgba(255, 255, 255, 0.1);
+  color: #fff;
+}
+
+.session-context-menu-item.danger:hover:not(:disabled) {
+  background: rgba(224, 108, 108, 0.16);
+  color: #e06c6c;
+}
+
+.session-context-menu-item:disabled {
+  opacity: 0.4;
+  cursor: default;
+}
+
+.session-context-menu-item svg {
+  flex-shrink: 0;
+}

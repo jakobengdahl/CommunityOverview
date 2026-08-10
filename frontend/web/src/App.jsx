@@ -1366,6 +1366,34 @@ function App() {
     [sessionId, switchToSession]
   );
 
+  // Copy the canonical share link for a session (contract §5 form
+  // `<base>/?session=<id>`), built from the current origin+path so it stays
+  // correct across deployments without needing the server base URL client-side.
+  const handleCopySessionLink = useCallback(
+    async (targetId) => {
+      const url = new URL(window.location.href);
+      url.hash = '';
+      url.search = '';
+      url.searchParams.set('session', targetId);
+      const link = url.toString();
+      try {
+        await navigator.clipboard.writeText(link);
+      } catch {
+        const el = document.createElement('textarea');
+        el.value = link;
+        document.body.appendChild(el);
+        el.select();
+        try {
+          document.execCommand('copy');
+        } finally {
+          document.body.removeChild(el);
+        }
+      }
+      showNotification('success', t('sessions.link_copied'));
+    },
+    [showNotification, t]
+  );
+
   const handleConnectSession = useCallback(
     (targetId) => {
       if (!sessionStore.isValidSessionId(targetId)) {
@@ -1657,6 +1685,7 @@ function App() {
           setRenameDialog({ id, name: entry?.name || '' });
         }}
         onDeleteSession={handleRequestDeleteSession}
+        onCopySessionLink={handleCopySessionLink}
         onOpenSettings={() => setSettingsOpen(true)}
         onOpenActivity={() => {
           setDrawerOpen(false);
