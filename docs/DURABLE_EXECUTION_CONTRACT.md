@@ -190,9 +190,24 @@ keeps adapter behaviour deterministic under test.
 reference, thread-safe implementation — the *null / volatile* adapter, analogous
 to `FileGraphPersistenceBackend` for graph persistence. It proves the contract
 is implementable and serves tests and standalone runs. **It is not durable** —
-its state does not survive a restart. Durable local and hosted adapters implement
-the same methods with real persistence and are held to the same
-`ExecutionStoreContractTests`.
+its state does not survive a restart.
+
+### Durable local adapter
+
+`SqliteExecutionStore` (`backend/agents/execution/sqlite_store.py`) is the
+default **durable** local adapter, backed by SQLite via the stdlib `sqlite3`
+module per [ADR 0001](adr/0001-local-durable-execution-store.md). Reopening the
+same database file after a restart recovers every job and its state. It holds
+`idempotency_key` under a `UNIQUE` constraint, runs `claim_next` inside a
+`BEGIN IMMEDIATE` transaction, and tracks its schema with `PRAGMA user_version`.
+It implements the same methods as every other adapter and passes the same
+`ExecutionStoreContractTests`, plus restart-durability tests the volatile
+adapter cannot satisfy.
+
+Hosted adapters implement the same methods with their own persistence and are
+held to the same contract. Wiring the scheduler/worker to run live agent work
+through a store (rather than the current in-memory queue) is a separate,
+later slice.
 
 ## 9. Public/private boundary
 
