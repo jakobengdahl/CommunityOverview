@@ -8,7 +8,11 @@ from unittest.mock import MagicMock
 import pytest
 
 from backend.agents.config import AgentConfig, AgentPrompts, AgentsSettings
-from backend.agents.execution import InMemoryExecutionStore, RetryPolicy
+from backend.agents.execution import (
+    InMemoryExecutionStore,
+    RetryPolicy,
+    SqliteExecutionStore,
+)
 from backend.agents.run_history import AgentRunRecorder
 from backend.agents.worker import AgentWorker
 
@@ -83,6 +87,26 @@ class TestRecorder:
         second = rec.record_start("agent-1", "A", _event_payload(event_id="dup"))
         assert first == second
         assert len(rec.list_runs()) == 1
+
+    def test_durable_sqlite_store_records_terminal_outcomes(self, tmp_path):
+        # The durable path is what this slice exists for: verify the recorder's
+        # start→terminal flow against SqliteExecutionStore, not only in-memory.
+        store = SqliteExecutionStore(
+            tmp_path / "runs.db", retry_policy=RetryPolicy(max_attempts=1)
+        )
+        try:
+            rec = AgentRunRecorder(store)
+            ok = rec.record_start("agent-1", "A", _event_payload(event_id="ok"))
+            rec.record_success(ok, {"handled": True})
+            bad = rec.record_start("agent-1", "A", _event_payload(event_id="bad"))
+            rec.record_failure(bad, "boom")
+
+            assert rec.get_run(ok)["status"] == "succeeded"
+            failed = rec.get_run(bad)
+            assert failed["status"] == "failed"  # terminal, not rescheduled
+            assert failed["attempts"] == 1
+        finally:
+            store.close()
 
     def test_none_store_is_noop(self):
         rec = AgentRunRecorder(None)
