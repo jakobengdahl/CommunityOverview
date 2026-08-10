@@ -271,7 +271,9 @@ storage.setup_events(enabled=True)
 ## Future Enhancements
 
 The following are planned but not implemented:
-- Persistent event queue with durability guarantees
+- Persistent event queue with durability guarantees — the seam these will
+  implement (durable queue/job state, retries, dead-letter, restart recovery) is
+  specified in [`DURABLE_EXECUTION_CONTRACT.md`](DURABLE_EXECUTION_CONTRACT.md)
 - Advanced filtering with query expressions
 - Event replay and debugging tools
 
