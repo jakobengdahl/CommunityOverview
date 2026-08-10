@@ -69,9 +69,10 @@ Concretely, when the adapter is implemented (the next slice):
 - It opens the database in **WAL journal mode** with a bounded `busy_timeout`,
   and performs `claim_next` inside a write transaction (`BEGIN IMMEDIATE`) so the
   select-and-transition is atomic under concurrent workers.
-- `idempotency_key` carries a **`UNIQUE` constraint**; `enqueue` upserts against
-  it and returns the existing row on conflict, satisfying the idempotency rule at
-  the storage layer instead of in application code.
+- `idempotency_key` carries a **`UNIQUE` constraint**; `enqueue` inserts, and on
+  an `idempotency_key` conflict returns the existing row **unchanged** (it does
+  not update it), satisfying the idempotency rule at the storage layer instead of
+  in application code.
 - Row shape is anchored to `ExecutionJob.to_dict()` / `from_dict()`; the
   `payload` and `result` blobs are stored as JSON text. Indexes on
   `(state, run_at)` and `created_at` back `claim_next` and `list_jobs`.
