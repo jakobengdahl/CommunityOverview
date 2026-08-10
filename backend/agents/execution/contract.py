@@ -73,10 +73,28 @@ class ExecutionStoreContractTests:
         assert second.id == first.id
         assert len(store.list_jobs()) == 1
 
+    def test_enqueue_dedups_against_terminal_job(self, store):
+        # The restart-safety property (§5): a key that already reached a terminal
+        # state must not re-enqueue new work — a schedule re-fired after it
+        # already succeeded stays deduplicated.
+        first = store.enqueue(_job(idempotency_key="once"))
+        store.claim_next("w1", now=T0)
+        store.complete(first.id, now=T0)
+        again = store.enqueue(_job(idempotency_key="once"))
+        assert again.id == first.id
+        assert again.state == ExecutionState.SUCCEEDED
+        assert len(store.list_jobs()) == 1
+
     def test_enqueue_returns_independent_copy(self, store):
         job = store.enqueue(_job())
         job.payload["mutated"] = True
         assert store.get(job.id).payload == {}
+
+    def test_enqueue_dedup_return_is_independent_copy(self, store):
+        store.enqueue(_job(idempotency_key="dup"))
+        dup = store.enqueue(_job(idempotency_key="dup"))
+        dup.payload["mutated"] = True
+        assert store.get(dup.id).payload == {}
 
     # -- claim / lease ------------------------------------------------------
 
@@ -223,6 +241,16 @@ class ExecutionStoreContractTests:
         # Lease now extends past the original expiry, so no recovery yet.
         assert store.recover_stale(now=T0 + timedelta(seconds=80)) == []
 
+    def test_renew_lease_rejects_non_running_and_unknown(self, store):
+        assert store.renew_lease("nope", "w1", now=T0) is False
+        j = store.enqueue(_job())
+        # PENDING (never claimed) cannot be renewed.
+        assert store.renew_lease(j.id, "w1", now=T0) is False
+        store.claim_next("w1", now=T0)
+        store.complete(j.id, now=T0)
+        # Terminal cannot be renewed.
+        assert store.renew_lease(j.id, "w1", now=T0) is False
+
     # -- inspection ---------------------------------------------------------
 
     def test_list_jobs_filters_and_orders(self, store):
@@ -237,3 +265,13 @@ class ExecutionStoreContractTests:
         assert len(store.list_jobs(states=[ExecutionState.PENDING])) == 2
         assert len(store.list_jobs(states=[ExecutionState.SUCCEEDED])) == 0
         assert len(store.list_jobs(limit=1)) == 1
+
+    def test_list_jobs_newest_first(self, store):
+        older = store.enqueue(
+            _job(idempotency_key="old", run_at=T0 - timedelta(seconds=60))
+        )
+        newer = store.enqueue(_job(idempotency_key="new", run_at=T0))
+        ordered = store.list_jobs()
+        assert [j.id for j in ordered] == [newer.id, older.id]
+        # limit keeps the newest.
+        assert [j.id for j in store.list_jobs(limit=1)] == [newer.id]

@@ -125,11 +125,20 @@ where it survives a restart.
 
 - `claim_next(worker_id, now, lease_seconds)` atomically selects the oldest
   runnable job, transitions it to `RUNNING`, increments `attempts`, and grants a
-  lease until `now + lease_seconds`. At most one worker holds a job at a time.
+  lease until `now + lease_seconds`. Only one worker holds a **valid** lease on a
+  job at a time — `claim_next` will not hand out a job whose lease is still live.
 - A job is **runnable** when it is `PENDING` with `run_at <= now`, **or**
   `RUNNING` with an expired lease (reclaimed after a crash — see §7).
 - A worker that runs longer than its lease calls `renew_lease` to keep it.
 - On success the worker calls `complete`; on failure, `fail`.
+- `complete`/`fail` act by **job id and are not lease-guarded**: the first
+  terminal write wins, and the sticky-terminal rule then makes every later write
+  a no-op. If a worker's lease expired and another reclaimed the job, whichever
+  worker reaches a terminal state first decides the outcome; the other's result
+  is dropped. This is consistent with at-least-once delivery (a reclaimed job may
+  run more than once) and keeps the core seam simple. An adapter that needs the
+  reclaiming worker's result to win — rejecting a stale worker's completion —
+  may add a lease-ownership check without changing this contract.
 
 Delivery is **at-least-once**: a worker that crashes after claiming but before
 completing will have its job reclaimed and retried. Agent actions that write to
