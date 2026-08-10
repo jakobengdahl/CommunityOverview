@@ -19,6 +19,13 @@ Effort scale: XS = single-line fix · S = up to ~30 lines / one file · M = mult
 
 ---
 
+### [2026-08-10] Durable execution contract header links to wrong section number
+
+- **File(s):** `docs/DURABLE_EXECUTION_CONTRACT.md:11`
+- **Context:** Discovered during `claude/task-core-durable-agent-runtime-6q32c8`
+- **Issue:** The scope note in the header says "see §8 Public/private boundary", but the ExecutionStore seam is §8 and the Public/private boundary is §9. The anchor `#8-publicprivate-boundary` is also stale. Should point to §9.
+- **Effort:** XS
+
 ## Open
 
 ### [2026-08-09] Visualization geometry/layout MCP tools bypass the authorization hook

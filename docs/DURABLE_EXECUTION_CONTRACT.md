@@ -201,7 +201,9 @@ This contract covers only generic core reliability. It deliberately excludes:
 - **Tenant / workspace isolation** and per-tenant concurrency, quotas and
   retention policy.
 - **The durable storage technology** (local file/SQL, hosted database) and its
-  migration posture.
+  migration posture. The *default local* choice is recorded in
+  [ADR 0001](adr/0001-local-durable-execution-store.md) (SQLite via stdlib
+  `sqlite3`); hosted storage technologies remain a hosted-layer concern.
 - **Run-history APIs and UI**, and **approval / governance** semantics.
 - Any business-specific scheduling, prioritisation or fairness policy.
 
