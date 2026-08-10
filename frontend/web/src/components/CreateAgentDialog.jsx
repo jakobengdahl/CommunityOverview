@@ -1,5 +1,6 @@
 import { useState, useEffect } from 'react';
 import useGraphStore from '../store/graphStore';
+import { useI18n } from '../i18n';
 import './CreateSubscriptionDialog.css'; // Reuse the same styles
 
 /**
@@ -12,8 +13,10 @@ import './CreateSubscriptionDialog.css'; // Reuse the same styles
  * The agent runtime will start a background worker for enabled agents and
  * route matching events to the agent's LLM-based processing loop.
  */
-export default function CreateAgentDialog({ onClose, onSave, initialData }) {
+export default function CreateAgentDialog({ onClose, onSave, initialData, onViewRuns }) {
+  const { t } = useI18n();
   const schema = useGraphStore((state) => state.schema);
+  const editingAgentId = initialData?.agent?.id || null;
 
   // Agent info
   const [name, setName] = useState('');
@@ -489,6 +492,15 @@ When a new Initiative node is created:
           </div>
 
           <div className="dialog-actions">
+            {editingAgentId && onViewRuns && (
+              <button
+                type="button"
+                className="btn-secondary"
+                onClick={() => onViewRuns(editingAgentId)}
+              >
+                {t('agent_runs.view_runs')}
+              </button>
+            )}
             <button type="button" className="btn-secondary" onClick={onClose}>
               Cancel
             </button>

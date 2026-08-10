@@ -344,6 +344,8 @@ The default API prefix is `/api` (configurable via `API_PREFIX`).
 | GET | `/api/views/{name}` | Get a saved view |
 | GET | `/api/views` | List saved views |
 | GET | `/agents/schedules` | List all agent schedules (for external scheduler reconciliation) |
+| GET | `/agents/runs` | List durable AgentRun history (filter by `agent_id`, `kind`, `status`, `limit`), newest-first |
+| GET | `/agents/runs/{run_id}` | Get a single AgentRun by id |
 | POST | `/agents/{id}/trigger` | Fire a scheduled agent immediately (used by GCP Cloud Scheduler) |
 
 ### Shared Session Endpoints
