@@ -19,6 +19,13 @@ Effort scale: XS = single-line fix · S = up to ~30 lines / one file · M = mult
 
 ---
 
+### [2026-08-10] Agent governance does not pre-filter tool definitions
+
+- **File(s):** `backend/agents/worker.py` (`_process_event`), `backend/agents/mcp_loader.py`
+- **Context:** Discovered during `claude/task-core-durable-agent-runtime-6q32c8` (basic-agent-governance)
+- **Issue:** The autonomy gate enforces the allowlist and blocks/queues mutating tools at execution time (authoritative), but the tool *definitions* handed to the LLM are not filtered by `tool_allowlist` or autonomy level. A read-only (observe/assist) or allowlist-restricted agent still sees tools it cannot use and may waste turns attempting them (they fail cleanly). Filtering `get_tool_definitions` by allowlist, and dropping mutating tools for read-only levels, would reduce wasted attempts. Enforcement is unaffected — this is an efficiency/UX improvement only.
+- **Effort:** S
+
 ### [2026-08-10] Durable execution contract header links to wrong section number
 
 - **File(s):** `docs/DURABLE_EXECUTION_CONTRACT.md:11`

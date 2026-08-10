@@ -346,6 +346,10 @@ The default API prefix is `/api` (configurable via `API_PREFIX`).
 | GET | `/agents/schedules` | List all agent schedules (for external scheduler reconciliation) |
 | GET | `/agents/runs` | List durable AgentRun history (filter by `agent_id`, `kind`, `status`, `limit`), newest-first |
 | GET | `/agents/runs/{run_id}` | Get a single AgentRun by id |
+| GET | `/agents/proposals` | List agent proposals (filter by `agent_id`, `status`, `limit`), newest-first |
+| GET | `/agents/proposals/{proposal_id}` | Get a single proposal by id |
+| POST | `/agents/proposals/{proposal_id}/approve` | Approve a proposal (applies the action for act_after_approval agents) |
+| POST | `/agents/proposals/{proposal_id}/reject` | Reject a proposal |
 | POST | `/agents/{id}/trigger` | Fire a scheduled agent immediately (used by GCP Cloud Scheduler) |
 
 ### Shared Session Endpoints

@@ -13,7 +13,13 @@ import './CreateSubscriptionDialog.css'; // Reuse the same styles
  * The agent runtime will start a background worker for enabled agents and
  * route matching events to the agent's LLM-based processing loop.
  */
-export default function CreateAgentDialog({ onClose, onSave, initialData, onViewRuns }) {
+export default function CreateAgentDialog({
+  onClose,
+  onSave,
+  initialData,
+  onViewRuns,
+  onViewProposals,
+}) {
   const { t } = useI18n();
   const schema = useGraphStore((state) => state.schema);
   const editingAgentId = initialData?.agent?.id || null;
@@ -499,6 +505,15 @@ When a new Initiative node is created:
                 onClick={() => onViewRuns(editingAgentId)}
               >
                 {t('agent_runs.view_runs')}
+              </button>
+            )}
+            {editingAgentId && onViewProposals && (
+              <button
+                type="button"
+                className="btn-secondary"
+                onClick={() => onViewProposals(editingAgentId)}
+              >
+                {t('agent_proposals.view_proposals')}
               </button>
             )}
             <button type="button" className="btn-secondary" onClick={onClose}>

@@ -24,6 +24,12 @@ from .execution import (
     RetryPolicy,
     SqliteExecutionStore,
 )
+from .governance import (
+    GovernanceManager,
+    InMemoryProposalStore,
+    ProposalStore,
+    SqliteProposalStore,
+)
 from backend.skills.loader import SkillsConfig
 
 if TYPE_CHECKING:
@@ -51,6 +57,7 @@ class AgentRegistry:
         graph_service: "GraphService",
         skills_config: Optional[SkillsConfig] = None,
         execution_store: Optional[ExecutionStore] = None,
+        proposal_store: Optional[ProposalStore] = None,
     ):
         """
         Initialize the agent registry.
@@ -63,6 +70,9 @@ class AgentRegistry:
             execution_store: Store backing durable AgentRun history. When None,
                 one is created from settings.run_history_db (SQLite when set,
                 otherwise a volatile in-memory store). Injectable for tests.
+            proposal_store: Store backing durable agent proposals (governance).
+                When None, one is created from settings.governance_db. Injectable
+                for tests.
         """
         self.settings = settings
         self._storage = graph_storage
@@ -81,6 +91,17 @@ class AgentRegistry:
             else:
                 execution_store = InMemoryExecutionStore(retry_policy=history_policy)
         self._run_recorder = AgentRunRecorder(execution_store)
+
+        # Durable agent governance: proposals with persistent approve/reject.
+        if proposal_store is None:
+            if settings.governance_db:
+                proposal_store = SqliteProposalStore(settings.governance_db)
+            else:
+                proposal_store = InMemoryProposalStore()
+        self._proposal_store = proposal_store
+        self._governance = GovernanceManager(
+            proposal_store, executor_factory=self._build_apply_executor
+        )
 
         # Active workers
         self._workers: Dict[str, AgentWorker] = {}
@@ -237,6 +258,7 @@ class AgentRegistry:
                 skills_config=self._skills_config,
                 graph_storage=self._storage,
                 run_recorder=self._run_recorder,
+                proposal_store=self._proposal_store,
             )
             worker.start()
             self._workers[config.agent_id] = worker
@@ -513,6 +535,45 @@ class AgentRegistry:
     def get_run(self, run_id: str) -> Optional[Dict[str, Any]]:
         """Return a single AgentRun by id, or None."""
         return self._run_recorder.get_run(run_id)
+
+    # ------------------------------------------------------------------
+    # Governance: proposals
+    # ------------------------------------------------------------------
+
+    def _build_apply_executor(self, agent_id: str):
+        """Raw (ungated) tool executor used to apply an approved proposal."""
+        self._ensure_initialized()
+        return self._mcp_loader.create_tool_executor(
+            graph_service=self._service, agent_id=agent_id
+        )
+
+    def list_proposals(
+        self,
+        *,
+        agent_id: Optional[str] = None,
+        status: Optional[str] = None,
+        limit: Optional[int] = None,
+    ) -> List[Dict[str, Any]]:
+        """List agent proposals, newest-first. Unknown status → empty."""
+        return self._governance.list_proposals(
+            agent_id=agent_id, status=status, limit=limit
+        )
+
+    def get_proposal(self, proposal_id: str) -> Optional[Dict[str, Any]]:
+        """Return a single proposal by id, or None."""
+        return self._governance.get_proposal(proposal_id)
+
+    def approve_proposal(
+        self, proposal_id: str, *, decided_by: Optional[str] = None
+    ) -> Optional[Dict[str, Any]]:
+        """Approve a proposal; applies the action for act_after_approval agents."""
+        return self._governance.approve(proposal_id, decided_by=decided_by)
+
+    def reject_proposal(
+        self, proposal_id: str, *, decided_by: Optional[str] = None
+    ) -> Optional[Dict[str, Any]]:
+        """Reject a proposal."""
+        return self._governance.reject(proposal_id, decided_by=decided_by)
 
     def get_available_mcp_integrations(self) -> List[Dict[str, Any]]:
         """Get list of available MCP integrations for UI."""

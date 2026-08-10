@@ -76,6 +76,7 @@ class AgentWorker:
         skills_config: Optional[SkillsConfig] = None,
         graph_storage: Optional[Any] = None,
         run_recorder: Optional[Any] = None,
+        proposal_store: Optional[Any] = None,
     ):
         """
         Initialize the agent worker.
@@ -89,6 +90,7 @@ class AgentWorker:
             skills_config: SkillsConfig for the skills loader
             graph_storage: GraphStorage for reading linked Skill nodes
             run_recorder: Optional AgentRunRecorder for durable run history
+            proposal_store: Optional ProposalStore backing agent governance
         """
         self.config = config
         self.settings = settings
@@ -98,6 +100,7 @@ class AgentWorker:
         self._skills_config = skills_config or SkillsConfig()
         self._graph_storage = graph_storage
         self._run_recorder = run_recorder
+        self._proposal_store = proposal_store
 
         # Event queue
         self._queue: queue.Queue[Optional[EventItem]] = queue.Queue()
@@ -392,11 +395,28 @@ class AgentWorker:
             # Build user message with event
             user_message = build_event_user_message(event_payload)
 
-            # Create tool executor
+            # Create tool executor, gated by the agent's autonomy level and tool
+            # allowlist. Mutating tools under an approval-gated level become
+            # durable proposals instead of executing.
             tool_executor = self.mcp_loader.create_tool_executor(
                 graph_service=self.graph_service,
                 agent_id=self.agent_id,
             )
+            if self._proposal_store is not None:
+                from .governance import AutonomyGate, coerce_autonomy
+
+                origin = event_payload.get("origin") or {}
+                gate = AutonomyGate(
+                    autonomy_level=coerce_autonomy(self.config.autonomy_level),
+                    tool_allowlist=self.config.tool_allowlist,
+                    mcp_loader=self.mcp_loader,
+                    proposal_store=self._proposal_store,
+                    agent_id=self.agent_id,
+                    agent_name=self.config.name,
+                    run_id=run_id,
+                    correlation_id=origin.get("event_correlation_id"),
+                )
+                tool_executor = gate.wrap(tool_executor)
 
             # Execute with tools
             result = self._llm_client.execute_with_tools(
