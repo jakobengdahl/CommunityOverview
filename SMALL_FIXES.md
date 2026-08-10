@@ -19,6 +19,20 @@ Effort scale: XS = single-line fix · S = up to ~30 lines / one file · M = mult
 
 ---
 
+### [2026-08-10] Flaky timing-dependent webhook delivery-retry test
+
+- **File(s):** `backend/core/events/tests/test_delivery.py:225` (`TestDeliveryWorker::test_failed_delivery_with_retry`)
+- **Context:** Discovered during `claude/task-core-durable-agent-runtime-6q32c8` (governance PR #299 CI); the test failed once on CI (`assert 0 == 1` — no SUCCESS result) but passes 5/5 locally and is unrelated to the diff (governance touches `backend/agents`/`backend/api_host` only).
+- **Issue:** The test enqueues an event, `time.sleep(1.0)`, then asserts exactly one SUCCESS result after 2 failing HTTP attempts (0.1s backoff each). Under CI load the fixed 1.0s wait can elapse before the third (successful) attempt lands, making it flaky. Should wait on a condition/event instead of a fixed sleep, or increase/parametrise the timeout.
+- **Effort:** S
+
+### [2026-08-10] Agent governance does not pre-filter tool definitions
+
+- **File(s):** `backend/agents/worker.py` (`_process_event`), `backend/agents/mcp_loader.py`
+- **Context:** Discovered during `claude/task-core-durable-agent-runtime-6q32c8` (basic-agent-governance)
+- **Issue:** The autonomy gate enforces the allowlist and blocks/queues mutating tools at execution time (authoritative), but the tool *definitions* handed to the LLM are not filtered by `tool_allowlist` or autonomy level. A read-only (observe/assist) or allowlist-restricted agent still sees tools it cannot use and may waste turns attempting them (they fail cleanly). Filtering `get_tool_definitions` by allowlist, and dropping mutating tools for read-only levels, would reduce wasted attempts. Enforcement is unaffected — this is an efficiency/UX improvement only.
+- **Effort:** S
+
 ### [2026-08-10] Durable execution contract header links to wrong section number
 
 - **File(s):** `docs/DURABLE_EXECUTION_CONTRACT.md:11`

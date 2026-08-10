@@ -105,6 +105,8 @@ function App() {
   const [editingAgentData, setEditingAgentData] = useState(null);
   const [showAgentRunsDialog, setShowAgentRunsDialog] = useState(false);
   const [agentRunsAgentId, setAgentRunsAgentId] = useState(null);
+  const [showAgentProposalsDialog, setShowAgentProposalsDialog] = useState(false);
+  const [agentProposalsAgentId, setAgentProposalsAgentId] = useState(null);
   const [createNodeType, setCreateNodeType] = useState(null);
   const [createGroupSignal, setCreateGroupSignal] = useState(0);
   const [saveViewSignal, setSaveViewSignal] = useState(0);
@@ -365,6 +367,7 @@ function App() {
       showSubscriptionDialog ||
       showAgentDialog ||
       showAgentRunsDialog ||
+      showAgentProposalsDialog ||
       skillDialogType ||
       showAKCDialog ||
       drawerOpen ||
@@ -384,6 +387,7 @@ function App() {
     showSubscriptionDialog,
     showAgentDialog,
     showAgentRunsDialog,
+    showAgentProposalsDialog,
     skillDialogType,
     showAKCDialog,
     drawerOpen,
@@ -1057,6 +1061,14 @@ function App() {
     setShowAgentRunsDialog(true);
   }, []);
 
+  // Callback: View agent proposals (optionally scoped to one agent)
+  const handleViewAgentProposals = useCallback((agentId = null) => {
+    setAgentProposalsAgentId(agentId);
+    setShowAgentDialog(false);
+    setEditingAgentData(null);
+    setShowAgentProposalsDialog(true);
+  }, []);
+
   // Save subscription node
   const handleSaveSubscription = useCallback(
     async (data) => {
@@ -1505,6 +1517,10 @@ function App() {
     setShowAgentRunsDialog,
     agentRunsAgentId,
     onViewAgentRuns: handleViewAgentRuns,
+    showAgentProposalsDialog,
+    setShowAgentProposalsDialog,
+    agentProposalsAgentId,
+    onViewAgentProposals: handleViewAgentProposals,
     skillDialogType,
     setSkillDialogType,
     editingSkillData,
@@ -1663,6 +1679,7 @@ function App() {
             showSubscriptionDialog ||
             showAgentDialog ||
             showAgentRunsDialog ||
+            showAgentProposalsDialog ||
             skillDialogType ||
             showAKCDialog
           )

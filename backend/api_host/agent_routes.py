@@ -86,6 +86,65 @@ def register_agent_routes(
             raise HTTPException(status_code=404, detail=f"Run '{run_id}' not found")
         return run
 
+    @app.get("/agents/proposals")
+    async def agents_proposals(
+        agent_id: Optional[str] = Query(None),
+        status: Optional[str] = Query(
+            None,
+            description="pending | approved | rejected | applied | apply_failed",
+        ),
+        limit: int = Query(100, ge=1, le=500),
+    ) -> List[Dict[str, Any]]:
+        """
+        List durable agent proposals, newest-first.
+
+        A proposal is a mutating action an agent recorded (under the propose /
+        act_after_approval autonomy levels) awaiting a human approve/reject
+        decision.
+        """
+        return agent_registry.list_proposals(
+            agent_id=agent_id, status=status, limit=limit
+        )
+
+    @app.get("/agents/proposals/{proposal_id}")
+    async def agents_proposal_detail(proposal_id: str) -> Dict[str, Any]:
+        """Get a single proposal by id."""
+        proposal = agent_registry.get_proposal(proposal_id)
+        if proposal is None:
+            raise HTTPException(
+                status_code=404, detail=f"Proposal '{proposal_id}' not found"
+            )
+        return proposal
+
+    @app.post("/agents/proposals/{proposal_id}/approve")
+    async def agents_proposal_approve(
+        proposal_id: str,
+        decided_by: Optional[str] = Query(None),
+    ) -> Dict[str, Any]:
+        """
+        Approve a proposal. For act_after_approval agents this also applies the
+        captured action and reports the outcome.
+        """
+        result = agent_registry.approve_proposal(proposal_id, decided_by=decided_by)
+        if result is None:
+            raise HTTPException(
+                status_code=404, detail=f"Proposal '{proposal_id}' not found"
+            )
+        return result
+
+    @app.post("/agents/proposals/{proposal_id}/reject")
+    async def agents_proposal_reject(
+        proposal_id: str,
+        decided_by: Optional[str] = Query(None),
+    ) -> Dict[str, Any]:
+        """Reject a proposal."""
+        result = agent_registry.reject_proposal(proposal_id, decided_by=decided_by)
+        if result is None:
+            raise HTTPException(
+                status_code=404, detail=f"Proposal '{proposal_id}' not found"
+            )
+        return result
+
     @app.post("/agents/{agent_id}/trigger")
     async def agent_trigger(agent_id: str):
         """

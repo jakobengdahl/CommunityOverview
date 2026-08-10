@@ -285,6 +285,42 @@ Read the history through the API:
 
 In the web UI, open an agent for editing and choose **View run history**.
 
+## Agent governance: autonomy levels and proposals
+
+Each agent has an **autonomy level** (`metadata.autonomy_level`) that bounds what
+its runs may do, enforced at the tool-execution boundary together with the
+agent's optional `tool_allowlist`:
+
+| Level | Mutating tools (add/update/delete nodes/edges, write_file) |
+|-------|-----------------------------------------------------------|
+| `observe` | Blocked — read-only |
+| `assist` | Blocked — read-only |
+| `propose` | Recorded as a durable **Proposal**; approving does not apply it (a human applies) |
+| `act_after_approval` | Recorded as a durable Proposal; approving **applies** the captured action |
+
+Read-only tools always run (subject to the allowlist). A mutating call under
+`propose` / `act_after_approval` is **not executed** — it becomes a durable
+`Proposal` (tool, arguments, agent, autonomy level, run correlation) with a
+persistent approve/reject decision and attribution. Advanced multi-approver /
+enterprise policy is a commercial-layer concern on top of this baseline.
+
+**Default:** when `autonomy_level` is unset it defaults to `act_after_approval`
+— an agent's mutating actions require a human approval before they take effect.
+
+Manage proposals through the API (or the **View proposals** button in the agent
+editor):
+
+| Method | Endpoint | Description |
+|--------|----------|-------------|
+| GET | `/agents/proposals` | List proposals; filter by `agent_id`, `status`, `limit` |
+| GET | `/agents/proposals/{id}` | Fetch a single proposal |
+| POST | `/agents/proposals/{id}/approve` | Approve (applies the action for act_after_approval) |
+| POST | `/agents/proposals/{id}/reject` | Reject |
+
+Proposals are persisted behind a replaceable store: a SQLite file when
+`AGENTS_GOVERNANCE_DB` is set, else a volatile in-memory store. Decisions are
+sticky — a decided proposal is never re-decided or re-applied.
+
 ## Limitations (PoC)
 
 - **In-memory delivery queue**: Events are delivered through an in-memory queue,
