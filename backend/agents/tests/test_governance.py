@@ -82,6 +82,29 @@ class TestStores:
         assert store.get(a.id).status is ProposalStatus.REJECTED
         assert len(store.list_proposals(statuses=[ProposalStatus.REJECTED])) == 1
 
+    def test_decide_is_atomic_compare_and_set(self):
+        store = InMemoryProposalStore()
+        p = store.create(
+            Proposal("a1", "graph.add_nodes", {}, AutonomyLevel.ACT_AFTER_APPROVAL)
+        )
+        first = store.decide(p.id, ProposalStatus.APPROVED, decided_by="jakob")
+        assert first is not None and first.status is ProposalStatus.APPROVED
+        # A second decide on a no-longer-pending proposal loses the race.
+        assert store.decide(p.id, ProposalStatus.REJECTED) is None
+        assert store.decide("missing", ProposalStatus.APPROVED) is None
+
+    def test_sqlite_decide_guards_on_pending(self, tmp_path):
+        store = SqliteProposalStore(tmp_path / "gov.db")
+        try:
+            p = store.create(
+                Proposal("a1", "graph.add_nodes", {}, AutonomyLevel.PROPOSE)
+            )
+            assert store.decide(p.id, ProposalStatus.APPROVED) is not None
+            assert store.decide(p.id, ProposalStatus.REJECTED) is None
+            assert store.get(p.id).status is ProposalStatus.APPROVED
+        finally:
+            store.close()
+
     def test_sqlite_persists_across_reopen(self, tmp_path):
         db = tmp_path / "gov.db"
         store = SqliteProposalStore(db)

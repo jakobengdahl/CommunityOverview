@@ -47,7 +47,7 @@
     "status_rejected": "Avslaget",
     "status_applied": "Verkställt",
     "status_apply_failed": "Verkställande misslyckades",
-    "detail_autonomy": "Autonaminivå",
+    "detail_autonomy": "Autonominivå",
     "detail_args": "Argument",
     "detail_decided_by": "Beslutat av",
     "detail_apply_result": "Verkställanderesultat",

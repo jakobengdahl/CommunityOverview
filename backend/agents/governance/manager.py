@@ -71,37 +71,40 @@ class GovernanceManager:
     def reject(
         self, proposal_id: str, *, decided_by: Optional[str] = None
     ) -> Optional[Dict[str, Any]]:
-        p = self._store.get(proposal_id)
-        if p is None:
+        existing = self._store.get(proposal_id)
+        if existing is None:
             return None
-        if p.status.is_decided:
-            return p.to_dict()  # decisions are sticky; idempotent
-        p.status = ProposalStatus.REJECTED
-        self._stamp_decision(p, decided_by)
-        return self._store.save(p).to_dict()
+        # Atomically claim the pending -> rejected transition. A None result
+        # means it was already decided (sticky) — return the current state.
+        claimed = self._store.decide(
+            proposal_id, ProposalStatus.REJECTED, decided_by=decided_by
+        )
+        if claimed is None:
+            current = self._store.get(proposal_id)
+            return current.to_dict() if current is not None else None
+        return claimed.to_dict()
 
     def approve(
         self, proposal_id: str, *, decided_by: Optional[str] = None
     ) -> Optional[Dict[str, Any]]:
-        p = self._store.get(proposal_id)
-        if p is None:
+        existing = self._store.get(proposal_id)
+        if existing is None:
             return None
-        if p.status.is_decided:
-            return p.to_dict()  # sticky: a second decision is a no-op
-        p.status = ProposalStatus.APPROVED
-        self._stamp_decision(p, decided_by)
-        if p.autonomy_level.applies_on_approval:
-            self._apply(p)
-        return self._store.save(p).to_dict()
+        # Atomically claim pending -> approved so at most one caller applies the
+        # action (exactly-once, even across processes sharing the store).
+        claimed = self._store.decide(
+            proposal_id, ProposalStatus.APPROVED, decided_by=decided_by
+        )
+        if claimed is None:
+            current = self._store.get(proposal_id)
+            return current.to_dict() if current is not None else None
+        if claimed.autonomy_level.applies_on_approval:
+            self._apply(claimed)
+            claimed.updated_at = utcnow()
+            claimed = self._store.save(claimed)
+        return claimed.to_dict()
 
     # -- internal -----------------------------------------------------------
-
-    @staticmethod
-    def _stamp_decision(p: Proposal, decided_by: Optional[str]) -> None:
-        now = utcnow()
-        p.decided_by = decided_by
-        p.decided_at = now
-        p.updated_at = now
 
     def _apply(self, p: Proposal) -> None:
         if self._executor_factory is None:

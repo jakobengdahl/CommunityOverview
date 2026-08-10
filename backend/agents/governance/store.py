@@ -17,7 +17,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import List, Optional, Protocol, Sequence, Union, runtime_checkable
 
-from .models import Proposal, ProposalStatus
+from .models import Proposal, ProposalStatus, utcnow
 
 _SCHEMA_VERSION = 1
 
@@ -52,6 +52,15 @@ class ProposalStore(Protocol):
 
     def save(self, proposal: Proposal) -> Proposal: ...
 
+    def decide(
+        self,
+        proposal_id: str,
+        to_status: ProposalStatus,
+        *,
+        decided_by: Optional[str] = None,
+        decided_at: Optional[datetime] = None,
+    ) -> Optional[Proposal]: ...
+
     def list_proposals(
         self,
         *,
@@ -84,6 +93,25 @@ class InMemoryProposalStore:
             stored = proposal.copy()
             self._items[stored.id] = stored
             return stored.copy()
+
+    def decide(
+        self,
+        proposal_id: str,
+        to_status: ProposalStatus,
+        *,
+        decided_by: Optional[str] = None,
+        decided_at: Optional[datetime] = None,
+    ) -> Optional[Proposal]:
+        when = decided_at or utcnow()
+        with self._lock:
+            item = self._items.get(proposal_id)
+            if item is None or item.status is not ProposalStatus.PENDING:
+                return None
+            item.status = to_status
+            item.decided_by = decided_by
+            item.decided_at = when
+            item.updated_at = when
+            return item.copy()
 
     def list_proposals(
         self,
@@ -183,6 +211,39 @@ class SqliteProposalStore:
             )
             self._conn.commit()
             return self._get_locked(proposal.id)
+
+    def decide(
+        self,
+        proposal_id: str,
+        to_status: ProposalStatus,
+        *,
+        decided_by: Optional[str] = None,
+        decided_at: Optional[datetime] = None,
+    ) -> Optional[Proposal]:
+        # Atomic compare-and-set: only the caller that flips PENDING wins, so a
+        # decision (and any apply that follows) happens exactly once even across
+        # processes sharing the file.
+        when = _to_epoch(decided_at or utcnow())
+        with self._lock:
+            cur = self._conn.execute(
+                """
+                UPDATE proposals SET
+                    status = ?, decided_by = ?, decided_at = ?, updated_at = ?
+                WHERE id = ? AND status = ?
+                """,
+                (
+                    to_status.value,
+                    decided_by,
+                    when,
+                    when,
+                    proposal_id,
+                    ProposalStatus.PENDING.value,
+                ),
+            )
+            self._conn.commit()
+            if cur.rowcount != 1:
+                return None
+            return self._get_locked(proposal_id)
 
     def get(self, proposal_id: str) -> Optional[Proposal]:
         with self._lock:
