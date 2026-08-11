@@ -274,6 +274,13 @@ describe('AppDialogs registry', () => {
     expect(handlers.onEdit).toHaveBeenCalledWith('n9', { type: 'Actor' });
   });
 
+  it('forwards the detailNode.view hint to the detail dialog as initialView', () => {
+    renderDialogs(makeDialogs(), {
+      detailNode: { id: 'n9', data: { type: 'Actor' }, view: 'history' },
+    });
+    expect(screen.getByTestId('node-detail').getAttribute('data-initial-view')).toBe('history');
+  });
+
   it('wires the settings dialog export action', () => {
     const dialogs = makeDialogs({ settingsOpen: true });
     const { handlers } = renderDialogs(dialogs);
