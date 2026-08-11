@@ -138,6 +138,14 @@
       "unknown": "unknown"
     }
   },
+  "nav_history": {
+    "title": "Recent nodes",
+    "close": "Close",
+    "clear": "Clear",
+    "action_added": "Added",
+    "action_visited": "Visited",
+    "jump_to": "Jump to {name}"
+  },
   "proposal": {
     "title": "Proposed addition:",
     "type": "Type:",
