@@ -36,6 +36,7 @@ would eliminate the split but is deferred to a future iteration.
 """
 
 import asyncio
+import secrets
 import time
 import re
 from typing import Dict, Any, Optional, AsyncIterator
@@ -89,6 +90,44 @@ class SessionRegistry:
 
     def session_exists(self, session_id: str) -> bool:
         return session_id in self._sessions
+
+    # ------------------------------------------------------------------
+    # Pulse-trigger tokens
+    # ------------------------------------------------------------------
+    #
+    # A session owner (the browser holding the SSE stream, which knows its own
+    # id) mints a capability-scoped secret so an *external* system can fire a
+    # visual node pulse into the live visualization without being handed the
+    # session id or the broader MCP push capability. The token lives only in
+    # memory alongside the session, so it dies with the session (TTL eviction),
+    # and re-minting rotates it — a previously shared trigger URL then stops
+    # working (revocation). Durable, identity-bound API keys are deliberately a
+    # hosted-layer concern and out of scope for the open core.
+
+    def mint_trigger_token(self, session_id: str) -> str:
+        """Create or rotate the pulse-trigger token for *session_id* and return it."""
+        self.get_or_create(session_id)
+        token = secrets.token_urlsafe(24)
+        self._sessions[session_id]["trigger_token"] = token
+        self._touch(session_id)
+        return token
+
+    def verify_trigger_token(self, session_id: str, token: Optional[str]) -> bool:
+        """Constant-time check that *token* matches the session's trigger token.
+
+        Returns False for an unknown session, a session with no token minted, or
+        a missing/empty token, so a caller learns nothing about session
+        existence before presenting a valid token.
+        """
+        if not token:
+            return False
+        entry = self._sessions.get(session_id)
+        if not entry:
+            return False
+        stored = entry.get("trigger_token")
+        if not stored:
+            return False
+        return secrets.compare_digest(stored, token)
 
     # ------------------------------------------------------------------
     # Command delivery

@@ -156,6 +156,7 @@ function GraphCanvasInner({
   hiddenNodeIds = [],
   hiddenEdgeIds = [],
   nodeMarks = {},
+  pulsedNodeIds = {},
   clearGroupsFlag = false,
   onExpand,
   onEdit,
@@ -413,6 +414,7 @@ function GraphCanvasInner({
           isHighlighted: highlightedNodeIds.includes(node.id),
           markColor: mark?.color ?? null,
           markLabel: mark?.label ?? null,
+          pulse: pulsedNodeIds[node.id] ?? null,
           remoteSelection: remoteSelections?.[node.id] ?? null,
           previewEnabled: nodePreviewEnabled,
           onExpand: onExpand ? () => onExpand(node.id, node) : null,
@@ -439,6 +441,7 @@ function GraphCanvasInner({
     onEdit,
     highlightedNodeIds,
     nodeMarks,
+    pulsedNodeIds,
     remoteSelections,
     nodePreviewEnabled,
   ]);

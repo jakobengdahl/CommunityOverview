@@ -86,6 +86,7 @@ function App() {
     showMinimap,
     nodePreviewEnabled,
     nodeMarks,
+    pulsedNodeIds,
     startGuide,
     getNodeColor,
     closeMenusSignal,
@@ -167,8 +168,9 @@ function App() {
   const applyServerSessionRef = useRef(null);
   // MCP tool-result push application (external AI agent commands → canvas) and
   // the legacy SSE push stream. The op-stream `command` events are wired below
-  // through syncHandlersRef and route through this same applyToolResultCommand.
-  const applyToolResultCommand = useToolResultCommands({
+  // through syncHandlersRef and route through these same appliers. Pulse
+  // commands (external pulse-trigger URLs) share the channel and dedup.
+  const { applyToolResultCommand, applyPulseCommand } = useToolResultCommands({
     sessionId,
     opStreamReady,
     latestViewport,
@@ -1318,6 +1320,8 @@ function App() {
       onCommand: (command) => {
         if (command?.type === 'tool_result' && command.result) {
           applyToolResultCommand(command.result, command.command_id);
+        } else if (command?.type === 'node_pulse') {
+          applyPulseCommand(command, command.command_id);
         }
       },
       // A 400/413 drop is terminal (malformed op, or a hard limit like the
@@ -1338,6 +1342,7 @@ function App() {
     showNotification,
     t,
     applyToolResultCommand,
+    applyPulseCommand,
     syncHandlersRef,
     setRoster,
     setRemoteSelections,
@@ -1404,6 +1409,34 @@ function App() {
     },
     [showNotification, t]
   );
+
+  // Mint a pulse-trigger token for the live session and copy the external
+  // trigger URL to the clipboard. Re-minting rotates the token, so this both
+  // creates and (re)issues the credential; any URL handed out earlier stops
+  // working. Only offered for the session this browser is live on.
+  const handleCopyTriggerUrl = useCallback(async () => {
+    let link;
+    try {
+      ({ url: link } = await api.mintPulseTriggerUrl(sessionId));
+    } catch {
+      showNotification('error', t('sessions.trigger_url_failed'));
+      return;
+    }
+    try {
+      await navigator.clipboard.writeText(link);
+    } catch {
+      const el = document.createElement('textarea');
+      el.value = link;
+      document.body.appendChild(el);
+      el.select();
+      try {
+        document.execCommand('copy');
+      } finally {
+        document.body.removeChild(el);
+      }
+    }
+    showNotification('success', t('sessions.trigger_url_copied'));
+  }, [sessionId, showNotification, t]);
 
   const handleConnectSession = useCallback(
     (targetId) => {
@@ -1596,6 +1629,7 @@ function App() {
           hiddenNodeIds={hiddenNodeIds}
           hiddenEdgeIds={hiddenEdgeIds}
           nodeMarks={nodeMarks}
+          pulsedNodeIds={pulsedNodeIds}
           clearGroupsFlag={clearGroupsFlag}
           onExpand={handleExpand}
           onEdit={handleEdit}
@@ -1716,6 +1750,7 @@ function App() {
         }}
         onDeleteSession={handleRequestDeleteSession}
         onCopySessionLink={handleCopySessionLink}
+        onCopyTriggerUrl={handleCopyTriggerUrl}
         onOpenSettings={() => setSettingsOpen(true)}
         onOpenActivity={() => {
           setDrawerOpen(false);
