@@ -19,6 +19,13 @@ Effort scale: XS = single-line fix · S = up to ~30 lines / one file · M = mult
 
 ---
 
+### [2026-08-11] Canvas undo history not invalidated by mid-session node repositioning
+
+- **File(s):** `packages/ui-graph-canvas/src/components/GraphCanvas.jsx` (the `clearHistory` effect keyed on `animatedLayoutResetKey`)
+- **Context:** Discovered during `claude/canvas-undo-redo` (review of PR #312).
+- **Issue:** Undo/redo history is only cleared when the session identity changes (`animatedLayoutResetKey` = `sessionId`). Node positions can also change within the same session without clearing history — a remote collaborator's move (`remotePositions`), an MCP animated layout, or loading a different saved view into the same session. After such a reposition a subsequent Ctrl+Z restores a node to a stale `from` position captured before the change. For remote moves this is arguably consistent with the contract's last-write-wins model (G5), but a saved-view reload creating a new baseline makes undo surprising. Consider clearing (or reconciling) history when a new position baseline is applied. Out of scope for the first undo/redo slice, which is single-user/single-baseline.
+- **Effort:** M
+
 ### [2026-08-11] Unused layout imports in GraphCanvas
 
 - **File(s):** `packages/ui-graph-canvas/src/components/GraphCanvas.jsx:33-35`

@@ -319,7 +319,9 @@
     "label_placeholder": "Label",
     "annotation_text_size": "Text size",
     "arrow_start_head": "Start arrowhead",
-    "arrow_end_head": "End arrowhead"
+    "arrow_end_head": "End arrowhead",
+    "undo_notification": "Move undone",
+    "redo_notification": "Move redone"
   },
   "common": {
     "saving": "Saving...",
