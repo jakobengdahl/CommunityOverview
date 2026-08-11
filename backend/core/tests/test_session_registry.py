@@ -191,3 +191,46 @@ class TestTTLEviction:
         evicted = reg.cleanup_stale()
         assert evicted == 0
         assert reg.session_exists("1234-5678")
+
+
+class TestTriggerTokens:
+    """mint_trigger_token / verify_trigger_token: capability-scoped pulse secrets."""
+
+    def test_mint_creates_session_and_returns_token(self):
+        reg = SessionRegistry()
+        token = reg.mint_trigger_token("1234-5678")
+        assert token
+        assert reg.session_exists("1234-5678")
+
+    def test_verify_accepts_minted_token(self):
+        reg = SessionRegistry()
+        token = reg.mint_trigger_token("1234-5678")
+        assert reg.verify_trigger_token("1234-5678", token) is True
+
+    def test_verify_rejects_wrong_token(self):
+        reg = SessionRegistry()
+        reg.mint_trigger_token("1234-5678")
+        assert reg.verify_trigger_token("1234-5678", "wrong") is False
+
+    def test_verify_rejects_empty_and_none(self):
+        reg = SessionRegistry()
+        reg.mint_trigger_token("1234-5678")
+        assert reg.verify_trigger_token("1234-5678", "") is False
+        assert reg.verify_trigger_token("1234-5678", None) is False
+
+    def test_verify_rejects_unknown_session(self):
+        reg = SessionRegistry()
+        assert reg.verify_trigger_token("0000-0000", "anything") is False
+
+    def test_verify_rejects_session_without_token(self):
+        reg = SessionRegistry()
+        reg.get_or_create("1234-5678")
+        assert reg.verify_trigger_token("1234-5678", "anything") is False
+
+    def test_reminting_rotates_token(self):
+        reg = SessionRegistry()
+        first = reg.mint_trigger_token("1234-5678")
+        second = reg.mint_trigger_token("1234-5678")
+        assert first != second
+        assert reg.verify_trigger_token("1234-5678", first) is False
+        assert reg.verify_trigger_token("1234-5678", second) is True

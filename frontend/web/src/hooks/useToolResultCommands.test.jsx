@@ -22,6 +22,7 @@ vi.mock('../store/graphStore', () => {
     addNodesToVisualization: vi.fn(),
     updateVisualization: vi.fn(),
     clearVisualization: vi.fn(),
+    pulseNode: vi.fn(),
   };
   return { default: { getState: vi.fn(() => state) } };
 });
@@ -65,7 +66,7 @@ const render = (opts = {}) =>
 describe('useToolResultCommands.applyToolResultCommand', () => {
   it('ignores a null tool result', () => {
     const { result } = render();
-    act(() => result.current(null, 'cmd-1'));
+    act(() => result.current.applyToolResultCommand(null, 'cmd-1'));
     expect(store().updateVisualization).not.toHaveBeenCalled();
     expect(store().addNodesToVisualization).not.toHaveBeenCalled();
     expect(store().clearVisualization).not.toHaveBeenCalled();
@@ -74,23 +75,23 @@ describe('useToolResultCommands.applyToolResultCommand', () => {
   it('dedupes by command_id — the same id is applied only once', () => {
     const { result } = render();
     const toolResult = { action: 'load_visualization', nodes: [{ id: 'n1', type: 'Goal' }] };
-    act(() => result.current(toolResult, 'cmd-1'));
-    act(() => result.current(toolResult, 'cmd-1'));
+    act(() => result.current.applyToolResultCommand(toolResult, 'cmd-1'));
+    act(() => result.current.applyToolResultCommand(toolResult, 'cmd-1'));
     expect(store().clearVisualization).toHaveBeenCalledTimes(1);
   });
 
   it('applies a distinct command_id even with identical payload', () => {
     const { result } = render();
     const toolResult = { action: 'load_visualization', nodes: [{ id: 'n1', type: 'Goal' }] };
-    act(() => result.current(toolResult, 'cmd-1'));
-    act(() => result.current(toolResult, 'cmd-2'));
+    act(() => result.current.applyToolResultCommand(toolResult, 'cmd-1'));
+    act(() => result.current.applyToolResultCommand(toolResult, 'cmd-2'));
     expect(store().clearVisualization).toHaveBeenCalledTimes(2);
   });
 
   it('add_to_visualization positions new nodes and adds them, dropping Community nodes', () => {
     const { result } = render();
     act(() =>
-      result.current(
+      result.current.applyToolResultCommand(
         {
           action: 'add_to_visualization',
           nodes: [
@@ -115,7 +116,7 @@ describe('useToolResultCommands.applyToolResultCommand', () => {
     const latestViewport = { current: { x: 10, y: 20, zoom: 2 } };
     const { result } = render({ latestViewport });
     act(() =>
-      result.current(
+      result.current.applyToolResultCommand(
         { action: 'add_to_visualization', nodes: [{ id: 'n1', type: 'Goal' }] },
         'cmd-1'
       )
@@ -130,7 +131,7 @@ describe('useToolResultCommands.applyToolResultCommand', () => {
   it('load_visualization clears then replaces the canvas', () => {
     const { result } = render();
     act(() =>
-      result.current(
+      result.current.applyToolResultCommand(
         { action: 'load_visualization', nodes: [{ id: 'n1', type: 'Goal' }], edges: [] },
         'cmd-1'
       )
@@ -141,7 +142,9 @@ describe('useToolResultCommands.applyToolResultCommand', () => {
 
   it('clear_visualization with no nodes clears without a replace', () => {
     const { result } = render();
-    act(() => result.current({ action: 'clear_visualization', nodes: [] }, 'cmd-1'));
+    act(() =>
+      result.current.applyToolResultCommand({ action: 'clear_visualization', nodes: [] }, 'cmd-1')
+    );
     expect(store().clearVisualization).toHaveBeenCalledTimes(1);
     expect(store().updateVisualization).not.toHaveBeenCalled();
   });
@@ -149,9 +152,43 @@ describe('useToolResultCommands.applyToolResultCommand', () => {
   it('an unrecognised action with nodes falls back to a full replace', () => {
     const { result } = render();
     act(() =>
-      result.current({ action: 'something_else', nodes: [{ id: 'n1', type: 'Goal' }] }, 'cmd-1')
+      result.current.applyToolResultCommand(
+        { action: 'something_else', nodes: [{ id: 'n1', type: 'Goal' }] },
+        'cmd-1'
+      )
     );
     expect(store().updateVisualization).toHaveBeenCalledWith([{ id: 'n1', type: 'Goal' }], []);
+  });
+});
+
+describe('useToolResultCommands.applyPulseCommand', () => {
+  it('pulses the targeted node with mapped options', () => {
+    const { result } = render();
+    act(() =>
+      result.current.applyPulseCommand(
+        { node_id: 'n1', pulse: { style: 'grow', color: '#ff0000', duration_ms: 2000 } },
+        'cmd-1'
+      )
+    );
+    expect(store().pulseNode).toHaveBeenCalledWith('n1', {
+      style: 'grow',
+      color: '#ff0000',
+      durationMs: 2000,
+    });
+  });
+
+  it('ignores a pulse without a node_id', () => {
+    const { result } = render();
+    act(() => result.current.applyPulseCommand({ pulse: { style: 'glow' } }, 'cmd-1'));
+    expect(store().pulseNode).not.toHaveBeenCalled();
+  });
+
+  it('dedupes a pulse by command_id', () => {
+    const { result } = render();
+    const cmd = { node_id: 'n1', pulse: {} };
+    act(() => result.current.applyPulseCommand(cmd, 'cmd-1'));
+    act(() => result.current.applyPulseCommand(cmd, 'cmd-1'));
+    expect(store().pulseNode).toHaveBeenCalledTimes(1);
   });
 });
 
@@ -189,6 +226,26 @@ describe('useToolResultCommands legacy SSE stream', () => {
       })
     );
     expect(store().clearVisualization).toHaveBeenCalledTimes(1);
+  });
+
+  it('routes a node_pulse message through applyPulseCommand', () => {
+    render();
+    const es = FakeEventSource.instances[0];
+    act(() =>
+      es.onmessage({
+        data: JSON.stringify({
+          type: 'node_pulse',
+          command_id: 'cmd-1',
+          node_id: 'n1',
+          pulse: { style: 'marker', color: null, duration_ms: 1500 },
+        }),
+      })
+    );
+    expect(store().pulseNode).toHaveBeenCalledWith('n1', {
+      style: 'marker',
+      color: null,
+      durationMs: 1500,
+    });
   });
 
   it('ignores ping, connected and non-tool_result messages', () => {

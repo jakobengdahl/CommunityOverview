@@ -8,6 +8,7 @@ import {
   GearFill,
   PencilSquare,
   Link45deg,
+  BroadcastPin,
   Trash,
   ClockHistory,
   LockFill,
@@ -34,6 +35,7 @@ function SessionDrawer({
   onRenameSession,
   onDeleteSession,
   onCopySessionLink,
+  onCopyTriggerUrl,
   onOpenSettings,
   onOpenActivity,
   canvasLocked = false,
@@ -173,6 +175,18 @@ function SessionDrawer({
                   icon: <Link45deg size={16} />,
                   onClick: () => onCopySessionLink?.(session.id),
                 },
+                // Only the session this browser is live on can receive pulses,
+                // so the trigger URL is offered on the current session only.
+                ...(session.id === currentSessionId && onCopyTriggerUrl
+                  ? [
+                      {
+                        key: 'copy-trigger-url',
+                        label: t('sessions.copy_trigger_url'),
+                        icon: <BroadcastPin size={15} />,
+                        onClick: () => onCopyTriggerUrl(session.id),
+                      },
+                    ]
+                  : []),
                 {
                   key: 'delete',
                   label: t('sessions.delete_session'),

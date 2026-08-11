@@ -293,3 +293,87 @@ body.graph-menu-open .graph-node-tooltip {
     color: #666;
   }
 }
+
+/* External pulse-trigger visual reactions (design: external pulse-trigger URLs).
+   An overlay span mounted on the node for the pulse duration and keyed by the
+   pulse seq, so a repeated trigger remounts it and the animation restarts even
+   mid-play. --pulse-color is set inline (falls back to the node colour). The
+   overlay never intercepts pointer events. */
+.graph-node-pulse {
+  position: absolute;
+  inset: -2px;
+  border-radius: 10px;
+  pointer-events: none;
+  z-index: 6;
+}
+
+/* glow — a coloured halo that breathes around the node */
+.graph-node-pulse-glow {
+  box-shadow: 0 0 12px 4px var(--pulse-color, #646cff);
+  animation: graph-node-pulse-glow 1s ease-in-out infinite;
+}
+
+@keyframes graph-node-pulse-glow {
+  0%,
+  100% {
+    opacity: 0.15;
+  }
+  50% {
+    opacity: 0.95;
+  }
+}
+
+/* grow — an expanding ring that radiates outward from the node border */
+.graph-node-pulse-grow {
+  border: 2px solid var(--pulse-color, #646cff);
+  opacity: 0;
+  animation: graph-node-pulse-grow 1s ease-out infinite;
+}
+
+@keyframes graph-node-pulse-grow {
+  0% {
+    transform: scale(1);
+    opacity: 0.9;
+  }
+  100% {
+    transform: scale(1.35);
+    opacity: 0;
+  }
+}
+
+/* marker — a dot running around the node border */
+.graph-node-pulse-marker::before {
+  content: '';
+  position: absolute;
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: var(--pulse-color, #646cff);
+  box-shadow: 0 0 6px 1px var(--pulse-color, #646cff);
+  offset-path: border-box;
+  offset-distance: 0%;
+  animation: graph-node-pulse-marker 1.1s linear infinite;
+}
+
+@keyframes graph-node-pulse-marker {
+  to {
+    offset-distance: 100%;
+  }
+}
+
+/* Motion is a client decision: honour prefers-reduced-motion by holding a
+   static, still-visible highlight instead of an animation. */
+@media (prefers-reduced-motion: reduce) {
+  .graph-node-pulse-glow {
+    animation: none;
+    opacity: 0.7;
+  }
+  .graph-node-pulse-grow {
+    animation: none;
+    opacity: 0.7;
+    transform: scale(1.12);
+  }
+  .graph-node-pulse-marker::before {
+    animation: none;
+  }
+}
