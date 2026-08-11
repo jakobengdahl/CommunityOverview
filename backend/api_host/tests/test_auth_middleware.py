@@ -269,6 +269,8 @@ class TestUnauthorizedContentNegotiation:
             # No WWW-Authenticate: browsers must render the form, not the native
             # Basic dialog (Chromium pops it before showing the body).
             assert "WWW-Authenticate" not in resp.headers
+            # Never cache the sign-in page.
+            assert resp.headers.get("cache-control") == "no-store"
             assert "Sign in" in resp.text
             # The raw backend error body must not be what the browser renders.
             assert '{"detail": "Authentication required"}' not in resp.text

@@ -306,6 +306,24 @@ def create_app(
     return app
 
 
+class _SPAStaticFiles(StaticFiles):
+    """StaticFiles that marks HTML documents ``Cache-Control: no-store``.
+
+    The SPA entry (index.html) is auth-guarded. Starlette's StaticFiles sends
+    only Last-Modified, so browsers apply heuristic caching and would replay a
+    cached authenticated shell after logout — letting a logged-out user reach
+    the app by pasting /web/ in the address bar. Forcing revalidation on the
+    HTML document makes that navigation hit the server (and 401 → sign-in) while
+    the content-hashed JS/CSS assets stay cacheable.
+    """
+
+    async def get_response(self, path, scope):
+        response = await super().get_response(path, scope)
+        if response.headers.get("content-type", "").startswith("text/html"):
+            response.headers["Cache-Control"] = "no-store"
+        return response
+
+
 def _mount_static_files(app: FastAPI, config: AppConfig) -> None:
     """
     Mount static file directories for web app and widget.
@@ -315,7 +333,9 @@ def _mount_static_files(app: FastAPI, config: AppConfig) -> None:
     # Mount web app static files
     web_path = Path(config.web_static_path)
     if web_path.exists() and web_path.is_dir():
-        app.mount("/web", StaticFiles(directory=str(web_path), html=True), name="web")
+        app.mount(
+            "/web", _SPAStaticFiles(directory=str(web_path), html=True), name="web"
+        )
     else:
         # Create fallback route that returns a placeholder
         @app.get("/web/{path:path}")
@@ -328,7 +348,9 @@ def _mount_static_files(app: FastAPI, config: AppConfig) -> None:
     widget_path = Path(config.widget_static_path)
     if widget_path.exists() and widget_path.is_dir():
         app.mount(
-            "/widget", StaticFiles(directory=str(widget_path), html=True), name="widget"
+            "/widget",
+            _SPAStaticFiles(directory=str(widget_path), html=True),
+            name="widget",
         )
     else:
         # Create fallback route that returns a placeholder
