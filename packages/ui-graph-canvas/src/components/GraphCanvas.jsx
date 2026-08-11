@@ -52,6 +52,11 @@ import {
   nodeCenter,
   resolveAnchoredArrow,
 } from '../utils/annotations';
+import {
+  directNeighborIds,
+  neighborStartPositions,
+  neighborDragPositions,
+} from '../utils/dragConnected';
 import './GraphCanvas.css';
 
 /**
@@ -204,6 +209,10 @@ function GraphCanvasInner({
   // the arrangement. Held in refs so arming doesn't re-render or re-bind keys.
   const organizePendingRef = useRef(false);
   const organizeTimerRef = useRef(null);
+  // Alt+drag "move with neighbours": snapshot of the anchor's start position and
+  // the trailing neighbours' start positions, captured at drag start. Held in a
+  // ref so the per-frame drag handler doesn't depend on React state timing.
+  const connectedDragRef = useRef(null);
   const { screenToFlowPosition, setCenter, getNodes: getFlowNodes, getViewport } = useReactFlow();
 
   // Stable notifier for annotation nodes (note/label/arrow) to signal the host
@@ -622,8 +631,70 @@ function GraphCanvasInner({
     clearSelection();
   }, [closeAllMenus, clearSelection]);
 
+  // Alt+drag: arm "move node together with its directly connected neighbours".
+  // Alt is chosen to avoid the Shift/Ctrl/Meta multi-select gesture. The
+  // neighbour snapshot is taken from ReactFlow's live store so it agrees with
+  // the coordinates onNodeDrag/onNodeDragStop read back.
+  const onNodeDragStart = useCallback(
+    (event, draggedNode, allDraggedNodes) => {
+      connectedDragRef.current = null;
+      if (!event?.altKey) return;
+      // The full set ReactFlow is dragging (may include group nodes when an
+      // Alt-drag starts from a multi-selection); used to skip neighbours that a
+      // dragged group already carries, so they aren't translated twice.
+      const dragged =
+        allDraggedNodes && allDraggedNodes.length > 0 ? allDraggedNodes : [draggedNode];
+      const draggedIds = new Set(dragged.map((n) => n.id));
+      // Only graph nodes carry meaningful edges; annotation/group nodes are
+      // excluded both as anchors and as trailing neighbours.
+      const anchors = dragged.filter((n) => !ANNOTATION_TYPES.has(n.type));
+      if (anchors.length === 0) return;
+      const anchorIds = new Set(anchors.map((n) => n.id));
+      const neighborIds = directNeighborIds(edges, anchorIds);
+      if (neighborIds.size === 0) return;
+      const startById = neighborStartPositions(getFlowNodes(), neighborIds, draggedIds);
+      if (startById.size === 0) return;
+      connectedDragRef.current = {
+        anchorId: draggedNode.id,
+        anchorStart: { x: draggedNode.position.x, y: draggedNode.position.y },
+        neighbors: startById,
+      };
+    },
+    [edges, getFlowNodes]
+  );
+
+  const onNodeDrag = useCallback(
+    (event, draggedNode) => {
+      const state = connectedDragRef.current;
+      if (!state || draggedNode.id !== state.anchorId) return;
+      const updates = neighborDragPositions(
+        state.neighbors,
+        state.anchorStart,
+        draggedNode.position
+      );
+      if (updates.size === 0) return;
+      setNodes((nds) =>
+        nds.map((n) => (updates.has(n.id) ? { ...n, position: updates.get(n.id) } : n))
+      );
+    },
+    [setNodes]
+  );
+
   const onNodeDragStop = useCallback(
     (event, draggedNode, allDraggedNodes) => {
+      // Persist the final positions of any Alt-drag neighbours that trailed the
+      // anchor, then disarm. Group re-parenting below is intentionally left to
+      // the explicitly dragged nodes only; trailing neighbours keep their parent.
+      const connected = connectedDragRef.current;
+      connectedDragRef.current = null;
+      if (connected && onNodePositionChange) {
+        const latest = getFlowNodes();
+        for (const id of connected.neighbors.keys()) {
+          const fn = latest.find((cn) => cn.id === id);
+          if (fn) onNodePositionChange(id, fn.position);
+        }
+      }
+
       if (onNodePositionChange) {
         onNodePositionChange(draggedNode.id, draggedNode.position);
       }
@@ -1373,6 +1444,8 @@ function GraphCanvasInner({
             onNodesChange={onNodesChange}
             onEdgesChange={onEdgesChange}
             onConnect={onConnect}
+            onNodeDragStart={onNodeDragStart}
+            onNodeDrag={onNodeDrag}
             onNodeDragStop={onNodeDragStop}
             onPaneContextMenu={onPaneContextMenu}
             onNodeContextMenu={onNodeContextMenu}
