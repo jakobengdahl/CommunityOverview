@@ -28,6 +28,7 @@ import {
 } from './ContextMenus';
 import { useRemotePositions } from '../hooks/useRemotePositions';
 import { useAnimatedLayout } from '../hooks/useAnimatedLayout';
+import { useCanvasHistory } from '../hooks/useCanvasHistory';
 import {
   applyLayout,
   getGridLayout,
@@ -172,6 +173,8 @@ function GraphCanvasInner({
     annotationTextSize: 'Text size',
     arrowStartHead: 'Start arrowhead',
     arrowEndHead: 'End arrowhead',
+    undoNotification: 'Move undone',
+    redoNotification: 'Move redone',
     ...contextMenuLabels,
   };
 
@@ -203,7 +206,21 @@ function GraphCanvasInner({
   // the arrangement. Held in refs so arming doesn't re-render or re-bind keys.
   const organizePendingRef = useRef(false);
   const organizeTimerRef = useRef(null);
+  // Positions of the nodes about to move, snapshotted at drag start so the
+  // finished drag can be recorded as an undoable move.
+  const dragStartPositionsRef = useRef(new Map());
   const { screenToFlowPosition, setCenter, getNodes: getFlowNodes, getViewport } = useReactFlow();
+
+  // Undo/redo history for node-position moves (drag + organize). Restoring a
+  // prior state writes the positions back through the same persistence path a
+  // normal move uses (see applyPositionMoves), matching the layout contract's
+  // read-then-write reversibility model.
+  const {
+    record: recordMove,
+    undo: undoMove,
+    redo: redoMove,
+    clear: clearHistory,
+  } = useCanvasHistory();
 
   // Stable notifier for annotation nodes (note/label/arrow) to signal the host
   // that an annotation was edited, recoloured or deleted so the session can be
@@ -448,6 +465,43 @@ function GraphCanvasInner({
     setTimeout(() => setNotification(null), 3000);
   }, []);
 
+  // Apply a batch of { id, position } moves to the canvas and persist each one
+  // through the same callback a drag/organize uses, so an undo or redo is
+  // indistinguishable from the move it reverses.
+  const applyPositionMoves = useCallback(
+    (moves) => {
+      if (!moves || moves.length === 0) return;
+      const posById = new Map(moves.map((m) => [m.id, m.position]));
+      setNodes((nds) =>
+        nds.map((n) => (posById.has(n.id) ? { ...n, position: posById.get(n.id) } : n))
+      );
+      if (onNodePositionChange) {
+        for (const m of moves) onNodePositionChange(m.id, m.position);
+      }
+    },
+    [setNodes, onNodePositionChange]
+  );
+
+  const handleUndo = useCallback(() => {
+    const moves = undoMove();
+    if (!moves) return;
+    applyPositionMoves(moves);
+    showNotification('info', cml.undoNotification);
+  }, [undoMove, applyPositionMoves, showNotification, cml.undoNotification]);
+
+  const handleRedo = useCallback(() => {
+    const moves = redoMove();
+    if (!moves) return;
+    applyPositionMoves(moves);
+    showNotification('info', cml.redoNotification);
+  }, [redoMove, applyPositionMoves, showNotification, cml.redoNotification]);
+
+  // Discard history when the session identity changes so an undo can never
+  // restore positions from a previously loaded session.
+  useEffect(() => {
+    clearHistory();
+  }, [animatedLayoutResetKey, clearHistory]);
+
   // While any context menu is open, suppress the hover info popup: the node the
   // menu was opened on is still hovered, so its tooltip (portaled to the body at
   // a high z-index) would otherwise render on top of / behind the menu. The
@@ -511,10 +565,15 @@ function GraphCanvasInner({
       // is the position we save (the drag path also persists relative positions).
       const nodeById = new Map(nodes.map((n) => [n.id, n]));
       const finalPos = new Map();
+      const moves = [];
       for (const [id, abs] of posById) {
         const parent = nodeById.get(id)?.parentId ? groupPos.get(nodeById.get(id).parentId) : null;
-        finalPos.set(id, parent ? { x: abs.x - parent.x, y: abs.y - parent.y } : abs);
+        const pos = parent ? { x: abs.x - parent.x, y: abs.y - parent.y } : abs;
+        finalPos.set(id, pos);
+        const cur = nodeById.get(id);
+        if (cur) moves.push({ id, from: { x: cur.position.x, y: cur.position.y }, to: pos });
       }
+      recordMove(moves);
       setNodes((nds) =>
         nds.map((n) => (finalPos.has(n.id) ? { ...n, position: finalPos.get(n.id) } : n))
       );
@@ -523,7 +582,7 @@ function GraphCanvasInner({
       }
       closeAllMenus();
     },
-    [selectedNodes, nodes, edges, setNodes, onNodePositionChange, closeAllMenus]
+    [selectedNodes, nodes, edges, setNodes, onNodePositionChange, closeAllMenus, recordMove]
   );
 
   // Create a free-floating annotation (note, label or arrow) at the given flow
@@ -621,6 +680,20 @@ function GraphCanvasInner({
     clearSelection();
   }, [closeAllMenus, clearSelection]);
 
+  // Snapshot the pre-drag positions of the graph nodes about to move, so the
+  // completed drag can be recorded as one undoable move. Annotation and group
+  // nodes are excluded — they persist through their own paths, not the
+  // position-move history.
+  const onNodeDragStart = useCallback((event, draggedNode, allDraggedNodes) => {
+    const set = allDraggedNodes && allDraggedNodes.length > 0 ? allDraggedNodes : [draggedNode];
+    const snap = new Map();
+    for (const n of set) {
+      if (ANNOTATION_TYPES.has(n.type)) continue;
+      snap.set(n.id, { x: n.position.x, y: n.position.y });
+    }
+    dragStartPositionsRef.current = snap;
+  }, []);
+
   const onNodeDragStop = useCallback(
     (event, draggedNode, allDraggedNodes) => {
       if (onNodePositionChange) {
@@ -629,6 +702,22 @@ function GraphCanvasInner({
 
       // Get latest node positions directly from ReactFlow's internal store
       const currentNodes = getFlowNodes();
+
+      // Record the completed drag as an undoable move: from the drag-start
+      // snapshot to the final positions. Done before the group-membership early
+      // return below so plain drags (no groups on the canvas) are still recorded.
+      const startSnap = dragStartPositionsRef.current;
+      if (startSnap && startSnap.size > 0) {
+        const moves = [];
+        for (const [id, from] of startSnap) {
+          const flowNode = currentNodes.find((cn) => cn.id === id);
+          const to = flowNode?.position;
+          if (to) moves.push({ id, from, to: { x: to.x, y: to.y } });
+        }
+        recordMove(moves);
+      }
+      dragStartPositionsRef.current = new Map();
+
       const groupNodes = currentNodes.filter((n) => n.type === 'group');
 
       // Determine which draggable graph nodes were part of this drag. Annotation
@@ -714,7 +803,7 @@ function GraphCanvasInner({
         return reorderNodesForParentChild(mapped);
       });
     },
-    [setNodes, onNodePositionChange, getFlowNodes]
+    [setNodes, onNodePositionChange, getFlowNodes, recordMove]
   );
 
   // Right-click on empty background. A plain right-click opens the annotation
@@ -1007,6 +1096,23 @@ function GraphCanvasInner({
       const tag = e.target.tagName;
       if (tag === 'INPUT' || tag === 'TEXTAREA' || e.target.isContentEditable) return;
 
+      // Undo/redo of node-position moves. Ctrl/Cmd+Z undoes; Ctrl/Cmd+Shift+Z
+      // and Ctrl/Cmd+Y redo (covering both the mac and Windows conventions).
+      if ((e.ctrlKey || e.metaKey) && !e.altKey) {
+        const key = e.key?.toLowerCase();
+        if (key === 'z') {
+          e.preventDefault();
+          if (e.shiftKey) handleRedo();
+          else handleUndo();
+          return;
+        }
+        if (key === 'y') {
+          e.preventDefault();
+          handleRedo();
+          return;
+        }
+      }
+
       // Second step of the organize chord: a pending Ctrl/Cmd+O is resolved by
       // the next c/h/v/t keystroke.
       if (organizePendingRef.current && !e.ctrlKey && !e.metaKey && !e.altKey) {
@@ -1092,6 +1198,8 @@ function GraphCanvasInner({
     organizeSelection,
     showNotification,
     cml.organizeHint,
+    handleUndo,
+    handleRedo,
   ]);
 
   // Create group when signal changes (triggered from toolbar)
@@ -1372,6 +1480,7 @@ function GraphCanvasInner({
             onNodesChange={onNodesChange}
             onEdgesChange={onEdgesChange}
             onConnect={onConnect}
+            onNodeDragStart={onNodeDragStart}
             onNodeDragStop={onNodeDragStop}
             onPaneContextMenu={onPaneContextMenu}
             onNodeContextMenu={onNodeContextMenu}

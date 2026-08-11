@@ -1684,6 +1684,8 @@ function App() {
             annotationTextSize: t('context_menu.annotation_text_size'),
             arrowStartHead: t('context_menu.arrow_start_head'),
             arrowEndHead: t('context_menu.arrow_end_head'),
+            undoNotification: t('context_menu.undo_notification'),
+            redoNotification: t('context_menu.redo_notification'),
           }}
           nodeColorResolver={getNodeColor}
           onViewportChange={(vp) => {
