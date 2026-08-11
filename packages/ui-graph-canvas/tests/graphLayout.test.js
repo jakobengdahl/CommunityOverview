@@ -60,4 +60,56 @@ describe('arrangeNodes', () => {
   it('returns an empty map for an empty selection', () => {
     expect(arrangeNodes([], [], 'cluster').size).toBe(0);
   });
+
+  describe('tidy (auto-tidy) mode', () => {
+    it('groups nodes by type into one column per type when there is no hierarchy', () => {
+      const typed = [
+        { id: 'g1', position: { x: 0, y: 0 }, data: { nodeType: 'Goal' } },
+        { id: 'g2', position: { x: 500, y: 500 }, data: { nodeType: 'Goal' } },
+        { id: 't1', position: { x: 900, y: 100 }, data: { nodeType: 'Task' } },
+      ];
+      const result = arrangeNodes(typed, [], 'tidy');
+      expect(result.size).toBe(3);
+      // The two Goals share a column (same x); the Task sits in a different column.
+      expect(result.get('g1').x).toBeCloseTo(result.get('g2').x, 5);
+      expect(result.get('t1').x).not.toBeCloseTo(result.get('g1').x, 5);
+      // Same-type nodes are stacked on distinct rows, so nothing overlaps.
+      expect(result.get('g1').y).not.toBeCloseTo(result.get('g2').y, 5);
+    });
+
+    it('lays out a hierarchical selection as a tree using internal edges', () => {
+      const hierNodes = [
+        { id: 'root', position: { x: 0, y: 0 }, data: { nodeType: 'Goal' } },
+        { id: 'child1', position: { x: 400, y: 0 }, data: { nodeType: 'Task' } },
+        { id: 'child2', position: { x: 800, y: 0 }, data: { nodeType: 'Task' } },
+      ];
+      const edges = [
+        { source: 'root', target: 'child1' },
+        { source: 'root', target: 'child2' },
+      ];
+      const result = arrangeNodes(hierNodes, edges, 'tidy');
+      expect(result.size).toBe(3);
+      // Tree (TB) puts the root above its children.
+      expect(result.get('root').y).toBeLessThan(result.get('child1').y);
+      expect(result.get('root').y).toBeLessThan(result.get('child2').y);
+    });
+
+    it('keeps the tidied arrangement centred on the selection centroid', () => {
+      const typed = [
+        { id: 'a', position: { x: 0, y: 0 }, data: { nodeType: 'Goal' } },
+        { id: 'b', position: { x: 300, y: 0 }, data: { nodeType: 'Task' } },
+        { id: 'c', position: { x: 0, y: 300 }, data: { nodeType: 'Risk' } },
+      ];
+      const result = arrangeNodes(typed, [], 'tidy');
+      const centroid = { x: (0 + 300 + 0) / 3, y: (0 + 0 + 300) / 3 };
+      const xs = [...result.values()].map((p) => p.x);
+      const ys = [...result.values()].map((p) => p.y);
+      const center = {
+        x: (Math.min(...xs) + Math.max(...xs)) / 2,
+        y: (Math.min(...ys) + Math.max(...ys)) / 2,
+      };
+      expect(center.x).toBeCloseTo(centroid.x, 5);
+      expect(center.y).toBeCloseTo(centroid.y, 5);
+    });
+  });
 });
