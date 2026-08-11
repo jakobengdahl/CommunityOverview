@@ -4,6 +4,18 @@ import { useI18n } from '../i18n';
 import EntityHistoryView from './EntityHistoryView';
 import './EditNodeDialog.css';
 
+const EDGE_MIN_THICKNESS = 1;
+const EDGE_MAX_THICKNESS = 12;
+const DEFAULT_THICKNESS = 2;
+
+// Keep this in sync with resolveEdgeVisuals() in the ui-graph-canvas package,
+// which normalizes and clamps the same attributes at render time.
+function clampThickness(value) {
+  const n = Number(value);
+  if (!Number.isFinite(n) || n <= 0) return DEFAULT_THICKNESS;
+  return Math.min(EDGE_MAX_THICKNESS, Math.max(EDGE_MIN_THICKNESS, Math.round(n)));
+}
+
 function EditEdgeDialog({ edge, nodes, onClose, onSave, onDelete }) {
   const { getRelationshipTypes } = useGraphStore();
   const { t } = useI18n();
@@ -36,15 +48,16 @@ function EditEdgeDialog({ edge, nodes, onClose, onSave, onDelete }) {
         label: edge.label || '',
       });
       const meta = edge.metadata && typeof edge.metadata === 'object' ? edge.metadata : {};
-      const thickness = Number(meta.thickness);
       const hasColor = typeof meta.color === 'string' && meta.color.trim() !== '';
+      // Normalize direction the same way resolveEdgeVisuals does so the dialog
+      // reflects (rather than silently discards) externally-set values.
+      const direction =
+        typeof meta.direction === 'string' ? meta.direction.trim().toLowerCase() : '';
       setAppearance({
-        direction: ['forward', 'backward', 'both', 'none'].includes(meta.direction)
-          ? meta.direction
-          : 'none',
+        direction: ['forward', 'backward', 'both'].includes(direction) ? direction : 'none',
         useColor: hasColor,
-        color: hasColor ? meta.color : '#666666',
-        thickness: Number.isFinite(thickness) && thickness > 0 ? thickness : 2,
+        color: hasColor ? meta.color.trim() : '#666666',
+        thickness: clampThickness(meta.thickness),
         arrow: meta.arrow === 'open' ? 'open' : 'closed',
         animated: meta.animated === true || meta.pulse === true,
       });
@@ -66,17 +79,46 @@ function EditEdgeDialog({ edge, nodes, onClose, onSave, onDelete }) {
 
   const handleSubmit = (e) => {
     e.preventDefault();
+    // Merge onto existing metadata, but only store non-default visual keys so an
+    // unrelated edit doesn't stamp defaults onto a previously-plain edge, and so
+    // clearing an attribute actually removes it.
     const baseMeta =
       edge && edge.metadata && typeof edge.metadata === 'object' ? { ...edge.metadata } : {};
-    baseMeta.direction = appearance.direction;
-    baseMeta.arrow = appearance.arrow;
-    baseMeta.thickness = Number(appearance.thickness) || 2;
-    baseMeta.animated = appearance.animated;
+
+    if (appearance.direction && appearance.direction !== 'none') {
+      baseMeta.direction = appearance.direction;
+    } else {
+      delete baseMeta.direction;
+    }
+
+    if (appearance.arrow === 'open') {
+      baseMeta.arrow = 'open';
+    } else {
+      delete baseMeta.arrow;
+    }
+
+    const thickness = clampThickness(appearance.thickness);
+    if (thickness !== DEFAULT_THICKNESS) {
+      baseMeta.thickness = thickness;
+    } else {
+      delete baseMeta.thickness;
+    }
+
     if (appearance.useColor) {
       baseMeta.color = appearance.color;
     } else {
       delete baseMeta.color;
     }
+
+    if (appearance.animated) {
+      baseMeta.animated = true;
+    } else {
+      // Clear both aliases so unchecking reliably stops the animation even for
+      // edges that were pulsed via the external `pulse` flag.
+      delete baseMeta.animated;
+      delete baseMeta.pulse;
+    }
+
     onSave({
       type: formData.type || null,
       label: formData.label,

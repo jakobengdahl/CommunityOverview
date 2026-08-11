@@ -188,7 +188,8 @@ body.graph-suppress-selection * {
 }
 
 @media (prefers-reduced-motion: reduce) {
-  .react-flow__edge.rf-edge-pulse .react-flow__edge-path {
+  .react-flow__edge.rf-edge-pulse .react-flow__edge-path,
+  .react-flow__edge.rf-edge-pulse.animated .react-flow__edge-path {
     animation: none;
   }
 }

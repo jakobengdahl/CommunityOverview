@@ -84,8 +84,8 @@ node. A dialog lets you select the relationship type.
 ![Edge creation](images/create-edge.png)
 *Hover over a node to reveal the connection handle (small circle), then drag to the target node to create an edge.*
 
-**Edge appearance:** Right-click an edge → **Edit** (or double-click it) to open the
-connection dialog. Besides the relationship type and label, the **Appearance** section
+**Edge appearance:** Right-click an edge → **Edit** to open the connection dialog.
+Besides the relationship type and label, the **Appearance** section
 lets you control how the edge is drawn on the canvas:
 
 - **Direction** — draw an arrowhead toward the target, toward the source, at both ends,
