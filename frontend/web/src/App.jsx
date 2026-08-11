@@ -11,6 +11,7 @@ import CollectKioskView from './components/CollectKioskView';
 import GuideOverlay from './components/GuideOverlay';
 import SessionDrawer from './components/SessionDrawer';
 import RecentActivityDrawer from './components/RecentActivityDrawer';
+import NodeHistoryPanel from './components/NodeHistoryPanel';
 import AppDialogs from './components/AppDialogs';
 import * as api from './services/api';
 import * as sessionStore from './services/sessionStore';
@@ -651,6 +652,14 @@ function App() {
       setDetailNode,
       showNotification,
     ]
+  );
+
+  // Callback: open the node detail dialog directly on its change-history tab
+  const handleViewNodeHistory = useCallback(
+    (nodeId, nodeData) => {
+      setDetailNode({ id: nodeId, data: nodeData || {}, view: 'history' });
+    },
+    [setDetailNode]
   );
 
   // Callback: Expand node to show related nodes
@@ -1617,6 +1626,7 @@ function App() {
           onShowOnly={handleShowOnly}
           onSelectionChange={handleSelectionChange}
           onNodeDoubleClick={handleNodeDoubleClick}
+          onViewNodeHistory={handleViewNodeHistory}
           focusNodeId={focusNodeId}
           onFocusComplete={clearFocusNode}
           createGroupSignal={createGroupSignal}
@@ -1664,6 +1674,7 @@ function App() {
             showOnly: t('context_menu.show_only'),
             selectSameType: t('context_menu.select_same_type'),
             selectRelated: t('context_menu.select_related'),
+            viewHistory: t('context_menu.view_history'),
             organize: t('context_menu.organize'),
             autoTidy: t('context_menu.auto_tidy'),
             organizeCluster: t('context_menu.organize_cluster'),
@@ -1685,6 +1696,8 @@ function App() {
             annotationTextSize: t('context_menu.annotation_text_size'),
             arrowStartHead: t('context_menu.arrow_start_head'),
             arrowEndHead: t('context_menu.arrow_end_head'),
+            undoNotification: t('context_menu.undo_notification'),
+            redoNotification: t('context_menu.redo_notification'),
           }}
           nodeColorResolver={getNodeColor}
           onViewportChange={(vp) => {
@@ -1758,6 +1771,7 @@ function App() {
         onCreateActiveKnowledgeCollection={handleCreateAKC}
       />
       {llmAvailable && <ChatPanel collectionShortName={akcShortName || undefined} />}
+      <NodeHistoryPanel />
 
       {notification && (
         <div className={`app-notification app-notification-${notification.type}`}>
