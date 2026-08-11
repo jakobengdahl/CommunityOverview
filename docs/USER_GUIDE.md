@@ -16,6 +16,7 @@ shared knowledge graphs. This guide covers all user-facing features.
    - [Groups and annotations](#25-groups-and-annotations)
    - [Saved views](#26-saved-views)
    - [Agents](#27-agents)
+   - [Recent nodes (navigation trail)](#28-recent-nodes-navigation-trail)
 3. [Search](#3-search)
 4. [AI Chat](#4-ai-chat)
    - [Asking questions](#41-asking-questions)
@@ -107,6 +108,9 @@ Right-clicking a node opens the context menu:
   whole visualization, including ones scrolled outside the current viewport
 - **Select related nodes** — select this node together with every node it is directly
   connected to
+- **View change history** — open the node's detail dialog straight to its **History** tab,
+  showing the read-only change log for that node (see [5.2](#52-recent-activity-audit-log)).
+  When the deployment retains no history for the node, the tab shows a "no history" message.
 - **Custom actions** — schema-defined items per node type, e.g. "Open in SSPCloud" that
   substitutes a field value into a URL and opens it in a new tab
 - **Delete** — remove the node permanently (shown in red, requires confirmation)
@@ -200,6 +204,23 @@ react to all node type changes).
 
 Agents appear as Agent nodes in the graph. Double-clicking opens the detail dialog
 where you can click **Edit**; right-click gives the same options via the context menu.
+
+### 2.8 Recent nodes (navigation trail)
+
+As you work, a **Recent nodes** button appears at the bottom-centre of the canvas
+once anything has happened. It keeps a short, session-scoped trail of the nodes you
+have **added** to the visualization (for example through search or *find related*)
+and the ones you have **visited** — navigated to from search or opened via
+double-click.
+
+Click the button to expand the trail (newest first). Each entry shows the node's
+name, whether it was added or visited, and how long ago. **Click an entry to jump
+back to that node** — the canvas re-centres on it. Use the trash icon to clear the
+trail, or **Esc** to close the panel.
+
+This trail is per-session and lives only in your browser. It is separate from
+**Recent activity** ([5.2](#52-recent-activity-audit-log)), which is a persisted
+audit log of who changed what in the graph data.
 
 ---
 
@@ -370,6 +391,7 @@ AI apps:
 | **Connect to session (via ID)** | Joins an existing session by entering its ID (format `1234-5678`) |
 | **Recent sessions** | The most recently used sessions — shown by name if you have named them, otherwise by ID. Click one to load it; the current session is saved automatically first. Hover a row and open the **⋮** menu for per-session actions: **Name session**, **Copy link** (copies the shareable `?session=…` URL to the clipboard), **Copy pulse-trigger URL** (on the session you are currently in — see [8.4](#84-external-pulse-triggers)), and **Delete session**. |
 | **Recent activity** | Opens the activity panel — a read-only audit log of graph changes (see [5.2](#52-recent-activity-audit-log)) |
+| **Lock / Unlock visualization** | Guards the current board against accidental clearing. While locked, **Esc × 2** does nothing at all, and the top-bar **clear** button asks for an emphatic confirmation warning that everything on the board will be removed. The setting is remembered in your browser. |
 | **Settings** | Opens the Settings dialog (see below) |
 
 Session content (node membership, positions, groups, and hidden nodes) is stored
@@ -660,7 +682,7 @@ animation.
 | **Delete** | Delete selected node or edge |
 | **Enter** (chat) | Send message |
 | **Escape** | Cancel guide / close dialog |
-| **Esc × 2** | Clear the canvas (remove all nodes from view) |
+| **Esc × 2** | Clear the canvas (remove all nodes from view). On a **named** session this first asks for confirmation; on a **locked** visualization it does nothing (unlock it, or use the clear button). |
 | **Ctrl+Z** / **Cmd+Z** | Undo the last node move (drag or Organize) |
 | **Ctrl+Shift+Z** / **Cmd+Shift+Z** / **Ctrl+Y** | Redo the last undone move |
 | **Space + drag** | Pan the canvas |

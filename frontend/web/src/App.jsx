@@ -11,7 +11,9 @@ import CollectKioskView from './components/CollectKioskView';
 import GuideOverlay from './components/GuideOverlay';
 import SessionDrawer from './components/SessionDrawer';
 import RecentActivityDrawer from './components/RecentActivityDrawer';
+import NodeHistoryPanel from './components/NodeHistoryPanel';
 import AppDialogs from './components/AppDialogs';
+import ConfirmDialog from './components/ConfirmDialog';
 import * as api from './services/api';
 import * as sessionStore from './services/sessionStore';
 import {
@@ -23,6 +25,7 @@ import {
 import { serverStateToMirror, useSharedSession } from './hooks/useSharedSession';
 import { useSyncConnection } from './hooks/useSyncConnection';
 import { useToolResultCommands } from './hooks/useToolResultCommands';
+import { decideClearAction } from './utils/clearBoard';
 import './App.css';
 
 const _urlParams = new URLSearchParams(window.location.search);
@@ -85,6 +88,8 @@ function App() {
     setFederationDepth,
     showMinimap,
     nodePreviewEnabled,
+    canvasLocked,
+    setCanvasLocked,
     nodeMarks,
     pulsedNodeIds,
     startGuide,
@@ -138,8 +143,17 @@ function App() {
   const [connectDialogOpen, setConnectDialogOpen] = useState(false);
   const [renameDialog, setRenameDialog] = useState(null);
   const [deleteSessionDialog, setDeleteSessionDialog] = useState(null);
+  // Pending clear-board confirmation. null when closed; { locked: boolean }
+  // otherwise — the locked variant shows a stronger warning (see requestClear).
+  const [clearConfirm, setClearConfirm] = useState(null);
   const [sessionsVersion, setSessionsVersion] = useState(0);
   const sessions = useMemo(() => sessionStore.listSessions(), [sessionsVersion]);
+  // A session is "named" once the user has given it a title; the clear-board
+  // guard treats named boards as worth protecting (unnamed ones clear freely).
+  const currentSessionName = useMemo(
+    () => sessions.find((s) => s.id === sessionId)?.name || '',
+    [sessions, sessionId]
+  );
 
   // ── Realtime sync (design step 6) ───────────────────────────────────────
   // The sync client owns the op-protocol stream and op emission for the active
@@ -379,6 +393,7 @@ function App() {
       connectDialogOpen ||
       renameDialog ||
       deleteSessionDialog ||
+      clearConfirm ||
       (akcShortName && akcConfig && !akcIntroShown)
     );
   }, [
@@ -399,10 +414,44 @@ function App() {
     connectDialogOpen,
     renameDialog,
     deleteSessionDialog,
+    clearConfirm,
     akcShortName,
     akcConfig,
     akcIntroShown,
   ]);
+
+  // Decide how a clear-board request is handled, based on how protected the
+  // board is (task: confirm before clearing a named or locked visualization):
+  //   • locked   → keyboard esc-esc does nothing; the button asks for an
+  //                emphatic confirmation warning everything will be removed.
+  //   • named    → confirm before clearing (both esc-esc and the button).
+  //   • unnamed  → clear immediately, no confirmation.
+  const requestClear = useCallback(
+    (source) => {
+      const action = decideClearAction({
+        locked: canvasLocked,
+        named: !!currentSessionName,
+        source,
+      });
+      if (action === 'clear') {
+        clearVisualization();
+      } else if (action === 'confirm') {
+        setClearConfirm({ locked: false });
+      } else if (action === 'confirm-locked') {
+        setClearConfirm({ locked: true });
+      }
+      // 'noop' — locked board, esc-esc does nothing.
+    },
+    [canvasLocked, currentSessionName, clearVisualization]
+  );
+
+  // The capture-phase keydown listener is registered once and reads the latest
+  // decision logic through a ref, so the double-Escape timer isn't reset by
+  // re-registration whenever the guard inputs change.
+  const requestClearRef = useRef(requestClear);
+  useLayoutEffect(() => {
+    requestClearRef.current = requestClear;
+  }, [requestClear]);
 
   // Double-Escape to clear the canvas (works even from input fields)
   useEffect(() => {
@@ -413,7 +462,7 @@ function App() {
       if (dialogOpenRef.current) return;
       const now = Date.now();
       if (now - lastEscape < 400) {
-        clearVisualization();
+        requestClearRef.current('keyboard');
         lastEscape = 0;
       } else {
         lastEscape = now;
@@ -422,7 +471,7 @@ function App() {
     // Capture phase so it fires even when focus is inside an input/textarea
     document.addEventListener('keydown', handleKeyDown, true);
     return () => document.removeEventListener('keydown', handleKeyDown, true);
-  }, [clearVisualization]);
+  }, []);
 
   // ── Session bootstrap (once) ────────────────────────────────────────────
   // Reflect the initial session id in the URL and, when it came from a
@@ -653,6 +702,14 @@ function App() {
       setDetailNode,
       showNotification,
     ]
+  );
+
+  // Callback: open the node detail dialog directly on its change-history tab
+  const handleViewNodeHistory = useCallback(
+    (nodeId, nodeData) => {
+      setDetailNode({ id: nodeId, data: nodeData || {}, view: 'history' });
+    },
+    [setDetailNode]
   );
 
   // Callback: Expand node to show related nodes
@@ -1651,6 +1708,7 @@ function App() {
           onShowOnly={handleShowOnly}
           onSelectionChange={handleSelectionChange}
           onNodeDoubleClick={handleNodeDoubleClick}
+          onViewNodeHistory={handleViewNodeHistory}
           focusNodeId={focusNodeId}
           onFocusComplete={clearFocusNode}
           createGroupSignal={createGroupSignal}
@@ -1698,6 +1756,7 @@ function App() {
             showOnly: t('context_menu.show_only'),
             selectSameType: t('context_menu.select_same_type'),
             selectRelated: t('context_menu.select_related'),
+            viewHistory: t('context_menu.view_history'),
             organize: t('context_menu.organize'),
             autoTidy: t('context_menu.auto_tidy'),
             organizeCluster: t('context_menu.organize_cluster'),
@@ -1733,7 +1792,7 @@ function App() {
         sessionId={sessionId}
         roster={roster}
         currentClientId={api.getClientId()}
-        onClear={clearVisualization}
+        onClear={() => requestClear('button')}
         onToggleDrawer={() => setDrawerOpen((prev) => !prev)}
       />
       <SessionDrawer
@@ -1756,6 +1815,8 @@ function App() {
           setDrawerOpen(false);
           setActivityOpen(true);
         }}
+        canvasLocked={canvasLocked}
+        onToggleLock={() => setCanvasLocked(!canvasLocked)}
         suspendEscape={
           !!(
             // The drawer is non-modal, so any dialog can be stacked on top of
@@ -1764,6 +1825,7 @@ function App() {
             connectDialogOpen ||
             renameDialog ||
             deleteSessionDialog ||
+            clearConfirm ||
             createNodeType ||
             editingNode ||
             detailNode ||
@@ -1780,6 +1842,26 @@ function App() {
         }
       />
       <RecentActivityDrawer open={activityOpen} onClose={() => setActivityOpen(false)} />
+      {clearConfirm && (
+        <ConfirmDialog
+          title={
+            clearConfirm.locked ? t('clear_confirm.locked_title') : t('clear_confirm.named_title')
+          }
+          message={
+            clearConfirm.locked
+              ? t('clear_confirm.locked_message')
+              : t('clear_confirm.named_message')
+          }
+          confirmText={t('clear_confirm.confirm')}
+          cancelText={t('common.cancel')}
+          confirmStyle="danger"
+          onConfirm={() => {
+            clearVisualization();
+            setClearConfirm(null);
+          }}
+          onCancel={() => setClearConfirm(null)}
+        />
+      )}
       {maxFederationDepth > 1 && (
         <div className="app-a11y-depth-live" aria-live="polite" aria-atomic="true">
           {t('federation.depth_indicator', { current: federationDepth, max: maxFederationDepth })}
@@ -1795,6 +1877,7 @@ function App() {
         onCreateActiveKnowledgeCollection={handleCreateAKC}
       />
       {llmAvailable && <ChatPanel collectionShortName={akcShortName || undefined} />}
+      <NodeHistoryPanel />
 
       {notification && (
         <div className={`app-notification app-notification-${notification.type}`}>

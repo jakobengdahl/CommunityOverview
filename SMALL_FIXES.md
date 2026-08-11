@@ -19,6 +19,13 @@ Effort scale: XS = single-line fix · S = up to ~30 lines / one file · M = mult
 
 ---
 
+### [2026-08-11] Node trail records a duplicate 'visited' when jumping to an older row
+
+- **File(s):** `frontend/web/src/store/graphStore.js` (`setFocusNodeId`); `frontend/web/src/components/NodeHistoryPanel.jsx`
+- **Context:** Discovered during `claude/canvas-node-history` (review round 2 of PR #315).
+- **Issue:** Clicking a non-top entry in the "Recent nodes" trail calls `setFocusNodeId`, which records a fresh `visited` entry. Because `appendNavEntries` only collapses against the immediate top of the trail, jumping back to an older node prepends a duplicate row (the original entry, including any "Added" label, stays lower in the list). This is intentional (focus = visit, mirroring browser history), so it is not a bug — but if the duplicate-on-jump reads as clutter, consider suppressing the record when the navigation originates from the trail panel itself, or de-duplicating anywhere in the trail rather than only at the top.
+- **Effort:** S
+
 ### [2026-08-11] Canvas undo history not invalidated by mid-session node repositioning
 
 - **File(s):** `packages/ui-graph-canvas/src/components/GraphCanvas.jsx` (the `clearHistory` effect keyed on `animatedLayoutResetKey`)

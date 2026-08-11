@@ -11,6 +11,8 @@ import {
   BroadcastPin,
   Trash,
   ClockHistory,
+  LockFill,
+  UnlockFill,
 } from 'react-bootstrap-icons';
 import { useI18n } from '../i18n';
 import SessionContextMenu from './SessionContextMenu';
@@ -36,6 +38,8 @@ function SessionDrawer({
   onCopyTriggerUrl,
   onOpenSettings,
   onOpenActivity,
+  canvasLocked = false,
+  onToggleLock,
   suspendEscape = false,
 }) {
   const { t } = useI18n();
@@ -197,6 +201,14 @@ function SessionDrawer({
       </div>
 
       <div className="session-drawer-footer">
+        <button
+          className={`session-drawer-item${canvasLocked ? ' active' : ''}`}
+          onClick={() => onToggleLock?.()}
+          aria-pressed={canvasLocked}
+        >
+          {canvasLocked ? <LockFill size={15} /> : <UnlockFill size={15} />}
+          <span>{canvasLocked ? t('sessions.unlock_canvas') : t('sessions.lock_canvas')}</span>
+        </button>
         {onOpenActivity && (
           <button className="session-drawer-item" onClick={onOpenActivity}>
             <ClockHistory size={15} />

@@ -138,6 +138,14 @@
       "unknown": "okänd"
     }
   },
+  "nav_history": {
+    "title": "Senaste noder",
+    "close": "Stäng",
+    "clear": "Rensa",
+    "action_added": "Tillagd",
+    "action_visited": "Besökt",
+    "jump_to": "Gå till {name}"
+  },
   "proposal": {
     "title": "Föreslaget tillägg:",
     "type": "Typ:",
@@ -250,6 +258,8 @@
     "session_deleted_remote": "Sessionen togs bort av en annan användare — startade en ny",
     "connect_error": "Kunde inte läsa in sessionen",
     "change_not_saved": "En ändring kunde inte sparas — uppdaterar sessionen",
+    "lock_canvas": "Lås visualiseringen",
+    "unlock_canvas": "Lås upp visualiseringen",
     "settings": "Inställningar"
   },
   "settings": {
@@ -275,6 +285,13 @@
     "session_id_tooltip": "Sessions-ID — dela med en extern AI för att ansluta den till detta fönster",
     "clear_canvas_tooltip": "Rensa canvas — ta bort alla noder och kanter (eller tryck Esc två gånger)",
     "clear_canvas_aria": "Rensa canvas"
+  },
+  "clear_confirm": {
+    "named_title": "Rensa den här visualiseringen?",
+    "named_message": "Detta tar bort alla noder och kanter från den aktuella visualiseringen. Är du säker?",
+    "locked_title": "Den här visualiseringen är låst",
+    "locked_message": "Varning: detta tar permanent bort allt du har lagt in i den här låsta visualiseringen — alla noder, kanter och anteckningar. Detta kan inte ångras. Är du säker på att du vill rensa den?",
+    "confirm": "Rensa visualiseringen"
   },
   "experts": {
     "title": "Expert-agenter",
@@ -303,6 +320,7 @@
     "show_only": "Visa enbart dessa",
     "select_same_type": "Markera alla noder av samma sort",
     "select_related": "Markera relaterade noder",
+    "view_history": "Visa ändringshistorik",
     "organize": "Organisera",
     "auto_tidy": "Städa automatiskt",
     "organize_cluster": "Klustra",

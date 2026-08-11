@@ -3,6 +3,7 @@ import { create } from 'zustand';
 const FEDERATION_DEPTH_STORAGE_KEY = 'federation_depth';
 const SHOW_MINIMAP_STORAGE_KEY = 'show_minimap';
 const NODE_PREVIEW_STORAGE_KEY = 'node_preview_enabled';
+const CANVAS_LOCKED_STORAGE_KEY = 'canvas_locked';
 
 function loadInitialShowMinimap() {
   try {
@@ -24,6 +25,16 @@ function loadInitialNodePreview() {
   return true;
 }
 
+function loadInitialCanvasLocked() {
+  try {
+    const stored = window?.localStorage?.getItem(CANVAS_LOCKED_STORAGE_KEY);
+    if (stored !== null) return stored === 'true';
+  } catch {
+    // ignore storage errors and use default
+  }
+  return false;
+}
+
 function loadInitialFederationDepth() {
   try {
     const stored = window?.localStorage?.getItem(FEDERATION_DEPTH_STORAGE_KEY);
@@ -35,6 +46,46 @@ function loadInitialFederationDepth() {
     // ignore storage errors and use default
   }
   return 1;
+}
+
+// How many entries the session-scoped node trail keeps. Bounded so a long
+// working session cannot grow it without limit; older entries are dropped.
+const NAV_HISTORY_LIMIT = 50;
+
+// Append node-trail entries (newest-first) onto an existing trail, returning a
+// new bounded array. Pure so the trimming/dedup logic is unit-testable without
+// the store. `at` is the shared ISO timestamp for this batch. A repeat of the
+// node currently at the top is collapsed in place (its timestamp is refreshed)
+// rather than pushed as an adjacent duplicate, so add-then-visit or re-focusing
+// the same node does not clutter the trail. On collapse an existing 'added'
+// designation is kept even if the incoming event is a 'visit', so a node the
+// user just added (then focused, e.g. via search) still reads as "Added".
+export function appendNavEntries(prev, entries, at, limit = NAV_HISTORY_LIMIT) {
+  let next = Array.isArray(prev) ? prev : [];
+  for (const e of entries || []) {
+    if (!e || !e.id) continue;
+    const action = e.action === 'added' ? 'added' : 'visited';
+    const collapses = next.length > 0 && next[0].id === e.id;
+    const row = {
+      id: e.id,
+      name: e.name || e.id,
+      type: e.type || '',
+      action: collapses && next[0].action === 'added' ? 'added' : action,
+      at,
+    };
+    next = collapses ? [row, ...next.slice(1)] : [row, ...next];
+  }
+  return next.slice(0, limit);
+}
+
+// Best-effort domain name/type for a node that may be a raw graph node (name,
+// type) or a React Flow node whose domain fields live under data (the wrapper's
+// own `type` is the React Flow node kind, e.g. 'custom', so data wins for type).
+function navNameType(node, fallbackId) {
+  return {
+    name: node?.name || node?.data?.name || node?.data?.label || fallbackId,
+    type: node?.data?.type || node?.data?.nodeType || node?.type || '',
+  };
 }
 
 // Both updateVisualization and clearVisualization raise clearGroupsFlag and then
@@ -179,11 +230,17 @@ const useGraphStore = create((set, get) => ({
   contextMenu: null,
   clearGroupsFlag: false, // Signal to clear groups in visualization
   focusNodeId: null, // Node ID to zoom/pan to
+  // Session-scoped, newest-first trail of nodes added to the visualization or
+  // navigated to, so the user can jump back through what happened. Distinct from
+  // the backend graph-mutation log (RecentActivityDrawer) and from the canvas
+  // position undo/redo (useCanvasHistory). Cleared on session switch / clear.
+  navHistory: [],
   pendingGroups: null, // Groups to restore from a saved view
   pendingAnnotations: null, // Note/label/arrow annotations to restore from a session
   chatPanelOpen: true, // Chat panel expanded vs minimized
   showMinimap: loadInitialShowMinimap(), // Minimap visibility (persisted)
   nodePreviewEnabled: loadInitialNodePreview(), // Hover info popup on/off (persisted)
+  canvasLocked: loadInitialCanvasLocked(), // Navigation-menu lock guarding the board (persisted)
 
   // Search state
   searchQuery: '',
@@ -250,12 +307,19 @@ const useGraphStore = create((set, get) => ({
     const uniqueNodes = Array.from(new Map(nodes.map((n) => [n.id, n])).values());
     const uniqueEdges = Array.from(new Map(edges.map((e) => [e.id, e])).values());
 
-    set({
+    // A wholesale replace can drop nodes the trail still references; prune those
+    // so every trail row stays a valid jump target. New arrivals are not
+    // recorded as 'added' here — a full replace is a baseline, not the
+    // incremental user additions the trail captures (those come through
+    // addNodesToVisualization).
+    const presentIds = new Set(uniqueNodes.map((n) => n.id));
+    set((state) => ({
       nodes: uniqueNodes,
       edges: uniqueEdges,
       highlightedNodeIds: highlightIds,
       clearGroupsFlag: true, // Signal to clear groups
-    });
+      navHistory: state.navHistory.filter((e) => presentIds.has(e.id)),
+    }));
     // Reset flag after a short delay
     scheduleClearGroupsReset(set);
   },
@@ -284,12 +348,20 @@ const useGraphStore = create((set, get) => ({
 
     // Calculate which IDs are actually new for highlighting
     const existingNodeIds = new Set(nodes.map((n) => n.id));
-    const actuallyNewNodeIds = newNodes.filter((n) => !existingNodeIds.has(n.id)).map((n) => n.id);
+    const newlyAdded = newNodes.filter((n) => !existingNodeIds.has(n.id));
+    const actuallyNewNodeIds = newlyAdded.map((n) => n.id);
+
+    const addedRows = newlyAdded.map((n) => ({
+      id: n.id,
+      ...navNameType(n, n.id),
+      action: 'added',
+    }));
 
     set({
       nodes: Array.from(nodeMap.values()),
       edges: Array.from(edgeMap.values()),
       highlightedNodeIds: actuallyNewNodeIds,
+      navHistory: appendNavEntries(get().navHistory, addedRows, new Date().toISOString()),
     });
   },
 
@@ -320,6 +392,7 @@ const useGraphStore = create((set, get) => ({
       clearGroupsFlag: true,
       selectedGraphNodes: [],
       selectedNodeId: null,
+      navHistory: [],
     });
     scheduleClearGroupsReset(set);
   },
@@ -421,6 +494,15 @@ const useGraphStore = create((set, get) => ({
       // ignore storage errors
     }
     set({ nodePreviewEnabled: enabled });
+  },
+
+  setCanvasLocked: (locked) => {
+    try {
+      window?.localStorage?.setItem(CANVAS_LOCKED_STORAGE_KEY, String(locked));
+    } catch {
+      // ignore storage errors
+    }
+    set({ canvasLocked: locked });
   },
 
   setStats: (stats) => set({ stats }),
@@ -566,6 +648,7 @@ const useGraphStore = create((set, get) => ({
       contextMenu: null,
       selectedNodeId: null,
       selectedGraphNodes: [],
+      navHistory: [],
       assistantSessionEpoch: state.assistantSessionEpoch + 1,
     }));
   },
@@ -578,17 +661,41 @@ const useGraphStore = create((set, get) => ({
   setEditingNode: (node) => set({ editingNode: node }),
   closeEditingNode: () => set({ editingNode: null }),
 
-  // Node detail view (double-click)
-  setDetailNode: (node) => set({ detailNode: node }),
+  // Node detail view (double-click). Opening a node's detail counts as visiting
+  // it, so it is recorded on the navigable trail.
+  setDetailNode: (node) =>
+    set((state) => {
+      if (!node?.id) return { detailNode: node };
+      const stored = state.nodes.find((n) => n.id === node.id);
+      const entry = { id: node.id, ...navNameType(stored || node, node.id), action: 'visited' };
+      return {
+        detailNode: node,
+        navHistory: appendNavEntries(state.navHistory, [entry], new Date().toISOString()),
+      };
+    }),
   closeDetailNode: () => set({ detailNode: null }),
 
   // Graph canvas selection
   setSelectedGraphNodes: (nodes) => set({ selectedGraphNodes: nodes }),
   clearSelectedGraphNodes: () => set({ selectedGraphNodes: [] }),
 
-  // Focus node actions
-  setFocusNodeId: (nodeId) => set({ focusNodeId: nodeId }),
+  // Focus node actions. setFocusNodeId is the single "navigate/center to a node"
+  // choke point (search results, guided steps, and the node-trail panel all use
+  // it), so navigating to a node records a visit on the trail. clearFocusNode
+  // only lowers the transient signal and is not a navigation, so it records
+  // nothing.
+  setFocusNodeId: (nodeId) =>
+    set((state) => {
+      if (!nodeId) return { focusNodeId: nodeId };
+      const stored = state.nodes.find((n) => n.id === nodeId);
+      const entry = { id: nodeId, ...navNameType(stored, nodeId), action: 'visited' };
+      return {
+        focusNodeId: nodeId,
+        navHistory: appendNavEntries(state.navHistory, [entry], new Date().toISOString()),
+      };
+    }),
   clearFocusNode: () => set({ focusNodeId: null }),
+  clearNavHistory: () => set({ navHistory: [] }),
 
   // Expert agent actions
   setAvailableExperts: (experts) => set({ availableExperts: experts }),
@@ -712,10 +819,13 @@ const useGraphStore = create((set, get) => ({
 
   // Delete node from visualization
   removeNode: (nodeId) => {
-    const { nodes, edges } = get();
+    const { nodes, edges, navHistory } = get();
     set({
       nodes: nodes.filter((n) => n.id !== nodeId),
       edges: edges.filter((e) => e.source !== nodeId && e.target !== nodeId),
+      // Drop the removed node from the trail so its row can't become a dead
+      // jump target.
+      navHistory: navHistory.filter((e) => e.id !== nodeId),
     });
   },
 }));

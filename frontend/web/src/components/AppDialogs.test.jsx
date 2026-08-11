@@ -26,8 +26,8 @@ vi.mock('./EditNodeDialog', () => ({
   ),
 }));
 vi.mock('./NodeDetailDialog', () => ({
-  default: ({ node, onClose, onEdit }) => (
-    <div data-testid="node-detail" data-node-id={node.id}>
+  default: ({ node, onClose, onEdit, initialView }) => (
+    <div data-testid="node-detail" data-node-id={node.id} data-initial-view={initialView}>
       <button onClick={() => onEdit(node.id, node.data)}>edit</button>
       <button onClick={onClose}>close</button>
     </div>
@@ -272,6 +272,13 @@ describe('AppDialogs registry', () => {
     fireEvent.click(screen.getByText('edit'));
     expect(closeDetailNode).toHaveBeenCalled();
     expect(handlers.onEdit).toHaveBeenCalledWith('n9', { type: 'Actor' });
+  });
+
+  it('forwards the detailNode.view hint to the detail dialog as initialView', () => {
+    renderDialogs(makeDialogs(), {
+      detailNode: { id: 'n9', data: { type: 'Actor' }, view: 'history' },
+    });
+    expect(screen.getByTestId('node-detail').getAttribute('data-initial-view')).toBe('history');
   });
 
   it('wires the settings dialog export action', () => {
