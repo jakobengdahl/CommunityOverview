@@ -19,6 +19,13 @@ Effort scale: XS = single-line fix · S = up to ~30 lines / one file · M = mult
 
 ---
 
+### [2026-08-11] Unused layout imports in GraphCanvas
+
+- **File(s):** `packages/ui-graph-canvas/src/components/GraphCanvas.jsx:33-35`
+- **Context:** Discovered during `claude/visualization-canvas-activities-46ayn1` while adding `positionNewNodes`/`arrangeNodes` to the same import block.
+- **Issue:** `getGridLayout`, `getCircularLayout` and `getLayoutedElements` are imported but never referenced in `GraphCanvas.jsx` (only `applyLayout` is used there). Dead imports; eslint's current config does not flag them. Remove for clarity.
+- **Effort:** XS
+
 ### [2026-08-10] Flaky timing-dependent webhook delivery-retry test
 
 - **File(s):** `backend/core/events/tests/test_delivery.py:225` (`TestDeliveryWorker::test_failed_delivery_with_retry`)

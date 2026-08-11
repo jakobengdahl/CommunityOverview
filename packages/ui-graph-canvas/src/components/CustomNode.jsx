@@ -129,6 +129,7 @@ function CustomNode({ data, id, selected }) {
 
       {showTooltip &&
         tooltipPos &&
+        data.previewEnabled !== false &&
         (data.description || data.communities?.length > 0 || data.markLabel) &&
         createPortal(
           <div
