@@ -18,6 +18,7 @@ const labels = {
   selectSameType: 'Select all nodes of the same type',
   selectRelated: 'Select related nodes',
   organize: 'Organize',
+  autoTidy: 'Auto-tidy',
   organizeCluster: 'Cluster',
   organizeHorizontal: 'List horizontally',
   organizeVertical: 'List vertically',
@@ -229,14 +230,16 @@ describe('MultiNodeContextMenu', () => {
         onClose={vi.fn()}
       />
     );
+    fireEvent.click(screen.getByRole('button', { name: /auto-tidy/i }));
     fireEvent.click(screen.getByRole('button', { name: /cluster/i }));
     fireEvent.click(screen.getByRole('button', { name: /list horizontally/i }));
     fireEvent.click(screen.getByRole('button', { name: /list vertically/i }));
     fireEvent.click(screen.getByRole('button', { name: /arrange as tree/i }));
-    expect(onOrganize).toHaveBeenNthCalledWith(1, 'cluster');
-    expect(onOrganize).toHaveBeenNthCalledWith(2, 'horizontal');
-    expect(onOrganize).toHaveBeenNthCalledWith(3, 'vertical');
-    expect(onOrganize).toHaveBeenNthCalledWith(4, 'tree');
+    expect(onOrganize).toHaveBeenNthCalledWith(1, 'tidy');
+    expect(onOrganize).toHaveBeenNthCalledWith(2, 'cluster');
+    expect(onOrganize).toHaveBeenNthCalledWith(3, 'horizontal');
+    expect(onOrganize).toHaveBeenNthCalledWith(4, 'vertical');
+    expect(onOrganize).toHaveBeenNthCalledWith(5, 'tree');
   });
 
   it('prefers onDeleteMultiple over per-node onDelete', () => {
