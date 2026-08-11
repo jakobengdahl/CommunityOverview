@@ -490,11 +490,29 @@ function GraphCanvasInner({
         selectedNodes.filter((n) => !ANNOTATION_TYPES.has(n.type)).map((n) => n.id)
       );
       if (selIds.size < 2) return;
-      const targets = nodes.filter((n) => selIds.has(n.id));
+      // Nodes inside a group hold parent-relative positions; arrange in absolute
+      // coordinates so a selection spanning grouped and ungrouped nodes stays
+      // consistent, then convert back to relative when writing grouped nodes.
+      const groupPos = new Map(
+        nodes.filter((n) => n.type === 'group').map((g) => [g.id, g.position])
+      );
+      const toAbsolute = (n) => {
+        const parent = n.parentId ? groupPos.get(n.parentId) : null;
+        return parent ? { x: n.position.x + parent.x, y: n.position.y + parent.y } : n.position;
+      };
+      const targets = nodes
+        .filter((n) => selIds.has(n.id))
+        .map((n) => ({ ...n, position: toAbsolute(n) }));
       const posById = arrangeNodes(targets, edges, mode);
       if (posById.size === 0) return;
       setNodes((nds) =>
-        nds.map((n) => (posById.has(n.id) ? { ...n, position: posById.get(n.id) } : n))
+        nds.map((n) => {
+          if (!posById.has(n.id)) return n;
+          const abs = posById.get(n.id);
+          const parent = n.parentId ? groupPos.get(n.parentId) : null;
+          const position = parent ? { x: abs.x - parent.x, y: abs.y - parent.y } : abs;
+          return { ...n, position };
+        })
       );
       if (onNodePositionChange) {
         for (const [id, pos] of posById) onNodePositionChange(id, pos);
