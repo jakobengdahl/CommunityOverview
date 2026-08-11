@@ -246,12 +246,13 @@ class TestAuthEnabledTakesPrecedence:
 class TestUnauthorizedContentNegotiation:
     """The 401 challenge is negotiated by Accept.
 
-    Regression for the SSPCloud Edge bug: a browser navigation must never land
-    on a blank page rendering the raw {"detail": "Authentication required"}
-    JSON. Browsers (Accept: text/html) get an HTML sign-in page WITHOUT a
-    WWW-Authenticate header, so no browser pops the native Basic dialog (which
-    can't drive the cookie login); API / fetch / MCP clients keep the JSON body
-    with the WWW-Authenticate challenge for programmatic auth.
+    Regression for the SSPCloud Edge/Chrome bug: a browser navigation must never
+    land on a blank page rendering the raw {"detail": "Authentication required"}
+    JSON, and no 401 may carry a WWW-Authenticate header — that header makes
+    Chromium pop the native Basic dialog (on the page OR on a subresource such as
+    the favicon), and that dialog can't drive the cookie login. Browsers
+    (Accept: text/html) get an HTML sign-in page; everything else gets the JSON
+    body. Neither carries WWW-Authenticate.
     """
 
     def _make_client(self, **config_overrides) -> tuple:
@@ -274,7 +275,7 @@ class TestUnauthorizedContentNegotiation:
         finally:
             os.unlink(path)
 
-    def test_api_client_still_gets_json_body(self):
+    def test_api_client_gets_json_body_without_www_authenticate(self):
         client, path = self._make_client(auth_enabled=True, auth_password="secret")
         try:
             resp = client.get(
@@ -285,7 +286,25 @@ class TestUnauthorizedContentNegotiation:
             assert resp.status_code == 401
             assert resp.headers["content-type"].startswith("application/json")
             assert resp.json() == {"detail": "Authentication required"}
-            assert "WWW-Authenticate" in resp.headers
+            # A subresource 401 (favicon, XHR) carrying this header would pop the
+            # native dialog in Chrome — it must not be sent.
+            assert "WWW-Authenticate" not in resp.headers
+        finally:
+            os.unlink(path)
+
+    def test_favicon_bypasses_auth(self):
+        """Favicons must be reachable unauthenticated: a guarded (401) favicon
+        subresource is what triggered the Chrome native Basic dialog."""
+        client, path = self._make_client(auth_enabled=True, auth_password="secret")
+        try:
+            for fav in [
+                "/favicon.ico",
+                "/favicon.svg",
+                "/favicon.png",
+                "/graph-icon.svg",
+            ]:
+                resp = client.get(fav, headers={"Accept": "image/avif,image/webp,*/*"})
+                assert resp.status_code != 401, fav
         finally:
             os.unlink(path)
 

@@ -45,10 +45,16 @@ def bearer_auth_app(temp_graph_file, temp_static_dirs) -> TestClient:
 
 
 def test_auth_required(auth_enabled_app):
-    """Endpoints should return 401 if no authentication is provided."""
+    """Endpoints should return 401 if no authentication is provided.
+
+    The 401 deliberately carries NO WWW-Authenticate header: it would make
+    browsers pop the native Basic dialog (on the page or a subresource such as
+    the favicon), which cannot drive the form/cookie login. Humans use
+    /auth/login; programmatic clients send Authorization proactively.
+    """
     response = auth_enabled_app.post("/api/search", json={"query": "test"})
     assert response.status_code == 401
-    assert "Basic" in response.headers["WWW-Authenticate"]
+    assert "WWW-Authenticate" not in response.headers
 
 
 def test_auth_success(auth_enabled_app):

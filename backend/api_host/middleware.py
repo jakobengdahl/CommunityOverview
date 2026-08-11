@@ -16,14 +16,12 @@ from .session_auth import request_has_valid_session
 
 logger = logging.getLogger(__name__)
 
-_REALM = 'Basic realm="Community Knowledge Graph"'
-
 # Sign-in page shown to browsers on an unauthenticated navigation. It carries a
 # real credential form that POSTs to /auth/login and sets a session cookie, so
-# the login flow works identically in every browser. The browser 401 does NOT
-# send WWW-Authenticate (see _unauthorized): that header would make the browser
-# pop the native Basic dialog instead of rendering this form, and that dialog
-# cannot drive the cookie login. __NEXT__ / __ERROR__ are substituted per request.
+# the login flow works identically in every browser. No 401 sends
+# WWW-Authenticate (see _unauthorized): that header would make the browser pop
+# the native Basic dialog instead of rendering this form, and that dialog cannot
+# drive the cookie login. __NEXT__ / __ERROR__ are substituted per request.
 _SIGNIN_TEMPLATE = """<!doctype html>
 <html lang="en">
 <head>
@@ -165,25 +163,23 @@ def _requested_target(request: Request) -> str:
 
 
 def _unauthorized(request: Request, detail: str) -> Response:
-    """Build a 401, negotiated by Accept, so every browser gets the sign-in form.
+    """Build a 401, negotiated by Accept, without ever sending WWW-Authenticate.
 
-    Browser navigations (Accept: text/html) get the HTML sign-in form and,
-    deliberately, NO WWW-Authenticate header: that header makes Chromium pop the
-    native Basic dialog before rendering the body, and that dialog cannot drive
-    the form/cookie login (it just hangs). Omitting it lets every browser render
-    the page consistently. API / fetch / MCP / curl clients keep the JSON body
-    with the WWW-Authenticate challenge for programmatic Basic/Bearer auth.
+    Browser navigations (Accept: text/html) get the HTML sign-in form; everything
+    else (API / fetch / MCP / curl, and browser subresources like the favicon,
+    which send Accept: image/*) gets the JSON body. Neither carries a
+    WWW-Authenticate header: it would make Chromium pop the native Basic dialog —
+    on the main page OR on a subresource such as the favicon — and that dialog
+    cannot drive the form/cookie login (it just hangs). Authentication now runs
+    through /auth/login + the session cookie for humans, and programmatic clients
+    send Authorization proactively, so the challenge header is unnecessary.
     """
     if _client_accepts_html(request):
         return HTMLResponse(
             content=render_signin_page(next_path=_requested_target(request)),
             status_code=401,
         )
-    return JSONResponse(
-        status_code=401,
-        content={"detail": detail},
-        headers={"WWW-Authenticate": _REALM},
-    )
+    return JSONResponse(status_code=401, content={"detail": detail})
 
 
 def compute_auth_active(config: AppConfig) -> bool:
@@ -231,6 +227,14 @@ def add_auth_middleware(app: FastAPI, config: AppConfig) -> None:
             "/auth/login",
             "/auth/logout",
             "/logged-out",
+            # Favicons are non-sensitive and are fetched as subresources by the
+            # sign-in / logged-out pages (and automatically as /favicon.ico).
+            # Guarding them would 401 a browser subresource — the surest way to
+            # trigger the native Basic dialog on an otherwise unauthenticated page.
+            "/favicon.ico",
+            "/favicon.svg",
+            "/favicon.png",
+            "/graph-icon.svg",
         ]:
             return await call_next(request)
 
