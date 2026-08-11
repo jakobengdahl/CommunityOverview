@@ -170,6 +170,12 @@
   transform: scale(1.1);
 }
 
+/* Hide the hover info popup while a context menu is open so the two never
+   overlap (the tooltip is portaled to the body, so this reaches it there). */
+body.graph-menu-open .graph-node-tooltip {
+  display: none;
+}
+
 .graph-node-tooltip {
   position: fixed;
   top: 0;

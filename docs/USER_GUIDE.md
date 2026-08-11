@@ -104,9 +104,14 @@ Right-clicking a node opens the context menu:
 - **Expand** — load all nodes directly connected to this node into the canvas
 - **Select all nodes of the same type** — select every node of this node's type across the
   whole visualization, including ones scrolled outside the current viewport
+- **Select related nodes** — select this node together with every node it is directly
+  connected to
 - **Custom actions** — schema-defined items per node type, e.g. "Open in SSPCloud" that
   substitutes a field value into a URL and opens it in a new tab
 - **Delete** — remove the node permanently (shown in red, requires confirmation)
+
+Newly added nodes (for example from **Expand**) are placed next to the node you expanded
+from, rather than stacking at the top-left corner.
 
 ![Context menu](images/context-menu.png)
 *Context menu on a ProductionSolution node. "Open in SSPCloud" is a custom action defined in the schema's `context_menu` configuration.*
@@ -116,9 +121,12 @@ Right-clicking on the **canvas background** offers quick-create options:
 - Create Agent
 
 Right-clicking a **selection of multiple nodes** shows bulk actions: Show only these,
-Select all nodes of the same type, Hide all, Delete all. "Select all nodes of the same
-type" extends the selection to every node whose type matches any type already in the
-selection.
+Select all nodes of the same type, Organize, Hide all, Delete all. "Select all nodes of the
+same type" extends the selection to every node whose type matches any type already in the
+selection. **Organize** arranges the selected nodes — Cluster, List horizontally, List
+vertically, or Arrange as tree — keeping them centred where they already sit. The same
+arrangements are available from the keyboard: press **Ctrl/Cmd+O** with a multi-selection,
+then **C** (cluster), **H** (horizontal), **V** (vertical) or **T** (tree).
 
 ### 2.5 Groups and annotations
 
@@ -449,6 +457,7 @@ a **Details** button opens a full node-type statistics dialog.
 | Option | Effect |
 |--------|--------|
 | **Show minimap** | Toggle the minimap overlay in the bottom-right corner of the canvas |
+| **Show node preview popup** | Toggle the hover info popup that previews a node's details. Turn it off if the popup gets in the way. |
 
 #### Your presence
 

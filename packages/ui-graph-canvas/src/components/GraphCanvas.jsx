@@ -33,6 +33,8 @@ import {
   getGridLayout,
   getCircularLayout,
   getLayoutedElements,
+  positionNewNodes,
+  arrangeNodes,
 } from '../utils/graphLayout';
 import {
   getNodeColor,
@@ -138,6 +140,7 @@ function GraphCanvasInner({
   onContextMenuAction = null,
   nodeColorResolver = null,
   onViewportChange = null,
+  nodePreviewEnabled = true,
   contextMenuLabels = {},
 }) {
   const cml = {
@@ -148,6 +151,13 @@ function GraphCanvasInner({
     nodesSelected: '{count} nodes selected',
     showOnly: 'Show only these',
     selectSameType: 'Select all nodes of the same type',
+    selectRelated: 'Select related nodes',
+    organize: 'Organize',
+    organizeCluster: 'Cluster',
+    organizeHorizontal: 'List horizontally',
+    organizeVertical: 'List vertically',
+    organizeTree: 'Arrange as tree',
+    organizeHint: 'Organize: C cluster · H horizontal · V vertical · T tree',
     hideAll: 'Hide all',
     deleteAll: 'Delete all',
     changeType: 'Change type',
@@ -189,6 +199,10 @@ function GraphCanvasInner({
   const reactFlowWrapper = useRef(null);
   const rightDragStart = useRef({ x: 0, y: 0, time: null });
   const mouseDownPos = useRef(null);
+  // Two-step "organize" keyboard chord: Ctrl/Cmd+O arms it, then c/h/v/t picks
+  // the arrangement. Held in refs so arming doesn't re-render or re-bind keys.
+  const organizePendingRef = useRef(false);
+  const organizeTimerRef = useRef(null);
   const { screenToFlowPosition, setCenter, getNodes: getFlowNodes, getViewport } = useReactFlow();
 
   // Stable notifier for annotation nodes (note/label/arrow) to signal the host
@@ -311,6 +325,7 @@ function GraphCanvasInner({
           markColor: mark?.color ?? null,
           markLabel: mark?.label ?? null,
           remoteSelection: remoteSelections?.[node.id] ?? null,
+          previewEnabled: nodePreviewEnabled,
           onExpand: onExpand ? () => onExpand(node.id, node) : null,
           onEdit: onEdit ? () => onEdit(node.id, node) : null,
         },
@@ -336,6 +351,7 @@ function GraphCanvasInner({
     highlightedNodeIds,
     nodeMarks,
     remoteSelections,
+    nodePreviewEnabled,
   ]);
 
   const [nodes, setNodes, onNodesChange] = useNodesState(reactFlowNodes);
@@ -345,8 +361,9 @@ function GraphCanvasInner({
   useEffect(() => {
     setNodes((nds) => {
       const manualNodes = clearGroupsFlag ? [] : nds.filter(isManualNode);
-      const newNodes = reactFlowNodes.map((n) => {
-        const existing = nds.find((curr) => curr.id === n.id);
+      const prevById = new Map(nds.map((n) => [n.id, n]));
+      const mapped = reactFlowNodes.map((n) => {
+        const existing = prevById.get(n.id);
         if (existing && existing.position.x !== 0) {
           return {
             ...n,
@@ -357,12 +374,36 @@ function GraphCanvasInner({
         }
         return n;
       });
+
+      // Place freshly-added nodes (e.g. from expanding a node) near the nodes
+      // they connect to instead of stacking them at the origin or scattering
+      // them via a full re-layout. Only when there is already a positioned
+      // layout to anchor against, only for nodes without an explicit saved
+      // position (a loaded/remote position is authoritative), and never in
+      // lazy-paging mode where "new" nodes are just more of the same result set.
+      const isPlaced = (n) => n.position && (n.position.x !== 0 || n.position.y !== 0);
+      const existingPlaced = mapped.filter((n) => prevById.has(n.id) && isPlaced(n));
+      const freshNodes = mapped.filter((n) => !prevById.has(n.id) && !n.data?._savedPosition);
+      const inLazyMode = visibleNodes.length > LAZY_LOAD_THRESHOLD;
+      if (freshNodes.length > 0 && existingPlaced.length > 0 && !inLazyMode) {
+        const posById = new Map(
+          positionNewNodes(freshNodes, existingPlaced, reactFlowEdges).map((n) => [
+            n.id,
+            n.position,
+          ])
+        );
+        const placed = mapped.map((n) =>
+          posById.has(n.id) ? { ...n, position: posById.get(n.id) } : n
+        );
+        return reorderNodesForParentChild([...placed, ...manualNodes]);
+      }
+
       // Groups must appear before their children in the array for ReactFlow
       // parent-child relationships to work. This also ensures groups render
       // behind custom nodes so clicks reach the nodes on top.
-      return reorderNodesForParentChild([...newNodes, ...manualNodes]);
+      return reorderNodesForParentChild([...mapped, ...manualNodes]);
     });
-  }, [reactFlowNodes, setNodes, clearGroupsFlag]);
+  }, [reactFlowNodes, reactFlowEdges, visibleNodes.length, setNodes, clearGroupsFlag]);
 
   // Update edges when input changes
   useEffect(() => {
@@ -401,6 +442,89 @@ function GraphCanvasInner({
     setEdgeContextMenu(null);
     setPaneContextMenu(null);
   }, []);
+
+  const showNotification = useCallback((type, message) => {
+    setNotification({ type, message });
+    setTimeout(() => setNotification(null), 3000);
+  }, []);
+
+  // While any context menu is open, suppress the hover info popup: the node the
+  // menu was opened on is still hovered, so its tooltip (portaled to the body at
+  // a high z-index) would otherwise render on top of / behind the menu. The
+  // tooltip lives in CustomNode and is portaled to the body, so a body-level
+  // class is the simplest way to reach it without threading menu state through
+  // every node's data.
+  const anyMenuOpen = !!(
+    nodeContextMenu ||
+    multiNodeContextMenu ||
+    edgeContextMenu ||
+    paneContextMenu
+  );
+  useEffect(() => {
+    document.body.classList.toggle('graph-menu-open', anyMenuOpen);
+    return () => document.body.classList.remove('graph-menu-open');
+  }, [anyMenuOpen]);
+
+  // Select a node together with every node it is directly connected to.
+  const selectRelatedNodes = useCallback(
+    (nodeId) => {
+      const relatedIds = new Set([nodeId]);
+      for (const e of edges) {
+        if (e.source === nodeId) relatedIds.add(e.target);
+        else if (e.target === nodeId) relatedIds.add(e.source);
+      }
+      const changes = nodes
+        .filter((n) => n.type !== 'group')
+        .map((n) => ({ id: n.id, type: 'select', selected: relatedIds.has(n.id) }));
+      if (changes.length > 0) onNodesChange(changes);
+      closeAllMenus();
+    },
+    [edges, nodes, onNodesChange, closeAllMenus]
+  );
+
+  // Re-arrange the currently selected graph nodes into a chosen structure
+  // (cluster / horizontal / vertical / tree), centred on where they already are.
+  const organizeSelection = useCallback(
+    (mode) => {
+      const selIds = new Set(
+        selectedNodes.filter((n) => !ANNOTATION_TYPES.has(n.type)).map((n) => n.id)
+      );
+      if (selIds.size < 2) return;
+      // Nodes inside a group hold parent-relative positions; arrange in absolute
+      // coordinates so a selection spanning grouped and ungrouped nodes stays
+      // consistent, then convert back to relative when writing grouped nodes.
+      const groupPos = new Map(
+        nodes.filter((n) => n.type === 'group').map((g) => [g.id, g.position])
+      );
+      const toAbsolute = (n) => {
+        const parent = n.parentId ? groupPos.get(n.parentId) : null;
+        return parent ? { x: n.position.x + parent.x, y: n.position.y + parent.y } : n.position;
+      };
+      const targets = nodes
+        .filter((n) => selIds.has(n.id))
+        .map((n) => ({ ...n, position: toAbsolute(n) }));
+      const posById = arrangeNodes(targets, edges, mode);
+      if (posById.size === 0) return;
+      // Convert the arranged absolute positions back to the parent-relative form
+      // ReactFlow stores for grouped nodes. Compute once and use for both the
+      // on-screen update and the persistence callback, so the position we render
+      // is the position we save (the drag path also persists relative positions).
+      const nodeById = new Map(nodes.map((n) => [n.id, n]));
+      const finalPos = new Map();
+      for (const [id, abs] of posById) {
+        const parent = nodeById.get(id)?.parentId ? groupPos.get(nodeById.get(id).parentId) : null;
+        finalPos.set(id, parent ? { x: abs.x - parent.x, y: abs.y - parent.y } : abs);
+      }
+      setNodes((nds) =>
+        nds.map((n) => (finalPos.has(n.id) ? { ...n, position: finalPos.get(n.id) } : n))
+      );
+      if (onNodePositionChange) {
+        for (const [id, pos] of finalPos) onNodePositionChange(id, pos);
+      }
+      closeAllMenus();
+    },
+    [selectedNodes, nodes, edges, setNodes, onNodePositionChange, closeAllMenus]
+  );
 
   // Create a free-floating annotation (note, label or arrow) at the given flow
   // position. Notes/labels/arrows are persisted in the session annotation list
@@ -872,9 +996,47 @@ function GraphCanvasInner({
 
   // Delete/Backspace hides selected nodes/edges, Escape clears selection
   useEffect(() => {
+    const cancelOrganizePending = () => {
+      organizePendingRef.current = false;
+      if (organizeTimerRef.current) {
+        clearTimeout(organizeTimerRef.current);
+        organizeTimerRef.current = null;
+      }
+    };
     const handleKeyDown = (e) => {
       const tag = e.target.tagName;
       if (tag === 'INPUT' || tag === 'TEXTAREA' || e.target.isContentEditable) return;
+
+      // Second step of the organize chord: a pending Ctrl/Cmd+O is resolved by
+      // the next c/h/v/t keystroke.
+      if (organizePendingRef.current && !e.ctrlKey && !e.metaKey && !e.altKey) {
+        const mode = { c: 'cluster', h: 'horizontal', v: 'vertical', t: 'tree' }[
+          e.key?.toLowerCase()
+        ];
+        if (mode) {
+          e.preventDefault();
+          cancelOrganizePending();
+          organizeSelection(mode);
+          return;
+        }
+        if (e.key === 'Escape') cancelOrganizePending();
+      }
+
+      // First step of the organize chord: Ctrl/Cmd+O arms it when a
+      // multi-selection of graph nodes exists.
+      if ((e.ctrlKey || e.metaKey) && !e.altKey && e.key?.toLowerCase() === 'o') {
+        const selectable = selectedNodes.filter((n) => !ANNOTATION_TYPES.has(n.type));
+        if (selectable.length >= 2) {
+          e.preventDefault();
+          organizePendingRef.current = true;
+          showNotification('info', cml.organizeHint);
+          if (organizeTimerRef.current) clearTimeout(organizeTimerRef.current);
+          organizeTimerRef.current = setTimeout(() => {
+            organizePendingRef.current = false;
+          }, 3000);
+          return;
+        }
+      }
 
       if (e.key === 'Escape') {
         closeAllMenus();
@@ -915,7 +1077,10 @@ function GraphCanvasInner({
       }
     };
     document.addEventListener('keydown', handleKeyDown);
-    return () => document.removeEventListener('keydown', handleKeyDown);
+    return () => {
+      document.removeEventListener('keydown', handleKeyDown);
+      cancelOrganizePending();
+    };
   }, [
     selectedNodes,
     selectedEdges,
@@ -924,6 +1089,9 @@ function GraphCanvasInner({
     onHideEdge,
     closeAllMenus,
     clearSelection,
+    organizeSelection,
+    showNotification,
+    cml.organizeHint,
   ]);
 
   // Create group when signal changes (triggered from toolbar)
@@ -1181,11 +1349,6 @@ function GraphCanvasInner({
     []
   );
 
-  const showNotification = useCallback((type, message) => {
-    setNotification({ type, message });
-    setTimeout(() => setNotification(null), 3000);
-  }, []);
-
   return (
     <AnnotationContext.Provider value={annotationContextValue}>
       <div className="graph-canvas-container">
@@ -1319,6 +1482,7 @@ function GraphCanvasInner({
           onDelete={onDelete}
           onContextMenuAction={onContextMenuAction}
           selectNodesByType={selectNodesByType}
+          onSelectRelated={selectRelatedNodes}
           onClose={() => setNodeContextMenu(null)}
         />
 
@@ -1331,6 +1495,7 @@ function GraphCanvasInner({
           onDelete={onDelete}
           onDeleteMultiple={onDeleteMultiple}
           selectNodesByType={selectNodesByType}
+          onOrganize={organizeSelection}
           onClose={() => setMultiNodeContextMenu(null)}
         />
 

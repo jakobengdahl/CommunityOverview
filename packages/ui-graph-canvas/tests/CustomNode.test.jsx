@@ -49,6 +49,24 @@ describe('CustomNode tooltip', () => {
     expect(tooltip.style.zIndex).toBe('99999');
   });
 
+  it('does not render the tooltip when the preview is disabled', () => {
+    render(
+      <CustomNode
+        id="node-1"
+        selected={false}
+        data={{
+          label: 'Node 1',
+          nodeType: 'Actor',
+          color: '#3B82F6',
+          description: 'Tooltip body',
+          previewEnabled: false,
+        }}
+      />
+    );
+    fireEvent.mouseEnter(screen.getByText('Node 1').closest('.graph-custom-node'));
+    expect(screen.queryByText('Tooltip body')).toBeNull();
+  });
+
   it('renders a remote-selection outline and name badge in the collaborator colour', () => {
     render(
       <CustomNode

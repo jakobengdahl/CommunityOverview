@@ -532,3 +532,72 @@ export function positionNewNodes(newNodes, existingNodes, edges = [], options = 
 
   return positionedNodes;
 }
+
+/**
+ * Re-arrange an already-placed set of nodes into a chosen structure, keeping the
+ * result centred on the selection's current centroid so it stays where the user
+ * is looking. Returns a Map of nodeId → new position covering only the given
+ * nodes (callers merge it into their own node list).
+ *
+ * modes:
+ *   'cluster'    — compact square-ish grid
+ *   'horizontal' — single row
+ *   'vertical'   — single column
+ *   'tree'       — hierarchical (dagre) over the edges internal to the selection
+ *
+ * @param {Array} nodesToArrange - Nodes with current positions
+ * @param {Array} edges - All edges (only those internal to the selection are used)
+ * @param {string} mode - One of the modes above
+ * @returns {Map<string, {x:number,y:number}>}
+ */
+export function arrangeNodes(nodesToArrange, edges = [], mode = 'cluster') {
+  const result = new Map();
+  if (!Array.isArray(nodesToArrange) || nodesToArrange.length === 0) return result;
+
+  const current = nodesToArrange.map((n) => n.position).filter(Boolean);
+  const centroid = current.length
+    ? {
+        x: current.reduce((s, p) => s + p.x, 0) / current.length,
+        y: current.reduce((s, p) => s + p.y, 0) / current.length,
+      }
+    : { x: 0, y: 0 };
+
+  let positioned;
+  if (mode === 'horizontal') {
+    positioned = nodesToArrange.map((n, i) => ({
+      id: n.id,
+      position: { x: i * GRID_CELL_W, y: 0 },
+    }));
+  } else if (mode === 'vertical') {
+    positioned = nodesToArrange.map((n, i) => ({
+      id: n.id,
+      position: { x: 0, y: i * GRID_CELL_H },
+    }));
+  } else if (mode === 'tree') {
+    const ids = new Set(nodesToArrange.map((n) => n.id));
+    const subEdges = (edges || []).filter((e) => ids.has(e.source) && ids.has(e.target));
+    positioned = getLayoutedElements(
+      nodesToArrange.map((n) => ({ id: n.id })),
+      subEdges,
+      'TB'
+    ).map((n) => ({ id: n.id, position: n.position }));
+  } else {
+    const cols = Math.max(1, Math.ceil(Math.sqrt(nodesToArrange.length)));
+    positioned = nodesToArrange.map((n, i) => ({
+      id: n.id,
+      position: { x: (i % cols) * GRID_CELL_W, y: Math.floor(i / cols) * GRID_CELL_H },
+    }));
+  }
+
+  // Recentre the arranged bounding box on the original centroid.
+  const xs = positioned.map((p) => p.position.x);
+  const ys = positioned.map((p) => p.position.y);
+  const shift = {
+    x: centroid.x - (Math.min(...xs) + Math.max(...xs)) / 2,
+    y: centroid.y - (Math.min(...ys) + Math.max(...ys)) / 2,
+  };
+  for (const p of positioned) {
+    result.set(p.id, { x: p.position.x + shift.x, y: p.position.y + shift.y });
+  }
+  return result;
+}

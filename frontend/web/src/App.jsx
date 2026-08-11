@@ -84,6 +84,7 @@ function App() {
     federationDepth,
     setFederationDepth,
     showMinimap,
+    nodePreviewEnabled,
     nodeMarks,
     startGuide,
     getNodeColor,
@@ -1651,6 +1652,7 @@ function App() {
           federationDepthLabel={t('federation.depth_label')}
           federationDepthTooltip={t('federation.depth_tooltip')}
           showMinimap={showMinimap}
+          nodePreviewEnabled={nodePreviewEnabled}
           schema={schema}
           onContextMenuAction={handleContextMenuAction}
           contextMenuLabels={{
@@ -1661,6 +1663,13 @@ function App() {
             nodesSelected: t('context_menu.nodes_selected'),
             showOnly: t('context_menu.show_only'),
             selectSameType: t('context_menu.select_same_type'),
+            selectRelated: t('context_menu.select_related'),
+            organize: t('context_menu.organize'),
+            organizeCluster: t('context_menu.organize_cluster'),
+            organizeHorizontal: t('context_menu.organize_horizontal'),
+            organizeVertical: t('context_menu.organize_vertical'),
+            organizeTree: t('context_menu.organize_tree'),
+            organizeHint: t('context_menu.organize_hint'),
             hideAll: t('context_menu.hide_all'),
             deleteAll: t('context_menu.delete_all'),
             changeType: t('context_menu.change_type'),
