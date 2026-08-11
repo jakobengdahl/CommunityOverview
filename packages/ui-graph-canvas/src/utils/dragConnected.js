@@ -30,12 +30,17 @@ export function directNeighborIds(edges, draggedIds) {
 // own containment rules and never follow a connected node). Returns a Map of
 // id -> {x, y} captured at drag start; the drag handler adds the anchor's delta
 // to these to keep the whole neighbourhood rigid.
-export function neighborStartPositions(nodes, neighborIds) {
+//
+// `draggedIds` (optional) is the full set of node ids ReactFlow is already
+// dragging (including any group nodes). A neighbour that is a child of one of
+// those groups is moved in absolute space by its parent's drag, so adding the
+// delta a second time would move it twice — such neighbours are skipped.
+export function neighborStartPositions(nodes, neighborIds, draggedIds = null) {
   const startById = new Map();
   for (const n of nodes || []) {
-    if (neighborIds.has(n.id) && !ANNOTATION_TYPES.has(n.type)) {
-      startById.set(n.id, { x: n.position.x, y: n.position.y });
-    }
+    if (!neighborIds.has(n.id) || ANNOTATION_TYPES.has(n.type)) continue;
+    if (draggedIds && n.parentId && draggedIds.has(n.parentId)) continue;
+    startById.set(n.id, { x: n.position.x, y: n.position.y });
   }
   return startById;
 }

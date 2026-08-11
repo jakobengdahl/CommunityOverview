@@ -61,6 +61,25 @@ describe('neighborStartPositions', () => {
     expect(start.has('grp1')).toBe(false);
     expect(start.has('b')).toBe(true);
   });
+
+  it('skips a neighbour whose parent group is itself being dragged (no double-move)', () => {
+    // C is a child of group G; when G is in the dragged set, ReactFlow already
+    // moves C via its parent, so C must not also be translated by the delta.
+    const withChild = [
+      { id: 'b', type: 'default', position: { x: 10, y: 20 } },
+      { id: 'c', type: 'default', parentId: 'G', position: { x: 5, y: 5 } },
+    ];
+    const draggedIds = new Set(['A', 'G']);
+    const start = neighborStartPositions(withChild, new Set(['b', 'c']), draggedIds);
+    expect(start.has('c')).toBe(false);
+    expect(start.has('b')).toBe(true);
+  });
+
+  it('keeps a child neighbour when its parent is NOT being dragged', () => {
+    const withChild = [{ id: 'c', type: 'default', parentId: 'G', position: { x: 5, y: 5 } }];
+    const start = neighborStartPositions(withChild, new Set(['c']), new Set(['A']));
+    expect(start.has('c')).toBe(true);
+  });
 });
 
 describe('neighborDragPositions', () => {

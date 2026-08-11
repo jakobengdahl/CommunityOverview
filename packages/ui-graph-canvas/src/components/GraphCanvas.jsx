@@ -639,19 +639,20 @@ function GraphCanvasInner({
     (event, draggedNode, allDraggedNodes) => {
       connectedDragRef.current = null;
       if (!event?.altKey) return;
+      // The full set ReactFlow is dragging (may include group nodes when an
+      // Alt-drag starts from a multi-selection); used to skip neighbours that a
+      // dragged group already carries, so they aren't translated twice.
+      const dragged =
+        allDraggedNodes && allDraggedNodes.length > 0 ? allDraggedNodes : [draggedNode];
+      const draggedIds = new Set(dragged.map((n) => n.id));
       // Only graph nodes carry meaningful edges; annotation/group nodes are
       // excluded both as anchors and as trailing neighbours.
-      const anchors =
-        allDraggedNodes && allDraggedNodes.length > 0
-          ? allDraggedNodes.filter((n) => !ANNOTATION_TYPES.has(n.type))
-          : ANNOTATION_TYPES.has(draggedNode.type)
-            ? []
-            : [draggedNode];
+      const anchors = dragged.filter((n) => !ANNOTATION_TYPES.has(n.type));
       if (anchors.length === 0) return;
       const anchorIds = new Set(anchors.map((n) => n.id));
       const neighborIds = directNeighborIds(edges, anchorIds);
       if (neighborIds.size === 0) return;
-      const startById = neighborStartPositions(getFlowNodes(), neighborIds);
+      const startById = neighborStartPositions(getFlowNodes(), neighborIds, draggedIds);
       if (startById.size === 0) return;
       connectedDragRef.current = {
         anchorId: draggedNode.id,
