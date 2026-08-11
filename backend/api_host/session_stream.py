@@ -42,7 +42,11 @@ _PULSE_COLOR_RE = re.compile(
 class PulseTriggerRequest(BaseModel):
     """Body of an external pulse-trigger call."""
 
-    node_id: str = Field(min_length=1, max_length=200)
+    # node_id is validated at the boundary to the id charset this graph actually
+    # uses (UUIDs and slug/namespaced ids), which excludes HTML/JS/whitespace
+    # metacharacters — so the value is safe everywhere it flows downstream (the
+    # SSE command stream and any response echo).
+    node_id: str = Field(min_length=1, max_length=200, pattern=r"^[A-Za-z0-9._:@/-]+$")
     style: str = _DEFAULT_PULSE_STYLE
     color: Optional[str] = Field(default=None, max_length=32)
     duration_ms: int = Field(default=1500, ge=200, le=15000)
@@ -158,6 +162,15 @@ def register_session_stream(
         embeds in the external trigger URL. Runs under the graph authorization
         seam so the hosted layer can bind minting to a real actor; the open-core
         default is permissive, consistent with the rest of the platform.
+
+        Threat model (open core): the session id is not itself a secret — it is
+        shared in the ``?session=`` URL — and already grants canvas-push via the
+        MCP session tools, so this endpoint does not widen the "push to a known
+        session" surface. It does add one griefing vector: because minting
+        rotates the token, anyone who can reach this route and knows a session
+        id can revoke a legitimate user's already-configured trigger URL. Gating
+        minting to an authenticated session owner is the hosted layer's job via
+        the authorization hook above.
         """
         if not session_registry.is_valid_session_id(session_id):
             return JSONResponse({"error": "invalid session_id format"}, status_code=400)
@@ -230,21 +243,17 @@ def register_session_stream(
             "command_id": secrets.token_hex(8),
         }
 
-        delivered = await session_registry.push_command(session_id, command)
-        # Best-effort mirror to the shared-session hub so every collaborator on
-        # the session reacts, not only the legacy single-consumer stream.
+        # Dispatch over the same best-effort channels as MCP tool pushes
+        # (_push_to_session): the legacy single-consumer registry and the
+        # shared-session hub, whichever the browser is currently on. Neither
+        # confirms a live subscriber — a pulse for a session no one is watching
+        # is simply unseen — so this reports *dispatch*, not receipt, matching
+        # the rest of the push architecture.
+        await session_registry.push_command(session_id, command)
         if session_manager is not None:
             try:
                 session_manager.push_command(session_id, command)
             except Exception:
                 pass
 
-        if not delivered:
-            return JSONResponse({"error": "session not connected"}, status_code=404)
-        return JSONResponse(
-            {
-                "success": True,
-                "node_id": body.node_id,
-                "command_id": command["command_id"],
-            }
-        )
+        return JSONResponse({"success": True, "command_id": command["command_id"]})

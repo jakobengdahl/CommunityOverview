@@ -404,7 +404,7 @@ broadcast `command` events reach every collaborator instead of just one:
 |--------|----------|-------------|
 | GET | `/sessions/{id}/stream` | SSE stream delivering MCP visualization commands to the browser. A connected stream signals that a browser is present to receive pushes |
 | POST | `/sessions/{id}/trigger-token` | Mint (or rotate) the session's pulse-trigger token, returning `{session_id, trigger_token, pulse_path}`. Called by the session's own browser; runs under the graph authorization seam (permissive in open core, hosted-gatable). Re-minting revokes the prior token |
-| POST | `/sessions/{id}/pulse` | External trigger: play a visual pulse on a node in the live session. Body `{node_id, style?, color?, duration_ms?}`; authenticated with the trigger token via `Authorization: Bearer` or `?token=`. Emits a `node_pulse` command over the SSE session-push channel. `401` without a valid token, `429` when the per-source lookup bucket is exhausted |
+| POST | `/sessions/{id}/pulse` | External trigger: play a visual pulse on a node in the live session. Body `{node_id, style?, color?, duration_ms?}`; authenticated with the trigger token via `Authorization: Bearer` or `?token=`. Emits a `node_pulse` command over the SSE session-push channels (best-effort dispatch — `success` means dispatched, not that a browser was watching). `401` without a valid token, `429` when the per-source lookup bucket is exhausted, `422` for a malformed body |
 
 External systems (e.g. a customer-registration webhook) call the pulse endpoint
 to draw a user's attention to a node; the trigger token is a capability-scoped,

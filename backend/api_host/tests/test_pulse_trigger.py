@@ -99,7 +99,10 @@ class TestPulseDelivery:
             headers={"Authorization": f"Bearer {token}"},
         )
         assert resp.status_code == 200
-        assert resp.json()["node_id"] == "customer-42"
+        # Reports dispatch (command_id), not receipt, and does not echo raw input.
+        assert resp.json()["success"] is True
+        assert resp.json()["command_id"]
+        assert "node_id" not in resp.json()
 
         cmd = self._last_command(test_app, session_id)
         assert cmd["type"] == "node_pulse"
@@ -177,3 +180,25 @@ class TestPulseValidation:
             headers={"Authorization": f"Bearer {token}"},
         )
         assert resp.status_code == 422
+
+    def test_node_id_with_unsafe_characters_is_rejected(self, test_app: TestClient):
+        session_id = "7002-8002"
+        token = _mint(test_app, session_id)
+        for bad in ["<script>", "a b", 'x"y', "node`1"]:
+            resp = test_app.post(
+                f"/sessions/{session_id}/pulse",
+                json={"node_id": bad},
+                headers={"Authorization": f"Bearer {token}"},
+            )
+            assert resp.status_code == 422, bad
+
+    def test_uuid_and_slug_node_ids_are_accepted(self, test_app: TestClient):
+        session_id = "7003-8003"
+        token = _mint(test_app, session_id)
+        for good in ["532c02ad-81ff-4334-8952-421577c393fb", "init-baseline-saas-v1"]:
+            resp = test_app.post(
+                f"/sessions/{session_id}/pulse",
+                json={"node_id": good},
+                headers={"Authorization": f"Bearer {token}"},
+            )
+            assert resp.status_code == 200, good
