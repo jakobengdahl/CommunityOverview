@@ -3,6 +3,7 @@ import { create } from 'zustand';
 const FEDERATION_DEPTH_STORAGE_KEY = 'federation_depth';
 const SHOW_MINIMAP_STORAGE_KEY = 'show_minimap';
 const NODE_PREVIEW_STORAGE_KEY = 'node_preview_enabled';
+const CANVAS_LOCKED_STORAGE_KEY = 'canvas_locked';
 
 function loadInitialShowMinimap() {
   try {
@@ -22,6 +23,16 @@ function loadInitialNodePreview() {
     // ignore storage errors and use default
   }
   return true;
+}
+
+function loadInitialCanvasLocked() {
+  try {
+    const stored = window?.localStorage?.getItem(CANVAS_LOCKED_STORAGE_KEY);
+    if (stored !== null) return stored === 'true';
+  } catch {
+    // ignore storage errors and use default
+  }
+  return false;
 }
 
 function loadInitialFederationDepth() {
@@ -214,6 +225,7 @@ const useGraphStore = create((set, get) => ({
   chatPanelOpen: true, // Chat panel expanded vs minimized
   showMinimap: loadInitialShowMinimap(), // Minimap visibility (persisted)
   nodePreviewEnabled: loadInitialNodePreview(), // Hover info popup on/off (persisted)
+  canvasLocked: loadInitialCanvasLocked(), // Navigation-menu lock guarding the board (persisted)
 
   // Search state
   searchQuery: '',
@@ -437,6 +449,15 @@ const useGraphStore = create((set, get) => ({
       // ignore storage errors
     }
     set({ nodePreviewEnabled: enabled });
+  },
+
+  setCanvasLocked: (locked) => {
+    try {
+      window?.localStorage?.setItem(CANVAS_LOCKED_STORAGE_KEY, String(locked));
+    } catch {
+      // ignore storage errors
+    }
+    set({ canvasLocked: locked });
   },
 
   setStats: (stats) => set({ stats }),
