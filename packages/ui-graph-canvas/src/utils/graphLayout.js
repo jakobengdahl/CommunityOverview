@@ -566,6 +566,17 @@ export function arrangeNodes(nodesToArrange, edges = [], mode = 'cluster') {
       }
     : { x: 0, y: 0 };
 
+  // Internal edges (both endpoints in the selection) define the hierarchy the tree
+  // and auto-tidy layouts respect.
+  const ids = new Set(nodesToArrange.map((n) => n.id));
+  const subEdges = (edges || []).filter((e) => ids.has(e.source) && ids.has(e.target));
+  const treeLayout = () =>
+    getLayoutedElements(
+      nodesToArrange.map((n) => ({ id: n.id })),
+      subEdges,
+      'TB'
+    ).map((n) => ({ id: n.id, position: n.position }));
+
   let positioned;
   if (mode === 'horizontal') {
     positioned = nodesToArrange.map((n, i) => ({
@@ -578,24 +589,12 @@ export function arrangeNodes(nodesToArrange, edges = [], mode = 'cluster') {
       position: { x: 0, y: i * GRID_CELL_H },
     }));
   } else if (mode === 'tree') {
-    const ids = new Set(nodesToArrange.map((n) => n.id));
-    const subEdges = (edges || []).filter((e) => ids.has(e.source) && ids.has(e.target));
-    positioned = getLayoutedElements(
-      nodesToArrange.map((n) => ({ id: n.id })),
-      subEdges,
-      'TB'
-    ).map((n) => ({ id: n.id, position: n.position }));
+    positioned = treeLayout();
   } else if (mode === 'tidy') {
-    const ids = new Set(nodesToArrange.map((n) => n.id));
-    const subEdges = (edges || []).filter((e) => ids.has(e.source) && ids.has(e.target));
     if (subEdges.length > 0) {
       // A hierarchy exists among the selected nodes — lay it out as a tree so the
       // structure is respected.
-      positioned = getLayoutedElements(
-        nodesToArrange.map((n) => ({ id: n.id })),
-        subEdges,
-        'TB'
-      ).map((n) => ({ id: n.id, position: n.position }));
+      positioned = treeLayout();
     } else {
       // No internal hierarchy — group by node type, one column per type, stacked in
       // a grid so nodes of the same type stay together and nothing overlaps.
