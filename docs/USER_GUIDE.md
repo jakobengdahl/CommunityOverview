@@ -128,6 +128,9 @@ vertically, or Arrange as tree — keeping them centred where they already sit. 
 arrangements are available from the keyboard: press **Ctrl/Cmd+O** with a multi-selection,
 then **C** (cluster), **H** (horizontal), **V** (vertical) or **T** (tree).
 
+Moving nodes can be undone: **Ctrl/Cmd+Z** reverses the last node move (a drag or an
+Organize arrangement), and **Ctrl/Cmd+Shift+Z** (or **Ctrl/Cmd+Y**) reapplies it.
+
 ### 2.5 Groups and annotations
 
 Nodes can be visually grouped by dragging them into a Group container (create one from
@@ -622,7 +625,8 @@ their final positions instead of animating.
 | **Enter** (chat) | Send message |
 | **Escape** | Cancel guide / close dialog |
 | **Esc × 2** | Clear the canvas (remove all nodes from view) |
-| **Ctrl+Z** / **Cmd+Z** | Undo (canvas layout changes only) |
+| **Ctrl+Z** / **Cmd+Z** | Undo the last node move (drag or Organize) |
+| **Ctrl+Shift+Z** / **Cmd+Shift+Z** / **Ctrl+Y** | Redo the last undone move |
 | **Space + drag** | Pan the canvas |
 | **Scroll wheel** | Zoom in/out |
 
