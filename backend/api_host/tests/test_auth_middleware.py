@@ -248,9 +248,10 @@ class TestUnauthorizedContentNegotiation:
 
     Regression for the SSPCloud Edge bug: a browser navigation must never land
     on a blank page rendering the raw {"detail": "Authentication required"}
-    JSON. Browsers (Accept: text/html) get an HTML sign-in page; API / fetch /
-    MCP clients keep the JSON body they parse. Both variants keep the
-    WWW-Authenticate header so the native Basic dialog still fires.
+    JSON. Browsers (Accept: text/html) get an HTML sign-in page WITHOUT a
+    WWW-Authenticate header, so no browser pops the native Basic dialog (which
+    can't drive the cookie login); API / fetch / MCP clients keep the JSON body
+    with the WWW-Authenticate challenge for programmatic auth.
     """
 
     def _make_client(self, **config_overrides) -> tuple:
@@ -258,13 +259,15 @@ class TestUnauthorizedContentNegotiation:
         app = create_app(config)
         return TestClient(app), path
 
-    def test_browser_navigation_gets_html_not_raw_json(self):
+    def test_browser_navigation_gets_html_without_www_authenticate(self):
         client, path = self._make_client(auth_enabled=True, auth_password="secret")
         try:
             resp = client.get("/", headers={"Accept": "text/html"})
             assert resp.status_code == 401
             assert resp.headers["content-type"].startswith("text/html")
-            assert "WWW-Authenticate" in resp.headers
+            # No WWW-Authenticate: browsers must render the form, not the native
+            # Basic dialog (Chromium pops it before showing the body).
+            assert "WWW-Authenticate" not in resp.headers
             assert "Sign in" in resp.text
             # The raw backend error body must not be what the browser renders.
             assert '{"detail": "Authentication required"}' not in resp.text
