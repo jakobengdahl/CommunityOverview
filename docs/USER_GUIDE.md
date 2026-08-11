@@ -365,6 +365,11 @@ of recently visited sessions stays local to your browser; only the session
 *content* lives on the server. The canvas is saved automatically while you work
 and restored when you return to a session.
 
+Switching sessions starts a fresh graph-assistant conversation: the chat history
+and any active skills or experts from the previous session are cleared, and any
+selected or opened node is reset, so nothing from one session carries over into
+another.
+
 Deleting a session removes its content for everyone. If you delete the session
 you are currently in, a fresh empty session is created and you are switched into
 it automatically. When other people are connected to a session you delete, the

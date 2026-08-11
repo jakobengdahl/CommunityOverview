@@ -88,6 +88,7 @@ function App() {
     startGuide,
     getNodeColor,
     closeMenusSignal,
+    resetSessionScopedState,
   } = useGraphStore();
 
   const { t, setLanguage, language } = useI18n();
@@ -1264,6 +1265,14 @@ function App() {
   // Shared-session lifecycle (STRUCTURE_REVIEW B1 slice 1): load a server-backed
   // session's canvas + seed the sync baseline. Extracted into useSharedSession
   // so the transition logic is testable in isolation.
+  // Bound reset used on every session switch: drops assistant history, experts,
+  // node overlays and selection carried over from the previous session and bumps
+  // the assistant epoch so an in-flight reply can't land in the new session.
+  const resetSessionScopedUi = useCallback(
+    () => resetSessionScopedState(t, language),
+    [resetSessionScopedState, t, language]
+  );
+
   const { applyServerSession, loadSessionFromServer } = useSharedSession({
     clearVisualization,
     addNodesToVisualization,
@@ -1273,6 +1282,7 @@ function App() {
     setPendingAnnotations,
     ensureSyncConnected,
     syncRef,
+    resetSessionScopedState: resetSessionScopedUi,
   });
   // Expose the latest applyServerSession to resyncFromServer (defined earlier).
   applyServerSessionRef.current = applyServerSession;
@@ -1452,13 +1462,21 @@ function App() {
       // one (design 3.6). Other connected clients are notified via the
       // server's session_deleted broadcast (handled once realtime lands).
       clearVisualization();
+      resetSessionScopedUi();
       const fresh = api.generateVisualizationSessionId();
       setSessionId(fresh);
       reflectSessionUrl(fresh);
       showNotification('info', t('sessions.session_deleted'));
     }
     setSessionsVersion((v) => v + 1);
-  }, [deleteSessionDialog, sessionId, clearVisualization, showNotification, t]);
+  }, [
+    deleteSessionDialog,
+    sessionId,
+    clearVisualization,
+    resetSessionScopedUi,
+    showNotification,
+    t,
+  ]);
 
   // Export full graph from backend API
   const handleExportGraph = useCallback(async () => {

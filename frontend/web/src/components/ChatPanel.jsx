@@ -78,6 +78,13 @@ function ChatPanel({ collectionShortName }) {
   const { t, language } = useI18n();
   const effectiveMaxDepth = Math.max(1, stats?.federation?.max_selectable_depth || 1);
 
+  // A session switch bumps assistantSessionEpoch. An assistant request captures
+  // the epoch before awaiting; if it changed by the time the reply arrives, the
+  // user switched sessions mid-request and the response belongs to a session
+  // that is no longer active — discard it so it can neither append to the new
+  // session's chat nor apply its canvas side-effects.
+  const isStaleAssistantEpoch = (epoch) => useGraphStore.getState().assistantSessionEpoch !== epoch;
+
   const [inputValue, setInputValue] = useState('');
   const [isProcessing, setIsProcessing] = useState(false);
   const [uploadedFile, setUploadedFile] = useState(null);
@@ -249,6 +256,7 @@ function ChatPanel({ collectionShortName }) {
     setUploadedFile(null);
     setIsProcessing(true);
     setError(null);
+    const requestEpoch = useGraphStore.getState().assistantSessionEpoch;
 
     try {
       const conversationMessages = chatMessages
@@ -267,6 +275,8 @@ function ChatPanel({ collectionShortName }) {
         visibleNodeIds: nodes.map((n) => n.id),
         selectedNodeIds: selectedGraphNodes.map((n) => n.id),
       });
+
+      if (isStaleAssistantEpoch(requestEpoch)) return;
 
       console.log('[ChatPanel] Response:', response);
 
@@ -296,6 +306,7 @@ function ChatPanel({ collectionShortName }) {
       };
       addChatMessage(assistantMessage);
     } catch (err) {
+      if (isStaleAssistantEpoch(requestEpoch)) return;
       console.error('[ChatPanel] Error:', err);
       addChatMessage({
         role: 'assistant',
@@ -360,6 +371,7 @@ function ChatPanel({ collectionShortName }) {
     const msg = t('chat.approve_node', { name: proposal.node.name });
     addChatMessage({ role: 'user', content: msg, timestamp: new Date() });
     setIsProcessing(true);
+    const requestEpoch = useGraphStore.getState().assistantSessionEpoch;
 
     try {
       const conversationMessages = chatMessages
@@ -373,6 +385,8 @@ function ChatPanel({ collectionShortName }) {
           activeExperts.length > 0 ? activeExperts[activeExperts.length - 1] : undefined,
         collectionShortName,
       });
+
+      if (isStaleAssistantEpoch(requestEpoch)) return;
 
       if (response.toolResult?.nodes) {
         const filteredNodes = filterCommunityNodes(response.toolResult.nodes);
@@ -389,6 +403,7 @@ function ChatPanel({ collectionShortName }) {
         toolUsed: response.toolUsed,
       });
     } catch (err) {
+      if (isStaleAssistantEpoch(requestEpoch)) return;
       addChatMessage({
         role: 'assistant',
         content: t('chat.error_prefix', { message: err.message }),
@@ -403,6 +418,7 @@ function ChatPanel({ collectionShortName }) {
     const msg = t('chat.reject_node');
     addChatMessage({ role: 'user', content: msg, timestamp: new Date() });
     setIsProcessing(true);
+    const requestEpoch = useGraphStore.getState().assistantSessionEpoch;
 
     try {
       const conversationMessages = chatMessages
@@ -416,6 +432,7 @@ function ChatPanel({ collectionShortName }) {
           activeExperts.length > 0 ? activeExperts[activeExperts.length - 1] : undefined,
         collectionShortName,
       });
+      if (isStaleAssistantEpoch(requestEpoch)) return;
       addChatMessage({
         role: 'assistant',
         content: response.content,
@@ -432,6 +449,7 @@ function ChatPanel({ collectionShortName }) {
     const msg = t('chat.confirm_delete');
     addChatMessage({ role: 'user', content: msg, timestamp: new Date() });
     setIsProcessing(true);
+    const requestEpoch = useGraphStore.getState().assistantSessionEpoch;
 
     try {
       const conversationMessages = chatMessages
@@ -445,6 +463,8 @@ function ChatPanel({ collectionShortName }) {
           activeExperts.length > 0 ? activeExperts[activeExperts.length - 1] : undefined,
         collectionShortName,
       });
+
+      if (isStaleAssistantEpoch(requestEpoch)) return;
 
       if (deleteConfirmation.node_ids) {
         const deletedIds = new Set(deleteConfirmation.node_ids);
@@ -462,6 +482,7 @@ function ChatPanel({ collectionShortName }) {
         toolUsed: response.toolUsed,
       });
     } catch (err) {
+      if (isStaleAssistantEpoch(requestEpoch)) return;
       addChatMessage({
         role: 'assistant',
         content: t('chat.error_prefix', { message: err.message }),
@@ -497,6 +518,7 @@ function ChatPanel({ collectionShortName }) {
     // kiosk, and keeping the answers aggregatable if the save is deferred.
     addChatMessage({ role: 'user', content: readable, llmContent, timestamp: new Date() });
     setIsProcessing(true);
+    const requestEpoch = useGraphStore.getState().assistantSessionEpoch;
 
     try {
       const conversationMessages = chatMessages
@@ -511,6 +533,8 @@ function ChatPanel({ collectionShortName }) {
         collectionShortName,
       });
 
+      if (isStaleAssistantEpoch(requestEpoch)) return;
+
       await applyToolResultSideEffects(response.toolResult);
 
       addChatMessage({
@@ -521,6 +545,7 @@ function ChatPanel({ collectionShortName }) {
         form: formFromResponse(response),
       });
     } catch (err) {
+      if (isStaleAssistantEpoch(requestEpoch)) return;
       addChatMessage({
         role: 'assistant',
         content: t('chat.error_prefix', { message: err.message }),

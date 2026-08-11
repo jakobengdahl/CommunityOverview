@@ -166,6 +166,12 @@ const useGraphStore = create((set, get) => ({
   // Chat state
   chatMessages: [DEFAULT_WELCOME_MESSAGE],
 
+  // Monotonic counter bumped on every visualization-session switch. In-flight
+  // assistant requests capture it before awaiting and drop their response if it
+  // changed, so a slow reply from the previous session cannot mutate the newly
+  // active session's chat or canvas.
+  assistantSessionEpoch: 0,
+
   // Expert agents
   availableExperts: [], // All expert agents from config
   activeExperts: [], // Currently active expert agent IDs
@@ -474,6 +480,28 @@ const useGraphStore = create((set, get) => ({
     const { presentation } = get();
     const welcomeMessage = createWelcomeMessage(presentation, t);
     set({ chatMessages: [welcomeMessage] });
+  },
+
+  // Reset all session-scoped UI state when switching visualization sessions so
+  // nothing leaks across sessions: the assistant conversation, the active expert
+  // roster, and the node-scoped overlays (detail dialog, edit dialog, context
+  // menu, selection) all belong to the session that was active when they opened.
+  // Bumping assistantSessionEpoch invalidates any assistant request still in
+  // flight from the previous session (see ChatPanel), so its response can never
+  // land in the new session.
+  resetSessionScopedState: (t, language) => {
+    const { presentation } = get();
+    const welcomeMessage = createWelcomeMessage(presentation, t, language);
+    set((state) => ({
+      chatMessages: [welcomeMessage],
+      activeExperts: [],
+      detailNode: null,
+      editingNode: null,
+      contextMenu: null,
+      selectedNodeId: null,
+      selectedGraphNodes: [],
+      assistantSessionEpoch: state.assistantSessionEpoch + 1,
+    }));
   },
 
   // Context menu actions
