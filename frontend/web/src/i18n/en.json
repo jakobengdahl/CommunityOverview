@@ -138,6 +138,14 @@
       "unknown": "unknown"
     }
   },
+  "nav_history": {
+    "title": "Recent nodes",
+    "close": "Close",
+    "clear": "Clear",
+    "action_added": "Added",
+    "action_visited": "Visited",
+    "jump_to": "Jump to {name}"
+  },
   "proposal": {
     "title": "Proposed addition:",
     "type": "Type:",
@@ -309,12 +317,14 @@
     "show_only": "Show only these",
     "select_same_type": "Select all nodes of the same type",
     "select_related": "Select related nodes",
+    "view_history": "View change history",
     "organize": "Organize",
+    "auto_tidy": "Auto-tidy",
     "organize_cluster": "Cluster",
     "organize_horizontal": "List horizontally",
     "organize_vertical": "List vertically",
     "organize_tree": "Arrange as tree",
-    "organize_hint": "Organize: C cluster · H horizontal · V vertical · T tree",
+    "organize_hint": "Organize: A auto-tidy · C cluster · H horizontal · V vertical · T tree",
     "hide_all": "Hide all",
     "delete_all": "Delete all",
     "change_type": "Change type",
@@ -327,7 +337,9 @@
     "label_placeholder": "Label",
     "annotation_text_size": "Text size",
     "arrow_start_head": "Start arrowhead",
-    "arrow_end_head": "End arrowhead"
+    "arrow_end_head": "End arrowhead",
+    "undo_notification": "Move undone",
+    "redo_notification": "Move redone"
   },
   "common": {
     "saving": "Saving...",

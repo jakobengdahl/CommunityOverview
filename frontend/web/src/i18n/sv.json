@@ -138,6 +138,14 @@
       "unknown": "okänd"
     }
   },
+  "nav_history": {
+    "title": "Senaste noder",
+    "close": "Stäng",
+    "clear": "Rensa",
+    "action_added": "Tillagd",
+    "action_visited": "Besökt",
+    "jump_to": "Gå till {name}"
+  },
   "proposal": {
     "title": "Föreslaget tillägg:",
     "type": "Typ:",
@@ -309,12 +317,14 @@
     "show_only": "Visa enbart dessa",
     "select_same_type": "Markera alla noder av samma sort",
     "select_related": "Markera relaterade noder",
+    "view_history": "Visa ändringshistorik",
     "organize": "Organisera",
+    "auto_tidy": "Städa automatiskt",
     "organize_cluster": "Klustra",
     "organize_horizontal": "Lista vågrätt",
     "organize_vertical": "Lista lodrätt",
     "organize_tree": "Ordna som träd",
-    "organize_hint": "Organisera: C kluster · H vågrätt · V lodrätt · T träd",
+    "organize_hint": "Organisera: A städa · C kluster · H vågrätt · V lodrätt · T träd",
     "hide_all": "Dölj alla",
     "delete_all": "Ta bort alla",
     "change_type": "Ändra typ",
@@ -327,7 +337,9 @@
     "label_placeholder": "Etikett",
     "annotation_text_size": "Textstorlek",
     "arrow_start_head": "Pilspets i början",
-    "arrow_end_head": "Pilspets i slutet"
+    "arrow_end_head": "Pilspets i slutet",
+    "undo_notification": "Flytt ångrad",
+    "redo_notification": "Flytt återställd"
   },
   "common": {
     "saving": "Sparar...",

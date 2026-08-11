@@ -16,6 +16,7 @@ shared knowledge graphs. This guide covers all user-facing features.
    - [Groups and annotations](#25-groups-and-annotations)
    - [Saved views](#26-saved-views)
    - [Agents](#27-agents)
+   - [Recent nodes (navigation trail)](#28-recent-nodes-navigation-trail)
 3. [Search](#3-search)
 4. [AI Chat](#4-ai-chat)
    - [Asking questions](#41-asking-questions)
@@ -106,6 +107,9 @@ Right-clicking a node opens the context menu:
   whole visualization, including ones scrolled outside the current viewport
 - **Select related nodes** — select this node together with every node it is directly
   connected to
+- **View change history** — open the node's detail dialog straight to its **History** tab,
+  showing the read-only change log for that node (see [5.2](#52-recent-activity-audit-log)).
+  When the deployment retains no history for the node, the tab shows a "no history" message.
 - **Custom actions** — schema-defined items per node type, e.g. "Open in SSPCloud" that
   substitutes a field value into a URL and opens it in a new tab
 - **Delete** — remove the node permanently (shown in red, requires confirmation)
@@ -123,10 +127,16 @@ Right-clicking on the **canvas background** offers quick-create options:
 Right-clicking a **selection of multiple nodes** shows bulk actions: Show only these,
 Select all nodes of the same type, Organize, Hide all, Delete all. "Select all nodes of the
 same type" extends the selection to every node whose type matches any type already in the
-selection. **Organize** arranges the selected nodes — Cluster, List horizontally, List
-vertically, or Arrange as tree — keeping them centred where they already sit. The same
-arrangements are available from the keyboard: press **Ctrl/Cmd+O** with a multi-selection,
-then **C** (cluster), **H** (horizontal), **V** (vertical) or **T** (tree).
+selection. **Organize** arranges the selected nodes — Auto-tidy, Cluster, List horizontally,
+List vertically, or Arrange as tree — keeping them centred where they already sit.
+**Auto-tidy** is the one-click option: it picks a sensible structure for you — a tree when
+the selected nodes are connected in a hierarchy, otherwise a per-type grouping — and always
+lays them out overlap-free. The same arrangements are available from the keyboard: press
+**Ctrl/Cmd+O** with a multi-selection, then **A** (auto-tidy), **C** (cluster), **H**
+(horizontal), **V** (vertical) or **T** (tree).
+
+Moving nodes can be undone: **Ctrl/Cmd+Z** reverses the last node move (a drag or an
+Organize arrangement), and **Ctrl/Cmd+Shift+Z** (or **Ctrl/Cmd+Y**) reapplies it.
 
 ### 2.5 Groups and annotations
 
@@ -193,6 +203,23 @@ react to all node type changes).
 
 Agents appear as Agent nodes in the graph. Double-clicking opens the detail dialog
 where you can click **Edit**; right-click gives the same options via the context menu.
+
+### 2.8 Recent nodes (navigation trail)
+
+As you work, a **Recent nodes** button appears at the bottom-centre of the canvas
+once anything has happened. It keeps a short, session-scoped trail of the nodes you
+have **added** to the visualization (for example through search or *find related*)
+and the ones you have **visited** — navigated to from search or opened via
+double-click.
+
+Click the button to expand the trail (newest first). Each entry shows the node's
+name, whether it was added or visited, and how long ago. **Click an entry to jump
+back to that node** — the canvas re-centres on it. Use the trash icon to clear the
+trail, or **Esc** to close the panel.
+
+This trail is per-session and lives only in your browser. It is separate from
+**Recent activity** ([5.2](#52-recent-activity-audit-log)), which is a persisted
+audit log of who changed what in the graph data.
 
 ---
 
@@ -623,7 +650,8 @@ their final positions instead of animating.
 | **Enter** (chat) | Send message |
 | **Escape** | Cancel guide / close dialog |
 | **Esc × 2** | Clear the canvas (remove all nodes from view). On a **named** session this first asks for confirmation; on a **locked** visualization it does nothing (unlock it, or use the clear button). |
-| **Ctrl+Z** / **Cmd+Z** | Undo (canvas layout changes only) |
+| **Ctrl+Z** / **Cmd+Z** | Undo the last node move (drag or Organize) |
+| **Ctrl+Shift+Z** / **Cmd+Shift+Z** / **Ctrl+Y** | Redo the last undone move |
 | **Space + drag** | Pan the canvas |
 | **Scroll wheel** | Zoom in/out |
 

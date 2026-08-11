@@ -17,7 +17,9 @@ const labels = {
   showOnly: 'Show only these',
   selectSameType: 'Select all nodes of the same type',
   selectRelated: 'Select related nodes',
+  viewHistory: 'View change history',
   organize: 'Organize',
+  autoTidy: 'Auto-tidy',
   organizeCluster: 'Cluster',
   organizeHorizontal: 'List horizontally',
   organizeVertical: 'List vertically',
@@ -159,6 +161,27 @@ describe('NodeContextMenu', () => {
     expect(onSelectRelated).toHaveBeenCalledWith('n1');
   });
 
+  it('omits the view-history button when no handler is given', () => {
+    render(<NodeContextMenu menu={{ x: 0, y: 0, node }} labels={labels} onClose={vi.fn()} />);
+    expect(screen.queryByRole('button', { name: /view change history/i })).toBeNull();
+  });
+
+  it('invokes onViewHistory with the node id and data then closes', () => {
+    const onViewHistory = vi.fn();
+    const onClose = vi.fn();
+    render(
+      <NodeContextMenu
+        menu={{ x: 0, y: 0, node }}
+        labels={labels}
+        onViewHistory={onViewHistory}
+        onClose={onClose}
+      />
+    );
+    fireEvent.click(screen.getByRole('button', { name: /view change history/i }));
+    expect(onViewHistory).toHaveBeenCalledWith('n1', node.data);
+    expect(onClose).toHaveBeenCalled();
+  });
+
   it('renders schema callback custom items and dispatches the action', () => {
     const onContextMenuAction = vi.fn();
     const onClose = vi.fn();
@@ -229,14 +252,16 @@ describe('MultiNodeContextMenu', () => {
         onClose={vi.fn()}
       />
     );
+    fireEvent.click(screen.getByRole('button', { name: /auto-tidy/i }));
     fireEvent.click(screen.getByRole('button', { name: /cluster/i }));
     fireEvent.click(screen.getByRole('button', { name: /list horizontally/i }));
     fireEvent.click(screen.getByRole('button', { name: /list vertically/i }));
     fireEvent.click(screen.getByRole('button', { name: /arrange as tree/i }));
-    expect(onOrganize).toHaveBeenNthCalledWith(1, 'cluster');
-    expect(onOrganize).toHaveBeenNthCalledWith(2, 'horizontal');
-    expect(onOrganize).toHaveBeenNthCalledWith(3, 'vertical');
-    expect(onOrganize).toHaveBeenNthCalledWith(4, 'tree');
+    expect(onOrganize).toHaveBeenNthCalledWith(1, 'tidy');
+    expect(onOrganize).toHaveBeenNthCalledWith(2, 'cluster');
+    expect(onOrganize).toHaveBeenNthCalledWith(3, 'horizontal');
+    expect(onOrganize).toHaveBeenNthCalledWith(4, 'vertical');
+    expect(onOrganize).toHaveBeenNthCalledWith(5, 'tree');
   });
 
   it('prefers onDeleteMultiple over per-node onDelete', () => {

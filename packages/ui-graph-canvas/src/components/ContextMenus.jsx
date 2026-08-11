@@ -34,6 +34,7 @@ export function NodeContextMenu({
   onContextMenuAction,
   selectNodesByType,
   onSelectRelated,
+  onViewHistory,
   onClose,
 }) {
   if (!menu) return null;
@@ -79,6 +80,16 @@ export function NodeContextMenu({
       </button>
       {onSelectRelated && (
         <button onClick={() => onSelectRelated(menu.node.id)}>🕸️ {cml.selectRelated}</button>
+      )}
+      {onViewHistory && (
+        <button
+          onClick={() => {
+            onViewHistory(menu.node.id, menu.node.data);
+            onClose();
+          }}
+        >
+          🕘 {cml.viewHistory}
+        </button>
       )}
       {(() => {
         const nodeType = menu.node.data?.nodeType || menu.node.data?.type;
@@ -193,6 +204,7 @@ export function MultiNodeContextMenu({
         <>
           <div className="context-menu-separator"></div>
           <div className="context-menu-subheader">{cml.organize}</div>
+          <button onClick={() => onOrganize('tidy')}>✨ {cml.autoTidy}</button>
           <button onClick={() => onOrganize('cluster')}>▦ {cml.organizeCluster}</button>
           <button onClick={() => onOrganize('horizontal')}>↔️ {cml.organizeHorizontal}</button>
           <button onClick={() => onOrganize('vertical')}>↕️ {cml.organizeVertical}</button>
