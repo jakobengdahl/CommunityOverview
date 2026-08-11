@@ -80,6 +80,68 @@ function reorderNodesForParentChild(nodes) {
 }
 
 /**
+ * Compute a dragged graph node's post-drag placement: its final parentId and
+ * position, accounting for entering a group (position becomes parent-relative),
+ * leaving a group (position becomes absolute), or neither. `currentNodes` is the
+ * live ReactFlow node list and `groupNodes` its group nodes. Returns
+ * { parentId, position:{x,y} }. Pure, so both the on-screen re-parent and the
+ * recorded undo entry derive the same final placement from one source.
+ */
+function computeGroupPlacement(node, currentNodes, groupNodes) {
+  const flowNode = currentNodes.find((cn) => cn.id === node.id);
+  const pos = flowNode?.position || node.position;
+
+  const absPos = node.parentId
+    ? {
+        x: pos.x + (groupNodes.find((g) => g.id === node.parentId)?.position.x || 0),
+        y: pos.y + (groupNodes.find((g) => g.id === node.parentId)?.position.y || 0),
+      }
+    : pos;
+
+  let targetGroup = null;
+  for (const g of groupNodes) {
+    const gb = {
+      left: g.position.x,
+      right: g.position.x + (g.style?.width || 300),
+      top: g.position.y,
+      bottom: g.position.y + (g.style?.height || 200),
+    };
+    if (
+      absPos.x >= gb.left &&
+      absPos.x <= gb.right &&
+      absPos.y >= gb.top &&
+      absPos.y <= gb.bottom
+    ) {
+      targetGroup = g;
+      break;
+    }
+  }
+
+  if (targetGroup && node.parentId !== targetGroup.id) {
+    // Enter group: position becomes relative to the group origin.
+    return {
+      parentId: targetGroup.id,
+      position: { x: absPos.x - targetGroup.position.x, y: absPos.y - targetGroup.position.y },
+    };
+  }
+
+  if (!targetGroup && node.parentId) {
+    // Exit group: position becomes absolute again.
+    const oldParent = groupNodes.find((gn) => gn.id === node.parentId);
+    return {
+      parentId: undefined,
+      position: {
+        x: pos.x + (oldParent?.position.x || 0),
+        y: pos.y + (oldParent?.position.y || 0),
+      },
+    };
+  }
+
+  // No membership change: keep the current parent and the just-dragged position.
+  return { parentId: node.parentId, position: { x: pos.x, y: pos.y } };
+}
+
+/**
  * GraphCanvas - Main graph visualization component
  */
 function GraphCanvasInner({
@@ -465,15 +527,24 @@ function GraphCanvasInner({
     setTimeout(() => setNotification(null), 3000);
   }, []);
 
-  // Apply a batch of { id, position } moves to the canvas and persist each one
-  // through the same callback a drag/organize uses, so an undo or redo is
-  // indistinguishable from the move it reverses.
+  // Apply a batch of { id, position, parentId } moves to the canvas and persist
+  // each one through the same callback a drag/organize uses, so an undo or redo
+  // is indistinguishable from the move it reverses. `parentId` is restored too
+  // (re-parenting the node into or out of a group), because a grouped node's
+  // position is parent-relative — restoring the position without the parent
+  // would place it in the wrong coordinate space.
   const applyPositionMoves = useCallback(
     (moves) => {
       if (!moves || moves.length === 0) return;
-      const posById = new Map(moves.map((m) => [m.id, m.position]));
+      const byId = new Map(moves.map((m) => [m.id, m]));
       setNodes((nds) =>
-        nds.map((n) => (posById.has(n.id) ? { ...n, position: posById.get(n.id) } : n))
+        reorderNodesForParentChild(
+          nds.map((n) => {
+            const m = byId.get(n.id);
+            if (!m) return n;
+            return { ...n, position: { ...m.position }, parentId: m.parentId };
+          })
+        )
       );
       if (onNodePositionChange) {
         for (const m of moves) onNodePositionChange(m.id, m.position);
@@ -571,7 +642,16 @@ function GraphCanvasInner({
         const pos = parent ? { x: abs.x - parent.x, y: abs.y - parent.y } : abs;
         finalPos.set(id, pos);
         const cur = nodeById.get(id);
-        if (cur) moves.push({ id, from: { x: cur.position.x, y: cur.position.y }, to: pos });
+        // Organize never changes group membership: carry the node's current
+        // parentId on both sides so an undo restores position without detaching
+        // a grouped node.
+        if (cur) {
+          moves.push({
+            id,
+            from: { x: cur.position.x, y: cur.position.y, parentId: cur.parentId },
+            to: { x: pos.x, y: pos.y, parentId: cur.parentId },
+          });
+        }
       }
       recordMove(moves);
       setNodes((nds) =>
@@ -689,7 +769,7 @@ function GraphCanvasInner({
     const snap = new Map();
     for (const n of set) {
       if (ANNOTATION_TYPES.has(n.type)) continue;
-      snap.set(n.id, { x: n.position.x, y: n.position.y });
+      snap.set(n.id, { x: n.position.x, y: n.position.y, parentId: n.parentId });
     }
     dragStartPositionsRef.current = snap;
   }, []);
@@ -702,22 +782,6 @@ function GraphCanvasInner({
 
       // Get latest node positions directly from ReactFlow's internal store
       const currentNodes = getFlowNodes();
-
-      // Record the completed drag as an undoable move: from the drag-start
-      // snapshot to the final positions. Done before the group-membership early
-      // return below so plain drags (no groups on the canvas) are still recorded.
-      const startSnap = dragStartPositionsRef.current;
-      if (startSnap && startSnap.size > 0) {
-        const moves = [];
-        for (const [id, from] of startSnap) {
-          const flowNode = currentNodes.find((cn) => cn.id === id);
-          const to = flowNode?.position;
-          if (to) moves.push({ id, from, to: { x: to.x, y: to.y } });
-        }
-        recordMove(moves);
-      }
-      dragStartPositionsRef.current = new Map();
-
       const groupNodes = currentNodes.filter((n) => n.type === 'group');
 
       // Determine which draggable graph nodes were part of this drag. Annotation
@@ -730,73 +794,67 @@ function GraphCanvasInner({
             : [];
       const draggedIds = new Set(nodesToProcess.map((n) => n.id));
 
-      // Nothing to process: either no non-group nodes dragged or no groups exist
-      if (draggedIds.size === 0 || groupNodes.length === 0) return;
+      const startSnap = dragStartPositionsRef.current;
+      dragStartPositionsRef.current = new Map();
+
+      // Compute each dragged graph node's final placement (position + parentId),
+      // including any group-membership change, so the on-screen re-parent and the
+      // recorded undo entry share one source of truth. Empty when there are no
+      // groups to enter/leave — a plain drag needs no re-parenting.
+      const finalById = new Map();
+      if (draggedIds.size > 0 && groupNodes.length > 0) {
+        for (const n of currentNodes) {
+          if (!draggedIds.has(n.id) || n.type === 'group') continue;
+          finalById.set(n.id, computeGroupPlacement(n, currentNodes, groupNodes));
+        }
+      }
+
+      // Record the completed drag as one undoable action: from the drag-start
+      // snapshot to the final placement. Runs for plain drags too, so a canvas
+      // with no groups still records moves. When a node changed group membership,
+      // the recorded `to` carries the new parentId and parent-relative position,
+      // so an undo restores the correct parent and coordinate space.
+      if (startSnap && startSnap.size > 0) {
+        const moves = [];
+        for (const [id, from] of startSnap) {
+          const placed = finalById.get(id);
+          if (placed) {
+            moves.push({
+              id,
+              from,
+              to: { x: placed.position.x, y: placed.position.y, parentId: placed.parentId },
+            });
+          } else {
+            const flowNode = currentNodes.find((cn) => cn.id === id);
+            if (flowNode) {
+              moves.push({
+                id,
+                from,
+                to: { x: flowNode.position.x, y: flowNode.position.y, parentId: flowNode.parentId },
+              });
+            }
+          }
+        }
+        recordMove(moves);
+      }
+
+      // Nothing to re-parent: either no non-group nodes dragged or no groups exist
+      if (finalById.size === 0) return;
 
       setNodes((nds) => {
         const mapped = nds.map((n) => {
-          if (!draggedIds.has(n.id) || n.type === 'group') return n;
-
-          // Use position from ReactFlow's store for accurate post-drag coordinates
-          const flowNode = currentNodes.find((cn) => cn.id === n.id);
-          const pos = flowNode?.position || n.position;
-
-          // Calculate absolute position (account for parent offset)
-          const absPos = n.parentId
-            ? {
-                x: pos.x + (groupNodes.find((g) => g.id === n.parentId)?.position.x || 0),
-                y: pos.y + (groupNodes.find((g) => g.id === n.parentId)?.position.y || 0),
-              }
-            : pos;
-
-          // Find which group this node is inside
-          let targetGroup = null;
-          for (const g of groupNodes) {
-            const gb = {
-              left: g.position.x,
-              right: g.position.x + (g.style?.width || 300),
-              top: g.position.y,
-              bottom: g.position.y + (g.style?.height || 200),
-            };
-            if (
-              absPos.x >= gb.left &&
-              absPos.x <= gb.right &&
-              absPos.y >= gb.top &&
-              absPos.y <= gb.bottom
-            ) {
-              targetGroup = g;
-              break;
-            }
+          const placed = finalById.get(n.id);
+          if (!placed) return n;
+          // Leave unchanged nodes as-is (preserving extent etc.); only rewrite a
+          // node that actually moved parent or position.
+          if (
+            placed.parentId === n.parentId &&
+            placed.position.x === n.position.x &&
+            placed.position.y === n.position.y
+          ) {
+            return n;
           }
-
-          if (targetGroup && n.parentId !== targetGroup.id) {
-            // Enter group
-            return {
-              ...n,
-              parentId: targetGroup.id,
-              position: {
-                x: absPos.x - targetGroup.position.x,
-                y: absPos.y - targetGroup.position.y,
-              },
-              extent: undefined,
-            };
-          }
-
-          if (!targetGroup && n.parentId) {
-            // Exit group
-            const oldParent = groupNodes.find((gn) => gn.id === n.parentId);
-            return {
-              ...n,
-              parentId: undefined,
-              position: {
-                x: pos.x + (oldParent?.position.x || 0),
-                y: pos.y + (oldParent?.position.y || 0),
-              },
-              extent: undefined,
-            };
-          }
-
-          return n;
+          return { ...n, parentId: placed.parentId, position: placed.position, extent: undefined };
         });
 
         // ReactFlow requires parent nodes before children in the array

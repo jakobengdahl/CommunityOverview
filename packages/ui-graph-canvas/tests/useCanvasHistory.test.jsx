@@ -64,6 +64,49 @@ describe('useCanvasHistory', () => {
     ]);
   });
 
+  it('round-trips parentId so undo/redo can restore group membership', () => {
+    const { result } = renderHook(() => useCanvasHistory());
+    act(() => {
+      // Node dragged from free space (no parent) into group g1 (parent-relative).
+      result.current.record([
+        {
+          id: 'a',
+          from: { x: 500, y: 500, parentId: undefined },
+          to: { x: 40, y: 40, parentId: 'g1' },
+        },
+      ]);
+    });
+    let undone;
+    act(() => {
+      undone = result.current.undo();
+    });
+    expect(undone).toEqual([{ id: 'a', position: { x: 500, y: 500 }, parentId: undefined }]);
+    let redone;
+    act(() => {
+      redone = result.current.redo();
+    });
+    expect(redone).toEqual([{ id: 'a', position: { x: 40, y: 40 }, parentId: 'g1' }]);
+  });
+
+  it('records a move where only the parent changed (position identical)', () => {
+    const { result } = renderHook(() => useCanvasHistory());
+    act(() => {
+      result.current.record([
+        {
+          id: 'a',
+          from: { x: 10, y: 10, parentId: undefined },
+          to: { x: 10, y: 10, parentId: 'g1' },
+        },
+      ]);
+    });
+    expect(result.current.canUndo).toBe(true);
+    let undone;
+    act(() => {
+      undone = result.current.undo();
+    });
+    expect(undone).toEqual([{ id: 'a', position: { x: 10, y: 10 }, parentId: undefined }]);
+  });
+
   it('recording a new action clears the redo stack', () => {
     const { result } = renderHook(() => useCanvasHistory());
     act(() => {
