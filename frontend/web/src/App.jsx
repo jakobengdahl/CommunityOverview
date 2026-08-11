@@ -653,6 +653,14 @@ function App() {
     ]
   );
 
+  // Callback: open the node detail dialog directly on its change-history tab
+  const handleViewNodeHistory = useCallback(
+    (nodeId, nodeData) => {
+      setDetailNode({ id: nodeId, data: nodeData || {}, view: 'history' });
+    },
+    [setDetailNode]
+  );
+
   // Callback: Expand node to show related nodes
   const handleExpand = useCallback(
     async (nodeId, nodeData) => {
@@ -1617,6 +1625,7 @@ function App() {
           onShowOnly={handleShowOnly}
           onSelectionChange={handleSelectionChange}
           onNodeDoubleClick={handleNodeDoubleClick}
+          onViewNodeHistory={handleViewNodeHistory}
           focusNodeId={focusNodeId}
           onFocusComplete={clearFocusNode}
           createGroupSignal={createGroupSignal}
@@ -1664,6 +1673,7 @@ function App() {
             showOnly: t('context_menu.show_only'),
             selectSameType: t('context_menu.select_same_type'),
             selectRelated: t('context_menu.select_related'),
+            viewHistory: t('context_menu.view_history'),
             organize: t('context_menu.organize'),
             autoTidy: t('context_menu.auto_tidy'),
             organizeCluster: t('context_menu.organize_cluster'),

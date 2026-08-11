@@ -26,8 +26,8 @@ vi.mock('./EditNodeDialog', () => ({
   ),
 }));
 vi.mock('./NodeDetailDialog', () => ({
-  default: ({ node, onClose, onEdit }) => (
-    <div data-testid="node-detail" data-node-id={node.id}>
+  default: ({ node, onClose, onEdit, initialView }) => (
+    <div data-testid="node-detail" data-node-id={node.id} data-initial-view={initialView}>
       <button onClick={() => onEdit(node.id, node.data)}>edit</button>
       <button onClick={onClose}>close</button>
     </div>
