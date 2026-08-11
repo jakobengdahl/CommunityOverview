@@ -159,6 +159,7 @@ function GraphCanvasInner({
   clearGroupsFlag = false,
   onExpand,
   onEdit,
+  onViewNodeHistory,
   onDelete,
   onHide,
   onDeleteMultiple,
@@ -220,6 +221,7 @@ function GraphCanvasInner({
     showOnly: 'Show only these',
     selectSameType: 'Select all nodes of the same type',
     selectRelated: 'Select related nodes',
+    viewHistory: 'View change history',
     organize: 'Organize',
     autoTidy: 'Auto-tidy',
     organizeCluster: 'Cluster',
@@ -1733,6 +1735,7 @@ function GraphCanvasInner({
           onContextMenuAction={onContextMenuAction}
           selectNodesByType={selectNodesByType}
           onSelectRelated={selectRelatedNodes}
+          onViewHistory={onViewNodeHistory}
           onClose={() => setNodeContextMenu(null)}
         />
 

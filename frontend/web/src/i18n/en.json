@@ -300,6 +300,7 @@
     "show_only": "Show only these",
     "select_same_type": "Select all nodes of the same type",
     "select_related": "Select related nodes",
+    "view_history": "View change history",
     "organize": "Organize",
     "auto_tidy": "Auto-tidy",
     "organize_cluster": "Cluster",
