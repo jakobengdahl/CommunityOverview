@@ -363,6 +363,7 @@ AI apps:
 | **Connect to session (via ID)** | Joins an existing session by entering its ID (format `1234-5678`) |
 | **Recent sessions** | The most recently used sessions — shown by name if you have named them, otherwise by ID. Click one to load it; the current session is saved automatically first. Hover a row and open the **⋮** menu for per-session actions: **Name session**, **Copy link** (copies the shareable `?session=…` URL to the clipboard), and **Delete session**. |
 | **Recent activity** | Opens the activity panel — a read-only audit log of graph changes (see [5.2](#52-recent-activity-audit-log)) |
+| **Lock / Unlock visualization** | Guards the current board against accidental clearing. While locked, **Esc × 2** does nothing at all, and the top-bar **clear** button asks for an emphatic confirmation warning that everything on the board will be removed. The setting is remembered in your browser. |
 | **Settings** | Opens the Settings dialog (see below) |
 
 Session content (node membership, positions, groups, and hidden nodes) is stored
@@ -621,7 +622,7 @@ their final positions instead of animating.
 | **Delete** | Delete selected node or edge |
 | **Enter** (chat) | Send message |
 | **Escape** | Cancel guide / close dialog |
-| **Esc × 2** | Clear the canvas (remove all nodes from view) |
+| **Esc × 2** | Clear the canvas (remove all nodes from view). On a **named** session this first asks for confirmation; on a **locked** visualization it does nothing (unlock it, or use the clear button). |
 | **Ctrl+Z** / **Cmd+Z** | Undo (canvas layout changes only) |
 | **Space + drag** | Pan the canvas |
 | **Scroll wheel** | Zoom in/out |
