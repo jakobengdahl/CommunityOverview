@@ -158,11 +158,12 @@ function GraphCanvasInner({
     selectSameType: 'Select all nodes of the same type',
     selectRelated: 'Select related nodes',
     organize: 'Organize',
+    autoTidy: 'Auto-tidy',
     organizeCluster: 'Cluster',
     organizeHorizontal: 'List horizontally',
     organizeVertical: 'List vertically',
     organizeTree: 'Arrange as tree',
-    organizeHint: 'Organize: C cluster · H horizontal · V vertical · T tree',
+    organizeHint: 'Organize: A auto-tidy · C cluster · H horizontal · V vertical · T tree',
     hideAll: 'Hide all',
     deleteAll: 'Delete all',
     changeType: 'Change type',
@@ -1080,7 +1081,7 @@ function GraphCanvasInner({
       // Second step of the organize chord: a pending Ctrl/Cmd+O is resolved by
       // the next c/h/v/t keystroke.
       if (organizePendingRef.current && !e.ctrlKey && !e.metaKey && !e.altKey) {
-        const mode = { c: 'cluster', h: 'horizontal', v: 'vertical', t: 'tree' }[
+        const mode = { a: 'tidy', c: 'cluster', h: 'horizontal', v: 'vertical', t: 'tree' }[
           e.key?.toLowerCase()
         ];
         if (mode) {

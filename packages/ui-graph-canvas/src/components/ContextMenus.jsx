@@ -193,6 +193,7 @@ export function MultiNodeContextMenu({
         <>
           <div className="context-menu-separator"></div>
           <div className="context-menu-subheader">{cml.organize}</div>
+          <button onClick={() => onOrganize('tidy')}>✨ {cml.autoTidy}</button>
           <button onClick={() => onOrganize('cluster')}>▦ {cml.organizeCluster}</button>
           <button onClick={() => onOrganize('horizontal')}>↔️ {cml.organizeHorizontal}</button>
           <button onClick={() => onOrganize('vertical')}>↕️ {cml.organizeVertical}</button>

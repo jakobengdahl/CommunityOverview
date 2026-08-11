@@ -1665,6 +1665,7 @@ function App() {
             selectSameType: t('context_menu.select_same_type'),
             selectRelated: t('context_menu.select_related'),
             organize: t('context_menu.organize'),
+            autoTidy: t('context_menu.auto_tidy'),
             organizeCluster: t('context_menu.organize_cluster'),
             organizeHorizontal: t('context_menu.organize_horizontal'),
             organizeVertical: t('context_menu.organize_vertical'),
