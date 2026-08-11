@@ -17,6 +17,7 @@ const labels = {
   showOnly: 'Show only these',
   selectSameType: 'Select all nodes of the same type',
   selectRelated: 'Select related nodes',
+  viewHistory: 'View change history',
   organize: 'Organize',
   autoTidy: 'Auto-tidy',
   organizeCluster: 'Cluster',
@@ -158,6 +159,27 @@ describe('NodeContextMenu', () => {
     );
     fireEvent.click(screen.getByRole('button', { name: /select related nodes/i }));
     expect(onSelectRelated).toHaveBeenCalledWith('n1');
+  });
+
+  it('omits the view-history button when no handler is given', () => {
+    render(<NodeContextMenu menu={{ x: 0, y: 0, node }} labels={labels} onClose={vi.fn()} />);
+    expect(screen.queryByRole('button', { name: /view change history/i })).toBeNull();
+  });
+
+  it('invokes onViewHistory with the node id and data then closes', () => {
+    const onViewHistory = vi.fn();
+    const onClose = vi.fn();
+    render(
+      <NodeContextMenu
+        menu={{ x: 0, y: 0, node }}
+        labels={labels}
+        onViewHistory={onViewHistory}
+        onClose={onClose}
+      />
+    );
+    fireEvent.click(screen.getByRole('button', { name: /view change history/i }));
+    expect(onViewHistory).toHaveBeenCalledWith('n1', node.data);
+    expect(onClose).toHaveBeenCalled();
   });
 
   it('renders schema callback custom items and dispatches the action', () => {

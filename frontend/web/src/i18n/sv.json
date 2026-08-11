@@ -308,6 +308,7 @@
     "show_only": "Visa enbart dessa",
     "select_same_type": "Markera alla noder av samma sort",
     "select_related": "Markera relaterade noder",
+    "view_history": "Visa ändringshistorik",
     "organize": "Organisera",
     "auto_tidy": "Städa automatiskt",
     "organize_cluster": "Klustra",

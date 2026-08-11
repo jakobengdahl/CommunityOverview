@@ -114,6 +114,7 @@ function AppDialogs({
       {detailNode && (
         <NodeDetailDialog
           node={detailNode}
+          initialView={detailNode.view}
           onClose={closeDetailNode}
           onEdit={(nodeId, nodeData) => {
             closeDetailNode();

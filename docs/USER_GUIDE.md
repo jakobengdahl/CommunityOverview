@@ -107,6 +107,9 @@ Right-clicking a node opens the context menu:
   whole visualization, including ones scrolled outside the current viewport
 - **Select related nodes** — select this node together with every node it is directly
   connected to
+- **View change history** — open the node's detail dialog straight to its **History** tab,
+  showing the read-only change log for that node (see [5.2](#52-recent-activity-audit-log)).
+  When the deployment retains no history for the node, the tab shows a "no history" message.
 - **Custom actions** — schema-defined items per node type, e.g. "Open in SSPCloud" that
   substitutes a field value into a URL and opens it in a new tab
 - **Delete** — remove the node permanently (shown in red, requires confirmation)
