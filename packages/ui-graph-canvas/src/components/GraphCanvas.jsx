@@ -505,17 +505,21 @@ function GraphCanvasInner({
         .map((n) => ({ ...n, position: toAbsolute(n) }));
       const posById = arrangeNodes(targets, edges, mode);
       if (posById.size === 0) return;
+      // Convert the arranged absolute positions back to the parent-relative form
+      // ReactFlow stores for grouped nodes. Compute once and use for both the
+      // on-screen update and the persistence callback, so the position we render
+      // is the position we save (the drag path also persists relative positions).
+      const nodeById = new Map(nodes.map((n) => [n.id, n]));
+      const finalPos = new Map();
+      for (const [id, abs] of posById) {
+        const parent = nodeById.get(id)?.parentId ? groupPos.get(nodeById.get(id).parentId) : null;
+        finalPos.set(id, parent ? { x: abs.x - parent.x, y: abs.y - parent.y } : abs);
+      }
       setNodes((nds) =>
-        nds.map((n) => {
-          if (!posById.has(n.id)) return n;
-          const abs = posById.get(n.id);
-          const parent = n.parentId ? groupPos.get(n.parentId) : null;
-          const position = parent ? { x: abs.x - parent.x, y: abs.y - parent.y } : abs;
-          return { ...n, position };
-        })
+        nds.map((n) => (finalPos.has(n.id) ? { ...n, position: finalPos.get(n.id) } : n))
       );
       if (onNodePositionChange) {
-        for (const [id, pos] of posById) onNodePositionChange(id, pos);
+        for (const [id, pos] of finalPos) onNodePositionChange(id, pos);
       }
       closeAllMenus();
     },
