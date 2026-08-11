@@ -16,6 +16,7 @@ import hashlib
 import hmac
 import time
 from typing import Optional
+from urllib.parse import urlsplit
 
 from starlette.requests import Request
 
@@ -24,17 +25,30 @@ from .config import AppConfig
 SESSION_COOKIE_NAME = "co_session"
 SESSION_TTL_SECONDS = 12 * 60 * 60  # 12h
 
+_KDF_SALT = b"co-session-cookie-v1"
+_KDF_ITERATIONS = 200_000
+_signing_key_cache: dict[str, bytes] = {}
+
 
 def _signing_key(config: AppConfig) -> Optional[bytes]:
-    """Derive the HMAC key from an existing server secret (no new config).
+    """Derive the HMAC signing key from an existing server secret (no new config).
 
-    Returns None when neither a bearer token nor a Basic password is set; the
-    caller then treats session cookies as unavailable.
+    Uses PBKDF2-HMAC-SHA256 (a deliberately expensive KDF) rather than a plain
+    fast hash, and caches the result per secret so the cost is paid once per
+    process. The key is deterministic from the secret, so it stays stable across
+    worker processes and restarts. Returns None when neither a bearer token nor a
+    Basic password is set; the caller then treats session cookies as unavailable.
     """
     secret = config.auth_bearer_token or config.auth_password
     if not secret:
         return None
-    return hashlib.sha256(("co-session-v1:" + secret).encode("utf-8")).digest()
+    key = _signing_key_cache.get(secret)
+    if key is None:
+        key = hashlib.pbkdf2_hmac(
+            "sha256", secret.encode("utf-8"), _KDF_SALT, _KDF_ITERATIONS
+        )
+        _signing_key_cache[secret] = key
+    return key
 
 
 def mint_session_cookie(
@@ -87,11 +101,14 @@ def credentials_valid(config: AppConfig, username: str, password: str) -> bool:
 def is_safe_next_path(path: str) -> bool:
     """Allow only same-origin absolute paths as post-login redirect targets.
 
-    Rejects protocol-relative (``//host``) and scheme-bearing values so the
-    ``next`` parameter can never become an open redirect.
+    A valid target starts with a single ``/`` and, once parsed, carries neither a
+    URL scheme nor a network location — so the ``next`` parameter can never become
+    an open redirect to another host. Protocol-relative (``//host``) and
+    backslash/CR/LF-bearing values are rejected outright.
     """
-    if not path or not path.startswith("/"):
+    if not path or not path.startswith("/") or path.startswith("//"):
         return False
-    if path.startswith("//") or path.startswith("/\\"):
+    if "\\" in path or "\n" in path or "\r" in path:
         return False
-    return "\\" not in path and "\n" not in path and "\r" not in path
+    parts = urlsplit(path)
+    return not parts.scheme and not parts.netloc
