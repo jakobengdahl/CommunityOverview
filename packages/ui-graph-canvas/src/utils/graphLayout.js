@@ -544,6 +544,10 @@ export function positionNewNodes(newNodes, existingNodes, edges = [], options = 
  *   'horizontal' — single row
  *   'vertical'   — single column
  *   'tree'       — hierarchical (dagre) over the edges internal to the selection
+ *   'tidy'       — auto-tidy: picks the sensible structure automatically. If the
+ *                  selection contains internal edges (a hierarchy) it lays out as a
+ *                  dagre tree; otherwise it groups nodes by node type into one column
+ *                  per type. Either way the grid spacing keeps nodes overlap-free.
  *
  * @param {Array} nodesToArrange - Nodes with current positions
  * @param {Array} edges - All edges (only those internal to the selection are used)
@@ -581,6 +585,39 @@ export function arrangeNodes(nodesToArrange, edges = [], mode = 'cluster') {
       subEdges,
       'TB'
     ).map((n) => ({ id: n.id, position: n.position }));
+  } else if (mode === 'tidy') {
+    const ids = new Set(nodesToArrange.map((n) => n.id));
+    const subEdges = (edges || []).filter((e) => ids.has(e.source) && ids.has(e.target));
+    if (subEdges.length > 0) {
+      // A hierarchy exists among the selected nodes — lay it out as a tree so the
+      // structure is respected.
+      positioned = getLayoutedElements(
+        nodesToArrange.map((n) => ({ id: n.id })),
+        subEdges,
+        'TB'
+      ).map((n) => ({ id: n.id, position: n.position }));
+    } else {
+      // No internal hierarchy — group by node type, one column per type, stacked in
+      // a grid so nodes of the same type stay together and nothing overlaps.
+      const typeOf = (n) => n.data?.nodeType || n.data?.type || '';
+      const groups = new Map();
+      for (const n of nodesToArrange) {
+        const t = typeOf(n);
+        if (!groups.has(t)) groups.set(t, []);
+        groups.get(t).push(n);
+      }
+      positioned = [];
+      let col = 0;
+      for (const members of groups.values()) {
+        members.forEach((n, row) => {
+          positioned.push({
+            id: n.id,
+            position: { x: col * GRID_CELL_W, y: row * GRID_CELL_H },
+          });
+        });
+        col += 1;
+      }
+    }
   } else {
     const cols = Math.max(1, Math.ceil(Math.sqrt(nodesToArrange.length)));
     positioned = nodesToArrange.map((n, i) => ({

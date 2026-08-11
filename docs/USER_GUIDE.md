@@ -123,10 +123,13 @@ Right-clicking on the **canvas background** offers quick-create options:
 Right-clicking a **selection of multiple nodes** shows bulk actions: Show only these,
 Select all nodes of the same type, Organize, Hide all, Delete all. "Select all nodes of the
 same type" extends the selection to every node whose type matches any type already in the
-selection. **Organize** arranges the selected nodes — Cluster, List horizontally, List
-vertically, or Arrange as tree — keeping them centred where they already sit. The same
-arrangements are available from the keyboard: press **Ctrl/Cmd+O** with a multi-selection,
-then **C** (cluster), **H** (horizontal), **V** (vertical) or **T** (tree).
+selection. **Organize** arranges the selected nodes — Auto-tidy, Cluster, List horizontally,
+List vertically, or Arrange as tree — keeping them centred where they already sit.
+**Auto-tidy** is the one-click option: it picks a sensible structure for you — a tree when
+the selected nodes are connected in a hierarchy, otherwise a per-type grouping — and always
+lays them out overlap-free. The same arrangements are available from the keyboard: press
+**Ctrl/Cmd+O** with a multi-selection, then **A** (auto-tidy), **C** (cluster), **H**
+(horizontal), **V** (vertical) or **T** (tree).
 
 ### 2.5 Groups and annotations
 
