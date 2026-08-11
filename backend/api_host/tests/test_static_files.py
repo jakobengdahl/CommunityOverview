@@ -96,6 +96,23 @@ class TestStaticFilesWithAdditionalContent:
             app = create_app(config)
             yield TestClient(app)
 
+    def test_html_shell_is_no_store(self, app_with_extra_files: TestClient):
+        """The SPA HTML shell must not be cached, so a logged-out browser can't
+        replay a cached authenticated app by pasting /web/ after logout."""
+        response = app_with_extra_files.get("/web/")
+        assert response.status_code == 200
+        assert response.headers.get("cache-control") == "no-store"
+        index = app_with_extra_files.get("/web/index.html")
+        assert index.headers.get("cache-control") == "no-store"
+
+    def test_hashed_assets_remain_cacheable(self, app_with_extra_files: TestClient):
+        """Non-HTML assets (JS/CSS) must NOT be forced no-store — they are
+        content-addressed and safe to cache."""
+        js = app_with_extra_files.get("/web/app.js")
+        assert js.headers.get("cache-control") != "no-store"
+        css = app_with_extra_files.get("/web/styles.css")
+        assert css.headers.get("cache-control") != "no-store"
+
     def test_serve_javascript_file(self, app_with_extra_files: TestClient):
         """JavaScript files are served with correct content type."""
         response = app_with_extra_files.get("/web/app.js")

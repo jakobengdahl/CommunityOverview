@@ -279,6 +279,7 @@ def register_system_routes(
                     next_path=target, error="Invalid username or password."
                 ),
                 status_code=401,
+                headers={"Cache-Control": "no-store"},
             )
         token = mint_session_cookie(config)
         if token is None:
@@ -288,6 +289,7 @@ def register_system_routes(
                     error="Login is unavailable on this instance.",
                 ),
                 status_code=500,
+                headers={"Cache-Control": "no-store"},
             )
         # Only mark the cookie Secure when the request actually arrived over
         # HTTPS (directly or via the ingress' X-Forwarded-Proto), so it still
@@ -308,12 +310,30 @@ def register_system_routes(
         )
         return response
 
+    def _clear_session_cookie(response, request: Request) -> None:
+        """Expire the session cookie, matching the attributes it was set with.
+
+        The cookie is set Secure over HTTPS; a deletion cookie must carry the
+        same path/secure/samesite so the browser reliably drops it.
+        """
+        forwarded_proto = (
+            request.headers.get("x-forwarded-proto", "").split(",")[0].strip()
+        )
+        secure = request.url.scheme == "https" or forwarded_proto == "https"
+        response.delete_cookie(
+            SESSION_COOKIE_NAME,
+            path="/",
+            secure=secure,
+            httponly=True,
+            samesite="lax",
+        )
+
     @app.get("/auth/logout")
     async def logout(request: Request):
         """Log the user out, clearing auth state appropriately."""
         if logout_redirect_url_env:
             response = RedirectResponse(url=logout_redirect_url_env, status_code=302)
-            response.delete_cookie(SESSION_COOKIE_NAME, path="/")
+            _clear_session_cookie(response, request)
             return response
 
         if config.mcp_basic_auth and not config.auth_enabled:
@@ -322,7 +342,7 @@ def register_system_routes(
             response = RedirectResponse(
                 url="/_gcp_iap/clear_login_cookie", status_code=302
             )
-            response.delete_cookie(SESSION_COOKIE_NAME, path="/")
+            _clear_session_cookie(response, request)
             return response
 
         # Session-cookie users: clearing the cookie is a real logout, so avoid
@@ -330,7 +350,7 @@ def register_system_routes(
         # native credential dialog the user just logged out of.
         if request_has_valid_session(request, config):
             response = RedirectResponse(url="/logged-out", status_code=302)
-            response.delete_cookie(SESSION_COOKIE_NAME, path="/")
+            _clear_session_cookie(response, request)
             return response
 
         if config.auth_enabled:
@@ -342,13 +362,16 @@ def register_system_routes(
             response = HTMLResponse(
                 content=LOGGED_OUT_HTML,
                 status_code=401,
-                headers={"WWW-Authenticate": 'Basic realm="Logged out"'},
+                headers={
+                    "WWW-Authenticate": 'Basic realm="Logged out"',
+                    "Cache-Control": "no-store",
+                },
             )
-            response.delete_cookie(SESSION_COOKIE_NAME, path="/")
+            _clear_session_cookie(response, request)
             return response
 
         response = RedirectResponse(url="/logged-out", status_code=302)
-        response.delete_cookie(SESSION_COOKIE_NAME, path="/")
+        _clear_session_cookie(response, request)
         return response
 
     # Fallback logged-out page, used when no external auth layer is present.
@@ -356,7 +379,9 @@ def register_system_routes(
     @app.get("/logged-out")
     async def logged_out():
         """Simple standalone page shown after logout."""
-        return HTMLResponse(content=LOGGED_OUT_HTML)
+        return HTMLResponse(
+            content=LOGGED_OUT_HTML, headers={"Cache-Control": "no-store"}
+        )
 
     @app.get("/info")
     async def info() -> Dict[str, Any]:
