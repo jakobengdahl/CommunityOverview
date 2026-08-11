@@ -178,6 +178,7 @@ def _unauthorized(request: Request, detail: str) -> Response:
         return HTMLResponse(
             content=render_signin_page(next_path=_requested_target(request)),
             status_code=401,
+            headers={"Cache-Control": "no-store"},
         )
     return JSONResponse(status_code=401, content={"detail": detail})
 
