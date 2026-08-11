@@ -44,31 +44,36 @@ const NAV_HISTORY_LIMIT = 50;
 // Append node-trail entries (newest-first) onto an existing trail, returning a
 // new bounded array. Pure so the trimming/dedup logic is unit-testable without
 // the store. `at` is the shared ISO timestamp for this batch. A repeat of the
-// node currently at the top is collapsed in place (its action/timestamp are
-// refreshed) rather than pushed as an adjacent duplicate, so add-then-visit or
-// re-focusing the same node does not clutter the trail.
+// node currently at the top is collapsed in place (its timestamp is refreshed)
+// rather than pushed as an adjacent duplicate, so add-then-visit or re-focusing
+// the same node does not clutter the trail. On collapse an existing 'added'
+// designation is kept even if the incoming event is a 'visit', so a node the
+// user just added (then focused, e.g. via search) still reads as "Added".
 export function appendNavEntries(prev, entries, at, limit = NAV_HISTORY_LIMIT) {
   let next = Array.isArray(prev) ? prev : [];
   for (const e of entries || []) {
     if (!e || !e.id) continue;
+    const action = e.action === 'added' ? 'added' : 'visited';
+    const collapses = next.length > 0 && next[0].id === e.id;
     const row = {
       id: e.id,
       name: e.name || e.id,
       type: e.type || '',
-      action: e.action === 'added' ? 'added' : 'visited',
+      action: collapses && next[0].action === 'added' ? 'added' : action,
       at,
     };
-    next = next.length > 0 && next[0].id === row.id ? [row, ...next.slice(1)] : [row, ...next];
+    next = collapses ? [row, ...next.slice(1)] : [row, ...next];
   }
   return next.slice(0, limit);
 }
 
 // Best-effort domain name/type for a node that may be a raw graph node (name,
-// type) or a React Flow node whose fields live under data.
+// type) or a React Flow node whose domain fields live under data (the wrapper's
+// own `type` is the React Flow node kind, e.g. 'custom', so data wins for type).
 function navNameType(node, fallbackId) {
   return {
     name: node?.name || node?.data?.name || node?.data?.label || fallbackId,
-    type: node?.type || node?.data?.nodeType || node?.data?.type || '',
+    type: node?.data?.type || node?.data?.nodeType || node?.type || '',
   };
 }
 
@@ -275,12 +280,19 @@ const useGraphStore = create((set, get) => ({
     const uniqueNodes = Array.from(new Map(nodes.map((n) => [n.id, n])).values());
     const uniqueEdges = Array.from(new Map(edges.map((e) => [e.id, e])).values());
 
-    set({
+    // A wholesale replace can drop nodes the trail still references; prune those
+    // so every trail row stays a valid jump target. New arrivals are not
+    // recorded as 'added' here — a full replace is a baseline, not the
+    // incremental user additions the trail captures (those come through
+    // addNodesToVisualization).
+    const presentIds = new Set(uniqueNodes.map((n) => n.id));
+    set((state) => ({
       nodes: uniqueNodes,
       edges: uniqueEdges,
       highlightedNodeIds: highlightIds,
       clearGroupsFlag: true, // Signal to clear groups
-    });
+      navHistory: state.navHistory.filter((e) => presentIds.has(e.id)),
+    }));
     // Reset flag after a short delay
     scheduleClearGroupsReset(set);
   },
@@ -741,10 +753,13 @@ const useGraphStore = create((set, get) => ({
 
   // Delete node from visualization
   removeNode: (nodeId) => {
-    const { nodes, edges } = get();
+    const { nodes, edges, navHistory } = get();
     set({
       nodes: nodes.filter((n) => n.id !== nodeId),
       edges: edges.filter((e) => e.source !== nodeId && e.target !== nodeId),
+      // Drop the removed node from the trail so its row can't become a dead
+      // jump target.
+      navHistory: navHistory.filter((e) => e.id !== nodeId),
     });
   },
 }));

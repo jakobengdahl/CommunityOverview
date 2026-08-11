@@ -15,10 +15,30 @@ describe('appendNavEntries', () => {
   });
 
   it('collapses a repeat of the node already at the top instead of duplicating it', () => {
-    const first = appendNavEntries([], [{ id: 'a', name: 'A', action: 'added' }], AT);
+    const first = appendNavEntries([], [{ id: 'a', name: 'A', action: 'visited' }], AT);
     const second = appendNavEntries(first, [{ id: 'a', name: 'A', action: 'visited' }], AT);
     expect(second).toHaveLength(1);
     expect(second[0].action).toBe('visited');
+  });
+
+  it('keeps an "added" designation when a later visit collapses onto it', () => {
+    const added = appendNavEntries([], [{ id: 'a', name: 'A', action: 'added' }], AT);
+    const afterVisit = appendNavEntries(added, [{ id: 'a', name: 'A', action: 'visited' }], AT);
+    expect(afterVisit).toHaveLength(1);
+    expect(afterVisit[0].action).toBe('added');
+  });
+
+  it('records the whole batch newest-last-on-top and preserves per-node type', () => {
+    const out = appendNavEntries(
+      [],
+      [
+        { id: 'a', name: 'A', type: 'Goal', action: 'added' },
+        { id: 'b', name: 'B', type: 'Actor', action: 'added' },
+      ],
+      AT
+    );
+    expect(out.map((r) => r.id)).toEqual(['b', 'a']);
+    expect(out.map((r) => r.type)).toEqual(['Actor', 'Goal']);
   });
 
   it('does not collapse a repeat that is not at the top', () => {
@@ -52,6 +72,63 @@ describe('graphStore navHistory recording', () => {
     const { navHistory } = useGraphStore.getState();
     expect(navHistory).toHaveLength(1);
     expect(navHistory[0]).toMatchObject({ id: 'a', name: 'Alpha', type: 'Goal', action: 'added' });
+  });
+
+  it('records every node of a bulk add, newest-last-on-top', () => {
+    useGraphStore.getState().addNodesToVisualization(
+      [
+        { id: 'a', name: 'Alpha', type: 'Goal' },
+        { id: 'b', name: 'Beta', type: 'Actor' },
+        { id: 'c', name: 'Gamma', type: 'Risk' },
+      ],
+      []
+    );
+    expect(useGraphStore.getState().navHistory.map((r) => r.id)).toEqual(['c', 'b', 'a']);
+  });
+
+  it('resolves the domain type from data for a React Flow shaped node', () => {
+    useGraphStore
+      .getState()
+      .addNodesToVisualization(
+        [{ id: 'a', type: 'custom', data: { label: 'Alpha', type: 'Goal' } }],
+        []
+      );
+    expect(useGraphStore.getState().navHistory[0]).toMatchObject({
+      id: 'a',
+      name: 'Alpha',
+      type: 'Goal',
+    });
+  });
+
+  it('keeps the "added" label after a search-style add-then-focus on the same node', () => {
+    useGraphStore
+      .getState()
+      .addNodesToVisualization([{ id: 'a', name: 'Alpha', type: 'Goal' }], []);
+    useGraphStore.getState().setFocusNodeId('a');
+    const { navHistory } = useGraphStore.getState();
+    expect(navHistory).toHaveLength(1);
+    expect(navHistory[0].action).toBe('added');
+  });
+
+  it('prunes trail entries for nodes dropped by a wholesale updateVisualization', () => {
+    useGraphStore.getState().addNodesToVisualization(
+      [
+        { id: 'a', name: 'Alpha', type: 'Goal' },
+        { id: 'b', name: 'Beta', type: 'Actor' },
+      ],
+      []
+    );
+    // Replace the visualization with only 'b'; the 'a' trail row must be pruned.
+    useGraphStore.getState().updateVisualization([{ id: 'b', name: 'Beta', type: 'Actor' }], []);
+    expect(useGraphStore.getState().navHistory.map((r) => r.id)).toEqual(['b']);
+  });
+
+  it('prunes a removed node from the trail', () => {
+    useGraphStore
+      .getState()
+      .addNodesToVisualization([{ id: 'a', name: 'Alpha', type: 'Goal' }], []);
+    useGraphStore.getState().removeNode('a');
+    expect(useGraphStore.getState().navHistory).toHaveLength(0);
   });
 
   it('does not record an add for a node already in the visualization', () => {
