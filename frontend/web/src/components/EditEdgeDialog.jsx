@@ -12,6 +12,14 @@ function EditEdgeDialog({ edge, nodes, onClose, onSave, onDelete }) {
     type: '',
     label: '',
   });
+  const [appearance, setAppearance] = useState({
+    direction: 'none',
+    useColor: false,
+    color: '#666666',
+    thickness: 2,
+    arrow: 'closed',
+    animated: false,
+  });
 
   const relationshipTypes = getRelationshipTypes?.() || [];
 
@@ -27,6 +35,19 @@ function EditEdgeDialog({ edge, nodes, onClose, onSave, onDelete }) {
         type: edge.type || edge.label || '',
         label: edge.label || '',
       });
+      const meta = edge.metadata && typeof edge.metadata === 'object' ? edge.metadata : {};
+      const thickness = Number(meta.thickness);
+      const hasColor = typeof meta.color === 'string' && meta.color.trim() !== '';
+      setAppearance({
+        direction: ['forward', 'backward', 'both', 'none'].includes(meta.direction)
+          ? meta.direction
+          : 'none',
+        useColor: hasColor,
+        color: hasColor ? meta.color : '#666666',
+        thickness: Number.isFinite(thickness) && thickness > 0 ? thickness : 2,
+        arrow: meta.arrow === 'open' ? 'open' : 'closed',
+        animated: meta.animated === true || meta.pulse === true,
+      });
     }
   }, [edge]);
 
@@ -35,11 +56,31 @@ function EditEdgeDialog({ edge, nodes, onClose, onSave, onDelete }) {
     setFormData((prev) => ({ ...prev, [name]: value }));
   };
 
+  const handleAppearanceChange = (e) => {
+    const { name, value, type, checked } = e.target;
+    setAppearance((prev) => ({
+      ...prev,
+      [name]: type === 'checkbox' ? checked : value,
+    }));
+  };
+
   const handleSubmit = (e) => {
     e.preventDefault();
+    const baseMeta =
+      edge && edge.metadata && typeof edge.metadata === 'object' ? { ...edge.metadata } : {};
+    baseMeta.direction = appearance.direction;
+    baseMeta.arrow = appearance.arrow;
+    baseMeta.thickness = Number(appearance.thickness) || 2;
+    baseMeta.animated = appearance.animated;
+    if (appearance.useColor) {
+      baseMeta.color = appearance.color;
+    } else {
+      delete baseMeta.color;
+    }
     onSave({
       type: formData.type || null,
       label: formData.label,
+      metadata: baseMeta,
     });
   };
 
@@ -128,6 +169,87 @@ function EditEdgeDialog({ edge, nodes, onClose, onSave, onDelete }) {
                 onChange={handleChange}
                 placeholder={t('edit_edge.label_placeholder')}
               />
+            </div>
+
+            <div className="form-group">
+              <label>{t('edit_edge.appearance')}</label>
+
+              <div className="form-group">
+                <label htmlFor="edge-direction">{t('edit_edge.direction')}</label>
+                <select
+                  id="edge-direction"
+                  name="direction"
+                  value={appearance.direction}
+                  onChange={handleAppearanceChange}
+                >
+                  <option value="none">{t('edit_edge.direction_none')}</option>
+                  <option value="forward">{t('edit_edge.direction_forward')}</option>
+                  <option value="backward">{t('edit_edge.direction_backward')}</option>
+                  <option value="both">{t('edit_edge.direction_both')}</option>
+                </select>
+              </div>
+
+              <div className="form-group">
+                <label htmlFor="edge-arrow">{t('edit_edge.arrow_style')}</label>
+                <select
+                  id="edge-arrow"
+                  name="arrow"
+                  value={appearance.arrow}
+                  onChange={handleAppearanceChange}
+                >
+                  <option value="closed">{t('edit_edge.arrow_closed')}</option>
+                  <option value="open">{t('edit_edge.arrow_open')}</option>
+                </select>
+              </div>
+
+              <div className="form-group">
+                <label htmlFor="edge-thickness">
+                  {t('edit_edge.thickness')} ({appearance.thickness}px)
+                </label>
+                <input
+                  type="range"
+                  id="edge-thickness"
+                  name="thickness"
+                  min="1"
+                  max="12"
+                  step="1"
+                  value={appearance.thickness}
+                  onChange={handleAppearanceChange}
+                />
+              </div>
+
+              <div className="form-group">
+                <label>
+                  <input
+                    type="checkbox"
+                    name="useColor"
+                    checked={appearance.useColor}
+                    onChange={handleAppearanceChange}
+                  />{' '}
+                  {t('edit_edge.custom_color')}
+                </label>
+                {appearance.useColor && (
+                  <input
+                    type="color"
+                    name="color"
+                    value={appearance.color}
+                    onChange={handleAppearanceChange}
+                    aria-label={t('edit_edge.color')}
+                  />
+                )}
+              </div>
+
+              <div className="form-group">
+                <label>
+                  <input
+                    type="checkbox"
+                    name="animated"
+                    checked={appearance.animated}
+                    onChange={handleAppearanceChange}
+                  />{' '}
+                  {t('edit_edge.animate')}
+                </label>
+              </div>
             </div>
 
             <div className="form-actions">

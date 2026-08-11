@@ -84,6 +84,20 @@ node. A dialog lets you select the relationship type.
 ![Edge creation](images/create-edge.png)
 *Hover over a node to reveal the connection handle (small circle), then drag to the target node to create an edge.*
 
+**Edge appearance:** Right-click an edge → **Edit** (or double-click it) to open the
+connection dialog. Besides the relationship type and label, the **Appearance** section
+lets you control how the edge is drawn on the canvas:
+
+- **Direction** — draw an arrowhead toward the target, toward the source, at both ends,
+  or none.
+- **Arrowhead** — filled or open arrow style.
+- **Thickness** — line width from 1 to 12 px.
+- **Custom colour** — override the default grey with any colour (the arrowheads follow it).
+- **Animate (pulse)** — animate the edge with a flowing, pulsing stroke instead of a
+  static line.
+
+Edges without any appearance settings keep the default look (thin grey line, no arrows).
+
 ### 2.3 Editing and deleting
 
 **Edit:** Double-click a node to open its detail dialog, then click **Edit**. All

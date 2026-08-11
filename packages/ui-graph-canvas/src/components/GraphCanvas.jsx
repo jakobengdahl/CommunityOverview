@@ -40,7 +40,7 @@ import {
   getNodeColor,
   LAZY_LOAD_THRESHOLD,
   INITIAL_LOAD_COUNT,
-  DEFAULT_EDGE_STYLE,
+  resolveEdgeVisuals,
 } from '../utils/constants';
 import {
   OVERLAY_TYPES,
@@ -292,18 +292,25 @@ function GraphCanvasInner({
 
   // Convert to React Flow edge format
   const reactFlowEdges = useMemo(() => {
-    return visibleEdges.map((edge) => ({
-      id: edge.id,
-      source: edge.source,
-      target: edge.target,
-      label: edge.type,
-      type: 'floating',
-      animated: false,
-      selectable: true,
-      style: DEFAULT_EDGE_STYLE,
-      labelStyle: { fill: '#888', fontSize: 10, fontWeight: 500 },
-      labelBgStyle: { fill: '#1a1a1a', fillOpacity: 0.8 },
-    }));
+    return visibleEdges.map((edge) => {
+      const visuals = resolveEdgeVisuals(edge.metadata);
+      return {
+        id: edge.id,
+        source: edge.source,
+        target: edge.target,
+        label: edge.type,
+        type: 'floating',
+        animated: visuals.animated,
+        selectable: true,
+        style: visuals.style,
+        markerStart: visuals.markerStart,
+        markerEnd: visuals.markerEnd,
+        className: visuals.className,
+        data: { type: edge.type, label: edge.label, metadata: edge.metadata || {} },
+        labelStyle: { fill: '#888', fontSize: 10, fontWeight: 500 },
+        labelBgStyle: { fill: '#1a1a1a', fillOpacity: 0.8 },
+      };
+    });
   }, [visibleEdges]);
 
   // Convert to React Flow node format with layout

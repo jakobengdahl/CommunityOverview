@@ -331,6 +331,19 @@
     "type": "Type",
     "no_type": "No specific type",
     "label_field": "Label",
-    "label_placeholder": "Optional label for this connection..."
+    "label_placeholder": "Optional label for this connection...",
+    "appearance": "Appearance",
+    "direction": "Direction",
+    "direction_none": "No arrow",
+    "direction_forward": "To target",
+    "direction_backward": "To source",
+    "direction_both": "Both ends",
+    "arrow_style": "Arrowhead",
+    "arrow_closed": "Filled",
+    "arrow_open": "Open",
+    "thickness": "Thickness",
+    "custom_color": "Custom colour",
+    "color": "Colour",
+    "animate": "Animate (pulse)"
   }
 }
