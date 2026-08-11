@@ -1,6 +1,7 @@
 """Auth and CORS middleware wiring for the api_host application."""
 
 import base64
+import html
 import logging
 import secrets
 
@@ -11,17 +12,20 @@ from starlette.requests import Request
 
 from .config import AppConfig
 from .diagnostics import PUBLIC_READINESS_PATH, PUBLIC_STARTUP_DIAGNOSTICS_PATH
+from .session_auth import request_has_valid_session
 
 logger = logging.getLogger(__name__)
 
 _REALM = 'Basic realm="Community Knowledge Graph"'
 
-# Sign-in page shown to browsers on an unauthenticated navigation. The 401 still
-# carries WWW-Authenticate: Basic so browsers that honour it show the native
-# credential dialog (the working Chrome flow). Browsers that render the body
-# instead of prompting — Microsoft Edge does this on some deployments — then see
-# a usable page with a Sign in action rather than the raw JSON error body.
-AUTH_REQUIRED_HTML = """<!doctype html>
+# Sign-in page shown to browsers on an unauthenticated navigation. It carries a
+# real credential form that POSTs to /auth/login and sets a session cookie, so
+# the login flow works identically in every browser — including those that never
+# surface the native Basic dialog (Microsoft Edge on some deployments). The 401
+# still carries WWW-Authenticate: Basic so browsers that do honour it can also
+# use the native dialog. Either way the user sees a usable page rather than the
+# raw JSON error body. __NEXT__ / __ERROR__ are substituted per request.
+_SIGNIN_TEMPLATE = """<!doctype html>
 <html lang="en">
 <head>
   <meta charset="utf-8" />
@@ -51,6 +55,8 @@ AUTH_REQUIRED_HTML = """<!doctype html>
       box-shadow: 0 8px 32px rgba(0, 0, 0, 0.5);
       padding: 32px 40px;
       max-width: 420px;
+      width: 100%;
+      box-sizing: border-box;
       text-align: center;
     }
     .auth-card h1 {
@@ -65,32 +71,80 @@ AUTH_REQUIRED_HTML = """<!doctype html>
       font-size: 0.95rem;
       line-height: 1.5;
     }
-    .auth-card a {
-      display: inline-block;
+    .auth-form {
+      display: flex;
+      flex-direction: column;
+      gap: 12px;
+      text-align: left;
+    }
+    .auth-form label {
+      display: flex;
+      flex-direction: column;
+      gap: 4px;
+      font-size: 0.8rem;
+      color: #bbb;
+    }
+    .auth-form input {
+      padding: 10px 12px;
+      border: 1px solid #333;
+      border-radius: 8px;
+      background: #151515;
+      color: #eaeaea;
+      font-size: 0.95rem;
+    }
+    .auth-form input:focus {
+      outline: none;
+      border-color: #646cff;
+    }
+    .auth-form button {
+      margin-top: 4px;
       padding: 10px 18px;
       background: #646cff;
       color: #fff;
-      text-decoration: none;
+      border: none;
       border-radius: 8px;
       font-size: 0.9rem;
       font-weight: 500;
+      cursor: pointer;
       transition: background 0.15s;
     }
-    .auth-card a:hover {
+    .auth-form button:hover {
       background: #535bf2;
+    }
+    .auth-error {
+      margin: 0 0 16px 0;
+      color: #ff8a8a;
+      font-size: 0.9rem;
     }
   </style>
 </head>
 <body>
   <div class="auth-card">
     <h1>Sign in required</h1>
-    <p>This instance is protected. Enter your credentials when prompted, or use
-      the button below to sign in.</p>
-    <a href="/">Sign in</a>
+    <p>This instance is protected. Enter your credentials to sign in.</p>
+    __ERROR__
+    <form class="auth-form" method="post" action="/auth/login">
+      <input type="hidden" name="next" value="__NEXT__" />
+      <label>Username
+        <input type="text" name="username" autocomplete="username" autofocus />
+      </label>
+      <label>Password
+        <input type="password" name="password" autocomplete="current-password" />
+      </label>
+      <button type="submit">Sign in</button>
+    </form>
   </div>
 </body>
 </html>
 """
+
+
+def render_signin_page(next_path: str = "/web/", error: str = "") -> str:
+    """Render the sign-in page with a safe redirect target and optional error."""
+    error_block = f'<p class="auth-error">{html.escape(error)}</p>' if error else ""
+    return _SIGNIN_TEMPLATE.replace(
+        "__NEXT__", html.escape(next_path, quote=True)
+    ).replace("__ERROR__", error_block)
 
 
 def _client_accepts_html(request: Request) -> bool:
@@ -103,15 +157,27 @@ def _client_accepts_html(request: Request) -> bool:
     return "text/html" in request.headers.get("Accept", "")
 
 
+def _requested_target(request: Request) -> str:
+    """The path (with query) the user was trying to reach, for post-login return."""
+    target = request.url.path
+    if request.url.query:
+        target = f"{target}?{request.url.query}"
+    return target
+
+
 def _unauthorized(request: Request, detail: str) -> Response:
     """Build a 401 challenge, negotiated by Accept so browsers never see raw JSON.
 
-    Both variants carry WWW-Authenticate so the native Basic dialog still fires.
+    Browsers get the HTML sign-in form (with the requested path as the return
+    target); API / fetch / MCP clients keep the JSON body. Both carry
+    WWW-Authenticate so the native Basic dialog still fires where supported.
     """
     headers = {"WWW-Authenticate": _REALM}
     if _client_accepts_html(request):
         return HTMLResponse(
-            content=AUTH_REQUIRED_HTML, status_code=401, headers=headers
+            content=render_signin_page(next_path=_requested_target(request)),
+            status_code=401,
+            headers=headers,
         )
     return JSONResponse(status_code=401, content={"detail": detail}, headers=headers)
 
@@ -158,6 +224,7 @@ def add_auth_middleware(app: FastAPI, config: AppConfig) -> None:
             "/healthz/secrets",
             "/info",
             PUBLIC_STARTUP_DIAGNOSTICS_PATH,
+            "/auth/login",
             "/auth/logout",
             "/logged-out",
         ]:
@@ -193,6 +260,12 @@ def add_auth_middleware(app: FastAPI, config: AppConfig) -> None:
             path = request.url.path
             if not (path.startswith("/mcp") or path.startswith("/execute_tool")):
                 return await call_next(request)
+
+        # A valid signed session cookie (issued by POST /auth/login after a
+        # successful form login) authenticates the request without the native
+        # Basic dialog — the browser-independent path, used by Edge.
+        if request_has_valid_session(request, config):
+            return await call_next(request)
 
         auth_header = request.headers.get("Authorization")
         if not auth_header:
