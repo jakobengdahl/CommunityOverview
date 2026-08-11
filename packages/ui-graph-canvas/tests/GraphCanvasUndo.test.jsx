@@ -5,7 +5,7 @@ import { GraphCanvas } from '../src/index';
 // A live node store so onNodeDragStop's getFlowNodes() and applyPositionMoves'
 // setNodes read/write the same array — enough to exercise the real drag →
 // keyboard-undo → persist wiring (including group re-parenting) end to end.
-const store = vi.hoisted(() => ({ nodes: [], handlers: {} }));
+const store = vi.hoisted(() => ({ nodes: [], edges: [], handlers: {} }));
 
 vi.mock('reactflow', () => {
   const MockReactFlow = (props) => {
@@ -24,7 +24,7 @@ vi.mock('reactflow', () => {
       },
       vi.fn(),
     ],
-    useEdgesState: () => [[], vi.fn(), vi.fn()],
+    useEdgesState: () => [store.edges, vi.fn(), vi.fn()],
     addEdge: (_params, edges) => edges,
     useReactFlow: () => ({
       getNodes: () => store.nodes,
@@ -50,6 +50,7 @@ const nodeById = (id) => store.nodes.find((n) => n.id === id);
 describe('GraphCanvas undo/redo of node moves', () => {
   beforeEach(() => {
     store.nodes = [];
+    store.edges = [];
     store.handlers = {};
   });
   afterEach(() => cleanup());
@@ -142,6 +143,56 @@ describe('GraphCanvas undo/redo of node moves', () => {
     expect(onNodePositionChange).toHaveBeenCalledWith('node-1', { x: 500, y: 500 });
     expect(nodeById('node-1').parentId).toBeUndefined();
     expect(nodeById('node-1').position).toEqual({ x: 500, y: 500 });
+  });
+
+  it('undo of an Alt+drag restores the anchor and its trailing neighbours as one action', () => {
+    const onNodePositionChange = vi.fn();
+    const twoNodes = [
+      { id: 'node-1', name: 'Anchor', type: 'Actor', description: 'a' },
+      { id: 'node-2', name: 'Neighbour', type: 'Actor', description: 'b' },
+    ];
+    // Populate edges before render so onNodeDragStart's closure (dep: edges)
+    // sees them; the mock's setEdges is a no-op, so the array persists.
+    store.edges = [{ id: 'e1', source: 'node-1', target: 'node-2' }];
+    render(<GraphCanvas nodes={twoNodes} edges={[]} onNodePositionChange={onNodePositionChange} />);
+
+    act(() => {
+      store.nodes = [
+        { id: 'node-1', type: 'custom', position: { x: 30, y: 30 }, data: {} },
+        { id: 'node-2', type: 'custom', position: { x: 50, y: 50 }, data: {} },
+      ];
+      const anchor = { id: 'node-1', type: 'custom', position: { x: 30, y: 30 } };
+      // Alt+drag arms "move with neighbours".
+      store.handlers.onNodeDragStart?.({ altKey: true }, anchor, [anchor]);
+      // Anchor moves to (130,130); onNodeDrag translates node-2 by the same delta.
+      store.nodes = [
+        { id: 'node-1', type: 'custom', position: { x: 130, y: 130 }, data: {} },
+        { id: 'node-2', type: 'custom', position: { x: 50, y: 50 }, data: {} },
+      ];
+      store.handlers.onNodeDrag?.(
+        {},
+        { id: 'node-1', type: 'custom', position: { x: 130, y: 130 } }
+      );
+      store.handlers.onNodeDragStop?.(
+        {},
+        { id: 'node-1', type: 'custom', position: { x: 130, y: 130 } },
+        [{ id: 'node-1', type: 'custom', position: { x: 130, y: 130 } }]
+      );
+    });
+
+    // The neighbour trailed the anchor by the same delta (+100,+100).
+    expect(nodeById('node-2').position).toEqual({ x: 150, y: 150 });
+
+    onNodePositionChange.mockClear();
+
+    // Undo restores BOTH the anchor and the neighbour to their pre-drag spots.
+    act(() => {
+      fireEvent.keyDown(document, { key: 'z', ctrlKey: true });
+    });
+    expect(onNodePositionChange).toHaveBeenCalledWith('node-1', { x: 30, y: 30 });
+    expect(onNodePositionChange).toHaveBeenCalledWith('node-2', { x: 50, y: 50 });
+    expect(nodeById('node-1').position).toEqual({ x: 30, y: 30 });
+    expect(nodeById('node-2').position).toEqual({ x: 50, y: 50 });
   });
 
   it('Ctrl+Z is a no-op when there is nothing to undo', () => {

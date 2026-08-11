@@ -53,6 +53,11 @@ import {
   nodeCenter,
   resolveAnchoredArrow,
 } from '../utils/annotations';
+import {
+  directNeighborIds,
+  neighborStartPositions,
+  neighborDragPositions,
+} from '../utils/dragConnected';
 import './GraphCanvas.css';
 
 /**
@@ -216,11 +221,12 @@ function GraphCanvasInner({
     selectSameType: 'Select all nodes of the same type',
     selectRelated: 'Select related nodes',
     organize: 'Organize',
+    autoTidy: 'Auto-tidy',
     organizeCluster: 'Cluster',
     organizeHorizontal: 'List horizontally',
     organizeVertical: 'List vertically',
     organizeTree: 'Arrange as tree',
-    organizeHint: 'Organize: C cluster · H horizontal · V vertical · T tree',
+    organizeHint: 'Organize: A auto-tidy · C cluster · H horizontal · V vertical · T tree',
     hideAll: 'Hide all',
     deleteAll: 'Delete all',
     changeType: 'Change type',
@@ -271,6 +277,10 @@ function GraphCanvasInner({
   // Positions of the nodes about to move, snapshotted at drag start so the
   // finished drag can be recorded as an undoable move.
   const dragStartPositionsRef = useRef(new Map());
+  // Alt+drag "move with neighbours": snapshot of the anchor's start position and
+  // the trailing neighbours' start positions, captured at drag start. Held in a
+  // ref so the per-frame drag handler doesn't depend on React state timing.
+  const connectedDragRef = useRef(null);
   const { screenToFlowPosition, setCenter, getNodes: getFlowNodes, getViewport } = useReactFlow();
 
   // Undo/redo history for node-position moves (drag + organize). Restoring a
@@ -760,22 +770,82 @@ function GraphCanvasInner({
     clearSelection();
   }, [closeAllMenus, clearSelection]);
 
-  // Snapshot the pre-drag positions of the graph nodes about to move, so the
-  // completed drag can be recorded as one undoable move. Annotation and group
-  // nodes are excluded — they persist through their own paths, not the
-  // position-move history.
-  const onNodeDragStart = useCallback((event, draggedNode, allDraggedNodes) => {
-    const set = allDraggedNodes && allDraggedNodes.length > 0 ? allDraggedNodes : [draggedNode];
-    const snap = new Map();
-    for (const n of set) {
-      if (ANNOTATION_TYPES.has(n.type)) continue;
-      snap.set(n.id, { x: n.position.x, y: n.position.y, parentId: n.parentId });
-    }
-    dragStartPositionsRef.current = snap;
-  }, []);
+  const onNodeDragStart = useCallback(
+    (event, draggedNode, allDraggedNodes) => {
+      // Snapshot the pre-drag positions (and parent) of the graph nodes about to
+      // move, so the completed drag can be recorded as one undoable move.
+      // Annotation and group nodes are excluded — they persist through their own
+      // paths, not the position-move history.
+      const set = allDraggedNodes && allDraggedNodes.length > 0 ? allDraggedNodes : [draggedNode];
+      const snap = new Map();
+      for (const n of set) {
+        if (ANNOTATION_TYPES.has(n.type)) continue;
+        snap.set(n.id, { x: n.position.x, y: n.position.y, parentId: n.parentId });
+      }
+      dragStartPositionsRef.current = snap;
+
+      // Alt+drag: arm "move node together with its directly connected
+      // neighbours". Alt is chosen to avoid the Shift/Ctrl/Meta multi-select
+      // gesture. The neighbour snapshot is taken from ReactFlow's live store so
+      // it agrees with the coordinates onNodeDrag/onNodeDragStop read back.
+      connectedDragRef.current = null;
+      if (!event?.altKey) return;
+      // The full set ReactFlow is dragging (may include group nodes when an
+      // Alt-drag starts from a multi-selection); used to skip neighbours that a
+      // dragged group already carries, so they aren't translated twice.
+      const dragged =
+        allDraggedNodes && allDraggedNodes.length > 0 ? allDraggedNodes : [draggedNode];
+      const draggedIds = new Set(dragged.map((n) => n.id));
+      // Only graph nodes carry meaningful edges; annotation/group nodes are
+      // excluded both as anchors and as trailing neighbours.
+      const anchors = dragged.filter((n) => !ANNOTATION_TYPES.has(n.type));
+      if (anchors.length === 0) return;
+      const anchorIds = new Set(anchors.map((n) => n.id));
+      const neighborIds = directNeighborIds(edges, anchorIds);
+      if (neighborIds.size === 0) return;
+      const startById = neighborStartPositions(getFlowNodes(), neighborIds, draggedIds);
+      if (startById.size === 0) return;
+      connectedDragRef.current = {
+        anchorId: draggedNode.id,
+        anchorStart: { x: draggedNode.position.x, y: draggedNode.position.y },
+        neighbors: startById,
+      };
+    },
+    [edges, getFlowNodes]
+  );
+
+  const onNodeDrag = useCallback(
+    (event, draggedNode) => {
+      const state = connectedDragRef.current;
+      if (!state || draggedNode.id !== state.anchorId) return;
+      const updates = neighborDragPositions(
+        state.neighbors,
+        state.anchorStart,
+        draggedNode.position
+      );
+      if (updates.size === 0) return;
+      setNodes((nds) =>
+        nds.map((n) => (updates.has(n.id) ? { ...n, position: updates.get(n.id) } : n))
+      );
+    },
+    [setNodes]
+  );
 
   const onNodeDragStop = useCallback(
     (event, draggedNode, allDraggedNodes) => {
+      // Persist the final positions of any Alt-drag neighbours that trailed the
+      // anchor, then disarm. Group re-parenting below is intentionally left to
+      // the explicitly dragged nodes only; trailing neighbours keep their parent.
+      const connected = connectedDragRef.current;
+      connectedDragRef.current = null;
+      if (connected && onNodePositionChange) {
+        const latest = getFlowNodes();
+        for (const id of connected.neighbors.keys()) {
+          const fn = latest.find((cn) => cn.id === id);
+          if (fn) onNodePositionChange(id, fn.position);
+        }
+      }
+
       if (onNodePositionChange) {
         onNodePositionChange(draggedNode.id, draggedNode.position);
       }
@@ -814,29 +884,41 @@ function GraphCanvasInner({
       // with no groups still records moves. When a node changed group membership,
       // the recorded `to` carries the new parentId and parent-relative position,
       // so an undo restores the correct parent and coordinate space.
-      if (startSnap && startSnap.size > 0) {
-        const moves = [];
-        for (const [id, from] of startSnap) {
-          const placed = finalById.get(id);
-          if (placed) {
+      const moves = [];
+      for (const [id, from] of startSnap) {
+        const placed = finalById.get(id);
+        if (placed) {
+          moves.push({
+            id,
+            from,
+            to: { x: placed.position.x, y: placed.position.y, parentId: placed.parentId },
+          });
+        } else {
+          const flowNode = currentNodes.find((cn) => cn.id === id);
+          if (flowNode) {
             moves.push({
               id,
               from,
-              to: { x: placed.position.x, y: placed.position.y, parentId: placed.parentId },
+              to: { x: flowNode.position.x, y: flowNode.position.y, parentId: flowNode.parentId },
             });
-          } else {
-            const flowNode = currentNodes.find((cn) => cn.id === id);
-            if (flowNode) {
-              moves.push({
-                id,
-                from,
-                to: { x: flowNode.position.x, y: flowNode.position.y, parentId: flowNode.parentId },
-              });
-            }
           }
         }
-        recordMove(moves);
       }
+      // Fold in the neighbours an Alt+drag carried along, so undoing the gesture
+      // restores the whole cluster, not just the anchor. Neighbours keep their
+      // parent (the neighbour drag never re-parents them).
+      if (connected) {
+        for (const [id, start] of connected.neighbors) {
+          const fn = currentNodes.find((cn) => cn.id === id);
+          if (!fn) continue;
+          moves.push({
+            id,
+            from: { x: start.x, y: start.y, parentId: fn.parentId },
+            to: { x: fn.position.x, y: fn.position.y, parentId: fn.parentId },
+          });
+        }
+      }
+      recordMove(moves);
 
       // Nothing to re-parent: either no non-group nodes dragged or no groups exist
       if (finalById.size === 0) return;
@@ -1174,7 +1256,7 @@ function GraphCanvasInner({
       // Second step of the organize chord: a pending Ctrl/Cmd+O is resolved by
       // the next c/h/v/t keystroke.
       if (organizePendingRef.current && !e.ctrlKey && !e.metaKey && !e.altKey) {
-        const mode = { c: 'cluster', h: 'horizontal', v: 'vertical', t: 'tree' }[
+        const mode = { a: 'tidy', c: 'cluster', h: 'horizontal', v: 'vertical', t: 'tree' }[
           e.key?.toLowerCase()
         ];
         if (mode) {
@@ -1539,6 +1621,7 @@ function GraphCanvasInner({
             onEdgesChange={onEdgesChange}
             onConnect={onConnect}
             onNodeDragStart={onNodeDragStart}
+            onNodeDrag={onNodeDrag}
             onNodeDragStop={onNodeDragStop}
             onPaneContextMenu={onPaneContextMenu}
             onNodeContextMenu={onNodeContextMenu}
