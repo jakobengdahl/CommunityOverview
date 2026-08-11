@@ -11,6 +11,7 @@ import CollectKioskView from './components/CollectKioskView';
 import GuideOverlay from './components/GuideOverlay';
 import SessionDrawer from './components/SessionDrawer';
 import RecentActivityDrawer from './components/RecentActivityDrawer';
+import NodeHistoryPanel from './components/NodeHistoryPanel';
 import AppDialogs from './components/AppDialogs';
 import * as api from './services/api';
 import * as sessionStore from './services/sessionStore';
@@ -1760,6 +1761,7 @@ function App() {
         onCreateActiveKnowledgeCollection={handleCreateAKC}
       />
       {llmAvailable && <ChatPanel collectionShortName={akcShortName || undefined} />}
+      <NodeHistoryPanel />
 
       {notification && (
         <div className={`app-notification app-notification-${notification.type}`}>

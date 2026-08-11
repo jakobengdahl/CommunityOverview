@@ -138,6 +138,14 @@
       "unknown": "okänd"
     }
   },
+  "nav_history": {
+    "title": "Senaste noder",
+    "close": "Stäng",
+    "clear": "Rensa",
+    "action_added": "Tillagd",
+    "action_visited": "Besökt",
+    "jump_to": "Gå till {name}"
+  },
   "proposal": {
     "title": "Föreslaget tillägg:",
     "type": "Typ:",

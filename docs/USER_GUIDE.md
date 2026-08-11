@@ -16,6 +16,7 @@ shared knowledge graphs. This guide covers all user-facing features.
    - [Groups and annotations](#25-groups-and-annotations)
    - [Saved views](#26-saved-views)
    - [Agents](#27-agents)
+   - [Recent nodes (navigation trail)](#28-recent-nodes-navigation-trail)
 3. [Search](#3-search)
 4. [AI Chat](#4-ai-chat)
    - [Asking questions](#41-asking-questions)
@@ -199,6 +200,23 @@ react to all node type changes).
 
 Agents appear as Agent nodes in the graph. Double-clicking opens the detail dialog
 where you can click **Edit**; right-click gives the same options via the context menu.
+
+### 2.8 Recent nodes (navigation trail)
+
+As you work, a **Recent nodes** button appears at the bottom-centre of the canvas
+once anything has happened. It keeps a short, session-scoped trail of the nodes you
+have **added** to the visualization (for example through search or *find related*)
+and the ones you have **visited** — navigated to from search or opened via
+double-click.
+
+Click the button to expand the trail (newest first). Each entry shows the node's
+name, whether it was added or visited, and how long ago. **Click an entry to jump
+back to that node** — the canvas re-centres on it. Use the trash icon to clear the
+trail, or **Esc** to close the panel.
+
+This trail is per-session and lives only in your browser. It is separate from
+**Recent activity** ([5.2](#52-recent-activity-audit-log)), which is a persisted
+audit log of who changed what in the graph data.
 
 ---
 
