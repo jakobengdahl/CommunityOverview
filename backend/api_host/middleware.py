@@ -20,11 +20,10 @@ _REALM = 'Basic realm="Community Knowledge Graph"'
 
 # Sign-in page shown to browsers on an unauthenticated navigation. It carries a
 # real credential form that POSTs to /auth/login and sets a session cookie, so
-# the login flow works identically in every browser — including those that never
-# surface the native Basic dialog (Microsoft Edge on some deployments). The 401
-# still carries WWW-Authenticate: Basic so browsers that do honour it can also
-# use the native dialog. Either way the user sees a usable page rather than the
-# raw JSON error body. __NEXT__ / __ERROR__ are substituted per request.
+# the login flow works identically in every browser. The browser 401 does NOT
+# send WWW-Authenticate (see _unauthorized): that header would make the browser
+# pop the native Basic dialog instead of rendering this form, and that dialog
+# cannot drive the cookie login. __NEXT__ / __ERROR__ are substituted per request.
 _SIGNIN_TEMPLATE = """<!doctype html>
 <html lang="en">
 <head>
@@ -166,20 +165,25 @@ def _requested_target(request: Request) -> str:
 
 
 def _unauthorized(request: Request, detail: str) -> Response:
-    """Build a 401 challenge, negotiated by Accept so browsers never see raw JSON.
+    """Build a 401, negotiated by Accept, so every browser gets the sign-in form.
 
-    Browsers get the HTML sign-in form (with the requested path as the return
-    target); API / fetch / MCP clients keep the JSON body. Both carry
-    WWW-Authenticate so the native Basic dialog still fires where supported.
+    Browser navigations (Accept: text/html) get the HTML sign-in form and,
+    deliberately, NO WWW-Authenticate header: that header makes Chromium pop the
+    native Basic dialog before rendering the body, and that dialog cannot drive
+    the form/cookie login (it just hangs). Omitting it lets every browser render
+    the page consistently. API / fetch / MCP / curl clients keep the JSON body
+    with the WWW-Authenticate challenge for programmatic Basic/Bearer auth.
     """
-    headers = {"WWW-Authenticate": _REALM}
     if _client_accepts_html(request):
         return HTMLResponse(
             content=render_signin_page(next_path=_requested_target(request)),
             status_code=401,
-            headers=headers,
         )
-    return JSONResponse(status_code=401, content={"detail": detail}, headers=headers)
+    return JSONResponse(
+        status_code=401,
+        content={"detail": detail},
+        headers={"WWW-Authenticate": _REALM},
+    )
 
 
 def compute_auth_active(config: AppConfig) -> bool:
