@@ -61,6 +61,7 @@ function App() {
     setStats,
     llmAvailable,
     setLlmAvailable,
+    setModelProfilesCapability,
     editingNode,
     setEditingNode,
     closeEditingNode,
@@ -87,6 +88,7 @@ function App() {
     startGuide,
     getNodeColor,
     closeMenusSignal,
+    resetSessionScopedState,
   } = useGraphStore();
 
   const { t, setLanguage, language } = useI18n();
@@ -102,6 +104,10 @@ function App() {
   const [editingSubscriptionData, setEditingSubscriptionData] = useState(null);
   const [showAgentDialog, setShowAgentDialog] = useState(false);
   const [editingAgentData, setEditingAgentData] = useState(null);
+  const [showAgentRunsDialog, setShowAgentRunsDialog] = useState(false);
+  const [agentRunsAgentId, setAgentRunsAgentId] = useState(null);
+  const [showAgentProposalsDialog, setShowAgentProposalsDialog] = useState(false);
+  const [agentProposalsAgentId, setAgentProposalsAgentId] = useState(null);
   const [createNodeType, setCreateNodeType] = useState(null);
   const [createGroupSignal, setCreateGroupSignal] = useState(0);
   const [saveViewSignal, setSaveViewSignal] = useState(0);
@@ -147,6 +153,8 @@ function App() {
     ensureSyncConnected,
     remotePositions,
     setRemotePositions,
+    animatedLayout,
+    setAnimatedLayout,
     remoteAnnotationOps,
     setRemoteAnnotationOps,
     roster,
@@ -237,7 +245,23 @@ function App() {
             setRemotePositions((prev) => ({ ...(prev || {}), [op.node_id]: op.position }));
           break;
         case 'layout_applied':
-          if (op.positions) setRemotePositions((prev) => ({ ...(prev || {}), ...op.positions }));
+          if (op.positions) {
+            // An MCP agent's arrange carries an animation hint (contract §9–§10):
+            // route it to the tweening channel so the whole batch moves as one
+            // coherent transition. A human bulk drag arrives without the hint and
+            // still applies instantly.
+            if (op.animation && op.animation.animate) {
+              // Queue, don't replace: two layout_applied ops delivered in one
+              // tick (a split arrange) must both survive React's batching —
+              // replacing would drop all but the last (mirrors node_moved).
+              setAnimatedLayout((prev) => [
+                ...(prev || []),
+                { positions: op.positions, animation: op.animation, seq: op.seq },
+              ]);
+            } else {
+              setRemotePositions((prev) => ({ ...(prev || {}), ...op.positions }));
+            }
+          }
           break;
         case 'annotation_created':
         case 'annotation_updated': {
@@ -282,6 +306,7 @@ function App() {
       setHiddenNodeIds,
       setHiddenEdgeIds,
       setRemotePositions,
+      setAnimatedLayout,
       setRemoteAnnotationOps,
       syncRef,
     ]
@@ -342,6 +367,8 @@ function App() {
       saveViewDialog ||
       showSubscriptionDialog ||
       showAgentDialog ||
+      showAgentRunsDialog ||
+      showAgentProposalsDialog ||
       skillDialogType ||
       showAKCDialog ||
       drawerOpen ||
@@ -360,6 +387,8 @@ function App() {
     saveViewDialog,
     showSubscriptionDialog,
     showAgentDialog,
+    showAgentRunsDialog,
+    showAgentProposalsDialog,
     skillDialogType,
     showAKCDialog,
     drawerOpen,
@@ -462,6 +491,7 @@ function App() {
         setConfig(schemaData, presentationData, t, language);
         setStats(statsData);
         setLlmAvailable(capabilitiesData.llm_available ?? false);
+        setModelProfilesCapability(capabilitiesData.model_profiles);
       } catch (error) {
         console.error('Error loading configuration:', error);
         api.getGraphStats().then(setStats).catch(console.error);
@@ -469,7 +499,7 @@ function App() {
       }
     };
     loadConfig();
-  }, [setConfig, setStats, setLlmAvailable, t, setLanguage, language]);
+  }, [setConfig, setStats, setLlmAvailable, setModelProfilesCapability, t, setLanguage, language]);
 
   useEffect(() => {
     if (!akcShortName) return;
@@ -1024,6 +1054,22 @@ function App() {
     setShowAgentDialog(true);
   }, []);
 
+  // Callback: View durable AgentRun history (optionally scoped to one agent)
+  const handleViewAgentRuns = useCallback((agentId = null) => {
+    setAgentRunsAgentId(agentId);
+    setShowAgentDialog(false);
+    setEditingAgentData(null);
+    setShowAgentRunsDialog(true);
+  }, []);
+
+  // Callback: View agent proposals (optionally scoped to one agent)
+  const handleViewAgentProposals = useCallback((agentId = null) => {
+    setAgentProposalsAgentId(agentId);
+    setShowAgentDialog(false);
+    setEditingAgentData(null);
+    setShowAgentProposalsDialog(true);
+  }, []);
+
   // Save subscription node
   const handleSaveSubscription = useCallback(
     async (data) => {
@@ -1219,6 +1265,14 @@ function App() {
   // Shared-session lifecycle (STRUCTURE_REVIEW B1 slice 1): load a server-backed
   // session's canvas + seed the sync baseline. Extracted into useSharedSession
   // so the transition logic is testable in isolation.
+  // Bound reset used on every session switch: drops assistant history, experts,
+  // node overlays and selection carried over from the previous session and bumps
+  // the assistant epoch so an in-flight reply can't land in the new session.
+  const resetSessionScopedUi = useCallback(
+    () => resetSessionScopedState(t, language),
+    [resetSessionScopedState, t, language]
+  );
+
   const { applyServerSession, loadSessionFromServer } = useSharedSession({
     clearVisualization,
     addNodesToVisualization,
@@ -1228,6 +1282,7 @@ function App() {
     setPendingAnnotations,
     ensureSyncConnected,
     syncRef,
+    resetSessionScopedState: resetSessionScopedUi,
   });
   // Expose the latest applyServerSession to resyncFromServer (defined earlier).
   applyServerSessionRef.current = applyServerSession;
@@ -1321,6 +1376,34 @@ function App() {
     [sessionId, switchToSession]
   );
 
+  // Copy the canonical share link for a session (contract §5 form
+  // `<base>/?session=<id>`), built from the current origin+path so it stays
+  // correct across deployments without needing the server base URL client-side.
+  const handleCopySessionLink = useCallback(
+    async (targetId) => {
+      const url = new URL(window.location.href);
+      url.hash = '';
+      url.search = '';
+      url.searchParams.set('session', targetId);
+      const link = url.toString();
+      try {
+        await navigator.clipboard.writeText(link);
+      } catch {
+        const el = document.createElement('textarea');
+        el.value = link;
+        document.body.appendChild(el);
+        el.select();
+        try {
+          document.execCommand('copy');
+        } finally {
+          document.body.removeChild(el);
+        }
+      }
+      showNotification('success', t('sessions.link_copied'));
+    },
+    [showNotification, t]
+  );
+
   const handleConnectSession = useCallback(
     (targetId) => {
       if (!sessionStore.isValidSessionId(targetId)) {
@@ -1379,13 +1462,21 @@ function App() {
       // one (design 3.6). Other connected clients are notified via the
       // server's session_deleted broadcast (handled once realtime lands).
       clearVisualization();
+      resetSessionScopedUi();
       const fresh = api.generateVisualizationSessionId();
       setSessionId(fresh);
       reflectSessionUrl(fresh);
       showNotification('info', t('sessions.session_deleted'));
     }
     setSessionsVersion((v) => v + 1);
-  }, [deleteSessionDialog, sessionId, clearVisualization, showNotification, t]);
+  }, [
+    deleteSessionDialog,
+    sessionId,
+    clearVisualization,
+    resetSessionScopedUi,
+    showNotification,
+    t,
+  ]);
 
   // Export full graph from backend API
   const handleExportGraph = useCallback(async () => {
@@ -1468,6 +1559,14 @@ function App() {
     setShowAgentDialog,
     editingAgentData,
     setEditingAgentData,
+    showAgentRunsDialog,
+    setShowAgentRunsDialog,
+    agentRunsAgentId,
+    onViewAgentRuns: handleViewAgentRuns,
+    showAgentProposalsDialog,
+    setShowAgentProposalsDialog,
+    agentProposalsAgentId,
+    onViewAgentProposals: handleViewAgentProposals,
     skillDialogType,
     setSkillDialogType,
     editingSkillData,
@@ -1529,6 +1628,19 @@ function App() {
           onAnnotationChange={scheduleAutoSave}
           remotePositions={remotePositions}
           onRemotePositionsApplied={() => setRemotePositions(null)}
+          animatedLayout={animatedLayout}
+          onAnimatedLayoutApplied={(drained) =>
+            setAnimatedLayout((prev) => {
+              // Clear only the batches the canvas actually drained: a new op
+              // enqueued between the drain and this reset must not be lost.
+              if (!prev || !drained || drained.length === 0) return prev || null;
+              const done = new Set(drained);
+              const rest = prev.filter((b) => !done.has(b));
+              return rest.length ? rest : null;
+            })
+          }
+          animatedLayoutResetKey={sessionId}
+          agentArrangingLabel={t('sessions.agent_arranging')}
           remoteAnnotationOps={remoteAnnotationOps}
           onRemoteAnnotationsApplied={() => setRemoteAnnotationOps(null)}
           remoteSelections={remoteSelections}
@@ -1591,6 +1703,7 @@ function App() {
           setRenameDialog({ id, name: entry?.name || '' });
         }}
         onDeleteSession={handleRequestDeleteSession}
+        onCopySessionLink={handleCopySessionLink}
         onOpenSettings={() => setSettingsOpen(true)}
         onOpenActivity={() => {
           setDrawerOpen(false);
@@ -1612,6 +1725,8 @@ function App() {
             saveViewDialog ||
             showSubscriptionDialog ||
             showAgentDialog ||
+            showAgentRunsDialog ||
+            showAgentProposalsDialog ||
             skillDialogType ||
             showAKCDialog
           )

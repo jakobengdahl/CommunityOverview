@@ -14,6 +14,10 @@ export function useSyncConnection(sessionId) {
   const syncRef = useRef(null);
   const syncHandlersRef = useRef({});
   const [remotePositions, setRemotePositions] = useState(null);
+  // A single MCP-initiated batch layout to animate (contract §9–§10), kept apart
+  // from remotePositions so an agent's arrange tweens while ordinary remote drags
+  // still apply instantly.
+  const [animatedLayout, setAnimatedLayout] = useState(null);
   const [remoteAnnotationOps, setRemoteAnnotationOps] = useState(null);
   // Presence roster + remote selection markers for the active session (step 7).
   const [roster, setRoster] = useState([]);
@@ -28,6 +32,7 @@ export function useSyncConnection(sessionId) {
   // remote positions from the previous session never bleed into the next one.
   const resetConnectionState = useCallback(() => {
     setRemotePositions(null);
+    setAnimatedLayout(null);
     setRemoteAnnotationOps(null);
     setRoster([]);
     setRemoteSelections({});
@@ -112,6 +117,8 @@ export function useSyncConnection(sessionId) {
     ensureSyncConnected,
     remotePositions,
     setRemotePositions,
+    animatedLayout,
+    setAnimatedLayout,
     remoteAnnotationOps,
     setRemoteAnnotationOps,
     roster,

@@ -242,6 +242,81 @@ class TestAuthEnabledTakesPrecedence:
             os.unlink(path)
 
 
+class TestUnauthorizedContentNegotiation:
+    """The 401 challenge is negotiated by Accept.
+
+    Regression for the SSPCloud Edge bug: a browser navigation must never land
+    on a blank page rendering the raw {"detail": "Authentication required"}
+    JSON. Browsers (Accept: text/html) get an HTML sign-in page; API / fetch /
+    MCP clients keep the JSON body they parse. Both variants keep the
+    WWW-Authenticate header so the native Basic dialog still fires.
+    """
+
+    def _make_client(self, **config_overrides) -> tuple:
+        config, path = _make_config(**config_overrides)
+        app = create_app(config)
+        return TestClient(app), path
+
+    def test_browser_navigation_gets_html_not_raw_json(self):
+        client, path = self._make_client(auth_enabled=True, auth_password="secret")
+        try:
+            resp = client.get("/", headers={"Accept": "text/html"})
+            assert resp.status_code == 401
+            assert resp.headers["content-type"].startswith("text/html")
+            assert "WWW-Authenticate" in resp.headers
+            assert "Sign in" in resp.text
+            # The raw backend error body must not be what the browser renders.
+            assert '{"detail": "Authentication required"}' not in resp.text
+        finally:
+            os.unlink(path)
+
+    def test_api_client_still_gets_json_body(self):
+        client, path = self._make_client(auth_enabled=True, auth_password="secret")
+        try:
+            resp = client.get(
+                "/api/search",
+                params={"query": "x"},
+                headers={"Accept": "application/json"},
+            )
+            assert resp.status_code == 401
+            assert resp.headers["content-type"].startswith("application/json")
+            assert resp.json() == {"detail": "Authentication required"}
+            assert "WWW-Authenticate" in resp.headers
+        finally:
+            os.unlink(path)
+
+    def test_default_accept_gets_json_body(self):
+        """A client sending Accept: */* (curl, many SDKs) keeps the JSON body."""
+        client, path = self._make_client(auth_enabled=True, auth_password="secret")
+        try:
+            resp = client.get(
+                "/api/search", params={"query": "x"}, headers={"Accept": "*/*"}
+            )
+            assert resp.status_code == 401
+            assert resp.json() == {"detail": "Authentication required"}
+        finally:
+            os.unlink(path)
+
+    def test_invalid_credentials_negotiated_too(self):
+        client, path = self._make_client(auth_enabled=True, auth_password="secret")
+        try:
+            bad = _auth_header("admin", "wrong")
+            html_resp = client.get("/", headers={**bad, "Accept": "text/html"})
+            assert html_resp.status_code == 401
+            assert html_resp.headers["content-type"].startswith("text/html")
+            assert "Sign in" in html_resp.text
+
+            json_resp = client.get(
+                "/api/search",
+                params={"query": "x"},
+                headers={**bad, "Accept": "application/json"},
+            )
+            assert json_resp.status_code == 401
+            assert json_resp.json() == {"detail": "Invalid credentials"}
+        finally:
+            os.unlink(path)
+
+
 class TestNoAuthDisabled:
     """When both auth flags are off, nothing is blocked."""
 

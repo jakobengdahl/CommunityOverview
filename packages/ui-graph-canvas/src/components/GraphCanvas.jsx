@@ -27,6 +27,7 @@ import {
   PaneContextMenu,
 } from './ContextMenus';
 import { useRemotePositions } from '../hooks/useRemotePositions';
+import { useAnimatedLayout } from '../hooks/useAnimatedLayout';
 import {
   applyLayout,
   getGridLayout,
@@ -119,6 +120,10 @@ function GraphCanvasInner({
   onAnnotationChange,
   remotePositions = null,
   onRemotePositionsApplied,
+  animatedLayout = null,
+  onAnimatedLayoutApplied,
+  animatedLayoutResetKey = null,
+  agentArrangingLabel = 'Assistant is arranging the view…',
   remoteAnnotationOps = null,
   onRemoteAnnotationsApplied,
   remoteSelections = null,
@@ -177,6 +182,9 @@ function GraphCanvasInner({
   const [selectedNodes, setSelectedNodes] = useState([]);
   const [selectedEdges, setSelectedEdges] = useState([]);
   const [paneContextMenu, setPaneContextMenu] = useState(null);
+  // True while an MCP-driven layout tween is in flight, so the canvas can show a
+  // non-interactive badge that an assistant is arranging the view.
+  const [agentArranging, setAgentArranging] = useState(false);
   const paneMenuRef = useRef(null);
   const reactFlowWrapper = useRef(null);
   const rightDragStart = useRef({ x: 0, y: 0, time: null });
@@ -1052,6 +1060,17 @@ function GraphCanvasInner({
   // positions for not-yet-mounted nodes until they appear.
   useRemotePositions({ remotePositions, onRemotePositionsApplied, nodes, setNodes });
 
+  // Tween an MCP-initiated batch layout (contract §9–§10) into place, honouring
+  // reduced motion and never disturbing a node the user is dragging.
+  useAnimatedLayout({
+    animatedLayout,
+    onAnimatedLayoutApplied,
+    onAgentArrangingChange: setAgentArranging,
+    setNodes,
+    getNodes: getFlowNodes,
+    resetKey: animatedLayoutResetKey,
+  });
+
   // Apply a queue of group/overlay annotation changes from other clients (design
   // step 6): upsert or delete annotation nodes and reassign group membership.
   // A queue (not a single op) so a burst arriving in one render is not coalesced.
@@ -1238,6 +1257,13 @@ function GraphCanvasInner({
               />
             )}
           </ReactFlow>
+
+          {agentArranging && (
+            <div className="graph-agent-arranging" role="status" aria-live="polite">
+              <span className="graph-agent-arranging-dot" />
+              <span className="graph-agent-arranging-label">{agentArrangingLabel}</span>
+            </div>
+          )}
 
           {marksLegend.length > 0 && (
             <div className="graph-marks-legend">

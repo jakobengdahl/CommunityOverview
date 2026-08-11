@@ -353,7 +353,7 @@ AI apps:
 | **Start new session** | Saves the current session automatically and opens a fresh, empty one |
 | **Search previous sessions** | Filters the recent-session list by name or ID |
 | **Connect to session (via ID)** | Joins an existing session by entering its ID (format `1234-5678`) |
-| **Recent sessions** | The most recently used sessions — shown by name if you have named them, otherwise by ID. Click one to load it; the current session is saved automatically first. Use the pencil icon to name a session, or the trash icon to delete it. |
+| **Recent sessions** | The most recently used sessions — shown by name if you have named them, otherwise by ID. Click one to load it; the current session is saved automatically first. Hover a row and open the **⋮** menu for per-session actions: **Name session**, **Copy link** (copies the shareable `?session=…` URL to the clipboard), and **Delete session**. |
 | **Recent activity** | Opens the activity panel — a read-only audit log of graph changes (see [5.2](#52-recent-activity-audit-log)) |
 | **Settings** | Opens the Settings dialog (see below) |
 
@@ -364,6 +364,11 @@ or enters the ID via **Connect to session** — joins the same session. Your lis
 of recently visited sessions stays local to your browser; only the session
 *content* lives on the server. The canvas is saved automatically while you work
 and restored when you return to a session.
+
+Switching sessions starts a fresh graph-assistant conversation: the chat history
+and any active skills or experts from the previous session are cleared, and any
+selected or opened node is reset, so nothing from one session carries over into
+another.
 
 Deleting a session removes its content for everyone. If you delete the session
 you are currently in, a fresh empty session is created and you are switched into
@@ -581,6 +586,14 @@ content.
 The canvas updates in real time — nodes appear, edges are drawn, and the layout
 adjusts automatically, all driven by the external AI without any manual work in
 the browser.
+
+When the assistant **arranges** the view — laying nodes out as a left-to-right
+flow, a grid, or swimlanes — the whole batch glides smoothly into place rather
+than jumping node by node, and a small *"Assistant is arranging the view…"* badge
+appears at the top of the canvas while it moves. You can keep dragging a node
+during an arrange; the assistant's layout leaves whatever you are holding
+untouched. If your system is set to **reduce motion**, the nodes snap straight to
+their final positions instead of animating.
 
 **Use cases:**
 

@@ -35,6 +35,14 @@ class ChatRequest(BaseModel):
     provider: Optional[str] = Field(
         None, description="Optional provider: 'claude' or 'openai'"
     )
+    model_profile_id: Optional[str] = Field(
+        None,
+        description=(
+            "Optional model profile id to use for this request (see "
+            "backend/config/model_profiles.py). Only applied when model profiles "
+            "are configured and selection is enabled; ignored otherwise."
+        ),
+    )
     federation_depth: Optional[int] = Field(
         None, ge=1, le=9, description="Optional federated search depth"
     )
@@ -86,6 +94,9 @@ class SimpleChatRequest(BaseModel):
     provider: Optional[str] = Field(
         None, description="Optional provider: 'claude' or 'openai'"
     )
+    model_profile_id: Optional[str] = Field(
+        None, description="Optional model profile id to use for this request"
+    )
     federation_depth: Optional[int] = Field(
         None, ge=1, le=9, description="Optional federated search depth"
     )
@@ -125,6 +136,9 @@ class ProposeNodesRequest(BaseModel):
     api_key: Optional[str] = Field(None, description="Optional API key override")
     provider: Optional[str] = Field(
         None, description="Optional provider: 'claude' or 'openai'"
+    )
+    model_profile_id: Optional[str] = Field(
+        None, description="Optional model profile id to use for this request"
     )
     federation_depth: Optional[int] = Field(
         None, ge=1, le=9, description="Optional federated search depth"
@@ -177,6 +191,7 @@ def create_ui_router(
                 messages=messages,
                 api_key=request.api_key,
                 provider=request.provider,
+                model_profile_id=request.model_profile_id,
                 federation_depth=request.federation_depth,
                 expert_agent_id=request.expert_agent_id,
                 skills_context=request.skills_context,
@@ -212,6 +227,7 @@ def create_ui_router(
                 user_message=request.message,
                 api_key=request.api_key,
                 provider=request.provider,
+                model_profile_id=request.model_profile_id,
                 federation_depth=request.federation_depth,
                 expert_agent_id=request.expert_agent_id,
             )
@@ -250,6 +266,7 @@ def create_ui_router(
                 communities=request.communities,
                 api_key=request.api_key,
                 provider=request.provider,
+                model_profile_id=request.model_profile_id,
                 federation_depth=request.federation_depth,
             )
             return result
@@ -265,6 +282,7 @@ def create_ui_router(
         analyze: bool = Form(True),
         api_key: Optional[str] = Form(None),
         provider: Optional[str] = Form(None),
+        model_profile_id: Optional[str] = Form(None),
     ) -> UploadResponse:
         """
         Upload and optionally analyze a document.
@@ -321,6 +339,7 @@ def create_ui_router(
                     document_context=result["text"],
                     api_key=api_key,
                     provider=provider,
+                    model_profile_id=model_profile_id,
                 )
 
                 response.chat_response = ChatResponse(
@@ -368,15 +387,19 @@ def create_ui_router(
         Return UI feature availability based on runtime configuration.
 
         Called by the frontend during startup to decide which features to show.
-        Currently reports LLM availability so the chat panel can be hidden when
-        no API keys are configured.
+        Reports LLM availability so the chat panel can be hidden when no API
+        keys are configured, and the public (non-secret) model profile list so
+        the chat UI can preselect the default profile and offer a selector when
+        more than one enabled profile exists.
         """
         from backend.llm.llm_providers import get_llm_availability
+        from backend.config import config_loader
 
         llm = get_llm_availability()
         return {
             "llm_available": llm["available"],
             "llm_provider": llm["provider"],
+            "model_profiles": config_loader.get_model_profiles_public(),
         }
 
     # ==================== Info Endpoints ====================

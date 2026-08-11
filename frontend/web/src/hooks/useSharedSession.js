@@ -54,6 +54,12 @@ export function useSharedSession({
   setPendingAnnotations,
   ensureSyncConnected,
   syncRef,
+  // Reset session-scoped UI state (assistant history, experts, node overlays,
+  // selection) once a *different* session's content is loaded. Injected so the
+  // hook stays UI-agnostic; optional so callers that don't need it can omit it.
+  // Deliberately NOT invoked from applyServerSession — that path is reused by
+  // same-session resync, which must keep the current session's assistant state.
+  resetSessionScopedState,
 }) {
   // Load a session's canvas content from the server (resolved node refs +
   // layout + group annotations) onto the store.
@@ -102,6 +108,9 @@ export function useSharedSession({
         const resolvedIds = (payload?.resolved?.nodes || []).map((n) => n.id);
         const baselineMirror = serverStateToMirror(payload?.state, resolvedIds);
         applyServerSession(payload);
+        // The target session's canvas is now loaded — drop any UI state carried
+        // over from the previous session before wiring up its realtime stream.
+        resetSessionScopedState?.();
         // Connect the realtime stream for this existing session and seed the sync
         // baseline from its state so later edits diff against what the server holds.
         // Best-effort from here on: the canvas above already loaded correctly, so a
@@ -115,6 +124,9 @@ export function useSharedSession({
         // Session does not exist server-side yet — new / not-yet-saved share URL.
         if (error?.status === 404) {
           clearVisualization();
+          // Switching into a brand-new / empty session is still a session switch:
+          // reset the carried-over UI state just as the loaded-content path does.
+          resetSessionScopedState?.();
           if (eagerConnect) {
             ensureSyncConnected(targetId)?.setBaseline({});
           } else if (syncRef.current && syncRef.current.sessionId === targetId) {
@@ -132,7 +144,7 @@ export function useSharedSession({
         }
       }
     },
-    [applyServerSession, clearVisualization, ensureSyncConnected, syncRef]
+    [applyServerSession, clearVisualization, ensureSyncConnected, syncRef, resetSessionScopedState]
   );
 
   return { applyServerSession, loadSessionFromServer };

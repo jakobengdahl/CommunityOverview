@@ -261,9 +261,71 @@ In the server configuration (`backend/api_host/server.py`), add:
 storage.setup_events(enabled=True)
 ```
 
+## AgentRun History
+
+Each time an agent processes a trigger (a schedule firing or a matching graph
+event), the run is recorded as a durable **AgentRun** behind the execution-store
+seam ([`DURABLE_EXECUTION_CONTRACT.md`](DURABLE_EXECUTION_CONTRACT.md)). A run
+captures the trigger kind, agent, status (`running` → `succeeded` / `failed`),
+attempts, correlation/session/origin, timestamps, and a small terminal result or
+error. History survives a restart when a durable store is configured and can be
+swapped for a hosted store without changing the API or UI.
+
+This is a **history sink**: event delivery still uses the in-memory queue
+(below); recording history never blocks or breaks processing. The store backing
+history is chosen by `AGENTS_RUN_HISTORY_DB` — a SQLite file path for durable
+history, or an in-memory (volatile) store when unset.
+
+Read the history through the API:
+
+| Method | Endpoint | Description |
+|--------|----------|-------------|
+| GET | `/agents/runs` | List runs newest-first; filter by `agent_id`, `kind` (`scheduled`/`event`), `status`, `limit` |
+| GET | `/agents/runs/{run_id}` | Fetch a single run |
+
+In the web UI, open an agent for editing and choose **View run history**.
+
+## Agent governance: autonomy levels and proposals
+
+Each agent has an **autonomy level** (`metadata.autonomy_level`) that bounds what
+its runs may do, enforced at the tool-execution boundary together with the
+agent's optional `tool_allowlist`:
+
+| Level | Mutating tools (add/update/delete nodes/edges, write_file) |
+|-------|-----------------------------------------------------------|
+| `observe` | Blocked — read-only |
+| `assist` | Blocked — read-only |
+| `propose` | Recorded as a durable **Proposal**; approving does not apply it (a human applies) |
+| `act_after_approval` | Recorded as a durable Proposal; approving **applies** the captured action |
+
+Read-only tools always run (subject to the allowlist). A mutating call under
+`propose` / `act_after_approval` is **not executed** — it becomes a durable
+`Proposal` (tool, arguments, agent, autonomy level, run correlation) with a
+persistent approve/reject decision and attribution. Advanced multi-approver /
+enterprise policy is a commercial-layer concern on top of this baseline.
+
+**Default:** when `autonomy_level` is unset it defaults to `act_after_approval`
+— an agent's mutating actions require a human approval before they take effect.
+
+Manage proposals through the API (or the **View proposals** button in the agent
+editor):
+
+| Method | Endpoint | Description |
+|--------|----------|-------------|
+| GET | `/agents/proposals` | List proposals; filter by `agent_id`, `status`, `limit` |
+| GET | `/agents/proposals/{id}` | Fetch a single proposal |
+| POST | `/agents/proposals/{id}/approve` | Approve (applies the action for act_after_approval) |
+| POST | `/agents/proposals/{id}/reject` | Reject |
+
+Proposals are persisted behind a replaceable store: a SQLite file when
+`AGENTS_GOVERNANCE_DB` is set, else a volatile in-memory store. Decisions are
+sticky — a decided proposal is never re-decided or re-applied.
+
 ## Limitations (PoC)
 
-- **In-memory queue**: Events are not persisted; lost on restart
+- **In-memory delivery queue**: Events are delivered through an in-memory queue,
+  lost on restart. (AgentRun *history* is recorded durably — see above — but the
+  delivery queue itself is not yet wired to the durable store.)
 - **No guaranteed delivery**: Failed events are dropped after retries
 - **Single process**: Works within one process only
 - **Simple filtering**: No complex query expressions
@@ -271,7 +333,9 @@ storage.setup_events(enabled=True)
 ## Future Enhancements
 
 The following are planned but not implemented:
-- Persistent event queue with durability guarantees
+- Persistent event queue with durability guarantees — the seam these will
+  implement (durable queue/job state, retries, dead-letter, restart recovery) is
+  specified in [`DURABLE_EXECUTION_CONTRACT.md`](DURABLE_EXECUTION_CONTRACT.md)
 - Advanced filtering with query expressions
 - Event replay and debugging tools
 

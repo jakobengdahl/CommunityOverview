@@ -141,6 +141,41 @@ class TestAgentsSettings:
 
             assert settings.enabled is False
 
+    def test_from_env_loads_model_profiles_from_schema_config(self, tmp_path):
+        """Agent settings should use schema-configured model profiles."""
+        import json
+        from backend.config import config_loader
+
+        config_file = tmp_path / "schema_config.json"
+        config_file.write_text(
+            json.dumps(
+                {
+                    "schema": {"node_types": {}, "relationship_types": {}},
+                    "model_profiles": {
+                        "profiles": [
+                            {
+                                "id": "agent-fast",
+                                "name": "Agent Fast",
+                                "provider": "openai",
+                                "model": "gpt-4o-mini",
+                                "default": True,
+                                "credential_ref": "OPENAI_API_KEY",
+                            }
+                        ]
+                    },
+                }
+            ),
+            encoding="utf-8",
+        )
+
+        with patch.dict(os.environ, {"SCHEMA_FILE": str(config_file)}, clear=True):
+            config_loader.reset_loader()
+            settings = AgentsSettings.from_env()
+
+        assert [profile.id for profile in settings.model_profiles] == ["agent-fast"]
+        assert settings.resolve_model_profile(None).profile.id == "agent-fast"
+        config_loader.reset_loader()
+
     def test_from_env_with_mcp_integrations_json(self):
         """Test loading MCP integrations from JSON environment variable."""
         import json

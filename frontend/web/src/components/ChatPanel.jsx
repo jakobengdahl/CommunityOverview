@@ -69,10 +69,21 @@ function ChatPanel({ collectionShortName }) {
     clearGuideChatInput,
     getNodeColor,
     requestCloseMenus,
+    modelProfiles,
+    modelProfileSelectionEnabled,
+    selectedModelProfileId,
+    setSelectedModelProfileId,
   } = useGraphStore();
 
   const { t, language } = useI18n();
   const effectiveMaxDepth = Math.max(1, stats?.federation?.max_selectable_depth || 1);
+
+  // A session switch bumps assistantSessionEpoch. An assistant request captures
+  // the epoch before awaiting; if it changed by the time the reply arrives, the
+  // user switched sessions mid-request and the response belongs to a session
+  // that is no longer active — discard it so it can neither append to the new
+  // session's chat nor apply its canvas side-effects.
+  const isStaleAssistantEpoch = (epoch) => useGraphStore.getState().assistantSessionEpoch !== epoch;
 
   const [inputValue, setInputValue] = useState('');
   const [isProcessing, setIsProcessing] = useState(false);
@@ -245,6 +256,7 @@ function ChatPanel({ collectionShortName }) {
     setUploadedFile(null);
     setIsProcessing(true);
     setError(null);
+    const requestEpoch = useGraphStore.getState().assistantSessionEpoch;
 
     try {
       const conversationMessages = chatMessages
@@ -255,6 +267,7 @@ function ChatPanel({ collectionShortName }) {
 
       const response = await api.sendChatMessage(conversationMessages, null, {
         federationDepth,
+        modelProfileId: selectedModelProfileId || undefined,
         expertAgentId:
           activeExperts.length > 0 ? activeExperts[activeExperts.length - 1] : undefined,
         skillsContext: skillsContext || undefined,
@@ -262,6 +275,8 @@ function ChatPanel({ collectionShortName }) {
         visibleNodeIds: nodes.map((n) => n.id),
         selectedNodeIds: selectedGraphNodes.map((n) => n.id),
       });
+
+      if (isStaleAssistantEpoch(requestEpoch)) return;
 
       console.log('[ChatPanel] Response:', response);
 
@@ -291,6 +306,7 @@ function ChatPanel({ collectionShortName }) {
       };
       addChatMessage(assistantMessage);
     } catch (err) {
+      if (isStaleAssistantEpoch(requestEpoch)) return;
       console.error('[ChatPanel] Error:', err);
       addChatMessage({
         role: 'assistant',
@@ -322,7 +338,9 @@ function ChatPanel({ collectionShortName }) {
     setError(null);
 
     try {
-      const result = await api.uploadFile(file, false);
+      const result = await api.uploadFile(file, false, {
+        modelProfileId: selectedModelProfileId || undefined,
+      });
       if (result.success && result.text) {
         setUploadedFile({
           filename: result.filename,
@@ -353,6 +371,7 @@ function ChatPanel({ collectionShortName }) {
     const msg = t('chat.approve_node', { name: proposal.node.name });
     addChatMessage({ role: 'user', content: msg, timestamp: new Date() });
     setIsProcessing(true);
+    const requestEpoch = useGraphStore.getState().assistantSessionEpoch;
 
     try {
       const conversationMessages = chatMessages
@@ -366,6 +385,8 @@ function ChatPanel({ collectionShortName }) {
           activeExperts.length > 0 ? activeExperts[activeExperts.length - 1] : undefined,
         collectionShortName,
       });
+
+      if (isStaleAssistantEpoch(requestEpoch)) return;
 
       if (response.toolResult?.nodes) {
         const filteredNodes = filterCommunityNodes(response.toolResult.nodes);
@@ -382,6 +403,7 @@ function ChatPanel({ collectionShortName }) {
         toolUsed: response.toolUsed,
       });
     } catch (err) {
+      if (isStaleAssistantEpoch(requestEpoch)) return;
       addChatMessage({
         role: 'assistant',
         content: t('chat.error_prefix', { message: err.message }),
@@ -396,6 +418,7 @@ function ChatPanel({ collectionShortName }) {
     const msg = t('chat.reject_node');
     addChatMessage({ role: 'user', content: msg, timestamp: new Date() });
     setIsProcessing(true);
+    const requestEpoch = useGraphStore.getState().assistantSessionEpoch;
 
     try {
       const conversationMessages = chatMessages
@@ -409,6 +432,7 @@ function ChatPanel({ collectionShortName }) {
           activeExperts.length > 0 ? activeExperts[activeExperts.length - 1] : undefined,
         collectionShortName,
       });
+      if (isStaleAssistantEpoch(requestEpoch)) return;
       addChatMessage({
         role: 'assistant',
         content: response.content,
@@ -425,6 +449,7 @@ function ChatPanel({ collectionShortName }) {
     const msg = t('chat.confirm_delete');
     addChatMessage({ role: 'user', content: msg, timestamp: new Date() });
     setIsProcessing(true);
+    const requestEpoch = useGraphStore.getState().assistantSessionEpoch;
 
     try {
       const conversationMessages = chatMessages
@@ -438,6 +463,8 @@ function ChatPanel({ collectionShortName }) {
           activeExperts.length > 0 ? activeExperts[activeExperts.length - 1] : undefined,
         collectionShortName,
       });
+
+      if (isStaleAssistantEpoch(requestEpoch)) return;
 
       if (deleteConfirmation.node_ids) {
         const deletedIds = new Set(deleteConfirmation.node_ids);
@@ -455,6 +482,7 @@ function ChatPanel({ collectionShortName }) {
         toolUsed: response.toolUsed,
       });
     } catch (err) {
+      if (isStaleAssistantEpoch(requestEpoch)) return;
       addChatMessage({
         role: 'assistant',
         content: t('chat.error_prefix', { message: err.message }),
@@ -490,6 +518,7 @@ function ChatPanel({ collectionShortName }) {
     // kiosk, and keeping the answers aggregatable if the save is deferred.
     addChatMessage({ role: 'user', content: readable, llmContent, timestamp: new Date() });
     setIsProcessing(true);
+    const requestEpoch = useGraphStore.getState().assistantSessionEpoch;
 
     try {
       const conversationMessages = chatMessages
@@ -504,6 +533,8 @@ function ChatPanel({ collectionShortName }) {
         collectionShortName,
       });
 
+      if (isStaleAssistantEpoch(requestEpoch)) return;
+
       await applyToolResultSideEffects(response.toolResult);
 
       addChatMessage({
@@ -514,6 +545,7 @@ function ChatPanel({ collectionShortName }) {
         form: formFromResponse(response),
       });
     } catch (err) {
+      if (isStaleAssistantEpoch(requestEpoch)) return;
       addChatMessage({
         role: 'assistant',
         content: t('chat.error_prefix', { message: err.message }),
@@ -941,6 +973,27 @@ function ChatPanel({ collectionShortName }) {
 
         <div className="button-row">
           <ExpertAgentSelector />
+          {modelProfiles.length > 0 && (
+            <select
+              className="model-profile-select"
+              aria-label={t('chat.model_profile')}
+              value={selectedModelProfileId || ''}
+              onChange={(e) => setSelectedModelProfileId(e.target.value || null)}
+              disabled={isProcessing || !modelProfileSelectionEnabled}
+              title={
+                modelProfileSelectionEnabled
+                  ? t('chat.model_profile')
+                  : t('chat.model_profile_selection_disabled')
+              }
+            >
+              {modelProfiles.map((profile) => (
+                <option key={profile.id} value={profile.id}>
+                  {profile.name || profile.id}
+                  {profile.default ? ' (default)' : ''}
+                </option>
+              ))}
+            </select>
+          )}
           <input
             type="file"
             ref={fileInputRef}
