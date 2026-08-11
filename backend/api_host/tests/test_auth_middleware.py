@@ -13,6 +13,7 @@ from fastapi.testclient import TestClient
 
 from backend.api_host.config import AppConfig
 from backend.api_host.server import create_app
+from backend.api_host.session_auth import SESSION_COOKIE_NAME
 
 
 def _make_config(**overrides) -> tuple:
@@ -445,3 +446,113 @@ class TestLogoutRoutes:
                 assert resp.headers["location"] == "https://custom.example.com/bye"
             finally:
                 os.unlink(path)
+
+
+class TestSessionCookieLogin:
+    """Form login (POST /auth/login) mints a signed session cookie the middleware
+    accepts, giving a browser-independent auth flow that does not depend on the
+    native HTTP Basic dialog (which Edge never surfaces on the sspcloud deploy).
+    """
+
+    def _make_client(self, **config_overrides) -> tuple:
+        config, path = _make_config(**config_overrides)
+        app = create_app(config)
+        return TestClient(app), path
+
+    def test_signin_page_renders_login_form(self):
+        client, path = self._make_client(auth_enabled=True, auth_password="secret")
+        try:
+            resp = client.get("/web/", headers={"Accept": "text/html"})
+            assert resp.status_code == 401
+            assert 'action="/auth/login"' in resp.text
+            assert 'name="username"' in resp.text
+            assert 'name="password"' in resp.text
+            # The requested path is preserved as the post-login return target.
+            assert 'name="next"' in resp.text
+            assert 'value="/web/"' in resp.text
+        finally:
+            os.unlink(path)
+
+    def test_form_login_sets_cookie_and_authenticates(self):
+        client, path = self._make_client(auth_enabled=True, auth_password="secret")
+        try:
+            resp = client.post(
+                "/auth/login",
+                data={"username": "admin", "password": "secret", "next": "/web/"},
+                follow_redirects=False,
+            )
+            assert resp.status_code == 303
+            assert resp.headers["location"] == "/web/"
+            assert SESSION_COOKIE_NAME in resp.cookies
+            # The cookie is now in the client jar; a guarded request is authorised.
+            follow = client.get("/api/search", params={"query": "x"})
+            assert follow.status_code != 401
+        finally:
+            os.unlink(path)
+
+    def test_form_login_wrong_password_401_no_cookie(self):
+        client, path = self._make_client(auth_enabled=True, auth_password="secret")
+        try:
+            resp = client.post(
+                "/auth/login",
+                data={"username": "admin", "password": "nope"},
+                follow_redirects=False,
+            )
+            assert resp.status_code == 401
+            assert "Invalid username or password" in resp.text
+            assert SESSION_COOKIE_NAME not in resp.cookies
+        finally:
+            os.unlink(path)
+
+    def test_login_rejects_open_redirect_next(self):
+        client, path = self._make_client(auth_enabled=True, auth_password="secret")
+        try:
+            resp = client.post(
+                "/auth/login",
+                data={
+                    "username": "admin",
+                    "password": "secret",
+                    "next": "//evil.example.com/",
+                },
+                follow_redirects=False,
+            )
+            assert resp.status_code == 303
+            assert resp.headers["location"] == "/web/"
+        finally:
+            os.unlink(path)
+
+    def test_tampered_session_cookie_rejected(self):
+        client, path = self._make_client(auth_enabled=True, auth_password="secret")
+        try:
+            client.cookies.set(SESSION_COOKIE_NAME, "v1.9999999999.deadbeef")
+            resp = client.get(
+                "/api/search",
+                params={"query": "x"},
+                headers={"Accept": "application/json"},
+            )
+            assert resp.status_code == 401
+        finally:
+            os.unlink(path)
+
+    def test_logout_with_session_cookie_clears_and_no_popup(self):
+        """A cookie-authenticated logout redirects to /logged-out (no 401 Basic
+        flush, so no native dialog re-opens) and clears the session."""
+        client, path = self._make_client(auth_enabled=True, auth_password="secret")
+        try:
+            client.post(
+                "/auth/login",
+                data={"username": "admin", "password": "secret"},
+                follow_redirects=False,
+            )
+            resp = client.get("/auth/logout", follow_redirects=False)
+            assert resp.status_code == 302
+            assert resp.headers["location"] == "/logged-out"
+            # Session is really gone: a guarded request is unauthorised again.
+            after = client.get(
+                "/api/search",
+                params={"query": "x"},
+                headers={"Accept": "application/json"},
+            )
+            assert after.status_code == 401
+        finally:
+            os.unlink(path)
