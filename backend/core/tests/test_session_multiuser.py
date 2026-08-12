@@ -14,6 +14,7 @@ import pytest
 from backend.core.session_store import (
     FileSessionPersistenceBackend,
     InMemorySessionPersistenceBackend,
+    OpError,
     SessionStore,
 )
 from backend.core.session_manager import SessionManager
@@ -123,6 +124,58 @@ class TestTwoClientsOneSession:
         assert any(
             e.get("op", {}).get("op") == "session_renamed" for e in await _drain(sub_b)
         )
+
+    async def test_edge_created_between_present_nodes_fans_out_to_all_clients(self):
+        """A drag-drawn edge must render for *every* connected client.
+
+        Regression for "edges sometimes don't appear in all connected clients
+        even though all nodes are visible everywhere": edges live in the graph,
+        not in session state, and are recovered by hydrating nodes — so an edge
+        drawn between two nodes both already present triggers no node add and,
+        without an explicit fan-out op, reaches nobody but the originator. The
+        edges_added op carries the edge payload through to all subscribers while
+        leaving session state (node_refs, positions, …) untouched.
+        """
+        mgr = _manager()
+        sid = mgr.create_session(name="Shared").id
+        sub_a, _ = mgr.connect(sid, "A", "Alice")
+        sub_b, _ = mgr.connect(sid, "B", "Bob")
+
+        # Both clients already share the two endpoint nodes.
+        await mgr.apply_ops(
+            sid, "A", 0, [{"op": "nodes_added", "node_ids": ["n1", "n2"]}]
+        )
+        await _drain(sub_a)
+        await _drain(sub_b)
+        state_before = mgr.get_session(sid).state["node_refs"][:]
+
+        # A draws an edge between the two present nodes.
+        edge = {"id": "e1", "source": "n1", "target": "n2", "type": "RELATES_TO"}
+        result = await mgr.apply_ops(
+            sid, "A", 0, [{"op": "edges_added", "edges": [edge]}]
+        )
+
+        # Fans out to the originator *and* the other client, edge payload intact.
+        for sub in (sub_a, sub_b):
+            events = [
+                e
+                for e in await _drain(sub)
+                if e.get("op", {}).get("op") == "edges_added"
+            ]
+            assert len(events) == 1, "edges_added must reach every subscriber"
+            assert events[0]["op"]["edges"] == [edge]
+
+        # It advances the revision but stores no edge state (edges live in the
+        # graph): node_refs are unchanged and there is no edge set on the session.
+        assert result["applied"][0]["op"] == "edges_added"
+        assert mgr.get_session(sid).state["node_refs"] == state_before
+        assert "edge_refs" not in mgr.get_session(sid).state
+
+    async def test_edges_added_requires_an_edges_list(self):
+        mgr = _manager()
+        sid = mgr.create_session().id
+        with pytest.raises(OpError):
+            await mgr.apply_ops(sid, "A", 0, [{"op": "edges_added", "node_ids": ["x"]}])
 
     async def test_sustained_moves_persist_mirror_and_survive_reload(self, tmp_path):
         """Node moves keep persisting + mirroring after a long op sequence.

@@ -297,6 +297,52 @@ describe('SessionSyncClient', () => {
     expect(client.seq).toBe(2);
   });
 
+  it('sendEdgesAdded enqueues and POSTs an edges_added op carrying the edges', async () => {
+    const { client, fetchImpl } = makeClient();
+    client.connect();
+    FakeEventSource.instances[0].emit({ type: 'snapshot', seq: 0, session: { state: {} } });
+    const edge = { id: 'e1', source: 'a', target: 'b', type: 'RELATES_TO' };
+    client.sendEdgesAdded([edge]);
+    await flush();
+    const posted = fetchImpl.calls.at(-1).body.ops;
+    expect(posted).toContainEqual({ op: 'edges_added', edges: [edge] });
+  });
+
+  it('sendEdgesAdded ignores an empty or id-less edge list', () => {
+    const { client, fetchImpl } = makeClient();
+    client.connect();
+    FakeEventSource.instances[0].emit({ type: 'snapshot', seq: 0, session: { state: {} } });
+    client.sendEdgesAdded([]);
+    client.sendEdgesAdded([{ source: 'a', target: 'b' }]);
+    expect(fetchImpl.calls).toHaveLength(0);
+  });
+
+  it('forwards a remote edges_added op to the host and never folds it into the mirror', async () => {
+    const onRemoteOps = vi.fn();
+    const { client, fetchImpl } = makeClient({ handlers: { onRemoteOps } });
+    client.connect();
+    const es = FakeEventSource.instances[0];
+    es.emit({ type: 'snapshot', seq: 0, session: { state: { node_refs: ['a', 'b'] } } });
+    const op = { op: 'edges_added', edges: [{ id: 'e1', source: 'a', target: 'b' }] };
+    es.emit({ type: 'op', client_id: 'client-other', op, seq: 1 });
+    expect(onRemoteOps).toHaveBeenCalledWith([op], { clientId: 'client-other' });
+    // Edges are graph-derived, not mirror state: re-syncing the same node set
+    // must emit nothing (the edge op left no residue that could echo back out).
+    client.setBaseline({ node_refs: ['a', 'b'] });
+    client.syncState({ node_refs: ['a', 'b'] });
+    await flush();
+    expect(fetchImpl.calls).toHaveLength(0);
+  });
+
+  it('applyOpToMirror leaves the mirror unchanged for an edges_added op', () => {
+    const before = normalizeMirror({ node_refs: ['a', 'b'], hidden_edge_ids: ['x'] });
+    const after = applyOpToMirror(before, {
+      op: 'edges_added',
+      edges: [{ id: 'e1', source: 'a', target: 'b' }],
+    });
+    expect(after).toEqual(before);
+  });
+
   it('delivers an agent layout_applied op with its animation hint intact', () => {
     // The canvas animation seam (contract §9-§10) depends on the animation hint
     // and the originating client id surviving delivery: the frontend routes an

@@ -242,6 +242,11 @@ export function applyOpToMirror(mirrorState, op) {
       m.hidden_node_ids = m.hidden_node_ids.filter((id) => !drop.has(id));
       break;
     }
+    case 'edges_added':
+      // Edges are graph-derived, not part of the mirror (see sendEdgesAdded):
+      // there is no edge set to fold, so this op never affects the outgoing
+      // diff — it is a pure fan-out signal.
+      break;
     case 'edges_hidden':
       m.hidden_edge_ids = Array.from(new Set([...m.hidden_edge_ids, ...(op.edge_ids || [])]));
       break;
@@ -564,6 +569,21 @@ export class SessionSyncClient {
     const ops = computeOps(this._baseline, next);
     this._baseline = next;
     if (ops.length) this._enqueue(ops);
+  }
+
+  /**
+   * Broadcast a live edge creation to the other connected clients. Edges live
+   * in the graph itself, not in the synced mirror, so `computeOps` never derives
+   * an edge op from a state snapshot: a fresh client recovers edges by hydrating
+   * its nodes (`getNodeDetails` returns incident edges), but a peer whose node
+   * set did not change — the case of drawing an edge between two nodes both
+   * already present — is never prompted to re-hydrate and so never renders it.
+   * This explicit op closes that gap; the server fans it out and remote hosts
+   * add the edge directly. No-op for an empty or id-less edge list.
+   */
+  sendEdgesAdded(edges) {
+    const list = (edges || []).filter((e) => e && e.id);
+    if (list.length) this._enqueue([{ op: 'edges_added', edges: list }]);
   }
 
   _enqueue(ops) {
