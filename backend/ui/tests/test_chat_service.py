@@ -1497,6 +1497,264 @@ class TestCollectResponsesOptOut:
         )
 
 
+class TestLinkResultsToResponse:
+    """Auto-linking created/updated nodes to their CollectionResponse node.
+
+    Covers the per-collection link_results setting (default True): the response
+    node is connected to every node the run created or updated, unless the
+    setting is disabled.
+    """
+
+    ALL_OPS = {"Actor": {"create": True, "update": True, "delete": True}}
+
+    def _service(self, graph_service, mock_llm_provider):
+        from backend.ui import ChatService
+
+        with (
+            patch(
+                "backend.ui.chat_logic.create_provider", return_value=mock_llm_provider
+            ),
+            patch.dict(os.environ, {"ANTHROPIC_API_KEY": "test-key"}),
+        ):
+            service = ChatService(graph_service)
+            service._processor.provider_type = "mock"
+            service._processor.default_api_key = "test-key"
+        return service
+
+    def _add_collection(self, graph_service, short_name, perms, link_results=None):
+        """Persist an AKC node (optionally with link_results) and return its id."""
+        meta = {
+            "short_name": short_name,
+            "prompt": "Collect data.",
+            "node_type_permissions": perms,
+        }
+        if link_results is not None:
+            meta["link_results"] = link_results
+        result = graph_service.add_nodes(
+            nodes=[
+                {
+                    "type": "ActiveKnowledgeCollection",
+                    "name": f"Collection {short_name}",
+                    "metadata": meta,
+                }
+            ],
+            edges=[],
+        )
+        return (result.get("added_node_ids") or [None])[0]
+
+    def _add_actor(self, graph_service, name):
+        result = graph_service.add_nodes(
+            nodes=[{"type": "Actor", "name": name}], edges=[]
+        )
+        return (result.get("added_node_ids") or [None])[0]
+
+    def _links_from(self, graph_service, response_id):
+        """Return the set of edge target ids originating at the response node."""
+        return {
+            edge.target
+            for edge in graph_service.storage.edges.values()
+            if edge.source == response_id
+        }
+
+    def test_resolve_records_link_results_default_true(
+        self, graph_service, mock_llm_provider
+    ):
+        service = self._service(graph_service, mock_llm_provider)
+        self._add_collection(graph_service, "run", self.ALL_OPS)
+        service._resolve_collection("run")
+        assert service._collection_nodes["run"]["link_results"] is True
+
+    def test_resolve_records_link_results_false(self, graph_service, mock_llm_provider):
+        service = self._service(graph_service, mock_llm_provider)
+        self._add_collection(graph_service, "run", self.ALL_OPS, link_results=False)
+        service._resolve_collection("run")
+        assert service._collection_nodes["run"]["link_results"] is False
+
+    def test_links_response_to_created_and_updated_nodes(
+        self, graph_service, mock_llm_provider
+    ):
+        """5 new Actors created + 3 existing updated -> response links to all 8."""
+        service = self._service(graph_service, mock_llm_provider)
+        akc_id = self._add_collection(graph_service, "run", self.ALL_OPS)
+
+        existing = [self._add_actor(graph_service, f"Existing {i}") for i in range(3)]
+
+        service._resolve_collection("run")
+        touched = []
+        enforced = service._make_enforced_tools(self.ALL_OPS, touched=touched)
+
+        add_result = enforced["add_nodes"](
+            nodes=[{"type": "Actor", "name": f"New {i}"} for i in range(5)]
+        )
+        created = add_result.get("added_node_ids") or []
+        assert len(created) == 5
+
+        for nid in existing:
+            upd = enforced["update_node"](nid, {"description": "updated in run"})
+            assert upd.get("success") is True
+
+        assert len(touched) == 8
+
+        tool = service._make_collection_response_tool("run", touched=touched)[
+            "save_collection_response"
+        ]
+        out = tool(answers=[{"field_id": "q1", "value": "done"}])
+
+        assert out["success"] is True
+        assert out["linked_node_count"] == 8
+
+        links = self._links_from(graph_service, out["response_id"])
+        # Every created and updated node is linked, plus the owning collection.
+        for nid in created + existing:
+            assert nid in links
+        assert akc_id in links
+
+    def test_link_results_false_skips_result_links(
+        self, graph_service, mock_llm_provider
+    ):
+        service = self._service(graph_service, mock_llm_provider)
+        akc_id = self._add_collection(
+            graph_service, "run", self.ALL_OPS, link_results=False
+        )
+
+        service._resolve_collection("run")
+        touched = []
+        enforced = service._make_enforced_tools(self.ALL_OPS, touched=touched)
+        add_result = enforced["add_nodes"](
+            nodes=[{"type": "Actor", "name": "New actor"}]
+        )
+        created = add_result.get("added_node_ids") or []
+        assert len(created) == 1
+
+        tool = service._make_collection_response_tool("run", touched=touched)[
+            "save_collection_response"
+        ]
+        out = tool(answers=[{"field_id": "q1", "value": "done"}])
+
+        assert out["success"] is True
+        assert out["linked_node_count"] == 0
+
+        links = self._links_from(graph_service, out["response_id"])
+        # The collection edge is still created; result nodes are not linked.
+        assert akc_id in links
+        assert created[0] not in links
+
+    def test_deleted_node_is_not_linked(self, graph_service, mock_llm_provider):
+        """A node created then deleted in the same run is pruned from the links."""
+        service = self._service(graph_service, mock_llm_provider)
+        self._add_collection(graph_service, "run", self.ALL_OPS)
+
+        service._resolve_collection("run")
+        touched = []
+        enforced = service._make_enforced_tools(self.ALL_OPS, touched=touched)
+        add_result = enforced["add_nodes"](
+            nodes=[
+                {"type": "Actor", "name": "Keep"},
+                {"type": "Actor", "name": "Remove"},
+            ]
+        )
+        created = add_result.get("added_node_ids") or []
+        assert len(created) == 2
+        keep_id, remove_id = created
+
+        del_result = enforced["delete_nodes"](node_ids=[remove_id], confirmed=True)
+        assert del_result.get("success") is True
+        assert remove_id not in touched
+
+        tool = service._make_collection_response_tool("run", touched=touched)[
+            "save_collection_response"
+        ]
+        out = tool(answers=[{"field_id": "q1", "value": "done"}])
+
+        assert out["linked_node_count"] == 1
+        links = self._links_from(graph_service, out["response_id"])
+        assert keep_id in links
+        assert remove_id not in links
+
+    def test_dedup_and_update_then_delete_pruned(
+        self, graph_service, mock_llm_provider
+    ):
+        """A created-then-updated node is linked exactly once; an updated
+        pre-existing node that is then deleted is not linked at all."""
+        service = self._service(graph_service, mock_llm_provider)
+        self._add_collection(graph_service, "run", self.ALL_OPS)
+        existing = self._add_actor(graph_service, "Existing")
+
+        service._resolve_collection("run")
+        touched = []
+        enforced = service._make_enforced_tools(self.ALL_OPS, touched=touched)
+
+        created = (
+            enforced["add_nodes"](nodes=[{"type": "Actor", "name": "Fresh"}]).get(
+                "added_node_ids"
+            )
+            or []
+        )
+        assert len(created) == 1
+        fresh = created[0]
+
+        # created-then-updated -> touched records it twice
+        enforced["update_node"](fresh, {"description": "again"})
+        # updated pre-existing node, then deleted -> must be pruned
+        enforced["update_node"](existing, {"description": "touched"})
+        enforced["delete_nodes"](node_ids=[existing], confirmed=True)
+        assert existing not in touched
+
+        tool = service._make_collection_response_tool("run", touched=touched)[
+            "save_collection_response"
+        ]
+        out = tool(answers=[{"field_id": "q1", "value": "done"}])
+
+        assert out["linked_node_count"] == 1
+        response_id = out["response_id"]
+        edges_to_fresh = [
+            e
+            for e in graph_service.storage.edges.values()
+            if e.source == response_id and e.target == fresh
+        ]
+        assert len(edges_to_fresh) == 1  # deduped, not one per touched occurrence
+        assert existing not in self._links_from(graph_service, response_id)
+
+    def test_process_message_links_response_end_to_end(self, chat_service):
+        """Full loop: the LLM creates a node then saves the response in one turn;
+        the response node is linked to the node created during that turn."""
+        service, mock_llm_provider = chat_service
+        graph_service = service.graph_service
+        self._add_collection(graph_service, "run", self.ALL_OPS)
+
+        mock_llm_provider.mock_tool_calls = [
+            {
+                "name": "add_nodes",
+                "input": {"nodes": [{"type": "Actor", "name": "Collected Co"}]},
+            },
+            {
+                "name": "save_collection_response",
+                "input": {"answers": [{"field_id": "org", "value": "Collected Co"}]},
+            },
+        ]
+        mock_llm_provider.mock_text_response = "Saved, thank you."
+
+        service.process_message(
+            messages=[{"role": "user", "content": "here is my org"}],
+            collection_short_name="run",
+        )
+
+        actors = graph_service.search_graph(
+            query="", node_types=["Actor"], limit=10
+        ).get("nodes", [])
+        actor_ids = [n["id"] for n in actors if n.get("name") == "Collected Co"]
+        assert len(actor_ids) == 1
+
+        responses = graph_service.search_graph(
+            query="", node_types=["CollectionResponse"], limit=10
+        ).get("nodes", [])
+        assert len(responses) == 1
+        response_id = responses[0]["id"]
+
+        links = self._links_from(graph_service, response_id)
+        assert actor_ids[0] in links
+
+
 # ---------------------------------------------------------------------------
 # Extra-actions: pure-action tools co-occurring with present_form
 # ---------------------------------------------------------------------------

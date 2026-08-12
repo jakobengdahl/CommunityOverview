@@ -494,4 +494,3 @@ See [backend/DEVELOPMENT.md](./backend/DEVELOPMENT.md) for detailed development 
 ## License
 
 MIT License - see LICENSE for details
-

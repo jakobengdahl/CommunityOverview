@@ -120,11 +120,17 @@ def update_node(
     event_session_id: Optional[str] = None,
     event_correlation_id: Optional[str] = None,
 ) -> Dict[str, Any]:
-    denied = access.authorize_graph_access(
+    decision = access.evaluate_graph_access(
         hook, action=GRAPH_ACTION_MUTATE, target="update_node"
     )
-    if denied:
-        return denied
+    if not decision.allowed:
+        return access.build_access_denied_result(
+            action=GRAPH_ACTION_MUTATE, target="update_node", decision=decision
+        )
+    if decision.graph_access.enabled and not access.is_node_visible(
+        storage.get_node(node_id), decision.graph_access
+    ):
+        return {"success": False, "error": f"Node with ID {node_id} not found"}
 
     event_context = access.build_event_context(
         target="update_node",
@@ -162,13 +168,23 @@ def delete_nodes(
     event_session_id: Optional[str] = None,
     event_correlation_id: Optional[str] = None,
 ) -> Dict[str, Any]:
-    denied = access.authorize_graph_access(
+    decision = access.evaluate_graph_access(
         hook, action=GRAPH_ACTION_MUTATE, target="delete_nodes"
     )
-    if denied:
+    if not decision.allowed:
+        denied = access.build_access_denied_result(
+            action=GRAPH_ACTION_MUTATE, target="delete_nodes", decision=decision
+        )
         denied.setdefault("deleted_node_ids", [])
         denied.setdefault("affected_edge_ids", [])
         return denied
+
+    if decision.graph_access.enabled:
+        node_ids = [
+            nid
+            for nid in node_ids
+            if access.is_node_visible(storage.get_node(nid), decision.graph_access)
+        ]
 
     event_context = access.build_event_context(
         target="delete_nodes",
@@ -199,11 +215,21 @@ def add_edge(
     event_session_id: Optional[str] = None,
     event_correlation_id: Optional[str] = None,
 ) -> Dict[str, Any]:
-    denied = access.authorize_graph_access(
+    decision = access.evaluate_graph_access(
         hook, action=GRAPH_ACTION_MUTATE, target="add_edge"
     )
-    if denied:
-        return denied
+    if not decision.allowed:
+        return access.build_access_denied_result(
+            action=GRAPH_ACTION_MUTATE, target="add_edge", decision=decision
+        )
+    if decision.graph_access.enabled and not (
+        access.is_node_visible(storage.get_node(source), decision.graph_access)
+        and access.is_node_visible(storage.get_node(target), decision.graph_access)
+    ):
+        return {
+            "success": False,
+            "message": "Could not add edge (source or target not found)",
+        }
 
     from backend.core.models import Edge as EdgeModel
 
@@ -252,11 +278,17 @@ def update_edge(
     event_session_id: Optional[str] = None,
     event_correlation_id: Optional[str] = None,
 ) -> Dict[str, Any]:
-    denied = access.authorize_graph_access(
+    decision = access.evaluate_graph_access(
         hook, action=GRAPH_ACTION_MUTATE, target="update_edge"
     )
-    if denied:
-        return denied
+    if not decision.allowed:
+        return access.build_access_denied_result(
+            action=GRAPH_ACTION_MUTATE, target="update_edge", decision=decision
+        )
+    if decision.graph_access.enabled and not access.is_edge_visible(
+        storage.edges.get(edge_id), storage, decision.graph_access
+    ):
+        return {"success": False, "error": f"Edge with ID {edge_id} not found"}
 
     event_context = access.build_event_context(
         target="update_edge",
@@ -283,11 +315,17 @@ def delete_edge(
     event_session_id: Optional[str] = None,
     event_correlation_id: Optional[str] = None,
 ) -> Dict[str, Any]:
-    denied = access.authorize_graph_access(
+    decision = access.evaluate_graph_access(
         hook, action=GRAPH_ACTION_MUTATE, target="delete_edge"
     )
-    if denied:
-        return denied
+    if not decision.allowed:
+        return access.build_access_denied_result(
+            action=GRAPH_ACTION_MUTATE, target="delete_edge", decision=decision
+        )
+    if decision.graph_access.enabled and not access.is_edge_visible(
+        storage.edges.get(edge_id), storage, decision.graph_access
+    ):
+        return {"success": False, "error": f"Edge with ID {edge_id} not found"}
 
     event_context = access.build_event_context(
         target="delete_edge",
@@ -314,10 +352,13 @@ def delete_edges(
     event_session_id: Optional[str] = None,
     event_correlation_id: Optional[str] = None,
 ) -> Dict[str, Any]:
-    denied = access.authorize_graph_access(
+    decision = access.evaluate_graph_access(
         hook, action=GRAPH_ACTION_MUTATE, target="delete_edges"
     )
-    if denied:
+    if not decision.allowed:
+        denied = access.build_access_denied_result(
+            action=GRAPH_ACTION_MUTATE, target="delete_edges", decision=decision
+        )
         denied.setdefault("deleted_edge_ids", [])
         return denied
 
@@ -334,6 +375,15 @@ def delete_edges(
             "success": False,
             "message": "Deletion requires confirmed=True. Please confirm before proceeding.",
         }
+
+    if decision.graph_access.enabled:
+        edge_ids = [
+            eid
+            for eid in edge_ids
+            if access.is_edge_visible(
+                storage.edges.get(eid), storage, decision.graph_access
+            )
+        ]
 
     event_context = access.build_event_context(
         target="delete_edges",

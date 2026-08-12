@@ -61,6 +61,28 @@ packages/
                     └─────────────┘
 ```
 
+**Authorization seam (reads *and* mutations):**
+
+Every GraphService operation is gated by a pluggable `GraphAuthorizationHook`
+(`backend/runtime/authorization.py`). The hook returns an allow/deny decision
+plus an optional `GraphAccessNarrowing` that restricts which graphs the request
+may see. Both halves are enforced consistently:
+
+- **Reads** deny when disallowed, then hide any node/edge outside the narrowed
+  scope (`search_graph`, `get_node_details`, saved views, stats, the custom REST
+  interfaces).
+- **Mutations** apply the same narrowing to their *target*: `update_node` /
+  `delete_nodes` / `update_edge` / `delete_edge` / `delete_edges` refuse to touch
+  an existing entity the caller could not read (returning the same not-found the
+  read paths return; batch deletes fail closed by dropping out-of-scope ids), and
+  `add_edge` refuses an endpoint outside scope. So a caller can never mutate or
+  destroy data they are not allowed to see. Edge scope is derived from endpoint
+  visibility, mirroring the read paths.
+
+The shipped `DefaultGraphAuthorizationHook` is permissive with narrowing
+disabled, so file-only/standalone mode is unaffected; the hosted layer swaps in a
+hook that narrows per tenant/workspace/graph without forking the core.
+
 ### Event System & Agents
 
 The system includes an event-driven architecture for webhooks and AI agents:
@@ -309,8 +331,9 @@ kept separate so a failure points at the layer that broke:
 - **Gateway tests** — the MCP OAuth gateway suite, run in isolation with its own
   pinned dependencies.
 
-The Docker build/publish job runs only on `preview`/`main` pushes and depends on
-all three test jobs.
+The Docker build/publish job runs only on `preview`/`prod` pushes (and version
+tags) and depends on all three test jobs. `main` is the integration branch:
+pushes to it run the tests but publish no image.
 
 ## API Reference
 

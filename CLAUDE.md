@@ -61,61 +61,63 @@ All repo-managed content (docs, comments, PR bodies) remains in English.
 ## Branch & Environment Strategy
 
 ```
-main        ← deploys to the prod environment (pilots)
+prod        ← deploys to the prod environment (pilots)
   ↑
-preview     ← deploys to the preview environment; periodic merge from dev
+preview     ← deploys to the preview environment; periodic merge from main
   ↑
-dev         ← integration branch; all features land here first. Deploys nowhere.
+main        ← integration branch; all features land here first. Deploys nowhere.
   ↑
-feature/*   ← one branch per task; PR always targets dev
+feature/*   ← one branch per task; PR always targets main
 claude/*    ← branches created by Claude agents (same rules apply)
 ```
 
-Environments are named **preview** and **prod**. `dev` is a branch, never an
-environment — a release channel or deploy target called "dev" is a naming bug.
+Environments are named **preview** and **prod**. `main` is the integration branch
+where features land and is never an environment; `prod` is the branch whose pushes
+deploy to the prod environment. A release channel or deploy target called "main" is
+a naming bug.
 
-**Do not merge into `main` or `preview` on your own initiative.** Those merges are
+**Do not merge into `preview` or `prod` on your own initiative.** Those merges are
 deployment actions, done infrequently by the project owner:
-- `dev → preview` when a batch of features is ready for deployment testing
-- `preview → main` when preview has been validated and a prod release is approved
+- `main → preview` when a batch of features is ready for deployment testing
+- `preview → prod` when preview has been validated and a prod release is approved
 
-**Explicit exception:** Claude may perform a `dev → preview` or `preview → main`
+**Explicit exception:** Claude may perform a `main → preview` or `preview → prod`
 merge when — and only when — the project owner explicitly asks for it in that turn
-(e.g. "merge with preview", "merge dev into preview", "promote preview to main",
-"release to main", or an equivalent Swedish phrasing like "merga till preview").
+(e.g. "merge with preview", "merge main into preview", "promote preview to prod",
+"release to prod", or an equivalent Swedish phrasing like "merga till preview").
 See "Explicit merge requests" below for how to carry this out. Absent such an
 explicit instruction, never initiate or propose these merges yourself.
 
-Docker images are built and published **only** when `preview` or `main` receives a
-push — never on feature branch pushes or PRs. Merging to `preview` or `main` is a
+Docker images are built and published **only** when `preview` or `prod` receives a
+push — never on feature branch pushes or PRs. Merging to `preview` or `prod` is a
 deployment action, not a code review action — treat it as one even when explicitly
 authorised.
 
 ### Hotfix path
 
-If a critical bug must bypass the dev/preview queue:
-1. Branch off `main`: `git checkout -b hotfix/<description> origin/main`
+If a critical bug must bypass the main/preview queue:
+1. Branch off `prod`: `git checkout -b hotfix/<description> origin/prod`
 2. Fix and test.
-3. Open a PR against `main` with explicit justification.
-4. After merge, immediately backmerge into `dev`: `git checkout dev && git merge main`.
+3. Open a PR against `prod` with explicit justification.
+4. After merge, immediately backmerge into `main`: `git checkout main && git merge prod`.
 
-This is the only legitimate exception to the "PRs target dev" rule.
+This is the only legitimate exception to the "PRs target main" rule.
 
-### Explicit merge requests (`preview` / `main`)
+### Explicit merge requests (`preview` / `prod`)
 
-Claude may merge into `preview` or `main` **only** when the project owner explicitly
+Claude may merge into `preview` or `prod` **only** when the project owner explicitly
 requests that merge in the current turn. A phrase such as "merge with preview",
-"merge dev into preview", "promote preview to main", "release to main", or an
-equivalent Swedish phrasing ("merga dev till preview", "släpp till main") is the
+"merge main into preview", "promote preview to prod", "release to prod", or an
+equivalent Swedish phrasing ("merga main till preview", "släpp till prod") is the
 trigger. A general instruction like "ship it" or "merge the PR" does **not** count —
 if the target branch is ambiguous, ask before acting.
 
 When explicitly authorised:
-1. Confirm the source and target are what was asked for (`dev → preview` or
-   `preview → main`) and that the source branch is green in CI.
+1. Confirm the source and target are what was asked for (`main → preview` or
+   `preview → prod`) and that the source branch is green in CI.
 2. Perform the merge that was requested — never substitute a different source or
    target, and never chain an additional merge that was not asked for (e.g. do not
-   also push `preview → main` when only `dev → preview` was requested).
+   also push `preview → prod` when only `main → preview` was requested).
 3. Report exactly what was merged and remind the owner that this triggers a Docker
    build/deploy for that environment.
 
@@ -125,10 +127,10 @@ If any part of the request is unclear, stop and ask rather than assume.
 
 ## What Claude Must Never Do
 
-- Open a PR against `main` or `preview` (except hotfixes, or an explicitly
+- Open a PR against `preview` or `prod` (except hotfixes, or an explicitly
   requested merge that you choose to route through a PR — see above).
-- Push directly to `dev`.
-- Merge into `preview` or `main` on your own initiative — do so only when the
+- Push directly to `main`.
+- Merge into `preview` or `prod` on your own initiative — do so only when the
   project owner explicitly asks for that specific merge (see "Explicit merge
   requests" above).
 - Add features beyond what the task requires. If you discover a related bug or
@@ -138,7 +140,7 @@ If any part of the request is unclear, stop and ask rather than assume.
   existed before you started working, or is in code you did not change. Log it
   in `SMALL_FIXES.md` with file, line, and context, then continue.
 - Skip the review loop for non-trivial changes.
-- Merge PRs against `main` or `preview` unless explicitly asked to in that turn —
+- Merge PRs against `preview` or `prod` unless explicitly asked to in that turn —
   those gates belong to the project owner (see "Explicit merge requests" above).
 - Stage debug artifacts: `print()` statements, `breakpoint()`, `pdb.set_trace()`,
   hardcoded test credentials, or generated data files left in source paths.
@@ -155,22 +157,22 @@ Follow this process for every feature or bug fix, regardless of size.
 
 **Default session ownership (end-to-end).** Unless the task says otherwise, a
 Claude session owns the whole cycle for the chosen task: solve it, open a PR
-targeting `dev`, run the review loop with a subagent, update any documentation
+targeting `main`, run the review loop with a subagent, update any documentation
 the change affects, and — once every review point is resolved and the
-definition-of-done checklist in step 10 passes — merge the PR to `dev` itself.
+definition-of-done checklist in step 10 passes — merge the PR to `main` itself.
 Do not stop at "PR opened" and wait for the owner to merge; merging a clean,
-green `dev` PR is part of the job. The only branches Claude never merges on its
-own initiative are `preview` and `main` (see the branch strategy above). If the
+green `main` PR is part of the job. The only branches Claude never merges on its
+own initiative are `preview` and `prod` (see the branch strategy above). If the
 tooling can't delete the feature branch after merge, leave it — the owner
 removes it manually.
 
-### 1. Orient — start from a fresh dev
+### 1. Orient — start from a fresh main
 
-Always start with a current copy of `dev`:
+Always start with a current copy of `main`:
 
 ```bash
-git fetch origin dev
-git checkout -b claude/<short-description> origin/dev
+git fetch origin main
+git checkout -b claude/<short-description> origin/main
 ```
 
 ### 2. Explore
@@ -285,7 +287,7 @@ before closing. The goal: nothing is lost between sessions.
 git push -u origin claude/<short-description>
 ```
 
-Open a PR targeting `dev` using `gh pr create` (token at `~/.gh_token`, load with `GH_TOKEN=$(cat ~/.gh_token)`). In remote environments without the `gh` CLI, use the GitHub MCP tools instead.
+Open a PR targeting `main` using `gh pr create` (token at `~/.gh_token`, load with `GH_TOKEN=$(cat ~/.gh_token)`). In remote environments without the `gh` CLI, use the GitHub MCP tools instead.
 
 The PR body follows `.github/pull_request_template.md`:
 - **Summary** — what changed and why.
@@ -295,12 +297,12 @@ The PR body follows `.github/pull_request_template.md`:
 
 ### 8. Review Loop
 
-After the PR is open, spawn a subagent with the full diff from dev:
+After the PR is open, spawn a subagent with the full diff from main:
 
 ```
 Agent(
   prompt="""Review the diff below from branch <name> in /path/to/repo.
-            Full diff vs dev: run `git diff origin/dev...HEAD` in the repo.
+            Full diff vs main: run `git diff origin/main...HEAD` in the repo.
 
             Look for: correctness bugs, edge cases, test gaps, consistency
             between related files (e.g. local vs. federation paths doing
@@ -327,12 +329,12 @@ Typical issues caught in review:
 
 ### 9. Resolve branch divergence
 
-If `dev` has advanced while your branch is in the review loop, bring the branch
+If `main` has advanced while your branch is in the review loop, bring the branch
 up to date before marking it ready:
 
 ```bash
-git fetch origin dev
-git merge origin/dev      # merge, not rebase — avoid rewriting shared history
+git fetch origin main
+git merge origin/main     # merge, not rebase — avoid rewriting shared history
 pytest backend/ -q        # re-run full suite after merge
 git push
 ```
@@ -340,9 +342,9 @@ git push
 Resolve conflicts by understanding both sides — never blindly accept all-incoming
 or all-outgoing changes.
 
-### 10. Merge to dev — definition of done
+### 10. Merge to main — definition of done
 
-When the review loop is clean, merge the PR to `dev` autonomously:
+When the review loop is clean, merge the PR to `main` autonomously:
 
 ```bash
 gh pr merge <number> \
@@ -379,14 +381,18 @@ required checks:
    - In that case, check CI once; if it is already green, merge now and report.
    - If CI is still pending, do **not** poll it with a scheduled wakeup.
 
-Current repo state (verified 2026-07-14):
+Current repo state (auto-merge verified 2026-07-14; protection moved from `dev`
+to `main` in the 2026-08-12 branch-strategy cutover):
 - repo setting **Allow auto-merge** is enabled
-- `dev` branch protection is enabled with strict required checks:
+- `main` (the integration branch, and PR target) has branch protection enabled
+  with strict required checks:
   - `Backend tests`
   - `Frontend tests`
   - `Gateway tests`
   - `Python lint (ruff)`
   - `Frontend lint (eslint + prettier)`
+- `prod` is protected too (it deploys to production); merges into it are the
+  owner's deployment action, not a Claude autonomous merge
 - admins are also subject to that protection
 
 Merge only when **all** of the following are true:
@@ -421,9 +427,9 @@ A small-fix session is started by the instruction **"kör small-fix-sessionen"**
 
 ### Entry checklist before starting
 
-- Pull latest `dev`.
+- Pull latest `main`.
 - Read `SMALL_FIXES.md` in full.
-- Confirm no items are already addressed by recent commits (check `git log --oneline origin/dev -20`).
+- Confirm no items are already addressed by recent commits (check `git log --oneline origin/main -20`).
 
 ### Batch selection
 
@@ -452,7 +458,7 @@ Follow the full Standard Development Workflow (steps 1–10), with these additio
    these are small, isolated fixes the loop typically converges in one round —
    but repeat until clean, same as any other PR.
 5. **After merge:** remove the resolved entries from `SMALL_FIXES.md`, commit
-   the update directly on `dev` via a standalone `chore: update small-fixes backlog`
+   the update directly on `main` via a standalone `chore: update small-fixes backlog`
    commit (no separate branch needed for the file update).
 6. If time and context permit, move on to the next batch in the same session.
    Otherwise stop — the backlog is in `SMALL_FIXES.md` for next time.
@@ -534,7 +540,7 @@ npm run format                      # Prettier (JS/JSX in the workspaces)
 ```
 
 Config lives in root `pyproject.toml` (ruff), `eslint.config.mjs`, and
-`.prettierrc.json`. On `dev` PRs, the lint jobs are part of the branch-protection
+`.prettierrc.json`. On `main` PRs, the lint jobs are part of the branch-protection
 required checks (STRUCTURE_REVIEW A4), so a lint failure is a real merge blocker.
 `react-hooks/rules-of-hooks` violations are errors — treat them as real bugs.
 `services/mcp_oauth_gateway/` is outside the ruff scope.
