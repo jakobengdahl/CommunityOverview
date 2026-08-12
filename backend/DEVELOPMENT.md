@@ -309,8 +309,9 @@ kept separate so a failure points at the layer that broke:
 - **Gateway tests** — the MCP OAuth gateway suite, run in isolation with its own
   pinned dependencies.
 
-The Docker build/publish job runs only on `preview`/`main` pushes and depends on
-all three test jobs.
+The Docker build/publish job runs only on `preview`/`prod` pushes (and version
+tags) and depends on all three test jobs. `main` is the integration branch:
+pushes to it run the tests but publish no image.
 
 ## API Reference
 

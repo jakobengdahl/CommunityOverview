@@ -24,7 +24,8 @@ repo produces and what the infra repo must consume.
 ## Images Published
 
 Both images are published to GitHub Container Registry (GHCR) on every
-successful push to `dev` or `main`.
+successful push to `preview` or `prod` (and on version tags). `main` is the
+integration branch: pushes to it run the tests but publish no image.
 
 | Image | Registry path |
 |-------|---------------|
@@ -36,8 +37,8 @@ successful push to `dev` or `main`.
 | Tag | Description |
 |-----|-------------|
 | `sha-<commit>` | Immutable. Canonical reference for a specific build. |
-| `dev` | Floating. Latest successful build from the `dev` branch. |
-| `latest` | Floating. Latest successful build from the `main` branch. |
+| `dev` | Floating. Latest successful build from the `preview` branch. |
+| `latest` | Floating. Latest successful build from the `prod` branch. |
 | `v<semver>` | Applied when a version tag (`v*`) is pushed. |
 
 Infra deployments **must** reference the immutable `sha-<commit>` tag (or the
@@ -50,8 +51,10 @@ image digest) to guarantee reproducible rollouts. Floating tags (`dev`,
 
 | Branch | Channel |
 |--------|---------|
-| `dev` | `dev` |
-| `main` (or version tag) | `prod` |
+| `preview` | `preview` |
+| `prod` (or version tag) | `prod` |
+
+`main` is the integration branch and maps to no channel — it does not deploy.
 
 ---
 
@@ -63,9 +66,9 @@ infra repo after a successful build. The payload is:
 
 ```json
 {
-  "channel":        "dev | prod",
+  "channel":        "preview | prod",
   "commit_sha":     "<full 40-char git SHA>",
-  "ref":            "refs/heads/dev | refs/heads/main | refs/tags/v1.2.3",
+  "ref":            "refs/heads/preview | refs/heads/prod | refs/tags/v1.2.3",
   "image_tag":      "sha-<commit>",
   "core_image":     "ghcr.io/<owner>/communityoverview",
   "core_digest":    "sha256:<digest>",
@@ -80,7 +83,7 @@ infra repo after a successful build. The payload is:
 
 | Field | Type | Description |
 |-------|------|-------------|
-| `channel` | string | Release channel: `dev` or `prod` |
+| `channel` | string | Release channel: `preview` or `prod` |
 | `commit_sha` | string | Full 40-character git SHA of the build |
 | `ref` | string | Git ref that triggered the build |
 | `image_tag` | string | Immutable image tag (`sha-<commit>`) to deploy |
