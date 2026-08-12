@@ -34,6 +34,7 @@ shared knowledge graphs. This guide covers all user-facing features.
    - [Available MCP tools](#81-available-mcp-tools)
    - [Connecting](#82-connecting)
    - [Live visualization control via session ID](#83-live-visualization-control-via-session-id)
+   - [External pulse triggers](#84-external-pulse-triggers)
 
 ---
 
@@ -402,8 +403,9 @@ AI apps:
 | **Start new session** | Saves the current session automatically and opens a fresh, empty one |
 | **Search previous sessions** | Filters the recent-session list by name or ID |
 | **Connect to session (via ID)** | Joins an existing session by entering its ID (format `1234-5678`) |
-| **Recent sessions** | The most recently used sessions — shown by name if you have named them, otherwise by ID. Click one to load it; the current session is saved automatically first. Hover a row and open the **⋮** menu for per-session actions: **Name session**, **Copy link** (copies the shareable `?session=…` URL to the clipboard), and **Delete session**. |
+| **Recent sessions** | The most recently used sessions — shown by name if you have named them, otherwise by ID. Click one to load it; the current session is saved automatically first. Hover a row and open the **⋮** menu for per-session actions: **Name session**, **Copy link** (copies the shareable `?session=…` URL to the clipboard), **Copy pulse-trigger URL** (on the session you are currently in — see [8.4](#84-external-pulse-triggers)), and **Delete session**. |
 | **Recent activity** | Opens the activity panel — a read-only audit log of graph changes (see [5.2](#52-recent-activity-audit-log)) |
+| **Lock / Unlock visualization** | Guards the current board against accidental clearing. While locked, **Esc × 2** does nothing at all, and the top-bar **clear** button asks for an emphatic confirmation warning that everything on the board will be removed. The setting is remembered in your browser. |
 | **Settings** | Opens the Settings dialog (see below) |
 
 Session content (node membership, positions, groups, and hidden nodes) is stored
@@ -653,6 +655,38 @@ their final positions instead of animating.
 - Share your session ID with a colleague who can then direct the visualization from
   their own AI assistant, in a collaborative session.
 
+### 8.4 External pulse triggers
+
+Beyond AI-driven control, any external system can make a single node **pulse** —
+briefly glow, grow, or run a marker around its border — to draw your attention to
+a live event, such as a new customer registering or a new dataset version being
+created.
+
+**How it works:**
+
+1. In the session menu (**☰**), open the **⋮** menu on the session you are
+   currently in and choose **Copy pulse-trigger URL**. This copies a dedicated,
+   authenticated trigger URL to your clipboard.
+2. Configure an external system (a webhook, an automation, a small script) to send
+   an HTTP `POST` to that URL when its event fires, with a JSON body naming the
+   node to react:
+
+   ```json
+   { "node_id": "customer-42", "style": "glow" }
+   ```
+
+   `style` is optional (`glow`, `grow`, or `marker`; defaults to `glow`), as are
+   `color` and `duration_ms`.
+3. The named node pulses in your open visualization the moment the URL is called —
+   and for everyone sharing the session.
+
+The URL carries a secret token scoped to the live session, so only systems you
+hand it to can trigger a pulse. Choosing **Copy pulse-trigger URL** again issues a
+fresh token and **revokes** the previous URL. The token lives only as long as the
+session, so a trigger URL stops working once the session ends. If your system is
+set to **reduce motion**, a triggered node shows a static highlight instead of an
+animation.
+
 ---
 
 ## Appendix: Keyboard shortcuts
@@ -662,7 +696,7 @@ their final positions instead of animating.
 | **Delete** | Delete selected node or edge |
 | **Enter** (chat) | Send message |
 | **Escape** | Cancel guide / close dialog |
-| **Esc × 2** | Clear the canvas (remove all nodes from view) |
+| **Esc × 2** | Clear the canvas (remove all nodes from view). On a **named** session this first asks for confirmation; on a **locked** visualization it does nothing (unlock it, or use the clear button). |
 | **Ctrl+Z** / **Cmd+Z** | Undo the last node move (drag or Organize) |
 | **Ctrl+Shift+Z** / **Cmd+Shift+Z** / **Ctrl+Y** | Redo the last undone move |
 | **Space + drag** | Pan the canvas |

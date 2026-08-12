@@ -1,4 +1,4 @@
-import { describe, it, expect, beforeEach } from 'vitest';
+import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import useGraphStore from './graphStore';
 
 const t = (key) => key;
@@ -72,5 +72,54 @@ describe('graphStore.resetSessionScopedState', () => {
     expect(useGraphStore.getState().assistantSessionEpoch).toBe(start + 2);
     expect(useGraphStore.getState().chatMessages).toHaveLength(1);
     expect(useGraphStore.getState().chatMessages[0].id).toBe('welcome');
+  });
+});
+
+describe('graphStore.pulseNode', () => {
+  beforeEach(() => {
+    vi.useFakeTimers();
+    useGraphStore.setState({ pulsedNodeIds: {} });
+  });
+
+  afterEach(() => {
+    vi.useRealTimers();
+  });
+
+  it('sets a pulse entry with style and colour, then auto-clears it', () => {
+    useGraphStore.getState().pulseNode('n1', { style: 'grow', color: '#f00', durationMs: 1000 });
+    const entry = useGraphStore.getState().pulsedNodeIds.n1;
+    expect(entry).toMatchObject({ style: 'grow', color: '#f00' });
+    expect(typeof entry.seq).toBe('number');
+
+    vi.advanceTimersByTime(1000);
+    expect(useGraphStore.getState().pulsedNodeIds.n1).toBeUndefined();
+  });
+
+  it('ignores a call without a node id', () => {
+    useGraphStore.getState().pulseNode('', { style: 'glow' });
+    expect(useGraphStore.getState().pulsedNodeIds).toEqual({});
+  });
+
+  it('clamps the duration into the allowed range', () => {
+    useGraphStore.getState().pulseNode('n1', { durationMs: 999999 });
+    // Below the 15s ceiling the entry is still present; just past it, it clears.
+    vi.advanceTimersByTime(15000);
+    expect(useGraphStore.getState().pulsedNodeIds.n1).toBeUndefined();
+  });
+
+  it('a repeat pulse bumps the seq and resets the auto-clear window', () => {
+    useGraphStore.getState().pulseNode('n1', { durationMs: 1000 });
+    const first = useGraphStore.getState().pulsedNodeIds.n1.seq;
+    vi.advanceTimersByTime(600);
+    useGraphStore.getState().pulseNode('n1', { durationMs: 1000 });
+    const second = useGraphStore.getState().pulsedNodeIds.n1.seq;
+    expect(second).toBeGreaterThan(first);
+
+    // The first timer must not clear the refreshed pulse.
+    vi.advanceTimersByTime(600);
+    expect(useGraphStore.getState().pulsedNodeIds.n1).toMatchObject({ seq: second });
+    // The refreshed window then elapses.
+    vi.advanceTimersByTime(400);
+    expect(useGraphStore.getState().pulsedNodeIds.n1).toBeUndefined();
   });
 });

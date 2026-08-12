@@ -247,6 +247,9 @@
     "session_menu": "Session actions",
     "copy_link": "Copy link",
     "link_copied": "Session link copied to clipboard",
+    "copy_trigger_url": "Copy pulse-trigger URL",
+    "trigger_url_copied": "Pulse-trigger URL copied to clipboard (previous URL revoked)",
+    "trigger_url_failed": "Could not create the pulse-trigger URL",
     "delete_session_title": "Delete session",
     "delete_session_message": "Delete this session? Its content is removed for everyone. This cannot be undone.",
     "delete_session_message_multi": "{count} other user(s) are connected to this session. Delete it anyway? Its content is removed for everyone and cannot be undone.",
@@ -255,6 +258,8 @@
     "session_deleted_remote": "This session was deleted by another user — started a new one",
     "connect_error": "Could not load session",
     "change_not_saved": "A change could not be saved — refreshing session",
+    "lock_canvas": "Lock visualization",
+    "unlock_canvas": "Unlock visualization",
     "settings": "Settings"
   },
   "settings": {
@@ -280,6 +285,13 @@
     "session_id_tooltip": "Session ID — share with an external AI to connect it to this window",
     "clear_canvas_tooltip": "Clear canvas — remove all nodes and edges (or press Esc twice)",
     "clear_canvas_aria": "Clear canvas"
+  },
+  "clear_confirm": {
+    "named_title": "Clear this visualization?",
+    "named_message": "This will remove all nodes and edges from the current visualization. Are you sure?",
+    "locked_title": "This visualization is locked",
+    "locked_message": "Warning: this will permanently remove everything you have entered on this locked visualization — all nodes, edges and annotations. This cannot be undone. Are you sure you want to clear it?",
+    "confirm": "Clear visualization"
   },
   "experts": {
     "title": "Expert Agents",

@@ -3,6 +3,7 @@ import { create } from 'zustand';
 const FEDERATION_DEPTH_STORAGE_KEY = 'federation_depth';
 const SHOW_MINIMAP_STORAGE_KEY = 'show_minimap';
 const NODE_PREVIEW_STORAGE_KEY = 'node_preview_enabled';
+const CANVAS_LOCKED_STORAGE_KEY = 'canvas_locked';
 
 function loadInitialShowMinimap() {
   try {
@@ -22,6 +23,16 @@ function loadInitialNodePreview() {
     // ignore storage errors and use default
   }
   return true;
+}
+
+function loadInitialCanvasLocked() {
+  try {
+    const stored = window?.localStorage?.getItem(CANVAS_LOCKED_STORAGE_KEY);
+    if (stored !== null) return stored === 'true';
+  } catch {
+    // ignore storage errors and use default
+  }
+  return false;
 }
 
 function loadInitialFederationDepth() {
@@ -89,6 +100,16 @@ function scheduleClearGroupsReset(set) {
     set({ clearGroupsFlag: false });
   }, 100);
 }
+
+// One auto-clear timer per pulsing node. A repeated pulse on the same node
+// replaces its timer so the visual always lasts the full latest duration, and
+// the timer only clears the entry if it still carries the seq it was armed for
+// (a newer pulse that arrived first must not be cut short by an older timer).
+const pulseClearTimers = new Map();
+let pulseSeqCounter = 0;
+const PULSE_MIN_MS = 200;
+const PULSE_MAX_MS = 15000;
+const PULSE_DEFAULT_MS = 1500;
 
 // Default welcome message (used before presentation is loaded)
 const DEFAULT_WELCOME_MESSAGE = {
@@ -197,6 +218,11 @@ const useGraphStore = create((set, get) => ({
   hiddenNodeIds: [],
   hiddenEdgeIds: [],
   nodeMarks: {},
+  // Transient per-node pulse state driven by external trigger URLs (design:
+  // external pulse-trigger). Maps nodeId -> { style, color, seq }; each entry is
+  // auto-cleared after its duration. seq changes on every (re)trigger so the
+  // client can restart the animation even when a node is pulsed again mid-play.
+  pulsedNodeIds: {},
   selectedNodeId: null,
   selectedGraphNodes: [], // Nodes selected in the graph canvas (full node data)
   editingNode: null,
@@ -214,6 +240,7 @@ const useGraphStore = create((set, get) => ({
   chatPanelOpen: true, // Chat panel expanded vs minimized
   showMinimap: loadInitialShowMinimap(), // Minimap visibility (persisted)
   nodePreviewEnabled: loadInitialNodePreview(), // Hover info popup on/off (persisted)
+  canvasLocked: loadInitialCanvasLocked(), // Navigation-menu lock guarding the board (persisted)
 
   // Search state
   searchQuery: '',
@@ -350,6 +377,8 @@ const useGraphStore = create((set, get) => ({
   },
 
   clearVisualization: () => {
+    pulseClearTimers.forEach((timer) => clearTimeout(timer));
+    pulseClearTimers.clear();
     set({
       nodes: [],
       edges: [],
@@ -357,6 +386,7 @@ const useGraphStore = create((set, get) => ({
       hiddenNodeIds: [],
       hiddenEdgeIds: [],
       nodeMarks: {},
+      pulsedNodeIds: {},
       pendingGroups: null,
       pendingAnnotations: null,
       clearGroupsFlag: true,
@@ -382,6 +412,33 @@ const useGraphStore = create((set, get) => ({
   },
 
   clearNodeMarks: () => set({ nodeMarks: {} }),
+
+  // Play a transient visual pulse on a node in response to an external trigger.
+  pulseNode: (nodeId, { style = 'glow', color = null, durationMs } = {}) => {
+    if (!nodeId) return;
+    const seq = ++pulseSeqCounter;
+    const duration = Math.min(
+      PULSE_MAX_MS,
+      Math.max(PULSE_MIN_MS, Number(durationMs) || PULSE_DEFAULT_MS)
+    );
+    set((state) => ({
+      pulsedNodeIds: { ...state.pulsedNodeIds, [nodeId]: { style, color, seq } },
+    }));
+
+    const existing = pulseClearTimers.get(nodeId);
+    if (existing) clearTimeout(existing);
+    const timer = setTimeout(() => {
+      pulseClearTimers.delete(nodeId);
+      set((state) => {
+        // Only clear if this node still shows the pulse we armed the timer for.
+        if (state.pulsedNodeIds[nodeId]?.seq !== seq) return {};
+        const next = { ...state.pulsedNodeIds };
+        delete next[nodeId];
+        return { pulsedNodeIds: next };
+      });
+    }, duration);
+    pulseClearTimers.set(nodeId, timer);
+  },
 
   toggleNodeVisibility: (nodeId) => {
     const { hiddenNodeIds } = get();
@@ -437,6 +494,15 @@ const useGraphStore = create((set, get) => ({
       // ignore storage errors
     }
     set({ nodePreviewEnabled: enabled });
+  },
+
+  setCanvasLocked: (locked) => {
+    try {
+      window?.localStorage?.setItem(CANVAS_LOCKED_STORAGE_KEY, String(locked));
+    } catch {
+      // ignore storage errors
+    }
+    set({ canvasLocked: locked });
   },
 
   setStats: (stats) => set({ stats }),

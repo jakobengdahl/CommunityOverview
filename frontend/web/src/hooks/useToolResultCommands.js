@@ -73,6 +73,25 @@ export function useToolResultCommands({ sessionId, opStreamReady, latestViewport
     [latestViewport]
   );
 
+  // Apply a `node_pulse` command (external pulse-trigger URLs): play a transient
+  // visual pulse on the targeted node. Shares the same command-id dedup as
+  // tool-result commands so a pulse that arrives on both the legacy stream and
+  // the op stream during handover only fires once.
+  const applyPulseCommand = useCallback((command, commandId) => {
+    if (!command?.node_id) return;
+    if (commandId) {
+      if (appliedCommandIdsRef.current.includes(commandId)) return;
+      appliedCommandIdsRef.current.push(commandId);
+      if (appliedCommandIdsRef.current.length > 20) appliedCommandIdsRef.current.shift();
+    }
+    const pulse = command.pulse || {};
+    useGraphStore.getState().pulseNode(command.node_id, {
+      style: pulse.style,
+      color: pulse.color,
+      durationMs: pulse.duration_ms,
+    });
+  }, []);
+
   // ── Visualization session: legacy SSE connection ────────────────────────
   // Opens the single-consumer push stream so external AI clients can push
   // visualization commands to this browser window via MCP, until the
@@ -88,6 +107,10 @@ export function useToolResultCommands({ sessionId, opStreamReady, latestViewport
       try {
         const cmd = JSON.parse(e.data);
         if (cmd.type === 'ping' || cmd.type === 'connected') return;
+        if (cmd.type === 'node_pulse') {
+          applyPulseCommand(cmd, cmd.command_id);
+          return;
+        }
         if (cmd.type !== 'tool_result' || !cmd.result) return;
         applyToolResultCommand(cmd.result, cmd.command_id);
       } catch (err) {
@@ -98,7 +121,7 @@ export function useToolResultCommands({ sessionId, opStreamReady, latestViewport
       // Browser auto-reconnects on SSE errors; no manual retry needed.
     };
     return () => evtSource.close();
-  }, [sessionId, opStreamReady, applyToolResultCommand]);
+  }, [sessionId, opStreamReady, applyToolResultCommand, applyPulseCommand]);
 
-  return applyToolResultCommand;
+  return { applyToolResultCommand, applyPulseCommand };
 }
