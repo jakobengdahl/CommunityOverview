@@ -41,6 +41,17 @@ const LAYOUT_BATCH_THRESHOLD = 20;
 const MAX_OPS_PER_BATCH = 500;
 const MAX_BATCH_BYTES = 240 * 1024;
 
+// A single `POST /ops` that never settles (a hung connection through a proxy —
+// SSE deployments commonly sit behind Cloud Run / an ingress that can hold a
+// half-open request open indefinitely) must not wedge the outbound channel
+// forever. Without a bound, `_flush`'s `await this._fetch(...)` never returns,
+// the `finally` that clears `_flushing` never runs, and every later flush
+// short-circuits on the `_flushing` guard — so all subsequent ops (moves, node
+// adds, everything) silently stop reaching the server for the life of the tab.
+// A timeout aborts the stuck request so the batch is requeued and retried
+// (ops are idempotent, so a resend after a lost response is safe — see R3).
+const DEFAULT_REQUEST_TIMEOUT_MS = 20_000;
+
 // Selection claims are advisory soft-locks (design 3.5). The server expires a
 // claim 30 s after its last renewal; the local client renews well inside that
 // window and mirrors the same TTL so a departed collaborator's marker never
@@ -291,6 +302,7 @@ export class SessionSyncClient {
     opsUrl,
     handlers = {},
     flushIntervalMs = 150,
+    requestTimeoutMs = DEFAULT_REQUEST_TIMEOUT_MS,
     fetchImpl,
     EventSourceImpl,
     nowFn,
@@ -302,6 +314,9 @@ export class SessionSyncClient {
     this.opsUrl = opsUrl;
     this.handlers = handlers;
     this.flushIntervalMs = flushIntervalMs;
+    // Upper bound on how long a single ops POST may stay in flight before it is
+    // aborted and retried; <= 0 disables the bound. See DEFAULT_REQUEST_TIMEOUT_MS.
+    this._requestTimeoutMs = requestTimeoutMs;
     this._fetch = fetchImpl || (typeof fetch !== 'undefined' ? fetch.bind(globalThis) : null);
     this._EventSource =
       EventSourceImpl || (typeof EventSource !== 'undefined' ? EventSource : null);
@@ -580,11 +595,9 @@ export class SessionSyncClient {
       return (async () => {
         for (const op of pending) {
           try {
-            await this._fetch(this.opsUrl, {
-              method: 'POST',
-              headers: { 'Content-Type': 'application/json' },
-              body: JSON.stringify({ client_id: this.clientId, base_seq: this._seq, ops: [op] }),
-            });
+            // Bounded like every other ops POST (_postOps) so a hung request on
+            // teardown cannot stall this drain loop indefinitely.
+            await this._postOps([op]);
           } catch {
             /* best-effort teardown flush */
           }
@@ -634,20 +647,64 @@ export class SessionSyncClient {
     return batch;
   }
 
+  /**
+   * POST one op batch, bounded by `_requestTimeoutMs`. Resolves with the fetch
+   * `Response`; rejects on a network error, an abort, or the timeout. The
+   * timeout is enforced with a `Promise.race`-style guard rather than relying on
+   * the request honouring `AbortController` (so a hung request — or a fake fetch
+   * that ignores the signal — can never leave the flush loop awaiting forever;
+   * that is the wedge this method exists to prevent). The abort is best-effort
+   * on top, to actually cancel a real in-flight request when the runtime
+   * supports it.
+   */
+  _postOps(batch) {
+    const controller = typeof AbortController !== 'undefined' ? new AbortController() : null;
+    const options = {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ client_id: this.clientId, base_seq: this._seq, ops: batch }),
+    };
+    if (controller) options.signal = controller.signal;
+    const request = this._fetch(this.opsUrl, options);
+    if (!(this._requestTimeoutMs > 0)) return request;
+    return new Promise((resolve, reject) => {
+      const timer = setTimeout(() => {
+        if (controller) {
+          try {
+            controller.abort();
+          } catch {
+            /* ignore */
+          }
+        }
+        reject(new Error('ops request timed out'));
+      }, this._requestTimeoutMs);
+      Promise.resolve(request).then(
+        (resp) => {
+          clearTimeout(timer);
+          resolve(resp);
+        },
+        (err) => {
+          clearTimeout(timer);
+          reject(err);
+        }
+      );
+    });
+  }
+
   async _flush({ bypassReady = false } = {}) {
     if (this._flushing || this._closed) return;
     if ((!this._ready && !bypassReady) || !this._queue.length || !this._fetch) return;
     this._flushing = true;
-    // After a rejected multi-op batch, resend one op at a time so a single bad
-    // op can't take valid ops down with it (the server applies a batch
-    // all-or-nothing). Otherwise chunk the queue against the server's caps.
-    const batch = this._takeBatch();
+    // `batch` is taken inside the try so that a throw here (e.g. JSON.stringify
+    // choking on a malformed op) still runs the finally that clears `_flushing`
+    // — otherwise the outbound channel would wedge exactly as a hung request
+    // would. After a rejected multi-op batch, resend one op at a time so a
+    // single bad op can't take valid ops down with it (the server applies a
+    // batch all-or-nothing). Otherwise chunk the queue against the server's caps.
+    let batch = null;
     try {
-      const resp = await this._fetch(this.opsUrl, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ client_id: this.clientId, base_seq: this._seq, ops: batch }),
-      });
+      batch = this._takeBatch();
+      const resp = await this._postOps(batch);
       if (resp && resp.ok) {
         const body = await resp.json().catch(() => ({}));
         if (typeof body.seq === 'number') this._seq = body.seq;
@@ -674,8 +731,11 @@ export class SessionSyncClient {
         this._scheduleRetry();
       }
     } catch {
-      // Network error: requeue and back off.
-      this._queue = batch.concat(this._queue);
+      // Network error, abort, or the request timeout: requeue and back off so a
+      // transient stall (or a hung connection the timeout just cancelled) is
+      // retried instead of permanently wedging op delivery. Ops are idempotent,
+      // so re-sending a batch whose response was lost is safe (see R3).
+      if (batch && batch.length) this._queue = batch.concat(this._queue);
       this._scheduleRetry();
     } finally {
       this._flushing = false;
