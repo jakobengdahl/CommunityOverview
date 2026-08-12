@@ -166,9 +166,7 @@ class TestGraphServiceIntegration:
         # A session showing n1 and n2 recovers the edge between them on reload.
         resolved = service.resolve_session_nodes(["n1", "n2"])
         assert {n["id"] for n in resolved["nodes"]} == {"n1", "n2"}
-        assert [(e["source"], e["target"]) for e in resolved["edges"]] == [
-            ("n1", "n2")
-        ]
+        assert [(e["source"], e["target"]) for e in resolved["edges"]] == [("n1", "n2")]
         # The n2->n3 edge is left out: n3 is not a ref, and a half-edge to an
         # absent node cannot be drawn. Its absence is correct, not the bug.
         assert all(e["target"] != "n3" for e in resolved["edges"])
