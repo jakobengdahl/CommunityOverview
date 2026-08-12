@@ -424,7 +424,7 @@ aws ecs create-service \
 
 ### Automatic Build & Publish
 
-The project includes GitHub Actions workflows. Images are published to GitHub Container Registry (GHCR) on every successful push to `dev`, `preview`, or `main`.
+The project includes GitHub Actions workflows. Images are published to GitHub Container Registry (GHCR) on every successful push to `preview` or `prod` (and on version tags). `main` is the integration branch — pushes to it run the tests but publish no image.
 
 | Workflow | File | Description |
 |----------|------|-------------|
@@ -443,26 +443,32 @@ The project includes GitHub Actions workflows. Images are published to GitHub Co
 | Tag | Description |
 |-----|-------------|
 | `sha-<commit>` | Immutable — canonical reference for a specific build |
-| `dev` | Floating — latest successful build from `dev` branch |
-| `latest` | Floating — latest successful build from `main` branch |
+| `dev` | Floating — latest successful build from `preview` branch |
+| `latest` | Floating — latest successful build from `prod` branch |
 
 ### How a Merge Flows
 
 ```
-Developer merges to dev
+Developer opens a PR → merges to main (integration)
          │
          ▼
-CI: tests run (pytest backend/core/tests/)
+CI: tests run — no image is built on main
          │
          ▼
-CI: build job (on success)
+Owner promotes main → preview  (deployment action)
+         │
+         ▼
+CI on preview: build job (on success)
   – builds core image → ghcr.io/jakobengdahl/communityoverview:sha-<sha>
   – builds gateway image → ghcr.io/jakobengdahl/communityoverview-gateway:sha-<sha>
   – pushes floating tag: dev
          │
          ▼
 CI: notify-infra job (if INFRA_DISPATCH_TOKEN configured)
-  – sends repository_dispatch app-release to infra repo
+  – sends repository_dispatch app-release, channel=preview, to infra repo
+         │
+         ▼
+Owner promotes preview → prod  → same flow with channel=prod, floating tag: latest
 ```
 
 See [DEPLOYMENT_CONTRACT.md](./DEPLOYMENT_CONTRACT.md) for the full artifact interface specification.
