@@ -45,29 +45,40 @@ export function useToolResultCommands({ sessionId, opStreamReady, latestViewport
         (n) => n.type !== 'Community' && n.data?.type !== 'Community'
       );
 
+      // Merge returned nodes into the current view (additive placement). Shared
+      // by the explicit add_to_visualization action and the no-explicit-action
+      // default so a plain additive request never clears the canvas.
+      const addNodesToView = () => {
+        if (filtered.length === 0) return;
+        const allEdges = [...currentEdges, ...(toolResult.edges || [])];
+        const vp = latestViewport.current;
+        const viewportCenter = vp
+          ? {
+              x: (window.innerWidth / 2 - vp.x) / vp.zoom,
+              y: (window.innerHeight / 2 - vp.y) / vp.zoom,
+            }
+          : null;
+        const positioned = positionNewNodes(filtered, currentNodes, allEdges, { viewportCenter });
+        addNodes(positioned, toolResult.edges || []);
+      };
+
       if (toolResult.action === 'add_to_visualization') {
-        if (filtered.length > 0) {
-          const allEdges = [...currentEdges, ...(toolResult.edges || [])];
-          const vp = latestViewport.current;
-          const viewportCenter = vp
-            ? {
-                x: (window.innerWidth / 2 - vp.x) / vp.zoom,
-                y: (window.innerHeight / 2 - vp.y) / vp.zoom,
-              }
-            : null;
-          const positioned = positionNewNodes(filtered, currentNodes, allEdges, { viewportCenter });
-          addNodes(positioned, toolResult.edges || []);
-        }
+        addNodesToView();
       } else if (
         toolResult.action === 'load_visualization' ||
-        toolResult.action === 'clear_visualization'
+        toolResult.action === 'clear_visualization' ||
+        toolResult.action === 'replace_visualization'
       ) {
+        // Explicit replace/clear/load: swap the whole view for the results.
         clearViz();
         if (filtered.length > 0) {
           updateViz(filtered, toolResult.edges || []);
         }
       } else if (filtered.length > 0) {
-        updateViz(filtered, toolResult.edges || []);
+        // No explicit view-content action: default to additive so a plain
+        // additive request (or any node-returning tool) never silently clears
+        // the current view.
+        addNodesToView();
       }
     },
     [latestViewport]

@@ -141,6 +141,17 @@ function ChatPanel({ collectionShortName }) {
   // so both entry points behave identically.
   const applyToolResultSideEffects = async (toolResult) => {
     if (!toolResult) return;
+    // Merge returned nodes into the current view (additive placement). Shared by
+    // the explicit add_to_visualization action and the no-explicit-action default
+    // so a plain additive request never clears the canvas.
+    const addNodesToView = (result) => {
+      if (!(result.nodes && result.nodes.length > 0)) return;
+      const filteredNodes = filterCommunityNodes(result.nodes);
+      const currentNodes = useGraphStore.getState().nodes;
+      const allEdges = [...edges, ...(result.edges || [])];
+      const positionedNodes = positionNewNodes(filteredNodes, currentNodes, allEdges);
+      addNodesToVisualization(positionedNodes, result.edges || []);
+    };
     if (toolResult.action === 'save_view' || toolResult.action === 'save_visualization') {
       const viewName = toolResult.name;
       const currentNodes = useGraphStore.getState().nodes;
@@ -165,12 +176,14 @@ function ChatPanel({ collectionShortName }) {
         updateVisualization(filteredNodes, toolResult.edges || []);
       }
     } else if (toolResult.action === 'add_to_visualization') {
+      addNodesToView(toolResult);
+    } else if (toolResult.action === 'replace_visualization') {
+      // Explicit replace/clear-and-add: swap the whole view for the results.
+      // Only an explicit replace clears the canvas — a plain additive request
+      // falls through to the additive default below.
       if (toolResult.nodes && toolResult.nodes.length > 0) {
         const filteredNodes = filterCommunityNodes(toolResult.nodes);
-        const currentNodes = useGraphStore.getState().nodes;
-        const allEdges = [...edges, ...(toolResult.edges || [])];
-        const positionedNodes = positionNewNodes(filteredNodes, currentNodes, allEdges);
-        addNodesToVisualization(positionedNodes, toolResult.edges || []);
+        updateVisualization(filteredNodes, toolResult.edges || []);
       }
     } else if (toolResult.action === 'update_in_visualization') {
       if (toolResult.nodes && toolResult.nodes.length > 0) {
@@ -200,8 +213,11 @@ function ChatPanel({ collectionShortName }) {
         );
       }
     } else if (toolResult.nodes && toolResult.nodes.length > 0) {
-      const filteredNodes = filterCommunityNodes(toolResult.nodes);
-      updateVisualization(filteredNodes, toolResult.edges || []);
+      // No explicit view-content action: default to additive so a plain
+      // additive request (or any node-returning tool) never silently clears the
+      // current view. The view is replaced only on an explicit replace/clear/load
+      // action handled above.
+      addNodesToView(toolResult);
     }
 
     // Execute any pure-action tools that co-occurred with present_form in the same

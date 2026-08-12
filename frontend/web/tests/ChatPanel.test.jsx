@@ -545,6 +545,62 @@ describe('ChatPanel', () => {
     });
   });
 
+  describe('Visualization intent (add vs replace)', () => {
+    const ACTOR = { id: 'a1', type: 'Actor', name: 'SCB' };
+
+    const setupSpies = () => {
+      const addSpy = vi.fn();
+      const updateSpy = vi.fn();
+      const clearSpy = vi.fn();
+      useGraphStore.setState({
+        nodes: [{ id: 'existing', type: 'Goal', name: 'Existing' }],
+        edges: [],
+        addNodesToVisualization: addSpy,
+        updateVisualization: updateSpy,
+        clearVisualization: clearSpy,
+      });
+      return { addSpy, updateSpy, clearSpy };
+    };
+
+    const send = async (toolResult) => {
+      api.sendChatMessage.mockResolvedValueOnce({
+        content: 'Done.',
+        toolUsed: 'search_graph',
+        toolResult,
+      });
+      render(<ChatPanel />);
+      const user = userEvent.setup();
+      await user.type(screen.getByPlaceholderText(/question|fråga|action|åtgärd/i), 'go');
+      await user.click(screen.getByRole('button', { name: /send|skicka/i }));
+      await waitFor(() => expect(screen.getByText('Done.')).toBeInTheDocument());
+    };
+
+    it('add_to_visualization adds nodes and never clears the view', async () => {
+      const { addSpy, updateSpy, clearSpy } = setupSpies();
+      await send({ action: 'add_to_visualization', nodes: [ACTOR], edges: [] });
+      expect(addSpy).toHaveBeenCalledTimes(1);
+      expect(updateSpy).not.toHaveBeenCalled();
+      expect(clearSpy).not.toHaveBeenCalled();
+    });
+
+    it('a plain additive request (no explicit action) adds and never clears', async () => {
+      // Regression: a node-returning search with no explicit action must default
+      // to additive placement, not silently replace the whole view.
+      const { addSpy, updateSpy, clearSpy } = setupSpies();
+      await send({ nodes: [ACTOR], edges: [] });
+      expect(addSpy).toHaveBeenCalledTimes(1);
+      expect(updateSpy).not.toHaveBeenCalled();
+      expect(clearSpy).not.toHaveBeenCalled();
+    });
+
+    it('replace_visualization replaces the whole view', async () => {
+      const { addSpy, updateSpy } = setupSpies();
+      await send({ action: 'replace_visualization', nodes: [ACTOR], edges: [] });
+      expect(updateSpy).toHaveBeenCalledTimes(1);
+      expect(addSpy).not.toHaveBeenCalled();
+    });
+  });
+
   describe('Collection form', () => {
     it('renders an assistant present_form and submits structured answers', async () => {
       useGraphStore.setState({

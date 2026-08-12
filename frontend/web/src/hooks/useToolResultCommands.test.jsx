@@ -149,7 +149,36 @@ describe('useToolResultCommands.applyToolResultCommand', () => {
     expect(store().updateVisualization).not.toHaveBeenCalled();
   });
 
-  it('an unrecognised action with nodes falls back to a full replace', () => {
+  it('replace_visualization clears then replaces the canvas', () => {
+    const { result } = render();
+    act(() =>
+      result.current.applyToolResultCommand(
+        { action: 'replace_visualization', nodes: [{ id: 'n1', type: 'Goal' }], edges: [] },
+        'cmd-1'
+      )
+    );
+    expect(store().clearVisualization).toHaveBeenCalledTimes(1);
+    expect(store().updateVisualization).toHaveBeenCalledWith([{ id: 'n1', type: 'Goal' }], []);
+    expect(store().addNodesToVisualization).not.toHaveBeenCalled();
+  });
+
+  it('no explicit action with nodes defaults to additive, not a full replace', () => {
+    const { result } = render();
+    act(() =>
+      result.current.applyToolResultCommand({ nodes: [{ id: 'n1', type: 'Goal' }] }, 'cmd-1')
+    );
+    // Additive default: nodes are merged in, the existing view is never cleared
+    // or replaced. This is the guard against a plain "add X" wiping the canvas.
+    expect(positionNewNodes).toHaveBeenCalledTimes(1);
+    expect(store().addNodesToVisualization).toHaveBeenCalledWith(
+      [{ id: 'n1', type: 'Goal', positioned: true }],
+      []
+    );
+    expect(store().updateVisualization).not.toHaveBeenCalled();
+    expect(store().clearVisualization).not.toHaveBeenCalled();
+  });
+
+  it('an unrecognised action with nodes defaults to additive (never clears)', () => {
     const { result } = render();
     act(() =>
       result.current.applyToolResultCommand(
@@ -157,7 +186,12 @@ describe('useToolResultCommands.applyToolResultCommand', () => {
         'cmd-1'
       )
     );
-    expect(store().updateVisualization).toHaveBeenCalledWith([{ id: 'n1', type: 'Goal' }], []);
+    expect(store().addNodesToVisualization).toHaveBeenCalledWith(
+      [{ id: 'n1', type: 'Goal', positioned: true }],
+      []
+    );
+    expect(store().updateVisualization).not.toHaveBeenCalled();
+    expect(store().clearVisualization).not.toHaveBeenCalled();
   });
 });
 
