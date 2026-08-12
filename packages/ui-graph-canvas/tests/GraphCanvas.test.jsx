@@ -129,12 +129,13 @@ describe('GraphCanvas', () => {
     expect(edge.className).toBe('react-flow__edge');
   });
 
-  // Frontend half of the "edges missing after reload" invariant: on load the
-  // canvas receives resolved nodes and their edges together, and the visibleEdges
-  // filter must keep every edge whose *both* endpoints are present while dropping
-  // an edge that references an absent node (you cannot draw a half-edge). A filter
-  // that is too strict would drop valid edges on reload; one too loose would leave
-  // dangling edges. This pins the by-endpoint-presence contract both ways.
+  // Endpoint-presence contract behind edge recovery on reload: when a load hands
+  // the canvas resolved nodes and their edges together, the visibleEdges filter
+  // must keep every edge whose *both* endpoints are present and drop an edge that
+  // references an absent node (you cannot draw a half-edge). A filter too strict
+  // would drop valid edges when a session is reloaded; one too loose would leave
+  // dangling edges. This pins the by-endpoint-presence contract both ways. (The
+  // reload glue that feeds resolved edges here is covered in useSharedSession.test.)
   it('renders edges between present nodes and drops edges with an absent endpoint', () => {
     render(
       <GraphCanvas
