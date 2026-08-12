@@ -1794,6 +1794,7 @@ function App() {
             redoNotification: t('context_menu.redo_notification'),
           }}
           nodeColorResolver={getNodeColor}
+          sessionKey={sessionId}
           onViewportChange={(vp) => {
             latestViewport.current = vp;
           }}
