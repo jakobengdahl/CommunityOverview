@@ -18,3 +18,4 @@ ADRs carry only the technical decision.
 | ADR | Title | Status |
 |---|---|---|
 | [0001](0001-local-durable-execution-store.md) | Default local durable execution store | Accepted |
+| [0002](0002-env-backed-secret-provider.md) | Environment-backed default secret provider | Accepted |

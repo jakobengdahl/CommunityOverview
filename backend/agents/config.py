@@ -8,7 +8,7 @@ import os
 import json
 import logging
 from dataclasses import dataclass, field
-from typing import List, Dict, Any, Optional
+from typing import List, Dict, Any, Optional, TYPE_CHECKING
 from enum import Enum
 
 from backend.config.model_profiles import (
@@ -16,6 +16,10 @@ from backend.config.model_profiles import (
     ProfileResolution,
     resolve_profile_reference,
 )
+from backend.agents.secrets import SECRET_REF_PREFIX, resolve_secret_mapping
+
+if TYPE_CHECKING:
+    from backend.agents.secrets import SecretProvider
 
 logger = logging.getLogger(__name__)
 
@@ -170,6 +174,22 @@ class MCPIntegration:
     command: Optional[List[str]] = None
     env: Dict[str, str] = field(default_factory=dict)
     enabled: bool = True
+
+    def resolved_env(
+        self, provider: "SecretProvider", *, required: bool = True
+    ) -> Dict[str, str]:
+        """
+        Return this integration's subprocess ``env`` with secret references
+        resolved through ``provider``.
+
+        Values may be plain literals or ``secret://<name>`` references; literals
+        pass through untouched and references are looked up via the provider just
+        before the environment is handed to a stdio tool subprocess. Resolving an
+        optional reference that is absent (``required=False``) drops that key
+        rather than passing ``None`` into the environment.
+        """
+        resolved = resolve_secret_mapping(self.env, provider, required=required)
+        return {k: v for k, v in resolved.items() if v is not None}
 
     def to_dict(self) -> Dict[str, Any]:
         """Convert to dictionary for serialization."""
@@ -455,9 +475,11 @@ class AgentsSettings:
             )
         )
 
-        # SEARCH: Brave Search MCP (only if API key is available)
-        brave_api_key = os.environ.get("BRAVE_API_KEY")
-        if brave_api_key:
+        # SEARCH: Brave Search MCP (only if the API key is configured).
+        # The env holds a secret *reference*, not the value: it is resolved
+        # through a SecretProvider (see backend/agents/secrets/) at the point the
+        # tool subprocess is launched, so no secret is inlined into config.
+        if os.environ.get("BRAVE_API_KEY"):
             integrations.append(
                 MCPIntegration(
                     id="SEARCH",
@@ -465,7 +487,7 @@ class AgentsSettings:
                     description="Search the web using Brave Search",
                     transport=MCPTransport.STDIO,
                     command=["npx", "-y", "@anthropic/brave-search-mcp"],
-                    env={"BRAVE_API_KEY": brave_api_key},
+                    env={"BRAVE_API_KEY": f"{SECRET_REF_PREFIX}BRAVE_API_KEY"},
                     enabled=True,
                 )
             )
