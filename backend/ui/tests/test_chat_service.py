@@ -864,6 +864,45 @@ class TestToolAllowlist:
         tool_result = result.get("toolResult") or {}
         assert "allowlist" in str(tool_result).lower()
 
+    def test_allowlist_blocks_unlisted_tool_in_tool_chain(self, chat_service):
+        """The gate re-applies on chained tool turns: a disallowed tool requested on
+        the SECOND LLM turn is blocked just like on the first."""
+        service, mock_llm = chat_service
+        akc_node = _make_akc_node(
+            "coll", ACTOR_ONLY_PERMS, tool_allowlist=["search_graph"]
+        )
+        # Turn 1: allowed search_graph → chains to Turn 2: disallowed add_nodes.
+        mock_llm.mock_tool_call_sequence = [
+            [{"name": "search_graph", "input": {"query": "x"}}],
+            [
+                {
+                    "name": "add_nodes",
+                    "input": {
+                        "nodes": [{"type": "Actor", "name": "Chained Agency"}],
+                        "edges": [],
+                    },
+                }
+            ],
+        ]
+        mock_llm.mock_text_response = "done"
+
+        with patch.object(
+            service._graph_service,
+            "search_graph",
+            return_value={"nodes": [akc_node], "edges": [], "total": 1},
+        ):
+            service.process_message(
+                messages=[{"role": "user", "content": "go"}],
+                collection_short_name="coll",
+            )
+
+        # The chained add_nodes call was blocked: no Actor reached the graph.
+        found = service._graph_service.search_graph(query="Chained Agency")
+        assert found["total"] == 0, "Chained disallowed tool executed despite the gate"
+        # Every LLM turn saw only the filtered tool set.
+        for advertised in mock_llm.received_tools:
+            assert {t["name"] for t in advertised} == {"search_graph"}
+
     def test_allowlist_ignored_outside_collection_mode(self, chat_service):
         """Without a collection_short_name the assistant is unrestricted (all tools)."""
         service, mock_llm = chat_service

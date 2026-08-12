@@ -2,7 +2,7 @@
  * @vitest-environment jsdom
  */
 import { describe, it, expect, vi } from 'vitest';
-import { fireEvent, render, screen } from '@testing-library/react';
+import { fireEvent, render, screen, within } from '@testing-library/react';
 import CreateActiveKnowledgeCollectionDialog from './CreateActiveKnowledgeCollectionDialog';
 
 const mockUseGraphStore = vi.fn();
@@ -119,6 +119,32 @@ describe('CreateActiveKnowledgeCollectionDialog', () => {
     const saved = onSave.mock.calls[0][0].metadata.tool_allowlist;
     expect(saved).toContain('search_graph');
     expect(saved).not.toContain('add_nodes');
+  });
+
+  it('blocks saving a restricted allowlist with no tools selected', () => {
+    const onSave = vi.fn();
+    const alertSpy = vi.spyOn(window, 'alert').mockImplementation(() => {});
+    const state = { schema: { node_types: { Actor: {} } } };
+    mockUseGraphStore.mockImplementation((selector) => selector(state));
+
+    render(<CreateActiveKnowledgeCollectionDialog onClose={vi.fn()} onSave={onSave} />);
+
+    fireEvent.change(screen.getByLabelText('Name *'), { target: { value: 'My collection' } });
+    fireEvent.click(screen.getByRole('checkbox', { name: /Restrict which tools/ }));
+
+    // Uncheck every tool in the Assistant Tools section (the first checkbox in
+    // the section is the restrict toggle — leave it on).
+    const section = screen.getByText('Assistant Tools').closest('.form-section');
+    within(section)
+      .getAllByRole('checkbox')
+      .slice(1)
+      .forEach((cb) => fireEvent.click(cb));
+
+    fireEvent.click(screen.getByRole('button', { name: 'Create Collection' }));
+
+    expect(onSave).not.toHaveBeenCalled();
+    expect(alertSpy).toHaveBeenCalled();
+    alertSpy.mockRestore();
   });
 
   it('loads an existing tool_allowlist in edit mode', () => {

@@ -207,6 +207,18 @@ export default function CreateActiveKnowledgeCollectionDialog({ onClose, onSave,
       return;
     }
 
+    // Guard the "empty ⇒ unrestricted" model against a misleading UI outcome:
+    // an enabled restriction with nothing checked would save an empty allowlist,
+    // which the backend treats as "all tools". That inverts the admin's intent,
+    // so require at least one tool or turning the restriction off.
+    const selectedTools = ASSISTANT_TOOLS.filter((t) => allowedTools[t.name]).map((t) => t.name);
+    if (restrictTools && selectedTools.length === 0) {
+      alert(
+        'Select at least one tool, or turn off "Restrict which tools the assistant can use" to allow all tools.'
+      );
+      return;
+    }
+
     const nodeObject = {
       name: name.trim(),
       type: 'ActiveKnowledgeCollection',
@@ -224,10 +236,9 @@ export default function CreateActiveKnowledgeCollectionDialog({ onClose, onSave,
         node_type_permissions: filterExcludedPermissions(nodeTypePermissions),
         // Empty array = unrestricted (all tools). The backend normalizes a
         // falsy/empty allowlist to "no restriction", so turning restriction off
-        // reliably clears any previously stored allowlist on update.
-        tool_allowlist: restrictTools
-          ? ASSISTANT_TOOLS.filter((t) => allowedTools[t.name]).map((t) => t.name)
-          : [],
+        // reliably clears any previously stored allowlist on update. When
+        // restriction is on, selectedTools is guaranteed non-empty (see guard above).
+        tool_allowlist: restrictTools ? selectedTools : [],
       },
     };
 

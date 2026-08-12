@@ -30,11 +30,28 @@ class MockLLMProvider:
 
     def __init__(self):
         self.mock_tool_calls: List[Dict[str, Any]] = []
+        # Optional multi-turn sequence: element N is the list of tool calls the
+        # mock returns on the (N+1)-th create_completion call, enabling tests of
+        # tool-chaining recursion. When set, it takes precedence over
+        # mock_tool_calls; once exhausted the mock returns mock_text_response.
+        self.mock_tool_call_sequence: List[List[Dict[str, Any]]] = None
         self.mock_text_response: str = "Mock response from LLM"
         self.call_count = 0
         self.received_messages: List[List[Dict]] = []
         self.received_system_prompts: List[str] = []
         self.received_tools: List[List[Dict]] = []
+
+    @staticmethod
+    def _tool_use_blocks(tool_calls: List[Dict[str, Any]]) -> List[Dict]:
+        return [
+            {
+                "type": "tool_use",
+                "id": f"mock_tool_{i}",
+                "name": tc["name"],
+                "input": tc.get("input", {}),
+            }
+            for i, tc in enumerate(tool_calls)
+        ]
 
     def create_completion(
         self,
@@ -49,19 +66,25 @@ class MockLLMProvider:
         self.received_tools.append(tools)
         self.call_count += 1
 
+        # Multi-turn sequence takes precedence when configured.
+        if self.mock_tool_call_sequence is not None:
+            turn = self.call_count - 1
+            if turn < len(self.mock_tool_call_sequence):
+                return LLMResponse(
+                    content=self._tool_use_blocks(self.mock_tool_call_sequence[turn]),
+                    stop_reason="tool_use",
+                )
+            return LLMResponse(
+                content=[{"type": "text", "text": self.mock_text_response}],
+                stop_reason="end_turn",
+            )
+
         # First call returns tool calls, subsequent calls return text
         if self.mock_tool_calls and self.call_count == 1:
-            content = []
-            for i, tool_call in enumerate(self.mock_tool_calls):
-                content.append(
-                    {
-                        "type": "tool_use",
-                        "id": f"mock_tool_{i}",
-                        "name": tool_call["name"],
-                        "input": tool_call.get("input", {}),
-                    }
-                )
-            return LLMResponse(content=content, stop_reason="tool_use")
+            return LLMResponse(
+                content=self._tool_use_blocks(self.mock_tool_calls),
+                stop_reason="tool_use",
+            )
         else:
             return LLMResponse(
                 content=[{"type": "text", "text": self.mock_text_response}],
@@ -71,6 +94,7 @@ class MockLLMProvider:
     def reset(self):
         """Reset mock state."""
         self.mock_tool_calls = []
+        self.mock_tool_call_sequence = None
         self.mock_text_response = "Mock response from LLM"
         self.call_count = 0
         self.received_messages = []
