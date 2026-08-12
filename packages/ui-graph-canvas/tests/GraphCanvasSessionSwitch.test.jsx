@@ -3,7 +3,10 @@ import { render, act } from '@testing-library/react';
 import { GraphCanvas } from '../src/index';
 
 // Shared fitView spy so every render returns the *same* mock and the test can
-// assert how many times the canvas refit across a session switch.
+// assert how many times the canvas refit across a session switch. The position
+// side of the switch (a node shared between sessions adopting the new session's
+// coordinates) is covered deterministically by reconcileSessionNodes.test.js;
+// here we pin the viewport half of the fix.
 const hoisted = vi.hoisted(() => ({ fitView: vi.fn() }));
 
 vi.mock('reactflow', () => {
