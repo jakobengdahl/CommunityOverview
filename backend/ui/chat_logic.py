@@ -19,19 +19,21 @@ logger = logging.getLogger(__name__)
 load_dotenv()
 
 # Visualization actions that decide how node/edge results affect the current
-# canvas (add vs. replace vs. clear). These are the only actions that determine
-# view-content placement; pure overlays/side-effects (mark_nodes, present_form,
-# save_view, start_guide, node_pulse) are intentionally excluded so they never
-# override how returned nodes are displayed. When a node-returning tool leaves
-# the action unset, the assistant defaults to additive placement — a plain
-# "add X" request must only add, never silently clear the view. Mirrors the
-# additive default of _push_visualization_command (backend/service/mcp_tools.py).
+# canvas (add vs. replace vs. clear vs. in-place update). These are the only
+# actions that determine view-content placement; pure overlays/side-effects
+# (mark_nodes, present_form, save_view, start_guide, node_pulse) are
+# intentionally excluded so they never override how returned nodes are
+# displayed. When a node-returning tool leaves the action unset, the assistant
+# defaults to additive placement — a plain "add X" request must only add, never
+# silently clear the view. Mirrors the additive default of
+# _push_visualization_command (backend/service/mcp_tools.py).
 _VIEW_CONTENT_ACTIONS = frozenset(
     {
         "add_to_visualization",
         "replace_visualization",
         "load_visualization",
         "clear_visualization",
+        "update_in_visualization",
     }
 )
 

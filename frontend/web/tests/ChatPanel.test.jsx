@@ -599,6 +599,16 @@ describe('ChatPanel', () => {
       expect(updateSpy).toHaveBeenCalledTimes(1);
       expect(addSpy).not.toHaveBeenCalled();
     });
+
+    it('clear-and-add (clear_visualization carrying nodes) clears then shows the nodes', async () => {
+      // "clear the view and show X": the backend emits clear_visualization with
+      // the searched nodes. The view must be cleared AND the nodes rendered.
+      const { addSpy, updateSpy, clearSpy } = setupSpies();
+      await send({ action: 'clear_visualization', nodes: [ACTOR], edges: [] });
+      expect(clearSpy).toHaveBeenCalledTimes(1);
+      expect(updateSpy).toHaveBeenCalledWith([ACTOR], []);
+      expect(addSpy).not.toHaveBeenCalled();
+    });
   });
 
   describe('Collection form', () => {

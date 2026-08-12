@@ -1714,3 +1714,29 @@ class TestVisualizationActionSemantics:
         tr = result["toolResult"]
         assert tr["action"] == "clear_visualization"
         assert any(n.get("name") == "Fresh Agency" for n in tr.get("nodes", []))
+
+    def test_update_node_keeps_in_place_update_action(self, chat_service):
+        # An "edit/rename node X" turn returns update_in_visualization with the
+        # updated node. The additive default must not clobber that action, or the
+        # frontend would add a duplicate instead of merging the node in place.
+        service, mock_llm = chat_service
+        add = service.graph_service.add_nodes(
+            nodes=[{"type": "Actor", "name": "Editable Agency"}], edges=[]
+        )
+        node_id = add["added_node_ids"][0]
+        mock_llm.mock_tool_calls = [
+            {
+                "name": "update_node",
+                "input": {
+                    "node_id": node_id,
+                    "updates": {"description": "Renamed and edited"},
+                },
+            }
+        ]
+        mock_llm.mock_text_response = "Updated the agency."
+
+        result = service.process_message([{"role": "user", "content": "edit it"}])
+
+        tr = result["toolResult"]
+        assert tr["action"] == "update_in_visualization"
+        assert any(n.get("id") == node_id for n in tr.get("nodes", []))

@@ -74,6 +74,17 @@ export function useToolResultCommands({ sessionId, opStreamReady, latestViewport
         if (filtered.length > 0) {
           updateViz(filtered, toolResult.edges || []);
         }
+      } else if (toolResult.action === 'update_in_visualization') {
+        // In-place update: replace matching nodes, keep the rest, append any
+        // genuinely new nodes. Kept in sync with the ChatPanel apply path.
+        if (filtered.length > 0) {
+          const updatedIds = new Set(filtered.map((n) => n.id));
+          const merged = currentNodes.map((n) =>
+            updatedIds.has(n.id) ? filtered.find((u) => u.id === n.id) : n
+          );
+          const newNodes = filtered.filter((n) => !currentNodes.some((cn) => cn.id === n.id));
+          updateViz([...merged, ...newNodes], currentEdges);
+        }
       } else if (filtered.length > 0) {
         // No explicit view-content action: default to additive so a plain
         // additive request (or any node-returning tool) never silently clears

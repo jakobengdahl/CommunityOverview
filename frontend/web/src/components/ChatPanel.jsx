@@ -168,23 +168,22 @@ function ChatPanel({ collectionShortName }) {
       } catch (err) {
         console.error('[ChatPanel] Failed to save view:', err);
       }
-    } else if (toolResult.action === 'clear_visualization') {
+    } else if (
+      toolResult.action === 'clear_visualization' ||
+      toolResult.action === 'load_visualization' ||
+      toolResult.action === 'replace_visualization'
+    ) {
+      // Explicit clear/replace/load: swap the whole view for the results. Clear
+      // first so a clear-and-add turn (clear_visualization carrying nodes) shows
+      // the new nodes, and an empty replace ends up empty. Kept identical to the
+      // useToolResultCommands path so both delivery channels behave the same.
       clearVisualization();
-    } else if (toolResult.action === 'load_visualization') {
       if (toolResult.nodes && toolResult.nodes.length > 0) {
         const filteredNodes = filterCommunityNodes(toolResult.nodes);
         updateVisualization(filteredNodes, toolResult.edges || []);
       }
     } else if (toolResult.action === 'add_to_visualization') {
       addNodesToView(toolResult);
-    } else if (toolResult.action === 'replace_visualization') {
-      // Explicit replace/clear-and-add: swap the whole view for the results.
-      // Only an explicit replace clears the canvas — a plain additive request
-      // falls through to the additive default below.
-      if (toolResult.nodes && toolResult.nodes.length > 0) {
-        const filteredNodes = filterCommunityNodes(toolResult.nodes);
-        updateVisualization(filteredNodes, toolResult.edges || []);
-      }
     } else if (toolResult.action === 'update_in_visualization') {
       if (toolResult.nodes && toolResult.nodes.length > 0) {
         const {

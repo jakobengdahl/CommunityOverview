@@ -178,6 +178,29 @@ describe('useToolResultCommands.applyToolResultCommand', () => {
     expect(store().clearVisualization).not.toHaveBeenCalled();
   });
 
+  it('update_in_visualization merges updated nodes in place and appends new ones', () => {
+    const { result } = render();
+    act(() =>
+      result.current.applyToolResultCommand(
+        {
+          action: 'update_in_visualization',
+          nodes: [
+            { id: 'existing', type: 'Goal', name: 'Renamed' },
+            { id: 'n2', type: 'Goal' },
+          ],
+          edges: [],
+        },
+        'cmd-1'
+      )
+    );
+    expect(store().updateVisualization).toHaveBeenCalledTimes(1);
+    const [nodesArg] = store().updateVisualization.mock.calls[0];
+    expect(nodesArg.map((n) => n.id)).toEqual(['existing', 'n2']);
+    expect(nodesArg.find((n) => n.id === 'existing').name).toBe('Renamed');
+    expect(store().addNodesToVisualization).not.toHaveBeenCalled();
+    expect(store().clearVisualization).not.toHaveBeenCalled();
+  });
+
   it('an unrecognised action with nodes defaults to additive (never clears)', () => {
     const { result } = render();
     act(() =>
