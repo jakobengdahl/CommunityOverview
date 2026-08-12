@@ -340,6 +340,7 @@ The default API prefix is `/api` (configurable via `API_PREFIX`).
 | GET | `/api/presentation` | Get presentation config |
 | GET | `/api/capabilities` | Get service capabilities |
 | GET | `/api/export` | Export graph data |
+| GET | `/api/{custom-path}` | Config-driven dedicated interface for one node/edge type (see Custom REST Interfaces below). Registered only for configured types. |
 | POST | `/api/views/save` | Save a named graph view |
 | GET | `/api/views/{name}` | Get a saved view |
 | GET | `/api/views` | List saved views |
@@ -351,6 +352,69 @@ The default API prefix is `/api` (configurable via `API_PREFIX`).
 | POST | `/agents/proposals/{proposal_id}/approve` | Approve a proposal (applies the action for act_after_approval agents) |
 | POST | `/agents/proposals/{proposal_id}/reject` | Reject a proposal |
 | POST | `/agents/{id}/trigger` | Fire a scheduled agent immediately (used by GCP Cloud Scheduler) |
+
+### Custom REST Interfaces (config-driven)
+
+A specific node type or edge type can be exposed as its own dedicated read-only
+`GET` endpoint that bypasses the generic node/edge interface and returns only
+entities of that type, optionally narrowed by tag/subtype filters. This is
+driven entirely from the open-core schema config file — the `rest_interfaces`
+top-level array in `schema_config.json`. It is empty by default (no dedicated
+endpoints; only the generic interface is exposed), so this is a purely additive,
+backward-compatible config surface — it does **not** change node/relationship
+types and is not a schema breaking-change.
+
+Each entry:
+
+| Field | Default | Meaning |
+|-------|---------|---------|
+| `path` | — (required) | URL segment appended to the API prefix, e.g. `actors` → `GET /api/actors`. Lowercase alphanumeric with `-`, `_`, `/` separators. |
+| `entity` | `node` | `node` or `edge`. |
+| `node_type` | `""` | Node type to expose (required when `entity` is `node`). |
+| `edge_type` | `""` | Edge/relationship type to expose (required when `entity` is `edge`). |
+| `enabled` | `true` | Set `false` to keep the config but not register the route. |
+| `limit` | `500` | Max entities returned (1–5000). |
+| `filters.tags_all` | `[]` | AND filter — the entity must carry **every** listed tag. |
+| `filters.tags_any` | `[]` | OR filter — the entity must carry **at least one** listed tag. |
+| `filters.subtypes_any` | `[]` | OR filter on node subtypes (ignored for edges). |
+
+`tags_all` and `tags_any` combine with AND (an entity must pass both). Edges have
+no `tags` field, so edge tag filters match against `edge.metadata["tags"]` (a
+list, when present).
+
+`node_type` / `edge_type` are matched by exact canonical type name (case
+sensitive, no alias resolution). A malformed entry (bad `path`/`entity`, or a
+`node`/`edge` entry missing its `node_type`/`edge_type`) is skipped with a logged
+warning; it never disables the rest of the config or the other interfaces.
+
+Example — expose `Actor` nodes at `/api/actors`, returning only actors tagged
+`approved` **or** `processing`:
+
+```json
+{
+  "schema": { "...": "..." },
+  "rest_interfaces": [
+    {
+      "path": "actors",
+      "entity": "node",
+      "node_type": "Actor",
+      "filters": { "tags_any": ["approved", "processing"] }
+    }
+  ]
+}
+```
+
+The response mirrors the generic search shape (`nodes`, `edges`, `total`) — for
+node interfaces, edges connecting two returned nodes are included; for edge
+interfaces, the endpoint returns `edges` plus their endpoint `nodes`.
+
+**Access parity:** dedicated interfaces apply the same read authorization and
+graph-scope narrowing as the generic interface (`GRAPH_ACTION_READ`), so a
+dedicated endpoint never returns more than a generic search under the same
+request scope. Edges are returned only when both endpoint nodes are visible.
+
+The SaaS/hosted layer can drive this same mechanism from a user-defined GUI
+config; the open-core core reads only the config file.
 
 ### Shared Session Endpoints
 
