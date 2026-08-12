@@ -11,7 +11,11 @@ reconnect catch-up.
 
 import pytest
 
-from backend.core.session_store import InMemorySessionPersistenceBackend, SessionStore
+from backend.core.session_store import (
+    FileSessionPersistenceBackend,
+    InMemorySessionPersistenceBackend,
+    SessionStore,
+)
 from backend.core.session_manager import SessionManager
 
 pytestmark = pytest.mark.asyncio
@@ -119,6 +123,69 @@ class TestTwoClientsOneSession:
         assert any(
             e.get("op", {}).get("op") == "session_renamed" for e in await _drain(sub_b)
         )
+
+    async def test_sustained_moves_persist_mirror_and_survive_reload(self, tmp_path):
+        """Node moves keep persisting + mirroring after a long op sequence.
+
+        Backbone invariant behind the "shared session silently loses node-move
+        persistence over time" bug: after a sustained sequence of ops (here well
+        past the 500-op ring buffer, from both clients), every node's latest
+        position must be (a) converged in server state, (b) delivered to *both*
+        clients, and (c) reloadable from disk by a fresh store — the exact three
+        things the founder report found broken ("not reflected in the other
+        client's view … reloading shows none of the moves were stored").
+        """
+        # Generous rate limit so the tight loop measures persistence/mirroring,
+        # not the per-client token bucket (which real drag cadence never hits).
+        mgr = SessionManager(
+            SessionStore(FileSessionPersistenceBackend(tmp_path)),
+            bucket_capacity=100_000,
+            bucket_refill_per_sec=100_000,
+        )
+        sid = mgr.create_session(name="Shared").id
+        sub_a, _ = mgr.connect(sid, "A", "Alice")
+        sub_b, _ = mgr.connect(sid, "B", "Bob")
+        await _drain(sub_a)
+        await _drain(sub_b)
+
+        await mgr.apply_ops(
+            sid,
+            "A",
+            0,
+            [{"op": "nodes_added", "node_ids": [f"n{i}" for i in range(5)]}],
+        )
+
+        last: dict[str, dict[str, float]] = {}
+        moves = 600  # > ring_size (500): forces the ring to trim mid-session
+        for i in range(moves):
+            who = "A" if i % 2 == 0 else "B"
+            nid = f"n{i % 5}"
+            pos = {"x": float(i), "y": float(i * 2)}
+            await mgr.apply_ops(
+                sid, who, None, [{"op": "node_moved", "node_id": nid, "position": pos}]
+            )
+            last[nid] = pos
+
+        # (a) Server state converged to each node's final move.
+        state = mgr.get_session(sid).state
+        for nid, pos in last.items():
+            assert state["positions"][nid] == pos
+
+        # (b) Both clients received every move (fan-out never stopped).
+        a_moves = [
+            e for e in await _drain(sub_a) if e.get("op", {}).get("op") == "node_moved"
+        ]
+        b_moves = [
+            e for e in await _drain(sub_b) if e.get("op", {}).get("op") == "node_moved"
+        ]
+        assert len(a_moves) == moves
+        assert len(b_moves) == moves
+
+        # (c) A fresh store (simulating a browser reload / process restart) reads
+        # the persisted positions back from disk.
+        reloaded = SessionStore(FileSessionPersistenceBackend(tmp_path)).get(sid)
+        for nid, pos in last.items():
+            assert reloaded.state["positions"][nid] == pos
 
     async def test_reconnect_catches_up_missed_ops(self):
         mgr = _manager()
