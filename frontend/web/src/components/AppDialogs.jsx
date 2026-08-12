@@ -5,6 +5,8 @@ import InputDialog from './InputDialog';
 import CreateSubscriptionDialog from './CreateSubscriptionDialog';
 import CreateSkillDialog from './CreateSkillDialog';
 import CreateAgentDialog from './CreateAgentDialog';
+import AgentRunsDialog from './AgentRunsDialog';
+import AgentProposalsDialog from './AgentProposalsDialog';
 import CreateActiveKnowledgeCollectionDialog from './CreateActiveKnowledgeCollectionDialog';
 import EditEdgeDialog from './EditEdgeDialog';
 import NodeDetailDialog from './NodeDetailDialog';
@@ -65,6 +67,14 @@ function AppDialogs({
     setShowAgentDialog,
     editingAgentData,
     setEditingAgentData,
+    showAgentRunsDialog,
+    setShowAgentRunsDialog,
+    agentRunsAgentId,
+    onViewAgentRuns,
+    showAgentProposalsDialog,
+    setShowAgentProposalsDialog,
+    agentProposalsAgentId,
+    onViewAgentProposals,
     skillDialogType,
     setSkillDialogType,
     editingSkillData,
@@ -104,6 +114,7 @@ function AppDialogs({
       {detailNode && (
         <NodeDetailDialog
           node={detailNode}
+          initialView={detailNode.view}
           onClose={closeDetailNode}
           onEdit={(nodeId, nodeData) => {
             closeDetailNode();
@@ -167,7 +178,7 @@ function AppDialogs({
         <InputDialog
           title={t('sessions.connect_session_title')}
           label={t('sessions.connect_session_label')}
-          placeholder="1234-5678"
+          placeholder={t('sessions.connect_session_placeholder')}
           confirmText={t('sessions.connect')}
           cancelText={t('common.cancel')}
           onConfirm={onConnectSession}
@@ -237,6 +248,19 @@ function AppDialogs({
           }}
           onSave={onSaveAgent}
           initialData={editingAgentData}
+          onViewRuns={onViewAgentRuns}
+          onViewProposals={onViewAgentProposals}
+        />
+      )}
+
+      {showAgentRunsDialog && (
+        <AgentRunsDialog agentId={agentRunsAgentId} onClose={() => setShowAgentRunsDialog(false)} />
+      )}
+
+      {showAgentProposalsDialog && (
+        <AgentProposalsDialog
+          agentId={agentProposalsAgentId}
+          onClose={() => setShowAgentProposalsDialog(false)}
         />
       )}
 

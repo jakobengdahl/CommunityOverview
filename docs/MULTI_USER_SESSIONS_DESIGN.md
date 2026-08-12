@@ -17,6 +17,12 @@ the open core. Each implementation step below is sized to be executed by one
 development session as one branch + one PR against `dev`, following the Standard
 Development Workflow in `CLAUDE.md`. Update the step status table as steps complete.
 
+**Related contract:** the MCP-facing session **lifecycle, ownership seam and
+canonical deep-link** semantics (assistant-created sessions, CRUD tools and the
+server-generated `?session=<id>` URL) are specified in
+[`MCP_SESSION_LIFECYCLE_CONTRACT.md`](MCP_SESSION_LIFECYCLE_CONTRACT.md). The
+session-store data model here remains authoritative where the two overlap.
+
 ---
 
 ## 1. Goal
@@ -153,6 +159,7 @@ Op catalogue (v1):
 |---|---|---|
 | `nodes_added` / `nodes_removed` | node_ids | set union / set removal, idempotent |
 | `node_moved` | node_id, position | LWW per node (server arrival order) |
+| `edges_added` | edges | fan-out only — broadcast to all subscribers, no session state mutated (edges live in the graph, R14); a peer whose node set is unchanged never re-hydrates, so a drag-drawn edge between two present nodes needs this to render for everyone |
 | `nodes_hidden` / `nodes_shown`, `edges_hidden` / `edges_shown` | ids | set ops, idempotent |
 | `annotation_created` / `annotation_updated` / `annotation_deleted` | annotation | LWW per annotation id; update on deleted annotation is dropped |
 | `group_membership_changed` | group_id, member_node_ids | LWW per group |

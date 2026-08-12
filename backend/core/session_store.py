@@ -50,6 +50,7 @@ STATE_OPS = {
     "node_moved",
     "nodes_hidden",
     "nodes_shown",
+    "edges_added",
     "edges_hidden",
     "edges_shown",
     "annotation_created",
@@ -457,6 +458,21 @@ class SessionStore:
             self._backend.save(session.to_dict())
             self._meta_cache = None
 
+    def persist_snapshot(self, snapshot: Dict[str, Any]) -> None:
+        """Persist a pre-serialised, fully-detached session dict.
+
+        ``persist`` reads ``session.state`` lazily inside the call, so when the
+        caller offloads it to a worker thread (``apply_ops`` does) the worker
+        iterates live state the event loop may still be mutating — a cross-thread
+        data race the moment a second, loop-thread writer (e.g. the synchronous
+        MCP ``apply_layout`` path) touches the same session during the flush. A
+        snapshot deep-copied on the loop thread hands the worker an immutable
+        object, so the two writers never share mutable state.
+        """
+        with self._lock:
+            self._backend.save(snapshot)
+            self._meta_cache = None
+
     def session_count(self) -> int:
         """Number of sessions that exist, on disk or in memory (R13).
 
@@ -521,6 +537,24 @@ class SessionStore:
             state["hidden_node_ids"] = _remove_all(
                 state["hidden_node_ids"], _require_id_list(op, "node_ids")
             )
+        elif op_type == "edges_added":
+            # Manually drawn edges live in the graph itself, not in session
+            # state (R14): a fresh hydration of the referenced nodes recovers
+            # them via get_node_details. This op therefore stores nothing — it
+            # exists only to fan a live edge creation out to *already-connected*
+            # clients, whose canvases would otherwise never re-render it because
+            # no node was added (nothing triggers a re-hydration). The applied
+            # op carries the edge payload straight through to subscribers.
+            edges = op.get("edges")
+            if not isinstance(edges, list):
+                raise OpError("edges_added requires an 'edges' list")
+            # Validate at the ingress boundary like every sibling op: each edge
+            # must be an object with a string id (peers key/dedupe on it). Junk
+            # here would otherwise be broadcast straight to every subscriber.
+            for edge in edges:
+                if not isinstance(edge, dict) or not isinstance(edge.get("id"), str):
+                    raise OpError("each edge in edges_added requires a string 'id'")
+            applied["edges"] = edges
         elif op_type == "edges_hidden":
             state["hidden_edge_ids"] = _union(
                 state["hidden_edge_ids"], _require_id_list(op, "edge_ids")

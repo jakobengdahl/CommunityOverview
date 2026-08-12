@@ -137,6 +137,50 @@ class TestGraphServiceIntegration:
         # Both edges should be gone
         assert len(storage.edges) == 0
 
+    def test_resolve_session_nodes_recovers_edges_on_reload(self, temp_dir):
+        """Reloading a session re-renders edges purely by resolving its node_refs.
+
+        Regression for "edges sometimes missing after reloading a session". Edges
+        are not persisted in shared-session state (the ``edges_added`` op stores
+        none — #323); a reload recovers them solely through
+        ``resolve_session_nodes``, which returns every graph edge whose *both*
+        endpoints are in the reloaded node_refs. This is the load-bearing invariant
+        behind that design, and it had no test at any layer.
+        """
+        json_path = os.path.join(temp_dir, "test.json")
+        storage = GraphStorage(json_path=json_path)
+        service = GraphService(storage)
+
+        service.add_nodes(
+            nodes=[
+                {"id": "n1", "type": "Actor", "name": "A"},
+                {"id": "n2", "type": "Initiative", "name": "B"},
+                {"id": "n3", "type": "Capability", "name": "C"},
+            ],
+            edges=[
+                {"source": "n1", "target": "n2", "type": "BELONGS_TO"},
+                {"source": "n2", "target": "n3", "type": "PART_OF"},
+            ],
+        )
+
+        # A session showing n1 and n2 recovers the edge between them on reload.
+        resolved = service.resolve_session_nodes(["n1", "n2"])
+        assert {n["id"] for n in resolved["nodes"]} == {"n1", "n2"}
+        assert [(e["source"], e["target"]) for e in resolved["edges"]] == [("n1", "n2")]
+        # The n2->n3 edge is left out: n3 is not a ref, and a half-edge to an
+        # absent node cannot be drawn. Its absence is correct, not the bug.
+        assert all(e["target"] != "n3" for e in resolved["edges"])
+
+        # An edge whose other endpoint is not in the session is not recovered.
+        assert service.resolve_session_nodes(["n1"])["edges"] == []
+
+        # A stale ref (node deleted from the graph) is skipped and drops its edges
+        # rather than erroring — the resolve stays robust across a reload.
+        service.delete_nodes(["n2"], confirmed=True)
+        after = service.resolve_session_nodes(["n1", "n2"])
+        assert {n["id"] for n in after["nodes"]} == {"n1"}
+        assert after["edges"] == []
+
     def test_statistics_reflect_actual_data(self, temp_dir):
         """Test that statistics accurately reflect the current state."""
         json_path = os.path.join(temp_dir, "test.json")

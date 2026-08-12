@@ -183,38 +183,6 @@
   letter-spacing: 0.04em;
 }
 
-.session-drawer-session-rename,
-.session-drawer-session-delete {
-  background: transparent;
-  border: none;
-  color: #666;
-  cursor: pointer;
-  padding: 6px 8px;
-  display: flex;
-  align-items: center;
-  border-radius: 6px;
-  flex-shrink: 0;
-  opacity: 0;
-  transition:
-    color 0.15s,
-    opacity 0.15s;
-}
-
-.session-drawer-session:hover .session-drawer-session-rename,
-.session-drawer-session:hover .session-drawer-session-delete,
-.session-drawer-session-rename:focus-visible,
-.session-drawer-session-delete:focus-visible {
-  opacity: 1;
-}
-
-.session-drawer-session-rename:hover {
-  color: #ccc;
-}
-
-.session-drawer-session-delete:hover {
-  color: #e06c6c;
-}
-
 .session-drawer-footer {
   border-top: 1px solid #333;
   padding: 8px;

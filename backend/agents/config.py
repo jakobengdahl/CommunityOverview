@@ -6,9 +6,18 @@ Defines settings for agents, MCP integrations, and global agent system configura
 
 import os
 import json
+import logging
 from dataclasses import dataclass, field
 from typing import List, Dict, Any, Optional
 from enum import Enum
+
+from backend.config.model_profiles import (
+    ModelProfile,
+    ProfileResolution,
+    resolve_profile_reference,
+)
+
+logger = logging.getLogger(__name__)
 
 _WEEKDAY_NAMES: Dict[str, int] = {
     "monday": 0,
@@ -204,11 +213,19 @@ class AgentConfig:
     mcp_integration_ids: List[str] = field(default_factory=list)
     prompts: AgentPrompts = field(default_factory=AgentPrompts)
     tool_allowlist: Optional[List[str]] = None
+    # Governance: observe | assist | propose | act_after_approval. Unset falls
+    # back to the governed default (act_after_approval) — mutating actions
+    # require human approval.
+    autonomy_level: str = "act_after_approval"
     # Skills: URLs to SKILL.md files or GitHub repos (loaded at runtime)
     skills_urls: List[str] = field(default_factory=list)
     # Skill node IDs in the graph (linked via USES_SKILL edges)
     skill_node_ids: List[str] = field(default_factory=list)
     schedule: Optional[AgentSchedule] = None
+    # Explicit model profile id (see backend/config/model_profiles.py). When
+    # None, the agent inherits the application default profile — or, when no
+    # profiles are configured at all, the legacy AgentsSettings LLM fields.
+    model_profile_id: Optional[str] = None
 
     @classmethod
     def from_node(cls, node: Any) -> "AgentConfig":
@@ -236,9 +253,11 @@ class AgentConfig:
             mcp_integration_ids=metadata.get("mcp_integration_ids", []),
             prompts=AgentPrompts.from_dict(prompts_data),
             tool_allowlist=metadata.get("tool_allowlist"),
+            autonomy_level=metadata.get("autonomy_level") or "act_after_approval",
             skills_urls=metadata.get("skills_urls", []),
             skill_node_ids=metadata.get("skill_node_ids", []),
             schedule=AgentSchedule.from_dict(metadata.get("schedule") or {}),
+            model_profile_id=metadata.get("model_profile_id"),
         )
 
     def to_dict(self) -> Dict[str, Any]:
@@ -251,9 +270,11 @@ class AgentConfig:
             "mcp_integration_ids": self.mcp_integration_ids,
             "prompts": {"task_prompt": self.prompts.task_prompt},
             "tool_allowlist": self.tool_allowlist,
+            "autonomy_level": self.autonomy_level,
             "skills_urls": self.skills_urls,
             "skill_node_ids": self.skill_node_ids,
             "schedule": self.schedule.to_dict() if self.schedule else None,
+            "model_profile_id": self.model_profile_id,
         }
 
 
@@ -278,6 +299,21 @@ class AgentsSettings:
     mcp_integrations: List[MCPIntegration] = field(default_factory=list)
     max_agent_turns: int = 10  # Max LLM turns per event processing
     event_timeout: float = 60.0  # Timeout for processing a single event
+    # Durable AgentRun history: path to the SQLite file the run-history store
+    # writes to. When unset, run history is kept in a volatile in-memory store
+    # (lost on restart) so standalone/dev runs need no file.
+    run_history_db: Optional[str] = None
+    # Durable agent proposals (governance): path to the SQLite file the proposal
+    # store writes to. When unset, proposals live in a volatile in-memory store.
+    governance_db: Optional[str] = None
+    # Named model profiles (see backend/config/model_profiles.py). Empty by
+    # default — that is the legacy single-provider mode using the fields
+    # above (llm_provider / llm_model / openai_api_key / anthropic_api_key).
+    model_profiles: List[ModelProfile] = field(default_factory=list)
+
+    def resolve_model_profile(self, profile_id: Optional[str]) -> ProfileResolution:
+        """Resolve an agent's (optional) explicit model_profile_id against configured profiles."""
+        return resolve_profile_reference(self.model_profiles, profile_id)
 
     @classmethod
     def from_env(cls) -> "AgentsSettings":
@@ -296,6 +332,10 @@ class AgentsSettings:
             MCP_INTEGRATIONS: JSON array of integration configs (optional)
             AGENTS_MAX_TURNS: Max LLM turns per event (default: 10)
             AGENTS_EVENT_TIMEOUT: Event processing timeout in seconds (default: 60)
+            AGENTS_RUN_HISTORY_DB: Path to the SQLite file for durable AgentRun
+                history (optional; in-memory/volatile when unset)
+            AGENTS_GOVERNANCE_DB: Path to the SQLite file for durable agent
+                proposals (optional; in-memory/volatile when unset)
         """
         # Parse enabled flag
         enabled_str = os.environ.get("AGENTS_ENABLED", "false").lower()
@@ -339,6 +379,16 @@ class AgentsSettings:
         if not mcp_integrations:
             mcp_integrations = cls._get_default_integrations()
 
+        # Model profiles live in schema_config.json, not environment variables.
+        # Import lazily to avoid a module import cycle at startup.
+        try:
+            from backend.config import config_loader
+
+            model_profiles = config_loader.get_model_profiles()
+        except Exception as exc:
+            print(f"Warning: Failed to load model profiles for agents: {exc}")
+            model_profiles = []
+
         return cls(
             enabled=enabled,
             scheduler_enabled=scheduler_enabled,
@@ -349,6 +399,9 @@ class AgentsSettings:
             mcp_integrations=mcp_integrations,
             max_agent_turns=int(os.environ.get("AGENTS_MAX_TURNS", "10")),
             event_timeout=float(os.environ.get("AGENTS_EVENT_TIMEOUT", "60")),
+            model_profiles=model_profiles,
+            run_history_db=os.environ.get("AGENTS_RUN_HISTORY_DB") or None,
+            governance_db=os.environ.get("AGENTS_GOVERNANCE_DB") or None,
         )
 
     @staticmethod

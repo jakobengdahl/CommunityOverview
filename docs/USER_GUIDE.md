@@ -16,6 +16,7 @@ shared knowledge graphs. This guide covers all user-facing features.
    - [Groups and annotations](#25-groups-and-annotations)
    - [Saved views](#26-saved-views)
    - [Agents](#27-agents)
+   - [Recent nodes (navigation trail)](#28-recent-nodes-navigation-trail)
 3. [Search](#3-search)
 4. [AI Chat](#4-ai-chat)
    - [Asking questions](#41-asking-questions)
@@ -33,6 +34,7 @@ shared knowledge graphs. This guide covers all user-facing features.
    - [Available MCP tools](#81-available-mcp-tools)
    - [Connecting](#82-connecting)
    - [Live visualization control via session ID](#83-live-visualization-control-via-session-id)
+   - [External pulse triggers](#84-external-pulse-triggers)
 
 ---
 
@@ -84,6 +86,20 @@ node. A dialog lets you select the relationship type.
 ![Edge creation](images/create-edge.png)
 *Hover over a node to reveal the connection handle (small circle), then drag to the target node to create an edge.*
 
+**Edge appearance:** Right-click an edge → **Edit** to open the connection dialog.
+Besides the relationship type and label, the **Appearance** section
+lets you control how the edge is drawn on the canvas:
+
+- **Direction** — draw an arrowhead toward the target, toward the source, at both ends,
+  or none.
+- **Arrowhead** — filled or open arrow style.
+- **Thickness** — line width from 1 to 12 px.
+- **Custom colour** — override the default grey with any colour (the arrowheads follow it).
+- **Animate (pulse)** — animate the edge with a flowing, pulsing stroke instead of a
+  static line.
+
+Edges without any appearance settings keep the default look (thin grey line, no arrows).
+
 ### 2.3 Editing and deleting
 
 **Edit:** Double-click a node to open its detail dialog, then click **Edit**. All
@@ -104,9 +120,17 @@ Right-clicking a node opens the context menu:
 - **Expand** — load all nodes directly connected to this node into the canvas
 - **Select all nodes of the same type** — select every node of this node's type across the
   whole visualization, including ones scrolled outside the current viewport
+- **Select related nodes** — select this node together with every node it is directly
+  connected to
+- **View change history** — open the node's detail dialog straight to its **History** tab,
+  showing the read-only change log for that node (see [5.2](#52-recent-activity-audit-log)).
+  When the deployment retains no history for the node, the tab shows a "no history" message.
 - **Custom actions** — schema-defined items per node type, e.g. "Open in SSPCloud" that
   substitutes a field value into a URL and opens it in a new tab
 - **Delete** — remove the node permanently (shown in red, requires confirmation)
+
+Newly added nodes (for example from **Expand**) are placed next to the node you expanded
+from, rather than stacking at the top-left corner.
 
 ![Context menu](images/context-menu.png)
 *Context menu on a ProductionSolution node. "Open in SSPCloud" is a custom action defined in the schema's `context_menu` configuration.*
@@ -116,9 +140,18 @@ Right-clicking on the **canvas background** offers quick-create options:
 - Create Agent
 
 Right-clicking a **selection of multiple nodes** shows bulk actions: Show only these,
-Select all nodes of the same type, Hide all, Delete all. "Select all nodes of the same
-type" extends the selection to every node whose type matches any type already in the
-selection.
+Select all nodes of the same type, Organize, Hide all, Delete all. "Select all nodes of the
+same type" extends the selection to every node whose type matches any type already in the
+selection. **Organize** arranges the selected nodes — Auto-tidy, Cluster, List horizontally,
+List vertically, or Arrange as tree — keeping them centred where they already sit.
+**Auto-tidy** is the one-click option: it picks a sensible structure for you — a tree when
+the selected nodes are connected in a hierarchy, otherwise a per-type grouping — and always
+lays them out overlap-free. The same arrangements are available from the keyboard: press
+**Ctrl/Cmd+O** with a multi-selection, then **A** (auto-tidy), **C** (cluster), **H**
+(horizontal), **V** (vertical) or **T** (tree).
+
+Moving nodes can be undone: **Ctrl/Cmd+Z** reverses the last node move (a drag or an
+Organize arrangement), and **Ctrl/Cmd+Shift+Z** (or **Ctrl/Cmd+Y**) reapplies it.
 
 ### 2.5 Groups and annotations
 
@@ -185,6 +218,23 @@ react to all node type changes).
 
 Agents appear as Agent nodes in the graph. Double-clicking opens the detail dialog
 where you can click **Edit**; right-click gives the same options via the context menu.
+
+### 2.8 Recent nodes (navigation trail)
+
+As you work, a **Recent nodes** button appears at the bottom-centre of the canvas
+once anything has happened. It keeps a short, session-scoped trail of the nodes you
+have **added** to the visualization (for example through search or *find related*)
+and the ones you have **visited** — navigated to from search or opened via
+double-click.
+
+Click the button to expand the trail (newest first). Each entry shows the node's
+name, whether it was added or visited, and how long ago. **Click an entry to jump
+back to that node** — the canvas re-centres on it. Use the trash icon to clear the
+trail, or **Esc** to close the panel.
+
+This trail is per-session and lives only in your browser. It is separate from
+**Recent activity** ([5.2](#52-recent-activity-audit-log)), which is a persisted
+audit log of who changed what in the graph data.
 
 ---
 
@@ -329,6 +379,13 @@ the responses for a collection can be compiled into simple aggregations or
 statistics later (for example, counts per option). Ask the collection owner's
 assistant to summarise the responses to see this in action.
 
+By default, each CollectionResponse is also linked to every node the assistant
+created or updated while handling that submission — so a submission that adds five
+new organisations and updates three existing ones links the response to all eight.
+This makes it easy to review the outcome of a single submission from its response
+node. The collection owner can turn this off with the **Link created and updated
+nodes to the response** option when creating or editing the collection.
+
 Free-text answers still work at any time; the structured controls are offered only
 where they make a question easier to answer.
 
@@ -352,18 +409,24 @@ AI apps:
 |------|--------|
 | **Start new session** | Saves the current session automatically and opens a fresh, empty one |
 | **Search previous sessions** | Filters the recent-session list by name or ID |
-| **Connect to session (via ID)** | Joins an existing session by entering its ID (format `1234-5678`) |
-| **Recent sessions** | The most recently used sessions — shown by name if you have named them, otherwise by ID. Click one to load it; the current session is saved automatically first. Use the pencil icon to name a session, or the trash icon to delete it. |
+| **Connect to session (via ID)** | Joins an existing session by entering its ID (format `1234-5678-9012-3456`) |
+| **Recent sessions** | The most recently used sessions — shown by name if you have named them, otherwise by ID. Click one to load it; the current session is saved automatically first. Hover a row and open the **⋮** menu for per-session actions: **Name session**, **Copy link** (copies the shareable `?session=…` URL to the clipboard), **Copy pulse-trigger URL** (on the session you are currently in — see [8.4](#84-external-pulse-triggers)), and **Delete session**. |
 | **Recent activity** | Opens the activity panel — a read-only audit log of graph changes (see [5.2](#52-recent-activity-audit-log)) |
+| **Lock / Unlock visualization** | Guards the current board against accidental clearing. While locked, **Esc × 2** does nothing at all, and the top-bar **clear** button asks for an emphatic confirmation warning that everything on the board will be removed. The setting is remembered in your browser. |
 | **Settings** | Opens the Settings dialog (see below) |
 
 Session content (node membership, positions, groups, and hidden nodes) is stored
 **on the server**, so a session can be shared with others: the active session ID
-is kept in the page URL (`?session=1234-5678`), and anyone who opens that URL —
+is kept in the page URL (`?session=1234-5678-9012-3456`), and anyone who opens that URL —
 or enters the ID via **Connect to session** — joins the same session. Your list
 of recently visited sessions stays local to your browser; only the session
 *content* lives on the server. The canvas is saved automatically while you work
 and restored when you return to a session.
+
+Switching sessions starts a fresh graph-assistant conversation: the chat history
+and any active skills or experts from the previous session are cleared, and any
+selected or opened node is reset, so nothing from one session carries over into
+another.
 
 Deleting a session removes its content for everyone. If you delete the session
 you are currently in, a fresh empty session is created and you are switched into
@@ -444,6 +507,7 @@ a **Details** button opens a full node-type statistics dialog.
 | Option | Effect |
 |--------|--------|
 | **Show minimap** | Toggle the minimap overlay in the bottom-right corner of the canvas |
+| **Show node preview popup** | Toggle the hover info popup that previews a node's details. Turn it off if the popup gets in the way. |
 
 #### Your presence
 
@@ -582,6 +646,14 @@ The canvas updates in real time — nodes appear, edges are drawn, and the layou
 adjusts automatically, all driven by the external AI without any manual work in
 the browser.
 
+When the assistant **arranges** the view — laying nodes out as a left-to-right
+flow, a grid, or swimlanes — the whole batch glides smoothly into place rather
+than jumping node by node, and a small *"Assistant is arranging the view…"* badge
+appears at the top of the canvas while it moves. You can keep dragging a node
+during an arrange; the assistant's layout leaves whatever you are holding
+untouched. If your system is set to **reduce motion**, the nodes snap straight to
+their final positions instead of animating.
+
 **Use cases:**
 
 - Use a powerful external assistant (e.g. a model with extended context or web access)
@@ -589,6 +661,38 @@ the browser.
 - Combine natural-language queries from one AI with graph navigation in another tool.
 - Share your session ID with a colleague who can then direct the visualization from
   their own AI assistant, in a collaborative session.
+
+### 8.4 External pulse triggers
+
+Beyond AI-driven control, any external system can make a single node **pulse** —
+briefly glow, grow, or run a marker around its border — to draw your attention to
+a live event, such as a new customer registering or a new dataset version being
+created.
+
+**How it works:**
+
+1. In the session menu (**☰**), open the **⋮** menu on the session you are
+   currently in and choose **Copy pulse-trigger URL**. This copies a dedicated,
+   authenticated trigger URL to your clipboard.
+2. Configure an external system (a webhook, an automation, a small script) to send
+   an HTTP `POST` to that URL when its event fires, with a JSON body naming the
+   node to react:
+
+   ```json
+   { "node_id": "customer-42", "style": "glow" }
+   ```
+
+   `style` is optional (`glow`, `grow`, or `marker`; defaults to `glow`), as are
+   `color` and `duration_ms`.
+3. The named node pulses in your open visualization the moment the URL is called —
+   and for everyone sharing the session.
+
+The URL carries a secret token scoped to the live session, so only systems you
+hand it to can trigger a pulse. Choosing **Copy pulse-trigger URL** again issues a
+fresh token and **revokes** the previous URL. The token lives only as long as the
+session, so a trigger URL stops working once the session ends. If your system is
+set to **reduce motion**, a triggered node shows a static highlight instead of an
+animation.
 
 ---
 
@@ -599,8 +703,9 @@ the browser.
 | **Delete** | Delete selected node or edge |
 | **Enter** (chat) | Send message |
 | **Escape** | Cancel guide / close dialog |
-| **Esc × 2** | Clear the canvas (remove all nodes from view) |
-| **Ctrl+Z** / **Cmd+Z** | Undo (canvas layout changes only) |
+| **Esc × 2** | Clear the canvas (remove all nodes from view). On a **named** session this first asks for confirmation; on a **locked** visualization it does nothing (unlock it, or use the clear button). |
+| **Ctrl+Z** / **Cmd+Z** | Undo the last node move (drag or Organize) |
+| **Ctrl+Shift+Z** / **Cmd+Shift+Z** / **Ctrl+Y** | Redo the last undone move |
 | **Space + drag** | Pan the canvas |
 | **Scroll wheel** | Zoom in/out |
 

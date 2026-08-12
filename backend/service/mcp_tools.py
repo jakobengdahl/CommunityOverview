@@ -18,11 +18,47 @@ Usage:
 import secrets
 from typing import List, Optional, Dict, Any, Callable
 
+from backend.core.session_auto_add import AutoAddRuleError
+from backend.core.session_store import OpError, is_valid_session_id
+from backend.core.session_manager import (
+    LayoutBusy,
+    OpBatchTooLarge,
+    RateLimited,
+    RevisionConflict,
+    SessionLimitReached,
+    SessionNotFound,
+)
+from backend.config.config_loader import build_session_url
+from backend.runtime.authorization import GRAPH_ACTION_MUTATE, GRAPH_ACTION_READ
+from . import access
 from .service import GraphService
+
+# Server-owned session state records node x/y but not rendered node dimensions
+# (design §3.8: the browser no longer uploads canvas geometry). Agents still need
+# a size to space nodes without overlap, so the layout tools advertise this
+# assumed default — model-space units at zoom 1, matching the canvas node box.
+_ASSUMED_NODE_SIZE = {"width": 220, "height": 120}
+
+# Stable client id the shared-session op protocol attributes MCP layout writes to,
+# so an AI agent is just another collaborator (design 3.8) and rate limiting /
+# presence group all its writes together.
+_MCP_LAYOUT_CLIENT_ID = "mcp-agent"
+
+# The same agent identity, used to attribute session lifecycle writes (rename,
+# delete) so an assistant's session management is auditable as one actor.
+_MCP_SESSION_CLIENT_ID = "mcp-agent"
+
+# Server-assigned default when an assistant creates a session without a name
+# (contract §4: names are non-unique and the server fills a default).
+_DEFAULT_SESSION_NAME = "Untitled session"
 
 
 def register_mcp_tools(
-    mcp, service: GraphService, session_registry=None, session_manager=None
+    mcp,
+    service: GraphService,
+    session_registry=None,
+    session_manager=None,
+    auto_add_registry=None,
 ) -> Dict[str, Callable]:
     """
     Register all GraphService methods as MCP tools.
@@ -34,6 +70,9 @@ def register_mcp_tools(
         session_manager: new shared-session manager; pushes are additionally
             broadcast to its hub subscribers so an AI agent is just another
             collaborator (design 3.8)
+        auto_add_registry: SessionAutoAddRegistry backing the session-scoped
+            auto-add agents (create/list/remove tools below). None disables
+            those tools (they return an error).
 
     Returns:
         Dict mapping tool names to their functions (for ChatProcessor)
@@ -564,6 +603,114 @@ def register_mcp_tools(
             "message": f"Canvas cleared in session '{visualization_session_id}'",
         }
 
+    def _auto_add_unavailable() -> Dict[str, Any]:
+        return {"success": False, "error": "Auto-add agents are not available"}
+
+    @register_tool
+    def create_session_auto_add_agent(
+        visualization_session_id: str,
+        node_types: Optional[List[str]] = None,
+        keywords: Optional[List[str]] = None,
+    ) -> Dict[str, Any]:
+        """
+        Create a session-scoped agent that auto-adds matching new nodes to a view.
+
+        The agent watches for nodes newly created anywhere in the graph and, for
+        each one that matches the pattern, ADDS it to this session's live
+        visualization — additively, without clearing what is already shown. It is
+        bound to this one session: it only ever pushes to this session and stops
+        when the session ends. It never modifies the graph.
+
+        Give at least one of ``node_types`` or ``keywords``; a rule with neither
+        is rejected because it would add every created node. When both are given a
+        node must match both (e.g. an Actor whose text contains a keyword).
+
+        Args:
+            visualization_session_id: The browser session ID shown in the header
+                (e.g. "8244-1742")
+            node_types: Node types to match (e.g. ["Actor"]); empty = any type
+            keywords: Case-insensitive substrings matched against a node's
+                name/description/summary/tags; empty = any text
+
+        Returns:
+            Dict with success status and the created agent (agent_id, pattern)
+        """
+        if auto_add_registry is None or not session_registry:
+            return _auto_add_unavailable()
+        if not session_registry.is_valid_session_id(visualization_session_id):
+            return {
+                "success": False,
+                "error": "Invalid session ID format — expected DDDD-DDDD-DDDD-DDDD",
+            }
+        try:
+            rule = auto_add_registry.add_rule(
+                visualization_session_id,
+                node_types=node_types,
+                keywords=keywords,
+            )
+        except AutoAddRuleError as exc:
+            return {"success": False, "error": str(exc)}
+        # Materialise the push session so the periodic prune keeps this agent
+        # while the session is live, even if configured before the browser's SSE
+        # stream has (re)connected — mirrors mint_trigger_token.
+        session_registry.get_or_create(visualization_session_id)
+        return {"success": True, "agent": rule.to_dict()}
+
+    @register_tool
+    def list_session_auto_add_agents(
+        visualization_session_id: str,
+    ) -> Dict[str, Any]:
+        """
+        List the auto-add agents configured on a visualization session.
+
+        Args:
+            visualization_session_id: The browser session ID shown in the header
+
+        Returns:
+            Dict with success status and the session's agents
+        """
+        if auto_add_registry is None or not session_registry:
+            return _auto_add_unavailable()
+        if not session_registry.is_valid_session_id(visualization_session_id):
+            return {
+                "success": False,
+                "error": "Invalid session ID format — expected DDDD-DDDD-DDDD-DDDD",
+            }
+        agents = [
+            r.to_dict() for r in auto_add_registry.list_rules(visualization_session_id)
+        ]
+        return {"success": True, "agents": agents}
+
+    @register_tool
+    def remove_session_auto_add_agent(
+        visualization_session_id: str,
+        agent_id: str,
+    ) -> Dict[str, Any]:
+        """
+        Remove an auto-add agent from a visualization session.
+
+        Args:
+            visualization_session_id: The browser session ID shown in the header
+            agent_id: The agent id returned by create_session_auto_add_agent
+
+        Returns:
+            Dict with success status
+        """
+        if auto_add_registry is None or not session_registry:
+            return _auto_add_unavailable()
+        if not session_registry.is_valid_session_id(visualization_session_id):
+            return {
+                "success": False,
+                "error": "Invalid session ID format — expected DDDD-DDDD-DDDD-DDDD",
+            }
+        removed = auto_add_registry.remove_rule(visualization_session_id, agent_id)
+        if not removed:
+            return {
+                "success": False,
+                "error": f"Auto-add agent '{agent_id}' not found in this session",
+            }
+        return {"success": True}
+
     @register_tool
     def connect_to_visualization_session(session_id: str) -> Dict[str, Any]:
         """
@@ -638,6 +785,469 @@ def register_mcp_tools(
             "selected_node_ids": selected,
             "node_count": len(visible),
         }
+
+    # ==================== Visualization Layout (geometry) ====================
+    #
+    # These two tools let an assistant read node geometry and move nodes in an
+    # open session. They implement the versioned geometry/movement contract in
+    # docs/MCP_VISUALIZATION_LAYOUT_CONTRACT.md: coordinates are model space
+    # (pixels at zoom 1, x/y = node top-left), node width/height are not
+    # server-owned (an assumed_node_size is advertised for spacing), a write is
+    # one atomic layout_applied op with optimistic-concurrency and batch caps,
+    # and the animation fields are a forward-compatible hint carried on the
+    # broadcast op for the canvas to honor.
+
+    @register_tool
+    def get_visualization_layout(session_id: str) -> Dict[str, Any]:
+        """
+        Read the geometry of every node in an open visualization session.
+
+        Returns each node's model-space position so an AI agent can compute a new
+        arrangement (a left-to-right DAG, a grid, swimlanes) and then call
+        ``apply_visualization_layout`` to move them.
+
+        Geometry contract (read this before computing positions):
+        - Coordinates are **model space**: independent of the user's zoom and pan,
+          in pixels at zoom 1. Origin is (0, 0); +x is right, +y is down.
+        - ``x``/``y`` is the node's **top-left** corner (React Flow convention).
+        - Node width/height are not server-owned, so they are not returned per
+          node. Use ``assumed_node_size`` to leave collision-free spacing.
+        - ``revision`` is a monotonic counter. Pass it back as
+          ``expected_revision`` to ``apply_visualization_layout`` for optimistic
+          concurrency (the write is rejected if someone else changed the session
+          in between). A node with no recorded position yet has ``x``/``y`` null.
+        - The connected users' viewports are not reported; prefer placing nodes
+          relative to their related nodes over guessing where a viewport is,
+          especially when several clients are connected.
+
+        Args:
+            session_id: The session ID shown in the browser header (e.g. "8244-1742")
+
+        Returns:
+            Dict with revision, node_count, nodes (id/x/y/hidden), assumed_node_size
+        """
+        if session_manager is None:
+            return {"error": "Session manager not available"}
+        if not is_valid_session_id(session_id):
+            return {"error": "Invalid session ID format — expected DDDD-DDDD-DDDD-DDDD"}
+        session = session_manager.get_session(session_id)
+        if session is None:
+            return {
+                "error": (
+                    f"Session '{session_id}' not found. "
+                    "Call connect_to_visualization_session first to verify the session is open."
+                )
+            }
+        positions = session.state.get("positions", {})
+        hidden = set(session.state.get("hidden_node_ids", []))
+        nodes = []
+        for node_id in session.state.get("node_refs", []):
+            pos = positions.get(node_id)
+            nodes.append(
+                {
+                    "id": node_id,
+                    "x": pos["x"] if pos else None,
+                    "y": pos["y"] if pos else None,
+                    "hidden": node_id in hidden,
+                }
+            )
+        return {
+            "session_id": session_id,
+            "revision": session.seq,
+            "node_count": len(nodes),
+            "nodes": nodes,
+            "assumed_node_size": _ASSUMED_NODE_SIZE,
+            "coordinate_space": "model-space, pixels at zoom 1, x/y = node top-left",
+            "connected_clients": session_manager.connected_count(session_id),
+        }
+
+    @register_tool
+    def apply_visualization_layout(
+        session_id: str,
+        positions: Optional[Dict[str, Any]] = None,
+        deltas: Optional[Dict[str, Any]] = None,
+        expected_revision: Optional[int] = None,
+        animate: bool = True,
+        duration_ms: int = 400,
+        easing: str = "ease-in-out",
+    ) -> Dict[str, Any]:
+        """
+        Move nodes in a visualization session by setting their positions.
+
+        The whole batch is applied as one atomic operation and mirrored live to
+        every connected browser, so a bulk re-layout arrives as a single change
+        rather than node-by-node jumps. The canvas tweens the batch from the
+        nodes' current positions to the targets using the animation hint below,
+        so an arrange reads as one coherent motion.
+
+        Coordinates are model space (zoom/pan independent, pixels at zoom 1,
+        ``x``/``y`` = node top-left), exactly as ``get_visualization_layout``
+        reports them. Only the nodes you name move; a write is a partial update of
+        the position map, not a replacement. A batch is capped at 500 moves and
+        256 KiB of payload (``too_large`` above that), and each write also draws
+        from a per-client rate budget sized to the number of moves — so a single
+        very large arrange may return ``rate_limited`` before the hard cap. Either
+        way, split a large session across successive writes, threading the
+        returned ``revision`` into the next ``expected_revision``.
+        Layout patterns (horizontal DAG, grid, swimlanes) and the full geometry
+        contract are documented in
+        ``docs/MCP_VISUALIZATION_LAYOUT_CONTRACT.md`` and ``backend/DEVELOPMENT.md``.
+
+        Args:
+            session_id: The session ID shown in the browser header (e.g. "8244-1742")
+            positions: Absolute targets ``{node_id: {"x": <n>, "y": <n>}}`` in the
+                model space described by ``get_visualization_layout``.
+            deltas: Relative moves ``{node_id: {"dx": <n>, "dy": <n>}}`` from each
+                node's current position (unknown ⇒ origin). Provide exactly one of
+                positions/deltas. Deltas are resolved to absolute positions before
+                broadcast, so every client applies identical coordinates.
+            expected_revision: If given, the write is rejected unless it equals the
+                session's current ``revision`` (optimistic concurrency). Read it
+                from ``get_visualization_layout`` first. Omit for last-write-wins.
+            animate: Whether the canvas should tween this move (default true). Send
+                the hint you intend; do not try to detect reduced motion yourself —
+                a viewer who asked for reduced motion snaps to the final positions
+                regardless (a client-side decision).
+            duration_ms: Tween duration in milliseconds (default 400).
+            easing: Tween easing, e.g. "ease-in-out" (default), "linear",
+                "ease-in", "ease-out".
+
+        Returns:
+            Dict with success, moved (node count), and the new revision. On a
+            concurrency clash returns success=false with the current revision so
+            the caller can re-read and retry. Retryable errors: revision_conflict,
+            busy, rate_limited; change the request for too_large or a validation
+            error.
+        """
+        if session_manager is None:
+            return {"success": False, "error": "Session manager not available"}
+        if not is_valid_session_id(session_id):
+            return {
+                "success": False,
+                "error": "Invalid session ID format — expected DDDD-DDDD-DDDD-DDDD",
+            }
+        animation = {
+            "animate": bool(animate),
+            "duration_ms": duration_ms,
+            "easing": easing,
+        }
+        try:
+            result = session_manager.apply_layout(
+                session_id,
+                _MCP_LAYOUT_CLIENT_ID,
+                positions=positions,
+                deltas=deltas,
+                expected_revision=expected_revision,
+                animation=animation,
+            )
+        except RevisionConflict as exc:
+            return {
+                "success": False,
+                "error": "revision_conflict",
+                "message": (
+                    "The session changed since you read it; re-read the layout "
+                    "and retry with the current revision."
+                ),
+                "expected_revision": exc.expected,
+                "current_revision": exc.actual,
+            }
+        except LayoutBusy:
+            return {
+                "success": False,
+                "error": "busy",
+                "message": "Another change is being applied to this session; retry.",
+            }
+        except RateLimited:
+            return {
+                "success": False,
+                "error": "rate_limited",
+                "message": "Too many layout writes; slow down and retry.",
+            }
+        except OpBatchTooLarge:
+            return {
+                "success": False,
+                "error": "too_large",
+                "message": "Too many nodes in one layout write; split into batches.",
+            }
+        except SessionNotFound:
+            return {
+                "success": False,
+                "error": (
+                    f"Session '{session_id}' not found. "
+                    "Call connect_to_visualization_session first to verify the session is open."
+                ),
+            }
+        except OpError as exc:
+            return {"success": False, "error": str(exc)}
+        return {
+            "success": True,
+            "session_id": session_id,
+            "moved": result["moved"],
+            "revision": result["revision"],
+        }
+
+    # ==================== Visualization Session CRUD ====================
+    #
+    # These let an assistant manage session *resources* (create/list/get/rename/
+    # delete), as opposed to the tools above that inspect or lay out an already
+    # open session. They implement the versioned contract in
+    # docs/MCP_SESSION_LIFECYCLE_CONTRACT.md: every operation is gated by the
+    # service authorization hook (permissive/anonymous by default in the open
+    # core; the hosted layer swaps the hook in to enforce tenancy), names are
+    # non-unique with a server default, and deletion is a confirmed hard delete.
+
+    def _authorize_session(action: str, target: str):
+        """Return None when allowed, or the access-denied result dict when not."""
+        return access.authorize_graph_access(
+            service.authorization_hook, action=action, target=target
+        )
+
+    def _project_session(session, *, mutate_allowed: bool) -> Dict[str, Any]:
+        """Full session-resource projection (contract §2) from a Session object."""
+        return {
+            "session_id": session.id,
+            "name": session.name,
+            "lifecycle_state": "active",
+            "owner": None,  # reserved; bound by the hosted layer, null in open core
+            "workspace": None,  # reserved; bound by the hosted layer
+            "created_at": session.created_at,
+            "updated_at": session.updated_at,
+            "revision": session.seq,
+            "node_count": len(session.state.get("node_refs", [])),
+            "capabilities": ["read"]
+            + (["rename", "delete", "layout"] if mutate_allowed else []),
+            # Server-owned canonical link (contract §5); None when no public base
+            # URL is configured. The assistant must never construct one itself.
+            "session_url": build_session_url(session.id),
+        }
+
+    def _project_meta(meta: Dict[str, Any], *, mutate_allowed: bool) -> Dict[str, Any]:
+        """Lightweight projection for the list index (no full state loaded).
+
+        ``node_count`` is intentionally omitted here — the list is served from a
+        cached meta index (session_store R13) to avoid a full-state disk scan per
+        session; call ``get_visualization_session`` for a session's node count.
+        """
+        return {
+            "session_id": meta["id"],
+            "name": meta.get("name"),
+            "lifecycle_state": "active",
+            "owner": None,
+            "workspace": None,
+            "created_at": meta.get("created_at"),
+            "updated_at": meta.get("updated_at"),
+            "revision": meta.get("seq"),
+            "capabilities": ["read"]
+            + (["rename", "delete", "layout"] if mutate_allowed else []),
+            "session_url": build_session_url(meta["id"]),
+        }
+
+    @register_tool
+    def create_visualization_session(name: Optional[str] = None) -> Dict[str, Any]:
+        """
+        Create a new, empty visualization session and return its identity.
+
+        Use this to prepare a named session from scratch: create it, add nodes
+        with the search/related tools (passing the returned session id as
+        ``visualization_session_id``), inspect its geometry with
+        ``get_visualization_layout``, arrange it with
+        ``apply_visualization_layout``, then hand the user its link.
+
+        Args:
+            name: Optional display name. Names are not required to be unique; when
+                omitted the server assigns a default.
+
+        Returns:
+            Dict with success and the session resource (session_id, name,
+            lifecycle_state, timestamps, revision, node_count, capabilities and
+            ``session_url``). ``session_url`` is the server-owned canonical direct
+            link — give that to the user as-is; never build a link from a hostname
+            yourself. It is null when no public base URL is configured for the
+            deployment.
+        """
+        if session_manager is None:
+            return {"success": False, "error": "Session manager not available"}
+        denied = _authorize_session(GRAPH_ACTION_MUTATE, "create_visualization_session")
+        if denied:
+            return denied
+        chosen = name.strip() if isinstance(name, str) and name.strip() else None
+        try:
+            session = session_manager.create_session(chosen or _DEFAULT_SESSION_NAME)
+        except SessionLimitReached:
+            return {
+                "success": False,
+                "error": "too_many_sessions",
+                "message": "The session limit has been reached; delete unused sessions and retry.",
+            }
+        return {
+            "success": True,
+            "session": _project_session(session, mutate_allowed=True),
+        }
+
+    @register_tool
+    def list_visualization_sessions() -> Dict[str, Any]:
+        """
+        List existing visualization sessions, most recently updated first.
+
+        Returns a lightweight index; call ``get_visualization_session`` for a
+        single session's full detail (including its node count).
+
+        Returns:
+            Dict with success, sessions (list of resource projections) and count.
+        """
+        if session_manager is None:
+            return {"success": False, "error": "Session manager not available"}
+        denied = _authorize_session(GRAPH_ACTION_READ, "list_visualization_sessions")
+        if denied:
+            return denied
+        mutate_allowed = (
+            _authorize_session(GRAPH_ACTION_MUTATE, "visualization_session") is None
+        )
+        metas = session_manager.list_sessions()
+        return {
+            "success": True,
+            "count": len(metas),
+            "sessions": [
+                _project_meta(m, mutate_allowed=mutate_allowed) for m in metas
+            ],
+        }
+
+    @register_tool
+    def get_visualization_session(session_id: str) -> Dict[str, Any]:
+        """
+        Inspect one visualization session's resource metadata.
+
+        Args:
+            session_id: The session ID (e.g. "8244-1742-3391-0057").
+
+        Returns:
+            Dict with success and the session resource, or an error when the id is
+            malformed or the session does not exist.
+        """
+        if session_manager is None:
+            return {"success": False, "error": "Session manager not available"}
+        if not is_valid_session_id(session_id):
+            return {
+                "success": False,
+                "error": "Invalid session ID format — expected DDDD-DDDD-DDDD-DDDD",
+            }
+        denied = _authorize_session(GRAPH_ACTION_READ, "get_visualization_session")
+        if denied:
+            return denied
+        session = session_manager.get_session(session_id)
+        if session is None:
+            return {"success": False, "error": f"Session '{session_id}' not found."}
+        mutate_allowed = (
+            _authorize_session(GRAPH_ACTION_MUTATE, "visualization_session") is None
+        )
+        return {
+            "success": True,
+            "session": _project_session(session, mutate_allowed=mutate_allowed),
+        }
+
+    @register_tool
+    def rename_visualization_session(
+        session_id: str, name: Optional[str] = None
+    ) -> Dict[str, Any]:
+        """
+        Set or clear a visualization session's display name.
+
+        Names are not required to be unique. Pass ``name=null`` to clear it.
+
+        Args:
+            session_id: The session ID (e.g. "8244-1742-3391-0057").
+            name: The new display name, or null to clear it.
+
+        Returns:
+            Dict with success and the updated session resource.
+        """
+        if session_manager is None:
+            return {"success": False, "error": "Session manager not available"}
+        if not is_valid_session_id(session_id):
+            return {
+                "success": False,
+                "error": "Invalid session ID format — expected DDDD-DDDD-DDDD-DDDD",
+            }
+        denied = _authorize_session(GRAPH_ACTION_MUTATE, "rename_visualization_session")
+        if denied:
+            return denied
+        try:
+            session = session_manager.rename_session_sync(
+                session_id, name, client_id=_MCP_SESSION_CLIENT_ID
+            )
+        except LayoutBusy:
+            return {
+                "success": False,
+                "error": "busy",
+                "message": "Another change is being applied to this session; retry.",
+            }
+        except SessionLimitReached:
+            return {
+                "success": False,
+                "error": "too_many_sessions",
+                "message": "The session limit has been reached; delete unused sessions and retry.",
+            }
+        except SessionNotFound:
+            return {"success": False, "error": f"Session '{session_id}' not found."}
+        except OpError as exc:
+            return {"success": False, "error": str(exc)}
+        return {
+            "success": True,
+            "session": _project_session(session, mutate_allowed=True),
+        }
+
+    @register_tool
+    def delete_visualization_session(
+        session_id: str, confirm: bool = False
+    ) -> Dict[str, Any]:
+        """
+        Permanently delete a visualization session (hard delete, no recovery).
+
+        Deletion is irreversible and requires explicit confirmation: call once to
+        see the confirmation prompt, then again with ``confirm=true``. Connected
+        browsers are notified that the session was deleted.
+
+        Args:
+            session_id: The session ID (e.g. "8244-1742-3391-0057").
+            confirm: Must be true to actually delete. Defaults to false so a delete
+                is never performed on a loose instruction.
+
+        Returns:
+            Dict with success and deleted=true, or a confirmation_required / error
+            result.
+        """
+        if session_manager is None:
+            return {"success": False, "error": "Session manager not available"}
+        if not is_valid_session_id(session_id):
+            return {
+                "success": False,
+                "error": "Invalid session ID format — expected DDDD-DDDD-DDDD-DDDD",
+            }
+        denied = _authorize_session(GRAPH_ACTION_MUTATE, "delete_visualization_session")
+        if denied:
+            return denied
+        if not confirm:
+            return {
+                "success": False,
+                "error": "confirmation_required",
+                "message": (
+                    f"Deleting session '{session_id}' is permanent and cannot be "
+                    "undone. Re-call with confirm=true to proceed."
+                ),
+            }
+        try:
+            existed = session_manager.delete_session_sync(
+                session_id, deleted_by=_MCP_SESSION_CLIENT_ID
+            )
+        except LayoutBusy:
+            return {
+                "success": False,
+                "error": "busy",
+                "message": "Another change is being applied to this session; retry.",
+            }
+        if not existed:
+            return {"success": False, "error": f"Session '{session_id}' not found."}
+        return {"success": True, "deleted": True, "session_id": session_id}
 
     return tools_map
 

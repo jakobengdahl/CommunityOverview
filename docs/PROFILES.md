@@ -217,6 +217,42 @@ The presentation section controls the UI and AI behavior:
 | `default_language` | Default UI language (`"en"` or `"sv"`) |
 | `skills_config` | Skills loader settings (see below) |
 
+#### Model profiles
+
+`model_profiles` is an optional top-level section in `schema_config.json`. If omitted or empty, the application keeps the legacy single-provider behavior (`LLM_PROVIDER`, `LLM_MODEL`, `OPENAI_API_KEY`, `ANTHROPIC_API_KEY`). If configured, each enabled chat request and background agent resolves to a named profile; agents may set `metadata.model_profile_id`, while chat users can select profiles in the UI when selection is enabled.
+
+```json
+{
+  "model_profiles": {
+    "selection_enabled": true,
+    "profiles": [
+      {
+        "id": "fast-openai",
+        "name": "Fast OpenAI",
+        "provider": "openai",
+        "model": "gpt-4o-mini",
+        "default": true,
+        "credential_ref": "OPENAI_API_KEY"
+      },
+      {
+        "id": "local-llm",
+        "name": "Local OpenAI-compatible LLM",
+        "provider": "openai",
+        "model": "qwen2.5-coder",
+        "endpoint": "http://localhost:8080/v1",
+        "credential_ref": "LOCAL_LLM_API_KEY"
+      }
+    ]
+  }
+}
+```
+
+Rules:
+- exactly one configured profile must be `default: true`, and it must be enabled
+- `credential_ref` is an environment variable name, never an inline API key
+- the public capabilities API only exposes enabled profile id/name/provider/model/default, never credentials or endpoints
+- `provider: "openai"` supports OpenAI-compatible endpoints via `endpoint`
+
 #### Skills configuration
 
 Skills are SKILL.md-format instructions injected into the AI agent's system prompt at startup. They tell the agent *how* to perform specific tasks.

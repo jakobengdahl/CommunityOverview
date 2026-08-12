@@ -70,3 +70,49 @@ describe('CollectKioskView form flow', () => {
     expect(lastMsg.content).toContain('Manager');
   });
 });
+
+describe('CollectKioskView rich-text rendering', () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+    if (!globalThis.crypto?.randomUUID) {
+      globalThis.crypto = { randomUUID: () => Math.random().toString(36).slice(2) };
+    }
+  });
+
+  async function startKioskWithAssistantMessage(content) {
+    api.getCollectConfig.mockResolvedValue({ name: 'Survey', introduction_text: 'Hi' });
+    api.sendChatMessage.mockResolvedValueOnce({ content, toolUsed: null, toolResult: null });
+
+    render(<CollectKioskView shortName="survey" />);
+    const startBtn = await screen.findByRole('button', { name: /Start/i });
+    fireEvent.click(startBtn);
+  }
+
+  it('renders assistant markdown (bold, lists, links) the same way the main assistant does', async () => {
+    await startKioskWithAssistantMessage(
+      'Here is **bold** text, a list:\n\n- item one\n- item two\n\nand a [link](https://example.com).'
+    );
+
+    // Bold → <strong>, not literal "**bold**".
+    const bold = await screen.findByText('bold');
+    expect(bold.tagName).toBe('STRONG');
+    expect(screen.queryByText(/\*\*bold\*\*/)).toBeNull();
+
+    // List markers → real <li> inside a <ul>.
+    const firstItem = screen.getByText('item one');
+    expect(firstItem.closest('li')).not.toBeNull();
+    expect(firstItem.closest('ul')).not.toBeNull();
+
+    // Link syntax → real anchor with href.
+    const link = screen.getByRole('link', { name: 'link' });
+    expect(link).toHaveAttribute('href', 'https://example.com');
+  });
+
+  it('does not render raw HTML in assistant messages (inherits the safe-by-default path)', async () => {
+    await startKioskWithAssistantMessage('Before <img src=x onerror="alert(1)"> after');
+
+    // The literal HTML must be escaped and shown as text, never injected as a node.
+    await screen.findByText(/onerror/);
+    expect(document.querySelector('img')).toBeNull();
+  });
+});

@@ -83,6 +83,24 @@ class SessionLimitReached(Exception):
     pass
 
 
+class LayoutBusy(Exception):
+    """A concurrent op batch holds the session lock; a layout write should retry.
+
+    ``apply_layout`` refuses rather than assigning a seq an in-flight ``apply_ops``
+    batch has not broadcast yet — broadcasting a higher seq first would make
+    seq-gating clients drop the batch's lower-seq ops permanently.
+    """
+
+
+class RevisionConflict(Exception):
+    """The caller's ``expected_revision`` no longer matches the session seq."""
+
+    def __init__(self, expected: int, actual: int) -> None:
+        super().__init__(f"expected revision {expected}, session is at {actual}")
+        self.expected = expected
+        self.actual = actual
+
+
 _DEFAULT_BUCKET_IDLE_TTL = 3600.0  # evict a key after 1 h of silence
 _DEFAULT_BUCKET_SWEEP_INTERVAL = 300.0  # run the eviction sweep at most every 5 min
 
@@ -267,6 +285,90 @@ class SessionManager:
             )
         return existed
 
+    def rename_session_sync(
+        self, session_id: str, name: Optional[str], client_id: Optional[str] = None
+    ) -> Session:
+        """Rename a session **synchronously** (the MCP tool path).
+
+        The async ``rename_session`` routes through ``apply_ops`` so the rename
+        gets a ``seq`` + ring entry and reaches a client reconnecting via
+        ``since_seq`` catch-up (R8). MCP tools are synchronous — they cannot
+        await — so this mirrors ``apply_layout`` instead: it emits the same
+        ``session_renamed`` state op inline on the event-loop thread (atomic
+        w.r.t. every coroutine on a single-threaded loop) and refuses with
+        ``LayoutBusy`` when an ``apply_ops`` batch holds the lock, so it never
+        assigns a ``seq`` that batch has not broadcast yet (the same seq-ordering
+        rule ``apply_layout`` documents).
+
+        ``get_or_create`` first (R7): a rename for an id that only exists in a
+        browser URL/recents must materialise it rather than raise, matching the
+        async path and the REST ``PATCH``.
+        """
+        if not is_valid_session_id(session_id):
+            raise SessionNotFound()
+        if name is not None and not isinstance(name, str):
+            raise OpError("'name' must be a string or null")
+        self.get_or_create(session_id)
+        if self._lock(session_id).locked():
+            raise LayoutBusy()
+        session = self.store.get(session_id)
+        if session is None:
+            raise SessionNotFound()
+
+        op = {"op": "session_renamed", "name": name, "client_id": client_id or "rest"}
+        saved_state = copy.deepcopy(session.state)
+        saved_seq = session.seq
+        saved_name = session.name
+        saved_updated_at = session.updated_at
+        ring = self.store.ring(session_id)
+        saved_ring = list(ring) if ring is not None else None
+        try:
+            applied = self.store.apply_state_op(session, op)
+            self.store.persist(session)
+        except Exception:
+            session.state = saved_state
+            session.seq = saved_seq
+            session.name = saved_name
+            session.updated_at = saved_updated_at
+            if ring is not None and saved_ring is not None:
+                ring.clear()
+                ring.extend(saved_ring)
+            raise
+
+        self.bus.publish(
+            session_id,
+            {
+                "type": "op",
+                "client_id": op["client_id"],
+                "op": applied,
+                "seq": applied["seq"],
+            },
+        )
+        return session
+
+    def delete_session_sync(
+        self, session_id: str, deleted_by: Optional[str] = None
+    ) -> bool:
+        """Delete a session **synchronously** (the MCP tool path).
+
+        The async ``delete_session`` takes the per-session lock to stop an
+        in-flight ``apply_ops`` batch from resurrecting the file via ``persist()``
+        after the delete. A sync tool cannot await that lock, so — like
+        ``apply_layout`` — it refuses with ``LayoutBusy`` when the lock is held and
+        otherwise deletes inline on the event-loop thread, where no coroutine can
+        interleave. Stale lock objects are left in ``self._locks`` for the same
+        reason ``delete_session`` documents.
+        """
+        if self._lock(session_id).locked():
+            raise LayoutBusy()
+        existed = self.store.delete(session_id)
+        if existed:
+            self.bus.publish(
+                session_id,
+                {"type": "session_deleted", "deleted_by": deleted_by},
+            )
+        return existed
+
     def roster(self, session_id: str) -> List[Dict[str, Any]]:
         return self.presence.roster(session_id)
 
@@ -364,7 +466,12 @@ class SessionManager:
                         state_changed = True
                         pending.append(("state", result))
                 if state_changed:
-                    await asyncio.to_thread(self.store.persist, session)
+                    # Snapshot on the loop thread, persist the copy off-thread:
+                    # the worker must never read ``session.state`` while a
+                    # loop-thread writer (the synchronous ``apply_layout`` path)
+                    # may be mutating it during this await. See persist_snapshot.
+                    snapshot = copy.deepcopy(session.to_dict())
+                    await asyncio.to_thread(self.store.persist_snapshot, snapshot)
             except Exception:
                 session.state = saved_state
                 session.seq = saved_seq
@@ -414,6 +521,118 @@ class SessionManager:
                     applied.append({"op": op_type, "element_ids": element_ids})
 
         return {"applied": applied, "seq": session.seq}
+
+    def apply_layout(
+        self,
+        session_id: str,
+        client_id: str,
+        *,
+        positions: Optional[Dict[str, Any]] = None,
+        deltas: Optional[Dict[str, Any]] = None,
+        expected_revision: Optional[int] = None,
+        animation: Optional[Dict[str, Any]] = None,
+    ) -> Dict[str, Any]:
+        """Apply one ``layout_applied`` op **synchronously** (the MCP write path).
+
+        Unlike ``apply_ops`` this never awaits: it runs to completion on the event
+        loop thread, so on a single-threaded loop it is atomic with respect to
+        every coroutine. That atomicity is what makes it safe without the async
+        per-session lock — but only while no ``apply_ops`` batch is mid-flight for
+        this session. Such a batch holds the lock across its seq-assign→persist→
+        broadcast region and may have assigned seqs it has not broadcast yet;
+        assigning a higher seq here and broadcasting it first would make
+        seq-gating clients (sessionSyncClient R15) drop the batch's lower-seq ops
+        permanently. So a held lock ⇒ ``LayoutBusy`` and the caller retries.
+
+        Exactly one of ``positions`` (absolute targets) or ``deltas`` (dx/dy from
+        the current server-owned position, unknown ⇒ origin) must be given.
+
+        Persistence is synchronous here (not offloaded like apply_ops): a
+        file-backend fsync briefly stalls the loop. That is the deliberate price
+        of lock-free atomicity, and layout writes are infrequent (agent-driven).
+        """
+        if not is_valid_session_id(session_id):
+            raise SessionNotFound()
+        if not isinstance(client_id, str) or not client_id:
+            raise OpError("'client_id' is required")
+        if (positions is None) == (deltas is None):
+            raise OpError("provide exactly one of 'positions' or 'deltas'")
+        moves = positions if positions is not None else deltas
+        if not isinstance(moves, dict) or not moves:
+            raise OpError("'positions'/'deltas' must be a non-empty object")
+        if len(moves) > self._max_ops:
+            raise OpBatchTooLarge()
+        if len(json.dumps(moves)) > self._max_op_batch_bytes:
+            raise OpBatchTooLarge()
+        if not self._bucket.consume(client_id, max(1, len(moves))):
+            raise RateLimited()
+
+        # A held lock means an apply_ops batch is mid-flight for this session
+        # (see the seq-ordering rationale in this method's docstring).
+        if self._lock(session_id).locked():
+            raise LayoutBusy()
+
+        session = self.store.get(session_id)
+        if session is None:
+            raise SessionNotFound()
+        if expected_revision is not None and expected_revision != session.seq:
+            raise RevisionConflict(expected_revision, session.seq)
+
+        if deltas is not None:
+            current = session.state.get("positions", {})
+            target: Dict[str, Dict[str, float]] = {}
+            for node_id, d in deltas.items():
+                if (
+                    not isinstance(d, dict)
+                    or not isinstance(d.get("dx"), (int, float))
+                    or not isinstance(d.get("dy"), (int, float))
+                ):
+                    raise OpError("each delta must be an object with numeric dx and dy")
+                base = current.get(node_id) or {"x": 0.0, "y": 0.0}
+                target[node_id] = {
+                    "x": float(base["x"]) + float(d["dx"]),
+                    "y": float(base["y"]) + float(d["dy"]),
+                }
+        else:
+            target = positions
+
+        op: Dict[str, Any] = {
+            "op": "layout_applied",
+            "positions": target,
+            "client_id": client_id,
+        }
+        if animation is not None:
+            op["animation"] = animation
+
+        # Snapshot for rollback so a persistence failure leaves in-memory state,
+        # seq and ring untouched — mirroring apply_ops' all-or-nothing guarantee.
+        saved_state = copy.deepcopy(session.state)
+        saved_seq = session.seq
+        saved_updated_at = session.updated_at
+        ring = self.store.ring(session_id)
+        saved_ring = list(ring) if ring is not None else None
+        try:
+            applied = self.store.apply_state_op(session, op)
+            self.store.persist(session)
+        except Exception:
+            session.state = saved_state
+            session.seq = saved_seq
+            session.updated_at = saved_updated_at
+            if ring is not None and saved_ring is not None:
+                ring.clear()
+                ring.extend(saved_ring)
+            raise
+
+        self.bus.publish(
+            session_id,
+            {
+                "type": "op",
+                "client_id": client_id,
+                "op": applied,
+                "seq": applied["seq"],
+            },
+        )
+        return {"applied": applied, "revision": session.seq, "moved": len(target)}
 
     @staticmethod
     def _validate_claim_op(op: Dict[str, Any]) -> None:

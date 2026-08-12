@@ -11,7 +11,9 @@ import CollectKioskView from './components/CollectKioskView';
 import GuideOverlay from './components/GuideOverlay';
 import SessionDrawer from './components/SessionDrawer';
 import RecentActivityDrawer from './components/RecentActivityDrawer';
+import NodeHistoryPanel from './components/NodeHistoryPanel';
 import AppDialogs from './components/AppDialogs';
+import ConfirmDialog from './components/ConfirmDialog';
 import * as api from './services/api';
 import * as sessionStore from './services/sessionStore';
 import {
@@ -23,6 +25,7 @@ import {
 import { serverStateToMirror, useSharedSession } from './hooks/useSharedSession';
 import { useSyncConnection } from './hooks/useSyncConnection';
 import { useToolResultCommands } from './hooks/useToolResultCommands';
+import { decideClearAction } from './utils/clearBoard';
 import './App.css';
 
 const _urlParams = new URLSearchParams(window.location.search);
@@ -61,6 +64,7 @@ function App() {
     setStats,
     llmAvailable,
     setLlmAvailable,
+    setModelProfilesCapability,
     editingNode,
     setEditingNode,
     closeEditingNode,
@@ -83,10 +87,15 @@ function App() {
     federationDepth,
     setFederationDepth,
     showMinimap,
+    nodePreviewEnabled,
+    canvasLocked,
+    setCanvasLocked,
     nodeMarks,
+    pulsedNodeIds,
     startGuide,
     getNodeColor,
     closeMenusSignal,
+    resetSessionScopedState,
   } = useGraphStore();
 
   const { t, setLanguage, language } = useI18n();
@@ -102,6 +111,10 @@ function App() {
   const [editingSubscriptionData, setEditingSubscriptionData] = useState(null);
   const [showAgentDialog, setShowAgentDialog] = useState(false);
   const [editingAgentData, setEditingAgentData] = useState(null);
+  const [showAgentRunsDialog, setShowAgentRunsDialog] = useState(false);
+  const [agentRunsAgentId, setAgentRunsAgentId] = useState(null);
+  const [showAgentProposalsDialog, setShowAgentProposalsDialog] = useState(false);
+  const [agentProposalsAgentId, setAgentProposalsAgentId] = useState(null);
   const [createNodeType, setCreateNodeType] = useState(null);
   const [createGroupSignal, setCreateGroupSignal] = useState(0);
   const [saveViewSignal, setSaveViewSignal] = useState(0);
@@ -130,8 +143,17 @@ function App() {
   const [connectDialogOpen, setConnectDialogOpen] = useState(false);
   const [renameDialog, setRenameDialog] = useState(null);
   const [deleteSessionDialog, setDeleteSessionDialog] = useState(null);
+  // Pending clear-board confirmation. null when closed; { locked: boolean }
+  // otherwise — the locked variant shows a stronger warning (see requestClear).
+  const [clearConfirm, setClearConfirm] = useState(null);
   const [sessionsVersion, setSessionsVersion] = useState(0);
   const sessions = useMemo(() => sessionStore.listSessions(), [sessionsVersion]);
+  // A session is "named" once the user has given it a title; the clear-board
+  // guard treats named boards as worth protecting (unnamed ones clear freely).
+  const currentSessionName = useMemo(
+    () => sessions.find((s) => s.id === sessionId)?.name || '',
+    [sessions, sessionId]
+  );
 
   // ── Realtime sync (design step 6) ───────────────────────────────────────
   // The sync client owns the op-protocol stream and op emission for the active
@@ -147,6 +169,8 @@ function App() {
     ensureSyncConnected,
     remotePositions,
     setRemotePositions,
+    animatedLayout,
+    setAnimatedLayout,
     remoteAnnotationOps,
     setRemoteAnnotationOps,
     roster,
@@ -158,8 +182,9 @@ function App() {
   const applyServerSessionRef = useRef(null);
   // MCP tool-result push application (external AI agent commands → canvas) and
   // the legacy SSE push stream. The op-stream `command` events are wired below
-  // through syncHandlersRef and route through this same applyToolResultCommand.
-  const applyToolResultCommand = useToolResultCommands({
+  // through syncHandlersRef and route through these same appliers. Pulse
+  // commands (external pulse-trigger URLs) share the channel and dedup.
+  const { applyToolResultCommand, applyPulseCommand } = useToolResultCommands({
     sessionId,
     opStreamReady,
     latestViewport,
@@ -220,6 +245,14 @@ function App() {
           setHiddenNodeIds((store.hiddenNodeIds || []).filter((id) => !drop.has(id)));
           break;
         }
+        case 'edges_added': {
+          // A collaborator drew an edge between nodes already present here. Its
+          // endpoints are in the graph, so render it directly; addNodesToVisualization
+          // dedupes by edge id, so a redraw after a later re-hydration is harmless.
+          const list = (op.edges || []).filter((e) => e && e.id);
+          if (list.length) addNodesToVisualization([], list);
+          break;
+        }
         case 'edges_hidden':
           setHiddenEdgeIds(
             Array.from(new Set([...(store.hiddenEdgeIds || []), ...(op.edge_ids || [])]))
@@ -237,7 +270,23 @@ function App() {
             setRemotePositions((prev) => ({ ...(prev || {}), [op.node_id]: op.position }));
           break;
         case 'layout_applied':
-          if (op.positions) setRemotePositions((prev) => ({ ...(prev || {}), ...op.positions }));
+          if (op.positions) {
+            // An MCP agent's arrange carries an animation hint (contract §9–§10):
+            // route it to the tweening channel so the whole batch moves as one
+            // coherent transition. A human bulk drag arrives without the hint and
+            // still applies instantly.
+            if (op.animation && op.animation.animate) {
+              // Queue, don't replace: two layout_applied ops delivered in one
+              // tick (a split arrange) must both survive React's batching —
+              // replacing would drop all but the last (mirrors node_moved).
+              setAnimatedLayout((prev) => [
+                ...(prev || []),
+                { positions: op.positions, animation: op.animation, seq: op.seq },
+              ]);
+            } else {
+              setRemotePositions((prev) => ({ ...(prev || {}), ...op.positions }));
+            }
+          }
           break;
         case 'annotation_created':
         case 'annotation_updated': {
@@ -282,6 +331,7 @@ function App() {
       setHiddenNodeIds,
       setHiddenEdgeIds,
       setRemotePositions,
+      setAnimatedLayout,
       setRemoteAnnotationOps,
       syncRef,
     ]
@@ -342,6 +392,8 @@ function App() {
       saveViewDialog ||
       showSubscriptionDialog ||
       showAgentDialog ||
+      showAgentRunsDialog ||
+      showAgentProposalsDialog ||
       skillDialogType ||
       showAKCDialog ||
       drawerOpen ||
@@ -349,6 +401,7 @@ function App() {
       connectDialogOpen ||
       renameDialog ||
       deleteSessionDialog ||
+      clearConfirm ||
       (akcShortName && akcConfig && !akcIntroShown)
     );
   }, [
@@ -360,6 +413,8 @@ function App() {
     saveViewDialog,
     showSubscriptionDialog,
     showAgentDialog,
+    showAgentRunsDialog,
+    showAgentProposalsDialog,
     skillDialogType,
     showAKCDialog,
     drawerOpen,
@@ -367,10 +422,44 @@ function App() {
     connectDialogOpen,
     renameDialog,
     deleteSessionDialog,
+    clearConfirm,
     akcShortName,
     akcConfig,
     akcIntroShown,
   ]);
+
+  // Decide how a clear-board request is handled, based on how protected the
+  // board is (task: confirm before clearing a named or locked visualization):
+  //   • locked   → keyboard esc-esc does nothing; the button asks for an
+  //                emphatic confirmation warning everything will be removed.
+  //   • named    → confirm before clearing (both esc-esc and the button).
+  //   • unnamed  → clear immediately, no confirmation.
+  const requestClear = useCallback(
+    (source) => {
+      const action = decideClearAction({
+        locked: canvasLocked,
+        named: !!currentSessionName,
+        source,
+      });
+      if (action === 'clear') {
+        clearVisualization();
+      } else if (action === 'confirm') {
+        setClearConfirm({ locked: false });
+      } else if (action === 'confirm-locked') {
+        setClearConfirm({ locked: true });
+      }
+      // 'noop' — locked board, esc-esc does nothing.
+    },
+    [canvasLocked, currentSessionName, clearVisualization]
+  );
+
+  // The capture-phase keydown listener is registered once and reads the latest
+  // decision logic through a ref, so the double-Escape timer isn't reset by
+  // re-registration whenever the guard inputs change.
+  const requestClearRef = useRef(requestClear);
+  useLayoutEffect(() => {
+    requestClearRef.current = requestClear;
+  }, [requestClear]);
 
   // Double-Escape to clear the canvas (works even from input fields)
   useEffect(() => {
@@ -381,7 +470,7 @@ function App() {
       if (dialogOpenRef.current) return;
       const now = Date.now();
       if (now - lastEscape < 400) {
-        clearVisualization();
+        requestClearRef.current('keyboard');
         lastEscape = 0;
       } else {
         lastEscape = now;
@@ -390,7 +479,7 @@ function App() {
     // Capture phase so it fires even when focus is inside an input/textarea
     document.addEventListener('keydown', handleKeyDown, true);
     return () => document.removeEventListener('keydown', handleKeyDown, true);
-  }, [clearVisualization]);
+  }, []);
 
   // ── Session bootstrap (once) ────────────────────────────────────────────
   // Reflect the initial session id in the URL and, when it came from a
@@ -401,7 +490,13 @@ function App() {
     const urlSession = _urlParams.get('session');
     if (sessionStore.isValidSessionId(urlSession)) {
       sessionStore.touchSession(urlSession);
-      loadSessionFromServer(urlSession, { eagerConnect: true });
+      // This id came in via a ?session= deep link, so a 404 means the linked
+      // session is gone/expired (not a brand-new local one) — surface it rather
+      // than silently opening an empty canvas (contract §5.3).
+      loadSessionFromServer(urlSession, {
+        eagerConnect: true,
+        onMissing: () => showNotification('info', t('sessions.link_not_found')),
+      });
     }
     setSessionsVersion((v) => v + 1);
   }, []); // eslint-disable-line react-hooks/exhaustive-deps
@@ -456,6 +551,7 @@ function App() {
         setConfig(schemaData, presentationData, t, language);
         setStats(statsData);
         setLlmAvailable(capabilitiesData.llm_available ?? false);
+        setModelProfilesCapability(capabilitiesData.model_profiles);
       } catch (error) {
         console.error('Error loading configuration:', error);
         api.getGraphStats().then(setStats).catch(console.error);
@@ -463,7 +559,7 @@ function App() {
       }
     };
     loadConfig();
-  }, [setConfig, setStats, setLlmAvailable, t, setLanguage, language]);
+  }, [setConfig, setStats, setLlmAvailable, setModelProfilesCapability, t, setLanguage, language]);
 
   useEffect(() => {
     if (!akcShortName) return;
@@ -614,6 +710,14 @@ function App() {
       setDetailNode,
       showNotification,
     ]
+  );
+
+  // Callback: open the node detail dialog directly on its change-history tab
+  const handleViewNodeHistory = useCallback(
+    (nodeId, nodeData) => {
+      setDetailNode({ id: nodeId, data: nodeData || {}, view: 'history' });
+    },
+    [setDetailNode]
   );
 
   // Callback: Expand node to show related nodes
@@ -776,6 +880,10 @@ function App() {
         const result = await api.addEdge(params.source, params.target);
         if (result.success && result.edge) {
           addNodesToVisualization([], [result.edge]);
+          // Fan the new edge out to collaborators. Both endpoints already exist
+          // on their canvases, so nothing else prompts them to re-hydrate it
+          // (no node was added); without this the edge renders only locally.
+          syncRef.current?.sendEdgesAdded([result.edge]);
         } else {
           // The edge is only drawn once persisted, so a non-success response must
           // surface an error rather than silently leaving nothing on the canvas.
@@ -786,7 +894,7 @@ function App() {
         showNotification('error', 'Could not create connection');
       }
     },
-    [addNodesToVisualization, showNotification]
+    [addNodesToVisualization, showNotification, syncRef]
   );
 
   // Callback: Show only selected nodes (hide all others)
@@ -1018,6 +1126,22 @@ function App() {
     setShowAgentDialog(true);
   }, []);
 
+  // Callback: View durable AgentRun history (optionally scoped to one agent)
+  const handleViewAgentRuns = useCallback((agentId = null) => {
+    setAgentRunsAgentId(agentId);
+    setShowAgentDialog(false);
+    setEditingAgentData(null);
+    setShowAgentRunsDialog(true);
+  }, []);
+
+  // Callback: View agent proposals (optionally scoped to one agent)
+  const handleViewAgentProposals = useCallback((agentId = null) => {
+    setAgentProposalsAgentId(agentId);
+    setShowAgentDialog(false);
+    setEditingAgentData(null);
+    setShowAgentProposalsDialog(true);
+  }, []);
+
   // Save subscription node
   const handleSaveSubscription = useCallback(
     async (data) => {
@@ -1213,6 +1337,14 @@ function App() {
   // Shared-session lifecycle (STRUCTURE_REVIEW B1 slice 1): load a server-backed
   // session's canvas + seed the sync baseline. Extracted into useSharedSession
   // so the transition logic is testable in isolation.
+  // Bound reset used on every session switch: drops assistant history, experts,
+  // node overlays and selection carried over from the previous session and bumps
+  // the assistant epoch so an in-flight reply can't land in the new session.
+  const resetSessionScopedUi = useCallback(
+    () => resetSessionScopedState(t, language),
+    [resetSessionScopedState, t, language]
+  );
+
   const { applyServerSession, loadSessionFromServer } = useSharedSession({
     clearVisualization,
     addNodesToVisualization,
@@ -1222,6 +1354,7 @@ function App() {
     setPendingAnnotations,
     ensureSyncConnected,
     syncRef,
+    resetSessionScopedState: resetSessionScopedUi,
   });
   // Expose the latest applyServerSession to resyncFromServer (defined earlier).
   applyServerSessionRef.current = applyServerSession;
@@ -1256,6 +1389,8 @@ function App() {
       onCommand: (command) => {
         if (command?.type === 'tool_result' && command.result) {
           applyToolResultCommand(command.result, command.command_id);
+        } else if (command?.type === 'node_pulse') {
+          applyPulseCommand(command, command.command_id);
         }
       },
       // A 400/413 drop is terminal (malformed op, or a hard limit like the
@@ -1276,6 +1411,7 @@ function App() {
     showNotification,
     t,
     applyToolResultCommand,
+    applyPulseCommand,
     syncHandlersRef,
     setRoster,
     setRemoteSelections,
@@ -1314,6 +1450,62 @@ function App() {
     },
     [sessionId, switchToSession]
   );
+
+  // Copy the canonical share link for a session (contract §5 form
+  // `<base>/?session=<id>`), built from the current origin+path so it stays
+  // correct across deployments without needing the server base URL client-side.
+  const handleCopySessionLink = useCallback(
+    async (targetId) => {
+      const url = new URL(window.location.href);
+      url.hash = '';
+      url.search = '';
+      url.searchParams.set('session', targetId);
+      const link = url.toString();
+      try {
+        await navigator.clipboard.writeText(link);
+      } catch {
+        const el = document.createElement('textarea');
+        el.value = link;
+        document.body.appendChild(el);
+        el.select();
+        try {
+          document.execCommand('copy');
+        } finally {
+          document.body.removeChild(el);
+        }
+      }
+      showNotification('success', t('sessions.link_copied'));
+    },
+    [showNotification, t]
+  );
+
+  // Mint a pulse-trigger token for the live session and copy the external
+  // trigger URL to the clipboard. Re-minting rotates the token, so this both
+  // creates and (re)issues the credential; any URL handed out earlier stops
+  // working. Only offered for the session this browser is live on.
+  const handleCopyTriggerUrl = useCallback(async () => {
+    let link;
+    try {
+      ({ url: link } = await api.mintPulseTriggerUrl(sessionId));
+    } catch {
+      showNotification('error', t('sessions.trigger_url_failed'));
+      return;
+    }
+    try {
+      await navigator.clipboard.writeText(link);
+    } catch {
+      const el = document.createElement('textarea');
+      el.value = link;
+      document.body.appendChild(el);
+      el.select();
+      try {
+        document.execCommand('copy');
+      } finally {
+        document.body.removeChild(el);
+      }
+    }
+    showNotification('success', t('sessions.trigger_url_copied'));
+  }, [sessionId, showNotification, t]);
 
   const handleConnectSession = useCallback(
     (targetId) => {
@@ -1373,13 +1565,21 @@ function App() {
       // one (design 3.6). Other connected clients are notified via the
       // server's session_deleted broadcast (handled once realtime lands).
       clearVisualization();
+      resetSessionScopedUi();
       const fresh = api.generateVisualizationSessionId();
       setSessionId(fresh);
       reflectSessionUrl(fresh);
       showNotification('info', t('sessions.session_deleted'));
     }
     setSessionsVersion((v) => v + 1);
-  }, [deleteSessionDialog, sessionId, clearVisualization, showNotification, t]);
+  }, [
+    deleteSessionDialog,
+    sessionId,
+    clearVisualization,
+    resetSessionScopedUi,
+    showNotification,
+    t,
+  ]);
 
   // Export full graph from backend API
   const handleExportGraph = useCallback(async () => {
@@ -1462,6 +1662,14 @@ function App() {
     setShowAgentDialog,
     editingAgentData,
     setEditingAgentData,
+    showAgentRunsDialog,
+    setShowAgentRunsDialog,
+    agentRunsAgentId,
+    onViewAgentRuns: handleViewAgentRuns,
+    showAgentProposalsDialog,
+    setShowAgentProposalsDialog,
+    agentProposalsAgentId,
+    onViewAgentProposals: handleViewAgentProposals,
     skillDialogType,
     setSkillDialogType,
     editingSkillData,
@@ -1490,6 +1698,7 @@ function App() {
           hiddenNodeIds={hiddenNodeIds}
           hiddenEdgeIds={hiddenEdgeIds}
           nodeMarks={nodeMarks}
+          pulsedNodeIds={pulsedNodeIds}
           clearGroupsFlag={clearGroupsFlag}
           onExpand={handleExpand}
           onEdit={handleEdit}
@@ -1511,6 +1720,7 @@ function App() {
           onShowOnly={handleShowOnly}
           onSelectionChange={handleSelectionChange}
           onNodeDoubleClick={handleNodeDoubleClick}
+          onViewNodeHistory={handleViewNodeHistory}
           focusNodeId={focusNodeId}
           onFocusComplete={clearFocusNode}
           createGroupSignal={createGroupSignal}
@@ -1523,6 +1733,19 @@ function App() {
           onAnnotationChange={scheduleAutoSave}
           remotePositions={remotePositions}
           onRemotePositionsApplied={() => setRemotePositions(null)}
+          animatedLayout={animatedLayout}
+          onAnimatedLayoutApplied={(drained) =>
+            setAnimatedLayout((prev) => {
+              // Clear only the batches the canvas actually drained: a new op
+              // enqueued between the drain and this reset must not be lost.
+              if (!prev || !drained || drained.length === 0) return prev || null;
+              const done = new Set(drained);
+              const rest = prev.filter((b) => !done.has(b));
+              return rest.length ? rest : null;
+            })
+          }
+          animatedLayoutResetKey={sessionId}
+          agentArrangingLabel={t('sessions.agent_arranging')}
           remoteAnnotationOps={remoteAnnotationOps}
           onRemoteAnnotationsApplied={() => setRemoteAnnotationOps(null)}
           remoteSelections={remoteSelections}
@@ -1533,6 +1756,7 @@ function App() {
           federationDepthLabel={t('federation.depth_label')}
           federationDepthTooltip={t('federation.depth_tooltip')}
           showMinimap={showMinimap}
+          nodePreviewEnabled={nodePreviewEnabled}
           schema={schema}
           onContextMenuAction={handleContextMenuAction}
           contextMenuLabels={{
@@ -1543,6 +1767,15 @@ function App() {
             nodesSelected: t('context_menu.nodes_selected'),
             showOnly: t('context_menu.show_only'),
             selectSameType: t('context_menu.select_same_type'),
+            selectRelated: t('context_menu.select_related'),
+            viewHistory: t('context_menu.view_history'),
+            organize: t('context_menu.organize'),
+            autoTidy: t('context_menu.auto_tidy'),
+            organizeCluster: t('context_menu.organize_cluster'),
+            organizeHorizontal: t('context_menu.organize_horizontal'),
+            organizeVertical: t('context_menu.organize_vertical'),
+            organizeTree: t('context_menu.organize_tree'),
+            organizeHint: t('context_menu.organize_hint'),
             hideAll: t('context_menu.hide_all'),
             deleteAll: t('context_menu.delete_all'),
             changeType: t('context_menu.change_type'),
@@ -1557,8 +1790,11 @@ function App() {
             annotationTextSize: t('context_menu.annotation_text_size'),
             arrowStartHead: t('context_menu.arrow_start_head'),
             arrowEndHead: t('context_menu.arrow_end_head'),
+            undoNotification: t('context_menu.undo_notification'),
+            redoNotification: t('context_menu.redo_notification'),
           }}
           nodeColorResolver={getNodeColor}
+          sessionKey={sessionId}
           onViewportChange={(vp) => {
             latestViewport.current = vp;
           }}
@@ -1569,7 +1805,7 @@ function App() {
         sessionId={sessionId}
         roster={roster}
         currentClientId={api.getClientId()}
-        onClear={clearVisualization}
+        onClear={() => requestClear('button')}
         onToggleDrawer={() => setDrawerOpen((prev) => !prev)}
       />
       <SessionDrawer
@@ -1585,11 +1821,15 @@ function App() {
           setRenameDialog({ id, name: entry?.name || '' });
         }}
         onDeleteSession={handleRequestDeleteSession}
+        onCopySessionLink={handleCopySessionLink}
+        onCopyTriggerUrl={handleCopyTriggerUrl}
         onOpenSettings={() => setSettingsOpen(true)}
         onOpenActivity={() => {
           setDrawerOpen(false);
           setActivityOpen(true);
         }}
+        canvasLocked={canvasLocked}
+        onToggleLock={() => setCanvasLocked(!canvasLocked)}
         suspendEscape={
           !!(
             // The drawer is non-modal, so any dialog can be stacked on top of
@@ -1598,6 +1838,7 @@ function App() {
             connectDialogOpen ||
             renameDialog ||
             deleteSessionDialog ||
+            clearConfirm ||
             createNodeType ||
             editingNode ||
             detailNode ||
@@ -1606,12 +1847,34 @@ function App() {
             saveViewDialog ||
             showSubscriptionDialog ||
             showAgentDialog ||
+            showAgentRunsDialog ||
+            showAgentProposalsDialog ||
             skillDialogType ||
             showAKCDialog
           )
         }
       />
       <RecentActivityDrawer open={activityOpen} onClose={() => setActivityOpen(false)} />
+      {clearConfirm && (
+        <ConfirmDialog
+          title={
+            clearConfirm.locked ? t('clear_confirm.locked_title') : t('clear_confirm.named_title')
+          }
+          message={
+            clearConfirm.locked
+              ? t('clear_confirm.locked_message')
+              : t('clear_confirm.named_message')
+          }
+          confirmText={t('clear_confirm.confirm')}
+          cancelText={t('common.cancel')}
+          confirmStyle="danger"
+          onConfirm={() => {
+            clearVisualization();
+            setClearConfirm(null);
+          }}
+          onCancel={() => setClearConfirm(null)}
+        />
+      )}
       {maxFederationDepth > 1 && (
         <div className="app-a11y-depth-live" aria-live="polite" aria-atomic="true">
           {t('federation.depth_indicator', { current: federationDepth, max: maxFederationDepth })}
@@ -1627,6 +1890,7 @@ function App() {
         onCreateActiveKnowledgeCollection={handleCreateAKC}
       />
       {llmAvailable && <ChatPanel collectionShortName={akcShortName || undefined} />}
+      <NodeHistoryPanel />
 
       {notification && (
         <div className={`app-notification app-notification-${notification.type}`}>

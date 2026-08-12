@@ -12,6 +12,8 @@ import './CustomNode.css';
  * - nodeType: Type of node (Actor, Initiative, etc.)
  * - color: Node color
  * - isHighlighted: Whether node is highlighted
+ * - pulse: transient { style: 'glow'|'grow'|'marker', color, seq } when an
+ *   external trigger fired a visual pulse on this node, else null
  * - description: Full description for tooltip
  * - communities: Array of community names
  * - onExpand: Callback when expand button clicked
@@ -27,6 +29,12 @@ function CustomNode({ data, id, selected }) {
 
   const isSkill = data.nodeType === 'Skill' || data.type === 'Skill';
   const remote = data.remoteSelection || null;
+  const pulse = data.pulse || null;
+  const pulseStyle = pulse
+    ? ['glow', 'grow', 'marker'].includes(pulse.style)
+      ? pulse.style
+      : 'glow'
+    : null;
 
   const handleExpand = (e) => {
     e.stopPropagation();
@@ -72,6 +80,15 @@ function CustomNode({ data, id, selected }) {
       }}
     >
       <Handle type="target" position={Position.Top} />
+
+      {pulseStyle && (
+        <span
+          key={pulse.seq}
+          className={`graph-node-pulse graph-node-pulse-${pulseStyle}`}
+          style={{ '--pulse-color': pulse.color || data.color || '#646cff' }}
+          aria-hidden="true"
+        />
+      )}
 
       {remote && (
         <div
@@ -129,6 +146,7 @@ function CustomNode({ data, id, selected }) {
 
       {showTooltip &&
         tooltipPos &&
+        data.previewEnabled !== false &&
         (data.description || data.communities?.length > 0 || data.markLabel) &&
         createPortal(
           <div

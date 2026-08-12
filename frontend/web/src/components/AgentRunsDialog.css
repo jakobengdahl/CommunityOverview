@@ -1,0 +1,77 @@
+.agent-runs-table {
+  width: 100%;
+  border-collapse: collapse;
+  margin-top: 0.75rem;
+  font-size: 0.85rem;
+}
+
+.agent-runs-table th,
+.agent-runs-table td {
+  text-align: left;
+  padding: 0.4rem 0.5rem;
+  border-bottom: 1px solid var(--border-color, #e2e2e2);
+}
+
+.agent-run-row {
+  cursor: pointer;
+}
+
+.agent-run-row:hover {
+  background: var(--hover-bg, rgba(0, 0, 0, 0.04));
+}
+
+.agent-run-status {
+  display: inline-block;
+  padding: 0.1rem 0.5rem;
+  border-radius: 10px;
+  font-size: 0.75rem;
+  font-weight: 600;
+  color: #fff;
+  background: #888;
+}
+
+.agent-run-status-queued {
+  background: #6b7280;
+}
+.agent-run-status-running {
+  background: #2563eb;
+}
+.agent-run-status-succeeded {
+  background: #16a34a;
+}
+.agent-run-status-failed {
+  background: #dc2626;
+}
+.agent-run-status-cancelled {
+  background: #9ca3af;
+}
+
+.agent-run-detail dl {
+  display: grid;
+  grid-template-columns: max-content 1fr;
+  gap: 0.2rem 0.75rem;
+  margin: 0.25rem 0;
+}
+
+.agent-run-detail dt {
+  font-weight: 600;
+  opacity: 0.75;
+}
+
+.agent-run-detail dd {
+  margin: 0;
+  word-break: break-word;
+}
+
+.agent-run-detail code {
+  font-size: 0.78rem;
+  white-space: pre-wrap;
+}
+
+.agent-run-error {
+  color: #dc2626;
+}
+
+.agent-runs-empty {
+  opacity: 0.7;
+}

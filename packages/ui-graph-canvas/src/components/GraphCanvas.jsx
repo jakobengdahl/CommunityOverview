@@ -27,17 +27,21 @@ import {
   PaneContextMenu,
 } from './ContextMenus';
 import { useRemotePositions } from '../hooks/useRemotePositions';
+import { useAnimatedLayout } from '../hooks/useAnimatedLayout';
+import { useCanvasHistory } from '../hooks/useCanvasHistory';
 import {
   applyLayout,
   getGridLayout,
   getCircularLayout,
   getLayoutedElements,
+  reconcileSessionNodes,
+  arrangeNodes,
 } from '../utils/graphLayout';
 import {
   getNodeColor,
   LAZY_LOAD_THRESHOLD,
   INITIAL_LOAD_COUNT,
-  DEFAULT_EDGE_STYLE,
+  resolveEdgeVisuals,
 } from '../utils/constants';
 import {
   OVERLAY_TYPES,
@@ -49,6 +53,11 @@ import {
   nodeCenter,
   resolveAnchoredArrow,
 } from '../utils/annotations';
+import {
+  directNeighborIds,
+  neighborStartPositions,
+  neighborDragPositions,
+} from '../utils/dragConnected';
 import './GraphCanvas.css';
 
 /**
@@ -76,6 +85,68 @@ function reorderNodesForParentChild(nodes) {
 }
 
 /**
+ * Compute a dragged graph node's post-drag placement: its final parentId and
+ * position, accounting for entering a group (position becomes parent-relative),
+ * leaving a group (position becomes absolute), or neither. `currentNodes` is the
+ * live ReactFlow node list and `groupNodes` its group nodes. Returns
+ * { parentId, position:{x,y} }. Pure, so both the on-screen re-parent and the
+ * recorded undo entry derive the same final placement from one source.
+ */
+function computeGroupPlacement(node, currentNodes, groupNodes) {
+  const flowNode = currentNodes.find((cn) => cn.id === node.id);
+  const pos = flowNode?.position || node.position;
+
+  const absPos = node.parentId
+    ? {
+        x: pos.x + (groupNodes.find((g) => g.id === node.parentId)?.position.x || 0),
+        y: pos.y + (groupNodes.find((g) => g.id === node.parentId)?.position.y || 0),
+      }
+    : pos;
+
+  let targetGroup = null;
+  for (const g of groupNodes) {
+    const gb = {
+      left: g.position.x,
+      right: g.position.x + (g.style?.width || 300),
+      top: g.position.y,
+      bottom: g.position.y + (g.style?.height || 200),
+    };
+    if (
+      absPos.x >= gb.left &&
+      absPos.x <= gb.right &&
+      absPos.y >= gb.top &&
+      absPos.y <= gb.bottom
+    ) {
+      targetGroup = g;
+      break;
+    }
+  }
+
+  if (targetGroup && node.parentId !== targetGroup.id) {
+    // Enter group: position becomes relative to the group origin.
+    return {
+      parentId: targetGroup.id,
+      position: { x: absPos.x - targetGroup.position.x, y: absPos.y - targetGroup.position.y },
+    };
+  }
+
+  if (!targetGroup && node.parentId) {
+    // Exit group: position becomes absolute again.
+    const oldParent = groupNodes.find((gn) => gn.id === node.parentId);
+    return {
+      parentId: undefined,
+      position: {
+        x: pos.x + (oldParent?.position.x || 0),
+        y: pos.y + (oldParent?.position.y || 0),
+      },
+    };
+  }
+
+  // No membership change: keep the current parent and the just-dragged position.
+  return { parentId: node.parentId, position: { x: pos.x, y: pos.y } };
+}
+
+/**
  * GraphCanvas - Main graph visualization component
  */
 function GraphCanvasInner({
@@ -85,9 +156,11 @@ function GraphCanvasInner({
   hiddenNodeIds = [],
   hiddenEdgeIds = [],
   nodeMarks = {},
+  pulsedNodeIds = {},
   clearGroupsFlag = false,
   onExpand,
   onEdit,
+  onViewNodeHistory,
   onDelete,
   onHide,
   onDeleteMultiple,
@@ -119,6 +192,10 @@ function GraphCanvasInner({
   onAnnotationChange,
   remotePositions = null,
   onRemotePositionsApplied,
+  animatedLayout = null,
+  onAnimatedLayoutApplied,
+  animatedLayoutResetKey = null,
+  agentArrangingLabel = 'Assistant is arranging the view…',
   remoteAnnotationOps = null,
   onRemoteAnnotationsApplied,
   remoteSelections = null,
@@ -133,6 +210,12 @@ function GraphCanvasInner({
   onContextMenuAction = null,
   nodeColorResolver = null,
   onViewportChange = null,
+  // Identity of the active visualization session. Changing it signals a session
+  // switch: the canvas discards the previous session's live node positions (so a
+  // node shared between sessions is not left at the old coordinates) and refits
+  // the view to the newly loaded content instead of lingering on the old camera.
+  sessionKey = null,
+  nodePreviewEnabled = true,
   contextMenuLabels = {},
 }) {
   const cml = {
@@ -143,6 +226,15 @@ function GraphCanvasInner({
     nodesSelected: '{count} nodes selected',
     showOnly: 'Show only these',
     selectSameType: 'Select all nodes of the same type',
+    selectRelated: 'Select related nodes',
+    viewHistory: 'View change history',
+    organize: 'Organize',
+    autoTidy: 'Auto-tidy',
+    organizeCluster: 'Cluster',
+    organizeHorizontal: 'List horizontally',
+    organizeVertical: 'List vertically',
+    organizeTree: 'Arrange as tree',
+    organizeHint: 'Organize: A auto-tidy · C cluster · H horizontal · V vertical · T tree',
     hideAll: 'Hide all',
     deleteAll: 'Delete all',
     changeType: 'Change type',
@@ -157,6 +249,8 @@ function GraphCanvasInner({
     annotationTextSize: 'Text size',
     arrowStartHead: 'Start arrowhead',
     arrowEndHead: 'End arrowhead',
+    undoNotification: 'Move undone',
+    redoNotification: 'Move redone',
     ...contextMenuLabels,
   };
 
@@ -177,11 +271,47 @@ function GraphCanvasInner({
   const [selectedNodes, setSelectedNodes] = useState([]);
   const [selectedEdges, setSelectedEdges] = useState([]);
   const [paneContextMenu, setPaneContextMenu] = useState(null);
+  // True while an MCP-driven layout tween is in flight, so the canvas can show a
+  // non-interactive badge that an assistant is arranging the view.
+  const [agentArranging, setAgentArranging] = useState(false);
   const paneMenuRef = useRef(null);
   const reactFlowWrapper = useRef(null);
   const rightDragStart = useRef({ x: 0, y: 0, time: null });
   const mouseDownPos = useRef(null);
-  const { screenToFlowPosition, setCenter, getNodes: getFlowNodes, getViewport } = useReactFlow();
+  // Two-step "organize" keyboard chord: Ctrl/Cmd+O arms it, then c/h/v/t picks
+  // the arrangement. Held in refs so arming doesn't re-render or re-bind keys.
+  const organizePendingRef = useRef(false);
+  const organizeTimerRef = useRef(null);
+  // Positions of the nodes about to move, snapshotted at drag start so the
+  // finished drag can be recorded as an undoable move.
+  const dragStartPositionsRef = useRef(new Map());
+  // Alt+drag "move with neighbours": snapshot of the anchor's start position and
+  // the trailing neighbours' start positions, captured at drag start. Held in a
+  // ref so the per-frame drag handler doesn't depend on React state timing.
+  const connectedDragRef = useRef(null);
+  const {
+    screenToFlowPosition,
+    setCenter,
+    getNodes: getFlowNodes,
+    getViewport,
+    fitView,
+  } = useReactFlow();
+  // Last session identity seen by the node-reconciliation effect and the
+  // refit-on-switch effect. Seeded with the mount value so the very first render
+  // is not treated as a switch (mount already fits via the ReactFlow fitView prop).
+  const lastSessionKeyRef = useRef(sessionKey);
+  const fitOnSessionKeyRef = useRef(sessionKey);
+
+  // Undo/redo history for node-position moves (drag + organize). Restoring a
+  // prior state writes the positions back through the same persistence path a
+  // normal move uses (see applyPositionMoves), matching the layout contract's
+  // read-then-write reversibility model.
+  const {
+    record: recordMove,
+    undo: undoMove,
+    redo: redoMove,
+    clear: clearHistory,
+  } = useCanvasHistory();
 
   // Stable notifier for annotation nodes (note/label/arrow) to signal the host
   // that an annotation was edited, recoloured or deleted so the session can be
@@ -270,18 +400,25 @@ function GraphCanvasInner({
 
   // Convert to React Flow edge format
   const reactFlowEdges = useMemo(() => {
-    return visibleEdges.map((edge) => ({
-      id: edge.id,
-      source: edge.source,
-      target: edge.target,
-      label: edge.type,
-      type: 'floating',
-      animated: false,
-      selectable: true,
-      style: DEFAULT_EDGE_STYLE,
-      labelStyle: { fill: '#888', fontSize: 10, fontWeight: 500 },
-      labelBgStyle: { fill: '#1a1a1a', fillOpacity: 0.8 },
-    }));
+    return visibleEdges.map((edge) => {
+      const visuals = resolveEdgeVisuals(edge.metadata);
+      return {
+        id: edge.id,
+        source: edge.source,
+        target: edge.target,
+        label: edge.type,
+        type: 'floating',
+        animated: visuals.animated,
+        selectable: true,
+        style: visuals.style,
+        markerStart: visuals.markerStart,
+        markerEnd: visuals.markerEnd,
+        className: visuals.className,
+        data: { type: edge.type, label: edge.label, metadata: edge.metadata || {} },
+        labelStyle: { fill: '#888', fontSize: 10, fontWeight: 500 },
+        labelBgStyle: { fill: '#1a1a1a', fillOpacity: 0.8 },
+      };
+    });
   }, [visibleEdges]);
 
   // Convert to React Flow node format with layout
@@ -302,7 +439,9 @@ function GraphCanvasInner({
           isHighlighted: highlightedNodeIds.includes(node.id),
           markColor: mark?.color ?? null,
           markLabel: mark?.label ?? null,
+          pulse: pulsedNodeIds[node.id] ?? null,
           remoteSelection: remoteSelections?.[node.id] ?? null,
+          previewEnabled: nodePreviewEnabled,
           onExpand: onExpand ? () => onExpand(node.id, node) : null,
           onEdit: onEdit ? () => onEdit(node.id, node) : null,
         },
@@ -327,7 +466,9 @@ function GraphCanvasInner({
     onEdit,
     highlightedNodeIds,
     nodeMarks,
+    pulsedNodeIds,
     remoteSelections,
+    nodePreviewEnabled,
   ]);
 
   const [nodes, setNodes, onNodesChange] = useNodesState(reactFlowNodes);
@@ -335,26 +476,39 @@ function GraphCanvasInner({
 
   // Update nodes when input changes
   useEffect(() => {
+    const sessionChanged = lastSessionKeyRef.current !== sessionKey;
+    lastSessionKeyRef.current = sessionKey;
     setNodes((nds) => {
-      const manualNodes = clearGroupsFlag ? [] : nds.filter(isManualNode);
-      const newNodes = reactFlowNodes.map((n) => {
-        const existing = nds.find((curr) => curr.id === n.id);
-        if (existing && existing.position.x !== 0) {
-          return {
-            ...n,
-            position: existing.position,
-            parentId: existing.parentId,
-            style: existing.style || n.style,
-          };
-        }
-        return n;
+      // A session switch drops the previous session's manual annotations too:
+      // clearVisualization sets clearGroupsFlag, and the new session's overlays
+      // arrive through the restore path. Outside a switch, keep the live ones.
+      const manualNodes = clearGroupsFlag || sessionChanged ? [] : nds.filter(isManualNode);
+      const reconciled = reconcileSessionNodes({
+        prevNodes: nds,
+        incomingNodes: reactFlowNodes,
+        incomingEdges: reactFlowEdges,
+        sessionChanged,
+        inLazyMode: visibleNodes.length > LAZY_LOAD_THRESHOLD,
       });
       // Groups must appear before their children in the array for ReactFlow
       // parent-child relationships to work. This also ensures groups render
       // behind custom nodes so clicks reach the nodes on top.
-      return reorderNodesForParentChild([...newNodes, ...manualNodes]);
+      return reorderNodesForParentChild([...reconciled, ...manualNodes]);
     });
-  }, [reactFlowNodes, setNodes, clearGroupsFlag]);
+  }, [reactFlowNodes, reactFlowEdges, visibleNodes.length, setNodes, clearGroupsFlag, sessionKey]);
+
+  // Refit the view whenever the session identity changes so switching sessions
+  // (e.g. via "recent sessions") frames the newly loaded content instead of
+  // leaving the camera on the viewport of the session just left. The mount value
+  // is seeded into the ref, so the initial fit still comes from the ReactFlow
+  // fitView prop and this effect only reacts to real switches. Deferred a frame
+  // so the incoming nodes are committed to the flow before it fits to them.
+  useEffect(() => {
+    if (fitOnSessionKeyRef.current === sessionKey) return;
+    fitOnSessionKeyRef.current = sessionKey;
+    const raf = requestAnimationFrame(() => fitView({ padding: 0.2, duration: 800 }));
+    return () => cancelAnimationFrame(raf);
+  }, [sessionKey, fitView]);
 
   // Update edges when input changes
   useEffect(() => {
@@ -393,6 +547,149 @@ function GraphCanvasInner({
     setEdgeContextMenu(null);
     setPaneContextMenu(null);
   }, []);
+
+  const showNotification = useCallback((type, message) => {
+    setNotification({ type, message });
+    setTimeout(() => setNotification(null), 3000);
+  }, []);
+
+  // Apply a batch of { id, position, parentId } moves to the canvas and persist
+  // each one through the same callback a drag/organize uses, so an undo or redo
+  // is indistinguishable from the move it reverses. `parentId` is restored too
+  // (re-parenting the node into or out of a group), because a grouped node's
+  // position is parent-relative — restoring the position without the parent
+  // would place it in the wrong coordinate space.
+  const applyPositionMoves = useCallback(
+    (moves) => {
+      if (!moves || moves.length === 0) return;
+      const byId = new Map(moves.map((m) => [m.id, m]));
+      setNodes((nds) =>
+        reorderNodesForParentChild(
+          nds.map((n) => {
+            const m = byId.get(n.id);
+            if (!m) return n;
+            return { ...n, position: { ...m.position }, parentId: m.parentId };
+          })
+        )
+      );
+      if (onNodePositionChange) {
+        for (const m of moves) onNodePositionChange(m.id, m.position);
+      }
+    },
+    [setNodes, onNodePositionChange]
+  );
+
+  const handleUndo = useCallback(() => {
+    const moves = undoMove();
+    if (!moves) return;
+    applyPositionMoves(moves);
+    showNotification('info', cml.undoNotification);
+  }, [undoMove, applyPositionMoves, showNotification, cml.undoNotification]);
+
+  const handleRedo = useCallback(() => {
+    const moves = redoMove();
+    if (!moves) return;
+    applyPositionMoves(moves);
+    showNotification('info', cml.redoNotification);
+  }, [redoMove, applyPositionMoves, showNotification, cml.redoNotification]);
+
+  // Discard history when the session identity changes so an undo can never
+  // restore positions from a previously loaded session.
+  useEffect(() => {
+    clearHistory();
+  }, [animatedLayoutResetKey, clearHistory]);
+
+  // While any context menu is open, suppress the hover info popup: the node the
+  // menu was opened on is still hovered, so its tooltip (portaled to the body at
+  // a high z-index) would otherwise render on top of / behind the menu. The
+  // tooltip lives in CustomNode and is portaled to the body, so a body-level
+  // class is the simplest way to reach it without threading menu state through
+  // every node's data.
+  const anyMenuOpen = !!(
+    nodeContextMenu ||
+    multiNodeContextMenu ||
+    edgeContextMenu ||
+    paneContextMenu
+  );
+  useEffect(() => {
+    document.body.classList.toggle('graph-menu-open', anyMenuOpen);
+    return () => document.body.classList.remove('graph-menu-open');
+  }, [anyMenuOpen]);
+
+  // Select a node together with every node it is directly connected to.
+  const selectRelatedNodes = useCallback(
+    (nodeId) => {
+      const relatedIds = new Set([nodeId]);
+      for (const e of edges) {
+        if (e.source === nodeId) relatedIds.add(e.target);
+        else if (e.target === nodeId) relatedIds.add(e.source);
+      }
+      const changes = nodes
+        .filter((n) => n.type !== 'group')
+        .map((n) => ({ id: n.id, type: 'select', selected: relatedIds.has(n.id) }));
+      if (changes.length > 0) onNodesChange(changes);
+      closeAllMenus();
+    },
+    [edges, nodes, onNodesChange, closeAllMenus]
+  );
+
+  // Re-arrange the currently selected graph nodes into a chosen structure
+  // (cluster / horizontal / vertical / tree), centred on where they already are.
+  const organizeSelection = useCallback(
+    (mode) => {
+      const selIds = new Set(
+        selectedNodes.filter((n) => !ANNOTATION_TYPES.has(n.type)).map((n) => n.id)
+      );
+      if (selIds.size < 2) return;
+      // Nodes inside a group hold parent-relative positions; arrange in absolute
+      // coordinates so a selection spanning grouped and ungrouped nodes stays
+      // consistent, then convert back to relative when writing grouped nodes.
+      const groupPos = new Map(
+        nodes.filter((n) => n.type === 'group').map((g) => [g.id, g.position])
+      );
+      const toAbsolute = (n) => {
+        const parent = n.parentId ? groupPos.get(n.parentId) : null;
+        return parent ? { x: n.position.x + parent.x, y: n.position.y + parent.y } : n.position;
+      };
+      const targets = nodes
+        .filter((n) => selIds.has(n.id))
+        .map((n) => ({ ...n, position: toAbsolute(n) }));
+      const posById = arrangeNodes(targets, edges, mode);
+      if (posById.size === 0) return;
+      // Convert the arranged absolute positions back to the parent-relative form
+      // ReactFlow stores for grouped nodes. Compute once and use for both the
+      // on-screen update and the persistence callback, so the position we render
+      // is the position we save (the drag path also persists relative positions).
+      const nodeById = new Map(nodes.map((n) => [n.id, n]));
+      const finalPos = new Map();
+      const moves = [];
+      for (const [id, abs] of posById) {
+        const parent = nodeById.get(id)?.parentId ? groupPos.get(nodeById.get(id).parentId) : null;
+        const pos = parent ? { x: abs.x - parent.x, y: abs.y - parent.y } : abs;
+        finalPos.set(id, pos);
+        const cur = nodeById.get(id);
+        // Organize never changes group membership: carry the node's current
+        // parentId on both sides so an undo restores position without detaching
+        // a grouped node.
+        if (cur) {
+          moves.push({
+            id,
+            from: { x: cur.position.x, y: cur.position.y, parentId: cur.parentId },
+            to: { x: pos.x, y: pos.y, parentId: cur.parentId },
+          });
+        }
+      }
+      recordMove(moves);
+      setNodes((nds) =>
+        nds.map((n) => (finalPos.has(n.id) ? { ...n, position: finalPos.get(n.id) } : n))
+      );
+      if (onNodePositionChange) {
+        for (const [id, pos] of finalPos) onNodePositionChange(id, pos);
+      }
+      closeAllMenus();
+    },
+    [selectedNodes, nodes, edges, setNodes, onNodePositionChange, closeAllMenus, recordMove]
+  );
 
   // Create a free-floating annotation (note, label or arrow) at the given flow
   // position. Notes/labels/arrows are persisted in the session annotation list
@@ -489,8 +786,82 @@ function GraphCanvasInner({
     clearSelection();
   }, [closeAllMenus, clearSelection]);
 
+  const onNodeDragStart = useCallback(
+    (event, draggedNode, allDraggedNodes) => {
+      // Snapshot the pre-drag positions (and parent) of the graph nodes about to
+      // move, so the completed drag can be recorded as one undoable move.
+      // Annotation and group nodes are excluded — they persist through their own
+      // paths, not the position-move history.
+      const set = allDraggedNodes && allDraggedNodes.length > 0 ? allDraggedNodes : [draggedNode];
+      const snap = new Map();
+      for (const n of set) {
+        if (ANNOTATION_TYPES.has(n.type)) continue;
+        snap.set(n.id, { x: n.position.x, y: n.position.y, parentId: n.parentId });
+      }
+      dragStartPositionsRef.current = snap;
+
+      // Alt+drag: arm "move node together with its directly connected
+      // neighbours". Alt is chosen to avoid the Shift/Ctrl/Meta multi-select
+      // gesture. The neighbour snapshot is taken from ReactFlow's live store so
+      // it agrees with the coordinates onNodeDrag/onNodeDragStop read back.
+      connectedDragRef.current = null;
+      if (!event?.altKey) return;
+      // The full set ReactFlow is dragging (may include group nodes when an
+      // Alt-drag starts from a multi-selection); used to skip neighbours that a
+      // dragged group already carries, so they aren't translated twice.
+      const dragged =
+        allDraggedNodes && allDraggedNodes.length > 0 ? allDraggedNodes : [draggedNode];
+      const draggedIds = new Set(dragged.map((n) => n.id));
+      // Only graph nodes carry meaningful edges; annotation/group nodes are
+      // excluded both as anchors and as trailing neighbours.
+      const anchors = dragged.filter((n) => !ANNOTATION_TYPES.has(n.type));
+      if (anchors.length === 0) return;
+      const anchorIds = new Set(anchors.map((n) => n.id));
+      const neighborIds = directNeighborIds(edges, anchorIds);
+      if (neighborIds.size === 0) return;
+      const startById = neighborStartPositions(getFlowNodes(), neighborIds, draggedIds);
+      if (startById.size === 0) return;
+      connectedDragRef.current = {
+        anchorId: draggedNode.id,
+        anchorStart: { x: draggedNode.position.x, y: draggedNode.position.y },
+        neighbors: startById,
+      };
+    },
+    [edges, getFlowNodes]
+  );
+
+  const onNodeDrag = useCallback(
+    (event, draggedNode) => {
+      const state = connectedDragRef.current;
+      if (!state || draggedNode.id !== state.anchorId) return;
+      const updates = neighborDragPositions(
+        state.neighbors,
+        state.anchorStart,
+        draggedNode.position
+      );
+      if (updates.size === 0) return;
+      setNodes((nds) =>
+        nds.map((n) => (updates.has(n.id) ? { ...n, position: updates.get(n.id) } : n))
+      );
+    },
+    [setNodes]
+  );
+
   const onNodeDragStop = useCallback(
     (event, draggedNode, allDraggedNodes) => {
+      // Persist the final positions of any Alt-drag neighbours that trailed the
+      // anchor, then disarm. Group re-parenting below is intentionally left to
+      // the explicitly dragged nodes only; trailing neighbours keep their parent.
+      const connected = connectedDragRef.current;
+      connectedDragRef.current = null;
+      if (connected && onNodePositionChange) {
+        const latest = getFlowNodes();
+        for (const id of connected.neighbors.keys()) {
+          const fn = latest.find((cn) => cn.id === id);
+          if (fn) onNodePositionChange(id, fn.position);
+        }
+      }
+
       if (onNodePositionChange) {
         onNodePositionChange(draggedNode.id, draggedNode.position);
       }
@@ -509,80 +880,86 @@ function GraphCanvasInner({
             : [];
       const draggedIds = new Set(nodesToProcess.map((n) => n.id));
 
-      // Nothing to process: either no non-group nodes dragged or no groups exist
-      if (draggedIds.size === 0 || groupNodes.length === 0) return;
+      const startSnap = dragStartPositionsRef.current;
+      dragStartPositionsRef.current = new Map();
+
+      // Compute each dragged graph node's final placement (position + parentId),
+      // including any group-membership change, so the on-screen re-parent and the
+      // recorded undo entry share one source of truth. Empty when there are no
+      // groups to enter/leave — a plain drag needs no re-parenting.
+      const finalById = new Map();
+      if (draggedIds.size > 0 && groupNodes.length > 0) {
+        for (const n of currentNodes) {
+          if (!draggedIds.has(n.id) || n.type === 'group') continue;
+          finalById.set(n.id, computeGroupPlacement(n, currentNodes, groupNodes));
+        }
+      }
+
+      // Record the completed drag as one undoable action: from the drag-start
+      // snapshot to the final placement. Runs for plain drags too, so a canvas
+      // with no groups still records moves. When a node changed group membership,
+      // the recorded `to` carries the new parentId and parent-relative position,
+      // so an undo restores the correct parent and coordinate space.
+      const moves = [];
+      for (const [id, from] of startSnap) {
+        const placed = finalById.get(id);
+        if (placed) {
+          moves.push({
+            id,
+            from,
+            to: { x: placed.position.x, y: placed.position.y, parentId: placed.parentId },
+          });
+        } else {
+          const flowNode = currentNodes.find((cn) => cn.id === id);
+          if (flowNode) {
+            moves.push({
+              id,
+              from,
+              to: { x: flowNode.position.x, y: flowNode.position.y, parentId: flowNode.parentId },
+            });
+          }
+        }
+      }
+      // Fold in the neighbours an Alt+drag carried along, so undoing the gesture
+      // restores the whole cluster, not just the anchor. Neighbours keep their
+      // parent (the neighbour drag never re-parents them).
+      if (connected) {
+        for (const [id, start] of connected.neighbors) {
+          const fn = currentNodes.find((cn) => cn.id === id);
+          if (!fn) continue;
+          moves.push({
+            id,
+            from: { x: start.x, y: start.y, parentId: fn.parentId },
+            to: { x: fn.position.x, y: fn.position.y, parentId: fn.parentId },
+          });
+        }
+      }
+      recordMove(moves);
+
+      // Nothing to re-parent: either no non-group nodes dragged or no groups exist
+      if (finalById.size === 0) return;
 
       setNodes((nds) => {
         const mapped = nds.map((n) => {
-          if (!draggedIds.has(n.id) || n.type === 'group') return n;
-
-          // Use position from ReactFlow's store for accurate post-drag coordinates
-          const flowNode = currentNodes.find((cn) => cn.id === n.id);
-          const pos = flowNode?.position || n.position;
-
-          // Calculate absolute position (account for parent offset)
-          const absPos = n.parentId
-            ? {
-                x: pos.x + (groupNodes.find((g) => g.id === n.parentId)?.position.x || 0),
-                y: pos.y + (groupNodes.find((g) => g.id === n.parentId)?.position.y || 0),
-              }
-            : pos;
-
-          // Find which group this node is inside
-          let targetGroup = null;
-          for (const g of groupNodes) {
-            const gb = {
-              left: g.position.x,
-              right: g.position.x + (g.style?.width || 300),
-              top: g.position.y,
-              bottom: g.position.y + (g.style?.height || 200),
-            };
-            if (
-              absPos.x >= gb.left &&
-              absPos.x <= gb.right &&
-              absPos.y >= gb.top &&
-              absPos.y <= gb.bottom
-            ) {
-              targetGroup = g;
-              break;
-            }
+          const placed = finalById.get(n.id);
+          if (!placed) return n;
+          // Leave unchanged nodes as-is (preserving extent etc.); only rewrite a
+          // node that actually moved parent or position.
+          if (
+            placed.parentId === n.parentId &&
+            placed.position.x === n.position.x &&
+            placed.position.y === n.position.y
+          ) {
+            return n;
           }
-
-          if (targetGroup && n.parentId !== targetGroup.id) {
-            // Enter group
-            return {
-              ...n,
-              parentId: targetGroup.id,
-              position: {
-                x: absPos.x - targetGroup.position.x,
-                y: absPos.y - targetGroup.position.y,
-              },
-              extent: undefined,
-            };
-          }
-
-          if (!targetGroup && n.parentId) {
-            // Exit group
-            const oldParent = groupNodes.find((gn) => gn.id === n.parentId);
-            return {
-              ...n,
-              parentId: undefined,
-              position: {
-                x: pos.x + (oldParent?.position.x || 0),
-                y: pos.y + (oldParent?.position.y || 0),
-              },
-              extent: undefined,
-            };
-          }
-
-          return n;
+          return { ...n, parentId: placed.parentId, position: placed.position, extent: undefined };
         });
 
         // ReactFlow requires parent nodes before children in the array
         return reorderNodesForParentChild(mapped);
       });
     },
-    [setNodes, onNodePositionChange, getFlowNodes]
+    [setNodes, onNodePositionChange, getFlowNodes, recordMove]
   );
 
   // Right-click on empty background. A plain right-click opens the annotation
@@ -864,9 +1241,64 @@ function GraphCanvasInner({
 
   // Delete/Backspace hides selected nodes/edges, Escape clears selection
   useEffect(() => {
+    const cancelOrganizePending = () => {
+      organizePendingRef.current = false;
+      if (organizeTimerRef.current) {
+        clearTimeout(organizeTimerRef.current);
+        organizeTimerRef.current = null;
+      }
+    };
     const handleKeyDown = (e) => {
       const tag = e.target.tagName;
       if (tag === 'INPUT' || tag === 'TEXTAREA' || e.target.isContentEditable) return;
+
+      // Undo/redo of node-position moves. Ctrl/Cmd+Z undoes; Ctrl/Cmd+Shift+Z
+      // and Ctrl/Cmd+Y redo (covering both the mac and Windows conventions).
+      if ((e.ctrlKey || e.metaKey) && !e.altKey) {
+        const key = e.key?.toLowerCase();
+        if (key === 'z') {
+          e.preventDefault();
+          if (e.shiftKey) handleRedo();
+          else handleUndo();
+          return;
+        }
+        if (key === 'y') {
+          e.preventDefault();
+          handleRedo();
+          return;
+        }
+      }
+
+      // Second step of the organize chord: a pending Ctrl/Cmd+O is resolved by
+      // the next c/h/v/t keystroke.
+      if (organizePendingRef.current && !e.ctrlKey && !e.metaKey && !e.altKey) {
+        const mode = { a: 'tidy', c: 'cluster', h: 'horizontal', v: 'vertical', t: 'tree' }[
+          e.key?.toLowerCase()
+        ];
+        if (mode) {
+          e.preventDefault();
+          cancelOrganizePending();
+          organizeSelection(mode);
+          return;
+        }
+        if (e.key === 'Escape') cancelOrganizePending();
+      }
+
+      // First step of the organize chord: Ctrl/Cmd+O arms it when a
+      // multi-selection of graph nodes exists.
+      if ((e.ctrlKey || e.metaKey) && !e.altKey && e.key?.toLowerCase() === 'o') {
+        const selectable = selectedNodes.filter((n) => !ANNOTATION_TYPES.has(n.type));
+        if (selectable.length >= 2) {
+          e.preventDefault();
+          organizePendingRef.current = true;
+          showNotification('info', cml.organizeHint);
+          if (organizeTimerRef.current) clearTimeout(organizeTimerRef.current);
+          organizeTimerRef.current = setTimeout(() => {
+            organizePendingRef.current = false;
+          }, 3000);
+          return;
+        }
+      }
 
       if (e.key === 'Escape') {
         closeAllMenus();
@@ -907,7 +1339,10 @@ function GraphCanvasInner({
       }
     };
     document.addEventListener('keydown', handleKeyDown);
-    return () => document.removeEventListener('keydown', handleKeyDown);
+    return () => {
+      document.removeEventListener('keydown', handleKeyDown);
+      cancelOrganizePending();
+    };
   }, [
     selectedNodes,
     selectedEdges,
@@ -916,6 +1351,11 @@ function GraphCanvasInner({
     onHideEdge,
     closeAllMenus,
     clearSelection,
+    organizeSelection,
+    showNotification,
+    cml.organizeHint,
+    handleUndo,
+    handleRedo,
   ]);
 
   // Create group when signal changes (triggered from toolbar)
@@ -1052,6 +1492,17 @@ function GraphCanvasInner({
   // positions for not-yet-mounted nodes until they appear.
   useRemotePositions({ remotePositions, onRemotePositionsApplied, nodes, setNodes });
 
+  // Tween an MCP-initiated batch layout (contract §9–§10) into place, honouring
+  // reduced motion and never disturbing a node the user is dragging.
+  useAnimatedLayout({
+    animatedLayout,
+    onAnimatedLayoutApplied,
+    onAgentArrangingChange: setAgentArranging,
+    setNodes,
+    getNodes: getFlowNodes,
+    resetKey: animatedLayoutResetKey,
+  });
+
   // Apply a queue of group/overlay annotation changes from other clients (design
   // step 6): upsert or delete annotation nodes and reassign group membership.
   // A queue (not a single op) so a burst arriving in one render is not coalesced.
@@ -1162,11 +1613,6 @@ function GraphCanvasInner({
     []
   );
 
-  const showNotification = useCallback((type, message) => {
-    setNotification({ type, message });
-    setTimeout(() => setNotification(null), 3000);
-  }, []);
-
   return (
     <AnnotationContext.Provider value={annotationContextValue}>
       <div className="graph-canvas-container">
@@ -1190,6 +1636,8 @@ function GraphCanvasInner({
             onNodesChange={onNodesChange}
             onEdgesChange={onEdgesChange}
             onConnect={onConnect}
+            onNodeDragStart={onNodeDragStart}
+            onNodeDrag={onNodeDrag}
             onNodeDragStop={onNodeDragStop}
             onPaneContextMenu={onPaneContextMenu}
             onNodeContextMenu={onNodeContextMenu}
@@ -1238,6 +1686,13 @@ function GraphCanvasInner({
               />
             )}
           </ReactFlow>
+
+          {agentArranging && (
+            <div className="graph-agent-arranging" role="status" aria-live="polite">
+              <span className="graph-agent-arranging-dot" />
+              <span className="graph-agent-arranging-label">{agentArrangingLabel}</span>
+            </div>
+          )}
 
           {marksLegend.length > 0 && (
             <div className="graph-marks-legend">
@@ -1293,6 +1748,8 @@ function GraphCanvasInner({
           onDelete={onDelete}
           onContextMenuAction={onContextMenuAction}
           selectNodesByType={selectNodesByType}
+          onSelectRelated={selectRelatedNodes}
+          onViewHistory={onViewNodeHistory}
           onClose={() => setNodeContextMenu(null)}
         />
 
@@ -1305,6 +1762,7 @@ function GraphCanvasInner({
           onDelete={onDelete}
           onDeleteMultiple={onDeleteMultiple}
           selectNodesByType={selectNodesByType}
+          onOrganize={organizeSelection}
           onClose={() => setMultiNodeContextMenu(null)}
         />
 

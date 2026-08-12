@@ -206,6 +206,46 @@ class TestChatServiceConversation:
         assert "Document content" in user_msg["content"]
         assert "AI and machine learning" in user_msg["content"]
 
+    def test_propose_nodes_uses_model_profile_resolution(self, chat_service):
+        """Node proposal extraction should use configured model profiles, not only legacy env keys."""
+        from backend.config.model_profiles import ModelProfile
+
+        service, mock_llm = chat_service
+        mock_llm.mock_text_response = '[{"type":"Actor","name":"Agency X","description":"Test agency","summary":"Agency X","tags":["test"],"subtypes":["Agency"]}]'
+
+        profile = ModelProfile(
+            id="extractor",
+            name="Extractor",
+            provider="openai",
+            model="gpt-4o-mini",
+            default=True,
+            credential_ref="EXTRACTOR_API_KEY",
+        )
+
+        with (
+            patch(
+                "backend.config.config_loader.get_model_profiles",
+                return_value=[profile],
+            ),
+            patch(
+                "backend.config.config_loader.get_model_profile_selection_enabled",
+                return_value=True,
+            ),
+            patch(
+                "backend.ui.chat_logic.create_provider_from_profile",
+                return_value=mock_llm,
+            ) as create_from_profile,
+        ):
+            result = service.propose_nodes_from_text(
+                text="Agency X runs a test initiative.",
+                model_profile_id="extractor",
+            )
+
+        assert result["success"] is True
+        assert result["proposed_nodes"][0]["name"] == "Agency X"
+        create_from_profile.assert_called_once()
+        assert create_from_profile.call_args.args[0].id == "extractor"
+
     def test_get_system_info(self, chat_service):
         """get_system_info should return provider and tools info."""
         service, _ = chat_service
@@ -420,17 +460,20 @@ class TestExpertAgentSkills:
 # ---------------------------------------------------------------------------
 
 
-def _make_akc_node(short_name, perms):
+def _make_akc_node(short_name, perms, tool_allowlist=None):
     """Build a minimal ActiveKnowledgeCollection node dict as returned by search_graph."""
+    metadata = {
+        "short_name": short_name,
+        "prompt": "Collect test data.",
+        "node_type_permissions": perms,
+    }
+    if tool_allowlist is not None:
+        metadata["tool_allowlist"] = tool_allowlist
     return {
         "id": f"akc-{short_name}",
         "name": short_name,
         "type": "ActiveKnowledgeCollection",
-        "metadata": {
-            "short_name": short_name,
-            "prompt": "Collect test data.",
-            "node_type_permissions": perms,
-        },
+        "metadata": metadata,
     }
 
 
@@ -721,6 +764,154 @@ class TestMakeEnforcedTools:
         assert result["total"] == 0, (
             "Forbidden node type was created despite permission enforcement"
         )
+
+
+class TestToolAllowlist:
+    """Tests for the per-collection tool allowlist (kiosk assistant tool access)."""
+
+    def test_normalize_tool_allowlist(self):
+        """Falsy/invalid allowlists normalize to None (unrestricted); lists are cleaned."""
+        from backend.ui import ChatService
+
+        assert ChatService._normalize_tool_allowlist(None) is None
+        assert ChatService._normalize_tool_allowlist([]) is None
+        assert ChatService._normalize_tool_allowlist("search_graph") is None
+        assert ChatService._normalize_tool_allowlist([1, "", None]) is None
+        assert ChatService._normalize_tool_allowlist(
+            ["search_graph", "", "present_form", 3]
+        ) == ["search_graph", "present_form"]
+
+    def test_allowlist_filters_advertised_tools(self, chat_service):
+        """Only allowlisted tools are advertised to the LLM when an allowlist is set."""
+        service, mock_llm = chat_service
+        akc_node = _make_akc_node(
+            "coll", ACTOR_ONLY_PERMS, tool_allowlist=["search_graph", "present_form"]
+        )
+        mock_llm.mock_text_response = "hi"
+
+        with patch.object(
+            service._graph_service,
+            "search_graph",
+            return_value={"nodes": [akc_node], "edges": [], "total": 1},
+        ):
+            service.process_message(
+                messages=[{"role": "user", "content": "hi"}],
+                collection_short_name="coll",
+            )
+
+        advertised = {t["name"] for t in mock_llm.received_tools[0]}
+        assert advertised == {"search_graph", "present_form"}
+
+    def test_no_allowlist_advertises_all_tools(self, chat_service):
+        """A collection without a tool allowlist keeps the full tool set (backward compatible)."""
+        service, mock_llm = chat_service
+        akc_node = _make_akc_node("coll", ACTOR_ONLY_PERMS)  # no tool_allowlist
+        mock_llm.mock_text_response = "hi"
+
+        with patch.object(
+            service._graph_service,
+            "search_graph",
+            return_value={"nodes": [akc_node], "edges": [], "total": 1},
+        ):
+            service.process_message(
+                messages=[{"role": "user", "content": "hi"}],
+                collection_short_name="coll",
+            )
+
+        advertised = mock_llm.received_tools[0]
+        assert advertised == service._processor.tool_definitions
+        assert len(advertised) > 2
+
+    def test_allowlist_blocks_unlisted_tool_server_side(self, chat_service):
+        """A tool outside the allowlist is blocked and never executed, even when
+        node-type permissions would otherwise allow it (server-side enforcement,
+        not just hiding the tool from the LLM)."""
+        service, mock_llm = chat_service
+
+        # Allowlist permits only search_graph; node-type perms WOULD allow creating
+        # an Actor — proving the block comes from the tool allowlist, not perms.
+        akc_node = _make_akc_node(
+            "coll", ACTOR_ONLY_PERMS, tool_allowlist=["search_graph"]
+        )
+        mock_llm.mock_tool_calls = [
+            {
+                "name": "add_nodes",
+                "input": {
+                    "nodes": [{"type": "Actor", "name": "Sneaky Agency"}],
+                    "edges": [],
+                },
+            }
+        ]
+        mock_llm.mock_text_response = "Blocked."
+
+        with patch.object(
+            service._graph_service,
+            "search_graph",
+            return_value={"nodes": [akc_node], "edges": [], "total": 1},
+        ):
+            result = service.process_message(
+                messages=[{"role": "user", "content": "add an actor"}],
+                collection_short_name="coll",
+            )
+
+        # The tool was blocked before execution: no Actor node reached the graph.
+        found = service._graph_service.search_graph(query="Sneaky Agency")
+        assert found["total"] == 0, (
+            "Allowlisted-out tool was executed despite the block"
+        )
+
+        # The block surfaced as a tool error result fed back to the LLM.
+        tool_result = result.get("toolResult") or {}
+        assert "allowlist" in str(tool_result).lower()
+
+    def test_allowlist_blocks_unlisted_tool_in_tool_chain(self, chat_service):
+        """The gate re-applies on chained tool turns: a disallowed tool requested on
+        the SECOND LLM turn is blocked just like on the first."""
+        service, mock_llm = chat_service
+        akc_node = _make_akc_node(
+            "coll", ACTOR_ONLY_PERMS, tool_allowlist=["search_graph"]
+        )
+        # Turn 1: allowed search_graph → chains to Turn 2: disallowed add_nodes.
+        mock_llm.mock_tool_call_sequence = [
+            [{"name": "search_graph", "input": {"query": "x"}}],
+            [
+                {
+                    "name": "add_nodes",
+                    "input": {
+                        "nodes": [{"type": "Actor", "name": "Chained Agency"}],
+                        "edges": [],
+                    },
+                }
+            ],
+        ]
+        mock_llm.mock_text_response = "done"
+
+        with patch.object(
+            service._graph_service,
+            "search_graph",
+            return_value={"nodes": [akc_node], "edges": [], "total": 1},
+        ):
+            service.process_message(
+                messages=[{"role": "user", "content": "go"}],
+                collection_short_name="coll",
+            )
+
+        # The chained add_nodes call was blocked: no Actor reached the graph.
+        found = service._graph_service.search_graph(query="Chained Agency")
+        assert found["total"] == 0, "Chained disallowed tool executed despite the gate"
+        # Every LLM turn saw only the filtered tool set.
+        for advertised in mock_llm.received_tools:
+            assert {t["name"] for t in advertised} == {"search_graph"}
+
+    def test_allowlist_ignored_outside_collection_mode(self, chat_service):
+        """Without a collection_short_name the assistant is unrestricted (all tools)."""
+        service, mock_llm = chat_service
+        mock_llm.mock_text_response = "hi"
+
+        service.process_message(messages=[{"role": "user", "content": "hi"}])
+
+        advertised = mock_llm.received_tools[0]
+        assert advertised == service._processor.tool_definitions
 
 
 class TestVisualizationContext:
@@ -1306,6 +1497,264 @@ class TestCollectResponsesOptOut:
         )
 
 
+class TestLinkResultsToResponse:
+    """Auto-linking created/updated nodes to their CollectionResponse node.
+
+    Covers the per-collection link_results setting (default True): the response
+    node is connected to every node the run created or updated, unless the
+    setting is disabled.
+    """
+
+    ALL_OPS = {"Actor": {"create": True, "update": True, "delete": True}}
+
+    def _service(self, graph_service, mock_llm_provider):
+        from backend.ui import ChatService
+
+        with (
+            patch(
+                "backend.ui.chat_logic.create_provider", return_value=mock_llm_provider
+            ),
+            patch.dict(os.environ, {"ANTHROPIC_API_KEY": "test-key"}),
+        ):
+            service = ChatService(graph_service)
+            service._processor.provider_type = "mock"
+            service._processor.default_api_key = "test-key"
+        return service
+
+    def _add_collection(self, graph_service, short_name, perms, link_results=None):
+        """Persist an AKC node (optionally with link_results) and return its id."""
+        meta = {
+            "short_name": short_name,
+            "prompt": "Collect data.",
+            "node_type_permissions": perms,
+        }
+        if link_results is not None:
+            meta["link_results"] = link_results
+        result = graph_service.add_nodes(
+            nodes=[
+                {
+                    "type": "ActiveKnowledgeCollection",
+                    "name": f"Collection {short_name}",
+                    "metadata": meta,
+                }
+            ],
+            edges=[],
+        )
+        return (result.get("added_node_ids") or [None])[0]
+
+    def _add_actor(self, graph_service, name):
+        result = graph_service.add_nodes(
+            nodes=[{"type": "Actor", "name": name}], edges=[]
+        )
+        return (result.get("added_node_ids") or [None])[0]
+
+    def _links_from(self, graph_service, response_id):
+        """Return the set of edge target ids originating at the response node."""
+        return {
+            edge.target
+            for edge in graph_service.storage.edges.values()
+            if edge.source == response_id
+        }
+
+    def test_resolve_records_link_results_default_true(
+        self, graph_service, mock_llm_provider
+    ):
+        service = self._service(graph_service, mock_llm_provider)
+        self._add_collection(graph_service, "run", self.ALL_OPS)
+        service._resolve_collection("run")
+        assert service._collection_nodes["run"]["link_results"] is True
+
+    def test_resolve_records_link_results_false(self, graph_service, mock_llm_provider):
+        service = self._service(graph_service, mock_llm_provider)
+        self._add_collection(graph_service, "run", self.ALL_OPS, link_results=False)
+        service._resolve_collection("run")
+        assert service._collection_nodes["run"]["link_results"] is False
+
+    def test_links_response_to_created_and_updated_nodes(
+        self, graph_service, mock_llm_provider
+    ):
+        """5 new Actors created + 3 existing updated -> response links to all 8."""
+        service = self._service(graph_service, mock_llm_provider)
+        akc_id = self._add_collection(graph_service, "run", self.ALL_OPS)
+
+        existing = [self._add_actor(graph_service, f"Existing {i}") for i in range(3)]
+
+        service._resolve_collection("run")
+        touched = []
+        enforced = service._make_enforced_tools(self.ALL_OPS, touched=touched)
+
+        add_result = enforced["add_nodes"](
+            nodes=[{"type": "Actor", "name": f"New {i}"} for i in range(5)]
+        )
+        created = add_result.get("added_node_ids") or []
+        assert len(created) == 5
+
+        for nid in existing:
+            upd = enforced["update_node"](nid, {"description": "updated in run"})
+            assert upd.get("success") is True
+
+        assert len(touched) == 8
+
+        tool = service._make_collection_response_tool("run", touched=touched)[
+            "save_collection_response"
+        ]
+        out = tool(answers=[{"field_id": "q1", "value": "done"}])
+
+        assert out["success"] is True
+        assert out["linked_node_count"] == 8
+
+        links = self._links_from(graph_service, out["response_id"])
+        # Every created and updated node is linked, plus the owning collection.
+        for nid in created + existing:
+            assert nid in links
+        assert akc_id in links
+
+    def test_link_results_false_skips_result_links(
+        self, graph_service, mock_llm_provider
+    ):
+        service = self._service(graph_service, mock_llm_provider)
+        akc_id = self._add_collection(
+            graph_service, "run", self.ALL_OPS, link_results=False
+        )
+
+        service._resolve_collection("run")
+        touched = []
+        enforced = service._make_enforced_tools(self.ALL_OPS, touched=touched)
+        add_result = enforced["add_nodes"](
+            nodes=[{"type": "Actor", "name": "New actor"}]
+        )
+        created = add_result.get("added_node_ids") or []
+        assert len(created) == 1
+
+        tool = service._make_collection_response_tool("run", touched=touched)[
+            "save_collection_response"
+        ]
+        out = tool(answers=[{"field_id": "q1", "value": "done"}])
+
+        assert out["success"] is True
+        assert out["linked_node_count"] == 0
+
+        links = self._links_from(graph_service, out["response_id"])
+        # The collection edge is still created; result nodes are not linked.
+        assert akc_id in links
+        assert created[0] not in links
+
+    def test_deleted_node_is_not_linked(self, graph_service, mock_llm_provider):
+        """A node created then deleted in the same run is pruned from the links."""
+        service = self._service(graph_service, mock_llm_provider)
+        self._add_collection(graph_service, "run", self.ALL_OPS)
+
+        service._resolve_collection("run")
+        touched = []
+        enforced = service._make_enforced_tools(self.ALL_OPS, touched=touched)
+        add_result = enforced["add_nodes"](
+            nodes=[
+                {"type": "Actor", "name": "Keep"},
+                {"type": "Actor", "name": "Remove"},
+            ]
+        )
+        created = add_result.get("added_node_ids") or []
+        assert len(created) == 2
+        keep_id, remove_id = created
+
+        del_result = enforced["delete_nodes"](node_ids=[remove_id], confirmed=True)
+        assert del_result.get("success") is True
+        assert remove_id not in touched
+
+        tool = service._make_collection_response_tool("run", touched=touched)[
+            "save_collection_response"
+        ]
+        out = tool(answers=[{"field_id": "q1", "value": "done"}])
+
+        assert out["linked_node_count"] == 1
+        links = self._links_from(graph_service, out["response_id"])
+        assert keep_id in links
+        assert remove_id not in links
+
+    def test_dedup_and_update_then_delete_pruned(
+        self, graph_service, mock_llm_provider
+    ):
+        """A created-then-updated node is linked exactly once; an updated
+        pre-existing node that is then deleted is not linked at all."""
+        service = self._service(graph_service, mock_llm_provider)
+        self._add_collection(graph_service, "run", self.ALL_OPS)
+        existing = self._add_actor(graph_service, "Existing")
+
+        service._resolve_collection("run")
+        touched = []
+        enforced = service._make_enforced_tools(self.ALL_OPS, touched=touched)
+
+        created = (
+            enforced["add_nodes"](nodes=[{"type": "Actor", "name": "Fresh"}]).get(
+                "added_node_ids"
+            )
+            or []
+        )
+        assert len(created) == 1
+        fresh = created[0]
+
+        # created-then-updated -> touched records it twice
+        enforced["update_node"](fresh, {"description": "again"})
+        # updated pre-existing node, then deleted -> must be pruned
+        enforced["update_node"](existing, {"description": "touched"})
+        enforced["delete_nodes"](node_ids=[existing], confirmed=True)
+        assert existing not in touched
+
+        tool = service._make_collection_response_tool("run", touched=touched)[
+            "save_collection_response"
+        ]
+        out = tool(answers=[{"field_id": "q1", "value": "done"}])
+
+        assert out["linked_node_count"] == 1
+        response_id = out["response_id"]
+        edges_to_fresh = [
+            e
+            for e in graph_service.storage.edges.values()
+            if e.source == response_id and e.target == fresh
+        ]
+        assert len(edges_to_fresh) == 1  # deduped, not one per touched occurrence
+        assert existing not in self._links_from(graph_service, response_id)
+
+    def test_process_message_links_response_end_to_end(self, chat_service):
+        """Full loop: the LLM creates a node then saves the response in one turn;
+        the response node is linked to the node created during that turn."""
+        service, mock_llm_provider = chat_service
+        graph_service = service.graph_service
+        self._add_collection(graph_service, "run", self.ALL_OPS)
+
+        mock_llm_provider.mock_tool_calls = [
+            {
+                "name": "add_nodes",
+                "input": {"nodes": [{"type": "Actor", "name": "Collected Co"}]},
+            },
+            {
+                "name": "save_collection_response",
+                "input": {"answers": [{"field_id": "org", "value": "Collected Co"}]},
+            },
+        ]
+        mock_llm_provider.mock_text_response = "Saved, thank you."
+
+        service.process_message(
+            messages=[{"role": "user", "content": "here is my org"}],
+            collection_short_name="run",
+        )
+
+        actors = graph_service.search_graph(
+            query="", node_types=["Actor"], limit=10
+        ).get("nodes", [])
+        actor_ids = [n["id"] for n in actors if n.get("name") == "Collected Co"]
+        assert len(actor_ids) == 1
+
+        responses = graph_service.search_graph(
+            query="", node_types=["CollectionResponse"], limit=10
+        ).get("nodes", [])
+        assert len(responses) == 1
+        response_id = responses[0]["id"]
+
+        links = self._links_from(graph_service, response_id)
+        assert actor_ids[0] in links
+
+
 # ---------------------------------------------------------------------------
 # Extra-actions: pure-action tools co-occurring with present_form
 # ---------------------------------------------------------------------------
@@ -1429,3 +1878,123 @@ class TestExtraActionsWithPresentForm:
         assert any(n.get("name") == "Agency X" for n in tr.get("nodes", []))
         extra = tr.get("extra_actions", [])
         assert any(e["action"] == "mark_nodes" for e in extra)
+
+
+class TestVisualizationActionSemantics:
+    """The assistant must only clear/replace the view on an explicit request.
+
+    A plain additive request ("add all actor nodes in the view") must ADD to the
+    current visualization; the view is replaced only when the user explicitly
+    asks for it. Node/edge accumulation used to drop the per-tool ``action``,
+    silently turning every node-returning search into a full-view replace — these
+    tests lock in the additive default and the explicit-replace path.
+    """
+
+    def test_add_action_is_preserved_through_accumulation(self, chat_service):
+        service, mock_llm = chat_service
+        service.graph_service.add_nodes(
+            nodes=[{"type": "Actor", "name": "Additive Agency"}], edges=[]
+        )
+        mock_llm.mock_tool_calls = [
+            {
+                "name": "search_graph",
+                "input": {
+                    "query": "Additive Agency",
+                    "action": "add_to_visualization",
+                },
+            }
+        ]
+        mock_llm.mock_text_response = "Added the agency to the view."
+
+        result = service.process_message([{"role": "user", "content": "add it"}])
+
+        tr = result["toolResult"]
+        assert tr["action"] == "add_to_visualization"
+        assert any(n.get("name") == "Additive Agency" for n in tr.get("nodes", []))
+
+    def test_no_action_defaults_to_additive_not_replace(self, chat_service):
+        # Regression: a node-returning search with no explicit action must default
+        # to additive placement so the current view is never silently cleared.
+        service, mock_llm = chat_service
+        service.graph_service.add_nodes(
+            nodes=[{"type": "Actor", "name": "Additive Agency"}], edges=[]
+        )
+        mock_llm.mock_tool_calls = [
+            {"name": "search_graph", "input": {"query": "Additive Agency"}}
+        ]
+        mock_llm.mock_text_response = "Here is the agency."
+
+        result = service.process_message([{"role": "user", "content": "show it"}])
+
+        tr = result["toolResult"]
+        assert tr["action"] == "add_to_visualization"
+        assert any(n.get("name") == "Additive Agency" for n in tr.get("nodes", []))
+
+    def test_replace_action_is_preserved(self, chat_service):
+        service, mock_llm = chat_service
+        service.graph_service.add_nodes(
+            nodes=[{"type": "Actor", "name": "Replace Agency"}], edges=[]
+        )
+        mock_llm.mock_tool_calls = [
+            {
+                "name": "search_graph",
+                "input": {
+                    "query": "Replace Agency",
+                    "action": "replace_visualization",
+                },
+            }
+        ]
+        mock_llm.mock_text_response = "Replaced the view."
+
+        result = service.process_message([{"role": "user", "content": "replace"}])
+
+        tr = result["toolResult"]
+        assert tr["action"] == "replace_visualization"
+        assert any(n.get("name") == "Replace Agency" for n in tr.get("nodes", []))
+
+    def test_explicit_clear_then_search_yields_clear_and_add(self, chat_service):
+        # "clear the view and show X": clear_visualization + a plain search in one
+        # turn. The clear intent must survive so the frontend clears then shows.
+        service, mock_llm = chat_service
+        service.graph_service.add_nodes(
+            nodes=[{"type": "Actor", "name": "Fresh Agency"}], edges=[]
+        )
+        mock_llm.mock_tool_calls = [
+            {"name": "clear_visualization", "input": {}},
+            {"name": "search_graph", "input": {"query": "Fresh Agency"}},
+        ]
+        mock_llm.mock_text_response = "Cleared and showed the agency."
+
+        result = service.process_message(
+            [{"role": "user", "content": "clear and show"}]
+        )
+
+        tr = result["toolResult"]
+        assert tr["action"] == "clear_visualization"
+        assert any(n.get("name") == "Fresh Agency" for n in tr.get("nodes", []))
+
+    def test_update_node_keeps_in_place_update_action(self, chat_service):
+        # An "edit/rename node X" turn returns update_in_visualization with the
+        # updated node. The additive default must not clobber that action, or the
+        # frontend would add a duplicate instead of merging the node in place.
+        service, mock_llm = chat_service
+        add = service.graph_service.add_nodes(
+            nodes=[{"type": "Actor", "name": "Editable Agency"}], edges=[]
+        )
+        node_id = add["added_node_ids"][0]
+        mock_llm.mock_tool_calls = [
+            {
+                "name": "update_node",
+                "input": {
+                    "node_id": node_id,
+                    "updates": {"description": "Renamed and edited"},
+                },
+            }
+        ]
+        mock_llm.mock_text_response = "Updated the agency."
+
+        result = service.process_message([{"role": "user", "content": "edit it"}])
+
+        tr = result["toolResult"]
+        assert tr["action"] == "update_in_visualization"
+        assert any(n.get("id") == node_id for n in tr.get("nodes", []))

@@ -2,10 +2,32 @@ import { create } from 'zustand';
 
 const FEDERATION_DEPTH_STORAGE_KEY = 'federation_depth';
 const SHOW_MINIMAP_STORAGE_KEY = 'show_minimap';
+const NODE_PREVIEW_STORAGE_KEY = 'node_preview_enabled';
+const CANVAS_LOCKED_STORAGE_KEY = 'canvas_locked';
 
 function loadInitialShowMinimap() {
   try {
     const stored = window?.localStorage?.getItem(SHOW_MINIMAP_STORAGE_KEY);
+    if (stored !== null) return stored === 'true';
+  } catch {
+    // ignore storage errors and use default
+  }
+  return false;
+}
+
+function loadInitialNodePreview() {
+  try {
+    const stored = window?.localStorage?.getItem(NODE_PREVIEW_STORAGE_KEY);
+    if (stored !== null) return stored === 'true';
+  } catch {
+    // ignore storage errors and use default
+  }
+  return true;
+}
+
+function loadInitialCanvasLocked() {
+  try {
+    const stored = window?.localStorage?.getItem(CANVAS_LOCKED_STORAGE_KEY);
     if (stored !== null) return stored === 'true';
   } catch {
     // ignore storage errors and use default
@@ -26,6 +48,46 @@ function loadInitialFederationDepth() {
   return 1;
 }
 
+// How many entries the session-scoped node trail keeps. Bounded so a long
+// working session cannot grow it without limit; older entries are dropped.
+const NAV_HISTORY_LIMIT = 50;
+
+// Append node-trail entries (newest-first) onto an existing trail, returning a
+// new bounded array. Pure so the trimming/dedup logic is unit-testable without
+// the store. `at` is the shared ISO timestamp for this batch. A repeat of the
+// node currently at the top is collapsed in place (its timestamp is refreshed)
+// rather than pushed as an adjacent duplicate, so add-then-visit or re-focusing
+// the same node does not clutter the trail. On collapse an existing 'added'
+// designation is kept even if the incoming event is a 'visit', so a node the
+// user just added (then focused, e.g. via search) still reads as "Added".
+export function appendNavEntries(prev, entries, at, limit = NAV_HISTORY_LIMIT) {
+  let next = Array.isArray(prev) ? prev : [];
+  for (const e of entries || []) {
+    if (!e || !e.id) continue;
+    const action = e.action === 'added' ? 'added' : 'visited';
+    const collapses = next.length > 0 && next[0].id === e.id;
+    const row = {
+      id: e.id,
+      name: e.name || e.id,
+      type: e.type || '',
+      action: collapses && next[0].action === 'added' ? 'added' : action,
+      at,
+    };
+    next = collapses ? [row, ...next.slice(1)] : [row, ...next];
+  }
+  return next.slice(0, limit);
+}
+
+// Best-effort domain name/type for a node that may be a raw graph node (name,
+// type) or a React Flow node whose domain fields live under data (the wrapper's
+// own `type` is the React Flow node kind, e.g. 'custom', so data wins for type).
+function navNameType(node, fallbackId) {
+  return {
+    name: node?.name || node?.data?.name || node?.data?.label || fallbackId,
+    type: node?.data?.type || node?.data?.nodeType || node?.type || '',
+  };
+}
+
 // Both updateVisualization and clearVisualization raise clearGroupsFlag and then
 // lower it after a short delay. A single shared timer means a second call within
 // that window cancels the earlier timer instead of letting it lower the flag
@@ -38,6 +100,16 @@ function scheduleClearGroupsReset(set) {
     set({ clearGroupsFlag: false });
   }, 100);
 }
+
+// One auto-clear timer per pulsing node. A repeated pulse on the same node
+// replaces its timer so the visual always lasts the full latest duration, and
+// the timer only clears the entry if it still carries the seq it was armed for
+// (a newer pulse that arrived first must not be cut short by an older timer).
+const pulseClearTimers = new Map();
+let pulseSeqCounter = 0;
+const PULSE_MIN_MS = 200;
+const PULSE_MAX_MS = 15000;
+const PULSE_DEFAULT_MS = 1500;
 
 // Default welcome message (used before presentation is loaded)
 const DEFAULT_WELCOME_MESSAGE = {
@@ -146,6 +218,11 @@ const useGraphStore = create((set, get) => ({
   hiddenNodeIds: [],
   hiddenEdgeIds: [],
   nodeMarks: {},
+  // Transient per-node pulse state driven by external trigger URLs (design:
+  // external pulse-trigger). Maps nodeId -> { style, color, seq }; each entry is
+  // auto-cleared after its duration. seq changes on every (re)trigger so the
+  // client can restart the animation even when a node is pulsed again mid-play.
+  pulsedNodeIds: {},
   selectedNodeId: null,
   selectedGraphNodes: [], // Nodes selected in the graph canvas (full node data)
   editingNode: null,
@@ -153,10 +230,17 @@ const useGraphStore = create((set, get) => ({
   contextMenu: null,
   clearGroupsFlag: false, // Signal to clear groups in visualization
   focusNodeId: null, // Node ID to zoom/pan to
+  // Session-scoped, newest-first trail of nodes added to the visualization or
+  // navigated to, so the user can jump back through what happened. Distinct from
+  // the backend graph-mutation log (RecentActivityDrawer) and from the canvas
+  // position undo/redo (useCanvasHistory). Cleared on session switch / clear.
+  navHistory: [],
   pendingGroups: null, // Groups to restore from a saved view
   pendingAnnotations: null, // Note/label/arrow annotations to restore from a session
   chatPanelOpen: true, // Chat panel expanded vs minimized
   showMinimap: loadInitialShowMinimap(), // Minimap visibility (persisted)
+  nodePreviewEnabled: loadInitialNodePreview(), // Hover info popup on/off (persisted)
+  canvasLocked: loadInitialCanvasLocked(), // Navigation-menu lock guarding the board (persisted)
 
   // Search state
   searchQuery: '',
@@ -165,6 +249,12 @@ const useGraphStore = create((set, get) => ({
 
   // Chat state
   chatMessages: [DEFAULT_WELCOME_MESSAGE],
+
+  // Monotonic counter bumped on every visualization-session switch. In-flight
+  // assistant requests capture it before awaiting and drop their response if it
+  // changed, so a slow reply from the previous session cannot mutate the newly
+  // active session's chat or canvas.
+  assistantSessionEpoch: 0,
 
   // Expert agents
   availableExperts: [], // All expert agents from config
@@ -193,6 +283,16 @@ const useGraphStore = create((set, get) => ({
   // LLM availability (null = not yet fetched, true/false = known)
   llmAvailable: null,
 
+  // Model profiles (see backend/config/model_profiles.py). Empty profiles list
+  // means no profiles are configured — the chat UI has nothing to select from
+  // and uses the legacy single-provider path implicitly.
+  modelProfiles: [],
+  defaultModelProfileId: null,
+  modelProfileSelectionEnabled: true,
+  // The profile the chat UI will send with the next request. Preselected to
+  // the default profile once capabilities are fetched.
+  selectedModelProfileId: null,
+
   // Loading states
   isLoading: false,
   configLoaded: false,
@@ -207,12 +307,19 @@ const useGraphStore = create((set, get) => ({
     const uniqueNodes = Array.from(new Map(nodes.map((n) => [n.id, n])).values());
     const uniqueEdges = Array.from(new Map(edges.map((e) => [e.id, e])).values());
 
-    set({
+    // A wholesale replace can drop nodes the trail still references; prune those
+    // so every trail row stays a valid jump target. New arrivals are not
+    // recorded as 'added' here — a full replace is a baseline, not the
+    // incremental user additions the trail captures (those come through
+    // addNodesToVisualization).
+    const presentIds = new Set(uniqueNodes.map((n) => n.id));
+    set((state) => ({
       nodes: uniqueNodes,
       edges: uniqueEdges,
       highlightedNodeIds: highlightIds,
       clearGroupsFlag: true, // Signal to clear groups
-    });
+      navHistory: state.navHistory.filter((e) => presentIds.has(e.id)),
+    }));
     // Reset flag after a short delay
     scheduleClearGroupsReset(set);
   },
@@ -241,12 +348,20 @@ const useGraphStore = create((set, get) => ({
 
     // Calculate which IDs are actually new for highlighting
     const existingNodeIds = new Set(nodes.map((n) => n.id));
-    const actuallyNewNodeIds = newNodes.filter((n) => !existingNodeIds.has(n.id)).map((n) => n.id);
+    const newlyAdded = newNodes.filter((n) => !existingNodeIds.has(n.id));
+    const actuallyNewNodeIds = newlyAdded.map((n) => n.id);
+
+    const addedRows = newlyAdded.map((n) => ({
+      id: n.id,
+      ...navNameType(n, n.id),
+      action: 'added',
+    }));
 
     set({
       nodes: Array.from(nodeMap.values()),
       edges: Array.from(edgeMap.values()),
       highlightedNodeIds: actuallyNewNodeIds,
+      navHistory: appendNavEntries(get().navHistory, addedRows, new Date().toISOString()),
     });
   },
 
@@ -262,6 +377,8 @@ const useGraphStore = create((set, get) => ({
   },
 
   clearVisualization: () => {
+    pulseClearTimers.forEach((timer) => clearTimeout(timer));
+    pulseClearTimers.clear();
     set({
       nodes: [],
       edges: [],
@@ -269,11 +386,13 @@ const useGraphStore = create((set, get) => ({
       hiddenNodeIds: [],
       hiddenEdgeIds: [],
       nodeMarks: {},
+      pulsedNodeIds: {},
       pendingGroups: null,
       pendingAnnotations: null,
       clearGroupsFlag: true,
       selectedGraphNodes: [],
       selectedNodeId: null,
+      navHistory: [],
     });
     scheduleClearGroupsReset(set);
   },
@@ -293,6 +412,33 @@ const useGraphStore = create((set, get) => ({
   },
 
   clearNodeMarks: () => set({ nodeMarks: {} }),
+
+  // Play a transient visual pulse on a node in response to an external trigger.
+  pulseNode: (nodeId, { style = 'glow', color = null, durationMs } = {}) => {
+    if (!nodeId) return;
+    const seq = ++pulseSeqCounter;
+    const duration = Math.min(
+      PULSE_MAX_MS,
+      Math.max(PULSE_MIN_MS, Number(durationMs) || PULSE_DEFAULT_MS)
+    );
+    set((state) => ({
+      pulsedNodeIds: { ...state.pulsedNodeIds, [nodeId]: { style, color, seq } },
+    }));
+
+    const existing = pulseClearTimers.get(nodeId);
+    if (existing) clearTimeout(existing);
+    const timer = setTimeout(() => {
+      pulseClearTimers.delete(nodeId);
+      set((state) => {
+        // Only clear if this node still shows the pulse we armed the timer for.
+        if (state.pulsedNodeIds[nodeId]?.seq !== seq) return {};
+        const next = { ...state.pulsedNodeIds };
+        delete next[nodeId];
+        return { pulsedNodeIds: next };
+      });
+    }, duration);
+    pulseClearTimers.set(nodeId, timer);
+  },
 
   toggleNodeVisibility: (nodeId) => {
     const { hiddenNodeIds } = get();
@@ -341,9 +487,43 @@ const useGraphStore = create((set, get) => ({
     set({ showMinimap: show });
   },
 
+  setNodePreviewEnabled: (enabled) => {
+    try {
+      window?.localStorage?.setItem(NODE_PREVIEW_STORAGE_KEY, String(enabled));
+    } catch {
+      // ignore storage errors
+    }
+    set({ nodePreviewEnabled: enabled });
+  },
+
+  setCanvasLocked: (locked) => {
+    try {
+      window?.localStorage?.setItem(CANVAS_LOCKED_STORAGE_KEY, String(locked));
+    } catch {
+      // ignore storage errors
+    }
+    set({ canvasLocked: locked });
+  },
+
   setStats: (stats) => set({ stats }),
 
   setLlmAvailable: (available) => set({ llmAvailable: available }),
+
+  // Apply the /ui/capabilities "model_profiles" payload: stores the enabled
+  // profile list and preselects the default profile for the chat UI.
+  setModelProfilesCapability: (modelProfilesCapability) => {
+    const profiles = modelProfilesCapability?.profiles || [];
+    const defaultProfileId = modelProfilesCapability?.default_profile_id ?? null;
+    const selectionEnabled = modelProfilesCapability?.selection_enabled ?? true;
+    set({
+      modelProfiles: profiles,
+      defaultModelProfileId: defaultProfileId,
+      modelProfileSelectionEnabled: selectionEnabled,
+      selectedModelProfileId: defaultProfileId,
+    });
+  },
+
+  setSelectedModelProfileId: (profileId) => set({ selectedModelProfileId: profileId }),
 
   setLoading: (isLoading) => set({ isLoading }),
 
@@ -450,6 +630,29 @@ const useGraphStore = create((set, get) => ({
     set({ chatMessages: [welcomeMessage] });
   },
 
+  // Reset all session-scoped UI state when switching visualization sessions so
+  // nothing leaks across sessions: the assistant conversation, the active expert
+  // roster, and the node-scoped overlays (detail dialog, edit dialog, context
+  // menu, selection) all belong to the session that was active when they opened.
+  // Bumping assistantSessionEpoch invalidates any assistant request still in
+  // flight from the previous session (see ChatPanel), so its response can never
+  // land in the new session.
+  resetSessionScopedState: (t, language) => {
+    const { presentation } = get();
+    const welcomeMessage = createWelcomeMessage(presentation, t, language);
+    set((state) => ({
+      chatMessages: [welcomeMessage],
+      activeExperts: [],
+      detailNode: null,
+      editingNode: null,
+      contextMenu: null,
+      selectedNodeId: null,
+      selectedGraphNodes: [],
+      navHistory: [],
+      assistantSessionEpoch: state.assistantSessionEpoch + 1,
+    }));
+  },
+
   // Context menu actions
   setContextMenu: (menu) => set({ contextMenu: menu }),
   closeContextMenu: () => set({ contextMenu: null }),
@@ -458,17 +661,41 @@ const useGraphStore = create((set, get) => ({
   setEditingNode: (node) => set({ editingNode: node }),
   closeEditingNode: () => set({ editingNode: null }),
 
-  // Node detail view (double-click)
-  setDetailNode: (node) => set({ detailNode: node }),
+  // Node detail view (double-click). Opening a node's detail counts as visiting
+  // it, so it is recorded on the navigable trail.
+  setDetailNode: (node) =>
+    set((state) => {
+      if (!node?.id) return { detailNode: node };
+      const stored = state.nodes.find((n) => n.id === node.id);
+      const entry = { id: node.id, ...navNameType(stored || node, node.id), action: 'visited' };
+      return {
+        detailNode: node,
+        navHistory: appendNavEntries(state.navHistory, [entry], new Date().toISOString()),
+      };
+    }),
   closeDetailNode: () => set({ detailNode: null }),
 
   // Graph canvas selection
   setSelectedGraphNodes: (nodes) => set({ selectedGraphNodes: nodes }),
   clearSelectedGraphNodes: () => set({ selectedGraphNodes: [] }),
 
-  // Focus node actions
-  setFocusNodeId: (nodeId) => set({ focusNodeId: nodeId }),
+  // Focus node actions. setFocusNodeId is the single "navigate/center to a node"
+  // choke point (search results, guided steps, and the node-trail panel all use
+  // it), so navigating to a node records a visit on the trail. clearFocusNode
+  // only lowers the transient signal and is not a navigation, so it records
+  // nothing.
+  setFocusNodeId: (nodeId) =>
+    set((state) => {
+      if (!nodeId) return { focusNodeId: nodeId };
+      const stored = state.nodes.find((n) => n.id === nodeId);
+      const entry = { id: nodeId, ...navNameType(stored, nodeId), action: 'visited' };
+      return {
+        focusNodeId: nodeId,
+        navHistory: appendNavEntries(state.navHistory, [entry], new Date().toISOString()),
+      };
+    }),
   clearFocusNode: () => set({ focusNodeId: null }),
+  clearNavHistory: () => set({ navHistory: [] }),
 
   // Expert agent actions
   setAvailableExperts: (experts) => set({ availableExperts: experts }),
@@ -592,10 +819,13 @@ const useGraphStore = create((set, get) => ({
 
   // Delete node from visualization
   removeNode: (nodeId) => {
-    const { nodes, edges } = get();
+    const { nodes, edges, navHistory } = get();
     set({
       nodes: nodes.filter((n) => n.id !== nodeId),
       edges: edges.filter((e) => e.source !== nodeId && e.target !== nodeId),
+      // Drop the removed node from the trail so its row can't become a dead
+      // jump target.
+      navHistory: navHistory.filter((e) => e.id !== nodeId),
     });
   },
 }));

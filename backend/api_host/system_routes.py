@@ -11,9 +11,19 @@ import time
 from pathlib import Path
 from typing import Any, Dict
 
-from fastapi import FastAPI
+from fastapi import FastAPI, Form, Request
 from fastapi.responses import JSONResponse, RedirectResponse, FileResponse, HTMLResponse
 from fastapi import Path as FastAPIPath
+
+from .middleware import render_signin_page
+from .session_auth import (
+    SESSION_COOKIE_NAME,
+    SESSION_TTL_SECONDS,
+    credentials_valid,
+    is_safe_next_path,
+    mint_session_cookie,
+    request_has_valid_session,
+)
 
 from backend.llm.llm_providers import get_llm_availability
 from backend.observability.health_probes import (
@@ -250,16 +260,98 @@ def register_system_routes(
     # This endpoint is exempt from auth middleware so it never loops.
     logout_redirect_url_env = os.environ.get("LOGOUT_REDIRECT_URL")
 
+    @app.post("/auth/login")
+    async def auth_login(
+        request: Request,
+        username: str = Form(""),
+        password: str = Form(""),
+        next_path: str = Form("/web/", alias="next"),
+    ):
+        """Validate credentials and set a signed session cookie.
+
+        This is the browser-independent login path: it does not rely on the
+        native HTTP Basic dialog, which some browsers never surface.
+        """
+        target = next_path if is_safe_next_path(next_path) else "/web/"
+        if not credentials_valid(config, username, password):
+            return HTMLResponse(
+                content=render_signin_page(
+                    next_path=target, error="Invalid username or password."
+                ),
+                status_code=401,
+                headers={"Cache-Control": "no-store"},
+            )
+        token = mint_session_cookie(config)
+        if token is None:
+            return HTMLResponse(
+                content=render_signin_page(
+                    next_path=target,
+                    error="Login is unavailable on this instance.",
+                ),
+                status_code=500,
+                headers={"Cache-Control": "no-store"},
+            )
+        # Only mark the cookie Secure when the request actually arrived over
+        # HTTPS (directly or via the ingress' X-Forwarded-Proto), so it still
+        # works for local HTTP development.
+        forwarded_proto = (
+            request.headers.get("x-forwarded-proto", "").split(",")[0].strip()
+        )
+        secure = request.url.scheme == "https" or forwarded_proto == "https"
+        response = RedirectResponse(url=target, status_code=303)
+        response.set_cookie(
+            SESSION_COOKIE_NAME,
+            token,
+            max_age=SESSION_TTL_SECONDS,
+            httponly=True,
+            secure=secure,
+            samesite="lax",
+            path="/",
+        )
+        return response
+
+    def _clear_session_cookie(response, request: Request) -> None:
+        """Expire the session cookie, matching the attributes it was set with.
+
+        The cookie is set Secure over HTTPS; a deletion cookie must carry the
+        same path/secure/samesite so the browser reliably drops it.
+        """
+        forwarded_proto = (
+            request.headers.get("x-forwarded-proto", "").split(",")[0].strip()
+        )
+        secure = request.url.scheme == "https" or forwarded_proto == "https"
+        response.delete_cookie(
+            SESSION_COOKIE_NAME,
+            path="/",
+            secure=secure,
+            httponly=True,
+            samesite="lax",
+        )
+
     @app.get("/auth/logout")
-    async def logout():
+    async def logout(request: Request):
         """Log the user out, clearing auth state appropriately."""
         if logout_redirect_url_env:
-            return RedirectResponse(url=logout_redirect_url_env, status_code=302)
+            response = RedirectResponse(url=logout_redirect_url_env, status_code=302)
+            _clear_session_cookie(response, request)
+            return response
 
         if config.mcp_basic_auth and not config.auth_enabled:
             # Behind GCP IAP – the only way to clear the IAP session cookie
             # is via the GCP-provided endpoint.
-            return RedirectResponse(url="/_gcp_iap/clear_login_cookie", status_code=302)
+            response = RedirectResponse(
+                url="/_gcp_iap/clear_login_cookie", status_code=302
+            )
+            _clear_session_cookie(response, request)
+            return response
+
+        # Session-cookie users: clearing the cookie is a real logout, so avoid
+        # the Basic-credential flush below — that 401 would otherwise re-open the
+        # native credential dialog the user just logged out of.
+        if request_has_valid_session(request, config):
+            response = RedirectResponse(url="/logged-out", status_code=302)
+            _clear_session_cookie(response, request)
+            return response
 
         if config.auth_enabled:
             # Basic Auth – the browser caches credentials and resends them
@@ -267,20 +359,29 @@ def register_system_routes(
             # cached credentials. The response body is the logged-out page
             # so the user sees it after dismissing the browser auth dialog
             # (or immediately in programmatic clients).
-            return HTMLResponse(
+            response = HTMLResponse(
                 content=LOGGED_OUT_HTML,
                 status_code=401,
-                headers={"WWW-Authenticate": 'Basic realm="Logged out"'},
+                headers={
+                    "WWW-Authenticate": 'Basic realm="Logged out"',
+                    "Cache-Control": "no-store",
+                },
             )
+            _clear_session_cookie(response, request)
+            return response
 
-        return RedirectResponse(url="/logged-out", status_code=302)
+        response = RedirectResponse(url="/logged-out", status_code=302)
+        _clear_session_cookie(response, request)
+        return response
 
     # Fallback logged-out page, used when no external auth layer is present.
     # Must not require auth — this page is where users land after logout.
     @app.get("/logged-out")
     async def logged_out():
         """Simple standalone page shown after logout."""
-        return HTMLResponse(content=LOGGED_OUT_HTML)
+        return HTMLResponse(
+            content=LOGGED_OUT_HTML, headers={"Cache-Control": "no-store"}
+        )
 
     @app.get("/info")
     async def info() -> Dict[str, Any]:

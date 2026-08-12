@@ -12,6 +12,7 @@ defaulting to config/default/schema_config.json.
 """
 
 import os
+import re
 import json
 import logging
 from typing import Dict, List, Optional, Any
@@ -26,6 +27,7 @@ from backend.runtime.request_context import (
     get_public_request_graph_selection_context,
     get_public_request_scope_context,
 )
+from backend.config.model_profiles import ModelProfile, ModelProfilesConfig
 
 logger = logging.getLogger(__name__)
 
@@ -262,6 +264,71 @@ class RuntimeMetadataConfig(BaseModel):
     enabled_extensions: List[str] = Field(default_factory=list)
 
 
+class RestInterfaceFilterConfig(BaseModel):
+    """Tag/subtype filter applied to a custom REST interface.
+
+    Semantics (all independent, combined with AND across the three fields):
+    - ``tags_all``: the entity must carry *every* listed tag (AND).
+    - ``tags_any``: the entity must carry *at least one* listed tag (OR).
+    - ``subtypes_any``: the node must carry at least one listed subtype (OR).
+      Ignored for edge interfaces (edges have no subtypes).
+
+    An empty list disables that dimension. All empty = no filtering.
+    """
+
+    tags_all: List[str] = Field(default_factory=list)
+    tags_any: List[str] = Field(default_factory=list)
+    subtypes_any: List[str] = Field(default_factory=list)
+
+
+class RestInterfaceConfig(BaseModel):
+    """A single config-driven dedicated REST interface for one node/edge type.
+
+    Exposes one node type (or edge type) at its own GET endpoint, bypassing the
+    generic node/edge REST interface, with optional tag/subtype filters. The
+    endpoint honours the same read authorization and graph-scope narrowing as
+    the generic interface — it never returns more than a generic search would.
+
+    ``path`` is the URL segment appended to the router prefix (e.g. ``actors``
+    served at ``/api/actors``). It is normalised (leading/trailing slashes
+    stripped) and validated against a conservative pattern.
+    """
+
+    path: str
+    entity: str = "node"  # "node" | "edge"
+    node_type: str = ""
+    edge_type: str = ""
+    enabled: bool = True
+    limit: int = Field(default=500, ge=1, le=5000)
+    filters: RestInterfaceFilterConfig = Field(
+        default_factory=RestInterfaceFilterConfig
+    )
+
+    @field_validator("path")
+    @classmethod
+    def _validate_path(cls, v: str) -> str:
+        normalized = v.strip().strip("/")
+        if not normalized:
+            raise ValueError("rest_interfaces[].path must be a non-empty URL segment")
+        if not re.fullmatch(r"[a-z0-9][a-z0-9/_-]*", normalized):
+            raise ValueError(
+                "rest_interfaces[].path must be lowercase alphanumeric with "
+                "'-', '_' or '/' separators (e.g. 'actors' or 'people/actors'): "
+                f"got {v!r}"
+            )
+        return normalized
+
+    @field_validator("entity")
+    @classmethod
+    def _validate_entity(cls, v: str) -> str:
+        entity = (v or "").strip().lower()
+        if entity not in {"node", "edge"}:
+            raise ValueError(
+                f"rest_interfaces[].entity must be 'node' or 'edge', got {v!r}"
+            )
+        return entity
+
+
 class PresentationConfig(BaseModel):
     """Presentation configuration for UI and prompts."""
 
@@ -292,6 +359,13 @@ class SchemaFileConfig(BaseModel):
     presentation: PresentationConfig = Field(default_factory=PresentationConfig)
     runtime: RuntimeMetadataConfig = Field(default_factory=RuntimeMetadataConfig)
     system: SystemConfig = Field(default_factory=SystemConfig)
+    # Config-driven dedicated REST interfaces per node/edge type (open core).
+    # Empty by default — only the generic node/edge REST interface is exposed.
+    rest_interfaces: List[RestInterfaceConfig] = Field(default_factory=list)
+    # Named LLM/model profiles across providers (see docs/PROFILES.md). Empty
+    # by default — that is the legacy single-provider mode (LLM_PROVIDER /
+    # LLM_MODEL / OPENAI_API_KEY / ANTHROPIC_API_KEY environment variables).
+    model_profiles: ModelProfilesConfig = Field(default_factory=ModelProfilesConfig)
 
     model_config = ConfigDict(populate_by_name=True)
 
@@ -334,6 +408,7 @@ class ConfigLoader:
             with open(self._config_path, "r", encoding="utf-8") as f:
                 raw_config = json.load(f)
 
+            self._sanitize_rest_interfaces(raw_config)
             self._config = SchemaFileConfig(**raw_config)
             logger.info(f"Loaded schema configuration from: {self._config_path}")
 
@@ -355,6 +430,39 @@ class ConfigLoader:
         # System types are now managed entirely in code via SYSTEM_NODE_TYPES.
         self._strip_system_types_from_config()
         self._apply_system_types()
+
+    @staticmethod
+    def _sanitize_rest_interfaces(raw_config: Dict[str, Any]) -> None:
+        """Drop malformed ``rest_interfaces`` entries in place before validation.
+
+        ``rest_interfaces`` entries carry strict validators (path/entity). Left in
+        the raw document, a single malformed entry would fail the whole
+        ``SchemaFileConfig`` construction and trip the loader's global fallback to
+        empty defaults — silently reverting every node type, relationship, profile,
+        etc. Validating each entry independently here and discarding only the bad
+        ones keeps one typo from nuking the entire config, matching the per-entry
+        graceful skipping the router already does for missing node_type/edge_type.
+        """
+        raw = raw_config.get("rest_interfaces")
+        if raw is None:
+            return
+        if not isinstance(raw, list):
+            logger.warning(
+                "rest_interfaces must be a list, got %s — ignoring", type(raw).__name__
+            )
+            raw_config["rest_interfaces"] = []
+            return
+        valid: List[Dict[str, Any]] = []
+        for index, entry in enumerate(raw):
+            try:
+                RestInterfaceConfig(**entry)
+            except Exception as exc:
+                logger.warning(
+                    "Skipping invalid rest_interfaces[%d] (%r): %s", index, entry, exc
+                )
+                continue
+            valid.append(entry)
+        raw_config["rest_interfaces"] = valid
 
     def _strip_system_types_from_config(self) -> None:
         """Remove any system node types found in the loaded config (backward compat)."""
@@ -559,6 +667,42 @@ def get_tenant_context() -> Dict[str, Any]:
     }
 
 
+PUBLIC_BASE_URL_ENV = "COMMUNITYOVERVIEW_PUBLIC_BASE_URL"
+
+
+def get_public_base_url() -> str:
+    """Externally reachable base URL used to build shareable links, or "".
+
+    Set per environment/tenant in hosted deployments (scheme + host + optional
+    base path). Unset in standalone/local use, in which case link builders
+    return ``None`` rather than emitting a guessed or ``localhost`` URL.
+    """
+    return os.getenv(PUBLIC_BASE_URL_ENV, "").strip()
+
+
+def build_session_url(session_id: str) -> Optional[str]:
+    """Canonical direct link to a visualization session, or ``None``.
+
+    Keeps the established ``?session=<id>`` form the frontend reads and reflects,
+    with the server owning the base URL so an assistant never guesses a host
+    (see ``docs/MCP_SESSION_LIFECYCLE_CONTRACT.md`` §5). Returns ``None`` when no
+    public base URL is configured.
+    """
+    from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
+
+    base = get_public_base_url()
+    if not base or not session_id:
+        return None
+    parts = urlsplit(base)
+    query = dict(parse_qsl(parts.query))
+    query["session"] = session_id
+    # Preserve any base path; ensure a "/" path when the base is a bare origin so
+    # the result is "https://host/?session=<id>" rather than "https://host?...".
+    return urlunsplit(
+        (parts.scheme, parts.netloc, parts.path or "/", urlencode(query), "")
+    )
+
+
 def _get_resolved_config_context() -> Dict[str, Any]:
     """Get internal config resolution details, including resolved filesystem paths."""
     schema_context = resolve_schema_config_path_info(DEFAULT_CONFIG_PATH)
@@ -602,6 +746,16 @@ def get_request_scope_info() -> Dict[str, Any]:
 def get_request_graph_selection_info() -> Dict[str, Any]:
     """Get the default public graph/workspace selection summary for this deployment."""
     return get_public_request_graph_selection_context()
+
+
+def get_rest_interfaces() -> List[RestInterfaceConfig]:
+    """Get the configured custom REST interfaces (open core).
+
+    Returns an empty list when none are configured, in which case only the
+    generic node/edge REST interface is exposed.
+    """
+    loader = _get_loader()
+    return list(loader.config.rest_interfaces)
 
 
 def get_node_type_names() -> List[str]:
@@ -663,3 +817,51 @@ def get_expert_agent_configs() -> "List[ExpertAgentConfig]":
     """Get the list of ExpertAgentConfig objects from the presentation section."""
     loader = _get_loader()
     return loader.config.presentation.expert_agents
+
+
+def get_model_profiles() -> List[ModelProfile]:
+    """
+    Get all configured model profiles (enabled and disabled), in file order.
+
+    An empty list means no model profiles are configured — callers should fall
+    back to the legacy single-provider environment configuration.
+    """
+    loader = _get_loader()
+    return list(loader.config.model_profiles.profiles)
+
+
+def get_model_profile_selection_enabled() -> bool:
+    """Whether the chat UI may select a model profile other than the default."""
+    loader = _get_loader()
+    return loader.config.model_profiles.selection_enabled
+
+
+def get_model_profiles_public() -> Dict[str, Any]:
+    """
+    Get the public (non-secret) view of model profile configuration.
+
+    Only enabled profiles are exposed — disabled profiles are an
+    implementation/config detail, not a user-facing choice. credential_ref,
+    endpoint and options are omitted; they are server-side resolution details,
+    not needed by clients.
+    """
+    from backend.config.model_profiles import get_default_profile, get_enabled_profiles
+
+    loader = _get_loader()
+    profiles = loader.config.model_profiles.profiles
+    default_profile = get_default_profile(profiles)
+
+    return {
+        "selection_enabled": loader.config.model_profiles.selection_enabled,
+        "default_profile_id": default_profile.id if default_profile else None,
+        "profiles": [
+            {
+                "id": p.id,
+                "name": p.name,
+                "provider": p.provider,
+                "model": p.model,
+                "default": p.default,
+            }
+            for p in get_enabled_profiles(profiles)
+        ],
+    }

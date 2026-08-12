@@ -7,10 +7,15 @@ import {
   BoxArrowInRight,
   GearFill,
   PencilSquare,
+  Link45deg,
+  BroadcastPin,
   Trash,
   ClockHistory,
+  LockFill,
+  UnlockFill,
 } from 'react-bootstrap-icons';
 import { useI18n } from '../i18n';
+import SessionContextMenu from './SessionContextMenu';
 import './SessionDrawer.css';
 
 /**
@@ -29,17 +34,32 @@ function SessionDrawer({
   onSelectSession,
   onRenameSession,
   onDeleteSession,
+  onCopySessionLink,
+  onCopyTriggerUrl,
   onOpenSettings,
   onOpenActivity,
+  canvasLocked = false,
+  onToggleLock,
   suspendEscape = false,
 }) {
   const { t } = useI18n();
   const [searchOpen, setSearchOpen] = useState(false);
   const [query, setQuery] = useState('');
+  const [openMenuId, setOpenMenuId] = useState(null);
+  const [wasOpen, setWasOpen] = useState(open);
   const searchInputRef = useRef(null);
 
+  // Only one per-session menu is open at a time; drop it when the drawer closes
+  // so it doesn't reappear on the next open. Reset during render (React's
+  // recommended pattern for deriving from a prop change) rather than in an effect.
+  if (open !== wasOpen) {
+    setWasOpen(open);
+    if (!open) setOpenMenuId(null);
+  }
+
   // Escape closes the drawer — except while a dialog is stacked on top of it
-  // (settings, connect, rename), where Escape belongs to that dialog.
+  // (settings, connect, rename), where Escape belongs to that dialog. An open
+  // per-session menu is peeled off first, keeping the drawer in place.
   useEffect(() => {
     if (!open || suspendEscape) return;
     const handleKeyDown = (e) => {
@@ -47,12 +67,16 @@ function SessionDrawer({
         // Stop the event here so GraphCanvas's own Escape handler doesn't
         // also clear the canvas selection when the drawer closes.
         e.stopPropagation();
+        if (openMenuId) {
+          setOpenMenuId(null);
+          return;
+        }
         onClose();
       }
     };
     document.addEventListener('keydown', handleKeyDown, true);
     return () => document.removeEventListener('keydown', handleKeyDown, true);
-  }, [open, suspendEscape, onClose]);
+  }, [open, suspendEscape, openMenuId, onClose]);
 
   useEffect(() => {
     if (searchOpen) searchInputRef.current?.focus();
@@ -133,27 +157,58 @@ function SessionDrawer({
               <span className="session-drawer-session-label">{session.name || session.id}</span>
               {session.name && <span className="session-drawer-session-id">{session.id}</span>}
             </button>
-            <button
-              className="session-drawer-session-rename"
-              onClick={() => onRenameSession(session.id)}
-              title={t('sessions.rename_session')}
-              aria-label={t('sessions.rename_session')}
-            >
-              <PencilSquare size={13} />
-            </button>
-            <button
-              className="session-drawer-session-delete"
-              onClick={() => onDeleteSession?.(session.id)}
-              title={t('sessions.delete_session')}
-              aria-label={t('sessions.delete_session')}
-            >
-              <Trash size={13} />
-            </button>
+            <SessionContextMenu
+              open={openMenuId === session.id}
+              onToggle={() => setOpenMenuId((cur) => (cur === session.id ? null : session.id))}
+              onClose={() => setOpenMenuId(null)}
+              triggerLabel={t('sessions.session_menu')}
+              items={[
+                {
+                  key: 'rename',
+                  label: t('sessions.rename_session'),
+                  icon: <PencilSquare size={14} />,
+                  onClick: () => onRenameSession(session.id),
+                },
+                {
+                  key: 'copy-link',
+                  label: t('sessions.copy_link'),
+                  icon: <Link45deg size={16} />,
+                  onClick: () => onCopySessionLink?.(session.id),
+                },
+                // Only the session this browser is live on can receive pulses,
+                // so the trigger URL is offered on the current session only.
+                ...(session.id === currentSessionId && onCopyTriggerUrl
+                  ? [
+                      {
+                        key: 'copy-trigger-url',
+                        label: t('sessions.copy_trigger_url'),
+                        icon: <BroadcastPin size={15} />,
+                        onClick: () => onCopyTriggerUrl(session.id),
+                      },
+                    ]
+                  : []),
+                {
+                  key: 'delete',
+                  label: t('sessions.delete_session'),
+                  icon: <Trash size={14} />,
+                  danger: true,
+                  onClick: () => onDeleteSession?.(session.id),
+                },
+              ]}
+            />
           </div>
         ))}
       </div>
 
       <div className="session-drawer-footer">
+        <button
+          className={`session-drawer-item${canvasLocked ? ' active' : ''}`}
+          onClick={() => onToggleLock?.()}
+          aria-pressed={canvasLocked}
+        >
+          {canvasLocked ? <LockFill size={15} /> : <UnlockFill size={15} />}
+          <span>{canvasLocked ? t('sessions.unlock_canvas') : t('sessions.lock_canvas')}</span>
+        </button>
         {onOpenActivity && (
           <button className="session-drawer-item" onClick={onOpenActivity}>
             <ClockHistory size={15} />

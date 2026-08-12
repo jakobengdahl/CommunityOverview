@@ -1,4 +1,58 @@
 {
+  "agent_runs": {
+    "title": "Agent run history",
+    "description": "Durable history of agent runs — the trigger, status, timing and outcome of each run.",
+    "view_runs": "View run history",
+    "refresh": "Refresh",
+    "loading": "Loading runs…",
+    "load_error": "Could not load runs: {error}",
+    "empty": "No agent runs recorded yet.",
+    "close": "Close",
+    "col_status": "Status",
+    "col_agent": "Agent",
+    "col_trigger": "Trigger",
+    "col_started": "Started",
+    "col_finished": "Finished",
+    "status_queued": "Queued",
+    "status_running": "Running",
+    "status_succeeded": "Succeeded",
+    "status_failed": "Failed",
+    "status_cancelled": "Cancelled",
+    "trigger_scheduled": "Scheduled",
+    "trigger_event": "Event",
+    "detail_event_type": "Event type",
+    "detail_attempts": "Attempts",
+    "detail_correlation": "Correlation ID",
+    "detail_error": "Error",
+    "detail_result": "Result"
+  },
+  "agent_proposals": {
+    "title": "Agent proposals",
+    "description": "Mutating actions agents recorded for approval. Approving an act-after-approval proposal applies the action.",
+    "view_proposals": "View proposals",
+    "refresh": "Refresh",
+    "loading": "Loading proposals…",
+    "load_error": "Could not load proposals: {error}",
+    "empty": "No agent proposals yet.",
+    "close": "Close",
+    "approve": "Approve",
+    "reject": "Reject",
+    "col_status": "Status",
+    "col_agent": "Agent",
+    "col_tool": "Action",
+    "col_created": "Created",
+    "col_actions": "Decision",
+    "status_pending": "Pending",
+    "status_approved": "Approved",
+    "status_rejected": "Rejected",
+    "status_applied": "Applied",
+    "status_apply_failed": "Apply failed",
+    "detail_autonomy": "Autonomy level",
+    "detail_args": "Arguments",
+    "detail_decided_by": "Decided by",
+    "detail_apply_result": "Apply result",
+    "detail_apply_error": "Apply error"
+  },
   "welcome": {
     "title": "Welcome to Community Knowledge Graph!",
     "language_policy_label": "Language policy",
@@ -36,7 +90,9 @@
     "delete_cancelled": "Deletion cancelled.",
     "selected_nodes": "{count} nodes selected",
     "clear_selection": "Clear selection",
-    "placeholder_with_selection": "Ask a question about the selected nodes..."
+    "placeholder_with_selection": "Ask a question about the selected nodes...",
+    "model_profile": "Model profile",
+    "model_profile_selection_disabled": "Model profile selection is disabled"
   },
   "detail": {
     "summary": "Summary",
@@ -81,6 +137,14 @@
       "days_ago": "{count} d ago",
       "unknown": "unknown"
     }
+  },
+  "nav_history": {
+    "title": "Recent nodes",
+    "close": "Close",
+    "clear": "Clear",
+    "action_added": "Added",
+    "action_visited": "Visited",
+    "jump_to": "Jump to {name}"
   },
   "proposal": {
     "title": "Proposed addition:",
@@ -153,6 +217,7 @@
     "export_error": "Could not export graph",
     "view_section": "View",
     "show_minimap": "Show minimap",
+    "show_node_preview": "Show node preview popup",
     "language_section": "Language",
     "language_en": "English",
     "language_sv": "Svenska",
@@ -160,16 +225,19 @@
   },
   "sessions": {
     "title": "Sessions",
+    "agent_arranging": "Assistant is arranging the view…",
     "close": "Close menu",
     "new_session": "Start new session",
     "new_session_started": "New session started",
+    "link_not_found": "That session link could not be found — it may have been deleted or expired.",
     "search_sessions": "Search previous sessions",
     "search_placeholder": "Search by name or ID...",
     "connect_session": "Connect to session (via ID)",
     "connect_session_title": "Connect to session",
     "connect_session_label": "Session ID",
+    "connect_session_placeholder": "1234-5678-9012-3456",
     "connect": "Connect",
-    "invalid_session_id": "Invalid session ID — expected format 1234-5678",
+    "invalid_session_id": "Invalid session ID — expected format 1234-5678-9012-3456",
     "recent_sessions": "Recent sessions",
     "no_sessions": "No previous sessions yet",
     "no_matches": "No sessions match your search",
@@ -177,6 +245,12 @@
     "rename_session_title": "Name session",
     "session_name_label": "Session name",
     "delete_session": "Delete session",
+    "session_menu": "Session actions",
+    "copy_link": "Copy link",
+    "link_copied": "Session link copied to clipboard",
+    "copy_trigger_url": "Copy pulse-trigger URL",
+    "trigger_url_copied": "Pulse-trigger URL copied to clipboard (previous URL revoked)",
+    "trigger_url_failed": "Could not create the pulse-trigger URL",
     "delete_session_title": "Delete session",
     "delete_session_message": "Delete this session? Its content is removed for everyone. This cannot be undone.",
     "delete_session_message_multi": "{count} other user(s) are connected to this session. Delete it anyway? Its content is removed for everyone and cannot be undone.",
@@ -185,6 +259,8 @@
     "session_deleted_remote": "This session was deleted by another user — started a new one",
     "connect_error": "Could not load session",
     "change_not_saved": "A change could not be saved — refreshing session",
+    "lock_canvas": "Lock visualization",
+    "unlock_canvas": "Unlock visualization",
     "settings": "Settings"
   },
   "settings": {
@@ -210,6 +286,13 @@
     "session_id_tooltip": "Session ID — share with an external AI to connect it to this window",
     "clear_canvas_tooltip": "Clear canvas — remove all nodes and edges (or press Esc twice)",
     "clear_canvas_aria": "Clear canvas"
+  },
+  "clear_confirm": {
+    "named_title": "Clear this visualization?",
+    "named_message": "This will remove all nodes and edges from the current visualization. Are you sure?",
+    "locked_title": "This visualization is locked",
+    "locked_message": "Warning: this will permanently remove everything you have entered on this locked visualization — all nodes, edges and annotations. This cannot be undone. Are you sure you want to clear it?",
+    "confirm": "Clear visualization"
   },
   "experts": {
     "title": "Expert Agents",
@@ -237,6 +320,15 @@
     "nodes_selected": "{count} nodes selected",
     "show_only": "Show only these",
     "select_same_type": "Select all nodes of the same type",
+    "select_related": "Select related nodes",
+    "view_history": "View change history",
+    "organize": "Organize",
+    "auto_tidy": "Auto-tidy",
+    "organize_cluster": "Cluster",
+    "organize_horizontal": "List horizontally",
+    "organize_vertical": "List vertically",
+    "organize_tree": "Arrange as tree",
+    "organize_hint": "Organize: A auto-tidy · C cluster · H horizontal · V vertical · T tree",
     "hide_all": "Hide all",
     "delete_all": "Delete all",
     "change_type": "Change type",
@@ -249,7 +341,9 @@
     "label_placeholder": "Label",
     "annotation_text_size": "Text size",
     "arrow_start_head": "Start arrowhead",
-    "arrow_end_head": "End arrowhead"
+    "arrow_end_head": "End arrowhead",
+    "undo_notification": "Move undone",
+    "redo_notification": "Move redone"
   },
   "common": {
     "saving": "Saving...",
@@ -262,6 +356,23 @@
     "type": "Type",
     "no_type": "No specific type",
     "label_field": "Label",
-    "label_placeholder": "Optional label for this connection..."
+    "label_placeholder": "Optional label for this connection...",
+    "appearance": "Appearance",
+    "direction": "Direction",
+    "direction_none": "No arrow",
+    "direction_forward": "To target",
+    "direction_backward": "To source",
+    "direction_both": "Both ends",
+    "arrow_style": "Arrowhead",
+    "arrow_closed": "Filled",
+    "arrow_open": "Open",
+    "thickness": "Thickness",
+    "custom_color": "Custom colour",
+    "color": "Colour",
+    "animate": "Animate (pulse)"
+  },
+  "active_data_collection": {
+    "link_results_label": "Link created and updated nodes to the response",
+    "link_results_help": "When enabled, each submission's response node is linked to every node the assistant created or updated during that collection run, so you can review the outcome of a submission at a glance."
   }
 }

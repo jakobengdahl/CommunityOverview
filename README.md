@@ -23,6 +23,7 @@ This system helps organizations avoid overlapping investments by making visible:
 
 *AI chat & intelligence*
 - **AI-powered chat:** Natural language interface (Claude or OpenAI) for exploring and managing the graph
+- **Configurable model profiles:** Define named chat/agent model profiles in `schema_config.json`; users can select enabled profiles while agents can bind to a profile by id
 - **Multi-provider support:** Switch between Claude (Anthropic), OpenAI, and any OpenAI-compatible endpoint (Ollama, Groq, Azure, etc.)
 - **Document upload:** Upload PDF, Word, or text documents for automatic entity extraction
 - **Node proposals:** LLM suggests entities with duplicate detection; user confirms before any node is added

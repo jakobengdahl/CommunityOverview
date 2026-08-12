@@ -35,12 +35,17 @@ from fastapi.staticfiles import StaticFiles
 # backend.api_host.server.FastMCP in tests that stub the MCP transport.
 from mcp.server.fastmcp import FastMCP
 
+from backend.core.session_auto_add import (
+    SessionAutoAddRegistry,
+    build_node_create_listener,
+)
 from backend.core.session_registry import SessionRegistry
 from backend.core.session_store import FileSessionPersistenceBackend, SessionStore
 from backend.core.session_manager import SessionManager
 
 from backend.core import GraphStorage
 from backend.service import GraphService, create_rest_router, register_mcp_tools
+from backend.service.mcp_tools import _push_to_session
 from backend.ui import ChatService, DocumentService, create_ui_router
 from backend.agents import AgentRegistry, AgentsSettings
 from backend.federation import (
@@ -246,7 +251,35 @@ def create_app(
     # (registered below) so that sync MCP tools can push commands thread-safely.
     session_registry = SessionRegistry()
     app.state.session_registry = session_registry
-    register_session_stream(app, session_registry, session_manager=session_manager)
+
+    # Session-scoped auto-add agents: react to node.create events and push each
+    # matching new node additively into the bound session's live view (reusing
+    # the additive _push_to_session path). Deterministic, no LLM, no graph
+    # mutation — so it needs no loop prevention. The push seam keeps this wiring,
+    # not core, responsible for transport.
+    auto_add_registry = SessionAutoAddRegistry()
+    app.state.auto_add_registry = auto_add_registry
+
+    def _auto_add_push(session_id: str, node_payload: dict) -> None:
+        _push_to_session(
+            session_registry,
+            session_id,
+            "session_auto_add_agent",
+            {"nodes": [node_payload], "edges": []},
+            session_manager,
+        )
+
+    graph_storage.add_system_listener(
+        build_node_create_listener(auto_add_registry, _auto_add_push)
+    )
+
+    register_session_stream(
+        app,
+        session_registry,
+        session_manager=session_manager,
+        graph_service=graph_service,
+        auto_add_registry=auto_add_registry,
+    )
 
     # Initialize FastMCP with dynamic instructions built from schema configuration
     mcp = FastMCP(
@@ -264,6 +297,7 @@ def create_app(
         graph_service,
         session_registry=session_registry,
         session_manager=session_manager,
+        auto_add_registry=auto_add_registry,
     )
 
     # Store MCP instance and tools map on app state
@@ -306,6 +340,24 @@ def create_app(
     return app
 
 
+class _SPAStaticFiles(StaticFiles):
+    """StaticFiles that marks HTML documents ``Cache-Control: no-store``.
+
+    The SPA entry (index.html) is auth-guarded. Starlette's StaticFiles sends
+    only Last-Modified, so browsers apply heuristic caching and would replay a
+    cached authenticated shell after logout — letting a logged-out user reach
+    the app by pasting /web/ in the address bar. Forcing revalidation on the
+    HTML document makes that navigation hit the server (and 401 → sign-in) while
+    the content-hashed JS/CSS assets stay cacheable.
+    """
+
+    async def get_response(self, path, scope):
+        response = await super().get_response(path, scope)
+        if response.headers.get("content-type", "").startswith("text/html"):
+            response.headers["Cache-Control"] = "no-store"
+        return response
+
+
 def _mount_static_files(app: FastAPI, config: AppConfig) -> None:
     """
     Mount static file directories for web app and widget.
@@ -315,7 +367,9 @@ def _mount_static_files(app: FastAPI, config: AppConfig) -> None:
     # Mount web app static files
     web_path = Path(config.web_static_path)
     if web_path.exists() and web_path.is_dir():
-        app.mount("/web", StaticFiles(directory=str(web_path), html=True), name="web")
+        app.mount(
+            "/web", _SPAStaticFiles(directory=str(web_path), html=True), name="web"
+        )
     else:
         # Create fallback route that returns a placeholder
         @app.get("/web/{path:path}")
@@ -328,7 +382,9 @@ def _mount_static_files(app: FastAPI, config: AppConfig) -> None:
     widget_path = Path(config.widget_static_path)
     if widget_path.exists() and widget_path.is_dir():
         app.mount(
-            "/widget", StaticFiles(directory=str(widget_path), html=True), name="widget"
+            "/widget",
+            _SPAStaticFiles(directory=str(widget_path), html=True),
+            name="widget",
         )
     else:
         # Create fallback route that returns a placeholder

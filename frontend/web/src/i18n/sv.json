@@ -1,4 +1,58 @@
 {
+  "agent_runs": {
+    "title": "Agentkörningar",
+    "description": "Beständig historik över agentkörningar – utlösare, status, tid och resultat för varje körning.",
+    "view_runs": "Visa körhistorik",
+    "refresh": "Uppdatera",
+    "loading": "Laddar körningar…",
+    "load_error": "Kunde inte ladda körningar: {error}",
+    "empty": "Inga agentkörningar registrerade ännu.",
+    "close": "Stäng",
+    "col_status": "Status",
+    "col_agent": "Agent",
+    "col_trigger": "Utlösare",
+    "col_started": "Startad",
+    "col_finished": "Avslutad",
+    "status_queued": "I kö",
+    "status_running": "Körs",
+    "status_succeeded": "Lyckades",
+    "status_failed": "Misslyckades",
+    "status_cancelled": "Avbruten",
+    "trigger_scheduled": "Schemalagd",
+    "trigger_event": "Händelse",
+    "detail_event_type": "Händelsetyp",
+    "detail_attempts": "Försök",
+    "detail_correlation": "Korrelations-ID",
+    "detail_error": "Fel",
+    "detail_result": "Resultat"
+  },
+  "agent_proposals": {
+    "title": "Agentförslag",
+    "description": "Ändrande åtgärder som agenter registrerat för godkännande. Att godkänna ett act-after-approval-förslag verkställer åtgärden.",
+    "view_proposals": "Visa förslag",
+    "refresh": "Uppdatera",
+    "loading": "Laddar förslag…",
+    "load_error": "Kunde inte ladda förslag: {error}",
+    "empty": "Inga agentförslag ännu.",
+    "close": "Stäng",
+    "approve": "Godkänn",
+    "reject": "Avslå",
+    "col_status": "Status",
+    "col_agent": "Agent",
+    "col_tool": "Åtgärd",
+    "col_created": "Skapad",
+    "col_actions": "Beslut",
+    "status_pending": "Väntar",
+    "status_approved": "Godkänt",
+    "status_rejected": "Avslaget",
+    "status_applied": "Verkställt",
+    "status_apply_failed": "Verkställande misslyckades",
+    "detail_autonomy": "Autonominivå",
+    "detail_args": "Argument",
+    "detail_decided_by": "Beslutat av",
+    "detail_apply_result": "Verkställanderesultat",
+    "detail_apply_error": "Verkställandefel"
+  },
   "welcome": {
     "title": "Välkommen till Community Knowledge Graph!",
     "language_policy_label": "Språkpolicy",
@@ -36,7 +90,9 @@
     "delete_cancelled": "Borttagning avbruten.",
     "selected_nodes": "{count} noder markerade",
     "clear_selection": "Rensa markering",
-    "placeholder_with_selection": "Ställ en fråga om de markerade noderna..."
+    "placeholder_with_selection": "Ställ en fråga om de markerade noderna...",
+    "model_profile": "Modellprofil",
+    "model_profile_selection_disabled": "Val av modellprofil är inaktiverat"
   },
   "detail": {
     "summary": "Sammanfattning",
@@ -81,6 +137,14 @@
       "days_ago": "{count} d sedan",
       "unknown": "okänd"
     }
+  },
+  "nav_history": {
+    "title": "Senaste noder",
+    "close": "Stäng",
+    "clear": "Rensa",
+    "action_added": "Tillagd",
+    "action_visited": "Besökt",
+    "jump_to": "Gå till {name}"
   },
   "proposal": {
     "title": "Föreslaget tillägg:",
@@ -153,6 +217,7 @@
     "export_error": "Kunde inte exportera grafen",
     "view_section": "Vy",
     "show_minimap": "Visa minimapp",
+    "show_node_preview": "Visa förhandsvisning av noder",
     "language_section": "Språk",
     "language_en": "English",
     "language_sv": "Svenska",
@@ -160,16 +225,19 @@
   },
   "sessions": {
     "title": "Sessioner",
+    "agent_arranging": "Assistenten ordnar vyn …",
     "close": "Stäng menyn",
     "new_session": "Starta ny session",
     "new_session_started": "Ny session startad",
+    "link_not_found": "Sessionslänken kunde inte hittas — den kan ha tagits bort eller upphört att gälla.",
     "search_sessions": "Sök bland tidigare sessioner",
     "search_placeholder": "Sök på namn eller ID...",
     "connect_session": "Anslut till session (via ID)",
     "connect_session_title": "Anslut till session",
     "connect_session_label": "Sessions-ID",
+    "connect_session_placeholder": "1234-5678-9012-3456",
     "connect": "Anslut",
-    "invalid_session_id": "Ogiltigt sessions-ID — förväntat format 1234-5678",
+    "invalid_session_id": "Ogiltigt sessions-ID — förväntat format 1234-5678-9012-3456",
     "recent_sessions": "Senaste sessioner",
     "no_sessions": "Inga tidigare sessioner ännu",
     "no_matches": "Inga sessioner matchar sökningen",
@@ -177,6 +245,12 @@
     "rename_session_title": "Namnge session",
     "session_name_label": "Sessionsnamn",
     "delete_session": "Ta bort session",
+    "session_menu": "Sessionsåtgärder",
+    "copy_link": "Kopiera länk",
+    "link_copied": "Sessionslänk kopierad till urklipp",
+    "copy_trigger_url": "Kopiera puls-utlösar-URL",
+    "trigger_url_copied": "Puls-utlösar-URL kopierad till urklipp (tidigare URL återkallad)",
+    "trigger_url_failed": "Kunde inte skapa puls-utlösar-URL",
     "delete_session_title": "Ta bort session",
     "delete_session_message": "Ta bort den här sessionen? Innehållet tas bort för alla. Detta kan inte ångras.",
     "delete_session_message_multi": "{count} andra användare är anslutna till den här sessionen. Ta bort den ändå? Innehållet tas bort för alla och kan inte ångras.",
@@ -185,6 +259,8 @@
     "session_deleted_remote": "Sessionen togs bort av en annan användare — startade en ny",
     "connect_error": "Kunde inte läsa in sessionen",
     "change_not_saved": "En ändring kunde inte sparas — uppdaterar sessionen",
+    "lock_canvas": "Lås visualiseringen",
+    "unlock_canvas": "Lås upp visualiseringen",
     "settings": "Inställningar"
   },
   "settings": {
@@ -210,6 +286,13 @@
     "session_id_tooltip": "Sessions-ID — dela med en extern AI för att ansluta den till detta fönster",
     "clear_canvas_tooltip": "Rensa canvas — ta bort alla noder och kanter (eller tryck Esc två gånger)",
     "clear_canvas_aria": "Rensa canvas"
+  },
+  "clear_confirm": {
+    "named_title": "Rensa den här visualiseringen?",
+    "named_message": "Detta tar bort alla noder och kanter från den aktuella visualiseringen. Är du säker?",
+    "locked_title": "Den här visualiseringen är låst",
+    "locked_message": "Varning: detta tar permanent bort allt du har lagt in i den här låsta visualiseringen — alla noder, kanter och anteckningar. Detta kan inte ångras. Är du säker på att du vill rensa den?",
+    "confirm": "Rensa visualiseringen"
   },
   "experts": {
     "title": "Expert-agenter",
@@ -237,6 +320,15 @@
     "nodes_selected": "{count} noder markerade",
     "show_only": "Visa enbart dessa",
     "select_same_type": "Markera alla noder av samma sort",
+    "select_related": "Markera relaterade noder",
+    "view_history": "Visa ändringshistorik",
+    "organize": "Organisera",
+    "auto_tidy": "Städa automatiskt",
+    "organize_cluster": "Klustra",
+    "organize_horizontal": "Lista vågrätt",
+    "organize_vertical": "Lista lodrätt",
+    "organize_tree": "Ordna som träd",
+    "organize_hint": "Organisera: A städa · C kluster · H vågrätt · V lodrätt · T träd",
     "hide_all": "Dölj alla",
     "delete_all": "Ta bort alla",
     "change_type": "Ändra typ",
@@ -249,7 +341,9 @@
     "label_placeholder": "Etikett",
     "annotation_text_size": "Textstorlek",
     "arrow_start_head": "Pilspets i början",
-    "arrow_end_head": "Pilspets i slutet"
+    "arrow_end_head": "Pilspets i slutet",
+    "undo_notification": "Flytt ångrad",
+    "redo_notification": "Flytt återställd"
   },
   "common": {
     "saving": "Sparar...",
@@ -262,6 +356,23 @@
     "type": "Typ",
     "no_type": "Ingen specifik typ",
     "label_field": "Etikett",
-    "label_placeholder": "Valfri etikett för den här kopplingen..."
+    "label_placeholder": "Valfri etikett för den här kopplingen...",
+    "appearance": "Utseende",
+    "direction": "Riktning",
+    "direction_none": "Ingen pil",
+    "direction_forward": "Mot mål",
+    "direction_backward": "Mot källa",
+    "direction_both": "Båda ändar",
+    "arrow_style": "Pilspets",
+    "arrow_closed": "Fylld",
+    "arrow_open": "Öppen",
+    "thickness": "Tjocklek",
+    "custom_color": "Egen färg",
+    "color": "Färg",
+    "animate": "Animera (puls)"
+  },
+  "active_data_collection": {
+    "link_results_label": "Länka skapade och uppdaterade noder till svaret",
+    "link_results_help": "När detta är aktiverat länkas varje inlämnings svarsnod till alla noder som assistenten skapade eller uppdaterade under insamlingen, så att du enkelt kan granska resultatet av en inlämning."
   }
 }

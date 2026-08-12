@@ -1,6 +1,8 @@
 import { describe, it, expect, beforeEach } from 'vitest';
 
 import * as sessionStore from '../src/services/sessionStore';
+import en from '../src/i18n/en.json';
+import sv from '../src/i18n/sv.json';
 
 describe('sessionStore (recents index)', () => {
   beforeEach(() => {
@@ -15,6 +17,20 @@ describe('sessionStore (recents index)', () => {
     expect(sessionStore.isValidSessionId('abcd-efgh')).toBe(false);
     expect(sessionStore.isValidSessionId('')).toBe(false);
     expect(sessionStore.isValidSessionId(null)).toBe(false);
+  });
+
+  // The connect dialog advertises the session-ID shape to users. Session IDs
+  // minted by the backend are the four-group form (DDDD-DDDD-DDDD-DDDD); the
+  // two-group legacy form is accepted but never generated. Guard the GUI
+  // example against regressing back to the shorter, stale format.
+  it.each([
+    ['en', en],
+    ['sv', sv],
+  ])('advertises the current four-group session-ID example (%s)', (_lang, catalog) => {
+    const example = catalog.sessions.connect_session_placeholder;
+    expect(sessionStore.isValidSessionId(example)).toBe(true);
+    expect(example.split('-')).toHaveLength(4);
+    expect(catalog.sessions.invalid_session_id).toContain(example);
   });
 
   it('touchSession registers a session and lists it', () => {

@@ -57,6 +57,16 @@ class GraphService:
         """Access the underlying storage (for advanced use cases)."""
         return self._storage
 
+    @property
+    def authorization_hook(self) -> GraphAuthorizationHook:
+        """The active authorization hook.
+
+        Exposed so surfaces that authorize outside the node/edge CRUD path
+        (e.g. the MCP visualization-session tools) evaluate against the *same*
+        hook instance the hosted layer swaps in, rather than a fresh default.
+        """
+        return self._authorization_hook
+
     # ==================== Search Operations ====================
 
     def search_graph(
@@ -95,6 +105,40 @@ class GraphService:
             node_id,
             relationship_types=relationship_types,
             depth=depth,
+        )
+
+    def list_typed_nodes(
+        self,
+        node_type: str,
+        tags_all: Optional[List[str]] = None,
+        tags_any: Optional[List[str]] = None,
+        subtypes_any: Optional[List[str]] = None,
+        limit: int = 500,
+    ) -> Dict[str, Any]:
+        return queries.list_typed_nodes(
+            self._storage,
+            self._authorization_hook,
+            node_type=node_type,
+            tags_all=tags_all,
+            tags_any=tags_any,
+            subtypes_any=subtypes_any,
+            limit=limit,
+        )
+
+    def list_typed_edges(
+        self,
+        edge_type: str,
+        tags_all: Optional[List[str]] = None,
+        tags_any: Optional[List[str]] = None,
+        limit: int = 500,
+    ) -> Dict[str, Any]:
+        return queries.list_typed_edges(
+            self._storage,
+            self._authorization_hook,
+            edge_type=edge_type,
+            tags_all=tags_all,
+            tags_any=tags_any,
+            limit=limit,
         )
 
     # ==================== Similarity Operations ====================

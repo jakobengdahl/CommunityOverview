@@ -20,6 +20,7 @@ function renderDrawer(overrides = {}) {
     onSelectSession: vi.fn(),
     onRenameSession: vi.fn(),
     onDeleteSession: vi.fn(),
+    onCopySessionLink: vi.fn(),
     onOpenSettings: vi.fn(),
     ...overrides,
   };
@@ -54,11 +55,41 @@ describe('SessionDrawer', () => {
     expect(props.onSelectSession).toHaveBeenCalledWith('1111-2222');
   });
 
-  it('invokes the delete callback with the session id', () => {
+  it('exposes per-session actions behind the context menu', () => {
     const props = renderDrawer();
-    const deleteButtons = screen.getAllByLabelText('Delete session');
-    fireEvent.click(deleteButtons[0]);
+    // Open the first session's menu, then pick Delete.
+    fireEvent.click(screen.getAllByLabelText('Session actions')[0]);
+    fireEvent.click(screen.getByRole('menuitem', { name: 'Delete session' }));
     expect(props.onDeleteSession).toHaveBeenCalledWith('1111-2222');
+  });
+
+  it('copies a session link from the context menu', () => {
+    const props = renderDrawer();
+    fireEvent.click(screen.getAllByLabelText('Session actions')[0]);
+    fireEvent.click(screen.getByRole('menuitem', { name: 'Copy link' }));
+    expect(props.onCopySessionLink).toHaveBeenCalledWith('1111-2222');
+  });
+
+  it('renames a session from the context menu', () => {
+    const props = renderDrawer();
+    fireEvent.click(screen.getAllByLabelText('Session actions')[0]);
+    fireEvent.click(screen.getByRole('menuitem', { name: 'Name session' }));
+    expect(props.onRenameSession).toHaveBeenCalledWith('1111-2222');
+  });
+
+  it('Escape peels off an open menu before it closes the drawer', () => {
+    const props = renderDrawer();
+    fireEvent.click(screen.getAllByLabelText('Session actions')[0]);
+    expect(screen.getByRole('menu')).toBeInTheDocument();
+
+    // First Escape closes the menu but leaves the drawer open.
+    fireEvent.keyDown(document, { key: 'Escape' });
+    expect(screen.queryByRole('menu')).not.toBeInTheDocument();
+    expect(props.onClose).not.toHaveBeenCalled();
+
+    // Second Escape closes the drawer.
+    fireEvent.keyDown(document, { key: 'Escape' });
+    expect(props.onClose).toHaveBeenCalled();
   });
 
   it('filters sessions from the search field', () => {

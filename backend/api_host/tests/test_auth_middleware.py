@@ -13,6 +13,7 @@ from fastapi.testclient import TestClient
 
 from backend.api_host.config import AppConfig
 from backend.api_host.server import create_app
+from backend.api_host.session_auth import SESSION_COOKIE_NAME
 
 
 def _make_config(**overrides) -> tuple:
@@ -242,6 +243,105 @@ class TestAuthEnabledTakesPrecedence:
             os.unlink(path)
 
 
+class TestUnauthorizedContentNegotiation:
+    """The 401 challenge is negotiated by Accept.
+
+    Regression for the SSPCloud Edge/Chrome bug: a browser navigation must never
+    land on a blank page rendering the raw {"detail": "Authentication required"}
+    JSON, and no 401 may carry a WWW-Authenticate header — that header makes
+    Chromium pop the native Basic dialog (on the page OR on a subresource such as
+    the favicon), and that dialog can't drive the cookie login. Browsers
+    (Accept: text/html) get an HTML sign-in page; everything else gets the JSON
+    body. Neither carries WWW-Authenticate.
+    """
+
+    def _make_client(self, **config_overrides) -> tuple:
+        config, path = _make_config(**config_overrides)
+        app = create_app(config)
+        return TestClient(app), path
+
+    def test_browser_navigation_gets_html_without_www_authenticate(self):
+        client, path = self._make_client(auth_enabled=True, auth_password="secret")
+        try:
+            resp = client.get("/", headers={"Accept": "text/html"})
+            assert resp.status_code == 401
+            assert resp.headers["content-type"].startswith("text/html")
+            # No WWW-Authenticate: browsers must render the form, not the native
+            # Basic dialog (Chromium pops it before showing the body).
+            assert "WWW-Authenticate" not in resp.headers
+            # Never cache the sign-in page.
+            assert resp.headers.get("cache-control") == "no-store"
+            assert "Sign in" in resp.text
+            # The raw backend error body must not be what the browser renders.
+            assert '{"detail": "Authentication required"}' not in resp.text
+        finally:
+            os.unlink(path)
+
+    def test_api_client_gets_json_body_without_www_authenticate(self):
+        client, path = self._make_client(auth_enabled=True, auth_password="secret")
+        try:
+            resp = client.get(
+                "/api/search",
+                params={"query": "x"},
+                headers={"Accept": "application/json"},
+            )
+            assert resp.status_code == 401
+            assert resp.headers["content-type"].startswith("application/json")
+            assert resp.json() == {"detail": "Authentication required"}
+            # A subresource 401 (favicon, XHR) carrying this header would pop the
+            # native dialog in Chrome — it must not be sent.
+            assert "WWW-Authenticate" not in resp.headers
+        finally:
+            os.unlink(path)
+
+    def test_favicon_bypasses_auth(self):
+        """Favicons must be reachable unauthenticated: a guarded (401) favicon
+        subresource is what triggered the Chrome native Basic dialog."""
+        client, path = self._make_client(auth_enabled=True, auth_password="secret")
+        try:
+            for fav in [
+                "/favicon.ico",
+                "/favicon.svg",
+                "/favicon.png",
+                "/graph-icon.svg",
+            ]:
+                resp = client.get(fav, headers={"Accept": "image/avif,image/webp,*/*"})
+                assert resp.status_code != 401, fav
+        finally:
+            os.unlink(path)
+
+    def test_default_accept_gets_json_body(self):
+        """A client sending Accept: */* (curl, many SDKs) keeps the JSON body."""
+        client, path = self._make_client(auth_enabled=True, auth_password="secret")
+        try:
+            resp = client.get(
+                "/api/search", params={"query": "x"}, headers={"Accept": "*/*"}
+            )
+            assert resp.status_code == 401
+            assert resp.json() == {"detail": "Authentication required"}
+        finally:
+            os.unlink(path)
+
+    def test_invalid_credentials_negotiated_too(self):
+        client, path = self._make_client(auth_enabled=True, auth_password="secret")
+        try:
+            bad = _auth_header("admin", "wrong")
+            html_resp = client.get("/", headers={**bad, "Accept": "text/html"})
+            assert html_resp.status_code == 401
+            assert html_resp.headers["content-type"].startswith("text/html")
+            assert "Sign in" in html_resp.text
+
+            json_resp = client.get(
+                "/api/search",
+                params={"query": "x"},
+                headers={**bad, "Accept": "application/json"},
+            )
+            assert json_resp.status_code == 401
+            assert json_resp.json() == {"detail": "Invalid credentials"}
+        finally:
+            os.unlink(path)
+
+
 class TestNoAuthDisabled:
     """When both auth flags are off, nothing is blocked."""
 
@@ -370,3 +470,113 @@ class TestLogoutRoutes:
                 assert resp.headers["location"] == "https://custom.example.com/bye"
             finally:
                 os.unlink(path)
+
+
+class TestSessionCookieLogin:
+    """Form login (POST /auth/login) mints a signed session cookie the middleware
+    accepts, giving a browser-independent auth flow that does not depend on the
+    native HTTP Basic dialog (which Edge never surfaces on the sspcloud deploy).
+    """
+
+    def _make_client(self, **config_overrides) -> tuple:
+        config, path = _make_config(**config_overrides)
+        app = create_app(config)
+        return TestClient(app), path
+
+    def test_signin_page_renders_login_form(self):
+        client, path = self._make_client(auth_enabled=True, auth_password="secret")
+        try:
+            resp = client.get("/web/", headers={"Accept": "text/html"})
+            assert resp.status_code == 401
+            assert 'action="/auth/login"' in resp.text
+            assert 'name="username"' in resp.text
+            assert 'name="password"' in resp.text
+            # The requested path is preserved as the post-login return target.
+            assert 'name="next"' in resp.text
+            assert 'value="/web/"' in resp.text
+        finally:
+            os.unlink(path)
+
+    def test_form_login_sets_cookie_and_authenticates(self):
+        client, path = self._make_client(auth_enabled=True, auth_password="secret")
+        try:
+            resp = client.post(
+                "/auth/login",
+                data={"username": "admin", "password": "secret", "next": "/web/"},
+                follow_redirects=False,
+            )
+            assert resp.status_code == 303
+            assert resp.headers["location"] == "/web/"
+            assert SESSION_COOKIE_NAME in resp.cookies
+            # The cookie is now in the client jar; a guarded request is authorised.
+            follow = client.get("/api/search", params={"query": "x"})
+            assert follow.status_code != 401
+        finally:
+            os.unlink(path)
+
+    def test_form_login_wrong_password_401_no_cookie(self):
+        client, path = self._make_client(auth_enabled=True, auth_password="secret")
+        try:
+            resp = client.post(
+                "/auth/login",
+                data={"username": "admin", "password": "nope"},
+                follow_redirects=False,
+            )
+            assert resp.status_code == 401
+            assert "Invalid username or password" in resp.text
+            assert SESSION_COOKIE_NAME not in resp.cookies
+        finally:
+            os.unlink(path)
+
+    def test_login_rejects_open_redirect_next(self):
+        client, path = self._make_client(auth_enabled=True, auth_password="secret")
+        try:
+            resp = client.post(
+                "/auth/login",
+                data={
+                    "username": "admin",
+                    "password": "secret",
+                    "next": "//evil.example.com/",
+                },
+                follow_redirects=False,
+            )
+            assert resp.status_code == 303
+            assert resp.headers["location"] == "/web/"
+        finally:
+            os.unlink(path)
+
+    def test_tampered_session_cookie_rejected(self):
+        client, path = self._make_client(auth_enabled=True, auth_password="secret")
+        try:
+            client.cookies.set(SESSION_COOKIE_NAME, "v1.9999999999.deadbeef")
+            resp = client.get(
+                "/api/search",
+                params={"query": "x"},
+                headers={"Accept": "application/json"},
+            )
+            assert resp.status_code == 401
+        finally:
+            os.unlink(path)
+
+    def test_logout_with_session_cookie_clears_and_no_popup(self):
+        """A cookie-authenticated logout redirects to /logged-out (no 401 Basic
+        flush, so no native dialog re-opens) and clears the session."""
+        client, path = self._make_client(auth_enabled=True, auth_password="secret")
+        try:
+            client.post(
+                "/auth/login",
+                data={"username": "admin", "password": "secret"},
+                follow_redirects=False,
+            )
+            resp = client.get("/auth/logout", follow_redirects=False)
+            assert resp.status_code == 302
+            assert resp.headers["location"] == "/logged-out"
+            # Session is really gone: a guarded request is unauthorised again.
+            after = client.get(
+                "/api/search",
+                params={"query": "x"},
+                headers={"Accept": "application/json"},
+            )
+            assert after.status_code == 401
+        finally:
+            os.unlink(path)

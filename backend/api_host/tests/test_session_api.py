@@ -307,6 +307,41 @@ class TestResolve:
         assert "node-1" in ids
         assert "does-not-exist" not in ids
 
+    def test_resolve_true_recovers_edges_between_present_refs(
+        self, test_app: TestClient
+    ):
+        """Reloading a session must re-render the edges its data includes.
+
+        Regression for "edges sometimes missing after reloading a session": edges
+        are not stored in session state (an ``edges_added`` op persists none — #323),
+        so a reload recovers them solely by resolving the session's node_refs
+        against the graph. This is the load-bearing invariant behind that design and
+        the exact ``?resolve=true`` call the frontend reload makes
+        (App.jsx bootstrap → useSharedSession.loadSessionFromServer). An edge is
+        returned iff *both* its endpoints are present node_refs; an edge whose other
+        endpoint is not in the session is correctly left out (you cannot draw a
+        half-edge). Sample graph fixture: node-1 -[edge-1]-> node-2 -[edge-2]-> node-3.
+        """
+        sid = test_app.post("/api/sessions", json={}).json()["id"]
+        test_app.post(
+            f"/api/sessions/{sid}/ops",
+            json={
+                "client_id": "c1",
+                "ops": [{"op": "nodes_added", "node_ids": ["node-1", "node-2"]}],
+            },
+        )
+        resolved = test_app.get(f"/api/sessions/{sid}?resolve=true").json()["resolved"]
+        edge_ids = {e["id"] for e in resolved["edges"]}
+        # edge-1 connects two present refs → recovered on reload.
+        assert "edge-1" in edge_ids
+        # edge-2's other endpoint (node-3) is not in the session → not recovered.
+        assert "edge-2" not in edge_ids
+        # Shape the canvas edge filter relies on (GraphCanvas visibleEdges needs
+        # e.id / e.source / e.target); a wrong shape would silently drop the edge.
+        edge1 = next(e for e in resolved["edges"] if e["id"] == "edge-1")
+        assert edge1["source"] == "node-1"
+        assert edge1["target"] == "node-2"
+
 
 class TestOpBatchBodyCap:
     def test_oversized_op_batch_returns_413(self, test_app: TestClient):

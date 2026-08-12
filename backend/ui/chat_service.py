@@ -19,7 +19,6 @@ import re
 from datetime import datetime, timezone
 
 from backend.ui.chat_logic import ChatProcessor
-from backend.llm.llm_providers import create_provider
 from backend.service import GraphService
 
 logger = logging.getLogger(__name__)
@@ -239,6 +238,20 @@ class ChatService:
         """Get the current LLM provider type (openai or claude)."""
         return self._processor.provider_type
 
+    @staticmethod
+    def _normalize_tool_allowlist(raw: Any) -> Optional[List[str]]:
+        """Normalize a collection's configured tool allowlist.
+
+        Returns None (unrestricted — all tools available) when the value is unset,
+        not a list, or empty after filtering. Otherwise returns the list of
+        non-empty string tool names. Mirrors the AIAgent model where a falsy
+        allowlist means "no restriction" rather than "no tools".
+        """
+        if not isinstance(raw, list):
+            return None
+        names = [t for t in raw if isinstance(t, str) and t]
+        return names or None
+
     def _resolve_collection(self, short_name: str) -> tuple:
         """Resolve an AKC short_name → (system_prompt_prefix, permissions_dict, collect_responses).
 
@@ -270,6 +283,9 @@ class ChatService:
                     self._collection_nodes[short_name] = {
                         "id": node.get("id"),
                         "name": node.get("name") or short_name,
+                        "tool_allowlist": self._normalize_tool_allowlist(
+                            meta.get("tool_allowlist")
+                        ),
                     }
                     raw_perms = meta.get("node_type_permissions") or {}
                     # Guard against individual null entries in the permissions dict
@@ -310,6 +326,18 @@ class ChatService:
                     collect_responses = meta.get("collect_responses", True)
                     if collect_responses is None:
                         collect_responses = True
+
+                    # Whether the CollectionResponse should be linked to every node
+                    # created or updated during a run. Consumed by the collection
+                    # response tool (via _collection_nodes), not by process_message,
+                    # so it is stored alongside the collection identity rather than
+                    # returned in the resolution tuple.
+                    link_results = meta.get("link_results", True)
+                    if link_results is None:
+                        link_results = True
+                    self._collection_nodes[short_name]["link_results"] = bool(
+                        link_results
+                    )
 
                     lines.append("")
                     if collect_responses:
@@ -365,8 +393,29 @@ class ChatService:
             return ("", {}, True)
         return (None, None, True)
 
-    def _make_enforced_tools(self, perms: dict) -> dict:
-        """Return a tools_map overlay that enforces node_type_permissions at call time."""
+    def _make_enforced_tools(self, perms: dict, touched: Optional[list] = None) -> dict:
+        """Return a tools_map overlay that enforces node_type_permissions at call time.
+
+        When ``touched`` is a list, the ids of nodes successfully created or updated by
+        the enforced tools are appended to it (and removed again on successful delete),
+        so a later save_collection_response call can link the response to every node the
+        run touched. Ids are only recorded for successful operations, and deletes prune
+        the list so it never references a node that no longer exists.
+        """
+
+        def _record(node_ids) -> None:
+            if touched is None:
+                return
+            for nid in node_ids:
+                if nid:
+                    touched.append(nid)
+
+        def _forget(node_ids) -> None:
+            if touched is None:
+                return
+            for nid in node_ids:
+                while nid in touched:
+                    touched.remove(nid)
 
         base_add = self._graph_service.add_nodes
         base_update = self._graph_service.update_node
@@ -412,7 +461,10 @@ class ChatService:
                         "Please only create node types that are listed as permitted."
                     ),
                 }
-            return base_add(nodes=nodes, edges=edges or [], **kwargs)
+            result = base_add(nodes=nodes, edges=edges or [], **kwargs)
+            if isinstance(result, dict) and result.get("success"):
+                _record(result.get("added_node_ids") or [])
+            return result
 
         def update_node_enforced(node_id, updates, **kwargs):
             node_type = _get_node_type(node_id)
@@ -428,7 +480,10 @@ class ChatService:
                     "success": False,
                     "error": f"Updating {node_type} nodes is not permitted in this collection.",
                 }
-            return base_update(node_id, updates, **kwargs)
+            result = base_update(node_id, updates, **kwargs)
+            if isinstance(result, dict) and result.get("success"):
+                _record([node_id])
+            return result
 
         def delete_nodes_enforced(node_ids, confirmed=False, **kwargs):
             forbidden_ids = []
@@ -453,7 +508,12 @@ class ChatService:
                     "success": False,
                     "error": "Cannot delete node(s) — " + "; ".join(errors) + ".",
                 }
-            return base_delete(node_ids=node_ids, confirmed=confirmed, **kwargs)
+            result = base_delete(node_ids=node_ids, confirmed=confirmed, **kwargs)
+            if isinstance(result, dict) and result.get("success"):
+                # Prune deleted nodes so the response is never linked to a node
+                # that no longer exists (an unresolvable edge would fail the save).
+                _forget(result.get("deleted_node_ids") or node_ids)
+            return result
 
         def delete_edges_enforced(edge_ids, confirmed=False, **kwargs):
             # Edge deletion is not permitted in collection mode because it can
@@ -472,7 +532,9 @@ class ChatService:
             "delete_edges": delete_edges_enforced,
         }
 
-    def _make_collection_response_tool(self, short_name: str) -> dict:
+    def _make_collection_response_tool(
+        self, short_name: str, touched: Optional[list] = None
+    ) -> dict:
         """Return a tools_map overlay with a save_collection_response bound to this collection.
 
         The response is stored as a CollectionResponse node whose metadata carries a flat
@@ -480,10 +542,16 @@ class ChatService:
         can later be aggregated into simple statistics. The collection reference lives in
         metadata (authoritative for aggregation); an edge to the collection node is added
         best-effort for graph navigation.
+
+        When the collection's ``link_results`` setting is enabled (the default) and
+        ``touched`` lists the ids of nodes created or updated during this run, the response
+        node is also linked (RELATES_TO) to every one of those nodes, so the outcome of a
+        submission can be reviewed at a glance.
         """
         info = self._collection_nodes.get(short_name) or {}
         collection_id = info.get("id")
         collection_name = info.get("name") or short_name
+        link_results = info.get("link_results", True)
 
         def save_collection_response(
             answers, respondent_label=None, form_title=None, **kwargs
@@ -538,8 +606,30 @@ class ChatService:
                 },
             }
             edges = []
+            seen_targets = set()
             if collection_id:
                 edges.append({"source": node["name"], "target": collection_id})
+                seen_targets.add(collection_id)
+
+            # Link the response to every node this run created or updated. Source is
+            # the response node's name (resolved within this same add_nodes call);
+            # targets are existing node ids. Dedupe so a node created-then-updated,
+            # or the collection node itself, is linked at most once.
+            linked_node_ids = []
+            if link_results and touched:
+                for tid in touched:
+                    if not tid or tid in seen_targets:
+                        continue
+                    seen_targets.add(tid)
+                    linked_node_ids.append(tid)
+                    edges.append(
+                        {
+                            "source": node["name"],
+                            "target": tid,
+                            "type": "RELATES_TO",
+                            "label": "collected",
+                        }
+                    )
 
             result = self._graph_service.add_nodes(nodes=[node], edges=edges)
             if result.get("success"):
@@ -549,6 +639,7 @@ class ChatService:
                     "success": True,
                     "response_id": added[0] if added else None,
                     "answer_count": len(normalized),
+                    "linked_node_count": len(linked_node_ids),
                 }
             return {
                 "success": False,
@@ -608,6 +699,7 @@ class ChatService:
         messages: List[Dict[str, Any]],
         api_key: Optional[str] = None,
         provider: Optional[str] = None,
+        model_profile_id: Optional[str] = None,
         federation_depth: Optional[int] = None,
         expert_agent_id: Optional[str] = None,
         skills_context: Optional[str] = None,
@@ -626,7 +718,11 @@ class ChatService:
         Args:
             messages: Conversation history as a list of message dicts
             api_key: Optional API key override (uses env var if not provided)
-            provider: Optional provider override ('claude' or 'openai')
+            provider: Optional provider override ('claude' or 'openai'). Ignored
+                once model profiles are configured (see model_profile_id).
+            model_profile_id: Optional explicit model profile id selected by the
+                caller (e.g. the chat UI). Only used when model profiles are
+                configured and selection_enabled — see backend/config/model_profiles.py.
             federation_depth: Optional federated search depth override
             expert_agent_id: Optional expert agent ID — when provided, the
                 agent's system_context and skills are prepended to the system
@@ -665,8 +761,13 @@ class ChatService:
             # collection_perms is None when no collection is active; {} means a collection
             # was found but has no node_type_permissions configured — enforce even then
             # so the enforced tool wrappers (e.g. delete_edges block) apply regardless.
+            # touched_nodes accumulates ids created/updated by the enforced tools within
+            # this single agentic loop, so save_collection_response can link the response
+            # to them. Scoped per request — the frontend does not replay prior tool
+            # results, so a collection run's writes and its save land in the same call.
+            touched_nodes = [] if collection_perms is not None else None
             tools_override = (
-                self._make_enforced_tools(collection_perms)
+                self._make_enforced_tools(collection_perms, touched=touched_nodes)
                 if collection_perms is not None
                 else None
             )
@@ -682,12 +783,28 @@ class ChatService:
             ):
                 tools_override = {
                     **(tools_override or {}),
-                    **self._make_collection_response_tool(collection_short_name),
+                    **self._make_collection_response_tool(
+                        collection_short_name, touched=touched_nodes
+                    ),
                 }
 
             visualization_context = self._format_visualization_context(
                 visible_node_ids, selected_node_ids
             )
+
+            # Per-collection tool allowlist (enforced server-side in ChatProcessor).
+            # Only applied within an active collection session; None means
+            # unrestricted, matching the AIAgent model. Read from the identity
+            # cache populated by _resolve_collection above.
+            # Note: on the fail-closed path (resolution error → prefix == ""), the
+            # node metadata could not be read, so the allowlist is unavailable and
+            # stays None here. Fail-closed still blocks all writes via the enforced
+            # tool wrappers; it does not additionally restrict read/action tools.
+            tool_allowlist = None
+            if collection_short_name and effective_prefix is not None:
+                tool_allowlist = (
+                    self._collection_nodes.get(collection_short_name) or {}
+                ).get("tool_allowlist")
 
             # skills_context is passed separately as skills_override so it lands
             # AFTER the base system prompt (recency precedence for behavioral overrides).
@@ -697,10 +814,12 @@ class ChatService:
                 messages=messages,
                 api_key=api_key,
                 provider=provider,
+                model_profile_id=model_profile_id,
                 extra_context=extra_context,
                 skills_override=skills_context or None,
                 tools_override=tools_override,
                 visualization_context=visualization_context,
+                tool_allowlist=tool_allowlist,
             )
         finally:
             self._current_federation_depth = None
@@ -711,6 +830,7 @@ class ChatService:
         conversation_history: Optional[List[Dict[str, Any]]] = None,
         api_key: Optional[str] = None,
         provider: Optional[str] = None,
+        model_profile_id: Optional[str] = None,
         document_context: Optional[str] = None,
         federation_depth: Optional[int] = None,
         expert_agent_id: Optional[str] = None,
@@ -753,6 +873,7 @@ User's question: {user_message}"""
             messages=messages,
             api_key=api_key,
             provider=provider,
+            model_profile_id=model_profile_id,
             federation_depth=federation_depth,
             expert_agent_id=expert_agent_id,
         )
@@ -777,6 +898,7 @@ User's question: {user_message}"""
         communities: Optional[List[str]] = None,
         api_key: Optional[str] = None,
         provider: Optional[str] = None,
+        model_profile_id: Optional[str] = None,
         federation_depth: Optional[int] = None,
     ) -> Dict[str, Any]:
         """
@@ -840,19 +962,18 @@ Respond with ONLY a JSON array of extracted entities, no other text. Example for
         messages = [{"role": "user", "content": extraction_prompt}]
 
         try:
-            # Get LLM to extract entities
-            key_to_use = api_key if api_key else self._processor.default_api_key
-            provider_to_use = provider if provider else self._processor.provider_type
-
-            if not key_to_use:
+            # Resolve LLM the same way as chat requests: model profiles take
+            # precedence when configured, otherwise fall back to legacy provider/API-key fields.
+            llm_provider, error = self._processor._resolve_llm_provider(
+                api_key, provider, model_profile_id
+            )
+            if error:
                 return {
                     "success": False,
-                    "error": "No API key available",
+                    "error": error,
                     "proposed_nodes": [],
                     "similar_existing": {},
                 }
-
-            llm_provider = create_provider(key_to_use, provider_to_use)
 
             response = llm_provider.create_completion(
                 messages=messages,
