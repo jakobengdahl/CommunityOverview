@@ -19,6 +19,18 @@ Effort scale: XS = single-line fix · S = up to ~30 lines / one file · M = mult
 
 ---
 
+### [2026-08-12] SecretProvider seam is declared and unit-tested but not wired into the runtime consumption path
+- **File(s):** `backend/agents/secrets/provider.py` (`SecretProvider`, `EnvSecretProvider`, `resolve_secret`); `backend/agents/config.py:178` (`MCPIntegration.resolved_env`); `backend/agents/mcp_loader.py` (`_execute_search_tool` reads `os.environ.get("BRAVE_API_KEY")` directly; `_connect_stdio` does not spawn with `resolved_env`)
+- **Context:** Discovered during `claude/core-request-scope-seams` while mapping the merged seam surface (PR #334).
+- **Issue:** The SecretProvider contract + `EnvSecretProvider` adapter + tests exist, but `resolved_env` is only ever called from `test_secrets.py`. No `SecretProvider` is instantiated or injected in non-test code, and the actual MCP subprocess launch path reads `os.environ` directly instead of resolving through the seam. Wiring the provider into `mcp_loader` (stdio env resolution) would make the seam load-bearing. Out of scope for the request/scope/authz-seam task.
+- **Effort:** M
+
+### [2026-08-12] Visibility helper reaches into FederationManager private `_cache`
+- **File(s):** `backend/service/access.py:163` (`get_federated_search_limit`)
+- **Context:** Discovered during `claude/core-request-scope-seams`.
+- **Issue:** `get_federated_search_limit` sums `federation_manager._cache.values()` node counts by reaching into a private attribute. A small public accessor (e.g. `FederationManager.total_cached_node_count()`) would remove the layering smell. Behavior is correct today; this is a maintainability note.
+- **Effort:** XS
+
 ### [2026-08-12] MCP create_session_auto_add_agent skips the session-count cap the REST path enforces
 
 - **File(s):** `backend/service/mcp_tools.py` (`create_session_auto_add_agent`, `session_registry.get_or_create` call); compare `backend/api_host/session_stream.py` (`create_auto_add_agent` checks `session_count >= SESSION_MAX_COUNT` before materialising)
