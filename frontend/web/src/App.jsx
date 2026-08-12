@@ -245,6 +245,14 @@ function App() {
           setHiddenNodeIds((store.hiddenNodeIds || []).filter((id) => !drop.has(id)));
           break;
         }
+        case 'edges_added': {
+          // A collaborator drew an edge between nodes already present here. Its
+          // endpoints are in the graph, so render it directly; addNodesToVisualization
+          // dedupes by edge id, so a redraw after a later re-hydration is harmless.
+          const list = (op.edges || []).filter((e) => e && e.id);
+          if (list.length) addNodesToVisualization([], list);
+          break;
+        }
         case 'edges_hidden':
           setHiddenEdgeIds(
             Array.from(new Set([...(store.hiddenEdgeIds || []), ...(op.edge_ids || [])]))
@@ -872,6 +880,10 @@ function App() {
         const result = await api.addEdge(params.source, params.target);
         if (result.success && result.edge) {
           addNodesToVisualization([], [result.edge]);
+          // Fan the new edge out to collaborators. Both endpoints already exist
+          // on their canvases, so nothing else prompts them to re-hydrate it
+          // (no node was added); without this the edge renders only locally.
+          syncRef.current?.sendEdgesAdded([result.edge]);
         } else {
           // The edge is only drawn once persisted, so a non-success response must
           // surface an error rather than silently leaving nothing on the canvas.
@@ -882,7 +894,7 @@ function App() {
         showNotification('error', 'Could not create connection');
       }
     },
-    [addNodesToVisualization, showNotification]
+    [addNodesToVisualization, showNotification, syncRef]
   );
 
   // Callback: Show only selected nodes (hide all others)
@@ -1782,6 +1794,7 @@ function App() {
             redoNotification: t('context_menu.redo_notification'),
           }}
           nodeColorResolver={getNodeColor}
+          sessionKey={sessionId}
           onViewportChange={(vp) => {
             latestViewport.current = vp;
           }}

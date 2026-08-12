@@ -238,6 +238,20 @@ class ChatService:
         """Get the current LLM provider type (openai or claude)."""
         return self._processor.provider_type
 
+    @staticmethod
+    def _normalize_tool_allowlist(raw: Any) -> Optional[List[str]]:
+        """Normalize a collection's configured tool allowlist.
+
+        Returns None (unrestricted — all tools available) when the value is unset,
+        not a list, or empty after filtering. Otherwise returns the list of
+        non-empty string tool names. Mirrors the AIAgent model where a falsy
+        allowlist means "no restriction" rather than "no tools".
+        """
+        if not isinstance(raw, list):
+            return None
+        names = [t for t in raw if isinstance(t, str) and t]
+        return names or None
+
     def _resolve_collection(self, short_name: str) -> tuple:
         """Resolve an AKC short_name → (system_prompt_prefix, permissions_dict, collect_responses).
 
@@ -269,6 +283,9 @@ class ChatService:
                     self._collection_nodes[short_name] = {
                         "id": node.get("id"),
                         "name": node.get("name") or short_name,
+                        "tool_allowlist": self._normalize_tool_allowlist(
+                            meta.get("tool_allowlist")
+                        ),
                     }
                     raw_perms = meta.get("node_type_permissions") or {}
                     # Guard against individual null entries in the permissions dict
@@ -775,6 +792,20 @@ class ChatService:
                 visible_node_ids, selected_node_ids
             )
 
+            # Per-collection tool allowlist (enforced server-side in ChatProcessor).
+            # Only applied within an active collection session; None means
+            # unrestricted, matching the AIAgent model. Read from the identity
+            # cache populated by _resolve_collection above.
+            # Note: on the fail-closed path (resolution error → prefix == ""), the
+            # node metadata could not be read, so the allowlist is unavailable and
+            # stays None here. Fail-closed still blocks all writes via the enforced
+            # tool wrappers; it does not additionally restrict read/action tools.
+            tool_allowlist = None
+            if collection_short_name and effective_prefix is not None:
+                tool_allowlist = (
+                    self._collection_nodes.get(collection_short_name) or {}
+                ).get("tool_allowlist")
+
             # skills_context is passed separately as skills_override so it lands
             # AFTER the base system prompt (recency precedence for behavioral overrides).
             # extra_context (expert persona) stays BEFORE the base prompt.
@@ -788,6 +819,7 @@ class ChatService:
                 skills_override=skills_context or None,
                 tools_override=tools_override,
                 visualization_context=visualization_context,
+                tool_allowlist=tool_allowlist,
             )
         finally:
             self._current_federation_depth = None

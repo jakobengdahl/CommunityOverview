@@ -297,6 +297,52 @@ describe('SessionSyncClient', () => {
     expect(client.seq).toBe(2);
   });
 
+  it('sendEdgesAdded enqueues and POSTs an edges_added op carrying the edges', async () => {
+    const { client, fetchImpl } = makeClient();
+    client.connect();
+    FakeEventSource.instances[0].emit({ type: 'snapshot', seq: 0, session: { state: {} } });
+    const edge = { id: 'e1', source: 'a', target: 'b', type: 'RELATES_TO' };
+    client.sendEdgesAdded([edge]);
+    await flush();
+    const posted = fetchImpl.calls.at(-1).body.ops;
+    expect(posted).toContainEqual({ op: 'edges_added', edges: [edge] });
+  });
+
+  it('sendEdgesAdded ignores an empty or id-less edge list', () => {
+    const { client, fetchImpl } = makeClient();
+    client.connect();
+    FakeEventSource.instances[0].emit({ type: 'snapshot', seq: 0, session: { state: {} } });
+    client.sendEdgesAdded([]);
+    client.sendEdgesAdded([{ source: 'a', target: 'b' }]);
+    expect(fetchImpl.calls).toHaveLength(0);
+  });
+
+  it('forwards a remote edges_added op to the host and never folds it into the mirror', async () => {
+    const onRemoteOps = vi.fn();
+    const { client, fetchImpl } = makeClient({ handlers: { onRemoteOps } });
+    client.connect();
+    const es = FakeEventSource.instances[0];
+    es.emit({ type: 'snapshot', seq: 0, session: { state: { node_refs: ['a', 'b'] } } });
+    const op = { op: 'edges_added', edges: [{ id: 'e1', source: 'a', target: 'b' }] };
+    es.emit({ type: 'op', client_id: 'client-other', op, seq: 1 });
+    expect(onRemoteOps).toHaveBeenCalledWith([op], { clientId: 'client-other' });
+    // Edges are graph-derived, not mirror state: re-syncing the same node set
+    // must emit nothing (the edge op left no residue that could echo back out).
+    client.setBaseline({ node_refs: ['a', 'b'] });
+    client.syncState({ node_refs: ['a', 'b'] });
+    await flush();
+    expect(fetchImpl.calls).toHaveLength(0);
+  });
+
+  it('applyOpToMirror leaves the mirror unchanged for an edges_added op', () => {
+    const before = normalizeMirror({ node_refs: ['a', 'b'], hidden_edge_ids: ['x'] });
+    const after = applyOpToMirror(before, {
+      op: 'edges_added',
+      edges: [{ id: 'e1', source: 'a', target: 'b' }],
+    });
+    expect(after).toEqual(before);
+  });
+
   it('delivers an agent layout_applied op with its animation hint intact', () => {
     // The canvas animation seam (contract §9-§10) depends on the animation hint
     // and the originating client id surviving delivery: the frontend routes an
@@ -364,6 +410,61 @@ describe('SessionSyncClient', () => {
     await new Promise((r) => setTimeout(r, 30));
     expect(onDropped).toHaveBeenCalled();
     expect(dropFetch.calls).toHaveLength(1); // not retried
+  });
+
+  it('does not permanently wedge outbound delivery when a POST /ops never settles', async () => {
+    // Regression for the shared-session "moves silently stop persisting over
+    // time" data-loss bug: a single hung POST (a half-open request held by a
+    // proxy) used to leave `_flushing` stuck true forever, so every later op —
+    // moves, node adds, everything — silently never reached the server, the
+    // batch in flight was lost, and a reload showed none of it stored. The
+    // request timeout must abort the stuck POST so delivery resumes.
+    const bodies = [];
+    let hang = true;
+    const fetchImpl = vi.fn((url, opts) => {
+      bodies.push(JSON.parse(opts.body));
+      if (hang) {
+        hang = false;
+        return new Promise(() => {}); // first POST never settles
+      }
+      return Promise.resolve({
+        ok: true,
+        status: 200,
+        json: async () => ({ applied: [], seq: bodies.length }),
+      });
+    });
+    const { client } = makeClient({ fetchImpl, requestTimeoutMs: 20 });
+    client.connect();
+    FakeEventSource.instances[0].emit({ type: 'snapshot', seq: 0, session: { state: {} } });
+
+    // First move → its POST hangs.
+    client.syncState({ node_refs: ['n0'], positions: { n0: { x: 1, y: 1 } } });
+    await new Promise((r) => setTimeout(r, 10));
+    // A later move made while the first request is still hung must still get out.
+    client.syncState({ node_refs: ['n0'], positions: { n0: { x: 2, y: 2 } } });
+    await new Promise((r) => setTimeout(r, 150)); // past the timeout + retry backoff
+
+    expect(fetchImpl.mock.calls.length).toBeGreaterThan(1); // not wedged
+    const allOps = bodies.flatMap((b) => b.ops || []);
+    // Neither move is lost: the hung batch's op is requeued, the later one sent.
+    expect(allOps).toContainEqual({ op: 'node_moved', node_id: 'n0', position: { x: 1, y: 1 } });
+    expect(allOps).toContainEqual({ op: 'node_moved', node_id: 'n0', position: { x: 2, y: 2 } });
+  });
+
+  it('releases the flush guard and retries after a hung ops request times out', async () => {
+    // The heart of the wedge fix: a request that never settles must not leave
+    // `_flushing` stuck true (which permanently blocks every later flush). After
+    // the timeout it is released and the op is retried on a fresh request.
+    const fetchImpl = vi.fn(() => new Promise(() => {})); // every POST hangs
+    const { client } = makeClient({ fetchImpl, requestTimeoutMs: 20 });
+    client.connect();
+    FakeEventSource.instances[0].emit({ type: 'snapshot', seq: 0, session: { state: {} } });
+    client.syncState({ node_refs: ['a'] });
+    await new Promise((r) => setTimeout(r, 120));
+    // Each hung POST times out and releases `_flushing`, so the client keeps
+    // reattempting instead of freezing on the first hung request forever. If the
+    // guard were never released, exactly one attempt would ever be made.
+    expect(fetchImpl.mock.calls.length).toBeGreaterThan(1);
   });
 
   it('folds a remote op into the baseline so re-syncing the same state emits nothing (echo-safe)', async () => {

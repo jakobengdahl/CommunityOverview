@@ -340,6 +340,7 @@ The default API prefix is `/api` (configurable via `API_PREFIX`).
 | GET | `/api/presentation` | Get presentation config |
 | GET | `/api/capabilities` | Get service capabilities |
 | GET | `/api/export` | Export graph data |
+| GET | `/api/{custom-path}` | Config-driven dedicated interface for one node/edge type (see Custom REST Interfaces below). Registered only for configured types. |
 | POST | `/api/views/save` | Save a named graph view |
 | GET | `/api/views/{name}` | Get a saved view |
 | GET | `/api/views` | List saved views |
@@ -351,6 +352,69 @@ The default API prefix is `/api` (configurable via `API_PREFIX`).
 | POST | `/agents/proposals/{proposal_id}/approve` | Approve a proposal (applies the action for act_after_approval agents) |
 | POST | `/agents/proposals/{proposal_id}/reject` | Reject a proposal |
 | POST | `/agents/{id}/trigger` | Fire a scheduled agent immediately (used by GCP Cloud Scheduler) |
+
+### Custom REST Interfaces (config-driven)
+
+A specific node type or edge type can be exposed as its own dedicated read-only
+`GET` endpoint that bypasses the generic node/edge interface and returns only
+entities of that type, optionally narrowed by tag/subtype filters. This is
+driven entirely from the open-core schema config file — the `rest_interfaces`
+top-level array in `schema_config.json`. It is empty by default (no dedicated
+endpoints; only the generic interface is exposed), so this is a purely additive,
+backward-compatible config surface — it does **not** change node/relationship
+types and is not a schema breaking-change.
+
+Each entry:
+
+| Field | Default | Meaning |
+|-------|---------|---------|
+| `path` | — (required) | URL segment appended to the API prefix, e.g. `actors` → `GET /api/actors`. Lowercase alphanumeric with `-`, `_`, `/` separators. |
+| `entity` | `node` | `node` or `edge`. |
+| `node_type` | `""` | Node type to expose (required when `entity` is `node`). |
+| `edge_type` | `""` | Edge/relationship type to expose (required when `entity` is `edge`). |
+| `enabled` | `true` | Set `false` to keep the config but not register the route. |
+| `limit` | `500` | Max entities returned (1–5000). |
+| `filters.tags_all` | `[]` | AND filter — the entity must carry **every** listed tag. |
+| `filters.tags_any` | `[]` | OR filter — the entity must carry **at least one** listed tag. |
+| `filters.subtypes_any` | `[]` | OR filter on node subtypes (ignored for edges). |
+
+`tags_all` and `tags_any` combine with AND (an entity must pass both). Edges have
+no `tags` field, so edge tag filters match against `edge.metadata["tags"]` (a
+list, when present).
+
+`node_type` / `edge_type` are matched by exact canonical type name (case
+sensitive, no alias resolution). A malformed entry (bad `path`/`entity`, or a
+`node`/`edge` entry missing its `node_type`/`edge_type`) is skipped with a logged
+warning; it never disables the rest of the config or the other interfaces.
+
+Example — expose `Actor` nodes at `/api/actors`, returning only actors tagged
+`approved` **or** `processing`:
+
+```json
+{
+  "schema": { "...": "..." },
+  "rest_interfaces": [
+    {
+      "path": "actors",
+      "entity": "node",
+      "node_type": "Actor",
+      "filters": { "tags_any": ["approved", "processing"] }
+    }
+  ]
+}
+```
+
+The response mirrors the generic search shape (`nodes`, `edges`, `total`) — for
+node interfaces, edges connecting two returned nodes are included; for edge
+interfaces, the endpoint returns `edges` plus their endpoint `nodes`.
+
+**Access parity:** dedicated interfaces apply the same read authorization and
+graph-scope narrowing as the generic interface (`GRAPH_ACTION_READ`), so a
+dedicated endpoint never returns more than a generic search under the same
+request scope. Edges are returned only when both endpoint nodes are visible.
+
+The SaaS/hosted layer can drive this same mechanism from a user-defined GUI
+config; the open-core core reads only the config file.
 
 ### Shared Session Endpoints
 
@@ -405,10 +469,25 @@ broadcast `command` events reach every collaborator instead of just one:
 | GET | `/sessions/{id}/stream` | SSE stream delivering MCP visualization commands to the browser. A connected stream signals that a browser is present to receive pushes |
 | POST | `/sessions/{id}/trigger-token` | Mint (or rotate) the session's pulse-trigger token, returning `{session_id, trigger_token, pulse_path}`. Called by the session's own browser; runs under the graph authorization seam (permissive in open core, hosted-gatable). Re-minting revokes the prior token |
 | POST | `/sessions/{id}/pulse` | External trigger: play a visual pulse on a node in the live session. Body `{node_id, style?, color?, duration_ms?}`; authenticated with the trigger token via `Authorization: Bearer` or `?token=`. Emits a `node_pulse` command over the SSE session-push channels (best-effort dispatch — `success` means dispatched, not that a browser was watching). `401` without a valid token, `429` when the per-source lookup bucket is exhausted, `422` for a malformed body |
+| POST | `/sessions/{id}/auto-add-agents` | Create a session-scoped auto-add agent. Body `{node_types?, keywords?}` (at least one required, else `400`); returns `{success, agent}`. Runs under the graph authorization/mutate seam (permissive in open core). Materialises the push session so the agent survives the prune while the session is live |
+| GET | `/sessions/{id}/auto-add-agents` | List the session's auto-add agents (`{success, agents}`) |
+| DELETE | `/sessions/{id}/auto-add-agents/{agent_id}` | Remove one auto-add agent (`404` if unknown). Also under the mutate seam |
 
 External systems (e.g. a customer-registration webhook) call the pulse endpoint
 to draw a user's attention to a node; the trigger token is a capability-scoped,
 in-memory, per-session secret that dies with the session.
+
+**Session-scoped auto-add agents.** An auto-add agent watches for newly created
+nodes matching a pattern (`node_types` and/or `keywords`) and adds each match to
+one session's live view — additively (reusing the `add_to_visualization` push
+path), never clearing existing content. It is bound to a single session: its rule
+lives in memory keyed by session id, only ever pushes to that session (never
+leaking into another), and is pruned when the session goes away. It is a
+deterministic reactor on the synchronous `node.create` event — no LLM, and it
+never mutates the graph, so no loop prevention is needed. The same operations are
+exposed as MCP tools (`create_session_auto_add_agent`,
+`list_session_auto_add_agents`, `remove_session_auto_add_agent`) so an assistant
+can configure one. See `docs/EVENT_SUBSCRIPTIONS.md`.
 
 ### MCP Tools
 
@@ -590,6 +669,30 @@ Click the "Chat" button in the application header to open the panel. The panel d
 The same chat functionality is available via the embeddable widget (`frontend/widget/`). This widget can be embedded in ChatGPT or other interfaces that support custom widgets.
 
 The widget uses the same `/ui/chat` endpoint, ensuring consistent behavior between the web app and external integrations.
+
+### Active Knowledge Collection kiosk
+
+When `/ui/chat` receives a `collection_short_name`, the assistant runs in
+collection (kiosk) mode. The matching `ActiveKnowledgeCollection` node's
+`metadata` drives the session:
+
+| metadata field | Purpose |
+|---|---|
+| `short_name` | URL identifier used to resolve the collection |
+| `introduction_text` | Public text shown before the chat starts |
+| `prompt` | Server-side AI instructions (never exposed to the client) |
+| `node_type_permissions` | Per-node-type `{create, update, delete}` flags, enforced server-side on graph mutations |
+| `tool_allowlist` | Optional list of tool names the assistant may use |
+| `collect_responses` | When `false`, `save_collection_response` is not installed |
+
+`tool_allowlist` mirrors the AIAgent tool-permission model
+(`backend/agents/governance/gate.py`): unset or empty means unrestricted (all
+tools), while a non-empty list restricts the assistant to exactly those tools.
+Enforcement is server-side and two-layered — disallowed tools are neither
+advertised to the LLM nor executed if requested anyway
+(`backend/ui/chat_logic.py`). The tool names match
+`ChatProcessor._generate_tool_definitions` (e.g. `search_graph`, `add_nodes`,
+`present_form`, `save_collection_response`).
 
 ## Development Workflow
 

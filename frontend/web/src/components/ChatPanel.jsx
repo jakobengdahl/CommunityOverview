@@ -7,17 +7,13 @@ import {
   Robot,
   Mortarboard,
 } from 'react-bootstrap-icons';
-import ReactMarkdown from 'react-markdown';
-import remarkGfm from 'remark-gfm';
-import remarkMath from 'remark-math';
-import rehypeKatex from 'rehype-katex';
-import 'katex/dist/katex.min.css';
 import useGraphStore from '../store/graphStore';
 import { useI18n } from '../i18n';
 import * as api from '../services/api';
 import { positionNewNodes } from '@community-graph/ui-graph-canvas';
 import ExpertAgentSelector from './ExpertAgentSelector';
 import CollectionForm from './CollectionForm';
+import MarkdownMessage from './MarkdownMessage';
 import './ChatPanel.css';
 
 /** Extract a present_form spec from a chat response, or null if none. */
@@ -145,6 +141,17 @@ function ChatPanel({ collectionShortName }) {
   // so both entry points behave identically.
   const applyToolResultSideEffects = async (toolResult) => {
     if (!toolResult) return;
+    // Merge returned nodes into the current view (additive placement). Shared by
+    // the explicit add_to_visualization action and the no-explicit-action default
+    // so a plain additive request never clears the canvas.
+    const addNodesToView = (result) => {
+      if (!(result.nodes && result.nodes.length > 0)) return;
+      const filteredNodes = filterCommunityNodes(result.nodes);
+      const currentNodes = useGraphStore.getState().nodes;
+      const allEdges = [...edges, ...(result.edges || [])];
+      const positionedNodes = positionNewNodes(filteredNodes, currentNodes, allEdges);
+      addNodesToVisualization(positionedNodes, result.edges || []);
+    };
     if (toolResult.action === 'save_view' || toolResult.action === 'save_visualization') {
       const viewName = toolResult.name;
       const currentNodes = useGraphStore.getState().nodes;
@@ -161,33 +168,38 @@ function ChatPanel({ collectionShortName }) {
       } catch (err) {
         console.error('[ChatPanel] Failed to save view:', err);
       }
-    } else if (toolResult.action === 'clear_visualization') {
+    } else if (
+      toolResult.action === 'clear_visualization' ||
+      toolResult.action === 'load_visualization' ||
+      toolResult.action === 'replace_visualization'
+    ) {
+      // Explicit clear/replace/load: swap the whole view for the results. Clear
+      // first so a clear-and-add turn (clear_visualization carrying nodes) shows
+      // the new nodes, and an empty replace ends up empty. Kept identical to the
+      // useToolResultCommands path so both delivery channels behave the same.
       clearVisualization();
-    } else if (toolResult.action === 'load_visualization') {
       if (toolResult.nodes && toolResult.nodes.length > 0) {
         const filteredNodes = filterCommunityNodes(toolResult.nodes);
         updateVisualization(filteredNodes, toolResult.edges || []);
       }
     } else if (toolResult.action === 'add_to_visualization') {
-      if (toolResult.nodes && toolResult.nodes.length > 0) {
-        const filteredNodes = filterCommunityNodes(toolResult.nodes);
-        const currentNodes = useGraphStore.getState().nodes;
-        const allEdges = [...edges, ...(toolResult.edges || [])];
-        const positionedNodes = positionNewNodes(filteredNodes, currentNodes, allEdges);
-        addNodesToVisualization(positionedNodes, toolResult.edges || []);
-      }
+      addNodesToView(toolResult);
     } else if (toolResult.action === 'update_in_visualization') {
-      if (toolResult.nodes && toolResult.nodes.length > 0) {
+      // In-place update: replace matching nodes, keep the rest, append new ones.
+      // Filter Community nodes like every other branch (and the hook path) so the
+      // two delivery channels stay identical.
+      const updatedNodes = filterCommunityNodes(toolResult.nodes || []);
+      if (updatedNodes.length > 0) {
         const {
           nodes: currentNodes,
           edges: currentEdges,
           updateVisualization: update,
         } = useGraphStore.getState();
-        const updatedNodeIds = new Set(toolResult.nodes.map((n) => n.id));
+        const updatedNodeIds = new Set(updatedNodes.map((n) => n.id));
         const mergedNodes = currentNodes.map((n) =>
-          updatedNodeIds.has(n.id) ? toolResult.nodes.find((un) => un.id === n.id) : n
+          updatedNodeIds.has(n.id) ? updatedNodes.find((un) => un.id === n.id) : n
         );
-        const newNodes = toolResult.nodes.filter((n) => !currentNodes.some((cn) => cn.id === n.id));
+        const newNodes = updatedNodes.filter((n) => !currentNodes.some((cn) => cn.id === n.id));
         update([...mergedNodes, ...newNodes], currentEdges);
       }
     } else if (toolResult.action === 'mark_nodes') {
@@ -204,8 +216,11 @@ function ChatPanel({ collectionShortName }) {
         );
       }
     } else if (toolResult.nodes && toolResult.nodes.length > 0) {
-      const filteredNodes = filterCommunityNodes(toolResult.nodes);
-      updateVisualization(filteredNodes, toolResult.edges || []);
+      // No explicit view-content action: default to additive so a plain
+      // additive request (or any node-returning tool) never silently clears the
+      // current view. The view is replaced only on an explicit replace/clear/load
+      // action handled above.
+      addNodesToView(toolResult);
     }
 
     // Execute any pure-action tools that co-occurred with present_form in the same
@@ -719,12 +734,7 @@ function ChatPanel({ collectionShortName }) {
               )}
               <div className="message-content">
                 {msg.role === 'assistant' || msg.role === 'expert' ? (
-                  <ReactMarkdown
-                    remarkPlugins={[remarkGfm, remarkMath]}
-                    rehypePlugins={[rehypeKatex]}
-                  >
-                    {msg.content}
-                  </ReactMarkdown>
+                  <MarkdownMessage>{msg.content}</MarkdownMessage>
                 ) : (
                   msg.content
                 )}

@@ -19,6 +19,27 @@ Effort scale: XS = single-line fix · S = up to ~30 lines / one file · M = mult
 
 ---
 
+### [2026-08-12] MCP create_session_auto_add_agent skips the session-count cap the REST path enforces
+
+- **File(s):** `backend/service/mcp_tools.py` (`create_session_auto_add_agent`, `session_registry.get_or_create` call); compare `backend/api_host/session_stream.py` (`create_auto_add_agent` checks `session_count >= SESSION_MAX_COUNT` before materialising)
+- **Context:** Discovered during `claude/session-scoped-autoadd-agent` (PR #328 review)
+- **Issue:** The REST create endpoint guards `session_registry.session_count >= SESSION_MAX_COUNT` before `get_or_create`; the MCP tool does not. Impact is bounded — MCP is the authenticated/trusted surface and `add_rule` still enforces `MAX_SESSIONS_WITH_RULES = 5000`, so registry growth is capped either way — so this is a consistency note, not a security hole. Align the MCP tool with the REST guard if the surfaces should behave identically.
+- **Effort:** XS
+
+### [2026-08-12] Mixed update+add assistant turn can leave an edited node stale in the view
+
+- **File(s):** `backend/ui/chat_logic.py` (`_handle_tool_use` last-action-wins capture); `frontend/web/src/store/graphStore.js:337-341` (`addNodesToVisualization` dedupes by id)
+- **Context:** Discovered during `claude/fix-assistant-clear-on-add` (PR #327 review round 2)
+- **Issue:** The single `toolResult.action` slot uses last-action-wins. A turn that calls `update_node` (→ `update_in_visualization`) and then `search_graph(add_to_visualization)` resolves to `add_to_visualization`; the additive apply path skips nodes already on canvas, so the edited node's on-canvas copy is not refreshed (the DB write still lands). The reverse order works because the in-place merge appends new nodes. Inherent to the one-action-per-result design; a proper fix needs richer per-node merge semantics (e.g. carry per-node placement intent instead of one turn-level action).
+- **Effort:** M
+
+### [2026-08-12] ChatPanel markdown lacks table styling that the kiosk now has
+
+- **File(s):** `frontend/web/src/components/ChatPanel.css:198-232` (markdown block); compare `frontend/web/src/components/CollectKioskView.css` table rules
+- **Context:** Discovered during `claude/kiosk-rich-text` (PR #317 review). Both the main Graph assistant and the kiosk now render GFM tables via the shared `MarkdownMessage` component, but only the kiosk styles `table`/`th`/`td`. ChatPanel tables fall back to unstyled browser defaults.
+- **Issue:** Minor visual inconsistency — assistant tables render borderless/cramped in ChatPanel while looking correct in the kiosk. Not a regression (pre-existing: ChatPanel never styled tables). Add matching `.message-content table/th/td` rules to `ChatPanel.css` for consistency.
+- **Effort:** XS
+
 ### [2026-08-11] Node trail records a duplicate 'visited' when jumping to an older row
 
 - **File(s):** `frontend/web/src/store/graphStore.js` (`setFocusNodeId`); `frontend/web/src/components/NodeHistoryPanel.jsx`
@@ -62,6 +83,12 @@ Effort scale: XS = single-line fix · S = up to ~30 lines / one file · M = mult
 - **Effort:** XS
 
 ## Open
+
+### [2026-08-12] Lazy-load slice hides edges to off-screen nodes on reload of a >200-node session
+- **File(s):** `packages/ui-graph-canvas/src/components/GraphCanvas.jsx:365-383` (`nodesToRender` / `visibleEdges`), `packages/ui-graph-canvas/src/utils/constants.js:92-93`
+- **Context:** Discovered during `claude/fix-edges-missing-after-reload` while triaging "edges sometimes missing after reloading a session" (that reload/hydration path is otherwise correct — edges live in the graph and are recovered by resolving node_refs; see PR).
+- **Issue:** When a session has more than `LAZY_LOAD_THRESHOLD` (200) nodes, `nodesToRender` renders only the first `INITIAL_LOAD_COUNT` (100) in `node_refs` order, and `visibleEdges` filters edges to `renderedNodeIds` (the sliced set). On reload of a large session this immediately drops every edge whose other endpoint sits in the un-loaded remainder, so a rendered node can show fewer edges than the data holds. It is announced by the "Showing 100 of N nodes" banner and inherently also hides the off-screen endpoint node (an edge to an unrendered node cannot be drawn), so it does not match the classic "both endpoints present but edge gone" bug — it is a lazy-load UX tradeoff. Possible improvements: raise the threshold, expand the rendered set to include nodes referenced by edges among already-loaded nodes, or make the banner mention hidden connections. Not a hydration fix — do not change resolve/hydration for it.
+- **Effort:** M
 
 ### [2026-08-09] Visualization geometry/layout MCP tools bypass the authorization hook
 - **File(s):** `backend/service/mcp_tools.py:685` (`get_visualization_layout`), `:749` (`apply_visualization_layout`), `:640` (`get_visualization_session_state`)
@@ -184,4 +211,16 @@ Effort scale: XS = single-line fix · S = up to ~30 lines / one file · M = mult
 - **File(s):** `backend/core/session_registry.py:80` (`asyncio.Queue()`), `push_command`/`push_command_sync`; producers `backend/service/mcp_tools.py` `_push_to_session` and `backend/api_host/session_stream.py` pulse endpoint
 - **Context:** Discovered during claude/canvas-pulse-trigger (review round 1)
 - **Issue:** Once a session's browser has switched to the shared op-protocol stream (`opStreamReady`), it closes the legacy `GET /sessions/{id}/stream` EventSource, so nothing drains that session's `SessionRegistry` queue. Every subsequent push (MCP tool results *and* pulse triggers) still enqueues onto the unconsumed, unbounded queue and calls `_touch`, which also keeps refreshing `last_seen` so the 1h TTL eviction never fires. Memory grows for the lifetime of an actively-pushed session that is on the op-stream. Pre-existing property of the push architecture (affects `_push_to_session` too), made more visible by higher-frequency external pulse triggers. Fix options: track active legacy-stream consumers on the registry and skip/bound enqueue when none is draining (careful not to break the legacy→op handover window, design §8.1 R5), or bound the queue with drop-oldest.
+- **Effort:** M
+
+### [2026-08-12] CreateActiveKnowledgeCollectionDialog does not use i18n
+- **File(s):** `frontend/web/src/components/CreateActiveKnowledgeCollectionDialog.jsx`
+- **Context:** Discovered during claude/kiosk-tool-access
+- **Issue:** The entire dialog hardcodes English display strings (section headings, labels, help text, alerts) instead of using the `useI18n()` hook with keys in `en.json`/`sv.json`, contradicting the repo i18n rule. The new "Assistant Tools" section follows the same hardcoded-English convention as the rest of the file for consistency; the whole dialog should be migrated to i18n in one pass rather than piecemeal.
+- **Effort:** M
+
+### [2026-08-12] Edge deletion and edge-type changes do not propagate in a shared session
+- **File(s):** `frontend/web/src/App.jsx` (`handleDeleteEdge`, `handleChangeEdgeType`, `handleSaveEdge`)
+- **Context:** Discovered during claude/fix-shared-session-edge-render (while fixing edge *creation* fan-out)
+- **Issue:** The shared-session op protocol now fans out edge creation (`edges_added`), but edge deletion, relationship-type changes, and edit-dialog saves still mutate only the local store/graph — no op is broadcast, so collaborators keep showing the stale edge until they reload and re-hydrate from the graph. Symmetric gap to the creation bug just fixed. Would need `edges_removed` / `edges_updated` fan-out ops (or a shared "re-hydrate these edges" signal) plus remote appliers, mirroring the `edges_added` path. Left out to keep the creation fix minimal and focused on the reported "edges don't appear" symptom.
 - **Effort:** M

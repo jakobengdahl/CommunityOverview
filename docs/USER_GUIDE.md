@@ -409,7 +409,7 @@ AI apps:
 |------|--------|
 | **Start new session** | Saves the current session automatically and opens a fresh, empty one |
 | **Search previous sessions** | Filters the recent-session list by name or ID |
-| **Connect to session (via ID)** | Joins an existing session by entering its ID (format `1234-5678`) |
+| **Connect to session (via ID)** | Joins an existing session by entering its ID (format `1234-5678-9012-3456`) |
 | **Recent sessions** | The most recently used sessions — shown by name if you have named them, otherwise by ID. Click one to load it; the current session is saved automatically first. Hover a row and open the **⋮** menu for per-session actions: **Name session**, **Copy link** (copies the shareable `?session=…` URL to the clipboard), **Copy pulse-trigger URL** (on the session you are currently in — see [8.4](#84-external-pulse-triggers)), and **Delete session**. |
 | **Recent activity** | Opens the activity panel — a read-only audit log of graph changes (see [5.2](#52-recent-activity-audit-log)) |
 | **Lock / Unlock visualization** | Guards the current board against accidental clearing. While locked, **Esc × 2** does nothing at all, and the top-bar **clear** button asks for an emphatic confirmation warning that everything on the board will be removed. The setting is remembered in your browser. |
@@ -417,7 +417,7 @@ AI apps:
 
 Session content (node membership, positions, groups, and hidden nodes) is stored
 **on the server**, so a session can be shared with others: the active session ID
-is kept in the page URL (`?session=1234-5678`), and anyone who opens that URL —
+is kept in the page URL (`?session=1234-5678-9012-3456`), and anyone who opens that URL —
 or enters the ID via **Connect to session** — joins the same session. Your list
 of recently visited sessions stays local to your browser; only the session
 *content* lives on the server. The canvas is saved automatically while you work

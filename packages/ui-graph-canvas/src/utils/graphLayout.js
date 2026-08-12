@@ -432,6 +432,60 @@ function layoutBatch(nodes, edges, origin) {
   return gridLayoutAt(nodes, origin);
 }
 
+// Reconcile a store-driven node update against the live canvas nodes.
+//
+// Within a session we keep each node's live position: it may have been dragged
+// since it was loaded, so incremental updates (highlighting, expanding a node,
+// remote edits) must not snap a dragged node back to its stored position. That
+// is why an existing node with a non-origin position wins over the incoming one.
+//
+// On a *session switch* that preservation is wrong. A node present in both the
+// session being left and the one being opened would keep the coordinates it had
+// in the old session, and only a reload would repair it. When `sessionChanged`
+// is true we drop the previous positions entirely, so the incoming (authoritative
+// saved/layout) position wins. Freshly-arrived nodes are still placed near the
+// nodes they connect to, but never relative to a previous session's layout.
+export function reconcileSessionNodes({
+  prevNodes,
+  incomingNodes,
+  incomingEdges = [],
+  sessionChanged = false,
+  inLazyMode = false,
+}) {
+  const prevById = sessionChanged ? new Map() : new Map(prevNodes.map((n) => [n.id, n]));
+
+  const mapped = incomingNodes.map((n) => {
+    const existing = prevById.get(n.id);
+    if (existing && existing.position.x !== 0) {
+      return {
+        ...n,
+        position: existing.position,
+        parentId: existing.parentId,
+        style: existing.style || n.style,
+      };
+    }
+    return n;
+  });
+
+  // Place freshly-added nodes (e.g. from expanding a node) near the nodes they
+  // connect to instead of stacking them at the origin or scattering them via a
+  // full re-layout. Only when there is already a positioned layout to anchor
+  // against, only for nodes without an explicit saved position (a loaded/remote
+  // position is authoritative), and never in lazy-paging mode where "new" nodes
+  // are just more of the same result set.
+  const isPlaced = (n) => n.position && (n.position.x !== 0 || n.position.y !== 0);
+  const existingPlaced = mapped.filter((n) => prevById.has(n.id) && isPlaced(n));
+  const freshNodes = mapped.filter((n) => !prevById.has(n.id) && !n.data?._savedPosition);
+  if (freshNodes.length > 0 && existingPlaced.length > 0 && !inLazyMode) {
+    const posById = new Map(
+      positionNewNodes(freshNodes, existingPlaced, incomingEdges).map((n) => [n.id, n.position])
+    );
+    return mapped.map((n) => (posById.has(n.id) ? { ...n, position: posById.get(n.id) } : n));
+  }
+
+  return mapped;
+}
+
 /**
  * Position new nodes intelligently on the canvas.
  *

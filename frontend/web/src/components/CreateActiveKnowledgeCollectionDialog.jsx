@@ -14,6 +14,34 @@ const EXCLUDED_TYPES = [
   'CollectionResponse',
 ];
 
+// Tools the collection kiosk assistant may be granted, keyed by the exact tool
+// name the backend advertises. Mirrors ChatProcessor._generate_tool_definitions
+// in backend/ui/chat_logic.py — keep in sync when tools are added/removed there.
+// An unset/empty allowlist means "unrestricted" (all tools), matching the
+// AIAgent tool-permission model; a non-empty list is enforced server-side.
+const ASSISTANT_TOOLS = [
+  { name: 'search_graph', label: 'Search the graph' },
+  { name: 'get_related_nodes', label: 'Get related nodes' },
+  { name: 'find_similar_nodes', label: 'Find similar nodes' },
+  { name: 'find_similar_nodes_batch', label: 'Find similar nodes (batch)' },
+  { name: 'list_node_types', label: 'List node types' },
+  { name: 'get_subtypes', label: 'Get subtypes' },
+  { name: 'get_schema', label: 'Get schema' },
+  { name: 'get_presentation', label: 'Get presentation config' },
+  { name: 'add_nodes', label: 'Add nodes' },
+  { name: 'propose_new_node', label: 'Propose a new node' },
+  { name: 'update_node', label: 'Update a node' },
+  { name: 'delete_nodes', label: 'Delete nodes' },
+  { name: 'delete_edges', label: 'Delete edges' },
+  { name: 'save_view', label: 'Save a view' },
+  { name: 'get_saved_view', label: 'Load a saved view' },
+  { name: 'list_saved_views', label: 'List saved views' },
+  { name: 'clear_visualization', label: 'Clear the visualization' },
+  { name: 'mark_nodes', label: 'Mark nodes' },
+  { name: 'present_form', label: 'Present an input form' },
+  { name: 'save_collection_response', label: 'Save a collection response' },
+];
+
 function filterExcludedPermissions(nodeTypePermissions = {}) {
   return Object.fromEntries(
     Object.entries(nodeTypePermissions).filter(([type]) => !EXCLUDED_TYPES.includes(type))
@@ -52,6 +80,14 @@ export default function CreateActiveKnowledgeCollectionDialog({ onClose, onSave,
   // Node type permissions: { TypeName: { create: bool, update: bool, delete: bool } }
   const [nodeTypePermissions, setNodeTypePermissions] = useState({});
 
+  // Tool access: when restrictTools is false the assistant is unrestricted (no
+  // allowlist saved). When true, only the checked tools are saved as the
+  // per-collection tool_allowlist and enforced server-side.
+  const [restrictTools, setRestrictTools] = useState(false);
+  const [allowedTools, setAllowedTools] = useState(() =>
+    Object.fromEntries(ASSISTANT_TOOLS.map((t) => [t.name, true]))
+  );
+
   // Copy feedback states
   const [copiedKiosk, setCopiedKiosk] = useState(false);
   const [copiedFull, setCopiedFull] = useState(false);
@@ -77,6 +113,18 @@ export default function CreateActiveKnowledgeCollectionDialog({ onClose, onSave,
 
       if (meta.node_type_permissions) {
         setNodeTypePermissions(filterExcludedPermissions(meta.node_type_permissions));
+      }
+
+      // A stored tool_allowlist (non-empty array) means the assistant is
+      // restricted to those tools; anything else means unrestricted.
+      if (Array.isArray(meta.tool_allowlist) && meta.tool_allowlist.length > 0) {
+        const allowed = new Set(meta.tool_allowlist);
+        setRestrictTools(true);
+        setAllowedTools(
+          Object.fromEntries(ASSISTANT_TOOLS.map((t) => [t.name, allowed.has(t.name)]))
+        );
+      } else {
+        setRestrictTools(false);
       }
     }
   }, [initialData]);
@@ -115,6 +163,10 @@ export default function CreateActiveKnowledgeCollectionDialog({ onClose, onSave,
         [field]: value,
       },
     }));
+  };
+
+  const handleToolToggle = (toolName, value) => {
+    setAllowedTools((prev) => ({ ...prev, [toolName]: value }));
   };
 
   const isShortNameValid = (value) => /^[a-z0-9]([a-z0-9-]{0,98}[a-z0-9])?$/.test(value);
@@ -160,6 +212,18 @@ export default function CreateActiveKnowledgeCollectionDialog({ onClose, onSave,
       return;
     }
 
+    // Guard the "empty ⇒ unrestricted" model against a misleading UI outcome:
+    // an enabled restriction with nothing checked would save an empty allowlist,
+    // which the backend treats as "all tools". That inverts the admin's intent,
+    // so require at least one tool or turning the restriction off.
+    const selectedTools = ASSISTANT_TOOLS.filter((t) => allowedTools[t.name]).map((t) => t.name);
+    if (restrictTools && selectedTools.length === 0) {
+      alert(
+        'Select at least one tool, or turn off "Restrict which tools the assistant can use" to allow all tools.'
+      );
+      return;
+    }
+
     const nodeObject = {
       name: name.trim(),
       type: 'ActiveKnowledgeCollection',
@@ -176,6 +240,11 @@ export default function CreateActiveKnowledgeCollectionDialog({ onClose, onSave,
         prompt: prompt.trim(),
         link_results: linkResults,
         node_type_permissions: filterExcludedPermissions(nodeTypePermissions),
+        // Empty array = unrestricted (all tools). The backend normalizes a
+        // falsy/empty allowlist to "no restriction", so turning restriction off
+        // reliably clears any previously stored allowlist on update. When
+        // restriction is on, selectedTools is guaranteed non-empty (see guard above).
+        tool_allowlist: restrictTools ? selectedTools : [],
       },
     };
 
@@ -409,7 +478,69 @@ Add each item to the knowledge graph as appropriate.`}
             )}
           </div>
 
-          {/* ── Section 4: Shareable URLs ─────────────────────────── */}
+          {/* ── Section 4: Assistant Tools ───────────────────────── */}
+          <div className="form-section">
+            <h3>Assistant Tools</h3>
+            <p style={{ margin: '0 0 0.75rem 0', color: '#888', fontSize: '0.85rem' }}>
+              Control which tools the kiosk AI assistant is allowed to use. By default the assistant
+              may use all available tools. Restrict this to an explicit allowlist to give the
+              collection assistant only the tools it needs. The allowlist is enforced server-side.
+            </p>
+
+            <label
+              style={{ display: 'flex', alignItems: 'center', gap: '0.5rem', cursor: 'pointer' }}
+            >
+              <input
+                type="checkbox"
+                checked={restrictTools}
+                onChange={(e) => setRestrictTools(e.target.checked)}
+                style={{ accentColor: '#646cff', width: '1rem', height: '1rem', cursor: 'pointer' }}
+              />
+              <span style={{ color: '#ddd', fontSize: '0.9rem' }}>
+                Restrict which tools the assistant can use
+              </span>
+            </label>
+
+            {restrictTools && (
+              <div
+                style={{
+                  marginTop: '0.75rem',
+                  display: 'grid',
+                  gridTemplateColumns: 'repeat(auto-fill, minmax(220px, 1fr))',
+                  gap: '0.3rem 1rem',
+                }}
+              >
+                {ASSISTANT_TOOLS.map((tool) => (
+                  <label
+                    key={tool.name}
+                    style={{
+                      display: 'flex',
+                      alignItems: 'center',
+                      gap: '0.5rem',
+                      fontSize: '0.85rem',
+                      color: '#ddd',
+                      cursor: 'pointer',
+                    }}
+                  >
+                    <input
+                      type="checkbox"
+                      checked={!!allowedTools[tool.name]}
+                      onChange={(e) => handleToolToggle(tool.name, e.target.checked)}
+                      style={{
+                        accentColor: '#646cff',
+                        width: '1rem',
+                        height: '1rem',
+                        cursor: 'pointer',
+                      }}
+                    />
+                    <span>{tool.label}</span>
+                  </label>
+                ))}
+              </div>
+            )}
+          </div>
+
+          {/* ── Section 5: Shareable URLs ─────────────────────────── */}
           <div className="form-section" style={{ borderBottom: 'none' }}>
             <h3>Shareable URLs</h3>
 
