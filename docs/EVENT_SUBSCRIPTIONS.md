@@ -321,6 +321,42 @@ Proposals are persisted behind a replaceable store: a SQLite file when
 `AGENTS_GOVERNANCE_DB` is set, else a volatile in-memory store. Decisions are
 sticky — a decided proposal is never re-decided or re-applied.
 
+## Session-scoped auto-add agents
+
+A **session-scoped auto-add agent** is a lightweight, deterministic reactor built
+directly on the `node.create` event. It watches for newly created nodes that
+match a pattern and **adds each match to one visualization session's live view**
+— additively (reusing the `add_to_visualization` push path), so it never clears
+what the session already shows.
+
+It is deliberately *not* an `Agent` node:
+
+- **Session-scoped.** Its rule lives in memory keyed by the visualization
+  `session_id` (like the pulse-trigger token), can only ever push to that one
+  session, and is pruned when the session goes away. It cannot leak nodes into
+  another session.
+- **Deterministic.** No LLM and no graph mutation — matching a created node and
+  pushing it to a session is a pure reaction. Because it never writes to the
+  graph it cannot generate further events, so — unlike graph-mutating agents — it
+  needs no loop-prevention wiring.
+- **Same match model.** The pattern reuses the subscription filter shape:
+  `node_types` (any-of) and/or `keywords` (case-insensitive, matched against
+  name/description/summary/tags). At least one constraint is required — a rule
+  matching every created node is rejected, so it can't flood the canvas.
+
+Configure one through either surface (both back the same in-memory registry):
+
+| Surface | Operation |
+|---------|-----------|
+| MCP tool | `create_session_auto_add_agent(visualization_session_id, node_types?, keywords?)` |
+| MCP tool | `list_session_auto_add_agents(visualization_session_id)` |
+| MCP tool | `remove_session_auto_add_agent(visualization_session_id, agent_id)` |
+| REST | `POST/GET /sessions/{id}/auto-add-agents`, `DELETE /sessions/{id}/auto-add-agents/{agent_id}` |
+
+Example: an agent with `node_types=["Actor"]` on the session you are viewing adds
+every newly created Actor node into that view as it appears, without disturbing
+the nodes already on the canvas.
+
 ## Limitations (PoC)
 
 - **In-memory delivery queue**: Events are delivered through an in-memory queue,

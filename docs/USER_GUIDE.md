@@ -379,6 +379,13 @@ the responses for a collection can be compiled into simple aggregations or
 statistics later (for example, counts per option). Ask the collection owner's
 assistant to summarise the responses to see this in action.
 
+By default, each CollectionResponse is also linked to every node the assistant
+created or updated while handling that submission — so a submission that adds five
+new organisations and updates three existing ones links the response to all eight.
+This makes it easy to review the outcome of a single submission from its response
+node. The collection owner can turn this off with the **Link created and updated
+nodes to the response** option when creating or editing the collection.
+
 Free-text answers still work at any time; the structured controls are offered only
 where they make a question easier to answer.
 

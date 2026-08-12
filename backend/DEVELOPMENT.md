@@ -470,10 +470,25 @@ broadcast `command` events reach every collaborator instead of just one:
 | GET | `/sessions/{id}/stream` | SSE stream delivering MCP visualization commands to the browser. A connected stream signals that a browser is present to receive pushes |
 | POST | `/sessions/{id}/trigger-token` | Mint (or rotate) the session's pulse-trigger token, returning `{session_id, trigger_token, pulse_path}`. Called by the session's own browser; runs under the graph authorization seam (permissive in open core, hosted-gatable). Re-minting revokes the prior token |
 | POST | `/sessions/{id}/pulse` | External trigger: play a visual pulse on a node in the live session. Body `{node_id, style?, color?, duration_ms?}`; authenticated with the trigger token via `Authorization: Bearer` or `?token=`. Emits a `node_pulse` command over the SSE session-push channels (best-effort dispatch — `success` means dispatched, not that a browser was watching). `401` without a valid token, `429` when the per-source lookup bucket is exhausted, `422` for a malformed body |
+| POST | `/sessions/{id}/auto-add-agents` | Create a session-scoped auto-add agent. Body `{node_types?, keywords?}` (at least one required, else `400`); returns `{success, agent}`. Runs under the graph authorization/mutate seam (permissive in open core). Materialises the push session so the agent survives the prune while the session is live |
+| GET | `/sessions/{id}/auto-add-agents` | List the session's auto-add agents (`{success, agents}`) |
+| DELETE | `/sessions/{id}/auto-add-agents/{agent_id}` | Remove one auto-add agent (`404` if unknown). Also under the mutate seam |
 
 External systems (e.g. a customer-registration webhook) call the pulse endpoint
 to draw a user's attention to a node; the trigger token is a capability-scoped,
 in-memory, per-session secret that dies with the session.
+
+**Session-scoped auto-add agents.** An auto-add agent watches for newly created
+nodes matching a pattern (`node_types` and/or `keywords`) and adds each match to
+one session's live view — additively (reusing the `add_to_visualization` push
+path), never clearing existing content. It is bound to a single session: its rule
+lives in memory keyed by session id, only ever pushes to that session (never
+leaking into another), and is pruned when the session goes away. It is a
+deterministic reactor on the synchronous `node.create` event — no LLM, and it
+never mutates the graph, so no loop prevention is needed. The same operations are
+exposed as MCP tools (`create_session_auto_add_agent`,
+`list_session_auto_add_agents`, `remove_session_auto_add_agent`) so an assistant
+can configure one. See `docs/EVENT_SUBSCRIPTIONS.md`.
 
 ### MCP Tools
 

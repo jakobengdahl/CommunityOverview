@@ -18,6 +18,7 @@ Usage:
 import secrets
 from typing import List, Optional, Dict, Any, Callable
 
+from backend.core.session_auto_add import AutoAddRuleError
 from backend.core.session_store import OpError, is_valid_session_id
 from backend.core.session_manager import (
     LayoutBusy,
@@ -53,7 +54,11 @@ _DEFAULT_SESSION_NAME = "Untitled session"
 
 
 def register_mcp_tools(
-    mcp, service: GraphService, session_registry=None, session_manager=None
+    mcp,
+    service: GraphService,
+    session_registry=None,
+    session_manager=None,
+    auto_add_registry=None,
 ) -> Dict[str, Callable]:
     """
     Register all GraphService methods as MCP tools.
@@ -65,6 +70,9 @@ def register_mcp_tools(
         session_manager: new shared-session manager; pushes are additionally
             broadcast to its hub subscribers so an AI agent is just another
             collaborator (design 3.8)
+        auto_add_registry: SessionAutoAddRegistry backing the session-scoped
+            auto-add agents (create/list/remove tools below). None disables
+            those tools (they return an error).
 
     Returns:
         Dict mapping tool names to their functions (for ChatProcessor)
@@ -594,6 +602,114 @@ def register_mcp_tools(
             "success": True,
             "message": f"Canvas cleared in session '{visualization_session_id}'",
         }
+
+    def _auto_add_unavailable() -> Dict[str, Any]:
+        return {"success": False, "error": "Auto-add agents are not available"}
+
+    @register_tool
+    def create_session_auto_add_agent(
+        visualization_session_id: str,
+        node_types: Optional[List[str]] = None,
+        keywords: Optional[List[str]] = None,
+    ) -> Dict[str, Any]:
+        """
+        Create a session-scoped agent that auto-adds matching new nodes to a view.
+
+        The agent watches for nodes newly created anywhere in the graph and, for
+        each one that matches the pattern, ADDS it to this session's live
+        visualization — additively, without clearing what is already shown. It is
+        bound to this one session: it only ever pushes to this session and stops
+        when the session ends. It never modifies the graph.
+
+        Give at least one of ``node_types`` or ``keywords``; a rule with neither
+        is rejected because it would add every created node. When both are given a
+        node must match both (e.g. an Actor whose text contains a keyword).
+
+        Args:
+            visualization_session_id: The browser session ID shown in the header
+                (e.g. "8244-1742")
+            node_types: Node types to match (e.g. ["Actor"]); empty = any type
+            keywords: Case-insensitive substrings matched against a node's
+                name/description/summary/tags; empty = any text
+
+        Returns:
+            Dict with success status and the created agent (agent_id, pattern)
+        """
+        if auto_add_registry is None or not session_registry:
+            return _auto_add_unavailable()
+        if not session_registry.is_valid_session_id(visualization_session_id):
+            return {
+                "success": False,
+                "error": "Invalid session ID format — expected DDDD-DDDD-DDDD-DDDD",
+            }
+        try:
+            rule = auto_add_registry.add_rule(
+                visualization_session_id,
+                node_types=node_types,
+                keywords=keywords,
+            )
+        except AutoAddRuleError as exc:
+            return {"success": False, "error": str(exc)}
+        # Materialise the push session so the periodic prune keeps this agent
+        # while the session is live, even if configured before the browser's SSE
+        # stream has (re)connected — mirrors mint_trigger_token.
+        session_registry.get_or_create(visualization_session_id)
+        return {"success": True, "agent": rule.to_dict()}
+
+    @register_tool
+    def list_session_auto_add_agents(
+        visualization_session_id: str,
+    ) -> Dict[str, Any]:
+        """
+        List the auto-add agents configured on a visualization session.
+
+        Args:
+            visualization_session_id: The browser session ID shown in the header
+
+        Returns:
+            Dict with success status and the session's agents
+        """
+        if auto_add_registry is None or not session_registry:
+            return _auto_add_unavailable()
+        if not session_registry.is_valid_session_id(visualization_session_id):
+            return {
+                "success": False,
+                "error": "Invalid session ID format — expected DDDD-DDDD-DDDD-DDDD",
+            }
+        agents = [
+            r.to_dict() for r in auto_add_registry.list_rules(visualization_session_id)
+        ]
+        return {"success": True, "agents": agents}
+
+    @register_tool
+    def remove_session_auto_add_agent(
+        visualization_session_id: str,
+        agent_id: str,
+    ) -> Dict[str, Any]:
+        """
+        Remove an auto-add agent from a visualization session.
+
+        Args:
+            visualization_session_id: The browser session ID shown in the header
+            agent_id: The agent id returned by create_session_auto_add_agent
+
+        Returns:
+            Dict with success status
+        """
+        if auto_add_registry is None or not session_registry:
+            return _auto_add_unavailable()
+        if not session_registry.is_valid_session_id(visualization_session_id):
+            return {
+                "success": False,
+                "error": "Invalid session ID format — expected DDDD-DDDD-DDDD-DDDD",
+            }
+        removed = auto_add_registry.remove_rule(visualization_session_id, agent_id)
+        if not removed:
+            return {
+                "success": False,
+                "error": f"Auto-add agent '{agent_id}' not found in this session",
+            }
+        return {"success": True}
 
     @register_tool
     def connect_to_visualization_session(session_id: str) -> Dict[str, Any]:

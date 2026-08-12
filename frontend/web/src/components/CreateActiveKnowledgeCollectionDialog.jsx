@@ -1,6 +1,7 @@
 import { useState, useEffect, useCallback } from 'react';
 import { ClipboardFill } from 'react-bootstrap-icons';
 import useGraphStore from '../store/graphStore';
+import { useI18n } from '../i18n';
 import './CreateSubscriptionDialog.css'; // Reuse the same styles
 
 const EXCLUDED_TYPES = [
@@ -62,6 +63,7 @@ function filterExcludedPermissions(nodeTypePermissions = {}) {
  */
 export default function CreateActiveKnowledgeCollectionDialog({ onClose, onSave, initialData }) {
   const schema = useGraphStore((state) => state.schema);
+  const { t } = useI18n();
 
   // Basic info
   const [name, setName] = useState('');
@@ -72,6 +74,8 @@ export default function CreateActiveKnowledgeCollectionDialog({ onClose, onSave,
   // Collection configuration
   const [introductionText, setIntroductionText] = useState('');
   const [prompt, setPrompt] = useState('');
+  // Link each submission's response node to every node created/updated in that run.
+  const [linkResults, setLinkResults] = useState(true);
 
   // Node type permissions: { TypeName: { create: bool, update: bool, delete: bool } }
   const [nodeTypePermissions, setNodeTypePermissions] = useState({});
@@ -105,6 +109,7 @@ export default function CreateActiveKnowledgeCollectionDialog({ onClose, onSave,
       setShortName(meta.short_name || '');
       setIntroductionText(meta.introduction_text || '');
       setPrompt(meta.prompt || '');
+      setLinkResults(meta.link_results !== false);
 
       if (meta.node_type_permissions) {
         setNodeTypePermissions(filterExcludedPermissions(meta.node_type_permissions));
@@ -233,6 +238,7 @@ export default function CreateActiveKnowledgeCollectionDialog({ onClose, onSave,
         short_name: shortName.trim(),
         introduction_text: introductionText.trim(),
         prompt: prompt.trim(),
+        link_results: linkResults,
         node_type_permissions: filterExcludedPermissions(nodeTypePermissions),
         // Empty array = unrestricted (all tools). The backend normalizes a
         // falsy/empty allowlist to "no restriction", so turning restriction off
@@ -374,6 +380,32 @@ Add each item to the knowledge graph as appropriate.`}
                 The AI assistant will use this as its special instructions for guiding data
                 collection. The standard graph assistant prompt is automatically appended.
               </small>
+            </div>
+
+            <div className="form-group">
+              <label
+                style={{
+                  display: 'flex',
+                  alignItems: 'flex-start',
+                  gap: '0.5rem',
+                  cursor: 'pointer',
+                }}
+              >
+                <input
+                  type="checkbox"
+                  checked={linkResults}
+                  onChange={(e) => setLinkResults(e.target.checked)}
+                  style={{
+                    accentColor: '#646cff',
+                    width: '1rem',
+                    height: '1rem',
+                    marginTop: '0.15rem',
+                    cursor: 'pointer',
+                  }}
+                />
+                <span>{t('active_data_collection.link_results_label')}</span>
+              </label>
+              <small>{t('active_data_collection.link_results_help')}</small>
             </div>
           </div>
 

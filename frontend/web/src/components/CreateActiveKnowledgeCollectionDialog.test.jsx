@@ -86,6 +86,62 @@ describe('CreateActiveKnowledgeCollectionDialog', () => {
     expect(onClose).toHaveBeenCalledTimes(1);
   });
 
+  it('defaults link_results to true and saves it (create mode)', () => {
+    const onSave = vi.fn();
+    const state = { schema: { node_types: { Actor: {} } } };
+    mockUseGraphStore.mockImplementation((selector) => selector(state));
+
+    render(<CreateActiveKnowledgeCollectionDialog onClose={vi.fn()} onSave={onSave} />);
+
+    const checkbox = screen.getByRole('checkbox', {
+      name: 'Link created and updated nodes to the response',
+    });
+    expect(checkbox.checked).toBe(true);
+
+    fireEvent.change(screen.getByPlaceholderText("e.g. 'Q1 Partner Feedback'"), {
+      target: { value: 'My collection' },
+    });
+    fireEvent.click(screen.getByRole('button', { name: 'Create Collection' }));
+
+    expect(onSave).toHaveBeenCalledTimes(1);
+    expect(onSave.mock.calls[0][0].metadata.link_results).toBe(true);
+  });
+
+  it('reflects link_results=false from initialData and saves the toggled value', () => {
+    const onSave = vi.fn();
+    const state = { schema: { node_types: { Actor: {} } } };
+    mockUseGraphStore.mockImplementation((selector) => selector(state));
+
+    render(
+      <CreateActiveKnowledgeCollectionDialog
+        onClose={vi.fn()}
+        onSave={onSave}
+        initialData={{
+          node: {
+            id: 'akc-1',
+            name: 'Existing collection',
+            metadata: {
+              short_name: 'existing-collection',
+              link_results: false,
+              node_type_permissions: {},
+            },
+          },
+        }}
+      />
+    );
+
+    const checkbox = screen.getByRole('checkbox', {
+      name: 'Link created and updated nodes to the response',
+    });
+    expect(checkbox.checked).toBe(false);
+
+    fireEvent.click(checkbox);
+    fireEvent.click(screen.getByRole('button', { name: 'Save Changes' }));
+
+    expect(onSave).toHaveBeenCalledTimes(1);
+    expect(onSave.mock.calls[0][0].metadata.link_results).toBe(true);
+  });
+
   it('saves an empty tool_allowlist (unrestricted) by default', () => {
     const onSave = vi.fn();
     const state = { schema: { node_types: { Actor: {} } } };
