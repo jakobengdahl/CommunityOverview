@@ -11,6 +11,9 @@ Covers:
 - the generic node/edge interface keeps working alongside dedicated ones.
 """
 
+import json
+import os
+
 import pytest
 from pydantic import ValidationError
 
@@ -59,6 +62,76 @@ class TestRestInterfaceConfig:
     def test_limit_bounds_enforced(self):
         with pytest.raises(ValidationError):
             RestInterfaceConfig(path="actors", node_type="Actor", limit=0)
+
+
+# ==================== Config-load robustness ====================
+
+
+class TestConfigLoadRobustness:
+    """A malformed rest_interfaces entry must not nuke the whole config."""
+
+    @pytest.fixture
+    def _restore_loader(self, tmp_path):
+        from backend.config import config_loader
+
+        config_loader.reset_loader()
+        yield tmp_path
+        os.environ.pop("SCHEMA_FILE", None)
+        config_loader.reset_loader()
+
+    def test_malformed_interface_dropped_config_preserved(self, _restore_loader):
+        from backend.config import config_loader
+
+        tmp_path = _restore_loader
+        config_file = tmp_path / "schema_config.json"
+        config_file.write_text(
+            json.dumps(
+                {
+                    "schema": {
+                        "node_types": {
+                            "Widget": {
+                                "fields": ["name", "description"],
+                                "color": "#123456",
+                            }
+                        }
+                    },
+                    "rest_interfaces": [
+                        {"path": "widgets", "node_type": "Widget"},  # valid
+                        {"path": "BadPath", "node_type": "Widget"},  # invalid path
+                        {"path": "x", "entity": "relationship"},  # invalid entity
+                    ],
+                }
+            ),
+            encoding="utf-8",
+        )
+        os.environ["SCHEMA_FILE"] = str(config_file)
+        config_loader.reset_loader()
+
+        # The custom node type survived — the config was NOT reverted to defaults.
+        assert "Widget" in config_loader.get_node_type_names()
+        # Only the well-formed interface remains.
+        interfaces = config_loader.get_rest_interfaces()
+        assert [i.path for i in interfaces] == ["widgets"]
+
+    def test_non_list_rest_interfaces_ignored(self, _restore_loader):
+        from backend.config import config_loader
+
+        tmp_path = _restore_loader
+        config_file = tmp_path / "schema_config.json"
+        config_file.write_text(
+            json.dumps(
+                {
+                    "schema": {"node_types": {"Widget": {"fields": ["name"]}}},
+                    "rest_interfaces": "not-a-list",
+                }
+            ),
+            encoding="utf-8",
+        )
+        os.environ["SCHEMA_FILE"] = str(config_file)
+        config_loader.reset_loader()
+
+        assert "Widget" in config_loader.get_node_type_names()
+        assert config_loader.get_rest_interfaces() == []
 
 
 # ==================== Service-level filter tests ====================
@@ -277,6 +350,57 @@ class TestAccessParity:
         # Same subset the narrowed generic search would return: only graph-alpha.
         assert [n["name"] for n in result["nodes"]] == ["Alpha"]
 
+    @pytest.fixture
+    def narrowed_edge_service(self, empty_storage: GraphStorage) -> GraphService:
+        empty_storage.add_nodes(
+            [
+                Node(
+                    id="alpha-1",
+                    type=NodeType.ACTOR,
+                    name="Alpha 1",
+                    metadata={"origin_graph_id": "graph-alpha"},
+                ),
+                Node(
+                    id="alpha-2",
+                    type=NodeType.ACTOR,
+                    name="Alpha 2",
+                    metadata={"origin_graph_id": "graph-alpha"},
+                ),
+                Node(
+                    id="beta-1",
+                    type=NodeType.ACTOR,
+                    name="Beta 1",
+                    metadata={"origin_graph_id": "graph-beta"},
+                ),
+            ],
+            [
+                # Both endpoints in graph-alpha → visible under alpha narrowing.
+                Edge(
+                    id="within", source="alpha-1", target="alpha-2", type="RELATES_TO"
+                ),
+                # Spans alpha (visible) and beta (hidden) → must be dropped.
+                Edge(
+                    id="spanning", source="alpha-1", target="beta-1", type="RELATES_TO"
+                ),
+            ],
+        )
+        return GraphService(
+            empty_storage, authorization_hook=SelectionAwareNarrowingHook()
+        )
+
+    def test_dedicated_edge_endpoint_drops_edges_into_hidden_graphs(
+        self, narrowed_edge_service: GraphService
+    ):
+        with use_request_authorization(
+            workspace_id="ws", workspace_kind="team", graph_id="graph-alpha"
+        ):
+            result = narrowed_edge_service.list_typed_edges(edge_type="RELATES_TO")
+        # Only the fully-in-scope edge survives; the spanning one is not leaked,
+        # and the hidden endpoint node never appears.
+        assert [e["id"] for e in result["edges"]] == ["within"]
+        assert {n["id"] for n in result["nodes"]} == {"alpha-1", "alpha-2"}
+        assert "beta-1" not in {n["id"] for n in result["nodes"]}
+
     def test_dedicated_endpoint_denied_when_generic_denied(
         self, empty_storage: GraphStorage
     ):
@@ -289,6 +413,19 @@ class TestAccessParity:
         empty_storage.add_nodes([Node(id="a1", type=NodeType.ACTOR, name="A")], [])
         service = GraphService(empty_storage, authorization_hook=DenyHook())
         result = service.list_typed_nodes(node_type="Actor")
+        assert result["error_code"] == "access_denied"
+
+    def test_dedicated_edge_endpoint_denied_when_generic_denied(
+        self, empty_storage: GraphStorage
+    ):
+        class DenyHook:
+            def evaluate(self, context):
+                return GraphAuthorizationDecision(
+                    allowed=False, mode="deny", source="test", reason="nope"
+                )
+
+        service = GraphService(empty_storage, authorization_hook=DenyHook())
+        result = service.list_typed_edges(edge_type="RELATES_TO")
         assert result["error_code"] == "access_denied"
 
 
@@ -359,3 +496,82 @@ class TestCustomInterfaceRouting:
 
     def test_unconfigured_type_has_no_dedicated_endpoint(self, client):
         assert client.get("/api/goals").status_code == 404
+
+    def test_edge_interface_served_over_http(self, empty_storage: GraphStorage):
+        try:
+            from fastapi import FastAPI
+            from fastapi.testclient import TestClient
+        except ImportError:
+            pytest.skip("FastAPI not installed")
+
+        empty_storage.add_nodes(
+            [
+                Node(id="n1", type=NodeType.ACTOR, name="N1"),
+                Node(id="n2", type=NodeType.ACTOR, name="N2"),
+            ],
+            [Edge(id="r1", source="n1", target="n2", type="RELATES_TO")],
+        )
+        service = GraphService(empty_storage)
+        interfaces = [
+            RestInterfaceConfig(path="links", entity="edge", edge_type="RELATES_TO"),
+        ]
+        router = create_rest_router(service, rest_interfaces=interfaces)
+        app = FastAPI()
+        app.include_router(router, prefix="/api")
+        client = TestClient(app)
+
+        resp = client.get("/api/links")
+        assert resp.status_code == 200
+        body = resp.json()
+        assert [e["id"] for e in body["edges"]] == ["r1"]
+        assert body["edge_type"] == "RELATES_TO"
+
+    def test_missing_type_interface_is_skipped(self, empty_storage: GraphStorage):
+        try:
+            from fastapi import FastAPI
+            from fastapi.testclient import TestClient
+        except ImportError:
+            pytest.skip("FastAPI not installed")
+
+        service = GraphService(empty_storage)
+        # entity 'node' with no node_type, and entity 'edge' with no edge_type —
+        # both must be skipped (no route registered) rather than crashing.
+        interfaces = [
+            RestInterfaceConfig(path="bad-node", entity="node"),
+            RestInterfaceConfig(path="bad-edge", entity="edge"),
+        ]
+        router = create_rest_router(service, rest_interfaces=interfaces)
+        app = FastAPI()
+        app.include_router(router, prefix="/api")
+        client = TestClient(app)
+
+        assert client.get("/api/bad-node").status_code == 404
+        assert client.get("/api/bad-edge").status_code == 404
+
+    def test_duplicate_path_registers_only_first(self, empty_storage: GraphStorage):
+        try:
+            from fastapi import FastAPI
+            from fastapi.testclient import TestClient
+        except ImportError:
+            pytest.skip("FastAPI not installed")
+
+        empty_storage.add_nodes(
+            [
+                Node(id="a1", type=NodeType.ACTOR, name="Actor node"),
+                Node(id="g1", type=NodeType.GOAL, name="Goal node"),
+            ],
+            [],
+        )
+        service = GraphService(empty_storage)
+        # Two interfaces claim the same path; the first (Actor) wins.
+        interfaces = [
+            RestInterfaceConfig(path="dup", node_type="Actor"),
+            RestInterfaceConfig(path="dup", node_type="Goal"),
+        ]
+        router = create_rest_router(service, rest_interfaces=interfaces)
+        app = FastAPI()
+        app.include_router(router, prefix="/api")
+        client = TestClient(app)
+
+        body = client.get("/api/dup").json()
+        assert body["node_type"] == "Actor"

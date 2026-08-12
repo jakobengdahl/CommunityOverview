@@ -382,6 +382,11 @@ Each entry:
 no `tags` field, so edge tag filters match against `edge.metadata["tags"]` (a
 list, when present).
 
+`node_type` / `edge_type` are matched by exact canonical type name (case
+sensitive, no alias resolution). A malformed entry (bad `path`/`entity`, or a
+`node`/`edge` entry missing its `node_type`/`edge_type`) is skipped with a logged
+warning; it never disables the rest of the config or the other interfaces.
+
 Example — expose `Actor` nodes at `/api/actors`, returning only actors tagged
 `approved` **or** `processing`:
 

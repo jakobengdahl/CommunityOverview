@@ -973,12 +973,6 @@ def create_rest_router(
     if session_manager is not None:
         _register_session_endpoints(router, service, session_manager)
 
-    # Register config-driven dedicated interfaces after the fixed routes so a
-    # fixed route always wins if an operator picks a colliding path.
-    if rest_interfaces is None:
-        rest_interfaces = get_rest_interfaces()
-    _register_custom_interface_endpoints(router, service, rest_interfaces)
-
     @router.get("/collect/{short_name}")
     async def get_collect_config(
         short_name: str = Path(
@@ -1016,5 +1010,12 @@ def create_rest_router(
             raise
         except Exception as e:
             raise HTTPException(status_code=500, detail=str(e))
+
+    # Register config-driven dedicated interfaces last, after every fixed route
+    # (including /collect/{short_name}), so a fixed route always wins if an
+    # operator picks a colliding path.
+    if rest_interfaces is None:
+        rest_interfaces = get_rest_interfaces()
+    _register_custom_interface_endpoints(router, service, rest_interfaces)
 
     return router

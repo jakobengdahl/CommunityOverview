@@ -408,6 +408,7 @@ class ConfigLoader:
             with open(self._config_path, "r", encoding="utf-8") as f:
                 raw_config = json.load(f)
 
+            self._sanitize_rest_interfaces(raw_config)
             self._config = SchemaFileConfig(**raw_config)
             logger.info(f"Loaded schema configuration from: {self._config_path}")
 
@@ -429,6 +430,39 @@ class ConfigLoader:
         # System types are now managed entirely in code via SYSTEM_NODE_TYPES.
         self._strip_system_types_from_config()
         self._apply_system_types()
+
+    @staticmethod
+    def _sanitize_rest_interfaces(raw_config: Dict[str, Any]) -> None:
+        """Drop malformed ``rest_interfaces`` entries in place before validation.
+
+        ``rest_interfaces`` entries carry strict validators (path/entity). Left in
+        the raw document, a single malformed entry would fail the whole
+        ``SchemaFileConfig`` construction and trip the loader's global fallback to
+        empty defaults — silently reverting every node type, relationship, profile,
+        etc. Validating each entry independently here and discarding only the bad
+        ones keeps one typo from nuking the entire config, matching the per-entry
+        graceful skipping the router already does for missing node_type/edge_type.
+        """
+        raw = raw_config.get("rest_interfaces")
+        if raw is None:
+            return
+        if not isinstance(raw, list):
+            logger.warning(
+                "rest_interfaces must be a list, got %s — ignoring", type(raw).__name__
+            )
+            raw_config["rest_interfaces"] = []
+            return
+        valid: List[Dict[str, Any]] = []
+        for index, entry in enumerate(raw):
+            try:
+                RestInterfaceConfig(**entry)
+            except Exception as exc:
+                logger.warning(
+                    "Skipping invalid rest_interfaces[%d] (%r): %s", index, entry, exc
+                )
+                continue
+            valid.append(entry)
+        raw_config["rest_interfaces"] = valid
 
     def _strip_system_types_from_config(self) -> None:
         """Remove any system node types found in the loaded config (backward compat)."""
