@@ -138,6 +138,12 @@ class TestRegistry:
         # can raise "dictionary changed size during iteration" (then get silently
         # swallowed, dropping the push). Hammer both paths concurrently and assert
         # no error escapes.
+        #
+        # A tiny switch interval forces frequent thread hand-offs so the race is
+        # reproduced reliably: with the lock removed this fails on essentially
+        # every run; at CPython's default 5 ms interval it would slip through
+        # ~90% of the time and be a near-useless guard. Restored in finally.
+        import sys
         import threading
 
         reg = SessionAutoAddRegistry()
@@ -162,14 +168,19 @@ class TestRegistry:
                 except Exception as exc:  # pragma: no cover - failure path
                     errors.append(exc)
 
-        threads = [threading.Thread(target=churn) for _ in range(3)]
-        threads += [threading.Thread(target=match) for _ in range(3)]
-        for t in threads:
-            t.start()
-        stop.wait(0.5)
-        stop.set()
-        for t in threads:
-            t.join()
+        previous_interval = sys.getswitchinterval()
+        sys.setswitchinterval(1e-6)
+        try:
+            threads = [threading.Thread(target=churn) for _ in range(4)]
+            threads += [threading.Thread(target=match) for _ in range(4)]
+            for t in threads:
+                t.start()
+            stop.wait(0.5)
+            stop.set()
+            for t in threads:
+                t.join()
+        finally:
+            sys.setswitchinterval(previous_interval)
 
         assert errors == []
 
