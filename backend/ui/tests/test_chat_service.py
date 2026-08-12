@@ -1620,3 +1620,123 @@ class TestExtraActionsWithPresentForm:
         assert any(n.get("name") == "Agency X" for n in tr.get("nodes", []))
         extra = tr.get("extra_actions", [])
         assert any(e["action"] == "mark_nodes" for e in extra)
+
+
+class TestVisualizationActionSemantics:
+    """The assistant must only clear/replace the view on an explicit request.
+
+    A plain additive request ("add all actor nodes in the view") must ADD to the
+    current visualization; the view is replaced only when the user explicitly
+    asks for it. Node/edge accumulation used to drop the per-tool ``action``,
+    silently turning every node-returning search into a full-view replace — these
+    tests lock in the additive default and the explicit-replace path.
+    """
+
+    def test_add_action_is_preserved_through_accumulation(self, chat_service):
+        service, mock_llm = chat_service
+        service.graph_service.add_nodes(
+            nodes=[{"type": "Actor", "name": "Additive Agency"}], edges=[]
+        )
+        mock_llm.mock_tool_calls = [
+            {
+                "name": "search_graph",
+                "input": {
+                    "query": "Additive Agency",
+                    "action": "add_to_visualization",
+                },
+            }
+        ]
+        mock_llm.mock_text_response = "Added the agency to the view."
+
+        result = service.process_message([{"role": "user", "content": "add it"}])
+
+        tr = result["toolResult"]
+        assert tr["action"] == "add_to_visualization"
+        assert any(n.get("name") == "Additive Agency" for n in tr.get("nodes", []))
+
+    def test_no_action_defaults_to_additive_not_replace(self, chat_service):
+        # Regression: a node-returning search with no explicit action must default
+        # to additive placement so the current view is never silently cleared.
+        service, mock_llm = chat_service
+        service.graph_service.add_nodes(
+            nodes=[{"type": "Actor", "name": "Additive Agency"}], edges=[]
+        )
+        mock_llm.mock_tool_calls = [
+            {"name": "search_graph", "input": {"query": "Additive Agency"}}
+        ]
+        mock_llm.mock_text_response = "Here is the agency."
+
+        result = service.process_message([{"role": "user", "content": "show it"}])
+
+        tr = result["toolResult"]
+        assert tr["action"] == "add_to_visualization"
+        assert any(n.get("name") == "Additive Agency" for n in tr.get("nodes", []))
+
+    def test_replace_action_is_preserved(self, chat_service):
+        service, mock_llm = chat_service
+        service.graph_service.add_nodes(
+            nodes=[{"type": "Actor", "name": "Replace Agency"}], edges=[]
+        )
+        mock_llm.mock_tool_calls = [
+            {
+                "name": "search_graph",
+                "input": {
+                    "query": "Replace Agency",
+                    "action": "replace_visualization",
+                },
+            }
+        ]
+        mock_llm.mock_text_response = "Replaced the view."
+
+        result = service.process_message([{"role": "user", "content": "replace"}])
+
+        tr = result["toolResult"]
+        assert tr["action"] == "replace_visualization"
+        assert any(n.get("name") == "Replace Agency" for n in tr.get("nodes", []))
+
+    def test_explicit_clear_then_search_yields_clear_and_add(self, chat_service):
+        # "clear the view and show X": clear_visualization + a plain search in one
+        # turn. The clear intent must survive so the frontend clears then shows.
+        service, mock_llm = chat_service
+        service.graph_service.add_nodes(
+            nodes=[{"type": "Actor", "name": "Fresh Agency"}], edges=[]
+        )
+        mock_llm.mock_tool_calls = [
+            {"name": "clear_visualization", "input": {}},
+            {"name": "search_graph", "input": {"query": "Fresh Agency"}},
+        ]
+        mock_llm.mock_text_response = "Cleared and showed the agency."
+
+        result = service.process_message(
+            [{"role": "user", "content": "clear and show"}]
+        )
+
+        tr = result["toolResult"]
+        assert tr["action"] == "clear_visualization"
+        assert any(n.get("name") == "Fresh Agency" for n in tr.get("nodes", []))
+
+    def test_update_node_keeps_in_place_update_action(self, chat_service):
+        # An "edit/rename node X" turn returns update_in_visualization with the
+        # updated node. The additive default must not clobber that action, or the
+        # frontend would add a duplicate instead of merging the node in place.
+        service, mock_llm = chat_service
+        add = service.graph_service.add_nodes(
+            nodes=[{"type": "Actor", "name": "Editable Agency"}], edges=[]
+        )
+        node_id = add["added_node_ids"][0]
+        mock_llm.mock_tool_calls = [
+            {
+                "name": "update_node",
+                "input": {
+                    "node_id": node_id,
+                    "updates": {"description": "Renamed and edited"},
+                },
+            }
+        ]
+        mock_llm.mock_text_response = "Updated the agency."
+
+        result = service.process_message([{"role": "user", "content": "edit it"}])
+
+        tr = result["toolResult"]
+        assert tr["action"] == "update_in_visualization"
+        assert any(n.get("id") == node_id for n in tr.get("nodes", []))

@@ -19,6 +19,13 @@ Effort scale: XS = single-line fix · S = up to ~30 lines / one file · M = mult
 
 ---
 
+### [2026-08-12] Mixed update+add assistant turn can leave an edited node stale in the view
+
+- **File(s):** `backend/ui/chat_logic.py` (`_handle_tool_use` last-action-wins capture); `frontend/web/src/store/graphStore.js:337-341` (`addNodesToVisualization` dedupes by id)
+- **Context:** Discovered during `claude/fix-assistant-clear-on-add` (PR #327 review round 2)
+- **Issue:** The single `toolResult.action` slot uses last-action-wins. A turn that calls `update_node` (→ `update_in_visualization`) and then `search_graph(add_to_visualization)` resolves to `add_to_visualization`; the additive apply path skips nodes already on canvas, so the edited node's on-canvas copy is not refreshed (the DB write still lands). The reverse order works because the in-place merge appends new nodes. Inherent to the one-action-per-result design; a proper fix needs richer per-node merge semantics (e.g. carry per-node placement intent instead of one turn-level action).
+- **Effort:** M
+
 ### [2026-08-12] ChatPanel markdown lacks table styling that the kiosk now has
 
 - **File(s):** `frontend/web/src/components/ChatPanel.css:198-232` (markdown block); compare `frontend/web/src/components/CollectKioskView.css` table rules
