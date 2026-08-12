@@ -23,7 +23,12 @@ vi.mock('reactflow', () => {
           <div
             key={edge.id}
             data-testid={`edge-${edge.id}`}
-            className="react-flow__edge"
+            className={`react-flow__edge${edge.className ? ` ${edge.className}` : ''}`}
+            data-animated={String(!!edge.animated)}
+            data-stroke={edge.style?.stroke ?? ''}
+            data-stroke-width={String(edge.style?.strokeWidth ?? '')}
+            data-marker-end={edge.markerEnd ? String(edge.markerEnd.type) : ''}
+            data-marker-start={edge.markerStart ? String(edge.markerStart.type) : ''}
             onContextMenu={(event) => onEdgeContextMenu?.(event, edge)}
           >
             {edge.label || edge.type}
@@ -61,7 +66,7 @@ vi.mock('reactflow', () => {
     SelectionMode: { Partial: 'partial' },
     Handle: ({ type }) => <div data-testid={`handle-${type}`} />,
     Position: { Top: 'top', Bottom: 'bottom', Left: 'left', Right: 'right' },
-    MarkerType: { ArrowClosed: 'arrowclosed' },
+    MarkerType: { ArrowClosed: 'arrowclosed', Arrow: 'arrow' },
   };
 });
 
@@ -111,6 +116,64 @@ describe('GraphCanvas', () => {
     );
 
     expect(screen.queryByLabelText('Federated search depth selector')).not.toBeInTheDocument();
+  });
+
+  it('renders edges without visual metadata using the default look', () => {
+    render(<GraphCanvas nodes={sampleNodes} edges={sampleEdges} />);
+    const edge = screen.getByTestId('edge-edge-1');
+    expect(edge).toHaveAttribute('data-stroke', '#666');
+    expect(edge).toHaveAttribute('data-stroke-width', '2');
+    expect(edge).toHaveAttribute('data-animated', 'false');
+    expect(edge).toHaveAttribute('data-marker-end', '');
+    expect(edge).toHaveAttribute('data-marker-start', '');
+    expect(edge.className).toBe('react-flow__edge');
+  });
+
+  // Endpoint-presence contract behind edge recovery on reload: when a load hands
+  // the canvas resolved nodes and their edges together, the visibleEdges filter
+  // must keep every edge whose *both* endpoints are present and drop an edge that
+  // references an absent node (you cannot draw a half-edge). A filter too strict
+  // would drop valid edges when a session is reloaded; one too loose would leave
+  // dangling edges. This pins the by-endpoint-presence contract both ways. (The
+  // reload glue that feeds resolved edges here is covered in useSharedSession.test.)
+  it('renders edges between present nodes and drops edges with an absent endpoint', () => {
+    render(
+      <GraphCanvas
+        nodes={sampleNodes}
+        edges={[
+          { id: 'edge-present', source: 'node-1', target: 'node-2', type: 'RELATES_TO' },
+          { id: 'edge-dangling', source: 'node-2', target: 'node-absent', type: 'RELATES_TO' },
+        ]}
+      />
+    );
+    expect(screen.getByTestId('edge-edge-present')).toBeInTheDocument();
+    expect(screen.queryByTestId('edge-edge-dangling')).not.toBeInTheDocument();
+  });
+
+  it('reflects edge visual metadata onto the rendered React Flow edge', () => {
+    const styledEdges = [
+      {
+        id: 'edge-1',
+        source: 'node-1',
+        target: 'node-2',
+        type: 'RELATES_TO',
+        metadata: {
+          color: '#ff8800',
+          thickness: 5,
+          direction: 'both',
+          arrow: 'open',
+          animated: true,
+        },
+      },
+    ];
+    render(<GraphCanvas nodes={sampleNodes} edges={styledEdges} />);
+    const edge = screen.getByTestId('edge-edge-1');
+    expect(edge).toHaveAttribute('data-stroke', '#ff8800');
+    expect(edge).toHaveAttribute('data-stroke-width', '5');
+    expect(edge).toHaveAttribute('data-animated', 'true');
+    expect(edge).toHaveAttribute('data-marker-end', 'arrow');
+    expect(edge).toHaveAttribute('data-marker-start', 'arrow');
+    expect(edge.className).toContain('rf-edge-pulse');
   });
 
   it('suppresses text selection while modifier-clicking to multi-select', () => {

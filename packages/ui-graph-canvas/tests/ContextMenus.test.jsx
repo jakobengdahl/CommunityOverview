@@ -16,6 +16,14 @@ const labels = {
   nodesSelected: '{count} nodes selected',
   showOnly: 'Show only these',
   selectSameType: 'Select all nodes of the same type',
+  selectRelated: 'Select related nodes',
+  viewHistory: 'View change history',
+  organize: 'Organize',
+  autoTidy: 'Auto-tidy',
+  organizeCluster: 'Cluster',
+  organizeHorizontal: 'List horizontally',
+  organizeVertical: 'List vertically',
+  organizeTree: 'Arrange as tree',
   hideAll: 'Hide all',
   deleteAll: 'Delete all',
   changeType: 'Change type',
@@ -134,6 +142,46 @@ describe('NodeContextMenu', () => {
     openSpy.mockRestore();
   });
 
+  it('omits the select-related button when no handler is given', () => {
+    render(<NodeContextMenu menu={{ x: 0, y: 0, node }} labels={labels} onClose={vi.fn()} />);
+    expect(screen.queryByRole('button', { name: /select related nodes/i })).toBeNull();
+  });
+
+  it('invokes onSelectRelated with the node id', () => {
+    const onSelectRelated = vi.fn();
+    render(
+      <NodeContextMenu
+        menu={{ x: 0, y: 0, node }}
+        labels={labels}
+        onSelectRelated={onSelectRelated}
+        onClose={vi.fn()}
+      />
+    );
+    fireEvent.click(screen.getByRole('button', { name: /select related nodes/i }));
+    expect(onSelectRelated).toHaveBeenCalledWith('n1');
+  });
+
+  it('omits the view-history button when no handler is given', () => {
+    render(<NodeContextMenu menu={{ x: 0, y: 0, node }} labels={labels} onClose={vi.fn()} />);
+    expect(screen.queryByRole('button', { name: /view change history/i })).toBeNull();
+  });
+
+  it('invokes onViewHistory with the node id and data then closes', () => {
+    const onViewHistory = vi.fn();
+    const onClose = vi.fn();
+    render(
+      <NodeContextMenu
+        menu={{ x: 0, y: 0, node }}
+        labels={labels}
+        onViewHistory={onViewHistory}
+        onClose={onClose}
+      />
+    );
+    fireEvent.click(screen.getByRole('button', { name: /view change history/i }));
+    expect(onViewHistory).toHaveBeenCalledWith('n1', node.data);
+    expect(onClose).toHaveBeenCalled();
+  });
+
   it('renders schema callback custom items and dispatches the action', () => {
     const onContextMenuAction = vi.fn();
     const onClose = vi.fn();
@@ -186,6 +234,34 @@ describe('MultiNodeContextMenu', () => {
     expect(onHide).toHaveBeenCalledWith('a');
     expect(onHide).toHaveBeenCalledWith('b');
     expect(onClose).toHaveBeenCalled();
+  });
+
+  it('omits the organize section when onOrganize is absent', () => {
+    render(<MultiNodeContextMenu menu={{ x: 0, y: 0, nodes }} labels={labels} onClose={vi.fn()} />);
+    expect(screen.queryByText('Organize')).toBeNull();
+    expect(screen.queryByRole('button', { name: /^cluster$/i })).toBeNull();
+  });
+
+  it('renders the organize options and calls onOrganize with the chosen mode', () => {
+    const onOrganize = vi.fn();
+    render(
+      <MultiNodeContextMenu
+        menu={{ x: 0, y: 0, nodes }}
+        labels={labels}
+        onOrganize={onOrganize}
+        onClose={vi.fn()}
+      />
+    );
+    fireEvent.click(screen.getByRole('button', { name: /auto-tidy/i }));
+    fireEvent.click(screen.getByRole('button', { name: /cluster/i }));
+    fireEvent.click(screen.getByRole('button', { name: /list horizontally/i }));
+    fireEvent.click(screen.getByRole('button', { name: /list vertically/i }));
+    fireEvent.click(screen.getByRole('button', { name: /arrange as tree/i }));
+    expect(onOrganize).toHaveBeenNthCalledWith(1, 'tidy');
+    expect(onOrganize).toHaveBeenNthCalledWith(2, 'cluster');
+    expect(onOrganize).toHaveBeenNthCalledWith(3, 'horizontal');
+    expect(onOrganize).toHaveBeenNthCalledWith(4, 'vertical');
+    expect(onOrganize).toHaveBeenNthCalledWith(5, 'tree');
   });
 
   it('prefers onDeleteMultiple over per-node onDelete', () => {

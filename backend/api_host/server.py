@@ -35,12 +35,17 @@ from fastapi.staticfiles import StaticFiles
 # backend.api_host.server.FastMCP in tests that stub the MCP transport.
 from mcp.server.fastmcp import FastMCP
 
+from backend.core.session_auto_add import (
+    SessionAutoAddRegistry,
+    build_node_create_listener,
+)
 from backend.core.session_registry import SessionRegistry
 from backend.core.session_store import FileSessionPersistenceBackend, SessionStore
 from backend.core.session_manager import SessionManager
 
 from backend.core import GraphStorage
 from backend.service import GraphService, create_rest_router, register_mcp_tools
+from backend.service.mcp_tools import _push_to_session
 from backend.ui import ChatService, DocumentService, create_ui_router
 from backend.agents import AgentRegistry, AgentsSettings
 from backend.federation import (
@@ -246,7 +251,35 @@ def create_app(
     # (registered below) so that sync MCP tools can push commands thread-safely.
     session_registry = SessionRegistry()
     app.state.session_registry = session_registry
-    register_session_stream(app, session_registry, session_manager=session_manager)
+
+    # Session-scoped auto-add agents: react to node.create events and push each
+    # matching new node additively into the bound session's live view (reusing
+    # the additive _push_to_session path). Deterministic, no LLM, no graph
+    # mutation — so it needs no loop prevention. The push seam keeps this wiring,
+    # not core, responsible for transport.
+    auto_add_registry = SessionAutoAddRegistry()
+    app.state.auto_add_registry = auto_add_registry
+
+    def _auto_add_push(session_id: str, node_payload: dict) -> None:
+        _push_to_session(
+            session_registry,
+            session_id,
+            "session_auto_add_agent",
+            {"nodes": [node_payload], "edges": []},
+            session_manager,
+        )
+
+    graph_storage.add_system_listener(
+        build_node_create_listener(auto_add_registry, _auto_add_push)
+    )
+
+    register_session_stream(
+        app,
+        session_registry,
+        session_manager=session_manager,
+        graph_service=graph_service,
+        auto_add_registry=auto_add_registry,
+    )
 
     # Initialize FastMCP with dynamic instructions built from schema configuration
     mcp = FastMCP(
@@ -264,6 +297,7 @@ def create_app(
         graph_service,
         session_registry=session_registry,
         session_manager=session_manager,
+        auto_add_registry=auto_add_registry,
     )
 
     # Store MCP instance and tools map on app state

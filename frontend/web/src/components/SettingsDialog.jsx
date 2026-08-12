@@ -1,6 +1,6 @@
 import { useState, useEffect } from 'react';
 import { createPortal } from 'react-dom';
-import { Download, Map, BoxArrowRight, X } from 'react-bootstrap-icons';
+import { Download, Map, Eye, BoxArrowRight, X } from 'react-bootstrap-icons';
 import useGraphStore from '../store/graphStore';
 import { useI18n } from '../i18n';
 import { getDisplayName, setDisplayName } from '../services/api';
@@ -17,7 +17,8 @@ const MAX_INLINE_TYPES = 5;
  */
 function SettingsDialog({ stats, onExportGraph, onClose }) {
   const { t, language, setLanguage } = useI18n();
-  const { showMinimap, setShowMinimap } = useGraphStore();
+  const { showMinimap, setShowMinimap, nodePreviewEnabled, setNodePreviewEnabled } =
+    useGraphStore();
   const [statsDialogOpen, setStatsDialogOpen] = useState(false);
   const [displayName, setDisplayNameState] = useState(() => getDisplayName() || '');
 
@@ -108,6 +109,14 @@ function SettingsDialog({ stats, onExportGraph, onClose }) {
             <Map size={14} />
             <span>{t('menu.show_minimap')}</span>
             <span className={`settings-dialog-toggle${showMinimap ? ' active' : ''}`} />
+          </button>
+          <button
+            className="settings-dialog-menu-item"
+            onClick={() => setNodePreviewEnabled(!nodePreviewEnabled)}
+          >
+            <Eye size={14} />
+            <span>{t('menu.show_node_preview')}</span>
+            <span className={`settings-dialog-toggle${nodePreviewEnabled ? ' active' : ''}`} />
           </button>
 
           <div className="settings-dialog-section-divider" />

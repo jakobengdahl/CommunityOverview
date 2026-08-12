@@ -70,10 +70,10 @@ function renderNodeTypePermissions(perms) {
   );
 }
 
-function NodeDetailDialog({ node, onClose, onEdit }) {
+function NodeDetailDialog({ node, onClose, onEdit, initialView = 'details' }) {
   const { getNodeColor, schema } = useGraphStore();
   const { t } = useI18n();
-  const [view, setView] = useState('details');
+  const [view, setView] = useState(initialView === 'history' ? 'history' : 'details');
 
   const data = node?.data || {};
   const nodeType = data.type || data.nodeType || '';

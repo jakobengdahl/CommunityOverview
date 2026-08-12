@@ -114,6 +114,7 @@ function AppDialogs({
       {detailNode && (
         <NodeDetailDialog
           node={detailNode}
+          initialView={detailNode.view}
           onClose={closeDetailNode}
           onEdit={(nodeId, nodeData) => {
             closeDetailNode();
@@ -177,7 +178,7 @@ function AppDialogs({
         <InputDialog
           title={t('sessions.connect_session_title')}
           label={t('sessions.connect_session_label')}
-          placeholder="1234-5678"
+          placeholder={t('sessions.connect_session_placeholder')}
           confirmText={t('sessions.connect')}
           cancelText={t('common.cancel')}
           onConfirm={onConnectSession}

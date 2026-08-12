@@ -432,6 +432,60 @@ function layoutBatch(nodes, edges, origin) {
   return gridLayoutAt(nodes, origin);
 }
 
+// Reconcile a store-driven node update against the live canvas nodes.
+//
+// Within a session we keep each node's live position: it may have been dragged
+// since it was loaded, so incremental updates (highlighting, expanding a node,
+// remote edits) must not snap a dragged node back to its stored position. That
+// is why an existing node with a non-origin position wins over the incoming one.
+//
+// On a *session switch* that preservation is wrong. A node present in both the
+// session being left and the one being opened would keep the coordinates it had
+// in the old session, and only a reload would repair it. When `sessionChanged`
+// is true we drop the previous positions entirely, so the incoming (authoritative
+// saved/layout) position wins. Freshly-arrived nodes are still placed near the
+// nodes they connect to, but never relative to a previous session's layout.
+export function reconcileSessionNodes({
+  prevNodes,
+  incomingNodes,
+  incomingEdges = [],
+  sessionChanged = false,
+  inLazyMode = false,
+}) {
+  const prevById = sessionChanged ? new Map() : new Map(prevNodes.map((n) => [n.id, n]));
+
+  const mapped = incomingNodes.map((n) => {
+    const existing = prevById.get(n.id);
+    if (existing && existing.position.x !== 0) {
+      return {
+        ...n,
+        position: existing.position,
+        parentId: existing.parentId,
+        style: existing.style || n.style,
+      };
+    }
+    return n;
+  });
+
+  // Place freshly-added nodes (e.g. from expanding a node) near the nodes they
+  // connect to instead of stacking them at the origin or scattering them via a
+  // full re-layout. Only when there is already a positioned layout to anchor
+  // against, only for nodes without an explicit saved position (a loaded/remote
+  // position is authoritative), and never in lazy-paging mode where "new" nodes
+  // are just more of the same result set.
+  const isPlaced = (n) => n.position && (n.position.x !== 0 || n.position.y !== 0);
+  const existingPlaced = mapped.filter((n) => prevById.has(n.id) && isPlaced(n));
+  const freshNodes = mapped.filter((n) => !prevById.has(n.id) && !n.data?._savedPosition);
+  if (freshNodes.length > 0 && existingPlaced.length > 0 && !inLazyMode) {
+    const posById = new Map(
+      positionNewNodes(freshNodes, existingPlaced, incomingEdges).map((n) => [n.id, n.position])
+    );
+    return mapped.map((n) => (posById.has(n.id) ? { ...n, position: posById.get(n.id) } : n));
+  }
+
+  return mapped;
+}
+
 /**
  * Position new nodes intelligently on the canvas.
  *
@@ -531,4 +585,109 @@ export function positionNewNodes(newNodes, existingNodes, edges = [], options = 
   }
 
   return positionedNodes;
+}
+
+/**
+ * Re-arrange an already-placed set of nodes into a chosen structure, keeping the
+ * result centred on the selection's current centroid so it stays where the user
+ * is looking. Returns a Map of nodeId → new position covering only the given
+ * nodes (callers merge it into their own node list).
+ *
+ * modes:
+ *   'cluster'    — compact square-ish grid
+ *   'horizontal' — single row
+ *   'vertical'   — single column
+ *   'tree'       — hierarchical (dagre) over the edges internal to the selection
+ *   'tidy'       — auto-tidy: picks the sensible structure automatically. If the
+ *                  selection contains internal edges (a hierarchy) it lays out as a
+ *                  dagre tree; otherwise it groups nodes by node type into one column
+ *                  per type. Either way the grid spacing keeps nodes overlap-free.
+ *
+ * @param {Array} nodesToArrange - Nodes with current positions
+ * @param {Array} edges - All edges (only those internal to the selection are used)
+ * @param {string} mode - One of the modes above
+ * @returns {Map<string, {x:number,y:number}>}
+ */
+export function arrangeNodes(nodesToArrange, edges = [], mode = 'cluster') {
+  const result = new Map();
+  if (!Array.isArray(nodesToArrange) || nodesToArrange.length === 0) return result;
+
+  const current = nodesToArrange.map((n) => n.position).filter(Boolean);
+  const centroid = current.length
+    ? {
+        x: current.reduce((s, p) => s + p.x, 0) / current.length,
+        y: current.reduce((s, p) => s + p.y, 0) / current.length,
+      }
+    : { x: 0, y: 0 };
+
+  // Internal edges (both endpoints in the selection) define the hierarchy the tree
+  // and auto-tidy layouts respect.
+  const ids = new Set(nodesToArrange.map((n) => n.id));
+  const subEdges = (edges || []).filter((e) => ids.has(e.source) && ids.has(e.target));
+  const treeLayout = () =>
+    getLayoutedElements(
+      nodesToArrange.map((n) => ({ id: n.id })),
+      subEdges,
+      'TB'
+    ).map((n) => ({ id: n.id, position: n.position }));
+
+  let positioned;
+  if (mode === 'horizontal') {
+    positioned = nodesToArrange.map((n, i) => ({
+      id: n.id,
+      position: { x: i * GRID_CELL_W, y: 0 },
+    }));
+  } else if (mode === 'vertical') {
+    positioned = nodesToArrange.map((n, i) => ({
+      id: n.id,
+      position: { x: 0, y: i * GRID_CELL_H },
+    }));
+  } else if (mode === 'tree') {
+    positioned = treeLayout();
+  } else if (mode === 'tidy') {
+    if (subEdges.length > 0) {
+      // A hierarchy exists among the selected nodes — lay it out as a tree so the
+      // structure is respected.
+      positioned = treeLayout();
+    } else {
+      // No internal hierarchy — group by node type, one column per type, stacked in
+      // a grid so nodes of the same type stay together and nothing overlaps.
+      const typeOf = (n) => n.data?.nodeType || n.data?.type || '';
+      const groups = new Map();
+      for (const n of nodesToArrange) {
+        const t = typeOf(n);
+        if (!groups.has(t)) groups.set(t, []);
+        groups.get(t).push(n);
+      }
+      positioned = [];
+      let col = 0;
+      for (const members of groups.values()) {
+        members.forEach((n, row) => {
+          positioned.push({
+            id: n.id,
+            position: { x: col * GRID_CELL_W, y: row * GRID_CELL_H },
+          });
+        });
+        col += 1;
+      }
+    }
+  } else {
+    const cols = Math.max(1, Math.ceil(Math.sqrt(nodesToArrange.length)));
+    positioned = nodesToArrange.map((n, i) => ({
+      id: n.id,
+      position: { x: (i % cols) * GRID_CELL_W, y: Math.floor(i / cols) * GRID_CELL_H },
+    }));
+  }
+
+  // Recentre the arranged bounding box on the original centroid.
+  const xs = positioned.map((p) => p.position.x);
+  const ys = positioned.map((p) => p.position.y);
+  const shift = {
+    x: centroid.x - (Math.min(...xs) + Math.max(...xs)) / 2,
+    y: centroid.y - (Math.min(...ys) + Math.max(...ys)) / 2,
+  };
+  for (const p of positioned) {
+    result.set(p.id, { x: p.position.x + shift.x, y: p.position.y + shift.y });
+  }
+  return result;
 }

@@ -553,6 +553,24 @@ export function getVisualizationStreamUrl(sessionId) {
 }
 
 /**
+ * Mint (or rotate) the pulse-trigger token for a live visualization session and
+ * return the absolute trigger URL an external system calls to pulse a node.
+ * Re-minting rotates the token, so any previously shared URL stops working.
+ *
+ * @param {string} sessionId
+ * @returns {Promise<{ url: string, token: string }>}
+ */
+export async function mintPulseTriggerUrl(sessionId) {
+  const data = await apiFetch(
+    `${getPathRoot()}/sessions/${encodeURIComponent(sessionId)}/trigger-token`,
+    { method: 'POST' }
+  );
+  const base = new URL(`${getPathRoot()}${data.pulse_path}`, window.location.origin);
+  base.searchParams.set('token', data.trigger_token);
+  return { url: base.toString(), token: data.trigger_token };
+}
+
+/**
  * Return the realtime op-protocol SSE stream URL for a shared session
  * (design step 6). Distinct from the legacy MCP-push stream above: this one
  * carries applied ops, presence and claims from the fan-out hub.

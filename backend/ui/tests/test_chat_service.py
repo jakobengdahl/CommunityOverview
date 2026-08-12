@@ -460,17 +460,20 @@ class TestExpertAgentSkills:
 # ---------------------------------------------------------------------------
 
 
-def _make_akc_node(short_name, perms):
+def _make_akc_node(short_name, perms, tool_allowlist=None):
     """Build a minimal ActiveKnowledgeCollection node dict as returned by search_graph."""
+    metadata = {
+        "short_name": short_name,
+        "prompt": "Collect test data.",
+        "node_type_permissions": perms,
+    }
+    if tool_allowlist is not None:
+        metadata["tool_allowlist"] = tool_allowlist
     return {
         "id": f"akc-{short_name}",
         "name": short_name,
         "type": "ActiveKnowledgeCollection",
-        "metadata": {
-            "short_name": short_name,
-            "prompt": "Collect test data.",
-            "node_type_permissions": perms,
-        },
+        "metadata": metadata,
     }
 
 
@@ -761,6 +764,154 @@ class TestMakeEnforcedTools:
         assert result["total"] == 0, (
             "Forbidden node type was created despite permission enforcement"
         )
+
+
+class TestToolAllowlist:
+    """Tests for the per-collection tool allowlist (kiosk assistant tool access)."""
+
+    def test_normalize_tool_allowlist(self):
+        """Falsy/invalid allowlists normalize to None (unrestricted); lists are cleaned."""
+        from backend.ui import ChatService
+
+        assert ChatService._normalize_tool_allowlist(None) is None
+        assert ChatService._normalize_tool_allowlist([]) is None
+        assert ChatService._normalize_tool_allowlist("search_graph") is None
+        assert ChatService._normalize_tool_allowlist([1, "", None]) is None
+        assert ChatService._normalize_tool_allowlist(
+            ["search_graph", "", "present_form", 3]
+        ) == ["search_graph", "present_form"]
+
+    def test_allowlist_filters_advertised_tools(self, chat_service):
+        """Only allowlisted tools are advertised to the LLM when an allowlist is set."""
+        service, mock_llm = chat_service
+        akc_node = _make_akc_node(
+            "coll", ACTOR_ONLY_PERMS, tool_allowlist=["search_graph", "present_form"]
+        )
+        mock_llm.mock_text_response = "hi"
+
+        with patch.object(
+            service._graph_service,
+            "search_graph",
+            return_value={"nodes": [akc_node], "edges": [], "total": 1},
+        ):
+            service.process_message(
+                messages=[{"role": "user", "content": "hi"}],
+                collection_short_name="coll",
+            )
+
+        advertised = {t["name"] for t in mock_llm.received_tools[0]}
+        assert advertised == {"search_graph", "present_form"}
+
+    def test_no_allowlist_advertises_all_tools(self, chat_service):
+        """A collection without a tool allowlist keeps the full tool set (backward compatible)."""
+        service, mock_llm = chat_service
+        akc_node = _make_akc_node("coll", ACTOR_ONLY_PERMS)  # no tool_allowlist
+        mock_llm.mock_text_response = "hi"
+
+        with patch.object(
+            service._graph_service,
+            "search_graph",
+            return_value={"nodes": [akc_node], "edges": [], "total": 1},
+        ):
+            service.process_message(
+                messages=[{"role": "user", "content": "hi"}],
+                collection_short_name="coll",
+            )
+
+        advertised = mock_llm.received_tools[0]
+        assert advertised == service._processor.tool_definitions
+        assert len(advertised) > 2
+
+    def test_allowlist_blocks_unlisted_tool_server_side(self, chat_service):
+        """A tool outside the allowlist is blocked and never executed, even when
+        node-type permissions would otherwise allow it (server-side enforcement,
+        not just hiding the tool from the LLM)."""
+        service, mock_llm = chat_service
+
+        # Allowlist permits only search_graph; node-type perms WOULD allow creating
+        # an Actor — proving the block comes from the tool allowlist, not perms.
+        akc_node = _make_akc_node(
+            "coll", ACTOR_ONLY_PERMS, tool_allowlist=["search_graph"]
+        )
+        mock_llm.mock_tool_calls = [
+            {
+                "name": "add_nodes",
+                "input": {
+                    "nodes": [{"type": "Actor", "name": "Sneaky Agency"}],
+                    "edges": [],
+                },
+            }
+        ]
+        mock_llm.mock_text_response = "Blocked."
+
+        with patch.object(
+            service._graph_service,
+            "search_graph",
+            return_value={"nodes": [akc_node], "edges": [], "total": 1},
+        ):
+            result = service.process_message(
+                messages=[{"role": "user", "content": "add an actor"}],
+                collection_short_name="coll",
+            )
+
+        # The tool was blocked before execution: no Actor node reached the graph.
+        found = service._graph_service.search_graph(query="Sneaky Agency")
+        assert found["total"] == 0, (
+            "Allowlisted-out tool was executed despite the block"
+        )
+
+        # The block surfaced as a tool error result fed back to the LLM.
+        tool_result = result.get("toolResult") or {}
+        assert "allowlist" in str(tool_result).lower()
+
+    def test_allowlist_blocks_unlisted_tool_in_tool_chain(self, chat_service):
+        """The gate re-applies on chained tool turns: a disallowed tool requested on
+        the SECOND LLM turn is blocked just like on the first."""
+        service, mock_llm = chat_service
+        akc_node = _make_akc_node(
+            "coll", ACTOR_ONLY_PERMS, tool_allowlist=["search_graph"]
+        )
+        # Turn 1: allowed search_graph → chains to Turn 2: disallowed add_nodes.
+        mock_llm.mock_tool_call_sequence = [
+            [{"name": "search_graph", "input": {"query": "x"}}],
+            [
+                {
+                    "name": "add_nodes",
+                    "input": {
+                        "nodes": [{"type": "Actor", "name": "Chained Agency"}],
+                        "edges": [],
+                    },
+                }
+            ],
+        ]
+        mock_llm.mock_text_response = "done"
+
+        with patch.object(
+            service._graph_service,
+            "search_graph",
+            return_value={"nodes": [akc_node], "edges": [], "total": 1},
+        ):
+            service.process_message(
+                messages=[{"role": "user", "content": "go"}],
+                collection_short_name="coll",
+            )
+
+        # The chained add_nodes call was blocked: no Actor reached the graph.
+        found = service._graph_service.search_graph(query="Chained Agency")
+        assert found["total"] == 0, "Chained disallowed tool executed despite the gate"
+        # Every LLM turn saw only the filtered tool set.
+        for advertised in mock_llm.received_tools:
+            assert {t["name"] for t in advertised} == {"search_graph"}
+
+    def test_allowlist_ignored_outside_collection_mode(self, chat_service):
+        """Without a collection_short_name the assistant is unrestricted (all tools)."""
+        service, mock_llm = chat_service
+        mock_llm.mock_text_response = "hi"
+
+        service.process_message(messages=[{"role": "user", "content": "hi"}])
+
+        advertised = mock_llm.received_tools[0]
+        assert advertised == service._processor.tool_definitions
 
 
 class TestVisualizationContext:
@@ -1469,3 +1620,123 @@ class TestExtraActionsWithPresentForm:
         assert any(n.get("name") == "Agency X" for n in tr.get("nodes", []))
         extra = tr.get("extra_actions", [])
         assert any(e["action"] == "mark_nodes" for e in extra)
+
+
+class TestVisualizationActionSemantics:
+    """The assistant must only clear/replace the view on an explicit request.
+
+    A plain additive request ("add all actor nodes in the view") must ADD to the
+    current visualization; the view is replaced only when the user explicitly
+    asks for it. Node/edge accumulation used to drop the per-tool ``action``,
+    silently turning every node-returning search into a full-view replace — these
+    tests lock in the additive default and the explicit-replace path.
+    """
+
+    def test_add_action_is_preserved_through_accumulation(self, chat_service):
+        service, mock_llm = chat_service
+        service.graph_service.add_nodes(
+            nodes=[{"type": "Actor", "name": "Additive Agency"}], edges=[]
+        )
+        mock_llm.mock_tool_calls = [
+            {
+                "name": "search_graph",
+                "input": {
+                    "query": "Additive Agency",
+                    "action": "add_to_visualization",
+                },
+            }
+        ]
+        mock_llm.mock_text_response = "Added the agency to the view."
+
+        result = service.process_message([{"role": "user", "content": "add it"}])
+
+        tr = result["toolResult"]
+        assert tr["action"] == "add_to_visualization"
+        assert any(n.get("name") == "Additive Agency" for n in tr.get("nodes", []))
+
+    def test_no_action_defaults_to_additive_not_replace(self, chat_service):
+        # Regression: a node-returning search with no explicit action must default
+        # to additive placement so the current view is never silently cleared.
+        service, mock_llm = chat_service
+        service.graph_service.add_nodes(
+            nodes=[{"type": "Actor", "name": "Additive Agency"}], edges=[]
+        )
+        mock_llm.mock_tool_calls = [
+            {"name": "search_graph", "input": {"query": "Additive Agency"}}
+        ]
+        mock_llm.mock_text_response = "Here is the agency."
+
+        result = service.process_message([{"role": "user", "content": "show it"}])
+
+        tr = result["toolResult"]
+        assert tr["action"] == "add_to_visualization"
+        assert any(n.get("name") == "Additive Agency" for n in tr.get("nodes", []))
+
+    def test_replace_action_is_preserved(self, chat_service):
+        service, mock_llm = chat_service
+        service.graph_service.add_nodes(
+            nodes=[{"type": "Actor", "name": "Replace Agency"}], edges=[]
+        )
+        mock_llm.mock_tool_calls = [
+            {
+                "name": "search_graph",
+                "input": {
+                    "query": "Replace Agency",
+                    "action": "replace_visualization",
+                },
+            }
+        ]
+        mock_llm.mock_text_response = "Replaced the view."
+
+        result = service.process_message([{"role": "user", "content": "replace"}])
+
+        tr = result["toolResult"]
+        assert tr["action"] == "replace_visualization"
+        assert any(n.get("name") == "Replace Agency" for n in tr.get("nodes", []))
+
+    def test_explicit_clear_then_search_yields_clear_and_add(self, chat_service):
+        # "clear the view and show X": clear_visualization + a plain search in one
+        # turn. The clear intent must survive so the frontend clears then shows.
+        service, mock_llm = chat_service
+        service.graph_service.add_nodes(
+            nodes=[{"type": "Actor", "name": "Fresh Agency"}], edges=[]
+        )
+        mock_llm.mock_tool_calls = [
+            {"name": "clear_visualization", "input": {}},
+            {"name": "search_graph", "input": {"query": "Fresh Agency"}},
+        ]
+        mock_llm.mock_text_response = "Cleared and showed the agency."
+
+        result = service.process_message(
+            [{"role": "user", "content": "clear and show"}]
+        )
+
+        tr = result["toolResult"]
+        assert tr["action"] == "clear_visualization"
+        assert any(n.get("name") == "Fresh Agency" for n in tr.get("nodes", []))
+
+    def test_update_node_keeps_in_place_update_action(self, chat_service):
+        # An "edit/rename node X" turn returns update_in_visualization with the
+        # updated node. The additive default must not clobber that action, or the
+        # frontend would add a duplicate instead of merging the node in place.
+        service, mock_llm = chat_service
+        add = service.graph_service.add_nodes(
+            nodes=[{"type": "Actor", "name": "Editable Agency"}], edges=[]
+        )
+        node_id = add["added_node_ids"][0]
+        mock_llm.mock_tool_calls = [
+            {
+                "name": "update_node",
+                "input": {
+                    "node_id": node_id,
+                    "updates": {"description": "Renamed and edited"},
+                },
+            }
+        ]
+        mock_llm.mock_text_response = "Updated the agency."
+
+        result = service.process_message([{"role": "user", "content": "edit it"}])
+
+        tr = result["toolResult"]
+        assert tr["action"] == "update_in_visualization"
+        assert any(n.get("id") == node_id for n in tr.get("nodes", []))
