@@ -1520,6 +1520,50 @@ class TestLinkResultsToResponse:
         assert keep_id in links
         assert remove_id not in links
 
+    def test_dedup_and_update_then_delete_pruned(
+        self, graph_service, mock_llm_provider
+    ):
+        """A created-then-updated node is linked exactly once; an updated
+        pre-existing node that is then deleted is not linked at all."""
+        service = self._service(graph_service, mock_llm_provider)
+        self._add_collection(graph_service, "run", self.ALL_OPS)
+        existing = self._add_actor(graph_service, "Existing")
+
+        service._resolve_collection("run")
+        touched = []
+        enforced = service._make_enforced_tools(self.ALL_OPS, touched=touched)
+
+        created = (
+            enforced["add_nodes"](nodes=[{"type": "Actor", "name": "Fresh"}]).get(
+                "added_node_ids"
+            )
+            or []
+        )
+        assert len(created) == 1
+        fresh = created[0]
+
+        # created-then-updated -> touched records it twice
+        enforced["update_node"](fresh, {"description": "again"})
+        # updated pre-existing node, then deleted -> must be pruned
+        enforced["update_node"](existing, {"description": "touched"})
+        enforced["delete_nodes"](node_ids=[existing], confirmed=True)
+        assert existing not in touched
+
+        tool = service._make_collection_response_tool("run", touched=touched)[
+            "save_collection_response"
+        ]
+        out = tool(answers=[{"field_id": "q1", "value": "done"}])
+
+        assert out["linked_node_count"] == 1
+        response_id = out["response_id"]
+        edges_to_fresh = [
+            e
+            for e in graph_service.storage.edges.values()
+            if e.source == response_id and e.target == fresh
+        ]
+        assert len(edges_to_fresh) == 1  # deduped, not one per touched occurrence
+        assert existing not in self._links_from(graph_service, response_id)
+
     def test_process_message_links_response_end_to_end(self, chat_service):
         """Full loop: the LLM creates a node then saves the response in one turn;
         the response node is linked to the node created during that turn."""
