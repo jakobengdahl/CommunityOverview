@@ -32,13 +32,13 @@ name: CI
 on:
   push:
     # main = integration (features land here via PR); preview and prod are the
-    # deploy branches (preview → preview instances, prod → production). `dev` is
-    # retained transitionally during the cutover to main-as-integration and can
-    # be dropped from these lists once no `dev` branch remains.
-    branches: [main, preview, prod, dev]
+    # deploy branches (preview → preview instances, prod → production). main runs
+    # the tests only — build/publish and the app-release dispatch fire on preview
+    # and prod (and version tags); see the build job's `if`.
+    branches: [main, preview, prod]
     tags: ['v*']
   pull_request:
-    branches: [main, preview, prod, dev]
+    branches: [main, preview, prod]
 
 env:
   REGISTRY: ghcr.io
