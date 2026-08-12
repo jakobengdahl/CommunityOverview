@@ -101,6 +101,16 @@ export default [
     },
   },
 
+  // react-three-fiber renders three.js objects as JSX host elements whose props
+  // (position, args, intensity, …) are not DOM attributes, so the generic
+  // unknown-property check does not apply to the XR workspace.
+  {
+    files: ['frontend/xr/**/*.{js,jsx}'],
+    rules: {
+      'react/no-unknown-property': 'off',
+    },
+  },
+
   // eslint-config-prettier must come last: it disables formatting-related rules.
   prettier,
 ];
