@@ -132,6 +132,47 @@ class TestRegistry:
         assert reg.session_count == 1
         assert reg.list_rules(SESSION_B) == []
 
+    def test_concurrent_add_remove_and_match_is_safe(self):
+        # The listener's matching_sessions runs on the graph-mutation thread while
+        # REST/MCP add/remove run on the loop thread. Without locking, matching
+        # can raise "dictionary changed size during iteration" (then get silently
+        # swallowed, dropping the push). Hammer both paths concurrently and assert
+        # no error escapes.
+        import threading
+
+        reg = SessionAutoAddRegistry()
+        errors = []
+        stop = threading.Event()
+
+        def churn():
+            i = 0
+            while not stop.is_set():
+                sid = f"{1000 + (i % 50):04d}-2000"
+                try:
+                    rule = reg.add_rule(sid, node_types=["Actor"])
+                    reg.remove_rule(sid, rule.agent_id)
+                except Exception as exc:  # pragma: no cover - failure path
+                    errors.append(exc)
+                i += 1
+
+        def match():
+            while not stop.is_set():
+                try:
+                    reg.matching_sessions("Actor", {"name": "SCB"})
+                except Exception as exc:  # pragma: no cover - failure path
+                    errors.append(exc)
+
+        threads = [threading.Thread(target=churn) for _ in range(3)]
+        threads += [threading.Thread(target=match) for _ in range(3)]
+        for t in threads:
+            t.start()
+        stop.wait(0.5)
+        stop.set()
+        for t in threads:
+            t.join()
+
+        assert errors == []
+
 
 class TestListener:
     def test_matching_node_is_pushed(self):

@@ -29,6 +29,7 @@ this core module has no dependency on the service/transport layer.
 
 import logging
 import secrets
+import threading
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from typing import Any, Callable, Dict, List, Optional
@@ -148,10 +149,19 @@ class SessionAutoAddRegistry:
     visualization-session push registry: they hold no durable state, are pruned
     when their session goes away, and are lost on restart (acceptable because a
     visualization session is itself ephemeral).
+
+    All access is guarded by a lock: the read path (``matching_sessions``) runs
+    on the ``node.create`` listener, which fires on whatever thread performed the
+    mutation (a request/loop thread, or an ``AgentWorker`` background thread),
+    while ``add_rule``/``remove_rule`` run from the REST/MCP surfaces on the loop
+    thread. Without the lock, a concurrent create/remove could raise "dictionary
+    changed size during iteration" during matching — swallowed by the event
+    emitter's guard, so the push would be silently dropped for that node.
     """
 
     def __init__(self) -> None:
         self._by_session: Dict[str, Dict[str, AutoAddRule]] = {}
+        self._lock = threading.Lock()
 
     def add_rule(
         self,
@@ -173,47 +183,51 @@ class SessionAutoAddRegistry:
                 "a rule with neither would add every created node to the view",
             )
 
-        existing = self._by_session.get(session_id)
-        if existing is None:
-            if len(self._by_session) >= MAX_SESSIONS_WITH_RULES:
+        with self._lock:
+            existing = self._by_session.get(session_id)
+            if existing is None:
+                if len(self._by_session) >= MAX_SESSIONS_WITH_RULES:
+                    raise AutoAddRuleError(
+                        "capacity_reached",
+                        "the maximum number of sessions with auto-add agents has "
+                        "been reached",
+                    )
+            elif len(existing) >= MAX_RULES_PER_SESSION:
                 raise AutoAddRuleError(
                     "capacity_reached",
-                    "the maximum number of sessions with auto-add agents has "
-                    "been reached",
+                    "this session already has the maximum number of auto-add "
+                    f"agents ({MAX_RULES_PER_SESSION})",
                 )
-        elif len(existing) >= MAX_RULES_PER_SESSION:
-            raise AutoAddRuleError(
-                "capacity_reached",
-                "this session already has the maximum number of auto-add agents "
-                f"({MAX_RULES_PER_SESSION})",
-            )
 
-        rule = AutoAddRule(
-            agent_id=secrets.token_hex(8),
-            session_id=session_id,
-            node_types=clean_types,
-            keywords=clean_keywords,
-        )
-        self._by_session.setdefault(session_id, {})[rule.agent_id] = rule
-        return rule
+            rule = AutoAddRule(
+                agent_id=secrets.token_hex(8),
+                session_id=session_id,
+                node_types=clean_types,
+                keywords=clean_keywords,
+            )
+            self._by_session.setdefault(session_id, {})[rule.agent_id] = rule
+            return rule
 
     def list_rules(self, session_id: str) -> List[AutoAddRule]:
-        return list(self._by_session.get(session_id, {}).values())
+        with self._lock:
+            return list(self._by_session.get(session_id, {}).values())
 
     def remove_rule(self, session_id: str, agent_id: str) -> bool:
         """Remove one agent. Returns True if it existed."""
-        rules = self._by_session.get(session_id)
-        if not rules or agent_id not in rules:
-            return False
-        del rules[agent_id]
-        if not rules:
-            del self._by_session[session_id]
-        return True
+        with self._lock:
+            rules = self._by_session.get(session_id)
+            if not rules or agent_id not in rules:
+                return False
+            del rules[agent_id]
+            if not rules:
+                del self._by_session[session_id]
+            return True
 
     def clear_session(self, session_id: str) -> int:
         """Drop all agents for a session. Returns the number removed."""
-        rules = self._by_session.pop(session_id, None)
-        return len(rules) if rules else 0
+        with self._lock:
+            rules = self._by_session.pop(session_id, None)
+            return len(rules) if rules else 0
 
     def matching_sessions(self, node_type: str, node_data: Dict[str, Any]) -> List[str]:
         """Return the session ids with at least one rule matching this node.
@@ -221,11 +235,12 @@ class SessionAutoAddRegistry:
         Each session appears at most once even if several of its rules match, so
         a session receives a newly created node exactly once.
         """
-        matched: List[str] = []
-        for session_id, rules in self._by_session.items():
-            if any(rule.matches(node_type, node_data) for rule in rules.values()):
-                matched.append(session_id)
-        return matched
+        with self._lock:
+            return [
+                session_id
+                for session_id, rules in self._by_session.items()
+                if any(rule.matches(node_type, node_data) for rule in rules.values())
+            ]
 
     def prune_to_sessions(self, live_session_ids) -> int:
         """Drop rules for sessions no longer live. Returns sessions removed.
@@ -234,18 +249,21 @@ class SessionAutoAddRegistry:
         that has been TTL-evicted (its browser gone) don't linger in memory.
         """
         live = set(live_session_ids)
-        stale = [sid for sid in self._by_session if sid not in live]
-        for sid in stale:
-            del self._by_session[sid]
-        return len(stale)
+        with self._lock:
+            stale = [sid for sid in self._by_session if sid not in live]
+            for sid in stale:
+                del self._by_session[sid]
+            return len(stale)
 
     @property
     def total_rules(self) -> int:
-        return sum(len(rules) for rules in self._by_session.values())
+        with self._lock:
+            return sum(len(rules) for rules in self._by_session.values())
 
     @property
     def session_count(self) -> int:
-        return len(self._by_session)
+        with self._lock:
+            return len(self._by_session)
 
 
 def build_node_create_listener(

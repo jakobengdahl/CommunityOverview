@@ -19,6 +19,13 @@ Effort scale: XS = single-line fix · S = up to ~30 lines / one file · M = mult
 
 ---
 
+### [2026-08-12] MCP create_session_auto_add_agent skips the session-count cap the REST path enforces
+
+- **File(s):** `backend/service/mcp_tools.py` (`create_session_auto_add_agent`, `session_registry.get_or_create` call); compare `backend/api_host/session_stream.py` (`create_auto_add_agent` checks `session_count >= SESSION_MAX_COUNT` before materialising)
+- **Context:** Discovered during `claude/session-scoped-autoadd-agent` (PR #328 review)
+- **Issue:** The REST create endpoint guards `session_registry.session_count >= SESSION_MAX_COUNT` before `get_or_create`; the MCP tool does not. Impact is bounded — MCP is the authenticated/trusted surface and `add_rule` still enforces `MAX_SESSIONS_WITH_RULES = 5000`, so registry growth is capped either way — so this is a consistency note, not a security hole. Align the MCP tool with the REST guard if the surfaces should behave identically.
+- **Effort:** XS
+
 ### [2026-08-12] Mixed update+add assistant turn can leave an edited node stale in the view
 
 - **File(s):** `backend/ui/chat_logic.py` (`_handle_tool_use` last-action-wins capture); `frontend/web/src/store/graphStore.js:337-341` (`addNodesToVisualization` dedupes by id)
