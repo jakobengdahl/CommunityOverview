@@ -7,17 +7,13 @@ import {
   Robot,
   Mortarboard,
 } from 'react-bootstrap-icons';
-import ReactMarkdown from 'react-markdown';
-import remarkGfm from 'remark-gfm';
-import remarkMath from 'remark-math';
-import rehypeKatex from 'rehype-katex';
-import 'katex/dist/katex.min.css';
 import useGraphStore from '../store/graphStore';
 import { useI18n } from '../i18n';
 import * as api from '../services/api';
 import { positionNewNodes } from '@community-graph/ui-graph-canvas';
 import ExpertAgentSelector from './ExpertAgentSelector';
 import CollectionForm from './CollectionForm';
+import MarkdownMessage from './MarkdownMessage';
 import './ChatPanel.css';
 
 /** Extract a present_form spec from a chat response, or null if none. */
@@ -719,12 +715,7 @@ function ChatPanel({ collectionShortName }) {
               )}
               <div className="message-content">
                 {msg.role === 'assistant' || msg.role === 'expert' ? (
-                  <ReactMarkdown
-                    remarkPlugins={[remarkGfm, remarkMath]}
-                    rehypePlugins={[rehypeKatex]}
-                  >
-                    {msg.content}
-                  </ReactMarkdown>
+                  <MarkdownMessage>{msg.content}</MarkdownMessage>
                 ) : (
                   msg.content
                 )}
