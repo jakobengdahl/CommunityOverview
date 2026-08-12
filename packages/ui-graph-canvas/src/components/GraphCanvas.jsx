@@ -34,7 +34,7 @@ import {
   getGridLayout,
   getCircularLayout,
   getLayoutedElements,
-  positionNewNodes,
+  reconcileSessionNodes,
   arrangeNodes,
 } from '../utils/graphLayout';
 import {
@@ -210,6 +210,11 @@ function GraphCanvasInner({
   onContextMenuAction = null,
   nodeColorResolver = null,
   onViewportChange = null,
+  // Identity of the active visualization session. Changing it signals a session
+  // switch: the canvas discards the previous session's live node positions (so a
+  // node shared between sessions is not left at the old coordinates) and refits
+  // the view to the newly loaded content instead of lingering on the old camera.
+  sessionKey = null,
   nodePreviewEnabled = true,
   contextMenuLabels = {},
 }) {
@@ -284,7 +289,18 @@ function GraphCanvasInner({
   // the trailing neighbours' start positions, captured at drag start. Held in a
   // ref so the per-frame drag handler doesn't depend on React state timing.
   const connectedDragRef = useRef(null);
-  const { screenToFlowPosition, setCenter, getNodes: getFlowNodes, getViewport } = useReactFlow();
+  const {
+    screenToFlowPosition,
+    setCenter,
+    getNodes: getFlowNodes,
+    getViewport,
+    fitView,
+  } = useReactFlow();
+  // Last session identity seen by the node-reconciliation effect and the
+  // refit-on-switch effect. Seeded with the mount value so the very first render
+  // is not treated as a switch (mount already fits via the ReactFlow fitView prop).
+  const lastSessionKeyRef = useRef(sessionKey);
+  const fitOnSessionKeyRef = useRef(sessionKey);
 
   // Undo/redo history for node-position moves (drag + organize). Restoring a
   // prior state writes the positions back through the same persistence path a
@@ -460,51 +476,39 @@ function GraphCanvasInner({
 
   // Update nodes when input changes
   useEffect(() => {
+    const sessionChanged = lastSessionKeyRef.current !== sessionKey;
+    lastSessionKeyRef.current = sessionKey;
     setNodes((nds) => {
-      const manualNodes = clearGroupsFlag ? [] : nds.filter(isManualNode);
-      const prevById = new Map(nds.map((n) => [n.id, n]));
-      const mapped = reactFlowNodes.map((n) => {
-        const existing = prevById.get(n.id);
-        if (existing && existing.position.x !== 0) {
-          return {
-            ...n,
-            position: existing.position,
-            parentId: existing.parentId,
-            style: existing.style || n.style,
-          };
-        }
-        return n;
+      // A session switch drops the previous session's manual annotations too:
+      // clearVisualization sets clearGroupsFlag, and the new session's overlays
+      // arrive through the restore path. Outside a switch, keep the live ones.
+      const manualNodes = clearGroupsFlag || sessionChanged ? [] : nds.filter(isManualNode);
+      const reconciled = reconcileSessionNodes({
+        prevNodes: nds,
+        incomingNodes: reactFlowNodes,
+        incomingEdges: reactFlowEdges,
+        sessionChanged,
+        inLazyMode: visibleNodes.length > LAZY_LOAD_THRESHOLD,
       });
-
-      // Place freshly-added nodes (e.g. from expanding a node) near the nodes
-      // they connect to instead of stacking them at the origin or scattering
-      // them via a full re-layout. Only when there is already a positioned
-      // layout to anchor against, only for nodes without an explicit saved
-      // position (a loaded/remote position is authoritative), and never in
-      // lazy-paging mode where "new" nodes are just more of the same result set.
-      const isPlaced = (n) => n.position && (n.position.x !== 0 || n.position.y !== 0);
-      const existingPlaced = mapped.filter((n) => prevById.has(n.id) && isPlaced(n));
-      const freshNodes = mapped.filter((n) => !prevById.has(n.id) && !n.data?._savedPosition);
-      const inLazyMode = visibleNodes.length > LAZY_LOAD_THRESHOLD;
-      if (freshNodes.length > 0 && existingPlaced.length > 0 && !inLazyMode) {
-        const posById = new Map(
-          positionNewNodes(freshNodes, existingPlaced, reactFlowEdges).map((n) => [
-            n.id,
-            n.position,
-          ])
-        );
-        const placed = mapped.map((n) =>
-          posById.has(n.id) ? { ...n, position: posById.get(n.id) } : n
-        );
-        return reorderNodesForParentChild([...placed, ...manualNodes]);
-      }
-
       // Groups must appear before their children in the array for ReactFlow
       // parent-child relationships to work. This also ensures groups render
       // behind custom nodes so clicks reach the nodes on top.
-      return reorderNodesForParentChild([...mapped, ...manualNodes]);
+      return reorderNodesForParentChild([...reconciled, ...manualNodes]);
     });
-  }, [reactFlowNodes, reactFlowEdges, visibleNodes.length, setNodes, clearGroupsFlag]);
+  }, [reactFlowNodes, reactFlowEdges, visibleNodes.length, setNodes, clearGroupsFlag, sessionKey]);
+
+  // Refit the view whenever the session identity changes so switching sessions
+  // (e.g. via "recent sessions") frames the newly loaded content instead of
+  // leaving the camera on the viewport of the session just left. The mount value
+  // is seeded into the ref, so the initial fit still comes from the ReactFlow
+  // fitView prop and this effect only reacts to real switches. Deferred a frame
+  // so the incoming nodes are committed to the flow before it fits to them.
+  useEffect(() => {
+    if (fitOnSessionKeyRef.current === sessionKey) return;
+    fitOnSessionKeyRef.current = sessionKey;
+    const raf = requestAnimationFrame(() => fitView({ padding: 0.2, duration: 800 }));
+    return () => cancelAnimationFrame(raf);
+  }, [sessionKey, fitView]);
 
   // Update edges when input changes
   useEffect(() => {
