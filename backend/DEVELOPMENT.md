@@ -591,6 +591,30 @@ The same chat functionality is available via the embeddable widget (`frontend/wi
 
 The widget uses the same `/ui/chat` endpoint, ensuring consistent behavior between the web app and external integrations.
 
+### Active Knowledge Collection kiosk
+
+When `/ui/chat` receives a `collection_short_name`, the assistant runs in
+collection (kiosk) mode. The matching `ActiveKnowledgeCollection` node's
+`metadata` drives the session:
+
+| metadata field | Purpose |
+|---|---|
+| `short_name` | URL identifier used to resolve the collection |
+| `introduction_text` | Public text shown before the chat starts |
+| `prompt` | Server-side AI instructions (never exposed to the client) |
+| `node_type_permissions` | Per-node-type `{create, update, delete}` flags, enforced server-side on graph mutations |
+| `tool_allowlist` | Optional list of tool names the assistant may use |
+| `collect_responses` | When `false`, `save_collection_response` is not installed |
+
+`tool_allowlist` mirrors the AIAgent tool-permission model
+(`backend/agents/governance/gate.py`): unset or empty means unrestricted (all
+tools), while a non-empty list restricts the assistant to exactly those tools.
+Enforcement is server-side and two-layered — disallowed tools are neither
+advertised to the LLM nor executed if requested anyway
+(`backend/ui/chat_logic.py`). The tool names match
+`ChatProcessor._generate_tool_definitions` (e.g. `search_graph`, `add_nodes`,
+`present_form`, `save_collection_response`).
+
 ## Development Workflow
 
 ### Adding a New MCP Tool
