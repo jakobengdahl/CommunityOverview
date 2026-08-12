@@ -202,6 +202,152 @@ def get_related_nodes(
     }
 
 
+def _matches_tag_filters(
+    values: List[str],
+    *,
+    tags_all: Optional[List[str]] = None,
+    tags_any: Optional[List[str]] = None,
+) -> bool:
+    """Return True when ``values`` satisfies the AND/OR tag filter.
+
+    ``tags_all`` (AND): every listed tag must be present.
+    ``tags_any`` (OR): at least one listed tag must be present.
+    Empty/omitted lists disable that dimension. Both empty → always True.
+    The two dimensions combine with AND (a value set must pass both).
+    """
+    present = set(values or [])
+    if tags_all and not set(tags_all).issubset(present):
+        return False
+    if tags_any and present.isdisjoint(set(tags_any)):
+        return False
+    return True
+
+
+def list_typed_nodes(
+    storage: "GraphStorage",
+    hook: "GraphAuthorizationHook",
+    *,
+    node_type: str,
+    tags_all: Optional[List[str]] = None,
+    tags_any: Optional[List[str]] = None,
+    subtypes_any: Optional[List[str]] = None,
+    limit: int = 500,
+) -> Dict[str, Any]:
+    """List local nodes of one type, filtered by tag/subtype, for a dedicated
+    REST interface.
+
+    Applies the same read authorization and graph-scope narrowing as
+    ``search_graph`` so a dedicated endpoint never returns more than the generic
+    interface would. Federated nodes are out of scope for these endpoints — they
+    expose the local graph's own configured types only.
+    """
+    target = f"list_typed_nodes:{node_type}"
+    decision = access.evaluate_graph_access(
+        hook, action=GRAPH_ACTION_READ, target=target
+    )
+    if not decision.allowed:
+        return access.build_access_denied_result(
+            action=GRAPH_ACTION_READ, target=target, decision=decision
+        )
+
+    matched = [
+        node
+        for node in storage.get_all_nodes()
+        if node.type_str == node_type
+        and access.is_node_visible(node, decision.graph_access)
+        and _matches_tag_filters(node.tags, tags_all=tags_all, tags_any=tags_any)
+        and (not subtypes_any or not set(node.subtypes).isdisjoint(set(subtypes_any)))
+    ]
+    matched = matched[:limit]
+
+    matched_ids = {node.id for node in matched}
+    incident = storage.get_incident_edges(list(matched_ids))
+    connecting_edges = [
+        edge
+        for edge in incident
+        if edge.source in matched_ids and edge.target in matched_ids
+    ]
+
+    return {
+        "nodes": serialize_nodes(matched),
+        "edges": serialize_edges(connecting_edges),
+        "total": len(matched),
+        "node_type": node_type,
+        "filters": {
+            "tags_all": list(tags_all or []),
+            "tags_any": list(tags_any or []),
+            "subtypes_any": list(subtypes_any or []),
+        },
+    }
+
+
+def list_typed_edges(
+    storage: "GraphStorage",
+    hook: "GraphAuthorizationHook",
+    *,
+    edge_type: str,
+    tags_all: Optional[List[str]] = None,
+    tags_any: Optional[List[str]] = None,
+    limit: int = 500,
+) -> Dict[str, Any]:
+    """List local edges of one type for a dedicated REST interface.
+
+    An edge is only returned when *both* of its endpoint nodes are visible under
+    the request's graph-scope narrowing — the same rule the generic search path
+    applies (``access.filter_nodes_and_edges``) — so a dedicated edge endpoint
+    cannot leak an edge into or out of a graph the caller may not see.
+
+    Edges carry no ``tags`` field; when tag filters are configured they are
+    matched against ``edge.metadata['tags']`` (a list, if present), so operators
+    can tag edges through metadata without a schema change.
+    """
+    target = f"list_typed_edges:{edge_type}"
+    decision = access.evaluate_graph_access(
+        hook, action=GRAPH_ACTION_READ, target=target
+    )
+    if not decision.allowed:
+        return access.build_access_denied_result(
+            action=GRAPH_ACTION_READ, target=target, decision=decision
+        )
+
+    matched_edges = []
+    endpoint_ids: set = set()
+    for edge in storage.get_all_edges():
+        if edge.type_str != edge_type:
+            continue
+        source = storage.get_node(edge.source)
+        targ = storage.get_node(edge.target)
+        if not access.is_node_visible(source, decision.graph_access):
+            continue
+        if not access.is_node_visible(targ, decision.graph_access):
+            continue
+        edge_tags = (edge.metadata or {}).get("tags") or []
+        if not isinstance(edge_tags, list):
+            edge_tags = []
+        if not _matches_tag_filters(edge_tags, tags_all=tags_all, tags_any=tags_any):
+            continue
+        matched_edges.append(edge)
+        endpoint_ids.add(edge.source)
+        endpoint_ids.add(edge.target)
+        if len(matched_edges) >= limit:
+            break
+
+    endpoint_nodes = [
+        node for node in (storage.get_node(nid) for nid in endpoint_ids) if node
+    ]
+
+    return {
+        "edges": serialize_edges(matched_edges),
+        "nodes": serialize_nodes(endpoint_nodes),
+        "total": len(matched_edges),
+        "edge_type": edge_type,
+        "filters": {
+            "tags_all": list(tags_all or []),
+            "tags_any": list(tags_any or []),
+        },
+    }
+
+
 def find_similar_nodes(
     storage: "GraphStorage",
     name: str,
