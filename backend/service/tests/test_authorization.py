@@ -394,8 +394,12 @@ class TestMutationScopeNarrowing:
         blocked = service.delete_nodes(["beta-1"], confirmed=True)
         assert blocked["deleted_node_ids"] == []
 
-        allowed = service.delete_nodes(["alpha-1"], confirmed=True)
-        assert allowed["deleted_node_ids"] == ["alpha-1"]
+    def test_delete_nodes_mixed_batch_deletes_only_in_scope(self, tmp_path):
+        service = self._alpha_scoped_service(tmp_path)
+
+        # The out-of-scope id is silently dropped; the in-scope id is deleted.
+        result = service.delete_nodes(["alpha-1", "beta-1"], confirmed=True)
+        assert result["deleted_node_ids"] == ["alpha-1"]
 
     def test_update_edge_outside_scope_is_not_found(self, tmp_path):
         service = self._alpha_scoped_service(tmp_path)
@@ -424,27 +428,37 @@ class TestMutationScopeNarrowing:
         blocked = service.delete_edges(["edge-2"], confirmed=True)
         assert blocked["deleted_edge_ids"] == []
 
-        allowed = service.delete_edges(["edge-1"], confirmed=True)
-        assert allowed["deleted_edge_ids"] == ["edge-1"]
+    def test_delete_edges_mixed_batch_deletes_only_in_scope(self, tmp_path):
+        service = self._alpha_scoped_service(tmp_path)
+
+        # edge-2 (alpha-1 -> beta-1) has an out-of-scope endpoint and is dropped;
+        # edge-1 (local-1 -> alpha-1) is fully in scope and deleted.
+        result = service.delete_edges(["edge-1", "edge-2"], confirmed=True)
+        assert result["deleted_edge_ids"] == ["edge-1"]
 
     def test_add_edge_into_out_of_scope_endpoint_is_refused(self, tmp_path):
         service = self._alpha_scoped_service(tmp_path)
 
-        blocked = service.add_edge("local-1", "beta-1", type="RELATES_TO")
+        blocked_target = service.add_edge("local-1", "beta-1", type="RELATES_TO")
+        blocked_source = service.add_edge("beta-1", "local-1", type="RELATES_TO")
         allowed = service.add_edge("local-1", "alpha-1", type="RELATES_TO")
 
-        assert blocked["success"] is False
-        assert "not found" in blocked["message"]
+        assert blocked_target["success"] is False
+        assert "not found" in blocked_target["message"]
+        assert blocked_source["success"] is False
+        assert "not found" in blocked_source["message"]
         assert allowed["success"] is True
 
-    def test_standalone_default_hook_mutates_graph_tagged_nodes(self, tmp_path):
-        # With the default (permissive, narrowing-disabled) hook, a node carrying
-        # an origin_graph_id is freely mutable/deletable — file-only/standalone
-        # behavior is unchanged by the mutation-scope enforcement above.
+    def test_standalone_default_hook_mutates_graph_tagged_entities(self, tmp_path):
+        # With the default (permissive, narrowing-disabled) hook, a node/edge
+        # touching an origin_graph_id-tagged node is freely mutable/deletable —
+        # file-only/standalone behavior is unchanged by the enforcement above.
         service = _make_saved_view_service(tmp_path, DefaultGraphAuthorizationHook())
 
         updated = service.update_node("beta-1", {"summary": "standalone edit"})
+        edge_updated = service.update_edge("edge-2", {"label": "standalone edge"})
         deleted = service.delete_nodes(["beta-1"], confirmed=True)
 
         assert updated["success"] is True
+        assert edge_updated["success"] is True
         assert deleted["deleted_node_ids"] == ["beta-1"]
