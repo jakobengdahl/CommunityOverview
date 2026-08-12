@@ -310,6 +310,18 @@ class ChatService:
                     if collect_responses is None:
                         collect_responses = True
 
+                    # Whether the CollectionResponse should be linked to every node
+                    # created or updated during a run. Consumed by the collection
+                    # response tool (via _collection_nodes), not by process_message,
+                    # so it is stored alongside the collection identity rather than
+                    # returned in the resolution tuple.
+                    link_results = meta.get("link_results", True)
+                    if link_results is None:
+                        link_results = True
+                    self._collection_nodes[short_name]["link_results"] = bool(
+                        link_results
+                    )
+
                     lines.append("")
                     if collect_responses:
                         lines.append(
@@ -364,8 +376,29 @@ class ChatService:
             return ("", {}, True)
         return (None, None, True)
 
-    def _make_enforced_tools(self, perms: dict) -> dict:
-        """Return a tools_map overlay that enforces node_type_permissions at call time."""
+    def _make_enforced_tools(self, perms: dict, touched: Optional[list] = None) -> dict:
+        """Return a tools_map overlay that enforces node_type_permissions at call time.
+
+        When ``touched`` is a list, the ids of nodes successfully created or updated by
+        the enforced tools are appended to it (and removed again on successful delete),
+        so a later save_collection_response call can link the response to every node the
+        run touched. Ids are only recorded for successful operations, and deletes prune
+        the list so it never references a node that no longer exists.
+        """
+
+        def _record(node_ids) -> None:
+            if touched is None:
+                return
+            for nid in node_ids:
+                if nid:
+                    touched.append(nid)
+
+        def _forget(node_ids) -> None:
+            if touched is None:
+                return
+            for nid in node_ids:
+                while nid in touched:
+                    touched.remove(nid)
 
         base_add = self._graph_service.add_nodes
         base_update = self._graph_service.update_node
@@ -411,7 +444,10 @@ class ChatService:
                         "Please only create node types that are listed as permitted."
                     ),
                 }
-            return base_add(nodes=nodes, edges=edges or [], **kwargs)
+            result = base_add(nodes=nodes, edges=edges or [], **kwargs)
+            if isinstance(result, dict) and result.get("success"):
+                _record(result.get("added_node_ids") or [])
+            return result
 
         def update_node_enforced(node_id, updates, **kwargs):
             node_type = _get_node_type(node_id)
@@ -427,7 +463,10 @@ class ChatService:
                     "success": False,
                     "error": f"Updating {node_type} nodes is not permitted in this collection.",
                 }
-            return base_update(node_id, updates, **kwargs)
+            result = base_update(node_id, updates, **kwargs)
+            if isinstance(result, dict) and result.get("success"):
+                _record([node_id])
+            return result
 
         def delete_nodes_enforced(node_ids, confirmed=False, **kwargs):
             forbidden_ids = []
@@ -452,7 +491,12 @@ class ChatService:
                     "success": False,
                     "error": "Cannot delete node(s) — " + "; ".join(errors) + ".",
                 }
-            return base_delete(node_ids=node_ids, confirmed=confirmed, **kwargs)
+            result = base_delete(node_ids=node_ids, confirmed=confirmed, **kwargs)
+            if isinstance(result, dict) and result.get("success"):
+                # Prune deleted nodes so the response is never linked to a node
+                # that no longer exists (an unresolvable edge would fail the save).
+                _forget(result.get("deleted_node_ids") or node_ids)
+            return result
 
         def delete_edges_enforced(edge_ids, confirmed=False, **kwargs):
             # Edge deletion is not permitted in collection mode because it can
@@ -471,7 +515,9 @@ class ChatService:
             "delete_edges": delete_edges_enforced,
         }
 
-    def _make_collection_response_tool(self, short_name: str) -> dict:
+    def _make_collection_response_tool(
+        self, short_name: str, touched: Optional[list] = None
+    ) -> dict:
         """Return a tools_map overlay with a save_collection_response bound to this collection.
 
         The response is stored as a CollectionResponse node whose metadata carries a flat
@@ -479,10 +525,16 @@ class ChatService:
         can later be aggregated into simple statistics. The collection reference lives in
         metadata (authoritative for aggregation); an edge to the collection node is added
         best-effort for graph navigation.
+
+        When the collection's ``link_results`` setting is enabled (the default) and
+        ``touched`` lists the ids of nodes created or updated during this run, the response
+        node is also linked (RELATES_TO) to every one of those nodes, so the outcome of a
+        submission can be reviewed at a glance.
         """
         info = self._collection_nodes.get(short_name) or {}
         collection_id = info.get("id")
         collection_name = info.get("name") or short_name
+        link_results = info.get("link_results", True)
 
         def save_collection_response(
             answers, respondent_label=None, form_title=None, **kwargs
@@ -537,8 +589,30 @@ class ChatService:
                 },
             }
             edges = []
+            seen_targets = set()
             if collection_id:
                 edges.append({"source": node["name"], "target": collection_id})
+                seen_targets.add(collection_id)
+
+            # Link the response to every node this run created or updated. Source is
+            # the response node's name (resolved within this same add_nodes call);
+            # targets are existing node ids. Dedupe so a node created-then-updated,
+            # or the collection node itself, is linked at most once.
+            linked_node_ids = []
+            if link_results and touched:
+                for tid in touched:
+                    if not tid or tid in seen_targets:
+                        continue
+                    seen_targets.add(tid)
+                    linked_node_ids.append(tid)
+                    edges.append(
+                        {
+                            "source": node["name"],
+                            "target": tid,
+                            "type": "RELATES_TO",
+                            "label": "collected",
+                        }
+                    )
 
             result = self._graph_service.add_nodes(nodes=[node], edges=edges)
             if result.get("success"):
@@ -548,6 +622,7 @@ class ChatService:
                     "success": True,
                     "response_id": added[0] if added else None,
                     "answer_count": len(normalized),
+                    "linked_node_count": len(linked_node_ids),
                 }
             return {
                 "success": False,
@@ -669,8 +744,13 @@ class ChatService:
             # collection_perms is None when no collection is active; {} means a collection
             # was found but has no node_type_permissions configured — enforce even then
             # so the enforced tool wrappers (e.g. delete_edges block) apply regardless.
+            # touched_nodes accumulates ids created/updated by the enforced tools within
+            # this single agentic loop, so save_collection_response can link the response
+            # to them. Scoped per request — the frontend does not replay prior tool
+            # results, so a collection run's writes and its save land in the same call.
+            touched_nodes = [] if collection_perms is not None else None
             tools_override = (
-                self._make_enforced_tools(collection_perms)
+                self._make_enforced_tools(collection_perms, touched=touched_nodes)
                 if collection_perms is not None
                 else None
             )
@@ -686,7 +766,9 @@ class ChatService:
             ):
                 tools_override = {
                     **(tools_override or {}),
-                    **self._make_collection_response_tool(collection_short_name),
+                    **self._make_collection_response_tool(
+                        collection_short_name, touched=touched_nodes
+                    ),
                 }
 
             visualization_context = self._format_visualization_context(

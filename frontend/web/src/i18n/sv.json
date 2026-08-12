@@ -369,5 +369,9 @@
     "custom_color": "Egen färg",
     "color": "Färg",
     "animate": "Animera (puls)"
+  },
+  "active_data_collection": {
+    "link_results_label": "Länka skapade och uppdaterade noder till svaret",
+    "link_results_help": "När detta är aktiverat länkas varje inlämnings svarsnod till alla noder som assistenten skapade eller uppdaterade under insamlingen, så att du enkelt kan granska resultatet av en inlämning."
   }
 }

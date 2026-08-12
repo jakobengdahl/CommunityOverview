@@ -369,5 +369,9 @@
     "custom_color": "Custom colour",
     "color": "Colour",
     "animate": "Animate (pulse)"
+  },
+  "active_data_collection": {
+    "link_results_label": "Link created and updated nodes to the response",
+    "link_results_help": "When enabled, each submission's response node is linked to every node the assistant created or updated during that collection run, so you can review the outcome of a submission at a glance."
   }
 }
