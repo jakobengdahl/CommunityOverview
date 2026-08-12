@@ -74,11 +74,19 @@ def _extract_trigger_token(
     return query_token
 
 
+class AutoAddAgentRequest(BaseModel):
+    """Body of a create-auto-add-agent call."""
+
+    node_types: list[str] = Field(default_factory=list)
+    keywords: list[str] = Field(default_factory=list)
+
+
 def register_session_stream(
     app: FastAPI,
     session_registry: SessionRegistry,
     session_manager=None,
     graph_service=None,
+    auto_add_registry=None,
 ) -> None:
     """Register the session-registry startup lifecycle and the SSE stream route."""
 
@@ -92,6 +100,12 @@ def register_session_stream(
                 evicted = session_registry.cleanup_stale()
                 if evicted:
                     logger.debug("session_registry: evicted %d stale sessions", evicted)
+                # Drop auto-add agents whose session is no longer live, so a
+                # session-scoped agent dies with its session (bounded memory).
+                if auto_add_registry is not None:
+                    auto_add_registry.prune_to_sessions(
+                        session_registry._sessions.keys()
+                    )
 
         app.state.session_cleanup_task = asyncio.create_task(_periodic_cleanup())
 
@@ -257,3 +271,97 @@ def register_session_stream(
                 pass
 
         return JSONResponse({"success": True, "command_id": command["command_id"]})
+
+    # ------------------------------------------------------------------
+    # Session-scoped auto-add agents
+    # ------------------------------------------------------------------
+    #
+    # An auto-add agent watches for newly created nodes matching a pattern and
+    # adds each match to this session's live view (additively). It is bound to
+    # this one session: it only pushes here and is pruned when the session ends.
+    # Creation goes through the graph authorization/mutate seam like the pulse
+    # trigger-token endpoint, so the hosted layer can bind it to a real actor;
+    # the open-core default is permissive. It never mutates the graph.
+
+    def _auto_add_authorize_mutate(request: Request):
+        """Return a denial JSONResponse if a mutating auto-add call is refused."""
+        if graph_service is None:
+            return None
+        with use_request_authorization(headers=request.headers):
+            denied = authorize_graph_access(
+                graph_service.authorization_hook,
+                action=GRAPH_ACTION_MUTATE,
+                target="session_auto_add_agent",
+            )
+        if denied:
+            return JSONResponse(denied, status_code=403)
+        return None
+
+    @app.post("/sessions/{session_id}/auto-add-agents")
+    async def create_auto_add_agent(
+        session_id: str, body: AutoAddAgentRequest, request: Request
+    ):
+        """Create a session-scoped auto-add agent on a live session."""
+        if auto_add_registry is None:
+            return JSONResponse(
+                {"error": "auto-add agents are not available"}, status_code=503
+            )
+        if not session_registry.is_valid_session_id(session_id):
+            return JSONResponse({"error": "invalid session_id format"}, status_code=400)
+
+        denied = _auto_add_authorize_mutate(request)
+        if denied is not None:
+            return denied
+        if _rate_limited(request):
+            return JSONResponse({"error": "rate limit exceeded"}, status_code=429)
+        if (
+            session_id not in session_registry._sessions
+            and session_registry.session_count >= SESSION_MAX_COUNT
+        ):
+            return JSONResponse({"error": "too many sessions"}, status_code=503)
+
+        from backend.core.session_auto_add import AutoAddRuleError
+
+        try:
+            rule = auto_add_registry.add_rule(
+                session_id, node_types=body.node_types, keywords=body.keywords
+            )
+        except AutoAddRuleError as exc:
+            return JSONResponse({"error": str(exc)}, status_code=400)
+        # Materialise the push session so the prune keeps this agent while live.
+        session_registry.get_or_create(session_id)
+        return JSONResponse({"success": True, "agent": rule.to_dict()})
+
+    @app.get("/sessions/{session_id}/auto-add-agents")
+    async def list_auto_add_agents(session_id: str, request: Request):
+        """List the auto-add agents configured on a session."""
+        if auto_add_registry is None:
+            return JSONResponse(
+                {"error": "auto-add agents are not available"}, status_code=503
+            )
+        if not session_registry.is_valid_session_id(session_id):
+            return JSONResponse({"error": "invalid session_id format"}, status_code=400)
+        if _rate_limited(request):
+            return JSONResponse({"error": "rate limit exceeded"}, status_code=429)
+        agents = [r.to_dict() for r in auto_add_registry.list_rules(session_id)]
+        return JSONResponse({"success": True, "agents": agents})
+
+    @app.delete("/sessions/{session_id}/auto-add-agents/{agent_id}")
+    async def delete_auto_add_agent(session_id: str, agent_id: str, request: Request):
+        """Remove an auto-add agent from a session."""
+        if auto_add_registry is None:
+            return JSONResponse(
+                {"error": "auto-add agents are not available"}, status_code=503
+            )
+        if not session_registry.is_valid_session_id(session_id):
+            return JSONResponse({"error": "invalid session_id format"}, status_code=400)
+
+        denied = _auto_add_authorize_mutate(request)
+        if denied is not None:
+            return denied
+        if _rate_limited(request):
+            return JSONResponse({"error": "rate limit exceeded"}, status_code=429)
+
+        if not auto_add_registry.remove_rule(session_id, agent_id):
+            return JSONResponse({"error": "auto-add agent not found"}, status_code=404)
+        return JSONResponse({"success": True})
