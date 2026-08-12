@@ -12,6 +12,7 @@ defaulting to config/default/schema_config.json.
 """
 
 import os
+import re
 import json
 import logging
 from typing import Dict, List, Optional, Any
@@ -263,6 +264,71 @@ class RuntimeMetadataConfig(BaseModel):
     enabled_extensions: List[str] = Field(default_factory=list)
 
 
+class RestInterfaceFilterConfig(BaseModel):
+    """Tag/subtype filter applied to a custom REST interface.
+
+    Semantics (all independent, combined with AND across the three fields):
+    - ``tags_all``: the entity must carry *every* listed tag (AND).
+    - ``tags_any``: the entity must carry *at least one* listed tag (OR).
+    - ``subtypes_any``: the node must carry at least one listed subtype (OR).
+      Ignored for edge interfaces (edges have no subtypes).
+
+    An empty list disables that dimension. All empty = no filtering.
+    """
+
+    tags_all: List[str] = Field(default_factory=list)
+    tags_any: List[str] = Field(default_factory=list)
+    subtypes_any: List[str] = Field(default_factory=list)
+
+
+class RestInterfaceConfig(BaseModel):
+    """A single config-driven dedicated REST interface for one node/edge type.
+
+    Exposes one node type (or edge type) at its own GET endpoint, bypassing the
+    generic node/edge REST interface, with optional tag/subtype filters. The
+    endpoint honours the same read authorization and graph-scope narrowing as
+    the generic interface — it never returns more than a generic search would.
+
+    ``path`` is the URL segment appended to the router prefix (e.g. ``actors``
+    served at ``/api/actors``). It is normalised (leading/trailing slashes
+    stripped) and validated against a conservative pattern.
+    """
+
+    path: str
+    entity: str = "node"  # "node" | "edge"
+    node_type: str = ""
+    edge_type: str = ""
+    enabled: bool = True
+    limit: int = Field(default=500, ge=1, le=5000)
+    filters: RestInterfaceFilterConfig = Field(
+        default_factory=RestInterfaceFilterConfig
+    )
+
+    @field_validator("path")
+    @classmethod
+    def _validate_path(cls, v: str) -> str:
+        normalized = v.strip().strip("/")
+        if not normalized:
+            raise ValueError("rest_interfaces[].path must be a non-empty URL segment")
+        if not re.fullmatch(r"[a-z0-9][a-z0-9/_-]*", normalized):
+            raise ValueError(
+                "rest_interfaces[].path must be lowercase alphanumeric with "
+                "'-', '_' or '/' separators (e.g. 'actors' or 'people/actors'): "
+                f"got {v!r}"
+            )
+        return normalized
+
+    @field_validator("entity")
+    @classmethod
+    def _validate_entity(cls, v: str) -> str:
+        entity = (v or "").strip().lower()
+        if entity not in {"node", "edge"}:
+            raise ValueError(
+                f"rest_interfaces[].entity must be 'node' or 'edge', got {v!r}"
+            )
+        return entity
+
+
 class PresentationConfig(BaseModel):
     """Presentation configuration for UI and prompts."""
 
@@ -293,6 +359,9 @@ class SchemaFileConfig(BaseModel):
     presentation: PresentationConfig = Field(default_factory=PresentationConfig)
     runtime: RuntimeMetadataConfig = Field(default_factory=RuntimeMetadataConfig)
     system: SystemConfig = Field(default_factory=SystemConfig)
+    # Config-driven dedicated REST interfaces per node/edge type (open core).
+    # Empty by default — only the generic node/edge REST interface is exposed.
+    rest_interfaces: List[RestInterfaceConfig] = Field(default_factory=list)
     # Named LLM/model profiles across providers (see docs/PROFILES.md). Empty
     # by default — that is the legacy single-provider mode (LLM_PROVIDER /
     # LLM_MODEL / OPENAI_API_KEY / ANTHROPIC_API_KEY environment variables).
@@ -643,6 +712,16 @@ def get_request_scope_info() -> Dict[str, Any]:
 def get_request_graph_selection_info() -> Dict[str, Any]:
     """Get the default public graph/workspace selection summary for this deployment."""
     return get_public_request_graph_selection_context()
+
+
+def get_rest_interfaces() -> List[RestInterfaceConfig]:
+    """Get the configured custom REST interfaces (open core).
+
+    Returns an empty list when none are configured, in which case only the
+    generic node/edge REST interface is exposed.
+    """
+    loader = _get_loader()
+    return list(loader.config.rest_interfaces)
 
 
 def get_node_type_names() -> List[str]:

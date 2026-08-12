@@ -19,6 +19,7 @@ Usage:
 
 import asyncio
 import json
+import logging
 from typing import List, Optional, Dict, Any
 from fastapi import APIRouter, HTTPException, Query, Body, Request, Path
 from fastapi.encoders import jsonable_encoder
@@ -26,9 +27,12 @@ from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, Field
 from pydantic import ValidationError as PydanticValidationError
 
+from backend.config.config_loader import RestInterfaceConfig, get_rest_interfaces
 from backend.runtime.authorization import use_request_authorization
 
 from .service import GraphService
+
+logger = logging.getLogger(__name__)
 
 
 def _lookup_rate_key(http_request: Request) -> str:
@@ -842,11 +846,103 @@ def _register_export_endpoints(router: APIRouter, service: GraphService) -> None
         return result
 
 
+def _register_custom_interface_endpoints(
+    router: APIRouter,
+    service: GraphService,
+    interfaces: List[RestInterfaceConfig],
+) -> None:
+    """Register config-driven dedicated REST interfaces per node/edge type.
+
+    Each enabled interface gets its own ``GET /{path}`` route that bypasses the
+    generic node/edge interface and returns only entities of the configured
+    type, narrowed by the configured tag/subtype filters. The routes delegate to
+    ``GraphService.list_typed_nodes`` / ``list_typed_edges``, which apply the
+    same read authorization and graph-scope narrowing as the generic interface,
+    so a dedicated endpoint never exposes more than a generic search would.
+    """
+    seen_paths: set = set()
+    for interface in interfaces:
+        if not interface.enabled:
+            continue
+        if interface.path in seen_paths:
+            logger.warning(
+                "Duplicate rest_interfaces path '%s' — skipping the later entry",
+                interface.path,
+            )
+            continue
+
+        if interface.entity == "node":
+            if not interface.node_type:
+                logger.warning(
+                    "rest_interfaces entry for path '%s' has entity 'node' but no "
+                    "node_type — skipping",
+                    interface.path,
+                )
+                continue
+        else:  # edge
+            if not interface.edge_type:
+                logger.warning(
+                    "rest_interfaces entry for path '%s' has entity 'edge' but no "
+                    "edge_type — skipping",
+                    interface.path,
+                )
+                continue
+
+        seen_paths.add(interface.path)
+        _register_single_custom_interface(router, service, interface)
+
+
+def _register_single_custom_interface(
+    router: APIRouter,
+    service: GraphService,
+    interface: RestInterfaceConfig,
+) -> None:
+    """Register one dedicated interface route.
+
+    A dedicated factory (rather than an inline closure in the loop) binds
+    ``interface`` per route, avoiding the late-binding pitfall where every
+    handler would otherwise close over the loop's final value.
+    """
+    filters = interface.filters
+
+    if interface.entity == "node":
+
+        @router.get(f"/{interface.path}", name=f"custom_interface_{interface.path}")
+        async def custom_node_interface(request: Request) -> Dict[str, Any]:
+            with use_request_authorization(headers=request.headers):
+                result = service.list_typed_nodes(
+                    node_type=interface.node_type,
+                    tags_all=filters.tags_all,
+                    tags_any=filters.tags_any,
+                    subtypes_any=filters.subtypes_any,
+                    limit=interface.limit,
+                )
+            _raise_for_access_denied(result)
+            return result
+
+    else:
+
+        @router.get(f"/{interface.path}", name=f"custom_interface_{interface.path}")
+        async def custom_edge_interface(request: Request) -> Dict[str, Any]:
+            with use_request_authorization(headers=request.headers):
+                result = service.list_typed_edges(
+                    edge_type=interface.edge_type,
+                    tags_all=filters.tags_all,
+                    tags_any=filters.tags_any,
+                    limit=interface.limit,
+                )
+            _raise_for_access_denied(result)
+            return result
+
+
 # ==================== Router Factory ====================
 
 
 def create_rest_router(
-    service: GraphService, prefix: str = "", session_manager=None
+    service: GraphService,
+    prefix: str = "",
+    session_manager=None,
+    rest_interfaces: Optional[List[RestInterfaceConfig]] = None,
 ) -> APIRouter:
     """
     Create a FastAPI router with all graph operation endpoints.
@@ -857,6 +953,9 @@ def create_rest_router(
         session_manager: Optional SessionManager enabling shared-session
             endpoints (/sessions CRUD + ops + stream). When None, those routes
             are not registered.
+        rest_interfaces: Optional explicit list of config-driven dedicated REST
+            interfaces. When None, they are read from the loaded schema config
+            (``config_loader.get_rest_interfaces()``).
 
     Returns:
         Configured APIRouter
@@ -873,6 +972,12 @@ def create_rest_router(
     _register_export_endpoints(router, service)
     if session_manager is not None:
         _register_session_endpoints(router, service, session_manager)
+
+    # Register config-driven dedicated interfaces after the fixed routes so a
+    # fixed route always wins if an operator picks a colliding path.
+    if rest_interfaces is None:
+        rest_interfaces = get_rest_interfaces()
+    _register_custom_interface_endpoints(router, service, rest_interfaces)
 
     @router.get("/collect/{short_name}")
     async def get_collect_config(
