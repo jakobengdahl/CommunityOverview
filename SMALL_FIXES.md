@@ -19,6 +19,13 @@ Effort scale: XS = single-line fix · S = up to ~30 lines / one file · M = mult
 
 ---
 
+### [2026-08-12] ChatPanel markdown lacks table styling that the kiosk now has
+
+- **File(s):** `frontend/web/src/components/ChatPanel.css:198-232` (markdown block); compare `frontend/web/src/components/CollectKioskView.css` table rules
+- **Context:** Discovered during `claude/kiosk-rich-text` (PR #317 review). Both the main Graph assistant and the kiosk now render GFM tables via the shared `MarkdownMessage` component, but only the kiosk styles `table`/`th`/`td`. ChatPanel tables fall back to unstyled browser defaults.
+- **Issue:** Minor visual inconsistency — assistant tables render borderless/cramped in ChatPanel while looking correct in the kiosk. Not a regression (pre-existing: ChatPanel never styled tables). Add matching `.message-content table/th/td` rules to `ChatPanel.css` for consistency.
+- **Effort:** XS
+
 ### [2026-08-11] Node trail records a duplicate 'visited' when jumping to an older row
 
 - **File(s):** `frontend/web/src/store/graphStore.js` (`setFocusNodeId`); `frontend/web/src/components/NodeHistoryPanel.jsx`

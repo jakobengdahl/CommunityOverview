@@ -2,6 +2,7 @@ import { useState, useEffect, useRef, useCallback } from 'react';
 import { FunnelFill, SendFill, ArrowRightCircleFill } from 'react-bootstrap-icons';
 import * as api from '../services/api';
 import CollectionForm from './CollectionForm';
+import MarkdownMessage from './MarkdownMessage';
 import './CollectKioskView.css';
 
 /** Extract a present_form spec from a chat response, or null if none. */
@@ -353,7 +354,13 @@ function CollectKioskView({ shortName }) {
           .map((msg) => (
             <div key={msg.id} className={`kiosk-message kiosk-message-${msg.role}`}>
               <div className="kiosk-message-bubble">
-                <div className="kiosk-message-content">{msg.content}</div>
+                <div className="kiosk-message-content">
+                  {msg.role === 'assistant' ? (
+                    <MarkdownMessage>{msg.content}</MarkdownMessage>
+                  ) : (
+                    msg.content
+                  )}
+                </div>
                 {msg.form && (
                   <CollectionForm
                     form={msg.form}
