@@ -991,6 +991,24 @@ class ChatProcessor:
             },
         ]
 
+    def _select_tool_definitions(
+        self, tool_allowlist: Optional[List[str]]
+    ) -> List[Dict]:
+        """
+        Return the tool definitions advertised to the LLM for this request.
+
+        Mirrors the AIAgent tool-permission model (backend/agents/governance/
+        gate.py): when ``tool_allowlist`` is unset/empty the full tool set is
+        offered (unrestricted); when it is a non-empty list only tools whose
+        name is in the list are advertised. This is the "hide from the LLM"
+        layer — execution is independently gated in _handle_tool_use so a
+        disallowed tool is blocked even if the model calls it anyway.
+        """
+        if not tool_allowlist:
+            return self.tool_definitions
+        allowed = set(tool_allowlist)
+        return [t for t in self.tool_definitions if t.get("name") in allowed]
+
     def _resolve_llm_provider(
         self,
         api_key: Optional[str],
@@ -1050,6 +1068,7 @@ class ChatProcessor:
         skills_override: str = None,
         tools_override: Dict[str, Callable] = None,
         visualization_context: str = None,
+        tool_allowlist: Optional[List[str]] = None,
     ) -> Dict:
         """
         Process a message history, call LLM, handle tools, return final response.
@@ -1071,6 +1090,11 @@ class ChatProcessor:
             visualization_context: Optional snapshot of the browser's current canvas state
                 (visible node IDs, selected nodes). Appended last so it is the freshest
                 context and helps the AI decide between add vs. replace actions.
+            tool_allowlist: Optional explicit list of tool names the assistant may
+                use for this request. Unset/empty means unrestricted (all tools).
+                When set, only listed tools are advertised to the LLM and executed;
+                any other tool is blocked server-side. Mirrors the AIAgent
+                tool-permission model (used by the collection kiosk).
         """
         try:
             llm_provider, error = self._resolve_llm_provider(
@@ -1096,11 +1120,16 @@ class ChatProcessor:
                     f"{active_system_prompt}\n\n{visualization_context}"
                 )
 
+            # Tools advertised to the LLM: filtered by the per-request allowlist
+            # (unrestricted when the allowlist is unset). Execution is gated
+            # independently in _handle_tool_use.
+            active_tool_definitions = self._select_tool_definitions(tool_allowlist)
+
             # First call to LLM
             response = llm_provider.create_completion(
                 messages=messages,
                 system_prompt=active_system_prompt,
-                tools=self.tool_definitions,
+                tools=active_tool_definitions,
                 max_tokens=4096,
             )
 
@@ -1112,6 +1141,8 @@ class ChatProcessor:
                     llm_provider,
                     system_prompt=active_system_prompt,
                     tools_override=tools_override,
+                    tool_allowlist=tool_allowlist,
+                    active_tool_definitions=active_tool_definitions,
                 )
 
             # Just text response
@@ -1151,6 +1182,8 @@ class ChatProcessor:
         tools_override: Dict[str, Callable] = None,
         pending_form=None,
         pending_extra_actions=None,
+        tool_allowlist: Optional[List[str]] = None,
+        active_tool_definitions: List[Dict] = None,
     ) -> Dict:
         """Handle tool use with support for tool chaining and result aggregation.
 
@@ -1172,6 +1205,8 @@ class ChatProcessor:
         active_system_prompt = (
             system_prompt if system_prompt is not None else self.system_prompt
         )
+        if active_tool_definitions is None:
+            active_tool_definitions = self._select_tool_definitions(tool_allowlist)
         effective_tools = {**self.tools_map, **(tools_override or {})}
 
         # Find ALL tool_use blocks (LLM can request multiple tools in parallel)
@@ -1200,6 +1235,25 @@ class ChatProcessor:
             last_tool_name = tool_name
 
             logger.info(f"Executing tool: {tool_name} with input: {tool_input}")
+
+            # Server-side allowlist gate — mirrors AIAgent AutonomyGate.wrap
+            # (backend/agents/governance/gate.py). A tool outside the request's
+            # allowlist is blocked before any execution, including the pure-action
+            # special cases below, so enforcement never depends on the LLM only
+            # seeing the filtered tool list.
+            if tool_allowlist is not None and tool_name not in tool_allowlist:
+                tool_results.append(
+                    {
+                        "tool_use_id": tool_id,
+                        "result": {
+                            "error": (
+                                f"Tool '{tool_name}' is not in this collection's "
+                                f"tool allowlist and was blocked."
+                            )
+                        },
+                    }
+                )
+                continue
 
             # Execute the tool
             tool_result = None
@@ -1332,7 +1386,7 @@ class ChatProcessor:
         final_response = provider.create_completion(
             messages=messages,
             system_prompt=active_system_prompt,
-            tools=self.tool_definitions,
+            tools=active_tool_definitions,
             max_tokens=4096,
         )
 
@@ -1349,6 +1403,8 @@ class ChatProcessor:
                 tools_override=tools_override,
                 pending_form=pending_form,
                 pending_extra_actions=pending_extra_actions,
+                tool_allowlist=tool_allowlist,
+                active_tool_definitions=active_tool_definitions,
             )
 
         # Extract text from response (handle multiple text blocks)

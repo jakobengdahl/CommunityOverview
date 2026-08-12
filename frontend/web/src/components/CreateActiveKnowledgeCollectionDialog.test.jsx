@@ -85,4 +85,73 @@ describe('CreateActiveKnowledgeCollectionDialog', () => {
     });
     expect(onClose).toHaveBeenCalledTimes(1);
   });
+
+  it('saves an empty tool_allowlist (unrestricted) by default', () => {
+    const onSave = vi.fn();
+    const state = { schema: { node_types: { Actor: {} } } };
+    mockUseGraphStore.mockImplementation((selector) => selector(state));
+
+    render(<CreateActiveKnowledgeCollectionDialog onClose={vi.fn()} onSave={onSave} />);
+
+    fireEvent.change(screen.getByLabelText('Name *'), { target: { value: 'My collection' } });
+    fireEvent.click(screen.getByRole('button', { name: 'Create Collection' }));
+
+    expect(onSave).toHaveBeenCalledTimes(1);
+    expect(onSave.mock.calls[0][0].metadata.tool_allowlist).toEqual([]);
+  });
+
+  it('saves only the checked tools when restriction is enabled', () => {
+    const onSave = vi.fn();
+    const state = { schema: { node_types: { Actor: {} } } };
+    mockUseGraphStore.mockImplementation((selector) => selector(state));
+
+    render(<CreateActiveKnowledgeCollectionDialog onClose={vi.fn()} onSave={onSave} />);
+
+    fireEvent.change(screen.getByLabelText('Name *'), { target: { value: 'My collection' } });
+
+    // Enable restriction — the tool checklist appears (all checked by default)
+    fireEvent.click(screen.getByRole('checkbox', { name: /Restrict which tools/ }));
+    // Uncheck one tool
+    fireEvent.click(screen.getByRole('checkbox', { name: 'Add nodes' }));
+
+    fireEvent.click(screen.getByRole('button', { name: 'Create Collection' }));
+
+    const saved = onSave.mock.calls[0][0].metadata.tool_allowlist;
+    expect(saved).toContain('search_graph');
+    expect(saved).not.toContain('add_nodes');
+  });
+
+  it('loads an existing tool_allowlist in edit mode', () => {
+    const onSave = vi.fn();
+    const state = { schema: { node_types: { Actor: {} } } };
+    mockUseGraphStore.mockImplementation((selector) => selector(state));
+
+    render(
+      <CreateActiveKnowledgeCollectionDialog
+        onClose={vi.fn()}
+        onSave={onSave}
+        initialData={{
+          node: {
+            id: 'akc-1',
+            name: 'Existing',
+            metadata: {
+              short_name: 'existing',
+              tool_allowlist: ['search_graph', 'present_form'],
+            },
+          },
+        }}
+      />
+    );
+
+    // Restriction is on and reflects the stored selection
+    expect(screen.getByRole('checkbox', { name: /Restrict which tools/ }).checked).toBe(true);
+    expect(screen.getByRole('checkbox', { name: 'Search the graph' }).checked).toBe(true);
+    expect(screen.getByRole('checkbox', { name: 'Add nodes' }).checked).toBe(false);
+
+    fireEvent.click(screen.getByRole('button', { name: 'Save Changes' }));
+    expect(onSave.mock.calls[0][0].metadata.tool_allowlist).toEqual([
+      'search_graph',
+      'present_form',
+    ]);
+  });
 });

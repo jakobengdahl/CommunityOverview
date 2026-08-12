@@ -34,6 +34,7 @@ class MockLLMProvider:
         self.call_count = 0
         self.received_messages: List[List[Dict]] = []
         self.received_system_prompts: List[str] = []
+        self.received_tools: List[List[Dict]] = []
 
     def create_completion(
         self,
@@ -45,6 +46,7 @@ class MockLLMProvider:
         """Return mock response with optional tool calls."""
         self.received_messages.append(messages)
         self.received_system_prompts.append(system_prompt)
+        self.received_tools.append(tools)
         self.call_count += 1
 
         # First call returns tool calls, subsequent calls return text
@@ -73,6 +75,7 @@ class MockLLMProvider:
         self.call_count = 0
         self.received_messages = []
         self.received_system_prompts = []
+        self.received_tools = []
 
 
 class MockSentenceTransformer:

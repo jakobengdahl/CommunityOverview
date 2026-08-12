@@ -460,17 +460,20 @@ class TestExpertAgentSkills:
 # ---------------------------------------------------------------------------
 
 
-def _make_akc_node(short_name, perms):
+def _make_akc_node(short_name, perms, tool_allowlist=None):
     """Build a minimal ActiveKnowledgeCollection node dict as returned by search_graph."""
+    metadata = {
+        "short_name": short_name,
+        "prompt": "Collect test data.",
+        "node_type_permissions": perms,
+    }
+    if tool_allowlist is not None:
+        metadata["tool_allowlist"] = tool_allowlist
     return {
         "id": f"akc-{short_name}",
         "name": short_name,
         "type": "ActiveKnowledgeCollection",
-        "metadata": {
-            "short_name": short_name,
-            "prompt": "Collect test data.",
-            "node_type_permissions": perms,
-        },
+        "metadata": metadata,
     }
 
 
@@ -761,6 +764,115 @@ class TestMakeEnforcedTools:
         assert result["total"] == 0, (
             "Forbidden node type was created despite permission enforcement"
         )
+
+
+class TestToolAllowlist:
+    """Tests for the per-collection tool allowlist (kiosk assistant tool access)."""
+
+    def test_normalize_tool_allowlist(self):
+        """Falsy/invalid allowlists normalize to None (unrestricted); lists are cleaned."""
+        from backend.ui import ChatService
+
+        assert ChatService._normalize_tool_allowlist(None) is None
+        assert ChatService._normalize_tool_allowlist([]) is None
+        assert ChatService._normalize_tool_allowlist("search_graph") is None
+        assert ChatService._normalize_tool_allowlist([1, "", None]) is None
+        assert ChatService._normalize_tool_allowlist(
+            ["search_graph", "", "present_form", 3]
+        ) == ["search_graph", "present_form"]
+
+    def test_allowlist_filters_advertised_tools(self, chat_service):
+        """Only allowlisted tools are advertised to the LLM when an allowlist is set."""
+        service, mock_llm = chat_service
+        akc_node = _make_akc_node(
+            "coll", ACTOR_ONLY_PERMS, tool_allowlist=["search_graph", "present_form"]
+        )
+        mock_llm.mock_text_response = "hi"
+
+        with patch.object(
+            service._graph_service,
+            "search_graph",
+            return_value={"nodes": [akc_node], "edges": [], "total": 1},
+        ):
+            service.process_message(
+                messages=[{"role": "user", "content": "hi"}],
+                collection_short_name="coll",
+            )
+
+        advertised = {t["name"] for t in mock_llm.received_tools[0]}
+        assert advertised == {"search_graph", "present_form"}
+
+    def test_no_allowlist_advertises_all_tools(self, chat_service):
+        """A collection without a tool allowlist keeps the full tool set (backward compatible)."""
+        service, mock_llm = chat_service
+        akc_node = _make_akc_node("coll", ACTOR_ONLY_PERMS)  # no tool_allowlist
+        mock_llm.mock_text_response = "hi"
+
+        with patch.object(
+            service._graph_service,
+            "search_graph",
+            return_value={"nodes": [akc_node], "edges": [], "total": 1},
+        ):
+            service.process_message(
+                messages=[{"role": "user", "content": "hi"}],
+                collection_short_name="coll",
+            )
+
+        advertised = mock_llm.received_tools[0]
+        assert advertised == service._processor.tool_definitions
+        assert len(advertised) > 2
+
+    def test_allowlist_blocks_unlisted_tool_server_side(self, chat_service):
+        """A tool outside the allowlist is blocked and never executed, even when
+        node-type permissions would otherwise allow it (server-side enforcement,
+        not just hiding the tool from the LLM)."""
+        service, mock_llm = chat_service
+
+        # Allowlist permits only search_graph; node-type perms WOULD allow creating
+        # an Actor — proving the block comes from the tool allowlist, not perms.
+        akc_node = _make_akc_node(
+            "coll", ACTOR_ONLY_PERMS, tool_allowlist=["search_graph"]
+        )
+        mock_llm.mock_tool_calls = [
+            {
+                "name": "add_nodes",
+                "input": {
+                    "nodes": [{"type": "Actor", "name": "Sneaky Agency"}],
+                    "edges": [],
+                },
+            }
+        ]
+        mock_llm.mock_text_response = "Blocked."
+
+        with patch.object(
+            service._graph_service,
+            "search_graph",
+            return_value={"nodes": [akc_node], "edges": [], "total": 1},
+        ):
+            result = service.process_message(
+                messages=[{"role": "user", "content": "add an actor"}],
+                collection_short_name="coll",
+            )
+
+        # The tool was blocked before execution: no Actor node reached the graph.
+        found = service._graph_service.search_graph(query="Sneaky Agency")
+        assert found["total"] == 0, (
+            "Allowlisted-out tool was executed despite the block"
+        )
+
+        # The block surfaced as a tool error result fed back to the LLM.
+        tool_result = result.get("toolResult") or {}
+        assert "allowlist" in str(tool_result).lower()
+
+    def test_allowlist_ignored_outside_collection_mode(self, chat_service):
+        """Without a collection_short_name the assistant is unrestricted (all tools)."""
+        service, mock_llm = chat_service
+        mock_llm.mock_text_response = "hi"
+
+        service.process_message(messages=[{"role": "user", "content": "hi"}])
+
+        advertised = mock_llm.received_tools[0]
+        assert advertised == service._processor.tool_definitions
 
 
 class TestVisualizationContext:
