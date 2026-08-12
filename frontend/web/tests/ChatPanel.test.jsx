@@ -609,6 +609,37 @@ describe('ChatPanel', () => {
       expect(updateSpy).toHaveBeenCalledWith([ACTOR], []);
       expect(addSpy).not.toHaveBeenCalled();
     });
+
+    it('an empty replace_visualization clears the view and renders nothing', async () => {
+      const { updateSpy, clearSpy } = setupSpies();
+      await send({ action: 'replace_visualization', nodes: [], edges: [] });
+      expect(clearSpy).toHaveBeenCalledTimes(1);
+      expect(updateSpy).not.toHaveBeenCalled();
+    });
+
+    it('update_in_visualization merges the edited node in place, never clears', async () => {
+      const addSpy = vi.fn();
+      const updateSpy = vi.fn();
+      const clearSpy = vi.fn();
+      useGraphStore.setState({
+        nodes: [{ id: 'a1', type: 'Actor', name: 'Old name' }],
+        edges: [],
+        addNodesToVisualization: addSpy,
+        updateVisualization: updateSpy,
+        clearVisualization: clearSpy,
+      });
+      await send({
+        action: 'update_in_visualization',
+        nodes: [{ id: 'a1', type: 'Actor', name: 'New name' }],
+        edges: [],
+      });
+      expect(updateSpy).toHaveBeenCalledTimes(1);
+      const [nodesArg] = updateSpy.mock.calls[0];
+      expect(nodesArg.map((n) => n.id)).toEqual(['a1']);
+      expect(nodesArg.find((n) => n.id === 'a1').name).toBe('New name');
+      expect(addSpy).not.toHaveBeenCalled();
+      expect(clearSpy).not.toHaveBeenCalled();
+    });
   });
 
   describe('Collection form', () => {

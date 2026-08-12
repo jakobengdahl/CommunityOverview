@@ -162,6 +162,18 @@ describe('useToolResultCommands.applyToolResultCommand', () => {
     expect(store().addNodesToVisualization).not.toHaveBeenCalled();
   });
 
+  it('an empty replace_visualization clears the view and renders nothing', () => {
+    const { result } = render();
+    act(() =>
+      result.current.applyToolResultCommand(
+        { action: 'replace_visualization', nodes: [], edges: [] },
+        'cmd-1'
+      )
+    );
+    expect(store().clearVisualization).toHaveBeenCalledTimes(1);
+    expect(store().updateVisualization).not.toHaveBeenCalled();
+  });
+
   it('no explicit action with nodes defaults to additive, not a full replace', () => {
     const { result } = render();
     act(() =>

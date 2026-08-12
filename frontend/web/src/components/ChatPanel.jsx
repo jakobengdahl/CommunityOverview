@@ -185,17 +185,21 @@ function ChatPanel({ collectionShortName }) {
     } else if (toolResult.action === 'add_to_visualization') {
       addNodesToView(toolResult);
     } else if (toolResult.action === 'update_in_visualization') {
-      if (toolResult.nodes && toolResult.nodes.length > 0) {
+      // In-place update: replace matching nodes, keep the rest, append new ones.
+      // Filter Community nodes like every other branch (and the hook path) so the
+      // two delivery channels stay identical.
+      const updatedNodes = filterCommunityNodes(toolResult.nodes || []);
+      if (updatedNodes.length > 0) {
         const {
           nodes: currentNodes,
           edges: currentEdges,
           updateVisualization: update,
         } = useGraphStore.getState();
-        const updatedNodeIds = new Set(toolResult.nodes.map((n) => n.id));
+        const updatedNodeIds = new Set(updatedNodes.map((n) => n.id));
         const mergedNodes = currentNodes.map((n) =>
-          updatedNodeIds.has(n.id) ? toolResult.nodes.find((un) => un.id === n.id) : n
+          updatedNodeIds.has(n.id) ? updatedNodes.find((un) => un.id === n.id) : n
         );
-        const newNodes = toolResult.nodes.filter((n) => !currentNodes.some((cn) => cn.id === n.id));
+        const newNodes = updatedNodes.filter((n) => !currentNodes.some((cn) => cn.id === n.id));
         update([...mergedNodes, ...newNodes], currentEdges);
       }
     } else if (toolResult.action === 'mark_nodes') {
