@@ -355,6 +355,19 @@
     "type": "Typ",
     "no_type": "Ingen specifik typ",
     "label_field": "Etikett",
-    "label_placeholder": "Valfri etikett för den här kopplingen..."
+    "label_placeholder": "Valfri etikett för den här kopplingen...",
+    "appearance": "Utseende",
+    "direction": "Riktning",
+    "direction_none": "Ingen pil",
+    "direction_forward": "Mot mål",
+    "direction_backward": "Mot källa",
+    "direction_both": "Båda ändar",
+    "arrow_style": "Pilspets",
+    "arrow_closed": "Fylld",
+    "arrow_open": "Öppen",
+    "thickness": "Tjocklek",
+    "custom_color": "Egen färg",
+    "color": "Färg",
+    "animate": "Animera (puls)"
   }
 }

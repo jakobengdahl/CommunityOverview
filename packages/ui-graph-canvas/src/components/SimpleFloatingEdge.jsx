@@ -6,7 +6,7 @@ import { getEdgeParams } from '../utils/graphLayout';
  * A floating edge that connects to the intersection point of the node border.
  * Based on React Flow example: https://reactflow.dev/examples/edges/floating-edges
  */
-function SimpleFloatingEdge({ id, source, target, markerEnd, style }) {
+function SimpleFloatingEdge({ id, source, target, markerStart, markerEnd, style }) {
   const sourceNode = useStore(useCallback((store) => store.nodeInternals.get(source), [source]));
   const targetNode = useStore(useCallback((store) => store.nodeInternals.get(target), [target]));
   const nodeInternals = useStore(useCallback((store) => store.nodeInternals, []));
@@ -33,7 +33,14 @@ function SimpleFloatingEdge({ id, source, target, markerEnd, style }) {
   // interactionWidth renders an invisible wider hit-path so edges are easy to
   // click/right-click without thickening the visible stroke.
   return (
-    <BaseEdge id={id} path={edgePath} markerEnd={markerEnd} style={style} interactionWidth={24} />
+    <BaseEdge
+      id={id}
+      path={edgePath}
+      markerStart={markerStart}
+      markerEnd={markerEnd}
+      style={style}
+      interactionWidth={24}
+    />
   );
 }
 
