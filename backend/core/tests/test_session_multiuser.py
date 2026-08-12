@@ -177,6 +177,13 @@ class TestTwoClientsOneSession:
         with pytest.raises(OpError):
             await mgr.apply_ops(sid, "A", 0, [{"op": "edges_added", "node_ids": ["x"]}])
 
+    async def test_edges_added_rejects_edges_without_a_string_id(self):
+        mgr = _manager()
+        sid = mgr.create_session().id
+        for bad in (["e1"], [{"source": "a", "target": "b"}], [{"id": 5}]):
+            with pytest.raises(OpError):
+                await mgr.apply_ops(sid, "A", 0, [{"op": "edges_added", "edges": bad}])
+
     async def test_sustained_moves_persist_mirror_and_survive_reload(self, tmp_path):
         """Node moves keep persisting + mirroring after a long op sequence.
 

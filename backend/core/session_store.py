@@ -548,6 +548,12 @@ class SessionStore:
             edges = op.get("edges")
             if not isinstance(edges, list):
                 raise OpError("edges_added requires an 'edges' list")
+            # Validate at the ingress boundary like every sibling op: each edge
+            # must be an object with a string id (peers key/dedupe on it). Junk
+            # here would otherwise be broadcast straight to every subscriber.
+            for edge in edges:
+                if not isinstance(edge, dict) or not isinstance(edge.get("id"), str):
+                    raise OpError("each edge in edges_added requires a string 'id'")
             applied["edges"] = edges
         elif op_type == "edges_hidden":
             state["hidden_edge_ids"] = _union(
