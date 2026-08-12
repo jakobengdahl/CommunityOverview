@@ -70,6 +70,12 @@ Effort scale: XS = single-line fix · S = up to ~30 lines / one file · M = mult
 
 ## Open
 
+### [2026-08-12] Lazy-load slice hides edges to off-screen nodes on reload of a >200-node session
+- **File(s):** `packages/ui-graph-canvas/src/components/GraphCanvas.jsx:365-383` (`nodesToRender` / `visibleEdges`), `packages/ui-graph-canvas/src/utils/constants.js:92-93`
+- **Context:** Discovered during `claude/fix-edges-missing-after-reload` while triaging "edges sometimes missing after reloading a session" (that reload/hydration path is otherwise correct — edges live in the graph and are recovered by resolving node_refs; see PR).
+- **Issue:** When a session has more than `LAZY_LOAD_THRESHOLD` (200) nodes, `nodesToRender` renders only the first `INITIAL_LOAD_COUNT` (100) in `node_refs` order, and `visibleEdges` filters edges to `renderedNodeIds` (the sliced set). On reload of a large session this immediately drops every edge whose other endpoint sits in the un-loaded remainder, so a rendered node can show fewer edges than the data holds. It is announced by the "Showing 100 of N nodes" banner and inherently also hides the off-screen endpoint node (an edge to an unrendered node cannot be drawn), so it does not match the classic "both endpoints present but edge gone" bug — it is a lazy-load UX tradeoff. Possible improvements: raise the threshold, expand the rendered set to include nodes referenced by edges among already-loaded nodes, or make the banner mention hidden connections. Not a hydration fix — do not change resolve/hydration for it.
+- **Effort:** M
+
 ### [2026-08-09] Visualization geometry/layout MCP tools bypass the authorization hook
 - **File(s):** `backend/service/mcp_tools.py:685` (`get_visualization_layout`), `:749` (`apply_visualization_layout`), `:640` (`get_visualization_session_state`)
 - **Context:** Discovered during `claude/task-test-assisted-session-creation-2kpz9b` (assistant-session end-to-end test)
