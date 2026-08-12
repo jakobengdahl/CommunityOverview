@@ -48,8 +48,10 @@ const MAX_BATCH_BYTES = 240 * 1024;
 // the `finally` that clears `_flushing` never runs, and every later flush
 // short-circuits on the `_flushing` guard — so all subsequent ops (moves, node
 // adds, everything) silently stop reaching the server for the life of the tab.
-// A timeout aborts the stuck request so the batch is requeued and retried
-// (ops are idempotent, so a resend after a lost response is safe — see R3).
+// A timeout aborts the stuck request so the batch is requeued and retried —
+// the same at-least-once retry the pre-existing network-error path already did.
+// Resends are safe: set ops and moves are idempotent and annotation_created is
+// an upsert-by-id server-side (R3), so a resend after a lost response converges.
 const DEFAULT_REQUEST_TIMEOUT_MS = 20_000;
 
 // Selection claims are advisory soft-locks (design 3.5). The server expires a
@@ -733,8 +735,9 @@ export class SessionSyncClient {
     } catch {
       // Network error, abort, or the request timeout: requeue and back off so a
       // transient stall (or a hung connection the timeout just cancelled) is
-      // retried instead of permanently wedging op delivery. Ops are idempotent,
-      // so re-sending a batch whose response was lost is safe (see R3).
+      // retried instead of permanently wedging op delivery. This is the same
+      // at-least-once retry the network-error path always did; resends converge
+      // (set ops/moves are idempotent, annotation_created upserts by id — R3).
       if (batch && batch.length) this._queue = batch.concat(this._queue);
       this._scheduleRetry();
     } finally {
