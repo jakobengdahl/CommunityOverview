@@ -81,6 +81,15 @@ class AutoAddAgentRequest(BaseModel):
     keywords: list[str] = Field(default_factory=list)
 
 
+# Fixed, safe messages for auto-add validation failures, keyed by the stable
+# AutoAddRuleError.code. The endpoint returns these instead of the raw exception
+# text so no exception detail is exposed to an external caller (CodeQL).
+_AUTO_ADD_ERROR_MESSAGES = {
+    "empty_pattern": "an auto-add agent needs at least one node type or keyword",
+    "capacity_reached": "auto-add agent capacity reached for this session",
+}
+
+
 def register_session_stream(
     app: FastAPI,
     session_registry: SessionRegistry,
@@ -327,7 +336,12 @@ def register_session_stream(
                 session_id, node_types=body.node_types, keywords=body.keywords
             )
         except AutoAddRuleError as exc:
-            return JSONResponse({"error": str(exc)}, status_code=400)
+            # Map to a fixed, safe message keyed by the exception's stable code —
+            # never echo the exception text back to an external caller.
+            message = _AUTO_ADD_ERROR_MESSAGES.get(
+                exc.code, "invalid auto-add agent pattern"
+            )
+            return JSONResponse({"error": message}, status_code=400)
         # Materialise the push session so the prune keeps this agent while live.
         session_registry.get_or_create(session_id)
         return JSONResponse({"success": True, "agent": rule.to_dict()})

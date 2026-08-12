@@ -45,7 +45,15 @@ MAX_ENTRY_LENGTH = 200
 
 
 class AutoAddRuleError(ValueError):
-    """Raised when an auto-add rule fails validation at the boundary."""
+    """Raised when an auto-add rule fails validation at the boundary.
+
+    Carries a stable, non-sensitive ``code`` so an HTTP boundary can map it to a
+    fixed, safe message instead of echoing the exception text back to a client.
+    """
+
+    def __init__(self, code: str, message: str) -> None:
+        super().__init__(message)
+        self.code = code
 
 
 def _now_iso() -> str:
@@ -160,21 +168,24 @@ class SessionAutoAddRegistry:
         clean_keywords = _normalize_pattern(keywords)
         if not clean_types and not clean_keywords:
             raise AutoAddRuleError(
+                "empty_pattern",
                 "an auto-add agent needs at least one node type or keyword; "
-                "a rule with neither would add every created node to the view"
+                "a rule with neither would add every created node to the view",
             )
 
         existing = self._by_session.get(session_id)
         if existing is None:
             if len(self._by_session) >= MAX_SESSIONS_WITH_RULES:
                 raise AutoAddRuleError(
+                    "capacity_reached",
                     "the maximum number of sessions with auto-add agents has "
-                    "been reached"
+                    "been reached",
                 )
         elif len(existing) >= MAX_RULES_PER_SESSION:
             raise AutoAddRuleError(
+                "capacity_reached",
                 "this session already has the maximum number of auto-add agents "
-                f"({MAX_RULES_PER_SESSION})"
+                f"({MAX_RULES_PER_SESSION})",
             )
 
         rule = AutoAddRule(
