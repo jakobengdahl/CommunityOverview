@@ -433,10 +433,12 @@ Two behaviours make this safe and backward compatible:
 - **Automatic fallback.** When a non-empty, non-`*` query produces **zero lexical
   matches**, the search retries once with semantic ranking, so a conceptual query
   still surfaces the closest nodes. The fallback is gated on the raw lexical
-  matches, not the access-filtered result, so a query that *did* match locally but
-  was then narrowed away by authorization is left to the federation path rather
-  than widened by meaning. It never changes results when lexical already returned
-  hits.
+  matches, not the access/filter-narrowed result, so a query that *did* match
+  locally but was then narrowed away by authorization or by tag/metadata filters
+  is left to the federation path rather than widened by meaning. It never changes
+  results when lexical already returned hits. A match-all query (`""` or `*`) has
+  no text to rank by meaning, so `semantic=true` falls through to the lexical
+  match-all behaviour.
 
 The response includes a top-level `"semantic"` boolean indicating whether semantic
 ranking (explicit or fallback) produced the returned nodes. Semantic ranking

@@ -112,8 +112,13 @@ def search_graph(
             include_archived=include_archived,
         )
 
+    # A match-all query ("" or "*") has no text to rank by meaning, so semantic
+    # ranking is meaningless: fall through to the lexical match-all behaviour even
+    # when semantic is requested.
+    query_is_match_all = not query or query.strip() in ("", "*")
+
     semantic_applied = False
-    if semantic:
+    if semantic and not query_is_match_all:
         # Explicit opt-in: rank local results by embedding meaning.
         visible_local_results = _visible_local(_semantic_candidates())
         semantic_applied = True
@@ -128,10 +133,11 @@ def search_graph(
 
         # Auto-fallback: a real (non match-all) query that the lexical text
         # search could not match at all retries with semantic ranking. Gate on
-        # the raw lexical candidates, not the access-filtered set, so a query
-        # that *did* match locally but was then narrowed away by authorization
-        # is left to the federation path instead of being widened by meaning.
-        if not local_results and query and query.strip() not in ("", "*"):
+        # the raw lexical candidates, not the access/filter-narrowed set, so a
+        # query that *did* match locally but was then narrowed away by
+        # authorization or by tag/metadata filters is left to the federation path
+        # instead of being widened by meaning.
+        if not semantic and not local_results and not query_is_match_all:
             fallback = _visible_local(_semantic_candidates())
             if fallback:
                 visible_local_results = fallback

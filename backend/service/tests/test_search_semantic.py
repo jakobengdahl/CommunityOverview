@@ -64,6 +64,30 @@ def _service(ranking):
     return GraphService(storage), calls
 
 
+def _service_with_tags(ranking):
+    """Like :func:`_service` but the ``sec`` node carries a ``blocked`` tag, so a
+    ``tags_none=["blocked"]`` filter removes a node that still matched lexically.
+    """
+    tmp = tempfile.mkdtemp()
+    storage = GraphStorage(
+        json_path=os.path.join(tmp, "g.json"),
+        embeddings_path=os.path.join(tmp, "e.pkl"),
+    )
+    nodes = _nodes()
+    nodes[0].tags = ["blocked"]  # the "Auth bypass remediation" node
+    storage.add_nodes(nodes, [])
+
+    calls = []
+
+    def fake_search(query_text=None, query_node=None, limit=5, threshold=0.0):
+        calls.append(query_text)
+        hits = [(nid, s) for nid, s in ranking if s >= threshold]
+        return hits[:limit]
+
+    storage.vector_store.search = fake_search
+    return GraphService(storage), calls
+
+
 def _names(result):
     return {n["name"] for n in result["nodes"]}
 
@@ -141,3 +165,27 @@ class TestAutoFallback:
         assert _names(result) == {"Auth bypass remediation"}
         assert result["semantic"] is False
         assert calls == []
+
+    def test_lexical_hit_narrowed_away_by_filter_does_not_fall_back(self):
+        # The headline invariant: the fallback gates on RAW lexical matches, not
+        # the post-filter set. "Auth" matches a node lexically, but a tag filter
+        # excludes it — leaving zero visible results. Semantic must NOT widen the
+        # query by meaning; the empty result is left to the (here absent)
+        # federation path instead of surfacing meaning-related nodes.
+        service, calls = _service_with_tags(ranking=[("ready", 0.99)])
+        result = service.search_graph(query="Auth", tags_none=["blocked"])
+        assert result["nodes"] == []  # the lexical hit was filtered out
+        assert result["semantic"] is False  # not widened by meaning
+        assert calls == []  # embedding provider never consulted
+
+    def test_semantic_flag_with_match_all_query_falls_through_to_lexical(self):
+        service, calls = _service(ranking=[("sec", 0.9)])
+        for q in ("", "*"):
+            result = service.search_graph(query=q, semantic=True)
+            assert _names(result) == {
+                "Auth bypass remediation",
+                "Delivery status tag",
+                "Zeta",
+            }
+            assert result["semantic"] is False
+        assert calls == []  # no meaning to rank by; provider never consulted
