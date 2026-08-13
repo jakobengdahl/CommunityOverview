@@ -16,7 +16,11 @@ from backend.config.model_profiles import (
     ProfileResolution,
     resolve_profile_reference,
 )
-from backend.agents.secrets import SECRET_REF_PREFIX, resolve_secret_mapping
+from backend.agents.secrets import (
+    SECRET_REF_PREFIX,
+    is_secret_ref,
+    resolve_secret_mapping,
+)
 
 if TYPE_CHECKING:
     from backend.agents.secrets import SecretProvider
@@ -143,6 +147,13 @@ class AgentSchedule:
         }
 
 
+#: Placeholder substituted for literal ``env`` values in serialized output so a
+#: user-supplied inline secret is never exposed through API responses or logs.
+#: ``secret://<name>`` references are safe (they name a secret, not its value) and
+#: pass through unredacted.
+REDACTED_ENV_VALUE = "***"
+
+
 class MCPTransport(str, Enum):
     """Transport type for MCP server connections."""
 
@@ -200,7 +211,13 @@ class MCPIntegration:
             "transport": self.transport.value,
             "url": self.url,
             "command": self.command,
-            "env": {k: v for k, v in self.env.items()},  # Don't expose secrets
+            # Redact literal env values so an inline secret is never serialized;
+            # secret://<name> references name a secret rather than holding its
+            # value, so they are safe to expose.
+            "env": {
+                k: (v if is_secret_ref(v) else REDACTED_ENV_VALUE)
+                for k, v in self.env.items()
+            },
             "enabled": self.enabled,
         }
 
