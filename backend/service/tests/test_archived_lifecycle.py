@@ -304,3 +304,15 @@ class TestArchivedAnchorTraversal:
         default = service.get_related_nodes(node_id="anchor", depth=2)
         assert "Anchor" in {n["name"] for n in default["nodes"]}
         assert "e-back" in {e["id"] for e in default["edges"]}
+
+    def test_archived_anchor_self_loop_retained(self):
+        # A self-loop on the archived anchor is the case the anchor exemption in
+        # _neighbor_blocked exists for: without it the loop's far endpoint (the
+        # anchor) is treated as an archived neighbour and the edge is dropped.
+        service = _service(
+            [Node(id="anchor", type=NodeType.ACTOR, name="Anchor")],
+            [Edge(id="e-self", source="anchor", target="anchor")],
+        )
+        service.archive_nodes(["anchor"])
+        result = service.get_related_nodes(node_id="anchor", depth=1)
+        assert "e-self" in {e["id"] for e in result["edges"]}
