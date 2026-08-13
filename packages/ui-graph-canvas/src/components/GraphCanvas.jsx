@@ -31,9 +31,6 @@ import { useAnimatedLayout } from '../hooks/useAnimatedLayout';
 import { useCanvasHistory } from '../hooks/useCanvasHistory';
 import {
   applyLayout,
-  getGridLayout,
-  getCircularLayout,
-  getLayoutedElements,
   reconcileSessionNodes,
   arrangeNodes,
 } from '../utils/graphLayout';
