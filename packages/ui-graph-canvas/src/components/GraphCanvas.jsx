@@ -29,14 +29,7 @@ import {
 import { useRemotePositions } from '../hooks/useRemotePositions';
 import { useAnimatedLayout } from '../hooks/useAnimatedLayout';
 import { useCanvasHistory } from '../hooks/useCanvasHistory';
-import {
-  applyLayout,
-  getGridLayout,
-  getCircularLayout,
-  getLayoutedElements,
-  reconcileSessionNodes,
-  arrangeNodes,
-} from '../utils/graphLayout';
+import { applyLayout, reconcileSessionNodes, arrangeNodes } from '../utils/graphLayout';
 import {
   getNodeColor,
   LAZY_LOAD_THRESHOLD,

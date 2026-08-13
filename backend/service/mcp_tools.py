@@ -943,6 +943,11 @@ def register_mcp_tools(
             return {"error": "Session registry not available"}
         if not session_registry.is_valid_session_id(session_id):
             return {"error": "Invalid session ID format — expected DDDD-DDDD-DDDD-DDDD"}
+        denied = _authorize_session(
+            GRAPH_ACTION_READ, "get_visualization_session_state"
+        )
+        if denied:
+            return denied
         if not session_registry.session_exists(session_id):
             return {
                 "error": (
@@ -1002,6 +1007,9 @@ def register_mcp_tools(
             return {"error": "Session manager not available"}
         if not is_valid_session_id(session_id):
             return {"error": "Invalid session ID format — expected DDDD-DDDD-DDDD-DDDD"}
+        denied = _authorize_session(GRAPH_ACTION_READ, "get_visualization_layout")
+        if denied:
+            return denied
         session = session_manager.get_session(session_id)
         if session is None:
             return {
@@ -1098,6 +1106,9 @@ def register_mcp_tools(
                 "success": False,
                 "error": "Invalid session ID format — expected DDDD-DDDD-DDDD-DDDD",
             }
+        denied = _authorize_session(GRAPH_ACTION_MUTATE, "apply_visualization_layout")
+        if denied:
+            return denied
         animation = {
             "animate": bool(animate),
             "duration_ms": duration_ms,
