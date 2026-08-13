@@ -71,6 +71,22 @@ class SearchRequest(BaseModel):
     federation_depth: Optional[int] = Field(
         None, ge=1, le=9, description="Optional federated search depth"
     )
+    tags_any: Optional[List[str]] = Field(
+        None, description="Keep nodes carrying at least one of these tags (OR)"
+    )
+    tags_all: Optional[List[str]] = Field(
+        None, description="Keep nodes carrying every one of these tags (AND)"
+    )
+    tags_none: Optional[List[str]] = Field(
+        None, description="Drop nodes carrying any of these tags (exclude)"
+    )
+    metadata_filters: Optional[List[Dict[str, Any]]] = Field(
+        None,
+        description=(
+            "Generic metadata filters, each "
+            '{"key": str, "values": [...], "match": "any"|"all"|"none"}'
+        ),
+    )
 
 
 class RelatedNodesRequest(BaseModel):
@@ -297,6 +313,10 @@ def _register_search_endpoints(router: APIRouter, service: GraphService) -> None
                 node_types=request.node_types,
                 limit=request.limit,
                 federation_depth=request.federation_depth,
+                tags_any=request.tags_any,
+                tags_all=request.tags_all,
+                tags_none=request.tags_none,
+                metadata_filters=request.metadata_filters,
             )
         _raise_for_access_denied(result)
         return result

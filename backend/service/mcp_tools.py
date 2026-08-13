@@ -119,16 +119,38 @@ def register_mcp_tools(
         limit: int = 50,
         action: Optional[str] = None,
         federation_depth: Optional[int] = None,
+        tags_any: Optional[List[str]] = None,
+        tags_all: Optional[List[str]] = None,
+        tags_none: Optional[List[str]] = None,
+        metadata_filters: Optional[List[Dict[str, Any]]] = None,
         visualization_session_id: Optional[str] = None,
     ) -> Dict[str, Any]:
         """
-        Search for nodes in the graph based on text query
+        Search for nodes in the graph based on text query, with optional generic
+        tag and metadata filtering.
+
+        The tag/metadata filters are use-case agnostic: they match on whatever
+        tags and metadata a deployment has put on its nodes and hardcode no field
+        names or values. Pass an empty query ("") to filter purely by tags and/or
+        metadata. When no filter argument is given the search behaves exactly as
+        before.
 
         Args:
-            query: Search text (matches against name, description, summary)
+            query: Search text (matches against name, description, summary). Use ""
+                to match on the filters alone.
             node_types: List of node types to filter on (Actor, Initiative, etc.)
             limit: Max number of results (default 50)
             action: Optional action for frontend ('add_to_visualization' to add to current view)
+            tags_any: Keep only nodes carrying at least one of these tags (OR).
+            tags_all: Keep only nodes carrying every one of these tags (AND).
+            tags_none: Drop nodes carrying any of these tags (exclude).
+            metadata_filters: A list of generic metadata filters, each a dict
+                ``{"key": <field>, "values": [...], "match": "any"|"all"|"none"}``.
+                ``any`` (default) keeps a node whose metadata value(s) at ``key``
+                intersect the given values; ``all`` requires every given value to
+                be present (for list-valued metadata); ``none`` excludes nodes that
+                match any given value. Values compare as strings. Multiple filters
+                combine with AND.
             visualization_session_id: Optional browser session ID — when provided, the result
                 is pushed live to the connected browser window via SSE
 
@@ -141,6 +163,10 @@ def register_mcp_tools(
             limit=limit,
             action=action,
             federation_depth=federation_depth,
+            tags_any=tags_any,
+            tags_all=tags_all,
+            tags_none=tags_none,
+            metadata_filters=metadata_filters,
         )
         _push(visualization_session_id, "search_graph", result)
         return result
