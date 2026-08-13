@@ -257,7 +257,11 @@ jobs:
           labels: ${{ steps.meta-core.outputs.labels }}
           cache-from: type=gha
           cache-to: type=gha,mode=max
-          platforms: linux/amd64,linux/arm64
+          # amd64 only: every consumer (Cloud Run, the SSP Cloud cluster) is
+          # x86_64, and no arm64 image is pulled anywhere. Building linux/arm64
+          # here means QEMU emulation of the ML + npm layers, which took hours
+          # whenever the gha cache was cold and doubled the cache footprint.
+          platforms: linux/amd64
 
       # -------------------------------------------------------------------
       # Gateway image (built from services/mcp_oauth_gateway/Dockerfile)
@@ -284,7 +288,8 @@ jobs:
           labels: ${{ steps.meta-gateway.outputs.labels }}
           cache-from: type=gha
           cache-to: type=gha,mode=max
-          platforms: linux/amd64,linux/arm64
+          # amd64 only — see the note on the core image build above.
+          platforms: linux/amd64
 
       # -------------------------------------------------------------------
       # Artifact metadata – written to the workflow summary so infra
