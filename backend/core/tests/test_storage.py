@@ -255,6 +255,30 @@ class TestGraphStorageCRUD:
         )
         assert updated.metadata == {"b": 2}
 
+    def test_update_node_metadata_merge_removes_extra_field_with_none(
+        self, storage_with_data
+    ):
+        """Merge mode applies null-deletion to schema-extra fields too, not just
+        the metadata dict — the consistency the docstring/docs promise."""
+        storage_with_data.update_node("actor-1", {"metadata": {"a": 1}})
+        # `custom_field` is a schema-extra key folded into metadata.
+        storage_with_data.update_node(
+            "actor-1", {"custom_field": "keep"}, metadata_merge=True
+        )
+        updated = storage_with_data.update_node(
+            "actor-1", {"custom_field": None}, metadata_merge=True
+        )
+        assert "custom_field" not in updated.metadata
+        assert updated.metadata == {"a": 1}
+
+    def test_update_node_metadata_none_rejected_in_replace_mode(
+        self, storage_with_data
+    ):
+        """Default replace path: metadata=None with no extra fields is rejected by
+        model validation, exactly as before merge mode existed (no silent blank)."""
+        with pytest.raises(ValueError):
+            storage_with_data.update_node("actor-1", {"metadata": None})
+
     def test_update_node_optimistic_concurrency_accepts_fresh(self, storage_with_data):
         """A write whose expected_updated_at still matches is accepted."""
         node = storage_with_data.get_node("actor-1")

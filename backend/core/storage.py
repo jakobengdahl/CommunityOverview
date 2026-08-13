@@ -787,10 +787,14 @@ class GraphStorage:
                 null-means-delete). Keys not mentioned are preserved. Default is
                 False, i.e. the legacy replace-whole-metadata behaviour.
             expected_updated_at: Optional optimistic-concurrency guard. When set
-                (an ISO 8601 string or a datetime), the update only proceeds if
-                the node's current ``updated_at`` still equals this value; a
-                mismatch raises :class:`StaleUpdateError` instead of clobbering a
-                concurrent write.
+                (an ISO 8601 string — as returned in a node's ``updated_at`` — or
+                a timezone-aware datetime), the update only proceeds if the node's
+                current ``updated_at`` still equals this value; a mismatch raises
+                :class:`StaleUpdateError` instead of clobbering a concurrent write.
+                Note ``updated_at`` is a UTC wall-clock timestamp used as the
+                version token: two writes within the same microsecond tick would
+                share a timestamp, so this guards against realistic interleaving,
+                not adversarial same-tick races.
 
         Raises:
             StaleUpdateError: if ``expected_updated_at`` no longer matches the
@@ -876,8 +880,13 @@ class GraphStorage:
                 candidate["metadata"] = merged
             else:
                 # Legacy/default: an explicit `metadata` replaces it wholesale.
+                # Assign the value as-is (no None->{} coercion) so a bad
+                # metadata=None with no extra fields is rejected by model
+                # validation below, exactly as before merge mode existed. When an
+                # extra field is present the fold step normalizes None to {},
+                # also matching the prior behaviour.
                 if "metadata" in updates:
-                    candidate["metadata"] = dict(updates["metadata"] or {})
+                    candidate["metadata"] = updates["metadata"]
                 if extra:
                     meta = dict(candidate.get("metadata") or {})
                     meta.update(extra)
