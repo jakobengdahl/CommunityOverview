@@ -407,6 +407,11 @@ to filter purely by tags/metadata. The applied filters are echoed back under
 `result["filters"]`. The REST endpoint and the `search_graph` MCP tool expose the
 same parameters.
 
+When a filter is active the text-search window is widened (locally, and across
+the federation cache) so post-filter results are not truncated by the `limit`. The
+final `limit` still bounds the returned nodes; as with unfiltered search, local
+matches are counted first and federated results only fill the remainder.
+
 Example (nodes tagged `partner`, excluding any tagged `archived`, whose
 `stage` metadata is `active` or `pilot`):
 

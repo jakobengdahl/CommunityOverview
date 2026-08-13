@@ -210,6 +210,95 @@ def test_search_graph_uses_runtime_federation_depth_override(tmp_path):
     assert result["federation"]["depth"] == 1
 
 
+def _manager_with_federated_nodes(nodes):
+    config = FederationFileConfig.model_validate(
+        {
+            "federation": {
+                "enabled": True,
+                "graphs": [
+                    {
+                        "graph_id": "esam-main",
+                        "display_name": "eSam",
+                        "enabled": True,
+                        "endpoints": {
+                            "graph_json_url": "https://example.invalid/graph.json"
+                        },
+                    }
+                ],
+            }
+        }
+    )
+    manager = FederationManager(config)
+    cache_nodes, _ = manager._build_cache(config.federation.graphs[0], nodes, [])
+    manager._cache["esam-main"].nodes = cache_nodes
+    return manager
+
+
+def test_generic_tag_filter_applies_to_federated_nodes(tmp_path):
+    """The tag filter must narrow federated results the same way it does local
+    ones — a federated node that does not carry the tag is dropped, one that does
+    survives."""
+    graph_file = tmp_path / "graph.json"
+    graph_file.write_text(json.dumps({"nodes": [], "edges": []}), encoding="utf-8")
+    storage = GraphStorage(str(graph_file))
+
+    manager = _manager_with_federated_nodes(
+        [
+            {
+                "id": "remote-1",
+                "type": "Actor",
+                "name": "Tagged remote",
+                "tags": ["partner"],
+            },
+            {
+                "id": "remote-2",
+                "type": "Actor",
+                "name": "Untagged remote",
+                "tags": [],
+            },
+        ]
+    )
+
+    service = GraphService(storage, federation_manager=manager)
+    result = service.search_graph(query="remote", tags_any=["partner"])
+
+    names = {n["name"] for n in result["nodes"]}
+    assert names == {"Tagged remote"}
+    assert result["federation"]["federated_nodes"] == 1
+
+
+def test_generic_metadata_filter_applies_to_federated_nodes(tmp_path):
+    graph_file = tmp_path / "graph.json"
+    graph_file.write_text(json.dumps({"nodes": [], "edges": []}), encoding="utf-8")
+    storage = GraphStorage(str(graph_file))
+
+    manager = _manager_with_federated_nodes(
+        [
+            {
+                "id": "remote-1",
+                "type": "Actor",
+                "name": "Active remote",
+                "metadata": {"stage": "active"},
+            },
+            {
+                "id": "remote-2",
+                "type": "Actor",
+                "name": "Archived remote",
+                "metadata": {"stage": "archived"},
+            },
+        ]
+    )
+
+    service = GraphService(storage, federation_manager=manager)
+    result = service.search_graph(
+        query="remote",
+        metadata_filters=[{"key": "stage", "values": ["active"]}],
+    )
+
+    names = {n["name"] for n in result["nodes"]}
+    assert names == {"Active remote"}
+
+
 def test_graph_stats_exposes_depth_and_graph_labels(tmp_path):
     graph_file = tmp_path / "graph.json"
     graph_file.write_text(

@@ -57,6 +57,11 @@ def search_graph(
     if node_types:
         type_filters = [NodeType.from_string(t) for t in node_types]
 
+    # Accept the documented list-of-filters shape; tolerate a single bare dict by
+    # normalising it once here so matching and the echoed `filters` agree.
+    if isinstance(metadata_filters, dict):
+        metadata_filters = [metadata_filters]
+
     has_generic_filters = bool(tags_all or tags_any or tags_none or metadata_filters)
 
     def _passes_filters(node) -> bool:
@@ -99,7 +104,10 @@ def search_graph(
                 query=query,
                 node_types=node_types,
                 limit=access.get_federated_search_limit(
-                    federation_manager, remaining, decision.graph_access
+                    federation_manager,
+                    remaining,
+                    decision.graph_access,
+                    widen=has_generic_filters,
                 ),
                 max_depth=federation_depth,
             )

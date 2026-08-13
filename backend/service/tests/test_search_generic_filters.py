@@ -206,3 +206,16 @@ class TestMetadataFilters:
             metadata_filters=[{"key": "status", "values": []}],
         )
         assert _names(result) == {"One", "Two", "Three", "Four"}
+
+    def test_single_bare_dict_is_normalised(self):
+        service = self._meta_service()
+        # Out-of-contract single-dict shape is tolerated: matching applies and the
+        # echoed filters carry it as a one-element list (not the dict's keys).
+        result = service.search_graph(
+            query="",
+            metadata_filters={"key": "status", "values": ["open"]},
+        )
+        assert _names(result) == {"One"}
+        assert result["filters"]["metadata_filters"] == [
+            {"key": "status", "values": ["open"]}
+        ]
