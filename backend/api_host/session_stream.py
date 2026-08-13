@@ -337,11 +337,29 @@ def register_session_stream(
             )
         except AutoAddRuleError as exc:
             # Map to a fixed, safe message keyed by the exception's stable code —
-            # never echo the exception text back to an external caller.
+            # never echo the exception text back to an external caller (CodeQL
+            # information-exposure). The full exception detail is kept only in a
+            # structured server log line, tagged with a correlation id the client
+            # can quote to support to tie its 400 back to that log entry.
+            correlation_id = secrets.token_hex(8)
+            logger.warning(
+                "auto-add rule rejected (session=%s code=%s correlation_id=%s): %s",
+                session_id,
+                exc.code,
+                correlation_id,
+                exc,
+            )
             message = _AUTO_ADD_ERROR_MESSAGES.get(
                 exc.code, "invalid auto-add agent pattern"
             )
-            return JSONResponse({"error": message}, status_code=400)
+            return JSONResponse(
+                {
+                    "error": message,
+                    "code": exc.code,
+                    "correlation_id": correlation_id,
+                },
+                status_code=400,
+            )
         # Materialise the push session so the prune keeps this agent while live.
         session_registry.get_or_create(session_id)
         return JSONResponse({"success": True, "agent": rule.to_dict()})

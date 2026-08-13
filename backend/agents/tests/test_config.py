@@ -10,7 +10,9 @@ from backend.agents.config import (
     AgentConfig,
     AgentsSettings,
     MCPTransport,
+    REDACTED_ENV_VALUE,
 )
+from backend.agents.secrets import SECRET_REF_PREFIX
 
 
 class TestMCPIntegration:
@@ -62,6 +64,25 @@ class TestMCPIntegration:
         assert result["transport"] == "http"
         assert result["url"] == "http://example.com/mcp"
         assert result["description"] == "Web tools"
+
+    def test_to_dict_redacts_literal_env_secret(self):
+        """A literal env value is never serialized; secret:// refs survive."""
+        integration = MCPIntegration(
+            id="SEARCH",
+            name="Brave Search",
+            transport=MCPTransport.STDIO,
+            command=["npx", "-y", "@anthropic/brave-search-mcp"],
+            env={
+                "BRAVE_API_KEY": "sk-literal-plaintext-secret",
+                "REF_KEY": f"{SECRET_REF_PREFIX}BRAVE_API_KEY",
+            },
+        )
+
+        result = integration.to_dict()
+
+        assert "sk-literal-plaintext-secret" not in str(result)
+        assert result["env"]["BRAVE_API_KEY"] == REDACTED_ENV_VALUE
+        assert result["env"]["REF_KEY"] == f"{SECRET_REF_PREFIX}BRAVE_API_KEY"
 
 
 class TestAgentConfig:

@@ -10,9 +10,15 @@ open core); listing is a read. The matching/isolation behaviour is covered in
 contract (validation, shape, lifecycle).
 """
 
+import logging
+
 from fastapi.testclient import TestClient
 
 SESSION = "1000-2000"
+
+# The suffix that only the *raw* AutoAddRuleError message carries — the client
+# must never see it, but the server log must.
+_RAW_ONLY_DETAIL = "a rule with neither would add every created node to the view"
 
 
 class TestCreate:
@@ -39,6 +45,44 @@ class TestCreate:
         resp = test_app.post(f"/sessions/{SESSION}/auto-add-agents", json={})
         assert resp.status_code == 400
         assert "at least one" in resp.json()["error"]
+
+    def test_rejection_does_not_leak_raw_exception_text(self, test_app: TestClient):
+        """The 400 body carries only the sanitized message + a stable code.
+
+        CodeQL alert 35: the raw AutoAddRuleError text must not reach an external
+        caller. The response exposes the fixed message and stable code, plus an
+        opaque correlation id — never the exception's own detail string.
+        """
+        resp = test_app.post(f"/sessions/{SESSION}/auto-add-agents", json={})
+        assert resp.status_code == 400
+        body = resp.json()
+        # Sanitized, stable client contract.
+        assert body["code"] == "empty_pattern"
+        assert body["correlation_id"]
+        # Raw exception detail must not appear anywhere in the serialized body.
+        assert _RAW_ONLY_DETAIL not in resp.text
+
+    def test_rejection_logs_detail_with_correlation_id(
+        self, test_app: TestClient, caplog
+    ):
+        """The full exception detail survives — but only in a server log line,
+        tagged with the same correlation id returned to the client."""
+        with caplog.at_level(logging.WARNING, logger="backend.api_host.session_stream"):
+            resp = test_app.post(f"/sessions/{SESSION}/auto-add-agents", json={})
+        assert resp.status_code == 400
+        correlation_id = resp.json()["correlation_id"]
+
+        matching = [
+            r
+            for r in caplog.records
+            if r.name == "backend.api_host.session_stream"
+            and correlation_id in r.getMessage()
+        ]
+        assert matching, "expected a server log line carrying the correlation id"
+        logged = matching[0].getMessage()
+        # The log — and only the log — retains the raw diagnostic detail.
+        assert _RAW_ONLY_DETAIL in logged
+        assert "empty_pattern" in logged
 
 
 class TestListAndDelete:

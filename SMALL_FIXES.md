@@ -225,14 +225,3 @@ Effort scale: XS = single-line fix · S = up to ~30 lines / one file · M = mult
 - **Issue:** Once a session's browser has switched to the shared op-protocol stream (`opStreamReady`), it closes the legacy `GET /sessions/{id}/stream` EventSource, so nothing drains that session's `SessionRegistry` queue. Every subsequent push (MCP tool results *and* pulse triggers) still enqueues onto the unconsumed, unbounded queue and calls `_touch`, which also keeps refreshing `last_seen` so the 1h TTL eviction never fires. Memory grows for the lifetime of an actively-pushed session that is on the op-stream. Pre-existing property of the push architecture (affects `_push_to_session` too), made more visible by higher-frequency external pulse triggers. Fix options: track active legacy-stream consumers on the registry and skip/bound enqueue when none is draining (careful not to break the legacy→op handover window, design §8.1 R5), or bound the queue with drop-oldest.
 - **Effort:** M
 
-### [2026-08-12] CreateActiveKnowledgeCollectionDialog does not use i18n
-- **File(s):** `frontend/web/src/components/CreateActiveKnowledgeCollectionDialog.jsx`
-- **Context:** Discovered during claude/kiosk-tool-access
-- **Issue:** The entire dialog hardcodes English display strings (section headings, labels, help text, alerts) instead of using the `useI18n()` hook with keys in `en.json`/`sv.json`, contradicting the repo i18n rule. The new "Assistant Tools" section follows the same hardcoded-English convention as the rest of the file for consistency; the whole dialog should be migrated to i18n in one pass rather than piecemeal.
-- **Effort:** M
-
-### [2026-08-12] MCPIntegration.to_dict claims to hide secrets but does not redact env
-- **File(s):** `backend/agents/config.py:203` (`to_dict`, the `env` line + `# Don't expose secrets` comment)
-- **Context:** Discovered during claude/core-secret-provider-seam (review round 1)
-- **Issue:** `MCPIntegration.to_dict` shallow-copies `env` verbatim while the inline comment claims it does not expose secrets. With the new SecretProvider seam the built-in SEARCH default now holds a `secret://…` reference (safe to serialise), but a user-supplied literal secret in a `MCP_INTEGRATIONS` `env` entry would still be serialised through `to_dict` (and thus API responses / logs). Follow-up: either redact `env` values in `to_dict`, or require/resolve env secrets as `secret://` references so literals are never stored. Out of scope for the seam-only PR.
-- **Effort:** XS
