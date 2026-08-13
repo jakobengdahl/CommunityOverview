@@ -91,6 +91,14 @@ class SearchRequest(BaseModel):
         False,
         description="When false (default) archived nodes and edges are excluded",
     )
+    semantic: bool = Field(
+        False,
+        description=(
+            "When true, rank results by embedding meaning instead of lexical "
+            "substring matching. Lexical search still auto-falls back to semantic "
+            "ranking when it returns zero results."
+        ),
+    )
 
 
 class RelatedNodesRequest(BaseModel):
@@ -373,6 +381,7 @@ def _register_search_endpoints(router: APIRouter, service: GraphService) -> None
                 tags_none=request.tags_none,
                 metadata_filters=request.metadata_filters,
                 include_archived=request.include_archived,
+                semantic=request.semantic,
             )
         _raise_for_access_denied(result)
         return result

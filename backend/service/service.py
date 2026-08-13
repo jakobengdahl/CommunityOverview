@@ -81,6 +81,7 @@ class GraphService:
         tags_none: Optional[List[str]] = None,
         metadata_filters: Optional[List[Dict[str, Any]]] = None,
         include_archived: bool = False,
+        semantic: bool = False,
     ) -> Dict[str, Any]:
         return queries.search_graph(
             self._storage,
@@ -96,6 +97,7 @@ class GraphService:
             tags_none=tags_none,
             metadata_filters=metadata_filters,
             include_archived=include_archived,
+            semantic=semantic,
         )
 
     def get_node_details(self, node_id: str) -> Dict[str, Any]:

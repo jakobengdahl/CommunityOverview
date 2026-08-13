@@ -124,6 +124,7 @@ def register_mcp_tools(
         tags_none: Optional[List[str]] = None,
         metadata_filters: Optional[List[Dict[str, Any]]] = None,
         include_archived: bool = False,
+        semantic: bool = False,
         visualization_session_id: Optional[str] = None,
     ) -> Dict[str, Any]:
         """
@@ -135,6 +136,15 @@ def register_mcp_tools(
         names or values. Pass an empty query ("") to filter purely by tags and/or
         metadata. When no filter argument is given the search behaves exactly as
         before.
+
+        By default the query is matched lexically (substring). Multi-word or
+        natural-language queries that no node contains verbatim therefore return
+        nothing; set ``semantic=True`` to rank nodes by embedding meaning instead.
+        As a safety net the search also falls back to semantic ranking
+        automatically when a non-empty lexical query yields zero results, so a
+        conceptual query still surfaces the closest nodes. The response includes
+        a ``"semantic"`` boolean indicating whether semantic ranking produced the
+        returned nodes.
 
         Args:
             query: Search text (matches against name, description, summary). Use ""
@@ -154,6 +164,10 @@ def register_mcp_tools(
                 combine with AND.
             include_archived: When False (default) archived nodes and edges are
                 excluded. Set True to include archived items in the results.
+            semantic: When True, rank results by embedding meaning (cosine
+                similarity) instead of lexical substring matching. Default False
+                keeps the lexical behavior, which still auto-falls back to
+                semantic ranking when it returns zero results.
             visualization_session_id: Optional browser session ID — when provided, the result
                 is pushed live to the connected browser window via SSE
 
@@ -171,6 +185,7 @@ def register_mcp_tools(
             tags_none=tags_none,
             metadata_filters=metadata_filters,
             include_archived=include_archived,
+            semantic=semantic,
         )
         _push(visualization_session_id, "search_graph", result)
         return result
