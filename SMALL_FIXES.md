@@ -219,12 +219,6 @@ Effort scale: XS = single-line fix · S = up to ~30 lines / one file · M = mult
 - **`federationDepthFlow.test.jsx` strict `toEqual` on the chat payload** — `frontend/web/tests/federationDepthFlow.test.jsx`. Changed the `sendChatMessage` options assertion from `toEqual` to `toMatchObject`, tolerating the extra context fields now sent alongside `federationDepth`. (Resolved the duplicate 2026-07-01 and 2026-07-02 entries for this same line.)
 - **`GraphCanvas.test.jsx` edge-delete test asserts a stale Swedish label** — `packages/ui-graph-canvas/tests/GraphCanvas.test.jsx`. Matched the edge-delete button by its actual English default label (`/delete/i`) instead of `/ta bort/i`. (Resolved the duplicate 2026-07-02 and 2026-07-03 entries for this same test.)
 
-### [2026-08-11] Legacy session-registry queue grows unbounded while browser is on the op-stream
-- **File(s):** `backend/core/session_registry.py:80` (`asyncio.Queue()`), `push_command`/`push_command_sync`; producers `backend/service/mcp_tools.py` `_push_to_session` and `backend/api_host/session_stream.py` pulse endpoint
-- **Context:** Discovered during claude/canvas-pulse-trigger (review round 1)
-- **Issue:** Once a session's browser has switched to the shared op-protocol stream (`opStreamReady`), it closes the legacy `GET /sessions/{id}/stream` EventSource, so nothing drains that session's `SessionRegistry` queue. Every subsequent push (MCP tool results *and* pulse triggers) still enqueues onto the unconsumed, unbounded queue and calls `_touch`, which also keeps refreshing `last_seen` so the 1h TTL eviction never fires. Memory grows for the lifetime of an actively-pushed session that is on the op-stream. Pre-existing property of the push architecture (affects `_push_to_session` too), made more visible by higher-frequency external pulse triggers. Fix options: track active legacy-stream consumers on the registry and skip/bound enqueue when none is draining (careful not to break the legacy→op handover window, design §8.1 R5), or bound the queue with drop-oldest.
-- **Effort:** M
-
 ### [2026-08-12] CreateActiveKnowledgeCollectionDialog does not use i18n
 - **File(s):** `frontend/web/src/components/CreateActiveKnowledgeCollectionDialog.jsx`
 - **Context:** Discovered during claude/kiosk-tool-access

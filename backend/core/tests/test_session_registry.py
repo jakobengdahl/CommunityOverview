@@ -9,7 +9,7 @@ import asyncio
 import time
 import pytest
 
-from backend.core.session_registry import SessionRegistry
+from backend.core.session_registry import SessionRegistry, _MAX_QUEUE_SIZE
 
 
 class TestSessionIdValidation:
@@ -171,6 +171,68 @@ class TestStream:
             break  # stop after first item
 
         assert received == [{"type": "cmd", "action": "test"}]
+
+
+class TestBoundedQueue:
+    """The legacy push queue stays bounded once the browser stops draining it.
+
+    Regression for the resource leak where a session that has switched to the
+    shared op stream closes its legacy SSE consumer, so nothing drains the
+    queue; every subsequent MCP-tool/pulse push previously grew an unbounded
+    queue for the session's lifetime.
+    """
+
+    @pytest.mark.asyncio
+    async def test_async_push_bounded_drops_oldest(self):
+        reg = SessionRegistry()
+        queue = reg.get_or_create("1234-5678")
+
+        # No consumer connected (browser is on the op stream). Push far past the
+        # cap; the queue must not grow without bound.
+        total = _MAX_QUEUE_SIZE + 50
+        for i in range(total):
+            assert await reg.push_command("1234-5678", {"type": "cmd", "seq": i})
+
+        assert queue.qsize() == _MAX_QUEUE_SIZE
+        # Oldest commands were dropped: the surviving window is the most recent.
+        first = queue.get_nowait()
+        assert first["seq"] == total - _MAX_QUEUE_SIZE
+
+    @pytest.mark.asyncio
+    async def test_sync_push_bounded_drops_oldest(self):
+        reg = SessionRegistry()
+        loop = asyncio.get_running_loop()
+        reg.set_event_loop(loop)
+        queue = reg.get_or_create("1234-5678")
+
+        total = _MAX_QUEUE_SIZE + 50
+        for i in range(total):
+            assert reg.push_command_sync("1234-5678", {"type": "cmd", "seq": i})
+        # push_command_sync enqueues via loop.call_soon; let the callbacks run.
+        for _ in range(5):
+            await asyncio.sleep(0)
+
+        assert queue.qsize() == _MAX_QUEUE_SIZE
+
+    @pytest.mark.asyncio
+    async def test_handover_delivers_queued_commands_to_late_consumer(self):
+        """Commands enqueued during the handover window still reach a legacy
+        consumer that connects within it."""
+        reg = SessionRegistry()
+        reg.get_or_create("1234-5678")
+
+        # Pushes arriving before the browser's SSE stream connects (or a brief
+        # reconnect during the legacy→op handover) must be buffered, not lost.
+        for i in range(3):
+            await reg.push_command("1234-5678", {"type": "cmd", "seq": i})
+
+        received = []
+        async for item in reg.stream("1234-5678"):
+            received.append(item["seq"])
+            if len(received) == 3:
+                break
+
+        assert received == [0, 1, 2]
 
 
 class TestTTLEviction:
