@@ -299,6 +299,41 @@ def test_generic_metadata_filter_applies_to_federated_nodes(tmp_path):
     assert names == {"Active remote"}
 
 
+def test_federated_widening_keeps_low_ranked_filter_match_under_limit(tmp_path):
+    """Regression: a filter-passing federated node ranked below the text window
+    must still survive because the fetch is widened when a filter is active.
+
+    With ``limit=1`` and several higher-scoring decoys, the un-widened path would
+    truncate the federated text search to the single top decoy and then filter it
+    away — dropping the one node the caller asked for.
+    """
+    graph_file = tmp_path / "graph.json"
+    graph_file.write_text(json.dumps({"nodes": [], "edges": []}), encoding="utf-8")
+    storage = GraphStorage(str(graph_file))
+
+    # Decoys are exact name matches (top score); the sole tagged node only
+    # *contains* the query, so it sorts last.
+    manager = _manager_with_federated_nodes(
+        [
+            {"id": "d1", "type": "Actor", "name": "remote"},
+            {"id": "d2", "type": "Actor", "name": "remote"},
+            {"id": "d3", "type": "Actor", "name": "remote"},
+            {
+                "id": "keep",
+                "type": "Actor",
+                "name": "please keep this remote",
+                "tags": ["keep"],
+            },
+        ]
+    )
+
+    service = GraphService(storage, federation_manager=manager)
+    result = service.search_graph(query="remote", tags_any=["keep"], limit=1)
+
+    names = {n["name"] for n in result["nodes"]}
+    assert names == {"please keep this remote"}
+
+
 def test_graph_stats_exposes_depth_and_graph_labels(tmp_path):
     graph_file = tmp_path / "graph.json"
     graph_file.write_text(
