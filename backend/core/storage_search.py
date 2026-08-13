@@ -111,12 +111,17 @@ def search_nodes(
     query: str,
     node_types: Optional[List[NodeType]] = None,
     limit: int = 50,
+    include_archived: bool = False,
 ) -> List[Node]:
     """Text search over *nodes*.  Matches against name, description, summary,
     tags, subtypes, aliases and node type (including localized labels).
     Results are ranked so that name matches rank above type matches, which
     rank above description/tag matches.
     Empty query or ``'*'`` returns all nodes (subject to filtering and limit).
+
+    Archived nodes are excluded unless ``include_archived`` is True. Excluding
+    them here — before the ``limit`` slice below — keeps ``limit`` counting only
+    visible results.
     """
     query_lower = query.lower().strip()
     results = []
@@ -124,6 +129,9 @@ def search_nodes(
 
     for node in nodes.values():
         if node_types and node.type not in node_types:
+            continue
+
+        if not include_archived and getattr(node, "archived", False):
             continue
 
         if not match_all:
@@ -158,9 +166,15 @@ def get_related_nodes(
     node_id: str,
     relationship_types: Optional[List[RelationshipType]] = None,
     depth: int = 1,
+    include_archived: bool = False,
 ) -> Dict[str, Any]:
     """BFS traversal from *node_id* up to *depth* hops.  Returns nodes and
     edges that are reachable, filtered by *relationship_types* when given.
+
+    Unless ``include_archived`` is True, archived edges are not traversed and
+    archived neighbour nodes are not visited (nor reached through), so an
+    archived node cannot re-enter the result set via a later hop. The starting
+    node is always included as the anchor, even when it is itself archived.
     """
     if node_id not in nodes:
         return {"nodes": [], "edges": []}
@@ -168,6 +182,15 @@ def get_related_nodes(
     visited_nodes = {node_id}
     visited_edges: set = set()
     current_layer = {node_id}
+
+    def _neighbor_blocked(neighbor_id: str) -> bool:
+        if include_archived or neighbor_id == node_id:
+            # The anchor is always part of the result, so an edge that reconnects
+            # to it (e.g. a cycle at depth >= 2) must not be dropped even when the
+            # anchor itself is archived.
+            return False
+        neighbor = nodes.get(neighbor_id)
+        return neighbor is not None and getattr(neighbor, "archived", False)
 
     for _ in range(depth):
         next_layer: set = set()
@@ -179,6 +202,10 @@ def get_related_nodes(
                 edge = edge_data["data"]
                 if relationship_types and edge.type not in relationship_types:
                     continue
+                if not include_archived and getattr(edge, "archived", False):
+                    continue
+                if _neighbor_blocked(target):
+                    continue
                 visited_edges.add(edge_id)
                 if target not in visited_nodes:
                     visited_nodes.add(target)
@@ -189,6 +216,10 @@ def get_related_nodes(
             ):
                 edge = edge_data["data"]
                 if relationship_types and edge.type not in relationship_types:
+                    continue
+                if not include_archived and getattr(edge, "archived", False):
+                    continue
+                if _neighbor_blocked(source):
                     continue
                 visited_edges.add(edge_id)
                 if source not in visited_nodes:

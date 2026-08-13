@@ -184,6 +184,9 @@ class Node(BaseModel):
         default_factory=list
     )  # Alternative names/synonyms; matched in search
     metadata: Dict[str, Any] = Field(default_factory=dict)
+    archived: bool = Field(
+        default=False
+    )  # Lifecycle flag: archived nodes are hidden from search/traversal by default
     embedding: Optional[List[float]] = None  # For future vector search
     created_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
     updated_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
@@ -245,6 +248,8 @@ class Node(BaseModel):
             data["created_at"] = _parse_datetime(data["created_at"])
         if isinstance(data.get("updated_at"), str):
             data["updated_at"] = _parse_datetime(data["updated_at"])
+        # Legacy data predates the archived flag; absent means not archived.
+        data.setdefault("archived", False)
         return cls(**data)
 
     def get_color(self) -> str:
@@ -263,6 +268,9 @@ class Edge(BaseModel):
     )  # Optional, defaults to general connection
     label: str = Field(default="")  # Optional free-text label for the connection
     metadata: Dict[str, Any] = Field(default_factory=dict)
+    archived: bool = Field(
+        default=False
+    )  # Lifecycle flag: archived edges are hidden from search/traversal by default
     created_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
 
     @field_validator("type", mode="before")
@@ -307,6 +315,8 @@ class Edge(BaseModel):
         # Handle legacy data without label field
         if "label" not in data:
             data["label"] = ""
+        # Legacy data predates the archived flag; absent means not archived.
+        data.setdefault("archived", False)
         return cls(**data)
 
 
