@@ -15,10 +15,12 @@ import pytest
 
 from backend.core import GraphStorage
 from backend.core.session_manager import SessionManager
+from backend.core.session_registry import SessionRegistry
 from backend.core.session_store import (
     InMemorySessionPersistenceBackend,
     SessionStore,
 )
+from backend.runtime.authorization import AUTHORIZATION_MODE_ENV
 from backend.service import GraphService, register_mcp_tools
 
 
@@ -33,6 +35,27 @@ def layout_tools(tmp_path):
     mock_mcp.tool = MagicMock(return_value=lambda f: f)
     tools_map = register_mcp_tools(mock_mcp, service, session_manager=manager)
     return tools_map, manager
+
+
+@pytest.fixture
+def authz_tools(tmp_path):
+    """tools_map wired with both a session registry and a manager.
+
+    ``get_visualization_session_state`` reads through the registry while the two
+    geometry tools read/write through the manager, so the authorization-gating
+    tests need both wired to exercise all three.
+    """
+    storage = GraphStorage(json_path=os.path.join(tmp_path, "g.json"))
+    service = GraphService(storage)
+    manager = SessionManager(SessionStore(InMemorySessionPersistenceBackend()))
+    registry = SessionRegistry()
+
+    mock_mcp = Mock()
+    mock_mcp.tool = MagicMock(return_value=lambda f: f)
+    tools_map = register_mcp_tools(
+        mock_mcp, service, session_registry=registry, session_manager=manager
+    )
+    return tools_map, manager, registry
 
 
 def _session_with_nodes(manager, node_ids):
@@ -184,3 +207,78 @@ class TestApplyVisualizationLayout:
             "duration_ms": 300,
             "easing": "linear",
         }
+
+
+class TestVisualizationToolsAuthorization:
+    """The geometry/state tools must gate through the same authorization seam as
+    the session CRUD tools.
+
+    Regression for the bypass where ``get_visualization_layout``,
+    ``get_visualization_session_state`` (READ) and ``apply_visualization_layout``
+    (MUTATE) skipped ``_authorize_session`` entirely: under the permissive
+    open-core default nothing changed, but in a read-only or deny-all mode (the
+    seam the hosted layer swaps in for per-tenant enforcement) an actor denied
+    ``get_visualization_session`` could still read node geometry and MOVE nodes.
+    """
+
+    def test_deny_all_blocks_layout_read(self, authz_tools, monkeypatch):
+        tools_map, manager, _ = authz_tools
+        session = _session_with_nodes(manager, ["a", "b"])
+        monkeypatch.setenv(AUTHORIZATION_MODE_ENV, "deny-all")
+
+        result = tools_map["get_visualization_layout"](session_id=session.id)
+
+        assert result.get("error_code") == "access_denied"
+
+    def test_deny_all_blocks_session_state_read(self, authz_tools, monkeypatch):
+        tools_map, manager, _ = authz_tools
+        session = _session_with_nodes(manager, ["a"])
+        monkeypatch.setenv(AUTHORIZATION_MODE_ENV, "deny-all")
+
+        result = tools_map["get_visualization_session_state"](session_id=session.id)
+
+        assert result.get("error_code") == "access_denied"
+
+    def test_read_only_blocks_layout_mutation_and_moves_nothing(
+        self, authz_tools, monkeypatch
+    ):
+        tools_map, manager, _ = authz_tools
+        session = _session_with_nodes(manager, ["a", "b"])
+        monkeypatch.setenv(AUTHORIZATION_MODE_ENV, "read-only")
+
+        result = tools_map["apply_visualization_layout"](
+            session_id=session.id, positions={"a": {"x": 10, "y": 20}}
+        )
+
+        assert result["success"] is False
+        assert result.get("error_code") == "access_denied"
+        # The denied write must not have moved the node.
+        assert "a" not in session.state.get("positions", {})
+
+    def test_read_only_still_allows_the_getters(self, authz_tools, monkeypatch):
+        # read-only denies only mutations; both READ tools must keep working.
+        tools_map, manager, registry = authz_tools
+        session = _session_with_nodes(manager, ["a"])
+        registry.get_or_create(session.id)  # state tool checks the registry
+        monkeypatch.setenv(AUTHORIZATION_MODE_ENV, "read-only")
+
+        layout = tools_map["get_visualization_layout"](session_id=session.id)
+        state = tools_map["get_visualization_session_state"](session_id=session.id)
+
+        assert layout["session_id"] == session.id
+        assert "error_code" not in layout
+        assert state["session_id"] == session.id
+        assert "error_code" not in state
+
+    def test_permissive_default_allows_read_and_mutation(self, authz_tools):
+        tools_map, manager, _ = authz_tools
+        session = _session_with_nodes(manager, ["a"])
+
+        layout = tools_map["get_visualization_layout"](session_id=session.id)
+        moved = tools_map["apply_visualization_layout"](
+            session_id=session.id, positions={"a": {"x": 1, "y": 2}}
+        )
+
+        assert "error_code" not in layout
+        assert moved["success"] is True
+        assert moved["moved"] == 1
