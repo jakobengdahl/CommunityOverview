@@ -376,6 +376,54 @@ The default API prefix is `/api` (configurable via `API_PREFIX`).
 | POST | `/agents/proposals/{proposal_id}/reject` | Reject a proposal |
 | POST | `/agents/{id}/trigger` | Fire a scheduled agent immediately (used by GCP Cloud Scheduler) |
 
+### Generic search filters (`/api/search` and the `search_graph` MCP tool)
+
+Beyond the text `query` and `node_types`, search accepts generic, config-neutral
+tag and metadata filters. They match on whatever tags and metadata a deployment
+has put on its nodes and hardcode no field names or values, so the same mechanism
+serves any use case. Omitting all of them leaves search behaviour unchanged.
+
+| Parameter | Meaning |
+|-----------|---------|
+| `tags_any` | Keep nodes carrying **at least one** of these tags (OR). |
+| `tags_all` | Keep nodes carrying **every** one of these tags (AND). |
+| `tags_none` | Drop nodes carrying **any** of these tags (exclude). |
+| `metadata_filters` | List of generic metadata filters (see below). |
+
+Each entry in `metadata_filters` is an object
+`{"key": <field>, "values": [...], "match": "any"|"all"|"none"}`:
+
+- `any` (default): the node's metadata value(s) at `key` intersect the requested
+  values.
+- `all`: every requested value is present in the node's value(s) at `key`
+  (meaningful when the stored value is itself a list).
+- `none`: the node's value(s) at `key` share nothing with the requested values.
+
+Values compare as strings, so heterogeneous scalar types (e.g. an integer stored
+in metadata vs. a string filter value) match uniformly. A filter with no `key` or
+no `values` is ignored. The tag dimensions and every metadata filter combine with
+AND — a node must satisfy all configured constraints. Pass an empty `query` (`""`)
+to filter purely by tags/metadata. The applied filters are echoed back under
+`result["filters"]`. The REST endpoint and the `search_graph` MCP tool expose the
+same parameters.
+
+When a filter is active the text-search window is widened (locally, and across
+the federation cache) so post-filter results are not truncated by the `limit`. The
+final `limit` still bounds the returned nodes; as with unfiltered search, local
+matches are counted first and federated results only fill the remainder.
+
+Example (nodes tagged `partner`, excluding any tagged `archived`, whose
+`stage` metadata is `active` or `pilot`):
+
+```json
+{
+  "query": "",
+  "tags_any": ["partner"],
+  "tags_none": ["archived"],
+  "metadata_filters": [{"key": "stage", "values": ["active", "pilot"]}]
+}
+```
+
 ### Custom REST Interfaces (config-driven)
 
 A specific node type or edge type can be exposed as its own dedicated read-only

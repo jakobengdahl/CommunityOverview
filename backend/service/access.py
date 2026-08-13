@@ -169,12 +169,19 @@ def get_federated_search_limit(
     federation_manager: Optional["FederationManager"],
     minimum_limit: int,
     graph_access: GraphAccessNarrowing,
+    widen: bool = False,
 ) -> int:
-    if (
-        not federation_manager
-        or not federation_manager.enabled
-        or not graph_access.enabled
-    ):
+    """Return how many federated nodes to fetch before post-fetch filtering.
+
+    The window is widened to the full federation cache when graph-scope narrowing
+    is active, or when ``widen`` is set (a generic tag/metadata filter is active),
+    so post-fetch filtering sees the full candidate set instead of dropping
+    matches that ranked below a ``minimum_limit``-sized text window — mirroring
+    the local widening in ``queries.search_graph``.
+    """
+    if not federation_manager or not federation_manager.enabled:
+        return minimum_limit
+    if not graph_access.enabled and not widen:
         return minimum_limit
     return max(
         minimum_limit,

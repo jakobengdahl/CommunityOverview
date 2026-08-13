@@ -38,6 +38,10 @@ def search_graph(
     limit: int = 50,
     action: Optional[str] = None,
     federation_depth: Optional[int] = None,
+    tags_any: Optional[List[str]] = None,
+    tags_all: Optional[List[str]] = None,
+    tags_none: Optional[List[str]] = None,
+    metadata_filters: Optional[List[Dict[str, Any]]] = None,
 ) -> Dict[str, Any]:
     decision = access.evaluate_graph_access(
         hook, action=GRAPH_ACTION_READ, target="search_graph"
@@ -53,18 +57,38 @@ def search_graph(
     if node_types:
         type_filters = [NodeType.from_string(t) for t in node_types]
 
+    # Accept the documented list-of-filters shape; tolerate a single bare dict by
+    # normalising it once here so matching and the echoed `filters` agree.
+    if isinstance(metadata_filters, dict):
+        metadata_filters = [metadata_filters]
+
+    has_generic_filters = bool(tags_all or tags_any or tags_none or metadata_filters)
+
+    def _passes_filters(node) -> bool:
+        return _node_matches_search_filters(
+            node,
+            tags_all=tags_all,
+            tags_any=tags_any,
+            tags_none=tags_none,
+            metadata_filters=metadata_filters,
+        )
+
+    # Widen the text-search window when a graph-scope narrowing or a generic
+    # tag/metadata filter is active, so post-fetch filtering sees the full
+    # candidate set instead of dropping matches that fell outside a `limit`-sized
+    # text window.
     local_results = storage.search_nodes(
         query=query,
         node_types=type_filters,
         limit=max(limit, storage.get_stats().total_nodes)
-        if decision.graph_access.enabled
+        if decision.graph_access.enabled or has_generic_filters
         else limit,
     )
 
     visible_local_results = [
         node
         for node in local_results
-        if access.is_node_visible(node, decision.graph_access)
+        if access.is_node_visible(node, decision.graph_access) and _passes_filters(node)
     ][:limit]
     logger.info(f"SEARCH: Found {len(visible_local_results)} visible local results")
 
@@ -80,11 +104,16 @@ def search_graph(
                 query=query,
                 node_types=node_types,
                 limit=access.get_federated_search_limit(
-                    federation_manager, remaining, decision.graph_access
+                    federation_manager,
+                    remaining,
+                    decision.graph_access,
+                    widen=has_generic_filters,
                 ),
                 max_depth=federation_depth,
             )
-            federated_nodes = federated["nodes"]
+            federated_nodes = [
+                node for node in federated["nodes"] if _passes_filters(node)
+            ]
             federated_edges = federated["edges"]
 
     all_nodes = visible_local_results + federated_nodes
@@ -121,7 +150,13 @@ def search_graph(
         "edges": serialize_edges(deduped_edges),
         "total": len(visible_nodes),
         "query": query,
-        "filters": {"node_types": node_types},
+        "filters": {
+            "node_types": node_types,
+            "tags_any": list(tags_any or []),
+            "tags_all": list(tags_all or []),
+            "tags_none": list(tags_none or []),
+            "metadata_filters": list(metadata_filters or []),
+        },
         "federation": {
             "included": bool(federation_manager and federation_manager.enabled),
             "federated_nodes": len(visible_federated_nodes),
@@ -207,20 +242,97 @@ def _matches_tag_filters(
     *,
     tags_all: Optional[List[str]] = None,
     tags_any: Optional[List[str]] = None,
+    tags_none: Optional[List[str]] = None,
 ) -> bool:
-    """Return True when ``values`` satisfies the AND/OR tag filter.
+    """Return True when ``values`` satisfies the AND/OR/NONE tag filter.
 
     ``tags_all`` (AND): every listed tag must be present.
     ``tags_any`` (OR): at least one listed tag must be present.
-    Empty/omitted lists disable that dimension. Both empty → always True.
-    The two dimensions combine with AND (a value set must pass both).
+    ``tags_none`` (NONE): none of the listed tags may be present.
+    Empty/omitted lists disable that dimension. All empty → always True.
+    The dimensions combine with AND (a value set must pass every configured one).
     """
     present = set(values or [])
     if tags_all and not set(tags_all).issubset(present):
         return False
     if tags_any and present.isdisjoint(set(tags_any)):
         return False
+    if tags_none and not present.isdisjoint(set(tags_none)):
+        return False
     return True
+
+
+def _as_value_set(raw: Any) -> set:
+    """Normalize a metadata value or a filter's requested values to a set of
+    strings, so config-neutral JSON scalars (str/int/bool) compare uniformly.
+
+    A list/tuple/set contributes each of its items; a scalar contributes itself;
+    ``None`` contributes nothing.
+    """
+    if raw is None:
+        return set()
+    if isinstance(raw, (list, tuple, set)):
+        return {str(v) for v in raw}
+    return {str(raw)}
+
+
+def _matches_metadata_filters(
+    metadata: Optional[Dict[str, Any]],
+    metadata_filters: Optional[List[Dict[str, Any]]],
+) -> bool:
+    """Return True when ``metadata`` satisfies every generic metadata filter.
+
+    Each filter is ``{"key": str, "values": [...], "match": "any"|"all"|"none"}``:
+      - ``any`` (default): the node's value(s) at ``key`` intersect the requested
+        values.
+      - ``all``: every requested value is present in the node's value(s) at
+        ``key`` (meaningful when the stored value is itself a list).
+      - ``none``: the node's value(s) at ``key`` share nothing with the requested
+        values (exclusion).
+
+    Values compare as strings so heterogeneous scalar types match uniformly. A
+    filter with no ``key`` or no ``values`` is ignored. Filters combine with AND
+    (the node must satisfy all of them). The mechanism is deliberately
+    key-agnostic — it hardcodes no field names or values.
+    """
+    if not metadata_filters:
+        return True
+    if isinstance(metadata_filters, dict):
+        metadata_filters = [metadata_filters]
+    meta = metadata or {}
+    for spec in metadata_filters:
+        if not isinstance(spec, dict):
+            continue
+        key = spec.get("key")
+        requested = _as_value_set(spec.get("values"))
+        if not key or not requested:
+            continue
+        match = str(spec.get("match") or "any").lower()
+        present = _as_value_set(meta.get(key))
+        if match == "all":
+            if not requested.issubset(present):
+                return False
+        elif match == "none":
+            if requested & present:
+                return False
+        else:  # "any" (and any unrecognised mode)
+            if present.isdisjoint(requested):
+                return False
+    return True
+
+
+def _node_matches_search_filters(
+    node: Any,
+    *,
+    tags_all: Optional[List[str]] = None,
+    tags_any: Optional[List[str]] = None,
+    tags_none: Optional[List[str]] = None,
+    metadata_filters: Optional[List[Dict[str, Any]]] = None,
+) -> bool:
+    """Combined generic tag + metadata predicate for a single node."""
+    return _matches_tag_filters(
+        node.tags, tags_all=tags_all, tags_any=tags_any, tags_none=tags_none
+    ) and _matches_metadata_filters(node.metadata, metadata_filters)
 
 
 def list_typed_nodes(

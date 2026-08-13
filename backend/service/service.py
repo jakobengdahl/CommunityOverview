@@ -76,6 +76,10 @@ class GraphService:
         limit: int = 50,
         action: Optional[str] = None,
         federation_depth: Optional[int] = None,
+        tags_any: Optional[List[str]] = None,
+        tags_all: Optional[List[str]] = None,
+        tags_none: Optional[List[str]] = None,
+        metadata_filters: Optional[List[Dict[str, Any]]] = None,
     ) -> Dict[str, Any]:
         return queries.search_graph(
             self._storage,
@@ -86,6 +90,10 @@ class GraphService:
             limit=limit,
             action=action,
             federation_depth=federation_depth,
+            tags_any=tags_any,
+            tags_all=tags_all,
+            tags_none=tags_none,
+            metadata_filters=metadata_filters,
         )
 
     def get_node_details(self, node_id: str) -> Dict[str, Any]:
