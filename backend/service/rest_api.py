@@ -148,6 +148,21 @@ class UpdateNodeRequest(BaseModel):
     """Request model for updating a node."""
 
     updates: Dict[str, Any] = Field(..., description="Fields to update")
+    metadata_merge: bool = Field(
+        False,
+        description=(
+            "When True, merge the `metadata` object field-by-field onto the "
+            "node's existing metadata (a null value removes a key) instead of "
+            "replacing the whole object. Default False keeps replace semantics."
+        ),
+    )
+    expected_updated_at: Optional[str] = Field(
+        None,
+        description=(
+            "Optimistic-concurrency guard: the `updated_at` the caller last read. "
+            "The update is rejected with 409 if the node changed since then."
+        ),
+    )
     # Event context (optional, for webhooks/loop prevention)
     event_origin: Optional[str] = Field(
         None, description="Source of mutation (web-ui, mcp, system, agent:<id>)"
@@ -469,8 +484,12 @@ def _register_node_crud_endpoints(router: APIRouter, service: GraphService) -> N
                 event_origin=request.event_origin,
                 event_session_id=request.event_session_id,
                 event_correlation_id=request.event_correlation_id,
+                metadata_merge=request.metadata_merge,
+                expected_updated_at=request.expected_updated_at,
             )
         _raise_for_access_denied(result)
+        if result.get("conflict"):
+            raise HTTPException(status_code=409, detail=result.get("error"))
         if not result.get("success", True):
             raise HTTPException(status_code=404, detail=result.get("error"))
         return result

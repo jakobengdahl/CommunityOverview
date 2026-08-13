@@ -183,6 +183,41 @@ class TestGraphServiceCRUD:
         assert result["success"] is False
         assert "error" in result
 
+    def test_update_node_metadata_merge_through_service(
+        self, populated_service: GraphService
+    ):
+        """Merge mode is honoured end-to-end through the service layer."""
+        populated_service.update_node("actor-1", {"metadata": {"a": 1, "b": 2}})
+        result = populated_service.update_node(
+            "actor-1", {"metadata": {"a": 9, "b": None}}, metadata_merge=True
+        )
+
+        assert result["success"] is True
+        assert result["node"]["metadata"] == {"a": 9}
+
+    def test_update_node_optimistic_conflict_returns_409_shape(
+        self, populated_service: GraphService
+    ):
+        """A stale expected_updated_at surfaces as a conflict result, not a clobber."""
+        first = populated_service.update_node("actor-1", {"summary": "one"})
+        stale = first["node"]["updated_at"]
+        populated_service.update_node("actor-1", {"summary": "two"})
+
+        result = populated_service.update_node(
+            "actor-1", {"summary": "three"}, expected_updated_at=stale
+        )
+
+        assert result["success"] is False
+        assert result["conflict"] is True
+        assert "current_updated_at" in result
+        # The rejected write must not have applied.
+        fresh = populated_service.update_node(
+            "actor-1",
+            {"summary": "three"},
+            expected_updated_at=result["current_updated_at"],
+        )
+        assert fresh["success"] is True
+
     def test_update_node_over_limit_returns_clean_error(
         self, populated_service: GraphService
     ):

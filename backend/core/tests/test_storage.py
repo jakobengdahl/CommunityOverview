@@ -233,6 +233,77 @@ class TestGraphStorageCRUD:
         result = storage_with_data.update_node("nonexistent", {"name": "New"})
         assert result is None
 
+    def test_update_node_replaces_metadata_by_default(self, storage_with_data):
+        """Legacy default: an explicit metadata dict replaces the whole object."""
+        storage_with_data.update_node("actor-1", {"metadata": {"a": 1, "b": 2}})
+        updated = storage_with_data.update_node("actor-1", {"metadata": {"a": 9}})
+        assert updated.metadata == {"a": 9}
+
+    def test_update_node_metadata_merge_keeps_other_keys(self, storage_with_data):
+        """Merge mode updates a single key without dropping the rest."""
+        storage_with_data.update_node("actor-1", {"metadata": {"a": 1, "b": 2}})
+        updated = storage_with_data.update_node(
+            "actor-1", {"metadata": {"a": 9}}, metadata_merge=True
+        )
+        assert updated.metadata == {"a": 9, "b": 2}
+
+    def test_update_node_metadata_merge_removes_key_with_none(self, storage_with_data):
+        """Merge mode: a null value removes just that key (RFC 7386)."""
+        storage_with_data.update_node("actor-1", {"metadata": {"a": 1, "b": 2}})
+        updated = storage_with_data.update_node(
+            "actor-1", {"metadata": {"a": None}}, metadata_merge=True
+        )
+        assert updated.metadata == {"b": 2}
+
+    def test_update_node_metadata_merge_removes_extra_field_with_none(
+        self, storage_with_data
+    ):
+        """Merge mode applies null-deletion to schema-extra fields too, not just
+        the metadata dict — the consistency the docstring/docs promise."""
+        storage_with_data.update_node("actor-1", {"metadata": {"a": 1}})
+        # `custom_field` is a schema-extra key folded into metadata.
+        storage_with_data.update_node(
+            "actor-1", {"custom_field": "keep"}, metadata_merge=True
+        )
+        updated = storage_with_data.update_node(
+            "actor-1", {"custom_field": None}, metadata_merge=True
+        )
+        assert "custom_field" not in updated.metadata
+        assert updated.metadata == {"a": 1}
+
+    def test_update_node_metadata_none_rejected_in_replace_mode(
+        self, storage_with_data
+    ):
+        """Default replace path: metadata=None with no extra fields is rejected by
+        model validation, exactly as before merge mode existed (no silent blank)."""
+        with pytest.raises(ValueError):
+            storage_with_data.update_node("actor-1", {"metadata": None})
+
+    def test_update_node_optimistic_concurrency_accepts_fresh(self, storage_with_data):
+        """A write whose expected_updated_at still matches is accepted."""
+        node = storage_with_data.get_node("actor-1")
+        fresh = node.updated_at.isoformat()
+        updated = storage_with_data.update_node(
+            "actor-1", {"summary": "ok"}, expected_updated_at=fresh
+        )
+        assert updated is not None
+        assert updated.summary == "ok"
+
+    def test_update_node_optimistic_concurrency_rejects_stale(self, storage_with_data):
+        """A write whose expected_updated_at is stale raises StaleUpdateError."""
+        from backend.core import StaleUpdateError
+
+        node = storage_with_data.get_node("actor-1")
+        stale = node.updated_at.isoformat()
+        # A concurrent write advances updated_at.
+        storage_with_data.update_node("actor-1", {"summary": "first"})
+        with pytest.raises(StaleUpdateError):
+            storage_with_data.update_node(
+                "actor-1", {"summary": "second"}, expected_updated_at=stale
+            )
+        # The stale write must not have applied.
+        assert storage_with_data.get_node("actor-1").summary == "first"
+
     def test_delete_node(self, storage_with_data):
         """Test deleting a node"""
         result = storage_with_data.delete_nodes(["actor-1"], confirmed=True)
