@@ -126,6 +126,7 @@ class GraphService:
         tags_any: Optional[List[str]] = None,
         subtypes_any: Optional[List[str]] = None,
         limit: int = 500,
+        include_archived: bool = False,
     ) -> Dict[str, Any]:
         return queries.list_typed_nodes(
             self._storage,
@@ -135,6 +136,7 @@ class GraphService:
             tags_any=tags_any,
             subtypes_any=subtypes_any,
             limit=limit,
+            include_archived=include_archived,
         )
 
     def list_typed_edges(
@@ -143,6 +145,7 @@ class GraphService:
         tags_all: Optional[List[str]] = None,
         tags_any: Optional[List[str]] = None,
         limit: int = 500,
+        include_archived: bool = False,
     ) -> Dict[str, Any]:
         return queries.list_typed_edges(
             self._storage,
@@ -151,6 +154,7 @@ class GraphService:
             tags_all=tags_all,
             tags_any=tags_any,
             limit=limit,
+            include_archived=include_archived,
         )
 
     # ==================== Similarity Operations ====================

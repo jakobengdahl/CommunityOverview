@@ -1013,7 +1013,9 @@ def _register_single_custom_interface(
     if interface.entity == "node":
 
         @router.get(f"/{interface.path}", name=f"custom_interface_{interface.path}")
-        async def custom_node_interface(request: Request) -> Dict[str, Any]:
+        async def custom_node_interface(
+            request: Request, include_archived: bool = False
+        ) -> Dict[str, Any]:
             with use_request_authorization(headers=request.headers):
                 result = service.list_typed_nodes(
                     node_type=interface.node_type,
@@ -1021,6 +1023,7 @@ def _register_single_custom_interface(
                     tags_any=filters.tags_any,
                     subtypes_any=filters.subtypes_any,
                     limit=interface.limit,
+                    include_archived=include_archived,
                 )
             _raise_for_access_denied(result)
             return result
@@ -1028,13 +1031,16 @@ def _register_single_custom_interface(
     else:
 
         @router.get(f"/{interface.path}", name=f"custom_interface_{interface.path}")
-        async def custom_edge_interface(request: Request) -> Dict[str, Any]:
+        async def custom_edge_interface(
+            request: Request, include_archived: bool = False
+        ) -> Dict[str, Any]:
             with use_request_authorization(headers=request.headers):
                 result = service.list_typed_edges(
                     edge_type=interface.edge_type,
                     tags_all=filters.tags_all,
                     tags_any=filters.tags_any,
                     limit=interface.limit,
+                    include_archived=include_archived,
                 )
             _raise_for_access_denied(result)
             return result

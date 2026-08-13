@@ -184,7 +184,10 @@ def get_related_nodes(
     current_layer = {node_id}
 
     def _neighbor_blocked(neighbor_id: str) -> bool:
-        if include_archived:
+        if include_archived or neighbor_id == node_id:
+            # The anchor is always part of the result, so an edge that reconnects
+            # to it (e.g. a cycle at depth >= 2) must not be dropped even when the
+            # anchor itself is archived.
             return False
         neighbor = nodes.get(neighbor_id)
         return neighbor is not None and getattr(neighbor, "archived", False)

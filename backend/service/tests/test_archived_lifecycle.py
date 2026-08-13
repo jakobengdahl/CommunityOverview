@@ -211,3 +211,96 @@ class TestArchivedEdgesInSearch:
         # Opt-in shows it.
         opened = service.search_graph(query="", include_archived=True)
         assert "e1" in {e["id"] for e in opened["edges"]}
+
+    def test_edge_to_archived_node_hidden(self):
+        # Archive the *node*, not the edge: the (still-active) edge must not leak
+        # the hidden node back into results as a dangling reference.
+        service = _service(
+            [
+                Node(id="a1", type=NodeType.ACTOR, name="Alpha"),
+                Node(id="a2", type=NodeType.ACTOR, name="Beta"),
+            ],
+            [Edge(id="e1", source="a1", target="a2")],
+        )
+        service.archive_nodes(["a2"])
+        result = service.search_graph(query="")
+        assert "Beta" not in _names(result)
+        assert "e1" not in {e["id"] for e in result["edges"]}
+        # Opt-in restores both node and its edge.
+        opened = service.search_graph(query="", include_archived=True)
+        assert "Beta" in _names(opened)
+        assert "e1" in {e["id"] for e in opened["edges"]}
+
+
+class TestTypedListExcludesArchived:
+    def _typed_service(self) -> GraphService:
+        return _service(
+            [
+                Node(id="a1", type=NodeType.ACTOR, name="Alpha"),
+                Node(id="a2", type=NodeType.ACTOR, name="Beta"),
+            ],
+            [Edge(id="e1", source="a1", target="a2", type=RelationshipType.RELATES_TO)],
+        )
+
+    def test_list_typed_nodes_excludes_archived(self):
+        service = self._typed_service()
+        service.archive_nodes(["a2"])
+        result = service.list_typed_nodes(node_type="Actor")
+        assert {n["name"] for n in result["nodes"]} == {"Alpha"}
+        assert result["filters"]["include_archived"] is False
+
+    def test_list_typed_nodes_include_archived(self):
+        service = self._typed_service()
+        service.archive_nodes(["a2"])
+        result = service.list_typed_nodes(node_type="Actor", include_archived=True)
+        assert {n["name"] for n in result["nodes"]} == {"Alpha", "Beta"}
+
+    def test_list_typed_nodes_drops_edge_to_archived_node(self):
+        service = self._typed_service()
+        service.archive_nodes(["a2"])
+        result = service.list_typed_nodes(node_type="Actor")
+        # a2 is gone, so the connecting edge cannot be returned either.
+        assert result["edges"] == []
+
+    def test_list_typed_edges_excludes_archived_edge(self):
+        service = self._typed_service()
+        service.archive_edges(["e1"])
+        result = service.list_typed_edges(edge_type="RELATES_TO")
+        assert {e["id"] for e in result["edges"]} == set()
+        included = service.list_typed_edges(
+            edge_type="RELATES_TO", include_archived=True
+        )
+        assert {e["id"] for e in included["edges"]} == {"e1"}
+
+    def test_list_typed_edges_excludes_edge_to_archived_node(self):
+        service = self._typed_service()
+        service.archive_nodes(["a2"])
+        result = service.list_typed_edges(edge_type="RELATES_TO")
+        assert result["edges"] == []
+
+
+class TestArchivedAnchorTraversal:
+    def test_archived_anchor_stays_connected_in_cycle(self):
+        # anchor is archived; a depth-2 cycle back to it must keep the anchor and
+        # the edge that reconnects to it (the anchor is always part of the result).
+        service = _service(
+            [
+                Node(id="anchor", type=NodeType.ACTOR, name="Anchor"),
+                Node(id="mid", type=NodeType.ACTOR, name="Mid"),
+            ],
+            [
+                Edge(id="e-out", source="anchor", target="mid"),
+                Edge(id="e-back", source="mid", target="anchor"),
+            ],
+        )
+        service.archive_nodes(["anchor"])
+        result = service.get_related_nodes(
+            node_id="anchor", depth=2, include_archived=True
+        )
+        # With include_archived the whole cycle is visible.
+        assert {n["name"] for n in result["nodes"]} == {"Anchor", "Mid"}
+        # Default (exclude): the anchor is still the returned anchor, and the edge
+        # reconnecting to it from the visible Mid node is not dropped.
+        default = service.get_related_nodes(node_id="anchor", depth=2)
+        assert "Anchor" in {n["name"] for n in default["nodes"]}
+        assert "e-back" in {e["id"] for e in default["edges"]}
