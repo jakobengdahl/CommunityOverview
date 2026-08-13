@@ -15,6 +15,13 @@ from .models import Node, Edge, NodeType, RelationshipType, SimilarNode
 from .vector_store import VectorStore
 
 
+# Default cosine-similarity floor for semantic search.  Embeddings from the
+# all-MiniLM-L6-v2 model score unrelated text near 0 and topically related text
+# well above this, so this keeps meaning-ranked results without hardcoding any
+# domain-specific tuning.
+DEFAULT_SEMANTIC_THRESHOLD = 0.3
+
+
 # ---------------------------------------------------------------------------
 # Searchable-text helpers
 # ---------------------------------------------------------------------------
@@ -152,6 +159,59 @@ def search_nodes(
         )
 
     return results[:limit]
+
+
+# ---------------------------------------------------------------------------
+# Semantic (embedding) search
+# ---------------------------------------------------------------------------
+
+
+def semantic_search_nodes(
+    nodes: Dict[str, Node],
+    vector_store: VectorStore,
+    query: str,
+    node_types: Optional[List[NodeType]] = None,
+    limit: int = 50,
+    threshold: float = DEFAULT_SEMANTIC_THRESHOLD,
+    include_archived: bool = False,
+) -> List[Node]:
+    """Rank nodes by embedding (cosine) similarity to *query*.
+
+    Reuses the same VectorStore embedding path as :func:`find_similar_nodes`:
+    the query text is embedded and compared against the stored node embeddings
+    (built from name + summary + description + tags on create/update). Returns
+    nodes ordered by descending similarity, keeping only those at or above
+    *threshold*.
+
+    When the embedding model or the stored embeddings are unavailable — e.g. the
+    ML-free base install where ``VectorStore.search`` cannot embed the query —
+    ``search`` returns nothing and this yields an empty list, so callers can keep
+    their lexical result unchanged.
+    """
+    query_text = (query or "").strip()
+    if not query_text or query_text == "*":
+        return []
+
+    # Over-fetch so the node-type / archived filtering below cannot starve the
+    # requested limit when the top hits are filtered out.
+    fetch_limit = max(limit * 4, limit)
+    ranked = vector_store.search(
+        query_text=query_text, limit=fetch_limit, threshold=threshold
+    )
+
+    results: List[Node] = []
+    for node_id, _score in ranked:
+        node = nodes.get(node_id)
+        if node is None:
+            continue
+        if node_types and node.type not in node_types:
+            continue
+        if not include_archived and getattr(node, "archived", False):
+            continue
+        results.append(node)
+        if len(results) >= limit:
+            break
+    return results
 
 
 # ---------------------------------------------------------------------------

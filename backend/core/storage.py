@@ -551,6 +551,29 @@ class GraphStorage:
             include_archived=include_archived,
         )
 
+    def semantic_search_nodes(
+        self,
+        query: str,
+        node_types: Optional[List[NodeType]] = None,
+        limit: int = 50,
+        threshold: float = storage_search.DEFAULT_SEMANTIC_THRESHOLD,
+        include_archived: bool = False,
+    ) -> List[Node]:
+        """Embedding-ranked search over nodes.  Delegates to storage_search.
+
+        Reuses the vector-store path shared with find_similar_nodes; returns
+        an empty list when embeddings are unavailable (ML-free install).
+        """
+        return storage_search.semantic_search_nodes(
+            self.nodes,
+            self.vector_store,
+            query,
+            node_types,
+            limit,
+            threshold,
+            include_archived=include_archived,
+        )
+
     def get_node(self, node_id: str) -> Optional[Node]:
         """Get a specific node"""
         return self.nodes.get(node_id)

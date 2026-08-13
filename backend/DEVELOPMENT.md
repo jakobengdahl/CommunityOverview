@@ -409,6 +409,41 @@ to filter purely by tags/metadata. The applied filters are echoed back under
 `result["filters"]`. The REST endpoint and the `search_graph` MCP tool expose the
 same parameters.
 
+### Semantic search (`semantic` flag on `/api/search` and `search_graph`)
+
+The default `query` is matched **lexically** (case-insensitive substring over
+name, description, summary, tags, subtypes, aliases and type label). Multi-word or
+natural-language queries that no node contains verbatim therefore return nothing.
+
+| Parameter | Meaning |
+|-----------|---------|
+| `semantic` | When `true`, rank results by **embedding meaning** (cosine similarity) instead of lexical substring matching. Default `false`. |
+
+Semantic ranking reuses the same embedding path as `find_similar_nodes`: node
+embeddings are built from `name + summary + description + tags` on create/update,
+and the query text is embedded and compared with cosine similarity, keeping hits
+above a similarity threshold ordered by score. No new dependency is involved — in
+the ML-free base install the embedding model is unavailable, so the vector search
+degrades to returning nothing (and, for `semantic=true`, an empty result) rather
+than failing.
+
+Two behaviours make this safe and backward compatible:
+
+- **Opt-in ranking.** `semantic=false` (the default) is unchanged lexical search.
+- **Automatic fallback.** When a non-empty, non-`*` query produces **zero lexical
+  matches**, the search retries once with semantic ranking, so a conceptual query
+  still surfaces the closest nodes. The fallback is gated on the raw lexical
+  matches, not the access-filtered result, so a query that *did* match locally but
+  was then narrowed away by authorization is left to the federation path rather
+  than widened by meaning. It never changes results when lexical already returned
+  hits.
+
+The response includes a top-level `"semantic"` boolean indicating whether semantic
+ranking (explicit or fallback) produced the returned nodes. Semantic ranking
+applies to the local graph; federated search remains lexical. Tag/metadata
+filters, `node_types`, archived exclusion and `limit` all still apply to semantic
+results.
+
 ### Archived lifecycle (`archived` flag on nodes and edges)
 
 Both nodes and edges carry a generic boolean `archived` field (default `false`).

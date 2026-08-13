@@ -52,6 +52,7 @@ def search_graph(
     tags_none: Optional[List[str]] = None,
     metadata_filters: Optional[List[Dict[str, Any]]] = None,
     include_archived: bool = False,
+    semantic: bool = False,
 ) -> Dict[str, Any]:
     decision = access.evaluate_graph_access(
         hook, action=GRAPH_ACTION_READ, target="search_graph"
@@ -61,7 +62,9 @@ def search_graph(
             action=GRAPH_ACTION_READ, target="search_graph", decision=decision
         )
 
-    logger.info(f"SEARCH: query='{query}' types={node_types} limit={limit}")
+    logger.info(
+        f"SEARCH: query='{query}' types={node_types} limit={limit} semantic={semantic}"
+    )
 
     type_filters = None
     if node_types:
@@ -87,20 +90,53 @@ def search_graph(
     # tag/metadata filter is active, so post-fetch filtering sees the full
     # candidate set instead of dropping matches that fell outside a `limit`-sized
     # text window.
-    local_results = storage.search_nodes(
-        query=query,
-        node_types=type_filters,
-        limit=max(limit, storage.get_stats().total_nodes)
+    search_limit = (
+        max(limit, storage.get_stats().total_nodes)
         if decision.graph_access.enabled or has_generic_filters
-        else limit,
-        include_archived=include_archived,
+        else limit
     )
 
-    visible_local_results = [
-        node
-        for node in local_results
-        if access.is_node_visible(node, decision.graph_access) and _passes_filters(node)
-    ][:limit]
+    def _visible_local(candidates) -> List:
+        return [
+            node
+            for node in candidates
+            if access.is_node_visible(node, decision.graph_access)
+            and _passes_filters(node)
+        ][:limit]
+
+    def _semantic_candidates():
+        return storage.semantic_search_nodes(
+            query=query,
+            node_types=type_filters,
+            limit=search_limit,
+            include_archived=include_archived,
+        )
+
+    semantic_applied = False
+    if semantic:
+        # Explicit opt-in: rank local results by embedding meaning.
+        visible_local_results = _visible_local(_semantic_candidates())
+        semantic_applied = True
+    else:
+        local_results = storage.search_nodes(
+            query=query,
+            node_types=type_filters,
+            limit=search_limit,
+            include_archived=include_archived,
+        )
+        visible_local_results = _visible_local(local_results)
+
+        # Auto-fallback: a real (non match-all) query that the lexical text
+        # search could not match at all retries with semantic ranking. Gate on
+        # the raw lexical candidates, not the access-filtered set, so a query
+        # that *did* match locally but was then narrowed away by authorization
+        # is left to the federation path instead of being widened by meaning.
+        if not local_results and query and query.strip() not in ("", "*"):
+            fallback = _visible_local(_semantic_candidates())
+            if fallback:
+                visible_local_results = fallback
+                semantic_applied = True
+
     logger.info(f"SEARCH: Found {len(visible_local_results)} visible local results")
 
     result_node_ids = set(node.id for node in visible_local_results)
@@ -193,6 +229,7 @@ def search_graph(
         "edges": serialize_edges(deduped_edges),
         "total": len(visible_nodes),
         "query": query,
+        "semantic": semantic_applied,
         "filters": {
             "node_types": node_types,
             "tags_any": list(tags_any or []),
