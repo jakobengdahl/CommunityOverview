@@ -343,6 +343,73 @@ describe('SessionSyncClient', () => {
     expect(after).toEqual(before);
   });
 
+  it('sendEdgesRemoved enqueues and POSTs an edges_removed op carrying the ids', async () => {
+    const { client, fetchImpl } = makeClient();
+    client.connect();
+    FakeEventSource.instances[0].emit({ type: 'snapshot', seq: 0, session: { state: {} } });
+    client.sendEdgesRemoved(['e1', 'e2']);
+    await flush();
+    const posted = fetchImpl.calls.at(-1).body.ops;
+    expect(posted).toContainEqual({ op: 'edges_removed', edge_ids: ['e1', 'e2'] });
+  });
+
+  it('sendEdgesRemoved ignores an empty or non-string id list', () => {
+    const { client, fetchImpl } = makeClient();
+    client.connect();
+    FakeEventSource.instances[0].emit({ type: 'snapshot', seq: 0, session: { state: {} } });
+    client.sendEdgesRemoved([]);
+    client.sendEdgesRemoved([null, 5]);
+    expect(fetchImpl.calls).toHaveLength(0);
+  });
+
+  it('sendEdgesUpdated enqueues and POSTs an edges_updated op carrying the edges', async () => {
+    const { client, fetchImpl } = makeClient();
+    client.connect();
+    FakeEventSource.instances[0].emit({ type: 'snapshot', seq: 0, session: { state: {} } });
+    const edge = { id: 'e1', type: 'DEPENDS_ON' };
+    client.sendEdgesUpdated([edge]);
+    await flush();
+    const posted = fetchImpl.calls.at(-1).body.ops;
+    expect(posted).toContainEqual({ op: 'edges_updated', edges: [edge] });
+  });
+
+  it('sendEdgesUpdated ignores an empty or id-less edge list', () => {
+    const { client, fetchImpl } = makeClient();
+    client.connect();
+    FakeEventSource.instances[0].emit({ type: 'snapshot', seq: 0, session: { state: {} } });
+    client.sendEdgesUpdated([]);
+    client.sendEdgesUpdated([{ type: 'DEPENDS_ON' }]);
+    expect(fetchImpl.calls).toHaveLength(0);
+  });
+
+  it('forwards remote edges_removed / edges_updated ops without folding them into the mirror', async () => {
+    const onRemoteOps = vi.fn();
+    const { client, fetchImpl } = makeClient({ handlers: { onRemoteOps } });
+    client.connect();
+    const es = FakeEventSource.instances[0];
+    es.emit({ type: 'snapshot', seq: 0, session: { state: { node_refs: ['a', 'b'] } } });
+    const removed = { op: 'edges_removed', edge_ids: ['e1'] };
+    const updated = { op: 'edges_updated', edges: [{ id: 'e1', type: 'DEPENDS_ON' }] };
+    es.emit({ type: 'op', client_id: 'client-other', op: removed, seq: 1 });
+    es.emit({ type: 'op', client_id: 'client-other', op: updated, seq: 2 });
+    expect(onRemoteOps).toHaveBeenCalledWith([removed], { clientId: 'client-other' });
+    expect(onRemoteOps).toHaveBeenCalledWith([updated], { clientId: 'client-other' });
+    // Edges are graph-derived, not mirror state: re-syncing the same node set
+    // must emit nothing (neither op left residue that could echo back out).
+    client.setBaseline({ node_refs: ['a', 'b'] });
+    client.syncState({ node_refs: ['a', 'b'] });
+    await flush();
+    expect(fetchImpl.calls).toHaveLength(0);
+  });
+
+  it('applyOpToMirror leaves the mirror unchanged for edges_removed / edges_updated ops', () => {
+    const before = normalizeMirror({ node_refs: ['a', 'b'], hidden_edge_ids: ['x'] });
+    expect(applyOpToMirror(before, { op: 'edges_removed', edge_ids: ['e1'] })).toEqual(before);
+    expect(
+      applyOpToMirror(before, { op: 'edges_updated', edges: [{ id: 'e1', type: 'DEPENDS_ON' }] })
+    ).toEqual(before);
+  });
+
   it('delivers an agent layout_applied op with its animation hint intact', () => {
     // The canvas animation seam (contract §9-§10) depends on the animation hint
     // and the originating client id surviving delivery: the frontend routes an

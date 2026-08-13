@@ -219,14 +219,3 @@ Effort scale: XS = single-line fix · S = up to ~30 lines / one file · M = mult
 - **`federationDepthFlow.test.jsx` strict `toEqual` on the chat payload** — `frontend/web/tests/federationDepthFlow.test.jsx`. Changed the `sendChatMessage` options assertion from `toEqual` to `toMatchObject`, tolerating the extra context fields now sent alongside `federationDepth`. (Resolved the duplicate 2026-07-01 and 2026-07-02 entries for this same line.)
 - **`GraphCanvas.test.jsx` edge-delete test asserts a stale Swedish label** — `packages/ui-graph-canvas/tests/GraphCanvas.test.jsx`. Matched the edge-delete button by its actual English default label (`/delete/i`) instead of `/ta bort/i`. (Resolved the duplicate 2026-07-02 and 2026-07-03 entries for this same test.)
 
-### [2026-08-12] CreateActiveKnowledgeCollectionDialog does not use i18n
-- **File(s):** `frontend/web/src/components/CreateActiveKnowledgeCollectionDialog.jsx`
-- **Context:** Discovered during claude/kiosk-tool-access
-- **Issue:** The entire dialog hardcodes English display strings (section headings, labels, help text, alerts) instead of using the `useI18n()` hook with keys in `en.json`/`sv.json`, contradicting the repo i18n rule. The new "Assistant Tools" section follows the same hardcoded-English convention as the rest of the file for consistency; the whole dialog should be migrated to i18n in one pass rather than piecemeal.
-- **Effort:** M
-
-### [2026-08-12] Edge deletion and edge-type changes do not propagate in a shared session
-- **File(s):** `frontend/web/src/App.jsx` (`handleDeleteEdge`, `handleChangeEdgeType`, `handleSaveEdge`)
-- **Context:** Discovered during claude/fix-shared-session-edge-render (while fixing edge *creation* fan-out)
-- **Issue:** The shared-session op protocol now fans out edge creation (`edges_added`), but edge deletion, relationship-type changes, and edit-dialog saves still mutate only the local store/graph — no op is broadcast, so collaborators keep showing the stale edge until they reload and re-hydrate from the graph. Symmetric gap to the creation bug just fixed. Would need `edges_removed` / `edges_updated` fan-out ops (or a shared "re-hydrate these edges" signal) plus remote appliers, mirroring the `edges_added` path. Left out to keep the creation fix minimal and focused on the reported "edges don't appear" symptom.
-- **Effort:** M
