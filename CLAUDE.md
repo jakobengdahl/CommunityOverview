@@ -134,11 +134,13 @@ If any part of the request is unclear, stop and ask rather than assume.
   project owner explicitly asks for that specific merge (see "Explicit merge
   requests" above).
 - Add features beyond what the task requires. If you discover a related bug or
-  improvement, log it in `SMALL_FIXES.md` (see below) and stop — never fix it
+  improvement, log it in the Corp planning graph as a `small-fix`-tagged Task
+  node (via the planning MCP), not in `SMALL_FIXES.md`, and stop — never fix it
   in the same branch.
 - Fix pre-existing bugs in the active branch. Pre-existing means: the problem
   existed before you started working, or is in code you did not change. Log it
-  in `SMALL_FIXES.md` with file, line, and context, then continue.
+  in the Corp planning graph as a `small-fix`-tagged Task node (via the planning
+  MCP) with file, line, and context, then continue.
 - Skip the review loop for non-trivial changes.
 - Merge PRs against `preview` or `prod` unless explicitly asked to in that turn —
   those gates belong to the project owner (see "Explicit merge requests" above).
@@ -252,23 +254,26 @@ clearly pre-existing: failing tests you didn't touch, inconsistencies between
 parallel code paths, dead code, stale TODO comments, or obvious bugs outside
 your change radius.
 
-**Do not fix them now.** Instead, append an entry to `SMALL_FIXES.md` in the
-repo root:
+**Do not fix them now.** Instead, create a `small-fix`-tagged Task node in the
+Corp planning graph (via the planning MCP) with these fields:
 
-```markdown
-### [YYYY-MM-DD] Short description
-- **File(s):** `path/to/file.py:line`
-- **Context:** Discovered during <branch-name>
-- **Issue:** What the problem is and why it matters
-- **Effort:** XS | S | M
-```
+- **name:** short description of the issue
+- **file(s):** `path/to/file.py:line`
+- **context:** discovered during `<branch-name>`
+- **issue:** what the problem is and why it matters
+- **effort:** XS | S | M
 
 Use XS for a single-line fix, S for up to ~30 lines / one file, M for
-multi-file or logic-heavy changes. Commit the updated `SMALL_FIXES.md` as part
-of your final commit on the branch (or as a standalone `chore:` commit).
+multi-file or logic-heavy changes.
 
-At end of session, sweep any notes from conversation context into `SMALL_FIXES.md`
-before closing. The goal: nothing is lost between sessions.
+If the planning MCP is unavailable in the session, fall back to noting the issue
+in the PR description and flagging it to the owner so it can be captured in the
+graph later.
+
+At end of session, sweep any notes from conversation context into the Corp
+planning graph before closing. The goal: nothing is lost between sessions.
+`SMALL_FIXES.md` is retained only as a historical archive of previously
+resolved fixes — do not add new open items to it.
 
 ### 6. Commit
 
@@ -423,12 +428,16 @@ Merge only when **all** of the following are true:
 ## Small-Fix Sessions
 
 A small-fix session is started by the instruction **"kör small-fix-sessionen"**
-(or equivalent). Its only goal is to drain items from `SMALL_FIXES.md`.
+(or equivalent). Its only goal is to drain `small-fix`-tagged Task nodes from the
+Corp planning graph.
 
 ### Entry checklist before starting
 
 - Pull latest `main`.
-- Read `SMALL_FIXES.md` in full.
+- Read the open `small-fix`-tagged Task nodes in the Corp planning graph in full
+  (via the planning MCP). If the planning MCP is unavailable, flag it to the
+  owner and stop — do not fall back to `SMALL_FIXES.md`, which is a historical
+  archive only.
 - Confirm no items are already addressed by recent commits (check `git log --oneline origin/main -20`).
 
 ### Batch selection
@@ -450,18 +459,18 @@ Follow the full Standard Development Workflow (steps 1–10), with these additio
 1. **Branch name:** `fix/small-fixes-<YYYY-MM-DD>` or `fix/small-fixes-<topic>`
    if the batch has a clear theme.
 2. **After Implement:** re-run the test suite for every file touched. If a new
-   test failure appears that is unrelated to your batch, log it in `SMALL_FIXES.md`
-   and do not fix it here.
-3. **PR body:** list each `SMALL_FIXES.md` entry being resolved. Note items
-   explicitly **not** addressed.
+   test failure appears that is unrelated to your batch, log it in the Corp
+   planning graph as a `small-fix`-tagged Task node and do not fix it here.
+3. **PR body:** list each `small-fix`-tagged Task node being resolved (by node
+   id/name). Note items explicitly **not** addressed.
 4. **Review loop:** spawn the review subagent as described in step 8. Because
    these are small, isolated fixes the loop typically converges in one round —
    but repeat until clean, same as any other PR.
-5. **After merge:** remove the resolved entries from `SMALL_FIXES.md`, commit
-   the update directly on `main` via a standalone `chore: update small-fixes backlog`
-   commit (no separate branch needed for the file update).
+5. **After merge:** mark the resolved `small-fix`-tagged Task nodes done in the
+   Corp planning graph (record the PR/commit on each node per the MCP-first
+   planning rules).
 6. If time and context permit, move on to the next batch in the same session.
-   Otherwise stop — the backlog is in `SMALL_FIXES.md` for next time.
+   Otherwise stop — the backlog lives in the Corp planning graph for next time.
 
 ### What never belongs in a small-fix batch
 
@@ -565,8 +574,8 @@ commit messages, and code comments.
 
 ### What never belongs in docs
 
-- Future proposals or TODOs in current-state documents — file them in `SMALL_FIXES.md`
-  or discuss in the PR body instead.
+- Future proposals or TODOs in current-state documents — file them in the Corp
+  planning graph as a `small-fix`-tagged Task node, or discuss in the PR body instead.
 - Swedish text in any file under `docs/` or in code comments — English only.
 
 ### Screenshot workflow (USER_GUIDE.md)
