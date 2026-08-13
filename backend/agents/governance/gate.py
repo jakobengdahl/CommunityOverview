@@ -50,6 +50,44 @@ def is_mutating_tool(mcp_loader: Any, namespaced_name: str) -> bool:
     return getattr(tool, "original_name", None) in MUTATING_ORIGINAL_TOOLS
 
 
+def filter_tool_definitions(
+    tool_definitions: List[Dict[str, Any]],
+    *,
+    autonomy_level: AutonomyLevel,
+    tool_allowlist: Optional[List[str]],
+    mcp_loader: Any,
+) -> List[Dict[str, Any]]:
+    """Drop the tool definitions the gate would unconditionally reject.
+
+    This is a pure efficiency pre-filter for the definitions handed to the LLM,
+    so a read-only or allowlist-restricted agent does not waste turns attempting
+    tools it can never use. It mirrors — and must stay in lock-step with — the
+    static rejections in :meth:`AutonomyGate.wrap`, reusing the same allowlist
+    semantics, the same :data:`AutonomyLevel.is_read_only` notion, and the same
+    :func:`is_mutating_tool` classification:
+
+    - a tool outside ``tool_allowlist`` (when one is set) is dropped;
+    - a mutating tool is dropped for read-only levels (observe/assist).
+
+    Mutating tools under ``propose`` / ``act_after_approval`` are **kept**: the
+    gate turns those into proposals rather than rejecting them, so the agent can
+    still legitimately call them. Enforcement remains authoritative; nothing here
+    grants access the gate would deny.
+    """
+    allow = set(tool_allowlist) if tool_allowlist else None
+    read_only = autonomy_level.is_read_only
+
+    filtered: List[Dict[str, Any]] = []
+    for definition in tool_definitions:
+        name = definition.get("name")
+        if allow is not None and name not in allow:
+            continue
+        if read_only and is_mutating_tool(mcp_loader, name):
+            continue
+        filtered.append(definition)
+    return filtered
+
+
 class AutonomyGate:
     """Wraps a tool executor to enforce one agent's governance for one run."""
 
