@@ -213,6 +213,9 @@ class TestBoundedQueue:
             await asyncio.sleep(0)
 
         assert queue.qsize() == _MAX_QUEUE_SIZE
+        # Same drop-oldest invariant as the async path: the newest window survives.
+        first = queue.get_nowait()
+        assert first["seq"] == total - _MAX_QUEUE_SIZE
 
     @pytest.mark.asyncio
     async def test_handover_delivers_queued_commands_to_late_consumer(self):
