@@ -233,6 +233,53 @@ class TestGraphStorageCRUD:
         result = storage_with_data.update_node("nonexistent", {"name": "New"})
         assert result is None
 
+    def test_update_node_replaces_metadata_by_default(self, storage_with_data):
+        """Legacy default: an explicit metadata dict replaces the whole object."""
+        storage_with_data.update_node("actor-1", {"metadata": {"a": 1, "b": 2}})
+        updated = storage_with_data.update_node("actor-1", {"metadata": {"a": 9}})
+        assert updated.metadata == {"a": 9}
+
+    def test_update_node_metadata_merge_keeps_other_keys(self, storage_with_data):
+        """Merge mode updates a single key without dropping the rest."""
+        storage_with_data.update_node("actor-1", {"metadata": {"a": 1, "b": 2}})
+        updated = storage_with_data.update_node(
+            "actor-1", {"metadata": {"a": 9}}, metadata_merge=True
+        )
+        assert updated.metadata == {"a": 9, "b": 2}
+
+    def test_update_node_metadata_merge_removes_key_with_none(self, storage_with_data):
+        """Merge mode: a null value removes just that key (RFC 7386)."""
+        storage_with_data.update_node("actor-1", {"metadata": {"a": 1, "b": 2}})
+        updated = storage_with_data.update_node(
+            "actor-1", {"metadata": {"a": None}}, metadata_merge=True
+        )
+        assert updated.metadata == {"b": 2}
+
+    def test_update_node_optimistic_concurrency_accepts_fresh(self, storage_with_data):
+        """A write whose expected_updated_at still matches is accepted."""
+        node = storage_with_data.get_node("actor-1")
+        fresh = node.updated_at.isoformat()
+        updated = storage_with_data.update_node(
+            "actor-1", {"summary": "ok"}, expected_updated_at=fresh
+        )
+        assert updated is not None
+        assert updated.summary == "ok"
+
+    def test_update_node_optimistic_concurrency_rejects_stale(self, storage_with_data):
+        """A write whose expected_updated_at is stale raises StaleUpdateError."""
+        from backend.core import StaleUpdateError
+
+        node = storage_with_data.get_node("actor-1")
+        stale = node.updated_at.isoformat()
+        # A concurrent write advances updated_at.
+        storage_with_data.update_node("actor-1", {"summary": "first"})
+        with pytest.raises(StaleUpdateError):
+            storage_with_data.update_node(
+                "actor-1", {"summary": "second"}, expected_updated_at=stale
+            )
+        # The stale write must not have applied.
+        assert storage_with_data.get_node("actor-1").summary == "first"
+
     def test_delete_node(self, storage_with_data):
         """Test deleting a node"""
         result = storage_with_data.delete_nodes(["actor-1"], confirmed=True)

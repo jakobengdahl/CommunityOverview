@@ -34,6 +34,7 @@ from .models import (
     AddNodesResult,
     DeleteNodesResult,
     DeleteEdgesResult,
+    _parse_datetime,
 )
 from .storage_backends import FileGraphPersistenceBackend, GraphPersistenceBackend
 from .vector_store import VectorStore
@@ -49,6 +50,45 @@ if TYPE_CHECKING:
     from .events.delivery import DeliveryWorker
     from .events.models import Event
     from .history_store import GraphHistoryStore
+
+
+class StaleUpdateError(Exception):
+    """Raised when an optimistic-concurrency guard on update_node fails.
+
+    The caller passed ``expected_updated_at`` but the node's live
+    ``updated_at`` no longer matches it, meaning the node changed since the
+    caller read it. The write is rejected instead of silently clobbering the
+    concurrent change. ``current_updated_at`` carries the live value so the
+    caller can re-read and retry.
+    """
+
+    def __init__(self, node_id: str, expected: Any, current: datetime):
+        self.node_id = node_id
+        self.expected = expected
+        self.current_updated_at = current
+        super().__init__(
+            f"Node '{node_id}' was modified since expected_updated_at="
+            f"{expected!r}; current updated_at is {current.isoformat()!r}"
+        )
+
+
+def _apply_metadata_patch(
+    base: Dict[str, Any], patch: Dict[str, Any]
+) -> Dict[str, Any]:
+    """Merge ``patch`` onto ``base`` at the top level (JSON-Merge-Patch style).
+
+    Each key in ``patch`` replaces that key in ``base``; a key whose patch value
+    is ``None`` is removed from the result (RFC 7386 null-means-delete). Keys not
+    mentioned in ``patch`` are preserved. Nested objects are replaced wholesale,
+    not merged recursively — the merge is intentionally top-level only.
+    """
+    result = dict(base)
+    for key, value in patch.items():
+        if value is None:
+            result.pop(key, None)
+        else:
+            result[key] = value
+    return result
 
 
 class GraphStorage:
@@ -727,6 +767,9 @@ class GraphStorage:
         node_id: str,
         updates: Dict,
         event_context: Optional[EventContext] = None,
+        *,
+        metadata_merge: bool = False,
+        expected_updated_at: Optional[Any] = None,
     ) -> Optional[Node]:
         """
         Update an existing node.
@@ -737,12 +780,42 @@ class GraphStorage:
             node_id: ID of the node to update
             updates: Dict with fields to update
             event_context: Optional context for event tracking and loop prevention
+            metadata_merge: When True, ``metadata`` (and any schema-defined extra
+                fields folded into metadata) is deep-merged at the top level onto
+                the node's existing metadata instead of replacing it wholesale.
+                A key whose value is ``None`` deletes that key (RFC 7386
+                null-means-delete). Keys not mentioned are preserved. Default is
+                False, i.e. the legacy replace-whole-metadata behaviour.
+            expected_updated_at: Optional optimistic-concurrency guard. When set
+                (an ISO 8601 string or a datetime), the update only proceeds if
+                the node's current ``updated_at`` still equals this value; a
+                mismatch raises :class:`StaleUpdateError` instead of clobbering a
+                concurrent write.
+
+        Raises:
+            StaleUpdateError: if ``expected_updated_at`` no longer matches the
+                node's live ``updated_at``.
+            ValueError: if the resulting node fails model validation.
         """
         with self._lock:
             if node_id not in self.nodes:
                 return None
 
             node = self.nodes[node_id]
+
+            # Optimistic-concurrency guard: reject the write if the node changed
+            # since the caller read it. Checked inside the lock so the compare and
+            # the subsequent mutation are atomic with respect to other writers.
+            if expected_updated_at is not None:
+                expected = (
+                    _parse_datetime(expected_updated_at)
+                    if isinstance(expected_updated_at, str)
+                    else expected_updated_at
+                )
+                if node.updated_at != expected:
+                    raise StaleUpdateError(
+                        node_id, expected_updated_at, node.updated_at
+                    )
 
             # Capture before state for events
             before_state = node.to_dict()
@@ -777,18 +850,38 @@ class GraphStorage:
             # invalid update is rejected here, atomically, with the live node untouched.
             candidate = node.to_dict()
             for key, value in updates.items():
-                if key in allowed_fields:
+                if key in allowed_fields and key != "metadata":
                     candidate[key] = value
-            # Fold schema-defined extra fields (anything outside the base model) into metadata
+
+            # Schema-defined extra fields (anything outside the base model) fold
+            # into metadata, same as an explicit `metadata` update.
             extra = {
                 k: v
                 for k, v in updates.items()
                 if k not in allowed_fields and k not in reserved_fields
             }
-            if extra:
-                meta = dict(candidate.get("metadata") or {})
-                meta.update(extra)
-                candidate["metadata"] = meta
+
+            if metadata_merge:
+                # Opt-in field-level merge: patch existing metadata top-level.
+                merged = dict(candidate.get("metadata") or {})
+                if "metadata" in updates:
+                    meta_update = updates["metadata"] or {}
+                    if not isinstance(meta_update, dict):
+                        raise ValueError(
+                            "metadata must be an object when metadata_merge is set"
+                        )
+                    merged = _apply_metadata_patch(merged, meta_update)
+                if extra:
+                    merged = _apply_metadata_patch(merged, extra)
+                candidate["metadata"] = merged
+            else:
+                # Legacy/default: an explicit `metadata` replaces it wholesale.
+                if "metadata" in updates:
+                    candidate["metadata"] = dict(updates["metadata"] or {})
+                if extra:
+                    meta = dict(candidate.get("metadata") or {})
+                    meta.update(extra)
+                    candidate["metadata"] = meta
 
             try:
                 validated = Node.from_dict(candidate)

@@ -464,6 +464,49 @@ Example (nodes tagged `partner`, excluding any tagged `archived`, whose
 }
 ```
 
+### Updating a node — metadata merge and optimistic concurrency
+
+`update_node` (`PATCH /api/nodes/{id}` and the `update_node` MCP tool) accepts the
+mutable fields `name`, `description`, `summary`, `tags`, `subtypes`, `aliases`,
+`metadata`, plus any schema-defined extra fields (folded into `metadata`). Two
+opt-in parameters control how the write is applied; both default off, so existing
+callers are unaffected.
+
+**`metadata_merge` (bool, default `false`) — field-level merge/patch.** By default
+an explicit `metadata` object *replaces* the whole stored object, so a caller must
+resend every key or it is dropped. With `metadata_merge: true`, the supplied
+`metadata` is merged onto the existing metadata at the top level:
+
+- keys you send are set (nested objects are replaced wholesale, not merged
+  recursively — the merge is top-level only);
+- keys you do **not** send are preserved;
+- a key whose value is `null` is **removed** (RFC 7386 JSON-Merge-Patch
+  convention).
+
+This makes concurrent writebacks that each touch a different key safe — no caller
+clobbers another's metadata by omitting it.
+
+**`expected_updated_at` (string, optional) — optimistic concurrency guard.** Pass
+the `updated_at` value you last read for the node. If the node's live `updated_at`
+no longer matches (someone wrote to it since you read it), the update is rejected
+instead of silently overwriting the concurrent change:
+
+- REST returns **HTTP 409 Conflict**;
+- MCP / service returns `{"success": false, "conflict": true, "current_updated_at": "<iso>"}`.
+
+The `current_updated_at` in the conflict result is the live value, so a caller can
+re-read (or re-use it) and retry.
+
+Example — set one metadata key and remove another, only if the node is unchanged:
+
+```json
+{
+  "updates": {"metadata": {"stage": "pilot", "draft": null}},
+  "metadata_merge": true,
+  "expected_updated_at": "2026-08-13T09:15:04.123456+00:00"
+}
+```
+
 ### Custom REST Interfaces (config-driven)
 
 A specific node type or edge type can be exposed as its own dedicated read-only

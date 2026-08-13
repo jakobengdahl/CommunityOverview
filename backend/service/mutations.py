@@ -7,7 +7,7 @@ and (where required) the federation manager as explicit parameters.
 
 from typing import TYPE_CHECKING, Any, Dict, List, Optional
 
-from backend.core import Edge, Node
+from backend.core import Edge, Node, StaleUpdateError
 from backend.runtime.authorization import (
     GRAPH_ACTION_MUTATE,
     GraphAuthorizationDecision,
@@ -119,6 +119,8 @@ def update_node(
     event_origin: Optional[str] = None,
     event_session_id: Optional[str] = None,
     event_correlation_id: Optional[str] = None,
+    metadata_merge: bool = False,
+    expected_updated_at: Optional[str] = None,
 ) -> Dict[str, Any]:
     decision = access.evaluate_graph_access(
         hook, action=GRAPH_ACTION_MUTATE, target="update_node"
@@ -141,8 +143,19 @@ def update_node(
 
     try:
         updated_node = storage.update_node(
-            node_id, updates, event_context=event_context
+            node_id,
+            updates,
+            event_context=event_context,
+            metadata_merge=metadata_merge,
+            expected_updated_at=expected_updated_at,
         )
+    except StaleUpdateError as e:
+        return {
+            "success": False,
+            "conflict": True,
+            "error": str(e),
+            "current_updated_at": e.current_updated_at.isoformat(),
+        }
     except ValueError as e:
         return {"success": False, "error": f"Error validating input: {e}"}
     if not updated_node:
