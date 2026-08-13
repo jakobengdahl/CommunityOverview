@@ -544,6 +544,9 @@ class FederationManager:
                 "summary": source_node.get("summary", ""),
                 "tags": source_node.get("tags", []),
                 "metadata": metadata,
+                # Preserve the remote lifecycle flag so a node archived in the
+                # origin graph stays archived (hidden by default) when federated.
+                "archived": bool(source_node.get("archived", False)),
             }
             try:
                 nodes[federated_node_id] = Node.from_dict(node_payload)
@@ -573,6 +576,8 @@ class FederationManager:
                     "sync_state": "fresh",
                     "is_federated": True,
                 },
+                # Preserve the remote lifecycle flag (see node payload above).
+                "archived": bool(source_edge.get("archived", False)),
             }
             try:
                 edges[edge_id] = Edge.from_dict(edge_payload)

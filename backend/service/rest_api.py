@@ -87,6 +87,10 @@ class SearchRequest(BaseModel):
             '{"key": str, "values": [...], "match": "any"|"all"|"none"}'
         ),
     )
+    include_archived: bool = Field(
+        False,
+        description="When false (default) archived nodes and edges are excluded",
+    )
 
 
 class RelatedNodesRequest(BaseModel):
@@ -97,6 +101,10 @@ class RelatedNodesRequest(BaseModel):
         None, description="Filter by relationship types"
     )
     depth: int = Field(1, ge=1, le=5, description="Traversal depth")
+    include_archived: bool = Field(
+        False,
+        description="When false (default) archived edges and neighbour nodes are excluded",
+    )
 
 
 class SimilarNodesRequest(BaseModel):
@@ -163,6 +171,38 @@ class DeleteNodesRequest(BaseModel):
     event_origin: Optional[str] = Field(
         None, description="Source of mutation (web-ui, mcp, system, agent:<id>)"
     )
+    event_session_id: Optional[str] = Field(
+        None, description="Session ID for loop prevention"
+    )
+    event_correlation_id: Optional[str] = Field(
+        None, description="Correlation ID for chaining events"
+    )
+
+
+class ArchiveNodesRequest(BaseModel):
+    """Request model for archiving/unarchiving nodes."""
+
+    node_ids: List[str] = Field(..., description="Node IDs to archive/unarchive")
+    archived: bool = Field(
+        True, description="True to archive (hide), False to unarchive (restore)"
+    )
+    event_origin: Optional[str] = Field(None, description="Source of mutation")
+    event_session_id: Optional[str] = Field(
+        None, description="Session ID for loop prevention"
+    )
+    event_correlation_id: Optional[str] = Field(
+        None, description="Correlation ID for chaining events"
+    )
+
+
+class ArchiveEdgesRequest(BaseModel):
+    """Request model for archiving/unarchiving edges."""
+
+    edge_ids: List[str] = Field(..., description="Edge IDs to archive/unarchive")
+    archived: bool = Field(
+        True, description="True to archive (hide), False to unarchive (restore)"
+    )
+    event_origin: Optional[str] = Field(None, description="Source of mutation")
     event_session_id: Optional[str] = Field(
         None, description="Session ID for loop prevention"
     )
@@ -317,6 +357,7 @@ def _register_search_endpoints(router: APIRouter, service: GraphService) -> None
                 tags_all=request.tags_all,
                 tags_none=request.tags_none,
                 metadata_filters=request.metadata_filters,
+                include_archived=request.include_archived,
             )
         _raise_for_access_denied(result)
         return result
@@ -337,11 +378,15 @@ def _register_search_endpoints(router: APIRouter, service: GraphService) -> None
         request: Request,
         relationship_types: Optional[List[str]] = Body(None),
         depth: int = Body(1, ge=1, le=5),
+        include_archived: bool = Body(False),
     ) -> Dict[str, Any]:
         """Get nodes connected to the given node."""
         with use_request_authorization(headers=request.headers):
             result = service.get_related_nodes(
-                node_id=node_id, relationship_types=relationship_types, depth=depth
+                node_id=node_id,
+                relationship_types=relationship_types,
+                depth=depth,
+                include_archived=include_archived,
             )
         _raise_for_access_denied(result)
         return result
@@ -448,6 +493,26 @@ def _register_node_crud_endpoints(router: APIRouter, service: GraphService) -> N
             raise HTTPException(status_code=400, detail=result.get("message"))
         return result
 
+    @router.post("/nodes/archive")
+    async def archive_nodes(
+        request: ArchiveNodesRequest, http_request: Request
+    ) -> Dict[str, Any]:
+        """Archive or unarchive nodes (hide-by-default vs. permanent delete)."""
+        with use_request_authorization(headers=http_request.headers):
+            archive = (
+                service.archive_nodes if request.archived else service.unarchive_nodes
+            )
+            result = archive(
+                node_ids=request.node_ids,
+                event_origin=request.event_origin,
+                event_session_id=request.event_session_id,
+                event_correlation_id=request.event_correlation_id,
+            )
+        _raise_for_access_denied(result)
+        if not result.get("success", True):
+            raise HTTPException(status_code=400, detail=result.get("message"))
+        return result
+
 
 def _register_edge_crud_endpoints(router: APIRouter, service: GraphService) -> None:
     @router.post("/edges")
@@ -505,6 +570,26 @@ def _register_edge_crud_endpoints(router: APIRouter, service: GraphService) -> N
         _raise_for_access_denied(result)
         if not result.get("success", True):
             raise HTTPException(status_code=404, detail=result.get("error"))
+        return result
+
+    @router.post("/edges/archive")
+    async def archive_edges(
+        request: ArchiveEdgesRequest, http_request: Request
+    ) -> Dict[str, Any]:
+        """Archive or unarchive edges (hide-by-default vs. permanent delete)."""
+        with use_request_authorization(headers=http_request.headers):
+            archive = (
+                service.archive_edges if request.archived else service.unarchive_edges
+            )
+            result = archive(
+                edge_ids=request.edge_ids,
+                event_origin=request.event_origin,
+                event_session_id=request.event_session_id,
+                event_correlation_id=request.event_correlation_id,
+            )
+        _raise_for_access_denied(result)
+        if not result.get("success", True):
+            raise HTTPException(status_code=400, detail=result.get("message"))
         return result
 
 

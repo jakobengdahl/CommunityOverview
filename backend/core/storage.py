@@ -494,7 +494,11 @@ class GraphStorage:
         )
 
     def search_nodes(
-        self, query: str, node_types: Optional[List[NodeType]] = None, limit: int = 50
+        self,
+        query: str,
+        node_types: Optional[List[NodeType]] = None,
+        limit: int = 50,
+        include_archived: bool = False,
     ) -> List[Node]:
         """Search nodes based on text query.  Delegates to storage_search."""
         return storage_search.search_nodes(
@@ -504,6 +508,7 @@ class GraphStorage:
             query,
             node_types,
             limit,
+            include_archived=include_archived,
         )
 
     def get_node(self, node_id: str) -> Optional[Node]:
@@ -523,10 +528,17 @@ class GraphStorage:
         node_id: str,
         relationship_types: Optional[List[RelationshipType]] = None,
         depth: int = 1,
+        include_archived: bool = False,
     ) -> Dict[str, Any]:
         """Get nodes connected to the given node.  Delegates to storage_search."""
         return storage_search.get_related_nodes(
-            self.nodes, self.edges, self.graph, node_id, relationship_types, depth
+            self.nodes,
+            self.edges,
+            self.graph,
+            node_id,
+            relationship_types,
+            depth,
+            include_archived=include_archived,
         )
 
     def find_similar_nodes(
@@ -745,7 +757,16 @@ class GraphStorage:
                 "aliases",
                 "metadata",
             }
-            reserved_fields = {"id", "type", "embedding", "created_at", "updated_at"}
+            # "archived" is reserved so a generic update can neither set it directly
+            # nor fold it into metadata — archiving goes through set_nodes_archived.
+            reserved_fields = {
+                "id",
+                "type",
+                "embedding",
+                "created_at",
+                "updated_at",
+                "archived",
+            }
 
             # Build the candidate state and validate it through the model BEFORE
             # mutating the live node. setattr on a pydantic model does not re-run
@@ -814,6 +835,57 @@ class GraphStorage:
             )
 
             return node
+
+    def set_nodes_archived(
+        self,
+        node_ids: List[str],
+        archived: bool,
+        event_context: Optional[EventContext] = None,
+    ) -> List[Node]:
+        """Set the ``archived`` flag on the given nodes.
+
+        Archiving hides a node from search/traversal by default while keeping it
+        (and its edges) in the graph, unlike deletion which is permanent. Returns
+        every node that was found (whether or not its state changed) so callers
+        get an idempotent view; only nodes whose flag actually changed emit an
+        update event, and the graph is saved once if anything changed.
+
+        Thread-safe: protected by _lock for the entire operation.
+        """
+        with self._lock:
+            found: List[Node] = []
+            changed = False
+            for node_id in node_ids:
+                node = self.nodes.get(node_id)
+                if node is None:
+                    continue
+                found.append(node)
+                if node.archived == archived:
+                    continue
+
+                before_state = node.to_dict()
+                node.archived = archived
+                node.updated_at = datetime.now(timezone.utc)
+                self.graph.nodes[node_id]["data"] = node
+                changed = True
+
+                node_type = (
+                    node.type.value if hasattr(node.type, "value") else str(node.type)
+                )
+                self._emit_event(
+                    event_type=EventType.NODE_UPDATE,
+                    entity_kind=EntityKind.NODE,
+                    entity_id=node_id,
+                    entity_type=node_type,
+                    before=before_state,
+                    after=node.to_dict(),
+                    context=event_context,
+                )
+
+            if changed:
+                self.save()
+
+            return found
 
     def delete_nodes(
         self,
@@ -1041,6 +1113,54 @@ class GraphStorage:
             )
 
             return edge
+
+    def set_edges_archived(
+        self,
+        edge_ids: List[str],
+        archived: bool,
+        event_context: Optional[EventContext] = None,
+    ) -> List[Edge]:
+        """Set the ``archived`` flag on the given edges.
+
+        Mirrors :meth:`set_nodes_archived`: archived edges are hidden from
+        search/traversal by default but remain in the graph. Returns every edge
+        that was found; only edges whose flag changed emit an update event, and
+        the graph is saved once if anything changed.
+
+        Thread-safe: protected by _lock for the entire operation.
+        """
+        with self._lock:
+            found: List[Edge] = []
+            changed = False
+            for edge_id in edge_ids:
+                edge = self.edges.get(edge_id)
+                if edge is None:
+                    continue
+                found.append(edge)
+                if edge.archived == archived:
+                    continue
+
+                before_state = edge.to_dict()
+                edge.archived = archived
+                changed = True
+
+                edge_type = (
+                    edge.type.value if hasattr(edge.type, "value") else str(edge.type)
+                )
+                self._emit_event(
+                    event_type=EventType.EDGE_UPDATE,
+                    entity_kind=EntityKind.EDGE,
+                    entity_id=edge_id,
+                    entity_type=edge_type,
+                    before=before_state,
+                    after=edge.to_dict(),
+                    context=event_context,
+                )
+
+            if changed:
+                self.save()
+
+            return found
 
     def delete_edge(
         self,

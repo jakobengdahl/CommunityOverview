@@ -93,6 +93,10 @@ class ChatService:
             "update_node": self._graph_service.update_node,
             "delete_nodes": self._graph_service.delete_nodes,
             "delete_edges": self._graph_service.delete_edges,
+            "archive_nodes": self._graph_service.archive_nodes,
+            "unarchive_nodes": self._graph_service.unarchive_nodes,
+            "archive_edges": self._graph_service.archive_edges,
+            "unarchive_edges": self._graph_service.unarchive_edges,
             "list_node_types": self._graph_service.list_node_types,
             "get_subtypes": self._graph_service.get_subtypes,
             "get_graph_stats": self._graph_service.get_graph_stats,
@@ -110,6 +114,7 @@ class ChatService:
         limit: int = 50,
         action: Optional[str] = None,
         federation_depth: Optional[int] = None,
+        include_archived: bool = False,
     ) -> Dict[str, Any]:
         effective_depth = (
             federation_depth
@@ -122,6 +127,7 @@ class ChatService:
             limit=limit,
             action=action,
             federation_depth=effective_depth,
+            include_archived=include_archived,
         )
 
     # ------------------------------------------------------------------
@@ -525,11 +531,24 @@ class ChatService:
                 "error": "Deleting edges is not permitted in collection mode.",
             }
 
+        def _archive_blocked(*args, **kwargs):
+            # Archiving/unarchiving changes node/edge visibility without a
+            # node-type permission check, so block it uniformly in collection
+            # mode for the same reason edge deletion is blocked.
+            return {
+                "success": False,
+                "error": "Archiving is not permitted in collection mode.",
+            }
+
         return {
             "add_nodes": add_nodes_enforced,
             "update_node": update_node_enforced,
             "delete_nodes": delete_nodes_enforced,
             "delete_edges": delete_edges_enforced,
+            "archive_nodes": _archive_blocked,
+            "unarchive_nodes": _archive_blocked,
+            "archive_edges": _archive_blocked,
+            "unarchive_edges": _archive_blocked,
         }
 
     def _make_collection_response_tool(

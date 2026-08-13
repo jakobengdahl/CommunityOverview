@@ -80,6 +80,7 @@ class GraphService:
         tags_all: Optional[List[str]] = None,
         tags_none: Optional[List[str]] = None,
         metadata_filters: Optional[List[Dict[str, Any]]] = None,
+        include_archived: bool = False,
     ) -> Dict[str, Any]:
         return queries.search_graph(
             self._storage,
@@ -94,6 +95,7 @@ class GraphService:
             tags_all=tags_all,
             tags_none=tags_none,
             metadata_filters=metadata_filters,
+            include_archived=include_archived,
         )
 
     def get_node_details(self, node_id: str) -> Dict[str, Any]:
@@ -106,6 +108,7 @@ class GraphService:
         node_id: str,
         relationship_types: Optional[List[str]] = None,
         depth: int = 1,
+        include_archived: bool = False,
     ) -> Dict[str, Any]:
         return queries.get_related_nodes(
             self._storage,
@@ -113,6 +116,7 @@ class GraphService:
             node_id,
             relationship_types=relationship_types,
             depth=depth,
+            include_archived=include_archived,
         )
 
     def list_typed_nodes(
@@ -252,6 +256,40 @@ class GraphService:
             event_correlation_id=event_correlation_id,
         )
 
+    def archive_nodes(
+        self,
+        node_ids: List[str],
+        event_origin: Optional[str] = None,
+        event_session_id: Optional[str] = None,
+        event_correlation_id: Optional[str] = None,
+    ) -> Dict[str, Any]:
+        return mutations.set_nodes_archived(
+            self._storage,
+            self._authorization_hook,
+            node_ids,
+            True,
+            event_origin=event_origin,
+            event_session_id=event_session_id,
+            event_correlation_id=event_correlation_id,
+        )
+
+    def unarchive_nodes(
+        self,
+        node_ids: List[str],
+        event_origin: Optional[str] = None,
+        event_session_id: Optional[str] = None,
+        event_correlation_id: Optional[str] = None,
+    ) -> Dict[str, Any]:
+        return mutations.set_nodes_archived(
+            self._storage,
+            self._authorization_hook,
+            node_ids,
+            False,
+            event_origin=event_origin,
+            event_session_id=event_session_id,
+            event_correlation_id=event_correlation_id,
+        )
+
     # ==================== Edge CRUD Operations ====================
 
     def add_edge(
@@ -323,6 +361,40 @@ class GraphService:
             self._authorization_hook,
             edge_ids,
             confirmed=confirmed,
+            event_origin=event_origin,
+            event_session_id=event_session_id,
+            event_correlation_id=event_correlation_id,
+        )
+
+    def archive_edges(
+        self,
+        edge_ids: List[str],
+        event_origin: Optional[str] = None,
+        event_session_id: Optional[str] = None,
+        event_correlation_id: Optional[str] = None,
+    ) -> Dict[str, Any]:
+        return mutations.set_edges_archived(
+            self._storage,
+            self._authorization_hook,
+            edge_ids,
+            True,
+            event_origin=event_origin,
+            event_session_id=event_session_id,
+            event_correlation_id=event_correlation_id,
+        )
+
+    def unarchive_edges(
+        self,
+        edge_ids: List[str],
+        event_origin: Optional[str] = None,
+        event_session_id: Optional[str] = None,
+        event_correlation_id: Optional[str] = None,
+    ) -> Dict[str, Any]:
+        return mutations.set_edges_archived(
+            self._storage,
+            self._authorization_hook,
+            edge_ids,
+            False,
             event_origin=event_origin,
             event_session_id=event_session_id,
             event_correlation_id=event_correlation_id,

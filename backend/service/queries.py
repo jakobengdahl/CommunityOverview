@@ -29,6 +29,15 @@ import logging
 logger = logging.getLogger(__name__)
 
 
+def _is_archived(obj: Any) -> bool:
+    """True when a node/edge carries a truthy ``archived`` flag.
+
+    Uses getattr so federated or legacy objects without the field are treated as
+    not archived.
+    """
+    return bool(getattr(obj, "archived", False))
+
+
 def search_graph(
     storage: "GraphStorage",
     federation_manager: Optional["FederationManager"],
@@ -42,6 +51,7 @@ def search_graph(
     tags_all: Optional[List[str]] = None,
     tags_none: Optional[List[str]] = None,
     metadata_filters: Optional[List[Dict[str, Any]]] = None,
+    include_archived: bool = False,
 ) -> Dict[str, Any]:
     decision = access.evaluate_graph_access(
         hook, action=GRAPH_ACTION_READ, target="search_graph"
@@ -83,6 +93,7 @@ def search_graph(
         limit=max(limit, storage.get_stats().total_nodes)
         if decision.graph_access.enabled or has_generic_filters
         else limit,
+        include_archived=include_archived,
     )
 
     visible_local_results = [
@@ -94,6 +105,8 @@ def search_graph(
 
     result_node_ids = set(node.id for node in visible_local_results)
     connecting_edges = storage.get_incident_edges(list(result_node_ids))
+    if not include_archived:
+        connecting_edges = [edge for edge in connecting_edges if not _is_archived(edge)]
 
     federated_nodes: List = []
     federated_edges: List = []
@@ -112,9 +125,16 @@ def search_graph(
                 max_depth=federation_depth,
             )
             federated_nodes = [
-                node for node in federated["nodes"] if _passes_filters(node)
+                node
+                for node in federated["nodes"]
+                if _passes_filters(node)
+                and (include_archived or not _is_archived(node))
             ]
-            federated_edges = federated["edges"]
+            federated_edges = [
+                edge
+                for edge in federated["edges"]
+                if include_archived or not _is_archived(edge)
+            ]
 
     all_nodes = visible_local_results + federated_nodes
     all_edges = connecting_edges + federated_edges
@@ -156,6 +176,7 @@ def search_graph(
             "tags_all": list(tags_all or []),
             "tags_none": list(tags_none or []),
             "metadata_filters": list(metadata_filters or []),
+            "include_archived": bool(include_archived),
         },
         "federation": {
             "included": bool(federation_manager and federation_manager.enabled),
@@ -201,6 +222,7 @@ def get_related_nodes(
     node_id: str,
     relationship_types: Optional[List[str]] = None,
     depth: int = 1,
+    include_archived: bool = False,
 ) -> Dict[str, Any]:
     decision = access.evaluate_graph_access(
         hook, action=GRAPH_ACTION_READ, target="get_related_nodes"
@@ -219,7 +241,10 @@ def get_related_nodes(
         rel_filters = [RelationshipType(r) for r in relationship_types]
 
     result = storage.get_related_nodes(
-        node_id=node_id, relationship_types=rel_filters, depth=depth
+        node_id=node_id,
+        relationship_types=rel_filters,
+        depth=depth,
+        include_archived=include_archived,
     )
 
     visible_nodes, visible_edges = access.filter_nodes_and_edges(

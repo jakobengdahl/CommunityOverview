@@ -349,9 +349,11 @@ The default API prefix is `/api` (configurable via `API_PREFIX`).
 | POST | `/api/nodes` | Add nodes and edges |
 | PATCH | `/api/nodes/{id}` | Update a node |
 | DELETE | `/api/nodes` | Delete nodes |
+| POST | `/api/nodes/archive` | Archive/unarchive nodes (`archived` flag; hide-by-default vs. permanent delete) |
 | POST | `/api/edges` | Add edges |
 | PATCH | `/api/edges/{id}` | Update an edge |
 | DELETE | `/api/edges/{id}` | Delete an edge |
+| POST | `/api/edges/archive` | Archive/unarchive edges (`archived` flag) |
 | GET | `/api/history` | Recent graph mutation history (newest first; `limit`, `offset`) |
 | GET | `/api/nodes/{id}/history` | Mutation history for a single node |
 | GET | `/api/edges/{id}/history` | Mutation history for a single edge |
@@ -406,6 +408,44 @@ AND — a node must satisfy all configured constraints. Pass an empty `query` (`
 to filter purely by tags/metadata. The applied filters are echoed back under
 `result["filters"]`. The REST endpoint and the `search_graph` MCP tool expose the
 same parameters.
+
+### Archived lifecycle (`archived` flag on nodes and edges)
+
+Both nodes and edges carry a generic boolean `archived` field (default `false`).
+Archiving is a *hide-by-default* lifecycle state, distinct from deletion:
+
+- **Archive** hides an item from search and traversal while keeping it — and its
+  history — in the graph. It is reversible.
+- **Delete** removes the item permanently.
+
+The flag is use-case neutral: the platform hardcodes no semantics for *why*
+something is archived. It is backward compatible — graph data written before the
+flag existed loads as not archived (absent = `false`), and serialization simply
+gains an `archived` key, so no data migration is required.
+
+**Default-exclude with an explicit opt-in.** `search_graph` and
+`get_related_nodes` (across REST, MCP and the chat tools) exclude archived nodes
+and edges by default. Pass `include_archived=true` to include them — for example
+to find an archived node so it can be restored. In traversal, an archived edge is
+not followed and an archived neighbour is not reached (so an archived node cannot
+re-enter results via a later hop); the starting node is always returned as the
+anchor. A fetch by id (`GET /api/nodes/{id}` / `get_node_details`) still returns an
+archived node — the default-exclude applies to search and traversal, not to direct
+lookups. Federated nodes/edges preserve the origin graph's `archived` flag, so a
+node archived upstream stays hidden downstream.
+
+**Mutations.** Archiving goes through dedicated operations rather than a generic
+field update (a generic `update_node` cannot set `archived`):
+
+| REST | MCP tools |
+|------|-----------|
+| `POST /api/nodes/archive` (`archived: true\|false`) | `archive_nodes` / `unarchive_nodes` |
+| `POST /api/edges/archive` (`archived: true\|false`) | `archive_edges` / `unarchive_edges` |
+
+Archiving emits the same `node.update` / `edge.update` events as any other change,
+and is idempotent (re-archiving an already-archived item is a no-op that still
+reports success). In collection (kiosk) mode the archive/unarchive tools are
+blocked, mirroring the edge-deletion block.
 
 When a filter is active the text-search window is widened (locally, and across
 the federation cache) so post-filter results are not truncated by the `limit`. The
@@ -571,6 +611,8 @@ can configure one. See `docs/EVENT_SUBSCRIPTIONS.md`.
 | `add_nodes` | Add new nodes and edges |
 | `update_node` | Update node properties |
 | `delete_nodes` | Delete nodes by ID |
+| `archive_nodes` / `unarchive_nodes` | Hide/restore nodes via the `archived` flag (see Archived lifecycle) |
+| `archive_edges` / `unarchive_edges` | Hide/restore edges via the `archived` flag |
 | `get_graph_stats` | Get graph statistics |
 | `save_view` | Save a named view (creates SavedView node) |
 | `get_visualization_layout` | Read every node's model-space position in an open session (for an agent to compute a new arrangement) |
