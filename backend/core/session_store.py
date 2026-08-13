@@ -51,6 +51,8 @@ STATE_OPS = {
     "nodes_hidden",
     "nodes_shown",
     "edges_added",
+    "edges_removed",
+    "edges_updated",
     "edges_hidden",
     "edges_shown",
     "annotation_created",
@@ -554,6 +556,28 @@ class SessionStore:
             for edge in edges:
                 if not isinstance(edge, dict) or not isinstance(edge.get("id"), str):
                     raise OpError("each edge in edges_added requires a string 'id'")
+            applied["edges"] = edges
+        elif op_type == "edges_removed":
+            # Symmetric to edges_added (R14): a manually deleted edge lives in the
+            # graph, not in session state, so this op stores nothing — it exists
+            # only to fan a live edge deletion out to *already-connected* clients,
+            # whose canvases would otherwise keep the stale edge because no node
+            # changed (nothing triggers a re-hydration). The applied op carries
+            # the edge ids straight through to subscribers.
+            edge_ids = _require_id_list(op, "edge_ids")
+            applied["edge_ids"] = edge_ids
+        elif op_type == "edges_updated":
+            # Symmetric to edges_added (R14): an edge's changed attributes (e.g. a
+            # new relationship type) live in the graph, not in session state, so
+            # this op stores nothing — it fans the change out to already-connected
+            # clients, who apply it in place rather than showing the stale edge
+            # until reload. The applied op carries the edge payload through.
+            edges = op.get("edges")
+            if not isinstance(edges, list):
+                raise OpError("edges_updated requires an 'edges' list")
+            for edge in edges:
+                if not isinstance(edge, dict) or not isinstance(edge.get("id"), str):
+                    raise OpError("each edge in edges_updated requires a string 'id'")
             applied["edges"] = edges
         elif op_type == "edges_hidden":
             state["hidden_edge_ids"] = _union(
