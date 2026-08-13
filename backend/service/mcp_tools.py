@@ -315,6 +315,8 @@ def register_mcp_tools(
     def update_node(
         node_id: str,
         updates: Dict[str, Any],
+        metadata_merge: bool = False,
+        expected_updated_at: Optional[str] = None,
         event_session_id: Optional[str] = None,
         event_correlation_id: Optional[str] = None,
     ) -> Dict[str, Any]:
@@ -324,6 +326,19 @@ def register_mcp_tools(
         Args:
             node_id: ID of the node to update
             updates: Dict with fields to update (name, description, summary, tags, aliases, metadata)
+            metadata_merge: When True, the `metadata` object is merged field-by-field
+                onto the node's existing metadata instead of replacing it wholesale:
+                only the keys you send are changed, other keys are preserved, and a
+                key whose value is null (None) is removed. Default False keeps the
+                legacy behaviour where `metadata` replaces the whole object — so a
+                caller must resend every key to avoid dropping it. Use merge mode for
+                safe concurrent writebacks that each touch a different key.
+            expected_updated_at: Optional optimistic-concurrency guard. Pass the
+                `updated_at` value you last read for this node; the update is
+                rejected (result has success=False and conflict=True) if the node
+                has changed since then, instead of silently overwriting a
+                concurrent write. On conflict the result includes the live
+                `current_updated_at` so you can re-read and retry.
             event_session_id: Optional session ID for webhook loop prevention
             event_correlation_id: Optional correlation ID for chaining events
 
@@ -336,6 +351,8 @@ def register_mcp_tools(
             event_origin="mcp",
             event_session_id=event_session_id,
             event_correlation_id=event_correlation_id,
+            metadata_merge=metadata_merge,
+            expected_updated_at=expected_updated_at,
         )
 
     @register_tool

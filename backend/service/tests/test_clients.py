@@ -138,6 +138,33 @@ class TestRESTAPIClient:
         assert data["success"] is True
         assert data["node"]["description"] == "Updated via REST"
 
+    def test_update_node_metadata_merge_endpoint(self, populated_api_client):
+        """PATCH with metadata_merge patches keys without dropping the rest."""
+        populated_api_client.patch(
+            "/api/graph/nodes/api-1", json={"updates": {"metadata": {"a": 1, "b": 2}}}
+        )
+        response = populated_api_client.patch(
+            "/api/graph/nodes/api-1",
+            json={"updates": {"metadata": {"a": 9, "b": None}}, "metadata_merge": True},
+        )
+        assert response.status_code == 200
+        assert response.json()["node"]["metadata"] == {"a": 9}
+
+    def test_update_node_stale_returns_409(self, populated_api_client):
+        """A stale expected_updated_at is rejected with HTTP 409."""
+        first = populated_api_client.patch(
+            "/api/graph/nodes/api-1", json={"updates": {"summary": "one"}}
+        )
+        stale = first.json()["node"]["updated_at"]
+        populated_api_client.patch(
+            "/api/graph/nodes/api-1", json={"updates": {"summary": "two"}}
+        )
+        conflict = populated_api_client.patch(
+            "/api/graph/nodes/api-1",
+            json={"updates": {"summary": "three"}, "expected_updated_at": stale},
+        )
+        assert conflict.status_code == 409
+
     def test_delete_nodes_endpoint(self, populated_api_client):
         """Test DELETE /api/graph/nodes endpoint."""
         response = populated_api_client.request(
