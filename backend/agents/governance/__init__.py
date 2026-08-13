@@ -19,7 +19,12 @@ from .store import (
     ProposalStore,
     SqliteProposalStore,
 )
-from .gate import AutonomyGate, MUTATING_ORIGINAL_TOOLS, is_mutating_tool
+from .gate import (
+    AutonomyGate,
+    MUTATING_ORIGINAL_TOOLS,
+    filter_tool_definitions,
+    is_mutating_tool,
+)
 from .manager import GovernanceManager
 
 __all__ = [
@@ -33,6 +38,7 @@ __all__ = [
     "SqliteProposalStore",
     "AutonomyGate",
     "MUTATING_ORIGINAL_TOOLS",
+    "filter_tool_definitions",
     "is_mutating_tool",
     "GovernanceManager",
 ]
