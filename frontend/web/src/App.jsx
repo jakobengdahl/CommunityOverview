@@ -253,6 +253,21 @@ function App() {
           if (list.length) addNodesToVisualization([], list);
           break;
         }
+        case 'edges_removed':
+          // A collaborator deleted an edge. Remove it directly; if it isn't
+          // present here (this host never had those endpoints) removeEdge is a
+          // harmless no-op.
+          (op.edge_ids || []).forEach((id) => removeEdge(id));
+          break;
+        case 'edges_updated':
+          // A collaborator changed an edge's attributes (e.g. its relationship
+          // type). Merge them in place; if the edge isn't present here,
+          // updateEdgeData is a harmless no-op and a later hydration recovers
+          // the current value from the graph.
+          (op.edges || []).forEach((e) => {
+            if (e && e.id) updateEdgeData(e.id, e);
+          });
+          break;
         case 'edges_hidden':
           setHiddenEdgeIds(
             Array.from(new Set([...(store.hiddenEdgeIds || []), ...(op.edge_ids || [])]))
@@ -328,6 +343,8 @@ function App() {
     [
       addNodesToVisualization,
       removeNode,
+      removeEdge,
+      updateEdgeData,
       setHiddenNodeIds,
       setHiddenEdgeIds,
       setRemotePositions,
@@ -818,13 +835,17 @@ function App() {
           throw new Error('Could not delete edge');
         }
         removeEdge(edgeId);
+        // Fan the deletion out to collaborators. Both endpoints already exist on
+        // their canvases, so nothing else prompts them to drop the edge (no node
+        // was removed); without this the edge lingers on their canvas until reload.
+        syncRef.current?.sendEdgesRemoved([edgeId]);
         showNotification('success', 'Edge deleted');
       } catch (error) {
         console.error('Error deleting edge:', error);
         showNotification('error', 'Could not delete edge');
       }
     },
-    [removeEdge, showNotification]
+    [removeEdge, showNotification, syncRef]
   );
 
   // Callback: Edit edge - opens EditEdgeDialog
@@ -846,6 +867,10 @@ function App() {
         await api.updateEdge(editingEdge.id, updates);
         const newEdges = edges.map((e) => (e.id === editingEdge.id ? { ...e, ...updates } : e));
         updateVisualization(nodes, newEdges);
+        // Fan the update out to collaborators: both endpoints already exist on
+        // their canvases, so nothing else prompts them to re-render the changed
+        // edge; without this they show the stale attributes until reload.
+        syncRef.current?.sendEdgesUpdated([{ id: editingEdge.id, ...updates }]);
         setEditingEdge(null);
         showNotification('success', 'Edge updated');
       } catch (error) {
@@ -853,7 +878,7 @@ function App() {
         showNotification('error', 'Could not update edge');
       }
     },
-    [editingEdge, nodes, edges, updateVisualization, showNotification]
+    [editingEdge, nodes, edges, updateVisualization, showNotification, syncRef]
   );
 
   // Callback: Change an edge's relationship type from the context menu.
@@ -863,14 +888,19 @@ function App() {
     async (edgeId, type) => {
       try {
         await api.updateEdge(edgeId, { type: type || null });
-        updateEdgeData(edgeId, { type: type || 'RELATES_TO' });
+        const nextType = type || 'RELATES_TO';
+        updateEdgeData(edgeId, { type: nextType });
+        // Fan the type change out to collaborators: both endpoints already exist
+        // on their canvases, so nothing else prompts them to re-render the edge;
+        // without this they keep showing the old type until reload.
+        syncRef.current?.sendEdgesUpdated([{ id: edgeId, type: nextType }]);
         showNotification('success', 'Connection type updated');
       } catch (error) {
         console.error('Error updating edge type:', error);
         showNotification('error', 'Could not update connection');
       }
     },
-    [updateEdgeData, showNotification]
+    [updateEdgeData, showNotification, syncRef]
   );
 
   // Callback: Connect nodes (from drag-connect in canvas)

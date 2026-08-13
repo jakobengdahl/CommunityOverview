@@ -148,6 +148,23 @@ class TestNode:
         assert node.tags == ["tag1", "tag2"]
         assert node.metadata == {"key": "value"}
 
+    def test_node_archived_defaults_false(self):
+        """A freshly created node is not archived by default."""
+        node = Node(type=NodeType.ACTOR, name="Test Actor")
+        assert node.archived is False
+        assert node.to_dict()["archived"] is False
+
+    def test_node_from_dict_legacy_without_archived(self):
+        """Legacy graph data predates the archived flag → absent means not archived."""
+        node = Node.from_dict({"id": "legacy", "type": "Actor", "name": "Legacy Actor"})
+        assert node.archived is False
+
+    def test_node_archived_round_trips(self):
+        """The archived flag survives a to_dict/from_dict round trip."""
+        node = Node(type=NodeType.ACTOR, name="Test Actor", archived=True)
+        restored = Node.from_dict(node.to_dict())
+        assert restored.archived is True
+
     def test_node_to_dict(self):
         """Test converting node to dictionary"""
         node = Node(type=NodeType.ACTOR, name="Test Actor", tags=["governance"])
@@ -157,6 +174,7 @@ class TestNode:
         assert data["name"] == "Test Actor"
         assert data["type"] == "Actor"
         assert data["tags"] == ["governance"]
+        assert data["archived"] is False
         assert isinstance(data["created_at"], str)  # ISO format string
 
     def test_node_from_dict(self):
@@ -309,6 +327,23 @@ class TestEdge:
 
         assert edge.id == "edge-1"
         assert edge.type == RelationshipType.RELATES_TO
+
+    def test_edge_archived_defaults_false(self):
+        """A freshly created edge is not archived by default."""
+        edge = Edge(source="node-1", target="node-2")
+        assert edge.archived is False
+        assert edge.to_dict()["archived"] is False
+
+    def test_edge_from_dict_legacy_without_archived(self):
+        """Legacy edge data predates the archived flag → absent means not archived."""
+        edge = Edge.from_dict({"id": "legacy", "source": "node-1", "target": "node-2"})
+        assert edge.archived is False
+
+    def test_edge_archived_round_trips(self):
+        """The archived flag survives a to_dict/from_dict round trip."""
+        edge = Edge(source="node-1", target="node-2", archived=True)
+        restored = Edge.from_dict(edge.to_dict())
+        assert restored.archived is True
 
     def test_edge_from_dict_accepts_zulu_timestamp(self):
         """Test creating edge from dictionary with UTC Z suffix timestamp."""

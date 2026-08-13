@@ -188,6 +188,22 @@ All nodes can have tags for better categorization and searchability:
 - Users can edit tags via the edit dialog OR by asking you to add/update them
 - ALWAYS suggest 3-5 relevant tags when creating new nodes
 
+ARCHIVED LIFECYCLE:
+Nodes and edges have an `archived` flag (default false) that is separate from deletion:
+- ARCHIVE = hide by default while keeping the item (and its history) in the graph.
+  Reversible. Use archive_nodes / archive_edges to archive, and
+  unarchive_nodes / unarchive_edges to restore.
+- DELETE = permanent removal. Use delete_nodes / delete_edges only when the user
+  truly wants the data gone.
+- When a user asks to "remove", "hide", "retire", "put away" or "arkivera" something
+  but does not clearly want permanent deletion, PREFER archiving and say so.
+- search_graph and get_related_nodes EXCLUDE archived nodes and edges by default.
+  To see or work with archived items, pass include_archived=true. So if a user asks
+  "what have I archived?" or wants to restore something, search with
+  include_archived=true first to find it, then unarchive it.
+- Archived items still exist: an archived node is not deleted, just hidden from the
+  default views.
+
 CORE PRINCIPLES:
 1. ALWAYS use MCP tools (search_graph, get_related_nodes, etc.) to interact with the graph
 2. NEVER fabricate or assume data - always query the graph using tools
@@ -574,6 +590,11 @@ class ChatProcessor:
                             "enum": ["add_to_visualization", "replace_visualization"],
                             "description": "How results affect the current view. 'add_to_visualization' ADDS results to the current view, keeping existing content (for 'lagg till X' and any plain additive request). 'replace_visualization' REPLACES the current view (only when the user EXPLICITLY asks to replace/clear-and-show, e.g. 'visa X', 'replace the view with X'). When omitted the default is ADDITIVE — a plain request never clears the view.",
                         },
+                        "include_archived": {
+                            "type": "boolean",
+                            "description": "When false (default) archived nodes and edges are excluded. Set true to include archived items (e.g. to find something the user wants to restore).",
+                            "default": False,
+                        },
                     },
                     "required": ["query"],
                 },
@@ -597,6 +618,11 @@ class ChatProcessor:
                             "type": "array",
                             "items": {"type": "string"},
                             "description": "Optional: Filter by relationship types",
+                        },
+                        "include_archived": {
+                            "type": "boolean",
+                            "description": "When false (default) archived edges are not traversed and archived neighbour nodes are excluded. Set true to include them.",
+                            "default": False,
                         },
                     },
                     "required": ["node_id"],
@@ -793,6 +819,66 @@ class ChatProcessor:
                             "type": "boolean",
                             "description": "Must be True to execute deletion",
                             "default": False,
+                        },
+                    },
+                    "required": ["edge_ids"],
+                },
+            },
+            {
+                "name": "archive_nodes",
+                "description": "Archive nodes: hide them from search/traversal by default without deleting. Reversible via unarchive_nodes. Prefer this over delete_nodes when the user wants to hide/retire a node rather than permanently remove it.",
+                "input_schema": {
+                    "type": "object",
+                    "properties": {
+                        "node_ids": {
+                            "type": "array",
+                            "items": {"type": "string"},
+                            "description": "List of node IDs to archive",
+                        },
+                    },
+                    "required": ["node_ids"],
+                },
+            },
+            {
+                "name": "unarchive_nodes",
+                "description": "Unarchive nodes: make previously archived nodes visible again. Find archived nodes first with search_graph(include_archived=true).",
+                "input_schema": {
+                    "type": "object",
+                    "properties": {
+                        "node_ids": {
+                            "type": "array",
+                            "items": {"type": "string"},
+                            "description": "List of node IDs to unarchive",
+                        },
+                    },
+                    "required": ["node_ids"],
+                },
+            },
+            {
+                "name": "archive_edges",
+                "description": "Archive edges: hide them from search/traversal by default without deleting. Reversible via unarchive_edges.",
+                "input_schema": {
+                    "type": "object",
+                    "properties": {
+                        "edge_ids": {
+                            "type": "array",
+                            "items": {"type": "string"},
+                            "description": "List of edge IDs to archive",
+                        },
+                    },
+                    "required": ["edge_ids"],
+                },
+            },
+            {
+                "name": "unarchive_edges",
+                "description": "Unarchive edges: make previously archived edges visible again.",
+                "input_schema": {
+                    "type": "object",
+                    "properties": {
+                        "edge_ids": {
+                            "type": "array",
+                            "items": {"type": "string"},
+                            "description": "List of edge IDs to unarchive",
                         },
                     },
                     "required": ["edge_ids"],

@@ -349,9 +349,11 @@ The default API prefix is `/api` (configurable via `API_PREFIX`).
 | POST | `/api/nodes` | Add nodes and edges |
 | PATCH | `/api/nodes/{id}` | Update a node |
 | DELETE | `/api/nodes` | Delete nodes |
+| POST | `/api/nodes/archive` | Archive/unarchive nodes (`archived` flag; hide-by-default vs. permanent delete) |
 | POST | `/api/edges` | Add edges |
 | PATCH | `/api/edges/{id}` | Update an edge |
 | DELETE | `/api/edges/{id}` | Delete an edge |
+| POST | `/api/edges/archive` | Archive/unarchive edges (`archived` flag) |
 | GET | `/api/history` | Recent graph mutation history (newest first; `limit`, `offset`) |
 | GET | `/api/nodes/{id}/history` | Mutation history for a single node |
 | GET | `/api/edges/{id}/history` | Mutation history for a single edge |
@@ -375,6 +377,92 @@ The default API prefix is `/api` (configurable via `API_PREFIX`).
 | POST | `/agents/proposals/{proposal_id}/approve` | Approve a proposal (applies the action for act_after_approval agents) |
 | POST | `/agents/proposals/{proposal_id}/reject` | Reject a proposal |
 | POST | `/agents/{id}/trigger` | Fire a scheduled agent immediately (used by GCP Cloud Scheduler) |
+
+### Generic search filters (`/api/search` and the `search_graph` MCP tool)
+
+Beyond the text `query` and `node_types`, search accepts generic, config-neutral
+tag and metadata filters. They match on whatever tags and metadata a deployment
+has put on its nodes and hardcode no field names or values, so the same mechanism
+serves any use case. Omitting all of them leaves search behaviour unchanged.
+
+| Parameter | Meaning |
+|-----------|---------|
+| `tags_any` | Keep nodes carrying **at least one** of these tags (OR). |
+| `tags_all` | Keep nodes carrying **every** one of these tags (AND). |
+| `tags_none` | Drop nodes carrying **any** of these tags (exclude). |
+| `metadata_filters` | List of generic metadata filters (see below). |
+
+Each entry in `metadata_filters` is an object
+`{"key": <field>, "values": [...], "match": "any"|"all"|"none"}`:
+
+- `any` (default): the node's metadata value(s) at `key` intersect the requested
+  values.
+- `all`: every requested value is present in the node's value(s) at `key`
+  (meaningful when the stored value is itself a list).
+- `none`: the node's value(s) at `key` share nothing with the requested values.
+
+Values compare as strings, so heterogeneous scalar types (e.g. an integer stored
+in metadata vs. a string filter value) match uniformly. A filter with no `key` or
+no `values` is ignored. The tag dimensions and every metadata filter combine with
+AND — a node must satisfy all configured constraints. Pass an empty `query` (`""`)
+to filter purely by tags/metadata. The applied filters are echoed back under
+`result["filters"]`. The REST endpoint and the `search_graph` MCP tool expose the
+same parameters.
+
+### Archived lifecycle (`archived` flag on nodes and edges)
+
+Both nodes and edges carry a generic boolean `archived` field (default `false`).
+Archiving is a *hide-by-default* lifecycle state, distinct from deletion:
+
+- **Archive** hides an item from search and traversal while keeping it — and its
+  history — in the graph. It is reversible.
+- **Delete** removes the item permanently.
+
+The flag is use-case neutral: the platform hardcodes no semantics for *why*
+something is archived. It is backward compatible — graph data written before the
+flag existed loads as not archived (absent = `false`), and serialization simply
+gains an `archived` key, so no data migration is required.
+
+**Default-exclude with an explicit opt-in.** `search_graph` and
+`get_related_nodes` (across REST, MCP and the chat tools) exclude archived nodes
+and edges by default. Pass `include_archived=true` to include them — for example
+to find an archived node so it can be restored. In traversal, an archived edge is
+not followed and an archived neighbour is not reached (so an archived node cannot
+re-enter results via a later hop); the starting node is always returned as the
+anchor. A fetch by id (`GET /api/nodes/{id}` / `get_node_details`) still returns an
+archived node — the default-exclude applies to search and traversal, not to direct
+lookups. Federated nodes/edges preserve the origin graph's `archived` flag, so a
+node archived upstream stays hidden downstream.
+
+**Mutations.** Archiving goes through dedicated operations rather than a generic
+field update (a generic `update_node` cannot set `archived`):
+
+| REST | MCP tools |
+|------|-----------|
+| `POST /api/nodes/archive` (`archived: true\|false`) | `archive_nodes` / `unarchive_nodes` |
+| `POST /api/edges/archive` (`archived: true\|false`) | `archive_edges` / `unarchive_edges` |
+
+Archiving emits the same `node.update` / `edge.update` events as any other change,
+and is idempotent (re-archiving an already-archived item is a no-op that still
+reports success). In collection (kiosk) mode the archive/unarchive tools are
+blocked, mirroring the edge-deletion block.
+
+When a filter is active the text-search window is widened (locally, and across
+the federation cache) so post-filter results are not truncated by the `limit`. The
+final `limit` still bounds the returned nodes; as with unfiltered search, local
+matches are counted first and federated results only fill the remainder.
+
+Example (nodes tagged `partner`, excluding any tagged `archived`, whose
+`stage` metadata is `active` or `pilot`):
+
+```json
+{
+  "query": "",
+  "tags_any": ["partner"],
+  "tags_none": ["archived"],
+  "metadata_filters": [{"key": "stage", "values": ["active", "pilot"]}]
+}
+```
 
 ### Custom REST Interfaces (config-driven)
 
@@ -523,6 +611,8 @@ can configure one. See `docs/EVENT_SUBSCRIPTIONS.md`.
 | `add_nodes` | Add new nodes and edges |
 | `update_node` | Update node properties |
 | `delete_nodes` | Delete nodes by ID |
+| `archive_nodes` / `unarchive_nodes` | Hide/restore nodes via the `archived` flag (see Archived lifecycle) |
+| `archive_edges` / `unarchive_edges` | Hide/restore edges via the `archived` flag |
 | `get_graph_stats` | Get graph statistics |
 | `save_view` | Save a named view (creates SavedView node) |
 | `get_visualization_layout` | Read every node's model-space position in an open session (for an agent to compute a new arrangement) |

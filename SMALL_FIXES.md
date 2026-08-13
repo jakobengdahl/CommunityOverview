@@ -1,5 +1,7 @@
 # Small Fixes Backlog
 
+> **Open small-fixes now live in the Corp planning graph** as `small-fix`-tagged Task nodes (migrated 2026-08-13). Log newly discovered deferred issues there, not in this file. This file is retained only as a historical record of previously resolved fixes.
+
 Issues discovered during feature development that are pre-existing and out of
 scope for the active session. Addressed in dedicated small-fix sessions.
 
@@ -50,68 +52,6 @@ Effort scale: XS = single-line fix · S = up to ~30 lines / one file · M = mult
 - **File(s):** `frontend/web/src/components/ChatPanel.css:198-232` (markdown block); compare `frontend/web/src/components/CollectKioskView.css` table rules
 - **Context:** Discovered during `claude/kiosk-rich-text` (PR #317 review). Both the main Graph assistant and the kiosk now render GFM tables via the shared `MarkdownMessage` component, but only the kiosk styles `table`/`th`/`td`. ChatPanel tables fall back to unstyled browser defaults.
 - **Issue:** Minor visual inconsistency — assistant tables render borderless/cramped in ChatPanel while looking correct in the kiosk. Not a regression (pre-existing: ChatPanel never styled tables). Add matching `.message-content table/th/td` rules to `ChatPanel.css` for consistency.
-- **Effort:** XS
-
-### [2026-08-11] Node trail records a duplicate 'visited' when jumping to an older row
-
-- **File(s):** `frontend/web/src/store/graphStore.js` (`setFocusNodeId`); `frontend/web/src/components/NodeHistoryPanel.jsx`
-- **Context:** Discovered during `claude/canvas-node-history` (review round 2 of PR #315).
-- **Issue:** Clicking a non-top entry in the "Recent nodes" trail calls `setFocusNodeId`, which records a fresh `visited` entry. Because `appendNavEntries` only collapses against the immediate top of the trail, jumping back to an older node prepends a duplicate row (the original entry, including any "Added" label, stays lower in the list). This is intentional (focus = visit, mirroring browser history), so it is not a bug — but if the duplicate-on-jump reads as clutter, consider suppressing the record when the navigation originates from the trail panel itself, or de-duplicating anywhere in the trail rather than only at the top.
-- **Effort:** S
-
-### [2026-08-11] Canvas undo history not invalidated by mid-session node repositioning
-
-- **File(s):** `packages/ui-graph-canvas/src/components/GraphCanvas.jsx` (the `clearHistory` effect keyed on `animatedLayoutResetKey`)
-- **Context:** Discovered during `claude/canvas-undo-redo` (review of PR #312).
-- **Issue:** Undo/redo history is only cleared when the session identity changes (`animatedLayoutResetKey` = `sessionId`). Node positions can also change within the same session without clearing history — a remote collaborator's move (`remotePositions`), an MCP animated layout, or loading a different saved view into the same session. After such a reposition a subsequent Ctrl+Z restores a node to a stale `from` position captured before the change. For remote moves this is arguably consistent with the contract's last-write-wins model (G5), but a saved-view reload creating a new baseline makes undo surprising. Consider clearing (or reconciling) history when a new position baseline is applied. Out of scope for the first undo/redo slice, which is single-user/single-baseline.
-- **Effort:** M
-
-### [2026-08-11] Unused layout imports in GraphCanvas
-
-- **File(s):** `packages/ui-graph-canvas/src/components/GraphCanvas.jsx:33-35`
-- **Context:** Discovered during `claude/visualization-canvas-activities-46ayn1` while adding `positionNewNodes`/`arrangeNodes` to the same import block.
-- **Issue:** `getGridLayout`, `getCircularLayout` and `getLayoutedElements` are imported but never referenced in `GraphCanvas.jsx` (only `applyLayout` is used there). Dead imports; eslint's current config does not flag them. Remove for clarity.
-- **Effort:** XS
-
-### [2026-08-10] Flaky timing-dependent webhook delivery-retry test
-
-- **File(s):** `backend/core/events/tests/test_delivery.py:225` (`TestDeliveryWorker::test_failed_delivery_with_retry`)
-- **Context:** Discovered during `claude/task-core-durable-agent-runtime-6q32c8` (governance PR #299 CI); the test failed once on CI (`assert 0 == 1` — no SUCCESS result) but passes 5/5 locally and is unrelated to the diff (governance touches `backend/agents`/`backend/api_host` only).
-- **Issue:** The test enqueues an event, `time.sleep(1.0)`, then asserts exactly one SUCCESS result after 2 failing HTTP attempts (0.1s backoff each). Under CI load the fixed 1.0s wait can elapse before the third (successful) attempt lands, making it flaky. Should wait on a condition/event instead of a fixed sleep, or increase/parametrise the timeout.
-- **Effort:** S
-
-### [2026-08-10] Agent governance does not pre-filter tool definitions
-
-- **File(s):** `backend/agents/worker.py` (`_process_event`), `backend/agents/mcp_loader.py`
-- **Context:** Discovered during `claude/task-core-durable-agent-runtime-6q32c8` (basic-agent-governance)
-- **Issue:** The autonomy gate enforces the allowlist and blocks/queues mutating tools at execution time (authoritative), but the tool *definitions* handed to the LLM are not filtered by `tool_allowlist` or autonomy level. A read-only (observe/assist) or allowlist-restricted agent still sees tools it cannot use and may waste turns attempting them (they fail cleanly). Filtering `get_tool_definitions` by allowlist, and dropping mutating tools for read-only levels, would reduce wasted attempts. Enforcement is unaffected — this is an efficiency/UX improvement only.
-- **Effort:** S
-
-### [2026-08-10] Durable execution contract header links to wrong section number
-
-- **File(s):** `docs/DURABLE_EXECUTION_CONTRACT.md:11`
-- **Context:** Discovered during `claude/task-core-durable-agent-runtime-6q32c8`
-- **Issue:** The scope note in the header says "see §8 Public/private boundary", but the ExecutionStore seam is §8 and the Public/private boundary is §9. The anchor `#8-publicprivate-boundary` is also stale. Should point to §9.
-- **Effort:** XS
-
-## Open
-
-### [2026-08-12] Lazy-load slice hides edges to off-screen nodes on reload of a >200-node session
-- **File(s):** `packages/ui-graph-canvas/src/components/GraphCanvas.jsx:365-383` (`nodesToRender` / `visibleEdges`), `packages/ui-graph-canvas/src/utils/constants.js:92-93`
-- **Context:** Discovered during `claude/fix-edges-missing-after-reload` while triaging "edges sometimes missing after reloading a session" (that reload/hydration path is otherwise correct — edges live in the graph and are recovered by resolving node_refs; see PR).
-- **Issue:** When a session has more than `LAZY_LOAD_THRESHOLD` (200) nodes, `nodesToRender` renders only the first `INITIAL_LOAD_COUNT` (100) in `node_refs` order, and `visibleEdges` filters edges to `renderedNodeIds` (the sliced set). On reload of a large session this immediately drops every edge whose other endpoint sits in the un-loaded remainder, so a rendered node can show fewer edges than the data holds. It is announced by the "Showing 100 of N nodes" banner and inherently also hides the off-screen endpoint node (an edge to an unrendered node cannot be drawn), so it does not match the classic "both endpoints present but edge gone" bug — it is a lazy-load UX tradeoff. Possible improvements: raise the threshold, expand the rendered set to include nodes referenced by edges among already-loaded nodes, or make the banner mention hidden connections. Not a hydration fix — do not change resolve/hydration for it.
-- **Effort:** M
-
-### [2026-08-09] Visualization geometry/layout MCP tools bypass the authorization hook
-- **File(s):** `backend/service/mcp_tools.py:685` (`get_visualization_layout`), `:749` (`apply_visualization_layout`), `:640` (`get_visualization_session_state`)
-- **Context:** Discovered during `claude/task-test-assisted-session-creation-2kpz9b` (assistant-session end-to-end test)
-- **Issue:** The session *resource* CRUD tools (`create/list/get/rename/delete_visualization_session`) gate every call through `_authorize_session` (the seam the hosted layer swaps in for per-tenant enforcement), but the geometry read (`get_visualization_layout`, `get_visualization_session_state`) and the layout write (`apply_visualization_layout`) do not. Under the open-core permissive default this is invisible, but it is an inconsistency between parallel tool paths: in a `read-only`/`deny-all` (or hosted per-tenant) authorization mode an actor denied `get_visualization_session` can still read node geometry and, more importantly, *move nodes* via `apply_visualization_layout` — a mutation. The `TestUnauthorizedAccess` test documents the gap (it deliberately asserts only the CRUD mutations are denied). If the hook is meant to guard every session-touching tool, add `_authorize_session(GRAPH_ACTION_READ/MUTATE, ...)` to these three (mirroring the CRUD tools) and cover it in `test_assisted_session_creation.py`.
-- **Effort:** S
-
-### [2026-07-19] Scheduled-trigger envelope omits `schema_version`
-- **File(s):** `backend/agents/scheduler.py:161` (`_build_payload`), test in `backend/agents/tests/test_scheduler.py:406`
-- **Context:** Discovered during `claude/saas-v1-slice-test-w6i7zp` (event envelope versioning)
-- **Issue:** `_build_payload` hand-builds a `scheduled_trigger` payload in the same envelope family (`event_id`/`event_type`/`occurred_at`/`origin`/`entity`) consumed by the same agent path (`build_event_user_message`), but does not carry the new top-level `schema_version`. This is an internal agent-processing message, not an external webhook delivery, so it is intentionally out of the versioned webhook contract for now. If the version stamp should apply to every envelope a consumer might read, extend it here and assert it in `test_payload_structure`.
 - **Effort:** XS
 
 ---
@@ -219,26 +159,3 @@ Effort scale: XS = single-line fix · S = up to ~30 lines / one file · M = mult
 - **`federationDepthFlow.test.jsx` strict `toEqual` on the chat payload** — `frontend/web/tests/federationDepthFlow.test.jsx`. Changed the `sendChatMessage` options assertion from `toEqual` to `toMatchObject`, tolerating the extra context fields now sent alongside `federationDepth`. (Resolved the duplicate 2026-07-01 and 2026-07-02 entries for this same line.)
 - **`GraphCanvas.test.jsx` edge-delete test asserts a stale Swedish label** — `packages/ui-graph-canvas/tests/GraphCanvas.test.jsx`. Matched the edge-delete button by its actual English default label (`/delete/i`) instead of `/ta bort/i`. (Resolved the duplicate 2026-07-02 and 2026-07-03 entries for this same test.)
 
-### [2026-08-11] Legacy session-registry queue grows unbounded while browser is on the op-stream
-- **File(s):** `backend/core/session_registry.py:80` (`asyncio.Queue()`), `push_command`/`push_command_sync`; producers `backend/service/mcp_tools.py` `_push_to_session` and `backend/api_host/session_stream.py` pulse endpoint
-- **Context:** Discovered during claude/canvas-pulse-trigger (review round 1)
-- **Issue:** Once a session's browser has switched to the shared op-protocol stream (`opStreamReady`), it closes the legacy `GET /sessions/{id}/stream` EventSource, so nothing drains that session's `SessionRegistry` queue. Every subsequent push (MCP tool results *and* pulse triggers) still enqueues onto the unconsumed, unbounded queue and calls `_touch`, which also keeps refreshing `last_seen` so the 1h TTL eviction never fires. Memory grows for the lifetime of an actively-pushed session that is on the op-stream. Pre-existing property of the push architecture (affects `_push_to_session` too), made more visible by higher-frequency external pulse triggers. Fix options: track active legacy-stream consumers on the registry and skip/bound enqueue when none is draining (careful not to break the legacy→op handover window, design §8.1 R5), or bound the queue with drop-oldest.
-- **Effort:** M
-
-### [2026-08-12] CreateActiveKnowledgeCollectionDialog does not use i18n
-- **File(s):** `frontend/web/src/components/CreateActiveKnowledgeCollectionDialog.jsx`
-- **Context:** Discovered during claude/kiosk-tool-access
-- **Issue:** The entire dialog hardcodes English display strings (section headings, labels, help text, alerts) instead of using the `useI18n()` hook with keys in `en.json`/`sv.json`, contradicting the repo i18n rule. The new "Assistant Tools" section follows the same hardcoded-English convention as the rest of the file for consistency; the whole dialog should be migrated to i18n in one pass rather than piecemeal.
-- **Effort:** M
-
-### [2026-08-12] Edge deletion and edge-type changes do not propagate in a shared session
-- **File(s):** `frontend/web/src/App.jsx` (`handleDeleteEdge`, `handleChangeEdgeType`, `handleSaveEdge`)
-- **Context:** Discovered during claude/fix-shared-session-edge-render (while fixing edge *creation* fan-out)
-- **Issue:** The shared-session op protocol now fans out edge creation (`edges_added`), but edge deletion, relationship-type changes, and edit-dialog saves still mutate only the local store/graph — no op is broadcast, so collaborators keep showing the stale edge until they reload and re-hydrate from the graph. Symmetric gap to the creation bug just fixed. Would need `edges_removed` / `edges_updated` fan-out ops (or a shared "re-hydrate these edges" signal) plus remote appliers, mirroring the `edges_added` path. Left out to keep the creation fix minimal and focused on the reported "edges don't appear" symptom.
-- **Effort:** M
-
-### [2026-08-12] MCPIntegration.to_dict claims to hide secrets but does not redact env
-- **File(s):** `backend/agents/config.py:203` (`to_dict`, the `env` line + `# Don't expose secrets` comment)
-- **Context:** Discovered during claude/core-secret-provider-seam (review round 1)
-- **Issue:** `MCPIntegration.to_dict` shallow-copies `env` verbatim while the inline comment claims it does not expose secrets. With the new SecretProvider seam the built-in SEARCH default now holds a `secret://…` reference (safe to serialise), but a user-supplied literal secret in a `MCP_INTEGRATIONS` `env` entry would still be serialised through `to_dict` (and thus API responses / logs). Follow-up: either redact `env` values in `to_dict`, or require/resolve env secrets as `secret://` references so literals are never stored. Out of scope for the seam-only PR.
-- **Effort:** XS

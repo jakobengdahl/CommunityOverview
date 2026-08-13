@@ -119,16 +119,41 @@ def register_mcp_tools(
         limit: int = 50,
         action: Optional[str] = None,
         federation_depth: Optional[int] = None,
+        tags_any: Optional[List[str]] = None,
+        tags_all: Optional[List[str]] = None,
+        tags_none: Optional[List[str]] = None,
+        metadata_filters: Optional[List[Dict[str, Any]]] = None,
+        include_archived: bool = False,
         visualization_session_id: Optional[str] = None,
     ) -> Dict[str, Any]:
         """
-        Search for nodes in the graph based on text query
+        Search for nodes in the graph based on text query, with optional generic
+        tag and metadata filtering.
+
+        The tag/metadata filters are use-case agnostic: they match on whatever
+        tags and metadata a deployment has put on its nodes and hardcode no field
+        names or values. Pass an empty query ("") to filter purely by tags and/or
+        metadata. When no filter argument is given the search behaves exactly as
+        before.
 
         Args:
-            query: Search text (matches against name, description, summary)
+            query: Search text (matches against name, description, summary). Use ""
+                to match on the filters alone.
             node_types: List of node types to filter on (Actor, Initiative, etc.)
             limit: Max number of results (default 50)
             action: Optional action for frontend ('add_to_visualization' to add to current view)
+            tags_any: Keep only nodes carrying at least one of these tags (OR).
+            tags_all: Keep only nodes carrying every one of these tags (AND).
+            tags_none: Drop nodes carrying any of these tags (exclude).
+            metadata_filters: A list of generic metadata filters, each a dict
+                ``{"key": <field>, "values": [...], "match": "any"|"all"|"none"}``.
+                ``any`` (default) keeps a node whose metadata value(s) at ``key``
+                intersect the given values; ``all`` requires every given value to
+                be present (for list-valued metadata); ``none`` excludes nodes that
+                match any given value. Values compare as strings. Multiple filters
+                combine with AND.
+            include_archived: When False (default) archived nodes and edges are
+                excluded. Set True to include archived items in the results.
             visualization_session_id: Optional browser session ID — when provided, the result
                 is pushed live to the connected browser window via SSE
 
@@ -141,6 +166,11 @@ def register_mcp_tools(
             limit=limit,
             action=action,
             federation_depth=federation_depth,
+            tags_any=tags_any,
+            tags_all=tags_all,
+            tags_none=tags_none,
+            metadata_filters=metadata_filters,
+            include_archived=include_archived,
         )
         _push(visualization_session_id, "search_graph", result)
         return result
@@ -163,6 +193,7 @@ def register_mcp_tools(
         node_id: str,
         relationship_types: Optional[List[str]] = None,
         depth: int = 1,
+        include_archived: bool = False,
         visualization_session_id: Optional[str] = None,
     ) -> Dict[str, Any]:
         """
@@ -172,6 +203,8 @@ def register_mcp_tools(
             node_id: ID of the starting node
             relationship_types: List of relationship types to filter on
             depth: How many hops from the starting node (default 1)
+            include_archived: When False (default) archived edges are not traversed
+                and archived neighbour nodes are excluded. Set True to include them.
             visualization_session_id: Optional browser session ID — when provided, the result
                 is pushed live to the connected browser window via SSE
 
@@ -182,6 +215,7 @@ def register_mcp_tools(
             node_id=node_id,
             relationship_types=relationship_types,
             depth=depth,
+            include_archived=include_archived,
         )
         _push(visualization_session_id, "get_related_nodes", result)
         return result
@@ -355,6 +389,112 @@ def register_mcp_tools(
         return service.delete_edges(
             edge_ids=edge_ids,
             confirmed=confirmed,
+            event_origin="mcp",
+            event_session_id=event_session_id,
+            event_correlation_id=event_correlation_id,
+        )
+
+    # ==================== Archive Tools ====================
+    # Archiving hides nodes/edges from search and traversal by default while
+    # keeping them in the graph, in contrast to delete_* which is permanent.
+
+    @register_tool
+    def archive_nodes(
+        node_ids: List[str],
+        event_session_id: Optional[str] = None,
+        event_correlation_id: Optional[str] = None,
+    ) -> Dict[str, Any]:
+        """
+        Archive nodes: hide them from search/traversal by default without deleting.
+
+        Archived nodes remain in the graph and can be restored with unarchive_nodes.
+        Prefer this over delete_nodes when the intent is to hide/retire a node
+        rather than permanently remove it.
+
+        Args:
+            node_ids: List of node IDs to archive
+            event_session_id: Optional session ID for webhook loop prevention
+            event_correlation_id: Optional correlation ID for chaining events
+
+        Returns:
+            Dict with result (archived, node_ids, nodes, success)
+        """
+        return service.archive_nodes(
+            node_ids=node_ids,
+            event_origin="mcp",
+            event_session_id=event_session_id,
+            event_correlation_id=event_correlation_id,
+        )
+
+    @register_tool
+    def unarchive_nodes(
+        node_ids: List[str],
+        event_session_id: Optional[str] = None,
+        event_correlation_id: Optional[str] = None,
+    ) -> Dict[str, Any]:
+        """
+        Unarchive nodes: make previously archived nodes visible again.
+
+        Args:
+            node_ids: List of node IDs to unarchive
+            event_session_id: Optional session ID for webhook loop prevention
+            event_correlation_id: Optional correlation ID for chaining events
+
+        Returns:
+            Dict with result (archived, node_ids, nodes, success)
+        """
+        return service.unarchive_nodes(
+            node_ids=node_ids,
+            event_origin="mcp",
+            event_session_id=event_session_id,
+            event_correlation_id=event_correlation_id,
+        )
+
+    @register_tool
+    def archive_edges(
+        edge_ids: List[str],
+        event_session_id: Optional[str] = None,
+        event_correlation_id: Optional[str] = None,
+    ) -> Dict[str, Any]:
+        """
+        Archive edges: hide them from search/traversal by default without deleting.
+
+        Archived edges remain in the graph and can be restored with unarchive_edges.
+
+        Args:
+            edge_ids: List of edge IDs to archive
+            event_session_id: Optional session ID for webhook loop prevention
+            event_correlation_id: Optional correlation ID for chaining events
+
+        Returns:
+            Dict with result (archived, edge_ids, edges, success)
+        """
+        return service.archive_edges(
+            edge_ids=edge_ids,
+            event_origin="mcp",
+            event_session_id=event_session_id,
+            event_correlation_id=event_correlation_id,
+        )
+
+    @register_tool
+    def unarchive_edges(
+        edge_ids: List[str],
+        event_session_id: Optional[str] = None,
+        event_correlation_id: Optional[str] = None,
+    ) -> Dict[str, Any]:
+        """
+        Unarchive edges: make previously archived edges visible again.
+
+        Args:
+            edge_ids: List of edge IDs to unarchive
+            event_session_id: Optional session ID for webhook loop prevention
+            event_correlation_id: Optional correlation ID for chaining events
+
+        Returns:
+            Dict with result (archived, edge_ids, edges, success)
+        """
+        return service.unarchive_edges(
+            edge_ids=edge_ids,
             event_origin="mcp",
             event_session_id=event_session_id,
             event_correlation_id=event_correlation_id,
