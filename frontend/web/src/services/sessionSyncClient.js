@@ -243,9 +243,11 @@ export function applyOpToMirror(mirrorState, op) {
       break;
     }
     case 'edges_added':
+    case 'edges_removed':
+    case 'edges_updated':
       // Edges are graph-derived, not part of the mirror (see sendEdgesAdded):
-      // there is no edge set to fold, so this op never affects the outgoing
-      // diff — it is a pure fan-out signal.
+      // there is no edge set to fold, so these ops never affect the outgoing
+      // diff — they are pure fan-out signals.
       break;
     case 'edges_hidden':
       m.hidden_edge_ids = Array.from(new Set([...m.hidden_edge_ids, ...(op.edge_ids || [])]));
@@ -584,6 +586,31 @@ export class SessionSyncClient {
   sendEdgesAdded(edges) {
     const list = (edges || []).filter((e) => e && e.id);
     if (list.length) this._enqueue([{ op: 'edges_added', edges: list }]);
+  }
+
+  /**
+   * Broadcast a live edge deletion to the other connected clients. Symmetric to
+   * `sendEdgesAdded`: edges live in the graph, not the synced mirror, so a peer
+   * whose node set did not change is never prompted to re-hydrate and keeps
+   * rendering the stale edge. This explicit op closes that gap; the server fans
+   * it out and remote hosts remove the edge directly. No-op for an empty list.
+   */
+  sendEdgesRemoved(edgeIds) {
+    const list = (edgeIds || []).filter((id) => typeof id === 'string' && id);
+    if (list.length) this._enqueue([{ op: 'edges_removed', edge_ids: list }]);
+  }
+
+  /**
+   * Broadcast a live edge update (e.g. a changed relationship type) to the other
+   * connected clients. Symmetric to `sendEdgesAdded`: the new attributes live in
+   * the graph, so a peer whose node set did not change never re-hydrates and
+   * keeps showing the stale edge. This explicit op closes that gap; the server
+   * fans it out and remote hosts apply the change in place. No-op for an empty
+   * or id-less edge list.
+   */
+  sendEdgesUpdated(edges) {
+    const list = (edges || []).filter((e) => e && e.id);
+    if (list.length) this._enqueue([{ op: 'edges_updated', edges: list }]);
   }
 
   _enqueue(ops) {
