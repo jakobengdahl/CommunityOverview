@@ -304,6 +304,11 @@
     "depth_indicator": "Depth {current}/{max}",
     "depth_indicator_tooltip": "Current federated search depth and maximum allowed depth"
   },
+  "canvas": {
+    "lazy_showing": "Showing {loaded} of {total} nodes",
+    "lazy_load_more": "Load More",
+    "lazy_hidden_connections": "{count} connections to nodes not yet loaded are hidden — Load More to reveal them"
+  },
   "guide": {
     "title": "Guide",
     "next": "Next",

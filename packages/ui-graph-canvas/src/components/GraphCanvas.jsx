@@ -198,6 +198,9 @@ function GraphCanvasInner({
   federationDepthLevels = null,
   federationDepthLabel = 'Depth',
   federationDepthTooltip = 'Depth levels are defined by installation configuration',
+  lazyLoadShowingLabel = 'Showing {loaded} of {total} nodes',
+  lazyLoadMoreLabel = 'Load More',
+  lazyLoadHiddenConnectionsLabel = '{count} connections to nodes not yet loaded are hidden — Load More to reveal them',
   showMinimap = false,
   schema = null,
   onContextMenuAction = null,
@@ -390,6 +393,43 @@ function GraphCanvasInner({
         renderedNodeIds.has(e.target)
     );
   }, [inputEdges, hiddenNodeIds, hiddenEdgeIds, nodesToRender]);
+
+  // Count connections dropped purely by the lazy-load slice: edges from a
+  // rendered node to a real node that exists in the session but has not been
+  // loaded yet. These are exactly the edges that reappear on "Load More" — so
+  // the banner can honestly disclose how many connections the current view is
+  // hiding, instead of silently dropping them on reload of a large session.
+  // Dangling edges (an endpoint that is not in the graph at all) are excluded,
+  // matching visibleEdges, which never draws them either.
+  const hiddenConnectionCount = useMemo(() => {
+    if (visibleNodes.length <= LAZY_LOAD_THRESHOLD) {
+      return 0;
+    }
+    const renderedNodeIds = new Set(nodesToRender.map((n) => n.id));
+    const graphNodeIds = new Set(visibleNodes.map((n) => n.id));
+    let count = 0;
+    for (const e of inputEdges) {
+      if (
+        hiddenNodeIds.includes(e.source) ||
+        hiddenNodeIds.includes(e.target) ||
+        hiddenEdgeIds.includes(e.id)
+      ) {
+        continue;
+      }
+      const sourceRendered = renderedNodeIds.has(e.source);
+      const targetRendered = renderedNodeIds.has(e.target);
+      if (sourceRendered && targetRendered) {
+        continue; // already drawn by visibleEdges
+      }
+      if (!graphNodeIds.has(e.source) || !graphNodeIds.has(e.target)) {
+        continue; // dangling endpoint, not a lazy-hidden connection
+      }
+      if (sourceRendered || targetRendered) {
+        count += 1;
+      }
+    }
+    return count;
+  }, [inputEdges, visibleNodes, nodesToRender, hiddenNodeIds, hiddenEdgeIds]);
 
   // Convert to React Flow edge format
   const reactFlowEdges = useMemo(() => {
@@ -1613,11 +1653,20 @@ function GraphCanvasInner({
           visibleNodes.length > LAZY_LOAD_THRESHOLD &&
           loadedNodeCount < visibleNodes.length && (
             <div className="graph-canvas-controls">
-              <div className="graph-lazy-load-info">
-                Showing {loadedNodeCount} of {visibleNodes.length} nodes
-                <button className="graph-load-more-button" onClick={handleLoadMore}>
-                  Load More
-                </button>
+              <div className="graph-lazy-load-panel">
+                <div className="graph-lazy-load-info">
+                  {lazyLoadShowingLabel
+                    .replace('{loaded}', loadedNodeCount)
+                    .replace('{total}', visibleNodes.length)}
+                  <button className="graph-load-more-button" onClick={handleLoadMore}>
+                    {lazyLoadMoreLabel}
+                  </button>
+                </div>
+                {hiddenConnectionCount > 0 && (
+                  <div className="graph-lazy-load-hidden-connections">
+                    {lazyLoadHiddenConnectionsLabel.replace('{count}', hiddenConnectionCount)}
+                  </div>
+                )}
               </div>
             </div>
           )}

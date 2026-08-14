@@ -43,6 +43,13 @@ body.graph-suppress-selection * {
   background: #535bf2;
 }
 
+.graph-lazy-load-panel {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  align-items: flex-end;
+}
+
 .graph-lazy-load-info {
   background: rgba(0, 0, 0, 0.7);
   color: #ddd;
@@ -52,6 +59,16 @@ body.graph-suppress-selection * {
   display: flex;
   align-items: center;
   gap: 10px;
+}
+
+.graph-lazy-load-hidden-connections {
+  background: rgba(0, 0, 0, 0.7);
+  color: #f5d58a;
+  padding: 6px 12px;
+  border-radius: 6px;
+  font-size: 12px;
+  max-width: 320px;
+  text-align: right;
 }
 
 .graph-load-more-button {
