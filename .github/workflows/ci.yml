@@ -25,6 +25,13 @@
 #   dev                   floating tag, latest successful build from preview branch
 #   latest                floating tag, latest successful build from prod branch
 #   v<semver>             applied only when a version tag is pushed
+#
+# Cost control (see detect-changes + the *-tests gate jobs below):
+#   - The heavy test jobs run only when service code actually changed and the
+#     PR is ready for review, so docs-only and draft PRs do not pay for the
+#     full suite.
+#   - The always-running gate jobs keep the branch-protection required-check
+#     names reporting on every PR, so a skipped heavy job never blocks merge.
 # =============================================================================
 
 name: CI
@@ -37,8 +44,34 @@ on:
     # and prod (and version tags); see the build job's `if`.
     branches: [main, preview, prod]
     tags: ['v*']
+    # A push whose entire diff is documentation never needs CI: main runs tests
+    # only (no deploy), and a docs-only push to a deploy branch produces no
+    # meaningful image change. A push event has no merge gate, so skipping the
+    # whole workflow here is safe and saves runner minutes. Pull requests
+    # deliberately do NOT use paths-ignore (see the note under `pull_request`).
+    paths-ignore:
+      - '**.md'
+      - 'docs/**'
   pull_request:
+    # No paths-ignore here on purpose. A required status check that never runs
+    # (because the workflow was path-skipped) stays permanently "expected" and
+    # blocks the merge forever. Instead the workflow always runs on PRs; the
+    # `detect-changes` job gates the heavy jobs, and the always-running `*-tests`
+    # gate jobs keep the required-check names reporting on every PR. The
+    # `ready_for_review` type is required so a draft→ready transition re-runs CI.
+    types: [opened, synchronize, reopened, ready_for_review]
     branches: [main, preview, prod]
+
+# Cancel superseded runs: a force-push or rapid re-push to the same ref cancels
+# the older in-flight run instead of paying for both.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+# Minimal default token scope for every job. The build job widens this to
+# `packages: write` for image publication; everything else only reads the repo.
+permissions:
+  contents: read
 
 env:
   REGISTRY: ghcr.io
@@ -47,14 +80,93 @@ env:
 
 jobs:
   # ---------------------------------------------------------------------------
-  # Backend tests – full pytest suite on every push and pull request.
-  # Installs only the base (ML-free) requirements: semantic search and the
-  # chat paths fall back to their mock/no-embedding implementations, so the
-  # suite runs without any network model download.
+  # detect-changes — classifies the diff so the heavy test jobs only run when
+  # service code actually changed. A change that touches ONLY docs/ or *.md
+  # (a pure documentation slice) yields service_code=false, which skips the
+  # backend/frontend/gateway test suites. Anything else — backend/, frontend/,
+  # packages/, services/, config/, workflow files — yields service_code=true and
+  # runs the full suite as before.
+  #
+  # Fail-safe: if the diff cannot be resolved (new branch, schedule/dispatch,
+  # empty diff) the job defaults to service_code=true so tests are never skipped
+  # by accident.
   # ---------------------------------------------------------------------------
-  backend-tests:
-    name: Backend tests
+  detect-changes:
+    name: Detect changes
     runs-on: ubuntu-latest
+    outputs:
+      service_code: ${{ steps.classify.outputs.service_code }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Classify changed files
+        id: classify
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          PR_BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          PR_HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+          PUSH_BEFORE: ${{ github.event.before }}
+        run: |
+          set -euo pipefail
+
+          changed=""
+          if [ "$EVENT_NAME" = "pull_request" ]; then
+            git fetch --no-tags --quiet origin "$PR_BASE_SHA" 2>/dev/null || true
+            # `|| true`: if the diff errors (unresolvable sha), fall through to
+            # the empty-diff fail-safe below (service_code=true) instead of
+            # aborting the job under `set -e`.
+            changed="$(git diff --name-only "$PR_BASE_SHA...$PR_HEAD_SHA" || true)"
+          elif [ "$EVENT_NAME" = "push" ]; then
+            if [ -n "${PUSH_BEFORE:-}" ] && git cat-file -e "${PUSH_BEFORE}^{commit}" 2>/dev/null; then
+              changed="$(git diff --name-only "$PUSH_BEFORE" "$GITHUB_SHA" || true)"
+            else
+              changed="$(git diff --name-only "${GITHUB_SHA}~1" "$GITHUB_SHA" 2>/dev/null || true)"
+            fi
+          fi
+
+          echo "Event: $EVENT_NAME"
+          echo "Changed files:"
+          printf '%s\n' "$changed"
+
+          # Fail-safe: could not resolve a diff (schedule/dispatch/new branch) ->
+          # run the heavy jobs.
+          if [ -z "$changed" ]; then
+            echo "No diff resolved — defaulting service_code=true (fail-safe)."
+            echo "service_code=true" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          service_code=false
+          while IFS= read -r f; do
+            [ -z "$f" ] && continue
+            case "$f" in
+              docs/*|*.md) ;;        # documentation only
+              *) service_code=true ;; # real service/app/config/workflow code
+            esac
+          done <<< "$changed"
+
+          echo "service_code=$service_code" >> "$GITHUB_OUTPUT"
+          echo "Resolved: service_code=$service_code"
+
+  # ---------------------------------------------------------------------------
+  # Backend tests – full pytest suite. Runs only when service code changed and
+  # the PR is ready for review (draft PRs skip it). Installs only the base
+  # (ML-free) requirements: semantic search and the chat paths fall back to
+  # their mock/no-embedding implementations, so the suite runs without any
+  # network model download.
+  #
+  # This is the WORKER job. Branch protection requires the "Backend tests" gate
+  # job below (not this one), so a skip here never blocks merge.
+  # ---------------------------------------------------------------------------
+  backend-tests-run:
+    name: Backend tests (run)
+    runs-on: ubuntu-latest
+    needs: detect-changes
+    if: >-
+      needs.detect-changes.outputs.service_code == 'true' &&
+      (github.event_name != 'pull_request' || github.event.pull_request.draft == false)
 
     steps:
       - name: Checkout code
@@ -74,14 +186,44 @@ jobs:
         env:
           PYTHONPATH: ${{ github.workspace }}
 
+  # Gate: always runs and carries the branch-protection required-check name
+  # "Backend tests". Passes when the worker succeeded or was skipped (docs-only
+  # or draft PR); fails only when the worker actually failed or was cancelled.
+  backend-tests:
+    name: Backend tests
+    runs-on: ubuntu-latest
+    needs: [detect-changes, backend-tests-run]
+    if: always()
+    steps:
+      - name: Verify backend tests succeeded or were skipped
+        env:
+          DETECT: ${{ needs.detect-changes.result }}
+          RESULT: ${{ needs.backend-tests-run.result }}
+        run: |
+          echo "detect-changes result: $DETECT | Backend tests (run) result: $RESULT"
+          if [ "$DETECT" != "success" ]; then
+            echo "::error::detect-changes did not succeed ($DETECT); refusing to pass the gate"
+            exit 1
+          fi
+          case "$RESULT" in
+            success|skipped) echo "Gate passed."; exit 0 ;;
+            *) echo "::error::Backend tests result '$RESULT' is not acceptable"; exit 1 ;;
+          esac
+
   # ---------------------------------------------------------------------------
   # Frontend tests – vitest across all npm workspaces (web, widget, canvas).
   # GitHub Actions sets CI=true, so vitest runs once instead of watch mode.
   # Playwright e2e stays out of this required path (see DEVELOPMENT.md).
+  #
+  # WORKER job; the "Frontend tests" gate below carries the required-check name.
   # ---------------------------------------------------------------------------
-  frontend-tests:
-    name: Frontend tests
+  frontend-tests-run:
+    name: Frontend tests (run)
     runs-on: ubuntu-latest
+    needs: detect-changes
+    if: >-
+      needs.detect-changes.outputs.service_code == 'true' &&
+      (github.event_name != 'pull_request' || github.event.pull_request.draft == false)
 
     steps:
       - name: Checkout code
@@ -99,13 +241,41 @@ jobs:
       - name: Run workspace unit tests
         run: npm run test:unit
 
+  # Gate carrying the required-check name "Frontend tests".
+  frontend-tests:
+    name: Frontend tests
+    runs-on: ubuntu-latest
+    needs: [detect-changes, frontend-tests-run]
+    if: always()
+    steps:
+      - name: Verify frontend tests succeeded or were skipped
+        env:
+          DETECT: ${{ needs.detect-changes.result }}
+          RESULT: ${{ needs.frontend-tests-run.result }}
+        run: |
+          echo "detect-changes result: $DETECT | Frontend tests (run) result: $RESULT"
+          if [ "$DETECT" != "success" ]; then
+            echo "::error::detect-changes did not succeed ($DETECT); refusing to pass the gate"
+            exit 1
+          fi
+          case "$RESULT" in
+            success|skipped) echo "Gate passed."; exit 0 ;;
+            *) echo "::error::Frontend tests result '$RESULT' is not acceptable"; exit 1 ;;
+          esac
+
   # ---------------------------------------------------------------------------
   # Gateway tests – the MCP OAuth gateway ships its own pinned dependency set,
   # so it is tested in an isolated job to keep its versions off the backend.
+  #
+  # WORKER job; the "Gateway tests" gate below carries the required-check name.
   # ---------------------------------------------------------------------------
-  gateway-tests:
-    name: Gateway tests
+  gateway-tests-run:
+    name: Gateway tests (run)
     runs-on: ubuntu-latest
+    needs: detect-changes
+    if: >-
+      needs.detect-changes.outputs.service_code == 'true' &&
+      (github.event_name != 'pull_request' || github.event.pull_request.draft == false)
 
     steps:
       - name: Checkout code
@@ -124,13 +294,39 @@ jobs:
         run: pytest test_oauth_flow.py -q
         working-directory: services/mcp_oauth_gateway
 
+  # Gate carrying the required-check name "Gateway tests".
+  gateway-tests:
+    name: Gateway tests
+    runs-on: ubuntu-latest
+    needs: [detect-changes, gateway-tests-run]
+    if: always()
+    steps:
+      - name: Verify gateway tests succeeded or were skipped
+        env:
+          DETECT: ${{ needs.detect-changes.result }}
+          RESULT: ${{ needs.gateway-tests-run.result }}
+        run: |
+          echo "detect-changes result: $DETECT | Gateway tests (run) result: $RESULT"
+          if [ "$DETECT" != "success" ]; then
+            echo "::error::detect-changes did not succeed ($DETECT); refusing to pass the gate"
+            exit 1
+          fi
+          case "$RESULT" in
+            success|skipped) echo "Gate passed."; exit 0 ;;
+            *) echo "::error::Gateway tests result '$RESULT' is not acceptable"; exit 1 ;;
+          esac
+
   # ---------------------------------------------------------------------------
   # Lint gates – mechanical correctness checks (unused imports, undefined
   # names, React rules-of-hooks). These jobs are intentionally NOT listed in
   # the build job's `needs`, so a lint failure never blocks image publication.
-  # On `dev` PRs they are still merge-blocking because branch protection marks
+  # On `main` PRs they are still merge-blocking because branch protection marks
   # them required (STRUCTURE_REVIEW item A4). Config: root pyproject.toml
   # (ruff), eslint.config.mjs + .prettierrc.json (JS workspaces).
+  #
+  # Lint runs on every PR (including docs-only PRs): it is cheap, and keeping it
+  # unconditional means the "Python lint (ruff)" and "Frontend lint" required
+  # checks always report without needing a gate job.
   # ---------------------------------------------------------------------------
   python-lint:
     name: Python lint (ruff)
@@ -181,12 +377,15 @@ jobs:
         run: npm run format:check
 
   # ---------------------------------------------------------------------------
-  # Build & Publish – only on branch/tag pushes, not pull requests
+  # Build & Publish – only on branch/tag pushes, not pull requests. Depends on
+  # the test WORKER jobs (not the gates): the image is published only when the
+  # suites actually ran and passed. A docs-only push resolves service_code=false,
+  # skips the workers, and therefore skips the build too (no code changed).
   # ---------------------------------------------------------------------------
   build:
     name: Build & Publish Images
     runs-on: ubuntu-latest
-    needs: [backend-tests, frontend-tests, gateway-tests]
+    needs: [backend-tests-run, frontend-tests-run, gateway-tests-run]
     if: github.event_name == 'push' && (github.ref == 'refs/heads/preview' || github.ref == 'refs/heads/prod' || startsWith(github.ref, 'refs/tags/'))
 
     permissions:
