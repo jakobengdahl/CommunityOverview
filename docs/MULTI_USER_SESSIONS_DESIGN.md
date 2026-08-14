@@ -1,20 +1,24 @@
 # Multi-User Shared Sessions — Design & Implementation Plan
 
-**Status:** Complete — the backend foundation (steps 1–3), the step-4
-frontend cutover (server-backed session lifecycle), the step-5 annotation
-kinds (note, label, arrow), the step-6 realtime op emit/apply loop, the
-step-7 presence UI + selection claims, and the step-8 hardening (transitional
-shims removed, op-batch body cap, multi-client e2e, docs sweep) are all
-implemented. A post-implementation code review (2026-07-06) found the issues
-listed in §8 — fix them in follow-up sessions before considering the feature
-hardened.
+**Status:** Design defined and implemented in the open core. The backend
+foundation (steps 1–3), the step-4 frontend cutover (server-backed session
+lifecycle), the step-5 annotation kinds (note, label, arrow), the step-6
+realtime op emit/apply loop, the step-7 presence UI + selection claims, and the
+step-8 hardening (transitional shims removed, op-batch body cap, multi-client
+e2e, docs sweep) are all implemented. The post-implementation code review
+(2026-07-06) findings in §8 (R1–R15) are all now resolved (see the per-item
+"Fixed" annotations). This document is the **foundational** design: the hosted
+realtime slices (Postgres-backed session store, Redis event bus,
+identity/presence, access/history, durability) are separate downstream slices
+that build on the open-core extension seams catalogued in §9 — they are not
+implemented here.
 **Scope:** Open-source core only. SaaS-specific extensions (multi-instance scale-out,
 account-bound session history, workspace ACLs) are designed in the private SaaS
 repository and are explicitly out of scope here (see "Out of scope" below).
 
 This document is the source of truth for the multi-user shared session feature in
 the open core. Each implementation step below is sized to be executed by one
-development session as one branch + one PR against `dev`, following the Standard
+development session as one branch + one PR against `main`, following the Standard
 Development Workflow in `CLAUDE.md`. Update the step status table as steps complete.
 
 **Related contract:** the MCP-facing session **lifecycle, ownership seam and
@@ -320,7 +324,7 @@ through an optional identity context on session endpoints when present.
 
 ## 5. Implementation plan
 
-Each step is one branch + one PR to `dev`, owning its own tests and doc updates per
+Each step is one branch + one PR to `main`, owning its own tests and doc updates per
 `CLAUDE.md` (review loop, full backend suite before PR, merge on green). Steps 1–3
 are backend-only and invisible to users; the localStorage path keeps working until
 step 4 switches the frontend over. Annotations come early (step 5, decision D12) so
@@ -843,3 +847,41 @@ two concurrent connections with one `client_id` (also hit by two *tabs*
 sharing the localStorage `client_id`, not just fast reconnects), the
 synchronous fsync on the event loop, the post-parse op-batch byte cap, the
 remote-added node (0,0) race, and the teardown flush in `_forceSingle` mode.
+
+## 9. Extension seams for the hosted realtime layer
+
+This section is the stable contract surface the open core promises to a hosted
+deployment. It consolidates the seams that are otherwise described piecemeal in
+§3.2 (persistence/fan-out), §3.4 (presence/identity) and §4 (out of scope) into
+one catalogue, so a downstream realtime slice can bind to a named seam instead of
+re-deriving it from the prose. Everything here is **general technical
+enablement**: the core defines *where* a hosted layer plugs in and *what shape*
+the plug is. Commercial packaging, plan/tier gating, tenancy and pricing live in
+the private SaaS repository and are deliberately absent here.
+
+The whole hosted realtime layer attaches at **one construction point** —
+`backend/api_host/server.py`, where `SessionStore(...)` and
+`SessionManager(...)` are built. A deployment overrides the two backends there
+and threads an identity context through the request layer; nothing else in the
+core needs to change.
+
+| Downstream SaaS slice | Open-core seam it binds to | Core-shipped default | Where it is injected |
+|---|---|---|---|
+| Postgres-backed session store | `SessionPersistenceBackend` Protocol — `load` / `save` / `delete` / `list_meta` (`backend/core/session_store.py`) | `FileSessionPersistenceBackend` (one JSON file per session, atomic temp+rename) | `SessionStore(<backend>)` |
+| Durability / retention | same `SessionPersistenceBackend` seam; the core adds **no** auto-eviction (D13), so a durable backend owns its own retention policy | file persistence, kept until explicit delete | `SessionStore(<backend>)` |
+| Redis event bus (multi-instance fan-out) | `SessionEventBus` Protocol — `publish` / `subscribe` / `unsubscribe` (`backend/core/session_hub.py`) | `InProcessEventBus` (per-subscriber asyncio queues, slow-consumer drop→resync) | `SessionManager(store, event_bus=<bus>)` |
+| Identity / named-identity presence | request-actor pass-through (`service.get_request_actor_info(headers=...)`) feeding the per-client `{client_id, display_name, color}` presence registration (§3.4) | anonymous guest identity (`Guest-<n>`, server-assigned colour); session id is the capability (D7) | session CRUD/stream endpoints in `rest_api.py` |
+| Access control / session history | (a) session id as capability + optional HTTP Basic Auth + per-source lookup rate limit (§3.9); (b) the localStorage recents index as the *personal* history seam (§3.6) | no accounts, no ACLs, no server-stored cross-user history | endpoints honour an identity context **when present**, otherwise fall through to the capability model |
+
+Contract obligations the core commits to, so hosted slices can depend on them:
+
+1. **Seam signatures are stable.** The two Protocols above (`SessionPersistenceBackend`, `SessionEventBus`) are the versioned boundary. Method shapes change only with a documented migration note (per `CLAUDE.md` → Schema and Config Changes), because a hosted backend implements them out-of-tree.
+2. **State is references + layout + annotations, never node copies** (D4/§3.1). A durable store persists exactly the `Session` shape in §3.1; node content is rehydrated from the graph on load. A Postgres backend therefore stores the same JSON document the file backend does, and needs no knowledge of graph internals.
+3. **Ops are the single write path** (§3.8). Every state mutation is an op with a monotonic `seq`; a hosted bus fans out the identical applied-op events. Multi-instance ordering is the bus implementation's responsibility — the core guarantees per-session serialization only within one instance.
+4. **Identity is optional and pass-through.** The core never *requires* an identity context; when a hosted layer supplies one (via the request-actor seam), the core carries it onto presence and endpoint handling without interpreting authorization. ACL enforcement is entirely the hosted layer's concern.
+
+Related core contracts a hosted slice reads alongside this document:
+[`MCP_SESSION_LIFECYCLE_CONTRACT.md`](MCP_SESSION_LIFECYCLE_CONTRACT.md) (session
+lifecycle, ownership seam, canonical deep-link) and
+[`DEPLOYMENT_AND_CONCURRENCY_ANALYSIS.md`](DEPLOYMENT_AND_CONCURRENCY_ANALYSIS.md)
+(single-instance constraint and the two scale-out seams).
