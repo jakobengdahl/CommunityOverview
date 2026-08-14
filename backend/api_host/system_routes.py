@@ -247,9 +247,16 @@ def register_system_routes(
         return JSONResponse(status_code=status_code, content=result)
 
     @app.get("/")
-    async def root() -> RedirectResponse:
-        """Redirect root to web application."""
-        return RedirectResponse(url="/web/", status_code=302)
+    async def root(request: Request) -> RedirectResponse:
+        """Redirect root to the web application, preserving any query string.
+
+        Deep links like ``/?session=<id>`` rely on the query surviving this
+        redirect: dropping it makes the SPA mint its own session instead of
+        joining the linked one.
+        """
+        query = request.url.query
+        target = f"/web/?{query}" if query else "/web/"
+        return RedirectResponse(url=target, status_code=302)
 
     # Logout endpoint - cloud-agnostic.
     # If LOGOUT_REDIRECT_URL is set, redirect there (e.g. an IAP / OAuth
