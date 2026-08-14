@@ -1785,6 +1785,9 @@ function App() {
           federationDepthLevels={federationDepthLevels}
           federationDepthLabel={t('federation.depth_label')}
           federationDepthTooltip={t('federation.depth_tooltip')}
+          lazyLoadShowingLabel={t('canvas.lazy_showing')}
+          lazyLoadMoreLabel={t('canvas.lazy_load_more')}
+          lazyLoadHiddenConnectionsLabel={t('canvas.lazy_hidden_connections')}
           showMinimap={showMinimap}
           nodePreviewEnabled={nodePreviewEnabled}
           schema={schema}

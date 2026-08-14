@@ -304,6 +304,11 @@
     "depth_indicator": "Djup {current}/{max}",
     "depth_indicator_tooltip": "Aktuell federerad söknivå och högsta tillåtna nivå"
   },
+  "canvas": {
+    "lazy_showing": "Visar {loaded} av {total} noder",
+    "lazy_load_more": "Ladda fler",
+    "lazy_hidden_connections": "{count} kopplingar till noder som ännu inte laddats är dolda — ladda fler för att visa dem"
+  },
   "guide": {
     "title": "Guide",
     "next": "Nästa",
