@@ -68,6 +68,11 @@ concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: true
 
+# Minimal default token scope for every job. The build job widens this to
+# `packages: write` for image publication; everything else only reads the repo.
+permissions:
+  contents: read
+
 env:
   REGISTRY: ghcr.io
   CORE_IMAGE: ${{ github.repository }}
@@ -187,14 +192,19 @@ jobs:
   backend-tests:
     name: Backend tests
     runs-on: ubuntu-latest
-    needs: backend-tests-run
+    needs: [detect-changes, backend-tests-run]
     if: always()
     steps:
       - name: Verify backend tests succeeded or were skipped
         env:
+          DETECT: ${{ needs.detect-changes.result }}
           RESULT: ${{ needs.backend-tests-run.result }}
         run: |
-          echo "Backend tests (run) result: $RESULT"
+          echo "detect-changes result: $DETECT | Backend tests (run) result: $RESULT"
+          if [ "$DETECT" != "success" ]; then
+            echo "::error::detect-changes did not succeed ($DETECT); refusing to pass the gate"
+            exit 1
+          fi
           case "$RESULT" in
             success|skipped) echo "Gate passed."; exit 0 ;;
             *) echo "::error::Backend tests result '$RESULT' is not acceptable"; exit 1 ;;
@@ -235,14 +245,19 @@ jobs:
   frontend-tests:
     name: Frontend tests
     runs-on: ubuntu-latest
-    needs: frontend-tests-run
+    needs: [detect-changes, frontend-tests-run]
     if: always()
     steps:
       - name: Verify frontend tests succeeded or were skipped
         env:
+          DETECT: ${{ needs.detect-changes.result }}
           RESULT: ${{ needs.frontend-tests-run.result }}
         run: |
-          echo "Frontend tests (run) result: $RESULT"
+          echo "detect-changes result: $DETECT | Frontend tests (run) result: $RESULT"
+          if [ "$DETECT" != "success" ]; then
+            echo "::error::detect-changes did not succeed ($DETECT); refusing to pass the gate"
+            exit 1
+          fi
           case "$RESULT" in
             success|skipped) echo "Gate passed."; exit 0 ;;
             *) echo "::error::Frontend tests result '$RESULT' is not acceptable"; exit 1 ;;
@@ -283,14 +298,19 @@ jobs:
   gateway-tests:
     name: Gateway tests
     runs-on: ubuntu-latest
-    needs: gateway-tests-run
+    needs: [detect-changes, gateway-tests-run]
     if: always()
     steps:
       - name: Verify gateway tests succeeded or were skipped
         env:
+          DETECT: ${{ needs.detect-changes.result }}
           RESULT: ${{ needs.gateway-tests-run.result }}
         run: |
-          echo "Gateway tests (run) result: $RESULT"
+          echo "detect-changes result: $DETECT | Gateway tests (run) result: $RESULT"
+          if [ "$DETECT" != "success" ]; then
+            echo "::error::detect-changes did not succeed ($DETECT); refusing to pass the gate"
+            exit 1
+          fi
           case "$RESULT" in
             success|skipped) echo "Gate passed."; exit 0 ;;
             *) echo "::error::Gateway tests result '$RESULT' is not acceptable"; exit 1 ;;
