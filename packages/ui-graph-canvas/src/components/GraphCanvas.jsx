@@ -188,6 +188,13 @@ function GraphCanvasInner({
   animatedLayout = null,
   onAnimatedLayoutApplied,
   animatedLayoutResetKey = null,
+  // Bumped by the host whenever the canvas contents are replaced wholesale (a
+  // saved view loaded into the running session, an agent replace/load, the
+  // clear-canvas action), establishing a new position baseline. Distinct from
+  // the incremental position writes of `remotePositions` and `animatedLayout`,
+  // which move nodes within the *same* contents and deliberately leave the
+  // undo history intact (last-write-wins, MULTI_USER_SESSIONS_DESIGN D2).
+  canvasBaselineEpoch = null,
   agentArrangingLabel = 'Assistant is arranging the view…',
   remoteAnnotationOps = null,
   onRemoteAnnotationsApplied,
@@ -626,11 +633,14 @@ function GraphCanvasInner({
     showNotification('info', cml.redoNotification);
   }, [redoMove, applyPositionMoves, showNotification, cml.redoNotification]);
 
-  // Discard history when the session identity changes so an undo can never
-  // restore positions from a previously loaded session.
+  // Discard history whenever a new position baseline is established: the session
+  // identity changes, or the canvas contents are replaced wholesale within the
+  // session. Either way the recorded "before" positions belong to a layout that
+  // is gone, while the node ids they name can still be on the canvas — so an
+  // undo would otherwise teleport a node to a coordinate from a discarded view.
   useEffect(() => {
     clearHistory();
-  }, [animatedLayoutResetKey, clearHistory]);
+  }, [animatedLayoutResetKey, canvasBaselineEpoch, clearHistory]);
 
   // While any context menu is open, suppress the hover info popup: the node the
   // menu was opened on is still hovered, so its tooltip (portaled to the body at

@@ -229,6 +229,16 @@ const useGraphStore = create((set, get) => ({
   detailNode: null, // Node to show in detail dialog (double-click)
   contextMenu: null,
   clearGroupsFlag: false, // Signal to clear groups in visualization
+  // Monotonic counter bumped every time the canvas contents are replaced
+  // wholesale (clearVisualization): a saved view loaded into the running
+  // session, an agent's replace/load, a search that swaps the view, the
+  // clear-canvas action. Each of those establishes a new position baseline, so
+  // the canvas discards its position undo/redo history — the recorded "before"
+  // positions describe a layout that no longer exists, while the node ids they
+  // name may well still be on the canvas. Deliberately *not* bumped by
+  // updateVisualization, which doubles as the in-place setter for ordinary
+  // edits (edge retype, node edit, node removal) that undo must survive.
+  canvasBaselineEpoch: 0,
   focusNodeId: null, // Node ID to zoom/pan to
   // Session-scoped, newest-first trail of nodes added to the visualization or
   // navigated to, so the user can jump back through what happened. Distinct from
@@ -379,7 +389,7 @@ const useGraphStore = create((set, get) => ({
   clearVisualization: () => {
     pulseClearTimers.forEach((timer) => clearTimeout(timer));
     pulseClearTimers.clear();
-    set({
+    set((state) => ({
       nodes: [],
       edges: [],
       highlightedNodeIds: [],
@@ -393,7 +403,8 @@ const useGraphStore = create((set, get) => ({
       selectedGraphNodes: [],
       selectedNodeId: null,
       navHistory: [],
-    });
+      canvasBaselineEpoch: state.canvasBaselineEpoch + 1,
+    }));
     scheduleClearGroupsReset(set);
   },
 

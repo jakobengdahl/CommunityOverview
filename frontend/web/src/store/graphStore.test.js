@@ -75,6 +75,42 @@ describe('graphStore.resetSessionScopedState', () => {
   });
 });
 
+// The canvas keys its position undo/redo history on this counter, so what does
+// and does not bump it is the whole contract: a wholesale replacement of the
+// canvas contents establishes a new position baseline, an in-place edit does not.
+describe('graphStore.canvasBaselineEpoch', () => {
+  beforeEach(() => {
+    vi.useFakeTimers();
+    useGraphStore.setState({ canvasBaselineEpoch: 0, nodes: [], edges: [] });
+  });
+
+  afterEach(() => {
+    vi.useRealTimers();
+  });
+
+  it('advances on every wholesale canvas replacement', () => {
+    useGraphStore.getState().clearVisualization();
+    expect(useGraphStore.getState().canvasBaselineEpoch).toBe(1);
+
+    // A saved view reloaded over the top of another one: the second load must be
+    // distinguishable from the first, or the canvas keeps a history recorded
+    // against the layout in between.
+    useGraphStore.getState().clearVisualization();
+    expect(useGraphStore.getState().canvasBaselineEpoch).toBe(2);
+  });
+
+  it('does not advance on an in-place edit of the current contents', () => {
+    // updateVisualization doubles as the setter for ordinary edits (edge retype,
+    // node edit, node removal). Bumping here would silently destroy the user's
+    // undo history every time they edited a node.
+    useGraphStore.getState().updateVisualization([{ id: 'n1' }], []);
+    expect(useGraphStore.getState().canvasBaselineEpoch).toBe(0);
+
+    useGraphStore.getState().addNodesToVisualization([{ id: 'n2' }], []);
+    expect(useGraphStore.getState().canvasBaselineEpoch).toBe(0);
+  });
+});
+
 describe('graphStore.pulseNode', () => {
   beforeEach(() => {
     vi.useFakeTimers();
