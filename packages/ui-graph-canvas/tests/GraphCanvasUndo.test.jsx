@@ -263,6 +263,11 @@ describe('GraphCanvas undo/redo of node moves', () => {
     // Both are position writes into the *same* canvas contents, resolved
     // last-write-wins (MULTI_USER_SESSIONS_DESIGN D2) — the user's undo is
     // simply the next write and must stay available.
+    //
+    // Applied in two steps, and each write asserted on arrival: sent together,
+    // the agent's snap overwrites the remote position, so a single end-state
+    // assertion would pin only the last writer and this test would keep passing
+    // with `remotePositions` entirely inert.
     act(() => {
       rerender(
         <GraphCanvas
@@ -271,13 +276,22 @@ describe('GraphCanvas undo/redo of node moves', () => {
           onNodePositionChange={onNodePositionChange}
           canvasBaselineEpoch={0}
           remotePositions={{ 'node-1': { x: 200, y: 200 } }}
+        />
+      );
+    });
+    expect(nodeById('node-1').position).toEqual({ x: 200, y: 200 });
+
+    act(() => {
+      rerender(
+        <GraphCanvas
+          nodes={inputNodes}
+          edges={[]}
+          onNodePositionChange={onNodePositionChange}
+          canvasBaselineEpoch={0}
           animatedLayout={[{ positions: { 'node-1': { x: 300, y: 300 } }, animation: null }]}
         />
       );
     });
-    // Both writes really landed (remote first, then the agent's snap) — without
-    // this the test would still pass if either prop became inert, and its name
-    // would be a lie.
     expect(nodeById('node-1').position).toEqual({ x: 300, y: 300 });
     onNodePositionChange.mockClear();
 

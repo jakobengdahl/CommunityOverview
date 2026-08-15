@@ -147,6 +147,9 @@ describe('Server-backed session lifecycle', () => {
     window.localStorage.clear();
     useGraphStore.getState().clearVisualization();
     FakeEventSource.instances = [];
+    // Reset, or a leftover value from the previous test satisfies the "canvas
+    // has rendered" barrier below and it stops being a barrier at all.
+    canvasProps.baselineEpoch = null;
     vi.clearAllMocks();
   });
 
@@ -174,13 +177,6 @@ describe('Server-backed session lifecycle', () => {
     expect(ops).toContainEqual({ op: 'node_moved', node_id: 'node-a', position: { x: 11, y: 22 } });
   });
 
-  // Regression (SMALL_FIXES 2026-07-10): if a sync client's connect() throws
-  // (e.g. new EventSource on a malformed stream URL), ensureSyncConnected must
-  // not let the exception escape the un-guarded auto-save call site, nor leave a
-  // half-connected client installed. Here the first save's connect() throws: the
-  // failure is contained (persistSessionSnapshot still completes, so the Save
-  // View dialog opens) and the next save builds a fresh client that flushes the
-  // pending ops to the server.
   // The canvas discards its position undo/redo history on this counter, so the
   // whole fix hangs on App passing it down. Asserted here — against the real App
   // and the real store — because the canvas-side and store-side tests both pass
@@ -207,6 +203,13 @@ describe('Server-backed session lifecycle', () => {
     expect(canvasProps.baselineEpoch).toBe(initial + 1);
   });
 
+  // Regression (SMALL_FIXES 2026-07-10): if a sync client's connect() throws
+  // (e.g. new EventSource on a malformed stream URL), ensureSyncConnected must
+  // not let the exception escape the un-guarded auto-save call site, nor leave a
+  // half-connected client installed. Here the first save's connect() throws: the
+  // failure is contained (persistSessionSnapshot still completes, so the Save
+  // View dialog opens) and the next save builds a fresh client that flushes the
+  // pending ops to the server.
   it('a sync connect failure is contained and recovers on the next save', async () => {
     const connectSpy = vi
       .spyOn(SessionSyncClient.prototype, 'connect')
