@@ -5,8 +5,9 @@ import { receiveRemoteSessionDeleted } from './sessionLifecycle';
 const t = (key) => key;
 
 // A session the user has actually worked in: assistant conversation, an active
-// expert, an open node-detail dialog, an edit dialog, a context menu and a
-// selection — all scoped to the node set currently on the canvas.
+// expert, an open node-detail dialog, a node edit dialog, an edge edit dialog,
+// a pending delete confirmation, a context menu and a selection — all scoped to
+// the node set currently on the canvas.
 function seedWorkedInSession() {
   useGraphStore.setState({
     presentation: {},
@@ -20,6 +21,8 @@ function seedWorkedInSession() {
     activeExperts: ['expert-a'],
     detailNode: { id: 'a1', name: 'Node A1' },
     editingNode: { id: 'a1', name: 'Node A1' },
+    editingEdge: { id: 'e1', source: 'a1', target: 'a1', type: 'RELATES_TO' },
+    deleteDialog: { nodeId: 'a1', nodeName: 'Node A1', isMultiple: false },
     contextMenu: { x: 1, y: 2, nodeId: 'a1' },
     selectedNodeId: 'a1',
     selectedGraphNodes: [{ id: 'a1', name: 'Node A1' }],
@@ -63,6 +66,11 @@ describe('receiveRemoteSessionDeleted (real store)', () => {
     expect(state.selectedNodeId).toBeNull();
     expect(state.detailNode).toBeNull();
     expect(state.nodes).toEqual([]);
+    // Dialogs addressing the deleted session's graph: confirming the edge one
+    // here would PUT an edge of a session that no longer exists and broadcast
+    // it through the sync client now serving the fresh session.
+    expect(state.editingEdge).toBeNull();
+    expect(state.deleteDialog).toBeNull();
     // An assistant reply still in flight for the deleted session must not land.
     expect(state.assistantSessionEpoch).toBe(1);
 

@@ -227,6 +227,8 @@ const useGraphStore = create((set, get) => ({
   selectedGraphNodes: [], // Nodes selected in the graph canvas (full node data)
   editingNode: null,
   detailNode: null, // Node to show in detail dialog (double-click)
+  editingEdge: null, // Edge to show in the edge-edit dialog
+  deleteDialog: null, // Pending node-delete confirmation ({ nodeId | nodeIds, ... })
   contextMenu: null,
   clearGroupsFlag: false, // Signal to clear groups in visualization
   // Monotonic counter bumped every time the canvas contents are replaced
@@ -645,8 +647,12 @@ const useGraphStore = create((set, get) => ({
 
   // Reset all session-scoped UI state when switching visualization sessions so
   // nothing leaks across sessions: the assistant conversation, the active expert
-  // roster, and the node-scoped overlays (detail dialog, edit dialog, context
-  // menu, selection) all belong to the session that was active when they opened.
+  // roster, and the graph-scoped overlays (detail dialog, node and edge edit
+  // dialogs, delete confirmation, context menu, selection) all belong to the
+  // session that was active when they opened. Confirming a dialog left open
+  // across a switch acts on the old session's graph while the sync client
+  // already points at the new one, so the edit would be broadcast into a
+  // session it does not belong to.
   // Bumping assistantSessionEpoch invalidates any assistant request still in
   // flight from the previous session (see ChatPanel), so its response can never
   // land in the new session.
@@ -658,6 +664,8 @@ const useGraphStore = create((set, get) => ({
       activeExperts: [],
       detailNode: null,
       editingNode: null,
+      editingEdge: null,
+      deleteDialog: null,
       contextMenu: null,
       selectedNodeId: null,
       selectedGraphNodes: [],
@@ -673,6 +681,12 @@ const useGraphStore = create((set, get) => ({
   // Node editing
   setEditingNode: (node) => set({ editingNode: node }),
   closeEditingNode: () => set({ editingNode: null }),
+
+  // Edge editing and the node-delete confirmation. Held here rather than in App
+  // so they reset through the same session-switch choke point as the node
+  // dialogs above; both address graph content that the new session may not have.
+  setEditingEdge: (edge) => set({ editingEdge: edge }),
+  setDeleteDialog: (dialog) => set({ deleteDialog: dialog }),
 
   // Node detail view (double-click). Opening a node's detail counts as visiting
   // it, so it is recorded on the navigable trail.
