@@ -83,6 +83,16 @@ describe('receiveRemoteSessionDeleted (real store)', () => {
     expect(useGraphStore.getState().chatMessages).toHaveLength(3);
   });
 
+  it('still drops when the broadcast names no deleter', () => {
+    // The server omits deleted_by on the queue-overflow recovery notice
+    // (rest_api.py), so an unattributed delete must not be mistaken for our own.
+    const { dropped, setSessionId } = receiveDelete(null);
+
+    expect(dropped).toBe(true);
+    expect(setSessionId).toHaveBeenCalledWith('sess-fresh');
+    expect(useGraphStore.getState().chatMessages).toHaveLength(1);
+  });
+
   it('resets before the new session id is adopted', () => {
     let historyWhenIdAdopted;
     receiveDelete('another-browser', {
