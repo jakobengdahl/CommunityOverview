@@ -409,11 +409,35 @@ to filter purely by tags/metadata. The applied filters are echoed back under
 `result["filters"]`. The REST endpoint and the `search_graph` MCP tool expose the
 same parameters.
 
+### Lexical match mode (`match_mode` on `/api/search` and `search_graph`)
+
+The lexical matcher requires the **whole query** in a node's searchable text, so
+a multi-word query returns nothing unless some node contains that phrase.
+`match_mode` makes the alternative explicit instead of forcing a caller to probe
+term by term:
+
+| Value | Meaning |
+|-------|---------|
+| `substring` (default) | The whole query must occur verbatim — unchanged behaviour. |
+| `any_term` | The query is split on whitespace; a node matches when it contains **any** term. |
+
+Ranking stays tier-based in `any_term`: a node scores by its **single
+best-matching term**, so a name-tier hit still outranks any accumulation of
+secondary signals, and the number of matched terms only breaks ties *within* a
+tier. Term scores are never summed across tiers. An unsupported value is
+rejected (`ValueError` in-process, `422` over REST) rather than silently
+ignored, and the requested mode is echoed back as `result["match_mode"]`.
+
+The mode applies to the local lexical search. It is ignored when `semantic=true`
+(that path does not use the lexical matcher), and federated search stays
+substring-matched — the same boundary semantic ranking has.
+
 ### Semantic search (`semantic` flag on `/api/search` and `search_graph`)
 
 The default `query` is matched **lexically** (case-insensitive substring over
 name, description, summary, tags, subtypes, aliases and type label). Multi-word or
-natural-language queries that no node contains verbatim therefore return nothing.
+natural-language queries that no node contains verbatim therefore return nothing
+unless `match_mode="any_term"` (above) is used.
 
 | Parameter | Meaning |
 |-----------|---------|
@@ -697,6 +721,7 @@ can configure one. See `docs/EVENT_SUBSCRIPTIONS.md`.
 | `save_view` | Save a named view (creates SavedView node) |
 | `get_visualization_layout` | Read every node's model-space position, type and status in an open session, plus the current selection (for an agent to compute a new arrangement) |
 | `apply_visualization_layout` | Move nodes in an open session by absolute positions or deltas; applied atomically, animated on the canvas, and mirrored live to all connected browsers |
+| `add_nodes_to_session` | Put a known set of nodes on a session's canvas by id (additive, skips ids the caller cannot read) |
 | `create_visualization_session` | Create a new empty session (optional non-unique name; server assigns a default when omitted) |
 | `list_visualization_sessions` | List existing sessions, most recently updated first |
 | `get_visualization_session` | Inspect one session's resource metadata (incl. node count) |
@@ -719,6 +744,24 @@ coordinate model, absolute vs. delta moves, atomic batching and caps, the
 animation seam and the `layout_applied` broadcast shape — are the versioned
 contract in
 [`docs/MCP_VISUALIZATION_LAYOUT_CONTRACT.md`](../docs/MCP_VISUALIZATION_LAYOUT_CONTRACT.md).
+Whether the connected canvas actually tweens the hint is a *deployment* fact, not
+something a write result can report, so it is published as the `animated_layout`
+capability in `get_capabilities` / `GET /api/capabilities` (a deployment whose
+canvas does not animate declares that id with `"enabled": false` in its
+presentation config).
+
+`add_nodes_to_session` populates the same shared session directly: it takes the
+node ids and applies one `nodes_added` op, so a known set lands on the canvas
+without having to craft a search that returns exactly that set. It is additive
+and idempotent (ids already in the session are not re-added and leave the
+`revision` untouched), goes through the same authorization gate as the other
+session writes, and skips — reporting in `skipped` — any id that does not resolve
+to a node the caller may read, so a stale id never becomes a phantom session
+reference. Session state is server-owned, so connected browsers receive the
+broadcast op and hydrate the nodes; a browser that connects later picks them up
+from the session state. The returned `revision` threads straight into
+`apply_visualization_layout`'s `expected_revision`, making "create → populate →
+arrange" three deterministic calls.
 
 ##### `get_visualization_layout` response
 
@@ -805,8 +848,11 @@ returned `revision` into the next `expected_revision`.
   ```python
   s = create_visualization_session(name="Q3 dependency map")
   sid = s["session"]["session_id"]
-  # add nodes via search_graph/get_related_nodes with visualization_session_id=sid,
-  # then arrange with apply_visualization_layout as above, then:
+  # put the exact node set on the canvas (or push results into it with
+  # search_graph/get_related_nodes and visualization_session_id=sid):
+  added = add_nodes_to_session(session_id=sid, node_ids=["init-a", "init-b"])
+  # then arrange with apply_visualization_layout as above, threading
+  # expected_revision=added["revision"], then:
   link = s["session"]["session_url"]   # server-owned canonical link, or null
   ```
 
