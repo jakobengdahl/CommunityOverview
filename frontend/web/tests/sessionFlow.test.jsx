@@ -3,11 +3,22 @@ import { render, screen, fireEvent, waitFor, act } from '@testing-library/react'
 
 import * as sessionStore from '../src/services/sessionStore';
 
+// Latest props of interest as the canvas actually received them, so a test can
+// assert on App's wiring rather than on the store alone.
+const canvasProps = vi.hoisted(() => ({ baselineEpoch: null }));
+
 // GraphCanvas stub: replays the saveViewSignal round-trip that App's session
 // snapshot mechanism is multiplexed over, without rendering ReactFlow.
 vi.mock('@community-graph/ui-graph-canvas', async () => {
   const { useEffect } = await import('react');
-  function GraphCanvas({ nodes = [], edges = [], saveViewSignal = 0, onSaveView }) {
+  function GraphCanvas({
+    nodes = [],
+    edges = [],
+    saveViewSignal = 0,
+    onSaveView,
+    canvasBaselineEpoch,
+  }) {
+    canvasProps.baselineEpoch = canvasBaselineEpoch;
     useEffect(() => {
       if (saveViewSignal > 0 && onSaveView) {
         onSaveView({
@@ -170,6 +181,32 @@ describe('Server-backed session lifecycle', () => {
   // failure is contained (persistSessionSnapshot still completes, so the Save
   // View dialog opens) and the next save builds a fresh client that flushes the
   // pending ops to the server.
+  // The canvas discards its position undo/redo history on this counter, so the
+  // whole fix hangs on App passing it down. Asserted here — against the real App
+  // and the real store — because the canvas-side and store-side tests both pass
+  // even with the prop unwired.
+  it('a wholesale canvas replacement reaches the canvas as a new baseline epoch; an in-place edit does not', async () => {
+    renderApp();
+    await waitFor(() => expect(typeof canvasProps.baselineEpoch).toBe('number'));
+    const initial = canvasProps.baselineEpoch;
+
+    // An in-place edit of the current contents (edge retype, node edit): the
+    // canvas must not be told the baseline moved, or every edit would silently
+    // destroy the user's undo history.
+    await act(async () => {
+      useGraphStore.getState().updateVisualization([NODE_A], []);
+    });
+    expect(canvasProps.baselineEpoch).toBe(initial);
+
+    // A saved view loaded over the running session: the canvas is emptied and
+    // repopulated from the view's own coordinates, so the epoch must advance.
+    await act(async () => {
+      useGraphStore.getState().clearVisualization();
+      useGraphStore.getState().addNodesToVisualization([NODE_A], []);
+    });
+    expect(canvasProps.baselineEpoch).toBe(initial + 1);
+  });
+
   it('a sync connect failure is contained and recovers on the next save', async () => {
     const connectSpy = vi
       .spyOn(SessionSyncClient.prototype, 'connect')

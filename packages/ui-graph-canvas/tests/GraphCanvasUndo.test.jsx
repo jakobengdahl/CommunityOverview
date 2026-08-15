@@ -275,6 +275,10 @@ describe('GraphCanvas undo/redo of node moves', () => {
         />
       );
     });
+    // Both writes really landed (remote first, then the agent's snap) — without
+    // this the test would still pass if either prop became inert, and its name
+    // would be a lie.
+    expect(nodeById('node-1').position).toEqual({ x: 300, y: 300 });
     onNodePositionChange.mockClear();
 
     act(() => {

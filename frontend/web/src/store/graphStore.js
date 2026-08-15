@@ -236,8 +236,10 @@ const useGraphStore = create((set, get) => ({
   // the canvas discards its position undo/redo history — the recorded "before"
   // positions describe a layout that no longer exists, while the node ids they
   // name may well still be on the canvas. Deliberately *not* bumped by
-  // updateVisualization, which doubles as the in-place setter for ordinary
-  // edits (edge retype, node edit, node removal) that undo must survive.
+  // updateVisualization: that action is replace-shaped, but its callers are
+  // either in-place edits of the current contents (edge retype, node edit, node
+  // removal) that undo must survive, or genuine replacements that call
+  // clearVisualization on the line before — so they have already bumped here.
   canvasBaselineEpoch: 0,
   focusNodeId: null, // Node ID to zoom/pan to
   // Session-scoped, newest-first trail of nodes added to the visualization or
