@@ -23,15 +23,19 @@ the device's WebXR-capable browser, with the same core loop the desktop client
 already offers: **create or connect to a session, then navigate it** — but with
 head/controller/hand input instead of mouse and keyboard.
 
-The important architectural fact is that everything *below* the rendering layer
-is transport- and rendering-agnostic and therefore reusable:
+The important architectural fact is that the protocol and data layers *below*
+the renderer are transport- and rendering-agnostic, and therefore reusable
+(the layout/colour utilities are not — see the reuse map):
 
 - The **shared multi-user session** is an SSE stream
   (`GET /api/sessions/{id}/stream`) over a server-owned `SessionStore`, driven by
-  a small op vocabulary: `nodes_added` / `nodes_removed`, `node_moved`,
-  `layout_applied`, `nodes_hidden` / `nodes_shown`, `edges_hidden` /
-  `edges_shown`, `annotation_*`, `group_membership_changed`, and the ephemeral
-  presence + `selection_claimed` / `selection_released` claims.
+  a small op vocabulary — the persisted `STATE_OPS`
+  (`backend/core/session_store.py`): `nodes_added` / `nodes_removed`,
+  `node_moved`, `nodes_hidden` / `nodes_shown`, `edges_added` /
+  `edges_removed` / `edges_updated`, `edges_hidden` / `edges_shown`,
+  `annotation_created` / `annotation_updated` / `annotation_deleted`,
+  `group_membership_changed`, `session_renamed`, `layout_applied` — plus the
+  ephemeral presence and `selection_claimed` / `selection_released` claims.
 - `frontend/web/src/services/sessionSyncClient.js` is **pure protocol**: it
   parses those ops and maintains session state, fully decoupled from React Flow.
 - `frontend/web/src/services/api.js` covers the REST reads (node details,
@@ -104,7 +108,7 @@ divergent question of a genuinely spatial 3D layout (and an optional protocol
 | Backend (REST, MCP, `SessionStore`, SSE sync, session registry) | **Unchanged, reused as-is** |
 | `sessionSyncClient.js` (op parsing + session state) | **Reused** (extract to a shared module or import across workspaces) |
 | `api.js` (REST reads) | **Reused** |
-| `graphLayout.js` (dagre wrapper) / `constants.js` (node type colours) | **Reused / shared** |
+| `graphLayout.js` (dagre wrapper) / `constants.js` (node type colours) | **Reusable only after extraction** — both live in `packages/ui-graph-canvas/src/utils/` and import `reactflow` at module level (`MarkerType`, `Position`), and some helpers (`getEdgeParams`, `getAbsolutePosition`) operate on React Flow's internal node shape. The substance the XR client wants — `NODE_COLORS` and the pure dagre wrapper `getLayoutedElements` — must be lifted out of those modules first, or importing them would pull React Flow into the XR bundle. |
 | `GraphCanvas.jsx` + React Flow rendering + DOM dialogs | **Not reused** — re-implemented in WebGL |
 
 ## Consequences
