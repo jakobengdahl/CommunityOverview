@@ -695,7 +695,7 @@ can configure one. See `docs/EVENT_SUBSCRIPTIONS.md`.
 | `archive_edges` / `unarchive_edges` | Hide/restore edges via the `archived` flag |
 | `get_graph_stats` | Get graph statistics |
 | `save_view` | Save a named view (creates SavedView node) |
-| `get_visualization_layout` | Read every node's model-space position in an open session (for an agent to compute a new arrangement) |
+| `get_visualization_layout` | Read every node's model-space position, type and status in an open session, plus the current selection (for an agent to compute a new arrangement) |
 | `apply_visualization_layout` | Move nodes in an open session by absolute positions or deltas; applied atomically, animated on the canvas, and mirrored live to all connected browsers |
 | `create_visualization_session` | Create a new empty session (optional non-unique name; server assigns a default when omitted) |
 | `list_visualization_sessions` | List existing sessions, most recently updated first |
@@ -719,6 +719,38 @@ coordinate model, absolute vs. delta moves, atomic batching and caps, the
 animation seam and the `layout_applied` broadcast shape — are the versioned
 contract in
 [`docs/MCP_VISUALIZATION_LAYOUT_CONTRACT.md`](../docs/MCP_VISUALIZATION_LAYOUT_CONTRACT.md).
+
+##### `get_visualization_layout` response
+
+| Field | Type | Notes |
+|---|---|---|
+| `session_id` | string | Echo of the requested id. |
+| `revision` | int | Monotonic op sequence; pass back as `expected_revision`. |
+| `node_count` | int | Number of nodes referenced by the session. |
+| `nodes[].id` | string | The session's node reference. |
+| `nodes[].x` / `nodes[].y` | number \| null | Model-space top-left; `null` when unset. |
+| `nodes[].hidden` | bool | Hidden in the session. The visible set is the nodes with `hidden` false. |
+| `nodes[].type` | string \| null | Graph node type, e.g. `"Initiative"`. `null` when the reference does not resolve to a node this caller may read. |
+| `nodes[].status` | string \| null | The node's `metadata["status"]` when the deployment stores one as a non-blank string, whitespace-trimmed; `null` otherwise. |
+| `selected_node_ids` | string[] | Currently selected elements, same value as `get_visualization_session_state`. |
+| `assumed_node_size` | object | `{ width, height }` for collision spacing. |
+| `coordinate_space` | string | Restatement of the coordinate model. |
+| `connected_clients` | int | How many browsers are attached. |
+
+`type` and `status` exist so an agent can arrange by meaning — type columns,
+status swimlanes — instead of inferring meaning from id prefixes or issuing a
+`get_node_details` call per node. `status` is a **convention**, not a schema
+field: this repo's schema defines no `status`, so a deployment that does not use
+`metadata["status"]` gets `null`, which means *unknown*, not *no status*. Both
+fields respect graph-scope narrowing: a node the caller may not read keeps its
+geometry entry with `type`/`status` `null`, so a layout never silently drops a
+node it must still place. Per-node measured `width`/`height` remain unavailable —
+the browser does not upload rendered geometry and node boxes size to their
+content, so `assumed_node_size` is still the only sizing input.
+
+`selected_node_ids` is merged in so "what is here and where is it" is one call.
+The visible set is deliberately not duplicated here — it is already the `nodes`
+entries with `hidden` false.
 
 #### Arranging a session (agent recipes)
 
@@ -751,10 +783,18 @@ returned `revision` into the next `expected_revision`.
 - **Grid.** Place N nodes in a `cols`-wide grid:
   `x = (i % cols) * (width + gap)`, `y = (i // cols) * (height + gap)`.
 
-- **Swimlanes.** Give each lane (e.g. a node type or status) a fixed `y` band and
-  lay its members out along `x`: `y = lane_index * (height + lane_gap)`,
-  `x = position_in_lane * (width + gap)`. Lanes are pure geometry here — the
-  contract moves individual node positions and does not group them (§8).
+- **Swimlanes.** Give each lane a fixed `y` band and lay its members out along
+  `x`: `y = lane_index * (height + lane_gap)`,
+  `x = position_in_lane * (width + gap)`. Take the lane key from the same read —
+  `nodes[].type` or `nodes[].status` — rather than from the node id or a
+  `get_node_details` call per node; group the `null`s into an explicit "unknown"
+  lane rather than dropping them. Lanes are pure geometry here — the contract
+  moves individual node positions and does not group them (§8).
+
+  ```python
+  layout = get_visualization_layout(session_id=sid)
+  lanes = sorted({n["status"] or "unknown" for n in layout["nodes"]})
+  ```
 
 - **Create a named, shareable session from scratch** — never assume a hostname:
 

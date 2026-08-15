@@ -520,6 +520,11 @@ class GraphService:
             self._storage, self._authorization_hook, node_ids
         )
 
+    def resolve_session_node_semantics(self, node_ids: List[str]) -> Dict[str, Any]:
+        return views.resolve_session_node_semantics(
+            self._storage, self._authorization_hook, node_ids
+        )
+
     def get_saved_view(self, name: str) -> Dict[str, Any]:
         return views.get_saved_view(self._storage, self._authorization_hook, name)
 
