@@ -591,9 +591,12 @@ steps 6–8.
 >   a single source of truth (design §3.8).
 > - **MCP query tools read server-owned state.** `connect_to_visualization_session`,
 >   `get_visualization_session_state` and `clear_visualization` no longer read the
->   browser-uploaded blob (which no longer exists). They report visible nodes from
->   the shared-session store's `node_refs` and the current selection from the
->   advisory claim map. A registry entry now means only "a browser is connected to
+>   browser-uploaded blob (which no longer exists). Visible nodes come from the
+>   shared-session store's `node_refs`. `get_visualization_session_state` also
+>   reports the current selection, read from the advisory claim map and narrowed
+>   to those same `node_refs` — claims are taken on *elements*, so an edge claim
+>   never reaches a field named `selected_node_ids`.
+>   A registry entry now means only "a browser is connected to
 >   receive MCP pushes" — the gate those tools use for "session is open".
 > - **Legacy push channel kept (scope boundary).** The legacy
 >   `GET /sessions/{id}/stream` MCP-push channel stays: §3.8 keeps MCP command
