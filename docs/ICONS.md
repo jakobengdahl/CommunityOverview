@@ -24,12 +24,12 @@ This is the constraint to keep in mind: `ICON_REGISTRY` only contains the
 icons that were imported and built into the frontend at deployment time.
 Bootstrap Icons ships **2,000+** icons, but a config can only select from the
 subset already registered — an `icon` value that isn't a registered key
-silently falls back to a per-node-type default, and then to a neutral filled
-circle (`CircleFill`); it does not raise an error. The same neutral circle is
-used for a node type that declares no `icon` at all. If a type shows the plain
-circle instead of the icon you picked, double check the exact spelling against
-the table below (names are case-sensitive PascalCase) and that the name is
-registered.
+silently falls back to the built-in default for that type name, and then to a
+neutral filled circle (`CircleFill`); it does not raise an error. A type that
+declares no `icon` and has no built-in default for its name gets the same
+neutral circle. If a type shows the plain circle instead of the icon you
+picked, double check the exact spelling against the table below (names are
+case-sensitive PascalCase) and that the name is registered.
 
 The tables below list every icon currently registered and available for
 selection, grouped by theme, so you don't need to search the full Bootstrap
