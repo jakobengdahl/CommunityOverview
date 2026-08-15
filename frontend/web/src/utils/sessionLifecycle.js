@@ -32,3 +32,50 @@ export function dropIntoFreshSession({
   setSessionId(freshId);
   reflectSessionUrl(freshId);
 }
+
+/**
+ * React to a `session_deleted` broadcast for the session this client is on: the
+ * session is gone for everyone, so this client lands in its own fresh session
+ * (design D11). Lives here rather than inline in the sync-handler map so it is
+ * covered by the same tests as the local delete it mirrors — the two paths had
+ * drifted once, leaving this one resetting the canvas but not the session-scoped
+ * UI.
+ *
+ * A delete we issued ourselves is ignored: the local delete path has already
+ * moved this client into a fresh session, and re-running here would strand it in
+ * a second one.
+ *
+ * @param {Object} params
+ * @param {string} params.deletedBy  Client id that issued the delete, per the broadcast.
+ * @param {string} params.clientId   This browser's client id.
+ * @param {string} params.sessionId  The session that was deleted (the active one).
+ * @param {Function} params.generateSessionId  Mint the id to land in.
+ * @param {Function} params.removeSession  Drop the session from the local recents list.
+ * @param {Function} params.clearVisualization  Store action: empty the canvas.
+ * @param {Function} params.resetSessionScopedState  Store action: reset session-scoped UI.
+ * @param {Function} params.setSessionId  Adopt the new session id.
+ * @param {Function} params.reflectSessionUrl  Mirror the new id into the URL.
+ * @returns {boolean} Whether this client was moved into a fresh session.
+ */
+export function receiveRemoteSessionDeleted({
+  deletedBy,
+  clientId,
+  sessionId,
+  generateSessionId,
+  removeSession,
+  clearVisualization,
+  resetSessionScopedState,
+  setSessionId,
+  reflectSessionUrl,
+}) {
+  if (deletedBy && deletedBy === clientId) return false;
+  removeSession(sessionId);
+  dropIntoFreshSession({
+    freshId: generateSessionId(),
+    clearVisualization,
+    resetSessionScopedState,
+    setSessionId,
+    reflectSessionUrl,
+  });
+  return true;
+}

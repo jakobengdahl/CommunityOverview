@@ -26,7 +26,7 @@ import { serverStateToMirror, useSharedSession } from './hooks/useSharedSession'
 import { useSyncConnection } from './hooks/useSyncConnection';
 import { useToolResultCommands } from './hooks/useToolResultCommands';
 import { decideClearAction } from './utils/clearBoard';
-import { dropIntoFreshSession } from './utils/sessionLifecycle';
+import { dropIntoFreshSession, receiveRemoteSessionDeleted } from './utils/sessionLifecycle';
 import './App.css';
 
 const _urlParams = new URLSearchParams(window.location.search);
@@ -1408,15 +1408,18 @@ function App() {
         setSessionsVersion((v) => v + 1);
       },
       onSessionDeleted: (deletedBy) => {
-        if (deletedBy && deletedBy === api.getClientId()) return; // our own delete
-        sessionStore.removeSession(sessionId);
-        dropIntoFreshSession({
-          freshId: api.generateVisualizationSessionId(),
+        const dropped = receiveRemoteSessionDeleted({
+          deletedBy,
+          clientId: api.getClientId(),
+          sessionId,
+          generateSessionId: api.generateVisualizationSessionId,
+          removeSession: sessionStore.removeSession,
           clearVisualization,
           resetSessionScopedState: resetSessionScopedUi,
           setSessionId,
           reflectSessionUrl,
         });
+        if (!dropped) return; // our own delete — already handled locally
         setSessionsVersion((v) => v + 1);
         showNotification('info', t('sessions.session_deleted_remote'));
       },

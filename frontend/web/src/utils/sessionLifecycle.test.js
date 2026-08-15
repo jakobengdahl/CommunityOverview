@@ -1,6 +1,6 @@
 import { describe, it, expect, beforeEach, vi } from 'vitest';
 import useGraphStore from '../store/graphStore';
-import { dropIntoFreshSession } from './sessionLifecycle';
+import { receiveRemoteSessionDeleted } from './sessionLifecycle';
 
 const t = (key) => key;
 
@@ -27,63 +27,70 @@ function seedWorkedInSession() {
   });
 }
 
-// Run the helper against the real store actions, so the whole drop is exercised
-// end to end rather than asserted against mocks.
-function drop(freshId, { setSessionId = vi.fn(), reflectSessionUrl = vi.fn() } = {}) {
-  const s = useGraphStore.getState();
-  dropIntoFreshSession({
-    freshId,
-    clearVisualization: s.clearVisualization,
+// Drive the deletion broadcast against the *real* store, so the whole reaction
+// is exercised end to end rather than asserted against mocks.
+function receiveDelete(deletedBy, overrides = {}) {
+  const deps = {
+    deletedBy,
+    clientId: 'this-browser',
+    sessionId: 'sess-deleted',
+    generateSessionId: () => 'sess-fresh',
+    removeSession: vi.fn(),
+    clearVisualization: useGraphStore.getState().clearVisualization,
     resetSessionScopedState: () => useGraphStore.getState().resetSessionScopedState(t, 'en'),
-    setSessionId,
-    reflectSessionUrl,
-  });
-  return { setSessionId, reflectSessionUrl };
+    setSessionId: vi.fn(),
+    reflectSessionUrl: vi.fn(),
+    ...overrides,
+  };
+  const dropped = receiveRemoteSessionDeleted(deps);
+  return { dropped, ...deps };
 }
 
-describe('dropIntoFreshSession (real store)', () => {
+describe('receiveRemoteSessionDeleted (real store)', () => {
   beforeEach(() => {
     seedWorkedInSession();
   });
 
-  it('leaves no assistant history from the session that was left behind', () => {
-    drop('sess-fresh');
-
-    const { chatMessages } = useGraphStore.getState();
-    expect(chatMessages).toHaveLength(1);
-    expect(chatMessages[0].id).toBe('welcome');
-    expect(chatMessages.some((m) => String(m.content).includes('deleted session'))).toBe(false);
-  });
-
-  it('clears the active node and every node-scoped overlay, and empties the canvas', () => {
-    drop('sess-fresh');
+  it('carries nothing from the deleted session into the fresh one', () => {
+    const { dropped, removeSession, setSessionId, reflectSessionUrl } =
+      receiveDelete('another-browser');
 
     const state = useGraphStore.getState();
-    expect(state.nodes).toEqual([]);
+    // The reported symptoms: assistant history and an active node that cannot
+    // exist in the session the user now finds themselves in.
+    expect(state.chatMessages).toHaveLength(1);
+    expect(state.chatMessages[0].id).toBe('welcome');
     expect(state.selectedNodeId).toBeNull();
-    expect(state.selectedGraphNodes).toEqual([]);
     expect(state.detailNode).toBeNull();
-    expect(state.editingNode).toBeNull();
-    expect(state.contextMenu).toBeNull();
-    expect(state.activeExperts).toEqual([]);
+    expect(state.nodes).toEqual([]);
+    // An assistant reply still in flight for the deleted session must not land.
+    expect(state.assistantSessionEpoch).toBe(1);
+
+    expect(dropped).toBe(true);
+    expect(removeSession).toHaveBeenCalledWith('sess-deleted');
+    expect(setSessionId).toHaveBeenCalledWith('sess-fresh');
+    expect(reflectSessionUrl).toHaveBeenCalledWith('sess-fresh');
   });
 
-  it('bumps the assistant epoch so a reply still in flight cannot land in the new session', () => {
-    drop('sess-fresh');
+  it('ignores the echo of a delete this browser issued itself', () => {
+    // The local delete path already moved this client into a fresh session;
+    // reacting again would strand it in a second one.
+    const { dropped, removeSession, setSessionId } = receiveDelete('this-browser');
 
-    expect(useGraphStore.getState().assistantSessionEpoch).toBe(1);
+    expect(dropped).toBe(false);
+    expect(removeSession).not.toHaveBeenCalled();
+    expect(setSessionId).not.toHaveBeenCalled();
+    expect(useGraphStore.getState().chatMessages).toHaveLength(3);
   });
 
   it('resets before the new session id is adopted', () => {
     let historyWhenIdAdopted;
-    const setSessionId = vi.fn(() => {
-      historyWhenIdAdopted = useGraphStore.getState().chatMessages;
+    receiveDelete('another-browser', {
+      setSessionId: vi.fn(() => {
+        historyWhenIdAdopted = useGraphStore.getState().chatMessages;
+      }),
     });
 
-    const { reflectSessionUrl } = drop('sess-fresh', { setSessionId });
-
     expect(historyWhenIdAdopted).toHaveLength(1);
-    expect(setSessionId).toHaveBeenCalledWith('sess-fresh');
-    expect(reflectSessionUrl).toHaveBeenCalledWith('sess-fresh');
   });
 });
