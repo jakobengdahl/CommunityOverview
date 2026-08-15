@@ -24,10 +24,11 @@ from typing import List, Optional, Dict, Any
 from fastapi import APIRouter, HTTPException, Query, Body, Request, Path
 from fastapi.encoders import jsonable_encoder
 from fastapi.responses import StreamingResponse
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator
 from pydantic import ValidationError as PydanticValidationError
 
 from backend.config.config_loader import RestInterfaceConfig, get_rest_interfaces
+from backend.core.storage_search import MATCH_MODE_SUBSTRING, validate_match_mode
 from backend.runtime.authorization import use_request_authorization
 
 from .service import GraphService
@@ -99,6 +100,20 @@ class SearchRequest(BaseModel):
             "ranking when it returns zero results."
         ),
     )
+    match_mode: str = Field(
+        MATCH_MODE_SUBSTRING,
+        description=(
+            "Lexical match mode: 'substring' (default) requires the whole query "
+            "verbatim; 'any_term' matches nodes containing any whitespace-"
+            "separated term. Ignored when semantic is true."
+        ),
+    )
+
+    @field_validator("match_mode")
+    @classmethod
+    def _validate_match_mode(cls, value: str) -> str:
+        """Reject an unsupported mode as a 422 rather than a 500 from the core."""
+        return validate_match_mode(value)
 
 
 class RelatedNodesRequest(BaseModel):
@@ -382,6 +397,7 @@ def _register_search_endpoints(router: APIRouter, service: GraphService) -> None
                 metadata_filters=request.metadata_filters,
                 include_archived=request.include_archived,
                 semantic=request.semantic,
+                match_mode=request.match_mode,
             )
         _raise_for_access_denied(result)
         return result
