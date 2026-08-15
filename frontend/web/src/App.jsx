@@ -27,6 +27,7 @@ import { useSyncConnection } from './hooks/useSyncConnection';
 import { useToolResultCommands } from './hooks/useToolResultCommands';
 import { decideClearAction } from './utils/clearBoard';
 import { dropIntoFreshSession, receiveRemoteSessionDeleted } from './utils/sessionLifecycle';
+import { applyEdgeUpdate, confirmNodeDelete } from './utils/sessionScopedGraphEdits';
 import './App.css';
 
 const _urlParams = new URLSearchParams(window.location.search);
@@ -867,20 +868,17 @@ function App() {
   const handleEdgeUpdate = useCallback(
     async (updates) => {
       if (!editingEdge) return;
-      try {
-        await api.updateEdge(editingEdge.id, updates);
-        const newEdges = edges.map((e) => (e.id === editingEdge.id ? { ...e, ...updates } : e));
-        updateVisualization(nodes, newEdges);
-        // Fan the update out to collaborators: both endpoints already exist on
-        // their canvases, so nothing else prompts them to re-render the changed
-        // edge; without this they show the stale attributes until reload.
-        syncRef.current?.sendEdgesUpdated([{ id: editingEdge.id, ...updates }]);
-        setEditingEdge(null);
-        showNotification('success', 'Edge updated');
-      } catch (error) {
-        console.error('Error updating edge:', error);
-        showNotification('error', 'Could not update edge');
-      }
+      await applyEdgeUpdate({
+        editingEdge,
+        updates,
+        updateEdge: api.updateEdge,
+        nodes,
+        edges,
+        updateVisualization,
+        syncRef,
+        setEditingEdge,
+        showNotification,
+      });
     },
     [editingEdge, setEditingEdge, nodes, edges, updateVisualization, showNotification, syncRef]
   );
@@ -974,23 +972,13 @@ function App() {
   // Confirm delete
   const handleConfirmDelete = useCallback(async () => {
     if (!deleteDialog) return;
-
-    try {
-      if (deleteDialog.isMultiple) {
-        await api.deleteNodes(deleteDialog.nodeIds, true);
-        deleteDialog.nodeIds.forEach((id) => removeNode(id));
-        showNotification('success', `${deleteDialog.nodeIds.length} nodes deleted`);
-      } else {
-        await api.deleteNodes([deleteDialog.nodeId], true);
-        removeNode(deleteDialog.nodeId);
-        showNotification('success', 'Node deleted');
-      }
-    } catch (error) {
-      console.error('Error deleting node(s):', error);
-      showNotification('error', 'Could not delete node(s)');
-    } finally {
-      setDeleteDialog(null);
-    }
+    await confirmNodeDelete({
+      deleteDialog,
+      deleteNodes: api.deleteNodes,
+      removeNode,
+      setDeleteDialog,
+      showNotification,
+    });
   }, [deleteDialog, setDeleteDialog, removeNode, showNotification]);
 
   // Toolbar: trigger group creation in GraphCanvas
