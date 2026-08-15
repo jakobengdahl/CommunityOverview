@@ -17,11 +17,27 @@ const API_BASE = getPathRoot() + '/api';
 // ============================================================
 
 /**
+ * Mint a random lowercase-hex token of `length` characters.
+ *
+ * Backed by crypto.getRandomValues, like generateVisualizationSessionId below.
+ * Math.random is seeded per page and its output is recoverable from earlier
+ * draws, so identifiers minted from it are guessable across clients; neither id
+ * built on this helper is treated as a capability today, but they are shared
+ * with collaborators, so they are minted unpredictably.
+ */
+function randomToken(length) {
+  const bytes = crypto.getRandomValues(new Uint8Array(Math.ceil(length / 2)));
+  return Array.from(bytes, (b) => b.toString(16).padStart(2, '0'))
+    .join('')
+    .slice(0, length);
+}
+
+/**
  * Generate a unique session ID for event tracking.
  * This helps with webhook loop prevention.
  */
 function generateSessionId() {
-  return 'session-' + Date.now().toString(36) + '-' + Math.random().toString(36).substr(2, 9);
+  return 'session-' + Date.now().toString(36) + '-' + randomToken(9);
 }
 
 // Session ID for this browser session (persisted in sessionStorage)
@@ -595,7 +611,7 @@ export function getClientId() {
     _clientId = null;
   }
   if (!_clientId) {
-    _clientId = 'client-' + Math.random().toString(36).slice(2, 10);
+    _clientId = 'client-' + randomToken(8);
     try {
       window.localStorage.setItem(CLIENT_ID_KEY, _clientId);
     } catch {

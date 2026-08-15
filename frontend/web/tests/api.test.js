@@ -92,3 +92,36 @@ describe('getEventSessionId', () => {
     expect(global.sessionStorage.setItem).not.toHaveBeenCalled();
   });
 });
+
+// Both identifiers are shared with collaborators — the client id travels in
+// presence rosters and in the session_deleted payload — so they are minted from
+// crypto.getRandomValues, as generateVisualizationSessionId already is. Math.random
+// is seeded per page and recoverable from earlier draws, which is what CodeQL
+// reports as insecure randomness.
+describe('identifier minting', () => {
+  beforeEach(() => {
+    window.localStorage.clear();
+    window.sessionStorage.clear();
+    vi.resetModules();
+  });
+
+  afterEach(() => {
+    vi.restoreAllMocks();
+  });
+
+  it('mints the client id without Math.random', async () => {
+    const randomSpy = vi.spyOn(Math, 'random');
+    const { getClientId } = await import('../src/services/api.js');
+
+    expect(getClientId()).toMatch(/^client-[0-9a-f]{8}$/);
+    expect(randomSpy).not.toHaveBeenCalled();
+  });
+
+  it('mints the event session id without Math.random', async () => {
+    const randomSpy = vi.spyOn(Math, 'random');
+    const { getEventSessionId } = await import('../src/services/api.js');
+
+    expect(getEventSessionId()).toMatch(/^session-[0-9a-z]+-[0-9a-f]{9}$/);
+    expect(randomSpy).not.toHaveBeenCalled();
+  });
+});
