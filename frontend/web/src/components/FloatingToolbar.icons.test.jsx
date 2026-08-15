@@ -73,8 +73,11 @@ function backendSystemNodeTypes() {
 }
 
 function backendExpertAgentDefaultIcon() {
-  // Anchored on the class body: another model in this file declares an `icon` field too.
-  const block = backendSource().match(/^class ExpertAgentConfig\(BaseModel\):\n(.*?)(?=^\S|\Z)/ms);
+  // Anchored on the class body (its indented and blank lines): another model in
+  // this file declares an `icon` field too.
+  const block = backendSource().match(
+    /^class ExpertAgentConfig\(BaseModel\):\n((?:[ \t].*\n|\n)*)/m
+  );
   if (!block) throw new Error(`ExpertAgentConfig not found in ${CONFIG_LOADER}`);
 
   const match = block[1].match(/^ {4}icon: str = "(\w+)"$/m);
