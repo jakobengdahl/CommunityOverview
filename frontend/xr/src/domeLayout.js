@@ -1,4 +1,4 @@
-// Pure geometry for the curved "dome" spatial model (ADR 0002).
+// Pure geometry for the curved "dome" spatial model (ADR 0003).
 //
 // Maps the graph's existing 2D {x, y} layout onto the inside of a curved dome
 // that wraps partway around a viewer seated at the origin looking down -Z. No

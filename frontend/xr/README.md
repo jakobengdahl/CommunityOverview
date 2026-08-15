@@ -1,13 +1,13 @@
 # @community-graph/xr — WebXR immersive graph client (spike)
 
 Exploratory WebGL/WebXR client that runs the graph on Quest-class headsets,
-following [ADR 0002](../../docs/adr/0002-webxr-immersive-graph-client-spike.md).
+following [ADR 0003](../../docs/adr/0003-webxr-immersive-graph-client-spike.md).
 This is an **additive** workspace: it does not touch the backend, the REST/MCP
 contracts, the session-sync protocol, or the existing 2D web client.
 
 ## What exists so far (scaffold)
 
-- A WebXR entry (`src/App.jsx`) using `react-three-fiber` + `@react-three/xr`
+- A WebXR entry (`src/App.jsx`) using `@react-three/fiber` + `@react-three/xr`
   with an **Enter VR** button and a placeholder scene.
 - The pure **dome layout** geometry (`src/domeLayout.js`, unit-tested in
   `src/domeLayout.test.js`): it maps the graph's 2D `{x, y}` layout onto a
@@ -22,7 +22,7 @@ data plumbing exists.
 
 Shared-session sync (create/connect by short ID), edges + SDF text labels,
 dome-radius zoom navigation, controller/hand ray-select, and the read-only
-in-world node panel. See ADR 0002 and the initiative's task list.
+in-world node panel. See ADR 0003 for the scope boundary.
 
 ## Run
 
