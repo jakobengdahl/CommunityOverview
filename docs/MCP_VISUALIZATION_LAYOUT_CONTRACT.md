@@ -351,11 +351,12 @@ differ between the open core and the hosted layer.
 - Realizing per-node measured dimensions, server-enforced locks, group-aware
   layout, or viewport control (all reserved above) are **additive** extensions
   that a later version can introduce without breaking v1 consumers.
-- Narrowing a field's contents to what its name and this document already
-  promise — as `selected_node_ids` was narrowed to the session's nodes (§4.2) —
-  is a **correction, not a version bump**: it can only remove values a conforming
-  consumer was already told not to expect. Widening a field, or renaming one, is
-  breaking and needs a new version.
+- Narrowing a field's contents to what its **name** promises — as
+  `selected_node_ids` was narrowed to the session's nodes (§4.2) — is a
+  **correction, not a version bump**. The prose describing it as element ids was
+  itself part of the defect: a field named for nodes that hands back edge ids
+  breaks the caller that reads it as its name reads. Widening a field, or
+  renaming one, is breaking and needs a new version.
 - The requirement node `req-mcp-layout-contract` and the decision
   `dec-visualization-layout-contract` in the Corp planning graph govern this
   document; status and evidence live there, not here.

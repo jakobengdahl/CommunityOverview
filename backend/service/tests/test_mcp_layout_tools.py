@@ -315,6 +315,24 @@ class TestGetVisualizationLayout:
         assert state["selected_node_ids"] == ["b"]
         assert state["visible_node_ids"] == ["a"]
 
+    def test_empty_selection_is_reported_as_an_empty_list(self, layout_tools):
+        tools_map, manager = layout_tools
+        session = _session_with_nodes(manager, ["a"])
+
+        result = tools_map["get_visualization_layout"](session_id=session.id)
+
+        assert result["selected_node_ids"] == []
+
+    def test_missing_manager_is_reported(self):
+        storage = GraphStorage(json_path="/tmp/does-not-matter.json")
+        service = GraphService(storage)
+        mock_mcp = Mock()
+        mock_mcp.tool = MagicMock(return_value=lambda f: f)
+        tools_map = register_mcp_tools(mock_mcp, service)  # no session_manager
+        assert "error" in tools_map["get_visualization_layout"](session_id="1111-2222")
+
+
+class TestGetVisualizationSessionState:
     def test_claims_outliving_their_session_are_not_reported_as_selection(
         self, authz_tools
     ):
@@ -334,22 +352,6 @@ class TestGetVisualizationLayout:
 
         assert state["visible_node_ids"] == []
         assert state["selected_node_ids"] == []
-
-    def test_empty_selection_is_reported_as_an_empty_list(self, layout_tools):
-        tools_map, manager = layout_tools
-        session = _session_with_nodes(manager, ["a"])
-
-        result = tools_map["get_visualization_layout"](session_id=session.id)
-
-        assert result["selected_node_ids"] == []
-
-    def test_missing_manager_is_reported(self):
-        storage = GraphStorage(json_path="/tmp/does-not-matter.json")
-        service = GraphService(storage)
-        mock_mcp = Mock()
-        mock_mcp.tool = MagicMock(return_value=lambda f: f)
-        tools_map = register_mcp_tools(mock_mcp, service)  # no session_manager
-        assert "error" in tools_map["get_visualization_layout"](session_id="1111-2222")
 
 
 class TestApplyVisualizationLayout:
