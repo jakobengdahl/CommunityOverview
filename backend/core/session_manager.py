@@ -378,9 +378,11 @@ class SessionManager:
     def claimed_elements(self, session_id: str) -> List[str]:
         """Element ids with a live selection claim (advisory soft-locks, D3).
 
-        The current per-user selection is expressed as claims, so this is what an
-        MCP query tool reports as ``selected_node_ids`` now that the browser no
-        longer uploads its selection (design §3.8).
+        The current per-user selection is expressed as claims, so this is the
+        source the MCP query tools read now that the browser no longer uploads
+        its selection (design §3.8). These are *element* ids: a claim may be
+        taken on an edge as well as a node, which is why the tools reporting a
+        ``selected_node_ids`` field narrow this to the session's nodes first.
         """
         return list(self.claims.snapshot(session_id).keys())
 
