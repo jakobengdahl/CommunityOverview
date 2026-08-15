@@ -3,9 +3,9 @@
  *
  * The widget replaces its whole node list on every search, so each search
  * establishes a new position baseline. Moves recorded against the layout the
- * user has left must not survive it — the node ids they name are often still on
- * the canvas, so an undo would otherwise teleport a node to a coordinate from
- * the previous search's layout.
+ * user has left must not survive it: a node that drops out of one result and
+ * comes back in a later one is laid out afresh, and an undo naming it would
+ * otherwise teleport it to a coordinate from the layout it was dragged in.
  *
  * These tests drive the real GraphCanvas (reactflow mocked) through the widget,
  * so they cover the search → baseline → history wiring end to end rather than
@@ -78,14 +78,18 @@ vi.mock('../src/mcpClient', () => ({
 }));
 
 const NODE = { id: 'n1', name: 'Node 1', type: 'Actor' };
+const OTHER_NODE = { id: 'n9', name: 'Node 9', type: 'Theme' };
 
 const nodeById = (id) => store.nodes.find((n) => n.id === id);
 
-const search = async (query) => {
+// Awaits the result landing on the canvas, not merely the tool call: `expectId`
+// is the node this search puts there, and it must not be one left over from the
+// previous search or the barrier passes before anything has happened.
+const search = async (query, expectId) => {
   fireEvent.change(screen.getByPlaceholderText('Search graph...'), { target: { value: query } });
   fireEvent.click(screen.getByRole('button', { name: 'Search' }));
   await waitFor(() => expect(mcp.searchGraph).toHaveBeenCalledWith(query));
-  await waitFor(() => expect(nodeById('n1')).toBeDefined());
+  await waitFor(() => expect(nodeById(expectId)).toBeDefined());
 };
 
 // Drag n1 from (30,40) to (100,50), leaving that move on the undo stack.
@@ -118,22 +122,28 @@ describe('Widget canvas undo baseline', () => {
   afterEach(() => cleanup());
 
   it('discards the undo history when a search replaces the node list', async () => {
-    mcp.searchGraph.mockResolvedValue({ nodes: [NODE], edges: [] });
+    mcp.searchGraph
+      .mockResolvedValueOnce({ nodes: [NODE], edges: [] })
+      .mockResolvedValueOnce({ nodes: [OTHER_NODE], edges: [] })
+      .mockResolvedValueOnce({ nodes: [NODE], edges: [] });
 
     render(<Widget />);
-    await search('first');
+    await search('first', 'n1');
     dragNode();
 
-    // A second search replaces the canvas contents. This node is in the new
-    // result too, and lands on the coordinate that search's layout gives it.
-    await search('second');
-    act(() => {
-      store.nodes = [{ id: 'n1', type: 'custom', position: { x: 800, y: 900 }, data: {} }];
-    });
+    // The next search replaces the contents with something else entirely, so
+    // the dragged node leaves the canvas; a third search brings it back, laid
+    // out from scratch rather than at the coordinate it was dragged to.
+    await search('second', 'n9');
+    await waitFor(() => expect(nodeById('n1')).toBeUndefined());
+    await search('third', 'n1');
+
+    const restored = { ...nodeById('n1').position };
+    expect(restored).not.toEqual({ x: 30, y: 40 });
 
     pressUndo();
 
-    expect(nodeById('n1').position).toEqual({ x: 800, y: 900 });
+    expect(nodeById('n1').position).toEqual(restored);
   });
 
   it('keeps the undo history when an expand adds nodes to the current layout', async () => {
@@ -144,7 +154,7 @@ describe('Widget canvas undo baseline', () => {
     });
 
     render(<Widget />);
-    await search('first');
+    await search('first', 'n1');
     const expandN1 = nodeById('n1').data.onExpand;
     dragNode();
 

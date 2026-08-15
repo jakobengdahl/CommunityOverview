@@ -21,6 +21,11 @@ function Widget({ initialQuery = '', onNodeSelect }) {
   // establishes a new position baseline; the canvas discards its undo history
   // on the change. Additive paths (expand) leave the existing nodes where they
   // are, so their recorded moves stay valid and must not bump it.
+  // The signal is per replacement, not per node: a node that survives into the
+  // next result keeps its position on the canvas, and its move is dropped from
+  // the history along with the rest. That costs an undo the user could still
+  // have used, which is the cheaper error than restoring a coordinate from a
+  // layout that is gone.
   const [canvasBaselineEpoch, setCanvasBaselineEpoch] = useState(0);
 
   // Check MCP availability on mount
