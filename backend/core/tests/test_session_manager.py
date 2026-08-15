@@ -1010,3 +1010,17 @@ class TestAddNodeRefs:
         assert s.seq == seq_before
         assert s.state["node_refs"] == []
         assert await _drain(sub) == []
+
+    async def test_repeated_ids_are_added_once(self):
+        mgr = _manager()
+        s = mgr.create_session()
+        sub, _ = mgr.connect(s.id, "c1", "A")
+        await _drain(sub)
+
+        res = mgr.add_node_refs(s.id, "mcp-agent", ["a", "a", "b"])
+
+        assert res["added"] == ["a", "b"]
+        assert res["node_count"] == 2
+        assert s.state["node_refs"] == ["a", "b"]
+        events = await _drain(sub)
+        assert events[0]["op"]["node_ids"] == ["a", "b"]

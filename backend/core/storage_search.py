@@ -173,7 +173,7 @@ def search_nodes(
 
     terms = [query_lower]
     if match_mode == MATCH_MODE_ANY_TERM and not match_all:
-        terms = query_lower.split() or [query_lower]
+        terms = query_lower.split()
 
     matched_terms: Dict[str, List[str]] = {}
 

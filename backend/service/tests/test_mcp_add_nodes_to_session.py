@@ -23,8 +23,10 @@ from backend.service import GraphService, register_mcp_tools
 from backend.service.tests.test_authorization import FixedNarrowingHook
 
 
-def _wire(storage, service):
-    manager = SessionManager(SessionStore(InMemorySessionPersistenceBackend()))
+def _wire(storage, service, **manager_kwargs):
+    manager = SessionManager(
+        SessionStore(InMemorySessionPersistenceBackend()), **manager_kwargs
+    )
     mock_mcp = Mock()
     mock_mcp.tool = MagicMock(return_value=lambda f: f)
     tools_map = register_mcp_tools(mock_mcp, service, session_manager=manager)
@@ -199,6 +201,56 @@ class TestAddNodesToSession:
 
         assert result["success"] is False
         assert "node_ids" in result["error"]
+
+    def test_a_repeated_id_is_added_and_reported_once(self, tools):
+        """`added` and the broadcast must agree with the stored union."""
+        tools_map, manager = tools
+        sid = _session(manager)
+        published = []
+        manager.bus.publish = lambda session_id, event: published.append(event)
+
+        result = tools_map["add_nodes_to_session"](
+            session_id=sid, node_ids=["alpha", "alpha", "beta"]
+        )
+
+        assert result["added"] == ["alpha", "beta"]
+        assert result["node_count"] == 2
+        assert published[0]["op"]["node_ids"] == ["alpha", "beta"]
+        assert manager.get_session(sid).state["node_refs"] == ["alpha", "beta"]
+
+    def test_a_non_string_id_is_skipped_not_an_exception(self, tools):
+        """Arguments reach this tool unvalidated (POST /execute_tool)."""
+        tools_map, manager = tools
+        sid = _session(manager)
+
+        result = tools_map["add_nodes_to_session"](
+            session_id=sid, node_ids=["alpha", {"id": "beta"}, 7]
+        )
+
+        assert result["success"] is True
+        assert result["added"] == ["alpha"]
+        assert result["skipped"] == [{"id": "beta"}, 7]
+        assert manager.get_session(sid).state["node_refs"] == ["alpha"]
+
+    def test_an_oversized_batch_is_rejected_before_any_node_is_resolved(self, tmp_path):
+        """The cap must bound the per-id resolve, not just the write after it."""
+        storage = GraphStorage(json_path=os.path.join(tmp_path, "g.json"))
+        service = GraphService(storage)
+        lookups = []
+        original = storage.get_node
+        storage.get_node = lambda node_id: (lookups.append(node_id), original(node_id))[
+            1
+        ]
+        tools_map, manager = _wire(storage, service, max_ops_per_batch=2)
+        sid = _session(manager)
+
+        result = tools_map["add_nodes_to_session"](
+            session_id=sid, node_ids=["a", "b", "c"]
+        )
+
+        assert result["success"] is False
+        assert result["error"] == "too_large"
+        assert lookups == []
 
 
 class TestAuthorization:

@@ -1275,6 +1275,15 @@ def register_mcp_tools(
             return denied
         if not isinstance(node_ids, list) or not node_ids:
             return {"success": False, "error": "'node_ids' must be a non-empty list"}
+        # Checked before the resolve below, which costs one node lookup per id:
+        # the write path enforces the same cap, but only after that work is
+        # already done.
+        if len(node_ids) > session_manager.max_ops_per_batch:
+            return {
+                "success": False,
+                "error": "too_large",
+                "message": "Too many nodes in one write; split into batches.",
+            }
 
         # Resolve through the read-authorized projection so an id the caller may
         # not read — or that no longer exists — never enters session state.
@@ -1287,7 +1296,14 @@ def register_mcp_tools(
             for node_id in node_ids
             if isinstance(node_id, str) and node_id in known
         ]
-        skipped = [node_id for node_id in node_ids if node_id not in known]
+        # Anything not resolvable is skipped, including an id that is not a
+        # string at all — `known` is keyed by string id, so testing membership
+        # for an unhashable value would raise instead.
+        skipped = [
+            node_id
+            for node_id in node_ids
+            if not (isinstance(node_id, str) and node_id in known)
+        ]
         if not resolvable:
             return {
                 "success": False,

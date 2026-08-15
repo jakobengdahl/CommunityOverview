@@ -54,6 +54,26 @@ def _service():
     return GraphService(storage)
 
 
+def _two_name_tier_service():
+    """Two nodes whose name-tier scores discriminate "best term" from "sum".
+
+    ``exact`` scores 500 000 on one term; ``two_terms`` scores 400 000 and
+    300 000 on two — a sum (700 000) would rank it first, the best single term
+    (400 000) must not.
+    """
+    tmp = tempfile.mkdtemp()
+    storage = GraphStorage(json_path=os.path.join(tmp, "g.json"))
+    storage.vector_store.search = lambda **kwargs: []
+    storage.add_nodes(
+        [
+            Node(id="exact", type=NodeType.INITIATIVE, name="Pricing"),
+            Node(id="two_terms", type=NodeType.INITIATIVE, name="Pricing plan rollout"),
+        ],
+        [],
+    )
+    return GraphService(storage)
+
+
 class TestDefaultIsUnchanged:
     def test_default_still_requires_the_whole_query_verbatim(self):
         """The pre-existing semantics: a phrase no node contains matches nothing."""
@@ -120,16 +140,34 @@ class TestAnyTermMode:
 
         assert [n["id"] for n in result["nodes"]] == ["offering", "plan"]
 
+    def test_two_name_tier_hits_do_not_outscore_one_better_hit(self):
+        """The invariant a summed score would break, at the tier that matters.
+
+        "Pricing" is an exact name match for one term (the top tier); "Pricing
+        plan rollout" matches *both* terms, each a weaker name-tier hit. Adding
+        the two up would beat the exact match — scoring by the single best term
+        keeps the stronger node first.
+        """
+        service = _two_name_tier_service()
+
+        result = service.search_graph(
+            query="pricing plan", match_mode=MATCH_MODE_ANY_TERM
+        )
+
+        assert [n["id"] for n in result["nodes"]] == ["exact", "two_terms"]
+
     def test_more_matched_terms_break_a_tie_within_the_same_tier(self):
         service = _service()
 
         result = service.search_graph(
-            query="paid tiers sell", match_mode=MATCH_MODE_ANY_TERM
+            query="sell segment paid", match_mode=MATCH_MODE_ANY_TERM
         )
 
         # Every hit here is description-tier, so the tie is broken by how many
-        # terms matched: "plan" on two ("paid", "tiers"), "offering" on one.
-        assert [n["id"] for n in result["nodes"]] == ["plan", "offering"]
+        # terms matched: "offering" on two ("sell", "segment"), "plan" on one.
+        # "offering" is also the *later* node in insertion order, so a stable
+        # sort without the tie-break would put "plan" first.
+        assert [n["id"] for n in result["nodes"]] == ["offering", "plan"]
 
 
 class TestValidation:

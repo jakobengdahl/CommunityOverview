@@ -103,6 +103,32 @@ class TestRESTAPIClient:
         assert data["total"] >= 1
         assert any(n["name"] == "API Actor" for n in data["nodes"])
 
+    def test_search_endpoint_any_term_match_mode(self, populated_api_client):
+        """REST exposes the same opt-in lexical mode as the MCP tool.
+
+        No node contains the whole phrase, so both hits come from the per-term
+        match — ``semantic`` false rules out the zero-result fallback having
+        produced them on an install where embeddings are available.
+        """
+        response = populated_api_client.post(
+            "/api/graph/search",
+            json={"query": "API Actor Initiative", "match_mode": "any_term"},
+        )
+
+        assert response.status_code == 200
+        data = response.json()
+        assert {n["id"] for n in data["nodes"]} == {"api-1", "api-2"}
+        assert data["match_mode"] == "any_term"
+        assert data["semantic"] is False
+
+    def test_search_endpoint_rejects_an_unknown_match_mode(self, populated_api_client):
+        """An unsupported mode is a request error, not a 500 from the core."""
+        response = populated_api_client.post(
+            "/api/graph/search", json={"query": "API", "match_mode": "fuzzy"}
+        )
+
+        assert response.status_code == 422
+
     def test_get_node_endpoint(self, populated_api_client):
         """Test GET /api/graph/nodes/{id} endpoint."""
         response = populated_api_client.get("/api/graph/nodes/api-1")

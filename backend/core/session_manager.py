@@ -201,6 +201,16 @@ class SessionManager:
         """Byte cap enforced on a single ops batch (§3.9)."""
         return self._max_op_batch_bytes
 
+    @property
+    def max_ops_per_batch(self) -> int:
+        """Op-count cap enforced on a single ops batch (§3.9).
+
+        Exposed so a caller that does per-item work *before* handing the batch
+        over (resolving node ids, say) can reject an oversized request first
+        instead of paying for it and failing the cap afterwards.
+        """
+        return self._max_ops
+
     def _lock(self, session_id: str) -> asyncio.Lock:
         lock = self._locks.get(session_id)
         if lock is None:
@@ -658,12 +668,17 @@ class SessionManager:
         if expected_revision is not None and expected_revision != session.seq:
             raise RevisionConflict(expected_revision, session.seq)
 
+        # Dedupe against the session *and* against the rest of this call, in
+        # order: a repeated id would otherwise be reported as added twice and
+        # ride the broadcast twice, while the stored state (a union) holds it
+        # once.
         present = set(session.state.get("node_refs", []))
-        added = [
-            node_id
-            for node_id in node_ids
-            if isinstance(node_id, str) and node_id not in present
-        ]
+        added: List[str] = []
+        for node_id in node_ids:
+            if not isinstance(node_id, str) or node_id in present:
+                continue
+            present.add(node_id)
+            added.append(node_id)
         if not added:
             return {
                 "applied": None,
