@@ -71,7 +71,9 @@ def resolve_session_node_semantics(
 
     ``status`` is not a schema field — it is whatever the deployment stores
     under ``metadata["status"]`` — so it is reported only when that value is a
-    string, and is ``None`` otherwise.
+    non-blank string, and is ``None`` otherwise. Blank normalises to ``None``
+    (as ``node_graph_id`` does for its own metadata key) so an agent building
+    status lanes never gets an unnamed one.
     """
     decision = access.evaluate_graph_access(
         hook, action=GRAPH_ACTION_READ, target="resolve_session_node_semantics"
@@ -93,7 +95,7 @@ def resolve_session_node_semantics(
         status = node.metadata.get("status")
         semantics[node_id] = {
             "type": node.type_str,
-            "status": status if isinstance(status, str) else None,
+            "status": status.strip() or None if isinstance(status, str) else None,
         }
 
     return {"success": True, "nodes": semantics}

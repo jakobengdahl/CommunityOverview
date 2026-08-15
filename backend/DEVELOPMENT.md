@@ -783,10 +783,18 @@ returned `revision` into the next `expected_revision`.
 - **Grid.** Place N nodes in a `cols`-wide grid:
   `x = (i % cols) * (width + gap)`, `y = (i // cols) * (height + gap)`.
 
-- **Swimlanes.** Give each lane (e.g. a node type or status) a fixed `y` band and
-  lay its members out along `x`: `y = lane_index * (height + lane_gap)`,
-  `x = position_in_lane * (width + gap)`. Lanes are pure geometry here — the
-  contract moves individual node positions and does not group them (§8).
+- **Swimlanes.** Give each lane a fixed `y` band and lay its members out along
+  `x`: `y = lane_index * (height + lane_gap)`,
+  `x = position_in_lane * (width + gap)`. Take the lane key from the same read —
+  `nodes[].type` or `nodes[].status` — rather than from the node id or a
+  `get_node_details` call per node; group the `null`s into an explicit "unknown"
+  lane rather than dropping them. Lanes are pure geometry here — the contract
+  moves individual node positions and does not group them (§8).
+
+  ```python
+  layout = get_visualization_layout(session_id=sid)
+  lanes = sorted({n["status"] or "unknown" for n in layout["nodes"]})
+  ```
 
 - **Create a named, shareable session from scratch** — never assume a hostname:
 

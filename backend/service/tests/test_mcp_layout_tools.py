@@ -13,7 +13,7 @@ from unittest.mock import MagicMock, Mock
 
 import pytest
 
-from backend.core import GraphStorage
+from backend.core import GraphStorage, Node
 from backend.core.session_manager import SessionManager
 from backend.core.session_registry import SessionRegistry
 from backend.core.session_store import (
@@ -22,6 +22,7 @@ from backend.core.session_store import (
 )
 from backend.runtime.authorization import AUTHORIZATION_MODE_ENV
 from backend.service import GraphService, register_mcp_tools
+from backend.service.tests.test_authorization import FixedNarrowingHook
 
 
 @pytest.fixture
@@ -151,16 +152,84 @@ class TestGetVisualizationLayout:
                     "type": "Actor",
                     "name": "Gamma",
                     "metadata": {"status": {"phase": 1}},
-                }
+                },
+                {
+                    "id": "delta",
+                    "type": "Actor",
+                    "name": "Delta",
+                    "metadata": {"status": "   "},
+                },
             ],
             edges=[],
         )
-        session = _session_with_nodes(manager, ["gamma"])
+        session = _session_with_nodes(manager, ["gamma", "delta"])
 
-        node = tools_map["get_visualization_layout"](session_id=session.id)["nodes"][0]
+        by_id = {
+            n["id"]: n
+            for n in tools_map["get_visualization_layout"](session_id=session.id)[
+                "nodes"
+            ]
+        }
 
-        assert node["type"] == "Actor"
-        assert node["status"] is None
+        assert by_id["gamma"]["type"] == "Actor"
+        assert by_id["gamma"]["status"] is None
+        # A blank status would otherwise become an unnamed swimlane.
+        assert by_id["delta"]["status"] is None
+
+    def test_out_of_scope_node_keeps_geometry_but_leaks_no_semantics(self, tmp_path):
+        """Graph-scope narrowing must hide meaning without hiding the node.
+
+        A node outside the caller's ``include_graph_ids`` must still be laid
+        out — dropping it would leave an agent unable to place something the
+        session references — but its type/status must not leak.
+        """
+        storage = GraphStorage(json_path=os.path.join(tmp_path, "g.json"))
+        storage.add_nodes(
+            [
+                Node(
+                    id="alpha",
+                    type="Initiative",
+                    name="Alpha",
+                    metadata={
+                        "origin_graph_id": "graph-alpha",
+                        "status": "in_progress",
+                    },
+                ),
+                Node(
+                    id="beta",
+                    type="Actor",
+                    name="Beta",
+                    metadata={"origin_graph_id": "graph-beta", "status": "done"},
+                ),
+            ],
+            [],
+        )
+        service = GraphService(
+            storage,
+            authorization_hook=FixedNarrowingHook(
+                allow_local_graph=False, include_graph_ids=("graph-alpha",)
+            ),
+        )
+        manager = SessionManager(SessionStore(InMemorySessionPersistenceBackend()))
+        mock_mcp = Mock()
+        mock_mcp.tool = MagicMock(return_value=lambda f: f)
+        tools_map = register_mcp_tools(mock_mcp, service, session_manager=manager)
+        session = _session_with_nodes(manager, ["alpha", "beta"])
+        manager.apply_layout(
+            session.id, "mcp-agent", positions={"beta": {"x": 7, "y": 8}}
+        )
+
+        by_id = {
+            n["id"]: n
+            for n in tools_map["get_visualization_layout"](session_id=session.id)[
+                "nodes"
+            ]
+        }
+
+        assert by_id["alpha"]["type"] == "Initiative"
+        assert by_id["alpha"]["status"] == "in_progress"
+        assert by_id["beta"]["x"] == 7.0 and by_id["beta"]["y"] == 8.0
+        assert by_id["beta"]["type"] is None and by_id["beta"]["status"] is None
 
     def test_invalid_session_id(self, layout_tools):
         tools_map, _ = layout_tools
