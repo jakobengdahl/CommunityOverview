@@ -56,22 +56,28 @@ function backendSystemNodeTypes() {
   const block = backendSource().match(/^SYSTEM_NODE_TYPES = \{$(.*?)^\}$/ms);
   if (!block) throw new Error(`SYSTEM_NODE_TYPES literal not found in ${CONFIG_LOADER}`);
 
+  const typeNames = [];
   const entries = [];
   let current = null;
   for (const line of block[1].split('\n')) {
     const typeName = line.match(/^ {4}"(\w+)": \{$/);
     if (typeName) {
       current = typeName[1];
+      typeNames.push(current);
       continue;
     }
     const icon = line.match(/^ {8}"icon": "(\w+)",?$/);
     if (icon && current) entries.push({ name: current, icon: icon[1] });
   }
-  return entries;
+  return { typeNames, entries };
 }
 
 function backendExpertAgentDefaultIcon() {
-  const match = backendSource().match(/^ {4}icon: str = "(\w+)"$/m);
+  // Anchored on the class body: another model in this file declares an `icon` field too.
+  const block = backendSource().match(/^class ExpertAgentConfig\(BaseModel\):\n(.*?)(?=^\S|\Z)/ms);
+  if (!block) throw new Error(`ExpertAgentConfig not found in ${CONFIG_LOADER}`);
+
+  const match = block[1].match(/^ {4}icon: str = "(\w+)"$/m);
   if (!match) throw new Error(`ExpertAgentConfig icon default not found in ${CONFIG_LOADER}`);
   return match[1];
 }
@@ -120,9 +126,11 @@ describe('resolveIcon', () => {
   });
 
   it('resolves every icon the backend injects for system node types', () => {
-    const entries = backendSystemNodeTypes();
-    // Parse guard: config_loader.py ships at least the UI-visible system types.
-    expect(entries.length).toBeGreaterThanOrEqual(6);
+    const { typeNames, entries } = backendSystemNodeTypes();
+    // Parse guard: every system type must yield an icon, so neither parser drift
+    // nor a system type added without an icon can quietly drop coverage.
+    expect(entries.length).toBeGreaterThan(0);
+    expect(entries.map(({ name }) => name)).toEqual(typeNames);
 
     const unresolved = entries
       .filter(
