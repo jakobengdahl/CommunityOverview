@@ -27,7 +27,7 @@ function seedDirtySessionState() {
 
 describe('graphStore.resetSessionScopedState', () => {
   beforeEach(() => {
-    useGraphStore.setState({ assistantSessionEpoch: 0 });
+    useGraphStore.setState({ sessionEpoch: 0 });
   });
 
   it('collapses assistant history to a single welcome message', () => {
@@ -68,10 +68,10 @@ describe('graphStore.resetSessionScopedState', () => {
 
   it('bumps the assistant epoch on every switch (A→B→A)', () => {
     seedDirtySessionState();
-    const start = useGraphStore.getState().assistantSessionEpoch;
+    const start = useGraphStore.getState().sessionEpoch;
 
     useGraphStore.getState().resetSessionScopedState(t, 'en'); // A → B
-    const afterFirst = useGraphStore.getState().assistantSessionEpoch;
+    const afterFirst = useGraphStore.getState().sessionEpoch;
     expect(afterFirst).toBe(start + 1);
 
     // Accumulate history again in B, then switch back to A: history must not
@@ -83,7 +83,7 @@ describe('graphStore.resetSessionScopedState', () => {
       ],
     });
     useGraphStore.getState().resetSessionScopedState(t, 'en'); // B → A
-    expect(useGraphStore.getState().assistantSessionEpoch).toBe(start + 2);
+    expect(useGraphStore.getState().sessionEpoch).toBe(start + 2);
     expect(useGraphStore.getState().chatMessages).toHaveLength(1);
     expect(useGraphStore.getState().chatMessages[0].id).toBe('welcome');
   });
@@ -122,6 +122,52 @@ describe('graphStore.canvasBaselineEpoch', () => {
 
     useGraphStore.getState().addNodesToVisualization([{ id: 'n2' }], []);
     expect(useGraphStore.getState().canvasBaselineEpoch).toBe(0);
+  });
+});
+
+describe('graphStore.clearVisualization', () => {
+  beforeEach(() => {
+    vi.useFakeTimers();
+  });
+
+  afterEach(() => {
+    vi.useRealTimers();
+  });
+
+  // Every caller that empties the canvas without a session change — esc-esc, the
+  // toolbar clear, a search replacing the results, the guide, and the MCP-driven
+  // clear_visualization — used to leave these open. Only the keyboard path is
+  // gated on a dialog being open, so an agent can pull the canvas out from under
+  // one; confirming it afterwards mutates the global graph for a node or edge
+  // the user can no longer see.
+  it('closes the dialogs that address canvas content', () => {
+    seedDirtySessionState();
+    useGraphStore.setState({ nodes: [{ id: 'a1' }], edges: [{ id: 'e1' }] });
+
+    useGraphStore.getState().clearVisualization();
+
+    const s = useGraphStore.getState();
+    expect(s.nodes).toEqual([]);
+    expect(s.edges).toEqual([]);
+    expect(s.detailNode).toBeNull();
+    expect(s.editingNode).toBeNull();
+    expect(s.editingEdge).toBeNull();
+    expect(s.deleteDialog).toBeNull();
+    expect(s.contextMenu).toBeNull();
+  });
+
+  // A clear is not a session switch: the assistant conversation and the experts
+  // belong to the session, not to the canvas contents, and must survive it.
+  it('leaves session-scoped state that is not about canvas content alone', () => {
+    seedDirtySessionState();
+    const epoch = useGraphStore.getState().sessionEpoch;
+
+    useGraphStore.getState().clearVisualization();
+
+    const s = useGraphStore.getState();
+    expect(s.chatMessages).toHaveLength(3);
+    expect(s.activeExperts).toEqual(['expert-a']);
+    expect(s.sessionEpoch).toBe(epoch);
   });
 });
 
