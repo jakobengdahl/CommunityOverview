@@ -34,7 +34,9 @@ const node = (id) => ({ id, type: 'Actor', name: id });
 const sessionPayload = (nodes) => ({ state: { annotations: [] }, resolved: { nodes, edges: [] } });
 
 // Simulate the user working inside the currently loaded session: some assistant
-// chat, an active expert, an open node-detail dialog, and a selected node.
+// chat, an active expert, an open node-detail dialog, a selected node, and the
+// two dialogs that act on graph content — an edge open for editing and a
+// pending node-delete confirmation, both addressing this session's canvas.
 function workInsideSession(selectedId) {
   const s = useGraphStore.getState();
   s.addChatMessage({ role: 'user', content: `question about ${selectedId}` });
@@ -43,6 +45,8 @@ function workInsideSession(selectedId) {
     activeExperts: ['expert-1'],
     detailNode: node(selectedId),
   });
+  s.setEditingEdge({ id: `edge-in-${selectedId}`, source: selectedId, target: selectedId });
+  s.setDeleteDialog({ nodeId: selectedId, nodeName: selectedId, isMultiple: false });
   s.setSelectedNodeId(selectedId);
   s.setSelectedGraphNodes([node(selectedId)]);
 }
@@ -55,6 +59,13 @@ function expectCleanSession() {
   expect(s.detailNode).toBeNull();
   expect(s.selectedNodeId).toBeNull();
   expect(s.selectedGraphNodes).toEqual([]);
+  // Left open, confirming the edge dialog would PUT the previous session's edge
+  // and fan the change out through the sync client the switch has just pointed
+  // at the new session; the delete confirmation would drop a node the user is
+  // no longer looking at. App's save handlers are guarded on these being set,
+  // so closing them here is what stops both.
+  expect(s.editingEdge).toBeNull();
+  expect(s.deleteDialog).toBeNull();
 }
 
 const nodeIds = () =>
@@ -74,6 +85,8 @@ describe('session-switch state isolation (real store)', () => {
       activeExperts: [],
       detailNode: null,
       editingNode: null,
+      editingEdge: null,
+      deleteDialog: null,
       contextMenu: null,
       selectedNodeId: null,
       selectedGraphNodes: [],

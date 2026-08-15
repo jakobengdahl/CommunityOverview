@@ -29,6 +29,15 @@ import logging
 logger = logging.getLogger(__name__)
 
 
+def _is_archived(obj: Any) -> bool:
+    """True when a node/edge carries a truthy ``archived`` flag.
+
+    Uses getattr so federated or legacy objects without the field are treated as
+    not archived.
+    """
+    return bool(getattr(obj, "archived", False))
+
+
 def search_graph(
     storage: "GraphStorage",
     federation_manager: Optional["FederationManager"],
@@ -38,6 +47,12 @@ def search_graph(
     limit: int = 50,
     action: Optional[str] = None,
     federation_depth: Optional[int] = None,
+    tags_any: Optional[List[str]] = None,
+    tags_all: Optional[List[str]] = None,
+    tags_none: Optional[List[str]] = None,
+    metadata_filters: Optional[List[Dict[str, Any]]] = None,
+    include_archived: bool = False,
+    semantic: bool = False,
 ) -> Dict[str, Any]:
     decision = access.evaluate_graph_access(
         hook, action=GRAPH_ACTION_READ, target="search_graph"
@@ -47,29 +62,106 @@ def search_graph(
             action=GRAPH_ACTION_READ, target="search_graph", decision=decision
         )
 
-    logger.info(f"SEARCH: query='{query}' types={node_types} limit={limit}")
+    logger.info(
+        f"SEARCH: query='{query}' types={node_types} limit={limit} semantic={semantic}"
+    )
 
     type_filters = None
     if node_types:
         type_filters = [NodeType.from_string(t) for t in node_types]
 
-    local_results = storage.search_nodes(
-        query=query,
-        node_types=type_filters,
-        limit=max(limit, storage.get_stats().total_nodes)
-        if decision.graph_access.enabled
-        else limit,
+    # Accept the documented list-of-filters shape; tolerate a single bare dict by
+    # normalising it once here so matching and the echoed `filters` agree.
+    if isinstance(metadata_filters, dict):
+        metadata_filters = [metadata_filters]
+
+    has_generic_filters = bool(tags_all or tags_any or tags_none or metadata_filters)
+
+    def _passes_filters(node) -> bool:
+        return _node_matches_search_filters(
+            node,
+            tags_all=tags_all,
+            tags_any=tags_any,
+            tags_none=tags_none,
+            metadata_filters=metadata_filters,
+        )
+
+    # Widen the text-search window when a graph-scope narrowing or a generic
+    # tag/metadata filter is active, so post-fetch filtering sees the full
+    # candidate set instead of dropping matches that fell outside a `limit`-sized
+    # text window.
+    search_limit = (
+        max(limit, storage.get_stats().total_nodes)
+        if decision.graph_access.enabled or has_generic_filters
+        else limit
     )
 
-    visible_local_results = [
-        node
-        for node in local_results
-        if access.is_node_visible(node, decision.graph_access)
-    ][:limit]
+    def _visible_local(candidates) -> List:
+        return [
+            node
+            for node in candidates
+            if access.is_node_visible(node, decision.graph_access)
+            and _passes_filters(node)
+        ][:limit]
+
+    def _semantic_candidates():
+        return storage.semantic_search_nodes(
+            query=query,
+            node_types=type_filters,
+            limit=search_limit,
+            include_archived=include_archived,
+        )
+
+    # A match-all query ("" or "*") has no text to rank by meaning, so semantic
+    # ranking is meaningless: fall through to the lexical match-all behaviour even
+    # when semantic is requested.
+    query_is_match_all = not query or query.strip() in ("", "*")
+
+    semantic_applied = False
+    if semantic and not query_is_match_all:
+        # Explicit opt-in: rank local results by embedding meaning.
+        visible_local_results = _visible_local(_semantic_candidates())
+        semantic_applied = True
+    else:
+        local_results = storage.search_nodes(
+            query=query,
+            node_types=type_filters,
+            limit=search_limit,
+            include_archived=include_archived,
+        )
+        visible_local_results = _visible_local(local_results)
+
+        # Auto-fallback: a real (non match-all) query that the lexical text
+        # search could not match at all retries with semantic ranking. Gate on
+        # the raw lexical candidates, not the access/filter-narrowed set, so a
+        # query that *did* match locally but was then narrowed away by
+        # authorization or by tag/metadata filters is left to the federation path
+        # instead of being widened by meaning.
+        if not semantic and not local_results and not query_is_match_all:
+            fallback = _visible_local(_semantic_candidates())
+            if fallback:
+                visible_local_results = fallback
+                semantic_applied = True
+
     logger.info(f"SEARCH: Found {len(visible_local_results)} visible local results")
 
     result_node_ids = set(node.id for node in visible_local_results)
     connecting_edges = storage.get_incident_edges(list(result_node_ids))
+    if not include_archived:
+        # Drop archived edges, and edges whose other endpoint is an archived
+        # node — an archived node is hidden, so its incident edges must not leak
+        # it back into results. Mirrors get_related_nodes' _neighbor_blocked.
+        def _local_endpoint_archived(edge) -> bool:
+            for nid in (edge.source, edge.target):
+                if _is_archived(storage.get_node(nid)):
+                    return True
+            return False
+
+        connecting_edges = [
+            edge
+            for edge in connecting_edges
+            if not _is_archived(edge) and not _local_endpoint_archived(edge)
+        ]
 
     federated_nodes: List = []
     federated_edges: List = []
@@ -80,12 +172,34 @@ def search_graph(
                 query=query,
                 node_types=node_types,
                 limit=access.get_federated_search_limit(
-                    federation_manager, remaining, decision.graph_access
+                    federation_manager,
+                    remaining,
+                    decision.graph_access,
+                    widen=has_generic_filters,
                 ),
                 max_depth=federation_depth,
             )
-            federated_nodes = federated["nodes"]
-            federated_edges = federated["edges"]
+            if include_archived:
+                federated_nodes = [
+                    node for node in federated["nodes"] if _passes_filters(node)
+                ]
+                federated_edges = federated["edges"]
+            else:
+                archived_fed_ids = {
+                    node.id for node in federated["nodes"] if _is_archived(node)
+                }
+                federated_nodes = [
+                    node
+                    for node in federated["nodes"]
+                    if _passes_filters(node) and node.id not in archived_fed_ids
+                ]
+                federated_edges = [
+                    edge
+                    for edge in federated["edges"]
+                    if not _is_archived(edge)
+                    and edge.source not in archived_fed_ids
+                    and edge.target not in archived_fed_ids
+                ]
 
     all_nodes = visible_local_results + federated_nodes
     all_edges = connecting_edges + federated_edges
@@ -121,7 +235,15 @@ def search_graph(
         "edges": serialize_edges(deduped_edges),
         "total": len(visible_nodes),
         "query": query,
-        "filters": {"node_types": node_types},
+        "semantic": semantic_applied,
+        "filters": {
+            "node_types": node_types,
+            "tags_any": list(tags_any or []),
+            "tags_all": list(tags_all or []),
+            "tags_none": list(tags_none or []),
+            "metadata_filters": list(metadata_filters or []),
+            "include_archived": bool(include_archived),
+        },
         "federation": {
             "included": bool(federation_manager and federation_manager.enabled),
             "federated_nodes": len(visible_federated_nodes),
@@ -166,6 +288,7 @@ def get_related_nodes(
     node_id: str,
     relationship_types: Optional[List[str]] = None,
     depth: int = 1,
+    include_archived: bool = False,
 ) -> Dict[str, Any]:
     decision = access.evaluate_graph_access(
         hook, action=GRAPH_ACTION_READ, target="get_related_nodes"
@@ -184,7 +307,10 @@ def get_related_nodes(
         rel_filters = [RelationshipType(r) for r in relationship_types]
 
     result = storage.get_related_nodes(
-        node_id=node_id, relationship_types=rel_filters, depth=depth
+        node_id=node_id,
+        relationship_types=rel_filters,
+        depth=depth,
+        include_archived=include_archived,
     )
 
     visible_nodes, visible_edges = access.filter_nodes_and_edges(
@@ -207,20 +333,97 @@ def _matches_tag_filters(
     *,
     tags_all: Optional[List[str]] = None,
     tags_any: Optional[List[str]] = None,
+    tags_none: Optional[List[str]] = None,
 ) -> bool:
-    """Return True when ``values`` satisfies the AND/OR tag filter.
+    """Return True when ``values`` satisfies the AND/OR/NONE tag filter.
 
     ``tags_all`` (AND): every listed tag must be present.
     ``tags_any`` (OR): at least one listed tag must be present.
-    Empty/omitted lists disable that dimension. Both empty → always True.
-    The two dimensions combine with AND (a value set must pass both).
+    ``tags_none`` (NONE): none of the listed tags may be present.
+    Empty/omitted lists disable that dimension. All empty → always True.
+    The dimensions combine with AND (a value set must pass every configured one).
     """
     present = set(values or [])
     if tags_all and not set(tags_all).issubset(present):
         return False
     if tags_any and present.isdisjoint(set(tags_any)):
         return False
+    if tags_none and not present.isdisjoint(set(tags_none)):
+        return False
     return True
+
+
+def _as_value_set(raw: Any) -> set:
+    """Normalize a metadata value or a filter's requested values to a set of
+    strings, so config-neutral JSON scalars (str/int/bool) compare uniformly.
+
+    A list/tuple/set contributes each of its items; a scalar contributes itself;
+    ``None`` contributes nothing.
+    """
+    if raw is None:
+        return set()
+    if isinstance(raw, (list, tuple, set)):
+        return {str(v) for v in raw}
+    return {str(raw)}
+
+
+def _matches_metadata_filters(
+    metadata: Optional[Dict[str, Any]],
+    metadata_filters: Optional[List[Dict[str, Any]]],
+) -> bool:
+    """Return True when ``metadata`` satisfies every generic metadata filter.
+
+    Each filter is ``{"key": str, "values": [...], "match": "any"|"all"|"none"}``:
+      - ``any`` (default): the node's value(s) at ``key`` intersect the requested
+        values.
+      - ``all``: every requested value is present in the node's value(s) at
+        ``key`` (meaningful when the stored value is itself a list).
+      - ``none``: the node's value(s) at ``key`` share nothing with the requested
+        values (exclusion).
+
+    Values compare as strings so heterogeneous scalar types match uniformly. A
+    filter with no ``key`` or no ``values`` is ignored. Filters combine with AND
+    (the node must satisfy all of them). The mechanism is deliberately
+    key-agnostic — it hardcodes no field names or values.
+    """
+    if not metadata_filters:
+        return True
+    if isinstance(metadata_filters, dict):
+        metadata_filters = [metadata_filters]
+    meta = metadata or {}
+    for spec in metadata_filters:
+        if not isinstance(spec, dict):
+            continue
+        key = spec.get("key")
+        requested = _as_value_set(spec.get("values"))
+        if not key or not requested:
+            continue
+        match = str(spec.get("match") or "any").lower()
+        present = _as_value_set(meta.get(key))
+        if match == "all":
+            if not requested.issubset(present):
+                return False
+        elif match == "none":
+            if requested & present:
+                return False
+        else:  # "any" (and any unrecognised mode)
+            if present.isdisjoint(requested):
+                return False
+    return True
+
+
+def _node_matches_search_filters(
+    node: Any,
+    *,
+    tags_all: Optional[List[str]] = None,
+    tags_any: Optional[List[str]] = None,
+    tags_none: Optional[List[str]] = None,
+    metadata_filters: Optional[List[Dict[str, Any]]] = None,
+) -> bool:
+    """Combined generic tag + metadata predicate for a single node."""
+    return _matches_tag_filters(
+        node.tags, tags_all=tags_all, tags_any=tags_any, tags_none=tags_none
+    ) and _matches_metadata_filters(node.metadata, metadata_filters)
 
 
 def list_typed_nodes(
@@ -232,14 +435,16 @@ def list_typed_nodes(
     tags_any: Optional[List[str]] = None,
     subtypes_any: Optional[List[str]] = None,
     limit: int = 500,
+    include_archived: bool = False,
 ) -> Dict[str, Any]:
     """List local nodes of one type, filtered by tag/subtype, for a dedicated
     REST interface.
 
     Applies the same read authorization and graph-scope narrowing as
     ``search_graph`` so a dedicated endpoint never returns more than the generic
-    interface would. Federated nodes are out of scope for these endpoints — they
-    expose the local graph's own configured types only.
+    interface would — including excluding archived nodes/edges by default (pass
+    ``include_archived`` to include them). Federated nodes are out of scope for
+    these endpoints — they expose the local graph's own configured types only.
     """
     target = f"list_typed_nodes:{node_type}"
     decision = access.evaluate_graph_access(
@@ -255,6 +460,7 @@ def list_typed_nodes(
         for node in storage.get_all_nodes()
         if node.type_str == node_type
         and access.is_node_visible(node, decision.graph_access)
+        and (include_archived or not _is_archived(node))
         and _matches_tag_filters(node.tags, tags_all=tags_all, tags_any=tags_any)
         and (not subtypes_any or not set(node.subtypes).isdisjoint(set(subtypes_any)))
     ]
@@ -265,7 +471,9 @@ def list_typed_nodes(
     connecting_edges = [
         edge
         for edge in incident
-        if edge.source in matched_ids and edge.target in matched_ids
+        if edge.source in matched_ids
+        and edge.target in matched_ids
+        and (include_archived or not _is_archived(edge))
     ]
 
     return {
@@ -277,6 +485,7 @@ def list_typed_nodes(
             "tags_all": list(tags_all or []),
             "tags_any": list(tags_any or []),
             "subtypes_any": list(subtypes_any or []),
+            "include_archived": bool(include_archived),
         },
     }
 
@@ -289,13 +498,16 @@ def list_typed_edges(
     tags_all: Optional[List[str]] = None,
     tags_any: Optional[List[str]] = None,
     limit: int = 500,
+    include_archived: bool = False,
 ) -> Dict[str, Any]:
     """List local edges of one type for a dedicated REST interface.
 
     An edge is only returned when *both* of its endpoint nodes are visible under
     the request's graph-scope narrowing — the same rule the generic search path
     applies (``access.filter_nodes_and_edges``) — so a dedicated edge endpoint
-    cannot leak an edge into or out of a graph the caller may not see.
+    cannot leak an edge into or out of a graph the caller may not see. Archived
+    edges, and edges whose endpoint node is archived, are excluded by default
+    (pass ``include_archived`` to include them), matching ``search_graph``.
 
     Edges carry no ``tags`` field; when tag filters are configured they are
     matched against ``edge.metadata['tags']`` (a list, if present), so operators
@@ -315,11 +527,15 @@ def list_typed_edges(
     for edge in storage.get_all_edges():
         if edge.type_str != edge_type:
             continue
+        if not include_archived and _is_archived(edge):
+            continue
         source = storage.get_node(edge.source)
         targ = storage.get_node(edge.target)
         if not access.is_node_visible(source, decision.graph_access):
             continue
         if not access.is_node_visible(targ, decision.graph_access):
+            continue
+        if not include_archived and (_is_archived(source) or _is_archived(targ)):
             continue
         edge_tags = (edge.metadata or {}).get("tags") or []
         if not isinstance(edge_tags, list):
@@ -344,6 +560,7 @@ def list_typed_edges(
         "filters": {
             "tags_all": list(tags_all or []),
             "tags_any": list(tags_any or []),
+            "include_archived": bool(include_archived),
         },
     }
 

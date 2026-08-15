@@ -717,6 +717,24 @@ class TestMakeEnforcedTools:
         assert result["success"] is False
         assert "not permitted" in result["error"]
 
+    @pytest.mark.parametrize(
+        "tool_name,kwargs",
+        [
+            ("archive_nodes", {"node_ids": ["n"]}),
+            ("unarchive_nodes", {"node_ids": ["n"]}),
+            ("archive_edges", {"edge_ids": ["e"]}),
+            ("unarchive_edges", {"edge_ids": ["e"]}),
+        ],
+    )
+    def test_archive_tools_blocked_in_collection_mode(
+        self, graph_service, mock_llm_provider, tool_name, kwargs
+    ):
+        service = self._make_service(graph_service, mock_llm_provider)
+        tools = service._make_enforced_tools(ACTOR_ONLY_PERMS)
+        result = tools[tool_name](**kwargs)
+        assert result["success"] is False
+        assert "not permitted" in result["error"]
+
     def test_process_message_enforces_permissions_via_tools_override(
         self, graph_service, mock_llm_provider
     ):

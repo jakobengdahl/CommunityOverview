@@ -29,14 +29,7 @@ import {
 import { useRemotePositions } from '../hooks/useRemotePositions';
 import { useAnimatedLayout } from '../hooks/useAnimatedLayout';
 import { useCanvasHistory } from '../hooks/useCanvasHistory';
-import {
-  applyLayout,
-  getGridLayout,
-  getCircularLayout,
-  getLayoutedElements,
-  reconcileSessionNodes,
-  arrangeNodes,
-} from '../utils/graphLayout';
+import { applyLayout, reconcileSessionNodes, arrangeNodes } from '../utils/graphLayout';
 import {
   getNodeColor,
   LAZY_LOAD_THRESHOLD,
@@ -195,6 +188,13 @@ function GraphCanvasInner({
   animatedLayout = null,
   onAnimatedLayoutApplied,
   animatedLayoutResetKey = null,
+  // Bumped by the host whenever the canvas contents are replaced wholesale (a
+  // saved view loaded into the running session, an agent replace/load, the
+  // clear-canvas action), establishing a new position baseline. Distinct from
+  // the incremental position writes of `remotePositions` and `animatedLayout`,
+  // which move nodes within the *same* contents and deliberately leave the
+  // undo history intact (last-write-wins, MULTI_USER_SESSIONS_DESIGN D2).
+  canvasBaselineEpoch = null,
   agentArrangingLabel = 'Assistant is arranging the view…',
   remoteAnnotationOps = null,
   onRemoteAnnotationsApplied,
@@ -205,6 +205,9 @@ function GraphCanvasInner({
   federationDepthLevels = null,
   federationDepthLabel = 'Depth',
   federationDepthTooltip = 'Depth levels are defined by installation configuration',
+  lazyLoadShowingLabel = 'Showing {loaded} of {total} nodes',
+  lazyLoadMoreLabel = 'Load More',
+  lazyLoadHiddenConnectionsLabel = '{count} connections to nodes not yet loaded are hidden — Load More to reveal them',
   showMinimap = false,
   schema = null,
   onContextMenuAction = null,
@@ -397,6 +400,43 @@ function GraphCanvasInner({
         renderedNodeIds.has(e.target)
     );
   }, [inputEdges, hiddenNodeIds, hiddenEdgeIds, nodesToRender]);
+
+  // Count connections dropped purely by the lazy-load slice: edges from a
+  // rendered node to a real node that exists in the session but has not been
+  // loaded yet. These are exactly the edges that reappear on "Load More" — so
+  // the banner can honestly disclose how many connections the current view is
+  // hiding, instead of silently dropping them on reload of a large session.
+  // Dangling edges (an endpoint that is not in the graph at all) are excluded,
+  // matching visibleEdges, which never draws them either.
+  const hiddenConnectionCount = useMemo(() => {
+    if (visibleNodes.length <= LAZY_LOAD_THRESHOLD) {
+      return 0;
+    }
+    const renderedNodeIds = new Set(nodesToRender.map((n) => n.id));
+    const graphNodeIds = new Set(visibleNodes.map((n) => n.id));
+    let count = 0;
+    for (const e of inputEdges) {
+      if (
+        hiddenNodeIds.includes(e.source) ||
+        hiddenNodeIds.includes(e.target) ||
+        hiddenEdgeIds.includes(e.id)
+      ) {
+        continue;
+      }
+      const sourceRendered = renderedNodeIds.has(e.source);
+      const targetRendered = renderedNodeIds.has(e.target);
+      if (sourceRendered && targetRendered) {
+        continue; // already drawn by visibleEdges
+      }
+      if (!graphNodeIds.has(e.source) || !graphNodeIds.has(e.target)) {
+        continue; // dangling endpoint, not a lazy-hidden connection
+      }
+      if (sourceRendered || targetRendered) {
+        count += 1;
+      }
+    }
+    return count;
+  }, [inputEdges, visibleNodes, nodesToRender, hiddenNodeIds, hiddenEdgeIds]);
 
   // Convert to React Flow edge format
   const reactFlowEdges = useMemo(() => {
@@ -593,11 +633,14 @@ function GraphCanvasInner({
     showNotification('info', cml.redoNotification);
   }, [redoMove, applyPositionMoves, showNotification, cml.redoNotification]);
 
-  // Discard history when the session identity changes so an undo can never
-  // restore positions from a previously loaded session.
+  // Discard history whenever a new position baseline is established: the session
+  // identity changes, or the canvas contents are replaced wholesale within the
+  // session. Either way the recorded "before" positions belong to a layout that
+  // is gone, while the node ids they name can still be on the canvas — so an
+  // undo would otherwise teleport a node to a coordinate from a discarded view.
   useEffect(() => {
     clearHistory();
-  }, [animatedLayoutResetKey, clearHistory]);
+  }, [animatedLayoutResetKey, canvasBaselineEpoch, clearHistory]);
 
   // While any context menu is open, suppress the hover info popup: the node the
   // menu was opened on is still hovered, so its tooltip (portaled to the body at
@@ -1620,11 +1663,20 @@ function GraphCanvasInner({
           visibleNodes.length > LAZY_LOAD_THRESHOLD &&
           loadedNodeCount < visibleNodes.length && (
             <div className="graph-canvas-controls">
-              <div className="graph-lazy-load-info">
-                Showing {loadedNodeCount} of {visibleNodes.length} nodes
-                <button className="graph-load-more-button" onClick={handleLoadMore}>
-                  Load More
-                </button>
+              <div className="graph-lazy-load-panel">
+                <div className="graph-lazy-load-info">
+                  {lazyLoadShowingLabel
+                    .replace('{loaded}', loadedNodeCount)
+                    .replace('{total}', visibleNodes.length)}
+                  <button className="graph-load-more-button" onClick={handleLoadMore}>
+                    {lazyLoadMoreLabel}
+                  </button>
+                </div>
+                {hiddenConnectionCount > 0 && (
+                  <div className="graph-lazy-load-hidden-connections">
+                    {lazyLoadHiddenConnectionsLabel.replace('{count}', hiddenConnectionCount)}
+                  </div>
+                )}
               </div>
             </div>
           )}

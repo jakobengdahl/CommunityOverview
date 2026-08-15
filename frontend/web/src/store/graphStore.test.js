@@ -17,6 +17,8 @@ function seedDirtySessionState() {
     activeExperts: ['expert-a'],
     detailNode: { id: 'a1', name: 'Node A1' },
     editingNode: { id: 'a2', name: 'Node A2' },
+    editingEdge: { id: 'e1', source: 'a1', target: 'a2', type: 'RELATES_TO' },
+    deleteDialog: { nodeId: 'a1', nodeName: 'Node A1', isMultiple: false },
     contextMenu: { x: 1, y: 2, nodeId: 'a1' },
     selectedNodeId: 'a1',
     selectedGraphNodes: [{ id: 'a1', name: 'Node A1' }],
@@ -52,6 +54,18 @@ describe('graphStore.resetSessionScopedState', () => {
     expect(state.selectedGraphNodes).toEqual([]);
   });
 
+  // Confirming either of these after a switch acts on the previous session's
+  // graph — and the edge dialog's save fans out through the sync client, which
+  // by then belongs to the new session. Neither may survive the switch.
+  it('closes the edge-edit dialog and the pending node-delete confirmation', () => {
+    seedDirtySessionState();
+    useGraphStore.getState().resetSessionScopedState(t, 'en');
+
+    const state = useGraphStore.getState();
+    expect(state.editingEdge).toBeNull();
+    expect(state.deleteDialog).toBeNull();
+  });
+
   it('bumps the assistant epoch on every switch (A→B→A)', () => {
     seedDirtySessionState();
     const start = useGraphStore.getState().assistantSessionEpoch;
@@ -72,6 +86,42 @@ describe('graphStore.resetSessionScopedState', () => {
     expect(useGraphStore.getState().assistantSessionEpoch).toBe(start + 2);
     expect(useGraphStore.getState().chatMessages).toHaveLength(1);
     expect(useGraphStore.getState().chatMessages[0].id).toBe('welcome');
+  });
+});
+
+// The canvas keys its position undo/redo history on this counter, so what does
+// and does not bump it is the whole contract: a wholesale replacement of the
+// canvas contents establishes a new position baseline, an in-place edit does not.
+describe('graphStore.canvasBaselineEpoch', () => {
+  beforeEach(() => {
+    vi.useFakeTimers();
+    useGraphStore.setState({ canvasBaselineEpoch: 0, nodes: [], edges: [] });
+  });
+
+  afterEach(() => {
+    vi.useRealTimers();
+  });
+
+  it('advances on every wholesale canvas replacement', () => {
+    useGraphStore.getState().clearVisualization();
+    expect(useGraphStore.getState().canvasBaselineEpoch).toBe(1);
+
+    // A saved view reloaded over the top of another one: the second load must be
+    // distinguishable from the first, or the canvas keeps a history recorded
+    // against the layout in between.
+    useGraphStore.getState().clearVisualization();
+    expect(useGraphStore.getState().canvasBaselineEpoch).toBe(2);
+  });
+
+  it('does not advance on an in-place edit of the current contents', () => {
+    // updateVisualization doubles as the setter for ordinary edits (edge retype,
+    // node edit, node removal). Bumping here would silently destroy the user's
+    // undo history every time they edited a node.
+    useGraphStore.getState().updateVisualization([{ id: 'n1' }], []);
+    expect(useGraphStore.getState().canvasBaselineEpoch).toBe(0);
+
+    useGraphStore.getState().addNodesToVisualization([{ id: 'n2' }], []);
+    expect(useGraphStore.getState().canvasBaselineEpoch).toBe(0);
   });
 });
 

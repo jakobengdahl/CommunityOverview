@@ -8,7 +8,7 @@ form of this contract is `backend/agents/execution/contract.py`
 (`ExecutionStoreContractTests`), which every adapter must pass.
 **Scope:** Open-source core only. Multi-tenant / workspace isolation, per-tenant
 concurrency and retention policy, and the choice of a durable storage technology
-are **out of scope** here — see [§8 Public/private boundary](#8-publicprivate-boundary).
+are **out of scope** here — see [§9 Public/private boundary](#9-publicprivate-boundary).
 
 This contract complements [`EVENT_SUBSCRIPTIONS.md`](EVENT_SUBSCRIPTIONS.md)
 (which owns event matching and webhook delivery) and

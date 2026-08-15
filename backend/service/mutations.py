@@ -7,7 +7,7 @@ and (where required) the federation manager as explicit parameters.
 
 from typing import TYPE_CHECKING, Any, Dict, List, Optional
 
-from backend.core import Edge, Node
+from backend.core import Edge, Node, StaleUpdateError
 from backend.runtime.authorization import (
     GRAPH_ACTION_MUTATE,
     GraphAuthorizationDecision,
@@ -119,12 +119,20 @@ def update_node(
     event_origin: Optional[str] = None,
     event_session_id: Optional[str] = None,
     event_correlation_id: Optional[str] = None,
+    metadata_merge: bool = False,
+    expected_updated_at: Optional[str] = None,
 ) -> Dict[str, Any]:
-    denied = access.authorize_graph_access(
+    decision = access.evaluate_graph_access(
         hook, action=GRAPH_ACTION_MUTATE, target="update_node"
     )
-    if denied:
-        return denied
+    if not decision.allowed:
+        return access.build_access_denied_result(
+            action=GRAPH_ACTION_MUTATE, target="update_node", decision=decision
+        )
+    if decision.graph_access.enabled and not access.is_node_visible(
+        storage.get_node(node_id), decision.graph_access
+    ):
+        return {"success": False, "error": f"Node with ID {node_id} not found"}
 
     event_context = access.build_event_context(
         target="update_node",
@@ -135,8 +143,19 @@ def update_node(
 
     try:
         updated_node = storage.update_node(
-            node_id, updates, event_context=event_context
+            node_id,
+            updates,
+            event_context=event_context,
+            metadata_merge=metadata_merge,
+            expected_updated_at=expected_updated_at,
         )
+    except StaleUpdateError as e:
+        return {
+            "success": False,
+            "conflict": True,
+            "error": str(e),
+            "current_updated_at": e.current_updated_at.isoformat(),
+        }
     except ValueError as e:
         return {"success": False, "error": f"Error validating input: {e}"}
     if not updated_node:
@@ -162,13 +181,23 @@ def delete_nodes(
     event_session_id: Optional[str] = None,
     event_correlation_id: Optional[str] = None,
 ) -> Dict[str, Any]:
-    denied = access.authorize_graph_access(
+    decision = access.evaluate_graph_access(
         hook, action=GRAPH_ACTION_MUTATE, target="delete_nodes"
     )
-    if denied:
+    if not decision.allowed:
+        denied = access.build_access_denied_result(
+            action=GRAPH_ACTION_MUTATE, target="delete_nodes", decision=decision
+        )
         denied.setdefault("deleted_node_ids", [])
         denied.setdefault("affected_edge_ids", [])
         return denied
+
+    if decision.graph_access.enabled:
+        node_ids = [
+            nid
+            for nid in node_ids
+            if access.is_node_visible(storage.get_node(nid), decision.graph_access)
+        ]
 
     event_context = access.build_event_context(
         target="delete_nodes",
@@ -180,6 +209,53 @@ def delete_nodes(
     result = storage.delete_nodes(node_ids, confirmed, event_context=event_context)
     return access.attach_mutation_attribution(
         serialize_delete_result(result), event_context
+    )
+
+
+def set_nodes_archived(
+    storage: "GraphStorage",
+    hook: "GraphAuthorizationHook",
+    node_ids: List[str],
+    archived: bool,
+    event_origin: Optional[str] = None,
+    event_session_id: Optional[str] = None,
+    event_correlation_id: Optional[str] = None,
+) -> Dict[str, Any]:
+    """Archive or unarchive nodes (hide-by-default vs. permanent delete)."""
+    decision = access.evaluate_graph_access(
+        hook, action=GRAPH_ACTION_MUTATE, target="archive_nodes"
+    )
+    if not decision.allowed:
+        denied = access.build_access_denied_result(
+            action=GRAPH_ACTION_MUTATE, target="archive_nodes", decision=decision
+        )
+        denied.setdefault("node_ids", [])
+        return denied
+
+    if decision.graph_access.enabled:
+        node_ids = [
+            nid
+            for nid in node_ids
+            if access.is_node_visible(storage.get_node(nid), decision.graph_access)
+        ]
+
+    event_context = access.build_event_context(
+        target="archive_nodes",
+        event_origin=event_origin,
+        event_session_id=event_session_id,
+        event_correlation_id=event_correlation_id,
+    )
+
+    nodes = storage.set_nodes_archived(node_ids, archived, event_context=event_context)
+    return access.attach_mutation_attribution(
+        {
+            "success": True,
+            "archived": archived,
+            "node_ids": [n.id for n in nodes],
+            "nodes": serialize_nodes(nodes),
+            "action": "update_in_visualization",
+        },
+        event_context,
     )
 
 
@@ -199,11 +275,21 @@ def add_edge(
     event_session_id: Optional[str] = None,
     event_correlation_id: Optional[str] = None,
 ) -> Dict[str, Any]:
-    denied = access.authorize_graph_access(
+    decision = access.evaluate_graph_access(
         hook, action=GRAPH_ACTION_MUTATE, target="add_edge"
     )
-    if denied:
-        return denied
+    if not decision.allowed:
+        return access.build_access_denied_result(
+            action=GRAPH_ACTION_MUTATE, target="add_edge", decision=decision
+        )
+    if decision.graph_access.enabled and not (
+        access.is_node_visible(storage.get_node(source), decision.graph_access)
+        and access.is_node_visible(storage.get_node(target), decision.graph_access)
+    ):
+        return {
+            "success": False,
+            "message": "Could not add edge (source or target not found)",
+        }
 
     from backend.core.models import Edge as EdgeModel
 
@@ -252,11 +338,17 @@ def update_edge(
     event_session_id: Optional[str] = None,
     event_correlation_id: Optional[str] = None,
 ) -> Dict[str, Any]:
-    denied = access.authorize_graph_access(
+    decision = access.evaluate_graph_access(
         hook, action=GRAPH_ACTION_MUTATE, target="update_edge"
     )
-    if denied:
-        return denied
+    if not decision.allowed:
+        return access.build_access_denied_result(
+            action=GRAPH_ACTION_MUTATE, target="update_edge", decision=decision
+        )
+    if decision.graph_access.enabled and not access.is_edge_visible(
+        storage.edges.get(edge_id), storage, decision.graph_access
+    ):
+        return {"success": False, "error": f"Edge with ID {edge_id} not found"}
 
     event_context = access.build_event_context(
         target="update_edge",
@@ -283,11 +375,17 @@ def delete_edge(
     event_session_id: Optional[str] = None,
     event_correlation_id: Optional[str] = None,
 ) -> Dict[str, Any]:
-    denied = access.authorize_graph_access(
+    decision = access.evaluate_graph_access(
         hook, action=GRAPH_ACTION_MUTATE, target="delete_edge"
     )
-    if denied:
-        return denied
+    if not decision.allowed:
+        return access.build_access_denied_result(
+            action=GRAPH_ACTION_MUTATE, target="delete_edge", decision=decision
+        )
+    if decision.graph_access.enabled and not access.is_edge_visible(
+        storage.edges.get(edge_id), storage, decision.graph_access
+    ):
+        return {"success": False, "error": f"Edge with ID {edge_id} not found"}
 
     event_context = access.build_event_context(
         target="delete_edge",
@@ -314,10 +412,13 @@ def delete_edges(
     event_session_id: Optional[str] = None,
     event_correlation_id: Optional[str] = None,
 ) -> Dict[str, Any]:
-    denied = access.authorize_graph_access(
+    decision = access.evaluate_graph_access(
         hook, action=GRAPH_ACTION_MUTATE, target="delete_edges"
     )
-    if denied:
+    if not decision.allowed:
+        denied = access.build_access_denied_result(
+            action=GRAPH_ACTION_MUTATE, target="delete_edges", decision=decision
+        )
         denied.setdefault("deleted_edge_ids", [])
         return denied
 
@@ -335,6 +436,15 @@ def delete_edges(
             "message": "Deletion requires confirmed=True. Please confirm before proceeding.",
         }
 
+    if decision.graph_access.enabled:
+        edge_ids = [
+            eid
+            for eid in edge_ids
+            if access.is_edge_visible(
+                storage.edges.get(eid), storage, decision.graph_access
+            )
+        ]
+
     event_context = access.build_event_context(
         target="delete_edges",
         event_origin=event_origin,
@@ -345,6 +455,55 @@ def delete_edges(
     result = storage.delete_edges(edge_ids, event_context=event_context)
     return access.attach_mutation_attribution(
         serialize_delete_edges_result(result), event_context
+    )
+
+
+def set_edges_archived(
+    storage: "GraphStorage",
+    hook: "GraphAuthorizationHook",
+    edge_ids: List[str],
+    archived: bool,
+    event_origin: Optional[str] = None,
+    event_session_id: Optional[str] = None,
+    event_correlation_id: Optional[str] = None,
+) -> Dict[str, Any]:
+    """Archive or unarchive edges (hide-by-default vs. permanent delete)."""
+    decision = access.evaluate_graph_access(
+        hook, action=GRAPH_ACTION_MUTATE, target="archive_edges"
+    )
+    if not decision.allowed:
+        denied = access.build_access_denied_result(
+            action=GRAPH_ACTION_MUTATE, target="archive_edges", decision=decision
+        )
+        denied.setdefault("edge_ids", [])
+        return denied
+
+    if decision.graph_access.enabled:
+        edge_ids = [
+            eid
+            for eid in edge_ids
+            if access.is_edge_visible(
+                storage.edges.get(eid), storage, decision.graph_access
+            )
+        ]
+
+    event_context = access.build_event_context(
+        target="archive_edges",
+        event_origin=event_origin,
+        event_session_id=event_session_id,
+        event_correlation_id=event_correlation_id,
+    )
+
+    edges = storage.set_edges_archived(edge_ids, archived, event_context=event_context)
+    return access.attach_mutation_attribution(
+        {
+            "success": True,
+            "archived": archived,
+            "edge_ids": [e.id for e in edges],
+            "edges": serialize_edges(edges),
+            "action": "update_in_visualization",
+        },
+        event_context,
     )
 
 

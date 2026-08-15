@@ -152,6 +152,10 @@ lays them out overlap-free. The same arrangements are available from the keyboar
 
 Moving nodes can be undone: **Ctrl/Cmd+Z** reverses the last node move (a drag or an
 Organize arrangement), and **Ctrl/Cmd+Shift+Z** (or **Ctrl/Cmd+Y**) reapplies it.
+The undo history covers the layout you are looking at, so it is discarded whenever the
+canvas is repopulated — switching session, loading a saved view, or clearing the board.
+Moves made by other people in the session, or by an assistant arranging the view, do not
+discard it: your undo still reverses your own last move.
 
 ### 2.5 Groups and annotations
 
@@ -430,7 +434,10 @@ another.
 
 Deleting a session removes its content for everyone. If you delete the session
 you are currently in, a fresh empty session is created and you are switched into
-it automatically. When other people are connected to a session you delete, the
+it automatically, with a notice; the same happens if someone else deletes the
+session you are in. Either way the new session starts clean in exactly the way
+described above — no chat history, experts, or open node from the deleted session
+follow you into it. When other people are connected to a session you delete, the
 confirmation warns you how many are currently in it.
 
 ### 5.1 Collaborating in a session

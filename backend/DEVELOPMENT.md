@@ -61,6 +61,28 @@ packages/
                     └─────────────┘
 ```
 
+**Authorization seam (reads *and* mutations):**
+
+Every GraphService operation is gated by a pluggable `GraphAuthorizationHook`
+(`backend/runtime/authorization.py`). The hook returns an allow/deny decision
+plus an optional `GraphAccessNarrowing` that restricts which graphs the request
+may see. Both halves are enforced consistently:
+
+- **Reads** deny when disallowed, then hide any node/edge outside the narrowed
+  scope (`search_graph`, `get_node_details`, saved views, stats, the custom REST
+  interfaces).
+- **Mutations** apply the same narrowing to their *target*: `update_node` /
+  `delete_nodes` / `update_edge` / `delete_edge` / `delete_edges` refuse to touch
+  an existing entity the caller could not read (returning the same not-found the
+  read paths return; batch deletes fail closed by dropping out-of-scope ids), and
+  `add_edge` refuses an endpoint outside scope. So a caller can never mutate or
+  destroy data they are not allowed to see. Edge scope is derived from endpoint
+  visibility, mirroring the read paths.
+
+The shipped `DefaultGraphAuthorizationHook` is permissive with narrowing
+disabled, so file-only/standalone mode is unaffected; the hosted layer swaps in a
+hook that narrows per tenant/workspace/graph without forking the core.
+
 ### Event System & Agents
 
 The system includes an event-driven architecture for webhooks and AI agents:
@@ -327,9 +349,11 @@ The default API prefix is `/api` (configurable via `API_PREFIX`).
 | POST | `/api/nodes` | Add nodes and edges |
 | PATCH | `/api/nodes/{id}` | Update a node |
 | DELETE | `/api/nodes` | Delete nodes |
+| POST | `/api/nodes/archive` | Archive/unarchive nodes (`archived` flag; hide-by-default vs. permanent delete) |
 | POST | `/api/edges` | Add edges |
 | PATCH | `/api/edges/{id}` | Update an edge |
 | DELETE | `/api/edges/{id}` | Delete an edge |
+| POST | `/api/edges/archive` | Archive/unarchive edges (`archived` flag) |
 | GET | `/api/history` | Recent graph mutation history (newest first; `limit`, `offset`) |
 | GET | `/api/nodes/{id}/history` | Mutation history for a single node |
 | GET | `/api/edges/{id}/history` | Mutation history for a single edge |
@@ -353,6 +377,172 @@ The default API prefix is `/api` (configurable via `API_PREFIX`).
 | POST | `/agents/proposals/{proposal_id}/approve` | Approve a proposal (applies the action for act_after_approval agents) |
 | POST | `/agents/proposals/{proposal_id}/reject` | Reject a proposal |
 | POST | `/agents/{id}/trigger` | Fire a scheduled agent immediately (used by GCP Cloud Scheduler) |
+
+### Generic search filters (`/api/search` and the `search_graph` MCP tool)
+
+Beyond the text `query` and `node_types`, search accepts generic, config-neutral
+tag and metadata filters. They match on whatever tags and metadata a deployment
+has put on its nodes and hardcode no field names or values, so the same mechanism
+serves any use case. Omitting all of them leaves search behaviour unchanged.
+
+| Parameter | Meaning |
+|-----------|---------|
+| `tags_any` | Keep nodes carrying **at least one** of these tags (OR). |
+| `tags_all` | Keep nodes carrying **every** one of these tags (AND). |
+| `tags_none` | Drop nodes carrying **any** of these tags (exclude). |
+| `metadata_filters` | List of generic metadata filters (see below). |
+
+Each entry in `metadata_filters` is an object
+`{"key": <field>, "values": [...], "match": "any"|"all"|"none"}`:
+
+- `any` (default): the node's metadata value(s) at `key` intersect the requested
+  values.
+- `all`: every requested value is present in the node's value(s) at `key`
+  (meaningful when the stored value is itself a list).
+- `none`: the node's value(s) at `key` share nothing with the requested values.
+
+Values compare as strings, so heterogeneous scalar types (e.g. an integer stored
+in metadata vs. a string filter value) match uniformly. A filter with no `key` or
+no `values` is ignored. The tag dimensions and every metadata filter combine with
+AND — a node must satisfy all configured constraints. Pass an empty `query` (`""`)
+to filter purely by tags/metadata. The applied filters are echoed back under
+`result["filters"]`. The REST endpoint and the `search_graph` MCP tool expose the
+same parameters.
+
+### Semantic search (`semantic` flag on `/api/search` and `search_graph`)
+
+The default `query` is matched **lexically** (case-insensitive substring over
+name, description, summary, tags, subtypes, aliases and type label). Multi-word or
+natural-language queries that no node contains verbatim therefore return nothing.
+
+| Parameter | Meaning |
+|-----------|---------|
+| `semantic` | When `true`, rank results by **embedding meaning** (cosine similarity) instead of lexical substring matching. Default `false`. |
+
+Semantic ranking reuses the same embedding path as `find_similar_nodes`: node
+embeddings are built from `name + summary + description + tags` on create/update,
+and the query text is embedded and compared with cosine similarity, keeping hits
+above a similarity threshold ordered by score. No new dependency is involved — in
+the ML-free base install the embedding model is unavailable, so the vector search
+degrades to returning nothing (and, for `semantic=true`, an empty result) rather
+than failing.
+
+Two behaviours make this safe and backward compatible:
+
+- **Opt-in ranking.** `semantic=false` (the default) is unchanged lexical search.
+- **Automatic fallback.** When a non-empty, non-`*` query produces **zero lexical
+  matches**, the search retries once with semantic ranking, so a conceptual query
+  still surfaces the closest nodes. The fallback is gated on the raw lexical
+  matches, not the access/filter-narrowed result, so a query that *did* match
+  locally but was then narrowed away by authorization or by tag/metadata filters
+  is left to the federation path rather than widened by meaning. It never changes
+  results when lexical already returned hits. A match-all query (`""` or `*`) has
+  no text to rank by meaning, so `semantic=true` falls through to the lexical
+  match-all behaviour.
+
+The response includes a top-level `"semantic"` boolean indicating whether semantic
+ranking (explicit or fallback) produced the returned nodes. Semantic ranking
+applies to the local graph; federated search remains lexical. Tag/metadata
+filters, `node_types`, archived exclusion and `limit` all still apply to semantic
+results.
+
+### Archived lifecycle (`archived` flag on nodes and edges)
+
+Both nodes and edges carry a generic boolean `archived` field (default `false`).
+Archiving is a *hide-by-default* lifecycle state, distinct from deletion:
+
+- **Archive** hides an item from search and traversal while keeping it — and its
+  history — in the graph. It is reversible.
+- **Delete** removes the item permanently.
+
+The flag is use-case neutral: the platform hardcodes no semantics for *why*
+something is archived. It is backward compatible — graph data written before the
+flag existed loads as not archived (absent = `false`), and serialization simply
+gains an `archived` key, so no data migration is required.
+
+**Default-exclude with an explicit opt-in.** `search_graph` and
+`get_related_nodes` (across REST, MCP and the chat tools) exclude archived nodes
+and edges by default. Pass `include_archived=true` to include them — for example
+to find an archived node so it can be restored. In traversal, an archived edge is
+not followed and an archived neighbour is not reached (so an archived node cannot
+re-enter results via a later hop); the starting node is always returned as the
+anchor. A fetch by id (`GET /api/nodes/{id}` / `get_node_details`) still returns an
+archived node — the default-exclude applies to search and traversal, not to direct
+lookups. Federated nodes/edges preserve the origin graph's `archived` flag, so a
+node archived upstream stays hidden downstream.
+
+**Mutations.** Archiving goes through dedicated operations rather than a generic
+field update (a generic `update_node` cannot set `archived`):
+
+| REST | MCP tools |
+|------|-----------|
+| `POST /api/nodes/archive` (`archived: true\|false`) | `archive_nodes` / `unarchive_nodes` |
+| `POST /api/edges/archive` (`archived: true\|false`) | `archive_edges` / `unarchive_edges` |
+
+Archiving emits the same `node.update` / `edge.update` events as any other change,
+and is idempotent (re-archiving an already-archived item is a no-op that still
+reports success). In collection (kiosk) mode the archive/unarchive tools are
+blocked, mirroring the edge-deletion block.
+
+When a filter is active the text-search window is widened (locally, and across
+the federation cache) so post-filter results are not truncated by the `limit`. The
+final `limit` still bounds the returned nodes; as with unfiltered search, local
+matches are counted first and federated results only fill the remainder.
+
+Example (nodes tagged `partner`, excluding any tagged `archived`, whose
+`stage` metadata is `active` or `pilot`):
+
+```json
+{
+  "query": "",
+  "tags_any": ["partner"],
+  "tags_none": ["archived"],
+  "metadata_filters": [{"key": "stage", "values": ["active", "pilot"]}]
+}
+```
+
+### Updating a node — metadata merge and optimistic concurrency
+
+`update_node` (`PATCH /api/nodes/{id}` and the `update_node` MCP tool) accepts the
+mutable fields `name`, `description`, `summary`, `tags`, `subtypes`, `aliases`,
+`metadata`, plus any schema-defined extra fields (folded into `metadata`). Two
+opt-in parameters control how the write is applied; both default off, so existing
+callers are unaffected.
+
+**`metadata_merge` (bool, default `false`) — field-level merge/patch.** By default
+an explicit `metadata` object *replaces* the whole stored object, so a caller must
+resend every key or it is dropped. With `metadata_merge: true`, the supplied
+`metadata` is merged onto the existing metadata at the top level:
+
+- keys you send are set (nested objects are replaced wholesale, not merged
+  recursively — the merge is top-level only);
+- keys you do **not** send are preserved;
+- a key whose value is `null` is **removed** (RFC 7386 JSON-Merge-Patch
+  convention).
+
+This makes concurrent writebacks that each touch a different key safe — no caller
+clobbers another's metadata by omitting it.
+
+**`expected_updated_at` (string, optional) — optimistic concurrency guard.** Pass
+the `updated_at` value you last read for the node. If the node's live `updated_at`
+no longer matches (someone wrote to it since you read it), the update is rejected
+instead of silently overwriting the concurrent change:
+
+- REST returns **HTTP 409 Conflict**;
+- MCP / service returns `{"success": false, "conflict": true, "current_updated_at": "<iso>"}`.
+
+The `current_updated_at` in the conflict result is the live value, so a caller can
+re-read (or re-use it) and retry.
+
+Example — set one metadata key and remove another, only if the node is unchanged:
+
+```json
+{
+  "updates": {"metadata": {"stage": "pilot", "draft": null}},
+  "metadata_merge": true,
+  "expected_updated_at": "2026-08-13T09:15:04.123456+00:00"
+}
+```
 
 ### Custom REST Interfaces (config-driven)
 
@@ -501,9 +691,11 @@ can configure one. See `docs/EVENT_SUBSCRIPTIONS.md`.
 | `add_nodes` | Add new nodes and edges |
 | `update_node` | Update node properties |
 | `delete_nodes` | Delete nodes by ID |
+| `archive_nodes` / `unarchive_nodes` | Hide/restore nodes via the `archived` flag (see Archived lifecycle) |
+| `archive_edges` / `unarchive_edges` | Hide/restore edges via the `archived` flag |
 | `get_graph_stats` | Get graph statistics |
 | `save_view` | Save a named view (creates SavedView node) |
-| `get_visualization_layout` | Read every node's model-space position in an open session (for an agent to compute a new arrangement) |
+| `get_visualization_layout` | Read every node's model-space position, type and status in an open session, plus the current selection (for an agent to compute a new arrangement) |
 | `apply_visualization_layout` | Move nodes in an open session by absolute positions or deltas; applied atomically, animated on the canvas, and mirrored live to all connected browsers |
 | `create_visualization_session` | Create a new empty session (optional non-unique name; server assigns a default when omitted) |
 | `list_visualization_sessions` | List existing sessions, most recently updated first |
@@ -527,6 +719,42 @@ coordinate model, absolute vs. delta moves, atomic batching and caps, the
 animation seam and the `layout_applied` broadcast shape — are the versioned
 contract in
 [`docs/MCP_VISUALIZATION_LAYOUT_CONTRACT.md`](../docs/MCP_VISUALIZATION_LAYOUT_CONTRACT.md).
+
+##### `get_visualization_layout` response
+
+| Field | Type | Notes |
+|---|---|---|
+| `session_id` | string | Echo of the requested id. |
+| `revision` | int | Monotonic op sequence; pass back as `expected_revision`. |
+| `node_count` | int | Number of nodes referenced by the session. |
+| `nodes[].id` | string | The session's node reference. |
+| `nodes[].x` / `nodes[].y` | number \| null | Model-space top-left; `null` when unset. |
+| `nodes[].hidden` | bool | Hidden in the session. The visible set is the nodes with `hidden` false. |
+| `nodes[].type` | string \| null | Graph node type, e.g. `"Initiative"`. `null` when the reference does not resolve to a node this caller may read. |
+| `nodes[].status` | string \| null | The node's `metadata["status"]` when the deployment stores one as a non-blank string, whitespace-trimmed; `null` otherwise. |
+| `selected_node_ids` | string[] | Currently selected **nodes**, same value as `get_visualization_session_state`. Selection claims are taken on elements, so edge claims are filtered out — every id here is one of this response's `nodes`. |
+| `assumed_node_size` | object | `{ width, height }` for collision spacing. |
+| `coordinate_space` | string | Restatement of the coordinate model. |
+| `connected_clients` | int | How many browsers are attached. |
+
+`type` and `status` exist so an agent can arrange by meaning — type columns,
+status swimlanes — instead of inferring meaning from id prefixes or issuing a
+`get_node_details` call per node. `status` is a **convention**, not a schema
+field: this repo's schema defines no `status`, so a deployment that does not use
+`metadata["status"]` gets `null`, which means *unknown*, not *no status*. Both
+fields respect graph-scope narrowing: a node the caller may not read keeps its
+geometry entry with `type`/`status` `null`, so a layout never silently drops a
+node it must still place. Per-node measured `width`/`height` remain unavailable —
+the browser does not upload rendered geometry and node boxes size to their
+content, so `assumed_node_size` is still the only sizing input.
+
+`selected_node_ids` is merged in so "what is here and where is it" is one call.
+The visible set is deliberately not duplicated here — it is already the `nodes`
+entries with `hidden` false. The selection comes from the advisory claim map,
+whose claims are on session *elements* (an edge can be claimed as well as a
+node), so both this tool and `get_visualization_session_state` narrow the field
+to the session's node references: an id read from it can always be passed back
+into a node argument such as `apply_visualization_layout`'s positions map.
 
 #### Arranging a session (agent recipes)
 
@@ -559,10 +787,18 @@ returned `revision` into the next `expected_revision`.
 - **Grid.** Place N nodes in a `cols`-wide grid:
   `x = (i % cols) * (width + gap)`, `y = (i // cols) * (height + gap)`.
 
-- **Swimlanes.** Give each lane (e.g. a node type or status) a fixed `y` band and
-  lay its members out along `x`: `y = lane_index * (height + lane_gap)`,
-  `x = position_in_lane * (width + gap)`. Lanes are pure geometry here — the
-  contract moves individual node positions and does not group them (§8).
+- **Swimlanes.** Give each lane a fixed `y` band and lay its members out along
+  `x`: `y = lane_index * (height + lane_gap)`,
+  `x = position_in_lane * (width + gap)`. Take the lane key from the same read —
+  `nodes[].type` or `nodes[].status` — rather than from the node id or a
+  `get_node_details` call per node; group the `null`s into an explicit "unknown"
+  lane rather than dropping them. Lanes are pure geometry here — the contract
+  moves individual node positions and does not group them (§8).
+
+  ```python
+  layout = get_visualization_layout(session_id=sid)
+  lanes = sorted({n["status"] or "unknown" for n in layout["nodes"]})
+  ```
 
 - **Create a named, shareable session from scratch** — never assume a hostname:
 

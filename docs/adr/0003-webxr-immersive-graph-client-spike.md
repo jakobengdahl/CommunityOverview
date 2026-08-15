@@ -1,4 +1,4 @@
-# ADR 0002 — WebXR immersive graph client (Quest) — spike
+# ADR 0003 — WebXR immersive graph client (Quest) — spike
 
 - **Status:** Proposed (spike / exploratory)
 - **Date:** 2026-08-12

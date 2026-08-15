@@ -196,19 +196,17 @@ export default function CreateActiveKnowledgeCollectionDialog({ onClose, onSave,
     e.preventDefault();
 
     if (!name.trim()) {
-      alert('Name is required');
+      alert(t('active_data_collection.alert_name_required'));
       return;
     }
 
     if (!shortName.trim()) {
-      alert('Short name is required');
+      alert(t('active_data_collection.alert_short_name_required'));
       return;
     }
 
     if (!isShortNameValid(shortName.trim())) {
-      alert(
-        'Short name must only contain lowercase letters, numbers, and hyphens (e.g. my-collection)'
-      );
+      alert(t('active_data_collection.alert_short_name_invalid'));
       return;
     }
 
@@ -218,9 +216,7 @@ export default function CreateActiveKnowledgeCollectionDialog({ onClose, onSave,
     // so require at least one tool or turning the restriction off.
     const selectedTools = ASSISTANT_TOOLS.filter((t) => allowedTools[t.name]).map((t) => t.name);
     if (restrictTools && selectedTools.length === 0) {
-      alert(
-        'Select at least one tool, or turn off "Restrict which tools the assistant can use" to allow all tools.'
-      );
+      alert(t('active_data_collection.alert_no_tools'));
       return;
     }
 
@@ -265,34 +261,35 @@ export default function CreateActiveKnowledgeCollectionDialog({ onClose, onSave,
         style={{ maxWidth: '680px' }}
         onClick={(e) => e.stopPropagation()}
       >
-        <h2>{initialData ? 'Edit Knowledge Collection' : 'Create Knowledge Collection'}</h2>
-        <p className="dialog-description">
-          An Active Knowledge Collection lets you set up a structured data-gathering session with a
-          special AI assistant available via a dedicated kiosk link.
-        </p>
+        <h2>
+          {initialData
+            ? t('active_data_collection.title_edit')
+            : t('active_data_collection.title_create')}
+        </h2>
+        <p className="dialog-description">{t('active_data_collection.dialog_description')}</p>
 
         <form onSubmit={handleSubmit}>
           {/* ── Section 1: Basic Info ─────────────────────────────── */}
           <div className="form-section">
-            <h3>Basic Information</h3>
+            <h3>{t('active_data_collection.section_basic')}</h3>
 
             <div className="form-group">
-              <label htmlFor="akc-name">Name *</label>
+              <label htmlFor="akc-name">{t('active_data_collection.name_label')} *</label>
               <input
                 id="akc-name"
                 type="text"
                 value={name}
                 onChange={(e) => handleNameChange(e.target.value)}
-                placeholder="e.g. 'Q1 Partner Feedback'"
+                placeholder={t('active_data_collection.name_placeholder')}
                 required
               />
             </div>
 
             <div className="form-group">
               <label htmlFor="akc-short-name">
-                Short Name *{' '}
+                {t('active_data_collection.short_name_label')} *{' '}
                 <span style={{ color: '#888', fontWeight: 'normal', fontSize: '0.8rem' }}>
-                  (URL identifier — must be unique)
+                  {t('active_data_collection.short_name_note')}
                 </span>
               </label>
               <input
@@ -302,84 +299,70 @@ export default function CreateActiveKnowledgeCollectionDialog({ onClose, onSave,
                 onChange={(e) =>
                   setShortName(e.target.value.toLowerCase().replace(/[^a-z0-9-]/g, ''))
                 }
-                placeholder="e.g. q1-partner-feedback"
+                placeholder={t('active_data_collection.short_name_placeholder')}
                 required
                 style={shortNameInvalid ? { borderColor: '#EF4444' } : {}}
               />
               {shortNameInvalid && (
                 <small style={{ color: '#EF4444' }}>
-                  Only lowercase letters, numbers, and hyphens are allowed.
+                  {t('active_data_collection.short_name_invalid')}
                 </small>
               )}
-              {!shortNameInvalid && (
-                <small>Used as a URL identifier. Must be unique across all collections.</small>
-              )}
+              {!shortNameInvalid && <small>{t('active_data_collection.short_name_help')}</small>}
             </div>
 
             <div className="form-group">
-              <label htmlFor="akc-description">Description</label>
+              <label htmlFor="akc-description">
+                {t('active_data_collection.description_label')}
+              </label>
               <textarea
                 id="akc-description"
                 value={description}
                 onChange={(e) => setDescription(e.target.value)}
-                placeholder="Describe the purpose of this knowledge collection"
+                placeholder={t('active_data_collection.description_placeholder')}
                 rows={2}
               />
             </div>
 
             <div className="form-group">
-              <label htmlFor="akc-aliases">Aliases / synonyms (comma-separated)</label>
+              <label htmlFor="akc-aliases">{t('active_data_collection.aliases_label')}</label>
               <input
                 id="akc-aliases"
                 type="text"
                 value={aliases}
                 onChange={(e) => setAliases(e.target.value)}
-                placeholder="alternative name, abbreviation, synonym"
+                placeholder={t('active_data_collection.aliases_placeholder')}
               />
             </div>
           </div>
 
           {/* ── Section 2: Collection Configuration ──────────────── */}
           <div className="form-section">
-            <h3>Collection Configuration</h3>
+            <h3>{t('active_data_collection.section_config')}</h3>
 
             <div className="form-group">
-              <label htmlFor="akc-intro">Introduction Text</label>
+              <label htmlFor="akc-intro">{t('active_data_collection.intro_label')}</label>
               <textarea
                 id="akc-intro"
                 value={introductionText}
                 onChange={(e) => setIntroductionText(e.target.value)}
-                placeholder="Write the text shown to users when they open the collection link. Explain who you are, what information you are gathering, and why."
+                placeholder={t('active_data_collection.intro_placeholder')}
                 rows={4}
               />
-              <small>
-                Shown to users when they open the collection link (before the chat starts).
-              </small>
+              <small>{t('active_data_collection.intro_help')}</small>
             </div>
 
             <div className="form-group">
-              <label htmlFor="akc-prompt">Prompt for AI Collector Assistant</label>
+              <label htmlFor="akc-prompt">{t('active_data_collection.prompt_label')}</label>
               <textarea
                 id="akc-prompt"
                 value={prompt}
                 onChange={(e) => setPrompt(e.target.value)}
-                placeholder={`Describe how the AI assistant should guide the data collection. Example:
-
-You are collecting information about digital initiatives from government agencies.
-Ask the user about:
-1. Their organization name and role
-2. Current digital projects they are involved in
-3. Challenges they are facing
-4. Resources or tools they use
-
-Add each item to the knowledge graph as appropriate.`}
+                placeholder={t('active_data_collection.prompt_placeholder')}
                 rows={8}
                 style={{ fontFamily: 'monospace', fontSize: '0.85rem' }}
               />
-              <small>
-                The AI assistant will use this as its special instructions for guiding data
-                collection. The standard graph assistant prompt is automatically appended.
-              </small>
+              <small>{t('active_data_collection.prompt_help')}</small>
             </div>
 
             <div className="form-group">
@@ -411,13 +394,13 @@ Add each item to the knowledge graph as appropriate.`}
 
           {/* ── Section 3: Node Type Permissions ─────────────────── */}
           <div className="form-section">
-            <h3>Node Type Permissions</h3>
+            <h3>{t('active_data_collection.section_permissions')}</h3>
             <p style={{ margin: '0 0 0.75rem 0', color: '#888', fontSize: '0.85rem' }}>
-              Control which operations the AI assistant is permitted to perform for each node type.
+              {t('active_data_collection.permissions_help')}
             </p>
 
             {nodeTypes.length === 0 ? (
-              <p style={{ color: '#888' }}>Loading node types…</p>
+              <p style={{ color: '#888' }}>{t('active_data_collection.loading_node_types')}</p>
             ) : (
               <div style={{ overflowX: 'auto' }}>
                 <table
@@ -431,16 +414,16 @@ Add each item to the knowledge graph as appropriate.`}
                   <thead>
                     <tr style={{ borderBottom: '1px solid #444' }}>
                       <th style={{ textAlign: 'left', padding: '0.4rem 0.5rem', color: '#aaa' }}>
-                        Node Type
+                        {t('active_data_collection.col_node_type')}
                       </th>
                       <th style={{ textAlign: 'center', padding: '0.4rem 0.5rem', color: '#aaa' }}>
-                        Can Create
+                        {t('active_data_collection.col_can_create')}
                       </th>
                       <th style={{ textAlign: 'center', padding: '0.4rem 0.5rem', color: '#aaa' }}>
-                        Can Update
+                        {t('active_data_collection.col_can_update')}
                       </th>
                       <th style={{ textAlign: 'center', padding: '0.4rem 0.5rem', color: '#aaa' }}>
-                        Can Delete
+                        {t('active_data_collection.col_can_delete')}
                       </th>
                     </tr>
                   </thead>
@@ -480,11 +463,9 @@ Add each item to the knowledge graph as appropriate.`}
 
           {/* ── Section 4: Assistant Tools ───────────────────────── */}
           <div className="form-section">
-            <h3>Assistant Tools</h3>
+            <h3>{t('active_data_collection.section_tools')}</h3>
             <p style={{ margin: '0 0 0.75rem 0', color: '#888', fontSize: '0.85rem' }}>
-              Control which tools the kiosk AI assistant is allowed to use. By default the assistant
-              may use all available tools. Restrict this to an explicit allowlist to give the
-              collection assistant only the tools it needs. The allowlist is enforced server-side.
+              {t('active_data_collection.tools_help')}
             </p>
 
             <label
@@ -497,7 +478,7 @@ Add each item to the knowledge graph as appropriate.`}
                 style={{ accentColor: '#646cff', width: '1rem', height: '1rem', cursor: 'pointer' }}
               />
               <span style={{ color: '#ddd', fontSize: '0.9rem' }}>
-                Restrict which tools the assistant can use
+                {t('active_data_collection.restrict_tools_label')}
               </span>
             </label>
 
@@ -533,7 +514,9 @@ Add each item to the knowledge graph as appropriate.`}
                         cursor: 'pointer',
                       }}
                     />
-                    <span>{tool.label}</span>
+                    <span>
+                      {t(`active_data_collection.tools.${tool.name}`, undefined, tool.label)}
+                    </span>
                   </label>
                 ))}
               </div>
@@ -542,14 +525,15 @@ Add each item to the knowledge graph as appropriate.`}
 
           {/* ── Section 5: Shareable URLs ─────────────────────────── */}
           <div className="form-section" style={{ borderBottom: 'none' }}>
-            <h3>Shareable URLs</h3>
+            <h3>{t('active_data_collection.section_urls')}</h3>
 
             {/* Kiosk URL */}
             <div style={{ marginBottom: '1rem' }}>
               <p style={{ margin: '0 0 0.4rem 0', color: '#aaa', fontSize: '0.85rem' }}>
-                <strong style={{ color: '#ddd' }}>Kiosk Collection URL</strong> — Send this to
-                people you want to gather knowledge from. They will see a focused AI assistant
-                without the full graph interface.
+                <strong style={{ color: '#ddd' }}>
+                  {t('active_data_collection.kiosk_url_label')}
+                </strong>{' '}
+                {t('active_data_collection.kiosk_url_help')}
               </p>
               <div
                 style={{
@@ -592,10 +576,12 @@ Add each item to the knowledge graph as appropriate.`}
                     transition: 'background 0.2s',
                     whiteSpace: 'nowrap',
                   }}
-                  title="Copy kiosk URL"
+                  title={t('active_data_collection.copy_kiosk_title')}
                 >
                   <ClipboardFill size={12} />
-                  {copiedKiosk ? 'Copied!' : 'Copy'}
+                  {copiedKiosk
+                    ? t('active_data_collection.copied')
+                    : t('active_data_collection.copy')}
                 </button>
               </div>
             </div>
@@ -603,8 +589,10 @@ Add each item to the knowledge graph as appropriate.`}
             {/* Full App URL */}
             <div>
               <p style={{ margin: '0 0 0.4rem 0', color: '#aaa', fontSize: '0.85rem' }}>
-                <strong style={{ color: '#ddd' }}>Full App Collection URL</strong> — Send this to
-                allow full graph access with the special collection assistant pre-loaded.
+                <strong style={{ color: '#ddd' }}>
+                  {t('active_data_collection.full_url_label')}
+                </strong>{' '}
+                {t('active_data_collection.full_url_help')}
               </p>
               <div
                 style={{
@@ -647,10 +635,12 @@ Add each item to the knowledge graph as appropriate.`}
                     transition: 'background 0.2s',
                     whiteSpace: 'nowrap',
                   }}
-                  title="Copy full app URL"
+                  title={t('active_data_collection.copy_full_title')}
                 >
                   <ClipboardFill size={12} />
-                  {copiedFull ? 'Copied!' : 'Copy'}
+                  {copiedFull
+                    ? t('active_data_collection.copied')
+                    : t('active_data_collection.copy')}
                 </button>
               </div>
             </div>
@@ -658,10 +648,12 @@ Add each item to the knowledge graph as appropriate.`}
 
           <div className="dialog-actions">
             <button type="button" className="btn-secondary" onClick={onClose}>
-              Cancel
+              {t('common.cancel')}
             </button>
             <button type="submit" className="btn-primary">
-              {initialData ? 'Save Changes' : 'Create Collection'}
+              {initialData
+                ? t('active_data_collection.save_changes')
+                : t('active_data_collection.create_collection')}
             </button>
           </div>
         </form>
