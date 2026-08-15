@@ -56,6 +56,11 @@ function backendSystemNodeTypes() {
   const block = backendSource().match(/^SYSTEM_NODE_TYPES = \{$(.*?)^\}$/ms);
   if (!block) throw new Error(`SYSTEM_NODE_TYPES literal not found in ${CONFIG_LOADER}`);
 
+  // Counted with a form-independent pattern: the line-scan below only sees the
+  // exploded multi-line form, so a collapsed entry would be invisible to both
+  // lists and slip past the comparison in the test.
+  const declaredKeys = block[1].match(/^ {4}"\w+":/gm) ?? [];
+
   const typeNames = [];
   const entries = [];
   let current = null;
@@ -69,7 +74,7 @@ function backendSystemNodeTypes() {
     const icon = line.match(/^ {8}"icon": "(\w+)",?$/);
     if (icon && current) entries.push({ name: current, icon: icon[1] });
   }
-  return { typeNames, entries };
+  return { declaredKeys, typeNames, entries };
 }
 
 function backendExpertAgentDefaultIcon() {
@@ -129,10 +134,13 @@ describe('resolveIcon', () => {
   });
 
   it('resolves every icon the backend injects for system node types', () => {
-    const { typeNames, entries } = backendSystemNodeTypes();
-    // Parse guard: every system type must yield an icon, so neither parser drift
-    // nor a system type added without an icon can quietly drop coverage.
+    const { declaredKeys, typeNames, entries } = backendSystemNodeTypes();
+    // Parse guard: every declared system type must be seen by the line scan, and
+    // every seen type must yield an icon. Parser drift, a collapsed entry, or a
+    // system type added without an icon each fail here rather than dropping
+    // coverage silently.
     expect(entries.length).toBeGreaterThan(0);
+    expect(typeNames.length).toBe(declaredKeys.length);
     expect(entries.map(({ name }) => name)).toEqual(typeNames);
 
     const unresolved = entries
