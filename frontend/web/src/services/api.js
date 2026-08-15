@@ -599,7 +599,9 @@ export function getSessionStreamUrl(sessionId) {
 }
 
 // Stable per-browser client id for shared-session presence and op attribution
-// (design 3.4). Kept in localStorage so it survives reloads.
+// (design 3.4). Kept in localStorage so it survives reloads. 12 hex chars: the
+// server keys element claims and rate-limit buckets on this id, so two live
+// clients colliding would let one release the other's claims.
 const CLIENT_ID_KEY = 'graph_client_id';
 let _clientId = null;
 
@@ -611,7 +613,7 @@ export function getClientId() {
     _clientId = null;
   }
   if (!_clientId) {
-    _clientId = 'client-' + randomToken(8);
+    _clientId = 'client-' + randomToken(12);
     try {
       window.localStorage.setItem(CLIENT_ID_KEY, _clientId);
     } catch {

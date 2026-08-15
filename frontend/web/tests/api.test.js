@@ -113,7 +113,7 @@ describe('identifier minting', () => {
     const randomSpy = vi.spyOn(Math, 'random');
     const { getClientId } = await import('../src/services/api.js');
 
-    expect(getClientId()).toMatch(/^client-[0-9a-f]{8}$/);
+    expect(getClientId()).toMatch(/^client-[0-9a-f]{12}$/);
     expect(randomSpy).not.toHaveBeenCalled();
   });
 
