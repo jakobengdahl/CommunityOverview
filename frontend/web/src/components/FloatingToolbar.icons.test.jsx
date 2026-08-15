@@ -37,6 +37,13 @@ describe('resolveIcon', () => {
     expect(resolveIcon('Customer', schema)).not.toBe(QuestionCircleFill);
   });
 
+  it('treats Object prototype member names as unregistered icons', () => {
+    for (const icon of ['toString', 'constructor', 'hasOwnProperty', '__proto__', 'valueOf']) {
+      const schema = { node_types: { Customer: { icon } } };
+      expect(resolveIcon('Customer', schema)).toBe(DEFAULT_ICON);
+    }
+  });
+
   it('keeps the legacy name mapping when the schema declares no icon', () => {
     expect(resolveIcon('Actor', { node_types: { Actor: {} } })).toBe(PersonFill);
     expect(resolveIcon('Actor', null)).toBe(PersonFill);

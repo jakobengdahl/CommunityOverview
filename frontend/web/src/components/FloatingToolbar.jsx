@@ -81,7 +81,9 @@ import './FloatingToolbar.css';
 
 // Registry of available icons, keyed by Bootstrap Icon name.
 // The schema_config.json "icon" field references these keys.
-const ICON_REGISTRY = {
+// Null prototype: keys come from config, and a plain object literal would resolve
+// "toString" or "constructor" to an inherited member that is not a component.
+const ICON_REGISTRY = Object.assign(Object.create(null), {
   PersonFill,
   RocketTakeoffFill,
   LightningFill,
@@ -154,10 +156,11 @@ const ICON_REGISTRY = {
   BinocularsFill,
   EyeFill,
   Translate,
-};
+});
 
 // Legacy fallback: maps node type name -> icon name (used when schema has no icon field)
-const LEGACY_ICON_MAP = {
+// Null prototype for the same reason as ICON_REGISTRY: node type names come from config.
+const LEGACY_ICON_MAP = Object.assign(Object.create(null), {
   Actor: 'PersonFill',
   Initiative: 'RocketTakeoffFill',
   Capability: 'LightningFill',
@@ -180,7 +183,7 @@ const LEGACY_ICON_MAP = {
   EventSubscription: 'BellFill',
   SavedView: 'BookmarkFill',
   Group: 'FolderFill',
-};
+});
 
 const COLOR_MAP = {
   Actor: '#3B82F6',
