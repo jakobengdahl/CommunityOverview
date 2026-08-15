@@ -1001,9 +1001,10 @@ def register_mcp_tools(
         - ``type`` is the node's graph type, e.g. "Initiative". It is null when
           the node reference does not resolve to a node this caller may read.
         - ``status`` is whatever the deployment stores under the node's
-          ``metadata["status"]``, and is null when the deployment does not use
-          that field. It is a convention, not a schema-enforced field, so treat a
-          null as "unknown", not as "no status".
+          ``metadata["status"]``, trimmed, and is null when that value is blank
+          or the deployment does not use the field. It is a convention, not a
+          schema-enforced field, so treat a null as "unknown", not as "no
+          status".
         - ``selected_node_ids`` is what the users currently have selected, the
           same value ``get_visualization_session_state`` reports, so an arrange
           that should respect the selection needs only this one call. The visible

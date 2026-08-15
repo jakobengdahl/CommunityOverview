@@ -159,10 +159,16 @@ class TestGetVisualizationLayout:
                     "name": "Delta",
                     "metadata": {"status": "   "},
                 },
+                {
+                    "id": "epsilon",
+                    "type": "Actor",
+                    "name": "Epsilon",
+                    "metadata": {"status": "  done  "},
+                },
             ],
             edges=[],
         )
-        session = _session_with_nodes(manager, ["gamma", "delta"])
+        session = _session_with_nodes(manager, ["gamma", "delta", "epsilon"])
 
         by_id = {
             n["id"]: n
@@ -175,6 +181,8 @@ class TestGetVisualizationLayout:
         assert by_id["gamma"]["status"] is None
         # A blank status would otherwise become an unnamed swimlane.
         assert by_id["delta"]["status"] is None
+        # Padding must not split one lane into two.
+        assert by_id["epsilon"]["status"] == "done"
 
     def test_out_of_scope_node_keeps_geometry_but_leaks_no_semantics(self, tmp_path):
         """Graph-scope narrowing must hide meaning without hiding the node.

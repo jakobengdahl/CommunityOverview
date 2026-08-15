@@ -731,7 +731,7 @@ contract in
 | `nodes[].x` / `nodes[].y` | number \| null | Model-space top-left; `null` when unset. |
 | `nodes[].hidden` | bool | Hidden in the session. The visible set is the nodes with `hidden` false. |
 | `nodes[].type` | string \| null | Graph node type, e.g. `"Initiative"`. `null` when the reference does not resolve to a node this caller may read. |
-| `nodes[].status` | string \| null | The node's `metadata["status"]` when the deployment stores one as a string; `null` otherwise. |
+| `nodes[].status` | string \| null | The node's `metadata["status"]` when the deployment stores one as a non-blank string, whitespace-trimmed; `null` otherwise. |
 | `selected_node_ids` | string[] | Currently selected elements, same value as `get_visualization_session_state`. |
 | `assumed_node_size` | object | `{ width, height }` for collision spacing. |
 | `coordinate_space` | string | Restatement of the coordinate model. |

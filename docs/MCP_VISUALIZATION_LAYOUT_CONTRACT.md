@@ -108,10 +108,12 @@ call per node, so the read carries a minimal semantic projection:
 - **`type`** is the node's graph type (e.g. `"Initiative"`). It is `null` when
   the session's node reference does not resolve to a node this caller may read.
 - **`status`** is whatever the deployment stores under the node's
-  `metadata["status"]`, reported only when that value is a string. `status` is a
-  **convention, not a schema field** — the core schema defines none — so `null`
-  means *unknown*, not *no status*, and an agent must not treat it as a lane of
-  its own without saying so.
+  `metadata["status"]`, reported only when that value is a **non-blank string**,
+  with surrounding whitespace trimmed. A blank or non-string value reports
+  `null`, so a status lane can never be unnamed. `status` is a **convention, not
+  a schema field** — the core schema defines none — so `null` means *unknown*,
+  not *no status*, and an agent must not treat it as a lane of its own without
+  saying so.
 
 Both fields honour the same graph-scope narrowing as every other read: a node the
 caller may not read still appears with its geometry, with `type`/`status` `null`.
