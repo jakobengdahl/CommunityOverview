@@ -392,12 +392,14 @@ const useGraphStore = create((set, get) => ({
   },
 
   // Emptying the canvas also closes the overlays that address canvas content.
-  // detailNode/editingNode/editingEdge/deleteDialog/contextMenu each point at a
-  // node or edge that is gone once this returns, and confirming one of them
-  // would still mutate the global graph for something the user can no longer
-  // see. Only the esc-esc path is gated on a dialog being open, so an agent
-  // driving clear_visualization can pull the canvas out from under an open
-  // dialog; closing them here covers every caller at once.
+  // detailNode/editingNode/editingEdge/deleteDialog each point at a node or edge
+  // that is gone once this returns, and confirming one of them would still
+  // mutate the global graph for something the user can no longer see. Only the
+  // esc-esc path is gated on a dialog being open, so an agent driving
+  // clear_visualization can pull the canvas out from under an open dialog;
+  // closing them here covers every caller at once. contextMenu is reset for
+  // parity with resetSessionScopedState only — nothing outside this store reads
+  // it today, and the canvas nodes own their own menus as local state.
   clearVisualization: () => {
     pulseClearTimers.forEach((timer) => clearTimeout(timer));
     pulseClearTimers.clear();

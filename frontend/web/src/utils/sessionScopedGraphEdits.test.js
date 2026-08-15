@@ -61,6 +61,7 @@ describe('applyEdgeUpdate', () => {
     expect(applied).toBe(true);
     expect(h.updateVisualization).toHaveBeenCalled();
     expect(h.syncRef.current.sendEdgesUpdated).toHaveBeenCalledWith([{ id: 'e1', type: 'OWNS' }]);
+    expect(h.setEditingEdge).toHaveBeenCalledWith(null);
     expect(h.showNotification).toHaveBeenCalledWith('success', 'Edge updated');
   });
 
@@ -84,7 +85,12 @@ describe('applyEdgeUpdate', () => {
     // edit must not be broadcast through the sync client the switch repointed.
     expect(h.updateVisualization).not.toHaveBeenCalled();
     expect(h.syncRef.current.sendEdgesUpdated).not.toHaveBeenCalled();
-    expect(h.showNotification).not.toHaveBeenCalled();
+    // Nor may it close a dialog: this session's copy is already closed, so the
+    // only thing left to hit is one the user opened after switching.
+    expect(h.setEditingEdge).not.toHaveBeenCalled();
+    // The PUT really did land in the graph, so it is still reported — the same
+    // rule confirmNodeDelete follows for its delete.
+    expect(h.showNotification).toHaveBeenCalledWith('success', 'Edge updated');
   });
 
   it('reports a failed PUT without touching the canvas', async () => {
@@ -124,6 +130,7 @@ describe('confirmNodeDelete', () => {
     expect(applied).toBe(true);
     expect(h.removeNode).toHaveBeenCalledWith('a');
     expect(useGraphStore.getState().nodes.map((n) => n.id)).toEqual(['b']);
+    expect(h.setDeleteDialog).toHaveBeenCalledWith(null);
     expect(h.showNotification).toHaveBeenCalledWith('success', 'Node deleted');
   });
 
@@ -157,6 +164,10 @@ describe('confirmNodeDelete', () => {
     expect(applied).toBe(false);
     expect(h.removeNode).not.toHaveBeenCalled();
     expect(useGraphStore.getState().nodes.map((n) => n.id)).toEqual(['x', 'y']);
+    // Closing the confirmation is session-scoped too: this session's copy is
+    // already closed, so a late close could only dismiss a fresh confirmation
+    // the user opened after switching.
+    expect(h.setDeleteDialog).not.toHaveBeenCalled();
     // The delete really did happen in the graph, so it is still reported.
     expect(h.showNotification).toHaveBeenCalledWith('success', 'Node deleted');
   });
