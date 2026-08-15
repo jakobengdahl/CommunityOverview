@@ -92,6 +92,76 @@ class TestGetVisualizationLayout:
         assert by_id["b"]["hidden"] is True
         assert by_id["a"]["hidden"] is False
 
+    def test_reports_node_type_and_status_for_semantic_arrangement(self, layout_tools):
+        """An agent must be able to lay out by type/status without parsing ids."""
+        tools_map, manager = layout_tools
+        tools_map["add_nodes"](
+            nodes=[
+                {
+                    "id": "alpha",
+                    "type": "Initiative",
+                    "name": "Alpha",
+                    "metadata": {"status": "in_progress"},
+                },
+                {"id": "beta", "type": "Actor", "name": "Beta"},
+            ],
+            edges=[],
+        )
+        session = _session_with_nodes(manager, ["alpha", "beta"])
+
+        result = tools_map["get_visualization_layout"](session_id=session.id)
+        by_id = {n["id"]: n for n in result["nodes"]}
+
+        assert by_id["alpha"]["type"] == "Initiative"
+        assert by_id["alpha"]["status"] == "in_progress"
+        assert by_id["beta"]["type"] == "Actor"
+        # A deployment that does not use metadata["status"] reports null, meaning
+        # "unknown" rather than a fabricated value.
+        assert by_id["beta"]["status"] is None
+        # The pre-existing geometry projection is unchanged alongside the new fields.
+        assert by_id["beta"]["x"] is None and by_id["beta"]["hidden"] is False
+        assert result["assumed_node_size"] == {"width": 220, "height": 120}
+
+    def test_unresolvable_node_ref_keeps_geometry_with_null_semantics(
+        self, layout_tools
+    ):
+        """A reference with no readable node must still report x/y/hidden."""
+        tools_map, manager = layout_tools
+        session = _session_with_nodes(manager, ["ghost"])
+        manager.apply_layout(
+            session.id, "mcp-agent", positions={"ghost": {"x": 3, "y": 4}}
+        )
+
+        result = tools_map["get_visualization_layout"](session_id=session.id)
+
+        assert result["node_count"] == 1
+        node = result["nodes"][0]
+        assert node["id"] == "ghost"
+        assert node["x"] == 3.0 and node["y"] == 4.0
+        assert node["hidden"] is False
+        assert node["type"] is None and node["status"] is None
+
+    def test_non_string_status_metadata_is_not_reported(self, layout_tools):
+        """Only a string status is a lane label; anything else reads as unknown."""
+        tools_map, manager = layout_tools
+        tools_map["add_nodes"](
+            nodes=[
+                {
+                    "id": "gamma",
+                    "type": "Actor",
+                    "name": "Gamma",
+                    "metadata": {"status": {"phase": 1}},
+                }
+            ],
+            edges=[],
+        )
+        session = _session_with_nodes(manager, ["gamma"])
+
+        node = tools_map["get_visualization_layout"](session_id=session.id)["nodes"][0]
+
+        assert node["type"] == "Actor"
+        assert node["status"] is None
+
     def test_invalid_session_id(self, layout_tools):
         tools_map, _ = layout_tools
         assert "error" in tools_map["get_visualization_layout"](session_id="nope")
@@ -100,6 +170,36 @@ class TestGetVisualizationLayout:
         tools_map, _ = layout_tools
         result = tools_map["get_visualization_layout"](session_id="9999-9999")
         assert "not found" in result["error"]
+
+    def test_reports_selection_so_one_call_answers_what_and_where(self, authz_tools):
+        """Selection is merged in and agrees with the dedicated state tool.
+
+        The visible set is deliberately *not* merged: it is already this
+        response's nodes with ``hidden`` false, so repeating it would duplicate
+        the same fact in two shapes.
+        """
+        tools_map, manager, registry = authz_tools
+        session = _session_with_nodes(manager, ["a", "b"])
+        registry.get_or_create(session.id)
+        manager.claims.claim(session.id, "client-1", ["a"])
+
+        result = tools_map["get_visualization_layout"](session_id=session.id)
+        state = tools_map["get_visualization_session_state"](session_id=session.id)
+
+        assert result["selected_node_ids"] == ["a"]
+        assert result["selected_node_ids"] == state["selected_node_ids"]
+        assert "visible_node_ids" not in result
+        assert [n["id"] for n in result["nodes"] if not n["hidden"]] == state[
+            "visible_node_ids"
+        ]
+
+    def test_empty_selection_is_reported_as_an_empty_list(self, layout_tools):
+        tools_map, manager = layout_tools
+        session = _session_with_nodes(manager, ["a"])
+
+        result = tools_map["get_visualization_layout"](session_id=session.id)
+
+        assert result["selected_node_ids"] == []
 
     def test_missing_manager_is_reported(self):
         storage = GraphStorage(json_path="/tmp/does-not-matter.json")

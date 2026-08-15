@@ -979,9 +979,9 @@ def register_mcp_tools(
         """
         Read the geometry of every node in an open visualization session.
 
-        Returns each node's model-space position so an AI agent can compute a new
-        arrangement (a left-to-right DAG, a grid, swimlanes) and then call
-        ``apply_visualization_layout`` to move them.
+        Returns each node's model-space position *and what it is*, so an AI agent
+        can compute a new arrangement (a left-to-right DAG, a grid, type or status
+        swimlanes) and then call ``apply_visualization_layout`` to move them.
 
         Geometry contract (read this before computing positions):
         - Coordinates are **model space**: independent of the user's zoom and pan,
@@ -997,11 +997,25 @@ def register_mcp_tools(
           relative to their related nodes over guessing where a viewport is,
           especially when several clients are connected.
 
+        Semantics for arranging by meaning (never parse the node id for this):
+        - ``type`` is the node's graph type, e.g. "Initiative". It is null when
+          the node reference does not resolve to a node this caller may read.
+        - ``status`` is whatever the deployment stores under the node's
+          ``metadata["status"]``, and is null when the deployment does not use
+          that field. It is a convention, not a schema-enforced field, so treat a
+          null as "unknown", not as "no status".
+        - ``selected_node_ids`` is what the users currently have selected, the
+          same value ``get_visualization_session_state`` reports, so an arrange
+          that should respect the selection needs only this one call. The visible
+          set is not repeated here: it is this response's nodes with
+          ``hidden`` false.
+
         Args:
             session_id: The session ID shown in the browser header (e.g. "8244-1742")
 
         Returns:
-            Dict with revision, node_count, nodes (id/x/y/hidden), assumed_node_size
+            Dict with revision, node_count, nodes (id/x/y/hidden/type/status),
+            selected_node_ids, assumed_node_size
         """
         if session_manager is None:
             return {"error": "Session manager not available"}
@@ -1020,15 +1034,20 @@ def register_mcp_tools(
             }
         positions = session.state.get("positions", {})
         hidden = set(session.state.get("hidden_node_ids", []))
+        node_refs = session.state.get("node_refs", [])
+        semantics = service.resolve_session_node_semantics(node_refs).get("nodes") or {}
         nodes = []
-        for node_id in session.state.get("node_refs", []):
+        for node_id in node_refs:
             pos = positions.get(node_id)
+            meaning = semantics.get(node_id) or {}
             nodes.append(
                 {
                     "id": node_id,
                     "x": pos["x"] if pos else None,
                     "y": pos["y"] if pos else None,
                     "hidden": node_id in hidden,
+                    "type": meaning.get("type"),
+                    "status": meaning.get("status"),
                 }
             )
         return {
@@ -1036,6 +1055,7 @@ def register_mcp_tools(
             "revision": session.seq,
             "node_count": len(nodes),
             "nodes": nodes,
+            "selected_node_ids": session_manager.claimed_elements(session_id),
             "assumed_node_size": _ASSUMED_NODE_SIZE,
             "coordinate_space": "model-space, pixels at zoom 1, x/y = node top-left",
             "connected_clients": session_manager.connected_count(session_id),
