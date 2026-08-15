@@ -227,22 +227,22 @@ class TestRESTAPIClient:
         response = api_client.get("/api/graph/capabilities")
         assert response.status_code == 200
         data = response.json()
-        assert data == {
-            "capabilities": [
-                {
-                    "id": "graph_export",
-                    "name": "Graph export",
-                    "description": "Allows clients to export graph data for offline analysis.",
-                    "enabled": True,
-                },
-                {
-                    "id": "assistant_guidance",
-                    "name": "Assistant guidance",
-                    "description": "Provides configuration for guided assistant interactions.",
-                    "enabled": False,
-                },
-            ]
-        }
+        assert data["capabilities"][:2] == [
+            {
+                "id": "graph_export",
+                "name": "Graph export",
+                "description": "Allows clients to export graph data for offline analysis.",
+                "enabled": True,
+            },
+            {
+                "id": "assistant_guidance",
+                "name": "Assistant guidance",
+                "description": "Provides configuration for guided assistant interactions.",
+                "enabled": False,
+            },
+        ]
+        # Appended by the server for every deployment (see config_loader).
+        assert [c["id"] for c in data["capabilities"][2:]] == ["animated_layout"]
 
     def test_batch_similarity_endpoint(self, populated_api_client):
         """Test POST /api/graph/similar/batch endpoint."""
@@ -414,22 +414,24 @@ class TestMCPClient:
         tools_map, _ = mcp_tools
         result = tools_map["get_capabilities"]()
 
-        assert result == {
-            "capabilities": [
-                {
-                    "id": "graph_export",
-                    "name": "Graph export",
-                    "description": "Allows clients to export graph data for offline analysis.",
-                    "enabled": True,
-                },
-                {
-                    "id": "assistant_guidance",
-                    "name": "Assistant guidance",
-                    "description": "Provides configuration for guided assistant interactions.",
-                    "enabled": False,
-                },
-            ]
-        }
+        assert result["capabilities"][:2] == [
+            {
+                "id": "graph_export",
+                "name": "Graph export",
+                "description": "Allows clients to export graph data for offline analysis.",
+                "enabled": True,
+            },
+            {
+                "id": "assistant_guidance",
+                "name": "Assistant guidance",
+                "description": "Provides configuration for guided assistant interactions.",
+                "enabled": False,
+            },
+        ]
+        # An agent can always ask whether this deployment's canvas tweens an
+        # apply_visualization_layout animation hint.
+        animated = [c for c in result["capabilities"] if c["id"] == "animated_layout"]
+        assert len(animated) == 1 and animated[0]["enabled"] is True
 
     def test_mcp_get_runtime_info(self, mcp_tools):
         """Test MCP get_runtime_info tool."""
