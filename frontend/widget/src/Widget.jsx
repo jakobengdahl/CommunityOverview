@@ -17,6 +17,11 @@ function Widget({ initialQuery = '', onNodeSelect }) {
   const [isLoading, setIsLoading] = useState(false);
   const [error, setError] = useState(null);
   const [mcpAvailable, setMcpAvailable] = useState(false);
+  // Bumped whenever the canvas contents are replaced wholesale, which
+  // establishes a new position baseline; the canvas discards its undo history
+  // on the change. Additive paths (expand) leave the existing nodes where they
+  // are, so their recorded moves stay valid and must not bump it.
+  const [canvasBaselineEpoch, setCanvasBaselineEpoch] = useState(0);
 
   // Check MCP availability on mount
   useEffect(() => {
@@ -41,6 +46,7 @@ function Widget({ initialQuery = '', onNodeSelect }) {
       if (result.nodes) {
         setNodes(result.nodes);
         setEdges(result.edges || []);
+        setCanvasBaselineEpoch((epoch) => epoch + 1);
         setHighlightedNodeIds(result.nodes.map((n) => n.id));
         setTimeout(() => setHighlightedNodeIds([]), 3000);
       }
@@ -122,6 +128,7 @@ function Widget({ initialQuery = '', onNodeSelect }) {
           edges={edges}
           highlightedNodeIds={highlightedNodeIds}
           hiddenNodeIds={[]}
+          canvasBaselineEpoch={canvasBaselineEpoch}
           onExpand={handleExpand}
           onEdit={handleEdit}
         />
