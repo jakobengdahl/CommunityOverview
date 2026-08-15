@@ -101,8 +101,13 @@ def register_mcp_tools(
 
         Session state is server-owned (design §3.8): visible nodes come from the
         shared-session store's node references, the current selection from the
-        advisory claim map. The browser no longer uploads canvas state — an MCP
-        tool reads the same state every collaborator converges on.
+        advisory claim map narrowed to those same references. The browser no
+        longer uploads canvas state — an MCP tool reads the same state every
+        collaborator converges on.
+
+        Both halves are read off the stored session, so a session the manager
+        does not hold reports an empty selection rather than claims that outlived
+        it: the claim map is not purged when a session is deleted.
         """
         visible: list = []
         selected: list = []

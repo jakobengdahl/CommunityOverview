@@ -292,6 +292,49 @@ class TestGetVisualizationLayout:
         assert result["selected_node_ids"] == ["a"]
         assert result["selected_node_ids"] == state["selected_node_ids"]
 
+    def test_selection_narrows_to_the_session_nodes_not_the_visible_ones(
+        self, authz_tools
+    ):
+        """A claimed *hidden* node is still selected.
+
+        The narrowing is against ``node_refs``, so every reported id is one of
+        this response's ``nodes`` — which include the hidden ones. Narrowing to
+        the visible set instead would drop a selection the users still hold.
+        """
+        tools_map, manager, registry = authz_tools
+        session = _session_with_nodes(manager, ["a", "b"])
+        registry.get_or_create(session.id)
+        manager.store.apply_state_op(session, {"op": "nodes_hidden", "node_ids": ["b"]})
+        manager.store.persist(session)
+        manager.claims.claim(session.id, "client-1", ["b"])
+
+        result = tools_map["get_visualization_layout"](session_id=session.id)
+        state = tools_map["get_visualization_session_state"](session_id=session.id)
+
+        assert result["selected_node_ids"] == ["b"]
+        assert state["selected_node_ids"] == ["b"]
+        assert state["visible_node_ids"] == ["a"]
+
+    def test_claims_outliving_their_session_are_not_reported_as_selection(
+        self, authz_tools
+    ):
+        """The claim map is not purged on delete, the selection read is.
+
+        Both halves of the state read come off the stored session, so a session
+        the manager no longer holds reports no selection even while a registry
+        entry (and its stale claims) survive.
+        """
+        tools_map, manager, registry = authz_tools
+        session = _session_with_nodes(manager, ["a"])
+        registry.get_or_create(session.id)
+        manager.claims.claim(session.id, "client-1", ["a"])
+        manager.delete_session_sync(session.id)
+
+        state = tools_map["get_visualization_session_state"](session_id=session.id)
+
+        assert state["visible_node_ids"] == []
+        assert state["selected_node_ids"] == []
+
     def test_empty_selection_is_reported_as_an_empty_list(self, layout_tools):
         tools_map, manager = layout_tools
         session = _session_with_nodes(manager, ["a"])
