@@ -98,6 +98,10 @@ function App() {
     getNodeColor,
     closeMenusSignal,
     resetSessionScopedState,
+    editingEdge,
+    setEditingEdge,
+    deleteDialog,
+    setDeleteDialog,
   } = useGraphStore();
 
   const { t, setLanguage, language } = useI18n();
@@ -107,7 +111,6 @@ function App() {
   const latestViewport = useRef(null);
   const dialogOpenRef = useRef(false);
   const [notification, setNotification] = useState(null);
-  const [deleteDialog, setDeleteDialog] = useState(null);
   const [saveViewDialog, setSaveViewDialog] = useState(null);
   const [showSubscriptionDialog, setShowSubscriptionDialog] = useState(false);
   const [editingSubscriptionData, setEditingSubscriptionData] = useState(null);
@@ -121,7 +124,6 @@ function App() {
   const [createGroupSignal, setCreateGroupSignal] = useState(0);
   const [saveViewSignal, setSaveViewSignal] = useState(0);
   const [isSavingView, setIsSavingView] = useState(false);
-  const [editingEdge, setEditingEdge] = useState(null);
   const [skillDialogType, setSkillDialogType] = useState(null);
   const [editingSkillData, setEditingSkillData] = useState(null);
   const [showAKCDialog, setShowAKCDialog] = useState(false);
@@ -858,7 +860,7 @@ function App() {
         setEditingEdge({ ...edge, ...edgeData });
       }
     },
-    [edges]
+    [edges, setEditingEdge]
   );
 
   // Callback: Save edge updates from EditEdgeDialog
@@ -880,7 +882,7 @@ function App() {
         showNotification('error', 'Could not update edge');
       }
     },
-    [editingEdge, nodes, edges, updateVisualization, showNotification, syncRef]
+    [editingEdge, setEditingEdge, nodes, edges, updateVisualization, showNotification, syncRef]
   );
 
   // Callback: Change an edge's relationship type from the context menu.
@@ -950,7 +952,7 @@ function App() {
         isMultiple: false,
       });
     },
-    [nodes]
+    [nodes, setDeleteDialog]
   );
 
   // Callback: Delete multiple nodes - shows dialog
@@ -966,7 +968,7 @@ function App() {
         isMultiple: true,
       });
     },
-    [nodes]
+    [nodes, setDeleteDialog]
   );
 
   // Confirm delete
@@ -989,7 +991,7 @@ function App() {
     } finally {
       setDeleteDialog(null);
     }
-  }, [deleteDialog, removeNode, showNotification]);
+  }, [deleteDialog, setDeleteDialog, removeNode, showNotification]);
 
   // Toolbar: trigger group creation in GraphCanvas
   const handleToolbarCreateGroup = useCallback(() => {
@@ -1681,10 +1683,11 @@ function App() {
   );
 
   // Modal dialog open/close (and edit-target) state, bundled for AppDialogs
-  // (STRUCTURE_REVIEW B1 slice 3). The state itself stays in App because the
-  // double-Escape guard and SessionDrawer's suspendEscape derive from it
-  // alongside the store-driven editingNode/detailNode; AppDialogs owns only the
-  // rendering of the stack.
+  // (STRUCTURE_REVIEW B1 slice 3). The double-Escape guard and SessionDrawer's
+  // suspendEscape derive from this bundle, so it stays assembled in App;
+  // AppDialogs owns only the rendering of the stack. The dialogs that address
+  // graph content (editingEdge, deleteDialog) live in the store next to
+  // editingNode/detailNode so a session switch resets them all at once.
   const dialogs = {
     createNodeType,
     setCreateNodeType,

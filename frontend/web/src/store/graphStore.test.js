@@ -17,6 +17,8 @@ function seedDirtySessionState() {
     activeExperts: ['expert-a'],
     detailNode: { id: 'a1', name: 'Node A1' },
     editingNode: { id: 'a2', name: 'Node A2' },
+    editingEdge: { id: 'e1', source: 'a1', target: 'a2', type: 'RELATES_TO' },
+    deleteDialog: { nodeId: 'a1', nodeName: 'Node A1', isMultiple: false },
     contextMenu: { x: 1, y: 2, nodeId: 'a1' },
     selectedNodeId: 'a1',
     selectedGraphNodes: [{ id: 'a1', name: 'Node A1' }],
@@ -50,6 +52,18 @@ describe('graphStore.resetSessionScopedState', () => {
     expect(state.contextMenu).toBeNull();
     expect(state.selectedNodeId).toBeNull();
     expect(state.selectedGraphNodes).toEqual([]);
+  });
+
+  // Confirming either of these after a switch acts on the previous session's
+  // graph — and the edge dialog's save fans out through the sync client, which
+  // by then belongs to the new session. Neither may survive the switch.
+  it('closes the edge-edit dialog and the pending node-delete confirmation', () => {
+    seedDirtySessionState();
+    useGraphStore.getState().resetSessionScopedState(t, 'en');
+
+    const state = useGraphStore.getState();
+    expect(state.editingEdge).toBeNull();
+    expect(state.deleteDialog).toBeNull();
   });
 
   it('bumps the assistant epoch on every switch (A→B→A)', () => {

@@ -91,7 +91,7 @@ DAG/grid/swimlane layouts the initiative targets.
 | `revision` | int | The session's monotonic op sequence (`seq`). Pass back as `expected_revision` to the write tool for optimistic concurrency (§7). |
 | `node_count` | int | Number of nodes referenced by the session. |
 | `nodes` | object[] | One entry per referenced node: `{ id, x, y, hidden, type, status }`. `x`/`y` are model-space top-left, or `null` when unset (§2). `hidden` is `true` when the node is currently hidden in the session (§8). `type`/`status` are the semantic projection below. |
-| `selected_node_ids` | string[] | The elements currently selected in the session — the same advisory claim map `get_visualization_session_state` reports (§4.2). |
+| `selected_node_ids` | string[] | The **nodes** currently selected in the session — the same value `get_visualization_session_state` reports (§4.2). Always a subset of this response's `nodes`. |
 | `assumed_node_size` | object | `{ width, height }` for collision spacing (§3). |
 | `coordinate_space` | string | Human-readable restatement of §2, e.g. `"model-space, pixels at zoom 1, x/y = node top-left"`. |
 | `connected_clients` | int | How many browsers are attached. When `> 0`, prefer placing nodes relative to related nodes over guessing a viewport (§8). |
@@ -129,7 +129,19 @@ honest `assumed_node_size` constant. That extension stays reserved (§10, §14).
 single call. The **visible set is deliberately not** duplicated into this
 response: it is exactly the `nodes` entries with `hidden` false, and carrying the
 same fact in two shapes invites the two to disagree. `get_visualization_session_state`
-remains the tool for reading session state on its own; it is unchanged.
+remains the tool for reading session state on its own; it reports the same
+selection.
+
+The selection's source is the advisory claim map, and claims are taken on session
+**elements** — an edge can be claimed just as a node can. The field is therefore
+**narrowed to the session's node references** in both tools: an id read from
+`selected_node_ids` is always a node in this response's `nodes` and can be passed
+straight back into a node argument such as `apply_visualization_layout`'s
+positions map. Selection claims on edges are consequently not observable through
+either tool. A truthful `selected_element_ids` reporting the unfiltered claim map
+would be an **additive** extension under §14, but it is not part of v1: it would
+carry the selection in two overlapping shapes for a claim kind no client
+currently produces.
 
 ## 5. Movement semantics (`apply_visualization_layout`)
 
@@ -339,6 +351,12 @@ differ between the open core and the hosted layer.
 - Realizing per-node measured dimensions, server-enforced locks, group-aware
   layout, or viewport control (all reserved above) are **additive** extensions
   that a later version can introduce without breaking v1 consumers.
+- Narrowing a field's contents to what its **name** promises — as
+  `selected_node_ids` was narrowed to the session's nodes (§4.2) — is a
+  **correction, not a version bump**. The prose describing it as element ids was
+  itself part of the defect: a field named for nodes that hands back edge ids
+  breaks the caller that reads it as its name reads. Widening a field, or
+  renaming one, is breaking and needs a new version.
 - The requirement node `req-mcp-layout-contract` and the decision
   `dec-visualization-layout-contract` in the Corp planning graph govern this
   document; status and evidence live there, not here.
