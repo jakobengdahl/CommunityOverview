@@ -81,7 +81,9 @@ import './FloatingToolbar.css';
 
 // Registry of available icons, keyed by Bootstrap Icon name.
 // The schema_config.json "icon" field references these keys.
-const ICON_REGISTRY = {
+// Null prototype: keys come from config, and a plain object literal would resolve
+// "toString" or "constructor" to an inherited member that is not a component.
+const ICON_REGISTRY = Object.assign(Object.create(null), {
   PersonFill,
   RocketTakeoffFill,
   LightningFill,
@@ -154,10 +156,11 @@ const ICON_REGISTRY = {
   BinocularsFill,
   EyeFill,
   Translate,
-};
+});
 
 // Legacy fallback: maps node type name -> icon name (used when schema has no icon field)
-const LEGACY_ICON_MAP = {
+// Null prototype for the same reason as ICON_REGISTRY: node type names come from config.
+const LEGACY_ICON_MAP = Object.assign(Object.create(null), {
   Actor: 'PersonFill',
   Initiative: 'RocketTakeoffFill',
   Capability: 'LightningFill',
@@ -180,9 +183,10 @@ const LEGACY_ICON_MAP = {
   EventSubscription: 'BellFill',
   SavedView: 'BookmarkFill',
   Group: 'FolderFill',
-};
+});
 
-const COLOR_MAP = {
+// Null prototype for the same reason as ICON_REGISTRY: node type names come from config.
+const COLOR_MAP = Object.assign(Object.create(null), {
   Actor: '#3B82F6',
   Initiative: '#10B981',
   Capability: '#F97316',
@@ -205,7 +209,9 @@ const COLOR_MAP = {
   EventSubscription: '#8B5CF6',
   SavedView: '#6B7280',
   Group: '#646cff',
-};
+});
+
+const DEFAULT_COLOR = '#9CA3AF';
 
 // System types always shown at the bottom (not from schema)
 const SYSTEM_TYPES = ['Agent', 'Skill', 'EventSubscription', 'ActiveKnowledgeCollection', 'Group'];
@@ -246,6 +252,18 @@ function resolveIcon(nodeType, schema) {
   }
   // 3. Default
   return DEFAULT_ICON;
+}
+
+/**
+ * Resolve display color for a node type.
+ * Priority: legacy COLOR_MAP -> schema color field -> DEFAULT_COLOR
+ *
+ * This is the opposite precedence to resolveIcon, which reads the schema first.
+ * Shipped profiles declare colors for legacy type names that differ from the map,
+ * so reading the schema first here would recolor them.
+ */
+function resolveColor(nodeType, schema) {
+  return COLOR_MAP[nodeType] || schema?.node_types?.[nodeType]?.color || DEFAULT_COLOR;
 }
 
 function FloatingToolbar({
@@ -344,7 +362,7 @@ function FloatingToolbar({
           }
 
           const Icon = resolveIcon(nodeType, schema);
-          const color = COLOR_MAP[nodeType] || schema?.node_types?.[nodeType]?.color || '#9CA3AF';
+          const color = resolveColor(nodeType, schema);
           const isDraggable = nodeType !== 'SavedView';
 
           return (
@@ -381,5 +399,5 @@ function FloatingToolbar({
   );
 }
 
-export { resolveIcon, COLOR_MAP, ICON_REGISTRY, DEFAULT_ICON };
+export { resolveIcon, resolveColor, COLOR_MAP, ICON_REGISTRY, DEFAULT_ICON, DEFAULT_COLOR };
 export default FloatingToolbar;
