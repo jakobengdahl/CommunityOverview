@@ -84,6 +84,18 @@ def register_mcp_tools(
             session_registry, session_id, tool_name, result, session_manager
         )
 
+    def _claimed_node_ids(session_id, node_refs):
+        """The session's *node* ids that currently hold a selection claim.
+
+        Claims are advisory soft-locks on session *elements*, so the claim map
+        can hold edge ids as well as node ids. Both read tools report this as
+        ``selected_node_ids``, so it is narrowed to the session's node
+        references — an agent must be able to feed the field straight into a
+        node argument such as ``apply_visualization_layout``'s positions map.
+        """
+        refs = set(node_refs)
+        return [e for e in session_manager.claimed_elements(session_id) if e in refs]
+
     def _session_view_state(session_id):
         """Return ``(visible_node_ids, selected_node_ids)`` as the server sees them.
 
@@ -97,11 +109,10 @@ def register_mcp_tools(
         if session_manager is not None:
             session = session_manager.get_session(session_id)
             if session is not None:
+                node_refs = session.state.get("node_refs", [])
                 hidden = set(session.state.get("hidden_node_ids", []))
-                visible = [
-                    n for n in session.state.get("node_refs", []) if n not in hidden
-                ]
-            selected = list(session_manager.claimed_elements(session_id))
+                visible = [n for n in node_refs if n not in hidden]
+                selected = _claimed_node_ids(session_id, node_refs)
         return visible, selected
 
     def register_tool(func: Callable) -> Callable:
@@ -933,6 +944,10 @@ def register_mcp_tools(
         Use this to understand what the user is looking at before deciding
         which nodes to add or which view to load.
 
+        ``selected_node_ids`` holds node ids only. A selection claim can also be
+        taken on an edge, but this field is narrowed to the session's nodes, so
+        it is safe to pass into any argument that expects node ids.
+
         Args:
             session_id: The session ID shown in the browser header (e.g. "8244-1742")
 
@@ -1007,7 +1022,10 @@ def register_mcp_tools(
           status".
         - ``selected_node_ids`` is what the users currently have selected, the
           same value ``get_visualization_session_state`` reports, so an arrange
-          that should respect the selection needs only this one call. The visible
+          that should respect the selection needs only this one call. It holds
+          node ids only — a selection claim can also be taken on an edge, but
+          this field is narrowed to this response's nodes, so every id in it can
+          be passed straight back to ``apply_visualization_layout``. The visible
           set is not repeated here: it is this response's nodes with
           ``hidden`` false.
 
@@ -1056,7 +1074,7 @@ def register_mcp_tools(
             "revision": session.seq,
             "node_count": len(nodes),
             "nodes": nodes,
-            "selected_node_ids": session_manager.claimed_elements(session_id),
+            "selected_node_ids": _claimed_node_ids(session_id, node_refs),
             "assumed_node_size": _ASSUMED_NODE_SIZE,
             "coordinate_space": "model-space, pixels at zoom 1, x/y = node top-left",
             "connected_clients": session_manager.connected_count(session_id),

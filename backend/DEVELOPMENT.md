@@ -732,7 +732,7 @@ contract in
 | `nodes[].hidden` | bool | Hidden in the session. The visible set is the nodes with `hidden` false. |
 | `nodes[].type` | string \| null | Graph node type, e.g. `"Initiative"`. `null` when the reference does not resolve to a node this caller may read. |
 | `nodes[].status` | string \| null | The node's `metadata["status"]` when the deployment stores one as a non-blank string, whitespace-trimmed; `null` otherwise. |
-| `selected_node_ids` | string[] | Currently selected elements, same value as `get_visualization_session_state`. |
+| `selected_node_ids` | string[] | Currently selected **nodes**, same value as `get_visualization_session_state`. Selection claims are taken on elements, so edge claims are filtered out — every id here is one of this response's `nodes`. |
 | `assumed_node_size` | object | `{ width, height }` for collision spacing. |
 | `coordinate_space` | string | Restatement of the coordinate model. |
 | `connected_clients` | int | How many browsers are attached. |
@@ -750,7 +750,11 @@ content, so `assumed_node_size` is still the only sizing input.
 
 `selected_node_ids` is merged in so "what is here and where is it" is one call.
 The visible set is deliberately not duplicated here — it is already the `nodes`
-entries with `hidden` false.
+entries with `hidden` false. The selection comes from the advisory claim map,
+whose claims are on session *elements* (an edge can be claimed as well as a
+node), so both this tool and `get_visualization_session_state` narrow the field
+to the session's node references: an id read from it can always be passed back
+into a node argument such as `apply_visualization_layout`'s positions map.
 
 #### Arranging a session (agent recipes)
 

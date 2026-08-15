@@ -270,6 +270,28 @@ class TestGetVisualizationLayout:
             "visible_node_ids"
         ]
 
+    def test_selected_node_ids_excludes_claims_that_are_not_session_nodes(
+        self, authz_tools
+    ):
+        """A claim on an edge never appears in a field named ``*_node_ids``.
+
+        Claims are advisory soft-locks on session *elements*, so the claim map
+        can hold edge ids. Both read tools narrow the field to the session's
+        node references, and they must stay in agreement about it — an agent
+        feeding the field back into a node argument would otherwise pass an
+        edge id.
+        """
+        tools_map, manager, registry = authz_tools
+        session = _session_with_nodes(manager, ["a", "b"])
+        registry.get_or_create(session.id)
+        manager.claims.claim(session.id, "client-1", ["a", "a->b", "stale-node"])
+
+        result = tools_map["get_visualization_layout"](session_id=session.id)
+        state = tools_map["get_visualization_session_state"](session_id=session.id)
+
+        assert result["selected_node_ids"] == ["a"]
+        assert result["selected_node_ids"] == state["selected_node_ids"]
+
     def test_empty_selection_is_reported_as_an_empty_list(self, layout_tools):
         tools_map, manager = layout_tools
         session = _session_with_nodes(manager, ["a"])
