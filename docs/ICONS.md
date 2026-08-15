@@ -24,10 +24,12 @@ This is the constraint to keep in mind: `ICON_REGISTRY` only contains the
 icons that were imported and built into the frontend at deployment time.
 Bootstrap Icons ships **2,000+** icons, but a config can only select from the
 subset already registered — an `icon` value that isn't a registered key
-silently falls back to a per-node-type default (or a generic question-mark
-icon), it does not raise an error. If you pick an icon from this document and
-it doesn't show up, double check the exact spelling against the table below
-(names are case-sensitive PascalCase).
+silently falls back to the built-in default for that type name, and then to a
+neutral filled circle (`CircleFill`); it does not raise an error. A type that
+declares no `icon` and has no built-in default for its name gets the same
+neutral circle. If a type shows the plain circle instead of the icon you
+picked, double check the exact spelling against the table below (names are
+case-sensitive PascalCase) and that the name is registered.
 
 The tables below list every icon currently registered and available for
 selection, grouped by theme, so you don't need to search the full Bootstrap
@@ -147,7 +149,8 @@ Icons library and guess whether a name made it into the build.
 | `Translate` | 🌐 | Multilingual content, localization |
 | `BookmarkFill` | 🔖 | Saved views |
 | `FolderFill` | 📁 | Groups, folders |
-| `QuestionCircleFill` | ❓ | Default fallback icon |
+| `QuestionCircleFill` | ❓ | Open questions, deliberately unknown items |
+| `CircleFill` | ⬤ | Generic node; the fallback when no icon is configured |
 
 ## Adding an icon that isn't in this list
 

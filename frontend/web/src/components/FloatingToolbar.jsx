@@ -23,6 +23,7 @@ import {
   Diagram3Fill,
   StarFill,
   QuestionCircleFill,
+  CircleFill,
   CardChecklist,
   InputCursorText,
   ListCheck,
@@ -103,6 +104,7 @@ const ICON_REGISTRY = {
   Diagram3Fill,
   StarFill,
   QuestionCircleFill,
+  CircleFill,
   CardChecklist,
   InputCursorText,
   ListCheck,
@@ -223,9 +225,13 @@ const FALLBACK_DOMAIN_ORDER = [
   'Risk',
 ];
 
+// Neutral glyph for node types with no registered icon. A question mark here
+// would read as a rendering error rather than as an unconfigured icon.
+const DEFAULT_ICON = CircleFill;
+
 /**
  * Resolve icon component for a node type.
- * Priority: schema icon field -> legacy fallback -> QuestionCircleFill
+ * Priority: schema icon field -> legacy fallback -> DEFAULT_ICON
  */
 function resolveIcon(nodeType, schema) {
   // 1. Check schema icon field
@@ -239,7 +245,7 @@ function resolveIcon(nodeType, schema) {
     return ICON_REGISTRY[legacyName];
   }
   // 3. Default
-  return QuestionCircleFill;
+  return DEFAULT_ICON;
 }
 
 function FloatingToolbar({
@@ -375,5 +381,5 @@ function FloatingToolbar({
   );
 }
 
-export { resolveIcon, COLOR_MAP, ICON_REGISTRY };
+export { resolveIcon, COLOR_MAP, ICON_REGISTRY, DEFAULT_ICON };
 export default FloatingToolbar;
