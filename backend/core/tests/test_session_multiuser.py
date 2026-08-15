@@ -184,6 +184,99 @@ class TestTwoClientsOneSession:
             with pytest.raises(OpError):
                 await mgr.apply_ops(sid, "A", 0, [{"op": "edges_added", "edges": bad}])
 
+    async def test_edge_removed_between_present_nodes_fans_out_to_all_clients(self):
+        """A deleted edge must disappear for *every* connected client.
+
+        Symmetric regression to the edges_added fan-out: an edge deleted between
+        two nodes both already present triggers no node change and, without an
+        explicit fan-out op, lingers on every canvas but the originator's until a
+        reload. The edges_removed op carries the edge ids through to all
+        subscribers while leaving session state untouched.
+        """
+        mgr = _manager()
+        sid = mgr.create_session(name="Shared").id
+        sub_a, _ = mgr.connect(sid, "A", "Alice")
+        sub_b, _ = mgr.connect(sid, "B", "Bob")
+
+        await mgr.apply_ops(
+            sid, "A", 0, [{"op": "nodes_added", "node_ids": ["n1", "n2"]}]
+        )
+        await _drain(sub_a)
+        await _drain(sub_b)
+        state_before = mgr.get_session(sid).state["node_refs"][:]
+
+        result = await mgr.apply_ops(
+            sid, "A", 0, [{"op": "edges_removed", "edge_ids": ["e1"]}]
+        )
+
+        for sub in (sub_a, sub_b):
+            events = [
+                e
+                for e in await _drain(sub)
+                if e.get("op", {}).get("op") == "edges_removed"
+            ]
+            assert len(events) == 1, "edges_removed must reach every subscriber"
+            assert events[0]["op"]["edge_ids"] == ["e1"]
+
+        assert result["applied"][0]["op"] == "edges_removed"
+        assert mgr.get_session(sid).state["node_refs"] == state_before
+
+    async def test_edges_removed_requires_an_edge_id_list(self):
+        mgr = _manager()
+        sid = mgr.create_session().id
+        for bad in ({"op": "edges_removed"}, {"op": "edges_removed", "edge_ids": [5]}):
+            with pytest.raises(OpError):
+                await mgr.apply_ops(sid, "A", 0, [bad])
+
+    async def test_edge_updated_between_present_nodes_fans_out_to_all_clients(self):
+        """A changed edge attribute must re-render for *every* connected client.
+
+        Symmetric regression to the edges_added fan-out: an edge whose type
+        changes between two nodes both already present triggers no node change
+        and, without an explicit fan-out op, keeps showing the stale type on
+        every canvas but the originator's until a reload. The edges_updated op
+        carries the edge payload through while leaving session state untouched.
+        """
+        mgr = _manager()
+        sid = mgr.create_session(name="Shared").id
+        sub_a, _ = mgr.connect(sid, "A", "Alice")
+        sub_b, _ = mgr.connect(sid, "B", "Bob")
+
+        await mgr.apply_ops(
+            sid, "A", 0, [{"op": "nodes_added", "node_ids": ["n1", "n2"]}]
+        )
+        await _drain(sub_a)
+        await _drain(sub_b)
+        state_before = mgr.get_session(sid).state["node_refs"][:]
+
+        edge = {"id": "e1", "type": "DEPENDS_ON"}
+        result = await mgr.apply_ops(
+            sid, "A", 0, [{"op": "edges_updated", "edges": [edge]}]
+        )
+
+        for sub in (sub_a, sub_b):
+            events = [
+                e
+                for e in await _drain(sub)
+                if e.get("op", {}).get("op") == "edges_updated"
+            ]
+            assert len(events) == 1, "edges_updated must reach every subscriber"
+            assert events[0]["op"]["edges"] == [edge]
+
+        assert result["applied"][0]["op"] == "edges_updated"
+        assert mgr.get_session(sid).state["node_refs"] == state_before
+
+    async def test_edges_updated_requires_valid_edges(self):
+        mgr = _manager()
+        sid = mgr.create_session().id
+        for bad in (
+            {"op": "edges_updated", "edge_ids": ["e1"]},
+            {"op": "edges_updated", "edges": [{"type": "X"}]},
+            {"op": "edges_updated", "edges": [{"id": 5}]},
+        ):
+            with pytest.raises(OpError):
+                await mgr.apply_ops(sid, "A", 0, [bad])
+
     async def test_sustained_moves_persist_mirror_and_survive_reload(self, tmp_path):
         """Node moves keep persisting + mirroring after a long op sequence.
 

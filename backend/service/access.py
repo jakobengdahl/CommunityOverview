@@ -90,6 +90,24 @@ def is_node_visible(node: Optional[Node], graph_access: GraphAccessNarrowing) ->
     return graph_access.matches(graph_id=node_graph_id(node))
 
 
+def is_edge_visible(
+    edge: Optional[Edge],
+    storage: "GraphStorage",
+    graph_access: GraphAccessNarrowing,
+) -> bool:
+    """An edge is visible only when both endpoint nodes are visible.
+
+    Mirrors ``filter_nodes_and_edges`` and ``list_typed_edges``: graph-scope
+    narrowing for an edge is derived from the visibility of its endpoints, so a
+    caller can never reach an edge into or out of a graph they may not see.
+    """
+    if edge is None:
+        return False
+    return is_node_visible(
+        storage.get_node(edge.source), graph_access
+    ) and is_node_visible(storage.get_node(edge.target), graph_access)
+
+
 def filter_nodes_and_edges(
     *,
     nodes: List[Node],
@@ -151,12 +169,19 @@ def get_federated_search_limit(
     federation_manager: Optional["FederationManager"],
     minimum_limit: int,
     graph_access: GraphAccessNarrowing,
+    widen: bool = False,
 ) -> int:
-    if (
-        not federation_manager
-        or not federation_manager.enabled
-        or not graph_access.enabled
-    ):
+    """Return how many federated nodes to fetch before post-fetch filtering.
+
+    The window is widened to the full federation cache when graph-scope narrowing
+    is active, or when ``widen`` is set (a generic tag/metadata filter is active),
+    so post-fetch filtering sees the full candidate set instead of dropping
+    matches that ranked below a ``minimum_limit``-sized text window — mirroring
+    the local widening in ``queries.search_graph``.
+    """
+    if not federation_manager or not federation_manager.enabled:
+        return minimum_limit
+    if not graph_access.enabled and not widen:
         return minimum_limit
     return max(
         minimum_limit,

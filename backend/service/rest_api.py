@@ -71,6 +71,34 @@ class SearchRequest(BaseModel):
     federation_depth: Optional[int] = Field(
         None, ge=1, le=9, description="Optional federated search depth"
     )
+    tags_any: Optional[List[str]] = Field(
+        None, description="Keep nodes carrying at least one of these tags (OR)"
+    )
+    tags_all: Optional[List[str]] = Field(
+        None, description="Keep nodes carrying every one of these tags (AND)"
+    )
+    tags_none: Optional[List[str]] = Field(
+        None, description="Drop nodes carrying any of these tags (exclude)"
+    )
+    metadata_filters: Optional[List[Dict[str, Any]]] = Field(
+        None,
+        description=(
+            "Generic metadata filters, each "
+            '{"key": str, "values": [...], "match": "any"|"all"|"none"}'
+        ),
+    )
+    include_archived: bool = Field(
+        False,
+        description="When false (default) archived nodes and edges are excluded",
+    )
+    semantic: bool = Field(
+        False,
+        description=(
+            "When true, rank results by embedding meaning instead of lexical "
+            "substring matching. Lexical search still auto-falls back to semantic "
+            "ranking when it returns zero results."
+        ),
+    )
 
 
 class RelatedNodesRequest(BaseModel):
@@ -81,6 +109,10 @@ class RelatedNodesRequest(BaseModel):
         None, description="Filter by relationship types"
     )
     depth: int = Field(1, ge=1, le=5, description="Traversal depth")
+    include_archived: bool = Field(
+        False,
+        description="When false (default) archived edges and neighbour nodes are excluded",
+    )
 
 
 class SimilarNodesRequest(BaseModel):
@@ -124,6 +156,21 @@ class UpdateNodeRequest(BaseModel):
     """Request model for updating a node."""
 
     updates: Dict[str, Any] = Field(..., description="Fields to update")
+    metadata_merge: bool = Field(
+        False,
+        description=(
+            "When True, merge the `metadata` object field-by-field onto the "
+            "node's existing metadata (a null value removes a key) instead of "
+            "replacing the whole object. Default False keeps replace semantics."
+        ),
+    )
+    expected_updated_at: Optional[str] = Field(
+        None,
+        description=(
+            "Optimistic-concurrency guard: the `updated_at` the caller last read. "
+            "The update is rejected with 409 if the node changed since then."
+        ),
+    )
     # Event context (optional, for webhooks/loop prevention)
     event_origin: Optional[str] = Field(
         None, description="Source of mutation (web-ui, mcp, system, agent:<id>)"
@@ -147,6 +194,38 @@ class DeleteNodesRequest(BaseModel):
     event_origin: Optional[str] = Field(
         None, description="Source of mutation (web-ui, mcp, system, agent:<id>)"
     )
+    event_session_id: Optional[str] = Field(
+        None, description="Session ID for loop prevention"
+    )
+    event_correlation_id: Optional[str] = Field(
+        None, description="Correlation ID for chaining events"
+    )
+
+
+class ArchiveNodesRequest(BaseModel):
+    """Request model for archiving/unarchiving nodes."""
+
+    node_ids: List[str] = Field(..., description="Node IDs to archive/unarchive")
+    archived: bool = Field(
+        True, description="True to archive (hide), False to unarchive (restore)"
+    )
+    event_origin: Optional[str] = Field(None, description="Source of mutation")
+    event_session_id: Optional[str] = Field(
+        None, description="Session ID for loop prevention"
+    )
+    event_correlation_id: Optional[str] = Field(
+        None, description="Correlation ID for chaining events"
+    )
+
+
+class ArchiveEdgesRequest(BaseModel):
+    """Request model for archiving/unarchiving edges."""
+
+    edge_ids: List[str] = Field(..., description="Edge IDs to archive/unarchive")
+    archived: bool = Field(
+        True, description="True to archive (hide), False to unarchive (restore)"
+    )
+    event_origin: Optional[str] = Field(None, description="Source of mutation")
     event_session_id: Optional[str] = Field(
         None, description="Session ID for loop prevention"
     )
@@ -297,6 +376,12 @@ def _register_search_endpoints(router: APIRouter, service: GraphService) -> None
                 node_types=request.node_types,
                 limit=request.limit,
                 federation_depth=request.federation_depth,
+                tags_any=request.tags_any,
+                tags_all=request.tags_all,
+                tags_none=request.tags_none,
+                metadata_filters=request.metadata_filters,
+                include_archived=request.include_archived,
+                semantic=request.semantic,
             )
         _raise_for_access_denied(result)
         return result
@@ -317,11 +402,15 @@ def _register_search_endpoints(router: APIRouter, service: GraphService) -> None
         request: Request,
         relationship_types: Optional[List[str]] = Body(None),
         depth: int = Body(1, ge=1, le=5),
+        include_archived: bool = Body(False),
     ) -> Dict[str, Any]:
         """Get nodes connected to the given node."""
         with use_request_authorization(headers=request.headers):
             result = service.get_related_nodes(
-                node_id=node_id, relationship_types=relationship_types, depth=depth
+                node_id=node_id,
+                relationship_types=relationship_types,
+                depth=depth,
+                include_archived=include_archived,
             )
         _raise_for_access_denied(result)
         return result
@@ -404,8 +493,12 @@ def _register_node_crud_endpoints(router: APIRouter, service: GraphService) -> N
                 event_origin=request.event_origin,
                 event_session_id=request.event_session_id,
                 event_correlation_id=request.event_correlation_id,
+                metadata_merge=request.metadata_merge,
+                expected_updated_at=request.expected_updated_at,
             )
         _raise_for_access_denied(result)
+        if result.get("conflict"):
+            raise HTTPException(status_code=409, detail=result.get("error"))
         if not result.get("success", True):
             raise HTTPException(status_code=404, detail=result.get("error"))
         return result
@@ -419,6 +512,26 @@ def _register_node_crud_endpoints(router: APIRouter, service: GraphService) -> N
             result = service.delete_nodes(
                 node_ids=request.node_ids,
                 confirmed=request.confirmed,
+                event_origin=request.event_origin,
+                event_session_id=request.event_session_id,
+                event_correlation_id=request.event_correlation_id,
+            )
+        _raise_for_access_denied(result)
+        if not result.get("success", True):
+            raise HTTPException(status_code=400, detail=result.get("message"))
+        return result
+
+    @router.post("/nodes/archive")
+    async def archive_nodes(
+        request: ArchiveNodesRequest, http_request: Request
+    ) -> Dict[str, Any]:
+        """Archive or unarchive nodes (hide-by-default vs. permanent delete)."""
+        with use_request_authorization(headers=http_request.headers):
+            archive = (
+                service.archive_nodes if request.archived else service.unarchive_nodes
+            )
+            result = archive(
+                node_ids=request.node_ids,
                 event_origin=request.event_origin,
                 event_session_id=request.event_session_id,
                 event_correlation_id=request.event_correlation_id,
@@ -485,6 +598,26 @@ def _register_edge_crud_endpoints(router: APIRouter, service: GraphService) -> N
         _raise_for_access_denied(result)
         if not result.get("success", True):
             raise HTTPException(status_code=404, detail=result.get("error"))
+        return result
+
+    @router.post("/edges/archive")
+    async def archive_edges(
+        request: ArchiveEdgesRequest, http_request: Request
+    ) -> Dict[str, Any]:
+        """Archive or unarchive edges (hide-by-default vs. permanent delete)."""
+        with use_request_authorization(headers=http_request.headers):
+            archive = (
+                service.archive_edges if request.archived else service.unarchive_edges
+            )
+            result = archive(
+                edge_ids=request.edge_ids,
+                event_origin=request.event_origin,
+                event_session_id=request.event_session_id,
+                event_correlation_id=request.event_correlation_id,
+            )
+        _raise_for_access_denied(result)
+        if not result.get("success", True):
+            raise HTTPException(status_code=400, detail=result.get("message"))
         return result
 
 
@@ -908,7 +1041,9 @@ def _register_single_custom_interface(
     if interface.entity == "node":
 
         @router.get(f"/{interface.path}", name=f"custom_interface_{interface.path}")
-        async def custom_node_interface(request: Request) -> Dict[str, Any]:
+        async def custom_node_interface(
+            request: Request, include_archived: bool = False
+        ) -> Dict[str, Any]:
             with use_request_authorization(headers=request.headers):
                 result = service.list_typed_nodes(
                     node_type=interface.node_type,
@@ -916,6 +1051,7 @@ def _register_single_custom_interface(
                     tags_any=filters.tags_any,
                     subtypes_any=filters.subtypes_any,
                     limit=interface.limit,
+                    include_archived=include_archived,
                 )
             _raise_for_access_denied(result)
             return result
@@ -923,13 +1059,16 @@ def _register_single_custom_interface(
     else:
 
         @router.get(f"/{interface.path}", name=f"custom_interface_{interface.path}")
-        async def custom_edge_interface(request: Request) -> Dict[str, Any]:
+        async def custom_edge_interface(
+            request: Request, include_archived: bool = False
+        ) -> Dict[str, Any]:
             with use_request_authorization(headers=request.headers):
                 result = service.list_typed_edges(
                     edge_type=interface.edge_type,
                     tags_all=filters.tags_all,
                     tags_any=filters.tags_any,
                     limit=interface.limit,
+                    include_archived=include_archived,
                 )
             _raise_for_access_denied(result)
             return result

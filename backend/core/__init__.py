@@ -30,7 +30,7 @@ Usage:
 """
 
 # Core storage
-from .storage import GraphStorage
+from .storage import GraphStorage, StaleUpdateError
 from .storage_backends import FileGraphPersistenceBackend, GraphPersistenceBackend
 from .history_store import (
     GraphHistoryStore,
@@ -78,6 +78,7 @@ from .events import (
 __all__ = [
     # Core storage
     "GraphStorage",
+    "StaleUpdateError",
     "GraphPersistenceBackend",
     "FileGraphPersistenceBackend",
     "GraphHistoryStore",

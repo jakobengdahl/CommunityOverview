@@ -84,24 +84,40 @@ def register_mcp_tools(
             session_registry, session_id, tool_name, result, session_manager
         )
 
+    def _claimed_node_ids(session_id, node_refs):
+        """The session's *node* ids that currently hold a selection claim.
+
+        Claims are advisory soft-locks on session *elements*, so the claim map
+        can hold edge ids as well as node ids. Both read tools report this as
+        ``selected_node_ids``, so it is narrowed to the session's node
+        references — an agent must be able to feed the field straight into a
+        node argument such as ``apply_visualization_layout``'s positions map.
+        """
+        refs = set(node_refs)
+        return [e for e in session_manager.claimed_elements(session_id) if e in refs]
+
     def _session_view_state(session_id):
         """Return ``(visible_node_ids, selected_node_ids)`` as the server sees them.
 
         Session state is server-owned (design §3.8): visible nodes come from the
         shared-session store's node references, the current selection from the
-        advisory claim map. The browser no longer uploads canvas state — an MCP
-        tool reads the same state every collaborator converges on.
+        advisory claim map narrowed to those same references. The browser no
+        longer uploads canvas state — an MCP tool reads the same state every
+        collaborator converges on.
+
+        Both halves are read off the stored session, so a session the manager
+        does not hold reports an empty selection rather than claims that outlived
+        it: the claim map is not purged when a session is deleted.
         """
         visible: list = []
         selected: list = []
         if session_manager is not None:
             session = session_manager.get_session(session_id)
             if session is not None:
+                node_refs = session.state.get("node_refs", [])
                 hidden = set(session.state.get("hidden_node_ids", []))
-                visible = [
-                    n for n in session.state.get("node_refs", []) if n not in hidden
-                ]
-            selected = list(session_manager.claimed_elements(session_id))
+                visible = [n for n in node_refs if n not in hidden]
+                selected = _claimed_node_ids(session_id, node_refs)
         return visible, selected
 
     def register_tool(func: Callable) -> Callable:
@@ -119,16 +135,55 @@ def register_mcp_tools(
         limit: int = 50,
         action: Optional[str] = None,
         federation_depth: Optional[int] = None,
+        tags_any: Optional[List[str]] = None,
+        tags_all: Optional[List[str]] = None,
+        tags_none: Optional[List[str]] = None,
+        metadata_filters: Optional[List[Dict[str, Any]]] = None,
+        include_archived: bool = False,
+        semantic: bool = False,
         visualization_session_id: Optional[str] = None,
     ) -> Dict[str, Any]:
         """
-        Search for nodes in the graph based on text query
+        Search for nodes in the graph based on text query, with optional generic
+        tag and metadata filtering.
+
+        The tag/metadata filters are use-case agnostic: they match on whatever
+        tags and metadata a deployment has put on its nodes and hardcode no field
+        names or values. Pass an empty query ("") to filter purely by tags and/or
+        metadata. When no filter argument is given the search behaves exactly as
+        before.
+
+        By default the query is matched lexically (substring). Multi-word or
+        natural-language queries that no node contains verbatim therefore return
+        nothing; set ``semantic=True`` to rank nodes by embedding meaning instead.
+        As a safety net the search also falls back to semantic ranking
+        automatically when a non-empty lexical query yields zero results, so a
+        conceptual query still surfaces the closest nodes. The response includes
+        a ``"semantic"`` boolean indicating whether semantic ranking produced the
+        returned nodes.
 
         Args:
-            query: Search text (matches against name, description, summary)
+            query: Search text (matches against name, description, summary). Use ""
+                to match on the filters alone.
             node_types: List of node types to filter on (Actor, Initiative, etc.)
             limit: Max number of results (default 50)
             action: Optional action for frontend ('add_to_visualization' to add to current view)
+            tags_any: Keep only nodes carrying at least one of these tags (OR).
+            tags_all: Keep only nodes carrying every one of these tags (AND).
+            tags_none: Drop nodes carrying any of these tags (exclude).
+            metadata_filters: A list of generic metadata filters, each a dict
+                ``{"key": <field>, "values": [...], "match": "any"|"all"|"none"}``.
+                ``any`` (default) keeps a node whose metadata value(s) at ``key``
+                intersect the given values; ``all`` requires every given value to
+                be present (for list-valued metadata); ``none`` excludes nodes that
+                match any given value. Values compare as strings. Multiple filters
+                combine with AND.
+            include_archived: When False (default) archived nodes and edges are
+                excluded. Set True to include archived items in the results.
+            semantic: When True, rank results by embedding meaning (cosine
+                similarity) instead of lexical substring matching. Default False
+                keeps the lexical behavior, which still auto-falls back to
+                semantic ranking when it returns zero results.
             visualization_session_id: Optional browser session ID — when provided, the result
                 is pushed live to the connected browser window via SSE
 
@@ -141,6 +196,12 @@ def register_mcp_tools(
             limit=limit,
             action=action,
             federation_depth=federation_depth,
+            tags_any=tags_any,
+            tags_all=tags_all,
+            tags_none=tags_none,
+            metadata_filters=metadata_filters,
+            include_archived=include_archived,
+            semantic=semantic,
         )
         _push(visualization_session_id, "search_graph", result)
         return result
@@ -163,6 +224,7 @@ def register_mcp_tools(
         node_id: str,
         relationship_types: Optional[List[str]] = None,
         depth: int = 1,
+        include_archived: bool = False,
         visualization_session_id: Optional[str] = None,
     ) -> Dict[str, Any]:
         """
@@ -172,6 +234,8 @@ def register_mcp_tools(
             node_id: ID of the starting node
             relationship_types: List of relationship types to filter on
             depth: How many hops from the starting node (default 1)
+            include_archived: When False (default) archived edges are not traversed
+                and archived neighbour nodes are excluded. Set True to include them.
             visualization_session_id: Optional browser session ID — when provided, the result
                 is pushed live to the connected browser window via SSE
 
@@ -182,6 +246,7 @@ def register_mcp_tools(
             node_id=node_id,
             relationship_types=relationship_types,
             depth=depth,
+            include_archived=include_archived,
         )
         _push(visualization_session_id, "get_related_nodes", result)
         return result
@@ -281,6 +346,8 @@ def register_mcp_tools(
     def update_node(
         node_id: str,
         updates: Dict[str, Any],
+        metadata_merge: bool = False,
+        expected_updated_at: Optional[str] = None,
         event_session_id: Optional[str] = None,
         event_correlation_id: Optional[str] = None,
     ) -> Dict[str, Any]:
@@ -290,6 +357,19 @@ def register_mcp_tools(
         Args:
             node_id: ID of the node to update
             updates: Dict with fields to update (name, description, summary, tags, aliases, metadata)
+            metadata_merge: When True, the `metadata` object is merged field-by-field
+                onto the node's existing metadata instead of replacing it wholesale:
+                only the keys you send are changed, other keys are preserved, and a
+                key whose value is null (None) is removed. Default False keeps the
+                legacy behaviour where `metadata` replaces the whole object — so a
+                caller must resend every key to avoid dropping it. Use merge mode for
+                safe concurrent writebacks that each touch a different key.
+            expected_updated_at: Optional optimistic-concurrency guard. Pass the
+                `updated_at` value you last read for this node; the update is
+                rejected (result has success=False and conflict=True) if the node
+                has changed since then, instead of silently overwriting a
+                concurrent write. On conflict the result includes the live
+                `current_updated_at` so you can re-read and retry.
             event_session_id: Optional session ID for webhook loop prevention
             event_correlation_id: Optional correlation ID for chaining events
 
@@ -302,6 +382,8 @@ def register_mcp_tools(
             event_origin="mcp",
             event_session_id=event_session_id,
             event_correlation_id=event_correlation_id,
+            metadata_merge=metadata_merge,
+            expected_updated_at=expected_updated_at,
         )
 
     @register_tool
@@ -355,6 +437,112 @@ def register_mcp_tools(
         return service.delete_edges(
             edge_ids=edge_ids,
             confirmed=confirmed,
+            event_origin="mcp",
+            event_session_id=event_session_id,
+            event_correlation_id=event_correlation_id,
+        )
+
+    # ==================== Archive Tools ====================
+    # Archiving hides nodes/edges from search and traversal by default while
+    # keeping them in the graph, in contrast to delete_* which is permanent.
+
+    @register_tool
+    def archive_nodes(
+        node_ids: List[str],
+        event_session_id: Optional[str] = None,
+        event_correlation_id: Optional[str] = None,
+    ) -> Dict[str, Any]:
+        """
+        Archive nodes: hide them from search/traversal by default without deleting.
+
+        Archived nodes remain in the graph and can be restored with unarchive_nodes.
+        Prefer this over delete_nodes when the intent is to hide/retire a node
+        rather than permanently remove it.
+
+        Args:
+            node_ids: List of node IDs to archive
+            event_session_id: Optional session ID for webhook loop prevention
+            event_correlation_id: Optional correlation ID for chaining events
+
+        Returns:
+            Dict with result (archived, node_ids, nodes, success)
+        """
+        return service.archive_nodes(
+            node_ids=node_ids,
+            event_origin="mcp",
+            event_session_id=event_session_id,
+            event_correlation_id=event_correlation_id,
+        )
+
+    @register_tool
+    def unarchive_nodes(
+        node_ids: List[str],
+        event_session_id: Optional[str] = None,
+        event_correlation_id: Optional[str] = None,
+    ) -> Dict[str, Any]:
+        """
+        Unarchive nodes: make previously archived nodes visible again.
+
+        Args:
+            node_ids: List of node IDs to unarchive
+            event_session_id: Optional session ID for webhook loop prevention
+            event_correlation_id: Optional correlation ID for chaining events
+
+        Returns:
+            Dict with result (archived, node_ids, nodes, success)
+        """
+        return service.unarchive_nodes(
+            node_ids=node_ids,
+            event_origin="mcp",
+            event_session_id=event_session_id,
+            event_correlation_id=event_correlation_id,
+        )
+
+    @register_tool
+    def archive_edges(
+        edge_ids: List[str],
+        event_session_id: Optional[str] = None,
+        event_correlation_id: Optional[str] = None,
+    ) -> Dict[str, Any]:
+        """
+        Archive edges: hide them from search/traversal by default without deleting.
+
+        Archived edges remain in the graph and can be restored with unarchive_edges.
+
+        Args:
+            edge_ids: List of edge IDs to archive
+            event_session_id: Optional session ID for webhook loop prevention
+            event_correlation_id: Optional correlation ID for chaining events
+
+        Returns:
+            Dict with result (archived, edge_ids, edges, success)
+        """
+        return service.archive_edges(
+            edge_ids=edge_ids,
+            event_origin="mcp",
+            event_session_id=event_session_id,
+            event_correlation_id=event_correlation_id,
+        )
+
+    @register_tool
+    def unarchive_edges(
+        edge_ids: List[str],
+        event_session_id: Optional[str] = None,
+        event_correlation_id: Optional[str] = None,
+    ) -> Dict[str, Any]:
+        """
+        Unarchive edges: make previously archived edges visible again.
+
+        Args:
+            edge_ids: List of edge IDs to unarchive
+            event_session_id: Optional session ID for webhook loop prevention
+            event_correlation_id: Optional correlation ID for chaining events
+
+        Returns:
+            Dict with result (archived, edge_ids, edges, success)
+        """
+        return service.unarchive_edges(
+            edge_ids=edge_ids,
             event_origin="mcp",
             event_session_id=event_session_id,
             event_correlation_id=event_correlation_id,
@@ -761,6 +949,10 @@ def register_mcp_tools(
         Use this to understand what the user is looking at before deciding
         which nodes to add or which view to load.
 
+        ``selected_node_ids`` holds node ids only. A selection claim can also be
+        taken on an edge, but this field is narrowed to the session's nodes, so
+        it is safe to pass into any argument that expects node ids.
+
         Args:
             session_id: The session ID shown in the browser header (e.g. "8244-1742")
 
@@ -771,6 +963,11 @@ def register_mcp_tools(
             return {"error": "Session registry not available"}
         if not session_registry.is_valid_session_id(session_id):
             return {"error": "Invalid session ID format — expected DDDD-DDDD-DDDD-DDDD"}
+        denied = _authorize_session(
+            GRAPH_ACTION_READ, "get_visualization_session_state"
+        )
+        if denied:
+            return denied
         if not session_registry.session_exists(session_id):
             return {
                 "error": (
@@ -802,9 +999,9 @@ def register_mcp_tools(
         """
         Read the geometry of every node in an open visualization session.
 
-        Returns each node's model-space position so an AI agent can compute a new
-        arrangement (a left-to-right DAG, a grid, swimlanes) and then call
-        ``apply_visualization_layout`` to move them.
+        Returns each node's model-space position *and what it is*, so an AI agent
+        can compute a new arrangement (a left-to-right DAG, a grid, type or status
+        swimlanes) and then call ``apply_visualization_layout`` to move them.
 
         Geometry contract (read this before computing positions):
         - Coordinates are **model space**: independent of the user's zoom and pan,
@@ -820,16 +1017,37 @@ def register_mcp_tools(
           relative to their related nodes over guessing where a viewport is,
           especially when several clients are connected.
 
+        Semantics for arranging by meaning (never parse the node id for this):
+        - ``type`` is the node's graph type, e.g. "Initiative". It is null when
+          the node reference does not resolve to a node this caller may read.
+        - ``status`` is whatever the deployment stores under the node's
+          ``metadata["status"]``, trimmed, and is null when that value is blank
+          or the deployment does not use the field. It is a convention, not a
+          schema-enforced field, so treat a null as "unknown", not as "no
+          status".
+        - ``selected_node_ids`` is what the users currently have selected, the
+          same value ``get_visualization_session_state`` reports, so an arrange
+          that should respect the selection needs only this one call. It holds
+          node ids only — a selection claim can also be taken on an edge, but
+          this field is narrowed to this response's nodes, so every id in it can
+          be passed straight back to ``apply_visualization_layout``. The visible
+          set is not repeated here: it is this response's nodes with
+          ``hidden`` false.
+
         Args:
             session_id: The session ID shown in the browser header (e.g. "8244-1742")
 
         Returns:
-            Dict with revision, node_count, nodes (id/x/y/hidden), assumed_node_size
+            Dict with revision, node_count, nodes (id/x/y/hidden/type/status),
+            selected_node_ids, assumed_node_size
         """
         if session_manager is None:
             return {"error": "Session manager not available"}
         if not is_valid_session_id(session_id):
             return {"error": "Invalid session ID format — expected DDDD-DDDD-DDDD-DDDD"}
+        denied = _authorize_session(GRAPH_ACTION_READ, "get_visualization_layout")
+        if denied:
+            return denied
         session = session_manager.get_session(session_id)
         if session is None:
             return {
@@ -840,15 +1058,20 @@ def register_mcp_tools(
             }
         positions = session.state.get("positions", {})
         hidden = set(session.state.get("hidden_node_ids", []))
+        node_refs = session.state.get("node_refs", [])
+        semantics = service.resolve_session_node_semantics(node_refs).get("nodes") or {}
         nodes = []
-        for node_id in session.state.get("node_refs", []):
+        for node_id in node_refs:
             pos = positions.get(node_id)
+            meaning = semantics.get(node_id) or {}
             nodes.append(
                 {
                     "id": node_id,
                     "x": pos["x"] if pos else None,
                     "y": pos["y"] if pos else None,
                     "hidden": node_id in hidden,
+                    "type": meaning.get("type"),
+                    "status": meaning.get("status"),
                 }
             )
         return {
@@ -856,6 +1079,7 @@ def register_mcp_tools(
             "revision": session.seq,
             "node_count": len(nodes),
             "nodes": nodes,
+            "selected_node_ids": _claimed_node_ids(session_id, node_refs),
             "assumed_node_size": _ASSUMED_NODE_SIZE,
             "coordinate_space": "model-space, pixels at zoom 1, x/y = node top-left",
             "connected_clients": session_manager.connected_count(session_id),
@@ -926,6 +1150,9 @@ def register_mcp_tools(
                 "success": False,
                 "error": "Invalid session ID format — expected DDDD-DDDD-DDDD-DDDD",
             }
+        denied = _authorize_session(GRAPH_ACTION_MUTATE, "apply_visualization_layout")
+        if denied:
+            return denied
         animation = {
             "animate": bool(animate),
             "duration_ms": duration_ms,

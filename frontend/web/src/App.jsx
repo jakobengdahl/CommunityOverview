@@ -26,6 +26,7 @@ import { serverStateToMirror, useSharedSession } from './hooks/useSharedSession'
 import { useSyncConnection } from './hooks/useSyncConnection';
 import { useToolResultCommands } from './hooks/useToolResultCommands';
 import { decideClearAction } from './utils/clearBoard';
+import { dropIntoFreshSession, receiveRemoteSessionDeleted } from './utils/sessionLifecycle';
 import './App.css';
 
 const _urlParams = new URLSearchParams(window.location.search);
@@ -54,6 +55,7 @@ function App() {
     hiddenNodeIds,
     hiddenEdgeIds,
     clearGroupsFlag,
+    canvasBaselineEpoch,
     addNodesToVisualization,
     updateVisualization,
     toggleNodeVisibility,
@@ -96,6 +98,10 @@ function App() {
     getNodeColor,
     closeMenusSignal,
     resetSessionScopedState,
+    editingEdge,
+    setEditingEdge,
+    deleteDialog,
+    setDeleteDialog,
   } = useGraphStore();
 
   const { t, setLanguage, language } = useI18n();
@@ -105,7 +111,6 @@ function App() {
   const latestViewport = useRef(null);
   const dialogOpenRef = useRef(false);
   const [notification, setNotification] = useState(null);
-  const [deleteDialog, setDeleteDialog] = useState(null);
   const [saveViewDialog, setSaveViewDialog] = useState(null);
   const [showSubscriptionDialog, setShowSubscriptionDialog] = useState(false);
   const [editingSubscriptionData, setEditingSubscriptionData] = useState(null);
@@ -119,7 +124,6 @@ function App() {
   const [createGroupSignal, setCreateGroupSignal] = useState(0);
   const [saveViewSignal, setSaveViewSignal] = useState(0);
   const [isSavingView, setIsSavingView] = useState(false);
-  const [editingEdge, setEditingEdge] = useState(null);
   const [skillDialogType, setSkillDialogType] = useState(null);
   const [editingSkillData, setEditingSkillData] = useState(null);
   const [showAKCDialog, setShowAKCDialog] = useState(false);
@@ -253,6 +257,21 @@ function App() {
           if (list.length) addNodesToVisualization([], list);
           break;
         }
+        case 'edges_removed':
+          // A collaborator deleted an edge. Remove it directly; if it isn't
+          // present here (this host never had those endpoints) removeEdge is a
+          // harmless no-op.
+          (op.edge_ids || []).forEach((id) => removeEdge(id));
+          break;
+        case 'edges_updated':
+          // A collaborator changed an edge's attributes (e.g. its relationship
+          // type). Merge them in place; if the edge isn't present here,
+          // updateEdgeData is a harmless no-op and a later hydration recovers
+          // the current value from the graph.
+          (op.edges || []).forEach((e) => {
+            if (e && e.id) updateEdgeData(e.id, e);
+          });
+          break;
         case 'edges_hidden':
           setHiddenEdgeIds(
             Array.from(new Set([...(store.hiddenEdgeIds || []), ...(op.edge_ids || [])]))
@@ -328,6 +347,8 @@ function App() {
     [
       addNodesToVisualization,
       removeNode,
+      removeEdge,
+      updateEdgeData,
       setHiddenNodeIds,
       setHiddenEdgeIds,
       setRemotePositions,
@@ -818,13 +839,17 @@ function App() {
           throw new Error('Could not delete edge');
         }
         removeEdge(edgeId);
+        // Fan the deletion out to collaborators. Both endpoints already exist on
+        // their canvases, so nothing else prompts them to drop the edge (no node
+        // was removed); without this the edge lingers on their canvas until reload.
+        syncRef.current?.sendEdgesRemoved([edgeId]);
         showNotification('success', 'Edge deleted');
       } catch (error) {
         console.error('Error deleting edge:', error);
         showNotification('error', 'Could not delete edge');
       }
     },
-    [removeEdge, showNotification]
+    [removeEdge, showNotification, syncRef]
   );
 
   // Callback: Edit edge - opens EditEdgeDialog
@@ -835,7 +860,7 @@ function App() {
         setEditingEdge({ ...edge, ...edgeData });
       }
     },
-    [edges]
+    [edges, setEditingEdge]
   );
 
   // Callback: Save edge updates from EditEdgeDialog
@@ -846,6 +871,10 @@ function App() {
         await api.updateEdge(editingEdge.id, updates);
         const newEdges = edges.map((e) => (e.id === editingEdge.id ? { ...e, ...updates } : e));
         updateVisualization(nodes, newEdges);
+        // Fan the update out to collaborators: both endpoints already exist on
+        // their canvases, so nothing else prompts them to re-render the changed
+        // edge; without this they show the stale attributes until reload.
+        syncRef.current?.sendEdgesUpdated([{ id: editingEdge.id, ...updates }]);
         setEditingEdge(null);
         showNotification('success', 'Edge updated');
       } catch (error) {
@@ -853,7 +882,7 @@ function App() {
         showNotification('error', 'Could not update edge');
       }
     },
-    [editingEdge, nodes, edges, updateVisualization, showNotification]
+    [editingEdge, setEditingEdge, nodes, edges, updateVisualization, showNotification, syncRef]
   );
 
   // Callback: Change an edge's relationship type from the context menu.
@@ -863,14 +892,19 @@ function App() {
     async (edgeId, type) => {
       try {
         await api.updateEdge(edgeId, { type: type || null });
-        updateEdgeData(edgeId, { type: type || 'RELATES_TO' });
+        const nextType = type || 'RELATES_TO';
+        updateEdgeData(edgeId, { type: nextType });
+        // Fan the type change out to collaborators: both endpoints already exist
+        // on their canvases, so nothing else prompts them to re-render the edge;
+        // without this they keep showing the old type until reload.
+        syncRef.current?.sendEdgesUpdated([{ id: edgeId, type: nextType }]);
         showNotification('success', 'Connection type updated');
       } catch (error) {
         console.error('Error updating edge type:', error);
         showNotification('error', 'Could not update connection');
       }
     },
-    [updateEdgeData, showNotification]
+    [updateEdgeData, showNotification, syncRef]
   );
 
   // Callback: Connect nodes (from drag-connect in canvas)
@@ -918,7 +952,7 @@ function App() {
         isMultiple: false,
       });
     },
-    [nodes]
+    [nodes, setDeleteDialog]
   );
 
   // Callback: Delete multiple nodes - shows dialog
@@ -934,7 +968,7 @@ function App() {
         isMultiple: true,
       });
     },
-    [nodes]
+    [nodes, setDeleteDialog]
   );
 
   // Confirm delete
@@ -957,7 +991,7 @@ function App() {
     } finally {
       setDeleteDialog(null);
     }
-  }, [deleteDialog, removeNode, showNotification]);
+  }, [deleteDialog, setDeleteDialog, removeNode, showNotification]);
 
   // Toolbar: trigger group creation in GraphCanvas
   const handleToolbarCreateGroup = useCallback(() => {
@@ -1377,12 +1411,18 @@ function App() {
         setSessionsVersion((v) => v + 1);
       },
       onSessionDeleted: (deletedBy) => {
-        if (deletedBy && deletedBy === api.getClientId()) return; // our own delete
-        sessionStore.removeSession(sessionId);
-        clearVisualization();
-        const fresh = api.generateVisualizationSessionId();
-        setSessionId(fresh);
-        reflectSessionUrl(fresh);
+        const dropped = receiveRemoteSessionDeleted({
+          deletedBy,
+          clientId: api.getClientId(),
+          sessionId,
+          generateSessionId: api.generateVisualizationSessionId,
+          removeSession: sessionStore.removeSession,
+          clearVisualization,
+          resetSessionScopedState: resetSessionScopedUi,
+          setSessionId,
+          reflectSessionUrl,
+        });
+        if (!dropped) return; // our own delete — already handled locally
         setSessionsVersion((v) => v + 1);
         showNotification('info', t('sessions.session_deleted_remote'));
       },
@@ -1408,6 +1448,7 @@ function App() {
     resyncFromServer,
     applyRemoteOp,
     clearVisualization,
+    resetSessionScopedUi,
     showNotification,
     t,
     applyToolResultCommand,
@@ -1564,11 +1605,13 @@ function App() {
       // Deleting the active session: drop its content and switch into a fresh
       // one (design 3.6). Other connected clients are notified via the
       // server's session_deleted broadcast (handled once realtime lands).
-      clearVisualization();
-      resetSessionScopedUi();
-      const fresh = api.generateVisualizationSessionId();
-      setSessionId(fresh);
-      reflectSessionUrl(fresh);
+      dropIntoFreshSession({
+        freshId: api.generateVisualizationSessionId(),
+        clearVisualization,
+        resetSessionScopedState: resetSessionScopedUi,
+        setSessionId,
+        reflectSessionUrl,
+      });
       showNotification('info', t('sessions.session_deleted'));
     }
     setSessionsVersion((v) => v + 1);
@@ -1640,10 +1683,11 @@ function App() {
   );
 
   // Modal dialog open/close (and edit-target) state, bundled for AppDialogs
-  // (STRUCTURE_REVIEW B1 slice 3). The state itself stays in App because the
-  // double-Escape guard and SessionDrawer's suspendEscape derive from it
-  // alongside the store-driven editingNode/detailNode; AppDialogs owns only the
-  // rendering of the stack.
+  // (STRUCTURE_REVIEW B1 slice 3). The double-Escape guard and SessionDrawer's
+  // suspendEscape derive from this bundle, so it stays assembled in App;
+  // AppDialogs owns only the rendering of the stack. The dialogs that address
+  // graph content (editingEdge, deleteDialog) live in the store next to
+  // editingNode/detailNode so a session switch resets them all at once.
   const dialogs = {
     createNodeType,
     setCreateNodeType,
@@ -1745,6 +1789,7 @@ function App() {
             })
           }
           animatedLayoutResetKey={sessionId}
+          canvasBaselineEpoch={canvasBaselineEpoch}
           agentArrangingLabel={t('sessions.agent_arranging')}
           remoteAnnotationOps={remoteAnnotationOps}
           onRemoteAnnotationsApplied={() => setRemoteAnnotationOps(null)}
@@ -1755,6 +1800,9 @@ function App() {
           federationDepthLevels={federationDepthLevels}
           federationDepthLabel={t('federation.depth_label')}
           federationDepthTooltip={t('federation.depth_tooltip')}
+          lazyLoadShowingLabel={t('canvas.lazy_showing')}
+          lazyLoadMoreLabel={t('canvas.lazy_load_more')}
+          lazyLoadHiddenConnectionsLabel={t('canvas.lazy_hidden_connections')}
           showMinimap={showMinimap}
           nodePreviewEnabled={nodePreviewEnabled}
           schema={schema}

@@ -46,6 +46,17 @@ from typing import Dict, Any, Optional, AsyncIterator
 SESSION_ID_RE = re.compile(r"^\d{4}-\d{4}(?:-\d{4}-\d{4})?$")
 _SESSION_TTL = 3600  # seconds — sessions not updated for this long are evicted
 
+# Upper bound on buffered, undrained commands per session. Once a browser has
+# moved to the shared op stream it closes its legacy SSE EventSource, so nothing
+# drains that session's queue; every subsequent MCP-tool or pulse push would grow
+# an unbounded queue for the session's lifetime (and each push refreshes
+# last_seen, so TTL eviction never reclaims it). Bounding the queue with
+# drop-oldest keeps memory finite while preserving the legacy→op handover window:
+# a legacy consumer that (re)connects within the window still receives the most
+# recent commands. The window is sub-second (design §8.1 R5), so this bound is far
+# larger than any legitimate pre-connect buffer.
+_MAX_QUEUE_SIZE = 1000
+
 
 class SessionRegistry:
     """In-memory registry of active browser visualization sessions."""
@@ -78,11 +89,34 @@ class SessionRegistry:
         """Return the existing queue for *session_id*, creating the session if new."""
         if session_id not in self._sessions:
             self._sessions[session_id] = {
-                "queue": asyncio.Queue(),
+                "queue": asyncio.Queue(maxsize=_MAX_QUEUE_SIZE),
                 "created_at": time.monotonic(),
                 "last_seen": time.monotonic(),
             }
         return self._sessions[session_id]["queue"]
+
+    @staticmethod
+    def _enqueue_drop_oldest(queue: asyncio.Queue, command: Dict[str, Any]) -> None:
+        """Put *command* on *queue*, discarding the oldest item if it is full.
+
+        Runs in the event-loop thread (directly, or via call_soon/
+        call_soon_threadsafe), so the drop-then-put pair is atomic with respect
+        to the single SSE consumer draining the queue. Bounds memory for a
+        session whose browser has stopped draining the legacy stream while
+        keeping the newest commands for a consumer that reconnects within the
+        handover window.
+        """
+        try:
+            queue.put_nowait(command)
+        except asyncio.QueueFull:
+            try:
+                queue.get_nowait()
+            except asyncio.QueueEmpty:
+                pass
+            try:
+                queue.put_nowait(command)
+            except asyncio.QueueFull:
+                pass
 
     def _touch(self, session_id: str) -> None:
         if session_id in self._sessions:
@@ -150,7 +184,7 @@ class SessionRegistry:
         try:
             # Fast path: already running inside the event loop thread.
             loop = asyncio.get_running_loop()
-            loop.call_soon(queue.put_nowait, command)
+            loop.call_soon(self._enqueue_drop_oldest, queue, command)
             self._touch(session_id)
             return True
         except RuntimeError:
@@ -158,7 +192,7 @@ class SessionRegistry:
             # thread-safe delivery from a thread-pool worker.
             if self._loop is None or not self._loop.is_running():
                 return False
-            self._loop.call_soon_threadsafe(queue.put_nowait, command)
+            self._loop.call_soon_threadsafe(self._enqueue_drop_oldest, queue, command)
             self._touch(session_id)
             return True
 
@@ -166,7 +200,10 @@ class SessionRegistry:
         """Push *command* from an async context.  Returns False if session unknown."""
         if session_id not in self._sessions:
             return False
-        await self._sessions[session_id]["queue"].put(command)
+        # Non-blocking drop-oldest rather than ``await queue.put`` so a full queue
+        # (browser off the legacy stream, nothing draining) never blocks the
+        # producer; memory stays bounded by _MAX_QUEUE_SIZE.
+        self._enqueue_drop_oldest(self._sessions[session_id]["queue"], command)
         self._touch(session_id)
         return True
 

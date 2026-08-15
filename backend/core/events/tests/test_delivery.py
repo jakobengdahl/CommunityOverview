@@ -17,6 +17,22 @@ from backend.core.events.models import (
 from backend.core.events.delivery import DeliveryWorker, DeliveryItem, is_safe_url
 
 
+def _wait_for(predicate, timeout: float = 5.0, interval: float = 0.02):
+    """Poll ``predicate`` until it returns a truthy value or the deadline passes.
+
+    Returns the predicate's value — truthy once the awaited condition holds, or the
+    final falsy value on timeout so the caller's assertion reports the real state.
+    Waiting on the outcome instead of a fixed sleep avoids races with delivery
+    retry timing under CI load.
+    """
+    deadline = time.monotonic() + timeout
+    value = predicate()
+    while not value and time.monotonic() < deadline:
+        time.sleep(interval)
+        value = predicate()
+    return value
+
+
 def create_test_event(
     event_id: str = "test-event-1",
     subscription_id: str = "sub-1",
@@ -215,13 +231,15 @@ class TestDeliveryWorker:
             event = create_test_event()
             worker.enqueue(event, "https://example.com/hook")
 
-            # Wait for retries
-            time.sleep(1.0)
+            # Wait until the delivery reaches its terminal SUCCESS state. The two
+            # failures each incur a 0.1s backoff before the third attempt lands, so
+            # a fixed sleep races with CI load; poll on the outcome instead.
+            success_results = _wait_for(
+                lambda: [r for r in results if r.status == DeliveryStatus.SUCCESS]
+            )
 
             # Should have 3 results: 2 retrying + 1 success
             assert len(results) >= 1
-            # Last result should be success
-            success_results = [r for r in results if r.status == DeliveryStatus.SUCCESS]
             assert len(success_results) == 1
         finally:
             worker.stop(wait=True)

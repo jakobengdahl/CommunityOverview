@@ -34,6 +34,13 @@ class TestHealthAndRoot:
         assert response.status_code == 302
         assert response.headers["location"] == "/web/"
 
+    def test_root_redirect_preserves_session_query(self, test_app: TestClient):
+        """A ?session= deep link must survive the root redirect so the SPA
+        joins the linked session instead of minting its own."""
+        response = test_app.get("/?session=1234-5678-9012-3456", follow_redirects=False)
+        assert response.status_code == 302
+        assert response.headers["location"] == "/web/?session=1234-5678-9012-3456"
+
     def test_info_endpoint(self, test_app: TestClient):
         """Info endpoint returns API information."""
         response = test_app.get("/info")

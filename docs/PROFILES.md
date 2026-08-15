@@ -122,7 +122,7 @@ Each node type has the following fields:
 | `category` | No | `"domain"` (default) or `"system"`. Domain types appear in the toolbar |
 | `description` | No | Describes the node type. Shown in MCP instructions to AI clients |
 | `color` | No | Hex color code for UI display. Defaults to `#9CA3AF` (gray) |
-| `icon` | No | Bootstrap Icon name for the toolbar (e.g. `"DatabaseFill"`, `"PeopleFill"`) |
+| `icon` | No | Bootstrap Icon name for the toolbar (e.g. `"DatabaseFill"`, `"PeopleFill"`). Omitted or unregistered names fall back to the built-in icon for known type names, otherwise to a neutral circle |
 | `static` | No | If `true`, nodes of this type cannot be created via the chat. Used for system types |
 | `ui_form` | No | Specialized creation dialog. `"skill"` opens the SKILL.md-compatible form |
 | `context_menu` | No | Array of extra items for the right-click context menu (see below) |
