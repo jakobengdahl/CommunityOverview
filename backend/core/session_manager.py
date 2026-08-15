@@ -606,8 +606,99 @@ class SessionManager:
         if animation is not None:
             op["animation"] = animation
 
-        # Snapshot for rollback so a persistence failure leaves in-memory state,
-        # seq and ring untouched — mirroring apply_ops' all-or-nothing guarantee.
+        applied = self._apply_op_sync(session, session_id, client_id, op)
+        return {"applied": applied, "revision": session.seq, "moved": len(target)}
+
+    def add_node_refs(
+        self,
+        session_id: str,
+        client_id: str,
+        node_ids: List[str],
+        *,
+        expected_revision: Optional[int] = None,
+    ) -> Dict[str, Any]:
+        """Add node references to a session **synchronously** (the MCP write path).
+
+        Places a known set of nodes on the canvas directly, instead of having to
+        craft a search that happens to return exactly that set. State is
+        server-owned (design §3.8), so the resulting ``nodes_added`` op is what
+        every connected browser converges on — a client that is not connected
+        yet picks the nodes up from the session state on join.
+
+        Shares ``apply_layout``'s atomicity contract: it never awaits, so it is
+        atomic on a single-threaded loop, and a held per-session lock (an
+        ``apply_ops`` batch mid-flight) means ``LayoutBusy`` rather than a seq
+        assigned out of broadcast order.
+
+        Ids already in the session are not re-added and do not advance the
+        session's revision: when the set adds nothing new the call is a no-op
+        that broadcasts nothing.
+        """
+        if not is_valid_session_id(session_id):
+            raise SessionNotFound()
+        if not isinstance(client_id, str) or not client_id:
+            raise OpError("'client_id' is required")
+        if not isinstance(node_ids, list) or not node_ids:
+            raise OpError("'node_ids' must be a non-empty list")
+        if len(node_ids) > self._max_ops:
+            raise OpBatchTooLarge()
+        if len(json.dumps(node_ids)) > self._max_op_batch_bytes:
+            raise OpBatchTooLarge()
+        if not self._bucket.consume(client_id, max(1, len(node_ids))):
+            raise RateLimited()
+
+        # A held lock means an apply_ops batch is mid-flight for this session
+        # (see apply_layout's docstring for the seq-ordering rationale).
+        if self._lock(session_id).locked():
+            raise LayoutBusy()
+
+        session = self.store.get(session_id)
+        if session is None:
+            raise SessionNotFound()
+        if expected_revision is not None and expected_revision != session.seq:
+            raise RevisionConflict(expected_revision, session.seq)
+
+        present = set(session.state.get("node_refs", []))
+        added = [
+            node_id
+            for node_id in node_ids
+            if isinstance(node_id, str) and node_id not in present
+        ]
+        if not added:
+            return {
+                "applied": None,
+                "revision": session.seq,
+                "added": [],
+                "node_count": len(session.state.get("node_refs", [])),
+            }
+
+        op: Dict[str, Any] = {
+            "op": "nodes_added",
+            "node_ids": added,
+            "client_id": client_id,
+        }
+        applied = self._apply_op_sync(session, session_id, client_id, op)
+        return {
+            "applied": applied,
+            "revision": session.seq,
+            "added": added,
+            "node_count": len(session.state.get("node_refs", [])),
+        }
+
+    def _apply_op_sync(
+        self,
+        session: Session,
+        session_id: str,
+        client_id: str,
+        op: Dict[str, Any],
+    ) -> Dict[str, Any]:
+        """Apply, persist and broadcast one state op on the calling thread.
+
+        Snapshots for rollback so a persistence failure leaves in-memory state,
+        seq and ring untouched — mirroring apply_ops' all-or-nothing guarantee.
+        Callers must only pass ops that always apply (``apply_state_op`` returns
+        ``None`` for legitimate no-ops, which never reach here).
+        """
         saved_state = copy.deepcopy(session.state)
         saved_seq = session.seq
         saved_updated_at = session.updated_at
@@ -634,7 +725,7 @@ class SessionManager:
                 "seq": applied["seq"],
             },
         )
-        return {"applied": applied, "revision": session.seq, "moved": len(target)}
+        return applied
 
     @staticmethod
     def _validate_claim_op(op: Dict[str, Any]) -> None:

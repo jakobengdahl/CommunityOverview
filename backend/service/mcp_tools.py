@@ -19,6 +19,7 @@ import secrets
 from typing import List, Optional, Dict, Any, Callable
 
 from backend.core.session_auto_add import AutoAddRuleError
+from backend.core.storage_search import MATCH_MODE_SUBSTRING
 from backend.core.session_store import OpError, is_valid_session_id
 from backend.core.session_manager import (
     LayoutBusy,
@@ -141,6 +142,7 @@ def register_mcp_tools(
         metadata_filters: Optional[List[Dict[str, Any]]] = None,
         include_archived: bool = False,
         semantic: bool = False,
+        match_mode: str = MATCH_MODE_SUBSTRING,
         visualization_session_id: Optional[str] = None,
     ) -> Dict[str, Any]:
         """
@@ -155,7 +157,8 @@ def register_mcp_tools(
 
         By default the query is matched lexically (substring). Multi-word or
         natural-language queries that no node contains verbatim therefore return
-        nothing; set ``semantic=True`` to rank nodes by embedding meaning instead.
+        nothing; set ``match_mode="any_term"`` to match any single term instead,
+        or ``semantic=True`` to rank nodes by embedding meaning.
         As a safety net the search also falls back to semantic ranking
         automatically when a non-empty lexical query yields zero results, so a
         conceptual query still surfaces the closest nodes. The response includes
@@ -184,6 +187,15 @@ def register_mcp_tools(
                 similarity) instead of lexical substring matching. Default False
                 keeps the lexical behavior, which still auto-falls back to
                 semantic ranking when it returns zero results.
+            match_mode: How the lexical query is matched. ``"substring"``
+                (default) requires the whole query verbatim — unchanged
+                behaviour. ``"any_term"`` splits the query on whitespace and
+                matches nodes containing **any** term, which is what a
+                multi-word query such as "plan pricing offering" usually means;
+                a node still ranks by its single best-matching term, so more
+                terms never outweigh a stronger match. Ignored when
+                ``semantic=True``. Applies to the local graph; federated search
+                stays substring-matched.
             visualization_session_id: Optional browser session ID — when provided, the result
                 is pushed live to the connected browser window via SSE
 
@@ -202,6 +214,7 @@ def register_mcp_tools(
             metadata_filters=metadata_filters,
             include_archived=include_archived,
             semantic=semantic,
+            match_mode=match_mode,
         )
         _push(visualization_session_id, "search_graph", result)
         return result
@@ -1210,6 +1223,131 @@ def register_mcp_tools(
             "success": True,
             "session_id": session_id,
             "moved": result["moved"],
+            "revision": result["revision"],
+        }
+
+    @register_tool
+    def add_nodes_to_session(
+        session_id: str,
+        node_ids: List[str],
+        expected_revision: Optional[int] = None,
+    ) -> Dict[str, Any]:
+        """
+        Put a known set of nodes on a session's canvas by their ids.
+
+        Use this when you already know which nodes belong in the view — the ids
+        from an earlier ``search_graph`` / ``get_related_nodes`` / traversal —
+        instead of crafting a search whose results happen to be exactly that
+        set. It is additive: nodes already in the session stay, and ids already
+        present are not added twice (a call that adds nothing new leaves the
+        revision untouched).
+
+        Ids that do not resolve to a node you may read are skipped and returned
+        in ``skipped``, so a stale id cannot put a phantom reference in the
+        session. The nodes arrive with no position; arrange them with
+        ``apply_visualization_layout``, threading the ``revision`` returned here
+        into its ``expected_revision``.
+
+        Args:
+            session_id: The session ID shown in the browser header (e.g. "8244-1742")
+            node_ids: Ids of the nodes to add.
+            expected_revision: If given, the write is rejected unless it equals
+                the session's current ``revision`` (optimistic concurrency).
+                Omit for last-write-wins.
+
+        Returns:
+            Dict with success, added (ids actually added), skipped (ids that did
+            not resolve), node_count (session total) and the new revision. On a
+            concurrency clash returns success=false with the current revision so
+            the caller can re-read and retry. Retryable errors:
+            revision_conflict, busy, rate_limited; change the request for
+            too_large or a validation error.
+        """
+        if session_manager is None:
+            return {"success": False, "error": "Session manager not available"}
+        if not is_valid_session_id(session_id):
+            return {
+                "success": False,
+                "error": "Invalid session ID format — expected DDDD-DDDD-DDDD-DDDD",
+            }
+        denied = _authorize_session(GRAPH_ACTION_MUTATE, "add_nodes_to_session")
+        if denied:
+            return denied
+        if not isinstance(node_ids, list) or not node_ids:
+            return {"success": False, "error": "'node_ids' must be a non-empty list"}
+
+        # Resolve through the read-authorized projection so an id the caller may
+        # not read — or that no longer exists — never enters session state.
+        resolved = service.resolve_session_node_semantics(node_ids)
+        if not resolved.get("success"):
+            return resolved
+        known = resolved.get("nodes") or {}
+        resolvable = [
+            node_id
+            for node_id in node_ids
+            if isinstance(node_id, str) and node_id in known
+        ]
+        skipped = [node_id for node_id in node_ids if node_id not in known]
+        if not resolvable:
+            return {
+                "success": False,
+                "error": "no_resolvable_nodes",
+                "message": "None of the given ids resolve to a node you can read.",
+                "skipped": skipped,
+            }
+
+        try:
+            result = session_manager.add_node_refs(
+                session_id,
+                _MCP_SESSION_CLIENT_ID,
+                resolvable,
+                expected_revision=expected_revision,
+            )
+        except RevisionConflict as exc:
+            return {
+                "success": False,
+                "error": "revision_conflict",
+                "message": (
+                    "The session changed since you read it; re-read the session "
+                    "and retry with the current revision."
+                ),
+                "expected_revision": exc.expected,
+                "current_revision": exc.actual,
+            }
+        except LayoutBusy:
+            return {
+                "success": False,
+                "error": "busy",
+                "message": "Another change is being applied to this session; retry.",
+            }
+        except RateLimited:
+            return {
+                "success": False,
+                "error": "rate_limited",
+                "message": "Too many session writes; slow down and retry.",
+            }
+        except OpBatchTooLarge:
+            return {
+                "success": False,
+                "error": "too_large",
+                "message": "Too many nodes in one write; split into batches.",
+            }
+        except SessionNotFound:
+            return {
+                "success": False,
+                "error": (
+                    f"Session '{session_id}' not found. "
+                    "Call connect_to_visualization_session first to verify the session is open."
+                ),
+            }
+        except OpError as exc:
+            return {"success": False, "error": str(exc)}
+        return {
+            "success": True,
+            "session_id": session_id,
+            "added": result["added"],
+            "skipped": skipped,
+            "node_count": result["node_count"],
             "revision": result["revision"],
         }
 
