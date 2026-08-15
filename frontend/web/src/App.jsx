@@ -26,6 +26,7 @@ import { serverStateToMirror, useSharedSession } from './hooks/useSharedSession'
 import { useSyncConnection } from './hooks/useSyncConnection';
 import { useToolResultCommands } from './hooks/useToolResultCommands';
 import { decideClearAction } from './utils/clearBoard';
+import { dropIntoFreshSession } from './utils/sessionLifecycle';
 import './App.css';
 
 const _urlParams = new URLSearchParams(window.location.search);
@@ -1409,10 +1410,13 @@ function App() {
       onSessionDeleted: (deletedBy) => {
         if (deletedBy && deletedBy === api.getClientId()) return; // our own delete
         sessionStore.removeSession(sessionId);
-        clearVisualization();
-        const fresh = api.generateVisualizationSessionId();
-        setSessionId(fresh);
-        reflectSessionUrl(fresh);
+        dropIntoFreshSession({
+          freshId: api.generateVisualizationSessionId(),
+          clearVisualization,
+          resetSessionScopedState: resetSessionScopedUi,
+          setSessionId,
+          reflectSessionUrl,
+        });
         setSessionsVersion((v) => v + 1);
         showNotification('info', t('sessions.session_deleted_remote'));
       },
@@ -1438,6 +1442,7 @@ function App() {
     resyncFromServer,
     applyRemoteOp,
     clearVisualization,
+    resetSessionScopedUi,
     showNotification,
     t,
     applyToolResultCommand,
@@ -1594,11 +1599,13 @@ function App() {
       // Deleting the active session: drop its content and switch into a fresh
       // one (design 3.6). Other connected clients are notified via the
       // server's session_deleted broadcast (handled once realtime lands).
-      clearVisualization();
-      resetSessionScopedUi();
-      const fresh = api.generateVisualizationSessionId();
-      setSessionId(fresh);
-      reflectSessionUrl(fresh);
+      dropIntoFreshSession({
+        freshId: api.generateVisualizationSessionId(),
+        clearVisualization,
+        resetSessionScopedState: resetSessionScopedUi,
+        setSessionId,
+        reflectSessionUrl,
+      });
       showNotification('info', t('sessions.session_deleted'));
     }
     setSessionsVersion((v) => v + 1);

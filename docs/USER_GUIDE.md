@@ -430,7 +430,10 @@ another.
 
 Deleting a session removes its content for everyone. If you delete the session
 you are currently in, a fresh empty session is created and you are switched into
-it automatically. When other people are connected to a session you delete, the
+it automatically; the same happens, with a notice, if someone else deletes the
+session you are in. Either way the new session starts clean in exactly the way
+described above — no chat history, experts, or open node from the deleted session
+follow you into it. When other people are connected to a session you delete, the
 confirmation warns you how many are currently in it.
 
 ### 5.1 Collaborating in a session
