@@ -313,6 +313,12 @@ error or `too_large` requires the agent to change the request.
   `expected_revision` to be sure).
 - Client-side single-user undo of a drag is governed by the realtime protocol in
   `MULTI_USER_SESSIONS_DESIGN.md`, not by this contract.
+- A layout write does **not** discard the viewer's client-side undo history. Like a
+  collaborator's move, it writes coordinates into the canvas contents the viewer
+  already has, and is resolved last-write-wins (D2) — the viewer's next undo is
+  simply the next write. Only a wholesale replacement of the canvas contents (a
+  session switch, a saved view loaded over the current one, a clear) establishes a
+  new position baseline and discards that history.
 
 ## 13. Public/private boundary
 

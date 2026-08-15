@@ -195,6 +195,112 @@ describe('GraphCanvas undo/redo of node moves', () => {
     expect(nodeById('node-2').position).toEqual({ x: 50, y: 50 });
   });
 
+  it('a wholesale canvas replacement discards the history, so undo cannot restore a stale position', () => {
+    const onNodePositionChange = vi.fn();
+    const { rerender } = render(
+      <GraphCanvas
+        nodes={inputNodes}
+        edges={[]}
+        onNodePositionChange={onNodePositionChange}
+        canvasBaselineEpoch={0}
+      />
+    );
+
+    // The user drags the node, so there is something on the undo stack.
+    const startNode = { id: 'node-1', type: 'custom', position: { x: 30, y: 40 } };
+    act(() => {
+      store.handlers.onNodeDragStart?.({}, startNode, [startNode]);
+      store.nodes = [{ id: 'node-1', type: 'custom', position: { x: 100, y: 50 }, data: {} }];
+      const endNode = { id: 'node-1', type: 'custom', position: { x: 100, y: 50 } };
+      store.handlers.onNodeDragStop?.({}, endNode, [endNode]);
+    });
+
+    // A saved view is loaded into the running session: the canvas is emptied and
+    // repopulated, and this node — present in the new view too — lands on the
+    // view's own saved coordinate. The session id has NOT changed.
+    act(() => {
+      rerender(
+        <GraphCanvas
+          nodes={inputNodes}
+          edges={[]}
+          onNodePositionChange={onNodePositionChange}
+          canvasBaselineEpoch={1}
+        />
+      );
+      store.nodes = [{ id: 'node-1', type: 'custom', position: { x: 800, y: 900 }, data: {} }];
+    });
+    onNodePositionChange.mockClear();
+
+    // Ctrl+Z must not reach back past the new baseline to (30,40) — a coordinate
+    // from a layout the user is no longer looking at.
+    act(() => {
+      fireEvent.keyDown(document, { key: 'z', ctrlKey: true });
+    });
+    expect(onNodePositionChange).not.toHaveBeenCalled();
+    expect(nodeById('node-1').position).toEqual({ x: 800, y: 900 });
+  });
+
+  it('a remote move and an agent layout leave the history intact — they write into the same baseline', () => {
+    const onNodePositionChange = vi.fn();
+    const { rerender } = render(
+      <GraphCanvas
+        nodes={inputNodes}
+        edges={[]}
+        onNodePositionChange={onNodePositionChange}
+        canvasBaselineEpoch={0}
+      />
+    );
+
+    const startNode = { id: 'node-1', type: 'custom', position: { x: 30, y: 40 } };
+    act(() => {
+      store.handlers.onNodeDragStart?.({}, startNode, [startNode]);
+      store.nodes = [{ id: 'node-1', type: 'custom', position: { x: 100, y: 50 }, data: {} }];
+      const endNode = { id: 'node-1', type: 'custom', position: { x: 100, y: 50 } };
+      store.handlers.onNodeDragStop?.({}, endNode, [endNode]);
+    });
+
+    // A collaborator nudges the node, then an agent snaps it somewhere else.
+    // Both are position writes into the *same* canvas contents, resolved
+    // last-write-wins (MULTI_USER_SESSIONS_DESIGN D2) — the user's undo is
+    // simply the next write and must stay available.
+    //
+    // Applied in two steps, and each write asserted on arrival: sent together,
+    // the agent's snap overwrites the remote position, so a single end-state
+    // assertion would pin only the last writer and this test would keep passing
+    // with `remotePositions` entirely inert.
+    act(() => {
+      rerender(
+        <GraphCanvas
+          nodes={inputNodes}
+          edges={[]}
+          onNodePositionChange={onNodePositionChange}
+          canvasBaselineEpoch={0}
+          remotePositions={{ 'node-1': { x: 200, y: 200 } }}
+        />
+      );
+    });
+    expect(nodeById('node-1').position).toEqual({ x: 200, y: 200 });
+
+    act(() => {
+      rerender(
+        <GraphCanvas
+          nodes={inputNodes}
+          edges={[]}
+          onNodePositionChange={onNodePositionChange}
+          canvasBaselineEpoch={0}
+          animatedLayout={[{ positions: { 'node-1': { x: 300, y: 300 } }, animation: null }]}
+        />
+      );
+    });
+    expect(nodeById('node-1').position).toEqual({ x: 300, y: 300 });
+    onNodePositionChange.mockClear();
+
+    act(() => {
+      fireEvent.keyDown(document, { key: 'z', ctrlKey: true });
+    });
+    expect(onNodePositionChange).toHaveBeenCalledWith('node-1', { x: 30, y: 40 });
+  });
+
   it('Ctrl+Z is a no-op when there is nothing to undo', () => {
     const onNodePositionChange = vi.fn();
     render(

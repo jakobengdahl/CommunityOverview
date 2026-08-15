@@ -55,6 +55,7 @@ function App() {
     hiddenNodeIds,
     hiddenEdgeIds,
     clearGroupsFlag,
+    canvasBaselineEpoch,
     addNodesToVisualization,
     updateVisualization,
     toggleNodeVisibility,
@@ -1785,6 +1786,7 @@ function App() {
             })
           }
           animatedLayoutResetKey={sessionId}
+          canvasBaselineEpoch={canvasBaselineEpoch}
           agentArrangingLabel={t('sessions.agent_arranging')}
           remoteAnnotationOps={remoteAnnotationOps}
           onRemoteAnnotationsApplied={() => setRemoteAnnotationOps(null)}
