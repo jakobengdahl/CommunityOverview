@@ -50,7 +50,7 @@ desktop user and vice versa.
 ## Decision
 
 Build a **separate, additive `frontend/xr` workspace** (a WebGL client using
-`three` via `react-three-fiber` + `@react-three/xr`) that reuses the existing
+`three` via `@react-three/fiber` + `@react-three/xr`) that reuses the existing
 session-sync protocol and REST API. Do **not** attempt to port React Flow into
 XR, and do **not** try to force the existing 2D canvas code to run in the
 headset. Reuse the protocol and data layer; re-implement only the rendering and
@@ -84,7 +84,9 @@ divergent question of a genuinely spatial 3D layout (and an optional protocol
   (drag a node along the dome surface) back into the shared session, so
   collaboration with desktop works immediately.
 - **Phase 2 (deferred): a voice + AI-assistant input mode.** Rather than porting
-  the ~40 DOM edit dialogs and fighting a virtual keyboard in VR, the plan is to
+  the 2D client's DOM dialog surface (~15 dialog components, of which the
+  create/edit forms are the ones an immersive client would need) and fighting a
+  virtual keyboard in VR, the plan is to
   route creation/editing/linking through a voice-driven assistant that performs
   the same graph mutations the dialogs perform today (via the existing REST/MCP
   write paths). This is explicitly **out of scope for the spike** and is
