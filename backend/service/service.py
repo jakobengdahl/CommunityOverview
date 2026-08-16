@@ -531,6 +531,15 @@ class GraphService:
         action: str = GRAPH_ACTION_READ,
         target: str = "resolve_session_node_semantics",
     ) -> Dict[str, Any]:
+        """Resolve session node references to their type and status.
+
+        ``action``/``target`` are required on the underlying helper, so that it
+        can never pick a caller's authorization scope for it. They keep defaults
+        *here* on purpose: this is a public method, and these two values are
+        exactly what it evaluated before they were parameters, so an existing
+        caller outside this repo is unaffected. Every caller in this repo passes
+        both explicitly, and a new one should too.
+        """
         return views.resolve_session_node_semantics(
             self._storage,
             self._authorization_hook,
