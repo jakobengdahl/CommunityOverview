@@ -169,6 +169,29 @@ class TestAnyTermMode:
         # sort without the tie-break would put "plan" first.
         assert [n["id"] for n in result["nodes"]] == ["offering", "plan"]
 
+    def test_repeating_a_term_does_not_change_the_ranking(self):
+        """A term counts once however often the caller wrote it.
+
+        The tie-break counts matched terms, so counting a repeated word once per
+        occurrence let repetition alone reorder same-tier results — and
+        repetition is normal in the natural-language queries this mode exists to
+        serve. Here "paid" repeated three times would give "plan" three hits
+        against "offering"'s two and flip the pair.
+        """
+        service = _service()
+
+        baseline = service.search_graph(
+            query="sell segment paid", match_mode=MATCH_MODE_ANY_TERM
+        )
+        repeated = service.search_graph(
+            query="sell segment paid paid paid", match_mode=MATCH_MODE_ANY_TERM
+        )
+
+        assert [n["id"] for n in repeated["nodes"]] == [
+            n["id"] for n in baseline["nodes"]
+        ]
+        assert [n["id"] for n in repeated["nodes"]] == ["offering", "plan"]
+
 
 class TestValidation:
     def test_unknown_mode_is_rejected(self):
