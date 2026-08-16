@@ -1,5 +1,5 @@
 // ESLint flat config for the JavaScript/JSX workspaces (frontend/web,
-// frontend/widget, packages/ui-graph-canvas).
+// frontend/widget, frontend/xr, packages/ui-graph-canvas).
 //
 // This is a mechanical correctness gate, not a style enforcer: Prettier owns
 // formatting (eslint-config-prettier, applied last, disables every rule that

@@ -14,9 +14,9 @@ contracts, the session-sync protocol, or the existing 2D web client.
   curved dome around the viewer, with **zoom mapped to dome radius** and **no
   z-axis** — keeping positions compatible with the 2D protocol.
 
-Placeholder nodes are rendered in the exact `{id, x, y}` shape the real
-`sessionSyncClient` will provide, so the mapping is visible on-device before any
-data plumbing exists.
+Placeholder nodes carry the same 2D `{x, y}` positions the real
+`sessionSyncClient` provides (it keys them by node id rather than holding a flat
+array), so the mapping is visible on-device before any data plumbing exists.
 
 ## Not yet wired (next tasks)
 
@@ -30,6 +30,14 @@ in-world node panel. See ADR 0003 for the scope boundary.
 npm install                 # from the repo root, once
 npm run dev -w @community-graph/xr
 ```
+
+On a desktop browser at `http://localhost:5173`, **Enter VR** does not fail for
+lack of a headset: `@react-three/xr` defaults to injecting the IWER emulator on
+`localhost`, so the button drops you into a simulated Quest 3 with emulated
+controllers. That is the flat-preview development path, and it is why the build
+emits `emulate` / `living_room` / `music_room` chunks. On a real headset the
+emulator bails out as soon as native `immersive-vr` is reported, so the smoke
+test below exercises the genuine runtime.
 
 ### Smoke test on a Quest headset
 

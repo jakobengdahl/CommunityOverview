@@ -29,6 +29,28 @@ describe('zoomToRadius', () => {
     expect(zoomToRadius(0)).toBe(DEFAULT_DOME.baseRadius);
     expect(zoomToRadius(-3)).toBe(DEFAULT_DOME.baseRadius);
   });
+
+  // A dropped or malformed zoom takes the same guard as 0 and -3, and is the
+  // input that actually shows up in practice.
+  it('falls back to the base radius for a missing or non-numeric zoom', () => {
+    expect(zoomToRadius(NaN)).toBe(DEFAULT_DOME.baseRadius);
+    expect(zoomToRadius(undefined)).toBe(DEFAULT_DOME.baseRadius);
+  });
+
+  // Without these, reversing the opts merge — silently ignoring every caller
+  // override — would leave the whole suite green.
+  it('honours caller overrides of the radius range', () => {
+    expect(zoomToRadius(1000, { minRadius: 4 })).toBe(4);
+    expect(zoomToRadius(0.0001, { maxRadius: 9 })).toBe(9);
+    expect(zoomToRadius(1, { baseRadius: 11 })).toBeCloseTo(11);
+  });
+
+  // Every other return is inside [minRadius, maxRadius]; the fallback must be
+  // too, or callers cannot rely on the range at all.
+  it('keeps the non-positive-zoom fallback inside the configured range', () => {
+    expect(zoomToRadius(0, { minRadius: 8 })).toBe(8);
+    expect(zoomToRadius(-1, { maxRadius: 4 })).toBe(4);
+  });
 });
 
 describe('sphericalToCartesian', () => {
@@ -69,9 +91,24 @@ describe('domePosition', () => {
     expect(domePosition(50, 10, bounds).y).toBeGreaterThan(domePosition(50, 90, bounds).y);
   });
 
+  // Asserting only z at the layout centre (where x = y = 0 by construction)
+  // would still pass if the radius were applied to z alone, so check the
+  // distance from the origin at an off-centre point too.
   it('honours an explicit radius from zoom', () => {
-    const p = domePosition(50, 50, bounds, { radius: 3 });
-    expect(p.z).toBeCloseTo(-3);
+    const centre = domePosition(50, 50, bounds, { radius: 3 });
+    expect(centre.z).toBeCloseTo(-3);
+
+    const corner = domePosition(0, 0, bounds, { radius: 3 });
+    const r = Math.sqrt(corner.x ** 2 + corner.y ** 2 + corner.z ** 2);
+    expect(r).toBeCloseTo(3);
+  });
+
+  it('honours a baseRadius override when no explicit radius is given', () => {
+    expect(domePosition(50, 50, bounds, { baseRadius: 9 }).z).toBeCloseTo(-9);
+  });
+
+  it('prefers an explicit radius over baseRadius', () => {
+    expect(domePosition(50, 50, bounds, { baseRadius: 9, radius: 4 }).z).toBeCloseTo(-4);
   });
 
   // Ordering alone would still pass if the wrap factor were wrong, so pin the
@@ -112,11 +149,43 @@ describe('domePosition', () => {
     expect(p.y).toBeCloseTo(0);
     expect(p.z).toBeCloseTo(-DEFAULT_DOME.baseRadius);
   });
+
+  // A non-finite coordinate must not reach the three.js matrices — one poisoned
+  // node would otherwise be indistinguishable from a poisoned scene.
+  it('centres a non-finite coordinate instead of producing NaN', () => {
+    for (const bad of [NaN, undefined, Infinity]) {
+      const p = domePosition(bad, bad, bounds);
+      expect(Number.isFinite(p.x)).toBe(true);
+      expect(Number.isFinite(p.y)).toBe(true);
+      expect(Number.isFinite(p.z)).toBe(true);
+    }
+  });
 });
 
 describe('layoutBounds', () => {
+  const UNIT_BOX = { minX: -1, maxX: 1, minY: -1, maxY: 1 };
+
   it('returns a safe unit box for an empty layout', () => {
-    expect(layoutBounds([])).toEqual({ minX: -1, maxX: 1, minY: -1, maxY: 1 });
+    expect(layoutBounds([])).toEqual(UNIT_BOX);
+  });
+
+  it('returns a safe unit box for a missing layout', () => {
+    expect(layoutBounds(null)).toEqual(UNIT_BOX);
+    expect(layoutBounds(undefined)).toEqual(UNIT_BOX);
+  });
+
+  // Skipping the bad entries must not leave the accumulators at ±Infinity.
+  it('returns a safe unit box when every position is non-finite', () => {
+    expect(layoutBounds([{ x: NaN, y: 0 }, { x: 1 }, {}])).toEqual(UNIT_BOX);
+  });
+
+  it('ignores non-finite positions when computing the extent', () => {
+    const b = layoutBounds([
+      { x: 2, y: 3 },
+      { x: NaN, y: 100 },
+      { x: 8, y: 9 },
+    ]);
+    expect(b).toEqual({ minX: 2, maxX: 8, minY: 3, maxY: 9 });
   });
 
   it('returns degenerate bounds for a single position', () => {
