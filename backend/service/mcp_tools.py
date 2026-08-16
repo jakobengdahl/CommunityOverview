@@ -1245,9 +1245,11 @@ def register_mcp_tools(
         present are not added twice (a call that adds nothing new leaves the
         revision untouched).
 
-        Ids that do not resolve to a node you may read are skipped and returned
+        Ids that do not resolve to a node you may add are skipped and returned
         in ``skipped``, so a stale id cannot put a phantom reference in the
-        session. The nodes arrive with no position; arrange them with
+        session. Only **local-graph** ids are addable: a ``search_graph`` result
+        can include federated nodes, which live in a remote graph and are always
+        skipped here. The nodes arrive with no position; arrange them with
         ``apply_visualization_layout``, threading the ``revision`` returned here
         into its ``expected_revision``.
 
@@ -1302,9 +1304,15 @@ def register_mcp_tools(
                 "message": "Too many nodes in one write; split into batches.",
             }
 
-        # Resolve through the read-authorized projection so an id the caller may
-        # not read — or that no longer exists — never enters session state.
-        resolved = service.resolve_session_node_semantics(node_ids)
+        # Resolve through the projection under the *mutate* decision, not a read
+        # one: a hook may narrow the two to different graph scopes, and this call
+        # writes the ids into server-owned session state. Filtering by what the
+        # caller may read would let a read-only-visible node be written in, the
+        # gap every sibling mutation closes by narrowing with its own decision.
+        # An id that no longer exists drops out here too.
+        resolved = service.resolve_session_node_semantics(
+            node_ids, action=GRAPH_ACTION_MUTATE
+        )
         if not resolved.get("success"):
             return resolved
         known = resolved.get("nodes") or {}
@@ -1329,7 +1337,11 @@ def register_mcp_tools(
             return {
                 "success": False,
                 "error": "no_resolvable_nodes",
-                "message": "None of the given ids resolve to a node you can read.",
+                "message": (
+                    "None of the given ids resolve to a node in this graph that "
+                    "you may add. Ids from a federated search result are not "
+                    "addable — only local-graph ids are."
+                ),
                 "skipped": skipped,
             }
 

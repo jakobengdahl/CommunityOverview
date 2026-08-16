@@ -16,6 +16,7 @@ from typing import List, Optional, Dict, Any
 from backend.core import GraphStorage
 from backend.core.storage_search import MATCH_MODE_SUBSTRING
 from backend.runtime.authorization import (
+    GRAPH_ACTION_READ,
     DefaultGraphAuthorizationHook,
     GraphAuthorizationHook,
 )
@@ -523,9 +524,11 @@ class GraphService:
             self._storage, self._authorization_hook, node_ids
         )
 
-    def resolve_session_node_semantics(self, node_ids: List[str]) -> Dict[str, Any]:
+    def resolve_session_node_semantics(
+        self, node_ids: List[str], *, action: str = GRAPH_ACTION_READ
+    ) -> Dict[str, Any]:
         return views.resolve_session_node_semantics(
-            self._storage, self._authorization_hook, node_ids
+            self._storage, self._authorization_hook, node_ids, action=action
         )
 
     def get_saved_view(self, name: str) -> Dict[str, Any]:

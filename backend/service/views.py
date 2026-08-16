@@ -60,6 +60,8 @@ def resolve_session_node_semantics(
     storage: "GraphStorage",
     hook: "GraphAuthorizationHook",
     node_ids: List[str],
+    *,
+    action: str = GRAPH_ACTION_READ,
 ) -> Dict[str, Any]:
     """Resolve the *meaning* of session node references: type and status only.
 
@@ -74,13 +76,19 @@ def resolve_session_node_semantics(
     non-blank string, and is ``None`` otherwise. Blank normalises to ``None``
     (as ``node_graph_id`` does for its own metadata key) so an agent building
     status lanes never gets an unnamed one.
+
+    ``action`` selects which authorization decision narrows the result. A caller
+    that only reads the projection leaves the default; a caller that turns it
+    into a write must pass ``GRAPH_ACTION_MUTATE`` so the ids it keeps are the
+    ones it may *write*, not merely the ones it may read — a hook is free to
+    narrow the two differently.
     """
     decision = access.evaluate_graph_access(
-        hook, action=GRAPH_ACTION_READ, target="resolve_session_node_semantics"
+        hook, action=action, target="resolve_session_node_semantics"
     )
     if not decision.allowed:
         return access.build_access_denied_result(
-            action=GRAPH_ACTION_READ,
+            action=action,
             target="resolve_session_node_semantics",
             decision=decision,
         )

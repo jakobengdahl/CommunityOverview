@@ -18,9 +18,45 @@ from backend.core.session_store import (
     InMemorySessionPersistenceBackend,
     SessionStore,
 )
-from backend.runtime.authorization import AUTHORIZATION_MODE_ENV
+from backend.runtime.authorization import (
+    AUTHORIZATION_MODE_ENV,
+    GRAPH_ACTION_MUTATE,
+    GraphAccessNarrowing,
+    GraphAuthorizationDecision,
+)
 from backend.service import GraphService, register_mcp_tools
 from backend.service.tests.test_authorization import FixedNarrowingHook
+
+
+class ActionScopedNarrowingHook:
+    """A hook that narrows ``mutate`` more tightly than ``read``.
+
+    ``FixedNarrowingHook`` returns the same narrowing whatever the action, so it
+    cannot tell whether a write filtered its ids with the read decision or the
+    mutate one. Per-action narrowing is the reason the hook protocol carries an
+    action at all, so only a hook that honours it pins the seam.
+    """
+
+    def __init__(self, *, read_graph_ids, mutate_graph_ids):
+        self.read_graph_ids = read_graph_ids
+        self.mutate_graph_ids = mutate_graph_ids
+
+    def evaluate(self, context):
+        include = (
+            self.mutate_graph_ids
+            if context.action == GRAPH_ACTION_MUTATE
+            else self.read_graph_ids
+        )
+        return GraphAuthorizationDecision(
+            allowed=True,
+            mode="action-scoped",
+            source="test",
+            graph_access=GraphAccessNarrowing(
+                enabled=True,
+                allow_local_graph=False,
+                include_graph_ids=include,
+            ),
+        )
 
 
 def _wire(storage, service, **manager_kwargs):
@@ -313,4 +349,51 @@ class TestAuthorization:
 
         assert result["added"] == ["mine"]
         assert result["skipped"] == ["theirs"]
+        assert manager.get_session(sid).state["node_refs"] == ["mine"]
+
+    def test_a_readable_but_unmutable_node_is_not_added(self, tmp_path):
+        """The write narrows by the *mutate* decision, not the read one.
+
+        A hook may let a caller read a graph it may not write into. Filtering the
+        ids by read visibility would put such a node into server-owned session
+        state — the gap every sibling mutation closes by narrowing with its own
+        decision.
+        """
+        storage = GraphStorage(json_path=os.path.join(tmp_path, "g.json"))
+        storage.add_nodes(
+            [
+                Node(
+                    id="mine",
+                    type="Initiative",
+                    name="Mine",
+                    metadata={"origin_graph_id": "graph-alpha"},
+                ),
+                Node(
+                    id="readable",
+                    type="Actor",
+                    name="Readable but not mine to write",
+                    metadata={"origin_graph_id": "graph-beta"},
+                ),
+            ],
+            [],
+        )
+        service = GraphService(
+            storage,
+            authorization_hook=ActionScopedNarrowingHook(
+                read_graph_ids=("graph-alpha", "graph-beta"),
+                mutate_graph_ids=("graph-alpha",),
+            ),
+        )
+        tools_map, manager = _wire(storage, service)
+        sid = _session(manager)
+
+        # The caller really can read it — that is what makes the seam matter.
+        assert service.get_node_details("readable").get("success") is not False
+
+        result = tools_map["add_nodes_to_session"](
+            session_id=sid, node_ids=["mine", "readable"]
+        )
+
+        assert result["added"] == ["mine"]
+        assert result["skipped"] == ["readable"]
         assert manager.get_session(sid).state["node_refs"] == ["mine"]
