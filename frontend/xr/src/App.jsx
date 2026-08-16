@@ -1,4 +1,4 @@
-import { useMemo } from 'react';
+import { useMemo, useState } from 'react';
 import { Canvas } from '@react-three/fiber';
 import { XR, createXRStore } from '@react-three/xr';
 import { domePosition, layoutBounds } from './domeLayout.js';
@@ -35,14 +35,31 @@ function DomeNodes({ nodes }) {
 }
 
 export default function App() {
+  // enterVR() rejects on a browser without WebXR — which is every desktop
+  // browser running the flat preview — and if the user denies the session.
+  // Surface that instead of leaving an unhandled rejection and a dead button.
+  const [error, setError] = useState(null);
+
   return (
     <>
-      <button className="xr-enter" onClick={() => store.enterVR()}>
+      <button
+        className="xr-enter"
+        onClick={() => {
+          setError(null);
+          store.enterVR().catch((err) => setError(err.message));
+        }}
+      >
         Enter VR
       </button>
       <div className="xr-hint">
-        Scaffold — placeholder dome. Connect a headset via `adb reverse` and open
-        http://localhost:5173 in the Quest Browser. See README.
+        {error ? (
+          <span className="xr-error">Could not enter VR: {error}</span>
+        ) : (
+          <>
+            Scaffold — placeholder dome. Connect a headset via `adb reverse` and open
+            http://localhost:5173 in the Quest Browser. See README.
+          </>
+        )}
       </div>
       {/*
         Flat-preview camera only — inside an XR session the runtime owns the

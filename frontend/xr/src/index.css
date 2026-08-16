@@ -22,6 +22,10 @@
   background: #34d399;
 }
 
+.xr-error {
+  color: #f87171;
+}
+
 .xr-hint {
   position: fixed;
   bottom: 16px;
