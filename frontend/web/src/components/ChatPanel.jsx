@@ -74,12 +74,6 @@ function ChatPanel({ collectionShortName }) {
   const { t, language } = useI18n();
   const effectiveMaxDepth = Math.max(1, stats?.federation?.max_selectable_depth || 1);
 
-  // A session switch bumps sessionEpoch. An assistant request captures the epoch
-  // before awaiting; if it changed by the time the reply arrives, the user
-  // switched sessions mid-request and the response belongs to a session that is
-  // no longer active — discard it so it can neither append to the new session's
-  // chat nor apply its canvas side-effects.
-
   const [inputValue, setInputValue] = useState('');
   const [isProcessing, setIsProcessing] = useState(false);
   const [uploadedFile, setUploadedFile] = useState(null);
