@@ -552,8 +552,22 @@ export async function getCollectConfig(shortName) {
  * @returns {string}
  */
 export function generateVisualizationSessionId() {
-  const buf = crypto.getRandomValues(new Uint16Array(4));
-  return Array.from(buf, (n) => String(n % 10000).padStart(4, '0')).join('-');
+  // Rejection sampling, not a bare `% 10000`: a Uint16 spans 65536 values, so
+  // folding the whole range would draw 0000-5535 six times per cycle and
+  // 5536-9999 only five, biasing every group. 0-59999 is an exact six-fold
+  // cover of the 10000 outcomes, so discarding the tail keeps each group
+  // uniform and the address space at its full ~10^16. This id is the
+  // capability that guards a shared session (design D7), so the bias is worth
+  // the extra draws.
+  const groups = [];
+  while (groups.length < 4) {
+    for (const n of crypto.getRandomValues(new Uint16Array(4))) {
+      if (n >= 60000) continue;
+      groups.push(String(n % 10000).padStart(4, '0'));
+      if (groups.length === 4) break;
+    }
+  }
+  return groups.join('-');
 }
 
 /**

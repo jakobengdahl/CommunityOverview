@@ -90,7 +90,7 @@ describe('session-switch state isolation (real store)', () => {
       contextMenu: null,
       selectedNodeId: null,
       selectedGraphNodes: [],
-      assistantSessionEpoch: 0,
+      sessionEpoch: 0,
     });
   });
 
@@ -105,7 +105,7 @@ describe('session-switch state isolation (real store)', () => {
     await act(async () => {
       await result.current.loadSessionFromServer('sess-a');
     });
-    const epochA = useGraphStore.getState().assistantSessionEpoch;
+    const epochA = useGraphStore.getState().sessionEpoch;
     workInsideSession('x'); // select the shared node and build history
 
     await act(async () => {
@@ -115,7 +115,7 @@ describe('session-switch state isolation (real store)', () => {
     // selection was still cleared (minimum reconcile), and no A history leaks.
     expect(nodeIds()).toEqual(['b1', 'x']);
     expectCleanSession();
-    expect(useGraphStore.getState().assistantSessionEpoch).toBe(epochA + 1);
+    expect(useGraphStore.getState().sessionEpoch).toBe(epochA + 1);
 
     workInsideSession('x');
     await act(async () => {
@@ -123,7 +123,7 @@ describe('session-switch state isolation (real store)', () => {
     });
     expect(nodeIds()).toEqual(['a1', 'x']);
     expectCleanSession();
-    expect(useGraphStore.getState().assistantSessionEpoch).toBe(epochA + 2);
+    expect(useGraphStore.getState().sessionEpoch).toBe(epochA + 2);
   });
 
   it('clears a selection whose node is absent from the target (disjoint sets)', async () => {

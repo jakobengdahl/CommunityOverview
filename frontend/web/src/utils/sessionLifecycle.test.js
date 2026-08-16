@@ -26,7 +26,7 @@ function seedWorkedInSession() {
     contextMenu: { x: 1, y: 2, nodeId: 'a1' },
     selectedNodeId: 'a1',
     selectedGraphNodes: [{ id: 'a1', name: 'Node A1' }],
-    assistantSessionEpoch: 0,
+    sessionEpoch: 0,
   });
 }
 
@@ -72,7 +72,7 @@ describe('receiveRemoteSessionDeleted (real store)', () => {
     expect(state.editingEdge).toBeNull();
     expect(state.deleteDialog).toBeNull();
     // An assistant reply still in flight for the deleted session must not land.
-    expect(state.assistantSessionEpoch).toBe(1);
+    expect(state.sessionEpoch).toBe(1);
 
     expect(dropped).toBe(true);
     expect(removeSession).toHaveBeenCalledWith('sess-deleted');
