@@ -423,14 +423,22 @@ term by term:
 | Value | Meaning |
 |-------|---------|
 | `substring` (default) | The whole query must occur verbatim — unchanged behaviour. |
-| `any_term` | The query is split on whitespace; a node matches when it contains **any** term. |
+| `any_term` | The query is split on whitespace into distinct terms; a node matches when it contains **any** of them. |
 
 Ranking stays tier-based in `any_term`: a node scores by its **single
 best-matching term**, so a name-tier hit still outranks any accumulation of
-secondary signals, and the number of matched terms only breaks ties *within* a
-tier. Term scores are never summed across tiers. An unsupported value is
-rejected (`ValueError` in-process, `422` over REST) rather than silently
-ignored, and the requested mode is echoed back as `result["match_mode"]`.
+secondary signals, and the number of matched *distinct* terms only breaks an
+exact scoring tie. Term scores are never summed across tiers, and a term the
+caller repeated is counted once, so repetition alone cannot reorder results. An
+unsupported value is rejected (`ValueError` in-process, `422` from
+`POST /api/graph/search`; over `/execute_tool` it surfaces as the generic `500`
+that any invalid tool argument produces) rather than silently ignored.
+
+The requested mode is echoed back as `result["match_mode"]`, but it describes the
+mode that was **requested, not necessarily applied**: it is ignored when
+`semantic=true`, and also when a lexical query matches nothing and the automatic
+semantic fallback takes over. Read `result["semantic"]` alongside it — that is
+the field that says which matcher actually produced the results.
 
 Each term is matched as a **substring, not a word**, and no term is filtered out:
 `"a pricing plan"` matches every node containing the letter `a` anywhere. Ranking
@@ -757,9 +765,12 @@ contract in
 [`docs/MCP_VISUALIZATION_LAYOUT_CONTRACT.md`](../docs/MCP_VISUALIZATION_LAYOUT_CONTRACT.md).
 Whether the connected canvas actually tweens the hint is a *deployment* fact, not
 something a write result can report, so it is published as the `animated_layout`
-capability in `get_capabilities` / `GET /api/capabilities` (a deployment whose
-canvas does not animate declares that id with `"enabled": false` in its
-presentation config).
+capability in `get_capabilities` / `GET /api/capabilities`. A deployment whose
+canvas does not animate says so by declaring that id in its presentation config —
+`{"id": "animated_layout", "name": "Animated layout", "enabled": false}`. The
+`name` is required: a capability entry missing it fails validation for the entire
+schema config, which then falls back to defaults and reports the capability as
+enabled — the opposite of what was intended.
 
 `add_nodes_to_session` populates the same shared session directly: it takes the
 node ids and applies one `nodes_added` op, so a known set lands on the canvas
