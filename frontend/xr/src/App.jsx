@@ -55,7 +55,9 @@ export default function App() {
         className="xr-enter"
         onClick={() => {
           setError(null);
-          store.enterVR().catch((err) => setError(err?.message || String(err) || 'unknown error'));
+          store
+            .enterVR()
+            .catch((err) => setError(err?.message || String(err ?? '') || 'unknown error'));
         }}
       >
         Enter VR

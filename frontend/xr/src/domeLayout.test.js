@@ -151,14 +151,27 @@ describe('domePosition', () => {
   });
 
   // A non-finite coordinate must not reach the three.js matrices — one poisoned
-  // node would otherwise be indistinguishable from a poisoned scene.
+  // node would otherwise be indistinguishable from a poisoned scene. Merely
+  // being finite is not enough: the node has to land dead ahead, not in a
+  // corner, or a bad coordinate reads as a real position.
   it('centres a non-finite coordinate instead of producing NaN', () => {
     for (const bad of [NaN, undefined, Infinity]) {
       const p = domePosition(bad, bad, bounds);
-      expect(Number.isFinite(p.x)).toBe(true);
-      expect(Number.isFinite(p.y)).toBe(true);
-      expect(Number.isFinite(p.z)).toBe(true);
+      expect(p.x).toBeCloseTo(0);
+      expect(p.y).toBeCloseTo(0);
+      expect(p.z).toBeCloseTo(-DEFAULT_DOME.baseRadius);
     }
+  });
+
+  // Inverted bounds are the only case the max <= min guard still handles on its
+  // own: the division stays finite but mirrors the axis, so the non-finite
+  // fallback never sees it.
+  it('centres a point given inverted bounds rather than mirroring the axis', () => {
+    const inverted = { minX: 100, maxX: 0, minY: 100, maxY: 0 };
+    const p = domePosition(25, 25, inverted);
+    expect(p.x).toBeCloseTo(0);
+    expect(p.y).toBeCloseTo(0);
+    expect(p.z).toBeCloseTo(-DEFAULT_DOME.baseRadius);
   });
 });
 
