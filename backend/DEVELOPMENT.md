@@ -435,9 +435,10 @@ unsupported value is rejected (`ValueError` in-process, `422` from
 any invalid tool argument produces) rather than silently ignored.
 
 The requested mode is echoed back as `result["match_mode"]`, but it describes the
-mode that was **requested, not necessarily applied** — see the paragraph on
-`semantic` below. Read `result["semantic"]` alongside it: that is the field that
-says which matcher actually produced the results.
+mode that was **requested, not necessarily the matcher that produced the
+results** — see the paragraph on the semantic fallback below. Read
+`result["semantic"]` alongside it: that is the field that says which matcher
+actually ran.
 
 Each term is matched as a **substring, not a word**, and no term is filtered out:
 `"a pricing plan"` matches every node containing the letter `a` anywhere. Ranking
@@ -447,10 +448,13 @@ sentence. (A word-boundary or minimum-length rule would change what a term means
 and is deliberately left out of the opt-in mode.)
 
 The mode applies to the local lexical search. It is ignored when `semantic=true`
-(that path does not use the lexical matcher) — and also when a lexical query
-matches nothing and the automatic semantic fallback takes over, which discards
-the lexical result while still echoing the requested mode. Federated search stays
-substring-matched — the same boundary semantic ranking has.
+(that path does not use the lexical matcher). It is *superseded* — not ignored —
+by the automatic semantic fallback: the lexical attempt still runs in the
+requested mode, and the mode decides whether the fallback fires at all, since it
+only fires when that attempt matched nothing. A non-empty lexical result is never
+discarded. `match_mode` is still echoed in that case while `result["semantic"]`
+flips to true. Federated search stays substring-matched — the same boundary
+semantic ranking has.
 
 ### Semantic search (`semantic` flag on `/api/search` and `search_graph`)
 

@@ -92,10 +92,12 @@ class ActionScopedNarrowingHook:
     def __init__(self, *, read_graph_ids, mutate_graph_ids):
         self.read_graph_ids = read_graph_ids
         self.mutate_graph_ids = mutate_graph_ids
+        self.seen_contexts = []
 
     def evaluate(
         self, context: GraphAuthorizationContext
     ) -> GraphAuthorizationDecision:
+        self.seen_contexts.append(context)
         include = (
             self.mutate_graph_ids
             if context.action == GRAPH_ACTION_MUTATE

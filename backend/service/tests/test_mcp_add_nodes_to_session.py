@@ -18,11 +18,15 @@ from backend.core.session_store import (
     InMemorySessionPersistenceBackend,
     SessionStore,
 )
-from backend.runtime.authorization import AUTHORIZATION_MODE_ENV
+from backend.runtime.authorization import (
+    AUTHORIZATION_MODE_ENV,
+    DefaultGraphAuthorizationHook,
+)
 from backend.service import GraphService, register_mcp_tools
 from backend.service.tests.test_authorization import (
     ActionScopedNarrowingHook,
     FixedNarrowingHook,
+    _make_multi_graph_service,
 )
 
 
@@ -267,6 +271,31 @@ class TestAddNodesToSession:
         assert result["error"] == "too_large"
         assert lookups == []
 
+    def test_a_federated_search_result_id_is_not_addable(self, tmp_path):
+        """The tool sends agents to search_graph, which can return remote ids.
+
+        A federated node lives in the FederationManager's own cache and never in
+        this server's storage, so the projection cannot resolve it. The docstring
+        promises that outcome; without this, a future "resolve through federation
+        too" change would break the promise silently.
+        """
+        service = _make_multi_graph_service(tmp_path, DefaultGraphAuthorizationHook())
+        tools_map, manager = _wire(None, service)
+        sid = _session(manager)
+
+        found = service.search_graph(query="Alpha result")
+        federated_ids = [n["id"] for n in found["nodes"]]
+        assert federated_ids == ["federated::graph-alpha::remote-1"]
+
+        result = tools_map["add_nodes_to_session"](
+            session_id=sid, node_ids=federated_ids
+        )
+
+        assert result["success"] is False
+        assert result["error"] == "no_resolvable_nodes"
+        assert result["skipped"] == federated_ids
+        assert manager.get_session(sid).state["node_refs"] == []
+
 
 class TestAuthorization:
     def test_read_only_mode_denies_the_write(self, tools, monkeypatch):
@@ -344,18 +373,17 @@ class TestAuthorization:
             ],
             [],
         )
-        service = GraphService(
-            storage,
-            authorization_hook=ActionScopedNarrowingHook(
-                read_graph_ids=("graph-alpha", "graph-beta"),
-                mutate_graph_ids=("graph-alpha",),
-            ),
+        hook = ActionScopedNarrowingHook(
+            read_graph_ids=("graph-alpha", "graph-beta"),
+            mutate_graph_ids=("graph-alpha",),
         )
+        service = GraphService(storage, authorization_hook=hook)
         tools_map, manager = _wire(storage, service)
         sid = _session(manager)
 
         # The caller really can read it — that is what makes the seam matter.
         assert service.get_node_details("readable").get("success") is not False
+        hook.seen_contexts.clear()
 
         result = tools_map["add_nodes_to_session"](
             session_id=sid, node_ids=["mine", "readable"]
@@ -364,3 +392,11 @@ class TestAuthorization:
         assert result["added"] == ["mine"]
         assert result["skipped"] == ["readable"]
         assert manager.get_session(sid).state["node_refs"] == ["mine"]
+
+        # Both evaluations of the one call ask the hook the same question, about
+        # the tool the caller invoked — not about the projection helper, a target
+        # a deployment's hook has no reason to have heard of.
+        assert [(c.action, c.target) for c in hook.seen_contexts] == [
+            ("mutate", "add_nodes_to_session"),
+            ("mutate", "add_nodes_to_session"),
+        ]

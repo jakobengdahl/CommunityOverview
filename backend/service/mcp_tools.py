@@ -189,11 +189,12 @@ def register_mcp_tools(
                 semantic ranking when it returns zero results.
             match_mode: How the lexical query is matched. ``"substring"``
                 (default) requires the whole query verbatim — unchanged
-                behaviour. ``"any_term"`` splits the query on whitespace and
-                matches nodes containing **any** term, which is what a
-                multi-word query such as "plan pricing offering" usually means;
-                a node still ranks by its single best-matching term, so more
-                terms never outweigh a stronger match. Each term is matched as a
+                behaviour. ``"any_term"`` splits the query on whitespace into
+                distinct terms and matches nodes containing **any** of them,
+                which is what a multi-word query such as "plan pricing offering"
+                usually means; a node still ranks by its single best-matching
+                term, so more terms never outweigh a stronger match, and a term
+                you repeat counts once. Each term is matched as a
                 substring, not as a word, so pass the distinctive terms: a short
                 or common one ("a", "the") matches almost everything and pads
                 the tail of the result with noise. Ignored when
@@ -1075,7 +1076,19 @@ def register_mcp_tools(
         positions = session.state.get("positions", {})
         hidden = set(session.state.get("hidden_node_ids", []))
         node_refs = session.state.get("node_refs", [])
-        semantics = service.resolve_session_node_semantics(node_refs).get("nodes") or {}
+        # Read scope, and this tool's own name as the target: same rule the
+        # write path follows, so a target-aware hook is never asked about the
+        # helper. It matters here because the projection's denial is swallowed
+        # into {} below — a narrowing meant for some other target would silently
+        # report every node as type/status None rather than erroring.
+        semantics = (
+            service.resolve_session_node_semantics(
+                node_refs,
+                action=GRAPH_ACTION_READ,
+                target="get_visualization_layout",
+            ).get("nodes")
+            or {}
+        )
         nodes = []
         for node_id in node_refs:
             pos = positions.get(node_id)

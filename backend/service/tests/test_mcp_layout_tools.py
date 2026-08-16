@@ -266,13 +266,11 @@ class TestGetVisualizationLayout:
             ],
             [],
         )
-        service = GraphService(
-            storage,
-            authorization_hook=ActionScopedNarrowingHook(
-                read_graph_ids=("graph-alpha", "graph-beta"),
-                mutate_graph_ids=("graph-alpha",),
-            ),
+        hook = ActionScopedNarrowingHook(
+            read_graph_ids=("graph-alpha", "graph-beta"),
+            mutate_graph_ids=("graph-alpha",),
         )
+        service = GraphService(storage, authorization_hook=hook)
         manager = SessionManager(SessionStore(InMemorySessionPersistenceBackend()))
         mock_mcp = Mock()
         mock_mcp.tool = MagicMock(return_value=lambda f: f)
@@ -283,6 +281,10 @@ class TestGetVisualizationLayout:
 
         assert node["type"] == "Initiative"
         assert node["status"] == "in_progress"
+        assert [(c.action, c.target) for c in hook.seen_contexts] == [
+            ("read", "get_visualization_layout"),
+            ("read", "get_visualization_layout"),
+        ]
 
     def test_invalid_session_id(self, layout_tools):
         tools_map, _ = layout_tools

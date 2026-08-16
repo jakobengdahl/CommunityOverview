@@ -104,8 +104,9 @@ class SearchRequest(BaseModel):
         MATCH_MODE_SUBSTRING,
         description=(
             "Lexical match mode: 'substring' (default) requires the whole query "
-            "verbatim; 'any_term' matches nodes containing any whitespace-"
-            "separated term. Ignored when semantic is true."
+            "verbatim; 'any_term' matches nodes containing any of the query's "
+            "distinct whitespace-separated terms, and a repeated term counts "
+            "once. Ignored when semantic is true."
         ),
     )
 

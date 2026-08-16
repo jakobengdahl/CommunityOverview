@@ -605,8 +605,9 @@ def get_presentation() -> Dict[str, Any]:
 #     {"id": "animated_layout", "name": "Animated layout", "enabled": false}
 #
 # `name` is required by CapabilityConfig — omitting it fails validation for the
-# whole schema config, not just this entry, and the deployment then silently
-# falls back to defaults (including this capability reporting enabled).
+# whole schema config, not just this entry, and the deployment then falls back to
+# defaults (including this capability reporting enabled) with nothing but a
+# logged warning to say so.
 _ANIMATED_LAYOUT_CAPABILITY = CapabilityConfig(
     id="animated_layout",
     name="Animated layout",
