@@ -76,8 +76,8 @@ jobs:
           pip-audit -r services/mcp_oauth_gateway/requirements.txt -f markdown 2>&1 | tee -a "$GITHUB_STEP_SUMMARY"
 
   # ---------------------------------------------------------------------------
-  # npm audit – JS dependency advisories. The root lockfile covers all three
-  # workspaces, so a single root audit reports across web, widget and canvas.
+  # npm audit – JS dependency advisories. The root lockfile covers every
+  # workspace, so a single root audit reports across web, widget, canvas and xr.
   # --omit=dev limits the report to dependencies that ship at runtime.
   # ---------------------------------------------------------------------------
   npm-audit:

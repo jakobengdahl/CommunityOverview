@@ -1,5 +1,5 @@
 // ESLint flat config for the JavaScript/JSX workspaces (frontend/web,
-// frontend/widget, packages/ui-graph-canvas).
+// frontend/widget, frontend/xr, packages/ui-graph-canvas).
 //
 // This is a mechanical correctness gate, not a style enforcer: Prettier owns
 // formatting (eslint-config-prettier, applied last, disables every rule that
@@ -98,6 +98,16 @@ export default [
         ...globals.node,
         ...globals.vitest,
       },
+    },
+  },
+
+  // react-three-fiber renders three.js objects as JSX host elements whose props
+  // (position, args, intensity, …) are not DOM attributes, so the generic
+  // unknown-property check does not apply to the XR workspace.
+  {
+    files: ['frontend/xr/**/*.{js,jsx}'],
+    rules: {
+      'react/no-unknown-property': 'off',
     },
   },
 
