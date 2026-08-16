@@ -230,13 +230,19 @@ class TestConfigLoader:
 
         del os.environ["SCHEMA_FILE"]
 
-    def test_get_capabilities_defaults_to_empty_list(self):
-        """Test capability manifest defaults to an empty list when not configured."""
+    def test_get_capabilities_always_reports_animated_layout(self):
+        """A deployment that declares nothing still answers the animation question.
+
+        An agent sending an ``apply_visualization_layout`` animation hint cannot
+        otherwise tell a tween from a snap, so the flag must be present whether
+        or not a deployment configured a manifest.
+        """
         from backend.config import config_loader
 
-        capabilities = config_loader.get_capabilities()
+        capabilities = config_loader.get_capabilities()["capabilities"]
 
-        assert capabilities == {"capabilities": []}
+        assert [c["id"] for c in capabilities] == ["animated_layout"]
+        assert capabilities[0]["enabled"] is True
 
     def test_get_capabilities_from_custom_config(self):
         """Test capability manifest is loaded from custom config."""
@@ -251,26 +257,55 @@ class TestConfigLoader:
         os.environ["SCHEMA_FILE"] = test_config_path
         config_loader.reset_loader()
 
-        capabilities = config_loader.get_capabilities()
+        capabilities = config_loader.get_capabilities()["capabilities"]
 
-        assert capabilities == {
-            "capabilities": [
-                {
-                    "id": "graph_export",
-                    "name": "Graph export",
-                    "description": "Allows clients to export graph data for offline analysis.",
-                    "enabled": True,
-                },
-                {
-                    "id": "assistant_guidance",
-                    "name": "Assistant guidance",
-                    "description": "Provides configuration for guided assistant interactions.",
-                    "enabled": False,
-                },
-            ]
-        }
+        assert capabilities[:2] == [
+            {
+                "id": "graph_export",
+                "name": "Graph export",
+                "description": "Allows clients to export graph data for offline analysis.",
+                "enabled": True,
+            },
+            {
+                "id": "assistant_guidance",
+                "name": "Assistant guidance",
+                "description": "Provides configuration for guided assistant interactions.",
+                "enabled": False,
+            },
+        ]
+        assert [c["id"] for c in capabilities[2:]] == ["animated_layout"]
 
         del os.environ["SCHEMA_FILE"]
+
+    def test_declared_animated_layout_capability_wins(self, tmp_path):
+        """A deployment whose canvas does not tween says so, and is not overruled."""
+        from backend.config import config_loader
+
+        config_path = tmp_path / "schema_config.json"
+        config_path.write_text(
+            json.dumps(
+                {
+                    "node_types": {},
+                    "relationship_types": {},
+                    "presentation": {
+                        "capabilities": [
+                            {
+                                "id": "animated_layout",
+                                "name": "Animated layout",
+                                "enabled": False,
+                            }
+                        ]
+                    },
+                }
+            )
+        )
+        os.environ["SCHEMA_FILE"] = str(config_path)
+        config_loader.reset_loader()
+
+        capabilities = config_loader.get_capabilities()["capabilities"]
+
+        assert [c["id"] for c in capabilities] == ["animated_layout"]
+        assert capabilities[0]["enabled"] is False
 
     def test_get_runtime_info_defaults_to_standalone(self):
         """Test runtime metadata defaults to standalone mode with no extensions."""
@@ -519,7 +554,9 @@ class TestSchemaIntegration:
             assert "colors" in presentation
 
             capabilities = service.get_capabilities()
-            assert capabilities == {"capabilities": []}
+            assert [c["id"] for c in capabilities["capabilities"]] == [
+                "animated_layout"
+            ]
         finally:
             os.unlink(temp_path)
 

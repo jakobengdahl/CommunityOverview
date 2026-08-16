@@ -596,15 +596,43 @@ def get_presentation() -> Dict[str, Any]:
     }
 
 
+# Capability every deployment reports whether or not its config declares one, so
+# an agent can always ask whether this instance's canvas actually tweens an
+# `apply_visualization_layout` animation hint instead of snapping to the targets.
+# The shipped canvas does, hence the default; a deployment running an older
+# frontend declares the same id with "enabled": false in its presentation config
+# to say otherwise.
+_ANIMATED_LAYOUT_CAPABILITY = CapabilityConfig(
+    id="animated_layout",
+    name="Animated layout",
+    description=(
+        "The canvas tweens an apply_visualization_layout animation hint "
+        "(animate/duration_ms/easing) instead of applying the move immediately. "
+        "A viewer who asked for reduced motion still snaps to the final "
+        "positions — that is a per-viewer client-side decision this flag cannot "
+        "report."
+    ),
+    enabled=True,
+)
+
+
 def get_capabilities() -> Dict[str, Any]:
-    """Get the public capability manifest for client discovery."""
+    """Get the public capability manifest for client discovery.
+
+    Deployment-declared capabilities come first, in config order; a server-known
+    default (see ``_ANIMATED_LAYOUT_CAPABILITY``) is appended only when the
+    config does not already declare that id, so a deployment always keeps the
+    last word on its own capabilities.
+    """
     loader = _get_loader()
-    return {
-        "capabilities": [
-            capability.model_dump()
-            for capability in loader.config.presentation.capabilities
-        ]
-    }
+    capabilities = [
+        capability.model_dump()
+        for capability in loader.config.presentation.capabilities
+    ]
+    declared_ids = {capability.get("id") for capability in capabilities}
+    if _ANIMATED_LAYOUT_CAPABILITY.id not in declared_ids:
+        capabilities.append(_ANIMATED_LAYOUT_CAPABILITY.model_dump())
+    return {"capabilities": capabilities}
 
 
 def _normalize_runtime_mode(runtime_mode: Optional[str]) -> str:

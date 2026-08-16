@@ -25,8 +25,10 @@ arrange a session without colliding nodes or fighting concurrent editors.
 
 ## 1. Motivation
 
-An MCP-connected assistant can populate a visualization session (via
-`search_graph` / `get_related_nodes` with a `visualization_session_id`) but then
+An MCP-connected assistant can populate a visualization session (by pushing
+results into it with `search_graph` / `get_related_nodes` and a
+`visualization_session_id`, or by naming the node ids outright with
+`add_nodes_to_session`) but then
 needs to **arrange** it: place nodes as a left-to-right DAG, a grid, or
 swimlanes. To do that safely it must agree with the server and the canvas on a
 single coordinate model, on how a bulk move is applied, and on how concurrent
@@ -259,6 +261,14 @@ and `easing` (default `"ease-in-out"`). These are a **hint** the canvas honors:
   `animate` hint. The contract's job is only to *carry* the hint; honoring or
   overriding it is the canvas's responsibility. Agents should send the hint they
   intend and must not try to detect reduced-motion themselves.
+- **Is the hint honored here?** A write returns success whether the connected
+  canvas tweened the batch or applied it immediately, so the result cannot answer
+  that. The deployment answers it instead: `get_capabilities` always reports an
+  `animated_layout` capability whose `enabled` says whether this instance's
+  canvas tweens the hint. A deployment running a canvas that does not declares
+  the same capability id with `"enabled": false` in its presentation config.
+  Reduced motion stays out of that flag — it is per-viewer and client-side (see
+  above), so no server-side manifest can report it.
 - **Cancellation / replacement.** A subsequent `layout_applied` op supersedes an
   in-flight transition for the same nodes; the canvas animates from wherever the
   nodes currently are toward the newest targets. Agents do not manage animation

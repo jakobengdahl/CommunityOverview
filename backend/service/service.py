@@ -14,6 +14,7 @@ public method signatures are preserved exactly.
 from typing import List, Optional, Dict, Any
 
 from backend.core import GraphStorage
+from backend.core.storage_search import MATCH_MODE_SUBSTRING
 from backend.runtime.authorization import (
     DefaultGraphAuthorizationHook,
     GraphAuthorizationHook,
@@ -82,6 +83,7 @@ class GraphService:
         metadata_filters: Optional[List[Dict[str, Any]]] = None,
         include_archived: bool = False,
         semantic: bool = False,
+        match_mode: str = MATCH_MODE_SUBSTRING,
     ) -> Dict[str, Any]:
         return queries.search_graph(
             self._storage,
@@ -98,6 +100,7 @@ class GraphService:
             metadata_filters=metadata_filters,
             include_archived=include_archived,
             semantic=semantic,
+            match_mode=match_mode,
         )
 
     def get_node_details(self, node_id: str) -> Dict[str, Any]:
