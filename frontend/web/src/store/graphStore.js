@@ -264,11 +264,12 @@ const useGraphStore = create((set, get) => ({
   // Chat state
   chatMessages: [DEFAULT_WELCOME_MESSAGE],
 
-  // Monotonic counter bumped on every visualization-session switch. In-flight
-  // assistant requests capture it before awaiting and drop their response if it
-  // changed, so a slow reply from the previous session cannot mutate the newly
-  // active session's chat or canvas.
-  assistantSessionEpoch: 0,
+  // Monotonic counter bumped on every visualization-session switch. Any handler
+  // that awaits a network call captures it first and drops its post-await
+  // effects if it changed (see isStaleSessionEpoch), so work started in one
+  // session can never mutate the chat, canvas or sync fan-out of the session
+  // the user has since moved to.
+  sessionEpoch: 0,
 
   // Expert agents
   availableExperts: [], // All expert agents from config
@@ -390,12 +391,26 @@ const useGraphStore = create((set, get) => ({
     set({ edges: edges.map((edge) => (edge.id === edgeId ? { ...edge, ...updates } : edge)) });
   },
 
+  // Emptying the canvas also closes the overlays that address canvas content.
+  // detailNode/editingNode/editingEdge/deleteDialog each point at a node or edge
+  // that is gone once this returns, and confirming one of them would still
+  // mutate the global graph for something the user can no longer see. Only the
+  // esc-esc path is gated on a dialog being open, so an agent driving
+  // clear_visualization can pull the canvas out from under an open dialog;
+  // closing them here covers every caller at once. contextMenu is reset for
+  // parity with resetSessionScopedState only — nothing outside this store reads
+  // it today, and the canvas nodes own their own menus as local state.
   clearVisualization: () => {
     pulseClearTimers.forEach((timer) => clearTimeout(timer));
     pulseClearTimers.clear();
     set((state) => ({
       nodes: [],
       edges: [],
+      detailNode: null,
+      editingNode: null,
+      editingEdge: null,
+      deleteDialog: null,
+      contextMenu: null,
       highlightedNodeIds: [],
       hiddenNodeIds: [],
       hiddenEdgeIds: [],
@@ -653,9 +668,9 @@ const useGraphStore = create((set, get) => ({
   // across a switch acts on the old session's graph while the sync client
   // already points at the new one, so the edit would be broadcast into a
   // session it does not belong to.
-  // Bumping assistantSessionEpoch invalidates any assistant request still in
-  // flight from the previous session (see ChatPanel), so its response can never
-  // land in the new session.
+  // Bumping sessionEpoch invalidates every request still in flight from the
+  // previous session — the assistant's, and App's edge-update and node-delete
+  // handlers — so none of their results can land in the new session.
   resetSessionScopedState: (t, language) => {
     const { presentation } = get();
     const welcomeMessage = createWelcomeMessage(presentation, t, language);
@@ -670,7 +685,7 @@ const useGraphStore = create((set, get) => ({
       selectedNodeId: null,
       selectedGraphNodes: [],
       navHistory: [],
-      assistantSessionEpoch: state.assistantSessionEpoch + 1,
+      sessionEpoch: state.sessionEpoch + 1,
     }));
   },
 
@@ -856,5 +871,18 @@ const useGraphStore = create((set, get) => ({
     });
   },
 }));
+
+/**
+ * Whether the visualization session has been switched since `epoch` was taken.
+ *
+ * Capture the epoch before awaiting, then call this before applying anything the
+ * await produced. Reads the store imperatively rather than through the hook so
+ * the value is the one current at resolution time, not the one closed over when
+ * the handler was created.
+ *
+ * @param {number} epoch  Value of sessionEpoch captured before the await.
+ * @returns {boolean}
+ */
+export const isStaleSessionEpoch = (epoch) => useGraphStore.getState().sessionEpoch !== epoch;
 
 export default useGraphStore;
