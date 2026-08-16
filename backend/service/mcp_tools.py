@@ -193,7 +193,10 @@ def register_mcp_tools(
                 matches nodes containing **any** term, which is what a
                 multi-word query such as "plan pricing offering" usually means;
                 a node still ranks by its single best-matching term, so more
-                terms never outweigh a stronger match. Ignored when
+                terms never outweigh a stronger match. Each term is matched as a
+                substring, not as a word, so pass the distinctive terms: a short
+                or common one ("a", "the") matches almost everything and pads
+                the tail of the result with noise. Ignored when
                 ``semantic=True``. Applies to the local graph; federated search
                 stays substring-matched.
             visualization_session_id: Optional browser session ID — when provided, the result
@@ -1248,6 +1251,17 @@ def register_mcp_tools(
         ``apply_visualization_layout``, threading the ``revision`` returned here
         into its ``expected_revision``.
 
+        An id already in the session is left exactly as it is — including when
+        it is currently hidden, which this tool does not undo. So a call can
+        legitimately report success with an empty ``added`` and still show
+        nothing new on the canvas.
+
+        A batch is capped at 500 ids, and each call also draws from a per-client
+        rate budget sized to the number of ids — so a batch well below the hard
+        cap can still return ``rate_limited``. Split large sets across
+        successive calls, threading the returned ``revision`` into the next
+        ``expected_revision``.
+
         Args:
             session_id: The session ID shown in the browser header (e.g. "8244-1742")
             node_ids: Ids of the nodes to add.
@@ -1256,8 +1270,11 @@ def register_mcp_tools(
                 Omit for last-write-wins.
 
         Returns:
-            Dict with success, added (ids actually added), skipped (ids that did
-            not resolve), node_count (session total) and the new revision. On a
+            Dict with success, added (ids actually added, deduplicated), skipped
+            (ids that did not resolve, deduplicated), node_count (nodes the
+            session references, hidden ones included — the same total
+            ``get_visualization_session`` reports, not the visible count from
+            ``get_visualization_session_state``) and the new revision. On a
             concurrency clash returns success=false with the current revision so
             the caller can re-read and retry. Retryable errors:
             revision_conflict, busy, rate_limited; change the request for
@@ -1298,12 +1315,16 @@ def register_mcp_tools(
         ]
         # Anything not resolvable is skipped, including an id that is not a
         # string at all — `known` is keyed by string id, so testing membership
-        # for an unhashable value would raise instead.
-        skipped = [
-            node_id
-            for node_id in node_ids
-            if not (isinstance(node_id, str) and node_id in known)
-        ]
+        # for an unhashable value would raise instead. Deduplicated in order for
+        # the same reason `added` is: a repeated id is one id, whichever list it
+        # ends up in. Non-strings are compared by equality, since an unhashable
+        # one cannot go in a set.
+        skipped: List[Any] = []
+        for node_id in node_ids:
+            if isinstance(node_id, str) and node_id in known:
+                continue
+            if node_id not in skipped:
+                skipped.append(node_id)
         if not resolvable:
             return {
                 "success": False,

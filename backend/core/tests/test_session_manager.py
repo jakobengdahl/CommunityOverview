@@ -1010,6 +1010,10 @@ class TestAddNodeRefs:
         assert s.seq == seq_before
         assert s.state["node_refs"] == []
         assert await _drain(sub) == []
+        # The ring must not keep the rolled-back op: the next write would reuse
+        # its seq, and a reconnecting client would replay a phantom add.
+        assert list(mgr.store.ring(s.id)) == []
+        assert mgr.catch_up(s.id, seq_before)["ops"] == []
 
     async def test_repeated_ids_are_added_once(self):
         mgr = _manager()

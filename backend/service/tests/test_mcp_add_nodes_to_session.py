@@ -218,6 +218,18 @@ class TestAddNodesToSession:
         assert published[0]["op"]["node_ids"] == ["alpha", "beta"]
         assert manager.get_session(sid).state["node_refs"] == ["alpha", "beta"]
 
+    def test_a_repeated_unresolvable_id_is_reported_once(self, tools):
+        """`skipped` counts ids, like `added` — not occurrences."""
+        tools_map, manager = tools
+        sid = _session(manager)
+
+        result = tools_map["add_nodes_to_session"](
+            session_id=sid, node_ids=["ghost", "ghost", "alpha"]
+        )
+
+        assert result["added"] == ["alpha"]
+        assert result["skipped"] == ["ghost"]
+
     def test_a_non_string_id_is_skipped_not_an_exception(self, tools):
         """Arguments reach this tool unvalidated (POST /execute_tool)."""
         tools_map, manager = tools

@@ -428,6 +428,13 @@ tier. Term scores are never summed across tiers. An unsupported value is
 rejected (`ValueError` in-process, `422` over REST) rather than silently
 ignored, and the requested mode is echoed back as `result["match_mode"]`.
 
+Each term is matched as a **substring, not a word**, and no term is filtered out:
+`"a pricing plan"` matches every node containing the letter `a` anywhere. Ranking
+still floats the real hits to the top, but `total` and the tail grow noisy, so
+callers should pass the distinctive terms rather than a whole natural-language
+sentence. (A word-boundary or minimum-length rule would change what a term means
+and is deliberately left out of the opt-in mode.)
+
 The mode applies to the local lexical search. It is ignored when `semantic=true`
 (that path does not use the lexical matcher), and federated search stays
 substring-matched — the same boundary semantic ranking has.
