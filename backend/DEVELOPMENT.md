@@ -138,9 +138,9 @@ npm install
 ```
 
 This installs dependencies for all workspaces (ui-graph-canvas, web, widget, xr).
-The `xr` spike is the heaviest of these by a wide margin — `three`, react-three-
-fiber and the WebXR emulator bundled with `@react-three/xr` — and none of it is
-needed unless you are working on that workspace.
+The `xr` spike is the heaviest of these by a wide margin — `three`,
+`@react-three/fiber` and the WebXR emulator bundled with `@react-three/xr` — and
+none of it is needed unless you are working on that workspace.
 
 ## Running the Server
 
@@ -328,7 +328,7 @@ kept separate so a failure points at the layer that broke:
 - **Backend tests** — `pytest backend/ -q` on the base (ML-free) requirements.
   Semantic search and chat use their mock/fallback paths, so no embedding model
   is downloaded in CI.
-- **Frontend tests** — `npm run test:unit` across the web, widget, and canvas
+- **Frontend tests** — `npm run test:unit` across the web, widget, canvas, and xr
   workspaces. Playwright e2e is intentionally excluded from the required path.
   Dependencies install with `npm ci` against the tracked root `package-lock.json`
   so the workspace tree is reproducible run-to-run (cached via `setup-node`).
