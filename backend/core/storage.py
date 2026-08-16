@@ -539,6 +539,7 @@ class GraphStorage:
         node_types: Optional[List[NodeType]] = None,
         limit: int = 50,
         include_archived: bool = False,
+        match_mode: str = storage_search.MATCH_MODE_SUBSTRING,
     ) -> List[Node]:
         """Search nodes based on text query.  Delegates to storage_search."""
         return storage_search.search_nodes(
@@ -549,6 +550,7 @@ class GraphStorage:
             node_types,
             limit,
             include_archived=include_archived,
+            match_mode=match_mode,
         )
 
     def semantic_search_nodes(

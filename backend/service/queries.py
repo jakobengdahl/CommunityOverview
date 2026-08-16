@@ -8,6 +8,7 @@ and the federation manager as explicit parameters.
 from typing import TYPE_CHECKING, Any, Dict, List, Optional
 
 from backend.core import NodeType, RelationshipType
+from backend.core.storage_search import MATCH_MODE_SUBSTRING, validate_match_mode
 from backend.runtime.authorization import GRAPH_ACTION_READ
 
 from . import access
@@ -53,7 +54,12 @@ def search_graph(
     metadata_filters: Optional[List[Dict[str, Any]]] = None,
     include_archived: bool = False,
     semantic: bool = False,
+    match_mode: str = MATCH_MODE_SUBSTRING,
 ) -> Dict[str, Any]:
+    # Validated before anything else runs: the semantic path never reaches the
+    # lexical matcher, so an unsupported mode would otherwise pass unnoticed.
+    validate_match_mode(match_mode)
+
     decision = access.evaluate_graph_access(
         hook, action=GRAPH_ACTION_READ, target="search_graph"
     )
@@ -128,6 +134,7 @@ def search_graph(
             node_types=type_filters,
             limit=search_limit,
             include_archived=include_archived,
+            match_mode=match_mode,
         )
         visible_local_results = _visible_local(local_results)
 
@@ -236,6 +243,7 @@ def search_graph(
         "total": len(visible_nodes),
         "query": query,
         "semantic": semantic_applied,
+        "match_mode": match_mode,
         "filters": {
             "node_types": node_types,
             "tags_any": list(tags_any or []),
