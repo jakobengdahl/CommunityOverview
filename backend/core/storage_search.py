@@ -159,11 +159,12 @@ def search_nodes(
 
     - ``substring`` (default): the whole query must occur verbatim in a node's
       searchable text — the historical behaviour.
-    - ``any_term``: the query is split on whitespace and a node matches when it
-      contains **any** term.  Ranking stays tier-based: a node scores by its
-      single best-matching term (so a name-tier match still outranks any pile of
-      secondary signals), and the number of matched terms only breaks ties
-      *within* a tier.  Never added: terms are not summed across tiers.
+    - ``any_term``: the query is split on whitespace into *distinct* terms and a
+      node matches when it contains **any** of them.  Ranking stays tier-based:
+      a node scores by its single best-matching term (so a name-tier match still
+      outranks any pile of secondary signals), and the number of matched
+      distinct terms only breaks an exact scoring tie.  Never added: terms are
+      not summed across tiers.
     """
     validate_match_mode(match_mode)
 
@@ -173,7 +174,12 @@ def search_nodes(
 
     terms = [query_lower]
     if match_mode == MATCH_MODE_ANY_TERM and not match_all:
-        terms = query_lower.split()
+        # Deduplicated, order preserved: the tie-break below counts matched
+        # terms, so a word the caller happened to repeat ("AI in the public
+        # sector and AI in the private sector") would otherwise be counted once
+        # per occurrence and could reorder same-tier results on repetition
+        # alone.
+        terms = list(dict.fromkeys(query_lower.split()))
 
     matched_terms: Dict[str, List[str]] = {}
 

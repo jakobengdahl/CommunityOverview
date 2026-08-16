@@ -18,9 +18,16 @@ from backend.core.session_store import (
     InMemorySessionPersistenceBackend,
     SessionStore,
 )
-from backend.runtime.authorization import AUTHORIZATION_MODE_ENV
+from backend.runtime.authorization import (
+    AUTHORIZATION_MODE_ENV,
+    DefaultGraphAuthorizationHook,
+)
 from backend.service import GraphService, register_mcp_tools
-from backend.service.tests.test_authorization import FixedNarrowingHook
+from backend.service.tests.test_authorization import (
+    ActionScopedNarrowingHook,
+    FixedNarrowingHook,
+    _make_multi_graph_service,
+)
 
 
 def _wire(storage, service, **manager_kwargs):
@@ -264,6 +271,54 @@ class TestAddNodesToSession:
         assert result["error"] == "too_large"
         assert lookups == []
 
+    def test_an_unadopted_federated_search_result_id_is_not_addable(self, tmp_path):
+        """The tool sends agents to search_graph, which can return remote ids.
+
+        An unadopted federated node lives only in the FederationManager's cache,
+        so the projection cannot resolve it. Adoption is what changes that, and
+        the next test covers the other side — together they pin the whole
+        promise the docstring makes, not just its convenient half.
+        """
+        service = _make_multi_graph_service(tmp_path, DefaultGraphAuthorizationHook())
+        tools_map, manager = _wire(None, service)
+        sid = _session(manager)
+
+        found = service.search_graph(query="Alpha result")
+        federated_ids = [n["id"] for n in found["nodes"]]
+        assert federated_ids == ["federated::graph-alpha::remote-1"]
+
+        result = tools_map["add_nodes_to_session"](
+            session_id=sid, node_ids=federated_ids
+        )
+
+        assert result["success"] is False
+        assert result["error"] == "no_resolvable_nodes"
+        assert result["skipped"] == federated_ids
+        assert manager.get_session(sid).state["node_refs"] == []
+
+    def test_an_adopted_federated_id_becomes_addable(self, tmp_path):
+        """Adoption writes a local reference under the *federated* id.
+
+        So the same id that was skipped a moment ago now resolves and is added.
+        The docstring says "unadopted" for exactly this reason; an absolute
+        "federated ids are never addable" would be false here.
+        """
+        service = _make_multi_graph_service(tmp_path, DefaultGraphAuthorizationHook())
+        tools_map, manager = _wire(None, service)
+        sid = _session(manager)
+        federated_id = "federated::graph-alpha::remote-1"
+
+        assert service.adopt_federated_node(federated_id)["success"] is True
+
+        result = tools_map["add_nodes_to_session"](
+            session_id=sid, node_ids=[federated_id]
+        )
+
+        assert result["success"] is True
+        assert result["added"] == [federated_id]
+        assert result["skipped"] == []
+        assert manager.get_session(sid).state["node_refs"] == [federated_id]
+
 
 class TestAuthorization:
     def test_read_only_mode_denies_the_write(self, tools, monkeypatch):
@@ -314,3 +369,59 @@ class TestAuthorization:
         assert result["added"] == ["mine"]
         assert result["skipped"] == ["theirs"]
         assert manager.get_session(sid).state["node_refs"] == ["mine"]
+
+    def test_a_readable_but_unmutable_node_is_not_added(self, tmp_path):
+        """The write narrows by the *mutate* decision, not the read one.
+
+        A hook may let a caller read a graph it may not write into. Filtering the
+        ids by read visibility would put such a node into server-owned session
+        state — the gap every sibling mutation closes by narrowing with its own
+        decision.
+        """
+        storage = GraphStorage(json_path=os.path.join(tmp_path, "g.json"))
+        storage.add_nodes(
+            [
+                Node(
+                    id="mine",
+                    type="Initiative",
+                    name="Mine",
+                    metadata={"origin_graph_id": "graph-alpha"},
+                ),
+                Node(
+                    id="readable",
+                    type="Actor",
+                    name="Readable but not mine to write",
+                    metadata={"origin_graph_id": "graph-beta"},
+                ),
+            ],
+            [],
+        )
+        hook = ActionScopedNarrowingHook(
+            read_graph_ids=("graph-alpha", "graph-beta"),
+            mutate_graph_ids=("graph-alpha",),
+        )
+        service = GraphService(storage, authorization_hook=hook)
+        tools_map, manager = _wire(storage, service)
+        sid = _session(manager)
+
+        # The caller really can read it — that is what makes the seam matter.
+        assert service.get_node_details("readable").get("success") is not False
+        hook.seen_contexts.clear()
+
+        result = tools_map["add_nodes_to_session"](
+            session_id=sid, node_ids=["mine", "readable"]
+        )
+
+        assert result["added"] == ["mine"]
+        assert result["skipped"] == ["readable"]
+        assert manager.get_session(sid).state["node_refs"] == ["mine"]
+
+        # Every evaluation this one call makes asks the hook the same question,
+        # about the tool the caller invoked — not about the projection helper, a
+        # target a deployment's hook has no reason to have heard of. Asserted as
+        # a set: the invariant is that they agree, not how many there are, so
+        # caching the decision would not have to break this test.
+        assert hook.seen_contexts
+        assert {(c.action, c.target) for c in hook.seen_contexts} == {
+            ("mutate", "add_nodes_to_session")
+        }

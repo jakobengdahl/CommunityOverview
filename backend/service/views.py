@@ -60,6 +60,9 @@ def resolve_session_node_semantics(
     storage: "GraphStorage",
     hook: "GraphAuthorizationHook",
     node_ids: List[str],
+    *,
+    action: str,
+    target: str,
 ) -> Dict[str, Any]:
     """Resolve the *meaning* of session node references: type and status only.
 
@@ -74,14 +77,22 @@ def resolve_session_node_semantics(
     non-blank string, and is ``None`` otherwise. Blank normalises to ``None``
     (as ``node_graph_id`` does for its own metadata key) so an agent building
     status lanes never gets an unnamed one.
+
+    ``action`` and ``target`` are required rather than defaulted, so the scope a
+    caller gets is never one this helper picked for it. A caller that only reads
+    the projection passes ``GRAPH_ACTION_READ``; one that turns it into a write
+    must pass ``GRAPH_ACTION_MUTATE``, so the ids it keeps are the ones it may
+    *write* and not merely the ones it may read — a hook is free to narrow the
+    two differently. ``target`` names the operation the decision is really for:
+    a caller that has already gated its own tool name passes that same name, so
+    a target-aware hook is asked about the operation the user invoked rather than
+    about this helper, and both evaluations of one call agree.
     """
-    decision = access.evaluate_graph_access(
-        hook, action=GRAPH_ACTION_READ, target="resolve_session_node_semantics"
-    )
+    decision = access.evaluate_graph_access(hook, action=action, target=target)
     if not decision.allowed:
         return access.build_access_denied_result(
-            action=GRAPH_ACTION_READ,
-            target="resolve_session_node_semantics",
+            action=action,
+            target=target,
             decision=decision,
         )
 

@@ -80,6 +80,41 @@ class FixedNarrowingHook:
         )
 
 
+class ActionScopedNarrowingHook:
+    """Narrows ``mutate`` more tightly than ``read``.
+
+    ``FixedNarrowingHook`` returns the same narrowing whatever the action, so it
+    cannot tell whether an operation filtered nodes with the read decision or the
+    mutate one. Per-action narrowing is the reason the hook protocol carries an
+    action at all, so only a hook that honours it pins that seam.
+    """
+
+    def __init__(self, *, read_graph_ids, mutate_graph_ids):
+        self.read_graph_ids = read_graph_ids
+        self.mutate_graph_ids = mutate_graph_ids
+        self.seen_contexts = []
+
+    def evaluate(
+        self, context: GraphAuthorizationContext
+    ) -> GraphAuthorizationDecision:
+        self.seen_contexts.append(context)
+        include = (
+            self.mutate_graph_ids
+            if context.action == GRAPH_ACTION_MUTATE
+            else self.read_graph_ids
+        )
+        return GraphAuthorizationDecision(
+            allowed=True,
+            mode="action-scoped",
+            source="test",
+            graph_access=GraphAccessNarrowing(
+                enabled=True,
+                allow_local_graph=False,
+                include_graph_ids=include,
+            ),
+        )
+
+
 def _make_multi_graph_service(tmp_path, hook) -> GraphService:
     graph_file = tmp_path / "graph.json"
     graph_file.write_text(

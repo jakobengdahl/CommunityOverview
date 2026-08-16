@@ -600,8 +600,14 @@ def get_presentation() -> Dict[str, Any]:
 # an agent can always ask whether this instance's canvas actually tweens an
 # `apply_visualization_layout` animation hint instead of snapping to the targets.
 # The shipped canvas does, hence the default; a deployment running an older
-# frontend declares the same id with "enabled": false in its presentation config
-# to say otherwise.
+# frontend says otherwise by declaring the same id in its presentation config:
+#
+#     {"id": "animated_layout", "name": "Animated layout", "enabled": false}
+#
+# `name` is required by CapabilityConfig — omitting it fails validation for the
+# whole schema config, not just this entry, and the deployment then falls back to
+# defaults (including this capability reporting enabled) with nothing but a
+# logged warning to say so.
 _ANIMATED_LAYOUT_CAPABILITY = CapabilityConfig(
     id="animated_layout",
     name="Animated layout",

@@ -189,11 +189,12 @@ def register_mcp_tools(
                 semantic ranking when it returns zero results.
             match_mode: How the lexical query is matched. ``"substring"``
                 (default) requires the whole query verbatim — unchanged
-                behaviour. ``"any_term"`` splits the query on whitespace and
-                matches nodes containing **any** term, which is what a
-                multi-word query such as "plan pricing offering" usually means;
-                a node still ranks by its single best-matching term, so more
-                terms never outweigh a stronger match. Each term is matched as a
+                behaviour. ``"any_term"`` splits the query on whitespace into
+                distinct terms and matches nodes containing **any** of them,
+                which is what a multi-word query such as "plan pricing offering"
+                usually means; a node still ranks by its single best-matching
+                term, so more terms never outweigh a stronger match, and a term
+                you repeat counts once. Each term is matched as a
                 substring, not as a word, so pass the distinctive terms: a short
                 or common one ("a", "the") matches almost everything and pads
                 the tail of the result with noise. Ignored when
@@ -1075,7 +1076,19 @@ def register_mcp_tools(
         positions = session.state.get("positions", {})
         hidden = set(session.state.get("hidden_node_ids", []))
         node_refs = session.state.get("node_refs", [])
-        semantics = service.resolve_session_node_semantics(node_refs).get("nodes") or {}
+        # Read scope, and this tool's own name as the target: same rule the
+        # write path follows, so a target-aware hook is never asked about the
+        # helper. It matters here because the projection's denial is swallowed
+        # into {} below — a narrowing meant for some other target would silently
+        # report every node as type/status None rather than erroring.
+        semantics = (
+            service.resolve_session_node_semantics(
+                node_refs,
+                action=GRAPH_ACTION_READ,
+                target="get_visualization_layout",
+            ).get("nodes")
+            or {}
+        )
         nodes = []
         for node_id in node_refs:
             pos = positions.get(node_id)
@@ -1245,9 +1258,13 @@ def register_mcp_tools(
         present are not added twice (a call that adds nothing new leaves the
         revision untouched).
 
-        Ids that do not resolve to a node you may read are skipped and returned
+        Ids that do not resolve to a node you may add are skipped and returned
         in ``skipped``, so a stale id cannot put a phantom reference in the
-        session. The nodes arrive with no position; arrange them with
+        session. Only ids in **this server's own graph storage** are addable: a
+        ``search_graph`` result can also contain federated nodes, which live in a
+        remote graph, so an *unadopted* federated id is skipped. Once
+        ``adopt_federated_node`` has run, that same id names a local reference
+        and becomes addable. The nodes arrive with no position; arrange them with
         ``apply_visualization_layout``, threading the ``revision`` returned here
         into its ``expected_revision``.
 
@@ -1302,9 +1319,17 @@ def register_mcp_tools(
                 "message": "Too many nodes in one write; split into batches.",
             }
 
-        # Resolve through the read-authorized projection so an id the caller may
-        # not read — or that no longer exists — never enters session state.
-        resolved = service.resolve_session_node_semantics(node_ids)
+        # Resolve through the projection under the *mutate* decision, not a read
+        # one: a hook may narrow the two to different graph scopes, and this call
+        # writes the ids into server-owned session state. Filtering by what the
+        # caller may read would let a read-only-visible node be written in, the
+        # gap every sibling mutation closes by narrowing with its own decision.
+        # An id that no longer exists drops out here too. Same target as the gate
+        # above, so a target-aware hook is asked about this tool twice rather
+        # than about a helper it has never heard of.
+        resolved = service.resolve_session_node_semantics(
+            node_ids, action=GRAPH_ACTION_MUTATE, target="add_nodes_to_session"
+        )
         if not resolved.get("success"):
             return resolved
         known = resolved.get("nodes") or {}
@@ -1329,7 +1354,12 @@ def register_mcp_tools(
             return {
                 "success": False,
                 "error": "no_resolvable_nodes",
-                "message": "None of the given ids resolve to a node you can read.",
+                "message": (
+                    "None of the given ids resolve to a node you may add. Only "
+                    "ids in this server's own graph storage are addable; an "
+                    "unadopted federated search result's ids are not — adopt "
+                    "the node first, or use its local id."
+                ),
                 "skipped": skipped,
             }
 

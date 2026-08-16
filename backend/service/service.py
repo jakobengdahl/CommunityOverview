@@ -16,6 +16,7 @@ from typing import List, Optional, Dict, Any
 from backend.core import GraphStorage
 from backend.core.storage_search import MATCH_MODE_SUBSTRING
 from backend.runtime.authorization import (
+    GRAPH_ACTION_READ,
     DefaultGraphAuthorizationHook,
     GraphAuthorizationHook,
 )
@@ -523,9 +524,28 @@ class GraphService:
             self._storage, self._authorization_hook, node_ids
         )
 
-    def resolve_session_node_semantics(self, node_ids: List[str]) -> Dict[str, Any]:
+    def resolve_session_node_semantics(
+        self,
+        node_ids: List[str],
+        *,
+        action: str = GRAPH_ACTION_READ,
+        target: str = "resolve_session_node_semantics",
+    ) -> Dict[str, Any]:
+        """Resolve session node references to their type and status.
+
+        ``action``/``target`` are required on the underlying helper, so that it
+        can never pick a caller's authorization scope for it. They keep defaults
+        *here* on purpose: this is a public method, and these two values are
+        exactly what it evaluated before they were parameters, so an existing
+        caller outside this repo is unaffected. Every caller in this repo passes
+        both explicitly, and a new one should too.
+        """
         return views.resolve_session_node_semantics(
-            self._storage, self._authorization_hook, node_ids
+            self._storage,
+            self._authorization_hook,
+            node_ids,
+            action=action,
+            target=target,
         )
 
     def get_saved_view(self, name: str) -> Dict[str, Any]:

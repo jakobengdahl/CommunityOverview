@@ -423,14 +423,23 @@ term by term:
 | Value | Meaning |
 |-------|---------|
 | `substring` (default) | The whole query must occur verbatim — unchanged behaviour. |
-| `any_term` | The query is split on whitespace; a node matches when it contains **any** term. |
+| `any_term` | The query is split on whitespace into distinct terms; a node matches when it contains **any** of them. |
 
 Ranking stays tier-based in `any_term`: a node scores by its **single
 best-matching term**, so a name-tier hit still outranks any accumulation of
-secondary signals, and the number of matched terms only breaks ties *within* a
-tier. Term scores are never summed across tiers. An unsupported value is
-rejected (`ValueError` in-process, `422` over REST) rather than silently
-ignored, and the requested mode is echoed back as `result["match_mode"]`.
+secondary signals, and the number of matched *distinct* terms only breaks an
+exact scoring tie. Term scores are never summed across tiers, and a term the
+caller repeated is counted once, so repetition alone cannot reorder results. An
+unsupported value is rejected (`ValueError` in-process, `422` from
+`POST /api/search`; over `/execute_tool` it surfaces as the generic `500` that
+any invalid tool argument produces) rather than silently ignored.
+
+The requested mode is echoed back as `result["match_mode"]`, but it describes the
+mode that was **requested, not necessarily the matcher that produced the
+results** — see the paragraph on the semantic fallback below. Read
+`result["semantic"]` alongside it: that is the field that says which matcher ran
+locally. (Federated rows come from the federation manager's own substring
+matcher either way — see the boundary note below.)
 
 Each term is matched as a **substring, not a word**, and no term is filtered out:
 `"a pricing plan"` matches every node containing the letter `a` anywhere. Ranking
@@ -440,8 +449,13 @@ sentence. (A word-boundary or minimum-length rule would change what a term means
 and is deliberately left out of the opt-in mode.)
 
 The mode applies to the local lexical search. It is ignored when `semantic=true`
-(that path does not use the lexical matcher), and federated search stays
-substring-matched — the same boundary semantic ranking has.
+(that path does not use the lexical matcher). It is *superseded* — not ignored —
+by the automatic semantic fallback: the lexical attempt still runs in the
+requested mode, and the mode decides whether the fallback fires at all, since it
+only fires when that attempt matched nothing. A non-empty lexical result is never
+discarded. `match_mode` is still echoed in that case while `result["semantic"]`
+flips to true. Federated search stays substring-matched — the same boundary
+semantic ranking has.
 
 ### Semantic search (`semantic` flag on `/api/search` and `search_graph`)
 
@@ -757,9 +771,12 @@ contract in
 [`docs/MCP_VISUALIZATION_LAYOUT_CONTRACT.md`](../docs/MCP_VISUALIZATION_LAYOUT_CONTRACT.md).
 Whether the connected canvas actually tweens the hint is a *deployment* fact, not
 something a write result can report, so it is published as the `animated_layout`
-capability in `get_capabilities` / `GET /api/capabilities` (a deployment whose
-canvas does not animate declares that id with `"enabled": false` in its
-presentation config).
+capability in `get_capabilities` / `GET /api/capabilities`. A deployment whose
+canvas does not animate says so by declaring that id in its presentation config —
+`{"id": "animated_layout", "name": "Animated layout", "enabled": false}`. The
+`name` is required: a capability entry missing it fails validation for the entire
+schema config, which then falls back to defaults and reports the capability as
+enabled — the opposite of what was intended.
 
 `add_nodes_to_session` populates the same shared session directly: it takes the
 node ids and applies one `nodes_added` op, so a known set lands on the canvas

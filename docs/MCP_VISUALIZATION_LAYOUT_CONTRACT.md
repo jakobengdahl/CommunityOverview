@@ -266,9 +266,12 @@ and `easing` (default `"ease-in-out"`). These are a **hint** the canvas honors:
   that. The deployment answers it instead: `get_capabilities` always reports an
   `animated_layout` capability whose `enabled` says whether this instance's
   canvas tweens the hint. A deployment running a canvas that does not declares
-  the same capability id with `"enabled": false` in its presentation config.
-  Reduced motion stays out of that flag — it is per-viewer and client-side (see
-  above), so no server-side manifest can report it.
+  the same capability id in its presentation config, as
+  `{"id": "animated_layout", "name": "Animated layout", "enabled": false}` — the
+  `name` is required, and an entry missing it invalidates the whole schema config
+  and falls back to defaults, reporting the capability as enabled. Reduced motion
+  stays out of that flag — it is per-viewer and client-side (see above), so no
+  server-side manifest can report it.
 - **Cancellation / replacement.** A subsequent `layout_applied` op supersedes an
   in-flight transition for the same nodes; the canvas animates from wherever the
   nodes currently are toward the newest targets. Agents do not manage animation
