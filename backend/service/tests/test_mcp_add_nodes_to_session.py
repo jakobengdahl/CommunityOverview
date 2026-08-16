@@ -18,45 +18,12 @@ from backend.core.session_store import (
     InMemorySessionPersistenceBackend,
     SessionStore,
 )
-from backend.runtime.authorization import (
-    AUTHORIZATION_MODE_ENV,
-    GRAPH_ACTION_MUTATE,
-    GraphAccessNarrowing,
-    GraphAuthorizationDecision,
-)
+from backend.runtime.authorization import AUTHORIZATION_MODE_ENV
 from backend.service import GraphService, register_mcp_tools
-from backend.service.tests.test_authorization import FixedNarrowingHook
-
-
-class ActionScopedNarrowingHook:
-    """A hook that narrows ``mutate`` more tightly than ``read``.
-
-    ``FixedNarrowingHook`` returns the same narrowing whatever the action, so it
-    cannot tell whether a write filtered its ids with the read decision or the
-    mutate one. Per-action narrowing is the reason the hook protocol carries an
-    action at all, so only a hook that honours it pins the seam.
-    """
-
-    def __init__(self, *, read_graph_ids, mutate_graph_ids):
-        self.read_graph_ids = read_graph_ids
-        self.mutate_graph_ids = mutate_graph_ids
-
-    def evaluate(self, context):
-        include = (
-            self.mutate_graph_ids
-            if context.action == GRAPH_ACTION_MUTATE
-            else self.read_graph_ids
-        )
-        return GraphAuthorizationDecision(
-            allowed=True,
-            mode="action-scoped",
-            source="test",
-            graph_access=GraphAccessNarrowing(
-                enabled=True,
-                allow_local_graph=False,
-                include_graph_ids=include,
-            ),
-        )
+from backend.service.tests.test_authorization import (
+    ActionScopedNarrowingHook,
+    FixedNarrowingHook,
+)
 
 
 def _wire(storage, service, **manager_kwargs):

@@ -525,10 +525,18 @@ class GraphService:
         )
 
     def resolve_session_node_semantics(
-        self, node_ids: List[str], *, action: str = GRAPH_ACTION_READ
+        self,
+        node_ids: List[str],
+        *,
+        action: str = GRAPH_ACTION_READ,
+        target: str = "resolve_session_node_semantics",
     ) -> Dict[str, Any]:
         return views.resolve_session_node_semantics(
-            self._storage, self._authorization_hook, node_ids, action=action
+            self._storage,
+            self._authorization_hook,
+            node_ids,
+            action=action,
+            target=target,
         )
 
     def get_saved_view(self, name: str) -> Dict[str, Any]:

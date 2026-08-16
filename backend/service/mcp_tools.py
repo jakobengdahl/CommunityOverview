@@ -1247,9 +1247,10 @@ def register_mcp_tools(
 
         Ids that do not resolve to a node you may add are skipped and returned
         in ``skipped``, so a stale id cannot put a phantom reference in the
-        session. Only **local-graph** ids are addable: a ``search_graph`` result
-        can include federated nodes, which live in a remote graph and are always
-        skipped here. The nodes arrive with no position; arrange them with
+        session. Only ids in **this server's own graph storage** are addable: a
+        ``search_graph`` result can also contain federated nodes, which live in a
+        remote graph and are always skipped here. The nodes arrive with no
+        position; arrange them with
         ``apply_visualization_layout``, threading the ``revision`` returned here
         into its ``expected_revision``.
 
@@ -1309,9 +1310,11 @@ def register_mcp_tools(
         # writes the ids into server-owned session state. Filtering by what the
         # caller may read would let a read-only-visible node be written in, the
         # gap every sibling mutation closes by narrowing with its own decision.
-        # An id that no longer exists drops out here too.
+        # An id that no longer exists drops out here too. Same target as the gate
+        # above, so a target-aware hook is asked about this tool twice rather
+        # than about a helper it has never heard of.
         resolved = service.resolve_session_node_semantics(
-            node_ids, action=GRAPH_ACTION_MUTATE
+            node_ids, action=GRAPH_ACTION_MUTATE, target="add_nodes_to_session"
         )
         if not resolved.get("success"):
             return resolved
@@ -1338,9 +1341,9 @@ def register_mcp_tools(
                 "success": False,
                 "error": "no_resolvable_nodes",
                 "message": (
-                    "None of the given ids resolve to a node in this graph that "
-                    "you may add. Ids from a federated search result are not "
-                    "addable — only local-graph ids are."
+                    "None of the given ids resolve to a node you may add. Only "
+                    "ids in this server's own graph storage are addable; a "
+                    "federated search result's ids are not."
                 ),
                 "skipped": skipped,
             }

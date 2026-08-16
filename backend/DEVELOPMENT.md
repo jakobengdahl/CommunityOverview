@@ -431,14 +431,13 @@ secondary signals, and the number of matched *distinct* terms only breaks an
 exact scoring tie. Term scores are never summed across tiers, and a term the
 caller repeated is counted once, so repetition alone cannot reorder results. An
 unsupported value is rejected (`ValueError` in-process, `422` from
-`POST /api/graph/search`; over `/execute_tool` it surfaces as the generic `500`
-that any invalid tool argument produces) rather than silently ignored.
+`POST /api/search`; over `/execute_tool` it surfaces as the generic `500` that
+any invalid tool argument produces) rather than silently ignored.
 
 The requested mode is echoed back as `result["match_mode"]`, but it describes the
-mode that was **requested, not necessarily applied**: it is ignored when
-`semantic=true`, and also when a lexical query matches nothing and the automatic
-semantic fallback takes over. Read `result["semantic"]` alongside it — that is
-the field that says which matcher actually produced the results.
+mode that was **requested, not necessarily applied** — see the paragraph on
+`semantic` below. Read `result["semantic"]` alongside it: that is the field that
+says which matcher actually produced the results.
 
 Each term is matched as a **substring, not a word**, and no term is filtered out:
 `"a pricing plan"` matches every node containing the letter `a` anywhere. Ranking
@@ -448,7 +447,9 @@ sentence. (A word-boundary or minimum-length rule would change what a term means
 and is deliberately left out of the opt-in mode.)
 
 The mode applies to the local lexical search. It is ignored when `semantic=true`
-(that path does not use the lexical matcher), and federated search stays
+(that path does not use the lexical matcher) — and also when a lexical query
+matches nothing and the automatic semantic fallback takes over, which discards
+the lexical result while still echoing the requested mode. Federated search stays
 substring-matched — the same boundary semantic ranking has.
 
 ### Semantic search (`semantic` flag on `/api/search` and `search_graph`)

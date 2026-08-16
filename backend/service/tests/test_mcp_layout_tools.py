@@ -22,7 +22,10 @@ from backend.core.session_store import (
 )
 from backend.runtime.authorization import AUTHORIZATION_MODE_ENV
 from backend.service import GraphService, register_mcp_tools
-from backend.service.tests.test_authorization import FixedNarrowingHook
+from backend.service.tests.test_authorization import (
+    ActionScopedNarrowingHook,
+    FixedNarrowingHook,
+)
 
 
 @pytest.fixture
@@ -238,6 +241,48 @@ class TestGetVisualizationLayout:
         assert by_id["alpha"]["status"] == "in_progress"
         assert by_id["beta"]["x"] == 7.0 and by_id["beta"]["y"] == 8.0
         assert by_id["beta"]["type"] is None and by_id["beta"]["status"] is None
+
+    def test_the_geometry_read_narrows_by_read_scope_not_mutate_scope(self, tmp_path):
+        """A node the caller may read but not write still reports its meaning.
+
+        The semantics projection takes its action from the caller because the
+        session *write* path must narrow by mutate scope. This read must keep
+        asking for read scope: narrowing it to mutate scope would not error —
+        the caller swallows a denial into an empty projection — it would quietly
+        report every node as ``type: None, status: None``.
+        """
+        storage = GraphStorage(json_path=os.path.join(tmp_path, "g.json"))
+        storage.add_nodes(
+            [
+                Node(
+                    id="readable",
+                    type="Initiative",
+                    name="Readable but not mine to write",
+                    metadata={
+                        "origin_graph_id": "graph-beta",
+                        "status": "in_progress",
+                    },
+                ),
+            ],
+            [],
+        )
+        service = GraphService(
+            storage,
+            authorization_hook=ActionScopedNarrowingHook(
+                read_graph_ids=("graph-alpha", "graph-beta"),
+                mutate_graph_ids=("graph-alpha",),
+            ),
+        )
+        manager = SessionManager(SessionStore(InMemorySessionPersistenceBackend()))
+        mock_mcp = Mock()
+        mock_mcp.tool = MagicMock(return_value=lambda f: f)
+        tools_map = register_mcp_tools(mock_mcp, service, session_manager=manager)
+        session = _session_with_nodes(manager, ["readable"])
+
+        node = tools_map["get_visualization_layout"](session_id=session.id)["nodes"][0]
+
+        assert node["type"] == "Initiative"
+        assert node["status"] == "in_progress"
 
     def test_invalid_session_id(self, layout_tools):
         tools_map, _ = layout_tools
