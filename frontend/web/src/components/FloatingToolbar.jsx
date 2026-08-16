@@ -258,7 +258,8 @@ function resolveIcon(nodeType, schema) {
  * Resolve display color for a node type.
  * Priority: schema color field -> legacy COLOR_MAP -> DEFAULT_COLOR
  *
- * Same precedence as resolveIcon: a profile's own declaration is authoritative.
+ * Same precedence order as resolveIcon, though a declared color is honoured
+ * unconditionally where a declared icon name must also exist in ICON_REGISTRY.
  * The backend fills in a default color for every node type a profile declares
  * (config_loader.NodeTypeConfig.color), so COLOR_MAP covers only the names the
  * active profile does not declare: Group, any type disabled via
