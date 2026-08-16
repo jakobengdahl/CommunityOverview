@@ -20,10 +20,12 @@ const edge = (id) => ({ id, source: 'a', target: 'b', type: 'RELATES_TO' });
  */
 function deferred() {
   let release;
-  const promise = new Promise((resolve) => {
+  let fail;
+  const promise = new Promise((resolve, reject) => {
     release = resolve;
+    fail = reject;
   });
-  return { promise, release: () => release() };
+  return { promise, release: () => release(), reject: (error) => fail(error) };
 }
 
 beforeEach(() => {
@@ -91,6 +93,22 @@ describe('applyEdgeUpdate', () => {
     // The PUT really did land in the graph, so it is still reported — the same
     // rule confirmNodeDelete follows for its delete.
     expect(h.showNotification).toHaveBeenCalledWith('success', 'Edge updated');
+  });
+
+  // The session-scoped work runs inside the same try as the PUT, so announcing
+  // success before it would let a throw there contradict itself: "Edge updated"
+  // followed by "Could not update edge" for an edit that actually landed.
+  it('does not claim success before the session-scoped work has run', async () => {
+    const h = harness();
+    h.updateVisualization = vi.fn(() => {
+      throw new Error('canvas blew up');
+    });
+
+    const applied = await applyEdgeUpdate({ ...h, updateEdge: vi.fn().mockResolvedValue({}) });
+
+    expect(applied).toBe(false);
+    expect(h.showNotification).toHaveBeenCalledTimes(1);
+    expect(h.showNotification).toHaveBeenCalledWith('error', 'Could not update edge');
   });
 
   it('reports a failed PUT without touching the canvas', async () => {
@@ -170,6 +188,25 @@ describe('confirmNodeDelete', () => {
     expect(h.setDeleteDialog).not.toHaveBeenCalled();
     // The delete really did happen in the graph, so it is still reported.
     expect(h.showNotification).toHaveBeenCalledWith('success', 'Node deleted');
+  });
+
+  // The close sits in a finally, so it has to respect the guard on the failure
+  // path too — otherwise a failed delete still dismisses whatever confirmation
+  // the user has open in the session they moved to.
+  it('leaves the confirmation alone when the delete fails after a switch', async () => {
+    const h = harness(single);
+    const call = deferred();
+    const deleteNodes = vi.fn(() => call.promise);
+
+    const inFlight = confirmNodeDelete({ ...h, deleteNodes });
+    switchSession();
+    call.reject(new Error('boom'));
+    const applied = await inFlight;
+
+    expect(applied).toBe(false);
+    expect(h.setDeleteDialog).not.toHaveBeenCalled();
+    expect(h.removeNode).not.toHaveBeenCalled();
+    expect(h.showNotification).toHaveBeenCalledWith('error', 'Could not delete node(s)');
   });
 
   it('closes the confirmation even when the delete fails', async () => {
