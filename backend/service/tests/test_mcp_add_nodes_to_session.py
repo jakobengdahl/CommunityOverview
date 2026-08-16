@@ -271,13 +271,13 @@ class TestAddNodesToSession:
         assert result["error"] == "too_large"
         assert lookups == []
 
-    def test_a_federated_search_result_id_is_not_addable(self, tmp_path):
+    def test_an_unadopted_federated_search_result_id_is_not_addable(self, tmp_path):
         """The tool sends agents to search_graph, which can return remote ids.
 
-        A federated node lives in the FederationManager's own cache and never in
-        this server's storage, so the projection cannot resolve it. The docstring
-        promises that outcome; without this, a future "resolve through federation
-        too" change would break the promise silently.
+        An unadopted federated node lives only in the FederationManager's cache,
+        so the projection cannot resolve it. Adoption is what changes that, and
+        the next test covers the other side — together they pin the whole
+        promise the docstring makes, not just its convenient half.
         """
         service = _make_multi_graph_service(tmp_path, DefaultGraphAuthorizationHook())
         tools_map, manager = _wire(None, service)
@@ -295,6 +295,29 @@ class TestAddNodesToSession:
         assert result["error"] == "no_resolvable_nodes"
         assert result["skipped"] == federated_ids
         assert manager.get_session(sid).state["node_refs"] == []
+
+    def test_an_adopted_federated_id_becomes_addable(self, tmp_path):
+        """Adoption writes a local reference under the *federated* id.
+
+        So the same id that was skipped a moment ago now resolves and is added.
+        The docstring says "unadopted" for exactly this reason; an absolute
+        "federated ids are never addable" would be false here.
+        """
+        service = _make_multi_graph_service(tmp_path, DefaultGraphAuthorizationHook())
+        tools_map, manager = _wire(None, service)
+        sid = _session(manager)
+        federated_id = "federated::graph-alpha::remote-1"
+
+        assert service.adopt_federated_node(federated_id)["success"] is True
+
+        result = tools_map["add_nodes_to_session"](
+            session_id=sid, node_ids=[federated_id]
+        )
+
+        assert result["success"] is True
+        assert result["added"] == [federated_id]
+        assert result["skipped"] == []
+        assert manager.get_session(sid).state["node_refs"] == [federated_id]
 
 
 class TestAuthorization:
@@ -393,10 +416,12 @@ class TestAuthorization:
         assert result["skipped"] == ["readable"]
         assert manager.get_session(sid).state["node_refs"] == ["mine"]
 
-        # Both evaluations of the one call ask the hook the same question, about
-        # the tool the caller invoked — not about the projection helper, a target
-        # a deployment's hook has no reason to have heard of.
-        assert [(c.action, c.target) for c in hook.seen_contexts] == [
-            ("mutate", "add_nodes_to_session"),
-            ("mutate", "add_nodes_to_session"),
-        ]
+        # Every evaluation this one call makes asks the hook the same question,
+        # about the tool the caller invoked — not about the projection helper, a
+        # target a deployment's hook has no reason to have heard of. Asserted as
+        # a set: the invariant is that they agree, not how many there are, so
+        # caching the decision would not have to break this test.
+        assert hook.seen_contexts
+        assert {(c.action, c.target) for c in hook.seen_contexts} == {
+            ("mutate", "add_nodes_to_session")
+        }

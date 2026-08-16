@@ -281,10 +281,10 @@ class TestGetVisualizationLayout:
 
         assert node["type"] == "Initiative"
         assert node["status"] == "in_progress"
-        assert [(c.action, c.target) for c in hook.seen_contexts] == [
-            ("read", "get_visualization_layout"),
-            ("read", "get_visualization_layout"),
-        ]
+        assert hook.seen_contexts
+        assert {(c.action, c.target) for c in hook.seen_contexts} == {
+            ("read", "get_visualization_layout")
+        }
 
     def test_invalid_session_id(self, layout_tools):
         tools_map, _ = layout_tools

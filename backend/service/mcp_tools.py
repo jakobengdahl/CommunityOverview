@@ -1262,8 +1262,9 @@ def register_mcp_tools(
         in ``skipped``, so a stale id cannot put a phantom reference in the
         session. Only ids in **this server's own graph storage** are addable: a
         ``search_graph`` result can also contain federated nodes, which live in a
-        remote graph and are always skipped here. The nodes arrive with no
-        position; arrange them with
+        remote graph, so an *unadopted* federated id is skipped. Once
+        ``adopt_federated_node`` has run, that same id names a local reference
+        and becomes addable. The nodes arrive with no position; arrange them with
         ``apply_visualization_layout``, threading the ``revision`` returned here
         into its ``expected_revision``.
 
@@ -1355,8 +1356,9 @@ def register_mcp_tools(
                 "error": "no_resolvable_nodes",
                 "message": (
                     "None of the given ids resolve to a node you may add. Only "
-                    "ids in this server's own graph storage are addable; a "
-                    "federated search result's ids are not."
+                    "ids in this server's own graph storage are addable; an "
+                    "unadopted federated search result's ids are not — adopt "
+                    "the node first, or use its local id."
                 ),
                 "skipped": skipped,
             }

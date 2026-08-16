@@ -437,8 +437,9 @@ any invalid tool argument produces) rather than silently ignored.
 The requested mode is echoed back as `result["match_mode"]`, but it describes the
 mode that was **requested, not necessarily the matcher that produced the
 results** — see the paragraph on the semantic fallback below. Read
-`result["semantic"]` alongside it: that is the field that says which matcher
-actually ran.
+`result["semantic"]` alongside it: that is the field that says which matcher ran
+locally. (Federated rows come from the federation manager's own substring
+matcher either way — see the boundary note below.)
 
 Each term is matched as a **substring, not a word**, and no term is filtered out:
 `"a pricing plan"` matches every node containing the letter `a` anywhere. Ranking
