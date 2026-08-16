@@ -65,13 +65,13 @@ describe('FloatingSearch result colors', () => {
     expect(dot.style.backgroundColor).toBe('rgb(124, 58, 237)'); // #7C3AED
   });
 
-  it('keeps the legacy color for a legacy type the schema recolors, matching the toolbar', async () => {
+  it('uses the schema color for a legacy type the profile recolors, matching the toolbar', async () => {
     const { container } = renderWithResults([{ id: 'n2', name: 'Reporting', type: 'Capability' }]);
 
     await waitFor(() => expect(container.querySelector('.floating-search-result')).toBeTruthy());
 
     const dot = container.querySelector('.floating-search-result-dot');
-    expect(dot.style.backgroundColor).toBe('rgb(249, 115, 22)'); // COLOR_MAP.Capability #F97316
+    expect(dot.style.backgroundColor).toBe('rgb(245, 158, 11)'); // schema #F59E0B
     expect(COLOR_MAP.Capability).toBe('#F97316');
   });
 });

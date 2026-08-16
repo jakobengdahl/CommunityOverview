@@ -256,14 +256,20 @@ function resolveIcon(nodeType, schema) {
 
 /**
  * Resolve display color for a node type.
- * Priority: legacy COLOR_MAP -> schema color field -> DEFAULT_COLOR
+ * Priority: schema color field -> legacy COLOR_MAP -> DEFAULT_COLOR
  *
- * This is the opposite precedence to resolveIcon, which reads the schema first.
- * Shipped profiles declare colors for legacy type names that differ from the map,
- * so reading the schema first here would recolor them.
+ * Same precedence order as resolveIcon, though a declared color is honoured
+ * unconditionally where a declared icon name must also exist in ICON_REGISTRY.
+ * The backend fills in a default color for every node type a profile declares
+ * (config_loader.NodeTypeConfig.color), so COLOR_MAP covers only the names the
+ * active profile does not declare: Group, any type disabled via
+ * system.disabled_node_types, and any type that reaches this helper from the
+ * data rather than the schema — nodes of a type the profile dropped, and
+ * federated search results carrying a remote profile's types. It also covers
+ * the window before the schema loads.
  */
 function resolveColor(nodeType, schema) {
-  return COLOR_MAP[nodeType] || schema?.node_types?.[nodeType]?.color || DEFAULT_COLOR;
+  return schema?.node_types?.[nodeType]?.color || COLOR_MAP[nodeType] || DEFAULT_COLOR;
 }
 
 function FloatingToolbar({

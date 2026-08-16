@@ -48,6 +48,10 @@ function loadInitialFederationDepth() {
   return 1;
 }
 
+function hasOwn(obj, key) {
+  return Object.prototype.hasOwnProperty.call(obj, key);
+}
+
 // How many entries the session-scoped node trail keeps. Bounded so a long
 // working session cannot grow it without limit; older entries are dropped.
 const NAV_HISTORY_LIMIT = 50;
@@ -593,17 +597,24 @@ const useGraphStore = create((set, get) => ({
   },
 
   // Get node color from schema/presentation
+  // Both lookup tables are parsed from profile JSON, so they carry Object.prototype:
+  // without an own-property guard a node type named toString or constructor would
+  // resolve an inherited member and be returned as a color. hasOwnProperty.call
+  // rather than Object.hasOwn: the Vite build target includes safari14, which
+  // predates ES2022, and nothing in the build polyfills built-in methods.
   getNodeColor: (nodeType) => {
     const { presentation, schema } = get();
 
     // Check presentation colors first
-    if (presentation?.colors?.[nodeType]) {
-      return presentation.colors[nodeType];
+    const colors = presentation?.colors;
+    if (colors && hasOwn(colors, nodeType) && colors[nodeType]) {
+      return colors[nodeType];
     }
 
     // Fall back to schema-defined color
-    if (schema?.node_types?.[nodeType]?.color) {
-      return schema.node_types[nodeType].color;
+    const nodeTypes = schema?.node_types;
+    if (nodeTypes && hasOwn(nodeTypes, nodeType) && nodeTypes[nodeType]?.color) {
+      return nodeTypes[nodeType].color;
     }
 
     // Default gray
@@ -613,7 +624,9 @@ const useGraphStore = create((set, get) => ({
   // Get node type config
   getNodeTypeConfig: (nodeType) => {
     const { schema } = get();
-    return schema?.node_types?.[nodeType] || null;
+    const nodeTypes = schema?.node_types;
+    if (!nodeTypes || !hasOwn(nodeTypes, nodeType)) return null;
+    return nodeTypes[nodeType] || null;
   },
 
   // Get all node types

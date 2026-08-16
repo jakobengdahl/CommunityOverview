@@ -145,6 +145,26 @@ describe('graphStore', () => {
       const color = useGraphStore.getState().getNodeColor('UnknownType');
       expect(color).toBe('#9CA3AF');
     });
+
+    it('treats Object prototype member names as uncolored node types', () => {
+      useGraphStore.setState({
+        presentation: { colors: {} },
+        schema: { node_types: {} },
+      });
+
+      for (const nodeType of ['toString', 'constructor', 'hasOwnProperty', '__proto__']) {
+        expect(useGraphStore.getState().getNodeColor(nodeType)).toBe('#9CA3AF');
+      }
+    });
+
+    it('still resolves a node type that a profile genuinely names after a prototype member', () => {
+      useGraphStore.setState({
+        presentation: { colors: {} },
+        schema: { node_types: { toString: { color: '#123456' } } },
+      });
+
+      expect(useGraphStore.getState().getNodeColor('toString')).toBe('#123456');
+    });
   });
 
   describe('getNodeTypes', () => {
@@ -235,6 +255,16 @@ describe('graphStore', () => {
 
       const config = useGraphStore.getState().getNodeTypeConfig('Unknown');
       expect(config).toBeNull();
+    });
+
+    it('returns null for Object prototype member names', () => {
+      useGraphStore.setState({
+        schema: { node_types: { Actor: { fields: ['name'] } } },
+      });
+
+      for (const nodeType of ['toString', 'constructor', 'hasOwnProperty', '__proto__']) {
+        expect(useGraphStore.getState().getNodeTypeConfig(nodeType)).toBeNull();
+      }
     });
 
     it('returns config for known type', () => {

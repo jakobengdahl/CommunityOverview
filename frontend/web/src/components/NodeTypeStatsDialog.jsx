@@ -1,10 +1,12 @@
 import { useEffect, useRef } from 'react';
 import { XLg } from 'react-bootstrap-icons';
-import { COLOR_MAP } from './FloatingToolbar';
+import useGraphStore from '../store/graphStore';
+import { resolveColor } from './FloatingToolbar';
 import './NodeTypeStatsDialog.css';
 
 function NodeTypeStatsDialog({ nodesByType, onClose }) {
   const dialogRef = useRef(null);
+  const schema = useGraphStore((s) => s.schema);
 
   useEffect(() => {
     dialogRef.current?.focus();
@@ -46,7 +48,7 @@ function NodeTypeStatsDialog({ nodesByType, onClose }) {
             <div key={type} className="nts-dialog-row">
               <span
                 className="nts-dialog-dot"
-                style={{ backgroundColor: COLOR_MAP[type] || '#9CA3AF' }}
+                style={{ backgroundColor: resolveColor(type, schema) }}
               />
               <span className="nts-dialog-type">{type}</span>
               <span className="nts-dialog-count">{count}</span>
