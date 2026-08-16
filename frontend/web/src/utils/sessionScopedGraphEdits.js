@@ -14,10 +14,11 @@ import useGraphStore, { isStaleSessionEpoch } from '../store/graphStore';
  * but nothing session-scoped is touched — no canvas edit, no sync fan-out, and
  * no dialog state, since by then those belong to the session the user moved to.
  *
- * These are not the only handlers with this shape — handleNodeUpdate,
- * handleSetEdgeType, handleDeleteEdge, handleConnect and handleExpand in App all
- * await and then mutate session-scoped state, and are still unguarded. Only the
- * two below were in scope here; the rest are logged as separate work.
+ * These are not the only handlers with this shape. Many more in App await and
+ * then mutate session-scoped state while still unguarded — among them
+ * handleNodeUpdate, handleSetEdgeType, handleDeleteEdge, handleConnect,
+ * handleExpand and the several save handlers. Only the two below were in scope
+ * here; the rest are logged as separate work.
  *
  * They live here rather than inline in App so the mid-await switch is covered by
  * a test — App itself is not rendered by the suite — following the same reasoning
@@ -60,8 +61,14 @@ export async function applyEdgeUpdate({
   const requestEpoch = useGraphStore.getState().sessionEpoch;
   try {
     await updateEdge(editingEdge.id, updates);
-    showNotification('success', 'Edge updated');
-    if (isStaleSessionEpoch(requestEpoch)) return false;
+    // Reported at the end of each branch rather than once above them: the
+    // session-scoped work below is still inside this try, so announcing success
+    // before it runs would let a throw there follow "Edge updated" with "Could
+    // not update edge" for a PUT that did land.
+    if (isStaleSessionEpoch(requestEpoch)) {
+      showNotification('success', 'Edge updated');
+      return false;
+    }
     const newEdges = edges.map((e) => (e.id === editingEdge.id ? { ...e, ...updates } : e));
     updateVisualization(nodes, newEdges);
     // Fan the update out to collaborators: both endpoints already exist on
@@ -69,6 +76,7 @@ export async function applyEdgeUpdate({
     // edge; without this they show the stale attributes until reload.
     syncRef.current?.sendEdgesUpdated([{ id: editingEdge.id, ...updates }]);
     setEditingEdge(null);
+    showNotification('success', 'Edge updated');
     return true;
   } catch (error) {
     console.error('Error updating edge:', error);
