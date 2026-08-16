@@ -45,15 +45,22 @@ export default function App() {
         http://localhost:5173 in the Quest Browser. See README.
       </div>
       {/*
-        `rotation` must be given explicitly: without it R3F calls
+        Flat-preview camera only — inside an XR session the runtime owns the
+        camera pose and projection, so neither of these props applies there.
+
+        `rotation` must be passed explicitly: without it R3F calls
         camera.lookAt(0, 0, 0) on a declaratively-configured camera, which from
-        eye height aims straight down at the floor and puts the whole dome
-        off-screen in the flat preview. An XR session supplies its own camera
-        pose, so this only affects the desktop view. The fov is wide enough to
-        contain the dome's full ±60°/±45° wrap (DEFAULT_DOME) — the layout
-        bounds always push the outermost nodes to those extremes.
+        eye height aims straight down at the floor and puts the dome off-screen.
+
+        The dome wraps ±60° horizontally and ±45° vertically around its centre,
+        which is more than a flat viewport can show from that centre: a frustum
+        is rectangular, so a corner node's vertical screen angle is
+        atan(tan(elevation) / cos(azimuth)) — 63° for the ±60°/±45° corner, not
+        45°. Containing that from the dome centre would need a ~135° vertical
+        fov. Backing the preview camera off along +Z instead keeps the whole
+        wrap in frame at a sane fov (verified for every aspect ratio >= 1).
       */}
-      <Canvas camera={{ position: [0, 1.5, 0], fov: 100, rotation: [0, 0, 0] }}>
+      <Canvas camera={{ position: [0, 1.5, 2.5], fov: 100, rotation: [0, 0, 0] }}>
         <XR store={store}>
           <ambientLight intensity={0.8} />
           <directionalLight position={[2, 4, 1]} intensity={1} />

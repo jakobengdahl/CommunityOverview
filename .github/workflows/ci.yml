@@ -211,7 +211,7 @@ jobs:
           esac
 
   # ---------------------------------------------------------------------------
-  # Frontend tests – vitest across all npm workspaces (web, widget, canvas).
+  # Frontend tests – vitest across all npm workspaces (web, widget, canvas, xr).
   # GitHub Actions sets CI=true, so vitest runs once instead of watch mode.
   # Playwright e2e stays out of this required path (see DEVELOPMENT.md).
   #
