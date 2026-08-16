@@ -256,14 +256,15 @@ function resolveIcon(nodeType, schema) {
 
 /**
  * Resolve display color for a node type.
- * Priority: legacy COLOR_MAP -> schema color field -> DEFAULT_COLOR
+ * Priority: schema color field -> legacy COLOR_MAP -> DEFAULT_COLOR
  *
- * This is the opposite precedence to resolveIcon, which reads the schema first.
- * Shipped profiles declare colors for legacy type names that differ from the map,
- * so reading the schema first here would recolor them.
+ * Same precedence as resolveIcon: a profile's own declaration is authoritative
+ * and the legacy map only covers type names the schema leaves uncolored. This
+ * also matches the canvas, which resolves color from the profile via
+ * graphStore.getNodeColor and never consulted this map.
  */
 function resolveColor(nodeType, schema) {
-  return COLOR_MAP[nodeType] || schema?.node_types?.[nodeType]?.color || DEFAULT_COLOR;
+  return schema?.node_types?.[nodeType]?.color || COLOR_MAP[nodeType] || DEFAULT_COLOR;
 }
 
 function FloatingToolbar({

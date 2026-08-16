@@ -5,7 +5,10 @@
 import { MarkerType } from 'reactflow';
 
 // Node type color mapping from metamodel
-export const NODE_COLORS = {
+// Null prototype: node type names come from profile config, and a plain object
+// literal would resolve "toString" or "constructor" to an inherited member and
+// return it as a color.
+export const NODE_COLORS = Object.assign(Object.create(null), {
   Actor: '#3B82F6',
   Initiative: '#10B981',
   Capability: '#F97316',
@@ -20,7 +23,7 @@ export const NODE_COLORS = {
   EventSubscription: '#8B5CF6',
   SavedView: '#6B7280',
   VisualizationView: '#6B7280', // Legacy support
-};
+});
 
 // Default edge styling
 export const DEFAULT_EDGE_STYLE = {

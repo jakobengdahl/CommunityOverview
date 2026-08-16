@@ -7,9 +7,17 @@ describe('resolveColor', () => {
     expect(resolveColor('Questionnaire', schema)).toBe('#7C3AED');
   });
 
-  it('keeps the legacy color for a legacy type name that the schema recolors', () => {
+  it('lets the schema recolor a legacy type name the map already covers', () => {
     const schema = { node_types: { Capability: { color: '#F59E0B' } } };
-    expect(resolveColor('Capability', schema)).toBe(COLOR_MAP.Capability);
+    expect(COLOR_MAP.Capability).toBe('#F97316');
+    expect(resolveColor('Capability', schema)).toBe('#F59E0B');
+  });
+
+  it('falls back to the legacy color for a covered type the schema leaves uncolored', () => {
+    expect(resolveColor('Capability', { node_types: { Capability: {} } })).toBe(
+      COLOR_MAP.Capability
+    );
+    expect(resolveColor('Capability', null)).toBe(COLOR_MAP.Capability);
   });
 
   it('falls back to neutral gray when neither source declares a color', () => {

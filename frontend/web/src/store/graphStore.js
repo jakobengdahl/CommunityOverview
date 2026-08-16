@@ -593,17 +593,22 @@ const useGraphStore = create((set, get) => ({
   },
 
   // Get node color from schema/presentation
+  // Both lookup tables are parsed from profile JSON, so they carry Object.prototype:
+  // without an own-property guard a node type named toString or constructor would
+  // resolve an inherited member and be returned as a color.
   getNodeColor: (nodeType) => {
     const { presentation, schema } = get();
 
     // Check presentation colors first
-    if (presentation?.colors?.[nodeType]) {
-      return presentation.colors[nodeType];
+    const colors = presentation?.colors;
+    if (colors && Object.hasOwn(colors, nodeType) && colors[nodeType]) {
+      return colors[nodeType];
     }
 
     // Fall back to schema-defined color
-    if (schema?.node_types?.[nodeType]?.color) {
-      return schema.node_types[nodeType].color;
+    const nodeTypes = schema?.node_types;
+    if (nodeTypes && Object.hasOwn(nodeTypes, nodeType) && nodeTypes[nodeType]?.color) {
+      return nodeTypes[nodeType].color;
     }
 
     // Default gray
@@ -613,7 +618,9 @@ const useGraphStore = create((set, get) => ({
   // Get node type config
   getNodeTypeConfig: (nodeType) => {
     const { schema } = get();
-    return schema?.node_types?.[nodeType] || null;
+    const nodeTypes = schema?.node_types;
+    if (!nodeTypes || !Object.hasOwn(nodeTypes, nodeType)) return null;
+    return nodeTypes[nodeType] || null;
   },
 
   // Get all node types
