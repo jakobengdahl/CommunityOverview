@@ -60,8 +60,9 @@ export function domePosition(x, y, bounds, opts = {}) {
   return sphericalToCartesian(radius, azimuth, elevation);
 }
 
-// Extent of a list of {x, y} layout positions, with a fallback for the empty
-// or single-point case so normalization never divides by zero.
+// Extent of a list of {x, y} layout positions. An empty layout falls back to a
+// unit box; a single point yields degenerate bounds (min === max), which
+// `normalize` above resolves to the dome centre rather than dividing by zero.
 export function layoutBounds(positions) {
   if (!positions || positions.length === 0) {
     return { minX: -1, maxX: 1, minY: -1, maxY: 1 };

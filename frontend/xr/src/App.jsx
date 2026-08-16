@@ -44,7 +44,16 @@ export default function App() {
         Scaffold — placeholder dome. Connect a headset via `adb reverse` and open
         http://localhost:5173 in the Quest Browser. See README.
       </div>
-      <Canvas camera={{ position: [0, 1.5, 0], fov: 70 }}>
+      {/*
+        `rotation` must be given explicitly: without it R3F calls
+        camera.lookAt(0, 0, 0) on a declaratively-configured camera, which from
+        eye height aims straight down at the floor and puts the whole dome
+        off-screen in the flat preview. An XR session supplies its own camera
+        pose, so this only affects the desktop view. The fov is wide enough to
+        contain the dome's full ±60°/±45° wrap (DEFAULT_DOME) — the layout
+        bounds always push the outermost nodes to those extremes.
+      */}
+      <Canvas camera={{ position: [0, 1.5, 0], fov: 100, rotation: [0, 0, 0] }}>
         <XR store={store}>
           <ambientLight intensity={0.8} />
           <directionalLight position={[2, 4, 1]} intensity={1} />

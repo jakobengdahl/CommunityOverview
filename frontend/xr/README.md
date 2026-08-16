@@ -27,7 +27,7 @@ in-world node panel. See ADR 0003 for the scope boundary.
 ## Run
 
 ```bash
-npm install                 # from the repo root (regenerates the lockfile)
+npm install                 # from the repo root, once
 npm run dev -w @community-graph/xr
 ```
 
