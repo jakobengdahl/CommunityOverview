@@ -35,7 +35,8 @@ On a desktop browser at `http://localhost:5173`, **Enter VR** does not fail for
 lack of a headset: `@react-three/xr` defaults to injecting the IWER emulator on
 `localhost`, so the button drops you into a simulated Quest 3 with emulated
 controllers. That is the flat-preview development path, and it is why the build
-emits `emulate` / `living_room` / `music_room` chunks. On a real headset the
+emits an `emulate` chunk plus one per bundled emulator scene (`living_room`,
+`music_room`, `office_small`, and so on). On a real headset the
 emulator bails out as soon as native `immersive-vr` is reported, so the smoke
 test below exercises the genuine runtime.
 

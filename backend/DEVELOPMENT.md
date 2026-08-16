@@ -19,7 +19,8 @@ backend/
 └── api_host/            # FastAPI application server
 frontend/
 ├── web/                 # Full web application
-└── widget/              # Embeddable widget for ChatGPT etc.
+├── widget/              # Embeddable widget for ChatGPT etc.
+└── xr/                  # WebXR immersive client for Quest headsets (spike)
 packages/
 └── ui-graph-canvas/     # React component for graph visualization
 ```
@@ -136,7 +137,10 @@ pip install -r backend/requirements-ml.txt
 npm install
 ```
 
-This installs dependencies for all workspaces (ui-graph-canvas, web, widget).
+This installs dependencies for all workspaces (ui-graph-canvas, web, widget, xr).
+The `xr` spike is the heaviest of these by a wide margin — `three`, react-three-
+fiber and the WebXR emulator bundled with `@react-three/xr` — and none of it is
+needed unless you are working on that workspace.
 
 ## Running the Server
 
