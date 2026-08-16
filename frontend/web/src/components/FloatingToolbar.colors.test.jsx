@@ -13,6 +13,8 @@ describe('resolveColor', () => {
     expect(resolveColor('Capability', schema)).toBe('#F59E0B');
   });
 
+  // The backend defaults every declared node type's color, so this fallback is
+  // reached only for names absent from the schema and before the schema loads.
   it('falls back to the legacy color for a covered type the schema leaves uncolored', () => {
     expect(resolveColor('Capability', { node_types: { Capability: {} } })).toBe(
       COLOR_MAP.Capability

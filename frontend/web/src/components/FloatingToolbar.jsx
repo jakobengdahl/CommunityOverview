@@ -258,10 +258,10 @@ function resolveIcon(nodeType, schema) {
  * Resolve display color for a node type.
  * Priority: schema color field -> legacy COLOR_MAP -> DEFAULT_COLOR
  *
- * Same precedence as resolveIcon: a profile's own declaration is authoritative
- * and the legacy map only covers type names the schema leaves uncolored. This
- * also matches the canvas, which resolves color from the profile via
- * graphStore.getNodeColor and never consulted this map.
+ * Same precedence as resolveIcon: a profile's own declaration is authoritative.
+ * The backend fills in a default color for every node type a profile declares
+ * (config_loader.NodeTypeConfig.color), so in practice COLOR_MAP only covers
+ * names absent from the schema — Group — and the window before the schema loads.
  */
 function resolveColor(nodeType, schema) {
   return schema?.node_types?.[nodeType]?.color || COLOR_MAP[nodeType] || DEFAULT_COLOR;

@@ -1,9 +1,9 @@
 import { describe, it, expect } from 'vitest';
-import { getNodeColor, NODE_COLORS } from '../src/utils/constants';
+import { getNodeColor } from '../src/utils/constants';
 
 describe('getNodeColor', () => {
   it('returns the registered color for a known node type', () => {
-    expect(getNodeColor('Actor')).toBe(NODE_COLORS.Actor);
+    expect(getNodeColor('Actor')).toBe('#3B82F6');
   });
 
   it('returns the neutral default for an unregistered node type', () => {
