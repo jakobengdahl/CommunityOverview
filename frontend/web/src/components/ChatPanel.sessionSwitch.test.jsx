@@ -42,7 +42,7 @@ function resetStore() {
     contextMenu: null,
     modelProfiles: [],
     stats: { federation: { max_selectable_depth: 1 } },
-    assistantSessionEpoch: 0,
+    sessionEpoch: 0,
   });
 }
 
