@@ -260,8 +260,12 @@ function resolveIcon(nodeType, schema) {
  *
  * Same precedence as resolveIcon: a profile's own declaration is authoritative.
  * The backend fills in a default color for every node type a profile declares
- * (config_loader.NodeTypeConfig.color), so in practice COLOR_MAP only covers
- * names absent from the schema — Group — and the window before the schema loads.
+ * (config_loader.NodeTypeConfig.color), so COLOR_MAP covers only the names the
+ * active profile does not declare: Group, any type disabled via
+ * system.disabled_node_types, and any type that reaches this helper from the
+ * data rather than the schema — nodes of a type the profile dropped, and
+ * federated search results carrying a remote profile's types. It also covers
+ * the window before the schema loads.
  */
 function resolveColor(nodeType, schema) {
   return schema?.node_types?.[nodeType]?.color || COLOR_MAP[nodeType] || DEFAULT_COLOR;
