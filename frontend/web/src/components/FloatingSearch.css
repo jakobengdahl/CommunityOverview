@@ -1,11 +1,13 @@
 .floating-search {
   position: fixed;
   top: 16px;
+  top: calc(16px + env(safe-area-inset-top));
   left: 50%;
   transform: translateX(-50%);
   z-index: 100;
   width: 400px;
   max-width: calc(100vw - 200px);
+  max-width: calc(100vw - 200px - env(safe-area-inset-left) - env(safe-area-inset-right));
 }
 
 .floating-search-bar {
