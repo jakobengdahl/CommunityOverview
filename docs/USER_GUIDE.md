@@ -113,6 +113,12 @@ Deletions require confirmation. A single operation can remove up to 10 nodes at 
 
 ### 2.4 Right-click context menu
 
+On a touch screen, a **long press** (about half a second, without dragging) is the
+equivalent of a right-click and opens the same menu described below, on a node, an edge,
+the canvas background, or a multi-node selection. A one-finger drag pans the canvas
+instead of drawing a selection box; pinch to zoom; tap to select; double-tap a node to
+open its detail dialog, same as a double-click.
+
 Right-clicking a node opens the context menu:
 
 - **Edit** — open the edit dialog
