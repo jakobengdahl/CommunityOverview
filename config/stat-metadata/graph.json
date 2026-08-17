@@ -4485,17 +4485,87 @@
     },
     {
       "id": "9b463f0d-325e-4cef-9d83-2b45f624d024",
-      "type": "CodeList",
+      "type": "Classification",
       "name": "COICOP 2018",
-      "description": "",
+      "description": "Classification of Individual Consumption According to Purpose (COICOP), 2018 revision. Classifies household consumption expenditure by purpose. Used to structure the consumption basket underlying the Consumer Price Index.",
       "summary": "Classification of Individual Consumption by Purpose.",
       "tags": [
         "classification",
         "COICOP",
-        "standard"
+        "standard",
+        "coicop",
+        "consumption",
+        "statistical-classification"
       ],
-      "subtypes": [],
-      "metadata": {},
+      "subtypes": [
+        "ClassificationVersion"
+      ],
+      "metadata": {
+        "is_classification": true,
+        "official_name": "Classification of Individual Consumption According to Purpose",
+        "version": "2018",
+        "status": "current",
+        "publisher": "United Nations Statistics Division",
+        "maintenance_agency": "United Nations Statistics Division",
+        "purpose": "Classify household consumption expenditure by purpose for national accounts, household budget surveys and consumer price statistics.",
+        "legal_basis": "Adopted by the UN Statistical Commission at its 49th session (2018)",
+        "valid_from": "2018-03-01",
+        "source_uri": "https://unstats.un.org/unsd/classifications/Family/Detail/5",
+        "codes": [
+          {
+            "code": "01",
+            "label": "Food and non-alcoholic beverages"
+          },
+          {
+            "code": "02",
+            "label": "Alcoholic beverages, tobacco and narcotics"
+          },
+          {
+            "code": "03",
+            "label": "Clothing and footwear"
+          },
+          {
+            "code": "04",
+            "label": "Housing, water, electricity, gas and other fuels"
+          },
+          {
+            "code": "05",
+            "label": "Furnishings, household equipment and routine household maintenance"
+          },
+          {
+            "code": "06",
+            "label": "Health"
+          },
+          {
+            "code": "07",
+            "label": "Transport"
+          },
+          {
+            "code": "08",
+            "label": "Information and communication"
+          },
+          {
+            "code": "09",
+            "label": "Recreation, sport and culture"
+          },
+          {
+            "code": "10",
+            "label": "Education services"
+          },
+          {
+            "code": "11",
+            "label": "Restaurants and accommodation services"
+          },
+          {
+            "code": "12",
+            "label": "Insurance and financial services"
+          },
+          {
+            "code": "13",
+            "label": "Personal care, social protection and miscellaneous goods and services"
+          }
+        ]
+      },
       "embedding": [
         0.06319963186979294,
         0.029120951890945435,
@@ -34685,6 +34755,214 @@
       },
       "created_at": "2026-06-18T09:00:00.000000",
       "updated_at": "2026-06-18T09:00:00.000000"
+    },
+    {
+      "id": "7c0eeb7b-fb40-5218-b3a3-84ef4b3a958c",
+      "type": "ClassificationItem",
+      "name": "Food and non-alcoholic beverages",
+      "description": "",
+      "summary": "",
+      "tags": [],
+      "subtypes": [],
+      "metadata": {
+        "code": "01",
+        "display_order": 0,
+        "generated": true
+      },
+      "created_at": "2026-06-13T21:08:51.089748",
+      "updated_at": "2026-06-13T21:08:51.089755"
+    },
+    {
+      "id": "7dc5bc5f-3abb-7762-1677-3ae4cb1e08da",
+      "type": "ClassificationItem",
+      "name": "Alcoholic beverages, tobacco and narcotics",
+      "description": "",
+      "summary": "",
+      "tags": [],
+      "subtypes": [],
+      "metadata": {
+        "code": "02",
+        "display_order": 1,
+        "generated": true
+      },
+      "created_at": "2026-06-13T21:08:51.089748",
+      "updated_at": "2026-06-13T21:08:51.089755"
+    },
+    {
+      "id": "0b226a2e-8219-e3a1-f158-021aa315cec0",
+      "type": "ClassificationItem",
+      "name": "Clothing and footwear",
+      "description": "",
+      "summary": "",
+      "tags": [],
+      "subtypes": [],
+      "metadata": {
+        "code": "03",
+        "display_order": 2,
+        "generated": true
+      },
+      "created_at": "2026-06-13T21:08:51.089748",
+      "updated_at": "2026-06-13T21:08:51.089755"
+    },
+    {
+      "id": "d20a9aab-248c-9552-3868-e691cb076601",
+      "type": "ClassificationItem",
+      "name": "Housing, water, electricity, gas and other fuels",
+      "description": "",
+      "summary": "",
+      "tags": [],
+      "subtypes": [],
+      "metadata": {
+        "code": "04",
+        "display_order": 3,
+        "generated": true
+      },
+      "created_at": "2026-06-13T21:08:51.089748",
+      "updated_at": "2026-06-13T21:08:51.089755"
+    },
+    {
+      "id": "6be08aaf-5aad-864a-9de3-2d86d223c25d",
+      "type": "ClassificationItem",
+      "name": "Furnishings, household equipment and routine household maintenance",
+      "description": "",
+      "summary": "",
+      "tags": [],
+      "subtypes": [],
+      "metadata": {
+        "code": "05",
+        "display_order": 4,
+        "generated": true
+      },
+      "created_at": "2026-06-13T21:08:51.089748",
+      "updated_at": "2026-06-13T21:08:51.089755"
+    },
+    {
+      "id": "a055ed64-463d-0a0b-ae9f-c07785a2ccdd",
+      "type": "ClassificationItem",
+      "name": "Health",
+      "description": "",
+      "summary": "",
+      "tags": [],
+      "subtypes": [],
+      "metadata": {
+        "code": "06",
+        "display_order": 5,
+        "generated": true
+      },
+      "created_at": "2026-06-13T21:08:51.089748",
+      "updated_at": "2026-06-13T21:08:51.089755"
+    },
+    {
+      "id": "53abf0e3-8fbe-2421-da32-74dfa8ed5c20",
+      "type": "ClassificationItem",
+      "name": "Transport",
+      "description": "",
+      "summary": "",
+      "tags": [],
+      "subtypes": [],
+      "metadata": {
+        "code": "07",
+        "display_order": 6,
+        "generated": true
+      },
+      "created_at": "2026-06-13T21:08:51.089748",
+      "updated_at": "2026-06-13T21:08:51.089755"
+    },
+    {
+      "id": "4eb39eb9-b659-dd9e-d946-14610abbdd7f",
+      "type": "ClassificationItem",
+      "name": "Information and communication",
+      "description": "",
+      "summary": "",
+      "tags": [],
+      "subtypes": [],
+      "metadata": {
+        "code": "08",
+        "display_order": 7,
+        "generated": true
+      },
+      "created_at": "2026-06-13T21:08:51.089748",
+      "updated_at": "2026-06-13T21:08:51.089755"
+    },
+    {
+      "id": "77117ca7-ab97-325c-6c2f-1470a3eab00e",
+      "type": "ClassificationItem",
+      "name": "Recreation, sport and culture",
+      "description": "",
+      "summary": "",
+      "tags": [],
+      "subtypes": [],
+      "metadata": {
+        "code": "09",
+        "display_order": 8,
+        "generated": true
+      },
+      "created_at": "2026-06-13T21:08:51.089748",
+      "updated_at": "2026-06-13T21:08:51.089755"
+    },
+    {
+      "id": "48f52590-d6a3-5803-a9b4-e4228ada274e",
+      "type": "ClassificationItem",
+      "name": "Education services",
+      "description": "",
+      "summary": "",
+      "tags": [],
+      "subtypes": [],
+      "metadata": {
+        "code": "10",
+        "display_order": 9,
+        "generated": true
+      },
+      "created_at": "2026-06-13T21:08:51.089748",
+      "updated_at": "2026-06-13T21:08:51.089755"
+    },
+    {
+      "id": "55076175-d258-5b9e-1d23-ab078f47bbee",
+      "type": "ClassificationItem",
+      "name": "Restaurants and accommodation services",
+      "description": "",
+      "summary": "",
+      "tags": [],
+      "subtypes": [],
+      "metadata": {
+        "code": "11",
+        "display_order": 10,
+        "generated": true
+      },
+      "created_at": "2026-06-13T21:08:51.089748",
+      "updated_at": "2026-06-13T21:08:51.089755"
+    },
+    {
+      "id": "1f523135-af32-45f2-ebbb-3aa1e9c4a662",
+      "type": "ClassificationItem",
+      "name": "Insurance and financial services",
+      "description": "",
+      "summary": "",
+      "tags": [],
+      "subtypes": [],
+      "metadata": {
+        "code": "12",
+        "display_order": 11,
+        "generated": true
+      },
+      "created_at": "2026-06-13T21:08:51.089748",
+      "updated_at": "2026-06-13T21:08:51.089755"
+    },
+    {
+      "id": "c87ad6f1-7fdf-4bdc-382c-ad213c760a45",
+      "type": "ClassificationItem",
+      "name": "Personal care, social protection and miscellaneous goods and services",
+      "description": "",
+      "summary": "",
+      "tags": [],
+      "subtypes": [],
+      "metadata": {
+        "code": "13",
+        "display_order": 12,
+        "generated": true
+      },
+      "created_at": "2026-06-13T21:08:51.089748",
+      "updated_at": "2026-06-13T21:08:51.089755"
     }
   ],
   "edges": [
@@ -37522,6 +37800,123 @@
       "label": "",
       "metadata": {},
       "created_at": "2026-06-18T09:00:00.000000"
+    },
+    {
+      "id": "63134692-9b38-17cb-2a0a-08f140163c43",
+      "source": "9b463f0d-325e-4cef-9d83-2b45f624d024",
+      "target": "7c0eeb7b-fb40-5218-b3a3-84ef4b3a958c",
+      "type": "HAS_ITEM",
+      "label": "",
+      "metadata": {},
+      "created_at": "2026-06-13T21:08:51.089748"
+    },
+    {
+      "id": "3a457f3b-9383-e631-1095-5f48f0bc7093",
+      "source": "9b463f0d-325e-4cef-9d83-2b45f624d024",
+      "target": "7dc5bc5f-3abb-7762-1677-3ae4cb1e08da",
+      "type": "HAS_ITEM",
+      "label": "",
+      "metadata": {},
+      "created_at": "2026-06-13T21:08:51.089748"
+    },
+    {
+      "id": "de817483-473b-6d7e-d2a3-2fde0be68fd8",
+      "source": "9b463f0d-325e-4cef-9d83-2b45f624d024",
+      "target": "0b226a2e-8219-e3a1-f158-021aa315cec0",
+      "type": "HAS_ITEM",
+      "label": "",
+      "metadata": {},
+      "created_at": "2026-06-13T21:08:51.089748"
+    },
+    {
+      "id": "98d82c3c-1afc-f9ed-4e25-2854f9587372",
+      "source": "9b463f0d-325e-4cef-9d83-2b45f624d024",
+      "target": "d20a9aab-248c-9552-3868-e691cb076601",
+      "type": "HAS_ITEM",
+      "label": "",
+      "metadata": {},
+      "created_at": "2026-06-13T21:08:51.089748"
+    },
+    {
+      "id": "b5150db2-4dda-3998-ed7a-6c57ad0508e8",
+      "source": "9b463f0d-325e-4cef-9d83-2b45f624d024",
+      "target": "6be08aaf-5aad-864a-9de3-2d86d223c25d",
+      "type": "HAS_ITEM",
+      "label": "",
+      "metadata": {},
+      "created_at": "2026-06-13T21:08:51.089748"
+    },
+    {
+      "id": "c33d38dd-55ee-e693-6d8d-c1b671bba520",
+      "source": "9b463f0d-325e-4cef-9d83-2b45f624d024",
+      "target": "a055ed64-463d-0a0b-ae9f-c07785a2ccdd",
+      "type": "HAS_ITEM",
+      "label": "",
+      "metadata": {},
+      "created_at": "2026-06-13T21:08:51.089748"
+    },
+    {
+      "id": "bf907d23-6030-be9f-d1fd-ef996db22715",
+      "source": "9b463f0d-325e-4cef-9d83-2b45f624d024",
+      "target": "53abf0e3-8fbe-2421-da32-74dfa8ed5c20",
+      "type": "HAS_ITEM",
+      "label": "",
+      "metadata": {},
+      "created_at": "2026-06-13T21:08:51.089748"
+    },
+    {
+      "id": "3a9d47c2-118d-0431-aaee-43a7938af712",
+      "source": "9b463f0d-325e-4cef-9d83-2b45f624d024",
+      "target": "4eb39eb9-b659-dd9e-d946-14610abbdd7f",
+      "type": "HAS_ITEM",
+      "label": "",
+      "metadata": {},
+      "created_at": "2026-06-13T21:08:51.089748"
+    },
+    {
+      "id": "05bb4bb8-91cd-4362-39a3-e0112ba61755",
+      "source": "9b463f0d-325e-4cef-9d83-2b45f624d024",
+      "target": "77117ca7-ab97-325c-6c2f-1470a3eab00e",
+      "type": "HAS_ITEM",
+      "label": "",
+      "metadata": {},
+      "created_at": "2026-06-13T21:08:51.089748"
+    },
+    {
+      "id": "18a417aa-435c-ef42-bab1-3f07d60490e9",
+      "source": "9b463f0d-325e-4cef-9d83-2b45f624d024",
+      "target": "48f52590-d6a3-5803-a9b4-e4228ada274e",
+      "type": "HAS_ITEM",
+      "label": "",
+      "metadata": {},
+      "created_at": "2026-06-13T21:08:51.089748"
+    },
+    {
+      "id": "e50cc393-08e3-408f-0cf0-355a2e991d35",
+      "source": "9b463f0d-325e-4cef-9d83-2b45f624d024",
+      "target": "55076175-d258-5b9e-1d23-ab078f47bbee",
+      "type": "HAS_ITEM",
+      "label": "",
+      "metadata": {},
+      "created_at": "2026-06-13T21:08:51.089748"
+    },
+    {
+      "id": "15125952-5386-8a62-8414-8075e700fc5e",
+      "source": "9b463f0d-325e-4cef-9d83-2b45f624d024",
+      "target": "1f523135-af32-45f2-ebbb-3aa1e9c4a662",
+      "type": "HAS_ITEM",
+      "label": "",
+      "metadata": {},
+      "created_at": "2026-06-13T21:08:51.089748"
+    },
+    {
+      "id": "cd75b5c9-696f-9aa2-2599-7a0858f69dd6",
+      "source": "9b463f0d-325e-4cef-9d83-2b45f624d024",
+      "target": "c87ad6f1-7fdf-4bdc-382c-ad213c760a45",
+      "type": "HAS_ITEM",
+      "label": "",
+      "metadata": {},
+      "created_at": "2026-06-13T21:08:51.089748"
     }
   ]
 }

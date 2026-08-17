@@ -408,6 +408,15 @@ migrated with `scripts/migrate_stat_metadata_metaplus.py`, which converts each
 so nothing about a variable's meaning is lost. `InstanceVariable` remains a valid
 subtype; it is no longer a primary type.
 
+A `CodeList` becomes a `Classification` only when it explicitly says it is one —
+`metadata.is_classification`, or the `Statistical Classification` subtype. A node
+whose name merely looks like a classification is left alone and reported. This
+profile's data is demonstration data, and some of its nodes were stubs, so
+`demo_enrichment.json` supplies the metadata they were missing before that rule
+runs (`--enrich`). Keeping enrichment in its own reviewable file means the
+conversion rule stays strict and every node that passes only because of an
+enrichment is visible in one place.
+
 Two values are documented rather than schema-validated in this step:
 
 ```text

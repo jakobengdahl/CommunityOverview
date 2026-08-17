@@ -12,15 +12,18 @@ Transforms, preserving every node id, edge id, subtype and unknown metadata key:
      real codes in metadata.codes. No code, level or hierarchy is ever invented,
      and metadata.codes is left in place.
 
-Anything ambiguous is left untouched and listed in the report.
+Anything ambiguous is left untouched and listed in the report. Where a demo node
+is ambiguous only because it is a stub, --enrich supplies the missing metadata
+from a reviewable file before the rule runs, instead of relaxing the rule.
 
 Re-running is a no-op: every step tests for the end state before acting.
 
 Usage:
-  migrate_graph.py <graph.json> [--write] [--report report.json] [--no-items]
+  migrate_stat_metadata_metaplus.py <graph.json> [--write] [--report report.json]
+                                    [--no-items] [--enrich demo_enrichment.json]
 """
+
 import json
-import sys
 import uuid
 import argparse
 import hashlib
@@ -63,6 +66,41 @@ def stable_item_id(classification_id, code):
     """Deterministic id so re-running never creates a second item for a code."""
     seed = f"{classification_id}:{code}"
     return str(uuid.UUID(hashlib.sha256(seed.encode()).hexdigest()[:32]))
+
+
+def enrich(graph, enrichment):
+    """Fill in metadata a demo node was missing, before anything is classified.
+
+    Kept separate from the conversion rule on purpose: the rule stays strict, and
+    every node that only passes it because of an enrichment is visible in one
+    reviewable file rather than hidden in a loosened heuristic.
+    """
+    applied = []
+    by_name = {}
+    for node in graph["nodes"]:
+        by_name.setdefault((node.get("name"), node.get("type")), []).append(node)
+
+    for entry in enrichment.get("nodes", []):
+        key = (entry["match_name"], entry["match_type"])
+        targets = by_name.get(key, [])
+        if not targets:
+            applied.append({"match": key, "status": "no matching node — skipped"})
+            continue
+        for node in targets:
+            for field in ("description", "summary"):
+                if field in entry and not (node.get(field) or "").strip():
+                    node[field] = entry[field]
+            meta = dict(node.get("metadata") or {})
+            for k, v in (entry.get("metadata") or {}).items():
+                meta.setdefault(k, v)
+            node["metadata"] = meta
+            tags = list(node.get("tags") or [])
+            for t in entry.get("tags_add", []):
+                if t not in tags:
+                    tags.append(t)
+            node["tags"] = tags
+            applied.append({"match": key, "id": node["id"], "status": "enriched"})
+    return applied
 
 
 def migrate(graph, create_items=True):
@@ -120,7 +158,9 @@ def migrate(graph, create_items=True):
 
         node["type"] = "Classification"
         meta = node.get("metadata") or {}
-        subtype = "ClassificationVersion" if meta.get("version") else "ClassificationSeries"
+        subtype = (
+            "ClassificationVersion" if meta.get("version") else "ClassificationSeries"
+        )
         add_subtype(node, subtype)
         # The marker subtype has served its purpose now that the type says it.
         node["subtypes"] = [
@@ -208,7 +248,9 @@ def migrate(graph, create_items=True):
         e["id"] for e in edges if e["source"] not in ids or e["target"] not in ids
     ]
     if dangling:
-        raise SystemExit(f"ABORT: {len(dangling)} edges point at missing nodes: {dangling[:5]}")
+        raise SystemExit(
+            f"ABORT: {len(dangling)} edges point at missing nodes: {dangling[:5]}"
+        )
     if len(ids) != len(nodes):
         raise SystemExit("ABORT: duplicate node ids produced")
     if any(n["type"] == "InstanceVariable" for n in nodes):
@@ -228,6 +270,11 @@ def main():
     ap.add_argument("--write", action="store_true")
     ap.add_argument("--report")
     ap.add_argument("--no-items", action="store_true")
+    ap.add_argument(
+        "--enrich",
+        help="JSON file supplying metadata that demo nodes are missing, applied "
+        "before classification detection",
+    )
     args = ap.parse_args()
 
     with open(args.graph, encoding="utf-8") as f:
@@ -236,19 +283,37 @@ def main():
     before_nodes = len(graph["nodes"])
     before_edges = len(graph["edges"])
 
+    enrichment_log = []
+    if args.enrich:
+        with open(args.enrich, encoding="utf-8") as f:
+            enrichment_log = enrich(graph, json.load(f))
+
     graph, report = migrate(graph, create_items=not args.no_items)
+    report["enrichment"] = enrichment_log
 
     print(f"=== {args.graph} ===")
-    print(f"nodes {before_nodes} -> {report['counts_after']['nodes']}   "
-          f"edges {before_edges} -> {report['counts_after']['edges']}")
-    print(f"InstanceVariable -> Variable      : {len(report['variables_migrated'])}"
-          f"  (already migrated: {report['variables_already_migrated']})")
-    print(f"CodeList -> Classification        : {len(report['classifications_converted'])}")
+    print(
+        f"nodes {before_nodes} -> {report['counts_after']['nodes']}   "
+        f"edges {before_edges} -> {report['counts_after']['edges']}"
+    )
+    for e in enrichment_log:
+        print(f"enrichment: {e['match'][0]!r} — {e['status']}")
+    print(
+        f"InstanceVariable -> Variable      : {len(report['variables_migrated'])}"
+        f"  (already migrated: {report['variables_already_migrated']})"
+    )
+    print(
+        f"CodeList -> Classification        : {len(report['classifications_converted'])}"
+    )
     for c in report["classifications_converted"]:
         print(f"    • {c['name']}  subtypes={c['subtypes']}")
-    print(f"ClassificationItem created        : {len(report['classification_items_created'])}")
+    print(
+        f"ClassificationItem created        : {len(report['classification_items_created'])}"
+    )
     print(f"CodeList kept as CodeList         : {len(report['codelists_kept'])}")
-    print(f"Left for manual review            : {len(report['left_for_manual_review'])}")
+    print(
+        f"Left for manual review            : {len(report['left_for_manual_review'])}"
+    )
     for c in report["left_for_manual_review"]:
         print(f"    • {c['name']} — {c['reason']}")
 
