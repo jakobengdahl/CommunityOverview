@@ -34,7 +34,9 @@ const node = (id) => ({ id, type: 'Actor', name: id });
 const sessionPayload = (nodes) => ({ state: { annotations: [] }, resolved: { nodes, edges: [] } });
 
 // Simulate the user working inside the currently loaded session: some assistant
-// chat, an active expert, an open node-detail dialog, and a selected node.
+// chat, an active expert, an open node-detail dialog, a selected node, and the
+// two dialogs that act on graph content — an edge open for editing and a
+// pending node-delete confirmation, both addressing this session's canvas.
 function workInsideSession(selectedId) {
   const s = useGraphStore.getState();
   s.addChatMessage({ role: 'user', content: `question about ${selectedId}` });
@@ -43,6 +45,8 @@ function workInsideSession(selectedId) {
     activeExperts: ['expert-1'],
     detailNode: node(selectedId),
   });
+  s.setEditingEdge({ id: `edge-in-${selectedId}`, source: selectedId, target: selectedId });
+  s.setDeleteDialog({ nodeId: selectedId, nodeName: selectedId, isMultiple: false });
   s.setSelectedNodeId(selectedId);
   s.setSelectedGraphNodes([node(selectedId)]);
 }
@@ -55,6 +59,13 @@ function expectCleanSession() {
   expect(s.detailNode).toBeNull();
   expect(s.selectedNodeId).toBeNull();
   expect(s.selectedGraphNodes).toEqual([]);
+  // Left open, confirming the edge dialog would PUT the previous session's edge
+  // and fan the change out through the sync client the switch has just pointed
+  // at the new session; the delete confirmation would drop a node the user is
+  // no longer looking at. App's save handlers are guarded on these being set,
+  // so closing them here is what stops both.
+  expect(s.editingEdge).toBeNull();
+  expect(s.deleteDialog).toBeNull();
 }
 
 const nodeIds = () =>
@@ -74,10 +85,12 @@ describe('session-switch state isolation (real store)', () => {
       activeExperts: [],
       detailNode: null,
       editingNode: null,
+      editingEdge: null,
+      deleteDialog: null,
       contextMenu: null,
       selectedNodeId: null,
       selectedGraphNodes: [],
-      assistantSessionEpoch: 0,
+      sessionEpoch: 0,
     });
   });
 
@@ -92,7 +105,7 @@ describe('session-switch state isolation (real store)', () => {
     await act(async () => {
       await result.current.loadSessionFromServer('sess-a');
     });
-    const epochA = useGraphStore.getState().assistantSessionEpoch;
+    const epochA = useGraphStore.getState().sessionEpoch;
     workInsideSession('x'); // select the shared node and build history
 
     await act(async () => {
@@ -102,7 +115,7 @@ describe('session-switch state isolation (real store)', () => {
     // selection was still cleared (minimum reconcile), and no A history leaks.
     expect(nodeIds()).toEqual(['b1', 'x']);
     expectCleanSession();
-    expect(useGraphStore.getState().assistantSessionEpoch).toBe(epochA + 1);
+    expect(useGraphStore.getState().sessionEpoch).toBe(epochA + 1);
 
     workInsideSession('x');
     await act(async () => {
@@ -110,7 +123,7 @@ describe('session-switch state isolation (real store)', () => {
     });
     expect(nodeIds()).toEqual(['a1', 'x']);
     expectCleanSession();
-    expect(useGraphStore.getState().assistantSessionEpoch).toBe(epochA + 2);
+    expect(useGraphStore.getState().sessionEpoch).toBe(epochA + 2);
   });
 
   it('clears a selection whose node is absent from the target (disjoint sets)', async () => {

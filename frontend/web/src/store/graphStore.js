@@ -48,6 +48,10 @@ function loadInitialFederationDepth() {
   return 1;
 }
 
+function hasOwn(obj, key) {
+  return Object.prototype.hasOwnProperty.call(obj, key);
+}
+
 // How many entries the session-scoped node trail keeps. Bounded so a long
 // working session cannot grow it without limit; older entries are dropped.
 const NAV_HISTORY_LIMIT = 50;
@@ -227,8 +231,22 @@ const useGraphStore = create((set, get) => ({
   selectedGraphNodes: [], // Nodes selected in the graph canvas (full node data)
   editingNode: null,
   detailNode: null, // Node to show in detail dialog (double-click)
+  editingEdge: null, // Edge to show in the edge-edit dialog
+  deleteDialog: null, // Pending node-delete confirmation ({ nodeId | nodeIds, ... })
   contextMenu: null,
   clearGroupsFlag: false, // Signal to clear groups in visualization
+  // Monotonic counter bumped every time the canvas contents are replaced
+  // wholesale (clearVisualization): a saved view loaded into the running
+  // session, an agent's replace/load, a search that swaps the view, the
+  // clear-canvas action. Each of those establishes a new position baseline, so
+  // the canvas discards its position undo/redo history — the recorded "before"
+  // positions describe a layout that no longer exists, while the node ids they
+  // name may well still be on the canvas. Deliberately *not* bumped by
+  // updateVisualization: that action is replace-shaped, but its callers are
+  // either in-place edits of the current contents (edge retype, node edit, node
+  // removal) that undo must survive, or genuine replacements that call
+  // clearVisualization on the line before — so they have already bumped here.
+  canvasBaselineEpoch: 0,
   focusNodeId: null, // Node ID to zoom/pan to
   // Session-scoped, newest-first trail of nodes added to the visualization or
   // navigated to, so the user can jump back through what happened. Distinct from
@@ -250,11 +268,12 @@ const useGraphStore = create((set, get) => ({
   // Chat state
   chatMessages: [DEFAULT_WELCOME_MESSAGE],
 
-  // Monotonic counter bumped on every visualization-session switch. In-flight
-  // assistant requests capture it before awaiting and drop their response if it
-  // changed, so a slow reply from the previous session cannot mutate the newly
-  // active session's chat or canvas.
-  assistantSessionEpoch: 0,
+  // Monotonic counter bumped on every visualization-session switch. Any handler
+  // that awaits a network call captures it first and drops its post-await
+  // effects if it changed (see isStaleSessionEpoch), so work started in one
+  // session can never mutate the chat, canvas or sync fan-out of the session
+  // the user has since moved to.
+  sessionEpoch: 0,
 
   // Expert agents
   availableExperts: [], // All expert agents from config
@@ -376,12 +395,26 @@ const useGraphStore = create((set, get) => ({
     set({ edges: edges.map((edge) => (edge.id === edgeId ? { ...edge, ...updates } : edge)) });
   },
 
+  // Emptying the canvas also closes the overlays that address canvas content.
+  // detailNode/editingNode/editingEdge/deleteDialog each point at a node or edge
+  // that is gone once this returns, and confirming one of them would still
+  // mutate the global graph for something the user can no longer see. Only the
+  // esc-esc path is gated on a dialog being open, so an agent driving
+  // clear_visualization can pull the canvas out from under an open dialog;
+  // closing them here covers every caller at once. contextMenu is reset for
+  // parity with resetSessionScopedState only — nothing outside this store reads
+  // it today, and the canvas nodes own their own menus as local state.
   clearVisualization: () => {
     pulseClearTimers.forEach((timer) => clearTimeout(timer));
     pulseClearTimers.clear();
-    set({
+    set((state) => ({
       nodes: [],
       edges: [],
+      detailNode: null,
+      editingNode: null,
+      editingEdge: null,
+      deleteDialog: null,
+      contextMenu: null,
       highlightedNodeIds: [],
       hiddenNodeIds: [],
       hiddenEdgeIds: [],
@@ -393,7 +426,8 @@ const useGraphStore = create((set, get) => ({
       selectedGraphNodes: [],
       selectedNodeId: null,
       navHistory: [],
-    });
+      canvasBaselineEpoch: state.canvasBaselineEpoch + 1,
+    }));
     scheduleClearGroupsReset(set);
   },
 
@@ -563,17 +597,24 @@ const useGraphStore = create((set, get) => ({
   },
 
   // Get node color from schema/presentation
+  // Both lookup tables are parsed from profile JSON, so they carry Object.prototype:
+  // without an own-property guard a node type named toString or constructor would
+  // resolve an inherited member and be returned as a color. hasOwnProperty.call
+  // rather than Object.hasOwn: the Vite build target includes safari14, which
+  // predates ES2022, and nothing in the build polyfills built-in methods.
   getNodeColor: (nodeType) => {
     const { presentation, schema } = get();
 
     // Check presentation colors first
-    if (presentation?.colors?.[nodeType]) {
-      return presentation.colors[nodeType];
+    const colors = presentation?.colors;
+    if (colors && hasOwn(colors, nodeType) && colors[nodeType]) {
+      return colors[nodeType];
     }
 
     // Fall back to schema-defined color
-    if (schema?.node_types?.[nodeType]?.color) {
-      return schema.node_types[nodeType].color;
+    const nodeTypes = schema?.node_types;
+    if (nodeTypes && hasOwn(nodeTypes, nodeType) && nodeTypes[nodeType]?.color) {
+      return nodeTypes[nodeType].color;
     }
 
     // Default gray
@@ -583,7 +624,9 @@ const useGraphStore = create((set, get) => ({
   // Get node type config
   getNodeTypeConfig: (nodeType) => {
     const { schema } = get();
-    return schema?.node_types?.[nodeType] || null;
+    const nodeTypes = schema?.node_types;
+    if (!nodeTypes || !hasOwn(nodeTypes, nodeType)) return null;
+    return nodeTypes[nodeType] || null;
   },
 
   // Get all node types
@@ -632,11 +675,15 @@ const useGraphStore = create((set, get) => ({
 
   // Reset all session-scoped UI state when switching visualization sessions so
   // nothing leaks across sessions: the assistant conversation, the active expert
-  // roster, and the node-scoped overlays (detail dialog, edit dialog, context
-  // menu, selection) all belong to the session that was active when they opened.
-  // Bumping assistantSessionEpoch invalidates any assistant request still in
-  // flight from the previous session (see ChatPanel), so its response can never
-  // land in the new session.
+  // roster, and the graph-scoped overlays (detail dialog, node and edge edit
+  // dialogs, delete confirmation, context menu, selection) all belong to the
+  // session that was active when they opened. Confirming a dialog left open
+  // across a switch acts on the old session's graph while the sync client
+  // already points at the new one, so the edit would be broadcast into a
+  // session it does not belong to.
+  // Bumping sessionEpoch invalidates every request still in flight from the
+  // previous session — the assistant's, and App's edge-update and node-delete
+  // handlers — so none of their results can land in the new session.
   resetSessionScopedState: (t, language) => {
     const { presentation } = get();
     const welcomeMessage = createWelcomeMessage(presentation, t, language);
@@ -645,11 +692,13 @@ const useGraphStore = create((set, get) => ({
       activeExperts: [],
       detailNode: null,
       editingNode: null,
+      editingEdge: null,
+      deleteDialog: null,
       contextMenu: null,
       selectedNodeId: null,
       selectedGraphNodes: [],
       navHistory: [],
-      assistantSessionEpoch: state.assistantSessionEpoch + 1,
+      sessionEpoch: state.sessionEpoch + 1,
     }));
   },
 
@@ -660,6 +709,12 @@ const useGraphStore = create((set, get) => ({
   // Node editing
   setEditingNode: (node) => set({ editingNode: node }),
   closeEditingNode: () => set({ editingNode: null }),
+
+  // Edge editing and the node-delete confirmation. Held here rather than in App
+  // so they reset through the same session-switch choke point as the node
+  // dialogs above; both address graph content that the new session may not have.
+  setEditingEdge: (edge) => set({ editingEdge: edge }),
+  setDeleteDialog: (dialog) => set({ deleteDialog: dialog }),
 
   // Node detail view (double-click). Opening a node's detail counts as visiting
   // it, so it is recorded on the navigable trail.
@@ -829,5 +884,18 @@ const useGraphStore = create((set, get) => ({
     });
   },
 }));
+
+/**
+ * Whether the visualization session has been switched since `epoch` was taken.
+ *
+ * Capture the epoch before awaiting, then call this before applying anything the
+ * await produced. Reads the store imperatively rather than through the hook so
+ * the value is the one current at resolution time, not the one closed over when
+ * the handler was created.
+ *
+ * @param {number} epoch  Value of sessionEpoch captured before the await.
+ * @returns {boolean}
+ */
+export const isStaleSessionEpoch = (epoch) => useGraphStore.getState().sessionEpoch !== epoch;
 
 export default useGraphStore;

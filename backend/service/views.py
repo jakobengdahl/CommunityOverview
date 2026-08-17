@@ -56,6 +56,62 @@ def resolve_session_nodes(
     return {"success": True, "nodes": nodes, "edges": edges}
 
 
+def resolve_session_node_semantics(
+    storage: "GraphStorage",
+    hook: "GraphAuthorizationHook",
+    node_ids: List[str],
+    *,
+    action: str,
+    target: str,
+) -> Dict[str, Any]:
+    """Resolve the *meaning* of session node references: type and status only.
+
+    The layout tools need this projection so an agent can arrange a session by
+    node type or status without parsing id strings or issuing one
+    ``get_node_details`` call per node. It deliberately does not reuse
+    ``resolve_session_nodes``: that one serializes whole nodes and scans for the
+    edges between them, which a geometry read never uses.
+
+    ``status`` is not a schema field — it is whatever the deployment stores
+    under ``metadata["status"]`` — so it is reported only when that value is a
+    non-blank string, and is ``None`` otherwise. Blank normalises to ``None``
+    (as ``node_graph_id`` does for its own metadata key) so an agent building
+    status lanes never gets an unnamed one.
+
+    ``action`` and ``target`` are required rather than defaulted, so the scope a
+    caller gets is never one this helper picked for it. A caller that only reads
+    the projection passes ``GRAPH_ACTION_READ``; one that turns it into a write
+    must pass ``GRAPH_ACTION_MUTATE``, so the ids it keeps are the ones it may
+    *write* and not merely the ones it may read — a hook is free to narrow the
+    two differently. ``target`` names the operation the decision is really for:
+    a caller that has already gated its own tool name passes that same name, so
+    a target-aware hook is asked about the operation the user invoked rather than
+    about this helper, and both evaluations of one call agree.
+    """
+    decision = access.evaluate_graph_access(hook, action=action, target=target)
+    if not decision.allowed:
+        return access.build_access_denied_result(
+            action=action,
+            target=target,
+            decision=decision,
+        )
+
+    semantics: Dict[str, Dict[str, Any]] = {}
+    for node_id in node_ids:
+        if not isinstance(node_id, str):
+            continue
+        node = storage.get_node(node_id)
+        if node is None or not access.is_node_visible(node, decision.graph_access):
+            continue
+        status = node.metadata.get("status")
+        semantics[node_id] = {
+            "type": node.type_str,
+            "status": status.strip() or None if isinstance(status, str) else None,
+        }
+
+    return {"success": True, "nodes": semantics}
+
+
 def get_saved_view(
     storage: "GraphStorage",
     hook: "GraphAuthorizationHook",

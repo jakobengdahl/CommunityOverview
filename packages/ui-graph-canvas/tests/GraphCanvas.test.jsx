@@ -150,6 +150,41 @@ describe('GraphCanvas', () => {
     expect(screen.queryByTestId('edge-edge-dangling')).not.toBeInTheDocument();
   });
 
+  // Regression: reloading a session with more than LAZY_LOAD_THRESHOLD (200)
+  // nodes renders only the first INITIAL_LOAD_COUNT (100) in order, and
+  // visibleEdges drops every edge whose other endpoint sits in the un-loaded
+  // remainder. Those edges used to vanish silently. The lazy-load banner must
+  // now disclose how many connections from loaded nodes are hidden, counting
+  // only real (non-dangling) edges that would reappear on "Load More".
+  it('discloses connections hidden by the lazy-load slice on a >200-node reload', () => {
+    const manyNodes = Array.from({ length: 250 }, (_, i) => ({
+      id: `node-${i}`,
+      name: `Node ${i}`,
+      type: 'Actor',
+    }));
+    const edges = [
+      // both endpoints in the loaded slice -> drawn, not counted as hidden
+      { id: 'edge-loaded', source: 'node-0', target: 'node-1', type: 'RELATES_TO' },
+      // source loaded, target in the un-loaded remainder -> dropped, counted
+      { id: 'edge-crosses', source: 'node-0', target: 'node-200', type: 'RELATES_TO' },
+      // both endpoints un-loaded -> dropped, not counted (no visible end)
+      { id: 'edge-offscreen', source: 'node-210', target: 'node-220', type: 'RELATES_TO' },
+    ];
+
+    render(<GraphCanvas nodes={manyNodes} edges={edges} />);
+
+    expect(screen.getByTestId('edge-edge-loaded')).toBeInTheDocument();
+    expect(screen.queryByTestId('edge-edge-crosses')).not.toBeInTheDocument();
+    expect(screen.queryByTestId('edge-edge-offscreen')).not.toBeInTheDocument();
+
+    expect(screen.getByText('Showing 100 of 250 nodes')).toBeInTheDocument();
+    expect(
+      screen.getByText(
+        '1 connections to nodes not yet loaded are hidden — Load More to reveal them'
+      )
+    ).toBeInTheDocument();
+  });
+
   it('reflects edge visual metadata onto the rendered React Flow edge', () => {
     const styledEdges = [
       {

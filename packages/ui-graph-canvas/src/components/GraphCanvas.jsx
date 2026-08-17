@@ -29,14 +29,7 @@ import {
 import { useRemotePositions } from '../hooks/useRemotePositions';
 import { useAnimatedLayout } from '../hooks/useAnimatedLayout';
 import { useCanvasHistory } from '../hooks/useCanvasHistory';
-import {
-  applyLayout,
-  getGridLayout,
-  getCircularLayout,
-  getLayoutedElements,
-  reconcileSessionNodes,
-  arrangeNodes,
-} from '../utils/graphLayout';
+import { applyLayout, reconcileSessionNodes, arrangeNodes } from '../utils/graphLayout';
 import {
   getNodeColor,
   LAZY_LOAD_THRESHOLD,
@@ -58,6 +51,7 @@ import {
   neighborStartPositions,
   neighborDragPositions,
 } from '../utils/dragConnected';
+import { createLongPressDetector } from '../utils/longPress';
 import './GraphCanvas.css';
 
 /**
@@ -195,6 +189,13 @@ function GraphCanvasInner({
   animatedLayout = null,
   onAnimatedLayoutApplied,
   animatedLayoutResetKey = null,
+  // Bumped by the host whenever the canvas contents are replaced wholesale (a
+  // saved view loaded into the running session, an agent replace/load, the
+  // clear-canvas action), establishing a new position baseline. Distinct from
+  // the incremental position writes of `remotePositions` and `animatedLayout`,
+  // which move nodes within the *same* contents and deliberately leave the
+  // undo history intact (last-write-wins, MULTI_USER_SESSIONS_DESIGN D2).
+  canvasBaselineEpoch = null,
   agentArrangingLabel = 'Assistant is arranging the view…',
   remoteAnnotationOps = null,
   onRemoteAnnotationsApplied,
@@ -205,6 +206,9 @@ function GraphCanvasInner({
   federationDepthLevels = null,
   federationDepthLabel = 'Depth',
   federationDepthTooltip = 'Depth levels are defined by installation configuration',
+  lazyLoadShowingLabel = 'Showing {loaded} of {total} nodes',
+  lazyLoadMoreLabel = 'Load More',
+  lazyLoadHiddenConnectionsLabel = '{count} connections to nodes not yet loaded are hidden — Load More to reveal them',
   showMinimap = false,
   schema = null,
   onContextMenuAction = null,
@@ -217,6 +221,11 @@ function GraphCanvasInner({
   sessionKey = null,
   nodePreviewEnabled = true,
   contextMenuLabels = {},
+  // 'auto' detects a coarse (touch) pointer itself via matchMedia — this
+  // package has no access to the host app's viewport-mode hook, so
+  // detection must be self-contained. 'on'/'off' force the mode (mainly for
+  // hosts that already know the input type, and for tests).
+  touchMode = 'auto',
 }) {
   const cml = {
     edit: 'Edit',
@@ -274,6 +283,37 @@ function GraphCanvasInner({
   // True while an MCP-driven layout tween is in flight, so the canvas can show a
   // non-interactive badge that an assistant is arranging the view.
   const [agentArranging, setAgentArranging] = useState(false);
+  // touchMode 'auto' self-detects a coarse pointer; 'on'/'off' bypass detection.
+  const [autoIsCoarsePointer, setAutoIsCoarsePointer] = useState(() => {
+    if (typeof window === 'undefined' || typeof window.matchMedia !== 'function') return false;
+    return window.matchMedia('(pointer: coarse)').matches;
+  });
+  useEffect(() => {
+    if (touchMode !== 'auto') return undefined;
+    if (typeof window === 'undefined' || typeof window.matchMedia !== 'function') return undefined;
+    const mql = window.matchMedia('(pointer: coarse)');
+    const handleChange = () => setAutoIsCoarsePointer(mql.matches);
+    handleChange();
+    if (mql.addEventListener) mql.addEventListener('change', handleChange);
+    else if (mql.addListener) mql.addListener(handleChange);
+    return () => {
+      if (mql.removeEventListener) mql.removeEventListener('change', handleChange);
+      else if (mql.removeListener) mql.removeListener(handleChange);
+    };
+  }, [touchMode]);
+  const isTouchMode = touchMode === 'off' ? false : touchMode === 'on' ? true : autoIsCoarsePointer;
+  // Long-press → context menu. The detector lives in a ref so its ~500ms timer
+  // isn't torn down and recreated every render; the fire callback is kept in a
+  // second ref, updated every render below (once the context-menu handlers it
+  // calls are defined), so the fixed-identity timer always invokes the latest
+  // closures instead of stale ones.
+  const longPressFireRef = useRef(null);
+  const longPressDetectorRef = useRef(null);
+  if (!longPressDetectorRef.current) {
+    longPressDetectorRef.current = createLongPressDetector({
+      onLongPress: (payload) => longPressFireRef.current?.(payload),
+    });
+  }
   const paneMenuRef = useRef(null);
   const reactFlowWrapper = useRef(null);
   const rightDragStart = useRef({ x: 0, y: 0, time: null });
@@ -397,6 +437,43 @@ function GraphCanvasInner({
         renderedNodeIds.has(e.target)
     );
   }, [inputEdges, hiddenNodeIds, hiddenEdgeIds, nodesToRender]);
+
+  // Count connections dropped purely by the lazy-load slice: edges from a
+  // rendered node to a real node that exists in the session but has not been
+  // loaded yet. These are exactly the edges that reappear on "Load More" — so
+  // the banner can honestly disclose how many connections the current view is
+  // hiding, instead of silently dropping them on reload of a large session.
+  // Dangling edges (an endpoint that is not in the graph at all) are excluded,
+  // matching visibleEdges, which never draws them either.
+  const hiddenConnectionCount = useMemo(() => {
+    if (visibleNodes.length <= LAZY_LOAD_THRESHOLD) {
+      return 0;
+    }
+    const renderedNodeIds = new Set(nodesToRender.map((n) => n.id));
+    const graphNodeIds = new Set(visibleNodes.map((n) => n.id));
+    let count = 0;
+    for (const e of inputEdges) {
+      if (
+        hiddenNodeIds.includes(e.source) ||
+        hiddenNodeIds.includes(e.target) ||
+        hiddenEdgeIds.includes(e.id)
+      ) {
+        continue;
+      }
+      const sourceRendered = renderedNodeIds.has(e.source);
+      const targetRendered = renderedNodeIds.has(e.target);
+      if (sourceRendered && targetRendered) {
+        continue; // already drawn by visibleEdges
+      }
+      if (!graphNodeIds.has(e.source) || !graphNodeIds.has(e.target)) {
+        continue; // dangling endpoint, not a lazy-hidden connection
+      }
+      if (sourceRendered || targetRendered) {
+        count += 1;
+      }
+    }
+    return count;
+  }, [inputEdges, visibleNodes, nodesToRender, hiddenNodeIds, hiddenEdgeIds]);
 
   // Convert to React Flow edge format
   const reactFlowEdges = useMemo(() => {
@@ -593,11 +670,14 @@ function GraphCanvasInner({
     showNotification('info', cml.redoNotification);
   }, [redoMove, applyPositionMoves, showNotification, cml.redoNotification]);
 
-  // Discard history when the session identity changes so an undo can never
-  // restore positions from a previously loaded session.
+  // Discard history whenever a new position baseline is established: the session
+  // identity changes, or the canvas contents are replaced wholesale within the
+  // session. Either way the recorded "before" positions belong to a layout that
+  // is gone, while the node ids they name can still be on the canvas — so an
+  // undo would otherwise teleport a node to a coordinate from a discarded view.
   useEffect(() => {
     clearHistory();
-  }, [animatedLayoutResetKey, clearHistory]);
+  }, [animatedLayoutResetKey, canvasBaselineEpoch, clearHistory]);
 
   // While any context menu is open, suppress the hover info popup: the node the
   // menu was opened on is still hovered, so its tooltip (portaled to the body at
@@ -1119,6 +1199,95 @@ function GraphCanvasInner({
     });
   }, []);
 
+  // Reuses the same context-menu handlers a desktop right-click calls,
+  // instead of duplicating their menu-opening logic, for a touch long-press.
+  // Kept current via the ref above so the detector's fixed-identity timer
+  // always calls the latest closures (fresh selection state, etc.).
+  longPressFireRef.current = (payload) => {
+    const syntheticEvent = {
+      clientX: payload.x,
+      clientY: payload.y,
+      preventDefault: () => {},
+      stopPropagation: () => {},
+    };
+    if (payload.kind === 'node') {
+      const node = getFlowNodes().find((n) => n.id === payload.nodeId);
+      if (node) onNodeContextMenu(syntheticEvent, node);
+      return;
+    }
+    if (payload.kind === 'edge') {
+      const edge = edges.find((e) => e.id === payload.edgeId);
+      if (edge) onEdgeContextMenu(syntheticEvent, edge);
+      return;
+    }
+    if (payload.kind === 'selection') {
+      onSelectionContextMenu(syntheticEvent);
+      return;
+    }
+    onPaneContextMenu(syntheticEvent);
+  };
+
+  // Touch: long-press on pane/node/edge/selection reaches the same actions a
+  // desktop right-click reaches. A one-finger drag pans and marquee selection
+  // is disabled instead (see selectionOnDrag/panOnDrag on <ReactFlow> below);
+  // tap-to-select and double-tap keep using ReactFlow's own click/double-click
+  // handling. Attached only in touch mode, so desktop mouse behaviour —
+  // right-drag pans, left-drag marquee-selects — is untouched.
+  useEffect(() => {
+    if (!isTouchMode) return undefined;
+    const wrapper = reactFlowWrapper.current;
+    if (!wrapper) return undefined;
+    const detector = longPressDetectorRef.current;
+
+    const resolveTouchTarget = (target) => {
+      const nodeEl = target?.closest?.('.react-flow__node');
+      if (nodeEl) return { kind: 'node', nodeId: nodeEl.getAttribute('data-id') };
+      const edgeEl = target?.closest?.('.react-flow__edge');
+      if (edgeEl) {
+        const testId = edgeEl.getAttribute('data-testid') || '';
+        const edgeId = testId.startsWith('rf__edge-') ? testId.slice('rf__edge-'.length) : null;
+        return { kind: 'edge', edgeId };
+      }
+      const selectionEl = target?.closest?.('.react-flow__nodesselection-rect');
+      if (selectionEl) return { kind: 'selection' };
+      return { kind: 'pane' };
+    };
+
+    const handlePointerDown = (event) => {
+      if (event.pointerType !== 'touch') return;
+      const info = resolveTouchTarget(event.target);
+      detector.onPointerDown(event.pointerId, event.clientX, event.clientY, {
+        ...info,
+        x: event.clientX,
+        y: event.clientY,
+      });
+    };
+    const handlePointerMove = (event) => {
+      if (event.pointerType !== 'touch') return;
+      detector.onPointerMove(event.pointerId, event.clientX, event.clientY);
+    };
+    const handlePointerUp = (event) => {
+      if (event.pointerType !== 'touch') return;
+      detector.onPointerUp(event.pointerId);
+    };
+    const handlePointerCancel = (event) => {
+      if (event.pointerType !== 'touch') return;
+      detector.onPointerCancel(event.pointerId);
+    };
+
+    wrapper.addEventListener('pointerdown', handlePointerDown);
+    wrapper.addEventListener('pointermove', handlePointerMove);
+    wrapper.addEventListener('pointerup', handlePointerUp);
+    wrapper.addEventListener('pointercancel', handlePointerCancel);
+    return () => {
+      wrapper.removeEventListener('pointerdown', handlePointerDown);
+      wrapper.removeEventListener('pointermove', handlePointerMove);
+      wrapper.removeEventListener('pointerup', handlePointerUp);
+      wrapper.removeEventListener('pointercancel', handlePointerCancel);
+      detector.reset();
+    };
+  }, [isTouchMode]);
+
   // Always prevent browser context menu on the canvas wrapper
   useEffect(() => {
     const wrapper = reactFlowWrapper.current;
@@ -1620,11 +1789,20 @@ function GraphCanvasInner({
           visibleNodes.length > LAZY_LOAD_THRESHOLD &&
           loadedNodeCount < visibleNodes.length && (
             <div className="graph-canvas-controls">
-              <div className="graph-lazy-load-info">
-                Showing {loadedNodeCount} of {visibleNodes.length} nodes
-                <button className="graph-load-more-button" onClick={handleLoadMore}>
-                  Load More
-                </button>
+              <div className="graph-lazy-load-panel">
+                <div className="graph-lazy-load-info">
+                  {lazyLoadShowingLabel
+                    .replace('{loaded}', loadedNodeCount)
+                    .replace('{total}', visibleNodes.length)}
+                  <button className="graph-load-more-button" onClick={handleLoadMore}>
+                    {lazyLoadMoreLabel}
+                  </button>
+                </div>
+                {hiddenConnectionCount > 0 && (
+                  <div className="graph-lazy-load-hidden-connections">
+                    {lazyLoadHiddenConnectionsLabel.replace('{count}', hiddenConnectionCount)}
+                  </div>
+                )}
               </div>
             </div>
           )}
@@ -1663,8 +1841,8 @@ function GraphCanvasInner({
             minZoom={0.1}
             maxZoom={2}
             defaultEdgeOptions={{ animated: true, style: { strokeWidth: 2 } }}
-            panOnDrag={[0, 2]}
-            selectionOnDrag={true}
+            panOnDrag={isTouchMode ? true : [0, 2]}
+            selectionOnDrag={!isTouchMode}
             selectionMode={SelectionMode.Partial}
             selectNodesOnDrag={true}
             deleteKeyCode={null}

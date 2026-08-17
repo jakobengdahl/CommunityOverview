@@ -925,3 +925,106 @@ class TestApplyLayout:
         assert [e["seq"] for e in events] == [1, 2]
         # The refused layout write left no trace.
         assert s.state["positions"]["a"] == {"x": 1.0, "y": 1.0}
+
+
+class TestAddNodeRefs:
+    """The synchronous MCP session-population path (``add_node_refs``)."""
+
+    async def test_nodes_enter_state_and_broadcast(self):
+        mgr = _manager()
+        s = mgr.create_session()
+        sub, _ = mgr.connect(s.id, "c1", "A")
+        await _drain(sub)
+
+        res = mgr.add_node_refs(s.id, "mcp-agent", ["a", "b"])
+
+        assert res["added"] == ["a", "b"]
+        assert res["node_count"] == 2
+        assert res["revision"] == s.seq == 1
+        assert s.state["node_refs"] == ["a", "b"]
+        events = await _drain(sub)
+        assert [e["op"]["op"] for e in events] == ["nodes_added"]
+        assert events[0]["op"]["node_ids"] == ["a", "b"]
+
+    async def test_adding_nothing_new_is_a_silent_no_op(self):
+        """A repeat add must not bump the revision every collaborator tracks."""
+        mgr = _manager()
+        s = mgr.create_session()
+        mgr.add_node_refs(s.id, "mcp-agent", ["a"])
+        sub, _ = mgr.connect(s.id, "c1", "A")
+        await _drain(sub)
+        seq_before = s.seq
+
+        res = mgr.add_node_refs(s.id, "mcp-agent", ["a"])
+
+        assert res["added"] == []
+        assert res["revision"] == seq_before == s.seq
+        assert await _drain(sub) == []
+
+    async def test_expected_revision_conflict(self):
+        mgr = _manager()
+        s = mgr.create_session()
+        mgr.add_node_refs(s.id, "mcp-agent", ["a"])
+
+        with pytest.raises(RevisionConflict):
+            mgr.add_node_refs(s.id, "mcp-agent", ["b"], expected_revision=0)
+        assert s.state["node_refs"] == ["a"]
+
+    async def test_empty_node_ids_raises(self):
+        mgr = _manager()
+        s = mgr.create_session()
+        with pytest.raises(OpError):
+            mgr.add_node_refs(s.id, "mcp-agent", [])
+
+    async def test_batch_too_large_by_count(self):
+        mgr = _manager(max_ops_per_batch=2)
+        s = mgr.create_session()
+        with pytest.raises(OpBatchTooLarge):
+            mgr.add_node_refs(s.id, "mcp-agent", ["a", "b", "c"])
+
+    async def test_unknown_session_raises(self):
+        mgr = _manager()
+        with pytest.raises(SessionNotFound):
+            mgr.add_node_refs("9999-9999", "mcp-agent", ["a"])
+
+    async def test_busy_when_session_lock_held(self):
+        mgr = _manager()
+        s = mgr.create_session()
+        await mgr._lock(s.id).acquire()
+        with pytest.raises(LayoutBusy):
+            mgr.add_node_refs(s.id, "mcp-agent", ["a"])
+
+    async def test_persist_failure_rolls_back_and_does_not_broadcast(self):
+        mgr = _manager()
+        s = mgr.create_session()
+        sub, _ = mgr.connect(s.id, "c1", "A")
+        await _drain(sub)
+        seq_before = s.seq
+
+        def boom(_session):
+            raise IOError("disk full")
+
+        mgr.store.persist = boom
+        with pytest.raises(IOError):
+            mgr.add_node_refs(s.id, "mcp-agent", ["a"])
+        assert s.seq == seq_before
+        assert s.state["node_refs"] == []
+        assert await _drain(sub) == []
+        # The ring must not keep the rolled-back op: the next write would reuse
+        # its seq, and a reconnecting client would replay a phantom add.
+        assert list(mgr.store.ring(s.id)) == []
+        assert mgr.catch_up(s.id, seq_before)["ops"] == []
+
+    async def test_repeated_ids_are_added_once(self):
+        mgr = _manager()
+        s = mgr.create_session()
+        sub, _ = mgr.connect(s.id, "c1", "A")
+        await _drain(sub)
+
+        res = mgr.add_node_refs(s.id, "mcp-agent", ["a", "a", "b"])
+
+        assert res["added"] == ["a", "b"]
+        assert res["node_count"] == 2
+        assert s.state["node_refs"] == ["a", "b"]
+        events = await _drain(sub)
+        assert events[0]["op"]["node_ids"] == ["a", "b"]

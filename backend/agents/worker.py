@@ -368,6 +368,24 @@ class AgentWorker:
             tool_definitions = self.mcp_loader.get_tool_definitions(
                 integration_ids=self.config.mcp_integration_ids
             )
+
+            # Pre-filter the definitions handed to the LLM to those the autonomy
+            # gate would actually let through, so a read-only or allowlist-
+            # restricted agent does not waste turns attempting tools it can never
+            # use. This is purely an efficiency reduction: the gate applied below
+            # remains the authoritative enforcement. Only pre-filter when the gate
+            # is active (a proposal store is wired), and reuse the gate's own
+            # autonomy level and allowlist so the two never diverge.
+            if self._proposal_store is not None:
+                from .governance import coerce_autonomy, filter_tool_definitions
+
+                tool_definitions = filter_tool_definitions(
+                    tool_definitions,
+                    autonomy_level=coerce_autonomy(self.config.autonomy_level),
+                    tool_allowlist=self.config.tool_allowlist,
+                    mcp_loader=self.mcp_loader,
+                )
+
             tool_names = [t["name"] for t in tool_definitions]
 
             # Get schema context from graph service (if available)

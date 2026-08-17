@@ -14,7 +14,9 @@ public method signatures are preserved exactly.
 from typing import List, Optional, Dict, Any
 
 from backend.core import GraphStorage
+from backend.core.storage_search import MATCH_MODE_SUBSTRING
 from backend.runtime.authorization import (
+    GRAPH_ACTION_READ,
     DefaultGraphAuthorizationHook,
     GraphAuthorizationHook,
 )
@@ -81,6 +83,8 @@ class GraphService:
         tags_none: Optional[List[str]] = None,
         metadata_filters: Optional[List[Dict[str, Any]]] = None,
         include_archived: bool = False,
+        semantic: bool = False,
+        match_mode: str = MATCH_MODE_SUBSTRING,
     ) -> Dict[str, Any]:
         return queries.search_graph(
             self._storage,
@@ -96,6 +100,8 @@ class GraphService:
             tags_none=tags_none,
             metadata_filters=metadata_filters,
             include_archived=include_archived,
+            semantic=semantic,
+            match_mode=match_mode,
         )
 
     def get_node_details(self, node_id: str) -> Dict[str, Any]:
@@ -231,6 +237,8 @@ class GraphService:
         event_origin: Optional[str] = None,
         event_session_id: Optional[str] = None,
         event_correlation_id: Optional[str] = None,
+        metadata_merge: bool = False,
+        expected_updated_at: Optional[str] = None,
     ) -> Dict[str, Any]:
         return mutations.update_node(
             self._storage,
@@ -240,6 +248,8 @@ class GraphService:
             event_origin=event_origin,
             event_session_id=event_session_id,
             event_correlation_id=event_correlation_id,
+            metadata_merge=metadata_merge,
+            expected_updated_at=expected_updated_at,
         )
 
     def delete_nodes(
@@ -512,6 +522,30 @@ class GraphService:
     def resolve_session_nodes(self, node_ids: List[str]) -> Dict[str, Any]:
         return views.resolve_session_nodes(
             self._storage, self._authorization_hook, node_ids
+        )
+
+    def resolve_session_node_semantics(
+        self,
+        node_ids: List[str],
+        *,
+        action: str = GRAPH_ACTION_READ,
+        target: str = "resolve_session_node_semantics",
+    ) -> Dict[str, Any]:
+        """Resolve session node references to their type and status.
+
+        ``action``/``target`` are required on the underlying helper, so that it
+        can never pick a caller's authorization scope for it. They keep defaults
+        *here* on purpose: this is a public method, and these two values are
+        exactly what it evaluated before they were parameters, so an existing
+        caller outside this repo is unaffected. Every caller in this repo passes
+        both explicitly, and a new one should too.
+        """
+        return views.resolve_session_node_semantics(
+            self._storage,
+            self._authorization_hook,
+            node_ids,
+            action=action,
+            target=target,
         )
 
     def get_saved_view(self, name: str) -> Dict[str, Any]:

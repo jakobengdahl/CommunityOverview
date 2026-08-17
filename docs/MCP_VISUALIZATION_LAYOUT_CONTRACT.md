@@ -25,8 +25,10 @@ arrange a session without colliding nodes or fighting concurrent editors.
 
 ## 1. Motivation
 
-An MCP-connected assistant can populate a visualization session (via
-`search_graph` / `get_related_nodes` with a `visualization_session_id`) but then
+An MCP-connected assistant can populate a visualization session (by pushing
+results into it with `search_graph` / `get_related_nodes` and a
+`visualization_session_id`, or by naming the node ids outright with
+`add_nodes_to_session`) but then
 needs to **arrange** it: place nodes as a left-to-right DAG, a grid, or
 swimlanes. To do that safely it must agree with the server and the canvas on a
 single coordinate model, on how a bulk move is applied, and on how concurrent
@@ -90,13 +92,58 @@ DAG/grid/swimlane layouts the initiative targets.
 | `session_id` | string | Echo of the requested id. |
 | `revision` | int | The session's monotonic op sequence (`seq`). Pass back as `expected_revision` to the write tool for optimistic concurrency (§7). |
 | `node_count` | int | Number of nodes referenced by the session. |
-| `nodes` | object[] | One entry per referenced node: `{ id, x, y, hidden }`. `x`/`y` are model-space top-left, or `null` when unset (§2). `hidden` is `true` when the node is currently hidden in the session (§8). |
+| `nodes` | object[] | One entry per referenced node: `{ id, x, y, hidden, type, status }`. `x`/`y` are model-space top-left, or `null` when unset (§2). `hidden` is `true` when the node is currently hidden in the session (§8). `type`/`status` are the semantic projection below. |
+| `selected_node_ids` | string[] | The **nodes** currently selected in the session — the same value `get_visualization_session_state` reports (§4.2). Always a subset of this response's `nodes`. |
 | `assumed_node_size` | object | `{ width, height }` for collision spacing (§3). |
 | `coordinate_space` | string | Human-readable restatement of §2, e.g. `"model-space, pixels at zoom 1, x/y = node top-left"`. |
 | `connected_clients` | int | How many browsers are attached. When `> 0`, prefer placing nodes relative to related nodes over guessing a viewport (§8). |
 
 Viewports are **deliberately not reported** (§8). Callers must treat unknown
 fields as forward-compatible additions and must not depend on field order.
+
+### 4.1 Semantic projection (`type`, `status`)
+
+Arranging a session *by meaning* — type columns, status swimlanes — must not
+require an agent to parse node id strings or to issue one `get_node_details`
+call per node, so the read carries a minimal semantic projection:
+
+- **`type`** is the node's graph type (e.g. `"Initiative"`). It is `null` when
+  the session's node reference does not resolve to a node this caller may read.
+- **`status`** is whatever the deployment stores under the node's
+  `metadata["status"]`, reported only when that value is a **non-blank string**,
+  with surrounding whitespace trimmed. A blank or non-string value reports
+  `null`, so a status lane can never be unnamed. `status` is a **convention, not
+  a schema field** — the core schema defines none — so `null` means *unknown*,
+  not *no status*, and an agent must not treat it as a lane of its own without
+  saying so.
+
+Both fields honour the same graph-scope narrowing as every other read: a node the
+caller may not read still appears with its geometry, with `type`/`status` `null`.
+A layout therefore never silently drops a node it must still position.
+
+Per-node measured `width`/`height` remain **out of this projection** (§3): the
+server has no measured size to report, and inventing one would be worse than the
+honest `assumed_node_size` constant. That extension stays reserved (§10, §14).
+
+### 4.2 Why the selection is merged but the visible set is not
+
+`selected_node_ids` is included so that "what is here, and where is it" is a
+single call. The **visible set is deliberately not** duplicated into this
+response: it is exactly the `nodes` entries with `hidden` false, and carrying the
+same fact in two shapes invites the two to disagree. `get_visualization_session_state`
+remains the tool for reading session state on its own; it reports the same
+selection.
+
+The selection's source is the advisory claim map, and claims are taken on session
+**elements** — an edge can be claimed just as a node can. The field is therefore
+**narrowed to the session's node references** in both tools: an id read from
+`selected_node_ids` is always a node in this response's `nodes` and can be passed
+straight back into a node argument such as `apply_visualization_layout`'s
+positions map. Selection claims on edges are consequently not observable through
+either tool. A truthful `selected_element_ids` reporting the unfiltered claim map
+would be an **additive** extension under §14, but it is not part of v1: it would
+carry the selection in two overlapping shapes for a claim kind no client
+currently produces.
 
 ## 5. Movement semantics (`apply_visualization_layout`)
 
@@ -214,6 +261,17 @@ and `easing` (default `"ease-in-out"`). These are a **hint** the canvas honors:
   `animate` hint. The contract's job is only to *carry* the hint; honoring or
   overriding it is the canvas's responsibility. Agents should send the hint they
   intend and must not try to detect reduced-motion themselves.
+- **Is the hint honored here?** A write returns success whether the connected
+  canvas tweened the batch or applied it immediately, so the result cannot answer
+  that. The deployment answers it instead: `get_capabilities` always reports an
+  `animated_layout` capability whose `enabled` says whether this instance's
+  canvas tweens the hint. A deployment running a canvas that does not declares
+  the same capability id in its presentation config, as
+  `{"id": "animated_layout", "name": "Animated layout", "enabled": false}` — the
+  `name` is required, and an entry missing it invalidates the whole schema config
+  and falls back to defaults, reporting the capability as enabled. Reduced motion
+  stays out of that flag — it is per-viewer and client-side (see above), so no
+  server-side manifest can report it.
 - **Cancellation / replacement.** A subsequent `layout_applied` op supersedes an
   in-flight transition for the same nodes; the canvas animates from wherever the
   nodes currently are toward the newest targets. Agents do not manage animation
@@ -280,6 +338,12 @@ error or `too_large` requires the agent to change the request.
   `expected_revision` to be sure).
 - Client-side single-user undo of a drag is governed by the realtime protocol in
   `MULTI_USER_SESSIONS_DESIGN.md`, not by this contract.
+- A layout write does **not** discard the viewer's client-side undo history. Like a
+  collaborator's move, it writes coordinates into the canvas contents the viewer
+  already has, and is resolved last-write-wins (D2) — the viewer's next undo is
+  simply the next write. Only a wholesale replacement of the canvas contents (a
+  session switch, a saved view loaded over the current one, a clear) establishes a
+  new position baseline and discards that history.
 
 ## 13. Public/private boundary
 
@@ -300,6 +364,12 @@ differ between the open core and the hosted layer.
 - Realizing per-node measured dimensions, server-enforced locks, group-aware
   layout, or viewport control (all reserved above) are **additive** extensions
   that a later version can introduce without breaking v1 consumers.
+- Narrowing a field's contents to what its **name** promises — as
+  `selected_node_ids` was narrowed to the session's nodes (§4.2) — is a
+  **correction, not a version bump**. The prose describing it as element ids was
+  itself part of the defect: a field named for nodes that hands back edge ids
+  breaks the caller that reads it as its name reads. Widening a field, or
+  renaming one, is breaking and needs a new version.
 - The requirement node `req-mcp-layout-contract` and the decision
   `dec-visualization-layout-contract` in the Corp planning graph govern this
   document; status and evidence live there, not here.
@@ -313,3 +383,4 @@ differ between the open core and the hosted layer.
 | `task-frontend-animated-layout-transitions` | Consumes §9–§10 — tweens the `layout_applied` op and honors reduced motion. |
 | `task-test-agent-layout-workflow` | Verifies §2–§12 end to end — geometry accuracy, collision-free layout, concurrency, limits, reduced motion. |
 | `task-document-agent-visualization-tools` | Publishes §2–§11 into the tool docstrings and `backend/DEVELOPMENT.md`. |
+| `task-mcp-layout-read-semantic-metadata` | Extends §4 additively with the semantic projection (§4.1) and the merged selection (§4.2); no version bump per §14. |

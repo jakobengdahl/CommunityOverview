@@ -1,0 +1,38 @@
+* {
+  box-sizing: border-box;
+}
+
+.xr-enter {
+  position: fixed;
+  top: 16px;
+  left: 50%;
+  transform: translateX(-50%);
+  z-index: 10;
+  padding: 12px 24px;
+  font-size: 16px;
+  font-weight: 600;
+  color: #0b0d12;
+  background: #6ee7b7;
+  border: none;
+  border-radius: 999px;
+  cursor: pointer;
+}
+
+.xr-enter:hover {
+  background: #34d399;
+}
+
+.xr-error {
+  color: #f87171;
+}
+
+.xr-hint {
+  position: fixed;
+  bottom: 16px;
+  left: 50%;
+  transform: translateX(-50%);
+  z-index: 10;
+  color: #8b93a7;
+  font-size: 13px;
+  text-align: center;
+}

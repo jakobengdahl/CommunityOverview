@@ -15,6 +15,37 @@ from .models import Node, Edge, NodeType, RelationshipType, SimilarNode
 from .vector_store import VectorStore
 
 
+# Default cosine-similarity floor for semantic search.  Embeddings from the
+# all-MiniLM-L6-v2 model score unrelated text near 0 and topically related text
+# well above this, so this keeps meaning-ranked results without hardcoding any
+# domain-specific tuning.
+DEFAULT_SEMANTIC_THRESHOLD = 0.3
+
+
+# Lexical match modes for :func:`search_nodes`.  ``substring`` is the historical
+# behaviour (the whole query must occur verbatim in a node's searchable text);
+# ``any_term`` is an opt-in OR over the query's whitespace-separated terms, so a
+# multi-word query no longer collapses to zero results when no node contains the
+# phrase itself.
+MATCH_MODE_SUBSTRING = "substring"
+MATCH_MODE_ANY_TERM = "any_term"
+MATCH_MODES = (MATCH_MODE_SUBSTRING, MATCH_MODE_ANY_TERM)
+
+
+def validate_match_mode(match_mode: str) -> str:
+    """Return *match_mode* unchanged, or raise ``ValueError`` if unsupported.
+
+    Callers that may skip the lexical path entirely (semantic search) validate
+    up front with this, so an unsupported mode is always rejected rather than
+    silently ignored.
+    """
+    if match_mode not in MATCH_MODES:
+        raise ValueError(
+            f"unknown match_mode {match_mode!r}; expected one of {', '.join(MATCH_MODES)}"
+        )
+    return match_mode
+
+
 # ---------------------------------------------------------------------------
 # Searchable-text helpers
 # ---------------------------------------------------------------------------
@@ -112,6 +143,7 @@ def search_nodes(
     node_types: Optional[List[NodeType]] = None,
     limit: int = 50,
     include_archived: bool = False,
+    match_mode: str = MATCH_MODE_SUBSTRING,
 ) -> List[Node]:
     """Text search over *nodes*.  Matches against name, description, summary,
     tags, subtypes, aliases and node type (including localized labels).
@@ -122,10 +154,34 @@ def search_nodes(
     Archived nodes are excluded unless ``include_archived`` is True. Excluding
     them here — before the ``limit`` slice below — keeps ``limit`` counting only
     visible results.
+
+    ``match_mode`` selects how the query text is matched:
+
+    - ``substring`` (default): the whole query must occur verbatim in a node's
+      searchable text — the historical behaviour.
+    - ``any_term``: the query is split on whitespace into *distinct* terms and a
+      node matches when it contains **any** of them.  Ranking stays tier-based:
+      a node scores by its single best-matching term (so a name-tier match still
+      outranks any pile of secondary signals), and the number of matched
+      distinct terms only breaks an exact scoring tie.  Never added: terms are
+      not summed across tiers.
     """
+    validate_match_mode(match_mode)
+
     query_lower = query.lower().strip()
     results = []
     match_all = query_lower == "" or query_lower == "*"
+
+    terms = [query_lower]
+    if match_mode == MATCH_MODE_ANY_TERM and not match_all:
+        # Deduplicated, order preserved: the tie-break below counts matched
+        # terms, so a word the caller happened to repeat ("AI in the public
+        # sector and AI in the private sector") would otherwise be counted once
+        # per occurrence and could reorder same-tier results on repetition
+        # alone.
+        terms = list(dict.fromkeys(query_lower.split()))
+
+    matched_terms: Dict[str, List[str]] = {}
 
     for node in nodes.values():
         if node_types and node.type not in node_types:
@@ -140,18 +196,79 @@ def search_nodes(
                 searchable_text = build_searchable_text(node, type_searchable_text)
                 searchable_text_cache[node.id] = searchable_text
 
-            if query_lower not in searchable_text:
+            hits = [term for term in terms if term in searchable_text]
+            if not hits:
                 continue
+            matched_terms[node.id] = hits
 
         results.append(node)
 
     if not match_all:
         results.sort(
-            key=lambda n: score_node_match(n, query_lower, type_searchable_text),
+            key=lambda n: (
+                max(
+                    score_node_match(n, term, type_searchable_text)
+                    for term in matched_terms[n.id]
+                ),
+                len(matched_terms[n.id]),
+            ),
             reverse=True,
         )
 
     return results[:limit]
+
+
+# ---------------------------------------------------------------------------
+# Semantic (embedding) search
+# ---------------------------------------------------------------------------
+
+
+def semantic_search_nodes(
+    nodes: Dict[str, Node],
+    vector_store: VectorStore,
+    query: str,
+    node_types: Optional[List[NodeType]] = None,
+    limit: int = 50,
+    threshold: float = DEFAULT_SEMANTIC_THRESHOLD,
+    include_archived: bool = False,
+) -> List[Node]:
+    """Rank nodes by embedding (cosine) similarity to *query*.
+
+    Reuses the same VectorStore embedding path as :func:`find_similar_nodes`:
+    the query text is embedded and compared against the stored node embeddings
+    (built from name + summary + description + tags on create/update). Returns
+    nodes ordered by descending similarity, keeping only those at or above
+    *threshold*.
+
+    When the embedding model or the stored embeddings are unavailable — e.g. the
+    ML-free base install where ``VectorStore.search`` cannot embed the query —
+    ``search`` returns nothing and this yields an empty list, so callers can keep
+    their lexical result unchanged.
+    """
+    query_text = (query or "").strip()
+    if not query_text or query_text == "*":
+        return []
+
+    # Over-fetch so the node-type / archived filtering below cannot starve the
+    # requested limit when the top hits are filtered out.
+    fetch_limit = max(limit * 4, limit)
+    ranked = vector_store.search(
+        query_text=query_text, limit=fetch_limit, threshold=threshold
+    )
+
+    results: List[Node] = []
+    for node_id, _score in ranked:
+        node = nodes.get(node_id)
+        if node is None:
+            continue
+        if node_types and node.type not in node_types:
+            continue
+        if not include_archived and getattr(node, "archived", False):
+            continue
+        results.append(node)
+        if len(results) >= limit:
+            break
+    return results
 
 
 # ---------------------------------------------------------------------------

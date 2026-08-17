@@ -35,7 +35,7 @@ This guide explains how to get started with the Community Overview graph app in 
 
 Use this pre-configured link to launch a VS Code Python service with all settings applied:
 
-<https://datalab.sspcloud.fr/launcher/ide/vscode-python?name=communityoverview-stat-metadata&version=2.5.6&s3=default&vault.secret=«communityoverview-secrets»&git.repository=«https%3A%2F%2Fgithub.com%2FAIML4OS%2FWP12_MetadataGraph%2F»&git.branch=«dev»&networking.user.enabled=true&networking.user.ports[0]=8000&autoLaunch=true>
+<https://datalab.sspcloud.fr/launcher/ide/vscode-python?name=communityoverview-stat-metadata&version=2.5.6&s3=default&vault.secret=«communityoverview-secrets»&git.repository=«https%3A%2F%2Fgithub.com%2FAIML4OS%2FWP12_MetadataGraph%2F»&git.branch=«main»&networking.user.enabled=true&networking.user.ports[0]=8000&autoLaunch=true>
 
 ### Option B: Manual Setup
 
@@ -43,7 +43,7 @@ Use this pre-configured link to launch a VS Code Python service with all setting
 2. Find and start a **VS Code Python** service.
 3. Configure the following settings:
    - **Vault** — set Secret to `communityoverview-secrets`.
-   - **Git** — set Repository to `https://github.com/AIML4OS/WP12_MetadataGraph/` and Branch to `dev`.
+   - **Git** — set Repository to `https://github.com/AIML4OS/WP12_MetadataGraph/` and Branch to `main`.
 4. Launch the service.
 
 ## Step 4: Start the App

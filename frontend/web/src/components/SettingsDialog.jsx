@@ -4,7 +4,7 @@ import { Download, Map, Eye, BoxArrowRight, X } from 'react-bootstrap-icons';
 import useGraphStore from '../store/graphStore';
 import { useI18n } from '../i18n';
 import { getDisplayName, setDisplayName } from '../services/api';
-import { COLOR_MAP } from './FloatingToolbar';
+import { resolveColor } from './FloatingToolbar';
 import NodeTypeStatsDialog from './NodeTypeStatsDialog';
 import './SettingsDialog.css';
 
@@ -17,7 +17,7 @@ const MAX_INLINE_TYPES = 5;
  */
 function SettingsDialog({ stats, onExportGraph, onClose }) {
   const { t, language, setLanguage } = useI18n();
-  const { showMinimap, setShowMinimap, nodePreviewEnabled, setNodePreviewEnabled } =
+  const { showMinimap, setShowMinimap, nodePreviewEnabled, setNodePreviewEnabled, schema } =
     useGraphStore();
   const [statsDialogOpen, setStatsDialogOpen] = useState(false);
   const [displayName, setDisplayNameState] = useState(() => getDisplayName() || '');
@@ -88,7 +88,7 @@ function SettingsDialog({ stats, onExportGraph, onClose }) {
                       <div key={type} className="settings-dialog-type-row">
                         <span
                           className="settings-dialog-type-dot"
-                          style={{ backgroundColor: COLOR_MAP[type] || '#9CA3AF' }}
+                          style={{ backgroundColor: resolveColor(type, schema) }}
                         />
                         <span className="settings-dialog-type-name">{type}</span>
                         <span className="settings-dialog-type-count">{count}</span>

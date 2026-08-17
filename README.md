@@ -123,6 +123,7 @@ See [docs/USER_GUIDE.md](./docs/USER_GUIDE.md) for a full user-facing walkthroug
     /src/store                    # Zustand state
     /tests                        # Unit and e2e tests
   /widget                         # ChatGPT embeddable widget
+  /xr                             # WebXR immersive client for Quest (spike)
 /packages                         # Shared packages
   /ui-graph-canvas                # Shared React Flow component
 /services                         # Standalone auxiliary services

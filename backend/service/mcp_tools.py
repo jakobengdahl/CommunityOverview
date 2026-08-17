@@ -19,6 +19,7 @@ import secrets
 from typing import List, Optional, Dict, Any, Callable
 
 from backend.core.session_auto_add import AutoAddRuleError
+from backend.core.storage_search import MATCH_MODE_SUBSTRING
 from backend.core.session_store import OpError, is_valid_session_id
 from backend.core.session_manager import (
     LayoutBusy,
@@ -84,24 +85,40 @@ def register_mcp_tools(
             session_registry, session_id, tool_name, result, session_manager
         )
 
+    def _claimed_node_ids(session_id, node_refs):
+        """The session's *node* ids that currently hold a selection claim.
+
+        Claims are advisory soft-locks on session *elements*, so the claim map
+        can hold edge ids as well as node ids. Both read tools report this as
+        ``selected_node_ids``, so it is narrowed to the session's node
+        references — an agent must be able to feed the field straight into a
+        node argument such as ``apply_visualization_layout``'s positions map.
+        """
+        refs = set(node_refs)
+        return [e for e in session_manager.claimed_elements(session_id) if e in refs]
+
     def _session_view_state(session_id):
         """Return ``(visible_node_ids, selected_node_ids)`` as the server sees them.
 
         Session state is server-owned (design §3.8): visible nodes come from the
         shared-session store's node references, the current selection from the
-        advisory claim map. The browser no longer uploads canvas state — an MCP
-        tool reads the same state every collaborator converges on.
+        advisory claim map narrowed to those same references. The browser no
+        longer uploads canvas state — an MCP tool reads the same state every
+        collaborator converges on.
+
+        Both halves are read off the stored session, so a session the manager
+        does not hold reports an empty selection rather than claims that outlived
+        it: the claim map is not purged when a session is deleted.
         """
         visible: list = []
         selected: list = []
         if session_manager is not None:
             session = session_manager.get_session(session_id)
             if session is not None:
+                node_refs = session.state.get("node_refs", [])
                 hidden = set(session.state.get("hidden_node_ids", []))
-                visible = [
-                    n for n in session.state.get("node_refs", []) if n not in hidden
-                ]
-            selected = list(session_manager.claimed_elements(session_id))
+                visible = [n for n in node_refs if n not in hidden]
+                selected = _claimed_node_ids(session_id, node_refs)
         return visible, selected
 
     def register_tool(func: Callable) -> Callable:
@@ -124,6 +141,8 @@ def register_mcp_tools(
         tags_none: Optional[List[str]] = None,
         metadata_filters: Optional[List[Dict[str, Any]]] = None,
         include_archived: bool = False,
+        semantic: bool = False,
+        match_mode: str = MATCH_MODE_SUBSTRING,
         visualization_session_id: Optional[str] = None,
     ) -> Dict[str, Any]:
         """
@@ -135,6 +154,16 @@ def register_mcp_tools(
         names or values. Pass an empty query ("") to filter purely by tags and/or
         metadata. When no filter argument is given the search behaves exactly as
         before.
+
+        By default the query is matched lexically (substring). Multi-word or
+        natural-language queries that no node contains verbatim therefore return
+        nothing; set ``match_mode="any_term"`` to match any single term instead,
+        or ``semantic=True`` to rank nodes by embedding meaning.
+        As a safety net the search also falls back to semantic ranking
+        automatically when a non-empty lexical query yields zero results, so a
+        conceptual query still surfaces the closest nodes. The response includes
+        a ``"semantic"`` boolean indicating whether semantic ranking produced the
+        returned nodes.
 
         Args:
             query: Search text (matches against name, description, summary). Use ""
@@ -154,6 +183,23 @@ def register_mcp_tools(
                 combine with AND.
             include_archived: When False (default) archived nodes and edges are
                 excluded. Set True to include archived items in the results.
+            semantic: When True, rank results by embedding meaning (cosine
+                similarity) instead of lexical substring matching. Default False
+                keeps the lexical behavior, which still auto-falls back to
+                semantic ranking when it returns zero results.
+            match_mode: How the lexical query is matched. ``"substring"``
+                (default) requires the whole query verbatim — unchanged
+                behaviour. ``"any_term"`` splits the query on whitespace into
+                distinct terms and matches nodes containing **any** of them,
+                which is what a multi-word query such as "plan pricing offering"
+                usually means; a node still ranks by its single best-matching
+                term, so more terms never outweigh a stronger match, and a term
+                you repeat counts once. Each term is matched as a
+                substring, not as a word, so pass the distinctive terms: a short
+                or common one ("a", "the") matches almost everything and pads
+                the tail of the result with noise. Ignored when
+                ``semantic=True``. Applies to the local graph; federated search
+                stays substring-matched.
             visualization_session_id: Optional browser session ID — when provided, the result
                 is pushed live to the connected browser window via SSE
 
@@ -171,6 +217,8 @@ def register_mcp_tools(
             tags_none=tags_none,
             metadata_filters=metadata_filters,
             include_archived=include_archived,
+            semantic=semantic,
+            match_mode=match_mode,
         )
         _push(visualization_session_id, "search_graph", result)
         return result
@@ -315,6 +363,8 @@ def register_mcp_tools(
     def update_node(
         node_id: str,
         updates: Dict[str, Any],
+        metadata_merge: bool = False,
+        expected_updated_at: Optional[str] = None,
         event_session_id: Optional[str] = None,
         event_correlation_id: Optional[str] = None,
     ) -> Dict[str, Any]:
@@ -324,6 +374,19 @@ def register_mcp_tools(
         Args:
             node_id: ID of the node to update
             updates: Dict with fields to update (name, description, summary, tags, aliases, metadata)
+            metadata_merge: When True, the `metadata` object is merged field-by-field
+                onto the node's existing metadata instead of replacing it wholesale:
+                only the keys you send are changed, other keys are preserved, and a
+                key whose value is null (None) is removed. Default False keeps the
+                legacy behaviour where `metadata` replaces the whole object — so a
+                caller must resend every key to avoid dropping it. Use merge mode for
+                safe concurrent writebacks that each touch a different key.
+            expected_updated_at: Optional optimistic-concurrency guard. Pass the
+                `updated_at` value you last read for this node; the update is
+                rejected (result has success=False and conflict=True) if the node
+                has changed since then, instead of silently overwriting a
+                concurrent write. On conflict the result includes the live
+                `current_updated_at` so you can re-read and retry.
             event_session_id: Optional session ID for webhook loop prevention
             event_correlation_id: Optional correlation ID for chaining events
 
@@ -336,6 +399,8 @@ def register_mcp_tools(
             event_origin="mcp",
             event_session_id=event_session_id,
             event_correlation_id=event_correlation_id,
+            metadata_merge=metadata_merge,
+            expected_updated_at=expected_updated_at,
         )
 
     @register_tool
@@ -901,6 +966,10 @@ def register_mcp_tools(
         Use this to understand what the user is looking at before deciding
         which nodes to add or which view to load.
 
+        ``selected_node_ids`` holds node ids only. A selection claim can also be
+        taken on an edge, but this field is narrowed to the session's nodes, so
+        it is safe to pass into any argument that expects node ids.
+
         Args:
             session_id: The session ID shown in the browser header (e.g. "8244-1742")
 
@@ -911,6 +980,11 @@ def register_mcp_tools(
             return {"error": "Session registry not available"}
         if not session_registry.is_valid_session_id(session_id):
             return {"error": "Invalid session ID format — expected DDDD-DDDD-DDDD-DDDD"}
+        denied = _authorize_session(
+            GRAPH_ACTION_READ, "get_visualization_session_state"
+        )
+        if denied:
+            return denied
         if not session_registry.session_exists(session_id):
             return {
                 "error": (
@@ -942,9 +1016,9 @@ def register_mcp_tools(
         """
         Read the geometry of every node in an open visualization session.
 
-        Returns each node's model-space position so an AI agent can compute a new
-        arrangement (a left-to-right DAG, a grid, swimlanes) and then call
-        ``apply_visualization_layout`` to move them.
+        Returns each node's model-space position *and what it is*, so an AI agent
+        can compute a new arrangement (a left-to-right DAG, a grid, type or status
+        swimlanes) and then call ``apply_visualization_layout`` to move them.
 
         Geometry contract (read this before computing positions):
         - Coordinates are **model space**: independent of the user's zoom and pan,
@@ -960,16 +1034,37 @@ def register_mcp_tools(
           relative to their related nodes over guessing where a viewport is,
           especially when several clients are connected.
 
+        Semantics for arranging by meaning (never parse the node id for this):
+        - ``type`` is the node's graph type, e.g. "Initiative". It is null when
+          the node reference does not resolve to a node this caller may read.
+        - ``status`` is whatever the deployment stores under the node's
+          ``metadata["status"]``, trimmed, and is null when that value is blank
+          or the deployment does not use the field. It is a convention, not a
+          schema-enforced field, so treat a null as "unknown", not as "no
+          status".
+        - ``selected_node_ids`` is what the users currently have selected, the
+          same value ``get_visualization_session_state`` reports, so an arrange
+          that should respect the selection needs only this one call. It holds
+          node ids only — a selection claim can also be taken on an edge, but
+          this field is narrowed to this response's nodes, so every id in it can
+          be passed straight back to ``apply_visualization_layout``. The visible
+          set is not repeated here: it is this response's nodes with
+          ``hidden`` false.
+
         Args:
             session_id: The session ID shown in the browser header (e.g. "8244-1742")
 
         Returns:
-            Dict with revision, node_count, nodes (id/x/y/hidden), assumed_node_size
+            Dict with revision, node_count, nodes (id/x/y/hidden/type/status),
+            selected_node_ids, assumed_node_size
         """
         if session_manager is None:
             return {"error": "Session manager not available"}
         if not is_valid_session_id(session_id):
             return {"error": "Invalid session ID format — expected DDDD-DDDD-DDDD-DDDD"}
+        denied = _authorize_session(GRAPH_ACTION_READ, "get_visualization_layout")
+        if denied:
+            return denied
         session = session_manager.get_session(session_id)
         if session is None:
             return {
@@ -980,15 +1075,32 @@ def register_mcp_tools(
             }
         positions = session.state.get("positions", {})
         hidden = set(session.state.get("hidden_node_ids", []))
+        node_refs = session.state.get("node_refs", [])
+        # Read scope, and this tool's own name as the target: same rule the
+        # write path follows, so a target-aware hook is never asked about the
+        # helper. It matters here because the projection's denial is swallowed
+        # into {} below — a narrowing meant for some other target would silently
+        # report every node as type/status None rather than erroring.
+        semantics = (
+            service.resolve_session_node_semantics(
+                node_refs,
+                action=GRAPH_ACTION_READ,
+                target="get_visualization_layout",
+            ).get("nodes")
+            or {}
+        )
         nodes = []
-        for node_id in session.state.get("node_refs", []):
+        for node_id in node_refs:
             pos = positions.get(node_id)
+            meaning = semantics.get(node_id) or {}
             nodes.append(
                 {
                     "id": node_id,
                     "x": pos["x"] if pos else None,
                     "y": pos["y"] if pos else None,
                     "hidden": node_id in hidden,
+                    "type": meaning.get("type"),
+                    "status": meaning.get("status"),
                 }
             )
         return {
@@ -996,6 +1108,7 @@ def register_mcp_tools(
             "revision": session.seq,
             "node_count": len(nodes),
             "nodes": nodes,
+            "selected_node_ids": _claimed_node_ids(session_id, node_refs),
             "assumed_node_size": _ASSUMED_NODE_SIZE,
             "coordinate_space": "model-space, pixels at zoom 1, x/y = node top-left",
             "connected_clients": session_manager.connected_count(session_id),
@@ -1066,6 +1179,9 @@ def register_mcp_tools(
                 "success": False,
                 "error": "Invalid session ID format — expected DDDD-DDDD-DDDD-DDDD",
             }
+        denied = _authorize_session(GRAPH_ACTION_MUTATE, "apply_visualization_layout")
+        if denied:
+            return denied
         animation = {
             "animate": bool(animate),
             "duration_ms": duration_ms,
@@ -1123,6 +1239,182 @@ def register_mcp_tools(
             "success": True,
             "session_id": session_id,
             "moved": result["moved"],
+            "revision": result["revision"],
+        }
+
+    @register_tool
+    def add_nodes_to_session(
+        session_id: str,
+        node_ids: List[str],
+        expected_revision: Optional[int] = None,
+    ) -> Dict[str, Any]:
+        """
+        Put a known set of nodes on a session's canvas by their ids.
+
+        Use this when you already know which nodes belong in the view — the ids
+        from an earlier ``search_graph`` / ``get_related_nodes`` / traversal —
+        instead of crafting a search whose results happen to be exactly that
+        set. It is additive: nodes already in the session stay, and ids already
+        present are not added twice (a call that adds nothing new leaves the
+        revision untouched).
+
+        Ids that do not resolve to a node you may add are skipped and returned
+        in ``skipped``, so a stale id cannot put a phantom reference in the
+        session. Only ids in **this server's own graph storage** are addable: a
+        ``search_graph`` result can also contain federated nodes, which live in a
+        remote graph, so an *unadopted* federated id is skipped. Once
+        ``adopt_federated_node`` has run, that same id names a local reference
+        and becomes addable. The nodes arrive with no position; arrange them with
+        ``apply_visualization_layout``, threading the ``revision`` returned here
+        into its ``expected_revision``.
+
+        An id already in the session is left exactly as it is — including when
+        it is currently hidden, which this tool does not undo. So a call can
+        legitimately report success with an empty ``added`` and still show
+        nothing new on the canvas.
+
+        A batch is capped at 500 ids, and each call also draws from a per-client
+        rate budget sized to the number of ids — so a batch well below the hard
+        cap can still return ``rate_limited``. Split large sets across
+        successive calls, threading the returned ``revision`` into the next
+        ``expected_revision``.
+
+        Args:
+            session_id: The session ID shown in the browser header (e.g. "8244-1742")
+            node_ids: Ids of the nodes to add.
+            expected_revision: If given, the write is rejected unless it equals
+                the session's current ``revision`` (optimistic concurrency).
+                Omit for last-write-wins.
+
+        Returns:
+            Dict with success, added (ids actually added, deduplicated), skipped
+            (ids that did not resolve, deduplicated), node_count (nodes the
+            session references, hidden ones included — the same total
+            ``get_visualization_session`` reports, not the visible count from
+            ``get_visualization_session_state``) and the new revision. On a
+            concurrency clash returns success=false with the current revision so
+            the caller can re-read and retry. Retryable errors:
+            revision_conflict, busy, rate_limited; change the request for
+            too_large or a validation error.
+        """
+        if session_manager is None:
+            return {"success": False, "error": "Session manager not available"}
+        if not is_valid_session_id(session_id):
+            return {
+                "success": False,
+                "error": "Invalid session ID format — expected DDDD-DDDD-DDDD-DDDD",
+            }
+        denied = _authorize_session(GRAPH_ACTION_MUTATE, "add_nodes_to_session")
+        if denied:
+            return denied
+        if not isinstance(node_ids, list) or not node_ids:
+            return {"success": False, "error": "'node_ids' must be a non-empty list"}
+        # Checked before the resolve below, which costs one node lookup per id:
+        # the write path enforces the same cap, but only after that work is
+        # already done.
+        if len(node_ids) > session_manager.max_ops_per_batch:
+            return {
+                "success": False,
+                "error": "too_large",
+                "message": "Too many nodes in one write; split into batches.",
+            }
+
+        # Resolve through the projection under the *mutate* decision, not a read
+        # one: a hook may narrow the two to different graph scopes, and this call
+        # writes the ids into server-owned session state. Filtering by what the
+        # caller may read would let a read-only-visible node be written in, the
+        # gap every sibling mutation closes by narrowing with its own decision.
+        # An id that no longer exists drops out here too. Same target as the gate
+        # above, so a target-aware hook is asked about this tool twice rather
+        # than about a helper it has never heard of.
+        resolved = service.resolve_session_node_semantics(
+            node_ids, action=GRAPH_ACTION_MUTATE, target="add_nodes_to_session"
+        )
+        if not resolved.get("success"):
+            return resolved
+        known = resolved.get("nodes") or {}
+        resolvable = [
+            node_id
+            for node_id in node_ids
+            if isinstance(node_id, str) and node_id in known
+        ]
+        # Anything not resolvable is skipped, including an id that is not a
+        # string at all — `known` is keyed by string id, so testing membership
+        # for an unhashable value would raise instead. Deduplicated in order for
+        # the same reason `added` is: a repeated id is one id, whichever list it
+        # ends up in. Non-strings are compared by equality, since an unhashable
+        # one cannot go in a set.
+        skipped: List[Any] = []
+        for node_id in node_ids:
+            if isinstance(node_id, str) and node_id in known:
+                continue
+            if node_id not in skipped:
+                skipped.append(node_id)
+        if not resolvable:
+            return {
+                "success": False,
+                "error": "no_resolvable_nodes",
+                "message": (
+                    "None of the given ids resolve to a node you may add. Only "
+                    "ids in this server's own graph storage are addable; an "
+                    "unadopted federated search result's ids are not — adopt "
+                    "the node first, or use its local id."
+                ),
+                "skipped": skipped,
+            }
+
+        try:
+            result = session_manager.add_node_refs(
+                session_id,
+                _MCP_SESSION_CLIENT_ID,
+                resolvable,
+                expected_revision=expected_revision,
+            )
+        except RevisionConflict as exc:
+            return {
+                "success": False,
+                "error": "revision_conflict",
+                "message": (
+                    "The session changed since you read it; re-read the session "
+                    "and retry with the current revision."
+                ),
+                "expected_revision": exc.expected,
+                "current_revision": exc.actual,
+            }
+        except LayoutBusy:
+            return {
+                "success": False,
+                "error": "busy",
+                "message": "Another change is being applied to this session; retry.",
+            }
+        except RateLimited:
+            return {
+                "success": False,
+                "error": "rate_limited",
+                "message": "Too many session writes; slow down and retry.",
+            }
+        except OpBatchTooLarge:
+            return {
+                "success": False,
+                "error": "too_large",
+                "message": "Too many nodes in one write; split into batches.",
+            }
+        except SessionNotFound:
+            return {
+                "success": False,
+                "error": (
+                    f"Session '{session_id}' not found. "
+                    "Call connect_to_visualization_session first to verify the session is open."
+                ),
+            }
+        except OpError as exc:
+            return {"success": False, "error": str(exc)}
+        return {
+            "success": True,
+            "session_id": session_id,
+            "added": result["added"],
+            "skipped": skipped,
+            "node_count": result["node_count"],
             "revision": result["revision"],
         }
 

@@ -8,6 +8,7 @@ and the federation manager as explicit parameters.
 from typing import TYPE_CHECKING, Any, Dict, List, Optional
 
 from backend.core import NodeType, RelationshipType
+from backend.core.storage_search import MATCH_MODE_SUBSTRING, validate_match_mode
 from backend.runtime.authorization import GRAPH_ACTION_READ
 
 from . import access
@@ -52,7 +53,13 @@ def search_graph(
     tags_none: Optional[List[str]] = None,
     metadata_filters: Optional[List[Dict[str, Any]]] = None,
     include_archived: bool = False,
+    semantic: bool = False,
+    match_mode: str = MATCH_MODE_SUBSTRING,
 ) -> Dict[str, Any]:
+    # Validated before anything else runs: the semantic path never reaches the
+    # lexical matcher, so an unsupported mode would otherwise pass unnoticed.
+    validate_match_mode(match_mode)
+
     decision = access.evaluate_graph_access(
         hook, action=GRAPH_ACTION_READ, target="search_graph"
     )
@@ -61,7 +68,9 @@ def search_graph(
             action=GRAPH_ACTION_READ, target="search_graph", decision=decision
         )
 
-    logger.info(f"SEARCH: query='{query}' types={node_types} limit={limit}")
+    logger.info(
+        f"SEARCH: query='{query}' types={node_types} limit={limit} semantic={semantic}"
+    )
 
     type_filters = None
     if node_types:
@@ -87,20 +96,60 @@ def search_graph(
     # tag/metadata filter is active, so post-fetch filtering sees the full
     # candidate set instead of dropping matches that fell outside a `limit`-sized
     # text window.
-    local_results = storage.search_nodes(
-        query=query,
-        node_types=type_filters,
-        limit=max(limit, storage.get_stats().total_nodes)
+    search_limit = (
+        max(limit, storage.get_stats().total_nodes)
         if decision.graph_access.enabled or has_generic_filters
-        else limit,
-        include_archived=include_archived,
+        else limit
     )
 
-    visible_local_results = [
-        node
-        for node in local_results
-        if access.is_node_visible(node, decision.graph_access) and _passes_filters(node)
-    ][:limit]
+    def _visible_local(candidates) -> List:
+        return [
+            node
+            for node in candidates
+            if access.is_node_visible(node, decision.graph_access)
+            and _passes_filters(node)
+        ][:limit]
+
+    def _semantic_candidates():
+        return storage.semantic_search_nodes(
+            query=query,
+            node_types=type_filters,
+            limit=search_limit,
+            include_archived=include_archived,
+        )
+
+    # A match-all query ("" or "*") has no text to rank by meaning, so semantic
+    # ranking is meaningless: fall through to the lexical match-all behaviour even
+    # when semantic is requested.
+    query_is_match_all = not query or query.strip() in ("", "*")
+
+    semantic_applied = False
+    if semantic and not query_is_match_all:
+        # Explicit opt-in: rank local results by embedding meaning.
+        visible_local_results = _visible_local(_semantic_candidates())
+        semantic_applied = True
+    else:
+        local_results = storage.search_nodes(
+            query=query,
+            node_types=type_filters,
+            limit=search_limit,
+            include_archived=include_archived,
+            match_mode=match_mode,
+        )
+        visible_local_results = _visible_local(local_results)
+
+        # Auto-fallback: a real (non match-all) query that the lexical text
+        # search could not match at all retries with semantic ranking. Gate on
+        # the raw lexical candidates, not the access/filter-narrowed set, so a
+        # query that *did* match locally but was then narrowed away by
+        # authorization or by tag/metadata filters is left to the federation path
+        # instead of being widened by meaning.
+        if not semantic and not local_results and not query_is_match_all:
+            fallback = _visible_local(_semantic_candidates())
+            if fallback:
+                visible_local_results = fallback
+                semantic_applied = True
+
     logger.info(f"SEARCH: Found {len(visible_local_results)} visible local results")
 
     result_node_ids = set(node.id for node in visible_local_results)
@@ -193,6 +242,8 @@ def search_graph(
         "edges": serialize_edges(deduped_edges),
         "total": len(visible_nodes),
         "query": query,
+        "semantic": semantic_applied,
+        "match_mode": match_mode,
         "filters": {
             "node_types": node_types,
             "tags_any": list(tags_any or []),

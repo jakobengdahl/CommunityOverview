@@ -1,7 +1,7 @@
 import { useState, useEffect, useRef, useCallback } from 'react';
 import { Search } from 'react-bootstrap-icons';
 import useGraphStore from '../store/graphStore';
-import { resolveIcon, COLOR_MAP } from './FloatingToolbar';
+import { resolveIcon, resolveColor } from './FloatingToolbar';
 import * as api from '../services/api';
 import './FloatingSearch.css';
 import { useI18n } from '../i18n';
@@ -301,7 +301,7 @@ function FloatingSearch() {
         <div className="floating-search-dropdown">
           {results.map((node, index) => {
             const Icon = resolveIcon(node.type, schema);
-            const color = COLOR_MAP[node.type] || '#9CA3AF';
+            const color = resolveColor(node.type, schema);
             const isInViz =
               vizNodes.some((n) => n.id === node.id) && !hiddenNodeIds.includes(node.id);
 

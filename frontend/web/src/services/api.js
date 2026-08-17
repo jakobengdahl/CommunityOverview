@@ -17,11 +17,27 @@ const API_BASE = getPathRoot() + '/api';
 // ============================================================
 
 /**
+ * Mint a random lowercase-hex token of `length` characters.
+ *
+ * Backed by crypto.getRandomValues, like generateVisualizationSessionId below.
+ * Math.random is seeded per page and its output is recoverable from earlier
+ * draws, so identifiers minted from it are guessable across clients; neither id
+ * built on this helper is treated as a capability today, but they are shared
+ * with collaborators, so they are minted unpredictably.
+ */
+function randomToken(length) {
+  const bytes = crypto.getRandomValues(new Uint8Array(Math.ceil(length / 2)));
+  return Array.from(bytes, (b) => b.toString(16).padStart(2, '0'))
+    .join('')
+    .slice(0, length);
+}
+
+/**
  * Generate a unique session ID for event tracking.
  * This helps with webhook loop prevention.
  */
 function generateSessionId() {
-  return 'session-' + Date.now().toString(36) + '-' + Math.random().toString(36).substr(2, 9);
+  return 'session-' + Date.now().toString(36) + '-' + randomToken(9);
 }
 
 // Session ID for this browser session (persisted in sessionStorage)
@@ -536,8 +552,22 @@ export async function getCollectConfig(shortName) {
  * @returns {string}
  */
 export function generateVisualizationSessionId() {
-  const buf = crypto.getRandomValues(new Uint16Array(4));
-  return Array.from(buf, (n) => String(n % 10000).padStart(4, '0')).join('-');
+  // Rejection sampling, not a bare `% 10000`: a Uint16 spans 65536 values, so
+  // folding the whole range would draw 0000-5535 six times per cycle and
+  // 5536-9999 only five, biasing every group. 0-59999 is an exact six-fold
+  // cover of the 10000 outcomes, so discarding the tail keeps each group
+  // uniform and the address space at its full ~10^16. This id is the
+  // capability that guards a shared session (design D7), so the bias is worth
+  // the extra draws.
+  const groups = [];
+  while (groups.length < 4) {
+    for (const n of crypto.getRandomValues(new Uint16Array(4))) {
+      if (n >= 60000) continue;
+      groups.push(String(n % 10000).padStart(4, '0'));
+      if (groups.length === 4) break;
+    }
+  }
+  return groups.join('-');
 }
 
 /**
@@ -583,7 +613,9 @@ export function getSessionStreamUrl(sessionId) {
 }
 
 // Stable per-browser client id for shared-session presence and op attribution
-// (design 3.4). Kept in localStorage so it survives reloads.
+// (design 3.4). Kept in localStorage so it survives reloads. 12 hex chars: the
+// server keys element claims and rate-limit buckets on this id, so two live
+// clients colliding would let one release the other's claims.
 const CLIENT_ID_KEY = 'graph_client_id';
 let _clientId = null;
 
@@ -595,7 +627,7 @@ export function getClientId() {
     _clientId = null;
   }
   if (!_clientId) {
-    _clientId = 'client-' + Math.random().toString(36).slice(2, 10);
+    _clientId = 'client-' + randomToken(12);
     try {
       window.localStorage.setItem(CLIENT_ID_KEY, _clientId);
     } catch {

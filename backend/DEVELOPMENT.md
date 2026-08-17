@@ -19,7 +19,8 @@ backend/
 └── api_host/            # FastAPI application server
 frontend/
 ├── web/                 # Full web application
-└── widget/              # Embeddable widget for ChatGPT etc.
+├── widget/              # Embeddable widget for ChatGPT etc.
+└── xr/                  # WebXR immersive client for Quest headsets (spike)
 packages/
 └── ui-graph-canvas/     # React component for graph visualization
 ```
@@ -136,7 +137,10 @@ pip install -r backend/requirements-ml.txt
 npm install
 ```
 
-This installs dependencies for all workspaces (ui-graph-canvas, web, widget).
+This installs dependencies for all workspaces (ui-graph-canvas, web, widget, xr).
+The `xr` spike is the heaviest of these by a wide margin — `three`,
+`@react-three/fiber` and the WebXR emulator bundled with `@react-three/xr` — and
+none of it is needed unless you are working on that workspace.
 
 ## Running the Server
 
@@ -324,7 +328,7 @@ kept separate so a failure points at the layer that broke:
 - **Backend tests** — `pytest backend/ -q` on the base (ML-free) requirements.
   Semantic search and chat use their mock/fallback paths, so no embedding model
   is downloaded in CI.
-- **Frontend tests** — `npm run test:unit` across the web, widget, and canvas
+- **Frontend tests** — `npm run test:unit` across the web, widget, canvas, and xr
   workspaces. Playwright e2e is intentionally excluded from the required path.
   Dependencies install with `npm ci` against the tracked root `package-lock.json`
   so the workspace tree is reproducible run-to-run (cached via `setup-node`).
@@ -409,6 +413,88 @@ to filter purely by tags/metadata. The applied filters are echoed back under
 `result["filters"]`. The REST endpoint and the `search_graph` MCP tool expose the
 same parameters.
 
+### Lexical match mode (`match_mode` on `/api/search` and `search_graph`)
+
+The lexical matcher requires the **whole query** in a node's searchable text, so
+a multi-word query returns nothing unless some node contains that phrase.
+`match_mode` makes the alternative explicit instead of forcing a caller to probe
+term by term:
+
+| Value | Meaning |
+|-------|---------|
+| `substring` (default) | The whole query must occur verbatim — unchanged behaviour. |
+| `any_term` | The query is split on whitespace into distinct terms; a node matches when it contains **any** of them. |
+
+Ranking stays tier-based in `any_term`: a node scores by its **single
+best-matching term**, so a name-tier hit still outranks any accumulation of
+secondary signals, and the number of matched *distinct* terms only breaks an
+exact scoring tie. Term scores are never summed across tiers, and a term the
+caller repeated is counted once, so repetition alone cannot reorder results. An
+unsupported value is rejected (`ValueError` in-process, `422` from
+`POST /api/search`; over `/execute_tool` it surfaces as the generic `500` that
+any invalid tool argument produces) rather than silently ignored.
+
+The requested mode is echoed back as `result["match_mode"]`, but it describes the
+mode that was **requested, not necessarily the matcher that produced the
+results** — see the paragraph on the semantic fallback below. Read
+`result["semantic"]` alongside it: that is the field that says which matcher ran
+locally. (Federated rows come from the federation manager's own substring
+matcher either way — see the boundary note below.)
+
+Each term is matched as a **substring, not a word**, and no term is filtered out:
+`"a pricing plan"` matches every node containing the letter `a` anywhere. Ranking
+still floats the real hits to the top, but `total` and the tail grow noisy, so
+callers should pass the distinctive terms rather than a whole natural-language
+sentence. (A word-boundary or minimum-length rule would change what a term means
+and is deliberately left out of the opt-in mode.)
+
+The mode applies to the local lexical search. It is ignored when `semantic=true`
+(that path does not use the lexical matcher). It is *superseded* — not ignored —
+by the automatic semantic fallback: the lexical attempt still runs in the
+requested mode, and the mode decides whether the fallback fires at all, since it
+only fires when that attempt matched nothing. A non-empty lexical result is never
+discarded. `match_mode` is still echoed in that case while `result["semantic"]`
+flips to true. Federated search stays substring-matched — the same boundary
+semantic ranking has.
+
+### Semantic search (`semantic` flag on `/api/search` and `search_graph`)
+
+The default `query` is matched **lexically** (case-insensitive substring over
+name, description, summary, tags, subtypes, aliases and type label). Multi-word or
+natural-language queries that no node contains verbatim therefore return nothing
+unless `match_mode="any_term"` (above) is used.
+
+| Parameter | Meaning |
+|-----------|---------|
+| `semantic` | When `true`, rank results by **embedding meaning** (cosine similarity) instead of lexical substring matching. Default `false`. |
+
+Semantic ranking reuses the same embedding path as `find_similar_nodes`: node
+embeddings are built from `name + summary + description + tags` on create/update,
+and the query text is embedded and compared with cosine similarity, keeping hits
+above a similarity threshold ordered by score. No new dependency is involved — in
+the ML-free base install the embedding model is unavailable, so the vector search
+degrades to returning nothing (and, for `semantic=true`, an empty result) rather
+than failing.
+
+Two behaviours make this safe and backward compatible:
+
+- **Opt-in ranking.** `semantic=false` (the default) is unchanged lexical search.
+- **Automatic fallback.** When a non-empty, non-`*` query produces **zero lexical
+  matches**, the search retries once with semantic ranking, so a conceptual query
+  still surfaces the closest nodes. The fallback is gated on the raw lexical
+  matches, not the access/filter-narrowed result, so a query that *did* match
+  locally but was then narrowed away by authorization or by tag/metadata filters
+  is left to the federation path rather than widened by meaning. It never changes
+  results when lexical already returned hits. A match-all query (`""` or `*`) has
+  no text to rank by meaning, so `semantic=true` falls through to the lexical
+  match-all behaviour.
+
+The response includes a top-level `"semantic"` boolean indicating whether semantic
+ranking (explicit or fallback) produced the returned nodes. Semantic ranking
+applies to the local graph; federated search remains lexical. Tag/metadata
+filters, `node_types`, archived exclusion and `limit` all still apply to semantic
+results.
+
 ### Archived lifecycle (`archived` flag on nodes and edges)
 
 Both nodes and edges carry a generic boolean `archived` field (default `false`).
@@ -461,6 +547,49 @@ Example (nodes tagged `partner`, excluding any tagged `archived`, whose
   "tags_any": ["partner"],
   "tags_none": ["archived"],
   "metadata_filters": [{"key": "stage", "values": ["active", "pilot"]}]
+}
+```
+
+### Updating a node — metadata merge and optimistic concurrency
+
+`update_node` (`PATCH /api/nodes/{id}` and the `update_node` MCP tool) accepts the
+mutable fields `name`, `description`, `summary`, `tags`, `subtypes`, `aliases`,
+`metadata`, plus any schema-defined extra fields (folded into `metadata`). Two
+opt-in parameters control how the write is applied; both default off, so existing
+callers are unaffected.
+
+**`metadata_merge` (bool, default `false`) — field-level merge/patch.** By default
+an explicit `metadata` object *replaces* the whole stored object, so a caller must
+resend every key or it is dropped. With `metadata_merge: true`, the supplied
+`metadata` is merged onto the existing metadata at the top level:
+
+- keys you send are set (nested objects are replaced wholesale, not merged
+  recursively — the merge is top-level only);
+- keys you do **not** send are preserved;
+- a key whose value is `null` is **removed** (RFC 7386 JSON-Merge-Patch
+  convention).
+
+This makes concurrent writebacks that each touch a different key safe — no caller
+clobbers another's metadata by omitting it.
+
+**`expected_updated_at` (string, optional) — optimistic concurrency guard.** Pass
+the `updated_at` value you last read for the node. If the node's live `updated_at`
+no longer matches (someone wrote to it since you read it), the update is rejected
+instead of silently overwriting the concurrent change:
+
+- REST returns **HTTP 409 Conflict**;
+- MCP / service returns `{"success": false, "conflict": true, "current_updated_at": "<iso>"}`.
+
+The `current_updated_at` in the conflict result is the live value, so a caller can
+re-read (or re-use it) and retry.
+
+Example — set one metadata key and remove another, only if the node is unchanged:
+
+```json
+{
+  "updates": {"metadata": {"stage": "pilot", "draft": null}},
+  "metadata_merge": true,
+  "expected_updated_at": "2026-08-13T09:15:04.123456+00:00"
 }
 ```
 
@@ -615,8 +744,9 @@ can configure one. See `docs/EVENT_SUBSCRIPTIONS.md`.
 | `archive_edges` / `unarchive_edges` | Hide/restore edges via the `archived` flag |
 | `get_graph_stats` | Get graph statistics |
 | `save_view` | Save a named view (creates SavedView node) |
-| `get_visualization_layout` | Read every node's model-space position in an open session (for an agent to compute a new arrangement) |
+| `get_visualization_layout` | Read every node's model-space position, type and status in an open session, plus the current selection (for an agent to compute a new arrangement) |
 | `apply_visualization_layout` | Move nodes in an open session by absolute positions or deltas; applied atomically, animated on the canvas, and mirrored live to all connected browsers |
+| `add_nodes_to_session` | Put a known set of nodes on a session's canvas by id (additive, skips ids the caller cannot read) |
 | `create_visualization_session` | Create a new empty session (optional non-unique name; server assigns a default when omitted) |
 | `list_visualization_sessions` | List existing sessions, most recently updated first |
 | `get_visualization_session` | Inspect one session's resource metadata (incl. node count) |
@@ -639,6 +769,63 @@ coordinate model, absolute vs. delta moves, atomic batching and caps, the
 animation seam and the `layout_applied` broadcast shape — are the versioned
 contract in
 [`docs/MCP_VISUALIZATION_LAYOUT_CONTRACT.md`](../docs/MCP_VISUALIZATION_LAYOUT_CONTRACT.md).
+Whether the connected canvas actually tweens the hint is a *deployment* fact, not
+something a write result can report, so it is published as the `animated_layout`
+capability in `get_capabilities` / `GET /api/capabilities`. A deployment whose
+canvas does not animate says so by declaring that id in its presentation config —
+`{"id": "animated_layout", "name": "Animated layout", "enabled": false}`. The
+`name` is required: a capability entry missing it fails validation for the entire
+schema config, which then falls back to defaults and reports the capability as
+enabled — the opposite of what was intended.
+
+`add_nodes_to_session` populates the same shared session directly: it takes the
+node ids and applies one `nodes_added` op, so a known set lands on the canvas
+without having to craft a search that returns exactly that set. It is additive
+and idempotent (ids already in the session are not re-added and leave the
+`revision` untouched), goes through the same authorization gate as the other
+session writes, and skips — reporting in `skipped` — any id that does not resolve
+to a node the caller may read, so a stale id never becomes a phantom session
+reference. Session state is server-owned, so connected browsers receive the
+broadcast op and hydrate the nodes; a browser that connects later picks them up
+from the session state. The returned `revision` threads straight into
+`apply_visualization_layout`'s `expected_revision`, making "create → populate →
+arrange" three deterministic calls.
+
+##### `get_visualization_layout` response
+
+| Field | Type | Notes |
+|---|---|---|
+| `session_id` | string | Echo of the requested id. |
+| `revision` | int | Monotonic op sequence; pass back as `expected_revision`. |
+| `node_count` | int | Number of nodes referenced by the session. |
+| `nodes[].id` | string | The session's node reference. |
+| `nodes[].x` / `nodes[].y` | number \| null | Model-space top-left; `null` when unset. |
+| `nodes[].hidden` | bool | Hidden in the session. The visible set is the nodes with `hidden` false. |
+| `nodes[].type` | string \| null | Graph node type, e.g. `"Initiative"`. `null` when the reference does not resolve to a node this caller may read. |
+| `nodes[].status` | string \| null | The node's `metadata["status"]` when the deployment stores one as a non-blank string, whitespace-trimmed; `null` otherwise. |
+| `selected_node_ids` | string[] | Currently selected **nodes**, same value as `get_visualization_session_state`. Selection claims are taken on elements, so edge claims are filtered out — every id here is one of this response's `nodes`. |
+| `assumed_node_size` | object | `{ width, height }` for collision spacing. |
+| `coordinate_space` | string | Restatement of the coordinate model. |
+| `connected_clients` | int | How many browsers are attached. |
+
+`type` and `status` exist so an agent can arrange by meaning — type columns,
+status swimlanes — instead of inferring meaning from id prefixes or issuing a
+`get_node_details` call per node. `status` is a **convention**, not a schema
+field: this repo's schema defines no `status`, so a deployment that does not use
+`metadata["status"]` gets `null`, which means *unknown*, not *no status*. Both
+fields respect graph-scope narrowing: a node the caller may not read keeps its
+geometry entry with `type`/`status` `null`, so a layout never silently drops a
+node it must still place. Per-node measured `width`/`height` remain unavailable —
+the browser does not upload rendered geometry and node boxes size to their
+content, so `assumed_node_size` is still the only sizing input.
+
+`selected_node_ids` is merged in so "what is here and where is it" is one call.
+The visible set is deliberately not duplicated here — it is already the `nodes`
+entries with `hidden` false. The selection comes from the advisory claim map,
+whose claims are on session *elements* (an edge can be claimed as well as a
+node), so both this tool and `get_visualization_session_state` narrow the field
+to the session's node references: an id read from it can always be passed back
+into a node argument such as `apply_visualization_layout`'s positions map.
 
 #### Arranging a session (agent recipes)
 
@@ -671,18 +858,29 @@ returned `revision` into the next `expected_revision`.
 - **Grid.** Place N nodes in a `cols`-wide grid:
   `x = (i % cols) * (width + gap)`, `y = (i // cols) * (height + gap)`.
 
-- **Swimlanes.** Give each lane (e.g. a node type or status) a fixed `y` band and
-  lay its members out along `x`: `y = lane_index * (height + lane_gap)`,
-  `x = position_in_lane * (width + gap)`. Lanes are pure geometry here — the
-  contract moves individual node positions and does not group them (§8).
+- **Swimlanes.** Give each lane a fixed `y` band and lay its members out along
+  `x`: `y = lane_index * (height + lane_gap)`,
+  `x = position_in_lane * (width + gap)`. Take the lane key from the same read —
+  `nodes[].type` or `nodes[].status` — rather than from the node id or a
+  `get_node_details` call per node; group the `null`s into an explicit "unknown"
+  lane rather than dropping them. Lanes are pure geometry here — the contract
+  moves individual node positions and does not group them (§8).
+
+  ```python
+  layout = get_visualization_layout(session_id=sid)
+  lanes = sorted({n["status"] or "unknown" for n in layout["nodes"]})
+  ```
 
 - **Create a named, shareable session from scratch** — never assume a hostname:
 
   ```python
   s = create_visualization_session(name="Q3 dependency map")
   sid = s["session"]["session_id"]
-  # add nodes via search_graph/get_related_nodes with visualization_session_id=sid,
-  # then arrange with apply_visualization_layout as above, then:
+  # put the exact node set on the canvas (or push results into it with
+  # search_graph/get_related_nodes and visualization_session_id=sid):
+  added = add_nodes_to_session(session_id=sid, node_ids=["init-a", "init-b"])
+  # then arrange with apply_visualization_layout as above, threading
+  # expected_revision=added["revision"], then:
   link = s["session"]["session_url"]   # server-owned canonical link, or null
   ```
 

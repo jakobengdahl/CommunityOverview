@@ -24,10 +24,11 @@ from typing import List, Optional, Dict, Any
 from fastapi import APIRouter, HTTPException, Query, Body, Request, Path
 from fastapi.encoders import jsonable_encoder
 from fastapi.responses import StreamingResponse
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator
 from pydantic import ValidationError as PydanticValidationError
 
 from backend.config.config_loader import RestInterfaceConfig, get_rest_interfaces
+from backend.core.storage_search import MATCH_MODE_SUBSTRING, validate_match_mode
 from backend.runtime.authorization import use_request_authorization
 
 from .service import GraphService
@@ -91,6 +92,29 @@ class SearchRequest(BaseModel):
         False,
         description="When false (default) archived nodes and edges are excluded",
     )
+    semantic: bool = Field(
+        False,
+        description=(
+            "When true, rank results by embedding meaning instead of lexical "
+            "substring matching. Lexical search still auto-falls back to semantic "
+            "ranking when it returns zero results."
+        ),
+    )
+    match_mode: str = Field(
+        MATCH_MODE_SUBSTRING,
+        description=(
+            "Lexical match mode: 'substring' (default) requires the whole query "
+            "verbatim; 'any_term' matches nodes containing any of the query's "
+            "distinct whitespace-separated terms, and a repeated term counts "
+            "once. Ignored when semantic is true."
+        ),
+    )
+
+    @field_validator("match_mode")
+    @classmethod
+    def _validate_match_mode(cls, value: str) -> str:
+        """Reject an unsupported mode as a 422 rather than a 500 from the core."""
+        return validate_match_mode(value)
 
 
 class RelatedNodesRequest(BaseModel):
@@ -148,6 +172,21 @@ class UpdateNodeRequest(BaseModel):
     """Request model for updating a node."""
 
     updates: Dict[str, Any] = Field(..., description="Fields to update")
+    metadata_merge: bool = Field(
+        False,
+        description=(
+            "When True, merge the `metadata` object field-by-field onto the "
+            "node's existing metadata (a null value removes a key) instead of "
+            "replacing the whole object. Default False keeps replace semantics."
+        ),
+    )
+    expected_updated_at: Optional[str] = Field(
+        None,
+        description=(
+            "Optimistic-concurrency guard: the `updated_at` the caller last read. "
+            "The update is rejected with 409 if the node changed since then."
+        ),
+    )
     # Event context (optional, for webhooks/loop prevention)
     event_origin: Optional[str] = Field(
         None, description="Source of mutation (web-ui, mcp, system, agent:<id>)"
@@ -358,6 +397,8 @@ def _register_search_endpoints(router: APIRouter, service: GraphService) -> None
                 tags_none=request.tags_none,
                 metadata_filters=request.metadata_filters,
                 include_archived=request.include_archived,
+                semantic=request.semantic,
+                match_mode=request.match_mode,
             )
         _raise_for_access_denied(result)
         return result
@@ -469,8 +510,12 @@ def _register_node_crud_endpoints(router: APIRouter, service: GraphService) -> N
                 event_origin=request.event_origin,
                 event_session_id=request.event_session_id,
                 event_correlation_id=request.event_correlation_id,
+                metadata_merge=request.metadata_merge,
+                expected_updated_at=request.expected_updated_at,
             )
         _raise_for_access_denied(result)
+        if result.get("conflict"):
+            raise HTTPException(status_code=409, detail=result.get("error"))
         if not result.get("success", True):
             raise HTTPException(status_code=404, detail=result.get("error"))
         return result

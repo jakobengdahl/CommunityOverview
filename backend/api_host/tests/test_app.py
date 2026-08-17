@@ -34,6 +34,13 @@ class TestHealthAndRoot:
         assert response.status_code == 302
         assert response.headers["location"] == "/web/"
 
+    def test_root_redirect_preserves_session_query(self, test_app: TestClient):
+        """A ?session= deep link must survive the root redirect so the SPA
+        joins the linked session instead of minting its own."""
+        response = test_app.get("/?session=1234-5678-9012-3456", follow_redirects=False)
+        assert response.status_code == 302
+        assert response.headers["location"] == "/web/?session=1234-5678-9012-3456"
+
     def test_info_endpoint(self, test_app: TestClient):
         """Info endpoint returns API information."""
         response = test_app.get("/info")
@@ -47,9 +54,11 @@ class TestHealthAndRoot:
         assert data["endpoints"]["ready"] == "/ready"
         assert data["endpoints"]["startup_diagnostics"] == "/diagnostics/startup"
         assert data["operability"]["startup_status"] == "ready"
+        # Nothing declared in config; the manifest still carries the server's
+        # own animated_layout capability.
         assert data["operability"]["capabilities"] == {
-            "configured": 0,
-            "enabled": 0,
+            "configured": 1,
+            "enabled": 1,
             "disabled": 0,
         }
         # llm_available is always present
@@ -164,9 +173,11 @@ class TestHealthAndRoot:
                 "source": "default",
             },
         }
+        # Nothing declared in config; the manifest still carries the server's
+        # own animated_layout capability.
         assert data["capabilities"] == {
-            "configured": 0,
-            "enabled": 0,
+            "configured": 1,
+            "enabled": 1,
             "disabled": 0,
         }
         assert "/root/" not in response.text
@@ -552,22 +563,21 @@ class TestStatisticsEndpoints:
         response = test_app.get("/api/capabilities")
         assert response.status_code == 200
         data = response.json()
-        assert data == {
-            "capabilities": [
-                {
-                    "id": "graph_export",
-                    "name": "Graph export",
-                    "description": "Allows clients to export graph data for offline analysis.",
-                    "enabled": True,
-                },
-                {
-                    "id": "assistant_guidance",
-                    "name": "Assistant guidance",
-                    "description": "Provides configuration for guided assistant interactions.",
-                    "enabled": False,
-                },
-            ]
-        }
+        assert data["capabilities"][:2] == [
+            {
+                "id": "graph_export",
+                "name": "Graph export",
+                "description": "Allows clients to export graph data for offline analysis.",
+                "enabled": True,
+            },
+            {
+                "id": "assistant_guidance",
+                "name": "Assistant guidance",
+                "description": "Provides configuration for guided assistant interactions.",
+                "enabled": False,
+            },
+        ]
+        assert [c["id"] for c in data["capabilities"][2:]] == ["animated_layout"]
 
     def test_get_runtime_info(self, test_app: TestClient):
         """Get runtime metadata via REST."""

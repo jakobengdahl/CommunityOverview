@@ -29,6 +29,7 @@ ENV
 # Frontend build output (rebuilt in container)
 frontend/web/dist
 frontend/widget/dist
+frontend/xr/dist
 *.egg-info
 dist
 build

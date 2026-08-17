@@ -1,7 +1,9 @@
 .floating-header {
   position: fixed;
   top: 16px;
+  top: calc(16px + env(safe-area-inset-top));
   left: 16px;
+  left: calc(16px + env(safe-area-inset-left));
   z-index: 100;
   transition: left 0.2s ease-out;
 }

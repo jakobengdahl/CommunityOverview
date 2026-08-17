@@ -16,6 +16,7 @@ from backend.agents.governance import (
     ProposalStatus,
     SqliteProposalStore,
     coerce_autonomy,
+    filter_tool_definitions,
 )
 from backend.agents.worker import AgentWorker, EventItem
 
@@ -182,6 +183,61 @@ class TestGate:
         assert proposals[0].run_id == "run-1"
 
 
+# -- definition pre-filter --------------------------------------------------
+
+
+class TestFilterToolDefinitions:
+    """The LLM-facing pre-filter must mirror the gate's static rejections."""
+
+    def _defs(self):
+        return [
+            {"name": "graph.search_graph", "description": "read"},
+            {"name": "graph.get_node_details", "description": "read"},
+            {"name": "graph.add_nodes", "description": "mutate"},
+            {"name": "graph.update_node", "description": "mutate"},
+        ]
+
+    def _names(self, defs):
+        return {d["name"] for d in defs}
+
+    def test_read_only_level_drops_mutating_definitions(self):
+        out = filter_tool_definitions(
+            self._defs(),
+            autonomy_level=AutonomyLevel.OBSERVE,
+            tool_allowlist=None,
+            mcp_loader=FakeLoader(),
+        )
+        assert self._names(out) == {"graph.search_graph", "graph.get_node_details"}
+
+    def test_allowlist_drops_unlisted_definitions(self):
+        out = filter_tool_definitions(
+            self._defs(),
+            autonomy_level=AutonomyLevel.ACT_AFTER_APPROVAL,
+            tool_allowlist=["graph.search_graph", "graph.add_nodes"],
+            mcp_loader=FakeLoader(),
+        )
+        assert self._names(out) == {"graph.search_graph", "graph.add_nodes"}
+
+    def test_writable_level_keeps_mutating_definitions(self):
+        out = filter_tool_definitions(
+            self._defs(),
+            autonomy_level=AutonomyLevel.ACT_AFTER_APPROVAL,
+            tool_allowlist=None,
+            mcp_loader=FakeLoader(),
+        )
+        assert self._names(out) == self._names(self._defs())
+
+    def test_allowlist_and_read_only_compose(self):
+        # Allowlist keeps add_nodes, but the read-only level still drops it.
+        out = filter_tool_definitions(
+            self._defs(),
+            autonomy_level=AutonomyLevel.ASSIST,
+            tool_allowlist=["graph.search_graph", "graph.add_nodes"],
+            mcp_loader=FakeLoader(),
+        )
+        assert self._names(out) == {"graph.search_graph"}
+
+
 # -- manager (approve / reject / apply) -------------------------------------
 
 
@@ -316,3 +372,87 @@ class TestWorkerAppliesGate:
         assert captured["result"]["status"] == "proposed"
         raw.assert_not_called()  # the mutation was gated, never executed
         assert len(store.list_proposals(agent_id="agent-001")) == 1
+
+
+class TestWorkerPreFiltersDefinitions:
+    """The definitions handed to the LLM exclude tools the gate would reject,
+    while the gate remains the authoritative enforcement at execution time."""
+
+    ALL_DEFS = [
+        {"name": "graph.search_graph", "description": "read"},
+        {"name": "graph.get_node_details", "description": "read"},
+        {"name": "graph.add_nodes", "description": "mutate"},
+        {"name": "graph.delete_nodes", "description": "mutate"},
+    ]
+
+    def _worker(self, store, autonomy, allowlist=None):
+        config = AgentConfig(
+            agent_id="agent-001",
+            name="Test Agent",
+            enabled=True,
+            prompts=AgentPrompts(task_prompt="Do things."),
+            mcp_integration_ids=[],
+            autonomy_level=autonomy,
+            tool_allowlist=allowlist,
+        )
+        loader = MagicMock()
+        loader.get_tool_definitions.return_value = [dict(d) for d in self.ALL_DEFS]
+        # is_mutating_tool consults get_tool().original_name.
+        loader.get_tool.side_effect = lambda name: SimpleNamespace(
+            original_name=name.split(".")[-1]
+        )
+        raw = MagicMock(return_value={"added_node_ids": ["n1"]})
+        loader.create_tool_executor.return_value = raw
+        worker = AgentWorker(
+            config=config,
+            settings=AgentsSettings(enabled=True, openai_api_key="k"),
+            mcp_loader=loader,
+            graph_service=MagicMock(),
+            proposal_store=store,
+        )
+        worker._cached_skills = []
+        worker._llm_client = MagicMock()
+        return worker, raw
+
+    def _run_and_capture(self, worker):
+        captured = {}
+
+        def fake_execute(**kwargs):
+            captured["tools"] = kwargs["tools"]
+            captured["executor"] = kwargs["tool_executor"]
+            return {"success": True, "final_response": "ok", "trace": [], "turns": 1}
+
+        worker._llm_client.execute_with_tools.side_effect = fake_execute
+        worker._process_event(EventItem(event_id="evt-1", payload=_payload()))
+        return captured
+
+    def test_read_only_agent_is_not_shown_mutating_tools(self):
+        store = InMemoryProposalStore()
+        worker, raw = self._worker(store, "observe")
+        captured = self._run_and_capture(worker)
+
+        shown = {d["name"] for d in captured["tools"]}
+        assert shown == {"graph.search_graph", "graph.get_node_details"}
+
+        # Enforcement still blocks a mutating call at execution time even though
+        # it was filtered from the definitions — the gate is authoritative.
+        result = captured["executor"]("graph.add_nodes", {"nodes": [1]})
+        assert "error" in result
+        raw.assert_not_called()
+        assert store.list_proposals() == []
+
+    def test_allowlist_restricted_agent_is_not_shown_unlisted_tools(self):
+        store = InMemoryProposalStore()
+        worker, raw = self._worker(
+            store, "act_after_approval", allowlist=["graph.search_graph"]
+        )
+        captured = self._run_and_capture(worker)
+
+        shown = {d["name"] for d in captured["tools"]}
+        assert shown == {"graph.search_graph"}
+
+        # A disallowed tool is still blocked by the gate if the LLM attempts it.
+        result = captured["executor"]("graph.add_nodes", {"nodes": [1]})
+        assert "error" in result
+        raw.assert_not_called()
+        assert store.list_proposals() == []
