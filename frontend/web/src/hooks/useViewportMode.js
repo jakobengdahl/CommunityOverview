@@ -37,9 +37,7 @@ function useMediaQuery(query) {
 export function useViewportMode() {
   const isMobile = useMediaQuery(MOBILE_QUERY);
   const isCoarsePointer = useMediaQuery(COARSE_POINTER_QUERY);
-  const [width, setWidth] = useState(() =>
-    typeof window !== 'undefined' ? window.innerWidth : 0
-  );
+  const [width, setWidth] = useState(() => (typeof window !== 'undefined' ? window.innerWidth : 0));
 
   useEffect(() => {
     if (typeof window === 'undefined') return undefined;
