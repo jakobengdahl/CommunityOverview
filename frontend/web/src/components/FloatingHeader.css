@@ -1,7 +1,9 @@
 .floating-header {
   position: fixed;
   top: 16px;
+  top: calc(16px + env(safe-area-inset-top));
   left: 16px;
+  left: calc(16px + env(safe-area-inset-left));
   z-index: 100;
   transition: left 0.2s ease-out;
 }
@@ -10,6 +12,7 @@
    original 16px offset relative to the drawer's right edge. */
 .app.session-drawer-open .floating-header {
   left: calc(var(--session-drawer-width, 280px) + 16px);
+  left: calc(var(--session-drawer-width, 280px) + 16px + env(safe-area-inset-left));
 }
 
 .floating-header-app-icon {

@@ -4,10 +4,15 @@
 .chat-panel-floating {
   position: fixed;
   right: 16px;
+  right: calc(16px + env(safe-area-inset-right));
   top: 80px;
   width: 380px;
   height: calc(100vh - 280px);
+  height: calc(100dvh - 280px);
+  height: calc(100dvh - 280px - env(safe-area-inset-bottom));
   max-height: calc(100vh - 280px);
+  max-height: calc(100dvh - 280px);
+  max-height: calc(100dvh - 280px - env(safe-area-inset-bottom));
   min-height: 300px;
   z-index: 100;
   background: rgba(26, 26, 26, 0.95);
@@ -24,7 +29,11 @@
 /* When minimap is hidden the panel can extend further toward the bottom */
 .chat-panel-floating.minimap-hidden {
   height: calc(100vh - 96px);
+  height: calc(100dvh - 96px);
+  height: calc(100dvh - 96px - env(safe-area-inset-bottom));
   max-height: calc(100vh - 96px);
+  max-height: calc(100dvh - 96px);
+  max-height: calc(100dvh - 96px - env(safe-area-inset-bottom));
 }
 
 @keyframes chatPanelOpen {
@@ -44,6 +53,7 @@
 .chat-panel-minimized {
   position: fixed;
   right: 16px;
+  right: calc(16px + env(safe-area-inset-right));
   top: 80px;
   width: 40px;
   z-index: 100;

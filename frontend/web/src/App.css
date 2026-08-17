@@ -2,6 +2,7 @@
   position: relative;
   width: 100vw;
   height: 100vh;
+  height: 100dvh;
   overflow: hidden;
   --session-drawer-width: 280px;
 }
@@ -18,6 +19,7 @@
 .app-notification {
   position: fixed;
   bottom: 20px;
+  bottom: calc(20px + env(safe-area-inset-bottom));
   left: 50%;
   transform: translateX(-50%);
   background: #2a2a2a;

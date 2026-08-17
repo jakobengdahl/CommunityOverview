@@ -1,7 +1,9 @@
 .floating-toolbar {
   position: fixed;
   left: 16px;
+  left: calc(16px + env(safe-area-inset-left));
   top: 80px;
+  top: calc(80px + env(safe-area-inset-top));
   z-index: 100;
   transition: left 0.2s ease-out;
   display: grid;
@@ -15,6 +17,8 @@
   border-radius: 10px;
   box-shadow: 0 4px 20px rgba(0, 0, 0, 0.4);
   max-height: calc(100vh - 100px);
+  max-height: calc(100dvh - 100px);
+  max-height: calc(100dvh - 100px - env(safe-area-inset-bottom));
   overflow-y: auto;
   scrollbar-width: thin;
   scrollbar-color: #555 transparent;
@@ -24,6 +28,7 @@
    16px distance from the drawer's edge as it had from the screen edge. */
 .app.session-drawer-open .floating-toolbar {
   left: calc(var(--session-drawer-width, 280px) + 16px);
+  left: calc(var(--session-drawer-width, 280px) + 16px + env(safe-area-inset-left));
 }
 
 .floating-toolbar::-webkit-scrollbar {
