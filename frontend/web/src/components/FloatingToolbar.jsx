@@ -74,6 +74,9 @@ import {
   BinocularsFill,
   EyeFill,
   Translate,
+  PersonLinesFill,
+  ListNested,
+  TagFill,
 } from 'react-bootstrap-icons';
 import useGraphStore from '../store/graphStore';
 import { useI18n } from '../i18n';
@@ -156,6 +159,9 @@ const ICON_REGISTRY = Object.assign(Object.create(null), {
   BinocularsFill,
   EyeFill,
   Translate,
+  PersonLinesFill,
+  ListNested,
+  TagFill,
 });
 
 // Legacy fallback: maps node type name -> icon name (used when schema has no icon field)
