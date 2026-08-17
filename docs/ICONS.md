@@ -44,6 +44,7 @@ Icons library and guess whether a name made it into the build.
 | `BuildingFill` | 🏢 | Institutions, single organizations |
 | `BuildingsFill` | 🏬 | Multiple organizations, federations |
 | `Bank` | 🏦 | Financial institutions, regulators |
+| `PersonLinesFill` | 🧾 | Populations, defined sets of units |
 
 ## Geography & International
 
@@ -67,6 +68,7 @@ Icons library and guess whether a name made it into the build.
 | `Sliders` | 🎚️ | Variables, measurements |
 | `ListOl` | 📝 | Value sets, ordered code lists |
 | `ListCheck` | ✅ | Checklists, code lists |
+| `ListNested` | 🌳 | Hierarchical classifications |
 
 ## Documents & Data
 
@@ -136,6 +138,7 @@ Icons library and guess whether a name made it into the build.
 | Icon Name | Visual | Suggested For |
 |-----------|--------|----------------|
 | `TagsFill` | 🏷️ | Themes, categories |
+| `TagFill` | 🏷️ | A single code or category item |
 | `CalendarEventFill` | 📅 | Events, milestones |
 | `Diagram2Fill` | 🔗 | Two-way relationships, mappings |
 | `Diagram3Fill` | 🔀 | Classifications, taxonomies |
