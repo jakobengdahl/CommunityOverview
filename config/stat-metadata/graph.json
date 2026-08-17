@@ -1181,7 +1181,7 @@
     },
     {
       "id": "a57c5e9e-96de-48c4-8839-137c50ec389c",
-      "type": "InstanceVariable",
+      "type": "Variable",
       "name": "region",
       "description": "Geographical region used for breakdown of labour market statistics. Coded variable using a regional classification (e.g. NUTS regions for Sweden). Acts as an identifier dimension in the LFS aggregate table structure.",
       "summary": "Geographical region; identifier dimension in LFS tables; coded using regional classification",
@@ -1194,7 +1194,8 @@
         "geography"
       ],
       "subtypes": [
-        "Identifier"
+        "Identifier",
+        "InstanceVariable"
       ],
       "metadata": {
         "dataType": "coded",
@@ -1206,7 +1207,7 @@
     },
     {
       "id": "8a718710-93c3-4162-9b6a-d0950c9d8734",
-      "type": "InstanceVariable",
+      "type": "Variable",
       "name": "sex",
       "description": "Sex of the person, used as a demographic breakdown in LFS aggregate tables. Coded variable with values for men and women. Acts as an identifier dimension in the LFS aggregate table structure.",
       "summary": "Sex; demographic identifier dimension in LFS tables; coded (men/women)",
@@ -1218,7 +1219,8 @@
         "demographic"
       ],
       "subtypes": [
-        "Identifier"
+        "Identifier",
+        "InstanceVariable"
       ],
       "metadata": {
         "dataType": "coded",
@@ -1230,7 +1232,7 @@
     },
     {
       "id": "7c407205-5fc4-49b9-b9f5-48e766097094",
-      "type": "InstanceVariable",
+      "type": "Variable",
       "name": "age_group",
       "description": "Age group used for presentation of labour market statistics. Persons are grouped into age bands (e.g. 15–24, 25–54, 55–74 years) for LFS aggregate tables. Acts as an identifier dimension.",
       "summary": "Age group; identifier dimension in LFS tables; coded age bands (15–24, 25–54, 55–74)",
@@ -1243,7 +1245,8 @@
         "demographic"
       ],
       "subtypes": [
-        "Identifier"
+        "Identifier",
+        "InstanceVariable"
       ],
       "metadata": {
         "dataType": "coded",
@@ -1255,7 +1258,7 @@
     },
     {
       "id": "80cc6cec-477c-4854-874e-e4f014040551",
-      "type": "InstanceVariable",
+      "type": "Variable",
       "name": "labour_status",
       "description": "Classification of persons by labour market status: employed, unemployed, or not in the labour force. Coded variable following ILO definitions as adapted for the EU-LFS framework. Acts as a key identifier dimension in the LFS aggregate table structure.",
       "summary": "Labour market status; key identifier dimension; coded (employed / unemployed / not in labour force)",
@@ -1269,7 +1272,8 @@
         "unemployment"
       ],
       "subtypes": [
-        "Identifier"
+        "Identifier",
+        "InstanceVariable"
       ],
       "metadata": {
         "dataType": "coded",
@@ -1281,7 +1285,7 @@
     },
     {
       "id": "1c1c5303-9dc0-4f5e-adff-a3308b1c1d4c",
-      "type": "InstanceVariable",
+      "type": "Variable",
       "name": "time_period",
       "description": "Reference month or year for the observation. For the monthly dataset this is the calendar month; for the annual dataset this is the reference year. Acts as an identifier dimension providing the time axis in the LFS aggregate table structure.",
       "summary": "Time period; identifier dimension; reference month or year for the LFS observation",
@@ -1294,7 +1298,8 @@
         "year"
       ],
       "subtypes": [
-        "Identifier"
+        "Identifier",
+        "InstanceVariable"
       ],
       "metadata": {
         "dataType": "time",
@@ -1306,7 +1311,7 @@
     },
     {
       "id": "f63be071-1ba7-48bb-b14d-2e7122e1124c",
-      "type": "InstanceVariable",
+      "type": "Variable",
       "name": "population_count",
       "description": "Estimated number of persons in the specified labour market status and demographic/regional breakdown. This is the single measure variable in the LFS aggregate table structure. Expressed in persons (thousands in published tables).",
       "summary": "Number of persons; measure variable in LFS tables; estimated population count in the specified breakdown",
@@ -1319,7 +1324,8 @@
         "estimate"
       ],
       "subtypes": [
-        "Measure"
+        "Measure",
+        "InstanceVariable"
       ],
       "metadata": {
         "dataType": "integer",
@@ -1762,7 +1768,7 @@
     },
     {
       "id": "25297259-35b3-4feb-a956-df8e54d5d110",
-      "type": "InstanceVariable",
+      "type": "Variable",
       "name": "political_party",
       "description": "Political party used as a reporting category in the Party Preference Survey. Coded variable referencing the Swedish parliamentary parties. Acts as a key identifier dimension in both PSU table structures.",
       "summary": "Political party; key identifier dimension in PSU tables; coded using Swedish parliamentary party list",
@@ -1774,7 +1780,8 @@
         "democracy"
       ],
       "subtypes": [
-        "Identifier"
+        "Identifier",
+        "InstanceVariable"
       ],
       "metadata": {
         "dataType": "coded",
@@ -1786,7 +1793,7 @@
     },
     {
       "id": "4cf19c0b-794c-4b21-8018-f6a628ee9117",
-      "type": "InstanceVariable",
+      "type": "Variable",
       "name": "survey_wave",
       "description": "Survey wave or measurement occasion, for example May 2025. Identifies the specific data collection round in the twice-yearly Party Preference Survey. Acts as an identifier dimension providing the time axis in PSU tables.",
       "summary": "Survey wave; identifier dimension in PSU tables; identifies the measurement occasion (e.g. May 2025)",
@@ -1798,7 +1805,8 @@
         "occasion"
       ],
       "subtypes": [
-        "Identifier"
+        "Identifier",
+        "InstanceVariable"
       ],
       "metadata": {
         "dataType": "string",
@@ -1810,7 +1818,7 @@
     },
     {
       "id": "0c4451f3-76a1-45de-bfdb-0be13caad556",
-      "type": "InstanceVariable",
+      "type": "Variable",
       "name": "vote_share_percent",
       "description": "Estimated percentage of votes for a political party if a parliamentary election were held today. This is a measure variable in the election-today estimate table structure. Based on survey responses weighted for non-response and representativeness.",
       "summary": "Vote share; measure variable; estimated % of votes for a party if election held today",
@@ -1822,7 +1830,8 @@
         "election"
       ],
       "subtypes": [
-        "Measure"
+        "Measure",
+        "InstanceVariable"
       ],
       "metadata": {
         "dataType": "decimal",
@@ -1835,7 +1844,7 @@
     },
     {
       "id": "c8a80a05-bab4-4c0a-ba6d-a189b44fcadc",
-      "type": "InstanceVariable",
+      "type": "Variable",
       "name": "preference_share_percent",
       "description": "Estimated percentage of the electorate preferring a given political party, regardless of whether the person would vote. Measure variable in the party preference by demographic group table structure.",
       "summary": "Party preference share; measure variable; estimated % of electorate preferring a given party",
@@ -1847,7 +1856,8 @@
         "party-preference"
       ],
       "subtypes": [
-        "Measure"
+        "Measure",
+        "InstanceVariable"
       ],
       "metadata": {
         "dataType": "decimal",
@@ -1860,7 +1870,7 @@
     },
     {
       "id": "cdb28b56-ba8c-4e68-ba1d-3f154a368b0b",
-      "type": "InstanceVariable",
+      "type": "Variable",
       "name": "margin_of_error",
       "description": "Uncertainty margin for the survey estimate, expressed in percentage points. Measure variable present in both PSU table structures. Reflects the sampling error associated with the estimate.",
       "summary": "Margin of error; measure variable; sampling uncertainty in percentage points for PSU estimates",
@@ -1872,7 +1882,8 @@
         "sampling"
       ],
       "subtypes": [
-        "Measure"
+        "Measure",
+        "InstanceVariable"
       ],
       "metadata": {
         "dataType": "decimal",
@@ -1885,7 +1896,7 @@
     },
     {
       "id": "407cd69d-7c8c-40be-8ad6-9ae7951f05bd",
-      "type": "InstanceVariable",
+      "type": "Variable",
       "name": "sex (PSU)",
       "description": "Sex of the person, used as a demographic breakdown in PSU party preference tables. Coded variable; PSU-specific instance of the sex concept, sharing the same concept and code list as the LFS sex variable.",
       "summary": "Sex; demographic identifier dimension in PSU preference tables; coded (men/women)",
@@ -1897,7 +1908,8 @@
         "demographic"
       ],
       "subtypes": [
-        "Identifier"
+        "Identifier",
+        "InstanceVariable"
       ],
       "metadata": {
         "dataType": "coded",
@@ -1909,7 +1921,7 @@
     },
     {
       "id": "a820e301-2091-41ea-bf24-5479b5d99ed8",
-      "type": "InstanceVariable",
+      "type": "Variable",
       "name": "age_group (PSU)",
       "description": "Age group used for presentation of political party preferences in PSU breakdowns. Coded variable; PSU-specific instance of the age concept, sharing the same concept and code list as the LFS age group variable.",
       "summary": "Age group; identifier dimension in PSU preference tables; coded age bands",
@@ -1921,7 +1933,8 @@
         "demographic"
       ],
       "subtypes": [
-        "Identifier"
+        "Identifier",
+        "InstanceVariable"
       ],
       "metadata": {
         "dataType": "coded",
@@ -1933,7 +1946,7 @@
     },
     {
       "id": "c4a89f94-68d2-40ba-8cc6-ec8e7f311d28",
-      "type": "InstanceVariable",
+      "type": "Variable",
       "name": "region (PSU)",
       "description": "Geographical region used for breakdown of political party preferences in PSU demographic tables. Coded variable; PSU-specific instance of the region concept, sharing the same concept and code list as the LFS region variable.",
       "summary": "Region; identifier dimension in PSU preference tables; coded using Swedish regional classification",
@@ -1946,7 +1959,8 @@
         "nuts"
       ],
       "subtypes": [
-        "Identifier"
+        "Identifier",
+        "InstanceVariable"
       ],
       "metadata": {
         "dataType": "coded",
@@ -2426,7 +2440,7 @@
     },
     {
       "id": "d26ea773-50c2-4eda-a2e0-eceed76550ae",
-      "type": "InstanceVariable",
+      "type": "Variable",
       "name": "region (Pop)",
       "description": "Geographical region used for breakdown in Population Statistics. Coded variable covering Sweden from national level down to municipality (kommun) level. Acts as an identifier dimension across all population datasets. Population statistics use a finer regional granularity than LFS, extending to individual municipalities.",
       "summary": "Region; identifier dimension in population tables; coded from national to municipality level",
@@ -2440,7 +2454,8 @@
         "geography"
       ],
       "subtypes": [
-        "Identifier"
+        "Identifier",
+        "InstanceVariable"
       ],
       "metadata": {
         "dataType": "coded",
@@ -2452,7 +2467,7 @@
     },
     {
       "id": "bdf04241-54a4-4ed8-a348-c81a9128fe98",
-      "type": "InstanceVariable",
+      "type": "Variable",
       "name": "sex (Pop)",
       "description": "Sex of the person, used as a demographic breakdown in population statistics tables. Coded variable; population-specific instance of the sex concept, sharing the same concept and code list as the LFS and PSU sex variables.",
       "summary": "Sex; demographic identifier dimension in population tables; coded (men/women)",
@@ -2464,7 +2479,8 @@
         "demographic"
       ],
       "subtypes": [
-        "Identifier"
+        "Identifier",
+        "InstanceVariable"
       ],
       "metadata": {
         "dataType": "coded",
@@ -2476,7 +2492,7 @@
     },
     {
       "id": "ae2762ac-1c0c-419d-a306-513c7e43808e",
-      "type": "InstanceVariable",
+      "type": "Variable",
       "name": "age_group (Pop)",
       "description": "Age group used for presentation of population data. Coded variable; population-specific instance of the age concept. In population stock tables, single-year ages are available; aggregated tables use standard age bands. Shares the age concept and demo code list with LFS and PSU.",
       "summary": "Age group; identifier dimension in population tables; coded age bands",
@@ -2488,7 +2504,8 @@
         "demographic"
       ],
       "subtypes": [
-        "Identifier"
+        "Identifier",
+        "InstanceVariable"
       ],
       "metadata": {
         "dataType": "coded",
@@ -2500,7 +2517,7 @@
     },
     {
       "id": "b228f924-d106-4e2f-8ace-093b32375a1b",
-      "type": "InstanceVariable",
+      "type": "Variable",
       "name": "time_period (Pop)",
       "description": "Reference year or quarter for the population observation. Acts as the time axis identifier dimension in all population statistics tables.",
       "summary": "Time period; identifier dimension in population tables; reference year or quarter",
@@ -2513,7 +2530,8 @@
         "quarter"
       ],
       "subtypes": [
-        "Identifier"
+        "Identifier",
+        "InstanceVariable"
       ],
       "metadata": {
         "dataType": "time",
@@ -2525,7 +2543,7 @@
     },
     {
       "id": "d216a792-cf24-4396-9bad-097e31e4467d",
-      "type": "InstanceVariable",
+      "type": "Variable",
       "name": "population_count (Pop)",
       "description": "Number of persons registered in Sweden with a given combination of demographic characteristics at the reference date. Measure variable in the population stock table. Register-based count without sampling error; shares the Population count concept with the LFS programme where it is a survey-based estimate, enabling cross-programme comparison of measurement methods.",
       "summary": "Population count; measure variable in population stock table; register-based headcount sharing the Population count concept with LFS",
@@ -2537,7 +2555,8 @@
         "register"
       ],
       "subtypes": [
-        "Measure"
+        "Measure",
+        "InstanceVariable"
       ],
       "metadata": {
         "dataType": "integer",
@@ -2550,7 +2569,7 @@
     },
     {
       "id": "6f84c074-b6c1-474a-b623-ba6ca0f33070",
-      "type": "InstanceVariable",
+      "type": "Variable",
       "name": "civil_status",
       "description": "Civil or marital status of a person at the reference date. Coded variable used as an identifier dimension in the population stock table. Standard categories are: unmarried, married, divorced and widowed. In Sweden, registered partnership (sambo) is tracked separately from legal civil status.",
       "summary": "Civil status; identifier dimension in population stock table; coded (unmarried, married, divorced, widowed)",
@@ -2563,7 +2582,8 @@
         "demographic"
       ],
       "subtypes": [
-        "Identifier"
+        "Identifier",
+        "InstanceVariable"
       ],
       "metadata": {
         "dataType": "coded",
@@ -2575,7 +2595,7 @@
     },
     {
       "id": "b64160b2-1b5c-41e4-a83e-439400313871",
-      "type": "InstanceVariable",
+      "type": "Variable",
       "name": "country_of_birth",
       "description": "The country in which a person was born. Coded variable using ISO 3166-1 country codes. Acts as an identifier dimension in the migration table and is a key nativity variable in population and labour market statistics. Country of birth is a standard Eurostat demographic variable enabling cross-country comparisons of migration and integration.",
       "summary": "Country of birth; identifier dimension in migration table; coded using ISO 3166-1; key nativity variable across demographic and labour market statistics",
@@ -2589,7 +2609,8 @@
         "nativity"
       ],
       "subtypes": [
-        "Identifier"
+        "Identifier",
+        "InstanceVariable"
       ],
       "metadata": {
         "dataType": "coded",
@@ -2601,7 +2622,7 @@
     },
     {
       "id": "515a240c-c176-46a7-98fc-a5125f960760",
-      "type": "InstanceVariable",
+      "type": "Variable",
       "name": "event_count",
       "description": "Number of vital events (births or deaths) in a given period with a specified combination of characteristics. Measure variable shared across the births and deaths datasets via the vital events table structure. For births, counts the number of live births; for deaths, counts the number of deaths.",
       "summary": "Event count; measure variable in vital events tables; number of births or deaths in the reference period",
@@ -2614,7 +2635,8 @@
         "vital-events"
       ],
       "subtypes": [
-        "Measure"
+        "Measure",
+        "InstanceVariable"
       ],
       "metadata": {
         "dataType": "integer",
@@ -2627,7 +2649,7 @@
     },
     {
       "id": "a654fdfe-5a00-4010-abd5-e9149258cad2",
-      "type": "InstanceVariable",
+      "type": "Variable",
       "name": "migrant_count",
       "description": "Number of persons immigrating to or emigrating from Sweden in a given period with a specified combination of characteristics. Measure variable in the migration table structure. Covers both international immigration and emigration depending on the direction of movement captured in the dataset.",
       "summary": "Migrant count; measure variable in migration table; number of immigrants or emigrants in the reference period",
@@ -2640,7 +2662,8 @@
         "emigration"
       ],
       "subtypes": [
-        "Measure"
+        "Measure",
+        "InstanceVariable"
       ],
       "metadata": {
         "dataType": "integer",
@@ -4864,7 +4887,7 @@
     },
     {
       "id": "3eb01442-5ea8-47e7-a47a-704b18432d16",
-      "type": "InstanceVariable",
+      "type": "Variable",
       "name": "Price",
       "description": "",
       "summary": "The observed price paid for a product offering.",
@@ -4872,7 +4895,9 @@
         "measure",
         "price"
       ],
-      "subtypes": [],
+      "subtypes": [
+        "InstanceVariable"
+      ],
       "metadata": {},
       "embedding": [
         -0.015398593619465828,
@@ -5265,7 +5290,7 @@
     },
     {
       "id": "20a0fd06-cb29-4964-9b9b-4d83d45816c5",
-      "type": "InstanceVariable",
+      "type": "Variable",
       "name": "Price Change",
       "description": "",
       "summary": "The interest variable representing change between periods.",
@@ -5273,7 +5298,9 @@
         "measure",
         "ratio"
       ],
-      "subtypes": [],
+      "subtypes": [
+        "InstanceVariable"
+      ],
       "metadata": {},
       "embedding": [
         0.0003895946720149368,
@@ -13807,7 +13834,7 @@
     },
     {
       "id": "2a706716-7143-4161-9645-cfaec884d2cd",
-      "type": "InstanceVariable",
+      "type": "Variable",
       "name": "Rent Price",
       "description": "",
       "summary": "The observed rent paid for a housing unit.",
@@ -13815,7 +13842,9 @@
         "measure",
         "rent"
       ],
-      "subtypes": [],
+      "subtypes": [
+        "InstanceVariable"
+      ],
       "metadata": {},
       "embedding": [
         0.004195728339254856,
@@ -14208,7 +14237,7 @@
     },
     {
       "id": "5f5670df-6b78-4090-ac60-4f6fa8ed4d86",
-      "type": "InstanceVariable",
+      "type": "Variable",
       "name": "Interest Rate Index",
       "description": "",
       "summary": "Index measuring the development of interest rates.",
@@ -14216,7 +14245,9 @@
         "measure",
         "interest"
       ],
-      "subtypes": [],
+      "subtypes": [
+        "InstanceVariable"
+      ],
       "metadata": {},
       "embedding": [
         0.05779552832245827,
@@ -14609,7 +14640,7 @@
     },
     {
       "id": "471b3e84-56a1-40bd-a2fa-540b23c81394",
-      "type": "InstanceVariable",
+      "type": "Variable",
       "name": "Capital Stock Index",
       "description": "",
       "summary": "Index measuring changes in the acquisition prices of housing stock.",
@@ -14617,7 +14648,9 @@
         "measure",
         "housing"
       ],
-      "subtypes": [],
+      "subtypes": [
+        "InstanceVariable"
+      ],
       "metadata": {},
       "embedding": [
         0.08046161383390427,
@@ -15010,7 +15043,7 @@
     },
     {
       "id": "bab1db05-fb0a-4aa5-8f52-7d94e39a8f0c",
-      "type": "InstanceVariable",
+      "type": "Variable",
       "name": "Maintenance Cost",
       "description": "",
       "summary": "Cost for housing maintenance and repairs.",
@@ -15018,7 +15051,9 @@
         "measure",
         "maintenance"
       ],
-      "subtypes": [],
+      "subtypes": [
+        "InstanceVariable"
+      ],
       "metadata": {},
       "embedding": [
         0.004509987775236368,
@@ -15411,7 +15446,7 @@
     },
     {
       "id": "c274ba14-2488-49d4-9d3a-91b661c8cc5f",
-      "type": "InstanceVariable",
+      "type": "Variable",
       "name": "Utility Price",
       "description": "",
       "summary": "Price for electricity, water, or gas.",
@@ -15419,7 +15454,9 @@
         "measure",
         "utility"
       ],
-      "subtypes": [],
+      "subtypes": [
+        "InstanceVariable"
+      ],
       "metadata": {},
       "embedding": [
         -0.03188145160675049,
@@ -15812,7 +15849,7 @@
     },
     {
       "id": "2d249e03-4c5a-41ef-a87f-d786faa0f863",
-      "type": "InstanceVariable",
+      "type": "Variable",
       "name": "Flight Price",
       "description": "",
       "summary": "Price for an international or domestic flight.",
@@ -15820,7 +15857,9 @@
         "measure",
         "flight"
       ],
-      "subtypes": [],
+      "subtypes": [
+        "InstanceVariable"
+      ],
       "metadata": {},
       "embedding": [
         0.08361901342868805,
@@ -16213,7 +16252,7 @@
     },
     {
       "id": "d9fd7315-87f4-4506-a175-cc0d04c43e72",
-      "type": "InstanceVariable",
+      "type": "Variable",
       "name": "Train Ticket Price",
       "description": "",
       "summary": "Price for a train journey.",
@@ -16221,7 +16260,9 @@
         "measure",
         "train"
       ],
-      "subtypes": [],
+      "subtypes": [
+        "InstanceVariable"
+      ],
       "metadata": {},
       "embedding": [
         -0.027638381347060204,
@@ -16614,7 +16655,7 @@
     },
     {
       "id": "db90fd18-184b-4779-aad2-80af85f96729",
-      "type": "InstanceVariable",
+      "type": "Variable",
       "name": "Medicated Price",
       "description": "",
       "summary": "Price paid for medicines after subsidies.",
@@ -16622,7 +16663,9 @@
         "measure",
         "medicine"
       ],
-      "subtypes": [],
+      "subtypes": [
+        "InstanceVariable"
+      ],
       "metadata": {},
       "embedding": [
         0.024039514362812042,
@@ -17015,7 +17058,7 @@
     },
     {
       "id": "3404d30b-4d65-4688-914d-ec1e0276deef",
-      "type": "InstanceVariable",
+      "type": "Variable",
       "name": "New Vehicle Price",
       "description": "",
       "summary": "Price for a brand new car.",
@@ -17023,7 +17066,9 @@
         "measure",
         "car"
       ],
-      "subtypes": [],
+      "subtypes": [
+        "InstanceVariable"
+      ],
       "metadata": {},
       "embedding": [
         -0.05291711166501045,
@@ -17416,7 +17461,7 @@
     },
     {
       "id": "b5d6e627-33bd-4088-b557-a051f3870bbc",
-      "type": "InstanceVariable",
+      "type": "Variable",
       "name": "Used Vehicle Price",
       "description": "",
       "summary": "Price for a used car.",
@@ -17424,7 +17469,9 @@
         "measure",
         "car"
       ],
-      "subtypes": [],
+      "subtypes": [
+        "InstanceVariable"
+      ],
       "metadata": {},
       "embedding": [
         -0.0173453688621521,
@@ -17817,7 +17864,7 @@
     },
     {
       "id": "5b620c1f-1346-4f35-bbd2-2c836bb1b937",
-      "type": "InstanceVariable",
+      "type": "Variable",
       "name": "Electricity Grid Price",
       "description": "",
       "summary": "Price for electricity network/grid services.",
@@ -17825,7 +17872,9 @@
         "measure",
         "electricity"
       ],
-      "subtypes": [],
+      "subtypes": [
+        "InstanceVariable"
+      ],
       "metadata": {},
       "embedding": [
         -0.03754319250583649,
@@ -18218,7 +18267,7 @@
     },
     {
       "id": "1e09c523-6429-426c-9c1c-44d943385f70",
-      "type": "InstanceVariable",
+      "type": "Variable",
       "name": "Electricity Trade Price",
       "description": "",
       "summary": "Price for electricity trading/supply.",
@@ -18226,7 +18275,9 @@
         "measure",
         "electricity"
       ],
-      "subtypes": [],
+      "subtypes": [
+        "InstanceVariable"
+      ],
       "metadata": {},
       "embedding": [
         -0.03650259971618652,
@@ -27449,12 +27500,14 @@
     },
     {
       "id": "51959297-5e37-4cd0-8dd0-c81911c3958f",
-      "type": "InstanceVariable",
+      "type": "Variable",
       "name": "Iarb1_Var",
       "description": "Variable for Iarb1",
       "summary": "",
       "tags": [],
-      "subtypes": [],
+      "subtypes": [
+        "InstanceVariable"
+      ],
       "metadata": {},
       "embedding": [
         0.06766203790903091,
@@ -27847,12 +27900,14 @@
     },
     {
       "id": "f57fbf4b-0f8c-4a99-8c1f-3f33fc3bbcfb",
-      "type": "InstanceVariable",
+      "type": "Variable",
       "name": "Iarb2_Var",
       "description": "Variable for Iarb2",
       "summary": "",
       "tags": [],
-      "subtypes": [],
+      "subtypes": [
+        "InstanceVariable"
+      ],
       "metadata": {},
       "embedding": [
         0.08570349216461182,
@@ -28245,12 +28300,14 @@
     },
     {
       "id": "78c3f172-520e-4cf7-9b63-1e563527c1b9",
-      "type": "InstanceVariable",
+      "type": "Variable",
       "name": "Iarb3_Var",
       "description": "Variable for Iarb3",
       "summary": "",
       "tags": [],
-      "subtypes": [],
+      "subtypes": [
+        "InstanceVariable"
+      ],
       "metadata": {},
       "embedding": [
         0.07020197063684464,
@@ -28643,12 +28700,14 @@
     },
     {
       "id": "61c53f40-0b0b-4474-abd5-749321709d41",
-      "type": "InstanceVariable",
+      "type": "Variable",
       "name": "Fran1_Var",
       "description": "Variable for Fran1",
       "summary": "",
       "tags": [],
-      "subtypes": [],
+      "subtypes": [
+        "InstanceVariable"
+      ],
       "metadata": {},
       "embedding": [
         0.04581821337342262,
@@ -29041,12 +29100,14 @@
     },
     {
       "id": "a59edcb9-39fb-4bf9-8ebf-8a6279f7a428",
-      "type": "InstanceVariable",
+      "type": "Variable",
       "name": "Hs1a_Var",
       "description": "Variable for Hs1a",
       "summary": "",
       "tags": [],
-      "subtypes": [],
+      "subtypes": [
+        "InstanceVariable"
+      ],
       "metadata": {},
       "embedding": [
         0.009167644195258617,
@@ -29439,12 +29500,14 @@
     },
     {
       "id": "8c59ee57-20ca-4f87-9d82-a6dd2b2d942e",
-      "type": "InstanceVariable",
+      "type": "Variable",
       "name": "Hs1c_Var",
       "description": "Variable for Hs1c",
       "summary": "",
       "tags": [],
-      "subtypes": [],
+      "subtypes": [
+        "InstanceVariable"
+      ],
       "metadata": {},
       "embedding": [
         0.004981049802154303,
@@ -34264,7 +34327,7 @@
     },
     {
       "id": "var-economic-activity",
-      "type": "InstanceVariable",
+      "type": "Variable",
       "name": "economic_activity",
       "description": "Economic activity of the respondent's job/local unit, coded using the NACE classification. A coded identifier dimension of the employment table.",
       "summary": "Economic activity dimension (NACE-coded identifier)",
@@ -34274,7 +34337,8 @@
         "identifier"
       ],
       "subtypes": [
-        "Identifier"
+        "Identifier",
+        "InstanceVariable"
       ],
       "metadata": {
         "role": "identifier"
@@ -34285,7 +34349,7 @@
     },
     {
       "id": "var-region",
-      "type": "InstanceVariable",
+      "type": "Variable",
       "name": "region",
       "description": "Region of residence, coded using the NUTS regional classification. A coded identifier dimension.",
       "summary": "Region dimension (NUTS-coded identifier)",
@@ -34295,7 +34359,8 @@
         "identifier"
       ],
       "subtypes": [
-        "Identifier"
+        "Identifier",
+        "InstanceVariable"
       ],
       "metadata": {
         "role": "identifier"
@@ -34306,7 +34371,7 @@
     },
     {
       "id": "var-sex",
-      "type": "InstanceVariable",
+      "type": "Variable",
       "name": "sex",
       "description": "Sex of the respondent, coded using the sex code list. A coded identifier dimension.",
       "summary": "Sex dimension (coded identifier)",
@@ -34315,7 +34380,8 @@
         "identifier"
       ],
       "subtypes": [
-        "Identifier"
+        "Identifier",
+        "InstanceVariable"
       ],
       "metadata": {
         "role": "identifier"
@@ -34326,7 +34392,7 @@
     },
     {
       "id": "var-employed",
-      "type": "InstanceVariable",
+      "type": "Variable",
       "name": "employed_persons",
       "description": "Number of employed persons in each cell. The measure of the employment table.",
       "summary": "Employed persons (measure)",
@@ -34335,7 +34401,8 @@
         "measure"
       ],
       "subtypes": [
-        "Measure"
+        "Measure",
+        "InstanceVariable"
       ],
       "metadata": {
         "role": "measure"
@@ -34346,7 +34413,7 @@
     },
     {
       "id": "cl-nace",
-      "type": "CodeList",
+      "type": "Classification",
       "name": "NACE Rev. 2",
       "description": "Statistical Classification of Economic Activities in the European Community (NACE). Used to code economic activity. The target of the change-impact scenario.",
       "summary": "NACE Rev. 2 economic-activity classification",
@@ -34357,7 +34424,7 @@
         "statistical-classification"
       ],
       "subtypes": [
-        "Statistical Classification"
+        "ClassificationVersion"
       ],
       "metadata": {
         "version": "Rev. 2",
@@ -34392,7 +34459,7 @@
     },
     {
       "id": "cl-region",
-      "type": "CodeList",
+      "type": "Classification",
       "name": "NUTS regions",
       "description": "Nomenclature of territorial units for statistics (NUTS), used to code region.",
       "summary": "NUTS regional classification",
@@ -34402,7 +34469,7 @@
         "region"
       ],
       "subtypes": [
-        "Statistical Classification"
+        "ClassificationVersion"
       ],
       "metadata": {
         "version": "2024",
@@ -34487,7 +34554,7 @@
     },
     {
       "id": "var-activity-label",
-      "type": "InstanceVariable",
+      "type": "Variable",
       "name": "activity_label",
       "description": "Free-text descriptive label for an economic activity, annotated from the NACE classification. A descriptive attribute, not an identifier dimension.",
       "summary": "Activity label (descriptive attribute, NACE-annotated)",
@@ -34497,12 +34564,125 @@
         "attribute"
       ],
       "subtypes": [
-        "Attribute"
+        "Attribute",
+        "InstanceVariable"
       ],
       "metadata": {
         "role": "attribute"
       },
       "embedding": null,
+      "created_at": "2026-06-18T09:00:00.000000",
+      "updated_at": "2026-06-18T09:00:00.000000"
+    },
+    {
+      "id": "29c30cc0-1d5c-6437-74a1-84bb9612d163",
+      "type": "ClassificationItem",
+      "name": "Agriculture, forestry and fishing",
+      "description": "",
+      "summary": "",
+      "tags": [],
+      "subtypes": [],
+      "metadata": {
+        "code": "A",
+        "display_order": 0,
+        "generated": true
+      },
+      "created_at": "2026-06-18T09:00:00.000000",
+      "updated_at": "2026-06-18T09:00:00.000000"
+    },
+    {
+      "id": "3a9ace22-3227-c9d4-e6d3-aab034bde7dc",
+      "type": "ClassificationItem",
+      "name": "Manufacturing",
+      "description": "",
+      "summary": "",
+      "tags": [],
+      "subtypes": [],
+      "metadata": {
+        "code": "C",
+        "display_order": 1,
+        "generated": true
+      },
+      "created_at": "2026-06-18T09:00:00.000000",
+      "updated_at": "2026-06-18T09:00:00.000000"
+    },
+    {
+      "id": "4048511f-b951-bfd6-d597-7a719eb99706",
+      "type": "ClassificationItem",
+      "name": "Construction",
+      "description": "",
+      "summary": "",
+      "tags": [],
+      "subtypes": [],
+      "metadata": {
+        "code": "F",
+        "display_order": 2,
+        "generated": true
+      },
+      "created_at": "2026-06-18T09:00:00.000000",
+      "updated_at": "2026-06-18T09:00:00.000000"
+    },
+    {
+      "id": "63bc7af0-e8a0-b38f-7df0-a8338f3155f8",
+      "type": "ClassificationItem",
+      "name": "Wholesale and retail trade",
+      "description": "",
+      "summary": "",
+      "tags": [],
+      "subtypes": [],
+      "metadata": {
+        "code": "G",
+        "display_order": 3,
+        "generated": true
+      },
+      "created_at": "2026-06-18T09:00:00.000000",
+      "updated_at": "2026-06-18T09:00:00.000000"
+    },
+    {
+      "id": "4b733ce9-d0e6-4fad-5e86-09d977a6cfd9",
+      "type": "ClassificationItem",
+      "name": "Public administration and defence",
+      "description": "",
+      "summary": "",
+      "tags": [],
+      "subtypes": [],
+      "metadata": {
+        "code": "O",
+        "display_order": 4,
+        "generated": true
+      },
+      "created_at": "2026-06-18T09:00:00.000000",
+      "updated_at": "2026-06-18T09:00:00.000000"
+    },
+    {
+      "id": "6ec35683-d1c1-41fa-8773-c6239a4807fb",
+      "type": "ClassificationItem",
+      "name": "Stockholm",
+      "description": "",
+      "summary": "",
+      "tags": [],
+      "subtypes": [],
+      "metadata": {
+        "code": "SE11",
+        "display_order": 0,
+        "generated": true
+      },
+      "created_at": "2026-06-18T09:00:00.000000",
+      "updated_at": "2026-06-18T09:00:00.000000"
+    },
+    {
+      "id": "0199b338-3ce3-c3e8-2494-9b4c0f8c09a1",
+      "type": "ClassificationItem",
+      "name": "Västsverige",
+      "description": "",
+      "summary": "",
+      "tags": [],
+      "subtypes": [],
+      "metadata": {
+        "code": "SE23",
+        "display_order": 1,
+        "generated": true
+      },
       "created_at": "2026-06-18T09:00:00.000000",
       "updated_at": "2026-06-18T09:00:00.000000"
     }
@@ -37276,6 +37456,69 @@
       "source": "var-activity-label",
       "target": "cl-nace",
       "type": "USES_CODE_LIST",
+      "label": "",
+      "metadata": {},
+      "created_at": "2026-06-18T09:00:00.000000"
+    },
+    {
+      "id": "317f7006-b163-faa4-6565-25d3aa58f769",
+      "source": "cl-nace",
+      "target": "29c30cc0-1d5c-6437-74a1-84bb9612d163",
+      "type": "HAS_ITEM",
+      "label": "",
+      "metadata": {},
+      "created_at": "2026-06-18T09:00:00.000000"
+    },
+    {
+      "id": "ee14acf9-eba2-1776-f264-631adaa0798c",
+      "source": "cl-nace",
+      "target": "3a9ace22-3227-c9d4-e6d3-aab034bde7dc",
+      "type": "HAS_ITEM",
+      "label": "",
+      "metadata": {},
+      "created_at": "2026-06-18T09:00:00.000000"
+    },
+    {
+      "id": "175b8d71-ffdc-7c8a-bf31-837956ee2643",
+      "source": "cl-nace",
+      "target": "4048511f-b951-bfd6-d597-7a719eb99706",
+      "type": "HAS_ITEM",
+      "label": "",
+      "metadata": {},
+      "created_at": "2026-06-18T09:00:00.000000"
+    },
+    {
+      "id": "0693e110-c21a-0dd9-62e2-e6b6e9253cf2",
+      "source": "cl-nace",
+      "target": "63bc7af0-e8a0-b38f-7df0-a8338f3155f8",
+      "type": "HAS_ITEM",
+      "label": "",
+      "metadata": {},
+      "created_at": "2026-06-18T09:00:00.000000"
+    },
+    {
+      "id": "fc2ef111-9f83-ca96-fd2d-bd2063b6fa66",
+      "source": "cl-nace",
+      "target": "4b733ce9-d0e6-4fad-5e86-09d977a6cfd9",
+      "type": "HAS_ITEM",
+      "label": "",
+      "metadata": {},
+      "created_at": "2026-06-18T09:00:00.000000"
+    },
+    {
+      "id": "8de0d7c8-6b13-9edb-3ce2-f5fd498442d8",
+      "source": "cl-region",
+      "target": "6ec35683-d1c1-41fa-8773-c6239a4807fb",
+      "type": "HAS_ITEM",
+      "label": "",
+      "metadata": {},
+      "created_at": "2026-06-18T09:00:00.000000"
+    },
+    {
+      "id": "f2961818-6bf9-bd02-5785-7c61be0951bd",
+      "source": "cl-region",
+      "target": "0199b338-3ce3-c3e8-2494-9b4c0f8c09a1",
+      "type": "HAS_ITEM",
       "label": "",
       "metadata": {},
       "created_at": "2026-06-18T09:00:00.000000"

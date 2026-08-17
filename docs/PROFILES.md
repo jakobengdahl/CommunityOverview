@@ -378,6 +378,43 @@ The `config/scb/` profile demonstrates a domain-specific configuration for Stati
 
 These are in addition to the common types (Actor, Initiative, Resource, etc.) that are shared across profiles.
 
+## Example: stat-metadata Profile
+
+The `config/stat-metadata/` profile models European Statistical System metadata.
+Its metamodel covers the MetaPlus concepts while deliberately keeping the number
+of node types small:
+
+- **DataSet** — statistical datasets. Register structure is expressed with the
+  subtypes `Register`, `RegisterVariant` and `RegisterVersion` rather than with
+  separate node types.
+- **Variable** — statistical variables. Subtypes carry both the conceptual level
+  (`RepresentedVariable`, `InstanceVariable`) and the semantic role (`Identifier`,
+  `Measure`, `Attribute`), and one node may hold several. Column-level details
+  (`column_name`, `data_type`, `length`, `format`) are attributes on the variable;
+  there is no separate Column node type.
+- **Population** — the set of units a dataset or register version describes.
+  Version-specific timing is carried on the `HAS_POPULATION` edge.
+- **ValueDomain** — permissible values, with the subtypes `EnumeratedValueDomain`,
+  `NumericRangeValueDomain` and `DescribedValueDomain`.
+- **CodeList** — simple, normally flat value lists. Structured entries live under
+  the metadata key `codes` as `[{code, label}, …]`.
+- **Classification** / **ClassificationItem** — formal, managed and often
+  hierarchical classifications (NACE, NUTS, COICOP) and their codes. The hierarchy
+  is expressed with `HAS_CHILD_ITEM` between items rather than with level nodes.
+
+`Variable` replaced `InstanceVariable` as the primary node type. Existing data is
+migrated with `scripts/migrate_stat_metadata_metaplus.py`, which converts each
+`InstanceVariable` node to `Variable` while adding `InstanceVariable` as a subtype,
+so nothing about a variable's meaning is lost. `InstanceVariable` remains a valid
+subtype; it is no longer a primary type.
+
+Two values are documented rather than schema-validated in this step:
+
+```text
+sensitive_personal_data_status: confirmed | not_confirmed | context_dependent | unknown
+identity_status:                confirmed | not_confirmed | potential | unknown
+```
+
 ## System Node Types
 
 Certain node types are always present regardless of profile:
