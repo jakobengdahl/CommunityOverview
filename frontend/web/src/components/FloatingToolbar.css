@@ -28,7 +28,6 @@
    16px distance from the drawer's edge as it had from the screen edge. */
 .app.session-drawer-open .floating-toolbar {
   left: calc(var(--session-drawer-width, 280px) + 16px);
-  left: calc(var(--session-drawer-width, 280px) + 16px + env(safe-area-inset-left));
 }
 
 .floating-toolbar::-webkit-scrollbar {
