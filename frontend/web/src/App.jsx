@@ -25,6 +25,7 @@ import {
 import { serverStateToMirror, useSharedSession } from './hooks/useSharedSession';
 import { useSyncConnection } from './hooks/useSyncConnection';
 import { useToolResultCommands } from './hooks/useToolResultCommands';
+import { useViewportMode } from './hooks/useViewportMode';
 import { decideClearAction } from './utils/clearBoard';
 import { dropIntoFreshSession, receiveRemoteSessionDeleted } from './utils/sessionLifecycle';
 import { applyEdgeUpdate, confirmNodeDelete } from './utils/sessionScopedGraphEdits';
@@ -143,6 +144,10 @@ function App() {
       : api.generateVisualizationSessionId();
   });
   const [drawerOpen, setDrawerOpen] = useState(false);
+  // Independent viewport signals (WAVE 0 mobile-shell enabler) — isMobile is a
+  // width breakpoint, isCoarsePointer is an input-type signal; neither implies
+  // the other (e.g. a touch-enabled laptop is coarse but not mobile-width).
+  const { isMobile, isCoarsePointer } = useViewportMode();
   const [activityOpen, setActivityOpen] = useState(false);
   const [settingsOpen, setSettingsOpen] = useState(false);
   const [connectDialogOpen, setConnectDialogOpen] = useState(false);
@@ -1721,7 +1726,9 @@ function App() {
   };
 
   return (
-    <div className={`app${drawerOpen ? ' session-drawer-open' : ''}`}>
+    <div
+      className={`app${drawerOpen ? ' session-drawer-open' : ''}${isMobile ? ' is-mobile' : ''}${isCoarsePointer ? ' is-touch' : ''}`}
+    >
       <div className="app-canvas" id="guide-target-canvas">
         <GraphCanvas
           nodes={nodes}
