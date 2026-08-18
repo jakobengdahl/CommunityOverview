@@ -260,6 +260,23 @@ describe('SceneSession', () => {
     expect(client().closed).toBe(true);
   });
 
+  it('keeps the delete notice when a reload already in flight resolves', async () => {
+    let resolveLoad;
+    const { session, client } = makeSession({
+      loadSession: vi.fn().mockImplementation(() => new Promise((res) => (resolveLoad = res))),
+    });
+    session.connect();
+    client().handlers.onReady(1);
+    client().handlers.onSessionDeleted('client-b');
+    // The read was served before the delete committed, so it succeeds anyway.
+    resolveLoad(twoNodes);
+    await Promise.resolve();
+    await Promise.resolve();
+    await Promise.resolve();
+
+    expect(session.getState().status).toBe('deleted');
+  });
+
   it('replays ops that arrived while the reload was in flight', async () => {
     let resolveLoad;
     const loadSession = vi.fn().mockImplementation(() => new Promise((res) => (resolveLoad = res)));

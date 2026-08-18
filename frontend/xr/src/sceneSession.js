@@ -80,6 +80,9 @@ export class SceneSession {
     // scene. Every op in the reducer's vocabulary is idempotent, so replaying
     // one the reload already reflects is harmless.
     this._reloadBuffer = null;
+    // A remote delete is terminal: the session is gone, so nothing may report
+    // it connected again (see `_reload`).
+    this._deleted = false;
 
     this._client = createClient({
       sessionId,
@@ -100,6 +103,7 @@ export class SceneSession {
           // next auto-reconnect (headset sleep/wake, network change) would
           // recreate the session we were just told is gone and report it
           // connected again, silently replacing the notice. Stop the stream.
+          this._deleted = true;
           this._client.close();
           this._setStatus('deleted');
         },
@@ -146,11 +150,16 @@ export class SceneSession {
    * session on connect and on every resync — this client does exactly the same.
    */
   async _reload() {
+    if (this._deleted) return;
     const generation = ++this._generation;
     this._reloadBuffer = [];
     try {
       const payload = await this._loadSession(this.sessionId, { resolve: true });
-      if (this._closed || generation !== this._generation) return;
+      // The delete notice can land while this read is in flight, and the read
+      // itself still succeeds when it was served before the delete committed.
+      // Without this guard the resolving reload would replace the notice with
+      // "connected" for a session that no longer exists.
+      if (this._closed || this._deleted || generation !== this._generation) return;
       const buffered = this._reloadBuffer;
       this._reloadBuffer = null;
       // The reload is authoritative and returns every node already hydrated,
@@ -175,7 +184,7 @@ export class SceneSession {
       this._setStatus('connected');
       this._hydratePending();
     } catch (err) {
-      if (this._closed || generation !== this._generation) return;
+      if (this._closed || this._deleted || generation !== this._generation) return;
       this._reloadBuffer = null;
       // The stream stays open, so a later resync retries this on its own; the
       // error is surfaced meanwhile rather than leaving an empty dome.
