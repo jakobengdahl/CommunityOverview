@@ -4,10 +4,33 @@ import pickle
 import argparse
 from pathlib import Path
 
+
+class RestrictedUnpickler(pickle.Unpickler):
+    def find_class(self, module, name):
+        # Allow specific safe classes for unpickling
+        allowed_classes = {
+            ("numpy.core.multiarray", "_reconstruct"),
+            ("numpy", "ndarray"),
+            ("numpy", "dtype"),
+            ("numpy.core.numeric", "_frombuffer"),
+            ("numpy.core.multiarray", "scalar"),
+            ("numpy", "float64"),
+            ("numpy", "float32"),
+            ("numpy", "_core.multiarray"),
+            ("numpy._core.multiarray", "_reconstruct"),
+            ("numpy._core.numeric", "_frombuffer"),
+        }
+
+        if (module, name) in allowed_classes:
+            return super().find_class(module, name)
+
+        raise pickle.UnpicklingError(f"Global '{module}.{name}' is forbidden")
+
+
 # Add project root to sys.path
 sys.path.append(os.getcwd())
 
-from backend.core import GraphStorage
+from backend.core import GraphStorage  # noqa: E402
 
 DEFAULT_GRAPH_PATH = "data/active/graph.json"
 
@@ -25,7 +48,7 @@ def migrate_embeddings(graph_path=DEFAULT_GRAPH_PATH):
     # Load raw pickle
     try:
         with open(embeddings_path, "rb") as f:
-            data = pickle.load(f)
+            data = RestrictedUnpickler(f).load()
             embeddings = data.get("embeddings", {})
             print(f"Loaded {len(embeddings)} embeddings from pickle.")
     except Exception as e:
