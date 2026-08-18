@@ -8,7 +8,7 @@ from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional, Callable
 import asyncio
-import httpx2 as httpx
+import httpx
 
 from backend.core.models import Edge, Node
 

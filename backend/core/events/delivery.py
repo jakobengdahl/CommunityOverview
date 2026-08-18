@@ -14,7 +14,7 @@ import queue
 import time
 from typing import Optional, Callable
 from datetime import datetime, timezone
-import httpx2 as httpx
+import httpx
 import urllib.parse
 import socket
 import ipaddress
