@@ -427,6 +427,13 @@ the result would leave a dangling edge. Watch for what rides along in them —
 `EventSubscription` nodes carry webhook URLs, which is how a personal lab hostname
 once reached this repository.
 
+Metadata keys are snake_case, matching every other profile. A `Variable` node's
+semantic role is carried by its subtypes (`Identifier`, `Measure`, `Attribute`)
+and nowhere else — some nodes still hold a leftover `role` metadata key from an
+earlier import, which is deliberately left undeclared: declaring it would give
+the UI a second, separately editable copy of the subtype that can drift out of
+agreement with it.
+
 Two values are documented rather than schema-validated in this step:
 
 ```text
