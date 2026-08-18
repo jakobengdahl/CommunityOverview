@@ -352,6 +352,26 @@ describe('SceneSession', () => {
     expect(loadNodeDetails).toHaveBeenCalledTimes(1);
   });
 
+  // The backend routes a rename through apply_ops, so it arrives as a
+  // `session_renamed` state op inside a {"type":"op"} envelope — i.e. through
+  // onRemoteOps, not the standalone event type the sync client also supports
+  // and this backend never publishes. That is what puts it in the reload
+  // buffer, so a rename racing a reload is not lost to the stale payload.
+  it('keeps a rename delivered as a state op while the reload was in flight', async () => {
+    let resolveReload;
+    const stalePayload = { ...payload([], {}), name: 'Old name' };
+    const { session, client } = makeSession({
+      loadSession: vi.fn().mockImplementation(() => new Promise((res) => (resolveReload = res))),
+    });
+    session.connect();
+    client().handlers.onReady(1);
+    client().handlers.onRemoteOps([{ op: 'session_renamed', name: 'New name' }]);
+    resolveReload(stalePayload);
+
+    await vi.waitFor(() => expect(session.getState().status).toBe('connected'));
+    expect(session.getState().scene.name).toBe('New name');
+  });
+
   it('does not replay a stale buffer into a later reload', async () => {
     let resolveFirst;
     const loadSession = vi
