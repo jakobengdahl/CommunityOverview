@@ -237,6 +237,7 @@
           "data_type",
           "length",
           "format",
+          "unit_of_measure",
           "sensitive_personal_data_status",
           "identity_status",
           "assessment_note",
