@@ -1198,8 +1198,8 @@
         "InstanceVariable"
       ],
       "metadata": {
-        "dataType": "coded",
-        "role": "identifier"
+        "role": "identifier",
+        "data_type": "coded"
       },
       "embedding": null,
       "created_at": "2026-05-19T09:08:12.613777",
@@ -1223,8 +1223,8 @@
         "InstanceVariable"
       ],
       "metadata": {
-        "dataType": "coded",
-        "role": "identifier"
+        "role": "identifier",
+        "data_type": "coded"
       },
       "embedding": null,
       "created_at": "2026-05-19T09:08:12.613805",
@@ -1249,8 +1249,8 @@
         "InstanceVariable"
       ],
       "metadata": {
-        "dataType": "coded",
-        "role": "identifier"
+        "role": "identifier",
+        "data_type": "coded"
       },
       "embedding": null,
       "created_at": "2026-05-19T09:08:12.613826",
@@ -1276,8 +1276,8 @@
         "InstanceVariable"
       ],
       "metadata": {
-        "dataType": "coded",
-        "role": "identifier"
+        "role": "identifier",
+        "data_type": "coded"
       },
       "embedding": null,
       "created_at": "2026-05-19T09:08:12.613857",
@@ -1302,8 +1302,8 @@
         "InstanceVariable"
       ],
       "metadata": {
-        "dataType": "time",
-        "role": "identifier"
+        "role": "identifier",
+        "data_type": "time"
       },
       "embedding": null,
       "created_at": "2026-05-19T09:08:12.613877",
@@ -1328,9 +1328,9 @@
         "InstanceVariable"
       ],
       "metadata": {
-        "dataType": "integer",
         "role": "measure",
-        "unitOfMeasure": "persons"
+        "data_type": "integer",
+        "unit_of_measure": "persons"
       },
       "embedding": null,
       "created_at": "2026-05-19T09:08:12.613896",
@@ -1784,8 +1784,8 @@
         "InstanceVariable"
       ],
       "metadata": {
-        "dataType": "coded",
-        "role": "identifier"
+        "role": "identifier",
+        "data_type": "coded"
       },
       "embedding": null,
       "created_at": "2026-05-19T09:14:00.205749",
@@ -1809,8 +1809,8 @@
         "InstanceVariable"
       ],
       "metadata": {
-        "dataType": "string",
-        "role": "identifier"
+        "role": "identifier",
+        "data_type": "string"
       },
       "embedding": null,
       "created_at": "2026-05-19T09:14:00.205777",
@@ -1834,9 +1834,9 @@
         "InstanceVariable"
       ],
       "metadata": {
-        "dataType": "decimal",
         "role": "measure",
-        "unitOfMeasure": "percent"
+        "data_type": "decimal",
+        "unit_of_measure": "percent"
       },
       "embedding": null,
       "created_at": "2026-05-19T09:14:00.205799",
@@ -1860,9 +1860,9 @@
         "InstanceVariable"
       ],
       "metadata": {
-        "dataType": "decimal",
         "role": "measure",
-        "unitOfMeasure": "percent"
+        "data_type": "decimal",
+        "unit_of_measure": "percent"
       },
       "embedding": null,
       "created_at": "2026-05-19T09:14:00.205819",
@@ -1886,9 +1886,9 @@
         "InstanceVariable"
       ],
       "metadata": {
-        "dataType": "decimal",
         "role": "measure",
-        "unitOfMeasure": "percentage points"
+        "data_type": "decimal",
+        "unit_of_measure": "percentage points"
       },
       "embedding": null,
       "created_at": "2026-05-19T09:14:00.205837",
@@ -1912,8 +1912,8 @@
         "InstanceVariable"
       ],
       "metadata": {
-        "dataType": "coded",
-        "role": "identifier"
+        "role": "identifier",
+        "data_type": "coded"
       },
       "embedding": null,
       "created_at": "2026-05-19T09:14:00.205867",
@@ -1937,8 +1937,8 @@
         "InstanceVariable"
       ],
       "metadata": {
-        "dataType": "coded",
-        "role": "identifier"
+        "role": "identifier",
+        "data_type": "coded"
       },
       "embedding": null,
       "created_at": "2026-05-19T09:14:00.205887",
@@ -1963,8 +1963,8 @@
         "InstanceVariable"
       ],
       "metadata": {
-        "dataType": "coded",
-        "role": "identifier"
+        "role": "identifier",
+        "data_type": "coded"
       },
       "embedding": null,
       "created_at": "2026-05-19T09:14:00.205905",
@@ -2458,8 +2458,8 @@
         "InstanceVariable"
       ],
       "metadata": {
-        "dataType": "coded",
-        "role": "identifier"
+        "role": "identifier",
+        "data_type": "coded"
       },
       "embedding": null,
       "created_at": "2026-05-19T09:26:11.012351",
@@ -2483,8 +2483,8 @@
         "InstanceVariable"
       ],
       "metadata": {
-        "dataType": "coded",
-        "role": "identifier"
+        "role": "identifier",
+        "data_type": "coded"
       },
       "embedding": null,
       "created_at": "2026-05-19T09:26:11.012378",
@@ -2508,8 +2508,8 @@
         "InstanceVariable"
       ],
       "metadata": {
-        "dataType": "coded",
-        "role": "identifier"
+        "role": "identifier",
+        "data_type": "coded"
       },
       "embedding": null,
       "created_at": "2026-05-19T09:26:11.012399",
@@ -2534,8 +2534,8 @@
         "InstanceVariable"
       ],
       "metadata": {
-        "dataType": "time",
-        "role": "identifier"
+        "role": "identifier",
+        "data_type": "time"
       },
       "embedding": null,
       "created_at": "2026-05-19T09:26:11.012417",
@@ -2559,9 +2559,9 @@
         "InstanceVariable"
       ],
       "metadata": {
-        "dataType": "integer",
         "role": "measure",
-        "unitOfMeasure": "persons"
+        "data_type": "integer",
+        "unit_of_measure": "persons"
       },
       "embedding": null,
       "created_at": "2026-05-19T09:26:11.012436",
@@ -2586,8 +2586,8 @@
         "InstanceVariable"
       ],
       "metadata": {
-        "dataType": "coded",
-        "role": "identifier"
+        "role": "identifier",
+        "data_type": "coded"
       },
       "embedding": null,
       "created_at": "2026-05-19T09:26:11.012454",
@@ -2613,8 +2613,8 @@
         "InstanceVariable"
       ],
       "metadata": {
-        "dataType": "coded",
-        "role": "identifier"
+        "role": "identifier",
+        "data_type": "coded"
       },
       "embedding": null,
       "created_at": "2026-05-19T09:26:11.012471",
@@ -2639,9 +2639,9 @@
         "InstanceVariable"
       ],
       "metadata": {
-        "dataType": "integer",
         "role": "measure",
-        "unitOfMeasure": "events"
+        "data_type": "integer",
+        "unit_of_measure": "events"
       },
       "embedding": null,
       "created_at": "2026-05-19T09:26:11.012488",
@@ -2666,9 +2666,9 @@
         "InstanceVariable"
       ],
       "metadata": {
-        "dataType": "integer",
         "role": "measure",
-        "unitOfMeasure": "persons"
+        "data_type": "integer",
+        "unit_of_measure": "persons"
       },
       "embedding": null,
       "created_at": "2026-05-19T09:26:11.012505",
