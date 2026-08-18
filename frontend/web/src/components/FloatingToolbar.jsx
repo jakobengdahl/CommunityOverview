@@ -390,6 +390,7 @@ function FloatingToolbar({
               draggable={isDraggable}
               onDragStart={(e) => handleDragStart(e, nodeType)}
               style={{ '--toolbar-item-color': color }}
+              aria-label={getTooltipLabel(nodeType)}
             >
               {Icon && <Icon size={18} />}
             </button>
