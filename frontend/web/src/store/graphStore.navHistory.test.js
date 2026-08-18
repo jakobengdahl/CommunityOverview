@@ -41,11 +41,52 @@ describe('appendNavEntries', () => {
     expect(out.map((r) => r.type)).toEqual(['Actor', 'Goal']);
   });
 
-  it('does not collapse a repeat that is not at the top', () => {
+  it('moves a repeat that is not at the top rather than duplicating it', () => {
     let trail = appendNavEntries([], [{ id: 'a', name: 'A', action: 'visited' }], AT);
     trail = appendNavEntries(trail, [{ id: 'b', name: 'B', action: 'visited' }], AT);
     trail = appendNavEntries(trail, [{ id: 'a', name: 'A', action: 'visited' }], AT);
-    expect(trail.map((r) => r.id)).toEqual(['a', 'b', 'a']);
+    expect(trail.map((r) => r.id)).toEqual(['a', 'b']);
+  });
+
+  it('refreshes the timestamp of a row it moves back to the top', () => {
+    const later = '2026-08-11T11:00:00.000Z';
+    let trail = appendNavEntries([], [{ id: 'a', name: 'A', action: 'visited' }], AT);
+    trail = appendNavEntries(trail, [{ id: 'b', name: 'B', action: 'visited' }], AT);
+    trail = appendNavEntries(trail, [{ id: 'a', name: 'A', action: 'visited' }], later);
+    expect(trail[0]).toMatchObject({ id: 'a', at: later });
+  });
+
+  it('keeps an "added" designation when the moved row is not at the top', () => {
+    let trail = appendNavEntries([], [{ id: 'a', name: 'A', action: 'added' }], AT);
+    trail = appendNavEntries(trail, [{ id: 'b', name: 'B', action: 'visited' }], AT);
+    trail = appendNavEntries(trail, [{ id: 'a', name: 'A', action: 'visited' }], AT);
+    expect(trail[0]).toMatchObject({ id: 'a', action: 'added' });
+  });
+
+  it('resolves a repeat within one batch against the trail it is being appended to', () => {
+    const trail = appendNavEntries(
+      [{ id: 'a', name: 'A', type: '', action: 'added', at: AT }],
+      [
+        { id: 'b', name: 'B', action: 'visited' },
+        { id: 'a', name: 'A', action: 'visited' },
+      ],
+      AT
+    );
+    expect(trail.map((r) => r.id)).toEqual(['a', 'b']);
+    expect(trail[0].action).toBe('added');
+  });
+
+  it('resolves a batch that repeats the same node against the row it just added', () => {
+    const trail = appendNavEntries(
+      [],
+      [
+        { id: 'a', name: 'A', action: 'visited' },
+        { id: 'a', name: 'A', action: 'added' },
+      ],
+      AT
+    );
+    expect(trail.map((r) => r.id)).toEqual(['a']);
+    expect(trail[0].action).toBe('added');
   });
 
   it('bounds the trail to the given limit, dropping the oldest', () => {
@@ -156,6 +197,28 @@ describe('graphStore navHistory recording', () => {
     useGraphStore.setState({ nodes: [{ id: 'a', name: 'Alpha', type: 'Goal' }] });
     useGraphStore.getState().setDetailNode({ id: 'a', data: { label: 'Alpha' } });
     expect(useGraphStore.getState().navHistory[0]).toMatchObject({ id: 'a', action: 'visited' });
+  });
+
+  it('does not grow the trail when the user jumps back and forth via the panel', () => {
+    // The Recent-nodes panel jumps by calling setFocusNodeId. Comparing two
+    // nodes by clicking between them must not bury the rest of the session
+    // under alternating rows for the same two nodes.
+    useGraphStore.setState({
+      nodes: [
+        { id: 'a', name: 'Alpha', type: 'Goal' },
+        { id: 'b', name: 'Beta', type: 'Actor' },
+        { id: 'c', name: 'Gamma', type: 'Risk' },
+      ],
+    });
+    const { setFocusNodeId } = useGraphStore.getState();
+    setFocusNodeId('a');
+    setFocusNodeId('b');
+    setFocusNodeId('c');
+    for (let i = 0; i < 3; i += 1) {
+      setFocusNodeId('a');
+      setFocusNodeId('b');
+    }
+    expect(useGraphStore.getState().navHistory.map((r) => r.id)).toEqual(['b', 'a', 'c']);
   });
 
   it('does not record anything when focus is cleared via setFocusNodeId(null)', () => {
