@@ -191,6 +191,7 @@ def test_validate_interval_valid():
     sync = FederationSync(interval_seconds=300)
     assert sync.interval_seconds == 300
 
+
 def test_validate_interval_invalid():
     with pytest.raises(ValidationError) as exc_info:
         FederationSync(interval_seconds=5)
