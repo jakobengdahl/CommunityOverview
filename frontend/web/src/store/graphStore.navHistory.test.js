@@ -63,6 +63,19 @@ describe('appendNavEntries', () => {
     expect(trail[0]).toMatchObject({ id: 'a', action: 'added' });
   });
 
+  it('resolves a repeat inside a single batch against the rows that batch just added', () => {
+    const trail = appendNavEntries(
+      [{ id: 'a', name: 'A', type: '', action: 'added', at: AT }],
+      [
+        { id: 'b', name: 'B', action: 'visited' },
+        { id: 'a', name: 'A', action: 'visited' },
+      ],
+      AT
+    );
+    expect(trail.map((r) => r.id)).toEqual(['a', 'b']);
+    expect(trail[0].action).toBe('added');
+  });
+
   it('bounds the trail to the given limit, dropping the oldest', () => {
     const entries = Array.from({ length: 5 }, (_, i) => ({ id: `n${i}`, action: 'added' }));
     let trail = [];

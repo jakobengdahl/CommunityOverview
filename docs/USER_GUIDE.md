@@ -242,6 +242,10 @@ name, whether it was added or visited, and how long ago. **Click an entry to jum
 back to that node** — the canvas re-centres on it. Use the trash icon to clear the
 trail, or **Esc** to close the panel.
 
+Each node appears at most once: returning to a node you have already seen moves its
+entry back to the top with a fresh time rather than adding a second row, so jumping
+between two nodes does not push the rest of the session out of the trail.
+
 This trail is per-session and lives only in your browser. It is separate from
 **Recent activity** ([5.2](#52-recent-activity-audit-log)), which is a persisted
 audit log of who changed what in the graph data.
