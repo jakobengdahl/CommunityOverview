@@ -77,11 +77,11 @@ function NodeHistoryPanel() {
             </button>
           </div>
           <ul className="node-history-list">
-            {navHistory.map((entry, i) => {
+            {navHistory.map((entry) => {
               const rel = relativeTime(entry.at);
               const isAdded = entry.action === 'added';
               return (
-                <li key={`${entry.id}-${i}`}>
+                <li key={entry.id}>
                   <button
                     type="button"
                     className="node-history-item"
