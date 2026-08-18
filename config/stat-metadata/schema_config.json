@@ -63,19 +63,6 @@
         "color": "#8B5CF6",
         "icon": "Diagram3Fill"
       },
-      "InstanceVariable": {
-        "fields": [
-          "name",
-          "description",
-          "summary",
-          "tags",
-          "subtypes"
-        ],
-        "category": "domain",
-        "description": "DEPRECATED — being migrated to Variable with subtype InstanceVariable. Variables or dimensions observed in a dataset or data structure, with a defined role (identifier or measure)",
-        "color": "#14B8A6",
-        "icon": "Sliders"
-      },
       "Concept": {
         "fields": [
           "name",
@@ -417,7 +404,6 @@
       "StatisticalProgramme": "#10B981",
       "DataSet": "#06B6D4",
       "DataStructure": "#8B5CF6",
-      "InstanceVariable": "#14B8A6",
       "Concept": "#F97316",
       "UnitType": "#EF4444",
       "CodeList": "#FBBF24",
