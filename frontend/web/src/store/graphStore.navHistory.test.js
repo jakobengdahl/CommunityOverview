@@ -63,7 +63,7 @@ describe('appendNavEntries', () => {
     expect(trail[0]).toMatchObject({ id: 'a', action: 'added' });
   });
 
-  it('resolves a repeat inside a single batch against the rows that batch just added', () => {
+  it('resolves a repeat within one batch against the trail it is being appended to', () => {
     const trail = appendNavEntries(
       [{ id: 'a', name: 'A', type: '', action: 'added', at: AT }],
       [
@@ -73,6 +73,19 @@ describe('appendNavEntries', () => {
       AT
     );
     expect(trail.map((r) => r.id)).toEqual(['a', 'b']);
+    expect(trail[0].action).toBe('added');
+  });
+
+  it('resolves a batch that repeats the same node against the row it just added', () => {
+    const trail = appendNavEntries(
+      [],
+      [
+        { id: 'a', name: 'A', action: 'visited' },
+        { id: 'a', name: 'A', action: 'added' },
+      ],
+      AT
+    );
+    expect(trail.map((r) => r.id)).toEqual(['a']);
     expect(trail[0].action).toBe('added');
   });
 

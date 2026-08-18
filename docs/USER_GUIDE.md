@@ -244,7 +244,8 @@ trail, or **Esc** to close the panel.
 
 Each node appears at most once: returning to a node you have already seen moves its
 entry back to the top with a fresh time rather than adding a second row, so jumping
-between two nodes does not push the rest of the session out of the trail.
+between two nodes does not push the rest of the session out of the trail. A node you
+added keeps its **Added** label even after you return to it later.
 
 This trail is per-session and lives only in your browser. It is separate from
 **Recent activity** ([5.2](#52-recent-activity-audit-log)), which is a persisted
