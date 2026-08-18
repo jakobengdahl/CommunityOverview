@@ -93,9 +93,14 @@ def enrich(graph, enrichment):
         # the original type made the file inert after the first run: the node is
         # a Classification by then, so a later correction to the enrichment —
         # a fixed label, an added division — could never reach it again.
-        targets = []
+        targets, seen_ids = [], set()
         for node_type in (entry["match_type"], "Classification"):
-            targets.extend(by_key.get((name, node_type), []))
+            for node in by_key.get((name, node_type), []):
+                # A node whose declared match_type is already Classification would
+                # otherwise be visited twice and logged twice for one change.
+                if node["id"] not in seen_ids:
+                    seen_ids.add(node["id"])
+                    targets.append(node)
         if not targets:
             applied.append(
                 {
@@ -116,8 +121,11 @@ def enrich(graph, enrichment):
                 # `setdefault` would treat a present-but-falsy value as already
                 # set — is_classification: false and codes: [] are exactly the
                 # stub shapes enrichment exists to repair, and both are falsy.
-                if key not in meta or meta[key] in (None, "", [], {}, False):
-                    if meta.get(key) != value:
+                current = meta.get(key)
+                # `in (..., False)` would swallow 0 and 0.0, since 0 == False.
+                blank = current is None or current is False or current in ("", [], {})
+                if key not in meta or blank:
+                    if current != value:
                         meta[key] = value
                         changed.append(f"metadata.{key}")
             node["metadata"] = meta
@@ -159,16 +167,37 @@ def _sync_items(graph, parent, report):
     by_id = {n["id"]: n for n in nodes}
     cid = parent["id"]
 
-    raw = (parent.get("metadata") or {}).get("codes") or []
+    raw = (parent.get("metadata") or {}).get("codes")
+    if raw is None:
+        raw = []
     if not isinstance(raw, list):
+        # A shape we cannot read is not evidence that the items are unwanted.
+        # Coercing it to [] would delete every generated item under a
+        # classification whose codes were merely malformed.
+        report["malformed_codes"].append(
+            {"id": cid, "name": parent.get("name"), "type": type(raw).__name__}
+        )
         return
-    # Enumerate the filtered list: indexing the raw one leaks the positions of
-    # entries that were skipped, leaving gaps in display_order.
-    wanted = {}
-    for order, entry in enumerate(
-        [e for e in raw if isinstance(e, dict) and "code" in e]
-    ):
-        wanted[str(entry["code"])] = (order, entry)
+
+    # Deduplicate first, then number: enumerating before collapsing collisions
+    # leaves holes in display_order, and a silently dropped duplicate is worse
+    # than a reported one.
+    ordered, collisions = [], []
+    seen_codes = set()
+    for entry in raw:
+        if not isinstance(entry, dict) or entry.get("code") is None:
+            continue
+        code = str(entry["code"])
+        if code in seen_codes:
+            collisions.append(code)
+            continue
+        seen_codes.add(code)
+        ordered.append((code, entry))
+    if collisions:
+        report["duplicate_codes"].append(
+            {"id": cid, "name": parent.get("name"), "codes": sorted(set(collisions))}
+        )
+    wanted = {code: (order, entry) for order, (code, entry) in enumerate(ordered)}
 
     existing = {}
     for edge in edges:
@@ -180,8 +209,15 @@ def _sync_items(graph, parent, report):
         # Keyed on the code, not on the generated id: an item authored by hand
         # or under an older id scheme is invisible to an id-based check, and a
         # second item for the same code would be created next to it.
-        code = str((item.get("metadata") or {}).get("code"))
-        existing.setdefault(code, []).append((edge, item))
+        code = (item.get("metadata") or {}).get("code")
+        if code is None:
+            # Never adopted and never deleted: str(None) would file it under the
+            # literal "None" and let a {"code": null} entry claim it.
+            report["items_without_code"].append(
+                {"id": item["id"], "classification": parent.get("name")}
+            )
+            continue
+        existing.setdefault(str(code), []).append((edge, item))
 
     for code, (order, entry) in wanted.items():
         label = entry.get("label") or code
@@ -253,8 +289,17 @@ def _sync_items(graph, parent, report):
                     }
                 )
                 continue
-            graph["nodes"] = [n for n in graph["nodes"] if n["id"] != item["id"]]
-            graph["edges"] = [e for e in graph["edges"] if e["id"] != edge["id"]]
+            # Drop every edge touching the item, not just the HAS_ITEM one that
+            # led here. Removing the node while another edge still references it
+            # leaves a dangling edge, which aborts the whole migration — inside
+            # the init container that means the pod never starts.
+            item_id = item["id"]
+            graph["nodes"] = [n for n in graph["nodes"] if n["id"] != item_id]
+            graph["edges"] = [
+                e
+                for e in graph["edges"]
+                if e["source"] != item_id and e["target"] != item_id
+            ]
             nodes, edges = graph["nodes"], graph["edges"]
             report["classification_items_removed"].append(
                 {"id": item["id"], "code": code, "classification": parent.get("name")}
@@ -272,6 +317,9 @@ def migrate(graph, create_items=True):
         "classification_items_updated": [],
         "classification_items_removed": [],
         "authored_items_kept": [],
+        "items_without_code": [],
+        "duplicate_codes": [],
+        "malformed_codes": [],
         "left_for_manual_review": [],
         "codelists_kept": [],
         "counts_before": {

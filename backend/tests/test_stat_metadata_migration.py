@@ -265,3 +265,138 @@ def test_duplicate_edge_ids_abort_before_any_write():
     )
     with pytest.raises(SystemExit, match="duplicate edge ids"):
         mig.migrate(graph)
+
+
+def test_removal_takes_every_edge_touching_the_item():
+    """A leftover edge would leave a dangling reference and abort the migration."""
+    graph = graph_with(classification([{"code": "A"}]))
+    graph, _ = mig.migrate(graph)
+    item_id = items_of(graph, "cls-1")[0]["id"]
+    graph["nodes"].append(
+        {
+            "id": "other",
+            "type": "Concept",
+            "name": "O",
+            "subtypes": [],
+            "tags": [],
+            "metadata": {},
+        }
+    )
+    graph["edges"].append(
+        {
+            "id": "ref1",
+            "source": "other",
+            "target": item_id,
+            "type": "RELATES_TO",
+            "metadata": {},
+        }
+    )
+    graph["nodes"][0]["metadata"]["codes"] = []
+
+    graph, _ = mig.migrate(graph)  # must not raise
+    assert not any(e["id"] == "ref1" for e in graph["edges"])
+
+
+def test_a_duplicate_code_is_reported_and_leaves_no_order_gap():
+    graph = graph_with(
+        classification([{"code": "A"}, {"code": "B"}, {"code": "A"}, {"code": "C"}])
+    )
+    graph, report = mig.migrate(graph)
+
+    orders = sorted(i["metadata"]["display_order"] for i in items_of(graph, "cls-1"))
+    assert orders == [0, 1, 2]
+    assert report["duplicate_codes"][0]["codes"] == ["A"]
+
+
+def test_codes_of_mixed_type_do_not_silently_collapse():
+    graph = graph_with(classification([{"code": 1}, {"code": "1"}, {"code": "2"}]))
+    graph, report = mig.migrate(graph)
+
+    orders = sorted(i["metadata"]["display_order"] for i in items_of(graph, "cls-1"))
+    assert orders == [0, 1]
+    assert report["duplicate_codes"], "the collapsed code was dropped without a word"
+
+
+def test_malformed_codes_never_delete_anything():
+    graph = graph_with(classification([{"code": "A"}]))
+    graph, _ = mig.migrate(graph)
+    graph["nodes"][0]["metadata"]["codes"] = {"not": "a list"}
+
+    graph, report = mig.migrate(graph)
+    assert len(items_of(graph, "cls-1")) == 1
+    assert report["malformed_codes"]
+
+
+def test_an_item_without_a_code_is_left_alone():
+    orphan = {
+        "id": "no-code",
+        "type": "ClassificationItem",
+        "name": "Codeless",
+        "subtypes": [],
+        "tags": [],
+        "metadata": {"generated": True},
+    }
+    edge = {
+        "id": "e1",
+        "source": "cls-1",
+        "target": "no-code",
+        "type": "HAS_ITEM",
+        "metadata": {},
+    }
+    graph = graph_with(
+        classification([{"code": None, "label": "Null code"}]), orphan, edges=[edge]
+    )
+
+    graph, report = mig.migrate(graph)
+    assert any(n["id"] == "no-code" for n in graph["nodes"])
+    assert report["items_without_code"]
+
+
+def test_enrichment_does_not_overwrite_a_legitimate_zero():
+    node = {
+        "id": "n1",
+        "type": "CodeList",
+        "name": "COICOP 2018",
+        "subtypes": [],
+        "tags": [],
+        "metadata": {"level_count": 0},
+    }
+    graph = graph_with(node)
+    mig.enrich(
+        graph,
+        {
+            "nodes": [
+                {
+                    "match_name": "COICOP 2018",
+                    "match_type": "CodeList",
+                    "metadata": {"level_count": 99},
+                }
+            ]
+        },
+    )
+    assert node["metadata"]["level_count"] == 0
+
+
+def test_enrichment_logs_one_entry_per_node():
+    node = {
+        "id": "n1",
+        "type": "Classification",
+        "name": "COICOP 2018",
+        "subtypes": [],
+        "tags": [],
+        "metadata": {},
+    }
+    graph = graph_with(node)
+    log = mig.enrich(
+        graph,
+        {
+            "nodes": [
+                {
+                    "match_name": "COICOP 2018",
+                    "match_type": "Classification",
+                    "metadata": {"purpose": "x"},
+                }
+            ]
+        },
+    )
+    assert len(log) == 1
