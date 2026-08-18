@@ -280,7 +280,7 @@ describe('SceneSession', () => {
   it('replays ops that arrived while the reload was in flight', async () => {
     let resolveLoad;
     const loadSession = vi.fn().mockImplementation(() => new Promise((res) => (resolveLoad = res)));
-    const { session, client } = makeSession({
+    const { session, client, loadNodeDetails } = makeSession({
       loadSession,
       loadNodeDetails: vi
         .fn()
@@ -302,6 +302,9 @@ describe('SceneSession', () => {
     );
     expect(session.getState().scene.nodes.n3).toMatchObject({ x: 7, y: 8 });
     await vi.waitFor(() => expect(session.getState().scene.nodes.n3.hydrated).toBe(true));
+    // The reload must not forget the fetch the op already started, or every
+    // node added during the reload window costs two identical REST reads.
+    expect(loadNodeDetails).toHaveBeenCalledTimes(1);
   });
 
   it('does not replay a stale buffer into a later reload', async () => {

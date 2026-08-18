@@ -45,12 +45,20 @@ describe('sceneFromSession', () => {
     expect(pendingNodeIds(scene)).toEqual([]);
   });
 
-  it('drops a node reference the graph no longer resolves', () => {
+  it('materialises no node from a stored position whose node no longer resolves', () => {
+    // A node deleted from the graph keeps its entry in the session's position
+    // map until something rewrites it. Identity comes from `resolved.nodes`
+    // alone, so the stale position must not conjure an anonymous node.
     const scene = sceneFromSession({
       ...sessionPayload,
-      state: { ...sessionPayload.state, node_refs: ['n1', 'n2', 'gone'] },
+      state: {
+        ...sessionPayload.state,
+        node_refs: ['n1', 'n2', 'gone'],
+        positions: { ...sessionPayload.state.positions, gone: { x: 5, y: 5 } },
+      },
     });
     expect(Object.keys(scene.nodes).sort()).toEqual(['n1', 'n2']);
+    expect(renderableNodes(scene).map((n) => n.id)).toEqual(['n1']);
   });
 
   it('keeps a resolved node without a stored position out of the render set', () => {

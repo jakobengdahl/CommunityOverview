@@ -162,9 +162,6 @@ export class SceneSession {
       if (this._closed || this._deleted || generation !== this._generation) return;
       const buffered = this._reloadBuffer;
       this._reloadBuffer = null;
-      // The reload is authoritative and returns every node already hydrated,
-      // so previous attempts carry no information into the new scene.
-      this._hydrationAttempted = new Set();
       // Presence and claims are ephemeral and stream-owned: the sync client
       // seeds them from the same snapshot that triggered this reload, and it
       // does so *before* firing onReady/onResync. Rebuilding the scene from
@@ -181,6 +178,13 @@ export class SceneSession {
       // assignment then discards — and no later op could repair it, since a
       // move for an unknown id is dropped by design.
       this._scene = applyOps(loaded, buffered);
+      // Prune rather than clear: a node the replayed buffer re-introduces
+      // already has a details fetch in flight from when the op first arrived,
+      // and forgetting that would issue a second one for the same id. Ids the
+      // reload dropped are forgotten, so a later re-add hydrates again.
+      this._hydrationAttempted = new Set(
+        [...this._hydrationAttempted].filter((id) => this._scene.nodes[id])
+      );
       this._setStatus('connected');
       this._hydratePending();
     } catch (err) {

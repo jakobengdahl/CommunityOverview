@@ -105,13 +105,13 @@ function SessionControls({ error, onCreate, onConnect, busy }) {
         value={draft}
         onChange={(e) => setDraft(e.target.value)}
         onKeyDown={(e) => {
-          if (e.key === 'Enter' && isValidSessionId(draft)) onConnect(draft.trim());
+          if (e.key === 'Enter' && !busy && isValidSessionId(draft)) onConnect(draft.trim());
         }}
       />
       <button
         type="button"
         onClick={() => onConnect(draft.trim())}
-        disabled={!isValidSessionId(draft)}
+        disabled={busy || !isValidSessionId(draft)}
       >
         Connect
       </button>
