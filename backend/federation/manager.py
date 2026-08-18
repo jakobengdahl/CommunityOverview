@@ -183,9 +183,7 @@ class FederationManager:
         timeout_s = max(0.1, self._config.federation.default_timeout_ms / 1000.0)
 
         try:
-            payload = await self._fetch_graph_payload(
-                graph_json_url, client, timeout_s
-            )
+            payload = await self._fetch_graph_payload(graph_json_url, client, timeout_s)
             return self._update_cache(graph, payload)
         except Exception as exc:
             self._set_degraded(graph.graph_id, str(exc))
