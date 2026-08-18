@@ -5,24 +5,48 @@ following [ADR 0003](../../docs/adr/0003-webxr-immersive-graph-client-spike.md).
 This is an **additive** workspace: it does not touch the backend, the REST/MCP
 contracts, the session-sync protocol, or the existing 2D web client.
 
-## What exists so far (scaffold)
+## What exists so far
 
 - A WebXR entry (`src/App.jsx`) using `@react-three/fiber` + `@react-three/xr`
-  with an **Enter VR** button and a placeholder scene.
+  with an **Enter VR** button, session controls, and the dome scene.
 - The pure **dome layout** geometry (`src/domeLayout.js`, unit-tested in
   `src/domeLayout.test.js`): it maps the graph's 2D `{x, y}` layout onto a
   curved dome around the viewer, with **zoom mapped to dome radius** and **no
   z-axis** — keeping positions compatible with the 2D protocol.
+- **Shared-session sync**, reusing the existing protocol with no change to it:
+  - `src/sceneSession.js` opens `GET /api/sessions/{id}/stream` through
+    `frontend/web/src/services/sessionSyncClient.js` — imported across the
+    workspace boundary, unmodified — and reloads the authoritative session over
+    REST on connect and on every resync, exactly as the 2D client does.
+  - `src/sceneModel.js` reduces the op stream (`nodes_added` / `nodes_removed`,
+    `node_moved`, `layout_applied`, `nodes_hidden` / `nodes_shown`,
+    `session_renamed`) plus presence and remote selection claims into the flat
+    scene the renderer draws. Pure and unit-tested in `src/sceneModel.test.js`.
 
-Placeholder nodes carry the same 2D `{x, y}` positions the real
-`sessionSyncClient` provides (it keys them by node id rather than holding a flat
-array), so the mapping is visible on-device before any data plumbing exists.
+Until a session is connected the scene shows placeholder nodes, so the dome
+geometry is still walkable on-device with no backend running.
 
-## Not yet wired (next tasks)
+### Connecting to a session
 
-Shared-session sync (create/connect by short ID), edges + SDF text labels,
-dome-radius zoom navigation, controller/hand ray-select, and the read-only
-in-world node panel. See ADR 0003 for the scope boundary.
+**New session** asks the backend for one; the short ID field joins an existing
+one (`0000-0000-0000-0000`, or the legacy two-group form). The connected ID is
+reflected into `?session=<id>`, so the desktop client's share link opens the
+headset straight into the same session — typing sixteen digits in VR is the
+worst part of the workflow.
+
+A node a collaborator adds arrives as an id only, so its name and type are
+fetched over REST; nodes render once a position op has placed them.
+
+### Not yet wired (next tasks)
+
+The client is **read-only on the protocol**: it renders the shared session but
+emits no ops of its own. Controller/hand ray-select (and with it the outgoing
+`selection_claimed` / `node_moved` ops), edges + SDF text labels, dome-radius
+zoom navigation, and the in-world node panel are still to come — as is lifting
+`sessionSyncClient.js` and the session helpers of `api.js` out of
+`frontend/web` into a shared package, now that a second consumer exists. Edge
+and annotation ops are therefore ignored by the scene model rather than reduced
+into state nothing draws. See ADR 0003 for the scope boundary.
 
 ## Run
 
@@ -30,6 +54,10 @@ in-world node panel. See ADR 0003 for the scope boundary.
 npm install                 # from the repo root, once
 npm run dev -w @community-graph/xr
 ```
+
+The dev server proxies `/api` to `http://localhost:8000`, so run the backend
+(`./start-dev.sh` or the usual uvicorn command) alongside it to create or join
+sessions.
 
 On a desktop browser at `http://localhost:5173`, **Enter VR** does not fail for
 lack of a headset: `@react-three/xr` defaults to injecting the IWER emulator on
@@ -59,5 +87,6 @@ already set) behind an HTTPS tunnel, or serve with a locally-trusted certificate
 npm run test -w @community-graph/xr
 ```
 
-The tests cover the pure dome geometry only; the R3F scene is validated on-device
-via the smoke test above.
+The tests cover the pure layers — dome geometry, the op-stream reduction, and
+the session wiring against a fake sync client. The R3F scene itself is validated
+on-device via the smoke test above.
