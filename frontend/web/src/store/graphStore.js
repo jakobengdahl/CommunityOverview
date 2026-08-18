@@ -58,26 +58,28 @@ const NAV_HISTORY_LIMIT = 50;
 
 // Append node-trail entries (newest-first) onto an existing trail, returning a
 // new bounded array. Pure so the trimming/dedup logic is unit-testable without
-// the store. `at` is the shared ISO timestamp for this batch. A repeat of the
-// node currently at the top is collapsed in place (its timestamp is refreshed)
-// rather than pushed as an adjacent duplicate, so add-then-visit or re-focusing
-// the same node does not clutter the trail. On collapse an existing 'added'
-// designation is kept even if the incoming event is a 'visit', so a node the
-// user just added (then focused, e.g. via search) still reads as "Added".
+// the store. `at` is the shared ISO timestamp for this batch. The trail is a
+// most-recently-used list, not a visit log: a node already anywhere in it is
+// moved to the top with a refreshed timestamp rather than added a second time.
+// Every row is just a jump target, so a second row for the same node offers the
+// user no action the first one does not, while still consuming one of the
+// bounded slots that an older, distinct node would otherwise hold. On such a
+// move an existing 'added' designation is kept even if the incoming event is a
+// 'visit', so a node the user added this session still reads as "Added".
 export function appendNavEntries(prev, entries, at, limit = NAV_HISTORY_LIMIT) {
   let next = Array.isArray(prev) ? prev : [];
   for (const e of entries || []) {
     if (!e || !e.id) continue;
     const action = e.action === 'added' ? 'added' : 'visited';
-    const collapses = next.length > 0 && next[0].id === e.id;
+    const existing = next.find((r) => r.id === e.id);
     const row = {
       id: e.id,
       name: e.name || e.id,
       type: e.type || '',
-      action: collapses && next[0].action === 'added' ? 'added' : action,
+      action: existing?.action === 'added' ? 'added' : action,
       at,
     };
-    next = collapses ? [row, ...next.slice(1)] : [row, ...next];
+    next = [row, ...next.filter((r) => r.id !== e.id)];
   }
   return next.slice(0, limit);
 }
