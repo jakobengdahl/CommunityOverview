@@ -5,6 +5,8 @@ import os
 from pathlib import Path
 
 import pytest
+from pydantic import ValidationError
+from backend.federation.config import FederationSync
 
 from backend.federation.config import (
     FederationFileConfig,
@@ -184,8 +186,6 @@ def test_config_with_depth_levels(tmp_path):
 
     assert loaded.federation.depth_levels == [1, 2, 4]
 
-from pydantic import ValidationError
-from backend.federation.config import FederationSync
 
 def test_validate_interval_valid():
     sync = FederationSync(interval_seconds=300)
