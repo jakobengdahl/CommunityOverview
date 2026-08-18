@@ -50,6 +50,7 @@ _COLOR_NAMES = {
     "#6B7280": "gray",
 }
 
+
 def _build_node_types_section(schema: dict) -> str:
     """Build the node types section for the system prompt."""
     node_types_section_parts = ["METAMODEL - Node Types:\n"]
@@ -72,6 +73,7 @@ def _build_node_types_section(schema: dict) -> str:
 
     return "".join(node_types_section_parts)
 
+
 def _build_relationship_types_section(schema: dict) -> str:
     """Build the relationship types section for the system prompt."""
     rel_types_section_parts = ["RELATIONSHIP TYPES:\n"]
@@ -79,6 +81,7 @@ def _build_relationship_types_section(schema: dict) -> str:
         desc = type_config.get("description", "")
         rel_types_section_parts.append(f"- {type_name}: {desc}\n")
     return "".join(rel_types_section_parts)
+
 
 def _build_system_prompt() -> str:
     """
