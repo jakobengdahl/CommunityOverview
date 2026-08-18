@@ -121,6 +121,48 @@ class FederationManager:
         except RuntimeError:
             asyncio.run(run_sync())
 
+    async def _fetch_graph_payload(
+        self, graph_json_url: str, client: Optional[httpx.AsyncClient], timeout_s: float
+    ) -> Dict[str, Any]:
+        """Fetch the federated graph JSON payload from the remote endpoint."""
+        if client is None:
+            async with httpx.AsyncClient() as new_client:
+                response = await new_client.get(graph_json_url, timeout=timeout_s)
+                response.raise_for_status()
+                return response.json()
+        else:
+            response = await client.get(graph_json_url, timeout=timeout_s)
+            response.raise_for_status()
+            return response.json()
+
+    def _update_cache(
+        self, graph: FederationGraphConfig, payload: Dict[str, Any]
+    ) -> Dict[str, Any]:
+        """Update the local cache with the fetched federated graph payload."""
+        nodes = payload.get("nodes", [])
+        edges = payload.get("edges", [])
+        cache_nodes, cache_edges = self._build_cache(graph, nodes, edges)
+
+        with self._lock:
+            entry = self._cache[graph.graph_id]
+            previous_nodes = dict(entry.nodes)
+            previous_edges = dict(entry.edges)
+            entry.nodes = cache_nodes
+            entry.edges = cache_edges
+            entry.status = "healthy"
+            entry.last_error = None
+            entry.last_synced_at = datetime.now(timezone.utc).isoformat()
+
+        self._emit_node_events(previous_nodes, cache_nodes)
+        self._emit_edge_events(previous_edges, cache_edges)
+
+        return {
+            "success": True,
+            "graph_id": graph.graph_id,
+            "nodes": len(cache_nodes),
+            "edges": len(cache_edges),
+        }
+
     async def sync_graph(
         self, graph_id: str, client: Optional[httpx.AsyncClient] = None
     ) -> Dict[str, Any]:
@@ -141,39 +183,10 @@ class FederationManager:
         timeout_s = max(0.1, self._config.federation.default_timeout_ms / 1000.0)
 
         try:
-            if client is None:
-                async with httpx.AsyncClient() as new_client:
-                    response = await new_client.get(graph_json_url, timeout=timeout_s)
-                    response.raise_for_status()
-                    payload = response.json()
-            else:
-                response = await client.get(graph_json_url, timeout=timeout_s)
-                response.raise_for_status()
-                payload = response.json()
-
-            nodes = payload.get("nodes", [])
-            edges = payload.get("edges", [])
-            cache_nodes, cache_edges = self._build_cache(graph, nodes, edges)
-
-            with self._lock:
-                entry = self._cache[graph.graph_id]
-                previous_nodes = dict(entry.nodes)
-                previous_edges = dict(entry.edges)
-                entry.nodes = cache_nodes
-                entry.edges = cache_edges
-                entry.status = "healthy"
-                entry.last_error = None
-                entry.last_synced_at = datetime.now(timezone.utc).isoformat()
-
-            self._emit_node_events(previous_nodes, cache_nodes)
-            self._emit_edge_events(previous_edges, cache_edges)
-
-            return {
-                "success": True,
-                "graph_id": graph.graph_id,
-                "nodes": len(cache_nodes),
-                "edges": len(cache_edges),
-            }
+            payload = await self._fetch_graph_payload(
+                graph_json_url, client, timeout_s
+            )
+            return self._update_cache(graph, payload)
         except Exception as exc:
             self._set_degraded(graph.graph_id, str(exc))
             return {"success": False, "graph_id": graph.graph_id, "error": str(exc)}
