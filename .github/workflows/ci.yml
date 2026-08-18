@@ -367,8 +367,12 @@ jobs:
           node-version: '20'
           cache: 'npm'
 
+      # ESLint and Prettier still walk every frontend/** file on disk,
+      # frontend/xr included — this only skips installing that workspace's
+      # own ~120 MB of runtime deps (three, @react-three/*, @iwer/*), which
+      # neither tool resolves or needs to lint/format its source.
       - name: Install dependencies
-        run: npm ci --no-audit --no-fund
+        run: npm ci --no-audit --no-fund --workspace @community-graph/web --workspace @community-graph/widget --include-workspace-root
 
       - name: ESLint
         run: npm run lint
