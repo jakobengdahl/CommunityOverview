@@ -219,7 +219,6 @@ export class SceneSession {
     const pending = pendingNodeIds(this._scene).filter((id) => !this._hydrationAttempted.has(id));
     if (!pending.length) return;
     for (const id of pending) this._hydrationAttempted.add(id);
-    const generation = this._generation;
     const results = await Promise.all(
       pending.map((id) =>
         Promise.resolve()
@@ -229,7 +228,13 @@ export class SceneSession {
           .catch(() => null)
       )
     );
-    if (this._closed || generation !== this._generation) return;
+    if (this._closed) return;
+    // Deliberately not guarded on the reload generation, unlike `_reload`
+    // itself. A node's name and type belong to the graph, not to a particular
+    // reload, and `hydrateNodes` only merges into ids the current scene holds
+    // — so a result that lands after a reload is still correct. Discarding it
+    // would strand the node: the attempt is already recorded, so nothing would
+    // ever fetch it again.
     const nodes = results.map((r) => r?.node).filter(Boolean);
     if (nodes.length) this._update(hydrateNodes(this._scene, nodes));
   }

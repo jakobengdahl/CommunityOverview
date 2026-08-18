@@ -307,6 +307,51 @@ describe('SceneSession', () => {
     expect(loadNodeDetails).toHaveBeenCalledTimes(1);
   });
 
+  // A hydration result that lands after a reload must still be applied: the
+  // attempt is already recorded, so discarding it would strand the node
+  // permanently un-named with nothing left to refetch it.
+  it('applies a node-details read that resolves after a reload bumped the generation', async () => {
+    let resolveDetails;
+    let resolveReload;
+    const empty = payload([], {});
+    const loadNodeDetails = vi
+      .fn()
+      .mockImplementation(() => new Promise((res) => (resolveDetails = res)));
+    const { session, client } = makeSession({
+      loadSession: vi
+        .fn()
+        .mockResolvedValueOnce(empty)
+        .mockImplementationOnce(() => new Promise((res) => (resolveReload = res))),
+      loadNodeDetails,
+    });
+    session.connect();
+    await client().handlers.onReady(1);
+
+    client().handlers.onRemoteOps([
+      { op: 'nodes_added', node_ids: ['n3'] },
+      { op: 'node_moved', node_id: 'n3', position: { x: 1, y: 1 } },
+    ]);
+    await Promise.resolve();
+    expect(loadNodeDetails).toHaveBeenCalledTimes(1);
+
+    // A resync bumps the generation while that read is still in flight, and
+    // re-introduces the node through the replayed buffer rather than the
+    // payload — so the reload cannot hydrate it either.
+    client().handlers.onResync();
+    await Promise.resolve();
+    client().handlers.onRemoteOps([
+      { op: 'nodes_added', node_ids: ['n3'] },
+      { op: 'node_moved', node_id: 'n3', position: { x: 2, y: 2 } },
+    ]);
+    resolveDetails({ node: { id: 'n3', name: 'Gamma' } });
+    await Promise.resolve();
+    await Promise.resolve();
+    resolveReload(empty);
+
+    await vi.waitFor(() => expect(session.getState().scene.nodes.n3?.name).toBe('Gamma'));
+    expect(loadNodeDetails).toHaveBeenCalledTimes(1);
+  });
+
   it('does not replay a stale buffer into a later reload', async () => {
     let resolveFirst;
     const loadSession = vi
