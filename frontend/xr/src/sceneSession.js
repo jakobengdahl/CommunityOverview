@@ -76,6 +76,10 @@ export class SceneSession {
     // between the op and the read never hydrates, so without this the pending
     // set would never drain and every later op batch would re-fetch it.
     this._hydrationAttempted = new Set();
+    // Ops delivered while a reload is in flight, replayed on top of the loaded
+    // scene. Every op in the reducer's vocabulary is idempotent, so replaying
+    // one the reload already reflects is harmless.
+    this._reloadBuffer = null;
 
     this._client = createClient({
       sessionId,
@@ -90,7 +94,15 @@ export class SceneSession {
         onPresence: (roster) => this._update(withRoster(this._scene, roster)),
         onSelections: (claims) => this._update(withClaims(this._scene, claims)),
         onSessionRenamed: (name) => this._update({ ...this._scene, name: name ?? null }),
-        onSessionDeleted: () => this._setStatus('deleted'),
+        onSessionDeleted: () => {
+          // The server broadcasts the notice but leaves the SSE generator
+          // running, and the stream endpoint is get-or-create. Left open, the
+          // next auto-reconnect (headset sleep/wake, network change) would
+          // recreate the session we were just told is gone and report it
+          // connected again, silently replacing the notice. Stop the stream.
+          this._client.close();
+          this._setStatus('deleted');
+        },
       },
     });
   }
@@ -135,16 +147,36 @@ export class SceneSession {
    */
   async _reload() {
     const generation = ++this._generation;
+    this._reloadBuffer = [];
     try {
       const payload = await this._loadSession(this.sessionId, { resolve: true });
       if (this._closed || generation !== this._generation) return;
+      const buffered = this._reloadBuffer;
+      this._reloadBuffer = null;
       // The reload is authoritative and returns every node already hydrated,
       // so previous attempts carry no information into the new scene.
       this._hydrationAttempted = new Set();
-      this._scene = sceneFromSession(payload, { sessionId: this.sessionId });
+      // Presence and claims are ephemeral and stream-owned: the sync client
+      // seeds them from the same snapshot that triggered this reload, and it
+      // does so *before* firing onReady/onResync. Rebuilding the scene from
+      // the REST payload alone would therefore drop the roster and every
+      // collaborator's selection the instant after they arrived, until some
+      // later join/leave happened to repopulate them.
+      const loaded = {
+        ...sceneFromSession(payload, { sessionId: this.sessionId }),
+        roster: this._scene.roster,
+        claims: this._scene.claims,
+      };
+      // An op that committed after the REST read but reached the stream before
+      // the REST response would otherwise be folded into a scene this
+      // assignment then discards — and no later op could repair it, since a
+      // move for an unknown id is dropped by design.
+      this._scene = applyOps(loaded, buffered);
       this._setStatus('connected');
+      this._hydratePending();
     } catch (err) {
       if (this._closed || generation !== this._generation) return;
+      this._reloadBuffer = null;
       // The stream stays open, so a later resync retries this on its own; the
       // error is surfaced meanwhile rather than leaving an empty dome.
       this._setStatus('error', err?.message || String(err ?? 'load failed'));
@@ -152,6 +184,7 @@ export class SceneSession {
   }
 
   _applyOps(ops) {
+    if (this._reloadBuffer) this._reloadBuffer.push(...(ops || []));
     const next = applyOps(this._scene, ops);
     if (next !== this._scene) {
       // Forget attempts for nodes the batch removed, so re-adding the same node

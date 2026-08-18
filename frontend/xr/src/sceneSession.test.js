@@ -213,12 +213,99 @@ describe('SceneSession', () => {
     expect(renderableNodes(scene).find((n) => n.id === 'n1').claim.displayName).toBe('Bo');
   });
 
-  it('reports a remote session delete', async () => {
+  // SessionSyncClient seeds presence from the snapshot *before* it fires
+  // onReady/onResync, so this is the order every real connect takes — a scene
+  // rebuilt from the REST payload alone would drop both a moment after they
+  // arrived, leaving the headset showing no collaborators and no selections.
+  it('keeps the roster and claims the snapshot seeded before it fired onReady', async () => {
+    const { session, client } = makeSession({ loadSession: vi.fn().mockResolvedValue(twoNodes) });
+    session.connect();
+
+    client().handlers.onPresence([{ client_id: 'client-b', display_name: 'Bo', color: '#f00' }]);
+    client().handlers.onSelections({
+      n1: { clientId: 'client-b', color: '#f00', displayName: 'Bo' },
+    });
+    await client().handlers.onReady(1);
+
+    const { scene } = session.getState();
+    expect(scene.roster).toHaveLength(1);
+    expect(renderableNodes(scene).find((n) => n.id === 'n1').claim.displayName).toBe('Bo');
+  });
+
+  it('keeps presence across the reload a resync triggers', async () => {
+    const { session, client } = makeSession({ loadSession: vi.fn().mockResolvedValue(twoNodes) });
+    session.connect();
+    await client().handlers.onReady(1);
+
+    client().handlers.onPresence([{ client_id: 'client-b', display_name: 'Bo', color: '#f00' }]);
+    client().handlers.onSelections({
+      n2: { clientId: 'client-b', color: '#f00', displayName: 'Bo' },
+    });
+    await client().handlers.onResync();
+
+    const { scene } = session.getState();
+    expect(scene.roster).toHaveLength(1);
+    expect(renderableNodes(scene).find((n) => n.id === 'n2').claim.displayName).toBe('Bo');
+  });
+
+  // The stream endpoint is get-or-create and the server leaves the generator
+  // running after the delete notice, so an open stream would let the next
+  // auto-reconnect recreate the very session that was just deleted.
+  it('stops the stream on a remote session delete', async () => {
     const { session, client } = makeSession({ loadSession: vi.fn().mockResolvedValue(twoNodes) });
     session.connect();
     await client().handlers.onReady(1);
     client().handlers.onSessionDeleted('client-b');
     expect(session.getState().status).toBe('deleted');
+    expect(client().closed).toBe(true);
+  });
+
+  it('replays ops that arrived while the reload was in flight', async () => {
+    let resolveLoad;
+    const loadSession = vi.fn().mockImplementation(() => new Promise((res) => (resolveLoad = res)));
+    const { session, client } = makeSession({
+      loadSession,
+      loadNodeDetails: vi
+        .fn()
+        .mockImplementation((id) => Promise.resolve({ node: { id, name: id } })),
+    });
+    session.connect();
+    client().handlers.onReady(1);
+
+    // Delivered on the stream before the REST response lands, and naming a node
+    // the response does not carry — so without the replay it is lost for good.
+    client().handlers.onRemoteOps([
+      { op: 'nodes_added', node_ids: ['n3'] },
+      { op: 'node_moved', node_id: 'n3', position: { x: 7, y: 8 } },
+      { op: 'nodes_hidden', node_ids: ['n1'] },
+    ]);
+    resolveLoad(twoNodes);
+    await vi.waitFor(() =>
+      expect(renderableNodes(session.getState().scene).map((n) => n.id)).toEqual(['n2', 'n3'])
+    );
+    expect(session.getState().scene.nodes.n3).toMatchObject({ x: 7, y: 8 });
+    await vi.waitFor(() => expect(session.getState().scene.nodes.n3.hydrated).toBe(true));
+  });
+
+  it('does not replay a stale buffer into a later reload', async () => {
+    let resolveFirst;
+    const loadSession = vi
+      .fn()
+      .mockImplementationOnce(() => new Promise((res) => (resolveFirst = res)))
+      .mockResolvedValueOnce(payload([{ id: 'n9', name: 'Nine' }], { n9: { x: 1, y: 1 } }));
+    const { session, client } = makeSession({ loadSession });
+    session.connect();
+
+    client().handlers.onReady(1);
+    client().handlers.onRemoteOps([{ op: 'nodes_hidden', node_ids: ['n1'] }]);
+    await client().handlers.onResync();
+    resolveFirst(twoNodes);
+    await Promise.resolve();
+    await Promise.resolve();
+
+    // The second reload won; the first reload's buffer must not leak into it.
+    expect(Object.keys(session.getState().scene.nodes)).toEqual(['n9']);
+    expect(session.getState().scene.hiddenNodeIds).toEqual([]);
   });
 
   it('stops emitting once closed', async () => {
