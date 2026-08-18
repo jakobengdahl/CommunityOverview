@@ -37,6 +37,51 @@ _VIEW_CONTENT_ACTIONS = frozenset(
     }
 )
 
+_COLOR_NAMES = {
+    "#3B82F6": "blue",
+    "#A855F7": "purple",
+    "#10B981": "green",
+    "#F97316": "orange",
+    "#FBBF24": "yellow",
+    "#EF4444": "red",
+    "#14B8A6": "teal",
+    "#6366F1": "indigo",
+    "#D946EF": "fuchsia",
+    "#6B7280": "gray",
+}
+
+
+def _build_node_types_section(schema: dict) -> str:
+    """Build the node types section for the system prompt."""
+    node_types_section_parts = ["METAMODEL - Node Types:\n"]
+
+    # Add domain types
+    for type_name, type_config in schema.get("node_types", {}).items():
+        if type_config.get("category") == "system":
+            continue  # Skip system types in the main domain list
+        color = type_config.get("color", "#9CA3AF")
+        desc = type_config.get("description", "")
+        # Map color to name for readability
+        color_name = _COLOR_NAMES.get(color, "")
+        node_types_section_parts.append(f"- {type_name} ({color_name}): {desc}\n")
+
+    # Add system types at the end
+    for type_name, type_config in schema.get("node_types", {}).items():
+        if type_config.get("category") == "system":
+            desc = type_config.get("description", "")
+            node_types_section_parts.append(f"- {type_name} (gray): {desc}\n")
+
+    return "".join(node_types_section_parts)
+
+
+def _build_relationship_types_section(schema: dict) -> str:
+    """Build the relationship types section for the system prompt."""
+    rel_types_section_parts = ["RELATIONSHIP TYPES:\n"]
+    for type_name, type_config in schema.get("relationship_types", {}).items():
+        desc = type_config.get("description", "")
+        rel_types_section_parts.append(f"- {type_name}: {desc}\n")
+    return "".join(rel_types_section_parts)
+
 
 def _build_system_prompt() -> str:
     """
@@ -51,39 +96,10 @@ def _build_system_prompt() -> str:
     presentation = config_loader.get_presentation()
 
     # Build node types section from config
-    node_types_section = "METAMODEL - Node Types:\n"
-    for type_name, type_config in schema.get("node_types", {}).items():
-        if type_config.get("category") == "system":
-            continue  # Skip system types in the main domain list
-        color = type_config.get("color", "#9CA3AF")
-        desc = type_config.get("description", "")
-        # Map color to name for readability
-        color_names = {
-            "#3B82F6": "blue",
-            "#A855F7": "purple",
-            "#10B981": "green",
-            "#F97316": "orange",
-            "#FBBF24": "yellow",
-            "#EF4444": "red",
-            "#14B8A6": "teal",
-            "#6366F1": "indigo",
-            "#D946EF": "fuchsia",
-            "#6B7280": "gray",
-        }
-        color_name = color_names.get(color, "")
-        node_types_section += f"- {type_name} ({color_name}): {desc}\n"
-
-    # Add system types at the end
-    for type_name, type_config in schema.get("node_types", {}).items():
-        if type_config.get("category") == "system":
-            desc = type_config.get("description", "")
-            node_types_section += f"- {type_name} (gray): {desc}\n"
+    node_types_section = _build_node_types_section(schema)
 
     # Build relationship types section from config
-    rel_types_section = "RELATIONSHIP TYPES:\n"
-    for type_name, type_config in schema.get("relationship_types", {}).items():
-        desc = type_config.get("description", "")
-        rel_types_section += f"- {type_name}: {desc}\n"
+    rel_types_section = _build_relationship_types_section(schema)
 
     # Get custom prompt parts
     prompt_prefix = presentation.get("prompt_prefix", "")
