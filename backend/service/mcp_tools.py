@@ -808,9 +808,12 @@ def register_mcp_tools(
         Removes everything currently displayed in the browser window without
         affecting the underlying graph data. Use this to start a fresh view.
 
-        This is a live-canvas command, so it requires a connected browser and
-        fails without one — unlike the tools that act on the session's stored
-        state, which work whether or not anyone is watching.
+        This is a live-canvas command, and it is dispatched over the *legacy*
+        push channel, so it fails unless a browser is holding that channel open
+        for the session — which is narrower than "someone is watching": a
+        browser that has moved to the op stream reports presence in
+        ``connect_to_visualization_session`` while this tool still refuses. The
+        tools that act on the session's stored state have no such requirement.
 
         Args:
             visualization_session_id: The browser session ID shown in the header
@@ -827,12 +830,26 @@ def register_mcp_tools(
                 "error": "Invalid session ID format — expected DDDD-DDDD-DDDD-DDDD",
             }
         if not session_registry.session_exists(visualization_session_id):
+            # Keep the contract's not-found error for an id that names no
+            # session at all (§8); "nobody is holding the legacy channel" is a
+            # different condition and must not be reported as if the session
+            # existed.
+            stored, _, _ = _session_facts(visualization_session_id)
+            if not stored:
+                return {
+                    "success": False,
+                    "error": (
+                        f"Session '{visualization_session_id}' not found. "
+                        "Create one with create_visualization_session, or use "
+                        "the session ID displayed in an open browser."
+                    ),
+                }
             return {
                 "success": False,
                 "error": (
-                    f"Session '{visualization_session_id}' has no browser "
-                    "holding its push channel open. Clearing only reaches a "
-                    "browser that is currently displaying the session."
+                    f"Session '{visualization_session_id}' exists, but no "
+                    "browser is holding its legacy push channel open, which is "
+                    "how this command is delivered."
                 ),
             }
         result = {
@@ -1001,14 +1018,18 @@ def register_mcp_tools(
             }
         # Same read gate as get_visualization_session_state: this tool reports a
         # session's existence and node count, so a hook that narrows reads must
-        # be asked here too (contract §7 routes every session operation through
-        # it).
+        # be asked here too. (Not every tool in this family is gated yet — the
+        # push-only ones are not — but the two that disclose stored session
+        # state now agree.)
         denied = _authorize_session(
             GRAPH_ACTION_READ, "connect_to_visualization_session"
         )
         if denied:
             return denied
         stored, clients, push_target = _session_facts(session_id)
+        # Existence is the store or the legacy registry — deliberately not
+        # presence. A client can still be attached to a session that was just
+        # deleted, and reporting that as found would resurrect it.
         if not stored and not push_target:
             return {
                 "connected": False,

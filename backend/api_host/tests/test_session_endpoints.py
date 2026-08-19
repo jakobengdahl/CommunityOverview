@@ -330,6 +330,10 @@ class TestHeadlessSessionAddressability:
     ):
         """The relaxed gate must not turn any well-formed id into a hit."""
         unknown = "1010-2020-3030-4040"
+        # The file-backed store is shared across test files and runs, and this
+        # test asserts the *absence* of a session — so clear any leftover first
+        # (same hazard _open_browser documents).
+        asyncio.run(test_app.app.state.session_manager.delete_session(unknown))
 
         connect = test_app.post(
             "/execute_tool",
@@ -359,10 +363,29 @@ class TestClearVisualization:
     """
 
     def test_clear_unknown_session_errors(self, test_app: TestClient):
+        """An id that names no session is not-found, per contract §8 — not
+        "exists but unwatched"."""
         clear = test_app.app.state.tools_map["clear_visualization"]
+        asyncio.run(test_app.app.state.session_manager.delete_session("0000-1111"))
+
         data = clear(visualization_session_id="0000-1111")
+
         assert data["success"] is False
-        assert "no browser holding its push channel open" in data["error"].lower()
+        assert "not found" in data["error"].lower()
+
+    def test_clear_reports_the_missing_push_channel_for_a_stored_session(
+        self, test_app: TestClient
+    ):
+        """A session that exists but has no legacy push channel is a different
+        failure from one that does not exist, and says so."""
+        clear = test_app.app.state.tools_map["clear_visualization"]
+        session_id = _create_headless_session(test_app)
+
+        data = clear(visualization_session_id=session_id)
+
+        assert data["success"] is False
+        assert "not found" not in data["error"].lower()
+        assert "legacy push channel" in data["error"].lower()
 
     def test_clear_open_session_succeeds(self, test_app: TestClient):
         # The push transport itself is covered by the search_graph push tests; a

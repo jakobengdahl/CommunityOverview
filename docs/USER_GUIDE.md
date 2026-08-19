@@ -616,7 +616,7 @@ interface.
 | `get_graph_stats` | Get summary statistics about the graph |
 | `save_view` | Save a named canvas view |
 | `get_capabilities` | Discover what the server supports |
-| `connect_to_visualization_session` | Bind to a specific browser window by session ID |
+| `connect_to_visualization_session` | Check that a session ID resolves, and whether a client is connected to it |
 
 ### 8.2 Connecting
 
