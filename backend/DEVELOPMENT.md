@@ -298,7 +298,8 @@ block in `playwright.config.js`), so no server needs to be running first. If one
 already is, Playwright reuses it rather than starting its own — which also means
 the `env` block (placeholder API key, throwaway graph file) does not apply, so a
 hand-started dev server keeps its own key and its e2e nodes land in its own
-graph. Stop it first, or set `CI=1`, to get the isolated setup.
+graph. Stop it first to get the isolated setup; `CI=1` does not help, it just
+makes Playwright refuse to start against an occupied port.
 
 The mobile specs require the backend to report an LLM as available, because the
 chat panel does not mount otherwise. Against a reused backend with no API key
@@ -322,10 +323,11 @@ opening the session drawer, creating a node from the toolbox, a long-press on
 that node opening its context menu, and the chat composer staying on screen.
 The desktop `chromium` project skips them, and they skip every other spec.
 
-The viewport-width check excludes surfaces listed in
-`KNOWN_HORIZONTAL_OVERFLOW` at the top of the spec, which already overflow on a
-phone. Removing an entry once the surface is fixed turns the check back on for
-it.
+The viewport check measures both edges and excludes surfaces listed in
+`KNOWN_RIGHT_OVERFLOW` / `KNOWN_LEFT_OVERFLOW` at the top of the spec, which
+already hang off a phone viewport. The lists are per-edge on purpose: exempting
+a subtree from both edges costs more coverage than the break it silences.
+Removing an entry once the surface is fixed turns the check back on for it.
 
 ### E2E Tests with Live Backend
 

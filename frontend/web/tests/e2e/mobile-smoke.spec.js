@@ -18,11 +18,16 @@ const LONG_PRESS_HOLD_MS = 900;
 // check reports *new* breaks rather than failing on ones that predate it.
 // Delete an entry once its surface is fixed and the check covers it again.
 //
-// .floating-header  — a nowrap flex row with no max-width, so at 390px its
-//                     session id ends at x~424 and its clear button at x~455.
+// Kept per-edge rather than as one list: exempting a subtree from both edges
+// costs far more coverage than the break being silenced. The chat panel is the
+// largest subtree in the shell, and only its left edge is broken.
+//
+// .floating-header — a nowrap flex row with no max-width, so at 390px its
+//   session id ends at x~424 and its clear button at x~455.
+const KNOWN_RIGHT_OVERFLOW = ['.floating-header'];
 // .chat-panel-floating — a fixed 380px anchored 16px from the right edge, so at
-//                     390px its left edge sits at x~-6.
-const KNOWN_HORIZONTAL_OVERFLOW = ['.floating-header', '.chat-panel-floating'];
+//   390px its left edge sits at x~-6. Its right edge is inside on both devices.
+const KNOWN_LEFT_OVERFLOW = ['.chat-panel-floating'];
 
 /**
  * Finds a point inside the first canvas node that nothing else covers.
@@ -90,8 +95,11 @@ async function longPress(page, point, whileHeld, holdMs = LONG_PRESS_HOLD_MS) {
     await page.waitForTimeout(holdMs);
     await whileHeld();
   } finally {
-    await cdp.send('Input.dispatchTouchEvent', { type: 'touchEnd', touchPoints: [] });
-    await cdp.detach();
+    // Swallowed: if whileHeld() failed, that error is the one worth reporting.
+    await cdp
+      .send('Input.dispatchTouchEvent', { type: 'touchEnd', touchPoints: [] })
+      .catch(() => {});
+    await cdp.detach().catch(() => {});
   }
 }
 
@@ -149,28 +157,33 @@ test.describe('mobile shell', () => {
   test('lays out inside the viewport width', async ({ page }) => {
     await openApp(page);
 
-    const overflowing = await page.evaluate((allowed) => {
-      const viewportWidth = window.innerWidth;
-      const offenders = [];
-      for (const el of document.querySelectorAll('body *')) {
-        if (allowed.some((selector) => el.closest(selector))) continue;
-        const style = getComputedStyle(el);
-        if (style.display === 'none' || style.visibility === 'hidden' || style.opacity === '0') {
-          continue;
+    const overflowing = await page.evaluate(
+      (allowed) => {
+        const viewportWidth = window.innerWidth;
+        const offenders = [];
+        const exempt = (el, selectors) => selectors.some((selector) => el.closest(selector));
+        for (const el of document.querySelectorAll('body *')) {
+          const style = getComputedStyle(el);
+          if (style.display === 'none' || style.visibility === 'hidden' || style.opacity === '0') {
+            continue;
+          }
+          const rect = el.getBoundingClientRect();
+          if (rect.width === 0 && rect.height === 0) continue;
+          // Both edges: content pushed off the left is as unreachable as content
+          // pushed off the right, and a fixed panel can do either.
+          const overRight = rect.right > viewportWidth + 1 && !exempt(el, allowed.right);
+          const overLeft = rect.left < -1 && !exempt(el, allowed.left);
+          if (overRight || overLeft) {
+            const className = typeof el.className === 'string' ? el.className : '';
+            offenders.push(
+              `${el.tagName.toLowerCase()}.${className} left=${Math.round(rect.left)} right=${Math.round(rect.right)}`
+            );
+          }
         }
-        const rect = el.getBoundingClientRect();
-        if (rect.width === 0 && rect.height === 0) continue;
-        // Both edges: content pushed off the left is as unreachable as content
-        // pushed off the right, and a fixed panel can do either.
-        if (rect.right > viewportWidth + 1 || rect.left < -1) {
-          const className = typeof el.className === 'string' ? el.className : '';
-          offenders.push(
-            `${el.tagName.toLowerCase()}.${className} left=${Math.round(rect.left)} right=${Math.round(rect.right)}`
-          );
-        }
-      }
-      return { viewportWidth, offenders };
-    }, KNOWN_HORIZONTAL_OVERFLOW);
+        return { viewportWidth, offenders };
+      },
+      { right: KNOWN_RIGHT_OVERFLOW, left: KNOWN_LEFT_OVERFLOW }
+    );
 
     expect(
       overflowing.offenders,
@@ -218,8 +231,9 @@ test.describe('mobile shell', () => {
     const composer = page.locator('.chat-input');
     await expect(composer).toBeVisible();
 
-    // Reachable means fully on screen: a composer pushed below the visual
-    // viewport is unusable even though it is technically "visible".
+    // Reachable means the composer's whole box sits inside the layout viewport.
+    // A panel that grows past the bottom edge leaves it visible to the DOM but
+    // off screen to the user, which is what this catches.
     const fits = await composer.evaluate((el) => {
       const rect = el.getBoundingClientRect();
       return {
