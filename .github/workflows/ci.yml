@@ -335,6 +335,11 @@ jobs:
     name: Mobile e2e (non-required)
     runs-on: ubuntu-latest
     needs: detect-changes
+    # A browser job has more ways to wedge than a unit-test job. Bounded so a
+    # hung step fails in minutes instead of holding a runner for the default six
+    # hours — this job is non-required, so a timeout costs nothing but a red
+    # square, while a hang costs runner minutes for everyone.
+    timeout-minutes: 20
     if: >-
       needs.detect-changes.outputs.service_code == 'true' &&
       (github.event_name != 'pull_request' || github.event.pull_request.draft == false)
@@ -363,8 +368,13 @@ jobs:
       - name: Install dependencies
         run: npm ci --no-audit --no-fund
 
+      # Browser download only, no `--with-deps`: the runner image already ships
+      # the shared libraries Chromium needs, and the apt-get half of
+      # `--with-deps` is the one step here that can block on a package lock —
+      # observed hanging for 20+ minutes after completing in 21s on an earlier
+      # run of this same job.
       - name: Install Playwright browser
-        run: npx playwright install --with-deps chromium
+        run: npx playwright install chromium
         working-directory: frontend/web
 
       - name: Run mobile smoke tests
