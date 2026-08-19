@@ -318,25 +318,35 @@ def test_sync_emits_edge_events_for_cache_changes():
 # tests above call _build_cache / _emit_node_events directly, so they cannot
 # tell whether sync_graph still wires fetch, cache swap and event emission
 # together; that wiring is what these cover.
+#
+# They use httpx.MockTransport rather than another loopback HTTPServer because
+# only a mock transport can script a multi-request sequence (sync, then fail,
+# then recover) and assert that some calls make no request at all. The loopback
+# tests above stay as they are: they exercise the real transport stack, which a
+# mock cannot.
 # ---------------------------------------------------------------------------
 
 _REMOTE_GRAPH_URL = "https://federated.invalid/graph.json"
+_TIMEOUT_MS = 1200
 
 
-def _single_graph_config(graph_json_url=_REMOTE_GRAPH_URL, enabled=True):
+def _single_graph_config(
+    graph_json_url=_REMOTE_GRAPH_URL, enabled=True, timeout_ms=_TIMEOUT_MS
+):
     return FederationFileConfig.model_validate(
         {
             "federation": {
                 "enabled": True,
                 "max_traversal_depth": 1,
+                "default_timeout_ms": timeout_ms,
                 "graphs": [
                     {
                         "graph_id": "esam-main",
                         "display_name": "eSam",
                         "enabled": enabled,
-                        # A graph with only an MCP endpoint is the real shape
-                        # of the "no graph_json_url" case — the config layer
-                        # rejects a graph with no endpoint URL at all.
+                        # A graph with only an MCP endpoint is the real shape of
+                        # the "no graph_json_url" case — the config layer rejects
+                        # a graph with no endpoint URL at all.
                         "endpoints": (
                             {"graph_json_url": graph_json_url}
                             if graph_json_url
@@ -369,13 +379,28 @@ class _ScriptedTransport:
         status_code, payload = step
         return httpx.Response(status_code, json=payload)
 
+    def assert_requested_once(self):
+        """The remote was asked for exactly the configured URL, by GET, with the
+        configured timeout applied — the fetch details no assertion on the
+        response body can pin."""
+        assert [str(request.url) for request in self.requests] == [_REMOTE_GRAPH_URL]
+        assert self.requests[0].method == "GET"
+        assert self.requests[0].extensions["timeout"] == {
+            "connect": _TIMEOUT_MS / 1000.0,
+            "read": _TIMEOUT_MS / 1000.0,
+            "write": _TIMEOUT_MS / 1000.0,
+            "pool": _TIMEOUT_MS / 1000.0,
+        }
+
 
 class _StubHttpxModule:
     """Stands in for the module-level ``httpx`` name in manager.py.
 
     ``_fetch_graph_payload`` constructs its own ``httpx.AsyncClient()`` when no
     client is passed in; replacing the module attribute is the only way to bind
-    a mock transport to that branch without opening a real socket.
+    a mock transport to that branch without opening a real socket. Every test
+    below installs it, so a regression that opens a client where it should not
+    is caught rather than quietly reaching the network.
     """
 
     def __init__(self, transport):
@@ -387,8 +412,18 @@ class _StubHttpxModule:
         return httpx.AsyncClient(transport=self._transport, **kwargs)
 
 
+def _sealed(monkeypatch, remote):
+    """Install the stub module so no test can fall through to a real client."""
+    stub = _StubHttpxModule(remote.transport)
+    monkeypatch.setattr(manager_module, "httpx", stub)
+    return stub
+
+
+_ONE_NODE = {"nodes": [{"id": "n1", "type": "Actor", "name": "First"}], "edges": []}
+
+
 @pytest.mark.asyncio
-async def test_sync_graph_loads_remote_nodes_and_edges_into_the_cache():
+async def test_sync_graph_loads_remote_nodes_and_edges_into_the_cache(monkeypatch):
     remote = _ScriptedTransport(
         (
             200,
@@ -403,6 +438,7 @@ async def test_sync_graph_loads_remote_nodes_and_edges_into_the_cache():
             },
         )
     )
+    stub = _sealed(monkeypatch, remote)
     manager = FederationManager(_single_graph_config())
 
     async with httpx.AsyncClient(transport=remote.transport) as client:
@@ -420,17 +456,14 @@ async def test_sync_graph_loads_remote_nodes_and_edges_into_the_cache():
     assert graph_status["cached_nodes"] == 2
     assert graph_status["cached_edges"] == 1
     assert graph_status["last_synced_at"] is not None
-    assert graph_status["last_error"] is None
-    assert [str(request.url) for request in remote.requests] == [_REMOTE_GRAPH_URL]
+    remote.assert_requested_once()
+    assert stub.clients_opened == 0
 
 
 @pytest.mark.asyncio
 async def test_sync_graph_opens_its_own_client_when_none_is_supplied(monkeypatch):
-    remote = _ScriptedTransport(
-        (200, {"nodes": [{"id": "n1", "type": "Actor", "name": "First"}], "edges": []})
-    )
-    stub = _StubHttpxModule(remote.transport)
-    monkeypatch.setattr(manager_module, "httpx", stub)
+    remote = _ScriptedTransport((200, _ONE_NODE))
+    stub = _sealed(monkeypatch, remote)
 
     manager = FederationManager(_single_graph_config())
     result = await manager.sync_graph("esam-main")
@@ -438,32 +471,39 @@ async def test_sync_graph_opens_its_own_client_when_none_is_supplied(monkeypatch
     assert result["success"] is True
     assert result["nodes"] == 1
     assert stub.clients_opened == 1
-    assert len(remote.requests) == 1
+    # The self-opened branch is a separate code path from the supplied-client
+    # branch, so it needs its own proof that it requests the right thing.
+    remote.assert_requested_once()
 
 
 @pytest.mark.asyncio
 async def test_sync_graph_reuses_a_supplied_client_instead_of_opening_its_own(
     monkeypatch,
 ):
-    remote = _ScriptedTransport((200, {"nodes": [], "edges": []}))
-    stub = _StubHttpxModule(remote.transport)
-    monkeypatch.setattr(manager_module, "httpx", stub)
+    remote = _ScriptedTransport((200, _ONE_NODE))
+    stub = _sealed(monkeypatch, remote)
 
     manager = FederationManager(_single_graph_config())
     async with httpx.AsyncClient(transport=remote.transport) as client:
         result = await manager.sync_graph("esam-main", client)
 
     assert result["success"] is True
+    assert result["nodes"] == 1
     assert stub.clients_opened == 0
     assert len(remote.requests) == 1
 
 
+@pytest.mark.parametrize("status_code", [401, 404, 500])
 @pytest.mark.asyncio
-async def test_sync_graph_degrades_and_keeps_the_cache_when_the_remote_returns_5xx():
+async def test_sync_graph_degrades_and_keeps_the_cache_on_an_error_response(
+    monkeypatch, status_code
+):
     remote = _ScriptedTransport(
-        (200, {"nodes": [{"id": "n1", "type": "Actor", "name": "First"}], "edges": []}),
-        (500, {"error": "upstream failure"}),
+        (200, _ONE_NODE),
+        (status_code, {"error": "upstream failure"}),
     )
+    _sealed(monkeypatch, remote)
+
     node_events = []
     manager = FederationManager(
         _single_graph_config(),
@@ -484,15 +524,17 @@ async def test_sync_graph_degrades_and_keeps_the_cache_when_the_remote_returns_5
     assert graph_status["status"] == "degraded"
     assert graph_status["last_error"]
     # A failed sync must leave the last good cache in place and emit nothing,
-    # or a transient remote outage would be indistinguishable from the remote
-    # having deleted every node it once served.
+    # or a transient remote outage becomes indistinguishable from the remote
+    # having deleted every node it served. 4xx matters as much as 5xx here: a
+    # federated graph that starts answering 401 must not be read as "empty".
     assert graph_status["cached_nodes"] == 1
     assert node_events == []
 
 
 @pytest.mark.asyncio
-async def test_sync_graph_degrades_when_the_remote_is_unreachable():
+async def test_sync_graph_degrades_when_the_remote_is_unreachable(monkeypatch):
     remote = _ScriptedTransport(httpx.ConnectError("connection refused"))
+    _sealed(monkeypatch, remote)
     manager = FederationManager(_single_graph_config())
 
     async with httpx.AsyncClient(transport=remote.transport) as client:
@@ -507,7 +549,52 @@ async def test_sync_graph_degrades_when_the_remote_is_unreachable():
 
 
 @pytest.mark.asyncio
-async def test_sync_graph_emits_node_and_edge_events_for_the_cache_swap():
+async def test_sync_graph_clears_the_recorded_error_once_a_later_sync_succeeds(
+    monkeypatch,
+):
+    remote = _ScriptedTransport(
+        (500, {"error": "upstream failure"}),
+        (200, _ONE_NODE),
+    )
+    _sealed(monkeypatch, remote)
+    manager = FederationManager(_single_graph_config())
+
+    async with httpx.AsyncClient(transport=remote.transport) as client:
+        assert (await manager.sync_graph("esam-main", client))["success"] is False
+        assert manager.get_status()["graphs"][0]["last_error"]
+        assert (await manager.sync_graph("esam-main", client))["success"] is True
+
+    # A recovered graph must stop reporting the stale failure, or an operator
+    # dashboard reading get_status() shows an error that is no longer true.
+    graph_status = manager.get_status()["graphs"][0]
+    assert graph_status["status"] == "healthy"
+    assert graph_status["last_error"] is None
+
+
+@pytest.mark.asyncio
+async def test_sync_graph_swaps_the_cache_before_it_announces_the_change(monkeypatch):
+    remote = _ScriptedTransport((200, _ONE_NODE))
+    _sealed(monkeypatch, remote)
+
+    observed = []
+
+    def _on_node_event(op, before, after):
+        # A subscriber that reacts to a create by reading the node back must
+        # find it there. Emitting before the swap would hand out a stale cache.
+        observed.append(manager.get_cached_node(after.id))
+
+    manager = FederationManager(_single_graph_config(), on_node_event=_on_node_event)
+
+    async with httpx.AsyncClient(transport=remote.transport) as client:
+        await manager.sync_graph("esam-main", client)
+
+    assert len(observed) == 1
+    assert observed[0] is not None
+    assert observed[0].id == "federated::esam-main::n1"
+
+
+@pytest.mark.asyncio
+async def test_sync_graph_emits_node_and_edge_events_for_the_cache_swap(monkeypatch):
     remote = _ScriptedTransport(
         (
             200,
@@ -534,6 +621,7 @@ async def test_sync_graph_emits_node_and_edge_events_for_the_cache_swap():
             },
         ),
     )
+    _sealed(monkeypatch, remote)
 
     def _record(sink):
         return lambda op, before, after: sink.append(
@@ -575,7 +663,9 @@ async def test_sync_graph_emits_node_and_edge_events_for_the_cache_swap():
 
 
 @pytest.mark.asyncio
-async def test_sync_graph_re_emits_an_update_for_a_node_the_remote_did_not_change():
+async def test_sync_graph_currently_re_emits_an_update_for_an_unchanged_node(
+    monkeypatch,
+):
     """Documents current behaviour, which is wrong but out of scope to change here.
 
     Node.from_dict stamps a fresh created_at/updated_at every time _build_cache
@@ -586,11 +676,8 @@ async def test_sync_graph_re_emits_an_update_for_a_node_the_remote_did_not_chang
     as smallfix-federation-unchanged-node-emits-update; this test is the one to
     flip when that is fixed.
     """
-    payload = {
-        "nodes": [{"id": "n1", "type": "Actor", "name": "First"}],
-        "edges": [],
-    }
-    remote = _ScriptedTransport((200, payload), (200, payload))
+    remote = _ScriptedTransport((200, _ONE_NODE), (200, _ONE_NODE))
+    _sealed(monkeypatch, remote)
 
     node_events = []
     manager = FederationManager(
@@ -607,12 +694,40 @@ async def test_sync_graph_re_emits_an_update_for_a_node_the_remote_did_not_chang
 
 
 @pytest.mark.asyncio
+async def test_sync_graph_treats_a_payload_without_nodes_as_an_empty_graph(monkeypatch):
+    """Also current behaviour rather than an endorsement: a 200 carrying neither
+    key empties the cache and reports success, so a remote that starts serving
+    `{}` silently drops every federated node and announces it as deletions."""
+    remote = _ScriptedTransport((200, _ONE_NODE), (200, {}))
+    _sealed(monkeypatch, remote)
+
+    node_events = []
+    manager = FederationManager(
+        _single_graph_config(),
+        on_node_event=lambda op, before, after: node_events.append(op),
+    )
+
+    async with httpx.AsyncClient(transport=remote.transport) as client:
+        await manager.sync_graph("esam-main", client)
+        node_events.clear()
+        result = await manager.sync_graph("esam-main", client)
+
+    assert result == {
+        "success": True,
+        "graph_id": "esam-main",
+        "nodes": 0,
+        "edges": 0,
+    }
+    assert manager.get_status()["graphs"][0]["cached_nodes"] == 0
+    assert node_events == ["delete"]
+
+
+@pytest.mark.asyncio
 async def test_sync_graph_degrades_without_a_request_when_no_graph_json_url_is_set(
     monkeypatch,
 ):
     remote = _ScriptedTransport(httpx.ConnectError("the network must not be touched"))
-    stub = _StubHttpxModule(remote.transport)
-    monkeypatch.setattr(manager_module, "httpx", stub)
+    stub = _sealed(monkeypatch, remote)
 
     manager = FederationManager(_single_graph_config(graph_json_url=None))
     result = await manager.sync_graph("esam-main")
@@ -628,8 +743,7 @@ async def test_sync_graph_declines_unknown_and_disabled_graphs_without_a_request
     monkeypatch,
 ):
     remote = _ScriptedTransport(httpx.ConnectError("the network must not be touched"))
-    stub = _StubHttpxModule(remote.transport)
-    monkeypatch.setattr(manager_module, "httpx", stub)
+    stub = _sealed(monkeypatch, remote)
 
     manager = FederationManager(_single_graph_config(enabled=False))
 
