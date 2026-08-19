@@ -450,6 +450,7 @@
     }
   },
   "bottom_sheet": {
+    "dialog_label": "Panel",
     "close": "Stäng",
     "drag_handle": "Draghandtag. Svep upp eller ner för att ändra storlek.",
     "snap_peek": "Kika",

@@ -450,6 +450,7 @@
     }
   },
   "bottom_sheet": {
+    "dialog_label": "Panel",
     "close": "Close",
     "drag_handle": "Drag handle. Swipe up or down to resize.",
     "snap_peek": "Peek",

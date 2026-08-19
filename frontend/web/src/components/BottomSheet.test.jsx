@@ -126,6 +126,51 @@ describe('BottomSheet', () => {
       firePointerEvent(handle, 'pointerup', 150, 1);
       expect(onSnapPointChange).toHaveBeenCalledWith('full');
     });
+
+    it('clears drag state left behind when isOpen closes mid-drag, so the next open can drag again', () => {
+      const onSnapPointChange = vi.fn();
+      const { rerender } = render(
+        <BottomSheet
+          isOpen
+          snapPoint="half"
+          onClose={() => {}}
+          onSnapPointChange={onSnapPointChange}
+        >
+          <button type="button">first</button>
+        </BottomSheet>
+      );
+
+      // Start a drag but never fire pointerup - e.g. Escape or a surface
+      // manager closes the sheet mid-gesture, unmounting the handle before
+      // finishDrag runs and clears dragStateRef.
+      firePointerEvent(screen.getByTestId('bottom-sheet-handle'), 'pointerdown', 300, 1);
+
+      rerender(
+        <BottomSheet
+          isOpen={false}
+          snapPoint="half"
+          onClose={() => {}}
+          onSnapPointChange={onSnapPointChange}
+        >
+          <button type="button">first</button>
+        </BottomSheet>
+      );
+      rerender(
+        <BottomSheet
+          isOpen
+          snapPoint="half"
+          onClose={() => {}}
+          onSnapPointChange={onSnapPointChange}
+        >
+          <button type="button">first</button>
+        </BottomSheet>
+      );
+
+      // A fresh pointerdown must start a new drag, not be swallowed by a
+      // dragStateRef the abandoned gesture left set.
+      drag(screen.getByTestId('bottom-sheet-handle'), { from: 300, to: 150 });
+      expect(onSnapPointChange).toHaveBeenCalledWith('full');
+    });
   });
 
   describe('live drag feedback', () => {
@@ -251,6 +296,16 @@ describe('BottomSheet', () => {
       'Custom handle (bottom_sheet.snap_half)'
     );
     expect(screen.getByLabelText('Dismiss')).toBeInTheDocument();
+  });
+
+  it('names the dialog after the title when one is given', () => {
+    renderSheet({ title: 'My sheet' });
+    expect(screen.getByRole('dialog')).toHaveAttribute('aria-label', 'My sheet');
+  });
+
+  it('falls back to a generic dialog label, not the close button label, when no title is given', () => {
+    renderSheet();
+    expect(screen.getByRole('dialog')).toHaveAttribute('aria-label', 'bottom_sheet.dialog_label');
   });
 
   it('updates the drag handle label as the snap point changes', () => {

@@ -68,6 +68,7 @@ function BottomSheet({
 }) {
   const { t } = useI18n();
   const resolvedCloseLabel = closeLabel ?? t('bottom_sheet.close');
+  const resolvedDialogLabel = title || t('bottom_sheet.dialog_label');
   const resolvedDragHandleLabel = dragHandleLabel ?? t('bottom_sheet.drag_handle');
   const snapLabel = t(`bottom_sheet.snap_${snapPoint}`, undefined, snapPoint);
   const prefersReducedMotion = usePrefersReducedMotion();
@@ -79,13 +80,24 @@ function BottomSheet({
 
   // Body scroll lock while open - restores whatever value was there before,
   // so a sheet opened while some other overlay already locked scroll doesn't
-  // clobber that lock on close.
+  // clobber that lock on close. The same cleanup also clears any drag left
+  // in progress: isOpen can flip to false mid-drag (Escape closes
+  // unconditionally in handleKeyDown below, and this primitive is meant to
+  // be driven by useSurfaceManager, whose mutual-exclusion open() can close
+  // a sheet for reasons that have nothing to do with the drag gesture).
+  // Without this, the component un-mounts its content and returns null
+  // while dragStateRef is still set, so handlePointerDown's multi-pointer
+  // guard (dragStateRef.current truthy -> return) would permanently ignore
+  // every future pointerdown on this instance, and a stale dragOffset could
+  // paint on the next open.
   useEffect(() => {
     if (!isOpen || typeof document === 'undefined') return undefined;
     const previousOverflow = document.body.style.overflow;
     document.body.style.overflow = 'hidden';
     return () => {
       document.body.style.overflow = previousOverflow;
+      dragStateRef.current = null;
+      setDragOffset(0);
     };
   }, [isOpen]);
 
@@ -184,9 +196,11 @@ function BottomSheet({
   if (!isOpen) return null;
 
   const heightRatio = SNAP_HEIGHTS[snapPoint] ?? SNAP_HEIGHTS.half;
+  // No per-snap-point class: the height is already set below via the inline
+  // style, and BottomSheet.css has no `.bottom-sheet--peek/--half/--full`
+  // rule for one to hook into - adding it here would just be dead weight.
   const sheetClassName = [
     'bottom-sheet',
-    `bottom-sheet--${snapPoint}`,
     prefersReducedMotion ? 'bottom-sheet--no-motion' : '',
     className,
   ]
@@ -204,7 +218,7 @@ function BottomSheet({
         }}
         role="dialog"
         aria-modal="true"
-        aria-label={title || resolvedCloseLabel}
+        aria-label={resolvedDialogLabel}
         tabIndex={-1}
         onClick={(event) => event.stopPropagation()}
         onKeyDown={handleKeyDown}
