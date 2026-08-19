@@ -448,5 +448,12 @@
       "present_form": "Present an input form",
       "save_collection_response": "Save a collection response"
     }
+  },
+  "bottom_sheet": {
+    "close": "Close",
+    "drag_handle": "Drag handle. Swipe up or down to resize.",
+    "snap_peek": "Peek",
+    "snap_half": "Half",
+    "snap_full": "Full"
   }
 }

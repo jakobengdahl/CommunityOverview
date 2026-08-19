@@ -448,5 +448,12 @@
       "present_form": "Visa ett inmatningsformulär",
       "save_collection_response": "Spara ett insamlingssvar"
     }
+  },
+  "bottom_sheet": {
+    "close": "Stäng",
+    "drag_handle": "Draghandtag. Svep upp eller ner för att ändra storlek.",
+    "snap_peek": "Kika",
+    "snap_half": "Halv",
+    "snap_full": "Full"
   }
 }
