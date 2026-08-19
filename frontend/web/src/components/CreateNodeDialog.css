@@ -154,3 +154,23 @@
   background: #333;
   color: #ddd;
 }
+
+/* Touch targets: see EditNodeDialog.css for the same pattern. Textareas
+   already exceed 44px and are left alone. */
+@media (pointer: coarse) {
+  .create-node-dialog .close-button {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    min-width: 44px;
+    min-height: 44px;
+  }
+
+  .create-node-dialog .form-group input {
+    min-height: 44px;
+  }
+
+  .create-node-dialog .form-actions button {
+    min-height: 44px;
+  }
+}

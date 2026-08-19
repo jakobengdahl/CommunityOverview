@@ -169,3 +169,13 @@
   align-items: center;
   gap: 4px;
 }
+
+@media (pointer: coarse) {
+  .floating-search-bar {
+    min-height: 44px;
+  }
+
+  .floating-search-result {
+    min-height: 44px;
+  }
+}

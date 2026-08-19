@@ -177,3 +177,22 @@
 .btn-secondary:hover {
   background: #444;
 }
+
+/* Touch targets: single-line text/url inputs and the checkbox row grow
+   via min-height (the checkbox itself stays native-sized inside its
+   now-taller, still-flex-centered label). Textareas already exceed 44px. */
+@media (pointer: coarse) {
+  .form-group input[type='text'],
+  .form-group input[type='url'] {
+    min-height: 44px;
+  }
+
+  .checkbox-label {
+    min-height: 44px;
+  }
+
+  .btn-primary,
+  .btn-secondary {
+    min-height: 44px;
+  }
+}

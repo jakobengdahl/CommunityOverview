@@ -84,3 +84,15 @@
 .session-context-menu-item svg {
   flex-shrink: 0;
 }
+
+@media (pointer: coarse) {
+  .session-context-menu-trigger {
+    min-width: 44px;
+    min-height: 44px;
+    justify-content: center;
+  }
+
+  .session-context-menu-item {
+    min-height: 44px;
+  }
+}
