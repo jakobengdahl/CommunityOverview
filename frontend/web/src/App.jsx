@@ -1283,8 +1283,13 @@ function App() {
       // (reusing the existing focus/center-camera primitive) instead of
       // landing wherever the layout defaults new nodes to. Desktop's
       // click-to-create and drag-to-canvas paths are unchanged.
+      //
+      // Deferred like FloatingSearch's identical newly-added-node case
+      // (FloatingSearch.jsx): the canvas's own node state only picks up
+      // addNodesToVisualization's update on a later render, so focusing
+      // synchronously would target a node the canvas doesn't know about yet.
       if (isCoarsePointer) {
-        setFocusNodeId(createdNode.id);
+        setTimeout(() => setFocusNodeId(createdNode.id), 100);
       }
     },
     [addNodesToVisualization, showNotification, isCoarsePointer, setFocusNodeId]

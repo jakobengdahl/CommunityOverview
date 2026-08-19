@@ -74,6 +74,7 @@ vi.mock('../src/services/api', () => {
       return { id, state: {}, resolved: { nodes: [], edges: [] }, roster: [] };
     }),
     getSchema: vi.fn(async () => ({ node_types: {} })),
+    getSubtypes: vi.fn(async () => ({ subtypes: {} })),
     getPresentation: vi.fn(async () => ({ title: 'Test' })),
     getGraphStats: vi.fn(async () => ({ total_nodes: 0, total_edges: 0 })),
     getUiCapabilities: vi.fn(async () => ({ llm_available: false })),
@@ -467,5 +468,52 @@ describe('Server-backed session lifecycle', () => {
     // Failed before mutating anything: still the original canvas and session.
     expect(useGraphStore.getState().nodes.map((n) => n.id)).toEqual(['node-a']);
     expect(window.location.search).not.toContain('session=aaaa-bbbb');
+  });
+
+  // Regression: a touch-created node's viewport-centering (App.jsx's
+  // handleNodeCreated, guarded on isCoarsePointer) must not fire in the same
+  // synchronous update as addNodesToVisualization. The canvas's own node
+  // state only picks up the addition on a later render (the same reason
+  // FloatingSearch.jsx defers setFocusNodeId by 100ms for a just-added node),
+  // so centering immediately would target a node the canvas doesn't know
+  // about yet and silently no-op.
+  it('defers centering a touch-created node until after it lands in the node store', async () => {
+    const originalMatchMedia = window.matchMedia;
+    window.matchMedia = vi.fn((query) => ({
+      matches: query === '(pointer: coarse)',
+      media: query,
+      addEventListener: vi.fn(),
+      removeEventListener: vi.fn(),
+    }));
+    api.getSchema.mockResolvedValueOnce({
+      node_types: { Actor: { category: 'domain', icon: 'PersonFill', color: '#3B82F6' } },
+    });
+    api.addNodes.mockResolvedValueOnce({ success: true, added_node_ids: ['new-actor-1'] });
+
+    renderApp();
+
+    // Query by the toolbar's own aria-label (not position): the store's
+    // `schema` is a shared module singleton that a prior test may have left
+    // populated, so the toolbar can render with stale content for a moment
+    // before this test's mocked getSchema() resolves and replaces it.
+    const actorButton = await screen.findByRole('button', { name: 'Actor' });
+    fireEvent.click(actorButton);
+
+    const nameInput = await screen.findByLabelText('Name *');
+    fireEvent.change(nameInput, { target: { value: 'Touch Actor' } });
+    fireEvent.click(screen.getByRole('button', { name: 'Create Actor' }));
+
+    await waitFor(() => {
+      expect(useGraphStore.getState().nodes.map((n) => n.id)).toContain('new-actor-1');
+    });
+    // The node is in the store already (assertion above), but the camera
+    // must not have been pointed at it in that same update.
+    expect(useGraphStore.getState().focusNodeId).not.toBe('new-actor-1');
+
+    await waitFor(() => {
+      expect(useGraphStore.getState().focusNodeId).toBe('new-actor-1');
+    });
+
+    window.matchMedia = originalMatchMedia;
   });
 });
