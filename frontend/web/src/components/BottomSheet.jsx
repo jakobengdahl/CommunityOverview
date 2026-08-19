@@ -42,9 +42,7 @@ function usePrefersReducedMotion() {
 
 function getFocusableElements(container) {
   if (!container) return [];
-  return Array.from(container.querySelectorAll(FOCUSABLE_SELECTOR)).filter(
-    (el) => !el.hasAttribute('data-focus-guard')
-  );
+  return Array.from(container.querySelectorAll(FOCUSABLE_SELECTOR));
 }
 
 /**
@@ -71,6 +69,7 @@ function BottomSheet({
   const { t } = useI18n();
   const resolvedCloseLabel = closeLabel ?? t('bottom_sheet.close');
   const resolvedDragHandleLabel = dragHandleLabel ?? t('bottom_sheet.drag_handle');
+  const snapLabel = t(`bottom_sheet.snap_${snapPoint}`, undefined, snapPoint);
   const prefersReducedMotion = usePrefersReducedMotion();
 
   const sheetRef = useRef(null);
@@ -142,19 +141,24 @@ function BottomSheet({
   );
 
   const handlePointerDown = useCallback((event) => {
-    dragStateRef.current = { startY: event.clientY };
+    // Ignore a second finger landing on the handle mid-drag - without this,
+    // its pointerdown would overwrite startY and the eventual pointerup
+    // would compute delta against the wrong origin (see longPress.js's
+    // primaryPointerId pattern in ui-graph-canvas for the same guard).
+    if (dragStateRef.current) return;
+    dragStateRef.current = { startY: event.clientY, pointerId: event.pointerId };
     event.currentTarget.setPointerCapture?.(event.pointerId);
   }, []);
 
   const handlePointerMove = useCallback((event) => {
-    if (!dragStateRef.current) return;
+    if (!dragStateRef.current || event.pointerId !== dragStateRef.current.pointerId) return;
     const delta = event.clientY - dragStateRef.current.startY;
-    setDragOffset(Math.max(0, delta));
+    setDragOffset(delta);
   }, []);
 
   const finishDrag = useCallback(
     (event) => {
-      if (!dragStateRef.current) return;
+      if (!dragStateRef.current || event.pointerId !== dragStateRef.current.pointerId) return;
       const delta = event.clientY - dragStateRef.current.startY;
       dragStateRef.current = null;
       setDragOffset(0);
@@ -207,15 +211,15 @@ function BottomSheet({
       >
         <div
           className="bottom-sheet-handle"
-          role="slider"
-          aria-label={resolvedDragHandleLabel}
-          aria-valuemin={0}
-          aria-valuemax={SNAP_POINTS.length - 1}
-          aria-valuenow={SNAP_POINTS.indexOf(snapPoint)}
-          aria-valuetext={snapPoint}
+          data-testid="bottom-sheet-handle"
+          // Not role="slider": that ARIA pattern implies arrow-key
+          // operability, and this handle is drag-only. A plain label
+          // (including the current snap position, translated) describes
+          // what it is without promising interaction it doesn't support.
+          aria-label={`${resolvedDragHandleLabel} (${snapLabel})`}
           // Deliberately not in the tab order (drag-only control): the focus
           // trap should land keyboard users on real sheet content, not on a
-          // handle that isn't keyboard-operable yet.
+          // handle that isn't keyboard-operable.
           tabIndex={-1}
           onPointerDown={handlePointerDown}
           onPointerMove={handlePointerMove}

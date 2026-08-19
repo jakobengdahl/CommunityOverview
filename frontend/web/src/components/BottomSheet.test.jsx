@@ -79,34 +79,69 @@ describe('BottomSheet', () => {
 
     it('dragging the handle up from half requests the full snap point', () => {
       const { onSnapPointChange } = renderSheet({ snapPoint: 'half' });
-      drag(screen.getByRole('slider'), { from: 300, to: 150 });
+      drag(screen.getByTestId('bottom-sheet-handle'), { from: 300, to: 150 });
       expect(onSnapPointChange).toHaveBeenCalledWith('full');
     });
 
     it('dragging the handle down from half requests the peek snap point', () => {
       const { onSnapPointChange } = renderSheet({ snapPoint: 'half' });
-      drag(screen.getByRole('slider'), { from: 150, to: 300 });
+      drag(screen.getByTestId('bottom-sheet-handle'), { from: 150, to: 300 });
       expect(onSnapPointChange).toHaveBeenCalledWith('peek');
     });
 
     it('dragging down from peek closes the sheet instead of requesting a lower snap point', () => {
       const { onClose, onSnapPointChange } = renderSheet({ snapPoint: 'peek' });
-      drag(screen.getByRole('slider'), { from: 150, to: 300 });
+      drag(screen.getByTestId('bottom-sheet-handle'), { from: 150, to: 300 });
       expect(onClose).toHaveBeenCalledTimes(1);
       expect(onSnapPointChange).not.toHaveBeenCalled();
     });
 
     it('dragging up from full is a no-op past the top snap point', () => {
       const { onSnapPointChange } = renderSheet({ snapPoint: 'full' });
-      drag(screen.getByRole('slider'), { from: 300, to: 150 });
+      drag(screen.getByTestId('bottom-sheet-handle'), { from: 300, to: 150 });
       expect(onSnapPointChange).not.toHaveBeenCalled();
     });
 
     it('a small drag under the threshold changes nothing', () => {
       const { onClose, onSnapPointChange } = renderSheet({ snapPoint: 'half' });
-      drag(screen.getByRole('slider'), { from: 150, to: 170 });
+      drag(screen.getByTestId('bottom-sheet-handle'), { from: 150, to: 170 });
       expect(onClose).not.toHaveBeenCalled();
       expect(onSnapPointChange).not.toHaveBeenCalled();
+    });
+
+    it('ignores a second pointer landing on the handle mid-drag instead of resetting the gesture', () => {
+      const { onSnapPointChange } = renderSheet({ snapPoint: 'half' });
+      const handle = screen.getByTestId('bottom-sheet-handle');
+
+      // First finger starts a drag toward "full" (delta -150 from 300->150).
+      firePointerEvent(handle, 'pointerdown', 300, 1);
+      // A second finger lands mid-gesture at a different Y - must be ignored,
+      // not overwrite the first pointer's start position.
+      firePointerEvent(handle, 'pointerdown', 500, 2);
+      // The second pointer lifting must not finish the first pointer's drag.
+      firePointerEvent(handle, 'pointerup', 500, 2);
+      expect(onSnapPointChange).not.toHaveBeenCalled();
+
+      // The original pointer finishes the drag using its own origin (300).
+      firePointerEvent(handle, 'pointerup', 150, 1);
+      expect(onSnapPointChange).toHaveBeenCalledWith('full');
+    });
+  });
+
+  describe('live drag feedback', () => {
+    it('tracks the sheet under the finger while dragging up, not just while dragging down', () => {
+      renderSheet({ snapPoint: 'half' });
+      const handle = screen.getByTestId('bottom-sheet-handle');
+      const dialog = screen.getByRole('dialog');
+
+      firePointerEvent(handle, 'pointerdown', 300, 1);
+      firePointerEvent(handle, 'pointermove', 250, 1);
+      // Dragging up (negative delta) must move visually too, not clamp to 0 -
+      // a floor there would freeze the sheet under the finger on every
+      // upward drag while downward drags still tracked in real time.
+      expect(dialog.style.transform).toBe('translateY(-50px)');
+
+      firePointerEvent(handle, 'pointerup', 250, 1);
     });
   });
 
@@ -201,14 +236,27 @@ describe('BottomSheet', () => {
     });
   });
 
-  it('uses i18n keys as default labels for close and drag handle', () => {
-    renderSheet();
-    expect(screen.getByRole('slider')).toHaveAttribute('aria-label', 'bottom_sheet.drag_handle');
+  it('uses i18n keys as default labels for close and drag handle, including the current snap position', () => {
+    renderSheet({ snapPoint: 'half' });
+    expect(screen.getByTestId('bottom-sheet-handle')).toHaveAttribute(
+      'aria-label',
+      'bottom_sheet.drag_handle (bottom_sheet.snap_half)'
+    );
   });
 
   it('accepts prop overrides for labels instead of the i18n defaults', () => {
     renderSheet({ dragHandleLabel: 'Custom handle', title: 'My sheet', closeLabel: 'Dismiss' });
-    expect(screen.getByRole('slider')).toHaveAttribute('aria-label', 'Custom handle');
+    expect(screen.getByTestId('bottom-sheet-handle')).toHaveAttribute(
+      'aria-label',
+      'Custom handle (bottom_sheet.snap_half)'
+    );
     expect(screen.getByLabelText('Dismiss')).toBeInTheDocument();
+  });
+
+  it('updates the drag handle label as the snap point changes', () => {
+    renderSheet({ snapPoint: 'full' });
+    expect(screen.getByTestId('bottom-sheet-handle').getAttribute('aria-label')).toContain(
+      'bottom_sheet.snap_full'
+    );
   });
 });
