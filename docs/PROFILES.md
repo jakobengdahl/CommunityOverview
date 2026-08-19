@@ -378,6 +378,73 @@ The `config/scb/` profile demonstrates a domain-specific configuration for Stati
 
 These are in addition to the common types (Actor, Initiative, Resource, etc.) that are shared across profiles.
 
+## Example: stat-metadata Profile
+
+The `config/stat-metadata/` profile models European Statistical System metadata.
+Its metamodel covers the MetaPlus concepts while deliberately keeping the number
+of node types small:
+
+- **DataSet** — statistical datasets. Register structure is expressed with the
+  subtypes `Register`, `RegisterVariant` and `RegisterVersion` rather than with
+  separate node types.
+- **Variable** — statistical variables. Subtypes carry both the conceptual level
+  (`RepresentedVariable`, `InstanceVariable`) and the semantic role (`Identifier`,
+  `Measure`, `Attribute`), and one node may hold several. Column-level details
+  (`column_name`, `data_type`, `length`, `format`) are attributes on the variable;
+  there is no separate Column node type.
+- **Population** — the set of units a dataset or register version describes.
+  Version-specific timing is carried on the `HAS_POPULATION` edge.
+- **ValueDomain** — permissible values, with the subtypes `EnumeratedValueDomain`,
+  `NumericRangeValueDomain` and `DescribedValueDomain`.
+- **CodeList** — simple, normally flat value lists. Structured entries live under
+  the metadata key `codes` as `[{code, label}, …]`.
+- **Classification** / **ClassificationItem** — formal, managed and often
+  hierarchical classifications (NACE, NUTS, COICOP) and their codes. The hierarchy
+  is expressed with `HAS_CHILD_ITEM` between items rather than with level nodes.
+
+`Variable` replaced `InstanceVariable` as the primary node type. Existing data is
+migrated with `scripts/migrate_stat_metadata_metaplus.py`, which converts each
+`InstanceVariable` node to `Variable` while adding `InstanceVariable` as a subtype,
+so nothing about a variable's meaning is lost. `InstanceVariable` remains a valid
+subtype; it is no longer a primary type.
+
+A `CodeList` becomes a `Classification` only when it explicitly says it is one —
+`metadata.is_classification`, or the `Statistical Classification` subtype. A node
+whose name merely looks like a classification is left alone and reported. This
+profile's data is demonstration data, and some of its nodes were stubs, so
+`demo_enrichment.json` supplies the metadata they were missing before that rule
+runs (`--enrich`). Keeping enrichment in its own reviewable file means the
+conversion rule stays strict and every node that passes only because of an
+enrichment is visible in one place.
+
+The profile's `graph.json` is example data only. Runtime state — `SavedView`,
+`VisualizationView`, `EventSubscription`, `Agent` and `Skill` nodes — is created by
+people using a running deployment and does not belong in it. A seed captured by
+exporting a live instance carries that state along, so run
+`scripts/strip_profile_runtime_nodes.py` over any such export before committing it:
+it removes those node types and every edge touching them, and refuses to write if
+the result would leave a dangling edge. Watch for what rides along in them —
+`EventSubscription` nodes carry webhook URLs, which is how a personal lab hostname
+once reached this repository.
+
+Metadata keys on `Variable` are snake_case, matching the convention every other
+profile follows. Nine camelCase keys remain on `DataSet`, `DataStructure` and
+`StatisticalProgramme` from an earlier import; none has a declared counterpart,
+so they are undeclared and left for a hygiene pass that renames and declares
+them together. A `Variable` node's
+semantic role is carried by its subtypes (`Identifier`, `Measure`, `Attribute`)
+and nowhere else — some nodes still hold a leftover `role` metadata key from an
+earlier import, which is deliberately left undeclared: declaring it would give
+the UI a second, separately editable copy of the subtype that can drift out of
+agreement with it.
+
+Two values are documented rather than schema-validated in this step:
+
+```text
+sensitive_personal_data_status: confirmed | not_confirmed | context_dependent | unknown
+identity_status:                confirmed | not_confirmed | potential | unknown
+```
+
 ## System Node Types
 
 Certain node types are always present regardless of profile:

@@ -1,0 +1,48 @@
+{
+  "_comment": [
+    "Demo-data enrichment applied before the MetaPlus migration classifies nodes.",
+    "This graph is a demonstration graph, and some of its nodes were stubs: a name",
+    "and a tag, with no metadata to decide anything from. Rather than loosening the",
+    "migration's conversion rule — which deliberately converts only nodes that",
+    "declare themselves formal classifications — the missing declaration is supplied",
+    "here, explicitly and reviewably, and the normal rule then applies.",
+    "The COICOP division codes below are the real COICOP 2018 divisions published by",
+    "the UN Statistics Division, not invented ones."
+  ],
+  "nodes": [
+    {
+      "match_name": "COICOP 2018",
+      "match_type": "CodeList",
+      "description": "Classification of Individual Consumption According to Purpose (COICOP), 2018 revision. Classifies household consumption expenditure by purpose. Used to structure the consumption basket underlying the Consumer Price Index.",
+      "summary": "UN classification of household consumption expenditure by purpose; basis of the CPI basket",
+      "metadata": {
+        "is_classification": true,
+        "official_name": "Classification of Individual Consumption According to Purpose",
+        "version": "2018",
+        "status": "current",
+        "publisher": "United Nations Statistics Division",
+        "maintenance_agency": "United Nations Statistics Division",
+        "purpose": "Classify household consumption expenditure by purpose for national accounts, household budget surveys and consumer price statistics.",
+        "legal_basis": "Adopted by the UN Statistical Commission at its 49th session (2018)",
+        "valid_from": "2018-03-01",
+        "source_uri": "https://unstats.un.org/unsd/classifications/Family/Detail/5",
+        "codes": [
+          { "code": "01", "label": "Food and non-alcoholic beverages" },
+          { "code": "02", "label": "Alcoholic beverages, tobacco and narcotics" },
+          { "code": "03", "label": "Clothing and footwear" },
+          { "code": "04", "label": "Housing, water, electricity, gas and other fuels" },
+          { "code": "05", "label": "Furnishings, household equipment and routine household maintenance" },
+          { "code": "06", "label": "Health" },
+          { "code": "07", "label": "Transport" },
+          { "code": "08", "label": "Information and communication" },
+          { "code": "09", "label": "Recreation, sport and culture" },
+          { "code": "10", "label": "Education services" },
+          { "code": "11", "label": "Restaurants and accommodation services" },
+          { "code": "12", "label": "Insurance and financial services" },
+          { "code": "13", "label": "Personal care, social protection and miscellaneous goods and services" }
+        ]
+      },
+      "tags_add": ["coicop", "consumption", "statistical-classification"]
+    }
+  ]
+}

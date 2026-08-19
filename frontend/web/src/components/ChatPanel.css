@@ -810,3 +810,55 @@
   padding: 2px 8px;
   background: rgba(20, 20, 28, 0.85);
 }
+
+/* Touch targets: icon-only buttons grow via min-width/min-height (the
+   existing flex-centering keeps the icon visually unchanged); the
+   minimized bar's 40px width is widened to the minimum instead of relying
+   on its already-tall vertical extent. */
+@media (pointer: coarse) {
+  .chat-panel-minimized {
+    width: 44px;
+  }
+
+  .chat-collapse-button {
+    min-width: 44px;
+    min-height: 44px;
+  }
+
+  /* .chat-header-left carries onClick={toggleChatPanel} and cursor:pointer
+     (ChatPanel.jsx) but had no sizing rule at all — its box was only the
+     icon+heading content (~21px). .chat-header's own height is already
+     governed by .chat-collapse-button above, so this doesn't grow the
+     header further. */
+  .chat-header-left {
+    min-height: 44px;
+  }
+
+  .selection-clear-button {
+    min-width: 44px;
+    min-height: 44px;
+  }
+
+  .remove-file-button {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    min-width: 44px;
+    min-height: 44px;
+  }
+
+  .chat-upload-button,
+  .chat-send-button,
+  .approve-button,
+  .reject-button {
+    min-height: 44px;
+  }
+
+  /* Native <select> in .button-row (ChatPanel.jsx, rendered only when
+     modelProfiles.length > 0) had no rule anywhere in this file, so its
+     size was left to native OS/browser select rendering rather than
+     guaranteed like its .button-row siblings. */
+  .model-profile-select {
+    min-height: 44px;
+  }
+}

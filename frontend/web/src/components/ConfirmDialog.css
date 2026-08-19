@@ -108,3 +108,9 @@
 .confirm-dialog-button.danger:hover {
   background: #dc2626;
 }
+
+@media (pointer: coarse) {
+  .confirm-dialog-button {
+    min-height: 44px;
+  }
+}

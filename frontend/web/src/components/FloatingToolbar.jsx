@@ -74,9 +74,13 @@ import {
   BinocularsFill,
   EyeFill,
   Translate,
+  PersonLinesFill,
+  ListNested,
+  TagFill,
 } from 'react-bootstrap-icons';
 import useGraphStore from '../store/graphStore';
 import { useI18n } from '../i18n';
+import { useViewportMode } from '../hooks/useViewportMode';
 import './FloatingToolbar.css';
 
 // Registry of available icons, keyed by Bootstrap Icon name.
@@ -156,6 +160,9 @@ const ICON_REGISTRY = Object.assign(Object.create(null), {
   BinocularsFill,
   EyeFill,
   Translate,
+  PersonLinesFill,
+  ListNested,
+  TagFill,
 });
 
 // Legacy fallback: maps node type name -> icon name (used when schema has no icon field)
@@ -281,6 +288,7 @@ function FloatingToolbar({
   onCreateActiveKnowledgeCollection,
 }) {
   const { t } = useI18n();
+  const { isCoarsePointer } = useViewportMode();
   const [hoveredType, setHoveredType] = useState(null);
   const [tooltipPos, setTooltipPos] = useState(null);
   const buttonRefs = useRef({});
@@ -369,7 +377,11 @@ function FloatingToolbar({
 
           const Icon = resolveIcon(nodeType, schema);
           const color = resolveColor(nodeType, schema);
-          const isDraggable = nodeType !== 'SavedView';
+          // HTML5 dataTransfer drag never fires on a touch pointer, so a coarse
+          // pointer only ever gets the tap path below — draggable stays true for
+          // desktop's unchanged drag-to-canvas path (App.jsx's onDropCreateNode).
+          const isDraggable = nodeType !== 'SavedView' && !isCoarsePointer;
+          const label = getTooltipLabel(nodeType);
 
           return (
             <button
@@ -383,9 +395,14 @@ function FloatingToolbar({
               onMouseLeave={handleMouseLeave}
               draggable={isDraggable}
               onDragStart={(e) => handleDragStart(e, nodeType)}
+              aria-label={label}
               style={{ '--toolbar-item-color': color }}
             >
               {Icon && <Icon size={18} />}
+              {/* Always rendered; CSS shows it whenever hover is unavailable
+                  (@media (hover: none) or .app.is-touch) instead of relying on
+                  the hover-only portal tooltip below. */}
+              <span className="floating-toolbar-item-label">{label}</span>
             </button>
           );
         })}

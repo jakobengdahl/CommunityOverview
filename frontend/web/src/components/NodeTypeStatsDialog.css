@@ -140,3 +140,20 @@
 .nts-dialog-ok:hover {
   background: #535bf2;
 }
+
+/* This dialog renders via a document.body portal, outside .app, so
+   @media (pointer: coarse) is used rather than the .app.is-touch class,
+   which would never match a portaled subtree. */
+@media (pointer: coarse) {
+  .nts-dialog-close {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    min-width: 44px;
+    min-height: 44px;
+  }
+
+  .nts-dialog-ok {
+    min-height: 44px;
+  }
+}
