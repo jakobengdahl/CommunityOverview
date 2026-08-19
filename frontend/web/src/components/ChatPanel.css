@@ -825,6 +825,15 @@
     min-height: 44px;
   }
 
+  /* .chat-header-left carries onClick={toggleChatPanel} and cursor:pointer
+     (ChatPanel.jsx) but had no sizing rule at all — its box was only the
+     icon+heading content (~21px). .chat-header's own height is already
+     governed by .chat-collapse-button above, so this doesn't grow the
+     header further. */
+  .chat-header-left {
+    min-height: 44px;
+  }
+
   .selection-clear-button {
     min-width: 44px;
     min-height: 44px;
