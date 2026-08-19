@@ -5,6 +5,8 @@ import os
 from pathlib import Path
 
 import pytest
+from pydantic import ValidationError
+from backend.federation.config import FederationSync
 
 from backend.federation.config import (
     FederationFileConfig,
@@ -183,3 +185,15 @@ def test_config_with_depth_levels(tmp_path):
     loaded = load_federation_config()
 
     assert loaded.federation.depth_levels == [1, 2, 4]
+
+
+def test_validate_interval_valid():
+    sync = FederationSync(interval_seconds=300)
+    assert sync.interval_seconds == 300
+
+
+def test_validate_interval_invalid():
+    with pytest.raises(ValidationError) as exc_info:
+        FederationSync(interval_seconds=5)
+
+    assert "interval_seconds must be >= 10" in str(exc_info.value)
