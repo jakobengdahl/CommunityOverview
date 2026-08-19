@@ -37,6 +37,13 @@ The planning graph is private and this repository is public: never name private
 deployments, hosts, tenants or commercial plans in files, commits or PR bodies
 here. Describe general technical enablement only.
 
+Before publishing a PR body or commit message, re-read it for hostnames, tenant
+names, tokens and internal URLs — the risk is highest when the change is *about*
+removing such a value, because the explanation naturally wants to quote it.
+Describe it (`a personal lab hostname`, `a localhost dev endpoint`) instead of
+reproducing it. A value removed from a file and then written into the PR that
+removes it has not been removed.
+
 ---
 
 ## Feature Planning & Routing
@@ -325,6 +332,25 @@ Address every finding that is a real bug or a meaningful gap. Then spawn another
 review subagent (briefing it on what changed between rounds). Repeat until the
 review comes back with no actionable findings.
 
+**Review the fixes, not just the original change.** A round that only fixes what
+the previous round found is not reviewed. Fixes are written under time pressure
+against a known-bad baseline, and they are where later rounds keep finding the
+worse defects — including two separately-correct fixes that contradicted each
+other across a repo boundary.
+
+**When a change spans this repo and the infra repo, review the pair.** An
+invariant can live between them: a script that starts deleting nodes and a
+workflow that asserts no node ever disappears are each defensible alone and
+broken together.
+
+**If the review loop cannot run, the work is unreviewed — say so and stop.**
+Subagents are occasionally unavailable (a session setting, a tool restriction).
+That does not downgrade step 8 to optional. Report the change as unreviewed,
+leave the PR open, and do not merge it. Reporting work as complete when the
+required review never happened is the failure mode this step exists to prevent,
+and it has already shipped a defect that took three pilots to the edge of an
+outage.
+
 Typical issues caught in review:
 - Additive scoring / ranking bugs that only appear with combined signals
 - Inconsistency between parallel implementations (e.g. local vs. federation paths)
@@ -404,7 +430,8 @@ Merge only when **all** of the following are true:
 
 - [ ] All tests pass locally (`pytest backend/ -q`)
 - [ ] CI is green on the PR (not red, not pending)
-- [ ] Review loop is clean (last subagent round raised no actionable findings)
+- [ ] Review loop is clean (last subagent round raised no actionable findings),
+      and the LAST round reviewed the fixes rather than only the original change
 - [ ] Documentation affected by the change is updated in the same PR (see the
       Documentation section for which files map to which changes)
 - [ ] No debug artifacts in the diff (`print`, `pdb`, hardcoded credentials)
@@ -510,6 +537,13 @@ Follow the full Standard Development Workflow (steps 1–10), with these additio
 Changes to node types, relationship types, or required field names are **breaking
 changes** — existing graph data may fail validation or silently lose meaning.
 
+Profile seed data (`config/<profile>/graph.json`) is **example data**, not a
+snapshot. An export taken from a running instance carries that instance's state —
+saved views, event subscriptions with webhook URLs, agents, skills — and those
+ship as if they were part of the profile. Run
+`scripts/strip_profile_runtime_nodes.py` over any such export before committing
+it, and see `docs/PROFILES.md` for what it removes and why.
+
 Before modifying the schema:
 - Document in the PR body exactly what changes and what existing data is affected.
 - Check whether any existing graph data (e.g. `config/stat-metadata/graph.json`)
@@ -518,6 +552,23 @@ Before modifying the schema:
   it in the PR.
 
 ---
+
+## Identifiers you have not resolved
+
+Never write a value that is supposed to identify something exact — an image
+digest, a checksum, a commit SHA, a package hash, a URL with an id in it —
+unless you resolved it from the thing itself in that session. A plausible-looking
+hash is indistinguishable from a real one on review and fails only at runtime.
+
+```bash
+# resolve, then paste
+docker buildx imagetools inspect python:3.11-slim --format '{{.Manifest.Digest}}'
+curl -fsSL "$RAW_URL" | sha256sum
+```
+
+If it cannot be resolved, use the mutable reference and say in a comment why it
+is not pinned. An unpinned tag is a known weakness; an invented digest is a
+broken deployment.
 
 ## Secrets Handling
 

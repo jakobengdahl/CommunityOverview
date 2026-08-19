@@ -10,6 +10,7 @@ All graph mutations resulting from document analysis
 go through ChatService -> GraphService.
 """
 
+import asyncio
 import os
 import tempfile
 from typing import Optional, Dict, Any
@@ -132,8 +133,12 @@ class DocumentService:
         # Save to temp directory
         try:
             file_path = Path(self._upload_dir) / safe_filename
-            with open(file_path, "wb") as f:
-                f.write(file_content)
+
+            def _write_file():
+                with open(file_path, "wb") as f:
+                    f.write(file_content)
+
+            await asyncio.to_thread(_write_file)
 
             return {
                 "success": True,
