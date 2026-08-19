@@ -291,6 +291,43 @@ npm run test:e2e
 
 E2E tests include:
 - `chat.spec.js` - Complete chat workflow testing
+- `mobile-smoke.spec.js` - Phone-viewport smoke tests (see below)
+
+Playwright starts the backend and the vite dev server itself (the `webServer`
+block in `playwright.config.js`), so no server needs to be running first. If one
+already is, Playwright reuses it rather than starting its own — which also means
+the `env` block (placeholder API key, throwaway graph file) does not apply, so a
+hand-started dev server keeps its own key and its e2e nodes land in its own
+graph. Stop it first to get the isolated setup; `CI=1` does not help, it just
+makes Playwright refuse to start against an occupied port.
+
+The mobile specs require the backend to report an LLM as available, because the
+chat panel does not mount otherwise. Against a reused backend with no API key
+configured they fail at startup rather than half-passing.
+
+#### Mobile smoke tests
+
+`mobile-smoke.spec.js` runs under two extra projects, `mobile-iphone`
+(iPhone 13, 390px) and `mobile-pixel` (Pixel 7, 412px). Both emulate touch and
+a coarse pointer, which is what the app's own mobile behaviour keys off, and
+both run on Chromium — the long-press assertion drives real touch events over
+CDP, which only Chromium exposes.
+
+```bash
+cd frontend/web
+npx playwright test tests/e2e/mobile-smoke.spec.js --project=mobile-iphone --project=mobile-pixel
+```
+
+The specs cover the app loading inside the viewport width, the hamburger
+opening the session drawer, creating a node from the toolbox, a long-press on
+that node opening its context menu, and the chat composer staying on screen.
+The desktop `chromium` project skips them, and they skip every other spec.
+
+The viewport check measures both edges and excludes surfaces listed in
+`KNOWN_RIGHT_OVERFLOW` / `KNOWN_LEFT_OVERFLOW` at the top of the spec, which
+already hang off a phone viewport. The lists are per-edge on purpose: exempting
+a subtree from both edges costs more coverage than the break it silences.
+Removing an entry once the surface is fixed turns the check back on for it.
 
 ### E2E Tests with Live Backend
 
@@ -335,8 +372,18 @@ kept separate so a failure points at the layer that broke:
 - **Gateway tests** — the MCP OAuth gateway suite, run in isolation with its own
   pinned dependencies.
 
+Two lint jobs (`Python lint (ruff)` and `Frontend lint (eslint + prettier)`) run
+alongside them, and one further job is **non-required**:
+
+- **Mobile e2e (non-required)** — `mobile-smoke.spec.js` on the `mobile-iphone`
+  and `mobile-pixel` projects. It carries no gate job, is not part of branch
+  protection, and is not in the build job's `needs`, so a mobile regression is
+  reported without blocking a merge or a release. Like the test jobs it is
+  gated on `detect-changes`, so a docs-only PR skips it. On failure the run
+  uploads the Playwright HTML report as the `mobile-e2e-report` artifact.
+
 The Docker build/publish job runs only on `preview`/`prod` pushes (and version
-tags) and depends on all three test jobs. `main` is the integration branch:
+tags) and depends on the three test jobs. `main` is the integration branch:
 pushes to it run the tests but publish no image.
 
 ## API Reference

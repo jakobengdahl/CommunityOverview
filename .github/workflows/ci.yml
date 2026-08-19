@@ -317,6 +317,79 @@ jobs:
           esac
 
   # ---------------------------------------------------------------------------
+  # Mobile e2e – Playwright smoke on emulated phone viewports (iPhone 13 and
+  # Pixel 7, both on Chromium). Covers what unit tests cannot: that the app
+  # still lays out inside a phone viewport and that its touch interactions —
+  # long-press context menu, toolbox node creation, the chat composer — survive.
+  #
+  # NON-REQUIRED by design: this job carries no gate, is absent from branch
+  # protection, and is absent from the build job's `needs`, so a red run reports
+  # a mobile regression without blocking a merge or a release. It runs on the
+  # workflow's existing push/pull_request triggers and adds no build or publish
+  # path of its own.
+  #
+  # Playwright starts the backend and the vite dev server itself; see the
+  # webServer block in frontend/web/playwright.config.js.
+  # ---------------------------------------------------------------------------
+  mobile-e2e:
+    name: Mobile e2e (non-required)
+    runs-on: ubuntu-latest
+    needs: detect-changes
+    # A browser job has more ways to wedge than a unit-test job. Bounded so a
+    # hung step fails in minutes instead of holding a runner for the default six
+    # hours — this job is non-required, so a timeout costs nothing but a red
+    # square, while a hang costs runner minutes for everyone.
+    timeout-minutes: 20
+    if: >-
+      needs.detect-changes.outputs.service_code == 'true' &&
+      (github.event_name != 'pull_request' || github.event.pull_request.draft == false)
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+          cache: 'pip'
+
+      # Base requirements only, like the backend job: the specs never reach a
+      # model, so the ML stack is dead weight here.
+      - name: Install backend dependencies
+        run: pip install -r backend/requirements.txt
+
+      - name: Set up Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: 'npm'
+
+      - name: Install dependencies
+        run: npm ci --no-audit --no-fund
+
+      # Browser download only, no `--with-deps`: the runner image already ships
+      # the shared libraries Chromium needs, and the apt-get half of
+      # `--with-deps` is the one step here that can block on a package lock —
+      # observed hanging for 20+ minutes after completing in 21s on an earlier
+      # run of this same job.
+      - name: Install Playwright browser
+        run: npx playwright install chromium
+        working-directory: frontend/web
+
+      - name: Run mobile smoke tests
+        run: npx playwright test tests/e2e/mobile-smoke.spec.js --project=mobile-iphone --project=mobile-pixel
+        working-directory: frontend/web
+
+      - name: Upload Playwright report
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: mobile-e2e-report
+          path: frontend/web/playwright-report/
+          retention-days: 7
+
+  # ---------------------------------------------------------------------------
   # Lint gates – mechanical correctness checks (unused imports, undefined
   # names, React rules-of-hooks). These jobs are intentionally NOT listed in
   # the build job's `needs`, so a lint failure never blocks image publication.

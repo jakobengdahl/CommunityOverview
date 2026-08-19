@@ -71,6 +71,12 @@ data/active/sessions/
 /graph.json
 /backend/graph.json
 
+# Playwright e2e output: reports, traces, and the throwaway graph the
+# backend writes while the mobile smoke specs run.
+frontend/web/test-results/
+frontend/web/playwright-report/
+data/e2e/
+
 # Federated test data (managed by scripts/start-federated-dev.sh)
 data/federated-a/
 data/federated-b/
