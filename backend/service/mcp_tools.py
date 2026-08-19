@@ -121,6 +121,24 @@ def register_mcp_tools(
                 selected = _claimed_node_ids(session_id, node_refs)
         return visible, selected
 
+    def _session_is_addressable(session_id) -> bool:
+        """True when *session_id* names a session that exists server-side.
+
+        The session is the stored entity (design §3.1); a registry entry only
+        records that a browser holds the *legacy push stream* open. Gating the
+        read tools on the registry made a session created and populated over
+        MCP — with no browser ever opened — report not-found even though its
+        state was there and ``get_visualization_layout`` read it fine. The
+        registry is still consulted so a session that only ever existed as a
+        push target (no store entry yet) keeps resolving.
+        """
+        if (
+            session_manager is not None
+            and session_manager.get_session(session_id) is not None
+        ):
+            return True
+        return bool(session_registry and session_registry.session_exists(session_id))
+
     def register_tool(func: Callable) -> Callable:
         """Register a function as both MCP tool and in tools_map."""
         mcp.tool()(func)
@@ -774,6 +792,10 @@ def register_mcp_tools(
         Removes everything currently displayed in the browser window without
         affecting the underlying graph data. Use this to start a fresh view.
 
+        This is a live-canvas command, so it requires a connected browser and
+        fails without one — unlike the tools that act on the session's stored
+        state, which work whether or not anyone is watching.
+
         Args:
             visualization_session_id: The browser session ID shown in the header
                 (e.g. "8244-1742")
@@ -792,8 +814,10 @@ def register_mcp_tools(
             return {
                 "success": False,
                 "error": (
-                    f"Session '{visualization_session_id}' not found. "
-                    "Call connect_to_visualization_session first to verify the session is open."
+                    f"Session '{visualization_session_id}' has no connected "
+                    "visualization client. Clearing only reaches a browser that "
+                    "is currently displaying the session — check "
+                    "connected_clients from connect_to_visualization_session."
                 ),
             }
         result = {
@@ -919,77 +943,117 @@ def register_mcp_tools(
     @register_tool
     def connect_to_visualization_session(session_id: str) -> Dict[str, Any]:
         """
-        Verify that a browser visualization session is open and ready.
+        Verify that a visualization session exists and can be addressed.
 
         Use this tool first to confirm the session ID before using the
         visualization_session_id parameter in other tools.
 
+        A session is addressable as soon as it exists server-side — whether a
+        browser opened it or ``create_visualization_session`` did. No browser
+        needs to be connected: session state is server-owned, so a client that
+        opens the session later picks up whatever was put there meanwhile.
+        ``connected_clients`` reports how many clients are reporting presence on
+        it right now — 0 for a session nobody has opened. The commands that only
+        reach a live canvas (``clear_visualization``, and the
+        ``visualization_session_id`` parameter on the search/read tools) reach
+        nobody while it is 0.
+
         Args:
-            session_id: The session ID shown in the browser header (e.g. "8244-1742")
+            session_id: The session ID shown in the browser header, or the one
+                returned by create_visualization_session (e.g. "8244-1742")
 
         Returns:
-            Dict with connected status and current canvas summary
+            Dict with connected status, connected_clients and canvas summary
         """
-        if not session_registry:
-            return {"connected": False, "error": "Session registry not available"}
-        if not session_registry.is_valid_session_id(session_id):
+        if session_registry is None and session_manager is None:
+            return {
+                "connected": False,
+                "error": "Visualization sessions are not available",
+            }
+        if not is_valid_session_id(session_id):
             return {
                 "connected": False,
                 "error": "Invalid session ID format — expected DDDD-DDDD-DDDD-DDDD",
             }
-        if not session_registry.session_exists(session_id):
+        if not _session_is_addressable(session_id):
             return {
                 "connected": False,
                 "message": (
                     f"Session '{session_id}' not found. "
-                    "Open the application in a browser and use the displayed session ID."
+                    "Create one with create_visualization_session, or use the "
+                    "session ID displayed in an open browser."
                 ),
             }
         visible, _ = _session_view_state(session_id)
+        clients = (
+            session_manager.connected_count(session_id)
+            if session_manager is not None
+            else 0
+        )
+        if clients:
+            message = (
+                f"Session '{session_id}' is active with {clients} connected "
+                "client(s). You can now pass visualization_session_id to "
+                "search_graph, get_related_nodes, get_saved_view, and "
+                "clear_visualization."
+            )
+        else:
+            message = (
+                f"Session '{session_id}' exists; no client is reporting presence "
+                "on it. The tools that act on stored session state "
+                "(add_nodes_to_session, get_visualization_layout, "
+                "apply_visualization_layout) work now; commands that only reach "
+                "a live canvas (clear_visualization, and the "
+                "visualization_session_id parameter on the search/read tools) "
+                "reach nobody until a browser opens the session."
+            )
         return {
             "connected": True,
             "session_id": session_id,
-            "message": (
-                f"Session '{session_id}' is active. "
-                "You can now pass visualization_session_id to search_graph, "
-                "get_related_nodes, get_saved_view, and clear_visualization."
-            ),
+            "connected_clients": clients,
+            "message": message,
             "visible_node_count": len(visible),
         }
 
     @register_tool
     def get_visualization_session_state(session_id: str) -> Dict[str, Any]:
         """
-        Get the current visualization state from an open browser session.
+        Get the current visualization state of a session.
 
         Returns the node IDs currently displayed and selected in the canvas.
         Use this to understand what the user is looking at before deciding
         which nodes to add or which view to load.
+
+        The state is server-owned, so it reads back for any session that exists
+        — including one created over MCP that no browser has opened yet, where
+        the selection is simply empty.
 
         ``selected_node_ids`` holds node ids only. A selection claim can also be
         taken on an edge, but this field is narrowed to the session's nodes, so
         it is safe to pass into any argument that expects node ids.
 
         Args:
-            session_id: The session ID shown in the browser header (e.g. "8244-1742")
+            session_id: The session ID shown in the browser header, or the one
+                returned by create_visualization_session (e.g. "8244-1742")
 
         Returns:
             Dict with visible_node_ids, selected_node_ids, and node_count
         """
-        if not session_registry:
-            return {"error": "Session registry not available"}
-        if not session_registry.is_valid_session_id(session_id):
+        if session_registry is None and session_manager is None:
+            return {"error": "Visualization sessions are not available"}
+        if not is_valid_session_id(session_id):
             return {"error": "Invalid session ID format — expected DDDD-DDDD-DDDD-DDDD"}
         denied = _authorize_session(
             GRAPH_ACTION_READ, "get_visualization_session_state"
         )
         if denied:
             return denied
-        if not session_registry.session_exists(session_id):
+        if not _session_is_addressable(session_id):
             return {
                 "error": (
                     f"Session '{session_id}' not found. "
-                    "Call connect_to_visualization_session first to verify the session is open."
+                    "Create one with create_visualization_session, or use the "
+                    "session ID displayed in an open browser."
                 )
             }
         visible, selected = _session_view_state(session_id)

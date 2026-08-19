@@ -597,7 +597,11 @@ steps 6–8.
 >   to those same `node_refs` — claims are taken on *elements*, so an edge claim
 >   never reaches a field named `selected_node_ids`.
 >   A registry entry now means only "a browser is connected to
->   receive MCP pushes" — the gate those tools use for "session is open".
+>   receive MCP pushes", so it gates `clear_visualization` — a live-canvas
+>   command — but not the two read tools. Those resolve a session that exists
+>   in the session store, whether or not a client is connected, so a session
+>   created and populated over MCP with no browser open is addressable;
+>   `connect_to_visualization_session` reports the presence count alongside it.
 > - **Legacy push channel kept (scope boundary).** The legacy
 >   `GET /sessions/{id}/stream` MCP-push channel stays: §3.8 keeps MCP command
 >   pushes, the browser opens it eagerly on load, and the op stream (which

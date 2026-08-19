@@ -10,7 +10,8 @@ the current selection from the advisory claim map.
 
 Covers:
 - MCP session tools connect_to_visualization_session / get_visualization_session_state
-  reading server-owned state
+  reading server-owned state, for a session with a browser and for one no
+  browser has ever opened
 - clear_visualization gating on browser presence
 - MCP push enqueues a command when a browser is connected
 - Invalid session ID rejection
@@ -37,6 +38,17 @@ def _open_browser(test_app: TestClient, session_id: str) -> None:
     """
     asyncio.run(test_app.app.state.session_manager.delete_session(session_id))
     test_app.app.state.session_registry.get_or_create(session_id)
+
+
+def _create_headless_session(test_app: TestClient) -> str:
+    """Create a session the way an unattended agent does: over MCP, no browser.
+
+    Deliberately leaves the push registry untouched — these tests are about a
+    session that exists server-side and has never had a client.
+    """
+    result = test_app.app.state.tools_map["create_visualization_session"]()
+    assert result["success"] is True
+    return result["session"]["session_id"]
 
 
 def _add_nodes(test_app: TestClient, session_id: str, node_ids) -> None:
@@ -183,6 +195,107 @@ class TestGetVisualizationSessionState:
         assert data["node_count"] == 1
 
 
+class TestHeadlessSessionAddressability:
+    """A session with no connected client is still a session.
+
+    Both read tools used to gate on the legacy push registry, which only records
+    that a browser holds the SSE stream open. A session created and populated
+    over MCP — the unattended-agent path — therefore reported "not found" while
+    its state was there and ``get_visualization_layout`` read it fine.
+    """
+
+    def test_connect_finds_a_session_no_browser_has_ever_opened(
+        self, test_app: TestClient
+    ):
+        session_id = _create_headless_session(test_app)
+        _add_nodes(test_app, session_id, ["node-1"])
+
+        data = test_app.post(
+            "/execute_tool",
+            json={
+                "tool_name": "connect_to_visualization_session",
+                "arguments": {"session_id": session_id},
+            },
+        ).json()
+
+        assert data["connected"] is True
+        assert data["session_id"] == session_id
+        assert data["visible_node_count"] == 1
+        # Addressable, but nobody is watching: the caller can tell the two apart.
+        assert data["connected_clients"] == 0
+
+    def test_state_reads_back_for_a_session_no_browser_has_ever_opened(
+        self, test_app: TestClient
+    ):
+        session_id = _create_headless_session(test_app)
+        _add_nodes(test_app, session_id, ["node-1", "node-2"])
+
+        data = test_app.post(
+            "/execute_tool",
+            json={
+                "tool_name": "get_visualization_session_state",
+                "arguments": {"session_id": session_id},
+            },
+        ).json()
+
+        assert data["session_id"] == session_id
+        assert data["visible_node_ids"] == ["node-1", "node-2"]
+        assert data["node_count"] == 2
+        assert data["selected_node_ids"] == []
+
+    def test_session_stays_addressable_after_its_client_goes_away(
+        self, test_app: TestClient
+    ):
+        """A disconnected client is not a deleted session.
+
+        The registry entry is evicted when the browser stops holding the stream
+        open; the stored session outlives it and must keep resolving.
+        """
+        session_id = _create_headless_session(test_app)
+        _add_nodes(test_app, session_id, ["node-1"])
+        registry = test_app.app.state.session_registry
+        registry.get_or_create(session_id)
+        registry._sessions[session_id]["last_seen"] -= 10_000
+        assert registry.cleanup_stale() >= 1
+        assert registry.session_exists(session_id) is False
+
+        data = test_app.post(
+            "/execute_tool",
+            json={
+                "tool_name": "connect_to_visualization_session",
+                "arguments": {"session_id": session_id},
+            },
+        ).json()
+
+        assert data["connected"] is True
+        assert data["visible_node_count"] == 1
+
+    def test_a_session_that_does_not_exist_is_still_reported_not_found(
+        self, test_app: TestClient
+    ):
+        """The relaxed gate must not turn any well-formed id into a hit."""
+        unknown = "1010-2020-3030-4040"
+
+        connect = test_app.post(
+            "/execute_tool",
+            json={
+                "tool_name": "connect_to_visualization_session",
+                "arguments": {"session_id": unknown},
+            },
+        ).json()
+        state = test_app.post(
+            "/execute_tool",
+            json={
+                "tool_name": "get_visualization_session_state",
+                "arguments": {"session_id": unknown},
+            },
+        ).json()
+
+        assert connect["connected"] is False
+        assert "not found" in connect["message"].lower()
+        assert "not found" in state["error"].lower()
+
+
 class TestClearVisualization:
     """MCP tool: clear_visualization.
 
@@ -194,7 +307,7 @@ class TestClearVisualization:
         clear = test_app.app.state.tools_map["clear_visualization"]
         data = clear(visualization_session_id="0000-1111")
         assert data["success"] is False
-        assert "not found" in data["error"].lower()
+        assert "no connected visualization client" in data["error"].lower()
 
     def test_clear_open_session_succeeds(self, test_app: TestClient):
         # The push transport itself is covered by the search_graph push tests; a
