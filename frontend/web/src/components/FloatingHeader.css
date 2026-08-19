@@ -135,13 +135,28 @@
   color: #e57373;
 }
 
-/* Touch targets: the icon stays the same visual size (18-20px), but the
-   button's own box grows to the 44x44px minimum via the existing
-   flex-centering, so nothing needs to move to make room for it. */
+/* Touch targets: an invisible ::after overlay extends the hit area to
+   44x44px without growing the button's own box. .floating-header,
+   .floating-toolbar and .chat-panel-floating are separate `position: fixed`
+   siblings stacked at hardcoded pixel offsets (16px / 80px / 80px) rather
+   than being flow-connected, so growing the header bar's height here (its
+   tallest child sets the bar's height) would have shrunk the ~18px
+   clearance above .floating-toolbar to a couple of px. The overlay keeps
+   the bar's height, and therefore that clearance, unchanged. */
 @media (pointer: coarse) {
   .floating-header-hamburger,
   .floating-header-clear {
-    min-width: 44px;
-    min-height: 44px;
+    position: relative;
+  }
+
+  .floating-header-hamburger::after,
+  .floating-header-clear::after {
+    content: '';
+    position: absolute;
+    top: 50%;
+    left: 50%;
+    width: 44px;
+    height: 44px;
+    transform: translate(-50%, -50%);
   }
 }
