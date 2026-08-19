@@ -1042,18 +1042,17 @@ def register_mcp_tools(
                 ),
             }
         visible, _ = _session_view_state(session_id)
-        reachable = clients > 0 or push_target
         stored_state_tools = (
             "add_nodes_to_session, get_visualization_layout and "
             "apply_visualization_layout act on its stored state"
         )
         if stored and clients > 0:
             message = (
-                f"Session '{session_id}' exists and {clients} client(s) "
-                f"connected to it. {stored_state_tools}, and results pushed "
-                "with the visualization_session_id parameter reach the canvas."
+                f"Session '{session_id}' exists with {clients} connected "
+                f"client(s). {stored_state_tools}, and results pushed with the "
+                "visualization_session_id parameter reach the canvas."
             )
-        elif stored and reachable:
+        elif stored and push_target:
             # Reachable through the legacy push channel only: a browser is
             # holding it open without reporting presence on the op stream, so
             # the count in this very payload is 0 and must not be contradicted.

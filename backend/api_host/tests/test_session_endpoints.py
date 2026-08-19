@@ -351,7 +351,7 @@ class TestHeadlessSessionAddressability:
 
         assert data["connected_clients"] == 1
         assert data["has_stored_state"] is True
-        assert "1 client(s) connected" in data["message"]
+        assert "1 connected client(s)" in data["message"]
 
     def test_a_session_that_does_not_exist_is_still_reported_not_found(
         self, test_app: TestClient
