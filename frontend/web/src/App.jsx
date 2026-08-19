@@ -79,6 +79,7 @@ function App() {
     setConfig,
     focusNodeId,
     clearFocusNode,
+    setFocusNodeId,
     pendingGroups,
     setPendingGroups,
     pendingAnnotations,
@@ -1277,8 +1278,21 @@ function App() {
     (createdNode) => {
       addNodesToVisualization([createdNode], []);
       showNotification('success', `${createdNode.type} "${createdNode.name}" created`);
+      // Touch has no drag-to-canvas step to choose a position, so a node
+      // created via a toolbar tap is centered in the viewport directly
+      // (reusing the existing focus/center-camera primitive) instead of
+      // landing wherever the layout defaults new nodes to. Desktop's
+      // click-to-create and drag-to-canvas paths are unchanged.
+      //
+      // Deferred like FloatingSearch's identical newly-added-node case
+      // (FloatingSearch.jsx): the canvas's own node state only picks up
+      // addNodesToVisualization's update on a later render, so focusing
+      // synchronously would target a node the canvas doesn't know about yet.
+      if (isCoarsePointer) {
+        setTimeout(() => setFocusNodeId(createdNode.id), 100);
+      }
     },
-    [addNodesToVisualization, showNotification]
+    [addNodesToVisualization, showNotification, isCoarsePointer, setFocusNodeId]
   );
 
   // Callback: Save a skill node (create or update)
