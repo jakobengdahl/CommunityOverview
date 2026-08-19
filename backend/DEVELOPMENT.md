@@ -294,7 +294,15 @@ E2E tests include:
 - `mobile-smoke.spec.js` - Phone-viewport smoke tests (see below)
 
 Playwright starts the backend and the vite dev server itself (the `webServer`
-block in `playwright.config.js`), so no server needs to be running first.
+block in `playwright.config.js`), so no server needs to be running first. If one
+already is, Playwright reuses it rather than starting its own — which also means
+the `env` block (placeholder API key, throwaway graph file) does not apply, so a
+hand-started dev server keeps its own key and its e2e nodes land in its own
+graph. Stop it first, or set `CI=1`, to get the isolated setup.
+
+The mobile specs require the backend to report an LLM as available, because the
+chat panel does not mount otherwise. Against a reused backend with no API key
+configured they fail at startup rather than half-passing.
 
 #### Mobile smoke tests
 

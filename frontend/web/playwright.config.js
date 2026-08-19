@@ -53,12 +53,15 @@ export default defineConfig({
       url: 'http://localhost:8000/health',
       reuseExistingServer: !process.env.CI,
       timeout: 120 * 1000,
+      // Applied only when Playwright starts this server. Locally,
+      // reuseExistingServer attaches to whatever is already on port 8000 and
+      // this block is ignored — so a dev server started by hand keeps its own
+      // key and writes e2e nodes into its own graph file.
       env: {
         // The chat panel only renders when the backend reports an LLM as
         // available. No request ever reaches a provider — the specs stop at the
         // composer — so a placeholder value is enough to exercise the panel.
         ANTHROPIC_API_KEY: 'test-key-for-e2e',
-        // Keep e2e writes out of the developer's working graph.
         GRAPH_FILE: 'data/e2e/graph.json',
       },
     },

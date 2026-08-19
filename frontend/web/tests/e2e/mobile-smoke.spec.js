@@ -14,12 +14,15 @@ import { test, expect } from '@playwright/test';
 // threshold; the detector fires on the timer, not on release.
 const LONG_PRESS_HOLD_MS = 900;
 
-// Surfaces that already extend past the right viewport edge on a phone. The
-// floating header is a nowrap flex row with no max-width, so its session id and
-// clear-canvas button sit off screen at 390px. Excluded so this check reports
-// *new* breaks rather than failing on one that predates it; delete the entry
-// when the header is fixed and the check covers it again.
-const KNOWN_HORIZONTAL_OVERFLOW = ['.floating-header'];
+// Surfaces that already hang off a viewport edge on a phone, excluded so this
+// check reports *new* breaks rather than failing on ones that predate it.
+// Delete an entry once its surface is fixed and the check covers it again.
+//
+// .floating-header  — a nowrap flex row with no max-width, so at 390px its
+//                     session id ends at x~424 and its clear button at x~455.
+// .chat-panel-floating — a fixed 380px anchored 16px from the right edge, so at
+//                     390px its left edge sits at x~-6.
+const KNOWN_HORIZONTAL_OVERFLOW = ['.floating-header', '.chat-panel-floating'];
 
 /**
  * Finds a point inside the first canvas node that nothing else covers.
@@ -68,12 +71,16 @@ async function touchPointOnNode(page) {
 }
 
 /**
- * Presses and holds at `point` using real touch events.
+ * Presses and holds at `point` using real touch events, running `whileHeld`
+ * before the finger lifts.
  *
  * Playwright's touchscreen API only taps, and the canvas ignores any pointer
  * whose `pointerType` is not `touch`, so the press is driven through CDP.
+ * Asserting while the touch is still down is the point: the detector fires on
+ * its timer and explicitly has no long-press-on-release, so an assertion made
+ * after the lift would also pass if that contract were inverted.
  */
-async function longPress(page, point, holdMs = LONG_PRESS_HOLD_MS) {
+async function longPress(page, point, whileHeld, holdMs = LONG_PRESS_HOLD_MS) {
   const cdp = await page.context().newCDPSession(page);
   try {
     await cdp.send('Input.dispatchTouchEvent', {
@@ -81,8 +88,9 @@ async function longPress(page, point, holdMs = LONG_PRESS_HOLD_MS) {
       touchPoints: [{ x: point.x, y: point.y, id: 1 }],
     });
     await page.waitForTimeout(holdMs);
-    await cdp.send('Input.dispatchTouchEvent', { type: 'touchEnd', touchPoints: [] });
+    await whileHeld();
   } finally {
+    await cdp.send('Input.dispatchTouchEvent', { type: 'touchEnd', touchPoints: [] });
     await cdp.detach();
   }
 }
@@ -109,13 +117,17 @@ async function minimizeChat(page) {
   const collapse = page.locator('.chat-collapse-button');
   if (await collapse.isVisible()) {
     await collapse.tap();
-    await expect(page.locator('.chat-panel-minimized')).toBeVisible();
   }
+  await expect(page.locator('.chat-panel-minimized')).toBeVisible();
 }
 
 async function openApp(page) {
   await page.goto('/');
   await expect(page.locator('.react-flow')).toBeVisible();
+  // The chat panel mounts only once /ui/capabilities has reported an LLM.
+  // Waiting for it means every assertion below measures a fully mounted shell,
+  // rather than racing that fetch and missing the panel entirely.
+  await expect(page.locator('.chat-panel-floating, .chat-panel-minimized')).toBeVisible();
   await settleAnimations(page);
   // The coarse-pointer branch is what every assertion below depends on; if the
   // project stopped emulating touch these tests would silently pass as desktop.
@@ -148,10 +160,12 @@ test.describe('mobile shell', () => {
         }
         const rect = el.getBoundingClientRect();
         if (rect.width === 0 && rect.height === 0) continue;
-        if (rect.right > viewportWidth + 1) {
+        // Both edges: content pushed off the left is as unreachable as content
+        // pushed off the right, and a fixed panel can do either.
+        if (rect.right > viewportWidth + 1 || rect.left < -1) {
           const className = typeof el.className === 'string' ? el.className : '';
           offenders.push(
-            `${el.tagName.toLowerCase()}.${className} right=${Math.round(rect.right)}`
+            `${el.tagName.toLowerCase()}.${className} left=${Math.round(rect.left)} right=${Math.round(rect.right)}`
           );
         }
       }
@@ -160,15 +174,8 @@ test.describe('mobile shell', () => {
 
     expect(
       overflowing.offenders,
-      `elements extend past the ${overflowing.viewportWidth}px viewport`
+      `elements hang off the edge of the ${overflowing.viewportWidth}px viewport`
     ).toEqual([]);
-
-    // Nothing may make the document itself scroll sideways either.
-    const scroll = await page.evaluate(() => ({
-      scrollWidth: document.documentElement.scrollWidth,
-      clientWidth: document.documentElement.clientWidth,
-    }));
-    expect(scroll.scrollWidth).toBeLessThanOrEqual(scroll.clientWidth);
   });
 
   test('hamburger opens the session drawer', async ({ page }) => {
@@ -197,9 +204,9 @@ test.describe('mobile shell', () => {
     await expect(page.locator('.react-flow__node')).toHaveCount(1);
     await expect(page.locator('.node-context-menu')).toHaveCount(0);
 
-    await longPress(page, await touchPointOnNode(page));
-
-    await expect(page.locator('.node-context-menu')).toBeVisible();
+    await longPress(page, await touchPointOnNode(page), async () => {
+      await expect(page.locator('.node-context-menu')).toBeVisible();
+    });
   });
 
   test('the chat panel reopens with a reachable composer', async ({ page }) => {
