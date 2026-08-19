@@ -121,23 +121,39 @@ def register_mcp_tools(
                 selected = _claimed_node_ids(session_id, node_refs)
         return visible, selected
 
-    def _session_is_addressable(session_id) -> bool:
-        """True when *session_id* names a session that exists server-side.
+    def _session_facts(session_id):
+        """Return ``(has_stored_state, clients, push_target)`` for *session_id*.
 
-        The session is the stored entity (design §3.1); a registry entry only
-        records that a browser holds the *legacy push stream* open. Gating the
-        read tools on the registry made a session created and populated over
-        MCP — with no browser ever opened — report not-found even though its
-        state was there and ``get_visualization_layout`` read it fine. The
-        registry is still consulted so a session that only ever existed as a
-        push target (no store entry yet) keeps resolving.
+        Two independent things can be true of a session id, and a tool that
+        conflates them misleads the caller either way:
+
+        - **stored state** — the session exists in the session store (design
+          §3.1). This is what the tools acting on stored state
+          (``add_nodes_to_session``, the layout tools) need; it is created by
+          ``create_visualization_session`` or lazily by a browser's first
+          change, so a browser sitting on a fresh session has none yet.
+        - **a reachable canvas** — either a client reporting presence on the op
+          stream (``clients``) or an entry in the legacy push registry
+          (``push_target``). ``_push_to_session`` delivers to both, so either
+          one means a push lands somewhere.
+
+        Gating the read tools on the registry alone made a session created and
+        populated over MCP — with no browser ever opened — report not-found even
+        though its state was there and ``get_visualization_layout`` read it fine.
         """
-        if (
+        stored = (
             session_manager is not None
             and session_manager.get_session(session_id) is not None
-        ):
-            return True
-        return bool(session_registry and session_registry.session_exists(session_id))
+        )
+        clients = (
+            session_manager.connected_count(session_id)
+            if session_manager is not None
+            else 0
+        )
+        push_target = bool(
+            session_registry and session_registry.session_exists(session_id)
+        )
+        return stored, clients, push_target
 
     def register_tool(func: Callable) -> Callable:
         """Register a function as both MCP tool and in tools_map."""
@@ -814,10 +830,9 @@ def register_mcp_tools(
             return {
                 "success": False,
                 "error": (
-                    f"Session '{visualization_session_id}' has no connected "
-                    "visualization client. Clearing only reaches a browser that "
-                    "is currently displaying the session — check "
-                    "connected_clients from connect_to_visualization_session."
+                    f"Session '{visualization_session_id}' has no browser "
+                    "holding its push channel open. Clearing only reaches a "
+                    "browser that is currently displaying the session."
                 ),
             }
         result = {
@@ -948,22 +963,31 @@ def register_mcp_tools(
         Use this tool first to confirm the session ID before using the
         visualization_session_id parameter in other tools.
 
-        A session is addressable as soon as it exists server-side — whether a
-        browser opened it or ``create_visualization_session`` did. No browser
-        needs to be connected: session state is server-owned, so a client that
-        opens the session later picks up whatever was put there meanwhile.
-        ``connected_clients`` reports how many clients are reporting presence on
-        it right now — 0 for a session nobody has opened. The commands that only
-        reach a live canvas (``clear_visualization``, and the
-        ``visualization_session_id`` parameter on the search/read tools) reach
-        nobody while it is 0.
+        A session resolves as soon as it exists — whether a browser opened it or
+        ``create_visualization_session`` did. No browser needs to be connected:
+        session state is server-owned, so a client that opens the session later
+        picks up whatever was put there meanwhile.
+
+        Two facts decide what you can do with it, and the result reports both:
+
+        - ``has_stored_state`` — the session exists in the session store. The
+          tools that act on stored state (``add_nodes_to_session``,
+          ``get_visualization_layout``, ``apply_visualization_layout``) work
+          exactly when this is true. A browser sitting on a session it has not
+          changed yet has none: the store entry materialises on the first
+          change, so those tools report not-found until then.
+        - ``connected_clients`` — how many clients report presence on the
+          session's op stream (the same count ``get_visualization_layout``
+          returns). Results pushed with the ``visualization_session_id``
+          parameter reach a live canvas; ``message`` says whether one is there.
 
         Args:
             session_id: The session ID shown in the browser header, or the one
                 returned by create_visualization_session (e.g. "8244-1742")
 
         Returns:
-            Dict with connected status, connected_clients and canvas summary
+            Dict with connected status, has_stored_state, connected_clients and
+            canvas summary
         """
         if session_registry is None and session_manager is None:
             return {
@@ -975,7 +999,17 @@ def register_mcp_tools(
                 "connected": False,
                 "error": "Invalid session ID format — expected DDDD-DDDD-DDDD-DDDD",
             }
-        if not _session_is_addressable(session_id):
+        # Same read gate as get_visualization_session_state: this tool reports a
+        # session's existence and node count, so a hook that narrows reads must
+        # be asked here too (contract §7 routes every session operation through
+        # it).
+        denied = _authorize_session(
+            GRAPH_ACTION_READ, "connect_to_visualization_session"
+        )
+        if denied:
+            return denied
+        stored, clients, push_target = _session_facts(session_id)
+        if not stored and not push_target:
             return {
                 "connected": False,
                 "message": (
@@ -985,31 +1019,37 @@ def register_mcp_tools(
                 ),
             }
         visible, _ = _session_view_state(session_id)
-        clients = (
-            session_manager.connected_count(session_id)
-            if session_manager is not None
-            else 0
-        )
-        if clients:
+        reachable = clients > 0 or push_target
+        if stored and reachable:
             message = (
-                f"Session '{session_id}' is active with {clients} connected "
-                "client(s). You can now pass visualization_session_id to "
-                "search_graph, get_related_nodes, get_saved_view, and "
-                "clear_visualization."
+                f"Session '{session_id}' exists and a client is connected to it. "
+                "add_nodes_to_session, get_visualization_layout and "
+                "apply_visualization_layout act on its stored state, and "
+                "results pushed with the visualization_session_id parameter "
+                "reach the canvas."
+            )
+        elif stored:
+            message = (
+                f"Session '{session_id}' exists, with no client connected to it. "
+                "add_nodes_to_session, get_visualization_layout and "
+                "apply_visualization_layout act on its stored state and work "
+                "now; anything aimed at a live canvas (clear_visualization, and "
+                "the visualization_session_id parameter on the search/read "
+                "tools) reaches nobody until a browser opens the session."
             )
         else:
             message = (
-                f"Session '{session_id}' exists; no client is reporting presence "
-                "on it. The tools that act on stored session state "
-                "(add_nodes_to_session, get_visualization_layout, "
-                "apply_visualization_layout) work now; commands that only reach "
-                "a live canvas (clear_visualization, and the "
-                "visualization_session_id parameter on the search/read tools) "
-                "reach nobody until a browser opens the session."
+                f"Session '{session_id}' is open in a client but has no stored "
+                "state yet — it materialises on the first change to it. Results "
+                "pushed with the visualization_session_id parameter reach the "
+                "canvas now, while add_nodes_to_session, "
+                "get_visualization_layout and apply_visualization_layout report "
+                "it as not found until it materialises."
             )
         return {
             "connected": True,
             "session_id": session_id,
+            "has_stored_state": stored,
             "connected_clients": clients,
             "message": message,
             "visible_node_count": len(visible),
@@ -1048,7 +1088,8 @@ def register_mcp_tools(
         )
         if denied:
             return denied
-        if not _session_is_addressable(session_id):
+        stored, _, push_target = _session_facts(session_id)
+        if not stored and not push_target:
             return {
                 "error": (
                     f"Session '{session_id}' not found. "
@@ -1134,7 +1175,9 @@ def register_mcp_tools(
             return {
                 "error": (
                     f"Session '{session_id}' not found. "
-                    "Call connect_to_visualization_session first to verify the session is open."
+                    "This tool acts on a session's stored state, which exists "
+                    "once create_visualization_session created it or a browser "
+                    "made its first change to it."
                 )
             }
         positions = session.state.get("positions", {})
@@ -1294,7 +1337,9 @@ def register_mcp_tools(
                 "success": False,
                 "error": (
                     f"Session '{session_id}' not found. "
-                    "Call connect_to_visualization_session first to verify the session is open."
+                    "This tool acts on a session's stored state, which exists "
+                    "once create_visualization_session created it or a browser "
+                    "made its first change to it."
                 ),
             }
         except OpError as exc:
@@ -1468,7 +1513,9 @@ def register_mcp_tools(
                 "success": False,
                 "error": (
                     f"Session '{session_id}' not found. "
-                    "Call connect_to_visualization_session first to verify the session is open."
+                    "This tool acts on a session's stored state, which exists "
+                    "once create_visualization_session created it or a browser "
+                    "made its first change to it."
                 ),
             }
         except OpError as exc:

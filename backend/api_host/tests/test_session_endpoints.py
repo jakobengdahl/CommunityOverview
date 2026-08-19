@@ -99,7 +99,14 @@ class TestConnectToVisualizationSession:
         assert data["visible_node_count"] == 1
 
     def test_connected_with_empty_store_reports_zero_nodes(self, test_app: TestClient):
-        """A browser can be connected before anything is saved server-side."""
+        """A browser can be connected before anything is saved server-side.
+
+        The op stream materialises the store entry lazily (on the first change),
+        so this browser is reachable through the legacy push channel while the
+        tools that act on stored state still have nothing to act on. The result
+        must say so: ``has_stored_state`` false, and no claim that those tools
+        work.
+        """
         session_id = "5555-6666"
         _open_browser(test_app, session_id)
 
@@ -112,6 +119,8 @@ class TestConnectToVisualizationSession:
         ).json()
         assert data["connected"] is True
         assert data["visible_node_count"] == 0
+        assert data["has_stored_state"] is False
+        assert "no stored state yet" in data["message"]
 
     def test_invalid_session_id_format_returns_error(self, test_app: TestClient):
         response = test_app.post(
@@ -256,7 +265,7 @@ class TestHeadlessSessionAddressability:
         registry = test_app.app.state.session_registry
         registry.get_or_create(session_id)
         registry._sessions[session_id]["last_seen"] -= 10_000
-        assert registry.cleanup_stale() >= 1
+        registry.cleanup_stale()
         assert registry.session_exists(session_id) is False
 
         data = test_app.post(
@@ -269,6 +278,52 @@ class TestHeadlessSessionAddressability:
 
         assert data["connected"] is True
         assert data["visible_node_count"] == 1
+
+    def test_headless_session_reports_stored_state_and_no_client(
+        self, test_app: TestClient
+    ):
+        """The two facts are reported separately because they fail apart.
+
+        A session created over MCP has stored state and no canvas; a browser's
+        unchanged session has a canvas and no stored state. Collapsing them into
+        one boolean gives the caller advice that is wrong in one of the two.
+        """
+        session_id = _create_headless_session(test_app)
+
+        data = test_app.post(
+            "/execute_tool",
+            json={
+                "tool_name": "connect_to_visualization_session",
+                "arguments": {"session_id": session_id},
+            },
+        ).json()
+
+        assert data["has_stored_state"] is True
+        assert data["connected_clients"] == 0
+        assert "no client connected" in data["message"]
+
+    def test_a_client_on_the_op_stream_counts_as_connected(self, test_app: TestClient):
+        """Presence, not a legacy registry entry, is what makes a canvas live.
+
+        A browser that has moved to the op stream reports presence and holds no
+        registry entry, so a result reported off the registry alone would call
+        this session unwatched.
+        """
+        session_id = _create_headless_session(test_app)
+        manager = test_app.app.state.session_manager
+        manager.presence.join(session_id, "client-1", "Tester")
+
+        data = test_app.post(
+            "/execute_tool",
+            json={
+                "tool_name": "connect_to_visualization_session",
+                "arguments": {"session_id": session_id},
+            },
+        ).json()
+
+        assert data["connected_clients"] == 1
+        assert data["has_stored_state"] is True
+        assert "a client is connected" in data["message"]
 
     def test_a_session_that_does_not_exist_is_still_reported_not_found(
         self, test_app: TestClient
@@ -307,7 +362,7 @@ class TestClearVisualization:
         clear = test_app.app.state.tools_map["clear_visualization"]
         data = clear(visualization_session_id="0000-1111")
         assert data["success"] is False
-        assert "no connected visualization client" in data["error"].lower()
+        assert "no browser holding its push channel open" in data["error"].lower()
 
     def test_clear_open_session_succeeds(self, test_app: TestClient):
         # The push transport itself is covered by the search_graph push tests; a
