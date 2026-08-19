@@ -808,12 +808,13 @@ def register_mcp_tools(
         Removes everything currently displayed in the browser window without
         affecting the underlying graph data. Use this to start a fresh view.
 
-        This is a live-canvas command, and it is dispatched over the *legacy*
-        push channel, so it fails unless a browser is holding that channel open
-        for the session — which is narrower than "someone is watching": a
-        browser that has moved to the op stream reports presence in
-        ``connect_to_visualization_session`` while this tool still refuses. The
-        tools that act on the session's stored state have no such requirement.
+        This is a live-canvas command, and it *gates* on the legacy push
+        channel: it refuses unless a browser is holding that channel open for
+        the session, which is narrower than "someone is watching" — a browser
+        that has moved to the op stream reports presence in
+        ``connect_to_visualization_session`` and still gets refused here, even
+        though the command would have reached it. The tools that act on the
+        session's stored state have no such requirement.
 
         Args:
             visualization_session_id: The browser session ID shown in the header
@@ -849,7 +850,7 @@ def register_mcp_tools(
                 "error": (
                     f"Session '{visualization_session_id}' exists, but no "
                     "browser is holding its legacy push channel open, which is "
-                    "how this command is delivered."
+                    "what this command is gated on."
                 ),
             }
         result = {
@@ -1018,9 +1019,10 @@ def register_mcp_tools(
             }
         # Same read gate as get_visualization_session_state: this tool reports a
         # session's existence and node count, so a hook that narrows reads must
-        # be asked here too. (Not every tool in this family is gated yet — the
-        # push-only ones are not — but the two that disclose stored session
-        # state now agree.)
+        # be asked here too. (Not every tool in this family is gated yet:
+        # clear_visualization and the three session auto-add agent tools still
+        # are not. This closes the one that discloses stored session state
+        # without asking.)
         denied = _authorize_session(
             GRAPH_ACTION_READ, "connect_to_visualization_session"
         )
@@ -1041,22 +1043,34 @@ def register_mcp_tools(
             }
         visible, _ = _session_view_state(session_id)
         reachable = clients > 0 or push_target
-        if stored and reachable:
+        stored_state_tools = (
+            "add_nodes_to_session, get_visualization_layout and "
+            "apply_visualization_layout act on its stored state"
+        )
+        if stored and clients > 0:
             message = (
-                f"Session '{session_id}' exists and a client is connected to it. "
-                "add_nodes_to_session, get_visualization_layout and "
-                "apply_visualization_layout act on its stored state, and "
-                "results pushed with the visualization_session_id parameter "
-                "reach the canvas."
+                f"Session '{session_id}' exists and {clients} client(s) "
+                f"connected to it. {stored_state_tools}, and results pushed "
+                "with the visualization_session_id parameter reach the canvas."
+            )
+        elif stored and reachable:
+            # Reachable through the legacy push channel only: a browser is
+            # holding it open without reporting presence on the op stream, so
+            # the count in this very payload is 0 and must not be contradicted.
+            message = (
+                f"Session '{session_id}' exists and a browser is holding its "
+                "legacy push channel open, though none is reporting presence "
+                f"on the op stream (connected_clients is 0). "
+                f"{stored_state_tools}, and results pushed with the "
+                "visualization_session_id parameter reach that browser."
             )
         elif stored:
             message = (
-                f"Session '{session_id}' exists, with no client connected to it. "
-                "add_nodes_to_session, get_visualization_layout and "
-                "apply_visualization_layout act on its stored state and work "
-                "now; anything aimed at a live canvas (clear_visualization, and "
-                "the visualization_session_id parameter on the search/read "
-                "tools) reaches nobody until a browser opens the session."
+                f"Session '{session_id}' exists, with no client connected to "
+                f"it. {stored_state_tools} and work now; anything aimed at a "
+                "live canvas (clear_visualization, and the "
+                "visualization_session_id parameter on the search/read tools) "
+                "reaches nobody until a browser opens the session."
             )
         else:
             message = (
