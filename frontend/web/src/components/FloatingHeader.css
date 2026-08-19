@@ -134,3 +134,14 @@
   background: rgba(229, 115, 115, 0.15);
   color: #e57373;
 }
+
+/* Touch targets: the icon stays the same visual size (18-20px), but the
+   button's own box grows to the 44x44px minimum via the existing
+   flex-centering, so nothing needs to move to make room for it. */
+@media (pointer: coarse) {
+  .floating-header-hamburger,
+  .floating-header-clear {
+    min-width: 44px;
+    min-height: 44px;
+  }
+}

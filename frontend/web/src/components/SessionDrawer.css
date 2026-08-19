@@ -191,3 +191,26 @@
   padding: 8px;
   flex-shrink: 0;
 }
+
+/* Touch targets: rows and the close button grow to the 44px floor via
+   min-height/min-width so the drawer simply reflows taller in touch mode;
+   desktop sizing (no min-height set) is untouched. */
+@media (pointer: coarse) {
+  .session-drawer-close {
+    min-width: 44px;
+    min-height: 44px;
+  }
+
+  .session-drawer-item {
+    min-height: 44px;
+  }
+
+  .session-drawer-session-name {
+    min-height: 44px;
+    justify-content: center;
+  }
+
+  .session-drawer-search-input {
+    min-height: 44px;
+  }
+}
