@@ -791,6 +791,9 @@ can configure one. See `docs/EVENT_SUBSCRIPTIONS.md`.
 | `archive_edges` / `unarchive_edges` | Hide/restore edges via the `archived` flag |
 | `get_graph_stats` | Get graph statistics |
 | `save_view` | Save a named view (creates SavedView node) |
+| `connect_to_visualization_session` | Check that a session id resolves, and how many clients are watching it (`connected_clients`) |
+| `get_visualization_session_state` | Read a session's visible and selected node ids |
+| `clear_visualization` | Clear the canvas in the browsers displaying a session (requires a browser holding the legacy push channel open) |
 | `get_visualization_layout` | Read every node's model-space position, type and status in an open session, plus the current selection (for an agent to compute a new arrangement) |
 | `apply_visualization_layout` | Move nodes in an open session by absolute positions or deltas; applied atomically, animated on the canvas, and mirrored live to all connected browsers |
 | `add_nodes_to_session` | Put a known set of nodes on a session's canvas by id (additive, skips ids the caller cannot read) |
@@ -799,6 +802,27 @@ can configure one. See `docs/EVENT_SUBSCRIPTIONS.md`.
 | `get_visualization_session` | Inspect one session's resource metadata (incl. node count) |
 | `rename_visualization_session` | Set or clear a session's display name |
 | `delete_visualization_session` | Permanently delete a session — requires `confirm=true` |
+
+Two independent things can be true of a session id, and
+`connect_to_visualization_session` reports both rather than collapsing them:
+
+- `has_stored_state` — the session exists in the session store. State is
+  server-owned, so the tools that act on it (`add_nodes_to_session`,
+  `get_visualization_layout`, `apply_visualization_layout`) and
+  `get_visualization_session_state` work with no client connected, and a browser
+  opening the session later picks up what was put there meanwhile. A store entry
+  is created by `create_visualization_session` or lazily by a browser's first
+  change, so a browser sitting on an unchanged session has none yet and those
+  tools report not-found until it materialises.
+- `connected_clients` — clients reporting presence on the session's op stream
+  (the same count `get_visualization_layout` returns). A push carrying the
+  `visualization_session_id` parameter goes to the op-stream hub *and* the
+  legacy push registry, so it can still reach a browser that has only the legacy
+  stream open and reports no presence; `message` states which case the session is
+  in. `clear_visualization` gates on the legacy registry specifically.
+
+A session id that is in neither the store nor the registry is reported as not
+found, by both read tools.
 
 `get_visualization_layout` / `apply_visualization_layout` operate on a shared
 visualization session (the `SessionManager` op protocol), so an AI agent
