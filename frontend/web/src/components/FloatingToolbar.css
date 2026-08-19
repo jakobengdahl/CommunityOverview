@@ -88,6 +88,50 @@
   cursor: grabbing;
 }
 
+/* Hidden by default: the desktop hover tooltip (portal, below) carries the
+   name instead. Shown whenever hover is unavailable, so a touch user never
+   has to hover to learn what an icon means. Two independent signals cover
+   this: the hover-capability media query (belt) and the .is-touch class
+   App.jsx already derives from the same isCoarsePointer flag (suspenders) —
+   see the .app.is-touch rules below. */
+.floating-toolbar-item-label {
+  display: none;
+  margin-left: 8px;
+  font-size: 0.78rem;
+  white-space: nowrap;
+  color: inherit;
+}
+
+@media (hover: none) {
+  .floating-toolbar {
+    grid-template-columns: 1fr;
+  }
+
+  .floating-toolbar-item {
+    width: auto;
+    justify-content: flex-start;
+    padding: 0 10px;
+  }
+
+  .floating-toolbar-item-label {
+    display: inline;
+  }
+}
+
+.app.is-touch .floating-toolbar {
+  grid-template-columns: 1fr;
+}
+
+.app.is-touch .floating-toolbar-item {
+  width: auto;
+  justify-content: flex-start;
+  padding: 0 10px;
+}
+
+.app.is-touch .floating-toolbar-item-label {
+  display: inline;
+}
+
 .floating-toolbar-tooltip {
   position: fixed;
   transform: translateY(-50%);
