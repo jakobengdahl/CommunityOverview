@@ -327,7 +327,10 @@ def test_sync_emits_edge_events_for_cache_changes():
 # ---------------------------------------------------------------------------
 
 _REMOTE_GRAPH_URL = "https://federated.invalid/graph.json"
-_TIMEOUT_MS = 1200
+# Deliberately not the shipped default (config.py: default_timeout_ms = 1200).
+# A configured value identical to the default cannot distinguish "the timeout
+# came from config" from "the timeout is hardcoded".
+_TIMEOUT_MS = 900
 
 
 def _single_graph_config(
@@ -407,6 +410,9 @@ class _StubHttpxModule:
         self._transport = transport
         self.clients_opened = 0
 
+    # Deliberately exposes AsyncClient alone. If manager.py grows a reference to
+    # another httpx attribute, these tests break loudly with AttributeError
+    # rather than quietly passing against an unexercised path.
     def AsyncClient(self, **kwargs):
         self.clients_opened += 1
         return httpx.AsyncClient(transport=self._transport, **kwargs)
@@ -529,6 +535,23 @@ async def test_sync_graph_degrades_and_keeps_the_cache_on_an_error_response(
     # federated graph that starts answering 401 must not be read as "empty".
     assert graph_status["cached_nodes"] == 1
     assert node_events == []
+
+
+@pytest.mark.asyncio
+async def test_sync_graph_degrades_on_an_error_response_from_its_own_client(
+    monkeypatch,
+):
+    """The self-opened branch has its own raise_for_status, so the parametrised
+    test above — which supplies a client — cannot reach it."""
+    remote = _ScriptedTransport((500, {"error": "upstream failure"}))
+    stub = _sealed(monkeypatch, remote)
+    manager = FederationManager(_single_graph_config())
+
+    result = await manager.sync_graph("esam-main")
+
+    assert result["success"] is False
+    assert stub.clients_opened == 1
+    assert manager.get_status()["graphs"][0]["status"] == "degraded"
 
 
 @pytest.mark.asyncio
@@ -694,10 +717,19 @@ async def test_sync_graph_currently_re_emits_an_update_for_an_unchanged_node(
 
 
 @pytest.mark.asyncio
-async def test_sync_graph_treats_a_payload_without_nodes_as_an_empty_graph(monkeypatch):
-    """Also current behaviour rather than an endorsement: a 200 carrying neither
-    key empties the cache and reports success, so a remote that starts serving
-    `{}` silently drops every federated node and announces it as deletions."""
+async def test_sync_graph_currently_treats_a_payload_without_nodes_as_an_empty_graph(
+    monkeypatch,
+):
+    """Documents current behaviour rather than endorsing it.
+
+    A 200 carrying neither key empties the cache and reports success, so a
+    remote that starts serving `{}` — malformed, truncated, or an error
+    envelope — silently drops every federated node and announces it as
+    deletions. That is the same outcome the non-2xx path deliberately guards
+    against, reached through a response the guard never sees. Tracked
+    separately as smallfix-federation-empty-payload-wipes-cache; this test is
+    the one to flip when that is decided.
+    """
     remote = _ScriptedTransport((200, _ONE_NODE), (200, {}))
     _sealed(monkeypatch, remote)
 
