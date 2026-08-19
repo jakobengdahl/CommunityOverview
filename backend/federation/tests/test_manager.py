@@ -428,6 +428,112 @@ def _sealed(monkeypatch, remote):
 _ONE_NODE = {"nodes": [{"id": "n1", "type": "Actor", "name": "First"}], "edges": []}
 
 
+_SECOND_GRAPH_URL = "https://federated-b.invalid/graph.json"
+
+
+def _two_graph_config():
+    """Every other federation fixture in this repo configures a single graph,
+    which cannot distinguish "resolves the named graph" from "resolves the only
+    graph"."""
+    return FederationFileConfig.model_validate(
+        {
+            "federation": {
+                "enabled": True,
+                "max_traversal_depth": 1,
+                "default_timeout_ms": _TIMEOUT_MS,
+                "graphs": [
+                    {
+                        "graph_id": "esam-main",
+                        "display_name": "eSam",
+                        "enabled": True,
+                        "endpoints": {"graph_json_url": _REMOTE_GRAPH_URL},
+                    },
+                    {
+                        "graph_id": "other-main",
+                        "display_name": "Other",
+                        "enabled": True,
+                        "endpoints": {"graph_json_url": _SECOND_GRAPH_URL},
+                    },
+                ],
+            }
+        }
+    )
+
+
+class _PerUrlTransport:
+    """Mock transport serving a different payload per URL, so a request to the
+    wrong endpoint is visible rather than indistinguishable."""
+
+    def __init__(self, payloads):
+        self._payloads = payloads
+        self.requests = []
+        self.transport = httpx.MockTransport(self._handle)
+
+    def _handle(self, request):
+        self.requests.append(request)
+        return httpx.Response(200, json=self._payloads[str(request.url)])
+
+
+def _two_graph_remote():
+    return _PerUrlTransport(
+        {
+            _REMOTE_GRAPH_URL: {
+                "nodes": [{"id": "a1", "type": "Actor", "name": "From A"}],
+                "edges": [],
+            },
+            _SECOND_GRAPH_URL: {
+                "nodes": [
+                    {"id": "b1", "type": "Actor", "name": "From B"},
+                    {"id": "b2", "type": "Actor", "name": "Also From B"},
+                ],
+                "edges": [],
+            },
+        }
+    )
+
+
+@pytest.mark.asyncio
+async def test_sync_graph_fetches_and_caches_only_the_graph_it_was_named(monkeypatch):
+    remote = _two_graph_remote()
+    _sealed(monkeypatch, remote)
+    manager = FederationManager(_two_graph_config())
+
+    async with httpx.AsyncClient(transport=remote.transport) as client:
+        result = await manager.sync_graph("other-main", client)
+
+    assert result["success"] is True
+    assert result["graph_id"] == "other-main"
+    assert result["nodes"] == 2
+
+    # Resolving the wrong graph would fetch one endpoint and write the payload
+    # into another graph's cache — a silent cross-graph poisoning.
+    assert [str(request.url) for request in remote.requests] == [_SECOND_GRAPH_URL]
+
+    by_id = {graph["graph_id"]: graph for graph in manager.get_status()["graphs"]}
+    assert by_id["other-main"]["cached_nodes"] == 2
+    assert by_id["other-main"]["status"] == "healthy"
+    assert by_id["esam-main"]["cached_nodes"] == 0
+    assert by_id["esam-main"]["status"] == "offline"
+    assert manager.get_cached_node("federated::other-main::b1") is not None
+    assert manager.get_cached_node("federated::esam-main::b1") is None
+
+
+@pytest.mark.asyncio
+async def test_sync_graph_declines_an_unknown_id_rather_than_syncing_another_graph(
+    monkeypatch,
+):
+    remote = _two_graph_remote()
+    _sealed(monkeypatch, remote)
+    manager = FederationManager(_two_graph_config())
+
+    result = await manager.sync_graph("no-such-graph")
+
+    assert result["success"] is False
+    assert "no-such-graph" in result["error"]
+    assert remote.requests == []
+    assert all(graph["cached_nodes"] == 0 for graph in manager.get_status()["graphs"])
+
+
 @pytest.mark.asyncio
 async def test_sync_graph_loads_remote_nodes_and_edges_into_the_cache(monkeypatch):
     remote = _ScriptedTransport(
@@ -537,13 +643,16 @@ async def test_sync_graph_degrades_and_keeps_the_cache_on_an_error_response(
     assert node_events == []
 
 
+@pytest.mark.parametrize("status_code", [401, 404, 500])
 @pytest.mark.asyncio
 async def test_sync_graph_degrades_on_an_error_response_from_its_own_client(
-    monkeypatch,
+    monkeypatch, status_code
 ):
     """The self-opened branch has its own raise_for_status, so the parametrised
-    test above — which supplies a client — cannot reach it."""
-    remote = _ScriptedTransport((500, {"error": "upstream failure"}))
+    test above — which supplies a client — cannot reach it. It needs the same
+    status range: 4xx is the case that matters most, and it matters at both
+    call sites."""
+    remote = _ScriptedTransport((status_code, {"error": "upstream failure"}))
     stub = _sealed(monkeypatch, remote)
     manager = FederationManager(_single_graph_config())
 
@@ -765,6 +874,7 @@ async def test_sync_graph_degrades_without_a_request_when_no_graph_json_url_is_s
     result = await manager.sync_graph("esam-main")
 
     assert result["success"] is False
+    assert result["error"]
     assert manager.get_status()["graphs"][0]["status"] == "degraded"
     assert stub.clients_opened == 0
     assert remote.requests == []
