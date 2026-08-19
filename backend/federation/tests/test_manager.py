@@ -431,10 +431,10 @@ _ONE_NODE = {"nodes": [{"id": "n1", "type": "Actor", "name": "First"}], "edges":
 _SECOND_GRAPH_URL = "https://federated-b.invalid/graph.json"
 
 
-def _two_graph_config():
+def _two_graph_config(other_graph_json_url=_SECOND_GRAPH_URL):
     """Every other federation fixture in this repo configures a single graph,
     which cannot distinguish "resolves the named graph" from "resolves the only
-    graph"."""
+    graph", nor "degrades the named graph" from "degrades the only graph"."""
     return FederationFileConfig.model_validate(
         {
             "federation": {
@@ -452,7 +452,11 @@ def _two_graph_config():
                         "graph_id": "other-main",
                         "display_name": "Other",
                         "enabled": True,
-                        "endpoints": {"graph_json_url": _SECOND_GRAPH_URL},
+                        "endpoints": (
+                            {"graph_json_url": other_graph_json_url}
+                            if other_graph_json_url
+                            else {"mcp_url": "https://federated-b.invalid/mcp"}
+                        ),
                     },
                 ],
             }
@@ -471,7 +475,9 @@ class _PerUrlTransport:
 
     def _handle(self, request):
         self.requests.append(request)
-        return httpx.Response(200, json=self._payloads[str(request.url)])
+        step = self._payloads[str(request.url)]
+        status_code, payload = step if isinstance(step, tuple) else (200, step)
+        return httpx.Response(status_code, json=payload)
 
 
 def _two_graph_remote():
@@ -499,6 +505,9 @@ async def test_sync_graph_fetches_and_caches_only_the_graph_it_was_named(monkeyp
     manager = FederationManager(_two_graph_config())
 
     async with httpx.AsyncClient(transport=remote.transport) as client:
+        # Sync the other graph first, so the assertions below distinguish "left
+        # untouched" from "reset back to the constructor defaults".
+        assert (await manager.sync_graph("esam-main", client))["success"] is True
         result = await manager.sync_graph("other-main", client)
 
     assert result["success"] is True
@@ -507,15 +516,52 @@ async def test_sync_graph_fetches_and_caches_only_the_graph_it_was_named(monkeyp
 
     # Resolving the wrong graph would fetch one endpoint and write the payload
     # into another graph's cache — a silent cross-graph poisoning.
-    assert [str(request.url) for request in remote.requests] == [_SECOND_GRAPH_URL]
+    assert [str(request.url) for request in remote.requests] == [
+        _REMOTE_GRAPH_URL,
+        _SECOND_GRAPH_URL,
+    ]
 
     by_id = {graph["graph_id"]: graph for graph in manager.get_status()["graphs"]}
     assert by_id["other-main"]["cached_nodes"] == 2
     assert by_id["other-main"]["status"] == "healthy"
-    assert by_id["esam-main"]["cached_nodes"] == 0
-    assert by_id["esam-main"]["status"] == "offline"
+    assert by_id["esam-main"]["cached_nodes"] == 1
+    assert by_id["esam-main"]["status"] == "healthy"
     assert manager.get_cached_node("federated::other-main::b1") is not None
     assert manager.get_cached_node("federated::esam-main::b1") is None
+    assert manager.get_cached_node("federated::esam-main::a1") is not None
+
+
+@pytest.mark.parametrize("other_graph_json_url", [_SECOND_GRAPH_URL, None])
+@pytest.mark.asyncio
+async def test_sync_graph_degrades_only_the_graph_that_failed(
+    monkeypatch, other_graph_json_url
+):
+    """Covers both degraded paths — the exception handler and the
+    missing-graph_json_url guard — since they name the failing graph
+    differently and either could degrade the wrong entry."""
+    remote = _PerUrlTransport(
+        {
+            _REMOTE_GRAPH_URL: {
+                "nodes": [{"id": "a1", "type": "Actor", "name": "From A"}],
+                "edges": [],
+            },
+            _SECOND_GRAPH_URL: (500, {"error": "upstream failure"}),
+        }
+    )
+    _sealed(monkeypatch, remote)
+    manager = FederationManager(_two_graph_config(other_graph_json_url))
+
+    async with httpx.AsyncClient(transport=remote.transport) as client:
+        assert (await manager.sync_graph("esam-main", client))["success"] is True
+        assert (await manager.sync_graph("other-main", client))["success"] is False
+
+    by_id = {graph["graph_id"]: graph for graph in manager.get_status()["graphs"]}
+    assert by_id["other-main"]["status"] == "degraded"
+    assert by_id["other-main"]["last_error"]
+    # The healthy graph must not be collateral damage of its neighbour failing.
+    assert by_id["esam-main"]["status"] == "healthy"
+    assert by_id["esam-main"]["last_error"] is None
+    assert by_id["esam-main"]["cached_nodes"] == 1
 
 
 @pytest.mark.asyncio
