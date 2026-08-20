@@ -1002,10 +1002,11 @@ Respond with ONLY a JSON array of extracted entities, no other text. Example for
             )
 
             # Extract JSON from response
-            response_text = ""
-            for block in response.content:
-                if isinstance(block, dict) and block.get("type") == "text":
-                    response_text += block.get("text", "")
+            response_text = "".join(
+                block.get("text", "")
+                for block in response.content
+                if isinstance(block, dict) and block.get("type") == "text"
+            )
 
             # Find JSON array in response
             json_match = re.search(r"\[[\s\S]*\]", response_text)
