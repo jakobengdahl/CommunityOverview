@@ -307,7 +307,12 @@
   "canvas": {
     "lazy_showing": "Showing {loaded} of {total} nodes",
     "lazy_load_more": "Load More",
-    "lazy_hidden_connections": "{count} connections to nodes not yet loaded are hidden — Load More to reveal them"
+    "lazy_hidden_connections": "{count} connections to nodes not yet loaded are hidden — Load More to reveal them",
+    "zoom_in": "Zoom in",
+    "zoom_out": "Zoom out",
+    "fit_view": "Fit whole graph",
+    "focus_view": "Focus on selected node",
+    "exit_focus_view": "Back to whole graph"
   },
   "guide": {
     "title": "Guide",

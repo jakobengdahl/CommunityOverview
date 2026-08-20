@@ -1813,6 +1813,12 @@ function App() {
           lazyLoadMoreLabel={t('canvas.lazy_load_more')}
           lazyLoadHiddenConnectionsLabel={t('canvas.lazy_hidden_connections')}
           showMinimap={showMinimap}
+          compactMode={isMobile ? 'on' : 'off'}
+          compactZoomInLabel={t('canvas.zoom_in')}
+          compactZoomOutLabel={t('canvas.zoom_out')}
+          compactFitViewLabel={t('canvas.fit_view')}
+          focusViewLabel={t('canvas.focus_view')}
+          exitFocusViewLabel={t('canvas.exit_focus_view')}
           nodePreviewEnabled={nodePreviewEnabled}
           schema={schema}
           onContextMenuAction={handleContextMenuAction}

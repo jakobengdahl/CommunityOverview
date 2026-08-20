@@ -307,7 +307,12 @@
   "canvas": {
     "lazy_showing": "Visar {loaded} av {total} noder",
     "lazy_load_more": "Ladda fler",
-    "lazy_hidden_connections": "{count} kopplingar till noder som ännu inte laddats är dolda — ladda fler för att visa dem"
+    "lazy_hidden_connections": "{count} kopplingar till noder som ännu inte laddats är dolda — ladda fler för att visa dem",
+    "zoom_in": "Zooma in",
+    "zoom_out": "Zooma ut",
+    "fit_view": "Visa hela grafen",
+    "focus_view": "Fokusera på vald nod",
+    "exit_focus_view": "Tillbaka till hela grafen"
   },
   "guide": {
     "title": "Guide",
