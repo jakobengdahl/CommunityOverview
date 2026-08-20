@@ -100,6 +100,11 @@ function FloatingSearch() {
       positionTransitionActive = false;
       measure();
     };
+    const handleTransitionCancel = (event) => {
+      if (event.propertyName && event.propertyName !== 'left') return;
+      positionTransitionActive = false;
+      cancelAnimationFrame(frame);
+    };
 
     const resizeObserver = new ResizeObserver(measure);
     resizeObserver.observe(header);
@@ -109,6 +114,7 @@ function FloatingSearch() {
     window.visualViewport?.addEventListener('resize', measure);
     header.addEventListener('transitionrun', handleTransitionRun);
     header.addEventListener('transitionend', handleTransitionEnd);
+    header.addEventListener('transitioncancel', handleTransitionCancel);
     applyMeasurement();
 
     return () => {
@@ -121,6 +127,7 @@ function FloatingSearch() {
       positionTransitionActive = false;
       header.removeEventListener('transitionrun', handleTransitionRun);
       header.removeEventListener('transitionend', handleTransitionEnd);
+      header.removeEventListener('transitioncancel', handleTransitionCancel);
     };
   }, []);
 
