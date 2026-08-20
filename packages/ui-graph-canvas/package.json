@@ -8,8 +8,9 @@
     "./styles": "./src/styles/index.css"
   },
   "scripts": {
-    "test": "vitest",
-    "test:coverage": "vitest --coverage"
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "test:coverage": "vitest run --coverage"
   },
   "peerDependencies": {
     "react": "^18.0.0",

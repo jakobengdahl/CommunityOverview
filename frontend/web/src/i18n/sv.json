@@ -296,7 +296,8 @@
   },
   "experts": {
     "title": "Expert-agenter",
-    "toggle_panel": "Lägg till eller ta bort expert-agenter"
+    "toggle_panel": "Lägg till eller ta bort expert-agenter",
+    "close": "Stäng expertpanelen"
   },
   "federation": {
     "depth_label": "Djup",
