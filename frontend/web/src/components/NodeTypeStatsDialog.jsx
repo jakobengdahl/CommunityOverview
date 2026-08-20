@@ -6,7 +6,8 @@ import './NodeTypeStatsDialog.css';
 
 function NodeTypeStatsDialog({ nodesByType, schema, onClose }) {
   const dialogRef = useRef(null);
-  const schema = useGraphStore((s) => s.schema);
+  const storeSchema = useGraphStore((s) => s.schema);
+  const effectiveSchema = schema ?? storeSchema;
 
   useEffect(() => {
     dialogRef.current?.focus();
@@ -22,8 +23,8 @@ function NodeTypeStatsDialog({ nodesByType, schema, onClose }) {
   }, [onClose]);
 
   const sorted = Object.entries(nodesByType).sort(([, a], [, b]) => b - a);
-  const relationshipTypes = schema?.relationship_types
-    ? Object.entries(schema.relationship_types).map(([type, config]) => ({
+  const relationshipTypes = effectiveSchema?.relationship_types
+    ? Object.entries(effectiveSchema.relationship_types).map(([type, config]) => ({
         type,
         description: config?.description || '',
         sourceTypes: Array.isArray(config?.source_types) ? config.source_types : [],
@@ -58,7 +59,7 @@ function NodeTypeStatsDialog({ nodesByType, schema, onClose }) {
             <div key={type} className="nts-dialog-row">
               <span
                 className="nts-dialog-dot"
-                style={{ backgroundColor: resolveColor(type, schema) }}
+                style={{ backgroundColor: resolveColor(type, effectiveSchema) }}
               />
               <span className="nts-dialog-type">{type}</span>
               <span className="nts-dialog-count">{count}</span>
