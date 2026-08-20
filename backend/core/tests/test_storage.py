@@ -210,7 +210,13 @@ class TestGraphStorageCRUD:
         initiative = Node(id="initiative", type=NodeType.INITIATIVE, name="Initiative")
         result = temp_storage.add_nodes(
             [actor, initiative],
-            [Edge(source="actor", target="initiative", type=RelationshipType.BELONGS_TO)],
+            [
+                Edge(
+                    source="actor",
+                    target="initiative",
+                    type=RelationshipType.BELONGS_TO,
+                )
+            ],
         )
 
         assert result.success is True

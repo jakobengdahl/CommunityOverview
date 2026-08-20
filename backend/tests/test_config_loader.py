@@ -174,9 +174,7 @@ class TestConfigLoader:
         assert schema["relationship_types"]["TEST_EDGE"]["source_types"] == [
             "CustomActor"
         ]
-        assert schema["relationship_types"]["TEST_EDGE"]["target_types"] == [
-            "TestNode"
-        ]
+        assert schema["relationship_types"]["TEST_EDGE"]["target_types"] == ["TestNode"]
 
         # Clean up
         del os.environ["SCHEMA_FILE"]

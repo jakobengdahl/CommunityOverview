@@ -361,7 +361,9 @@ def update_edge(
     )
 
     try:
-        updated_edge = storage.update_edge(edge_id, updates, event_context=event_context)
+        updated_edge = storage.update_edge(
+            edge_id, updates, event_context=event_context
+        )
     except ValueError as e:
         return {"success": False, "message": str(e)}
     if not updated_edge:
