@@ -290,6 +290,38 @@ describe('GraphCanvas', () => {
     expect(onSetEdgeType).toHaveBeenCalledWith('edge-1', 'BELONGS_TO');
   });
 
+  it('filters edge relationship types by source and target node type', () => {
+    const schema = {
+      relationship_types: {
+        RELATES_TO: { description: 'Relates to' },
+        WORKS_FOR: {
+          description: 'Applies to Actor -> Initiative',
+          source_types: ['Actor'],
+          target_types: ['Initiative'],
+        },
+        IMPLEMENTS: {
+          description: 'Wrong direction for this edge',
+          source_types: ['Initiative'],
+          target_types: ['Actor'],
+        },
+      },
+    };
+
+    render(
+      <GraphCanvas
+        nodes={sampleNodes}
+        edges={sampleEdges}
+        schema={schema}
+        onSetEdgeType={vi.fn()}
+      />
+    );
+
+    fireEvent.contextMenu(screen.getByTestId('edge-edge-1'));
+
+    expect(screen.getByRole('button', { name: /^works_for$/i })).toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: /^implements$/i })).toBeNull();
+  });
+
   it('resets an edge to a general connection from its context menu', () => {
     const onSetEdgeType = vi.fn();
     const schema = { relationship_types: { BELONGS_TO: { description: 'Belongs to' } } };

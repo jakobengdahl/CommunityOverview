@@ -651,6 +651,27 @@ const useGraphStore = create((set, get) => ({
     }));
   },
 
+  isRelationshipTypeApplicable: (relationshipType, sourceType, targetType) => {
+    const { schema } = get();
+    const config = schema?.relationship_types?.[relationshipType];
+    // Unconfigured relationship types are allowed for backward compatibility.
+    if (!config) return true;
+    const sourceTypes = Array.isArray(config.source_types) ? config.source_types : [];
+    const targetTypes = Array.isArray(config.target_types) ? config.target_types : [];
+    const sourceAllowed =
+      sourceTypes.length === 0 || sourceTypes.includes('*') || sourceTypes.includes(sourceType);
+    const targetAllowed =
+      targetTypes.length === 0 || targetTypes.includes('*') || targetTypes.includes(targetType);
+    return sourceAllowed && targetAllowed;
+  },
+
+  getRelationshipTypesForNodes: (sourceType, targetType) => {
+    const { getRelationshipTypes, isRelationshipTypeApplicable } = get();
+    return getRelationshipTypes().filter((rt) =>
+      isRelationshipTypeApplicable(rt.type, sourceType, targetType)
+    );
+  },
+
   // Clear highlights after a delay
   clearHighlights: () => {
     setTimeout(() => set({ highlightedNodeIds: [] }), 3000);

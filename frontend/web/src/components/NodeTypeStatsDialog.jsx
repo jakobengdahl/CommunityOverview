@@ -4,7 +4,7 @@ import useGraphStore from '../store/graphStore';
 import { resolveColor } from './FloatingToolbar';
 import './NodeTypeStatsDialog.css';
 
-function NodeTypeStatsDialog({ nodesByType, onClose }) {
+function NodeTypeStatsDialog({ nodesByType, schema, onClose }) {
   const dialogRef = useRef(null);
   const schema = useGraphStore((s) => s.schema);
 
@@ -22,6 +22,15 @@ function NodeTypeStatsDialog({ nodesByType, onClose }) {
   }, [onClose]);
 
   const sorted = Object.entries(nodesByType).sort(([, a], [, b]) => b - a);
+  const relationshipTypes = schema?.relationship_types
+    ? Object.entries(schema.relationship_types).map(([type, config]) => ({
+        type,
+        description: config?.description || '',
+        sourceTypes: Array.isArray(config?.source_types) ? config.source_types : [],
+        targetTypes: Array.isArray(config?.target_types) ? config.target_types : [],
+      }))
+    : [];
+  const formatRules = (types) => (types.length > 0 ? types.join(', ') : '*');
 
   return (
     <div className="nts-dialog-overlay" onClick={onClose}>
@@ -44,6 +53,7 @@ function NodeTypeStatsDialog({ nodesByType, onClose }) {
         </div>
 
         <div className="nts-dialog-body">
+          <div className="nts-dialog-section-title">Node types</div>
           {sorted.map(([type, count]) => (
             <div key={type} className="nts-dialog-row">
               <span
@@ -54,6 +64,24 @@ function NodeTypeStatsDialog({ nodesByType, onClose }) {
               <span className="nts-dialog-count">{count}</span>
             </div>
           ))}
+          {relationshipTypes.length > 0 && (
+            <>
+              <div className="nts-dialog-section-title nts-dialog-section-spaced">
+                Relationship types
+              </div>
+              {relationshipTypes.map((rt) => (
+                <div key={rt.type} className="nts-dialog-relationship-row">
+                  <span className="nts-dialog-type">{rt.type}</span>
+                  <span className="nts-dialog-rule">
+                    {formatRules(rt.sourceTypes)} -&gt; {formatRules(rt.targetTypes)}
+                  </span>
+                  {rt.description && (
+                    <span className="nts-dialog-description">{rt.description}</span>
+                  )}
+                </div>
+              ))}
+            </>
+          )}
         </div>
 
         <div className="nts-dialog-footer">
