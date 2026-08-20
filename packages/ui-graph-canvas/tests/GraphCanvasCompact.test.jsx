@@ -1,6 +1,7 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { render, screen, act, cleanup, fireEvent } from '@testing-library/react';
 import { GraphCanvas } from '../src/index';
+import { LAZY_LOAD_THRESHOLD, INITIAL_LOAD_COUNT } from '../src/utils/constants';
 
 // Captures what GraphCanvas hands to ReactFlow (the nodes it renders, the
 // fitViewOptions it configures), the camera calls the compact pill makes, and
@@ -13,6 +14,7 @@ import { GraphCanvas } from '../src/index';
 const hoisted = vi.hoisted(() => ({
   flowProps: null,
   currentNodes: [],
+  liveNodes: null,
   selectionOnChange: null,
   setNodes: null,
   fitView: null,
@@ -24,6 +26,7 @@ vi.mock('reactflow', () => {
   const MockReactFlow = (props) => {
     hoisted.flowProps = props;
     hoisted.currentNodes = props.nodes || [];
+    if (hoisted.liveNodes === null) hoisted.liveNodes = props.nodes || [];
     return (
       <div data-testid="react-flow">
         {props.nodes?.map((node) => (
@@ -43,7 +46,11 @@ vi.mock('reactflow', () => {
     useEdgesState: (initialEdges) => [initialEdges || [], vi.fn(), vi.fn()],
     addEdge: (_params, edges) => edges,
     useReactFlow: () => ({
-      getNodes: () => hoisted.currentNodes,
+      // getNodes() is ReactFlow's live store, which is NOT the same as what the
+      // canvas last rendered: it carries drags, group parenting and annotation
+      // overlays. A test seeds hoisted.liveNodes to model that; otherwise it
+      // tracks the rendered nodes.
+      getNodes: () => hoisted.liveNodes ?? hoisted.currentNodes,
       getEdges: () => [],
       setNodes: vi.fn(),
       setEdges: vi.fn(),
@@ -102,6 +109,7 @@ const flushFrame = async () => {
 };
 
 beforeEach(() => {
+  hoisted.liveNodes = null;
   hoisted.setNodes = vi.fn();
   hoisted.fitView = vi.fn();
   hoisted.zoomIn = vi.fn();
@@ -249,35 +257,115 @@ describe('mobile focus view', () => {
     expect(radii[0]).toBeGreaterThan(0);
   });
 
-  it('restores the positions the canvas had before focus was entered', () => {
+  // The reconciliation half of focus (what actually lands in node state) is only
+  // observable through the setNodes updaters, since useNodesState is mocked as a
+  // pass-through. Folding them over a seeded previous state is how these tests
+  // reach it.
+  const foldSetNodes = (prevNodes) =>
+    hoisted.setNodes.mock.calls.map(([updater]) => updater).reduce((acc, u) => u(acc), prevNodes);
+
+  it('restores the exact canvas — positions, group membership and annotations', () => {
+    // Live flow state that the incoming memo cannot reproduce on its own: nodes
+    // dragged away from their computed layout, one of them inside a group, plus
+    // a note overlay that exists only on the canvas. Without this the "restore"
+    // assertion would compare two identical layouts and pass either way.
+    const liveNodes = [
+      { id: 'node-1', type: 'custom', position: { x: 11, y: 12 }, data: {} },
+      { id: 'node-2', type: 'custom', position: { x: 21, y: 22 }, parentId: 'group-1', data: {} },
+      { id: 'node-3', type: 'custom', position: { x: 31, y: 32 }, data: {} },
+      { id: 'node-4', type: 'custom', position: { x: 41, y: 42 }, data: {} },
+      { id: 'group-1', type: 'group', position: { x: 5, y: 5 }, data: {} },
+      { id: 'note-1', type: 'note', position: { x: 900, y: 900 }, data: {} },
+    ];
     render(<GraphCanvas nodes={nodes} edges={edges} compactMode="on" />);
-    const before = new Map(hoisted.flowProps.nodes.map((n) => [n.id, { ...n.position }]));
+    hoisted.liveNodes = liveNodes;
+    selectNodes([{ id: 'node-1', type: 'custom' }]);
+
+    hoisted.setNodes.mockClear();
+    click(focusButton());
+    const focused = foldSetNodes(liveNodes);
+
+    // Entering: only the ego graph, at ring coordinates, detached from the group
+    // so an absolute position is not read as parent-relative.
+    expect(focused.map((n) => n.id).sort()).toEqual(['node-1', 'node-2']);
+    expect(focused.find((n) => n.id === 'node-2').parentId).toBeUndefined();
+    expect(focused.find((n) => n.id === 'node-1').position).not.toEqual({ x: 11, y: 12 });
+
+    hoisted.liveNodes = focused;
+    hoisted.setNodes.mockClear();
+    click(exitFocusButton());
+    const restored = foldSetNodes(focused);
+
+    const byId = new Map(restored.map((n) => [n.id, n]));
+    expect([...byId.keys()].sort()).toEqual([
+      'group-1',
+      'node-1',
+      'node-2',
+      'node-3',
+      'node-4',
+      'note-1',
+    ]);
+    for (const live of liveNodes) {
+      expect(byId.get(live.id).position).toEqual(live.position);
+    }
+    // Group membership survives the round trip — the defect this asserts against
+    // is silent detachment, which the autosave would then persist.
+    expect(byId.get('node-2').parentId).toBe('group-1');
+  });
+
+  it('refuses to save while focused, so the ego layout cannot reach the server', () => {
+    const onSaveView = vi.fn();
+    const { rerender } = render(
+      <GraphCanvas
+        nodes={nodes}
+        edges={edges}
+        compactMode="on"
+        onSaveView={onSaveView}
+        saveViewSignal={0}
+      />
+    );
+
+    // Every persistence path in the host — debounced autosave and the explicit
+    // toolbar button alike — arrives as this signal.
+    onSaveView.mockClear();
+    rerender(
+      <GraphCanvas
+        nodes={nodes}
+        edges={edges}
+        compactMode="on"
+        onSaveView={onSaveView}
+        saveViewSignal={1}
+      />
+    );
+    expect(onSaveView).toHaveBeenCalled();
 
     selectNodes([{ id: 'node-1', type: 'custom' }]);
     click(focusButton());
 
-    // The ego layout really did move things, so the restore below is a
-    // meaningful assertion rather than a comparison of two identical layouts.
-    const during = new Map(hoisted.flowProps.nodes.map((n) => [n.id, { ...n.position }]));
-    expect(during.get('node-1')).not.toEqual(before.get('node-1'));
+    onSaveView.mockClear();
+    rerender(
+      <GraphCanvas
+        nodes={nodes}
+        edges={edges}
+        compactMode="on"
+        onSaveView={onSaveView}
+        saveViewSignal={2}
+      />
+    );
+    expect(onSaveView).not.toHaveBeenCalled();
+    expect(screen.getByText('Leave the focus view before saving')).toBeInTheDocument();
 
-    // Leaving focus re-bases every position, so the reconciliation updater is
-    // handed the focus-era nodes and has to put the originals back.
-    hoisted.setNodes.mockClear();
     click(exitFocusButton());
-
-    const focusEraNodes = hoisted.flowProps.nodes.map((n) => ({
-      ...n,
-      position: during.get(n.id) || n.position,
-    }));
-    const restored = hoisted.setNodes.mock.calls
-      .map(([updater]) => updater)
-      .reduce((acc, updater) => updater(acc), focusEraNodes);
-
-    for (const node of restored) {
-      expect(node.position).toEqual(before.get(node.id));
-    }
-    expect(restored.map((n) => n.id).sort()).toEqual(['node-1', 'node-2', 'node-3', 'node-4']);
+    rerender(
+      <GraphCanvas
+        nodes={nodes}
+        edges={edges}
+        compactMode="on"
+        onSaveView={onSaveView}
+        saveViewSignal={3}
+      />
+    );
+    expect(onSaveView).toHaveBeenCalled();
   });
 
   it('refits the camera on entering and on leaving focus', async () => {
@@ -328,5 +416,39 @@ describe('mobile focus view', () => {
 
     expect(renderedNodeIds()).toEqual(['node-2', 'node-3', 'node-4']);
     expect(screen.queryByRole('button', { name: 'Back to whole graph' })).not.toBeInTheDocument();
+
+    // ...and it stays gone. A remembered root would re-enter focus by itself the
+    // moment that node came back — from an undone delete, a session switched
+    // away and back, or an assistant re-adding it.
+    rerender(<GraphCanvas nodes={nodes} edges={edges} compactMode="on" />);
+    expect(renderedNodeIds()).toEqual(['node-1', 'node-2', 'node-3', 'node-4']);
+  });
+
+  it('leaves the lazy-load progress alone, so a large graph comes back whole', () => {
+    // Above LAZY_LOAD_THRESHOLD the canvas renders a slice, and the slice size
+    // must not be recomputed from the focus set — a focus round trip that reset
+    // "Load More" progress would not be the reversible lens it claims to be.
+    const many = Array.from({ length: LAZY_LOAD_THRESHOLD + 50 }, (_, i) => ({
+      id: `bulk-${i}`,
+      name: `Bulk ${i}`,
+      type: 'Actor',
+    }));
+    const bulkEdges = [{ id: 'bulk-edge', source: 'bulk-0', target: 'bulk-1', type: 'RELATES_TO' }];
+
+    render(<GraphCanvas nodes={many} edges={bulkEdges} compactMode="on" />);
+    expect(hoisted.flowProps.nodes.length).toBeLessThan(many.length);
+
+    // Advance past the initial slice, otherwise "progress preserved" and
+    // "progress reset" produce the same number and the assertion proves nothing.
+    click(screen.getByRole('button', { name: 'Load More' }));
+    const loadedBefore = hoisted.flowProps.nodes.length;
+    expect(loadedBefore).toBeGreaterThan(INITIAL_LOAD_COUNT);
+
+    selectNodes([{ id: 'bulk-0', type: 'custom' }]);
+    click(focusButton());
+    expect(renderedNodeIds()).toEqual(['bulk-0', 'bulk-1']);
+
+    click(exitFocusButton());
+    expect(hoisted.flowProps.nodes.length).toBe(loadedBefore);
   });
 });

@@ -312,7 +312,9 @@
     "zoom_out": "Zooma ut",
     "fit_view": "Visa hela grafen",
     "focus_view": "Fokusera på vald nod",
-    "exit_focus_view": "Tillbaka till hela grafen"
+    "exit_focus_view": "Tillbaka till hela grafen",
+    "controls_group": "Kontroller för arbetsytan",
+    "focus_view_save_blocked": "Lämna fokusvyn innan du sparar"
   },
   "guide": {
     "title": "Guide",

@@ -449,11 +449,24 @@ body.graph-suppress-selection * {
     overflow-x: auto;
   }
 
+  /* The base rule slides in from translateX(-50%), which centres a fixed-width
+     toast. This one spans the viewport instead, so that keyframe would launch it
+     half a screen to the left; it fades rather than slides. */
   .graph-notification {
     left: 12px;
     right: 12px;
     bottom: 200px;
     transform: none;
+    animation: graphNotificationFadeIn 0.3s ease;
+  }
+
+  @keyframes graphNotificationFadeIn {
+    from {
+      opacity: 0;
+    }
+    to {
+      opacity: 1;
+    }
   }
 }
 

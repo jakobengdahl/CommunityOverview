@@ -738,13 +738,20 @@ canvas to one node at a time:
    connected to it, arranged in a ring around it.
 3. Tap the same button again to return to the whole graph.
 
-Leaving the focus view puts every node back where it was — the focus layout is
-a way of looking at the graph, not a change to it. Nothing is saved and nothing
-is deleted, so it is always safe to enter and leave. Focus needs a single node
-selected; it is not offered for notes, labels, arrows or groups.
+The focus view is a lens, not an edit. Leaving it puts every node back exactly
+where it was, including nodes inside groups, and your notes, labels and arrows
+come back with them — they are set aside while you are focused so the view frames
+the ring rather than an annotation parked elsewhere on the canvas. Nothing is
+saved and nothing is deleted.
 
-If the node you are focused on is removed, or you switch to another session, the
-canvas returns to the full graph on its own.
+Because of that, the canvas will not save while you are focused: the focus
+layout is temporary, and writing it down would overwrite the real one. If you
+try, you will be told to leave the focus view first. Saving works normally again
+as soon as you do.
+
+Focus needs a single node selected; it is not offered for notes, labels, arrows
+or groups. If the node you are focused on is removed, or you switch to another
+session, the canvas returns to the full graph on its own.
 
 ---
 

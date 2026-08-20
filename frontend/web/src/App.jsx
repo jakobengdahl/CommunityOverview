@@ -1819,6 +1819,8 @@ function App() {
           compactFitViewLabel={t('canvas.fit_view')}
           focusViewLabel={t('canvas.focus_view')}
           exitFocusViewLabel={t('canvas.exit_focus_view')}
+          compactControlsLabel={t('canvas.controls_group')}
+          focusViewSaveBlockedLabel={t('canvas.focus_view_save_blocked')}
           nodePreviewEnabled={nodePreviewEnabled}
           schema={schema}
           onContextMenuAction={handleContextMenuAction}
