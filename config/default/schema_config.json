@@ -175,13 +175,19 @@
         "description": "Belongs to (actor belongs to community, initiative belongs to actor)"
       },
       "IMPLEMENTS": {
-        "description": "Implements (initiative implements legislation)"
+        "description": "Implements (initiative implements legislation)",
+        "source_types": ["Initiative"],
+        "target_types": ["Legislation"]
       },
       "PRODUCES": {
-        "description": "Produces (initiative produces resource/capability)"
+        "description": "Produces (initiative produces resource/capability)",
+        "source_types": ["Initiative", "Actor"],
+        "target_types": ["Resource", "Capability", "Data"]
       },
       "GOVERNED_BY": {
-        "description": "Governed by (initiative governed by legislation)"
+        "description": "Governed by (initiative governed by legislation)",
+        "source_types": ["Initiative"],
+        "target_types": ["Legislation"]
       },
       "RELATES_TO": {
         "description": "Relates to (general connection)"
@@ -190,10 +196,14 @@
         "description": "Part of (component is part of larger whole)"
       },
       "AIMS_FOR": {
-        "description": "Aims for (initiative or actor aims for a goal)"
+        "description": "Aims for (initiative or actor aims for a goal)",
+        "source_types": ["Initiative", "Actor"],
+        "target_types": ["Goal"]
       },
       "USES_SKILL": {
-        "description": "Uses skill (agent uses a skill definition)"
+        "description": "Uses skill (agent uses a skill definition)",
+        "source_types": ["Agent"],
+        "target_types": ["Skill"]
       }
     }
   },
