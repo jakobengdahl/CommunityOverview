@@ -212,7 +212,8 @@ jobs:
 
   # ---------------------------------------------------------------------------
   # Frontend tests – vitest across all npm workspaces (web, widget, canvas, xr).
-  # GitHub Actions sets CI=true, so vitest runs once instead of watch mode.
+  # Every workspace's `test` script is `vitest run`, so the suite exits on its
+  # own here and locally; `test:watch` is the interactive variant.
   # Playwright e2e stays out of this required path (see DEVELOPMENT.md).
   #
   # WORKER job; the "Frontend tests" gate below carries the required-check name.

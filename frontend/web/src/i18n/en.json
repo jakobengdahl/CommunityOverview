@@ -300,7 +300,8 @@
   },
   "experts": {
     "title": "Expert Agents",
-    "toggle_panel": "Add or remove expert agents"
+    "toggle_panel": "Add or remove expert agents",
+    "close": "Close experts panel"
   },
   "federation": {
     "depth_label": "Depth",
