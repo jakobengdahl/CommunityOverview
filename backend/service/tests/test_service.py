@@ -157,6 +157,45 @@ class TestGraphServiceCRUD:
         assert len(result["added_node_ids"]) == 2
         assert len(result["added_edge_ids"]) == 1
 
+    def test_agent_batch_write_rejects_inapplicable_edge(
+        self, empty_service: GraphService
+    ):
+        """Agent/MCP-style add_nodes writes return a clear applicability error."""
+        result = empty_service.add_nodes(
+            nodes=[
+                {"id": "actor-1", "type": "Actor", "name": "Actor 1"},
+                {"id": "law-1", "type": "Legislation", "name": "Law 1"},
+            ],
+            edges=[
+                {
+                    "source": "actor-1",
+                    "target": "law-1",
+                    "type": "IMPLEMENTS",
+                }
+            ],
+            event_origin="agent:test-agent",
+        )
+
+        assert result["success"] is False
+        assert "source type 'Actor' is not allowed" in result["message"]
+
+    def test_add_edge_rejects_inapplicable_relationship_type(
+        self, empty_service: GraphService
+    ):
+        """Single edge API writes surface applicability failures cleanly."""
+        empty_service.add_nodes(
+            nodes=[
+                {"id": "actor-1", "type": "Actor", "name": "Actor 1"},
+                {"id": "law-1", "type": "Legislation", "name": "Law 1"},
+            ],
+            edges=[],
+        )
+
+        result = empty_service.add_edge("actor-1", "law-1", type="IMPLEMENTS")
+
+        assert result["success"] is False
+        assert "source type 'Actor' is not allowed" in result["message"]
+
     def test_add_nodes_dynamic_type_accepted(self, empty_service: GraphService):
         """Dynamic node types are accepted (schema is permissive)."""
         nodes = [{"type": "CustomType", "name": "Test"}]
@@ -276,6 +315,30 @@ class TestGraphServiceCRUD:
 
         assert result["success"] is True
         assert result["deleted_edge_id"] == "edge-1"
+
+    def test_update_edge_rejects_inapplicable_type_change(
+        self, empty_service: GraphService
+    ):
+        """Changing an edge type is validated against endpoint node types."""
+        empty_service.add_nodes(
+            nodes=[
+                {"id": "actor-1", "type": "Actor", "name": "Actor 1"},
+                {"id": "law-1", "type": "Legislation", "name": "Law 1"},
+            ],
+            edges=[
+                {
+                    "id": "edge-1",
+                    "source": "actor-1",
+                    "target": "law-1",
+                    "type": "RELATES_TO",
+                }
+            ],
+        )
+
+        result = empty_service.update_edge("edge-1", {"type": "IMPLEMENTS"})
+
+        assert result["success"] is False
+        assert "source type 'Actor' is not allowed" in result["message"]
 
     def test_delete_edges_bulk(self, empty_service: GraphService):
         """Test deleting multiple edges."""

@@ -768,9 +768,23 @@ def list_relationship_types() -> Dict[str, Any]:
     relationship_types = []
     for type_name, type_config in schema.get("relationship_types", {}).items():
         relationship_types.append(
-            {"type": type_name, "description": type_config.get("description", "")}
+            {
+                "type": type_name,
+                "description": type_config.get("description", ""),
+                "source_types": type_config.get("source_types", []),
+                "target_types": type_config.get("target_types", []),
+            }
         )
     return {"relationship_types": relationship_types}
+
+
+def audit_relationship_applicability(storage: "GraphStorage") -> Dict[str, Any]:
+    violations = storage.audit_relationship_applicability()
+    return {
+        "success": True,
+        "violation_count": len(violations),
+        "violations": violations,
+    }
 
 
 def get_schema() -> Dict[str, Any]:

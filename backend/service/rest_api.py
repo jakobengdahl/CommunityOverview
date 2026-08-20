@@ -410,7 +410,11 @@ def _register_search_endpoints(router: APIRouter, service: GraphService) -> None
             result = service.get_node_details(node_id)
         _raise_for_access_denied(result)
         if not result.get("success", True):
-            raise HTTPException(status_code=404, detail=result.get("error"))
+            status_code = 404 if result.get("error") else 400
+            raise HTTPException(
+                status_code=status_code,
+                detail=result.get("error") or result.get("message"),
+            )
         return result
 
     @router.post("/nodes/{node_id}/related")
@@ -696,6 +700,11 @@ def _register_metadata_endpoints(router: APIRouter, service: GraphService) -> No
     async def list_relationship_types() -> Dict[str, Any]:
         """List all allowed relationship types according to schema config."""
         return service.list_relationship_types()
+
+    @router.get("/meta/relationship-applicability/audit")
+    async def audit_relationship_applicability() -> Dict[str, Any]:
+        """Report existing edges that violate relationship applicability rules."""
+        return service.audit_relationship_applicability()
 
     @router.get("/meta/subtypes")
     async def get_subtypes(

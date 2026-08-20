@@ -171,9 +171,59 @@ class TestConfigLoader:
 
         # Check custom relationship types
         assert "CUSTOM_RELATION" in schema["relationship_types"]
+        assert schema["relationship_types"]["TEST_EDGE"]["source_types"] == [
+            "CustomActor"
+        ]
+        assert schema["relationship_types"]["TEST_EDGE"]["target_types"] == [
+            "TestNode"
+        ]
 
         # Clean up
         del os.environ["SCHEMA_FILE"]
+
+    def test_relationship_type_applicability_helper(self, tmp_path):
+        """Relationship applicability supports direction, wildcards, and absent rules."""
+        from backend.config import config_loader
+
+        config = {
+            "schema": {
+                "node_types": {
+                    "Source": {"fields": ["name"]},
+                    "Target": {"fields": ["name"]},
+                    "Other": {"fields": ["name"]},
+                },
+                "relationship_types": {
+                    "DIRECTED": {
+                        "source_types": ["Source"],
+                        "target_types": ["Target"],
+                    },
+                    "WILDCARD": {
+                        "source_types": ["*"],
+                        "target_types": ["Target"],
+                    },
+                    "GLOBAL": {"description": "No applicability rules"},
+                },
+            }
+        }
+        config_file = tmp_path / "schema_config.json"
+        config_file.write_text(json.dumps(config), encoding="utf-8")
+        os.environ["SCHEMA_FILE"] = str(config_file)
+        config_loader.reset_loader()
+
+        assert config_loader.relationship_type_allows_node_types(
+            "DIRECTED", "Source", "Target"
+        )["allowed"]
+        blocked = config_loader.relationship_type_allows_node_types(
+            "DIRECTED", "Target", "Source"
+        )
+        assert blocked["allowed"] is False
+        assert "source type 'Target' is not allowed" in blocked["message"]
+        assert config_loader.relationship_type_allows_node_types(
+            "WILDCARD", "Other", "Target"
+        )["allowed"]
+        assert config_loader.relationship_type_allows_node_types(
+            "GLOBAL", "Other", "Source"
+        )["allowed"]
 
     def test_get_presentation(self):
         """Test getting presentation configuration."""
