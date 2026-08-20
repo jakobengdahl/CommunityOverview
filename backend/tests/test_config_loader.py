@@ -189,6 +189,7 @@ class TestConfigLoader:
         assert "prompt_suffix" in presentation
         assert "default_language" in presentation
         assert "language_policy" in presentation
+        assert presentation["ui"]["ai_assistant"]["default_collapsed"] is False
 
     def test_custom_presentation(self):
         """Test presentation from custom config."""

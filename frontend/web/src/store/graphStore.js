@@ -4,6 +4,32 @@ const FEDERATION_DEPTH_STORAGE_KEY = 'federation_depth';
 const SHOW_MINIMAP_STORAGE_KEY = 'show_minimap';
 const NODE_PREVIEW_STORAGE_KEY = 'node_preview_enabled';
 const CANVAS_LOCKED_STORAGE_KEY = 'canvas_locked';
+export const AI_ASSISTANT_COLLAPSED_STORAGE_KEY = 'community-graph:ui:ai-assistant-collapsed';
+
+function loadAiAssistantCollapsedPreference() {
+  try {
+    const stored = globalThis.localStorage?.getItem(AI_ASSISTANT_COLLAPSED_STORAGE_KEY);
+    if (stored === 'true') return true;
+    if (stored === 'false') return false;
+  } catch {
+    // Storage is optional; configuration remains the fallback.
+  }
+  return null;
+}
+
+function persistAiAssistantCollapsed(collapsed) {
+  try {
+    globalThis.localStorage?.setItem(AI_ASSISTANT_COLLAPSED_STORAGE_KEY, String(collapsed));
+  } catch {
+    // A disabled or full localStorage must not make the assistant unusable.
+  }
+}
+
+function configuredChatPanelOpen(presentation) {
+  const preference = loadAiAssistantCollapsedPreference();
+  if (preference !== null) return !preference;
+  return presentation?.ui?.ai_assistant?.default_collapsed !== true;
+}
 
 function loadInitialShowMinimap() {
   try {
@@ -257,7 +283,7 @@ const useGraphStore = create((set, get) => ({
   navHistory: [],
   pendingGroups: null, // Groups to restore from a saved view
   pendingAnnotations: null, // Note/label/arrow annotations to restore from a session
-  chatPanelOpen: true, // Chat panel expanded vs minimized
+  chatPanelOpen: configuredChatPanelOpen(), // Browser preference, then configured default
   showMinimap: loadInitialShowMinimap(), // Minimap visibility (persisted)
   nodePreviewEnabled: loadInitialNodePreview(), // Hover info popup on/off (persisted)
   canvasLocked: loadInitialCanvasLocked(), // Navigation-menu lock guarding the board (persisted)
@@ -581,6 +607,7 @@ const useGraphStore = create((set, get) => ({
 
     set({
       presentation,
+      chatPanelOpen: configuredChatPanelOpen(presentation),
       chatMessages: updatedMessages,
       configLoaded: true,
       availableExperts: presentation?.expert_agents || [],
@@ -592,6 +619,7 @@ const useGraphStore = create((set, get) => ({
     set({
       schema,
       presentation,
+      chatPanelOpen: configuredChatPanelOpen(presentation),
       chatMessages: [welcomeMessage],
       configLoaded: true,
       availableExperts: presentation?.expert_agents || [],
@@ -805,8 +833,18 @@ const useGraphStore = create((set, get) => ({
   },
 
   // Chat panel actions
-  toggleChatPanel: () => set((state) => ({ chatPanelOpen: !state.chatPanelOpen })),
-  setChatPanelOpen: (open) => set({ chatPanelOpen: open }),
+  toggleChatPanel: () =>
+    set((state) => {
+      const open = !state.chatPanelOpen;
+      persistAiAssistantCollapsed(!open);
+      return { chatPanelOpen: open };
+    }),
+  setChatPanelOpen: (open) => {
+    persistAiAssistantCollapsed(!open);
+    set({ chatPanelOpen: open });
+  },
+  setChatPanelOpenTransient: (open) => set({ chatPanelOpen: open }),
+  toggleChatPanelTransient: () => set((state) => ({ chatPanelOpen: !state.chatPanelOpen })),
 
   // Guide actions
   startGuide: (guideDefinition) =>

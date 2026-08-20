@@ -65,6 +65,7 @@ describe('ChatPanel', () => {
       expect(
         screen.queryByPlaceholderText(/question|fråga|action|åtgärd/i)
       ).not.toBeInTheDocument();
+      expect(localStorage.getItem('community-graph:ui:ai-assistant-collapsed')).toBe('true');
     });
   });
 

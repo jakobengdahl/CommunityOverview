@@ -1,4 +1,4 @@
-import { useState, useEffect, useRef, useCallback } from 'react';
+import { useState, useEffect, useLayoutEffect, useRef, useCallback } from 'react';
 import { Search } from 'react-bootstrap-icons';
 import useGraphStore from '../store/graphStore';
 import { resolveIcon, resolveColor } from './FloatingToolbar';
@@ -31,6 +31,98 @@ function FloatingSearch() {
   const inputRef = useRef(null);
   const containerRef = useRef(null);
   const debounceRef = useRef(null);
+
+  useLayoutEffect(() => {
+    const search = containerRef.current;
+    const header = document.querySelector('.floating-header');
+    if (!search || !header) return;
+
+    let frame;
+    const safeAreaProbe = document.createElement('div');
+    safeAreaProbe.style.cssText =
+      'position:fixed;visibility:hidden;pointer-events:none;padding-left:env(safe-area-inset-left);padding-right:env(safe-area-inset-right)';
+    document.body.appendChild(safeAreaProbe);
+
+    const applyMeasurement = () => {
+      const headerRect = header.getBoundingClientRect();
+      const viewportWidth = document.documentElement.clientWidth || window.innerWidth;
+      const probeStyle = getComputedStyle(safeAreaProbe);
+      const safeLeft = Number.parseFloat(probeStyle.paddingLeft) || 0;
+      const safeRight = Number.parseFloat(probeStyle.paddingRight) || 0;
+      const edgeGap = 16;
+      const chromeGap = 12;
+      const maximumWidth = 400;
+      const minimumUsableWidth = 240;
+      const leftEdge = safeLeft + edgeGap;
+      const rightEdge = viewportWidth - safeRight - edgeGap;
+      const centeredLeft = (viewportWidth - maximumWidth) / 2;
+      const left = Math.max(leftEdge, centeredLeft, headerRect.right + chromeGap);
+      const width = Math.max(0, Math.min(maximumWidth, rightEdge - left));
+      const stacked = viewportWidth <= 600 || width < minimumUsableWidth;
+
+      const phoneStack = stacked && viewportWidth <= 600;
+      const stackedWidth = phoneStack
+        ? rightEdge - leftEdge
+        : Math.min(maximumWidth, rightEdge - leftEdge);
+      const stackedLeft = phoneStack
+        ? leftEdge
+        : Math.max(leftEdge, (viewportWidth - stackedWidth) / 2);
+
+      search.dataset.stacked = String(stacked);
+      search.style.setProperty(
+        '--floating-search-left',
+        `${Math.round(stacked ? stackedLeft : left)}px`
+      );
+      search.style.setProperty(
+        '--floating-search-width',
+        `${Math.round(stacked ? stackedWidth : width)}px`
+      );
+      search.style.setProperty('--floating-header-bottom', `${Math.ceil(headerRect.bottom)}px`);
+    };
+    const measure = () => {
+      cancelAnimationFrame(frame);
+      frame = requestAnimationFrame(applyMeasurement);
+    };
+    let positionTransitionActive = false;
+    const measurePositionTransition = () => {
+      if (!positionTransitionActive) return;
+      applyMeasurement();
+      frame = requestAnimationFrame(measurePositionTransition);
+    };
+    const handleTransitionRun = (event) => {
+      if (event.propertyName !== 'left') return;
+      positionTransitionActive = true;
+      cancelAnimationFrame(frame);
+      measurePositionTransition();
+    };
+    const handleTransitionEnd = (event) => {
+      if (event.propertyName && event.propertyName !== 'left') return;
+      positionTransitionActive = false;
+      measure();
+    };
+
+    const resizeObserver = new ResizeObserver(measure);
+    resizeObserver.observe(header);
+    const mutationObserver = new MutationObserver(measure);
+    mutationObserver.observe(header, { childList: true, subtree: true, characterData: true });
+    window.addEventListener('resize', measure);
+    window.visualViewport?.addEventListener('resize', measure);
+    header.addEventListener('transitionrun', handleTransitionRun);
+    header.addEventListener('transitionend', handleTransitionEnd);
+    applyMeasurement();
+
+    return () => {
+      cancelAnimationFrame(frame);
+      resizeObserver.disconnect();
+      mutationObserver.disconnect();
+      safeAreaProbe.remove();
+      window.removeEventListener('resize', measure);
+      window.visualViewport?.removeEventListener('resize', measure);
+      positionTransitionActive = false;
+      header.removeEventListener('transitionrun', handleTransitionRun);
+      header.removeEventListener('transitionend', handleTransitionEnd);
+    };
+  }, []);
 
   const getTypeLabel = useCallback(
     (nodeType) => {

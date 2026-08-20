@@ -26,6 +26,8 @@ import { serverStateToMirror, useSharedSession } from './hooks/useSharedSession'
 import { useSyncConnection } from './hooks/useSyncConnection';
 import { useToolResultCommands } from './hooks/useToolResultCommands';
 import { useViewportMode } from './hooks/useViewportMode';
+import { useFullscreenCanvas } from './hooks/useFullscreenCanvas';
+import FullscreenExitButton from './components/FullscreenExitButton';
 import { decideClearAction } from './utils/clearBoard';
 import { dropIntoFreshSession, receiveRemoteSessionDeleted } from './utils/sessionLifecycle';
 import { applyEdgeUpdate, confirmNodeDelete } from './utils/sessionScopedGraphEdits';
@@ -113,6 +115,9 @@ function App() {
   const urlViewLoadedRef = useRef(false);
   const latestViewport = useRef(null);
   const dialogOpenRef = useRef(false);
+  const appRef = useRef(null);
+  const { enterFullscreenCanvas, exitFullscreenCanvas, fullscreenCanvasActive } =
+    useFullscreenCanvas(appRef);
   const [notification, setNotification] = useState(null);
   const [saveViewDialog, setSaveViewDialog] = useState(null);
   const [showSubscriptionDialog, setShowSubscriptionDialog] = useState(false);
@@ -1741,7 +1746,8 @@ function App() {
 
   return (
     <div
-      className={`app${drawerOpen ? ' session-drawer-open' : ''}${isMobile ? ' is-mobile' : ''}${isCoarsePointer ? ' is-touch' : ''}`}
+      ref={appRef}
+      className={`app${drawerOpen ? ' session-drawer-open' : ''}${isMobile ? ' is-mobile' : ''}${isCoarsePointer ? ' is-touch' : ''}${fullscreenCanvasActive ? ' fullscreen-canvas-mode' : ''}`}
     >
       <div className="app-canvas" id="guide-target-canvas">
         <GraphCanvas
@@ -1887,6 +1893,7 @@ function App() {
         }}
         canvasLocked={canvasLocked}
         onToggleLock={() => setCanvasLocked(!canvasLocked)}
+        onEnterFullscreen={enterFullscreenCanvas}
         suspendEscape={
           !!(
             // The drawer is non-modal, so any dialog can be stacked on top of
@@ -1911,6 +1918,9 @@ function App() {
           )
         }
       />
+      {fullscreenCanvasActive && (
+        <FullscreenExitButton onExit={exitFullscreenCanvas} label={t('fullscreen.exit')} />
+      )}
       <RecentActivityDrawer open={activityOpen} onClose={() => setActivityOpen(false)} />
       {clearConfirm && (
         <ConfirmDialog

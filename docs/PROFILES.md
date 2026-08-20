@@ -96,6 +96,11 @@ The schema config defines the metadata model. It has two main sections:
     "prompt_prefix": "System prompt context for the AI assistant.",
     "prompt_suffix": "Reminders appended to the AI system prompt.",
     "default_language": "en"
+  },
+  "ui": {
+    "ai_assistant": {
+      "default_collapsed": false
+    }
   }
 }
 ```
@@ -216,6 +221,14 @@ The presentation section controls the UI and AI behavior:
 | `prompt_suffix` | Appended to the AI system prompt |
 | `default_language` | Default UI language (`"en"` or `"sv"`) |
 | `skills_config` | Skills loader settings (see below) |
+
+The optional top-level `ui.ai_assistant.default_collapsed` boolean controls the
+assistant's initial state for browsers that have not made a choice. It defaults
+to `false`, preserving the expanded assistant. Expanding or collapsing the
+assistant stores a browser-local preference under
+`community-graph:ui:ai-assistant-collapsed`; that preference takes precedence
+over profile configuration on later visits. It does not require an account and
+does not affect deployments where the assistant is unavailable.
 
 #### Model profiles
 

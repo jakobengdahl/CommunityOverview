@@ -22,9 +22,7 @@ const LONG_PRESS_HOLD_MS = 900;
 // costs far more coverage than the break being silenced. The chat panel is the
 // largest subtree in the shell, and only its left edge is broken.
 //
-// .floating-header — a nowrap flex row with no max-width, so at 390px its
-//   session id ends at x~424 and its clear button at x~455.
-const KNOWN_RIGHT_OVERFLOW = ['.floating-header'];
+const KNOWN_RIGHT_OVERFLOW = [];
 // .chat-panel-floating — a fixed 380px anchored 16px from the right edge, so at
 //   390px its left edge sits at x~-6. Its right edge is inside on both devices.
 const KNOWN_LEFT_OVERFLOW = ['.chat-panel-floating'];
@@ -154,6 +152,19 @@ async function createNodeFromToolbox(page, nodeType, name) {
 }
 
 test.describe('mobile shell', () => {
+  test('search stays below the header and uses the available phone width', async ({ page }) => {
+    await openApp(page);
+
+    const geometry = await page.evaluate(() => {
+      const header = document.querySelector('.floating-header').getBoundingClientRect();
+      const search = document.querySelector('.floating-search').getBoundingClientRect();
+      return { headerBottom: header.bottom, searchTop: search.top, searchWidth: search.width };
+    });
+
+    expect(geometry.searchTop).toBeGreaterThanOrEqual(geometry.headerBottom + 7);
+    expect(geometry.searchWidth).toBeGreaterThanOrEqual(page.viewportSize().width - 40);
+  });
+
   test('lays out inside the viewport width', async ({ page }) => {
     await openApp(page);
 

@@ -120,4 +120,38 @@ describe('FloatingSearch federation labels', () => {
       expect(screen.queryByText(/Depth/)).not.toBeInTheDocument();
     });
   });
+
+  it('uses the measured header edge instead of overlapping top chrome', async () => {
+    const header = document.createElement('div');
+    header.className = 'floating-header';
+    header.getBoundingClientRect = () => ({ right: 350, bottom: 58 });
+    document.body.appendChild(header);
+
+    render(<FloatingSearch />);
+
+    await waitFor(() => {
+      const search = document.querySelector('.floating-search');
+      expect(search.style.getPropertyValue('--floating-search-left')).toBe('362px');
+      expect(search.style.getPropertyValue('--floating-header-bottom')).toBe('58px');
+    });
+    header.remove();
+  });
+
+  it('stacks below the header rather than collapsing in constrained desktop space', async () => {
+    const header = document.createElement('div');
+    header.className = 'floating-header';
+    header.getBoundingClientRect = () => ({ right: 800, bottom: 58 });
+    document.body.appendChild(header);
+
+    render(<FloatingSearch />);
+
+    await waitFor(() => {
+      const search = document.querySelector('.floating-search');
+      expect(search.dataset.stacked).toBe('true');
+      expect(Number.parseInt(search.style.getPropertyValue('--floating-search-width'), 10)).toBe(
+        400
+      );
+    });
+    header.remove();
+  });
 });

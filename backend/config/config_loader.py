@@ -346,6 +346,18 @@ class PresentationConfig(BaseModel):
     guides: List[GuideConfig] = Field(default_factory=list)
 
 
+class AiAssistantUiConfig(BaseModel):
+    """Initial assistant presentation before a browser preference exists."""
+
+    default_collapsed: bool = False
+
+
+class UiConfig(BaseModel):
+    """Open-core browser UI defaults."""
+
+    ai_assistant: AiAssistantUiConfig = Field(default_factory=AiAssistantUiConfig)
+
+
 class SystemConfig(BaseModel):
     """System-level toggles for built-in node types managed by code."""
 
@@ -357,6 +369,7 @@ class SchemaFileConfig(BaseModel):
 
     schema_: SchemaConfig = Field(alias="schema", default_factory=SchemaConfig)
     presentation: PresentationConfig = Field(default_factory=PresentationConfig)
+    ui: UiConfig = Field(default_factory=UiConfig)
     runtime: RuntimeMetadataConfig = Field(default_factory=RuntimeMetadataConfig)
     system: SystemConfig = Field(default_factory=SystemConfig)
     # Config-driven dedicated REST interfaces per node/edge type (open core).
@@ -593,6 +606,7 @@ def get_presentation() -> Dict[str, Any]:
         "expert_agents": [agent.model_dump() for agent in pres.expert_agents],
         "capabilities": [capability.model_dump() for capability in pres.capabilities],
         "guides": [guide.model_dump() for guide in pres.guides],
+        "ui": loader.config.ui.model_dump(),
     }
 
 

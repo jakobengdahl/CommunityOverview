@@ -223,6 +223,10 @@
     "language_sv": "Svenska",
     "logout": "Log out"
   },
+  "fullscreen": {
+    "enter": "Fullscreen canvas",
+    "exit": "Exit fullscreen canvas"
+  },
   "sessions": {
     "title": "Sessions",
     "agent_arranging": "Assistant is arranging the view…",

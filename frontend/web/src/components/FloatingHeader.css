@@ -6,6 +6,7 @@
   left: calc(16px + env(safe-area-inset-left));
   z-index: 100;
   transition: left 0.2s ease-out;
+  max-width: calc(100vw - 32px - env(safe-area-inset-left) - env(safe-area-inset-right));
 }
 
 /* When the session drawer is docked to the left edge, the header keeps its
@@ -30,6 +31,8 @@
   border: 1px solid #333;
   border-radius: 10px;
   box-shadow: 0 4px 20px rgba(0, 0, 0, 0.4);
+  min-width: 0;
+  box-sizing: border-box;
 }
 
 .floating-header-hamburger {
@@ -58,6 +61,8 @@
   color: #fff;
   white-space: nowrap;
   user-select: none;
+  overflow: hidden;
+  text-overflow: ellipsis;
 }
 
 .floating-header-session-id {
@@ -72,6 +77,33 @@
   user-select: all;
   cursor: default;
   flex-shrink: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+@media (max-width: 600px) {
+  .floating-header,
+  .app.session-drawer-open .floating-header {
+    left: calc(16px + env(safe-area-inset-left));
+  }
+
+  .floating-header-bar {
+    max-width: 100%;
+    padding-right: 10px;
+  }
+
+  .floating-header-title,
+  .floating-header-session-id {
+    min-width: 0;
+  }
+
+  .floating-header-title {
+    flex: 1 1 auto;
+  }
+
+  .floating-header-session-id {
+    flex: 0 1 7rem;
+  }
 }
 
 .floating-header-presence {
