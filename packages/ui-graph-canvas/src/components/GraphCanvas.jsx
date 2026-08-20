@@ -1139,6 +1139,14 @@ function GraphCanvasInner({
 
   const onNodeDragStop = useCallback(
     (event, draggedNode, allDraggedNodes) => {
+      // Focus view renders a temporary ego layout; dragging there must not
+      // overwrite the persisted whole-graph positions of the visible nodes.
+      if (activeFocusRootId) {
+        connectedDragRef.current = null;
+        dragStartPositionsRef.current = new Map();
+        return;
+      }
+
       // Persist the final positions of any Alt-drag neighbours that trailed the
       // anchor, then disarm. Group re-parenting below is intentionally left to
       // the explicitly dragged nodes only; trailing neighbours keep their parent.
@@ -1249,7 +1257,7 @@ function GraphCanvasInner({
         return reorderNodesForParentChild(mapped);
       });
     },
-    [setNodes, onNodePositionChange, getFlowNodes, recordMove]
+    [setNodes, onNodePositionChange, getFlowNodes, recordMove, activeFocusRootId]
   );
 
   // Right-click on empty background. A plain right-click opens the annotation
