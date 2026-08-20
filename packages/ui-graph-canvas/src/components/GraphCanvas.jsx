@@ -252,7 +252,6 @@ function GraphCanvasInner({
   focusViewLabel = 'Focus on selected node',
   exitFocusViewLabel = 'Back to whole graph',
   compactControlsLabel = 'Canvas controls',
-  focusViewSaveBlockedLabel = 'Leave the focus view before saving',
 }) {
   const cml = {
     edit: 'Edit',
@@ -357,20 +356,20 @@ function GraphCanvasInner({
   // Focus view: the id of the node the canvas is currently narrowed to, or null
   // for the whole graph. Only the root and its direct neighbours are rendered.
   const [focusRootId, setFocusRootId] = useState(null);
-  // The whole canvas as of the moment focus was entered: every node's position
-  // and group parent, plus the annotation overlays themselves. Leaving focus
-  // puts all three back, so the view the user returns to is the one they left
-  // rather than a re-layout.
+  // The whole canvas as of the moment focus was entered — every flow node and
+  // edge, verbatim. Leaving focus restores it, and a save requested while
+  // focused serializes it instead of the temporary ego layout.
   const preFocusRef = useRef(null);
   const lastFocusRootRef = useRef(null);
-  // Whether this focus session has already explained why saving is refused.
-  const focusSaveNoticeRef = useRef(false);
-  // A focus root can leave the session (deleted, or a session switch loaded
-  // different content), which would otherwise strand the canvas on an empty
-  // focus view with no node to exit from. Derived rather than repaired in an
-  // effect, so the stale id simply stops counting on the very same render.
+  // Focus is only ever active while the compact chrome is on screen, because the
+  // control that leaves it lives in that pill and nowhere else: a phone rotated
+  // to landscape (852px on a current handset) or a window widened past the
+  // breakpoint would otherwise strand the canvas on the ego graph with no way
+  // back. The same guard covers a focus root that leaves the session — deleted,
+  // or a session switch that loaded different content. Derived rather than
+  // repaired in an effect, so a stale id stops counting on the very same render.
   const activeFocusRootId =
-    focusRootId && inputNodes.some((n) => n.id === focusRootId) ? focusRootId : null;
+    isCompact && focusRootId && inputNodes.some((n) => n.id === focusRootId) ? focusRootId : null;
   // Long-press → context menu. The detector lives in a ref so its ~500ms timer
   // isn't torn down and recreated every render; the fire callback is kept in a
   // second ref, updated every render below (once the context-menu handlers it
@@ -671,7 +670,14 @@ function GraphCanvasInner({
     const enteringFocus = focusChanged && activeFocusRootId !== null;
     const leavingFocus = focusChanged && activeFocusRootId === null;
     lastFocusRootRef.current = activeFocusRootId;
-    const snapshot = preFocusRef.current;
+    // A wholesale content replace (session switch, clear, an agent loading a
+    // different graph) makes the snapshot describe a canvas that no longer
+    // exists. Restoring it would force stale coordinates onto whatever ids the
+    // old and new content happen to share, and resurrect groups and overlays the
+    // replace deliberately dropped.
+    const contentReplaced = sessionChanged || clearGroupsFlag;
+    if (contentReplaced) preFocusRef.current = null;
+    const snapshot = contentReplaced ? null : preFocusRef.current;
     if (leavingFocus) preFocusRef.current = null;
     setNodes((nds) => {
       // A session switch drops the previous session's manual annotations too:
@@ -682,7 +688,7 @@ function GraphCanvasInner({
       let manualNodes;
       if (clearGroupsFlag || sessionChanged) manualNodes = [];
       else if (activeFocusRootId) manualNodes = [];
-      else if (leavingFocus) manualNodes = snapshot?.manualNodes ?? [];
+      else if (leavingFocus) manualNodes = (snapshot?.nodes ?? []).filter(isManualNode);
       else manualNodes = nds.filter(isManualNode);
 
       const reconciled = reconcileSessionNodes({
@@ -708,16 +714,17 @@ function GraphCanvasInner({
           ego.has(n.id) ? { ...n, position: ego.get(n.id), parentId: undefined } : n
         );
       } else if (leavingFocus && snapshot) {
-        positioned = reconciled.map((n) =>
-          snapshot.positions.has(n.id)
-            ? {
-                ...n,
-                position: snapshot.positions.get(n.id),
-                parentId: snapshot.parents.get(n.id),
-                style: snapshot.styles.get(n.id) || n.style,
-              }
-            : n
-        );
+        const before = new Map(snapshot.nodes.map((n) => [n.id, n]));
+        positioned = reconciled.map((n) => {
+          const prior = before.get(n.id);
+          if (!prior) return n;
+          return {
+            ...n,
+            position: prior.position,
+            parentId: prior.parentId,
+            style: prior.style || n.style,
+          };
+        });
       }
 
       // Groups must appear before their children in the array for ReactFlow
@@ -763,29 +770,18 @@ function GraphCanvasInner({
   const enterFocusView = useCallback(
     (rootId) => {
       if (!rootId) return;
-      const live = getFlowNodes();
-      focusSaveNoticeRef.current = false;
-      preFocusRef.current = {
-        positions: new Map(live.map((n) => [n.id, n.position])),
-        parents: new Map(live.map((n) => [n.id, n.parentId])),
-        styles: new Map(live.map((n) => [n.id, n.style])),
-        manualNodes: live.filter(isManualNode),
-      };
+      preFocusRef.current = { nodes: getFlowNodes(), edges };
       setFocusRootId(rootId);
     },
-    [getFlowNodes]
+    [getFlowNodes, edges]
   );
 
-  const exitFocusView = useCallback(() => {
-    focusSaveNoticeRef.current = false;
-    setFocusRootId(null);
-  }, []);
+  const exitFocusView = useCallback(() => setFocusRootId(null), []);
 
-  // The root leaving the session already falls back to the whole graph through
-  // activeFocusRootId, but the id itself has to go too: if that node ever comes
-  // back (an undone delete, a session switched away and back, an assistant
-  // re-adding it) a leftover id would silently re-enter focus, with the
-  // pre-focus snapshot already spent.
+  // Falling back through activeFocusRootId is not enough on its own: the id has
+  // to go too, or focus would silently re-engage the moment the condition that
+  // suspended it lifts — the node returning from an undone delete, or the phone
+  // being rotated back to portrait — with the pre-focus snapshot already spent.
   useEffect(() => {
     if (focusRootId && !activeFocusRootId) {
       preFocusRef.current = null;
@@ -1263,6 +1259,13 @@ function GraphCanvasInner({
     (event) => {
       event.preventDefault();
       event.stopPropagation();
+      // The pane menu exists only to add notes, labels and arrows, and the focus
+      // view sets annotations aside — one created here would be dropped by the
+      // next reconcile pass with nothing to say so.
+      if (activeFocusRootId) {
+        closeAllMenus();
+        return;
+      }
       const start = rightDragStart.current;
       const movedFar =
         start.time != null &&
@@ -1279,7 +1282,7 @@ function GraphCanvasInner({
       const flowPosition = screenToFlowPosition({ x: event.clientX, y: event.clientY });
       setPaneContextMenu({ x: event.clientX, y: event.clientY, flowPosition });
     },
-    [closeAllMenus, clearSelection, screenToFlowPosition]
+    [closeAllMenus, clearSelection, screenToFlowPosition, activeFocusRootId]
   );
 
   // Right-click on the selection box (multi-node selection)
@@ -1337,35 +1340,37 @@ function GraphCanvasInner({
   // the real layout with a temporary lens and drop every node not in the focus
   // set from the snapshot.
   const handleSaveView = useCallback(() => {
-    if (activeFocusRootId) {
-      // Told once per focus session, not once per attempt: the host re-fires
-      // this signal on a debounce, and notifying from here re-renders, which
-      // would feed straight back into the effect that called it.
-      if (!focusSaveNoticeRef.current) {
-        focusSaveNoticeRef.current = true;
-        showNotification('info', focusViewSaveBlockedLabel);
-      }
-      return;
-    }
-    if (onSaveView) {
-      const viewData = {
-        nodes: nodes.map((n) => ({ id: n.id, position: n.position, parentId: n.parentId })),
-        edges: edges.map((e) => ({ id: e.id, source: e.source, target: e.target, label: e.label })),
-        groups: nodes
-          .filter((n) => n.type === 'group')
-          .map((g) => ({
-            id: g.id,
-            label: g.data.label,
-            description: g.data.description,
-            position: g.position,
-            style: g.style,
-            color: g.data.color,
-          })),
-        annotations: nodes.filter((n) => OVERLAY_TYPES.has(n.type)).map(flowNodeToOverlay),
-      };
-      onSaveView(viewData);
-    }
-  }, [nodes, edges, onSaveView, activeFocusRootId, showNotification, focusViewSaveBlockedLabel]);
+    if (!onSaveView) return;
+    // While the focus view is active the mounted canvas is a temporary lens: a
+    // handful of nodes at ego-ring coordinates, with the annotations set aside.
+    // Saving that would overwrite the real layout. Saving the state focus was
+    // entered from is both correct and, unlike refusing, keeps the round trip
+    // the host waits on intact — App.switchToSession performs the entire switch
+    // inside the callback that only fires once onSaveView has been called.
+    const snapshot = activeFocusRootId ? preFocusRef.current : null;
+    const viewNodes = snapshot ? snapshot.nodes : nodes;
+    const viewEdges = snapshot ? snapshot.edges : edges;
+    onSaveView({
+      nodes: viewNodes.map((n) => ({ id: n.id, position: n.position, parentId: n.parentId })),
+      edges: viewEdges.map((e) => ({
+        id: e.id,
+        source: e.source,
+        target: e.target,
+        label: e.label,
+      })),
+      groups: viewNodes
+        .filter((n) => n.type === 'group')
+        .map((g) => ({
+          id: g.id,
+          label: g.data.label,
+          description: g.data.description,
+          position: g.position,
+          style: g.style,
+          color: g.data.color,
+        })),
+      annotations: viewNodes.filter((n) => OVERLAY_TYPES.has(n.type)).map(flowNodeToOverlay),
+    });
+  }, [nodes, edges, onSaveView, activeFocusRootId]);
 
   const handleLoadMore = useCallback(() => {
     setLoadedNodeCount((prev) => Math.min(prev + 100, visibleNodes.length));
@@ -1760,10 +1765,10 @@ function GraphCanvasInner({
 
   // Create group when signal changes (triggered from toolbar)
   useEffect(() => {
-    if (createGroupSignal > 0) {
+    if (createGroupSignal > 0 && !activeFocusRootId) {
       handleAddGroup();
     }
-  }, [createGroupSignal, handleAddGroup]);
+  }, [createGroupSignal, handleAddGroup, activeFocusRootId]);
 
   // Save view when signal changes (triggered from toolbar)
   useEffect(() => {

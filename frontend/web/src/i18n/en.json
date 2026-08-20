@@ -313,8 +313,7 @@
     "fit_view": "Fit whole graph",
     "focus_view": "Focus on selected node",
     "exit_focus_view": "Back to whole graph",
-    "controls_group": "Canvas controls",
-    "focus_view_save_blocked": "Leave the focus view before saving"
+    "controls_group": "Canvas controls"
   },
   "guide": {
     "title": "Guide",

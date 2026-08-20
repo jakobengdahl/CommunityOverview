@@ -741,17 +741,19 @@ canvas to one node at a time:
 The focus view is a lens, not an edit. Leaving it puts every node back exactly
 where it was, including nodes inside groups, and your notes, labels and arrows
 come back with them — they are set aside while you are focused so the view frames
-the ring rather than an annotation parked elsewhere on the canvas. Nothing is
-saved and nothing is deleted.
+the ring rather than an annotation parked elsewhere on the canvas. The focus
+layout itself is never saved: while you are focused, the canvas saves the view
+you focused *from*, so an autosave or a session switch records your real layout
+rather than the temporary one.
 
-Because of that, the canvas will not save while you are focused: the focus
-layout is temporary, and writing it down would overwrite the real one. If you
-try, you will be told to leave the focus view first. Saving works normally again
-as soon as you do.
+Because annotations are set aside, you cannot add a note, label or arrow while
+focused — leave the focus view first. Everything else works as usual.
 
 Focus needs a single node selected; it is not offered for notes, labels, arrows
-or groups. If the node you are focused on is removed, or you switch to another
-session, the canvas returns to the full graph on its own.
+or groups. The canvas returns to the full graph on its own if the node you are
+focused on is removed, if you switch to another session, or if the screen stops
+being phone-sized — turning a phone to landscape ends the focus view rather than
+leaving you in it without the controls to get out.
 
 ---
 

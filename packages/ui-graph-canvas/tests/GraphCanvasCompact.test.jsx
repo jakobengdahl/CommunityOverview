@@ -264,19 +264,21 @@ describe('mobile focus view', () => {
   const foldSetNodes = (prevNodes) =>
     hoisted.setNodes.mock.calls.map(([updater]) => updater).reduce((acc, u) => u(acc), prevNodes);
 
+  // Live flow state the incoming memo cannot reproduce on its own: nodes dragged
+  // away from their computed layout, one of them inside a group, plus a note
+  // overlay that exists only on the canvas. Without this, a "restore" assertion
+  // would compare two identical layouts and pass either way.
+  const seededLiveNodes = () => [
+    { id: 'node-1', type: 'custom', position: { x: 11, y: 12 }, data: {} },
+    { id: 'node-2', type: 'custom', position: { x: 21, y: 22 }, parentId: 'group-1', data: {} },
+    { id: 'node-3', type: 'custom', position: { x: 31, y: 32 }, data: {} },
+    { id: 'node-4', type: 'custom', position: { x: 41, y: 42 }, data: {} },
+    { id: 'group-1', type: 'group', position: { x: 5, y: 5 }, data: { label: 'G' } },
+    { id: 'note-1', type: 'note', position: { x: 900, y: 900 }, data: { text: 'n' } },
+  ];
+
   it('restores the exact canvas — positions, group membership and annotations', () => {
-    // Live flow state that the incoming memo cannot reproduce on its own: nodes
-    // dragged away from their computed layout, one of them inside a group, plus
-    // a note overlay that exists only on the canvas. Without this the "restore"
-    // assertion would compare two identical layouts and pass either way.
-    const liveNodes = [
-      { id: 'node-1', type: 'custom', position: { x: 11, y: 12 }, data: {} },
-      { id: 'node-2', type: 'custom', position: { x: 21, y: 22 }, parentId: 'group-1', data: {} },
-      { id: 'node-3', type: 'custom', position: { x: 31, y: 32 }, data: {} },
-      { id: 'node-4', type: 'custom', position: { x: 41, y: 42 }, data: {} },
-      { id: 'group-1', type: 'group', position: { x: 5, y: 5 }, data: {} },
-      { id: 'note-1', type: 'note', position: { x: 900, y: 900 }, data: {} },
-    ];
+    const liveNodes = seededLiveNodes();
     render(<GraphCanvas nodes={nodes} edges={edges} compactMode="on" />);
     hoisted.liveNodes = liveNodes;
     selectNodes([{ id: 'node-1', type: 'custom' }]);
@@ -313,74 +315,66 @@ describe('mobile focus view', () => {
     expect(byId.get('node-2').parentId).toBe('group-1');
   });
 
-  it('refuses to save while focused, so the ego layout cannot reach the server', () => {
+  it('saves the canvas focus was entered from, never the ego layout', () => {
+    // Every persistence path in the host arrives as this signal — the debounced
+    // autosave and the toolbar button alike — and the host does real work in the
+    // callback that only runs once onSaveView has been called (App.switchToSession
+    // performs the entire session switch there). So a save requested while focused
+    // must still be answered; it just must not be answered with the lens.
+    const liveNodes = seededLiveNodes();
     const onSaveView = vi.fn();
-    const { rerender } = render(
+    const props = (saveViewSignal) => (
       <GraphCanvas
         nodes={nodes}
         edges={edges}
         compactMode="on"
         onSaveView={onSaveView}
-        saveViewSignal={0}
+        saveViewSignal={saveViewSignal}
       />
     );
 
-    // Every persistence path in the host — debounced autosave and the explicit
-    // toolbar button alike — arrives as this signal.
-    onSaveView.mockClear();
-    rerender(
-      <GraphCanvas
-        nodes={nodes}
-        edges={edges}
-        compactMode="on"
-        onSaveView={onSaveView}
-        saveViewSignal={1}
-      />
-    );
-    expect(onSaveView).toHaveBeenCalled();
-
+    const { rerender } = render(props(0));
+    hoisted.liveNodes = liveNodes;
     selectNodes([{ id: 'node-1', type: 'custom' }]);
     click(focusButton());
 
     onSaveView.mockClear();
-    rerender(
-      <GraphCanvas
-        nodes={nodes}
-        edges={edges}
-        compactMode="on"
-        onSaveView={onSaveView}
-        saveViewSignal={2}
-      />
-    );
-    expect(onSaveView).not.toHaveBeenCalled();
-    expect(screen.getByText('Leave the focus view before saving')).toBeInTheDocument();
+    rerender(props(1));
 
-    click(exitFocusButton());
-    rerender(
-      <GraphCanvas
-        nodes={nodes}
-        edges={edges}
-        compactMode="on"
-        onSaveView={onSaveView}
-        saveViewSignal={3}
-      />
-    );
     expect(onSaveView).toHaveBeenCalled();
+    const viewData = onSaveView.mock.calls.at(-1)[0];
+    // The whole pre-focus canvas, not the two mounted nodes at ring coordinates.
+    expect(viewData.nodes.map((n) => n.id).sort()).toEqual([
+      'group-1',
+      'node-1',
+      'node-2',
+      'node-3',
+      'node-4',
+      'note-1',
+    ]);
+    expect(viewData.nodes.find((n) => n.id === 'node-1').position).toEqual({ x: 11, y: 12 });
+    expect(viewData.nodes.find((n) => n.id === 'node-2').parentId).toBe('group-1');
+    expect(viewData.groups.map((g) => g.id)).toEqual(['group-1']);
+    expect(viewData.annotations).toHaveLength(1);
   });
 
   it('refits the camera on entering and on leaving focus', async () => {
     render(<GraphCanvas nodes={nodes} edges={edges} compactMode="on" />);
     selectNodes([{ id: 'node-1', type: 'custom' }]);
 
+    // The focus refit is the short one; the mount fit and the session refit both
+    // run at 800ms, so asserting on padding alone would not tell them apart.
+    const focusRefit = { padding: 0.05, duration: 400 };
+
     hoisted.fitView.mockClear();
     click(focusButton());
     await flushFrame();
-    expect(hoisted.fitView).toHaveBeenCalledWith(expect.objectContaining({ padding: 0.05 }));
+    expect(hoisted.fitView).toHaveBeenCalledWith(focusRefit);
 
     hoisted.fitView.mockClear();
     click(exitFocusButton());
     await flushFrame();
-    expect(hoisted.fitView).toHaveBeenCalledWith(expect.objectContaining({ padding: 0.05 }));
+    expect(hoisted.fitView).toHaveBeenCalledWith(focusRefit);
   });
 
   it('disables the focus control until exactly one graph node is selected', () => {
@@ -395,6 +389,69 @@ describe('mobile focus view', () => {
 
     selectNodes([{ id: 'node-1', type: 'custom' }]);
     expect(focusButton()).toBeEnabled();
+  });
+
+  it('lets go of focus when the viewport stops being compact', () => {
+    // The control that leaves focus lives in the compact pill and nowhere else,
+    // so a phone rotated to landscape (852px on a current handset) would
+    // otherwise strand the canvas on the ego graph with no way out.
+    const { rerender } = render(<GraphCanvas nodes={nodes} edges={edges} compactMode="on" />);
+    selectNodes([{ id: 'node-1', type: 'custom' }]);
+    click(focusButton());
+    expect(renderedNodeIds()).toEqual(['node-1', 'node-2']);
+
+    rerender(<GraphCanvas nodes={nodes} edges={edges} compactMode="off" />);
+    expect(renderedNodeIds()).toEqual(['node-1', 'node-2', 'node-3', 'node-4']);
+
+    // ...and rotating back does not silently re-enter it.
+    rerender(<GraphCanvas nodes={nodes} edges={edges} compactMode="on" />);
+    expect(renderedNodeIds()).toEqual(['node-1', 'node-2', 'node-3', 'node-4']);
+    expect(screen.queryByRole('button', { name: 'Back to whole graph' })).not.toBeInTheDocument();
+  });
+
+  it('offers no pane menu while focused, since a new annotation would be dropped', () => {
+    const paneEvent = () => ({
+      preventDefault: () => {},
+      stopPropagation: () => {},
+      clientX: 40,
+      clientY: 40,
+    });
+
+    render(<GraphCanvas nodes={nodes} edges={edges} compactMode="on" />);
+    act(() => hoisted.flowProps.onPaneContextMenu(paneEvent()));
+    expect(document.querySelector('.pane-context-menu')).toBeInTheDocument();
+
+    selectNodes([{ id: 'node-1', type: 'custom' }]);
+    click(focusButton());
+    act(() => hoisted.flowProps.onPaneContextMenu(paneEvent()));
+    expect(document.querySelector('.pane-context-menu')).not.toBeInTheDocument();
+  });
+
+  it('drops the pre-focus snapshot when the canvas contents are replaced under it', () => {
+    // A session switch, or an agent loading a different graph, replaces the
+    // contents wholesale. The snapshot then describes a canvas that no longer
+    // exists, and forcing it back would drag stale coordinates onto whatever ids
+    // the old and new content happen to share — and resurrect overlays the
+    // replace deliberately dropped.
+    const liveNodes = seededLiveNodes();
+    const { rerender } = render(
+      <GraphCanvas nodes={nodes} edges={edges} compactMode="on" sessionKey="a" />
+    );
+    hoisted.liveNodes = liveNodes;
+    selectNodes([{ id: 'node-1', type: 'custom' }]);
+    click(focusButton());
+
+    rerender(<GraphCanvas nodes={nodes} edges={edges} compactMode="on" sessionKey="b" />);
+
+    hoisted.setNodes.mockClear();
+    click(exitFocusButton());
+    const restored = foldSetNodes(hoisted.flowProps.nodes);
+
+    const staleById = new Map(liveNodes.map((n) => [n.id, n.position]));
+    for (const node of restored) {
+      expect(node.position).not.toEqual(staleById.get(node.id));
+    }
+    expect(restored.some((n) => n.id === 'note-1' || n.id === 'group-1')).toBe(false);
   });
 
   it('does not offer focus for an annotation, which has no graph neighbours', () => {
