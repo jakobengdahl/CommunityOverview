@@ -1292,10 +1292,11 @@ class ChatProcessor:
 
             # Just text response
             # Extract text from content blocks
-            text_content = ""
-            for block in response.content:
-                if isinstance(block, dict) and block.get("type") == "text":
-                    text_content += block.get("text", "")
+            text_content = "".join(
+                block.get("text", "")
+                for block in response.content
+                if isinstance(block, dict) and block.get("type") == "text"
+            )
 
             return {
                 "content": text_content if text_content else "No text response from AI",
@@ -1573,10 +1574,11 @@ class ChatProcessor:
             )
 
         # Extract text from response (handle multiple text blocks)
-        final_text = ""
-        for block in final_response.content:
-            if isinstance(block, dict) and block.get("type") == "text":
-                final_text += block.get("text", "")
+        final_text = "".join(
+            block.get("text", "")
+            for block in final_response.content
+            if isinstance(block, dict) and block.get("type") == "text"
+        )
 
         # Prepare final tool result with accumulated data
         final_tool_result = {}
