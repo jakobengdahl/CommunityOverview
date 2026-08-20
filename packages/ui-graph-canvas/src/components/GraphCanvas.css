@@ -370,6 +370,106 @@ body.graph-suppress-selection * {
   }
 }
 
+/* Compact canvas chrome: a touch-sized pill replacing the React Flow control
+   cluster, whose 26px buttons are below any usable touch target.
+
+   Anchored bottom-right, a row clear of the bottom edge, rather than in the
+   bottom-left corner the desktop cluster uses. On a phone the bottom edge
+   belongs to the browser's gesture area, hosts dock their own chrome across the
+   bottom centre, and a left rail is where a toolbox naturally sits — the
+   bottom-right corner is the one a thumb reaches and nothing else claims. */
+.graph-compact-controls {
+  position: absolute;
+  right: 12px;
+  right: calc(12px + env(safe-area-inset-right));
+  bottom: 72px;
+  bottom: calc(72px + env(safe-area-inset-bottom));
+  z-index: 6;
+  display: flex;
+  flex-direction: row;
+  gap: 6px;
+  padding: 6px;
+  border-radius: 999px;
+  border: 1px solid rgba(255, 255, 255, 0.18);
+  background: rgba(24, 24, 24, 0.88);
+  backdrop-filter: blur(2px);
+}
+
+.graph-compact-control {
+  width: 44px;
+  height: 44px;
+  border-radius: 50%;
+  border: 1px solid #4b5563;
+  background: #1f2937;
+  color: #e5e7eb;
+  font-size: 20px;
+  line-height: 1;
+  cursor: pointer;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.graph-compact-control:disabled {
+  opacity: 0.4;
+  cursor: default;
+}
+
+.graph-compact-control-focus.active {
+  border-color: #6366f1;
+  background: #4f46e5;
+  color: #ffffff;
+}
+
+/* Phone widths: the minimap is suppressed here (see GraphCanvas.jsx), so the
+   224px dodge that kept the depth control clear of it no longer buys anything
+   and only pushes the control off a 390px screen. Each surface gets its own
+   corner instead, and the notification moves above the controls row so a toast
+   never lands on top of them. */
+@media (max-width: 768px) {
+  /* Stacked directly above the compact pill in the same right-hand column: the
+     224px offset it used to dodge the minimap with is meaningless here (the
+     minimap is suppressed at this width) and pushes it off a 390px screen. */
+  .federation-depth-control {
+    right: 12px;
+    right: calc(12px + env(safe-area-inset-right));
+    bottom: 136px;
+    bottom: calc(136px + env(safe-area-inset-bottom));
+    padding: 6px;
+    gap: 4px;
+    /* A deployment with many depth levels scrolls the strip rather than growing
+       across the screen. */
+    max-width: calc(100% - 24px);
+  }
+
+  /* Laid out as a row so the control stays one button tall whatever the level
+     count is — which is what keeps the notification lane above it clear. */
+  .federation-depth-levels {
+    flex-direction: row;
+    overflow-x: auto;
+  }
+
+  /* The base rule slides in from translateX(-50%), which centres a fixed-width
+     toast. This one spans the viewport instead, so that keyframe would launch it
+     half a screen to the left; it fades rather than slides. */
+  .graph-notification {
+    left: 12px;
+    right: 12px;
+    bottom: 200px;
+    transform: none;
+    animation: graphNotificationFadeIn 0.3s ease;
+  }
+
+  @keyframes graphNotificationFadeIn {
+    from {
+      opacity: 0;
+    }
+    to {
+      opacity: 1;
+    }
+  }
+}
+
 .graph-marks-legend {
   position: absolute;
   top: 10px;

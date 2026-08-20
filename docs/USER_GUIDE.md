@@ -35,6 +35,7 @@ shared knowledge graphs. This guide covers all user-facing features.
    - [Connecting](#82-connecting)
    - [Live visualization control via session ID](#83-live-visualization-control-via-session-id)
    - [External pulse triggers](#84-external-pulse-triggers)
+9. [On a phone](#9-on-a-phone)
 
 ---
 
@@ -714,6 +715,48 @@ animation.
 
 ---
 
+## 9. On a phone
+
+On a phone-sized screen (roughly 768 px wide and below) the canvas swaps its
+desktop chrome for a layout that fits a thumb.
+
+**Canvas controls.** The desktop zoom cluster is replaced by a compact pill in
+the bottom-right corner with four touch-sized buttons: **zoom in**, **zoom out**,
+**fit whole graph**, and **focus**. The minimap is not drawn at this width even
+if you have switched it on under Settings — it would cover a large share of the
+screen. Switching back to a wider screen restores the desktop controls and your
+minimap setting; nothing is changed permanently.
+
+Fitting the graph also frames it more tightly than on desktop, so a fitted graph
+fills the screen instead of sitting in a wide margin.
+
+**Focus view.** A large graph is hard to read on a phone, so you can narrow the
+canvas to one node at a time:
+
+1. Tap a node to select it. The **focus** button (◎) in the pill becomes active.
+2. Tap **focus**. The canvas now shows only that node and the nodes directly
+   connected to it, arranged in a ring around it.
+3. Tap the same button again to return to the whole graph.
+
+The focus view is a lens, not an edit. Leaving it puts every node back exactly
+where it was, including nodes inside groups, and your notes, labels and arrows
+come back with them — they are set aside while you are focused so the view frames
+the ring rather than an annotation parked elsewhere on the canvas. The focus
+layout itself is never saved: while you are focused, the canvas saves the view
+you focused *from*, so an autosave or a session switch records your real layout
+rather than the temporary one.
+
+Because annotations are set aside, you cannot add a note, label or arrow while
+focused — leave the focus view first. Everything else works as usual.
+
+Focus needs a single node selected; it is not offered for notes, labels, arrows
+or groups. The canvas returns to the full graph on its own if the node you are
+focused on is removed, if you switch to another session, or if the screen stops
+being phone-sized — turning a phone to landscape ends the focus view rather than
+leaving you in it without the controls to get out.
+
+---
+
 ## Appendix: Keyboard shortcuts
 
 | Shortcut | Action |
@@ -751,3 +794,5 @@ Screenshots for this guide are saved to `docs/images/` in PNG format.
 | `skills.png` | ✓ | Chat panel bottom showing active skill and selected nodes |
 | `mcp-session-control.png` | ✓ | External AI (ChatGPT) controlling the canvas via session ID |
 | `federation-depth.png` | pending | Canvas depth selector (requires federation-enabled instance) |
+| `mobile-canvas-controls.png` | pending | Phone viewport with the compact zoom/fit/focus pill in the bottom-right corner |
+| `mobile-focus-view.png` | pending | Phone viewport in focus view — one node ringed by its direct neighbours |
