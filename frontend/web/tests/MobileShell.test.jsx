@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest';
-import { render, screen, fireEvent } from '@testing-library/react';
+import { render, screen, fireEvent, act } from '@testing-library/react';
 
 import MobileShell from '../src/components/MobileShell';
 import useGraphStore from '../src/store/graphStore';
@@ -125,6 +125,22 @@ describe('MobileShell', () => {
     fireEvent.click(screen.getByLabelText('mobile_nav.menu'));
     expect(screen.getByTestId('session-drawer')).toBeInTheDocument();
     expect(useGraphStore.getState().chatPanelOpen).toBe(false);
+  });
+
+  it("opening chat via ChatPanel's own control (not the bottom nav) still closes the open menu", () => {
+    // ChatPanel's own minimized bubble calls the store's toggleChatPanel
+    // directly - it is mocked out above, so simulate that exact call site
+    // rather than the mobile_nav.chat button, which goes through openChat().
+    render(<MobileShell {...baseProps()} />);
+
+    fireEvent.click(screen.getByLabelText('mobile_nav.menu'));
+    expect(screen.getByTestId('session-drawer')).toBeInTheDocument();
+
+    act(() => {
+      useGraphStore.getState().toggleChatPanel();
+    });
+    expect(useGraphStore.getState().chatPanelOpen).toBe(true);
+    expect(screen.queryByTestId('session-drawer')).not.toBeInTheDocument();
   });
 
   it('the Graph nav item closes every surface and returns to the canvas', () => {

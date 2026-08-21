@@ -1,4 +1,4 @@
-import { useState } from 'react';
+import { useEffect, useState } from 'react';
 import {
   Diagram3Fill,
   Search,
@@ -72,6 +72,18 @@ function MobileShell({
   const [sheetSnapPoint, setSheetSnapPoint] = useState('half');
 
   const sheetOpen = surface.isOpen('search') || surface.isOpen('create');
+
+  // ChatPanel's own minimized bubble (its established touch target, reused
+  // as-is per the "do not fork" rule) calls the store's toggleChatPanel
+  // directly, bypassing openChat() below - so mutual exclusion with
+  // search/create/menu has to be enforced here, reactively, rather than only
+  // at the call sites this component controls.
+  useEffect(() => {
+    if (chatPanelOpen) {
+      surface.close();
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [chatPanelOpen]);
 
   const closeAllSurfaces = () => {
     surface.close();
