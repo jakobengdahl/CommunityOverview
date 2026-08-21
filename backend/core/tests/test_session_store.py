@@ -218,7 +218,28 @@ class TestStateOps:
             {"op": "annotation_created", "annotation": {"kind": "note", "text": "hi"}},
         )
         assert isinstance(applied["annotation"]["id"], str)
+        assert applied["annotation"]["type"] == "note"
         assert s.state["annotations"][0]["text"] == "hi"
+
+    def test_annotation_created_accepts_v1_types_and_migrates_arrow_alias(self, tmp_path):
+        store = _store(tmp_path)
+        s = store.create()
+        line = self._apply(
+            store,
+            s,
+            {
+                "op": "annotation_created",
+                "annotation": {"id": "line-1", "type": "line", "from": {"x": 0, "y": 0}, "to": {"x": 1, "y": 1}},
+            },
+        )
+        arrow = self._apply(
+            store,
+            s,
+            {"op": "annotation_created", "annotation": {"id": "arrow-1", "kind": "arrow"}},
+        )
+        assert line["annotation"]["kind"] == "line"
+        assert arrow["annotation"]["type"] == "line"
+        assert [a["id"] for a in s.state["annotations"]] == ["line-1", "arrow-1"]
 
     def test_annotation_created_retry_with_same_id_upserts_not_duplicates(
         self, tmp_path

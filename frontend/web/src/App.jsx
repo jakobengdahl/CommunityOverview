@@ -15,9 +15,9 @@ import * as api from './services/api';
 import * as sessionStore from './services/sessionStore';
 import {
   annotationsToGroups,
-  groupsToAnnotations,
   annotationsToOverlays,
-  overlaysToAnnotations,
+  annotationDocumentToLegacyMetadata,
+  legacyMetadataToAnnotationDocument,
 } from './utils/sessionAnnotations';
 import { serverStateToMirror, useSharedSession } from './hooks/useSharedSession';
 import { useSyncConnection } from './hooks/useSyncConnection';
@@ -1020,15 +1020,18 @@ function App() {
       // Annotations carry group boxes plus the free-floating overlays (notes,
       // labels, arrows) the canvas collects in viewData.annotations. All kinds
       // share one server-side annotation list (design 3.1).
+      const annotationDocument = legacyMetadataToAnnotationDocument({
+        groups: viewData?.groups || [],
+        parentIds,
+        annotations: viewData?.annotations || [],
+      });
       const nextState = {
         node_refs: state.nodes.map((n) => n.id),
         positions,
         hidden_node_ids: state.hiddenNodeIds || [],
         hidden_edge_ids: state.hiddenEdgeIds || [],
-        annotations: [
-          ...groupsToAnnotations(viewData?.groups || [], parentIds),
-          ...overlaysToAnnotations(viewData?.annotations || []),
-        ],
+        annotation_schema_version: annotationDocument.schema_version,
+        annotations: annotationDocument.annotations,
       };
       // Emit the change as incremental ops (design step 6, replacing step 4's
       // full-state PUT). Connecting here — the first non-empty save — materialises
@@ -1106,6 +1109,15 @@ function App() {
 
       setIsSavingView(true);
       try {
+        const parentIds = Object.fromEntries(
+          saveViewDialog.viewData.nodes.filter((n) => n.parentId).map((n) => [n.id, n.parentId])
+        );
+        const annotationDocument = legacyMetadataToAnnotationDocument({
+          groups: saveViewDialog.viewData.groups || [],
+          parentIds,
+          annotations: saveViewDialog.viewData.annotations || [],
+        });
+        const legacyAnnotationMetadata = annotationDocumentToLegacyMetadata(annotationDocument);
         const viewNode = {
           name,
           type: 'SavedView',
@@ -1116,13 +1128,13 @@ function App() {
             positions: Object.fromEntries(
               saveViewDialog.viewData.nodes.map((n) => [n.id, n.position])
             ),
-            parentIds: Object.fromEntries(
-              saveViewDialog.viewData.nodes.filter((n) => n.parentId).map((n) => [n.id, n.parentId])
-            ),
+            parentIds,
             edge_ids: (saveViewDialog.viewData.edges || []).map((e) => e.id),
             edges: saveViewDialog.viewData.edges || [],
-            groups: saveViewDialog.viewData.groups,
-            annotations: saveViewDialog.viewData.annotations || [],
+            annotation_schema_version: annotationDocument.schema_version,
+            annotation_document: annotationDocument,
+            groups: legacyAnnotationMetadata.groups,
+            annotations: legacyAnnotationMetadata.annotations,
           },
           communities: [],
         };
