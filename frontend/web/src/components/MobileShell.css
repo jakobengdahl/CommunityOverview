@@ -1,0 +1,86 @@
+/* Compact top bar — replaces FloatingHeader's hamburger+title+clear bar on a
+   phone; Menu (session drawer, settings, activity) moved to the bottom nav. */
+.mobile-shell-topbar {
+  position: fixed;
+  top: 0;
+  left: 0;
+  right: 0;
+  height: 44px;
+  padding: 0 12px;
+  padding-top: env(safe-area-inset-top);
+  height: calc(44px + env(safe-area-inset-top));
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  background: rgba(26, 26, 26, 0.92);
+  backdrop-filter: blur(12px);
+  -webkit-backdrop-filter: blur(12px);
+  border-bottom: 1px solid #333;
+  z-index: 100;
+}
+
+.mobile-shell-topbar-title {
+  color: #ddd;
+  font-size: 0.9rem;
+  font-weight: 500;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.mobile-shell-topbar-clear {
+  flex-shrink: 0;
+  width: 44px;
+  height: 44px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: transparent;
+  border: none;
+  color: #ccc;
+  cursor: pointer;
+}
+
+/* Five-slot bottom navigation (Graph / Search / Create / Chat / Menu). Fixed
+   height (see the comment on GraphCanvas.css's .graph-compact-controls,
+   anchored `bottom: 72px` to leave room for exactly this bar) so the compact
+   canvas controls never overlap it. */
+.mobile-shell-bottomnav {
+  position: fixed;
+  left: 0;
+  right: 0;
+  bottom: 0;
+  height: 64px;
+  height: calc(64px + env(safe-area-inset-bottom));
+  padding-bottom: env(safe-area-inset-bottom);
+  display: flex;
+  z-index: 100;
+  background: rgba(26, 26, 26, 0.92);
+  backdrop-filter: blur(12px);
+  -webkit-backdrop-filter: blur(12px);
+  border-top: 1px solid #333;
+}
+
+.mobile-shell-bottomnav-item {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 2px;
+  min-height: 44px;
+  background: transparent;
+  border: none;
+  color: #999;
+  cursor: pointer;
+}
+
+.mobile-shell-bottomnav-item.active {
+  color: #818cf8;
+}
+
+.mobile-shell-bottomnav-label {
+  font-size: 0.65rem;
+  white-space: nowrap;
+}
