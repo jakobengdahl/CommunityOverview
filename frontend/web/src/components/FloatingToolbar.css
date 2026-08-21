@@ -134,6 +134,36 @@
   display: inline;
 }
 
+/* Sheet variant: content hosted inside MobileShell's BottomSheet rather than
+   floating fixed on screen — the sheet primitive already owns positioning and
+   scrolling, so this drops the fixed chrome and always uses the single-column,
+   always-labelled layout the touch styles above already define. */
+.floating-toolbar--sheet {
+  position: static;
+  left: auto;
+  top: auto;
+  max-height: none;
+  width: 100%;
+  grid-template-columns: 1fr;
+  box-shadow: none;
+  border: none;
+  background: transparent;
+  backdrop-filter: none;
+  -webkit-backdrop-filter: none;
+  padding: 0;
+}
+
+.floating-toolbar--sheet .floating-toolbar-item {
+  width: auto;
+  min-height: 44px;
+  justify-content: flex-start;
+  padding: 0 10px;
+}
+
+.floating-toolbar--sheet .floating-toolbar-item-label {
+  display: inline;
+}
+
 .floating-toolbar-tooltip {
   position: fixed;
   transform: translateY(-50%);
