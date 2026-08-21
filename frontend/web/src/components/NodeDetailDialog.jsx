@@ -128,7 +128,11 @@ function NodeDetailDialog({ node, onClose, onEdit, initialView = 'details' }) {
               <h2>{data.name || data.label || t('detail.unknown_node')}</h2>
             </div>
           </div>
-          <button className="close-button" onClick={onClose} aria-label={t('common.close') || 'Close'}>
+          <button
+            className="close-button"
+            onClick={onClose}
+            aria-label={t('common.close') || 'Close'}
+          >
             &times;
           </button>
         </header>
