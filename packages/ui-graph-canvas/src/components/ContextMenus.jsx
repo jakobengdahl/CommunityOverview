@@ -73,6 +73,20 @@ function useMenuOpenFocus(containerRef, menu) {
   }, [menu, containerRef]);
 }
 
+/**
+ * Given a list (in DOM order) and the arrow/Home/End key that fired, returns
+ * the index to move focus to next, wrapping at either end. Shared by the
+ * root-level roving nav and the Submenu panel's own roving nav below, so a
+ * fix to the wrap-around/Home/End semantics only has to be made once.
+ */
+function nextRovingIndex(items, currentElement, key) {
+  const currentIndex = items.indexOf(currentElement);
+  if (key === 'Home') return 0;
+  if (key === 'End') return items.length - 1;
+  if (key === 'ArrowDown') return currentIndex < 0 ? 0 : (currentIndex + 1) % items.length;
+  return currentIndex < 0 ? items.length - 1 : (currentIndex - 1 + items.length) % items.length;
+}
+
 /** ArrowUp/ArrowDown/Home/End roving navigation across a menu's top-level items. */
 function useRootMenuKeyNav(containerRef) {
   return useCallback(
@@ -81,16 +95,7 @@ function useRootMenuKeyNav(containerRef) {
       const items = focusableRootItems(containerRef);
       if (items.length === 0) return;
       event.preventDefault();
-      const currentIndex = items.indexOf(document.activeElement);
-      let nextIndex;
-      if (event.key === 'Home') nextIndex = 0;
-      else if (event.key === 'End') nextIndex = items.length - 1;
-      else if (event.key === 'ArrowDown')
-        nextIndex = currentIndex < 0 ? 0 : (currentIndex + 1) % items.length;
-      else
-        nextIndex =
-          currentIndex < 0 ? items.length - 1 : (currentIndex - 1 + items.length) % items.length;
-      items[nextIndex]?.focus();
+      items[nextRovingIndex(items, document.activeElement, event.key)]?.focus();
     },
     [containerRef]
   );
@@ -141,21 +146,25 @@ export function buildContextMenuUrl(urlTemplate, nodeData) {
  * showing the new target's items but never actually opened for it. Collapse
  * whenever the identity changes.
  */
-function Submenu({ label, ariaLabel, items, panelClassName, disabled = false, resetKey }) {
+function Submenu({ label, ariaLabel, items, panelClassName, resetKey }) {
   const [open, setOpen] = useState(false);
   const [flip, setFlip] = useState({ x: false, y: false });
   const triggerRef = useRef(null);
   const panelRef = useRef(null);
 
-  const close = useCallback((opts) => {
+  const close = useCallback(() => {
     setOpen(false);
-    if (opts?.refocusTrigger !== false) triggerRef.current?.focus();
+    triggerRef.current?.focus();
   }, []);
 
   // Collapse if the enclosing menu retargets to a different node/edge (see
-  // the `resetKey` doc above) — guarded so a resetKey change that finds the
-  // submenu already closed doesn't trigger a pointless extra render.
-  useEffect(() => {
+  // the `resetKey` doc above). Layout effect, not a passive one: this must
+  // land before the browser paints the retargeted frame, or a submenu left
+  // open for the previous target would flash on screen showing the new
+  // target's items before collapsing. Guarded so a resetKey change that
+  // finds the submenu already closed doesn't trigger a pointless extra
+  // render.
+  useLayoutEffect(() => {
     setOpen((wasOpen) => (wasOpen ? false : wasOpen));
   }, [resetKey]);
 
@@ -191,7 +200,6 @@ function Submenu({ label, ariaLabel, items, panelClassName, disabled = false, re
 
   const handleTriggerKeyDown = useCallback(
     (event) => {
-      if (disabled) return;
       if (event.key === 'ArrowRight' || event.key === 'Enter' || event.key === ' ') {
         event.preventDefault();
         setOpen(true);
@@ -201,7 +209,7 @@ function Submenu({ label, ariaLabel, items, panelClassName, disabled = false, re
         close();
       }
     },
-    [disabled, open, close]
+    [open, close]
   );
 
   const handlePanelKeyDown = useCallback(
@@ -219,19 +227,7 @@ function Submenu({ label, ariaLabel, items, panelClassName, disabled = false, re
           panelRef.current?.querySelectorAll('[data-menu-item="sub"]:not([disabled])') || []
         );
         if (focusable.length === 0) return;
-        const currentIndex = focusable.indexOf(document.activeElement);
-        let nextIndex;
-        if (event.key === 'Home') nextIndex = 0;
-        else if (event.key === 'End') nextIndex = focusable.length - 1;
-        else if (event.key === 'ArrowDown') {
-          nextIndex = currentIndex < 0 ? 0 : (currentIndex + 1) % focusable.length;
-        } else {
-          nextIndex =
-            currentIndex < 0
-              ? focusable.length - 1
-              : (currentIndex - 1 + focusable.length) % focusable.length;
-        }
-        focusable[nextIndex]?.focus();
+        focusable[nextRovingIndex(focusable, document.activeElement, event.key)]?.focus();
       }
     },
     [close]
@@ -256,9 +252,8 @@ function Submenu({ label, ariaLabel, items, panelClassName, disabled = false, re
         aria-haspopup="menu"
         aria-expanded={open}
         aria-label={ariaLabel || label}
-        disabled={disabled}
         className="context-submenu-trigger"
-        onClick={() => !disabled && setOpen((o) => !o)}
+        onClick={() => setOpen((o) => !o)}
         onKeyDown={handleTriggerKeyDown}
       >
         <span>{label}</span>
@@ -285,7 +280,14 @@ function Submenu({ label, ariaLabel, items, panelClassName, disabled = false, re
               onClick={() => {
                 if (item.disabled) return;
                 item.onSelect();
-                close({ refocusTrigger: false });
+                // Always return focus to this trigger, even when the item's
+                // onSelect (e.g. the edge-type picker) also closes the whole
+                // parent menu — that unmount happens on a later render, so
+                // the trigger is still mounted right now. For actions where
+                // the parent menu deliberately stays open (Organize), this is
+                // what keeps focus from stranding on <body> after the button
+                // it was on disappears.
+                close();
               }}
             >
               {item.active ? '✓ ' : ''}
