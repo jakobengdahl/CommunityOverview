@@ -205,6 +205,74 @@ describe('NodeContextMenu', () => {
     expect(onContextMenuAction).toHaveBeenCalledWith('do_it', 'n1', node.data);
     expect(onClose).toHaveBeenCalled();
   });
+
+  it('focuses the first item on open and ArrowDown/ArrowUp rove focus, wrapping at the ends', () => {
+    render(
+      <NodeContextMenu
+        menu={{ x: 0, y: 0, node }}
+        labels={labels}
+        onEdit={vi.fn()}
+        onHide={vi.fn()}
+        onClose={vi.fn()}
+      />
+    );
+    const editBtn = screen.getByRole('button', { name: /edit/i });
+    const hideBtn = screen.getByRole('button', { name: /hide/i });
+    const selectBtn = screen.getByRole('button', { name: /select all nodes of the same type/i });
+    expect(document.activeElement).toBe(editBtn);
+    fireEvent.keyDown(editBtn, { key: 'ArrowDown' });
+    expect(document.activeElement).toBe(hideBtn);
+    fireEvent.keyDown(hideBtn, { key: 'ArrowDown' });
+    expect(document.activeElement).toBe(selectBtn);
+    fireEvent.keyDown(selectBtn, { key: 'ArrowDown' });
+    expect(document.activeElement).toBe(editBtn);
+    fireEvent.keyDown(editBtn, { key: 'ArrowUp' });
+    expect(document.activeElement).toBe(selectBtn);
+  });
+
+  it('Home/End jump focus to the first/last root item', () => {
+    render(
+      <NodeContextMenu
+        menu={{ x: 0, y: 0, node }}
+        labels={labels}
+        onEdit={vi.fn()}
+        onHide={vi.fn()}
+        onDelete={vi.fn()}
+        onClose={vi.fn()}
+      />
+    );
+    const editBtn = screen.getByRole('button', { name: /edit/i });
+    const deleteBtn = screen.getByRole('button', { name: /delete/i });
+    fireEvent.keyDown(editBtn, { key: 'End' });
+    expect(document.activeElement).toBe(deleteBtn);
+    fireEvent.keyDown(deleteBtn, { key: 'Home' });
+    expect(document.activeElement).toBe(editBtn);
+  });
+
+  it('restores focus to the previously-focused element once the menu closes', () => {
+    const trigger = document.createElement('button');
+    document.body.appendChild(trigger);
+    trigger.focus();
+
+    const { rerender } = render(
+      <NodeContextMenu menu={null} labels={labels} onEdit={vi.fn()} onClose={vi.fn()} />
+    );
+    expect(document.activeElement).toBe(trigger);
+
+    rerender(
+      <NodeContextMenu
+        menu={{ x: 0, y: 0, node }}
+        labels={labels}
+        onEdit={vi.fn()}
+        onClose={vi.fn()}
+      />
+    );
+    expect(document.activeElement).toBe(screen.getByRole('button', { name: /edit/i }));
+
+    rerender(<NodeContextMenu menu={null} labels={labels} onEdit={vi.fn()} onClose={vi.fn()} />);
+    expect(document.activeElement).toBe(trigger);
+    document.body.removeChild(trigger);
+  });
 });
 
 describe('MultiNodeContextMenu', () => {
@@ -242,6 +310,22 @@ describe('MultiNodeContextMenu', () => {
     expect(screen.queryByRole('button', { name: /^cluster$/i })).toBeNull();
   });
 
+  it('groups the organize actions behind a submenu trigger, not the root menu', () => {
+    render(
+      <MultiNodeContextMenu
+        menu={{ x: 0, y: 0, nodes }}
+        labels={labels}
+        onOrganize={vi.fn()}
+        onClose={vi.fn()}
+      />
+    );
+    // The five layout actions are not offered directly at the root level...
+    expect(screen.queryByRole('button', { name: /^cluster$/i })).toBeNull();
+    // ...they appear once the "Organize" trigger opens its panel.
+    fireEvent.click(screen.getByRole('button', { name: /^organize$/i }));
+    expect(screen.getByRole('button', { name: /^cluster$/i })).toBeTruthy();
+  });
+
   it('renders the organize options and calls onOrganize with the chosen mode', () => {
     const onOrganize = vi.fn();
     render(
@@ -252,15 +336,21 @@ describe('MultiNodeContextMenu', () => {
         onClose={vi.fn()}
       />
     );
+    const openOrganize = () => fireEvent.click(screen.getByRole('button', { name: /^organize$/i }));
+    openOrganize();
     fireEvent.click(screen.getByRole('button', { name: /auto-tidy/i }));
-    fireEvent.click(screen.getByRole('button', { name: /cluster/i }));
-    fireEvent.click(screen.getByRole('button', { name: /list horizontally/i }));
-    fireEvent.click(screen.getByRole('button', { name: /list vertically/i }));
-    fireEvent.click(screen.getByRole('button', { name: /arrange as tree/i }));
     expect(onOrganize).toHaveBeenNthCalledWith(1, 'tidy');
+    openOrganize();
+    fireEvent.click(screen.getByRole('button', { name: /^cluster$/i }));
     expect(onOrganize).toHaveBeenNthCalledWith(2, 'cluster');
+    openOrganize();
+    fireEvent.click(screen.getByRole('button', { name: /list horizontally/i }));
     expect(onOrganize).toHaveBeenNthCalledWith(3, 'horizontal');
+    openOrganize();
+    fireEvent.click(screen.getByRole('button', { name: /list vertically/i }));
     expect(onOrganize).toHaveBeenNthCalledWith(4, 'vertical');
+    openOrganize();
+    fireEvent.click(screen.getByRole('button', { name: /arrange as tree/i }));
     expect(onOrganize).toHaveBeenNthCalledWith(5, 'tree');
   });
 
@@ -296,7 +386,37 @@ describe('EdgeContextMenu', () => {
     expect(container.querySelector('.edge-context-menu')).toBeNull();
   });
 
-  it('sets a new edge type then closes', () => {
+  it('keeps every edge type out of the root menu until Change type is opened', () => {
+    render(
+      <EdgeContextMenu
+        menu={{ x: 0, y: 0, edge }}
+        labels={labels}
+        relationshipTypes={relationshipTypes}
+        onSetEdgeType={vi.fn()}
+        onClose={vi.fn()}
+      />
+    );
+    expect(screen.queryByRole('button', { name: /^WORKS_FOR$/ })).toBeNull();
+    fireEvent.click(screen.getByRole('button', { name: /^change type$/i }));
+    expect(screen.getByRole('button', { name: /^WORKS_FOR$/ })).toBeTruthy();
+  });
+
+  it('opens the Change type submenu from the keyboard (Enter or ArrowRight), not just a click', () => {
+    render(
+      <EdgeContextMenu
+        menu={{ x: 0, y: 0, edge }}
+        labels={labels}
+        relationshipTypes={relationshipTypes}
+        onSetEdgeType={vi.fn()}
+        onClose={vi.fn()}
+      />
+    );
+    const trigger = screen.getByRole('button', { name: /^change type$/i });
+    fireEvent.keyDown(trigger, { key: 'ArrowRight' });
+    expect(screen.getByRole('button', { name: /^WORKS_FOR$/ })).toBeTruthy();
+  });
+
+  it('sets a new edge type then closes the whole menu', () => {
     const onSetEdgeType = vi.fn();
     const onClose = vi.fn();
     render(
@@ -308,6 +428,7 @@ describe('EdgeContextMenu', () => {
         onClose={onClose}
       />
     );
+    fireEvent.click(screen.getByRole('button', { name: /^change type$/i }));
     fireEvent.click(screen.getByRole('button', { name: /^WORKS_FOR$/ }));
     expect(onSetEdgeType).toHaveBeenCalledWith('e1', 'WORKS_FOR');
     expect(onClose).toHaveBeenCalled();
@@ -324,6 +445,159 @@ describe('EdgeContextMenu', () => {
       />
     );
     expect(screen.queryByText('Change type')).toBeNull();
+  });
+
+  it('ignores relationship type entries with no usable type name', () => {
+    render(
+      <EdgeContextMenu
+        menu={{ x: 0, y: 0, edge }}
+        labels={labels}
+        relationshipTypes={[{ type: '' }, { description: 'no type at all' }, ...relationshipTypes]}
+        onSetEdgeType={vi.fn()}
+        onClose={vi.fn()}
+      />
+    );
+    fireEvent.click(screen.getByRole('button', { name: /^change type$/i }));
+    expect(screen.getByRole('button', { name: /^WORKS_FOR$/ })).toBeTruthy();
+    // Only "General connection" + "WORKS_FOR" — the two malformed entries are dropped.
+    const panelButtons = document.querySelectorAll('.edge-type-list button');
+    expect(panelButtons.length).toBe(2);
+  });
+
+  it("disables the edge's current type as a selectable choice and does not offer it as an action", () => {
+    const onSetEdgeType = vi.fn();
+    render(
+      <EdgeContextMenu
+        menu={{ x: 0, y: 0, edge }}
+        labels={labels}
+        relationshipTypes={relationshipTypes}
+        onSetEdgeType={onSetEdgeType}
+        onClose={vi.fn()}
+      />
+    );
+    fireEvent.click(screen.getByRole('button', { name: /^change type$/i }));
+    const currentTypeBtn = screen.getByRole('button', { name: /general connection/i });
+    expect(currentTypeBtn).toBeDisabled();
+    fireEvent.click(currentTypeBtn);
+    expect(onSetEdgeType).not.toHaveBeenCalled();
+  });
+
+  it('focuses the first enabled submenu item on open, skipping the disabled current type', () => {
+    render(
+      <EdgeContextMenu
+        menu={{ x: 0, y: 0, edge }}
+        labels={labels}
+        relationshipTypes={relationshipTypes}
+        onSetEdgeType={vi.fn()}
+        onClose={vi.fn()}
+      />
+    );
+    fireEvent.click(screen.getByRole('button', { name: /^change type$/i }));
+    expect(document.activeElement).toBe(screen.getByRole('button', { name: /^WORKS_FOR$/ }));
+  });
+
+  it('Escape closes only the submenu, returns focus to its trigger, and leaves the edge menu open', () => {
+    render(
+      <EdgeContextMenu
+        menu={{ x: 0, y: 0, edge }}
+        labels={labels}
+        relationshipTypes={relationshipTypes}
+        onSetEdgeType={vi.fn()}
+        onClose={vi.fn()}
+      />
+    );
+    const trigger = screen.getByRole('button', { name: /^change type$/i });
+    fireEvent.click(trigger);
+    const worksForBtn = screen.getByRole('button', { name: /^WORKS_FOR$/ });
+    fireEvent.keyDown(worksForBtn, { key: 'Escape' });
+    expect(screen.queryByRole('button', { name: /^WORKS_FOR$/ })).toBeNull();
+    expect(document.activeElement).toBe(trigger);
+    expect(document.querySelector('.edge-context-menu')).not.toBeNull();
+  });
+
+  it('ArrowDown/ArrowUp rove focus among the submenu items once open', () => {
+    render(
+      <EdgeContextMenu
+        menu={{ x: 0, y: 0, edge }}
+        labels={labels}
+        relationshipTypes={[...relationshipTypes, { type: 'MENTIONS', description: '' }]}
+        onSetEdgeType={vi.fn()}
+        onClose={vi.fn()}
+      />
+    );
+    fireEvent.click(screen.getByRole('button', { name: /^change type$/i }));
+    const worksForBtn = screen.getByRole('button', { name: /^WORKS_FOR$/ });
+    const mentionsBtn = screen.getByRole('button', { name: /^MENTIONS$/ });
+    expect(document.activeElement).toBe(worksForBtn);
+    fireEvent.keyDown(worksForBtn, { key: 'ArrowDown' });
+    expect(document.activeElement).toBe(mentionsBtn);
+    fireEvent.keyDown(mentionsBtn, { key: 'ArrowUp' });
+    expect(document.activeElement).toBe(worksForBtn);
+  });
+
+  it('ArrowDown/ArrowUp rove focus among the root-level items, wrapping at the ends', () => {
+    render(
+      <EdgeContextMenu
+        menu={{ x: 0, y: 0, edge }}
+        labels={labels}
+        relationshipTypes={relationshipTypes}
+        onSetEdgeType={vi.fn()}
+        onEditEdge={vi.fn()}
+        onHideEdge={vi.fn()}
+        onClose={vi.fn()}
+      />
+    );
+    const changeTypeBtn = screen.getByRole('button', { name: /^change type$/i });
+    const editBtn = screen.getByRole('button', { name: /edit/i });
+    const hideBtn = screen.getByRole('button', { name: /hide/i });
+    expect(document.activeElement).toBe(changeTypeBtn);
+    fireEvent.keyDown(changeTypeBtn, { key: 'ArrowDown' });
+    expect(document.activeElement).toBe(editBtn);
+    fireEvent.keyDown(editBtn, { key: 'ArrowDown' });
+    expect(document.activeElement).toBe(hideBtn);
+    fireEvent.keyDown(hideBtn, { key: 'ArrowDown' });
+    expect(document.activeElement).toBe(changeTypeBtn);
+    fireEvent.keyDown(changeTypeBtn, { key: 'ArrowUp' });
+    expect(document.activeElement).toBe(hideBtn);
+  });
+
+  it('moves focus into the menu on open and restores it to the previously-focused element on close', () => {
+    const trigger = document.createElement('button');
+    document.body.appendChild(trigger);
+    trigger.focus();
+    expect(document.activeElement).toBe(trigger);
+
+    const { rerender } = render(
+      <EdgeContextMenu
+        menu={null}
+        labels={labels}
+        relationshipTypes={relationshipTypes}
+        onClose={vi.fn()}
+      />
+    );
+    expect(document.activeElement).toBe(trigger);
+
+    rerender(
+      <EdgeContextMenu
+        menu={{ x: 0, y: 0, edge }}
+        labels={labels}
+        relationshipTypes={relationshipTypes}
+        onSetEdgeType={vi.fn()}
+        onClose={vi.fn()}
+      />
+    );
+    expect(document.activeElement).toBe(screen.getByRole('button', { name: /^change type$/i }));
+
+    rerender(
+      <EdgeContextMenu
+        menu={null}
+        labels={labels}
+        relationshipTypes={relationshipTypes}
+        onClose={vi.fn()}
+      />
+    );
+    expect(document.activeElement).toBe(trigger);
+    document.body.removeChild(trigger);
   });
 });
 

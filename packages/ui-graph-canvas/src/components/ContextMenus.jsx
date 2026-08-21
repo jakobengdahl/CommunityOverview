@@ -1,3 +1,5 @@
+import { useCallback, useEffect, useLayoutEffect, useRef, useState } from 'react';
+
 /**
  * Presentational context-menu components for GraphCanvas.
  *
@@ -5,7 +7,85 @@
  * state, position and the action callbacks stay in GraphCanvas, which passes the
  * current menu descriptor plus an `onClose` closer. A component returns null when
  * its menu is not open, so callers can render it unconditionally.
+ *
+ * Keyboard/focus contract shared by every menu below:
+ * - Opening a menu moves focus to its first enabled item and remembers what was
+ *   focused before, so closing it (Escape, an outside click, picking an action)
+ *   restores focus there instead of stranding it on a removed element.
+ * - ArrowUp/ArrowDown/Home/End rove focus between the menu's top-level items
+ *   (`data-menu-item="root"`); a `<Submenu>` traps the same keys while its panel
+ *   is open so the two levels never fight over focus.
+ * - Every actionable element is a real `<button>` (native tab/click/Enter/Space
+ *   support), so touch taps and assistive tech both work with no extra wiring —
+ *   the only added affordance is bigger touch targets under `(pointer: coarse)`.
  */
+
+const ROOT_ITEM_SELECTOR = '[data-menu-item="root"]:not([disabled])';
+
+/** Reads the container ref lazily so callers can build the handler before mount. */
+function focusableRootItems(containerRef) {
+  const container = containerRef.current;
+  if (!container) return [];
+  return Array.from(container.querySelectorAll(ROOT_ITEM_SELECTOR));
+}
+
+/**
+ * Moves focus into a just-opened menu and restores it to whatever had focus
+ * beforehand once the menu closes (or unmounts).
+ */
+function useMenuOpenFocus(containerRef, isOpen) {
+  const previousFocusRef = useRef(null);
+  useEffect(() => {
+    if (!isOpen) return undefined;
+    previousFocusRef.current = document.activeElement;
+    const items = focusableRootItems(containerRef);
+    items[0]?.focus();
+    return () => {
+      const prev = previousFocusRef.current;
+      if (prev && typeof prev.focus === 'function' && document.contains(prev)) {
+        prev.focus();
+      }
+    };
+  }, [isOpen, containerRef]);
+}
+
+/** ArrowUp/ArrowDown/Home/End roving navigation across a menu's top-level items. */
+function useRootMenuKeyNav(containerRef) {
+  return useCallback(
+    (event) => {
+      if (!['ArrowDown', 'ArrowUp', 'Home', 'End'].includes(event.key)) return;
+      const items = focusableRootItems(containerRef);
+      if (items.length === 0) return;
+      event.preventDefault();
+      const currentIndex = items.indexOf(document.activeElement);
+      let nextIndex;
+      if (event.key === 'Home') nextIndex = 0;
+      else if (event.key === 'End') nextIndex = items.length - 1;
+      else if (event.key === 'ArrowDown')
+        nextIndex = currentIndex < 0 ? 0 : (currentIndex + 1) % items.length;
+      else
+        nextIndex =
+          currentIndex < 0 ? items.length - 1 : (currentIndex - 1 + items.length) % items.length;
+      items[nextIndex]?.focus();
+    },
+    [containerRef]
+  );
+}
+
+/** Combines an internal ref (used for focus/keynav) with an optional externally-owned ref. */
+function useMergedContainerRef(externalRef) {
+  const containerRef = useRef(null);
+  const setRef = useCallback(
+    (el) => {
+      containerRef.current = el;
+      if (!externalRef) return;
+      if (typeof externalRef === 'function') externalRef(el);
+      else externalRef.current = el;
+    },
+    [externalRef]
+  );
+  return [containerRef, setRef];
+}
 
 /**
  * Build a URL from a template string, substituting {field} or [field] tokens
@@ -23,6 +103,163 @@ export function buildContextMenuUrl(urlTemplate, nodeData) {
   });
 }
 
+/**
+ * A single flyout submenu used to group a large option set (edge types, layout
+ * actions) behind one root-level trigger instead of listing every option at the
+ * top level. Opens on click/Enter/Space/ArrowRight (not hover-only, so it works
+ * the same on touch); Escape/ArrowLeft closes it and returns focus to the
+ * trigger without closing the parent menu.
+ */
+function Submenu({ label, ariaLabel, items, panelClassName, disabled = false }) {
+  const [open, setOpen] = useState(false);
+  const [flip, setFlip] = useState({ x: false, y: false });
+  const triggerRef = useRef(null);
+  const panelRef = useRef(null);
+
+  const close = useCallback((opts) => {
+    setOpen(false);
+    if (opts?.refocusTrigger !== false) triggerRef.current?.focus();
+  }, []);
+
+  // Focus the first enabled item as soon as the panel opens.
+  useEffect(() => {
+    if (!open) return undefined;
+    const first = panelRef.current?.querySelector('[data-menu-item="sub"]:not([disabled])');
+    first?.focus();
+    return undefined;
+  }, [open]);
+
+  // Keep the panel on-screen: flip to the opposite side when it would overflow.
+  useLayoutEffect(() => {
+    if (!open || !panelRef.current) return;
+    const rect = panelRef.current.getBoundingClientRect();
+    setFlip({
+      x: rect.right > window.innerWidth,
+      y: rect.bottom > window.innerHeight,
+    });
+  }, [open]);
+
+  // Dismiss on outside interaction, same convention as the other menus.
+  useEffect(() => {
+    if (!open) return undefined;
+    const handleOutside = (event) => {
+      if (panelRef.current?.contains(event.target)) return;
+      if (triggerRef.current?.contains(event.target)) return;
+      setOpen(false);
+    };
+    document.addEventListener('mousedown', handleOutside, true);
+    return () => document.removeEventListener('mousedown', handleOutside, true);
+  }, [open]);
+
+  const handleTriggerKeyDown = useCallback(
+    (event) => {
+      if (disabled) return;
+      if (event.key === 'ArrowRight' || event.key === 'Enter' || event.key === ' ') {
+        event.preventDefault();
+        setOpen(true);
+      } else if (open && (event.key === 'ArrowLeft' || event.key === 'Escape')) {
+        event.preventDefault();
+        event.stopPropagation();
+        close();
+      }
+    },
+    [disabled, open, close]
+  );
+
+  const handlePanelKeyDown = useCallback(
+    (event) => {
+      if (event.key === 'ArrowLeft' || event.key === 'Escape') {
+        event.preventDefault();
+        event.stopPropagation();
+        close();
+        return;
+      }
+      if (['ArrowDown', 'ArrowUp', 'Home', 'End'].includes(event.key)) {
+        event.preventDefault();
+        event.stopPropagation();
+        const focusable = Array.from(
+          panelRef.current?.querySelectorAll('[data-menu-item="sub"]:not([disabled])') || []
+        );
+        if (focusable.length === 0) return;
+        const currentIndex = focusable.indexOf(document.activeElement);
+        let nextIndex;
+        if (event.key === 'Home') nextIndex = 0;
+        else if (event.key === 'End') nextIndex = focusable.length - 1;
+        else if (event.key === 'ArrowDown') {
+          nextIndex = currentIndex < 0 ? 0 : (currentIndex + 1) % focusable.length;
+        } else {
+          nextIndex =
+            currentIndex < 0
+              ? focusable.length - 1
+              : (currentIndex - 1 + focusable.length) % focusable.length;
+        }
+        focusable[nextIndex]?.focus();
+      }
+    },
+    [close]
+  );
+
+  const panelClasses = [
+    'graph-context-menu',
+    'context-submenu-panel',
+    panelClassName,
+    flip.x ? 'context-submenu-panel-flip-x' : '',
+    flip.y ? 'context-submenu-panel-flip-y' : '',
+  ]
+    .filter(Boolean)
+    .join(' ');
+
+  return (
+    <div className="context-submenu">
+      <button
+        ref={triggerRef}
+        type="button"
+        data-menu-item="root"
+        aria-haspopup="menu"
+        aria-expanded={open}
+        aria-label={ariaLabel || label}
+        disabled={disabled}
+        className="context-submenu-trigger"
+        onClick={() => !disabled && setOpen((o) => !o)}
+        onKeyDown={handleTriggerKeyDown}
+      >
+        <span>{label}</span>
+        <span className="context-submenu-caret" aria-hidden="true">
+          ›
+        </span>
+      </button>
+      {open && (
+        <div
+          ref={panelRef}
+          aria-label={ariaLabel || label}
+          className={panelClasses}
+          onKeyDown={handlePanelKeyDown}
+        >
+          {items.map((item) => (
+            <button
+              key={item.key}
+              type="button"
+              data-menu-item="sub"
+              disabled={item.disabled}
+              aria-disabled={item.disabled || undefined}
+              title={item.description || undefined}
+              className={item.active ? 'edge-type-active' : ''}
+              onClick={() => {
+                if (item.disabled) return;
+                item.onSelect();
+                close({ refocusTrigger: false });
+              }}
+            >
+              {item.active ? '✓ ' : ''}
+              {item.label}
+            </button>
+          ))}
+        </div>
+      )}
+    </div>
+  );
+}
+
 export function NodeContextMenu({
   menu,
   labels: cml,
@@ -37,11 +274,22 @@ export function NodeContextMenu({
   onViewHistory,
   onClose,
 }) {
+  const [containerRef, setContainerRef] = useMergedContainerRef(null);
+  useMenuOpenFocus(containerRef, !!menu);
+  const handleRootKeyDown = useRootMenuKeyNav(containerRef);
+
   if (!menu) return null;
   return (
-    <div className="graph-context-menu node-context-menu" style={{ left: menu.x, top: menu.y }}>
+    <div
+      ref={setContainerRef}
+      className="graph-context-menu node-context-menu"
+      style={{ left: menu.x, top: menu.y }}
+      onKeyDown={handleRootKeyDown}
+    >
       {onEdit && (
         <button
+          type="button"
+          data-menu-item="root"
           onClick={() => {
             onEdit(menu.node.id, menu.node.data);
             onClose();
@@ -52,6 +300,8 @@ export function NodeContextMenu({
       )}
       {onHide && (
         <button
+          type="button"
+          data-menu-item="root"
           onClick={() => {
             onHide(menu.node.id);
             onClose();
@@ -62,6 +312,8 @@ export function NodeContextMenu({
       )}
       {onExpand && (
         <button
+          type="button"
+          data-menu-item="root"
           onClick={() => {
             onExpand(menu.node.id, menu.node.data);
             onClose();
@@ -71,6 +323,8 @@ export function NodeContextMenu({
         </button>
       )}
       <button
+        type="button"
+        data-menu-item="root"
         onClick={() => {
           const nodeType = menu.node.data?.nodeType || menu.node.data?.type;
           selectNodesByType([nodeType]);
@@ -79,10 +333,14 @@ export function NodeContextMenu({
         🎯 {cml.selectSameType}
       </button>
       {onSelectRelated && (
-        <button onClick={() => onSelectRelated(menu.node.id)}>🕸️ {cml.selectRelated}</button>
+        <button type="button" data-menu-item="root" onClick={() => onSelectRelated(menu.node.id)}>
+          🕸️ {cml.selectRelated}
+        </button>
       )}
       {onViewHistory && (
         <button
+          type="button"
+          data-menu-item="root"
           onClick={() => {
             onViewHistory(menu.node.id, menu.node.data);
             onClose();
@@ -105,6 +363,8 @@ export function NodeContextMenu({
               return (
                 <button
                   key={idx}
+                  type="button"
+                  data-menu-item="root"
                   onClick={() => {
                     window.open(url, '_blank', 'noopener,noreferrer');
                     onClose();
@@ -121,6 +381,8 @@ export function NodeContextMenu({
               return (
                 <button
                   key={idx}
+                  type="button"
+                  data-menu-item="root"
                   onClick={() => {
                     onContextMenuAction(actionName, menu.node.id, nodeData);
                     onClose();
@@ -146,6 +408,8 @@ export function NodeContextMenu({
         <>
           <div className="context-menu-separator"></div>
           <button
+            type="button"
+            data-menu-item="root"
             className="context-menu-danger"
             onClick={() => {
               onDelete(menu.node.id);
@@ -172,17 +436,39 @@ export function MultiNodeContextMenu({
   onOrganize,
   onClose,
 }) {
+  const [containerRef, setContainerRef] = useMergedContainerRef(null);
+  useMenuOpenFocus(containerRef, !!menu);
+  const handleRootKeyDown = useRootMenuKeyNav(containerRef);
+
   if (!menu) return null;
+  const organizeItems = onOrganize
+    ? [
+        { key: 'tidy', label: cml.autoTidy, onSelect: () => onOrganize('tidy') },
+        { key: 'cluster', label: cml.organizeCluster, onSelect: () => onOrganize('cluster') },
+        {
+          key: 'horizontal',
+          label: cml.organizeHorizontal,
+          onSelect: () => onOrganize('horizontal'),
+        },
+        { key: 'vertical', label: cml.organizeVertical, onSelect: () => onOrganize('vertical') },
+        { key: 'tree', label: cml.organizeTree, onSelect: () => onOrganize('tree') },
+      ]
+    : [];
+
   return (
     <div
+      ref={setContainerRef}
       className="graph-context-menu node-context-menu multi-node-context-menu"
       style={{ left: menu.x, top: menu.y }}
+      onKeyDown={handleRootKeyDown}
     >
       <div className="context-menu-header">
         {cml.nodesSelected.replace('{count}', menu.nodes.length)}
       </div>
       {onShowOnly && (
         <button
+          type="button"
+          data-menu-item="root"
           onClick={() => {
             const nodeIds = menu.nodes.map((n) => n.id);
             onShowOnly(nodeIds);
@@ -193,6 +479,8 @@ export function MultiNodeContextMenu({
         </button>
       )}
       <button
+        type="button"
+        data-menu-item="root"
         onClick={() => {
           const types = menu.nodes.map((n) => n.data?.nodeType || n.data?.type);
           selectNodesByType(types);
@@ -203,17 +491,18 @@ export function MultiNodeContextMenu({
       {onOrganize && (
         <>
           <div className="context-menu-separator"></div>
-          <div className="context-menu-subheader">{cml.organize}</div>
-          <button onClick={() => onOrganize('tidy')}>✨ {cml.autoTidy}</button>
-          <button onClick={() => onOrganize('cluster')}>▦ {cml.organizeCluster}</button>
-          <button onClick={() => onOrganize('horizontal')}>↔️ {cml.organizeHorizontal}</button>
-          <button onClick={() => onOrganize('vertical')}>↕️ {cml.organizeVertical}</button>
-          <button onClick={() => onOrganize('tree')}>🌳 {cml.organizeTree}</button>
-          <div className="context-menu-separator"></div>
+          <Submenu
+            label={`✨ ${cml.organize}`}
+            ariaLabel={cml.organize}
+            items={organizeItems}
+            panelClassName="organize-list"
+          />
         </>
       )}
       {(onHideMultiple || onHide) && (
         <button
+          type="button"
+          data-menu-item="root"
           onClick={() => {
             const nodeIds = menu.nodes.map((n) => n.id);
             if (onHideMultiple) {
@@ -231,6 +520,8 @@ export function MultiNodeContextMenu({
         <>
           <div className="context-menu-separator"></div>
           <button
+            type="button"
+            data-menu-item="root"
             className="context-menu-danger"
             onClick={() => {
               const nodeIds = menu.nodes.map((n) => n.id);
@@ -260,52 +551,70 @@ export function EdgeContextMenu({
   onDeleteEdge,
   onClose,
 }) {
+  const [containerRef, setContainerRef] = useMergedContainerRef(null);
+  useMenuOpenFocus(containerRef, !!menu);
+  const handleRootKeyDown = useRootMenuKeyNav(containerRef);
+
   if (!menu) return null;
+
+  const validRelationshipTypes = (relationshipTypes || []).filter(
+    (rt) => rt && typeof rt.type === 'string' && rt.type.length > 0
+  );
+  const currentType = menu.edge.label || menu.edge.data?.type || '';
+  const isGeneral = !currentType || currentType === 'RELATES_TO';
+
+  // The type an edge already has is not a valid "change to" target — offering
+  // it as a selectable choice would be a no-op dressed up as an action.
+  // Picking a type closes the whole edge menu (matching the other actions
+  // below), not just the submenu, so onSelect closes the root menu itself.
+  const edgeTypeItems = validRelationshipTypes.length
+    ? [
+        {
+          key: 'RELATES_TO',
+          label: cml.generalConnection,
+          active: isGeneral,
+          disabled: isGeneral,
+          onSelect: () => {
+            onSetEdgeType(menu.edge.id, 'RELATES_TO');
+            onClose();
+          },
+        },
+        ...validRelationshipTypes
+          .filter((rt) => rt.type !== 'RELATES_TO')
+          .map((rt) => ({
+            key: rt.type,
+            label: rt.type,
+            description: rt.description,
+            active: currentType === rt.type,
+            disabled: currentType === rt.type,
+            onSelect: () => {
+              onSetEdgeType(menu.edge.id, rt.type);
+              onClose();
+            },
+          })),
+      ]
+    : [];
+
   return (
-    <div className="graph-context-menu edge-context-menu" style={{ left: menu.x, top: menu.y }}>
+    <div
+      ref={setContainerRef}
+      className="graph-context-menu edge-context-menu"
+      style={{ left: menu.x, top: menu.y }}
+      onKeyDown={handleRootKeyDown}
+    >
       <div className="context-menu-header">
         {menu.edge.label || menu.edge.data?.type || 'Connection'}
       </div>
-      {onSetEdgeType &&
-        relationshipTypes.length > 0 &&
-        (() => {
-          const currentType = menu.edge.label || menu.edge.data?.type || '';
-          const isGeneral = !currentType || currentType === 'RELATES_TO';
-          const setType = (type) => {
-            onSetEdgeType(menu.edge.id, type);
-            onClose();
-          };
-          return (
-            <>
-              <div className="context-menu-subheader">{cml.changeType}</div>
-              <div className="edge-type-list">
-                <button
-                  className={isGeneral ? 'edge-type-active' : ''}
-                  onClick={() => setType('RELATES_TO')}
-                >
-                  {isGeneral ? '✓ ' : ''}
-                  {cml.generalConnection}
-                </button>
-                {relationshipTypes
-                  .filter((rt) => rt.type !== 'RELATES_TO')
-                  .map((rt) => (
-                    <button
-                      key={rt.type}
-                      title={rt.description || undefined}
-                      className={currentType === rt.type ? 'edge-type-active' : ''}
-                      onClick={() => setType(rt.type)}
-                    >
-                      {currentType === rt.type ? '✓ ' : ''}
-                      {rt.type}
-                    </button>
-                  ))}
-              </div>
-              <div className="context-menu-separator"></div>
-            </>
-          );
-        })()}
+      {onSetEdgeType && edgeTypeItems.length > 0 && (
+        <>
+          <Submenu label={cml.changeType} items={edgeTypeItems} panelClassName="edge-type-list" />
+          <div className="context-menu-separator"></div>
+        </>
+      )}
       {onEditEdge && (
         <button
+          type="button"
+          data-menu-item="root"
           onClick={() => {
             onEditEdge(menu.edge.id, menu.edge);
             onClose();
@@ -316,6 +625,8 @@ export function EdgeContextMenu({
       )}
       {onHideEdge && (
         <button
+          type="button"
+          data-menu-item="root"
           onClick={() => {
             onHideEdge(menu.edge.id);
             onClose();
@@ -328,6 +639,8 @@ export function EdgeContextMenu({
         <>
           <div className="context-menu-separator"></div>
           <button
+            type="button"
+            data-menu-item="root"
             className="context-menu-danger"
             onClick={() => {
               onDeleteEdge(menu.edge.id);
@@ -343,18 +656,37 @@ export function EdgeContextMenu({
 }
 
 export function PaneContextMenu({ menu, labels: cml, menuRef, createAnnotation }) {
+  const [containerRef, setContainerRef] = useMergedContainerRef(menuRef);
+  useMenuOpenFocus(containerRef, !!menu);
+  const handleRootKeyDown = useRootMenuKeyNav(containerRef);
+
   if (!menu) return null;
   return (
     <div
-      ref={menuRef}
+      ref={setContainerRef}
       className="graph-context-menu pane-context-menu"
       style={{ left: menu.x, top: menu.y }}
+      onKeyDown={handleRootKeyDown}
     >
-      <button onClick={() => createAnnotation('note', menu.flowPosition)}>📝 {cml.addNote}</button>
-      <button onClick={() => createAnnotation('label', menu.flowPosition)}>
+      <button
+        type="button"
+        data-menu-item="root"
+        onClick={() => createAnnotation('note', menu.flowPosition)}
+      >
+        📝 {cml.addNote}
+      </button>
+      <button
+        type="button"
+        data-menu-item="root"
+        onClick={() => createAnnotation('label', menu.flowPosition)}
+      >
         🏷️ {cml.addLabel}
       </button>
-      <button onClick={() => createAnnotation('arrow', menu.flowPosition)}>
+      <button
+        type="button"
+        data-menu-item="root"
+        onClick={() => createAnnotation('arrow', menu.flowPosition)}
+      >
         ➡️ {cml.addArrow}
       </button>
     </div>

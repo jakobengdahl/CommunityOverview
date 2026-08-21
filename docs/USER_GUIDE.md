@@ -146,16 +146,27 @@ Right-clicking on the **canvas background** offers quick-create options:
 - Create EventSubscription (webhook)
 - Create Agent
 
+Right-clicking an **edge** opens: **Change type** (a submenu listing every relationship
+type defined in the schema; the edge's current type is shown checked and cannot be
+re-selected), **Edit**, **Hide**, and **Delete**.
+
 Right-clicking a **selection of multiple nodes** shows bulk actions: Show only these,
-Select all nodes of the same type, Organize, Hide all, Delete all. "Select all nodes of the
-same type" extends the selection to every node whose type matches any type already in the
-selection. **Organize** arranges the selected nodes — Auto-tidy, Cluster, List horizontally,
-List vertically, or Arrange as tree — keeping them centred where they already sit.
-**Auto-tidy** is the one-click option: it picks a sensible structure for you — a tree when
-the selected nodes are connected in a hierarchy, otherwise a per-type grouping — and always
-lays them out overlap-free. The same arrangements are available from the keyboard: press
-**Ctrl/Cmd+O** with a multi-selection, then **A** (auto-tidy), **C** (cluster), **H**
-(horizontal), **V** (vertical) or **T** (tree).
+Select all nodes of the same type, an **Organize** submenu, Hide all, Delete all. "Select
+all nodes of the same type" extends the selection to every node whose type matches any
+type already in the selection. **Organize** opens a submenu of arrangements — Auto-tidy,
+Cluster, List horizontally, List vertically, or Arrange as tree — keeping the nodes
+centred where they already sit. **Auto-tidy** is the one-click option: it picks a sensible
+structure for you — a tree when the selected nodes are connected in a hierarchy,
+otherwise a per-type grouping — and always lays them out overlap-free. The same
+arrangements are available from the keyboard: press **Ctrl/Cmd+O** with a
+multi-selection, then **A** (auto-tidy), **C** (cluster), **H** (horizontal), **V**
+(vertical) or **T** (tree).
+
+Every context menu supports keyboard use: opening one moves focus to its first item,
+**↑/↓** move between items and wrap at the ends, **Home/End** jump to the first/last
+item, and **Escape** closes the menu and returns focus to wherever it was before the
+menu opened. A submenu trigger (**Change type**, **Organize**) also opens with **→**
+or **Enter**, and closes with **←** or **Escape** without closing the menu it belongs to.
 
 Moving nodes can be undone: **Ctrl/Cmd+Z** reverses the last node move (a drag or an
 Organize arrangement), and **Ctrl/Cmd+Shift+Z** (or **Ctrl/Cmd+Y**) reapplies it.
