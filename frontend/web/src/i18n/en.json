@@ -463,5 +463,15 @@
     "snap_peek": "Peek",
     "snap_half": "Half",
     "snap_full": "Full"
+  },
+  "mobile_nav": {
+    "bottom_nav": "App navigation",
+    "graph": "Graph",
+    "search": "Search",
+    "create": "Create",
+    "chat": "Chat",
+    "menu": "Menu",
+    "search_panel_title": "Search",
+    "create_panel_title": "Create"
   }
 }

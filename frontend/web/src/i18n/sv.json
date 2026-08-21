@@ -463,5 +463,15 @@
     "snap_peek": "Kika",
     "snap_half": "Halv",
     "snap_full": "Full"
+  },
+  "mobile_nav": {
+    "bottom_nav": "Appnavigering",
+    "graph": "Graf",
+    "search": "Sök",
+    "create": "Skapa",
+    "chat": "Chatt",
+    "menu": "Meny",
+    "search_panel_title": "Sök",
+    "create_panel_title": "Skapa"
   }
 }
