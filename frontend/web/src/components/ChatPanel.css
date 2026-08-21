@@ -816,6 +816,14 @@
    minimized bar's 40px width is widened to the minimum instead of relying
    on its already-tall vertical extent. */
 @media (pointer: coarse) {
+  .chat-panel-floating,
+  .chat-panel-floating.minimap-hidden {
+    bottom: calc(72px + env(safe-area-inset-bottom));
+    height: auto;
+    max-height: none;
+    min-height: 0;
+  }
+
   .chat-panel-minimized {
     width: 44px;
   }
