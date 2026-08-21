@@ -133,8 +133,15 @@ export function buildContextMenuUrl(urlTemplate, nodeData) {
  * top level. Opens on click/Enter/Space/ArrowRight (not hover-only, so it works
  * the same on touch); Escape/ArrowLeft closes it and returns focus to the
  * trigger without closing the parent menu.
+ *
+ * `resetKey` should be the enclosing menu's descriptor object. GraphCanvas can
+ * retarget an already-open menu straight to a different node/edge without an
+ * intervening close (a new descriptor, same component instance), which would
+ * otherwise leave a submenu that was open for the old target still expanded —
+ * showing the new target's items but never actually opened for it. Collapse
+ * whenever the identity changes.
  */
-function Submenu({ label, ariaLabel, items, panelClassName, disabled = false }) {
+function Submenu({ label, ariaLabel, items, panelClassName, disabled = false, resetKey }) {
   const [open, setOpen] = useState(false);
   const [flip, setFlip] = useState({ x: false, y: false });
   const triggerRef = useRef(null);
@@ -144,6 +151,13 @@ function Submenu({ label, ariaLabel, items, panelClassName, disabled = false }) 
     setOpen(false);
     if (opts?.refocusTrigger !== false) triggerRef.current?.focus();
   }, []);
+
+  // Collapse if the enclosing menu retargets to a different node/edge (see
+  // the `resetKey` doc above) — guarded so a resetKey change that finds the
+  // submenu already closed doesn't trigger a pointless extra render.
+  useEffect(() => {
+    setOpen((wasOpen) => (wasOpen ? false : wasOpen));
+  }, [resetKey]);
 
   // Focus the first enabled item as soon as the panel opens.
   useEffect(() => {
@@ -520,6 +534,7 @@ export function MultiNodeContextMenu({
             ariaLabel={cml.organize}
             items={organizeItems}
             panelClassName="organize-list"
+            resetKey={menu}
           />
         </>
       )}
@@ -631,7 +646,12 @@ export function EdgeContextMenu({
       </div>
       {onSetEdgeType && edgeTypeItems.length > 0 && (
         <>
-          <Submenu label={cml.changeType} items={edgeTypeItems} panelClassName="edge-type-list" />
+          <Submenu
+            label={cml.changeType}
+            items={edgeTypeItems}
+            panelClassName="edge-type-list"
+            resetKey={menu}
+          />
           <div className="context-menu-separator"></div>
         </>
       )}

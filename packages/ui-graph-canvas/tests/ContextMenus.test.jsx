@@ -662,6 +662,34 @@ describe('EdgeContextMenu', () => {
     expect(document.activeElement).toBe(screen.getByRole('button', { name: /^change type$/i }));
   });
 
+  it('collapses an open Change type submenu when the menu retargets to a different edge', () => {
+    const otherEdge = { id: 'e2', label: 'WORKS_FOR', data: {} };
+    const { rerender } = render(
+      <EdgeContextMenu
+        menu={{ x: 0, y: 0, edge }}
+        labels={labels}
+        relationshipTypes={relationshipTypes}
+        onSetEdgeType={vi.fn()}
+        onClose={vi.fn()}
+      />
+    );
+    fireEvent.click(screen.getByRole('button', { name: /^change type$/i }));
+    expect(document.querySelector('.context-submenu-panel')).not.toBeNull();
+
+    // Retargeting straight to a different edge (no intervening close) must not
+    // leave the previous target's submenu looking open for the new target.
+    rerender(
+      <EdgeContextMenu
+        menu={{ x: 10, y: 10, edge: otherEdge }}
+        labels={labels}
+        relationshipTypes={relationshipTypes}
+        onSetEdgeType={vi.fn()}
+        onClose={vi.fn()}
+      />
+    );
+    expect(document.querySelector('.context-submenu-panel')).toBeNull();
+  });
+
   it('flips the submenu panel to the opposite side/edge when it would overflow the viewport', () => {
     const originalRect = Element.prototype.getBoundingClientRect;
     Element.prototype.getBoundingClientRect = () => ({
