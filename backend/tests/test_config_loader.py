@@ -188,7 +188,16 @@ class TestConfigLoader:
         assert "prompt_prefix" in presentation
         assert "prompt_suffix" in presentation
         assert "default_language" in presentation
+        assert "default_chat_collapsed" in presentation
         assert "language_policy" in presentation
+
+    def test_default_chat_collapsed_defaults_false(self):
+        """A config without an explicit setting keeps the assistant panel open."""
+        from backend.config import config_loader
+
+        presentation = config_loader.get_presentation()
+
+        assert presentation["default_chat_collapsed"] is False
 
     def test_custom_presentation(self):
         """Test presentation from custom config."""

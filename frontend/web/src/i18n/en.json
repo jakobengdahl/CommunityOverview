@@ -218,6 +218,8 @@
     "view_section": "View",
     "show_minimap": "Show minimap",
     "show_node_preview": "Show node preview popup",
+    "show_assistant_panel": "Assistant panel open",
+    "reset_assistant_panel_default": "Reset to default",
     "language_section": "Language",
     "language_en": "English",
     "language_sv": "Svenska",

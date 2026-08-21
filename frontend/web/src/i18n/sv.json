@@ -218,6 +218,8 @@
     "view_section": "Vy",
     "show_minimap": "Visa minimapp",
     "show_node_preview": "Visa förhandsvisning av noder",
+    "show_assistant_panel": "Assistentpanelen öppen",
+    "reset_assistant_panel_default": "Återställ till standard",
     "language_section": "Språk",
     "language_en": "English",
     "language_sv": "Svenska",
