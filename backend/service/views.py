@@ -32,9 +32,21 @@ def _annotation_document_to_legacy_metadata(
             continue
         annotation_type = annotation.get("type") or annotation.get("kind")
         if annotation_type == "group":
-            geometry = annotation.get("geometry") if isinstance(annotation.get("geometry"), dict) else {}
-            position = annotation.get("position") if isinstance(annotation.get("position"), dict) else {}
-            size = annotation.get("size") if isinstance(annotation.get("size"), dict) else {}
+            geometry = (
+                annotation.get("geometry")
+                if isinstance(annotation.get("geometry"), dict)
+                else {}
+            )
+            position = (
+                annotation.get("position")
+                if isinstance(annotation.get("position"), dict)
+                else {}
+            )
+            size = (
+                annotation.get("size")
+                if isinstance(annotation.get("size"), dict)
+                else {}
+            )
             group: Dict[str, Any] = {
                 "id": annotation.get("id"),
                 "label": annotation.get("label", "Group"),
@@ -48,14 +60,20 @@ def _annotation_document_to_legacy_metadata(
             height = size.get("h", geometry.get("h", geometry.get("height")))
             if width is not None and height is not None:
                 group["style"] = {"width": width, "height": height}
-            style = annotation.get("style") if isinstance(annotation.get("style"), dict) else {}
+            style = (
+                annotation.get("style")
+                if isinstance(annotation.get("style"), dict)
+                else {}
+            )
             color = annotation.get("color") or style.get("color")
             if color is not None:
                 group["color"] = color
             groups.append(group)
             if isinstance(annotation.get("member_node_ids"), list):
                 for node_id in annotation["member_node_ids"]:
-                    if isinstance(node_id, str) and isinstance(annotation.get("id"), str):
+                    if isinstance(node_id, str) and isinstance(
+                        annotation.get("id"), str
+                    ):
                         parent_ids[node_id] = annotation["id"]
         else:
             annotations.append(annotation)
@@ -251,7 +269,9 @@ def get_saved_view(
     filtered_hidden_node_ids = [
         node_id for node_id in hidden_node_ids if node_id in visible_node_id_set
     ]
-    legacy_parent_ids = view_node.metadata.get("parentIds", {}) or legacy_from_document["parentIds"]
+    legacy_parent_ids = (
+        view_node.metadata.get("parentIds", {}) or legacy_from_document["parentIds"]
+    )
     parent_ids = {
         node_id: group_id
         for node_id, group_id in legacy_parent_ids.items()
@@ -271,7 +291,9 @@ def get_saved_view(
         "action": "load_visualization",
     }
     if annotation_document:
-        result["annotation_schema_version"] = view_node.metadata.get("annotation_schema_version", 1)
+        result["annotation_schema_version"] = view_node.metadata.get(
+            "annotation_schema_version", 1
+        )
         result["annotation_document"] = annotation_document
     return result
 

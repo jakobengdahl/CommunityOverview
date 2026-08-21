@@ -405,7 +405,9 @@ class TestGraphServiceSavedViews:
         assert result["success"] is False
         assert "error" in result
 
-    def test_get_saved_view_returns_v1_annotation_document_when_persisted(self, service_with_view: GraphService):
+    def test_get_saved_view_returns_v1_annotation_document_when_persisted(
+        self, service_with_view: GraphService
+    ):
         """Saved views can carry the v1 annotation document while keeping legacy fields."""
         storage = service_with_view._storage
         view = storage.get_node("view-1")
@@ -413,12 +415,33 @@ class TestGraphServiceSavedViews:
         view.metadata["annotation_document"] = {
             "schema_version": 1,
             "annotations": [
-                {"id": "group-1", "type": "group", "kind": "group", "label": "G", "member_node_ids": ["actor-1"]},
-                {"id": "note-1", "type": "note", "kind": "note", "text": "hello", "position": {"x": 1, "y": 2}},
+                {
+                    "id": "group-1",
+                    "type": "group",
+                    "kind": "group",
+                    "label": "G",
+                    "member_node_ids": ["actor-1"],
+                },
+                {
+                    "id": "note-1",
+                    "type": "note",
+                    "kind": "note",
+                    "text": "hello",
+                    "position": {"x": 1, "y": 2},
+                },
             ],
         }
-        view.metadata["groups"] = [{"id": "group-1", "label": "G", "position": {"x": 0, "y": 0}}]
-        view.metadata["annotations"] = [{"id": "note-1", "kind": "note", "text": "hello", "position": {"x": 1, "y": 2}}]
+        view.metadata["groups"] = [
+            {"id": "group-1", "label": "G", "position": {"x": 0, "y": 0}}
+        ]
+        view.metadata["annotations"] = [
+            {
+                "id": "note-1",
+                "kind": "note",
+                "text": "hello",
+                "position": {"x": 1, "y": 2},
+            }
+        ]
         storage.update_node("view-1", {"metadata": view.metadata})
 
         result = service_with_view.get_saved_view("Test View")
@@ -428,7 +451,9 @@ class TestGraphServiceSavedViews:
         assert result["annotation_document"]["annotations"][0]["type"] == "group"
         assert result["annotations"][0]["kind"] == "note"
 
-    def test_get_saved_view_derives_legacy_fields_from_v1_only_document(self, service_with_view: GraphService):
+    def test_get_saved_view_derives_legacy_fields_from_v1_only_document(
+        self, service_with_view: GraphService
+    ):
         """Existing load paths still receive groups/annotations from v1-only saved views."""
         storage = service_with_view._storage
         view = storage.get_node("view-1")

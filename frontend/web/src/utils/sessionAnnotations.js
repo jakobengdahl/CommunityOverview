@@ -7,11 +7,12 @@ import { createAnnotation, normalizeAnnotationDocument } from '@community-graph/
 // `kind: "group"` (design 3.1). These two helpers translate between that
 // server shape and the {groups, parentIds} shape the canvas round-trips.
 function documentAnnotations(annotations) {
+  if (annotations == null) return [];
   if (annotations?.schema_version === 1 && Array.isArray(annotations.annotations)) {
     return normalizeAnnotationDocument(annotations).annotations;
   }
   if (Array.isArray(annotations)) return normalizeAnnotationDocument(annotations).annotations;
-  return [];
+  throw new Error('Malformed session payload: state.annotations is not an array');
 }
 
 export function annotationDocumentToLegacyMetadata(documentInput) {
@@ -26,6 +27,9 @@ export function annotationDocumentToLegacyMetadata(documentInput) {
 export function legacyMetadataToAnnotationDocument(metadata = {}) {
   if (metadata.annotation_document)
     return normalizeAnnotationDocument(metadata.annotation_document);
+  if (metadata.annotations != null && !Array.isArray(metadata.annotations)) {
+    throw new Error('Malformed session payload: state.annotations is not an array');
+  }
   if (metadata.annotation_schema_version === 1 && Array.isArray(metadata.annotations)) {
     return normalizeAnnotationDocument(metadata.annotations);
   }

@@ -9,7 +9,8 @@ const canvasProps = vi.hoisted(() => ({ baselineEpoch: null }));
 
 // GraphCanvas stub: replays the saveViewSignal round-trip that App's session
 // snapshot mechanism is multiplexed over, without rendering ReactFlow.
-vi.mock('@community-graph/ui-graph-canvas', async () => {
+vi.mock('@community-graph/ui-graph-canvas', async (importOriginal) => {
+  const actual = await importOriginal();
   const { useEffect } = await import('react');
   function GraphCanvas({
     nodes = [],
@@ -36,6 +37,7 @@ vi.mock('@community-graph/ui-graph-canvas', async () => {
     return <div data-testid="graph-canvas-stub" />;
   }
   return {
+    ...actual,
     GraphCanvas,
     positionNewNodes: (newNodes) => newNodes,
   };

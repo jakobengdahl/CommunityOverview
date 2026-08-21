@@ -39,7 +39,18 @@ from typing import Any, Deque, Dict, List, Optional, Protocol
 # previously-shared session URLs keep resolving.
 SESSION_ID_RE = re.compile(r"^\d{4}-\d{4}(?:-\d{4}-\d{4})?$")
 
-_ANNOTATION_TYPES = {"group", "note", "text", "label", "line", "frame", "shape", "icon", "vote_dot", "image"}
+_ANNOTATION_TYPES = {
+    "group",
+    "note",
+    "text",
+    "label",
+    "line",
+    "frame",
+    "shape",
+    "icon",
+    "vote_dot",
+    "image",
+}
 _LEGACY_ANNOTATION_ALIASES = {"arrow": "line"}
 _DEFAULT_MAX_ANNOTATIONS = 2000
 _DEFAULT_RING_SIZE = 500
@@ -661,7 +672,8 @@ class SessionStore:
                 (
                     a
                     for a in state["annotations"]
-                    if a.get("id") == group_id and (a.get("type") or a.get("kind")) == "group"
+                    if a.get("id") == group_id
+                    and (a.get("type") or a.get("kind")) == "group"
                 ),
                 None,
             )

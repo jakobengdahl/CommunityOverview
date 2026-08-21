@@ -221,7 +221,9 @@ class TestStateOps:
         assert applied["annotation"]["type"] == "note"
         assert s.state["annotations"][0]["text"] == "hi"
 
-    def test_annotation_created_accepts_v1_types_and_migrates_arrow_alias(self, tmp_path):
+    def test_annotation_created_accepts_v1_types_and_migrates_arrow_alias(
+        self, tmp_path
+    ):
         store = _store(tmp_path)
         s = store.create()
         line = self._apply(
@@ -229,13 +231,21 @@ class TestStateOps:
             s,
             {
                 "op": "annotation_created",
-                "annotation": {"id": "line-1", "type": "line", "from": {"x": 0, "y": 0}, "to": {"x": 1, "y": 1}},
+                "annotation": {
+                    "id": "line-1",
+                    "type": "line",
+                    "from": {"x": 0, "y": 0},
+                    "to": {"x": 1, "y": 1},
+                },
             },
         )
         arrow = self._apply(
             store,
             s,
-            {"op": "annotation_created", "annotation": {"id": "arrow-1", "kind": "arrow"}},
+            {
+                "op": "annotation_created",
+                "annotation": {"id": "arrow-1", "kind": "arrow"},
+            },
         )
         assert line["annotation"]["kind"] == "line"
         assert arrow["annotation"]["type"] == "line"
