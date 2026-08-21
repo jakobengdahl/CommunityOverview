@@ -3,13 +3,10 @@ import { GraphCanvas } from '@community-graph/ui-graph-canvas';
 import '@community-graph/ui-graph-canvas/styles';
 import useGraphStore from './store/graphStore';
 import { useI18n } from './i18n';
-import FloatingHeader from './components/FloatingHeader';
-import FloatingToolbar from './components/FloatingToolbar';
-import FloatingSearch from './components/FloatingSearch';
-import ChatPanel from './components/ChatPanel';
+import DesktopShell from './components/DesktopShell';
+import MobileShell from './components/MobileShell';
 import CollectKioskView from './components/CollectKioskView';
 import GuideOverlay from './components/GuideOverlay';
-import SessionDrawer from './components/SessionDrawer';
 import RecentActivityDrawer from './components/RecentActivityDrawer';
 import NodeHistoryPanel from './components/NodeHistoryPanel';
 import AppDialogs from './components/AppDialogs';
@@ -1739,6 +1736,56 @@ function App() {
     setDeleteSessionDialog,
   };
 
+  // The session drawer is non-modal (in either shell), so any dialog can be
+  // stacked on top of it; while one is open, Escape belongs to that dialog.
+  const suspendEscape = !!(
+    settingsOpen ||
+    connectDialogOpen ||
+    renameDialog ||
+    deleteSessionDialog ||
+    clearConfirm ||
+    createNodeType ||
+    editingNode ||
+    detailNode ||
+    editingEdge ||
+    deleteDialog ||
+    saveViewDialog ||
+    showSubscriptionDialog ||
+    showAgentDialog ||
+    showAgentRunsDialog ||
+    showAgentProposalsDialog ||
+    skillDialogType ||
+    showAKCDialog
+  );
+
+  const shellProps = {
+    sessionId,
+    sessions,
+    currentSessionId: sessionId,
+    onNewSession: handleNewSession,
+    onConnectSession: () => setConnectDialogOpen(true),
+    onSelectSession: handleSelectSession,
+    onRenameSession: (id) => {
+      const entry = sessions.find((s) => s.id === id);
+      setRenameDialog({ id, name: entry?.name || '' });
+    },
+    onDeleteSession: handleRequestDeleteSession,
+    onCopySessionLink: handleCopySessionLink,
+    onCopyTriggerUrl: handleCopyTriggerUrl,
+    onOpenSettings: () => setSettingsOpen(true),
+    canvasLocked,
+    onToggleLock: () => setCanvasLocked(!canvasLocked),
+    suspendEscape,
+    onCreateNodeForType: handleCreateNodeForType,
+    onCreateAgent: handleCreateAgent,
+    onCreateSubscription: handleCreateSubscription,
+    onSaveView: handleToolbarSaveView,
+    onCreateGroup: handleToolbarCreateGroup,
+    onCreateActiveKnowledgeCollection: handleCreateAKC,
+    llmAvailable,
+    akcShortName,
+  };
+
   return (
     <div
       className={`app${drawerOpen ? ' session-drawer-open' : ''}${isMobile ? ' is-mobile' : ''}${isCoarsePointer ? ' is-touch' : ''}`}
@@ -1865,59 +1912,27 @@ function App() {
         />
       </div>
 
-      <FloatingHeader
-        sessionId={sessionId}
-        roster={roster}
-        currentClientId={api.getClientId()}
-        onClear={() => requestClear('button')}
-        onToggleDrawer={() => setDrawerOpen((prev) => !prev)}
-      />
-      <SessionDrawer
-        open={drawerOpen}
-        onClose={() => setDrawerOpen(false)}
-        sessions={sessions}
-        currentSessionId={sessionId}
-        onNewSession={handleNewSession}
-        onConnectSession={() => setConnectDialogOpen(true)}
-        onSelectSession={handleSelectSession}
-        onRenameSession={(id) => {
-          const entry = sessions.find((s) => s.id === id);
-          setRenameDialog({ id, name: entry?.name || '' });
-        }}
-        onDeleteSession={handleRequestDeleteSession}
-        onCopySessionLink={handleCopySessionLink}
-        onCopyTriggerUrl={handleCopyTriggerUrl}
-        onOpenSettings={() => setSettingsOpen(true)}
-        onOpenActivity={() => {
-          setDrawerOpen(false);
-          setActivityOpen(true);
-        }}
-        canvasLocked={canvasLocked}
-        onToggleLock={() => setCanvasLocked(!canvasLocked)}
-        suspendEscape={
-          !!(
-            // The drawer is non-modal, so any dialog can be stacked on top of
-            // it; while one is open, Escape belongs to that dialog.
-            settingsOpen ||
-            connectDialogOpen ||
-            renameDialog ||
-            deleteSessionDialog ||
-            clearConfirm ||
-            createNodeType ||
-            editingNode ||
-            detailNode ||
-            editingEdge ||
-            deleteDialog ||
-            saveViewDialog ||
-            showSubscriptionDialog ||
-            showAgentDialog ||
-            showAgentRunsDialog ||
-            showAgentProposalsDialog ||
-            skillDialogType ||
-            showAKCDialog
-          )
-        }
-      />
+      {isMobile ? (
+        <MobileShell
+          {...shellProps}
+          onClear={() => requestClear('button')}
+          onOpenActivity={() => setActivityOpen(true)}
+        />
+      ) : (
+        <DesktopShell
+          {...shellProps}
+          roster={roster}
+          currentClientId={api.getClientId()}
+          onClear={() => requestClear('button')}
+          drawerOpen={drawerOpen}
+          onToggleDrawer={() => setDrawerOpen((prev) => !prev)}
+          onCloseDrawer={() => setDrawerOpen(false)}
+          onOpenActivity={() => {
+            setDrawerOpen(false);
+            setActivityOpen(true);
+          }}
+        />
+      )}
       <RecentActivityDrawer open={activityOpen} onClose={() => setActivityOpen(false)} />
       {clearConfirm && (
         <ConfirmDialog
@@ -1944,16 +1959,6 @@ function App() {
           {t('federation.depth_indicator', { current: federationDepth, max: maxFederationDepth })}
         </div>
       )}
-      <FloatingSearch />
-      <FloatingToolbar
-        onCreateNode={handleCreateNodeForType}
-        onCreateAgent={handleCreateAgent}
-        onCreateSubscription={handleCreateSubscription}
-        onSaveView={handleToolbarSaveView}
-        onCreateGroup={handleToolbarCreateGroup}
-        onCreateActiveKnowledgeCollection={handleCreateAKC}
-      />
-      {llmAvailable && <ChatPanel collectionShortName={akcShortName || undefined} />}
       <NodeHistoryPanel />
 
       {notification && (

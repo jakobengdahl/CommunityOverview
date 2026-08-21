@@ -719,7 +719,23 @@ animation.
 ## 9. On a phone
 
 On a phone-sized screen (roughly 768 px wide and below) the canvas swaps its
-desktop chrome for a layout that fits a thumb.
+desktop chrome — the header, search bar, toolbar, chat panel and session
+menu — for a layout that fits a thumb.
+
+**Navigation.** A compact top bar replaces the desktop header, and a five-slot
+bottom navigation bar replaces the toolbar and the hamburger menu:
+
+| Slot | Effect |
+|------|--------|
+| **Graph** | Closes any open panel and returns to the full-screen canvas |
+| **Search** | Opens the graph search in a sheet that slides up from the bottom |
+| **Create** | Opens the node-type picker in the same bottom sheet |
+| **Chat** | Opens the AI assistant (only shown when it is available) |
+| **Menu** | Opens the session menu — the same panel described in
+[section 5](#5-session-menu-and-settings) |
+
+Only one of these is ever open at a time — opening one closes whatever else was
+open, so the canvas is never covered by more than one panel at once.
 
 **Canvas controls.** The desktop zoom cluster is replaced by a compact pill in
 the bottom-right corner with four touch-sized buttons: **zoom in**, **zoom out**,
@@ -797,3 +813,5 @@ Screenshots for this guide are saved to `docs/images/` in PNG format.
 | `federation-depth.png` | pending | Canvas depth selector (requires federation-enabled instance) |
 | `mobile-canvas-controls.png` | pending | Phone viewport with the compact zoom/fit/focus pill in the bottom-right corner |
 | `mobile-focus-view.png` | pending | Phone viewport in focus view — one node ringed by its direct neighbours |
+| `mobile-bottom-nav.png` | pending | Phone viewport showing the compact top bar and the five-slot bottom navigation |
+| `mobile-create-sheet.png` | pending | Phone viewport with the Create bottom sheet open over the canvas |

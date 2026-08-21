@@ -21,12 +21,12 @@ const LONG_PRESS_HOLD_MS = 900;
 // Kept per-edge rather than as one list: exempting a subtree from both edges
 // costs far more coverage than the break being silenced. The chat panel is the
 // largest subtree in the shell, and only its left edge is broken.
-//
-// .floating-header — a nowrap flex row with no max-width, so at 390px its
-//   session id ends at x~424 and its clear button at x~455.
-const KNOWN_RIGHT_OVERFLOW = ['.floating-header'];
+const KNOWN_RIGHT_OVERFLOW = [];
 // .chat-panel-floating — a fixed 380px anchored 16px from the right edge, so at
 //   390px its left edge sits at x~-6. Its right edge is inside on both devices.
+// ChatPanel keeps its own pre-existing floating/minimized presentation in
+// MobileShell (see MobileShell.jsx) rather than being re-hosted in the bottom
+// sheet, so this pre-existing break is unchanged by the mobile shell split.
 const KNOWN_LEFT_OVERFLOW = ['.chat-panel-floating'];
 
 /**
@@ -144,10 +144,20 @@ async function openApp(page) {
   // The coarse-pointer branch is what every assertion below depends on; if the
   // project stopped emulating touch these tests would silently pass as desktop.
   await expect(page.locator('.app.is-touch')).toBeVisible();
+  await expect(page.locator('.mobile-shell-bottomnav')).toBeVisible();
+}
+
+/**
+ * Opens the Create bottom sheet via the nav (this also minimizes the chat
+ * panel if it was expanded — MobileShell keeps at most one surface open).
+ */
+async function openCreatePanel(page) {
+  await page.locator('.mobile-shell-bottomnav-item[aria-label="Create"]').tap();
+  await expect(page.locator('.bottom-sheet')).toBeVisible();
 }
 
 async function createNodeFromToolbox(page, nodeType, name) {
-  await minimizeChat(page);
+  await openCreatePanel(page);
   await page.locator(`.floating-toolbar-item[aria-label="${nodeType}"]`).tap();
 
   const dialog = page.locator('.create-node-dialog');
@@ -155,6 +165,8 @@ async function createNodeFromToolbox(page, nodeType, name) {
   await dialog.locator('#create-name').fill(name);
   await dialog.locator('button[type="submit"]').tap();
   await expect(dialog).toBeHidden();
+  // Picking a type closes the sheet — it does not linger over the canvas.
+  await expect(page.locator('.bottom-sheet')).toHaveCount(0);
 }
 
 test.describe('mobile shell', () => {
@@ -195,16 +207,38 @@ test.describe('mobile shell', () => {
     ).toEqual([]);
   });
 
-  test('hamburger opens the session drawer', async ({ page }) => {
+  test('the Menu nav item opens the session drawer', async ({ page }) => {
     await openApp(page);
 
     const drawer = page.locator('.session-drawer');
     await expect(drawer).not.toHaveClass(/\bopen\b/);
 
-    await page.locator('.floating-header-hamburger').tap();
+    await page.locator('.mobile-shell-bottomnav-item[aria-label="Menu"]').tap();
 
     await expect(drawer).toHaveClass(/\bopen\b/);
     await expect(drawer.locator('.session-drawer-item').first()).toBeVisible();
+  });
+
+  test('at most one surface covers the canvas at a time', async ({ page }) => {
+    await openApp(page);
+    // Chat starts expanded by default (chatPanelOpen defaults to true).
+    await expect(page.locator('.chat-panel-floating')).toBeVisible();
+
+    await page.locator('.mobile-shell-bottomnav-item[aria-label="Create"]').tap();
+    await expect(page.locator('.bottom-sheet')).toBeVisible();
+    // Opening the create sheet must minimize chat first.
+    await expect(page.locator('.chat-panel-floating')).toHaveCount(0);
+    await expect(page.locator('.chat-panel-minimized')).toBeVisible();
+
+    await page.locator('.mobile-shell-bottomnav-item[aria-label="Chat"]').tap();
+    // Opening chat must close the sheet.
+    await expect(page.locator('.bottom-sheet')).toHaveCount(0);
+    await expect(page.locator('.chat-panel-floating')).toBeVisible();
+
+    await page.locator('.mobile-shell-bottomnav-item[aria-label="Menu"]').tap();
+    // Opening the menu drawer must minimize chat too.
+    await expect(page.locator('.session-drawer')).toHaveClass(/\bopen\b/);
+    await expect(page.locator('.chat-panel-floating')).toHaveCount(0);
   });
 
   test('a node can be created from the toolbox', async ({ page }, testInfo) => {
