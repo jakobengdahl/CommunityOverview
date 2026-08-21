@@ -202,7 +202,8 @@ The presentation section controls the UI and AI behavior:
     },
     "prompt_prefix": "You are a knowledge agent for my domain...",
     "prompt_suffix": "Always confirm before making changes.",
-    "default_language": "en"
+    "default_language": "en",
+    "default_chat_collapsed": false
   }
 }
 ```
@@ -215,6 +216,7 @@ The presentation section controls the UI and AI behavior:
 | `prompt_prefix` | Injected at the start of the AI system prompt |
 | `prompt_suffix` | Appended to the AI system prompt |
 | `default_language` | Default UI language (`"en"` or `"sv"`) |
+| `default_chat_collapsed` | Whether the assistant panel starts collapsed for a visitor with no stored preference of their own (default `false`, i.e. open). A visitor's own explicit open/collapse choice, once made, is stored in their browser and takes precedence over this on every later visit until they reset it |
 | `skills_config` | Skills loader settings (see below) |
 
 #### Model profiles

@@ -215,6 +215,7 @@
     "prompt_prefix": "You are a knowledge agent that helps users navigate and maintain a knowledge graph for community collaboration on public digitalization.",
     "prompt_suffix": "Remember to suggest saved views when relevant, and always ask for confirmation before making changes to the graph.",
     "default_language": "en",
+    "default_chat_collapsed": false,
     "language_policy": {
       "mode": "preferred",
       "primary_language": "en",

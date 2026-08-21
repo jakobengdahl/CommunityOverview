@@ -278,7 +278,13 @@ function GuideOverlay() {
         } else if (action === 'maximize_chat') {
           if (!cancelled) useGraphStore.getState().setChatPanelOpen(true);
         } else if (action === 'toggle_chat') {
-          if (!cancelled) useGraphStore.getState().toggleChatPanel();
+          // Deliberately setChatPanelOpen, not toggleChatPanel: a scripted tour
+          // step is staging the panel, not the visitor stating a real
+          // preference, and must not persist over their actual choice.
+          if (!cancelled) {
+            const { chatPanelOpen, setChatPanelOpen } = useGraphStore.getState();
+            setChatPanelOpen(!chatPanelOpen);
+          }
         }
       } catch (err) {
         console.error('[GuideOverlay] Action error:', err);
