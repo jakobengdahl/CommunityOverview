@@ -165,6 +165,47 @@ body.graph-suppress-selection * {
   color: #888;
 }
 
+/* Submenu (e.g. edge "Change type", multi-select "Organize"): a root-level
+   trigger button that flies out a nested panel instead of listing every
+   option inline. Opens on click/keyboard, not hover-only, so touch works. */
+.context-submenu {
+  position: relative;
+}
+
+.context-submenu-trigger {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+}
+
+.context-submenu-trigger[aria-expanded='true'] {
+  background: rgba(100, 108, 255, 0.2);
+}
+
+.context-submenu-caret {
+  opacity: 0.6;
+}
+
+.context-submenu-panel {
+  position: absolute;
+  left: 100%;
+  top: 0;
+  margin-left: 2px;
+}
+
+.context-submenu-panel-flip-x {
+  left: auto;
+  right: 100%;
+  margin-left: 0;
+  margin-right: 2px;
+}
+
+.context-submenu-panel-flip-y {
+  top: auto;
+  bottom: 0;
+}
+
 .edge-type-list {
   max-height: 220px;
   overflow-y: auto;
@@ -173,6 +214,30 @@ body.graph-suppress-selection * {
 .edge-type-list button.edge-type-active {
   color: #60a5fa;
   font-weight: 600;
+}
+
+.graph-context-menu button:disabled {
+  opacity: 0.5;
+  cursor: default;
+}
+
+.graph-context-menu button:disabled:hover {
+  background: transparent;
+}
+
+/* Touch/coarse-pointer devices: bigger hit targets, since hover affordances
+   (e.g. `:hover` highlighting) don't apply and fingers are less precise than
+   a cursor. */
+@media (pointer: coarse) {
+  .graph-context-menu button {
+    padding: 12px 14px;
+    font-size: 14px;
+    min-height: 44px;
+  }
+
+  .context-submenu-panel {
+    min-width: 160px;
+  }
 }
 
 /* Selected edge styling */
