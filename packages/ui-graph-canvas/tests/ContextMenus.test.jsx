@@ -599,6 +599,116 @@ describe('EdgeContextMenu', () => {
     expect(document.activeElement).toBe(trigger);
     document.body.removeChild(trigger);
   });
+
+  it('does not steal focus back on close if focus already moved elsewhere on the page', () => {
+    const { rerender } = render(
+      <EdgeContextMenu
+        menu={{ x: 0, y: 0, edge }}
+        labels={labels}
+        relationshipTypes={relationshipTypes}
+        onSetEdgeType={vi.fn()}
+        onClose={vi.fn()}
+      />
+    );
+    // Something outside the menu (e.g. a search box the host closes menus for)
+    // takes focus while the menu is still open.
+    const elsewhere = document.createElement('input');
+    document.body.appendChild(elsewhere);
+    elsewhere.focus();
+    expect(document.activeElement).toBe(elsewhere);
+
+    rerender(
+      <EdgeContextMenu
+        menu={null}
+        labels={labels}
+        relationshipTypes={relationshipTypes}
+        onClose={vi.fn()}
+      />
+    );
+    // Closing must not yank focus back to the menu's original trigger.
+    expect(document.activeElement).toBe(elsewhere);
+    document.body.removeChild(elsewhere);
+  });
+
+  it('re-focuses the first item when the menu retargets to a different edge without closing first', () => {
+    const otherEdge = { id: 'e2', label: 'WORKS_FOR', data: {} };
+    const { rerender } = render(
+      <EdgeContextMenu
+        menu={{ x: 0, y: 0, edge }}
+        labels={labels}
+        relationshipTypes={relationshipTypes}
+        onSetEdgeType={vi.fn()}
+        onEditEdge={vi.fn()}
+        onClose={vi.fn()}
+      />
+    );
+    const changeTypeBtn = screen.getByRole('button', { name: /^change type$/i });
+    expect(document.activeElement).toBe(changeTypeBtn);
+    fireEvent.keyDown(changeTypeBtn, { key: 'ArrowDown' });
+    expect(document.activeElement).toBe(screen.getByRole('button', { name: /edit/i }));
+
+    // GraphCanvas retargets an open menu straight to a new edge — a new
+    // descriptor object, never passing through `menu: null`.
+    rerender(
+      <EdgeContextMenu
+        menu={{ x: 10, y: 10, edge: otherEdge }}
+        labels={labels}
+        relationshipTypes={relationshipTypes}
+        onSetEdgeType={vi.fn()}
+        onEditEdge={vi.fn()}
+        onClose={vi.fn()}
+      />
+    );
+    expect(document.activeElement).toBe(screen.getByRole('button', { name: /^change type$/i }));
+  });
+
+  it('flips the submenu panel to the opposite side/edge when it would overflow the viewport', () => {
+    const originalRect = Element.prototype.getBoundingClientRect;
+    Element.prototype.getBoundingClientRect = () => ({
+      x: 0,
+      y: 0,
+      width: 200,
+      height: 200,
+      top: 0,
+      left: 0,
+      right: window.innerWidth + 50,
+      bottom: window.innerHeight + 50,
+      toJSON() {},
+    });
+    try {
+      render(
+        <EdgeContextMenu
+          menu={{ x: 0, y: 0, edge }}
+          labels={labels}
+          relationshipTypes={relationshipTypes}
+          onSetEdgeType={vi.fn()}
+          onClose={vi.fn()}
+        />
+      );
+      fireEvent.click(screen.getByRole('button', { name: /^change type$/i }));
+      const panel = document.querySelector('.context-submenu-panel');
+      expect(panel).not.toBeNull();
+      expect(panel.className).toContain('context-submenu-panel-flip-x');
+      expect(panel.className).toContain('context-submenu-panel-flip-y');
+    } finally {
+      Element.prototype.getBoundingClientRect = originalRect;
+    }
+  });
+
+  it('does not flip the submenu panel when it fits within the viewport', () => {
+    render(
+      <EdgeContextMenu
+        menu={{ x: 0, y: 0, edge }}
+        labels={labels}
+        relationshipTypes={relationshipTypes}
+        onSetEdgeType={vi.fn()}
+        onClose={vi.fn()}
+      />
+    );
+    fireEvent.click(screen.getByRole('button', { name: /^change type$/i }));
+    const panel = document.querySelector('.context-submenu-panel');
+    expect(panel.className).not.toContain('flip');
+  });
 });
 
 describe('PaneContextMenu', () => {

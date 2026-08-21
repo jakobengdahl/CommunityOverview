@@ -32,21 +32,45 @@ function focusableRootItems(containerRef) {
 /**
  * Moves focus into a just-opened menu and restores it to whatever had focus
  * beforehand once the menu closes (or unmounts).
+ *
+ * Keyed on the menu descriptor itself, not just "is a menu open" — GraphCanvas
+ * retargets an already-open menu straight to a new node/edge (no intervening
+ * close), which is a fresh descriptor object each time. Keying on a boolean
+ * would miss that retarget, leaving focus on a button belonging to the
+ * previous target that may no longer even be in the DOM (a different node
+ * type can render fewer items).
+ *
+ * Restoring focus on close is skipped if focus already moved somewhere else
+ * on the page while the menu was open (tracked via `focusin`) — e.g. the host
+ * app closes menus as a side effect of the user focusing a search/chat input;
+ * closing must not then yank focus back out of the field they just clicked.
  */
-function useMenuOpenFocus(containerRef, isOpen) {
+function useMenuOpenFocus(containerRef, menu) {
   const previousFocusRef = useRef(null);
+  const focusMovedAwayRef = useRef(false);
   useEffect(() => {
-    if (!isOpen) return undefined;
+    if (!menu) return undefined;
     previousFocusRef.current = document.activeElement;
+    focusMovedAwayRef.current = false;
     const items = focusableRootItems(containerRef);
     items[0]?.focus();
+
+    const handleFocusIn = (event) => {
+      if (containerRef.current && !containerRef.current.contains(event.target)) {
+        focusMovedAwayRef.current = true;
+      }
+    };
+    document.addEventListener('focusin', handleFocusIn, true);
+
     return () => {
+      document.removeEventListener('focusin', handleFocusIn, true);
+      if (focusMovedAwayRef.current) return;
       const prev = previousFocusRef.current;
       if (prev && typeof prev.focus === 'function' && document.contains(prev)) {
         prev.focus();
       }
     };
-  }, [isOpen, containerRef]);
+  }, [menu, containerRef]);
 }
 
 /** ArrowUp/ArrowDown/Home/End roving navigation across a menu's top-level items. */
@@ -275,7 +299,7 @@ export function NodeContextMenu({
   onClose,
 }) {
   const [containerRef, setContainerRef] = useMergedContainerRef(null);
-  useMenuOpenFocus(containerRef, !!menu);
+  useMenuOpenFocus(containerRef, menu);
   const handleRootKeyDown = useRootMenuKeyNav(containerRef);
 
   if (!menu) return null;
@@ -437,7 +461,7 @@ export function MultiNodeContextMenu({
   onClose,
 }) {
   const [containerRef, setContainerRef] = useMergedContainerRef(null);
-  useMenuOpenFocus(containerRef, !!menu);
+  useMenuOpenFocus(containerRef, menu);
   const handleRootKeyDown = useRootMenuKeyNav(containerRef);
 
   if (!menu) return null;
@@ -552,7 +576,7 @@ export function EdgeContextMenu({
   onClose,
 }) {
   const [containerRef, setContainerRef] = useMergedContainerRef(null);
-  useMenuOpenFocus(containerRef, !!menu);
+  useMenuOpenFocus(containerRef, menu);
   const handleRootKeyDown = useRootMenuKeyNav(containerRef);
 
   if (!menu) return null;
@@ -657,7 +681,7 @@ export function EdgeContextMenu({
 
 export function PaneContextMenu({ menu, labels: cml, menuRef, createAnnotation }) {
   const [containerRef, setContainerRef] = useMergedContainerRef(menuRef);
-  useMenuOpenFocus(containerRef, !!menu);
+  useMenuOpenFocus(containerRef, menu);
   const handleRootKeyDown = useRootMenuKeyNav(containerRef);
 
   if (!menu) return null;

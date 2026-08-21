@@ -211,8 +211,7 @@ body.graph-suppress-selection * {
   overflow-y: auto;
 }
 
-.edge-type-list button.edge-type-active,
-.organize-list button.edge-type-active {
+.edge-type-list button.edge-type-active {
   color: #60a5fa;
   font-weight: 600;
 }
