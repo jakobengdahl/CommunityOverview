@@ -338,6 +338,10 @@ class PresentationConfig(BaseModel):
     prompt_prefix: str = ""
     prompt_suffix: str = ""
     default_language: str = "en"
+    # Whether the chat/assistant panel starts collapsed for a first-time visitor.
+    # A visitor's own explicit open/collapse choice (persisted client-side) always
+    # takes precedence over this once made.
+    default_chat_collapsed: bool = False
     language_policy: LanguagePolicyConfig = Field(default_factory=LanguagePolicyConfig)
     widget_url: str = ""  # URL template for the graph widget
     expert_agents: List[ExpertAgentConfig] = Field(default_factory=list)
@@ -570,6 +574,8 @@ def get_presentation() -> Dict[str, Any]:
     - prompt_prefix: Prefix for LLM system prompt
     - prompt_suffix: Suffix for LLM system prompt
     - default_language: Default language code
+    - default_chat_collapsed: Whether the assistant panel starts collapsed
+      for a visitor with no stored preference of their own
     """
     loader = _get_loader()
     pres = loader.config.presentation
@@ -588,6 +594,7 @@ def get_presentation() -> Dict[str, Any]:
         "prompt_prefix": pres.prompt_prefix,
         "prompt_suffix": pres.prompt_suffix,
         "default_language": pres.default_language,
+        "default_chat_collapsed": pres.default_chat_collapsed,
         "language_policy": pres.language_policy.model_dump(),
         "widget_url": pres.widget_url,
         "expert_agents": [agent.model_dump() for agent in pres.expert_agents],

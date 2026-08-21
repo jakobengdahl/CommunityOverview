@@ -4,6 +4,28 @@ const FEDERATION_DEPTH_STORAGE_KEY = 'federation_depth';
 const SHOW_MINIMAP_STORAGE_KEY = 'show_minimap';
 const NODE_PREVIEW_STORAGE_KEY = 'node_preview_enabled';
 const CANVAS_LOCKED_STORAGE_KEY = 'canvas_locked';
+const CHAT_PANEL_OPEN_STORAGE_KEY = 'chat_panel_open';
+
+// Returns the visitor's own explicit open/collapsed choice, or null when none
+// has been made yet — distinct from loadInitialChatPanelOpen's boolean return
+// so setConfig can tell "no override" apart from "explicitly chose open".
+function loadStoredChatPanelOpen() {
+  try {
+    const stored = window?.localStorage?.getItem(CHAT_PANEL_OPEN_STORAGE_KEY);
+    if (stored !== null) return stored === 'true';
+  } catch {
+    // ignore storage errors and use default
+  }
+  return null;
+}
+
+function loadInitialChatPanelOpen() {
+  const stored = loadStoredChatPanelOpen();
+  // Falls back to open (the historical hardcoded default) until the backend
+  // config default arrives — setConfig reconciles this against
+  // presentation.default_chat_collapsed once it does.
+  return stored !== null ? stored : true;
+}
 
 function loadInitialShowMinimap() {
   try {
@@ -257,7 +279,7 @@ const useGraphStore = create((set, get) => ({
   navHistory: [],
   pendingGroups: null, // Groups to restore from a saved view
   pendingAnnotations: null, // Note/label/arrow annotations to restore from a session
-  chatPanelOpen: true, // Chat panel expanded vs minimized
+  chatPanelOpen: loadInitialChatPanelOpen(), // Chat panel expanded vs minimized (persisted)
   showMinimap: loadInitialShowMinimap(), // Minimap visibility (persisted)
   nodePreviewEnabled: loadInitialNodePreview(), // Hover info popup on/off (persisted)
   canvasLocked: loadInitialCanvasLocked(), // Navigation-menu lock guarding the board (persisted)
@@ -589,13 +611,20 @@ const useGraphStore = create((set, get) => ({
 
   setConfig: (schema, presentation, t, language) => {
     const welcomeMessage = createWelcomeMessage(presentation, t, language);
-    set({
+    const patch = {
       schema,
       presentation,
       chatMessages: [welcomeMessage],
       configLoaded: true,
       availableExperts: presentation?.expert_agents || [],
-    });
+    };
+    // Apply the backend's configured startup state only when the visitor has
+    // not made their own explicit open/collapse choice yet — an explicit
+    // choice always takes precedence, matching the default_language pattern.
+    if (loadStoredChatPanelOpen() === null) {
+      patch.chatPanelOpen = !presentation?.default_chat_collapsed;
+    }
+    set(patch);
   },
 
   // Get node color from schema/presentation
@@ -804,9 +833,36 @@ const useGraphStore = create((set, get) => ({
     }
   },
 
-  // Chat panel actions
-  toggleChatPanel: () => set((state) => ({ chatPanelOpen: !state.chatPanelOpen })),
+  // Chat panel actions.
+  // toggleChatPanel is wired to the panel's own header/minimized-bar click —
+  // a genuine explicit choice — so it persists and then overrides the
+  // configured default on every later visit (see setConfig above and
+  // resetChatPanelToDefault below). setChatPanelOpen deliberately does NOT
+  // persist: GuideOverlay uses it to stage the panel open/closed for a
+  // scripted tour step, which is not the visitor expressing a real
+  // preference, and must not silently clobber one they already made.
+  toggleChatPanel: () =>
+    set((state) => {
+      const next = !state.chatPanelOpen;
+      try {
+        window?.localStorage?.setItem(CHAT_PANEL_OPEN_STORAGE_KEY, String(next));
+      } catch {
+        // ignore storage errors
+      }
+      return { chatPanelOpen: next };
+    }),
   setChatPanelOpen: (open) => set({ chatPanelOpen: open }),
+  // Clears the visitor's stored choice and falls back to the configured
+  // application default again.
+  resetChatPanelToDefault: () =>
+    set((state) => {
+      try {
+        window?.localStorage?.removeItem(CHAT_PANEL_OPEN_STORAGE_KEY);
+      } catch {
+        // ignore storage errors
+      }
+      return { chatPanelOpen: !state.presentation?.default_chat_collapsed };
+    }),
 
   // Guide actions
   startGuide: (guideDefinition) =>

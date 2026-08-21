@@ -27,6 +27,7 @@ describe('ChatPanel', () => {
 
   afterEach(() => {
     vi.restoreAllMocks();
+    window.localStorage.removeItem('chat_panel_open');
   });
 
   describe('Rendering', () => {
@@ -65,6 +66,23 @@ describe('ChatPanel', () => {
       expect(
         screen.queryByPlaceholderText(/question|fråga|action|åtgärd/i)
       ).not.toBeInTheDocument();
+    });
+
+    it('persists an explicit collapse choice so it survives a reload', () => {
+      render(<ChatPanel />);
+
+      fireEvent.click(screen.getByTitle('Minimize'));
+
+      expect(window.localStorage.getItem('chat_panel_open')).toBe('false');
+    });
+
+    it('persists an explicit re-expand choice from the minimized bar', () => {
+      useGraphStore.setState({ chatPanelOpen: false });
+      render(<ChatPanel />);
+
+      fireEvent.click(screen.getByText('Graph assistant'));
+
+      expect(window.localStorage.getItem('chat_panel_open')).toBe('true');
     });
   });
 
