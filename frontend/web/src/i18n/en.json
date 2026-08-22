@@ -362,7 +362,8 @@
   "common": {
     "saving": "Saving...",
     "save": "Save",
-    "cancel": "Cancel"
+    "cancel": "Cancel",
+    "close": "Close"
   },
   "edit_edge": {
     "title": "Edit Connection",

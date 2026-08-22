@@ -362,7 +362,8 @@
   "common": {
     "saving": "Sparar...",
     "save": "Spara",
-    "cancel": "Avbryt"
+    "cancel": "Avbryt",
+    "close": "Stäng"
   },
   "edit_edge": {
     "title": "Redigera koppling",
