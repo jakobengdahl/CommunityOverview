@@ -341,6 +341,28 @@ class TestUpdateAnnotation:
         assert result["annotation"]["content"]["to"] == {"x": 200, "y": 0}
         assert result["annotation"]["content"]["endArrow"] is True
 
+    def test_position_move_translates_line_endpoint(self, annotation_tools):
+        """Moving a line via x/y must translate its `to` endpoint by the same
+        delta, preserving the line's shape instead of stretching it."""
+        tools_map, manager = annotation_tools
+        session = manager.create_session()
+        created = tools_map["create_annotation"](
+            session_id=session.id,
+            type="line",
+            x=0,
+            y=0,
+            content={"to": {"x": 100, "y": 0}, "endArrow": True},
+        )
+        ann_id = created["annotation"]["id"]
+
+        result = tools_map["update_annotation"](
+            session_id=session.id, annotation_id=ann_id, x=50, y=10
+        )
+
+        assert result["success"] is True
+        assert result["annotation"]["x"] == 50 and result["annotation"]["y"] == 10
+        assert result["annotation"]["content"]["to"] == {"x": 150, "y": 10}
+
     def test_style_update_replaces_whole_style_dict(self, annotation_tools):
         tools_map, manager = annotation_tools
         session = manager.create_session()
@@ -529,7 +551,11 @@ class TestDuplicateAnnotation:
         copy = result["annotation"]
         assert copy["id"] == "line-copy"
         assert copy["x"] == 15 and copy["y"] == 25
-        assert copy["content"] == {"to": {"x": 110, "y": 20}, "endArrow": True}
+        # The `to` endpoint must translate by the same (dx, dy) as the
+        # position, so the duplicate keeps the original's line shape instead
+        # of stretching it (the original was created at x=10,y=20 with
+        # to=(110,20); a (5,5) offset moves both ends the same amount).
+        assert copy["content"] == {"to": {"x": 115, "y": 25}, "endArrow": True}
         assert copy["style"] == {"stroke": "#000"}
         assert len(session.state["annotations"]) == 2
         # The original is untouched.

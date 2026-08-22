@@ -297,6 +297,76 @@ class TestStateOps:
         assert result is None
         assert s.seq == seq_before  # dropped op must not advance seq
 
+    def test_annotation_created_upsert_rejects_type_change(self, tmp_path):
+        """A create-op that upserts by id (existing id, new content) must not
+        be able to retype the annotation — that must go through delete +
+        create, which is an explicit, visible two-step action."""
+        store = _store(tmp_path)
+        s = store.create()
+        self._apply(
+            store,
+            s,
+            {
+                "op": "annotation_created",
+                "annotation": {"id": "ann-1", "type": "line", "to": {"x": 1, "y": 1}},
+            },
+        )
+        seq_before = s.seq
+        with pytest.raises(OpError):
+            self._apply(
+                store,
+                s,
+                {
+                    "op": "annotation_created",
+                    "annotation": {"id": "ann-1", "type": "shape"},
+                },
+            )
+        assert s.seq == seq_before
+        assert s.state["annotations"][0]["type"] == "line"
+
+    def test_annotation_updated_rejects_type_change(self, tmp_path):
+        store = _store(tmp_path)
+        s = store.create()
+        applied = self._apply(
+            store,
+            s,
+            {
+                "op": "annotation_created",
+                "annotation": {"type": "line", "to": {"x": 1, "y": 1}},
+            },
+        )
+        ann_id = applied["annotation"]["id"]
+        seq_before = s.seq
+        with pytest.raises(OpError):
+            self._apply(
+                store,
+                s,
+                {
+                    "op": "annotation_updated",
+                    "annotation": {"id": ann_id, "type": "shape"},
+                },
+            )
+        assert s.seq == seq_before
+        assert s.state["annotations"][0]["type"] == "line"
+
+    def test_annotation_updated_rejects_type_change_via_kind_alias(self, tmp_path):
+        """The legacy `arrow` alias resolves to `line`; a stored `line`
+        annotation must still be protected even when the incoming patch
+        spells its (different) type via `kind` instead of `type`."""
+        store = _store(tmp_path)
+        s = store.create()
+        applied = self._apply(
+            store, s, {"op": "annotation_created", "annotation": {"kind": "note"}}
+        )
+        ann_id = applied["annotation"]["id"]
+        with pytest.raises(OpError):
+            self._apply(
+                store,
+                s,
+                {"op": "annotation_updated", "annotation": {"id": ann_id, "kind": "arrow"}},
+            )
+        assert s.state["annotations"][0]["type"] == "note"
+
     def test_group_membership_changed_requires_group(self, tmp_path):
         store = _store(tmp_path)
         s = store.create()
