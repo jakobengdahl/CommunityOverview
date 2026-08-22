@@ -40,7 +40,7 @@ const GENERIC_OVERLAY_FIELDS = {
   shape: ['shape', 'color'],
   icon: ['icon', 'color'],
   vote_dot: ['value', 'color'],
-  image: ['image', 'alt'],
+  image: ['image', 'alt', 'color'],
 };
 
 // Generic overlay kinds that carry an explicit box size (frame/shape/image);

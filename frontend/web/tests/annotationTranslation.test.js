@@ -182,7 +182,7 @@ describe('generic annotation overlay translation', () => {
     expect(annotationsToOverlays(server)).toEqual(overlays);
   });
 
-  it('round-trips an image annotation (URL content only, no upload)', () => {
+  it('round-trips an image annotation (URL content, alt, and colour)', () => {
     const overlays = [
       {
         id: 'image-1',
@@ -190,11 +190,13 @@ describe('generic annotation overlay translation', () => {
         position: { x: 2, y: 3 },
         image: { url: 'https://example.com/a.png' },
         alt: 'diagram',
+        color: '#38BDF8',
         size: { w: 240, h: 180 },
       },
     ];
     const server = overlaysToAnnotations(overlays);
     expect(server[0].image).toEqual({ url: 'https://example.com/a.png' });
+    expect(server[0].style).toMatchObject({ color: '#38BDF8' });
     expect(annotationsToOverlays(server)).toEqual(overlays);
   });
 

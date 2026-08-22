@@ -199,20 +199,21 @@ describe('generic annotation overlay serialization', () => {
     expect(flowNodeToOverlay(node)).toEqual(overlay);
   });
 
-  it('round-trips an image overlay (URL content only)', () => {
+  it('round-trips an image overlay (URL content, alt, and colour)', () => {
     const overlay = {
       id: 'image-1',
       kind: 'image',
       position: { x: 2, y: 3 },
       image: { url: 'https://example.com/a.png' },
       alt: 'diagram',
+      color: '#38BDF8',
       size: { w: 240, h: 180 },
     };
     const node = overlayToFlowNode(overlay);
     expect(node).toMatchObject({
       type: 'image',
       style: { width: 240, height: 180 },
-      data: { image: { url: 'https://example.com/a.png' }, alt: 'diagram' },
+      data: { image: { url: 'https://example.com/a.png' }, alt: 'diagram', color: '#38BDF8' },
     });
     expect(flowNodeToOverlay(node)).toEqual(overlay);
   });
