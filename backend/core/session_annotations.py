@@ -36,7 +36,7 @@ DEFAULT_NOTE_SIZE = {"w": 160, "h": 96}
 # Every v1 type except `note` and `group` — see module docstring for why
 # those two are excluded from the generic tool set.
 GENERIC_ANNOTATION_TYPES: FrozenSet[str] = frozenset(
-    {"text", "label", "line", "frame", "shape", "icon", "vote_dot", "image"}
+    {"text", "label", "line", "frame", "shape", "icon", "vote_dot", "image", "freehand"}
 )
 ALL_ANNOTATION_TYPES: FrozenSet[str] = GENERIC_ANNOTATION_TYPES | {
     NOTE_TYPE,
@@ -277,7 +277,7 @@ def build_annotation(
     ``locked``) shared by every v1 type, mirroring ``createAnnotation()``.
     Unlike ``build_note_annotation`` this does not model each type's payload
     shape — that differs too much across line/label/shape/frame/icon/
-    vote_dot/image for one generic builder to hand-build — so *content*
+    vote_dot/image/freehand for one generic builder to hand-build — so *content*
     carries it verbatim and is merged onto the annotation as-is. The
     frontend's ``createAnnotation()`` re-normalizes defensively on load
     either way, so a caller-supplied payload that is merely incomplete (e.g.
@@ -338,6 +338,37 @@ def translate_line_endpoints(
     return translated
 
 
+def translate_freehand_points(
+    existing: Dict[str, Any], dx: float, dy: float
+) -> Dict[str, Any]:
+    """Translate a freehand annotation's sampled points by (dx, dy).
+
+    A freehand stroke's shape lives in its ``points`` content field as
+    absolute model-space coordinates, outside the common ``geometry``/
+    ``position`` envelope — same reason as ``translate_line_endpoints``:
+    moving the annotation must slide every sampled point by the same delta,
+    or the stroke reshapes instead of sliding. Returns the fields to merge
+    onto the target patch/copy; empty for annotations without a ``points``
+    list (every non-``freehand`` type).
+    """
+    points = existing.get("points")
+    if not isinstance(points, list) or not points:
+        return {}
+    translated = []
+    changed = False
+    for point in points:
+        if (
+            isinstance(point, dict)
+            and isinstance(point.get("x"), (int, float))
+            and isinstance(point.get("y"), (int, float))
+        ):
+            translated.append({**point, "x": point["x"] + dx, "y": point["y"] + dy})
+            changed = True
+        else:
+            translated.append(point)
+    return {"points": translated} if changed else {}
+
+
 def build_annotation_patch(
     existing: Dict[str, Any],
     *,
@@ -385,6 +416,7 @@ def build_annotation_patch(
         dy = position["y"] - original_y
         if dx or dy:
             patch.update(translate_line_endpoints(existing, dx, dy))
+            patch.update(translate_freehand_points(existing, dx, dy))
     if resized:
         size["w"] = w if w is not None else size.get("w", 0)
         size["h"] = h if h is not None else size.get("h", 0)

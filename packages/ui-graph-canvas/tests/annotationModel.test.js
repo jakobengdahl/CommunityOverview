@@ -153,6 +153,79 @@ describe('annotationModel contract v1', () => {
     expect(annotation.start.attachment).toBeUndefined();
   });
 
+  it('normalizes a freehand annotation: points, pressure clamp, smoothing clamp, stroke width', () => {
+    const annotation = createAnnotation({
+      id: 'freehand-1',
+      type: 'freehand',
+      points: [
+        { x: 0, y: 0, pressure: 0.5 },
+        { x: 10, y: 5, pressure: 2 }, // out of range, clamps to 1
+        { x: 20, y: 0, pressure: -1 }, // out of range, clamps to 0
+        { x: 30, y: 5 }, // no pressure sample
+      ],
+      smoothing: 5, // out of range, clamps to 1
+      strokeWidth: 4,
+      pointerType: 'pen',
+      pressureSource: 'device',
+    });
+
+    expect(annotation).toMatchObject({
+      id: 'freehand-1',
+      type: 'freehand',
+      kind: 'freehand',
+      position: { x: 0, y: 0 },
+      points: [
+        { x: 0, y: 0, pressure: 0.5 },
+        { x: 10, y: 5, pressure: 1 },
+        { x: 20, y: 0, pressure: 0 },
+        { x: 30, y: 5 },
+      ],
+      smoothing: 1,
+      strokeWidth: 4,
+      pointerType: 'pen',
+      pressureSource: 'device',
+    });
+    expect(annotation.points[3]).not.toHaveProperty('pressure');
+  });
+
+  it('defaults a freehand annotation with no points to a single point at its position', () => {
+    const annotation = createAnnotation({
+      id: 'freehand-empty',
+      type: 'freehand',
+      position: { x: 7, y: 9 },
+    });
+    expect(annotation.points).toEqual([{ x: 7, y: 9 }]);
+    expect(annotation.smoothing).toBe(0);
+    expect(annotation.strokeWidth).toBeGreaterThan(0);
+  });
+
+  it('translates a freehand stroke via the transform operation like any other annotation geometry', () => {
+    const doc = normalizeAnnotationDocument([
+      {
+        id: 'freehand-1',
+        type: 'freehand',
+        points: [
+          { x: 0, y: 0 },
+          { x: 10, y: 10 },
+        ],
+      },
+    ]);
+    const result = applyAnnotationOperation(doc, {
+      type: 'transform',
+      id: 'freehand-1',
+      geometry: { x: 5, y: 5 },
+    });
+    // Geometry (the envelope anchor) moves; the raw sampled points are a
+    // separate content field the frontend's overlay layer keeps in sync with
+    // it (see sessionAnnotations.js) — this operation alone does not rewrite
+    // them, mirroring how `transform` treats a line's from/to.
+    expect(result.document.annotations[0].geometry).toMatchObject({ x: 5, y: 5 });
+    expect(result.document.annotations[0].points).toEqual([
+      { x: 0, y: 0 },
+      { x: 10, y: 10 },
+    ]);
+  });
+
   it('fails invalid operations without mutating the document', () => {
     const doc = normalizeAnnotationDocument([{ id: 'note-1', type: 'note', text: 'safe' }]);
     expect(() =>

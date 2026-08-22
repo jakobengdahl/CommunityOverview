@@ -90,6 +90,72 @@ describe('annotation overlay translation', () => {
     expect(annotationsToOverlays(server)).toEqual(overlays);
   });
 
+  it('round-trips a freehand stroke via absolute model-space points', () => {
+    const overlays = [
+      {
+        id: 'freehand-1',
+        kind: 'freehand',
+        position: { x: 5, y: 6 },
+        points: [
+          { x: 0, y: 0, pressure: 0.6 },
+          { x: 10, y: 4 },
+          { x: 18, y: -2 },
+        ],
+        color: '#F472B6',
+        strokeWidth: 3,
+        smoothing: 0.4,
+        pointerType: 'pen',
+        pressureSource: 'device',
+        z: 0,
+        locked: false,
+      },
+    ];
+    const server = overlaysToAnnotations(overlays);
+    // The server document stores absolute model-space points (anchor + each
+    // node-relative offset), unlike the overlay's node-relative points.
+    expect(server[0].points).toEqual([
+      { x: 5, y: 6, pressure: 0.6 },
+      { x: 15, y: 10 },
+      { x: 23, y: 4 },
+    ]);
+    expect(annotationsToOverlays(server)).toEqual(overlays);
+  });
+
+  it('defaults strokeWidth/smoothing for a freehand stroke drawn at the origin with no style given', () => {
+    const overlays = [
+      {
+        id: 'freehand-2',
+        kind: 'freehand',
+        position: { x: 0, y: 0 },
+        points: [
+          { x: 0, y: 0 },
+          { x: 3, y: 3 },
+        ],
+        color: undefined,
+        z: 0,
+        locked: false,
+      },
+    ];
+    const server = overlaysToAnnotations(overlays);
+    expect(server[0].points).toEqual([
+      { x: 0, y: 0 },
+      { x: 3, y: 3 },
+    ]);
+    // strokeWidth/smoothing always resolve to a concrete value in the
+    // canonical model (annotationModel.js's withTypePayload), unlike colour
+    // which stays undefined when not given — so these do not survive as
+    // `undefined` the way the "no colour" line case does.
+    expect(server[0].strokeWidth).toBeGreaterThan(0);
+    expect(server[0].smoothing).toBe(0);
+    const roundTripped = annotationsToOverlays(server);
+    expect(roundTripped[0]).toMatchObject({
+      id: 'freehand-2',
+      kind: 'freehand',
+      position: { x: 0, y: 0 },
+      points: overlays[0].points,
+    });
+  });
+
   it('round-trips note and label text sizes', () => {
     const overlays = [
       {

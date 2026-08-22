@@ -11,12 +11,14 @@ export const ANNOTATION_TYPES = Object.freeze([
   'icon',
   'vote_dot',
   'image',
+  'freehand',
 ]);
 
 const TYPE_SET = new Set(ANNOTATION_TYPES);
 const LEGACY_KIND_ALIASES = Object.freeze({ arrow: 'line' });
 const DEFAULT_SIZE = Object.freeze({ w: 160, h: 96 });
 const DEFAULT_LINE_DELTA = Object.freeze({ x: 160, y: 0 });
+const DEFAULT_FREEHAND_STROKE_WIDTH = 2;
 
 function isPlainObject(value) {
   return Boolean(value) && typeof value === 'object' && !Array.isArray(value);
@@ -37,6 +39,21 @@ function normalizePoint(point, fallback = { x: 0, y: 0 }) {
     x: finiteNumber(source.x, fallback.x || 0),
     y: finiteNumber(source.y, fallback.y || 0),
   };
+}
+
+function clamp01(value, fallback = 0) {
+  return Math.min(1, Math.max(0, finiteNumber(value, fallback)));
+}
+
+// A single sampled freehand point: model-space x/y plus optional pressure
+// (0-1, from the pointer device) — pressure is omitted rather than defaulted
+// to 1 so a renderer/exporter can tell "no pressure data" apart from
+// "full pressure".
+function normalizeFreehandPoint(point) {
+  const source = isPlainObject(point) ? point : {};
+  const out = { x: finiteNumber(source.x, 0), y: finiteNumber(source.y, 0) };
+  if (Number.isFinite(source.pressure)) out.pressure = clamp01(source.pressure);
+  return out;
 }
 
 function normalizeSize(size, fallback = DEFAULT_SIZE) {
@@ -158,6 +175,25 @@ function withTypePayload(annotation, type, geometry) {
     return {
       image: clone(annotation.image || {}),
       alt: annotation.alt || '',
+    };
+  }
+  if (type === 'freehand') {
+    const rawPoints = Array.isArray(annotation.points) ? annotation.points : [];
+    const points = rawPoints.map(normalizeFreehandPoint);
+    // A stroke always needs at least one point to anchor its position; an
+    // empty draw (e.g. a discarded/aborted stroke) falls back to the
+    // annotation's own position/geometry instead of producing a pointless
+    // annotation with no visible geometry.
+    if (points.length === 0) points.push(normalizePoint(annotation.position || geometry));
+    return {
+      points,
+      smoothing: clamp01(annotation.smoothing, 0),
+      strokeWidth: Math.max(
+        0.5,
+        finiteNumber(annotation.strokeWidth, DEFAULT_FREEHAND_STROKE_WIDTH)
+      ),
+      pointerType: annotation.pointerType || undefined,
+      pressureSource: annotation.pressureSource || undefined,
     };
   }
   return {};

@@ -1,0 +1,11 @@
+.graph-freehand-node {
+  cursor: move;
+}
+
+.graph-freehand-node.locked {
+  cursor: default;
+}
+
+.graph-freehand-node.selected svg path:last-of-type {
+  filter: drop-shadow(0 0 3px rgba(255, 255, 255, 0.7));
+}

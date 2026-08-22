@@ -19,6 +19,7 @@ import NoteNode from './NoteNode';
 import LabelNode from './LabelNode';
 import ArrowNode from './ArrowNode';
 import GenericAnnotationNode from './GenericAnnotationNode';
+import FreehandAnnotationNode from './FreehandAnnotationNode';
 import { AnnotationContext } from './AnnotationContext';
 import SimpleFloatingEdge from './SimpleFloatingEdge';
 import {
@@ -2031,6 +2032,7 @@ function GraphCanvasInner({
       icon: GenericAnnotationNode,
       vote_dot: GenericAnnotationNode,
       image: GenericAnnotationNode,
+      freehand: FreehandAnnotationNode,
     }),
     []
   );
