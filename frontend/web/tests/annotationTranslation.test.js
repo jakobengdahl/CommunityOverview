@@ -127,7 +127,10 @@ describe('annotation overlay translation', () => {
         id: 'freehand-2',
         kind: 'freehand',
         position: { x: 0, y: 0 },
-        points: [{ x: 0, y: 0 }, { x: 3, y: 3 }],
+        points: [
+          { x: 0, y: 0 },
+          { x: 3, y: 3 },
+        ],
         color: undefined,
         z: 0,
         locked: false,

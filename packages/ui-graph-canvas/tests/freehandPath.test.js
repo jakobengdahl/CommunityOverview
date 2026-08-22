@@ -1,5 +1,9 @@
 import { describe, it, expect } from 'vitest';
-import { reduceFreehandPoints, pointsToPathData, buildFreehandPath } from '../src/utils/freehandPath';
+import {
+  reduceFreehandPoints,
+  pointsToPathData,
+  buildFreehandPath,
+} from '../src/utils/freehandPath';
 
 // A "jittery" hand-drawn line: an L-shaped stroke (roughly horizontal, then
 // roughly vertical) with small perpendicular wobble at every sample — the
@@ -10,7 +14,7 @@ import { reduceFreehandPoints, pointsToPathData, buildFreehandPath } from '../sr
 function jitteryLine() {
   const points = [];
   for (let x = 0; x <= 40; x += 2) {
-    points.push({ x, y: (x % 4 === 0 ? 0.5 : -0.5) });
+    points.push({ x, y: x % 4 === 0 ? 0.5 : -0.5 });
   }
   for (let y = 2; y <= 40; y += 2) {
     points.push({ x: 40 + (y % 4 === 0 ? 0.5 : -0.5), y });
@@ -81,11 +85,20 @@ describe('pointsToPathData', () => {
   });
 
   it('builds a straight M/L segment for two points', () => {
-    expect(pointsToPathData([{ x: 0, y: 0 }, { x: 10, y: 0 }])).toBe('M 0 0 L 10 0');
+    expect(
+      pointsToPathData([
+        { x: 0, y: 0 },
+        { x: 10, y: 0 },
+      ])
+    ).toBe('M 0 0 L 10 0');
   });
 
   it('builds quadratic-through-midpoint curve commands for 3+ points', () => {
-    const d = pointsToPathData([{ x: 0, y: 0 }, { x: 10, y: 10 }, { x: 20, y: 0 }]);
+    const d = pointsToPathData([
+      { x: 0, y: 0 },
+      { x: 10, y: 10 },
+      { x: 20, y: 0 },
+    ]);
     expect(d).toBe('M 0 0 Q 10 10 15 5 L 20 0');
   });
 
@@ -108,7 +121,11 @@ describe('buildFreehandPath', () => {
   });
 
   it('keeps the minimal raw path at smoothing=0', () => {
-    const points = [{ x: 0, y: 0 }, { x: 5, y: 5 }, { x: 10, y: 0 }];
+    const points = [
+      { x: 0, y: 0 },
+      { x: 5, y: 5 },
+      { x: 10, y: 0 },
+    ];
     const { points: reduced, d } = buildFreehandPath(points, 0);
     expect(reduced).toEqual(points);
     expect(d).toBe('M 0 0 Q 5 5 7.5 2.5 L 10 0');

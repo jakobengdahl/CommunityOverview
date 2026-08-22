@@ -188,7 +188,10 @@ function withTypePayload(annotation, type, geometry) {
     return {
       points,
       smoothing: clamp01(annotation.smoothing, 0),
-      strokeWidth: Math.max(0.5, finiteNumber(annotation.strokeWidth, DEFAULT_FREEHAND_STROKE_WIDTH)),
+      strokeWidth: Math.max(
+        0.5,
+        finiteNumber(annotation.strokeWidth, DEFAULT_FREEHAND_STROKE_WIDTH)
+      ),
       pointerType: annotation.pointerType || undefined,
       pressureSource: annotation.pressureSource || undefined,
     };

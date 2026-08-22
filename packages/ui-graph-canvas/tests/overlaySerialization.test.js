@@ -342,7 +342,10 @@ describe('generic annotation overlay serialization', () => {
       id: 'freehand-1',
       kind: 'freehand',
       position: { x: 0, y: 0 },
-      points: [{ x: 0, y: 0 }, { x: 10, y: 10 }],
+      points: [
+        { x: 0, y: 0 },
+        { x: 10, y: 10 },
+      ],
       color: '#fff',
       z: 0,
       locked: false,
