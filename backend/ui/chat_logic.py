@@ -1383,6 +1383,19 @@ class ChatProcessor:
         tool_results = []
         last_tool_name = None
 
+        # Track existing IDs for accumulated nodes and edges to avoid duplicates.
+        # Initializing sets here instead of inside the loop avoids O(N^2) complexity.
+        existing_node_ids = {
+            n.get("id")
+            for n in accumulated_nodes
+            if isinstance(n, dict) and "id" in n
+        }
+        existing_edge_ids = {
+            e.get("id")
+            for e in accumulated_edges
+            if isinstance(e, dict) and "id" in e
+        }
+
         for tool_use in tool_uses:
             tool_name = tool_use.get("name")
             tool_input = tool_use.get("input")
@@ -1470,26 +1483,16 @@ class ChatProcessor:
             if tool_result and isinstance(tool_result, dict):
                 if "nodes" in tool_result and isinstance(tool_result["nodes"], list):
                     # Add unique nodes (avoid duplicates by ID)
-                    existing_ids = {
-                        n.get("id")
-                        for n in accumulated_nodes
-                        if isinstance(n, dict) and "id" in n
-                    }
                     for node in tool_result["nodes"]:
                         if (
                             isinstance(node, dict)
-                            and node.get("id") not in existing_ids
+                            and node.get("id") not in existing_node_ids
                         ):
                             accumulated_nodes.append(node)
-                            existing_ids.add(node.get("id"))
+                            existing_node_ids.add(node.get("id"))
 
                 if "edges" in tool_result and isinstance(tool_result["edges"], list):
                     # Add unique edges (avoid duplicates by ID)
-                    existing_edge_ids = {
-                        e.get("id")
-                        for e in accumulated_edges
-                        if isinstance(e, dict) and "id" in e
-                    }
                     for edge in tool_result["edges"]:
                         if (
                             isinstance(edge, dict)
