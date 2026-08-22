@@ -109,3 +109,119 @@ describe('annotation overlay translation', () => {
     expect(overlays[0].kind).toBe('note');
   });
 });
+
+// The v1 annotation model (docs/ANNOTATION_CONTRACT.md) also defines text,
+// frame, shape, icon, vote_dot and image, created via the generic MCP
+// annotation tools (c0edb4f). annotationsToOverlays used to only branch on
+// note/label/line, so these types were silently dropped from onSaveView and
+// from the annotation_created/annotation_updated live-op path in App.jsx —
+// an MCP agent could create them, but they never appeared on the canvas.
+describe('generic annotation overlay translation', () => {
+  it('round-trips a text annotation (colour/font size via style)', () => {
+    const overlays = [
+      {
+        id: 'text-1',
+        kind: 'text',
+        position: { x: 1, y: 2 },
+        text: 'Region',
+        color: '#fff',
+        fontSize: 20,
+      },
+    ];
+    const server = overlaysToAnnotations(overlays);
+    expect(server[0].style).toEqual({ color: '#fff', fontSize: 20 });
+    expect(annotationsToOverlays(server)).toEqual(overlays);
+  });
+
+  it('round-trips a frame annotation (size lives in geometry, not a payload field)', () => {
+    const overlays = [
+      {
+        id: 'frame-1',
+        kind: 'frame',
+        position: { x: 0, y: 0 },
+        color: '#4ADE80',
+        size: { w: 300, h: 200 },
+      },
+    ];
+    const server = overlaysToAnnotations(overlays);
+    expect(server[0].geometry).toMatchObject({ w: 300, h: 200 });
+    expect(annotationsToOverlays(server)).toEqual(overlays);
+  });
+
+  it('round-trips a shape annotation', () => {
+    const overlays = [
+      {
+        id: 'shape-1',
+        kind: 'shape',
+        position: { x: 5, y: 5 },
+        shape: 'circle',
+        color: '#60A5FA',
+        size: { w: 120, h: 120 },
+      },
+    ];
+    const server = overlaysToAnnotations(overlays);
+    expect(server[0].shape).toBe('circle');
+    expect(annotationsToOverlays(server)).toEqual(overlays);
+  });
+
+  it('round-trips an icon annotation', () => {
+    const overlays = [
+      { id: 'icon-1', kind: 'icon', position: { x: 8, y: 8 }, icon: 'flag', color: '#F472B6' },
+    ];
+    const server = overlaysToAnnotations(overlays);
+    expect(server[0].icon).toBe('flag');
+    expect(annotationsToOverlays(server)).toEqual(overlays);
+  });
+
+  it('round-trips a vote_dot annotation', () => {
+    const overlays = [
+      { id: 'vote-1', kind: 'vote_dot', position: { x: 9, y: 9 }, value: 3, color: '#FB923C' },
+    ];
+    const server = overlaysToAnnotations(overlays);
+    expect(server[0].value).toBe(3);
+    expect(annotationsToOverlays(server)).toEqual(overlays);
+  });
+
+  it('round-trips an image annotation (URL content, alt, and colour)', () => {
+    const overlays = [
+      {
+        id: 'image-1',
+        kind: 'image',
+        position: { x: 2, y: 3 },
+        image: { url: 'https://example.com/a.png' },
+        alt: 'diagram',
+        color: '#38BDF8',
+        size: { w: 240, h: 180 },
+      },
+    ];
+    const server = overlaysToAnnotations(overlays);
+    expect(server[0].image).toEqual({ url: 'https://example.com/a.png' });
+    expect(server[0].style).toMatchObject({ color: '#38BDF8' });
+    expect(annotationsToOverlays(server)).toEqual(overlays);
+  });
+
+  it('no longer drops the generic v1 types that used to be silently ignored', () => {
+    const server = [
+      { id: 't1', type: 'text', position: { x: 0, y: 0 }, text: 'hi' },
+      {
+        id: 'f1',
+        type: 'frame',
+        position: { x: 0, y: 0 },
+        geometry: { x: 0, y: 0, w: 160, h: 96 },
+      },
+      { id: 's1', type: 'shape', position: { x: 0, y: 0 }, shape: 'rectangle' },
+      { id: 'i1', type: 'icon', position: { x: 0, y: 0 }, icon: 'flag' },
+      { id: 'v1', type: 'vote_dot', position: { x: 0, y: 0 }, value: 1 },
+      { id: 'im1', type: 'image', position: { x: 0, y: 0 }, image: { url: 'https://x/y.png' } },
+    ];
+    const overlays = annotationsToOverlays(server);
+    expect(overlays.map((o) => o.kind).sort()).toEqual([
+      'frame',
+      'icon',
+      'image',
+      'shape',
+      'text',
+      'vote_dot',
+    ]);
+  });
+});

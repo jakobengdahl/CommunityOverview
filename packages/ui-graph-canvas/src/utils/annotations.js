@@ -6,8 +6,46 @@
  * logic, so they are tracked apart from these overlays.
  */
 
-export const OVERLAY_TYPES = new Set(['note', 'label', 'arrow']);
-export const ANNOTATION_TYPES = new Set(['group', 'note', 'label', 'arrow']);
+// text/frame/shape/icon/vote_dot/image are the rest of the v1 annotation
+// model (docs/ANNOTATION_CONTRACT.md) that isn't note/label/arrow/group.
+// They render through GenericAnnotationNode — a simple, non-interactive
+// visual representation rather than dedicated per-type UX like NoteNode.
+export const GENERIC_OVERLAY_TYPES = new Set([
+  'text',
+  'frame',
+  'shape',
+  'icon',
+  'vote_dot',
+  'image',
+]);
+export const OVERLAY_TYPES = new Set(['note', 'label', 'arrow', ...GENERIC_OVERLAY_TYPES]);
+export const ANNOTATION_TYPES = new Set([
+  'group',
+  'note',
+  'label',
+  'arrow',
+  ...GENERIC_OVERLAY_TYPES,
+]);
+
+// Default box size (px) for a generic overlay that carries explicit
+// dimensions (frame/shape/image) but wasn't given a size.
+const DEFAULT_GENERIC_SIZE = { w: 160, h: 96 };
+
+// Per-kind payload fields carried on a generic overlay's `data`, beyond the
+// shared id/type/position/style. Drives both overlayToFlowNode and its
+// inverse so the two stay exact mirrors of each other.
+const GENERIC_OVERLAY_FIELDS = {
+  text: ['text', 'color', 'fontSize'],
+  frame: ['color'],
+  shape: ['shape', 'color'],
+  icon: ['icon', 'color'],
+  vote_dot: ['value', 'color'],
+  image: ['image', 'alt', 'color'],
+};
+
+// Generic overlay kinds that carry an explicit box size (frame/shape/image);
+// icon/vote_dot/text render at a fixed intrinsic size instead.
+const SIZED_GENERIC_KINDS = new Set(['frame', 'shape', 'image']);
 
 // Default text sizes (px) for note body and label text; overridable per node.
 export const DEFAULT_NOTE_FONT_SIZE = 14;
@@ -47,6 +85,17 @@ export function overlayToFlowNode(overlay) {
       data: { text: overlay.text || '', color: overlay.color, fontSize: overlay.fontSize },
     };
   }
+  if (GENERIC_OVERLAY_TYPES.has(overlay.kind)) {
+    const data = {};
+    for (const field of GENERIC_OVERLAY_FIELDS[overlay.kind]) data[field] = overlay[field];
+    const node = { ...base, data };
+    if (SIZED_GENERIC_KINDS.has(overlay.kind)) {
+      node.style = overlay.size
+        ? { width: overlay.size.w, height: overlay.size.h }
+        : { width: DEFAULT_GENERIC_SIZE.w, height: DEFAULT_GENERIC_SIZE.h };
+    }
+    return node;
+  }
   // arrow / line: endpoints carry independent head symbols and optional anchors.
   const data = {
     dx: overlay.dx ?? 160,
@@ -79,6 +128,14 @@ export function flowNodeToOverlay(node) {
       color: node.data?.color,
       fontSize: node.data?.fontSize,
     };
+  }
+  if (GENERIC_OVERLAY_TYPES.has(node.type)) {
+    const out = { ...base };
+    for (const field of GENERIC_OVERLAY_FIELDS[node.type]) out[field] = node.data?.[field];
+    if (SIZED_GENERIC_KINDS.has(node.type) && node.style) {
+      out.size = { w: node.style.width, h: node.style.height };
+    }
+    return out;
   }
   const out = {
     ...base,

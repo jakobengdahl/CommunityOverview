@@ -77,6 +77,55 @@ export function groupsToAnnotations(viewGroups, parentIds) {
   );
 }
 
+// The rest of the v1 annotation model (docs/ANNOTATION_CONTRACT.md) beyond
+// note/label/line: text, frame, shape, icon, vote_dot, image. Color lives
+// under style.color (like label), and frame/shape/image size lives in
+// geometry — createAnnotation has no dedicated `size` payload field for
+// these types the way it does for note.
+const SIZED_GENERIC_TYPES = new Set(['frame', 'shape', 'image']);
+const GENERIC_OVERLAY_TYPES = new Set(['text', 'frame', 'shape', 'icon', 'vote_dot', 'image']);
+
+function genericAnnotationToOverlay(a) {
+  const overlay = {
+    id: a.id,
+    kind: a.type,
+    position: a.position || { x: 0, y: 0 },
+    color: a.style?.color,
+  };
+  if (a.type === 'text') {
+    overlay.text = a.text || '';
+    overlay.fontSize = a.style?.fontSize;
+  } else if (a.type === 'shape') {
+    overlay.shape = a.shape || 'rectangle';
+  } else if (a.type === 'icon') {
+    overlay.icon = a.icon || 'circle';
+  } else if (a.type === 'vote_dot') {
+    overlay.value = a.value ?? null;
+  } else if (a.type === 'image') {
+    overlay.image = a.image || {};
+    overlay.alt = a.alt || '';
+  }
+  if (SIZED_GENERIC_TYPES.has(a.type)) {
+    overlay.size = { w: a.geometry?.w ?? 0, h: a.geometry?.h ?? 0 };
+  }
+  return overlay;
+}
+
+function genericOverlayToAnnotation(o) {
+  const input = { id: o.id, type: o.kind, position: o.position || { x: 0, y: 0 } };
+  input.style = o.kind === 'text' ? { color: o.color, fontSize: o.fontSize } : { color: o.color };
+  if (o.kind === 'text') input.text = o.text || '';
+  else if (o.kind === 'shape') input.shape = o.shape || 'rectangle';
+  else if (o.kind === 'icon') input.icon = o.icon || 'circle';
+  else if (o.kind === 'vote_dot') input.value = o.value ?? null;
+  else if (o.kind === 'image') {
+    input.image = o.image || {};
+    input.alt = o.alt || '';
+  }
+  if (SIZED_GENERIC_TYPES.has(o.kind) && o.size) input.size = o.size;
+  return createAnnotation(input);
+}
+
 // Note/label/arrow annotations round-trip between the server annotation model
 // (design 3.1) and the canvas-shape overlay descriptors the GraphCanvas emits
 // (via onSaveView) and consumes (via annotationsToRestore). Groups keep their
@@ -120,6 +169,8 @@ export function annotationsToOverlays(annotations) {
       if (a.startAnchor) overlay.startAnchor = a.startAnchor;
       if (a.endAnchor) overlay.endAnchor = a.endAnchor;
       out.push(overlay);
+    } else if (GENERIC_OVERLAY_TYPES.has(a?.type)) {
+      out.push(genericAnnotationToOverlay(a));
     }
   }
   return out;
@@ -146,6 +197,9 @@ export function overlaysToAnnotations(overlays) {
         text: o.text || '',
         style: { color: o.color, fontSize: o.fontSize },
       });
+    }
+    if (GENERIC_OVERLAY_TYPES.has(o.kind)) {
+      return genericOverlayToAnnotation(o);
     }
     // arrow: store both endpoints as absolute points (design 3.1)
     const from = o.position || { x: 0, y: 0 };

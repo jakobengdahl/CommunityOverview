@@ -18,6 +18,7 @@ import GroupNode from './GroupNode';
 import NoteNode from './NoteNode';
 import LabelNode from './LabelNode';
 import ArrowNode from './ArrowNode';
+import GenericAnnotationNode from './GenericAnnotationNode';
 import { AnnotationContext } from './AnnotationContext';
 import SimpleFloatingEdge from './SimpleFloatingEdge';
 import {
@@ -2024,6 +2025,12 @@ function GraphCanvasInner({
       note: NoteNode,
       label: LabelNode,
       arrow: ArrowNode,
+      text: GenericAnnotationNode,
+      frame: GenericAnnotationNode,
+      shape: GenericAnnotationNode,
+      icon: GenericAnnotationNode,
+      vote_dot: GenericAnnotationNode,
+      image: GenericAnnotationNode,
     }),
     []
   );
