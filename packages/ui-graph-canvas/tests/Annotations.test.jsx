@@ -192,4 +192,66 @@ describe('ArrowNode', () => {
     const updater = hoisted.setNodes.mock.calls[0][0];
     expect(updater([{ id: 'arrow-1' }, { id: 'keep' }])).toEqual([{ id: 'keep' }]);
   });
+
+  it('hides the endpoint handles for a locked arrow even when selected', () => {
+    const { container } = renderWithContext(
+      <ArrowNode id="arrow-1" data={{ dx: 160, dy: 0, locked: true }} selected />
+    );
+    expect(container.querySelectorAll('circle.graph-arrow-handle').length).toBe(0);
+  });
+
+  it('keeps a locked arrow non-draggable after a style change (colour)', () => {
+    const { notifyChange } = renderWithContext(
+      <ArrowNode id="arrow-1" data={{ dx: 160, dy: 0, locked: true }} selected={false} />
+    );
+    fireEvent.contextMenu(document.querySelector('.graph-arrow-node'));
+    const colorButtons = document.querySelectorAll('.color-button');
+    fireEvent.click(colorButtons[1]);
+    expect(notifyChange).toHaveBeenCalledTimes(1);
+    const updater = hoisted.setNodes.mock.calls[0][0];
+    const result = updater([
+      { id: 'arrow-1', data: { dx: 160, dy: 0, locked: true }, draggable: false },
+    ]);
+    expect(result[0].data.locked).toBe(true);
+    expect(result[0].draggable).toBe(false);
+  });
+
+  it('stays draggable after a style change on an unlocked, unanchored arrow', () => {
+    renderWithContext(
+      <ArrowNode id="arrow-1" data={{ dx: 160, dy: 0, locked: false }} selected={false} />
+    );
+    fireEvent.contextMenu(document.querySelector('.graph-arrow-node'));
+    const colorButtons = document.querySelectorAll('.color-button');
+    fireEvent.click(colorButtons[1]);
+    const updater = hoisted.setNodes.mock.calls[0][0];
+    const result = updater([
+      { id: 'arrow-1', data: { dx: 160, dy: 0, locked: false }, draggable: true },
+    ]);
+    expect(result[0].draggable).toBe(true);
+  });
+
+  it('ignores an in-flight endpoint move once the arrow becomes locked', () => {
+    renderWithContext(<ArrowNode id="arrow-1" data={{ dx: 160, dy: 0 }} selected />);
+    const [startHandle] = document.querySelectorAll('circle.graph-arrow-handle');
+    fireEvent.pointerDown(startHandle, { clientX: 0, clientY: 0 });
+    const moveEvent = new MouseEvent('pointermove', {
+      bubbles: true,
+      cancelable: true,
+      clientX: 20,
+      clientY: 5,
+    });
+    window.dispatchEvent(moveEvent);
+    expect(hoisted.setNodes).toHaveBeenCalledTimes(1);
+    const updater = hoisted.setNodes.mock.calls[0][0];
+    // Simulate a realtime lock landing between drag-start and this move: the
+    // updater reads the fresh node from state, not the (now stale) render-time
+    // `data` prop, and must refuse to touch its geometry.
+    const lockedNode = {
+      id: 'arrow-1',
+      position: { x: 0, y: 0 },
+      data: { dx: 160, dy: 0, locked: true },
+    };
+    const result = updater([lockedNode]);
+    expect(result[0]).toBe(lockedNode);
+  });
 });

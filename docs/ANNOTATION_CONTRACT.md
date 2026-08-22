@@ -101,6 +101,18 @@ these types visible on the canvas and round-trip through save/load. Editing
 them beyond drag-to-move (resizing, per-type property editors) is out of
 scope for v1 and is done through the MCP tools above instead.
 
+`z` and `locked` round-trip through every annotation type's canvas
+representation (`overlayToFlowNode`/`flowNodeToOverlay` in
+`packages/ui-graph-canvas/src/utils/annotations.js`, and the server-model
+translators in `frontend/web/src/utils/sessionAnnotations.js`): `z` maps to
+the ReactFlow node's `zIndex`, and `locked` maps to `draggable: false`. This
+is the canvas UI's own enforcement of `locked` — the server never rejects a
+write to a locked annotation (`reorder_annotation` / `set_annotation_lock` /
+`update_annotation` all still apply). A translator that dropped either field
+would make the browser's own next autosave diff the annotation back to its
+`z: 0` / `locked: false` default and silently overwrite whatever a
+collaborator or agent had just set.
+
 ## V1 non-goals
 
 GIF, SVG, crop, image filters, threaded comments, vote counting, true frame grouping and cross-session annotation libraries are outside v1.

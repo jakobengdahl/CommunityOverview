@@ -70,25 +70,37 @@ export function isArrowAnchored(data) {
 // canvas-shape annotation ({id, kind, position, ...payload}).
 export function overlayToFlowNode(overlay) {
   const base = { id: overlay.id, type: overlay.kind, position: overlay.position || { x: 0, y: 0 } };
+  // `z` (layer order) and `locked` (the canvas UI's own edit-lock convention,
+  // set via the generic MCP annotation tools) are envelope fields on every v1
+  // annotation type. They must round-trip through the ReactFlow node — a flow
+  // node that silently dropped them would, on the next autosave, diff back out
+  // as an `annotation_updated` that resets a collaborator's/agent's `z`/`locked`
+  // to their defaults, overwriting the very change realtime sync just delivered.
+  const locked = Boolean(overlay.locked);
+  const zIndex = overlay.z ?? 0;
   if (overlay.kind === 'note') {
     return {
       ...base,
-      data: { text: overlay.text || '', color: overlay.color, fontSize: overlay.fontSize },
+      data: { text: overlay.text || '', color: overlay.color, fontSize: overlay.fontSize, locked },
       style: overlay.size
         ? { width: overlay.size.w, height: overlay.size.h }
         : { width: 200, height: 140 },
+      draggable: !locked,
+      zIndex,
     };
   }
   if (overlay.kind === 'label') {
     return {
       ...base,
-      data: { text: overlay.text || '', color: overlay.color, fontSize: overlay.fontSize },
+      data: { text: overlay.text || '', color: overlay.color, fontSize: overlay.fontSize, locked },
+      draggable: !locked,
+      zIndex,
     };
   }
   if (GENERIC_OVERLAY_TYPES.has(overlay.kind)) {
-    const data = {};
+    const data = { locked };
     for (const field of GENERIC_OVERLAY_FIELDS[overlay.kind]) data[field] = overlay[field];
-    const node = { ...base, data };
+    const node = { ...base, data, draggable: !locked, zIndex };
     if (SIZED_GENERIC_KINDS.has(overlay.kind)) {
       node.style = overlay.size
         ? { width: overlay.size.w, height: overlay.size.h }
@@ -103,15 +115,21 @@ export function overlayToFlowNode(overlay) {
     color: overlay.color,
     startArrow: overlay.startArrow ?? false,
     endArrow: overlay.endArrow ?? true,
+    locked,
   };
   if (overlay.startAnchor) data.startAnchor = overlay.startAnchor;
   if (overlay.endAnchor) data.endAnchor = overlay.endAnchor;
-  return { ...base, data, draggable: !isArrowAnchored(data) };
+  return { ...base, data, draggable: !locked && !isArrowAnchored(data), zIndex };
 }
 
 // Serialize a ReactFlow overlay node back to the host's canvas-shape annotation.
 export function flowNodeToOverlay(node) {
   const base = { id: node.id, kind: node.type, position: node.position };
+  // Mirrors overlayToFlowNode's envelope fields; see its comment for why these
+  // must survive the round trip. `node.zIndex`/`node.data.locked` are undefined
+  // on a freshly created node (never synced yet), hence the defaults below.
+  const z = node.zIndex ?? 0;
+  const locked = Boolean(node.data?.locked);
   if (node.type === 'note') {
     return {
       ...base,
@@ -119,6 +137,8 @@ export function flowNodeToOverlay(node) {
       color: node.data?.color,
       fontSize: node.data?.fontSize,
       size: node.style ? { w: node.style.width, h: node.style.height } : undefined,
+      z,
+      locked,
     };
   }
   if (node.type === 'label') {
@@ -127,10 +147,12 @@ export function flowNodeToOverlay(node) {
       text: node.data?.text || '',
       color: node.data?.color,
       fontSize: node.data?.fontSize,
+      z,
+      locked,
     };
   }
   if (GENERIC_OVERLAY_TYPES.has(node.type)) {
-    const out = { ...base };
+    const out = { ...base, z, locked };
     for (const field of GENERIC_OVERLAY_FIELDS[node.type]) out[field] = node.data?.[field];
     if (SIZED_GENERIC_KINDS.has(node.type) && node.style) {
       out.size = { w: node.style.width, h: node.style.height };
@@ -144,6 +166,8 @@ export function flowNodeToOverlay(node) {
     color: node.data?.color,
     startArrow: node.data?.startArrow ?? false,
     endArrow: node.data?.endArrow ?? true,
+    z,
+    locked,
   };
   if (node.data?.startAnchor) out.startAnchor = node.data.startAnchor;
   if (node.data?.endAnchor) out.endAnchor = node.data.endAnchor;

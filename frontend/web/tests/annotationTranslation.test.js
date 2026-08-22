@@ -14,6 +14,8 @@ describe('annotation overlay translation', () => {
         text: 'hello',
         color: '#FEF08A',
         size: { w: 200, h: 140 },
+        z: 0,
+        locked: false,
       },
     ];
     const server = overlaysToAnnotations(overlays);
@@ -28,7 +30,15 @@ describe('annotation overlay translation', () => {
 
   it('round-trips a label (colour stored under style)', () => {
     const overlays = [
-      { id: 'label-1', kind: 'label', position: { x: 3, y: 4 }, text: 'Region', color: '#fff' },
+      {
+        id: 'label-1',
+        kind: 'label',
+        position: { x: 3, y: 4 },
+        text: 'Region',
+        color: '#fff',
+        z: 0,
+        locked: false,
+      },
     ];
     const server = overlaysToAnnotations(overlays);
     expect(server[0].style).toEqual({ color: '#fff' });
@@ -46,6 +56,8 @@ describe('annotation overlay translation', () => {
         color: '#fff',
         startArrow: false,
         endArrow: true,
+        z: 0,
+        locked: false,
       },
     ];
     const server = overlaysToAnnotations(overlays);
@@ -67,6 +79,8 @@ describe('annotation overlay translation', () => {
         endArrow: false,
         startAnchor: 'node-a',
         endAnchor: 'node-b',
+        z: 0,
+        locked: false,
       },
     ];
     const server = overlaysToAnnotations(overlays);
@@ -86,6 +100,8 @@ describe('annotation overlay translation', () => {
         color: '#FEF08A',
         fontSize: 24,
         size: { w: 200, h: 140 },
+        z: 0,
+        locked: false,
       },
       {
         id: 'label-1',
@@ -94,9 +110,36 @@ describe('annotation overlay translation', () => {
         text: 'l',
         color: '#fff',
         fontSize: 28,
+        z: 0,
+        locked: false,
       },
     ];
     expect(annotationsToOverlays(overlaysToAnnotations(overlays))).toEqual(overlays);
+  });
+
+  // z (layer order) and locked (the canvas UI's own edit-lock convention set by
+  // the generic MCP annotation tools, docs/ANNOTATION_CONTRACT.md) are envelope
+  // fields on every v1 annotation type. Before this fix, annotationsToOverlays
+  // silently dropped them, so a browser's next autosave would diff the
+  // annotation back to z=0/locked=false and overwrite a collaborator's or
+  // agent's `reorder_annotation`/`set_annotation_lock` call — a realtime-sync
+  // data-loss bug, not just a rendering gap.
+  it('preserves a non-default z and locked flag across the full round trip', () => {
+    const overlays = [
+      {
+        id: 'note-1',
+        kind: 'note',
+        position: { x: 0, y: 0 },
+        text: 'n',
+        color: '#FEF08A',
+        size: { w: 200, h: 140 },
+        z: 3,
+        locked: true,
+      },
+    ];
+    const server = overlaysToAnnotations(overlays);
+    expect(server[0]).toMatchObject({ z: 3, locked: true });
+    expect(annotationsToOverlays(server)).toEqual(overlays);
   });
 
   it('ignores group annotations (handled separately)', () => {
@@ -126,6 +169,8 @@ describe('generic annotation overlay translation', () => {
         text: 'Region',
         color: '#fff',
         fontSize: 20,
+        z: 0,
+        locked: false,
       },
     ];
     const server = overlaysToAnnotations(overlays);
@@ -141,6 +186,8 @@ describe('generic annotation overlay translation', () => {
         position: { x: 0, y: 0 },
         color: '#4ADE80',
         size: { w: 300, h: 200 },
+        z: 0,
+        locked: false,
       },
     ];
     const server = overlaysToAnnotations(overlays);
@@ -148,7 +195,7 @@ describe('generic annotation overlay translation', () => {
     expect(annotationsToOverlays(server)).toEqual(overlays);
   });
 
-  it('round-trips a shape annotation', () => {
+  it('round-trips a shape annotation with a non-default layer order', () => {
     const overlays = [
       {
         id: 'shape-1',
@@ -157,25 +204,45 @@ describe('generic annotation overlay translation', () => {
         shape: 'circle',
         color: '#60A5FA',
         size: { w: 120, h: 120 },
+        z: 4,
+        locked: false,
       },
     ];
     const server = overlaysToAnnotations(overlays);
     expect(server[0].shape).toBe('circle');
+    expect(server[0].z).toBe(4);
     expect(annotationsToOverlays(server)).toEqual(overlays);
   });
 
-  it('round-trips an icon annotation', () => {
+  it('round-trips a locked icon annotation', () => {
     const overlays = [
-      { id: 'icon-1', kind: 'icon', position: { x: 8, y: 8 }, icon: 'flag', color: '#F472B6' },
+      {
+        id: 'icon-1',
+        kind: 'icon',
+        position: { x: 8, y: 8 },
+        icon: 'flag',
+        color: '#F472B6',
+        z: 0,
+        locked: true,
+      },
     ];
     const server = overlaysToAnnotations(overlays);
     expect(server[0].icon).toBe('flag');
+    expect(server[0].locked).toBe(true);
     expect(annotationsToOverlays(server)).toEqual(overlays);
   });
 
   it('round-trips a vote_dot annotation', () => {
     const overlays = [
-      { id: 'vote-1', kind: 'vote_dot', position: { x: 9, y: 9 }, value: 3, color: '#FB923C' },
+      {
+        id: 'vote-1',
+        kind: 'vote_dot',
+        position: { x: 9, y: 9 },
+        value: 3,
+        color: '#FB923C',
+        z: 0,
+        locked: false,
+      },
     ];
     const server = overlaysToAnnotations(overlays);
     expect(server[0].value).toBe(3);
@@ -192,6 +259,8 @@ describe('generic annotation overlay translation', () => {
         alt: 'diagram',
         color: '#38BDF8',
         size: { w: 240, h: 180 },
+        z: 0,
+        locked: false,
       },
     ];
     const server = overlaysToAnnotations(overlays);

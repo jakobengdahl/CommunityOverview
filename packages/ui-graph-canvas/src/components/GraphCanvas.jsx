@@ -1893,7 +1893,7 @@ function GraphCanvasInner({
       if (n.type !== 'arrow') continue;
       if (!n.data?.startAnchor && !n.data?.endAnchor) continue;
       const resolved = resolveAnchoredArrow(n, centers);
-      const desiredDraggable = !isArrowHeld(n.data, existing);
+      const desiredDraggable = !n.data?.locked && !isArrowHeld(n.data, existing);
       if (resolved || n.draggable !== desiredDraggable) {
         updates.set(n.id, { resolved, desiredDraggable });
         if (resolved) geometryChanged = true;
