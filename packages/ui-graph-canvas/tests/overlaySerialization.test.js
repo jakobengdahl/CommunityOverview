@@ -8,6 +8,7 @@ import {
   nodeCenter,
   findSnapTarget,
   resolveAnchoredArrow,
+  OVERLAY_TYPES,
 } from '../src/utils/annotations';
 
 // GraphCanvas maps between the host's canvas-shape overlay descriptors and
@@ -101,6 +102,119 @@ describe('overlay serialization', () => {
     expect(isManualNode({ id: 'arrow-1', type: 'arrow' })).toBe(true);
     expect(isManualNode({ id: 'group-1', type: 'group' })).toBe(true);
     expect(isManualNode({ id: 'x', type: 'custom' })).toBe(false);
+  });
+});
+
+// The v1 annotation model (docs/ANNOTATION_CONTRACT.md) also defines text,
+// frame, shape, icon, vote_dot and image. These were previously store/MCP-only:
+// the canvas normalized them (annotationModel.js) but silently dropped them
+// here, so an MCP-created shape or image never appeared on screen. These
+// round-trips lock in a simple, generic visual representation for each.
+describe('generic annotation overlay serialization', () => {
+  it('registers text/frame/shape/icon/vote_dot/image as overlay types', () => {
+    for (const kind of ['text', 'frame', 'shape', 'icon', 'vote_dot', 'image']) {
+      expect(OVERLAY_TYPES.has(kind)).toBe(true);
+    }
+  });
+
+  it('round-trips a text overlay (colour/font size)', () => {
+    const overlay = {
+      id: 'text-1',
+      kind: 'text',
+      position: { x: 1, y: 2 },
+      text: 'Hi',
+      color: '#fff',
+      fontSize: 20,
+    };
+    const node = overlayToFlowNode(overlay);
+    expect(node).toMatchObject({
+      id: 'text-1',
+      type: 'text',
+      position: { x: 1, y: 2 },
+      data: { text: 'Hi', color: '#fff', fontSize: 20 },
+    });
+    expect(flowNodeToOverlay(node)).toEqual(overlay);
+  });
+
+  it('round-trips a frame overlay with an explicit size', () => {
+    const overlay = {
+      id: 'frame-1',
+      kind: 'frame',
+      position: { x: 0, y: 0 },
+      color: '#4ADE80',
+      size: { w: 300, h: 200 },
+    };
+    const node = overlayToFlowNode(overlay);
+    expect(node).toMatchObject({
+      id: 'frame-1',
+      type: 'frame',
+      style: { width: 300, height: 200 },
+      data: { color: '#4ADE80' },
+    });
+    expect(flowNodeToOverlay(node)).toEqual(overlay);
+  });
+
+  it('defaults a frame to 160x96 when size is missing', () => {
+    const node = overlayToFlowNode({ id: 'f', kind: 'frame', position: { x: 0, y: 0 } });
+    expect(node.style).toEqual({ width: 160, height: 96 });
+  });
+
+  it('round-trips a shape overlay (shape name, colour, size)', () => {
+    const overlay = {
+      id: 'shape-1',
+      kind: 'shape',
+      position: { x: 5, y: 5 },
+      shape: 'circle',
+      color: '#60A5FA',
+      size: { w: 120, h: 120 },
+    };
+    const node = overlayToFlowNode(overlay);
+    expect(node.data).toEqual({ shape: 'circle', color: '#60A5FA' });
+    expect(flowNodeToOverlay(node)).toEqual(overlay);
+  });
+
+  it('round-trips an icon overlay', () => {
+    const overlay = {
+      id: 'icon-1',
+      kind: 'icon',
+      position: { x: 8, y: 8 },
+      icon: 'flag',
+      color: '#F472B6',
+    };
+    const node = overlayToFlowNode(overlay);
+    expect(node.data).toEqual({ icon: 'flag', color: '#F472B6' });
+    expect(flowNodeToOverlay(node)).toEqual(overlay);
+  });
+
+  it('round-trips a vote_dot overlay, preserving a value of 0', () => {
+    const overlay = {
+      id: 'vote-1',
+      kind: 'vote_dot',
+      position: { x: 9, y: 9 },
+      value: 0,
+      color: '#FB923C',
+    };
+    const node = overlayToFlowNode(overlay);
+    expect(node.data).toEqual({ value: 0, color: '#FB923C' });
+    expect(flowNodeToOverlay(node)).toEqual(overlay);
+  });
+
+  it('round-trips an image overlay (URL content only)', () => {
+    const overlay = {
+      id: 'image-1',
+      kind: 'image',
+      position: { x: 2, y: 3 },
+      image: { url: 'https://example.com/a.png' },
+      alt: 'diagram',
+      size: { w: 240, h: 180 },
+    };
+    const node = overlayToFlowNode(overlay);
+    expect(node).toMatchObject({
+      type: 'image',
+      style: { width: 240, height: 180 },
+      data: { image: { url: 'https://example.com/a.png' }, alt: 'diagram' },
+    });
+    expect(flowNodeToOverlay(node)).toEqual(overlay);
   });
 });
 

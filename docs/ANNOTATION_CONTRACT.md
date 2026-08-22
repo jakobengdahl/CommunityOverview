@@ -91,6 +91,16 @@ annotation's id with a different type, is refused rather than applied. See
 `backend/DEVELOPMENT.md`'s "Generic annotation tools" section for the full
 contract, including the per-type `content` payload shape.
 
+## Canvas rendering
+
+`note`, `label` and `line` have dedicated, interactive canvas UX (drag,
+resize, inline text editing, anchoring). The rest of the v1 model — `text`,
+`frame`, `shape`, `icon`, `vote_dot`, `image` — renders as a simple, read-only
+visual representation: enough to make an MCP-created annotation of one of
+these types visible on the canvas and round-trip through save/load. Editing
+them beyond drag-to-move (resizing, per-type property editors) is out of
+scope for v1 and is done through the MCP tools above instead.
+
 ## V1 non-goals
 
 GIF, SVG, crop, image filters, threaded comments, vote counting, true frame grouping and cross-session annotation libraries are outside v1.

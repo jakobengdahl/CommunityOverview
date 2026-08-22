@@ -15,6 +15,7 @@ export { default as GroupNode } from './components/GroupNode';
 export { default as NoteNode } from './components/NoteNode';
 export { default as LabelNode } from './components/LabelNode';
 export { default as ArrowNode } from './components/ArrowNode';
+export { default as GenericAnnotationNode } from './components/GenericAnnotationNode';
 
 // Layout utilities
 export {

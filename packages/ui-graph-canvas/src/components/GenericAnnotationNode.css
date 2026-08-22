@@ -1,0 +1,65 @@
+.graph-generic-annotation-node.kind-text {
+  padding: 4px 8px;
+  font-size: 16px;
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+
+.graph-generic-annotation-node.kind-frame {
+  box-sizing: border-box;
+  border: 2px dashed #94a3b8;
+  border-radius: 4px;
+  background: transparent;
+}
+
+.graph-generic-annotation-node.kind-shape {
+  box-sizing: border-box;
+  border-radius: 4px;
+}
+
+.graph-generic-annotation-node.kind-shape.shape-circle {
+  border-radius: 50%;
+}
+
+.graph-generic-annotation-node.kind-icon {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 32px;
+  height: 32px;
+  border-radius: 50%;
+  border: 2px solid #94a3b8;
+  background: #1a1a1a;
+  color: #e6edf3;
+  font-size: 11px;
+  text-transform: uppercase;
+}
+
+.graph-generic-annotation-node.kind-vote_dot {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 24px;
+  height: 24px;
+  border-radius: 50%;
+  color: #1a1a1a;
+  font-size: 12px;
+  font-weight: 600;
+}
+
+.graph-generic-annotation-node.kind-image {
+  display: block;
+  object-fit: contain;
+}
+
+.graph-generic-annotation-node.kind-image-empty {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  box-sizing: border-box;
+  border: 1px dashed #94a3b8;
+  color: #94a3b8;
+  font-size: 12px;
+  text-align: center;
+  padding: 4px;
+}
