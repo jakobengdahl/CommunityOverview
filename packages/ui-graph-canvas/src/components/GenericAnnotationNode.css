@@ -1,3 +1,8 @@
+.graph-generic-annotation-node.selected {
+  outline: 1px dashed rgba(255, 255, 255, 0.6);
+  outline-offset: 2px;
+}
+
 .graph-generic-annotation-node.kind-text {
   padding: 4px 8px;
   font-size: 16px;
