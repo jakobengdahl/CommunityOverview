@@ -185,3 +185,15 @@
   top: calc(var(--floating-header-bottom, 60px) + 8px);
   max-width: none;
 }
+
+/* Sheet variant: content hosted inside MobileShell's BottomSheet rather than
+   floating fixed near the top of the viewport — the sheet primitive already
+   owns positioning, so this only needs to lay out normally inside it. */
+.floating-search--sheet {
+  position: static;
+  top: auto;
+  left: auto;
+  transform: none;
+  width: 100%;
+  max-width: none;
+}

@@ -39,7 +39,19 @@ from typing import Any, Deque, Dict, List, Optional, Protocol
 # previously-shared session URLs keep resolving.
 SESSION_ID_RE = re.compile(r"^\d{4}-\d{4}(?:-\d{4}-\d{4})?$")
 
-_ANNOTATION_KINDS = {"group", "note", "label", "arrow"}
+_ANNOTATION_TYPES = {
+    "group",
+    "note",
+    "text",
+    "label",
+    "line",
+    "frame",
+    "shape",
+    "icon",
+    "vote_dot",
+    "image",
+}
+_LEGACY_ANNOTATION_ALIASES = {"arrow": "line"}
 _DEFAULT_MAX_ANNOTATIONS = 2000
 _DEFAULT_RING_SIZE = 500
 
@@ -78,6 +90,7 @@ def _empty_state() -> Dict[str, Any]:
         "positions": {},
         "hidden_node_ids": [],
         "hidden_edge_ids": [],
+        "annotation_schema_version": 1,
         "annotations": [],
     }
 
@@ -299,14 +312,19 @@ def _validate_position(value: Any) -> Dict[str, float]:
 def _validate_annotation(value: Any, *, require_id: bool) -> Dict[str, Any]:
     if not isinstance(value, dict):
         raise OpError("annotation must be an object")
-    kind = value.get("kind")
-    if kind not in _ANNOTATION_KINDS:
-        raise OpError(f"annotation kind must be one of {sorted(_ANNOTATION_KINDS)}")
-    if require_id and not isinstance(value.get("id"), str):
+    annotation = dict(value)
+    raw_type = annotation.get("type") or annotation.get("kind")
+    ann_type = _LEGACY_ANNOTATION_ALIASES.get(raw_type, raw_type)
+    if ann_type not in _ANNOTATION_TYPES:
+        raise OpError(f"annotation type must be one of {sorted(_ANNOTATION_TYPES)}")
+    annotation["type"] = ann_type
+    # Keep kind for existing clients and persisted group checks; v1 uses type as canonical.
+    annotation["kind"] = ann_type
+    if require_id and not isinstance(annotation.get("id"), str):
         raise OpError("annotation update/delete requires a string 'id'")
-    if "position" in value and value["position"] is not None:
-        _validate_position(value["position"])
-    return value
+    if "position" in annotation and annotation["position"] is not None:
+        _validate_position(annotation["position"])
+    return annotation
 
 
 def _union(existing: List[str], incoming: List[str]) -> List[str]:
@@ -654,7 +672,8 @@ class SessionStore:
                 (
                     a
                     for a in state["annotations"]
-                    if a.get("id") == group_id and a.get("kind") == "group"
+                    if a.get("id") == group_id
+                    and (a.get("type") or a.get("kind")) == "group"
                 ),
                 None,
             )

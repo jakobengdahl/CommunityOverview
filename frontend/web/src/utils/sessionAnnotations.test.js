@@ -1,5 +1,10 @@
 import { describe, it, expect } from 'vitest';
-import { annotationsToGroups, groupsToAnnotations } from './sessionAnnotations';
+import {
+  annotationDocumentToLegacyMetadata,
+  annotationsToGroups,
+  groupsToAnnotations,
+  legacyMetadataToAnnotationDocument,
+} from './sessionAnnotations';
 
 describe('group description round-trip (R12)', () => {
   it('carries description through groupsToAnnotations', () => {
@@ -48,5 +53,28 @@ describe('group description round-trip (R12)', () => {
     ]);
     const [ann] = groupsToAnnotations(groups, parentIds);
     expect(ann.description).toBe('Round trip');
+  });
+
+  it('migrates legacy saved-view metadata into a v1 annotation document', () => {
+    const document = legacyMetadataToAnnotationDocument({
+      groups: [{ id: 'g1', label: 'Team', position: { x: 0, y: 0 } }],
+      parentIds: { n1: 'g1' },
+      annotations: [{ id: 'note-1', kind: 'note', position: { x: 1, y: 2 }, text: 'hello' }],
+    });
+    expect(document.schema_version).toBe(1);
+    expect(document.annotations.map((a) => a.type).sort()).toEqual(['group', 'note']);
+    expect(document.annotations.find((a) => a.id === 'g1').member_node_ids).toEqual(['n1']);
+  });
+
+  it('exports a v1 document as backward-compatible saved-view metadata', () => {
+    const metadata = annotationDocumentToLegacyMetadata([
+      { id: 'g1', type: 'group', label: 'Team', member_node_ids: ['n1'], position: { x: 0, y: 0 } },
+      { id: 'label-1', type: 'label', text: 'L', position: { x: 1, y: 1 } },
+    ]);
+    expect(metadata.annotation_schema_version).toBe(1);
+    expect(metadata.groups).toHaveLength(1);
+    expect(metadata.annotations).toEqual([
+      expect.objectContaining({ id: 'label-1', kind: 'label', text: 'L' }),
+    ]);
   });
 });

@@ -100,6 +100,12 @@
   color: #999;
 }
 
+@media (pointer: coarse) {
+  .app-notification {
+    bottom: calc(84px + env(safe-area-inset-bottom));
+  }
+}
+
 .app-a11y-depth-live {
   position: absolute;
   width: 1px;

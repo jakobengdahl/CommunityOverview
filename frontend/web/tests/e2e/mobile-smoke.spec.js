@@ -21,21 +21,27 @@ const LONG_PRESS_HOLD_MS = 900;
 // Kept per-edge rather than as one list: exempting a subtree from both edges
 // costs far more coverage than the break being silenced. The chat panel is the
 // largest subtree in the shell, and only its left edge is broken.
-//
 const KNOWN_RIGHT_OVERFLOW = [];
 // .chat-panel-floating — a fixed 380px anchored 16px from the right edge, so at
 //   390px its left edge sits at x~-6. Its right edge is inside on both devices.
+// ChatPanel keeps its own pre-existing floating/minimized presentation in
+// MobileShell (see MobileShell.jsx) rather than being re-hosted in the bottom
+// sheet, so this pre-existing break is unchanged by the mobile shell split.
 const KNOWN_LEFT_OVERFLOW = ['.chat-panel-floating'];
 
 /**
- * Finds a point inside the first canvas node that nothing else covers.
+ * Finds a point inside a canvas node that nothing else covers.
  *
  * The floating toolbar overlays a large part of a phone viewport, and a freshly
  * created node is centred underneath it, so the node's own centre often belongs
  * to the toolbar. Probing with elementFromPoint picks a spot the press will
  * actually reach.
+ *
+ * `index` selects among the canvas nodes in DOM order; with several on screen
+ * the earlier ones can end up underneath the later ones, which is not a state
+ * this probe can resolve.
  */
-async function touchPointOnNode(page) {
+async function touchPointOnNode(page, index = 0) {
   let point = null;
   let previousRect = null;
   // Polled for two reasons: a newly created node is animated to the centre of
@@ -44,8 +50,8 @@ async function touchPointOnNode(page) {
   await expect
     .poll(
       async () => {
-        const sample = await page.evaluate(() => {
-          const node = document.querySelector('.react-flow__node');
+        const sample = await page.evaluate((nodeIndex) => {
+          const node = document.querySelectorAll('.react-flow__node')[nodeIndex];
           if (!node) return null;
           const id = node.getAttribute('data-id');
           const rect = node.getBoundingClientRect();
@@ -61,7 +67,7 @@ async function touchPointOnNode(page) {
             }
           }
           return { key: `${rect.left},${rect.top},${rect.width},${rect.height}`, free };
-        });
+        }, index);
         const settled = sample !== null && sample.key === previousRect;
         previousRect = sample?.key ?? null;
         point = sample?.free ?? null;
@@ -138,10 +144,20 @@ async function openApp(page) {
   // The coarse-pointer branch is what every assertion below depends on; if the
   // project stopped emulating touch these tests would silently pass as desktop.
   await expect(page.locator('.app.is-touch')).toBeVisible();
+  await expect(page.locator('.mobile-shell-bottomnav')).toBeVisible();
+}
+
+/**
+ * Opens the Create bottom sheet via the nav (this also minimizes the chat
+ * panel if it was expanded — MobileShell keeps at most one surface open).
+ */
+async function openCreatePanel(page) {
+  await page.locator('.mobile-shell-bottomnav-item[aria-label="Create"]').tap();
+  await expect(page.locator('.bottom-sheet')).toBeVisible();
 }
 
 async function createNodeFromToolbox(page, nodeType, name) {
-  await minimizeChat(page);
+  await openCreatePanel(page);
   await page.locator(`.floating-toolbar-item[aria-label="${nodeType}"]`).tap();
 
   const dialog = page.locator('.create-node-dialog');
@@ -149,22 +165,11 @@ async function createNodeFromToolbox(page, nodeType, name) {
   await dialog.locator('#create-name').fill(name);
   await dialog.locator('button[type="submit"]').tap();
   await expect(dialog).toBeHidden();
+  // Picking a type closes the sheet — it does not linger over the canvas.
+  await expect(page.locator('.bottom-sheet')).toHaveCount(0);
 }
 
 test.describe('mobile shell', () => {
-  test('search stays below the header and uses the available phone width', async ({ page }) => {
-    await openApp(page);
-
-    const geometry = await page.evaluate(() => {
-      const header = document.querySelector('.floating-header').getBoundingClientRect();
-      const search = document.querySelector('.floating-search').getBoundingClientRect();
-      return { headerBottom: header.bottom, searchTop: search.top, searchWidth: search.width };
-    });
-
-    expect(geometry.searchTop).toBeGreaterThanOrEqual(geometry.headerBottom + 7);
-    expect(geometry.searchWidth).toBeGreaterThanOrEqual(page.viewportSize().width - 40);
-  });
-
   test('lays out inside the viewport width', async ({ page }) => {
     await openApp(page);
 
@@ -202,16 +207,38 @@ test.describe('mobile shell', () => {
     ).toEqual([]);
   });
 
-  test('hamburger opens the session drawer', async ({ page }) => {
+  test('the Menu nav item opens the session drawer', async ({ page }) => {
     await openApp(page);
 
     const drawer = page.locator('.session-drawer');
     await expect(drawer).not.toHaveClass(/\bopen\b/);
 
-    await page.locator('.floating-header-hamburger').tap();
+    await page.locator('.mobile-shell-bottomnav-item[aria-label="Menu"]').tap();
 
     await expect(drawer).toHaveClass(/\bopen\b/);
     await expect(drawer.locator('.session-drawer-item').first()).toBeVisible();
+  });
+
+  test('at most one surface covers the canvas at a time', async ({ page }) => {
+    await openApp(page);
+    // Chat starts expanded by default (chatPanelOpen defaults to true).
+    await expect(page.locator('.chat-panel-floating')).toBeVisible();
+
+    await page.locator('.mobile-shell-bottomnav-item[aria-label="Create"]').tap();
+    await expect(page.locator('.bottom-sheet')).toBeVisible();
+    // Opening the create sheet must minimize chat first.
+    await expect(page.locator('.chat-panel-floating')).toHaveCount(0);
+    await expect(page.locator('.chat-panel-minimized')).toBeVisible();
+
+    await page.locator('.mobile-shell-bottomnav-item[aria-label="Chat"]').tap();
+    // Opening chat must close the sheet.
+    await expect(page.locator('.bottom-sheet')).toHaveCount(0);
+    await expect(page.locator('.chat-panel-floating')).toBeVisible();
+
+    await page.locator('.mobile-shell-bottomnav-item[aria-label="Menu"]').tap();
+    // Opening the menu drawer must minimize chat too.
+    await expect(page.locator('.session-drawer')).toHaveClass(/\bopen\b/);
+    await expect(page.locator('.chat-panel-floating')).toHaveCount(0);
   });
 
   test('a node can be created from the toolbox', async ({ page }, testInfo) => {
@@ -231,6 +258,94 @@ test.describe('mobile shell', () => {
     await longPress(page, await touchPointOnNode(page), async () => {
       await expect(page.locator('.node-context-menu')).toBeVisible();
     });
+  });
+
+  test('canvas controls claim non-overlapping space', async ({ page }) => {
+    await openApp(page);
+
+    // The desktop control cluster is replaced, not merely restyled: its 26px
+    // buttons are below any usable touch target.
+    await expect(page.locator('.react-flow__controls')).toHaveCount(0);
+    await expect(page.locator('.graph-compact-controls')).toBeVisible();
+
+    // Every interactive surface the canvas positions for itself. A selector
+    // that is absent in this profile (the minimap is off by default, the depth
+    // control needs a federated deployment) contributes nothing rather than
+    // failing — the check is about the ones that are on screen together.
+    const CANVAS_CONTROLS = [
+      '.graph-compact-controls',
+      '.federation-depth-control',
+      '.react-flow__controls',
+      '.react-flow__minimap',
+      '.graph-canvas-controls',
+      '.graph-notification',
+    ];
+
+    const overlaps = await page.evaluate((selectors) => {
+      const boxes = [];
+      for (const selector of selectors) {
+        for (const el of document.querySelectorAll(selector)) {
+          const style = getComputedStyle(el);
+          if (style.display === 'none' || style.visibility === 'hidden') continue;
+          const rect = el.getBoundingClientRect();
+          if (rect.width === 0 || rect.height === 0) continue;
+          boxes.push({ selector, rect });
+        }
+      }
+      const found = [];
+      for (let i = 0; i < boxes.length; i += 1) {
+        for (let j = i + 1; j < boxes.length; j += 1) {
+          const a = boxes[i].rect;
+          const b = boxes[j].rect;
+          const intersects =
+            a.left < b.right && b.left < a.right && a.top < b.bottom && b.top < a.bottom;
+          if (intersects) found.push(`${boxes[i].selector} overlaps ${boxes[j].selector}`);
+        }
+      }
+      return { measured: boxes.map((b) => b.selector), found };
+    }, CANVAS_CONTROLS);
+
+    expect(overlaps.measured).toContain('.graph-compact-controls');
+    expect(overlaps.found, 'canvas controls overlap each other').toEqual([]);
+  });
+
+  test('the compact controls are touch-sized', async ({ page }) => {
+    await openApp(page);
+
+    const undersized = await page.evaluate(() =>
+      Array.from(document.querySelectorAll('.graph-compact-controls button'))
+        .map((el) => ({ label: el.getAttribute('aria-label'), rect: el.getBoundingClientRect() }))
+        .filter(({ rect }) => rect.width < 44 || rect.height < 44)
+        .map(({ label, rect }) => `${label} ${Math.round(rect.width)}x${Math.round(rect.height)}`)
+    );
+
+    expect(undersized).toEqual([]);
+  });
+
+  test('a node can be focused and unfocused without a context menu', async ({ page }, testInfo) => {
+    await openApp(page);
+    // Two unrelated nodes, so entering focus visibly narrows the canvas to one.
+    await createNodeFromToolbox(page, 'Actor', `Focus actor ${testInfo.project.name}`);
+    await createNodeFromToolbox(page, 'Actor', `Other actor ${testInfo.project.name}`);
+    await expect(page.locator('.react-flow__node')).toHaveCount(2);
+
+    const focus = page.locator('.graph-compact-control-focus');
+    await expect(focus).toBeDisabled();
+
+    // Selecting by tapping the node is the whole entry path — no long press,
+    // no context menu.
+    const point = await touchPointOnNode(page, 1);
+    await page.touchscreen.tap(point.x, point.y);
+    await expect(focus).toBeEnabled();
+
+    await focus.tap();
+    await expect(focus).toHaveAttribute('aria-pressed', 'true');
+    await expect(page.locator('.react-flow__node')).toHaveCount(1);
+
+    // ...and the same control takes the whole canvas back.
+    await focus.tap();
+    await expect(focus).toHaveAttribute('aria-pressed', 'false');
+    await expect(page.locator('.react-flow__node')).toHaveCount(2);
   });
 
   test('the chat panel reopens with a reachable composer', async ({ page }) => {

@@ -218,6 +218,8 @@
     "view_section": "View",
     "show_minimap": "Show minimap",
     "show_node_preview": "Show node preview popup",
+    "show_assistant_panel": "Assistant panel open",
+    "reset_assistant_panel_default": "Reset to default",
     "language_section": "Language",
     "language_en": "English",
     "language_sv": "Svenska",
@@ -312,7 +314,13 @@
   "canvas": {
     "lazy_showing": "Showing {loaded} of {total} nodes",
     "lazy_load_more": "Load More",
-    "lazy_hidden_connections": "{count} connections to nodes not yet loaded are hidden — Load More to reveal them"
+    "lazy_hidden_connections": "{count} connections to nodes not yet loaded are hidden — Load More to reveal them",
+    "zoom_in": "Zoom in",
+    "zoom_out": "Zoom out",
+    "fit_view": "Fit whole graph",
+    "focus_view": "Focus on selected node",
+    "exit_focus_view": "Back to whole graph",
+    "controls_group": "Canvas controls"
   },
   "guide": {
     "title": "Guide",
@@ -358,7 +366,8 @@
   "common": {
     "saving": "Saving...",
     "save": "Save",
-    "cancel": "Cancel"
+    "cancel": "Cancel",
+    "close": "Close"
   },
   "edit_edge": {
     "title": "Edit Connection",
@@ -461,5 +470,15 @@
     "snap_peek": "Peek",
     "snap_half": "Half",
     "snap_full": "Full"
+  },
+  "mobile_nav": {
+    "bottom_nav": "App navigation",
+    "graph": "Graph",
+    "search": "Search",
+    "create": "Create",
+    "chat": "Chat",
+    "menu": "Menu",
+    "search_panel_title": "Search",
+    "create_panel_title": "Create"
   }
 }

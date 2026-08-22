@@ -159,6 +159,96 @@ class TestGraphStorageCRUD:
         assert len(result.added_node_ids) == 2
         assert len(result.added_edge_ids) == 1
 
+    def test_add_edge_rejects_relationship_type_for_wrong_source_type(
+        self, temp_storage
+    ):
+        """Single edge writes enforce directed source/target applicability."""
+        actor = Node(id="actor", type=NodeType.ACTOR, name="Actor")
+        legislation = Node(id="law", type=NodeType.LEGISLATION, name="Law")
+        temp_storage.add_nodes([actor, legislation], [])
+
+        with pytest.raises(ValueError, match="IMPLEMENTS"):
+            temp_storage.add_edge(
+                Edge(source="actor", target="law", type=RelationshipType.IMPLEMENTS)
+            )
+
+        assert len(temp_storage.edges) == 0
+
+    def test_add_nodes_rejects_relationship_type_for_wrong_target_type(
+        self, temp_storage
+    ):
+        """Batch/import-style writes enforce relationship applicability."""
+        initiative = Node(id="initiative", type=NodeType.INITIATIVE, name="Initiative")
+        actor = Node(id="actor", type=NodeType.ACTOR, name="Actor")
+        edge = Edge(
+            source="initiative", target="actor", type=RelationshipType.IMPLEMENTS
+        )
+
+        result = temp_storage.add_nodes([initiative, actor], [edge])
+
+        assert result.success is False
+        assert "target type 'Actor' is not allowed" in result.message
+        assert len(temp_storage.edges) == 0
+
+    def test_update_edge_rejects_inapplicable_type_change(self, temp_storage):
+        """Changing an edge type is blocked when the endpoints do not apply."""
+        actor = Node(id="actor", type=NodeType.ACTOR, name="Actor")
+        legislation = Node(id="law", type=NodeType.LEGISLATION, name="Law")
+        temp_storage.add_nodes([actor, legislation], [])
+        edge_id = temp_storage.add_edge(
+            Edge(source="actor", target="law", type=RelationshipType.RELATES_TO)
+        )
+
+        with pytest.raises(ValueError, match="source type 'Actor' is not allowed"):
+            temp_storage.update_edge(edge_id, {"type": "IMPLEMENTS"})
+
+        assert temp_storage.edges[edge_id].type_str == "RELATES_TO"
+
+    def test_relationship_type_without_rules_remains_global(self, temp_storage):
+        """Relationship types with no source/target rules preserve legacy behavior."""
+        actor = Node(id="actor", type=NodeType.ACTOR, name="Actor")
+        initiative = Node(id="initiative", type=NodeType.INITIATIVE, name="Initiative")
+        result = temp_storage.add_nodes(
+            [actor, initiative],
+            [
+                Edge(
+                    source="actor",
+                    target="initiative",
+                    type=RelationshipType.BELONGS_TO,
+                )
+            ],
+        )
+
+        assert result.success is True
+        assert len(result.added_edge_ids) == 1
+
+    def test_audit_relationship_applicability_reports_legacy_violations(self):
+        """Loading legacy data is permissive; the audit reports violations read-only."""
+        data = {
+            "nodes": [
+                {"id": "actor", "type": "Actor", "name": "Actor"},
+                {"id": "law", "type": "Legislation", "name": "Law"},
+            ],
+            "edges": [
+                {
+                    "id": "legacy-edge",
+                    "source": "actor",
+                    "target": "law",
+                    "type": "IMPLEMENTS",
+                }
+            ],
+            "metadata": {"version": "1.0"},
+        }
+        storage = GraphStorage(persistence_backend=InMemoryPersistenceBackend(data))
+
+        violations = storage.audit_relationship_applicability()
+
+        assert len(violations) == 1
+        assert violations[0]["edge_id"] == "legacy-edge"
+        assert "source type 'Actor' is not allowed" in violations[0]["message"]
+        assert "legacy-edge" in storage.edges
+        storage.flush()
+
     def test_add_edge_by_name(self, temp_storage):
         """Test that edges can reference nodes by name"""
         node1 = Node(type=NodeType.ACTOR, name="Actor One")

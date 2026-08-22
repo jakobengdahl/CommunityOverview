@@ -11,6 +11,7 @@ describe('SettingsDialog', () => {
     useGraphStore.setState({
       showMinimap: false,
       setShowMinimap: useGraphStore.getState().setShowMinimap,
+      schema: null,
     });
   });
 
@@ -43,6 +44,38 @@ describe('SettingsDialog', () => {
     expect(useGraphStore.getState().showMinimap).toBe(true);
   });
 
+  it('toggles the assistant panel setting and persists the explicit choice', () => {
+    useGraphStore.setState({ chatPanelOpen: true });
+    render(
+      <I18nProvider>
+        <SettingsDialog stats={null} onClose={() => {}} />
+      </I18nProvider>
+    );
+
+    fireEvent.click(screen.getByRole('button', { name: /Assistant panel open/i }));
+
+    expect(useGraphStore.getState().chatPanelOpen).toBe(false);
+    expect(window.localStorage.getItem('chat_panel_open')).toBe('false');
+  });
+
+  it('resets the assistant panel to the application default', () => {
+    useGraphStore.setState({
+      chatPanelOpen: false,
+      presentation: { default_chat_collapsed: false },
+    });
+    window.localStorage.setItem('chat_panel_open', 'false');
+    render(
+      <I18nProvider>
+        <SettingsDialog stats={null} onClose={() => {}} />
+      </I18nProvider>
+    );
+
+    fireEvent.click(screen.getByRole('button', { name: /Reset to default/i }));
+
+    expect(useGraphStore.getState().chatPanelOpen).toBe(true);
+    expect(window.localStorage.getItem('chat_panel_open')).toBeNull();
+  });
+
   it('closes on Escape', () => {
     const onClose = vi.fn();
     render(
@@ -53,5 +86,45 @@ describe('SettingsDialog', () => {
 
     fireEvent.keyDown(document, { key: 'Escape' });
     expect(onClose).toHaveBeenCalledTimes(1);
+  });
+
+  it('shows relationship applicability rules in the metamodel details dialog', () => {
+    useGraphStore.setState({
+      schema: {
+        relationship_types: {
+          IMPLEMENTS: {
+            description: 'Implements',
+            source_types: ['Initiative'],
+            target_types: ['Legislation'],
+          },
+        },
+      },
+    });
+
+    render(
+      <I18nProvider>
+        <SettingsDialog
+          stats={{
+            total_nodes: 6,
+            total_edges: 1,
+            nodes_by_type: {
+              Actor: 1,
+              Initiative: 1,
+              Capability: 1,
+              Resource: 1,
+              Legislation: 1,
+              Goal: 1,
+            },
+          }}
+          onClose={() => {}}
+        />
+      </I18nProvider>
+    );
+
+    fireEvent.click(screen.getByRole('button', { name: 'Details' }));
+
+    expect(screen.getByText('Relationship types')).toBeInTheDocument();
+    expect(screen.getByText('IMPLEMENTS')).toBeInTheDocument();
+    expect(screen.getByText('Initiative -> Legislation')).toBeInTheDocument();
   });
 });

@@ -8,7 +8,16 @@ import { render, screen, fireEvent } from '@testing-library/react';
 import EditEdgeDialog from '../src/components/EditEdgeDialog';
 
 vi.mock('../src/store/graphStore', () => ({
-  default: () => ({ getRelationshipTypes: () => [{ type: 'KNOWS', description: 'knows' }] }),
+  default: () => ({
+    getRelationshipTypes: () => [
+      { type: 'KNOWS', description: 'knows' },
+      { type: 'WORKS_FOR', description: 'employment' },
+    ],
+    getRelationshipTypesForNodes: (sourceType, targetType) =>
+      sourceType === 'Person' && targetType === 'Person'
+        ? [{ type: 'KNOWS', description: 'knows' }]
+        : [],
+  }),
 }));
 
 vi.mock('../src/components/EntityHistoryView', () => ({
@@ -54,8 +63,8 @@ vi.mock('../src/i18n', () => ({
 
 const edge = { id: 'e1', source: 'n1', target: 'n2', type: 'KNOWS', label: 'knows' };
 const nodes = [
-  { id: 'n1', name: 'Alice' },
-  { id: 'n2', name: 'Bob' },
+  { id: 'n1', name: 'Alice', type: 'Person' },
+  { id: 'n2', name: 'Bob', type: 'Person' },
 ];
 
 function renderDialog() {
@@ -82,6 +91,8 @@ describe('EditEdgeDialog', () => {
     expect(screen.getByText('Connection')).toBeInTheDocument();
     expect(screen.getByLabelText('Type')).toBeInTheDocument();
     expect(screen.getByRole('option', { name: 'No specific type' })).toBeInTheDocument();
+    expect(screen.getByRole('option', { name: 'KNOWS - knows' })).toBeInTheDocument();
+    expect(screen.queryByRole('option', { name: 'WORKS_FOR - employment' })).toBeNull();
     expect(screen.getByLabelText('Label')).toBeInTheDocument();
     expect(
       screen.getByPlaceholderText('Optional label for this connection...')

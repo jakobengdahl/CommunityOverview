@@ -282,12 +282,48 @@ describe('GraphCanvas', () => {
 
     fireEvent.contextMenu(screen.getByTestId('edge-edge-1'));
 
+    // Types are grouped behind a "Change type" submenu instead of the root menu.
+    fireEvent.click(screen.getByRole('button', { name: /^change type$/i }));
+
     // General connection is always offered and reflects the RELATES_TO edge.
     expect(screen.getByRole('button', { name: /general connection/i })).toBeInTheDocument();
 
     fireEvent.click(screen.getByRole('button', { name: /^belongs_to$/i }));
 
     expect(onSetEdgeType).toHaveBeenCalledWith('edge-1', 'BELONGS_TO');
+  });
+
+  it('filters edge relationship types by source and target node type', () => {
+    const schema = {
+      relationship_types: {
+        RELATES_TO: { description: 'Relates to' },
+        WORKS_FOR: {
+          description: 'Applies to Actor -> Initiative',
+          source_types: ['Actor'],
+          target_types: ['Initiative'],
+        },
+        IMPLEMENTS: {
+          description: 'Wrong direction for this edge',
+          source_types: ['Initiative'],
+          target_types: ['Actor'],
+        },
+      },
+    };
+
+    render(
+      <GraphCanvas
+        nodes={sampleNodes}
+        edges={sampleEdges}
+        schema={schema}
+        onSetEdgeType={vi.fn()}
+      />
+    );
+
+    fireEvent.contextMenu(screen.getByTestId('edge-edge-1'));
+    fireEvent.click(screen.getByRole('button', { name: /^change type$/i }));
+
+    expect(screen.getByRole('button', { name: /^works_for$/i })).toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: /^implements$/i })).toBeNull();
   });
 
   it('resets an edge to a general connection from its context menu', () => {
@@ -304,6 +340,7 @@ describe('GraphCanvas', () => {
     );
 
     fireEvent.contextMenu(screen.getByTestId('edge-edge-1'));
+    fireEvent.click(screen.getByRole('button', { name: /^change type$/i }));
     fireEvent.click(screen.getByRole('button', { name: /general connection/i }));
 
     expect(onSetEdgeType).toHaveBeenCalledWith('edge-1', 'RELATES_TO');

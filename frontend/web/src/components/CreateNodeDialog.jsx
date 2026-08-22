@@ -128,7 +128,7 @@ function CreateNodeDialog({ nodeType, onClose, onSave }) {
             <span className="create-node-type-dot" style={{ backgroundColor: color }} />
             <h2>Create {nodeType}</h2>
           </div>
-          <button className="close-button" onClick={onClose}>
+          <button className="close-button" onClick={onClose} aria-label="Close">
             ×
           </button>
         </header>

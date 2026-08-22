@@ -6,7 +6,7 @@ import * as api from '../services/api';
 import './FloatingSearch.css';
 import { useI18n } from '../i18n';
 
-function FloatingSearch() {
+function FloatingSearch({ variant = 'floating' }) {
   const { t, language } = useI18n();
   const {
     nodes: vizNodes,
@@ -369,7 +369,11 @@ function FloatingSearch() {
   };
 
   return (
-    <div className="floating-search" id="guide-target-search" ref={containerRef}>
+    <div
+      className={`floating-search${variant === 'sheet' ? ' floating-search--sheet' : ''}`}
+      id="guide-target-search"
+      ref={containerRef}
+    >
       <div className="floating-search-bar">
         <Search size={18} className="floating-search-icon" />
         <input

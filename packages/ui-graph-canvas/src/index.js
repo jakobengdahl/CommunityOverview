@@ -26,6 +26,17 @@ export {
   positionNewNodes,
 } from './utils/graphLayout';
 
+// Annotation model utilities
+export {
+  ANNOTATION_SCHEMA_VERSION,
+  ANNOTATION_TYPES,
+  applyAnnotationOperation,
+  createAnnotation,
+  createAnnotationDocument,
+  migrateLegacyAnnotations,
+  normalizeAnnotationDocument,
+} from './utils/annotationModel';
+
 // Constants
 export {
   NODE_COLORS,
