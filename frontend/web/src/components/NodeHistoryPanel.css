@@ -190,3 +190,9 @@
   margin-left: auto;
   flex-shrink: 0;
 }
+
+@media (pointer: coarse) {
+  .node-history {
+    bottom: calc(80px + env(safe-area-inset-bottom));
+  }
+}

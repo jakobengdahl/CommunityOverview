@@ -282,6 +282,9 @@ describe('GraphCanvas', () => {
 
     fireEvent.contextMenu(screen.getByTestId('edge-edge-1'));
 
+    // Types are grouped behind a "Change type" submenu instead of the root menu.
+    fireEvent.click(screen.getByRole('button', { name: /^change type$/i }));
+
     // General connection is always offered and reflects the RELATES_TO edge.
     expect(screen.getByRole('button', { name: /general connection/i })).toBeInTheDocument();
 
@@ -336,6 +339,7 @@ describe('GraphCanvas', () => {
     );
 
     fireEvent.contextMenu(screen.getByTestId('edge-edge-1'));
+    fireEvent.click(screen.getByRole('button', { name: /^change type$/i }));
     fireEvent.click(screen.getByRole('button', { name: /general connection/i }));
 
     expect(onSetEdgeType).toHaveBeenCalledWith('edge-1', 'RELATES_TO');

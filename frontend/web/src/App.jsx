@@ -3,13 +3,10 @@ import { GraphCanvas } from '@community-graph/ui-graph-canvas';
 import '@community-graph/ui-graph-canvas/styles';
 import useGraphStore from './store/graphStore';
 import { useI18n } from './i18n';
-import FloatingHeader from './components/FloatingHeader';
-import FloatingToolbar from './components/FloatingToolbar';
-import FloatingSearch from './components/FloatingSearch';
-import ChatPanel from './components/ChatPanel';
+import DesktopShell from './components/DesktopShell';
+import MobileShell from './components/MobileShell';
 import CollectKioskView from './components/CollectKioskView';
 import GuideOverlay from './components/GuideOverlay';
-import SessionDrawer from './components/SessionDrawer';
 import RecentActivityDrawer from './components/RecentActivityDrawer';
 import NodeHistoryPanel from './components/NodeHistoryPanel';
 import AppDialogs from './components/AppDialogs';
@@ -18,9 +15,9 @@ import * as api from './services/api';
 import * as sessionStore from './services/sessionStore';
 import {
   annotationsToGroups,
-  groupsToAnnotations,
   annotationsToOverlays,
-  overlaysToAnnotations,
+  annotationDocumentToLegacyMetadata,
+  legacyMetadataToAnnotationDocument,
 } from './utils/sessionAnnotations';
 import { serverStateToMirror, useSharedSession } from './hooks/useSharedSession';
 import { useSyncConnection } from './hooks/useSyncConnection';
@@ -1023,15 +1020,18 @@ function App() {
       // Annotations carry group boxes plus the free-floating overlays (notes,
       // labels, arrows) the canvas collects in viewData.annotations. All kinds
       // share one server-side annotation list (design 3.1).
+      const annotationDocument = legacyMetadataToAnnotationDocument({
+        groups: viewData?.groups || [],
+        parentIds,
+        annotations: viewData?.annotations || [],
+      });
       const nextState = {
         node_refs: state.nodes.map((n) => n.id),
         positions,
         hidden_node_ids: state.hiddenNodeIds || [],
         hidden_edge_ids: state.hiddenEdgeIds || [],
-        annotations: [
-          ...groupsToAnnotations(viewData?.groups || [], parentIds),
-          ...overlaysToAnnotations(viewData?.annotations || []),
-        ],
+        annotation_schema_version: annotationDocument.schema_version,
+        annotations: annotationDocument.annotations,
       };
       // Emit the change as incremental ops (design step 6, replacing step 4's
       // full-state PUT). Connecting here — the first non-empty save — materialises
@@ -1109,6 +1109,15 @@ function App() {
 
       setIsSavingView(true);
       try {
+        const parentIds = Object.fromEntries(
+          saveViewDialog.viewData.nodes.filter((n) => n.parentId).map((n) => [n.id, n.parentId])
+        );
+        const annotationDocument = legacyMetadataToAnnotationDocument({
+          groups: saveViewDialog.viewData.groups || [],
+          parentIds,
+          annotations: saveViewDialog.viewData.annotations || [],
+        });
+        const legacyAnnotationMetadata = annotationDocumentToLegacyMetadata(annotationDocument);
         const viewNode = {
           name,
           type: 'SavedView',
@@ -1119,13 +1128,13 @@ function App() {
             positions: Object.fromEntries(
               saveViewDialog.viewData.nodes.map((n) => [n.id, n.position])
             ),
-            parentIds: Object.fromEntries(
-              saveViewDialog.viewData.nodes.filter((n) => n.parentId).map((n) => [n.id, n.parentId])
-            ),
+            parentIds,
             edge_ids: (saveViewDialog.viewData.edges || []).map((e) => e.id),
             edges: saveViewDialog.viewData.edges || [],
-            groups: saveViewDialog.viewData.groups,
-            annotations: saveViewDialog.viewData.annotations || [],
+            annotation_schema_version: annotationDocument.schema_version,
+            annotation_document: annotationDocument,
+            groups: legacyAnnotationMetadata.groups,
+            annotations: legacyAnnotationMetadata.annotations,
           },
           communities: [],
         };
@@ -1739,6 +1748,56 @@ function App() {
     setDeleteSessionDialog,
   };
 
+  // The session drawer is non-modal (in either shell), so any dialog can be
+  // stacked on top of it; while one is open, Escape belongs to that dialog.
+  const suspendEscape = !!(
+    settingsOpen ||
+    connectDialogOpen ||
+    renameDialog ||
+    deleteSessionDialog ||
+    clearConfirm ||
+    createNodeType ||
+    editingNode ||
+    detailNode ||
+    editingEdge ||
+    deleteDialog ||
+    saveViewDialog ||
+    showSubscriptionDialog ||
+    showAgentDialog ||
+    showAgentRunsDialog ||
+    showAgentProposalsDialog ||
+    skillDialogType ||
+    showAKCDialog
+  );
+
+  const shellProps = {
+    sessionId,
+    sessions,
+    currentSessionId: sessionId,
+    onNewSession: handleNewSession,
+    onConnectSession: () => setConnectDialogOpen(true),
+    onSelectSession: handleSelectSession,
+    onRenameSession: (id) => {
+      const entry = sessions.find((s) => s.id === id);
+      setRenameDialog({ id, name: entry?.name || '' });
+    },
+    onDeleteSession: handleRequestDeleteSession,
+    onCopySessionLink: handleCopySessionLink,
+    onCopyTriggerUrl: handleCopyTriggerUrl,
+    onOpenSettings: () => setSettingsOpen(true),
+    canvasLocked,
+    onToggleLock: () => setCanvasLocked(!canvasLocked),
+    suspendEscape,
+    onCreateNodeForType: handleCreateNodeForType,
+    onCreateAgent: handleCreateAgent,
+    onCreateSubscription: handleCreateSubscription,
+    onSaveView: handleToolbarSaveView,
+    onCreateGroup: handleToolbarCreateGroup,
+    onCreateActiveKnowledgeCollection: handleCreateAKC,
+    llmAvailable,
+    akcShortName,
+  };
+
   return (
     <div
       className={`app${drawerOpen ? ' session-drawer-open' : ''}${isMobile ? ' is-mobile' : ''}${isCoarsePointer ? ' is-touch' : ''}`}
@@ -1813,6 +1872,13 @@ function App() {
           lazyLoadMoreLabel={t('canvas.lazy_load_more')}
           lazyLoadHiddenConnectionsLabel={t('canvas.lazy_hidden_connections')}
           showMinimap={showMinimap}
+          compactMode={isMobile ? 'on' : 'off'}
+          compactZoomInLabel={t('canvas.zoom_in')}
+          compactZoomOutLabel={t('canvas.zoom_out')}
+          compactFitViewLabel={t('canvas.fit_view')}
+          focusViewLabel={t('canvas.focus_view')}
+          exitFocusViewLabel={t('canvas.exit_focus_view')}
+          compactControlsLabel={t('canvas.controls_group')}
           nodePreviewEnabled={nodePreviewEnabled}
           schema={schema}
           onContextMenuAction={handleContextMenuAction}
@@ -1858,59 +1924,27 @@ function App() {
         />
       </div>
 
-      <FloatingHeader
-        sessionId={sessionId}
-        roster={roster}
-        currentClientId={api.getClientId()}
-        onClear={() => requestClear('button')}
-        onToggleDrawer={() => setDrawerOpen((prev) => !prev)}
-      />
-      <SessionDrawer
-        open={drawerOpen}
-        onClose={() => setDrawerOpen(false)}
-        sessions={sessions}
-        currentSessionId={sessionId}
-        onNewSession={handleNewSession}
-        onConnectSession={() => setConnectDialogOpen(true)}
-        onSelectSession={handleSelectSession}
-        onRenameSession={(id) => {
-          const entry = sessions.find((s) => s.id === id);
-          setRenameDialog({ id, name: entry?.name || '' });
-        }}
-        onDeleteSession={handleRequestDeleteSession}
-        onCopySessionLink={handleCopySessionLink}
-        onCopyTriggerUrl={handleCopyTriggerUrl}
-        onOpenSettings={() => setSettingsOpen(true)}
-        onOpenActivity={() => {
-          setDrawerOpen(false);
-          setActivityOpen(true);
-        }}
-        canvasLocked={canvasLocked}
-        onToggleLock={() => setCanvasLocked(!canvasLocked)}
-        suspendEscape={
-          !!(
-            // The drawer is non-modal, so any dialog can be stacked on top of
-            // it; while one is open, Escape belongs to that dialog.
-            settingsOpen ||
-            connectDialogOpen ||
-            renameDialog ||
-            deleteSessionDialog ||
-            clearConfirm ||
-            createNodeType ||
-            editingNode ||
-            detailNode ||
-            editingEdge ||
-            deleteDialog ||
-            saveViewDialog ||
-            showSubscriptionDialog ||
-            showAgentDialog ||
-            showAgentRunsDialog ||
-            showAgentProposalsDialog ||
-            skillDialogType ||
-            showAKCDialog
-          )
-        }
-      />
+      {isMobile ? (
+        <MobileShell
+          {...shellProps}
+          onClear={() => requestClear('button')}
+          onOpenActivity={() => setActivityOpen(true)}
+        />
+      ) : (
+        <DesktopShell
+          {...shellProps}
+          roster={roster}
+          currentClientId={api.getClientId()}
+          onClear={() => requestClear('button')}
+          drawerOpen={drawerOpen}
+          onToggleDrawer={() => setDrawerOpen((prev) => !prev)}
+          onCloseDrawer={() => setDrawerOpen(false)}
+          onOpenActivity={() => {
+            setDrawerOpen(false);
+            setActivityOpen(true);
+          }}
+        />
+      )}
       <RecentActivityDrawer open={activityOpen} onClose={() => setActivityOpen(false)} />
       {clearConfirm && (
         <ConfirmDialog
@@ -1937,16 +1971,6 @@ function App() {
           {t('federation.depth_indicator', { current: federationDepth, max: maxFederationDepth })}
         </div>
       )}
-      <FloatingSearch />
-      <FloatingToolbar
-        onCreateNode={handleCreateNodeForType}
-        onCreateAgent={handleCreateAgent}
-        onCreateSubscription={handleCreateSubscription}
-        onSaveView={handleToolbarSaveView}
-        onCreateGroup={handleToolbarCreateGroup}
-        onCreateActiveKnowledgeCollection={handleCreateAKC}
-      />
-      {llmAvailable && <ChatPanel collectionShortName={akcShortName || undefined} />}
       <NodeHistoryPanel />
 
       {notification && (

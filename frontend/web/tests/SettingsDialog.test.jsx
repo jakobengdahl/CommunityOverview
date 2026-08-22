@@ -44,6 +44,38 @@ describe('SettingsDialog', () => {
     expect(useGraphStore.getState().showMinimap).toBe(true);
   });
 
+  it('toggles the assistant panel setting and persists the explicit choice', () => {
+    useGraphStore.setState({ chatPanelOpen: true });
+    render(
+      <I18nProvider>
+        <SettingsDialog stats={null} onClose={() => {}} />
+      </I18nProvider>
+    );
+
+    fireEvent.click(screen.getByRole('button', { name: /Assistant panel open/i }));
+
+    expect(useGraphStore.getState().chatPanelOpen).toBe(false);
+    expect(window.localStorage.getItem('chat_panel_open')).toBe('false');
+  });
+
+  it('resets the assistant panel to the application default', () => {
+    useGraphStore.setState({
+      chatPanelOpen: false,
+      presentation: { default_chat_collapsed: false },
+    });
+    window.localStorage.setItem('chat_panel_open', 'false');
+    render(
+      <I18nProvider>
+        <SettingsDialog stats={null} onClose={() => {}} />
+      </I18nProvider>
+    );
+
+    fireEvent.click(screen.getByRole('button', { name: /Reset to default/i }));
+
+    expect(useGraphStore.getState().chatPanelOpen).toBe(true);
+    expect(window.localStorage.getItem('chat_panel_open')).toBeNull();
+  });
+
   it('closes on Escape', () => {
     const onClose = vi.fn();
     render(

@@ -18,6 +18,68 @@ if TYPE_CHECKING:
     from backend.runtime.authorization import GraphAuthorizationHook
 
 
+def _annotation_document_to_legacy_metadata(
+    annotation_document: Dict[str, Any] | None,
+) -> Dict[str, Any]:
+    if not isinstance(annotation_document, dict):
+        return {"groups": [], "annotations": [], "parentIds": {}}
+
+    groups: List[Dict[str, Any]] = []
+    annotations: List[Dict[str, Any]] = []
+    parent_ids: Dict[str, str] = {}
+    for annotation in annotation_document.get("annotations", []):
+        if not isinstance(annotation, dict):
+            continue
+        annotation_type = annotation.get("type") or annotation.get("kind")
+        if annotation_type == "group":
+            geometry = (
+                annotation.get("geometry")
+                if isinstance(annotation.get("geometry"), dict)
+                else {}
+            )
+            position = (
+                annotation.get("position")
+                if isinstance(annotation.get("position"), dict)
+                else {}
+            )
+            size = (
+                annotation.get("size")
+                if isinstance(annotation.get("size"), dict)
+                else {}
+            )
+            group: Dict[str, Any] = {
+                "id": annotation.get("id"),
+                "label": annotation.get("label", "Group"),
+                "description": annotation.get("description", ""),
+                "position": {
+                    "x": geometry.get("x", position.get("x", 0)),
+                    "y": geometry.get("y", position.get("y", 0)),
+                },
+            }
+            width = size.get("w", geometry.get("w", geometry.get("width")))
+            height = size.get("h", geometry.get("h", geometry.get("height")))
+            if width is not None and height is not None:
+                group["style"] = {"width": width, "height": height}
+            style = (
+                annotation.get("style")
+                if isinstance(annotation.get("style"), dict)
+                else {}
+            )
+            color = annotation.get("color") or style.get("color")
+            if color is not None:
+                group["color"] = color
+            groups.append(group)
+            if isinstance(annotation.get("member_node_ids"), list):
+                for node_id in annotation["member_node_ids"]:
+                    if isinstance(node_id, str) and isinstance(
+                        annotation.get("id"), str
+                    ):
+                        parent_ids[node_id] = annotation["id"]
+        else:
+            annotations.append(annotation)
+    return {"groups": groups, "annotations": annotations, "parentIds": parent_ids}
+
+
 def save_view(name: str) -> Dict[str, Any]:
     """Signal the frontend to capture and save the current visualization state."""
     return {
@@ -184,8 +246,12 @@ def get_saved_view(
 
     edges = serialize_edges(storage.get_edges_between_nodes(visible_node_ids))
 
+    annotation_document = view_node.metadata.get("annotation_document")
+    legacy_from_document = _annotation_document_to_legacy_metadata(annotation_document)
     saved_groups = view_node.metadata.get("groups", [])
-    if saved_groups:
+    if annotation_document:
+        group_data = saved_groups or legacy_from_document["groups"]
+    elif saved_groups:
         group_data = saved_groups
     else:
         group_data = []
@@ -203,13 +269,16 @@ def get_saved_view(
     filtered_hidden_node_ids = [
         node_id for node_id in hidden_node_ids if node_id in visible_node_id_set
     ]
+    legacy_parent_ids = (
+        view_node.metadata.get("parentIds", {}) or legacy_from_document["parentIds"]
+    )
     parent_ids = {
         node_id: group_id
-        for node_id, group_id in view_node.metadata.get("parentIds", {}).items()
+        for node_id, group_id in legacy_parent_ids.items()
         if node_id in visible_node_id_set
     }
 
-    return {
+    result = {
         "success": True,
         "nodes": nodes,
         "edges": edges,
@@ -217,9 +286,16 @@ def get_saved_view(
         "hidden_node_ids": filtered_hidden_node_ids,
         "groups": group_data,
         "parentIds": parent_ids,
-        "annotations": view_node.metadata.get("annotations", []),
+        "annotations": view_node.metadata.get("annotations", [])
+        or legacy_from_document["annotations"],
         "action": "load_visualization",
     }
+    if annotation_document:
+        result["annotation_schema_version"] = view_node.metadata.get(
+            "annotation_schema_version", 1
+        )
+        result["annotation_document"] = annotation_document
+    return result
 
 
 def list_saved_views(

@@ -157,7 +157,11 @@ function EditEdgeDialog({ edge, nodes, onClose, onSave, onDelete }) {
           <div className="edit-dialog-header-title">
             <h2>{t('edit_edge.title')}</h2>
           </div>
-          <button className="close-button" onClick={onClose}>
+          <button
+            className="close-button"
+            onClick={onClose}
+            aria-label={t('common.close') || 'Close'}
+          >
             x
           </button>
         </header>

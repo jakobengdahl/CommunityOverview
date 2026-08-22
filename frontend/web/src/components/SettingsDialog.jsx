@@ -1,6 +1,6 @@
 import { useState, useEffect } from 'react';
 import { createPortal } from 'react-dom';
-import { Download, Map, Eye, BoxArrowRight, X } from 'react-bootstrap-icons';
+import { Download, Map, Eye, ChatDotsFill, BoxArrowRight, X } from 'react-bootstrap-icons';
 import useGraphStore from '../store/graphStore';
 import { useI18n } from '../i18n';
 import { getDisplayName, setDisplayName } from '../services/api';
@@ -17,8 +17,16 @@ const MAX_INLINE_TYPES = 5;
  */
 function SettingsDialog({ stats, onExportGraph, onClose }) {
   const { t, language, setLanguage } = useI18n();
-  const { showMinimap, setShowMinimap, nodePreviewEnabled, setNodePreviewEnabled, schema } =
-    useGraphStore();
+  const {
+    showMinimap,
+    setShowMinimap,
+    nodePreviewEnabled,
+    setNodePreviewEnabled,
+    chatPanelOpen,
+    toggleChatPanel,
+    resetChatPanelToDefault,
+    schema,
+  } = useGraphStore();
   const [statsDialogOpen, setStatsDialogOpen] = useState(false);
   const [displayName, setDisplayNameState] = useState(() => getDisplayName() || '');
 
@@ -117,6 +125,17 @@ function SettingsDialog({ stats, onExportGraph, onClose }) {
             <Eye size={14} />
             <span>{t('menu.show_node_preview')}</span>
             <span className={`settings-dialog-toggle${nodePreviewEnabled ? ' active' : ''}`} />
+          </button>
+          <button className="settings-dialog-menu-item" onClick={() => toggleChatPanel()}>
+            <ChatDotsFill size={14} />
+            <span>{t('menu.show_assistant_panel')}</span>
+            <span className={`settings-dialog-toggle${chatPanelOpen ? ' active' : ''}`} />
+          </button>
+          <button
+            className="settings-dialog-type-details-btn settings-dialog-reset-btn"
+            onClick={() => resetChatPanelToDefault()}
+          >
+            {t('menu.reset_assistant_panel_default')}
           </button>
 
           <div className="settings-dialog-section-divider" />

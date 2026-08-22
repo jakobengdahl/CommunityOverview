@@ -149,6 +149,10 @@
   border-color: #666;
 }
 
+.settings-dialog-reset-btn {
+  margin: 2px 0 4px 10px;
+}
+
 .settings-dialog-type-row {
   display: flex;
   align-items: center;

@@ -1,22 +1,57 @@
-// Pure transforms between the server-side annotation model (design 3.1) and the
+// Pure transforms between the server-side annotation model and the
 // canvas-facing shapes GraphCanvas emits/consumes. Shared by the shared-session
 // lifecycle (useSharedSession) and by App's incremental-op and snapshot paths.
+import { createAnnotation, normalizeAnnotationDocument } from '@community-graph/ui-graph-canvas';
 
 // Group boxes persist inside the generic server-side annotation list as
 // `kind: "group"` (design 3.1). These two helpers translate between that
 // server shape and the {groups, parentIds} shape the canvas round-trips.
+function documentAnnotations(annotations) {
+  if (annotations == null) return [];
+  if (annotations?.schema_version === 1 && Array.isArray(annotations.annotations)) {
+    return normalizeAnnotationDocument(annotations).annotations;
+  }
+  if (Array.isArray(annotations)) return normalizeAnnotationDocument(annotations).annotations;
+  throw new Error('Malformed session payload: state.annotations is not an array');
+}
+
+export function annotationDocumentToLegacyMetadata(documentInput) {
+  const document = normalizeAnnotationDocument(documentInput || []);
+  return {
+    annotation_schema_version: document.schema_version,
+    annotations: annotationsToOverlays(document),
+    groups: annotationsToGroups(document).groups,
+  };
+}
+
+export function legacyMetadataToAnnotationDocument(metadata = {}) {
+  if (metadata.annotation_document)
+    return normalizeAnnotationDocument(metadata.annotation_document);
+  if (metadata.annotations != null && !Array.isArray(metadata.annotations)) {
+    throw new Error('Malformed session payload: state.annotations is not an array');
+  }
+  if (metadata.annotation_schema_version === 1 && Array.isArray(metadata.annotations)) {
+    return normalizeAnnotationDocument(metadata.annotations);
+  }
+  return normalizeAnnotationDocument([
+    ...groupsToAnnotations(metadata.groups || [], metadata.parentIds || {}),
+    ...overlaysToAnnotations(metadata.annotations || []),
+  ]);
+}
+
 export function annotationsToGroups(annotations) {
   const groups = [];
   const parentIds = {};
-  for (const a of annotations || []) {
-    if (a?.kind !== 'group') continue;
+  const document = documentAnnotations(annotations);
+  for (const a of document) {
+    if (a?.type !== 'group') continue;
     groups.push({
       id: a.id,
       label: a.label || 'Group',
       description: a.description || '',
       position: a.position || { x: 0, y: 0 },
       style: a.size ? { width: a.size.w, height: a.size.h } : undefined,
-      color: a.color,
+      color: a.color ?? a.style?.color,
     });
     for (const m of a.member_node_ids || []) parentIds[m] = a.id;
   }
@@ -28,16 +63,18 @@ export function groupsToAnnotations(viewGroups, parentIds) {
   for (const [nodeId, groupId] of Object.entries(parentIds || {})) {
     (membersByGroup[groupId] = membersByGroup[groupId] || []).push(nodeId);
   }
-  return (viewGroups || []).map((g) => ({
-    id: g.id,
-    kind: 'group',
-    position: g.position || { x: 0, y: 0 },
-    label: g.label || '',
-    description: g.description || '',
-    color: g.color,
-    size: g.style ? { w: g.style.width, h: g.style.height } : undefined,
-    member_node_ids: membersByGroup[g.id] || [],
-  }));
+  return (viewGroups || []).map((g) =>
+    createAnnotation({
+      id: g.id,
+      type: 'group',
+      position: g.position || { x: 0, y: 0 },
+      label: g.label || '',
+      description: g.description || '',
+      color: g.color,
+      size: g.style ? { w: g.style.width, h: g.style.height } : undefined,
+      member_node_ids: membersByGroup[g.id] || [],
+    })
+  );
 }
 
 // Note/label/arrow annotations round-trip between the server annotation model
@@ -46,8 +83,9 @@ export function groupsToAnnotations(viewGroups, parentIds) {
 // own translation above; these cover the free-floating overlays from step 5.
 export function annotationsToOverlays(annotations) {
   const out = [];
-  for (const a of annotations || []) {
-    if (a?.kind === 'note') {
+  const document = documentAnnotations(annotations);
+  for (const a of document) {
+    if (a?.type === 'note') {
       out.push({
         id: a.id,
         kind: 'note',
@@ -57,7 +95,7 @@ export function annotationsToOverlays(annotations) {
         fontSize: a.fontSize,
         size: a.size,
       });
-    } else if (a?.kind === 'label') {
+    } else if (a?.type === 'label') {
       out.push({
         id: a.id,
         kind: 'label',
@@ -66,7 +104,7 @@ export function annotationsToOverlays(annotations) {
         color: a.style?.color,
         fontSize: a.style?.fontSize,
       });
-    } else if (a?.kind === 'arrow') {
+    } else if (a?.type === 'line') {
       const from = a.from || a.position || { x: 0, y: 0 };
       const to = a.to || { x: from.x + 160, y: from.y };
       const overlay = {
@@ -90,24 +128,24 @@ export function annotationsToOverlays(annotations) {
 export function overlaysToAnnotations(overlays) {
   return (overlays || []).map((o) => {
     if (o.kind === 'note') {
-      return {
+      return createAnnotation({
         id: o.id,
-        kind: 'note',
+        type: 'note',
         position: o.position || { x: 0, y: 0 },
         text: o.text || '',
         color: o.color,
         fontSize: o.fontSize,
         size: o.size,
-      };
+      });
     }
     if (o.kind === 'label') {
-      return {
+      return createAnnotation({
         id: o.id,
-        kind: 'label',
+        type: 'label',
         position: o.position || { x: 0, y: 0 },
         text: o.text || '',
         style: { color: o.color, fontSize: o.fontSize },
-      };
+      });
     }
     // arrow: store both endpoints as absolute points (design 3.1)
     const from = o.position || { x: 0, y: 0 };
@@ -115,7 +153,7 @@ export function overlaysToAnnotations(overlays) {
     const dy = o.dy ?? 0;
     const ann = {
       id: o.id,
-      kind: 'arrow',
+      type: 'line',
       position: { x: from.x, y: from.y },
       from: { x: from.x, y: from.y },
       to: { x: from.x + dx, y: from.y + dy },
@@ -125,6 +163,6 @@ export function overlaysToAnnotations(overlays) {
     };
     if (o.startAnchor) ann.startAnchor = o.startAnchor;
     if (o.endAnchor) ann.endAnchor = o.endAnchor;
-    return ann;
+    return createAnnotation(ann);
   });
 }

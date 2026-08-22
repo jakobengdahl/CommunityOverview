@@ -218,6 +218,8 @@
     "view_section": "Vy",
     "show_minimap": "Visa minimapp",
     "show_node_preview": "Visa förhandsvisning av noder",
+    "show_assistant_panel": "Assistentpanelen öppen",
+    "reset_assistant_panel_default": "Återställ till standard",
     "language_section": "Språk",
     "language_en": "English",
     "language_sv": "Svenska",
@@ -308,7 +310,13 @@
   "canvas": {
     "lazy_showing": "Visar {loaded} av {total} noder",
     "lazy_load_more": "Ladda fler",
-    "lazy_hidden_connections": "{count} kopplingar till noder som ännu inte laddats är dolda — ladda fler för att visa dem"
+    "lazy_hidden_connections": "{count} kopplingar till noder som ännu inte laddats är dolda — ladda fler för att visa dem",
+    "zoom_in": "Zooma in",
+    "zoom_out": "Zooma ut",
+    "fit_view": "Visa hela grafen",
+    "focus_view": "Fokusera på vald nod",
+    "exit_focus_view": "Tillbaka till hela grafen",
+    "controls_group": "Kontroller för arbetsytan"
   },
   "guide": {
     "title": "Guide",
@@ -354,7 +362,8 @@
   "common": {
     "saving": "Sparar...",
     "save": "Spara",
-    "cancel": "Avbryt"
+    "cancel": "Avbryt",
+    "close": "Stäng"
   },
   "edit_edge": {
     "title": "Redigera koppling",
@@ -457,5 +466,15 @@
     "snap_peek": "Kika",
     "snap_half": "Halv",
     "snap_full": "Full"
+  },
+  "mobile_nav": {
+    "bottom_nav": "Appnavigering",
+    "graph": "Graf",
+    "search": "Sök",
+    "create": "Skapa",
+    "chat": "Chatt",
+    "menu": "Meny",
+    "search_panel_title": "Sök",
+    "create_panel_title": "Skapa"
   }
 }
