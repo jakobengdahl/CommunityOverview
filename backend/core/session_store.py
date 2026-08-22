@@ -631,7 +631,16 @@ class SessionStore:
             if existing is not None:
                 # A retried create (lost response, resent batch) carries the same
                 # client-assigned id as the one already applied: upsert so the
-                # retry is idempotent instead of appending a duplicate.
+                # retry is idempotent instead of appending a duplicate. But an
+                # upsert must never be a covert retype — both `type` and
+                # `kind` are already canonicalised by `_validate_annotation`,
+                # so a straight comparison catches it regardless of which
+                # field (or the legacy `arrow` alias) the caller used.
+                if existing.get("type") != annotation.get("type"):
+                    raise OpError(
+                        f"annotation {incoming_id!r} already exists as type "
+                        f"{existing.get('type')!r}; cannot change type via upsert"
+                    )
                 existing.update(annotation)
                 existing["updated_at"] = _now_iso()
                 applied["annotation"] = existing
@@ -651,6 +660,11 @@ class SessionStore:
             )
             if target is None:
                 return None  # update on deleted annotation is dropped (D-table rule)
+            if target.get("type") != incoming.get("type"):
+                raise OpError(
+                    f"annotation {incoming['id']!r} is type {target.get('type')!r}; "
+                    "cannot change type via update"
+                )
             target.update(incoming)
             target["updated_at"] = _now_iso()
             applied["annotation"] = target

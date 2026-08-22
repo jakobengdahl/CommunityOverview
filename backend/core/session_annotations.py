@@ -313,6 +313,31 @@ def build_annotation(
     return annotation
 
 
+def translate_line_endpoints(
+    existing: Dict[str, Any], dx: float, dy: float
+) -> Dict[str, Any]:
+    """Translate a line annotation's explicit endpoint coordinates by (dx, dy).
+
+    A line's shape lives in its ``from``/``to`` content fields, outside the
+    common ``geometry``/``position`` envelope those fields shadow (the
+    envelope's x/y only tracks the anchor, `from` in practice). Moving or
+    duplicating a line must translate both ends by the same delta or the
+    line stretches/reshapes instead of sliding. Returns the fields to merge
+    onto the target patch/copy; empty for annotations without explicit
+    endpoint coordinates (every non-``line`` type).
+    """
+    translated: Dict[str, Any] = {}
+    for key in ("from", "to"):
+        point = existing.get(key)
+        if (
+            isinstance(point, dict)
+            and isinstance(point.get("x"), (int, float))
+            and isinstance(point.get("y"), (int, float))
+        ):
+            translated[key] = {**point, "x": point["x"] + dx, "y": point["y"] + dy}
+    return translated
+
+
 def build_annotation_patch(
     existing: Dict[str, Any],
     *,
@@ -349,11 +374,17 @@ def build_annotation_patch(
     resized = w is not None or h is not None
     rotated = rotation is not None
     if moved:
-        position["x"] = x if x is not None else position.get("x", 0)
-        position["y"] = y if y is not None else position.get("y", 0)
+        original_x = position.get("x", 0)
+        original_y = position.get("y", 0)
+        position["x"] = x if x is not None else original_x
+        position["y"] = y if y is not None else original_y
         geometry["x"] = position["x"]
         geometry["y"] = position["y"]
         patch["position"] = position
+        dx = position["x"] - original_x
+        dy = position["y"] - original_y
+        if dx or dy:
+            patch.update(translate_line_endpoints(existing, dx, dy))
     if resized:
         size["w"] = w if w is not None else size.get("w", 0)
         size["h"] = h if h is not None else size.get("h", 0)

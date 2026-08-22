@@ -158,6 +158,34 @@ class TestApplyOps:
         # Nothing was broadcast to subscribers.
         assert await _drain(sub) == []
 
+    async def test_batch_rejects_annotation_retype_and_rolls_back(self):
+        """The raw ``apply_ops`` batch path (what the browser's websocket
+        write path actually calls) must not be able to retype an existing
+        annotation either — the store-level check must not be something only
+        the MCP tool layer's pre-checks enforce. A same-batch retype attempt
+        must also roll back any earlier op in that batch."""
+        mgr = _manager()
+        s = mgr.create_session()
+        mgr.upsert_annotation(s.id, "mcp-agent", {"id": "ann-1", "type": "line"})
+        seq_before = s.seq
+        with pytest.raises(OpError):
+            await mgr.apply_ops(
+                s.id,
+                "c1",
+                seq_before,
+                [
+                    {"op": "annotation_created", "annotation": {"kind": "note"}},
+                    {
+                        "op": "annotation_updated",
+                        "annotation": {"id": "ann-1", "type": "shape"},
+                    },
+                ],
+            )
+        after = mgr.get_session(s.id)
+        assert after.seq == seq_before
+        assert len(after.state["annotations"]) == 1
+        assert after.state["annotations"][0]["type"] == "line"
+
     async def test_persist_failure_rolls_back_and_does_not_broadcast(self):
         """A persistence failure must roll back in-memory state and broadcast nothing.
 
@@ -1113,6 +1141,19 @@ class TestUpsertAnnotation:
         assert s.seq == seq_before
         assert s.state["annotations"] == []
 
+    async def test_upsert_by_id_rejects_type_change(self):
+        """The store's upsert-by-id path (annotation_created with an existing
+        id) must not silently retype an annotation — not even through the
+        synchronous MCP write path, which bypasses any tool-layer pre-check."""
+        mgr = _manager()
+        s = mgr.create_session()
+        mgr.upsert_annotation(s.id, "mcp-agent", {"id": "ann-1", "type": "line"})
+        seq_before = s.seq
+        with pytest.raises(OpError):
+            mgr.upsert_annotation(s.id, "mcp-agent", {"id": "ann-1", "type": "shape"})
+        assert s.seq == seq_before
+        assert s.state["annotations"][0]["type"] == "line"
+
 
 class TestUpdateAnnotation:
     """The synchronous MCP annotation-update write path (``update_annotation``)."""
@@ -1163,6 +1204,16 @@ class TestUpdateAnnotation:
             mgr.update_annotation(
                 "9999-9999", "mcp-agent", {"id": "note-1", "type": "note"}
             )
+
+    async def test_rejects_type_change(self):
+        mgr = _manager()
+        s = mgr.create_session()
+        mgr.upsert_annotation(s.id, "mcp-agent", {"id": "ann-1", "type": "line"})
+        seq_before = s.seq
+        with pytest.raises(OpError):
+            mgr.update_annotation(s.id, "mcp-agent", {"id": "ann-1", "type": "shape"})
+        assert s.seq == seq_before
+        assert s.state["annotations"][0]["type"] == "line"
 
 
 class TestDeleteAnnotation:

@@ -45,6 +45,7 @@ from backend.core.session_annotations import (
     normalize_generic_type,
     project_annotation,
     resolve_annotation_type_alias,
+    translate_line_endpoints,
 )
 from backend.config.config_loader import build_session_url
 from backend.runtime.authorization import GRAPH_ACTION_MUTATE, GRAPH_ACTION_READ
@@ -3077,6 +3078,7 @@ def register_mcp_tools(
         position["x"] = position.get("x", 0) + dx
         position["y"] = position.get("y", 0) + dy
         copy["position"] = position
+        copy.update(translate_line_endpoints(existing, dx, dy))
         if new_annotation_id is not None:
             copy["id"] = new_annotation_id
         try:

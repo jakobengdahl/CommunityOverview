@@ -208,6 +208,48 @@ class TestBuildAnnotationPatch:
         assert patch["type"] == "line"
         assert patch["kind"] == "line"
 
+    def test_position_move_translates_line_endpoint(self):
+        """Moving a line must translate its `to` endpoint by the same delta,
+        preserving line shape instead of leaving `to` behind (stretching it)."""
+        existing = self._existing()  # position (5, 6), to (105, 6)
+        patch = build_annotation_patch(existing, x=55, y=16)
+        assert patch["to"] == {"x": 155, "y": 16}
+
+    def test_position_move_translates_explicit_from_endpoint(self):
+        existing = self._existing(**{"from": {"x": 5, "y": 6}})
+        patch = build_annotation_patch(existing, x=55, y=16)
+        assert patch["from"] == {"x": 55, "y": 16}
+        assert patch["to"] == {"x": 155, "y": 16}
+
+    def test_resize_only_does_not_translate_endpoints(self):
+        """Resizing (no x/y move) must not reshape the line."""
+        existing = self._existing()
+        patch = build_annotation_patch(existing, w=300)
+        assert "to" not in patch
+
+    def test_explicit_content_endpoint_overrides_translation(self):
+        """An explicit content['to'] is the caller's intent and must win over
+        the implicit translation computed from the position move."""
+        existing = self._existing()
+        patch = build_annotation_patch(
+            existing, x=55, y=16, content={"to": {"x": 999, "y": 999}}
+        )
+        assert patch["to"] == {"x": 999, "y": 999}
+
+    def test_position_move_on_non_line_type_does_not_add_endpoint_fields(self):
+        existing = {
+            "id": "shape-1",
+            "type": "shape",
+            "kind": "shape",
+            "position": {"x": 0, "y": 0},
+            "geometry": {"x": 0, "y": 0, "w": 10, "h": 10, "rotation": 0},
+            "size": {"w": 10, "h": 10},
+            "shape": "rectangle",
+        }
+        patch = build_annotation_patch(existing, x=10, y=10)
+        assert "to" not in patch
+        assert "from" not in patch
+
 
 class TestProjectAnnotation:
     def test_projects_read_shape_with_content(self):
