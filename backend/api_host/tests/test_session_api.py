@@ -286,6 +286,105 @@ class TestSessionOps:
         assert resp.status_code == 400
 
 
+class TestSessionActivityAndUndo:
+    def _create_note(
+        self, test_app: TestClient, sid: str, client_id: str = "c1", text: str = "hi"
+    ) -> None:
+        resp = test_app.post(
+            f"/api/sessions/{sid}/ops",
+            json={
+                "client_id": client_id,
+                "ops": [
+                    {
+                        "op": "annotation_created",
+                        "annotation": {"id": "note-1", "type": "note", "text": text},
+                    }
+                ],
+            },
+        )
+        assert resp.status_code == 200
+
+    def test_activity_lists_newest_first(self, test_app: TestClient):
+        sid = test_app.post("/api/sessions", json={}).json()["id"]
+        self._create_note(test_app, sid, text="first")
+        test_app.post(
+            f"/api/sessions/{sid}/ops",
+            json={
+                "client_id": "c1",
+                "ops": [
+                    {
+                        "op": "annotation_updated",
+                        "annotation": {"id": "note-1", "type": "note", "text": "second"},
+                    }
+                ],
+            },
+        )
+
+        resp = test_app.get(f"/api/sessions/{sid}/activity")
+        assert resp.status_code == 200
+        records = resp.json()["activity"]
+        assert [r["op"] for r in records] == ["annotation_updated", "annotation_created"]
+
+    def test_undo_reverts_the_actors_last_action(self, test_app: TestClient):
+        sid = test_app.post("/api/sessions", json={}).json()["id"]
+        self._create_note(test_app, sid)
+
+        resp = test_app.post(f"/api/sessions/{sid}/undo", json={"client_id": "c1"})
+        assert resp.status_code == 200
+        assert resp.json()["undone_op"] == "annotation_created"
+
+        state = test_app.get(f"/api/sessions/{sid}").json()["state"]
+        assert state["annotations"] == []
+
+    def test_undo_delete_restores_the_annotation(self, test_app: TestClient):
+        sid = test_app.post("/api/sessions", json={}).json()["id"]
+        self._create_note(test_app, sid, text="hello")
+        test_app.post(
+            f"/api/sessions/{sid}/ops",
+            json={
+                "client_id": "c1",
+                "ops": [{"op": "annotation_deleted", "annotation_id": "note-1"}],
+            },
+        )
+
+        resp = test_app.post(f"/api/sessions/{sid}/undo", json={"client_id": "c1"})
+        assert resp.status_code == 200
+        assert resp.json()["undone_op"] == "annotation_deleted"
+
+        state = test_app.get(f"/api/sessions/{sid}").json()["state"]
+        assert state["annotations"][0]["text"] == "hello"
+
+    def test_undo_conflict_returns_409(self, test_app: TestClient):
+        sid = test_app.post("/api/sessions", json={}).json()["id"]
+        self._create_note(test_app, sid, client_id="c1", text="mine")
+        test_app.post(
+            f"/api/sessions/{sid}/ops",
+            json={
+                "client_id": "c2",
+                "ops": [
+                    {
+                        "op": "annotation_updated",
+                        "annotation": {"id": "note-1", "type": "note", "text": "theirs"},
+                    }
+                ],
+            },
+        )
+
+        resp = test_app.post(f"/api/sessions/{sid}/undo", json={"client_id": "c1"})
+        assert resp.status_code == 409
+
+    def test_undo_with_no_history_returns_404(self, test_app: TestClient):
+        sid = test_app.post("/api/sessions", json={}).json()["id"]
+        resp = test_app.post(f"/api/sessions/{sid}/undo", json={"client_id": "c1"})
+        assert resp.status_code == 404
+
+    def test_undo_unknown_session_404(self, test_app: TestClient):
+        resp = test_app.post(
+            "/api/sessions/9999-9999/undo", json={"client_id": "c1"}
+        )
+        assert resp.status_code == 404
+
+
 class TestResolve:
     def test_resolve_true_returns_nodes(self, test_app: TestClient):
         """?resolve=true rehydrates node references against the graph."""
