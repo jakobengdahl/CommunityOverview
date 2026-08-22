@@ -96,6 +96,7 @@ jobs:
     runs-on: ubuntu-latest
     outputs:
       service_code: ${{ steps.classify.outputs.service_code }}
+      python_code: ${{ steps.classify.outputs.python_code }}
     steps:
       - uses: actions/checkout@v4
         with:
@@ -133,22 +134,32 @@ jobs:
           # Fail-safe: could not resolve a diff (schedule/dispatch/new branch) ->
           # run the heavy jobs.
           if [ -z "$changed" ]; then
-            echo "No diff resolved — defaulting service_code=true (fail-safe)."
+            echo "No diff resolved — defaulting service_code=true python_code=true (fail-safe)."
             echo "service_code=true" >> "$GITHUB_OUTPUT"
+            echo "python_code=true" >> "$GITHUB_OUTPUT"
             exit 0
           fi
 
           service_code=false
+          # python_code narrows further than service_code: it drives the Python
+          # lint job specifically, so a PR that only touches e.g. frontend/ isn't
+          # made to pay for (or be blocked by) unrelated ruff drift on backend/
+          # or scripts/ it never touched.
+          python_code=false
           while IFS= read -r f; do
             [ -z "$f" ] && continue
             case "$f" in
               docs/*|*.md) ;;        # documentation only
               *) service_code=true ;; # real service/app/config/workflow code
             esac
+            case "$f" in
+              backend/*|scripts/*|pyproject.toml|.github/workflows/*) python_code=true ;;
+            esac
           done <<< "$changed"
 
           echo "service_code=$service_code" >> "$GITHUB_OUTPUT"
-          echo "Resolved: service_code=$service_code"
+          echo "python_code=$python_code" >> "$GITHUB_OUTPUT"
+          echo "Resolved: service_code=$service_code python_code=$python_code"
 
   # ---------------------------------------------------------------------------
   # Backend tests – full pytest suite. Runs only when service code changed and
@@ -398,13 +409,22 @@ jobs:
   # them required (STRUCTURE_REVIEW item A4). Config: root pyproject.toml
   # (ruff), eslint.config.mjs + .prettierrc.json (JS workspaces).
   #
-  # Lint runs on every PR (including docs-only PRs): it is cheap, and keeping it
-  # unconditional means the "Python lint (ruff)" and "Frontend lint" required
-  # checks always report without needing a gate job.
+  # Python lint follows the same gate/worker split as the *-tests jobs above:
+  # the WORKER only runs when detect-changes reports python_code=true, so a PR
+  # that never touches backend/, scripts/, pyproject.toml or the workflow file
+  # isn't blocked by unrelated ruff drift it didn't introduce. The gate below
+  # always runs and carries the required-check name "Python lint (ruff)", so
+  # branch protection keeps seeing that check on every PR.
+  #
+  # Frontend lint stays unconditional: it is cheap enough that scoping it
+  # wasn't worth the added indirection, and keeping it simple means the
+  # "Frontend lint" required check always reports without needing a gate job.
   # ---------------------------------------------------------------------------
-  python-lint:
-    name: Python lint (ruff)
+  python-lint-run:
+    name: Python lint (ruff) (run)
     runs-on: ubuntu-latest
+    needs: detect-changes
+    if: needs.detect-changes.outputs.python_code == 'true'
 
     steps:
       - name: Checkout code
@@ -426,6 +446,31 @@ jobs:
 
       - name: Ruff format check
         run: ruff format --check backend scripts
+
+  # Gate: always runs and carries the branch-protection required-check name
+  # "Python lint (ruff)". Passes when the worker succeeded or was skipped (no
+  # Python-relevant files changed); fails only when the worker actually failed
+  # or was cancelled.
+  python-lint:
+    name: Python lint (ruff)
+    runs-on: ubuntu-latest
+    needs: [detect-changes, python-lint-run]
+    if: always()
+    steps:
+      - name: Verify python lint succeeded or was skipped
+        env:
+          DETECT: ${{ needs.detect-changes.result }}
+          RESULT: ${{ needs.python-lint-run.result }}
+        run: |
+          echo "detect-changes result: $DETECT | Python lint (ruff) (run) result: $RESULT"
+          if [ "$DETECT" != "success" ]; then
+            echo "::error::detect-changes did not succeed ($DETECT); refusing to pass the gate"
+            exit 1
+          fi
+          case "$RESULT" in
+            success|skipped) echo "Gate passed."; exit 0 ;;
+            *) echo "::error::Python lint result '$RESULT' is not acceptable"; exit 1 ;;
+          esac
 
   frontend-lint:
     name: Frontend lint (eslint + prettier)
