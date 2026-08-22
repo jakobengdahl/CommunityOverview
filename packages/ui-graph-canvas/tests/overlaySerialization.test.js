@@ -24,6 +24,8 @@ describe('overlay serialization', () => {
       color: '#FEF08A',
       fontSize: 18,
       size: { w: 200, h: 140 },
+      z: 0,
+      locked: false,
     };
     const node = overlayToFlowNode(overlay);
     expect(node).toMatchObject({
@@ -34,6 +36,42 @@ describe('overlay serialization', () => {
       data: { text: 'hi', color: '#FEF08A', fontSize: 18 },
     });
     expect(flowNodeToOverlay(node)).toEqual(overlay);
+  });
+
+  // z (layer order) and locked (the canvas UI's own edit-lock convention, set
+  // via the generic MCP annotation tools) are envelope fields on every v1
+  // annotation type. A translator that dropped them would, on the host's next
+  // autosave, diff the annotation back to its z=0/locked=false defaults and
+  // overwrite a collaborator's or agent's change.
+  it('round-trips a non-zero z and a locked flag through the flow node', () => {
+    const overlay = {
+      id: 'note-1',
+      kind: 'note',
+      position: { x: 1, y: 2 },
+      text: 'hi',
+      color: '#FEF08A',
+      fontSize: 18,
+      size: { w: 200, h: 140 },
+      z: 5,
+      locked: true,
+    };
+    const node = overlayToFlowNode(overlay);
+    expect(node.zIndex).toBe(5);
+    expect(node.draggable).toBe(false);
+    expect(node.data.locked).toBe(true);
+    expect(flowNodeToOverlay(node)).toEqual(overlay);
+  });
+
+  it('defaults z and locked when absent from the overlay (a freshly created annotation)', () => {
+    const node = overlayToFlowNode({ id: 'n', kind: 'note', position: { x: 0, y: 0 } });
+    expect(node.zIndex).toBe(0);
+    expect(node.draggable).toBe(true);
+    expect(flowNodeToOverlay(node)).toMatchObject({ z: 0, locked: false });
+  });
+
+  it('defaults z and locked when absent from a bare flow node (never synced yet)', () => {
+    const node = { id: 'n', type: 'note', position: { x: 0, y: 0 }, data: {} };
+    expect(flowNodeToOverlay(node)).toMatchObject({ z: 0, locked: false });
   });
 
   it('defaults a note to 200x140 when size is missing', () => {
@@ -49,6 +87,8 @@ describe('overlay serialization', () => {
       text: 'L',
       color: '#fff',
       fontSize: 28,
+      z: 0,
+      locked: false,
     };
     expect(flowNodeToOverlay(overlayToFlowNode(overlay))).toEqual(overlay);
   });
@@ -63,9 +103,22 @@ describe('overlay serialization', () => {
       color: '#fff',
     };
     const node = overlayToFlowNode(overlay);
-    expect(node.data).toEqual({ dx: 0, dy: 40, color: '#fff', startArrow: false, endArrow: true });
+    expect(node.data).toEqual({
+      dx: 0,
+      dy: 40,
+      color: '#fff',
+      startArrow: false,
+      endArrow: true,
+      locked: false,
+    });
     // Defaults are materialised on the way back so the model is explicit.
-    expect(flowNodeToOverlay(node)).toEqual({ ...overlay, startArrow: false, endArrow: true });
+    expect(flowNodeToOverlay(node)).toEqual({
+      ...overlay,
+      startArrow: false,
+      endArrow: true,
+      z: 0,
+      locked: false,
+    });
   });
 
   it('round-trips a double-headed line with anchors', () => {
@@ -80,6 +133,8 @@ describe('overlay serialization', () => {
       endArrow: false,
       startAnchor: 'node-a',
       endAnchor: 'node-b',
+      z: 0,
+      locked: false,
     };
     const node = overlayToFlowNode(overlay);
     expect(node.draggable).toBe(false);
@@ -95,6 +150,18 @@ describe('overlay serialization', () => {
       dy: 10,
     });
     expect(node.draggable).toBe(true);
+  });
+
+  it('keeps a locked arrow non-draggable even without anchors', () => {
+    const node = overlayToFlowNode({
+      id: 'arrow-4',
+      kind: 'arrow',
+      position: { x: 0, y: 0 },
+      dx: 10,
+      dy: 10,
+      locked: true,
+    });
+    expect(node.draggable).toBe(false);
   });
 
   it('recognises overlays and groups as manual (preserved) nodes', () => {
@@ -125,6 +192,8 @@ describe('generic annotation overlay serialization', () => {
       text: 'Hi',
       color: '#fff',
       fontSize: 20,
+      z: 0,
+      locked: false,
     };
     const node = overlayToFlowNode(overlay);
     expect(node).toMatchObject({
@@ -143,6 +212,8 @@ describe('generic annotation overlay serialization', () => {
       position: { x: 0, y: 0 },
       color: '#4ADE80',
       size: { w: 300, h: 200 },
+      z: 0,
+      locked: false,
     };
     const node = overlayToFlowNode(overlay);
     expect(node).toMatchObject({
@@ -167,22 +238,28 @@ describe('generic annotation overlay serialization', () => {
       shape: 'circle',
       color: '#60A5FA',
       size: { w: 120, h: 120 },
+      z: 2,
+      locked: false,
     };
     const node = overlayToFlowNode(overlay);
-    expect(node.data).toEqual({ shape: 'circle', color: '#60A5FA' });
+    expect(node.data).toEqual({ shape: 'circle', color: '#60A5FA', locked: false });
+    expect(node.zIndex).toBe(2);
     expect(flowNodeToOverlay(node)).toEqual(overlay);
   });
 
-  it('round-trips an icon overlay', () => {
+  it('round-trips a locked icon overlay', () => {
     const overlay = {
       id: 'icon-1',
       kind: 'icon',
       position: { x: 8, y: 8 },
       icon: 'flag',
       color: '#F472B6',
+      z: 0,
+      locked: true,
     };
     const node = overlayToFlowNode(overlay);
-    expect(node.data).toEqual({ icon: 'flag', color: '#F472B6' });
+    expect(node.data).toEqual({ icon: 'flag', color: '#F472B6', locked: true });
+    expect(node.draggable).toBe(false);
     expect(flowNodeToOverlay(node)).toEqual(overlay);
   });
 
@@ -193,9 +270,11 @@ describe('generic annotation overlay serialization', () => {
       position: { x: 9, y: 9 },
       value: 0,
       color: '#FB923C',
+      z: 0,
+      locked: false,
     };
     const node = overlayToFlowNode(overlay);
-    expect(node.data).toEqual({ value: 0, color: '#FB923C' });
+    expect(node.data).toEqual({ value: 0, color: '#FB923C', locked: false });
     expect(flowNodeToOverlay(node)).toEqual(overlay);
   });
 
@@ -208,6 +287,8 @@ describe('generic annotation overlay serialization', () => {
       alt: 'diagram',
       color: '#38BDF8',
       size: { w: 240, h: 180 },
+      z: 0,
+      locked: false,
     };
     const node = overlayToFlowNode(overlay);
     expect(node).toMatchObject({

@@ -91,6 +91,8 @@ function genericAnnotationToOverlay(a) {
     kind: a.type,
     position: a.position || { x: 0, y: 0 },
     color: a.style?.color,
+    z: a.z ?? 0,
+    locked: Boolean(a.locked),
   };
   if (a.type === 'text') {
     overlay.text = a.text || '';
@@ -112,7 +114,13 @@ function genericAnnotationToOverlay(a) {
 }
 
 function genericOverlayToAnnotation(o) {
-  const input = { id: o.id, type: o.kind, position: o.position || { x: 0, y: 0 } };
+  const input = {
+    id: o.id,
+    type: o.kind,
+    position: o.position || { x: 0, y: 0 },
+    z: o.z ?? 0,
+    locked: Boolean(o.locked),
+  };
   input.style = o.kind === 'text' ? { color: o.color, fontSize: o.fontSize } : { color: o.color };
   if (o.kind === 'text') input.text = o.text || '';
   else if (o.kind === 'shape') input.shape = o.shape || 'rectangle';
@@ -143,6 +151,8 @@ export function annotationsToOverlays(annotations) {
         color: a.color,
         fontSize: a.fontSize,
         size: a.size,
+        z: a.z ?? 0,
+        locked: Boolean(a.locked),
       });
     } else if (a?.type === 'label') {
       out.push({
@@ -152,6 +162,8 @@ export function annotationsToOverlays(annotations) {
         text: a.text || '',
         color: a.style?.color,
         fontSize: a.style?.fontSize,
+        z: a.z ?? 0,
+        locked: Boolean(a.locked),
       });
     } else if (a?.type === 'line') {
       const from = a.from || a.position || { x: 0, y: 0 };
@@ -165,6 +177,8 @@ export function annotationsToOverlays(annotations) {
         color: a.style?.color,
         startArrow: a.startArrow ?? false,
         endArrow: a.endArrow ?? true,
+        z: a.z ?? 0,
+        locked: Boolean(a.locked),
       };
       if (a.startAnchor) overlay.startAnchor = a.startAnchor;
       if (a.endAnchor) overlay.endAnchor = a.endAnchor;
@@ -187,6 +201,8 @@ export function overlaysToAnnotations(overlays) {
         color: o.color,
         fontSize: o.fontSize,
         size: o.size,
+        z: o.z ?? 0,
+        locked: Boolean(o.locked),
       });
     }
     if (o.kind === 'label') {
@@ -196,6 +212,8 @@ export function overlaysToAnnotations(overlays) {
         position: o.position || { x: 0, y: 0 },
         text: o.text || '',
         style: { color: o.color, fontSize: o.fontSize },
+        z: o.z ?? 0,
+        locked: Boolean(o.locked),
       });
     }
     if (GENERIC_OVERLAY_TYPES.has(o.kind)) {
@@ -214,6 +232,8 @@ export function overlaysToAnnotations(overlays) {
       style: { color: o.color },
       startArrow: o.startArrow ?? false,
       endArrow: o.endArrow ?? true,
+      z: o.z ?? 0,
+      locked: Boolean(o.locked),
     };
     if (o.startAnchor) ann.startAnchor = o.startAnchor;
     if (o.endAnchor) ann.endAnchor = o.endAnchor;
