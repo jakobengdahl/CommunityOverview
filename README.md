@@ -495,3 +495,5 @@ See [backend/DEVELOPMENT.md](./backend/DEVELOPMENT.md) for detailed development 
 ## License
 
 MIT License - see LICENSE for details
+
+<!-- TEMP CI VERIFICATION LINE (PR #418 python-lint gate check) - safe to delete, will be removed before merge -->
