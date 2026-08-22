@@ -134,6 +134,57 @@ function genericOverlayToAnnotation(o) {
   return createAnnotation(input);
 }
 
+// freehand stores its sampled points as absolute model-space coordinates
+// (design: same envelope as `line`'s from/to), but the canvas overlay/flow
+// node shape needs `position` + points *relative* to it, the same anchor
+// convention `line`'s dx/dy uses, so a plain ReactFlow drag (which only
+// moves `position`) slides the whole stroke without this layer rewriting
+// every point on every render.
+function freehandAnnotationToOverlay(a) {
+  const rawPoints = Array.isArray(a.points) && a.points.length ? a.points : [{ x: 0, y: 0 }];
+  const anchor = rawPoints[0];
+  return {
+    id: a.id,
+    kind: 'freehand',
+    position: { x: anchor.x, y: anchor.y },
+    points: rawPoints.map((p) => {
+      const point = { x: p.x - anchor.x, y: p.y - anchor.y };
+      if (p.pressure != null) point.pressure = p.pressure;
+      return point;
+    }),
+    color: a.style?.color,
+    strokeWidth: a.strokeWidth,
+    smoothing: a.smoothing ?? 0,
+    pointerType: a.pointerType,
+    pressureSource: a.pressureSource,
+    z: a.z ?? 0,
+    locked: Boolean(a.locked),
+  };
+}
+
+function freehandOverlayToAnnotation(o) {
+  const anchor = o.position || { x: 0, y: 0 };
+  const rawPoints = Array.isArray(o.points) && o.points.length ? o.points : [{ x: 0, y: 0 }];
+  const points = rawPoints.map((p) => {
+    const point = { x: anchor.x + (p.x ?? 0), y: anchor.y + (p.y ?? 0) };
+    if (p.pressure != null) point.pressure = p.pressure;
+    return point;
+  });
+  return createAnnotation({
+    id: o.id,
+    type: 'freehand',
+    position: { x: anchor.x, y: anchor.y },
+    points,
+    style: { color: o.color },
+    strokeWidth: o.strokeWidth,
+    smoothing: o.smoothing ?? 0,
+    pointerType: o.pointerType,
+    pressureSource: o.pressureSource,
+    z: o.z ?? 0,
+    locked: Boolean(o.locked),
+  });
+}
+
 // Note/label/arrow annotations round-trip between the server annotation model
 // (design 3.1) and the canvas-shape overlay descriptors the GraphCanvas emits
 // (via onSaveView) and consumes (via annotationsToRestore). Groups keep their
@@ -183,6 +234,8 @@ export function annotationsToOverlays(annotations) {
       if (a.startAnchor) overlay.startAnchor = a.startAnchor;
       if (a.endAnchor) overlay.endAnchor = a.endAnchor;
       out.push(overlay);
+    } else if (a?.type === 'freehand') {
+      out.push(freehandAnnotationToOverlay(a));
     } else if (GENERIC_OVERLAY_TYPES.has(a?.type)) {
       out.push(genericAnnotationToOverlay(a));
     }
@@ -215,6 +268,9 @@ export function overlaysToAnnotations(overlays) {
         z: o.z ?? 0,
         locked: Boolean(o.locked),
       });
+    }
+    if (o.kind === 'freehand') {
+      return freehandOverlayToAnnotation(o);
     }
     if (GENERIC_OVERLAY_TYPES.has(o.kind)) {
       return genericOverlayToAnnotation(o);

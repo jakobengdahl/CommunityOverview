@@ -6,10 +6,13 @@
  * logic, so they are tracked apart from these overlays.
  */
 
-// text/frame/shape/icon/vote_dot/image are the rest of the v1 annotation
-// model (docs/ANNOTATION_CONTRACT.md) that isn't note/label/arrow/group.
-// They render through GenericAnnotationNode — a simple, non-interactive
-// visual representation rather than dedicated per-type UX like NoteNode.
+// text/frame/shape/icon/vote_dot/image/freehand are the rest of the v1
+// annotation model (docs/ANNOTATION_CONTRACT.md) that isn't note/label/
+// arrow/group. text/frame/shape/icon/vote_dot/image render through
+// GenericAnnotationNode — a simple, non-interactive visual representation
+// rather than dedicated per-type UX like NoteNode. freehand renders through
+// its own FreehandAnnotationNode (an SVG path, like ArrowNode) but still
+// shares this generic envelope-field handling.
 export const GENERIC_OVERLAY_TYPES = new Set([
   'text',
   'frame',
@@ -17,6 +20,7 @@ export const GENERIC_OVERLAY_TYPES = new Set([
   'icon',
   'vote_dot',
   'image',
+  'freehand',
 ]);
 export const OVERLAY_TYPES = new Set(['note', 'label', 'arrow', ...GENERIC_OVERLAY_TYPES]);
 export const ANNOTATION_TYPES = new Set([
@@ -41,6 +45,11 @@ const GENERIC_OVERLAY_FIELDS = {
   icon: ['icon', 'color'],
   vote_dot: ['value', 'color'],
   image: ['image', 'alt', 'color'],
+  // `points` are node-relative (relative to the node's own `position`, the
+  // stroke's anchor/first sampled point) — the same convention arrow's
+  // dx/dy uses, so a plain ReactFlow drag (which only updates `position`)
+  // moves the whole stroke without this layer having to touch `points`.
+  freehand: ['points', 'color', 'strokeWidth', 'smoothing', 'pointerType', 'pressureSource'],
 };
 
 // Generic overlay kinds that carry an explicit box size (frame/shape/image);

@@ -50,6 +50,7 @@ _ANNOTATION_TYPES = {
     "icon",
     "vote_dot",
     "image",
+    "freehand",
 }
 _LEGACY_ANNOTATION_ALIASES = {"arrow": "line"}
 _DEFAULT_MAX_ANNOTATIONS = 2000

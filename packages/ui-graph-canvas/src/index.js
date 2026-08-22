@@ -16,6 +16,7 @@ export { default as NoteNode } from './components/NoteNode';
 export { default as LabelNode } from './components/LabelNode';
 export { default as ArrowNode } from './components/ArrowNode';
 export { default as GenericAnnotationNode } from './components/GenericAnnotationNode';
+export { default as FreehandAnnotationNode } from './components/FreehandAnnotationNode';
 
 // Layout utilities
 export {
@@ -37,6 +38,10 @@ export {
   migrateLegacyAnnotations,
   normalizeAnnotationDocument,
 } from './utils/annotationModel';
+
+// Freehand annotation utilities
+export { reduceFreehandPoints, pointsToPathData, buildFreehandPath } from './utils/freehandPath';
+export { createFreehandStrokeCapture } from './utils/freehandStroke';
 
 // Constants
 export {

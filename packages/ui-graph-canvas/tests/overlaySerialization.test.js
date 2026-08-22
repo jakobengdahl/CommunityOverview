@@ -298,6 +298,61 @@ describe('generic annotation overlay serialization', () => {
     });
     expect(flowNodeToOverlay(node)).toEqual(overlay);
   });
+
+  it('round-trips a freehand overlay (node-relative points, pressure, stroke style)', () => {
+    const overlay = {
+      id: 'freehand-1',
+      kind: 'freehand',
+      position: { x: 10, y: 10 },
+      points: [
+        { x: 0, y: 0, pressure: 0.4 },
+        { x: 5, y: 3 },
+        { x: 12, y: 1 },
+      ],
+      color: '#F472B6',
+      strokeWidth: 3,
+      smoothing: 0.5,
+      pointerType: 'pen',
+      pressureSource: 'device',
+      z: 1,
+      locked: false,
+    };
+    const node = overlayToFlowNode(overlay);
+    expect(node).toMatchObject({
+      id: 'freehand-1',
+      type: 'freehand',
+      position: { x: 10, y: 10 },
+      data: {
+        points: overlay.points,
+        color: '#F472B6',
+        strokeWidth: 3,
+        smoothing: 0.5,
+        pointerType: 'pen',
+        pressureSource: 'device',
+      },
+    });
+    expect(flowNodeToOverlay(node)).toEqual(overlay);
+  });
+
+  it('drags a freehand node without rewriting its point coordinates', () => {
+    // The node-relative convention: moving `position` alone (a plain
+    // ReactFlow drag) must be enough to move the whole stroke — `data.points`
+    // never needs to change.
+    const overlay = {
+      id: 'freehand-1',
+      kind: 'freehand',
+      position: { x: 0, y: 0 },
+      points: [{ x: 0, y: 0 }, { x: 10, y: 10 }],
+      color: '#fff',
+      z: 0,
+      locked: false,
+    };
+    const node = overlayToFlowNode(overlay);
+    const dragged = { ...node, position: { x: 100, y: 200 } };
+    const draggedOverlay = flowNodeToOverlay(dragged);
+    expect(draggedOverlay.position).toEqual({ x: 100, y: 200 });
+    expect(draggedOverlay.points).toEqual(overlay.points);
+  });
 });
 
 describe('isArrowAnchored', () => {

@@ -17,6 +17,7 @@ from backend.core.session_annotations import (
     normalize_generic_type,
     project_annotation,
     resolve_annotation_type_alias,
+    translate_freehand_points,
 )
 
 
@@ -33,6 +34,7 @@ class TestTypeResolution:
             "icon",
             "vote_dot",
             "image",
+            "freehand",
         } == set(GENERIC_ANNOTATION_TYPES)
 
     def test_all_types_includes_note_and_group(self):
