@@ -17,7 +17,6 @@ from backend.core.session_annotations import (
     normalize_generic_type,
     project_annotation,
     resolve_annotation_type_alias,
-    translate_freehand_points,
 )
 
 
