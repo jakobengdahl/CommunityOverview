@@ -2,7 +2,7 @@ import { describe, it, expect, vi, beforeEach } from 'vitest';
 import { render, screen, fireEvent, act } from '@testing-library/react';
 
 import MobileShell from '../src/components/MobileShell';
-import useGraphStore from '../src/store/graphStore';
+import useGraphStore, { AI_ASSISTANT_COLLAPSED_STORAGE_KEY } from '../src/store/graphStore';
 
 vi.mock('../src/i18n', () => ({
   useI18n: () => ({
@@ -62,6 +62,7 @@ function baseProps(overrides = {}) {
 
 describe('MobileShell', () => {
   beforeEach(() => {
+    localStorage.clear();
     useGraphStore.setState({ chatPanelOpen: false });
   });
 
@@ -118,13 +119,15 @@ describe('MobileShell', () => {
     expect(screen.getByTestId('floating-search')).toBeInTheDocument();
   });
 
-  it('opening the menu drawer minimizes chat', () => {
+  it('opening the menu drawer minimizes chat without overwriting the persisted chat preference', () => {
+    localStorage.setItem(AI_ASSISTANT_COLLAPSED_STORAGE_KEY, 'false');
     useGraphStore.setState({ chatPanelOpen: true });
     render(<MobileShell {...baseProps()} />);
 
     fireEvent.click(screen.getByLabelText('mobile_nav.menu'));
     expect(screen.getByTestId('session-drawer')).toBeInTheDocument();
     expect(useGraphStore.getState().chatPanelOpen).toBe(false);
+    expect(localStorage.getItem(AI_ASSISTANT_COLLAPSED_STORAGE_KEY)).toBe('false');
   });
 
   it("opening chat via ChatPanel's own control (not the bottom nav) still closes the open menu", () => {
@@ -143,7 +146,8 @@ describe('MobileShell', () => {
     expect(screen.queryByTestId('session-drawer')).not.toBeInTheDocument();
   });
 
-  it('the Graph nav item closes every surface and returns to the canvas', () => {
+  it('the Graph nav item closes every surface and returns to the canvas without persisting chat collapse', () => {
+    localStorage.setItem(AI_ASSISTANT_COLLAPSED_STORAGE_KEY, 'false');
     render(<MobileShell {...baseProps()} />);
 
     fireEvent.click(screen.getByLabelText('mobile_nav.menu'));
@@ -152,6 +156,7 @@ describe('MobileShell', () => {
     fireEvent.click(screen.getByLabelText('mobile_nav.graph'));
     expect(screen.queryByTestId('session-drawer')).not.toBeInTheDocument();
     expect(useGraphStore.getState().chatPanelOpen).toBe(false);
+    expect(localStorage.getItem(AI_ASSISTANT_COLLAPSED_STORAGE_KEY)).toBe('false');
   });
 
   it('picking a node type from the create sheet closes the sheet and forwards the type', () => {

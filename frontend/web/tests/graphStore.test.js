@@ -1,8 +1,10 @@
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
-import useGraphStore from '../src/store/graphStore';
+import useGraphStore, { AI_ASSISTANT_COLLAPSED_STORAGE_KEY } from '../src/store/graphStore';
 
 describe('graphStore', () => {
   beforeEach(() => {
+    vi.restoreAllMocks();
+    localStorage.clear();
     // Reset store to initial state
     useGraphStore.setState({
       nodes: [],
@@ -22,6 +24,60 @@ describe('graphStore', () => {
       isLoading: false,
       configLoaded: false,
       error: null,
+    });
+  });
+
+  describe('AI assistant collapsed preference', () => {
+    it('uses the configured default when no browser preference exists', () => {
+      useGraphStore.getState().setConfig({}, { ui: { ai_assistant: { default_collapsed: true } } });
+      expect(useGraphStore.getState().chatPanelOpen).toBe(false);
+    });
+
+    it('stays expanded when configuration is absent', () => {
+      useGraphStore.getState().setConfig({}, {});
+      expect(useGraphStore.getState().chatPanelOpen).toBe(true);
+    });
+
+    it('gives a valid browser preference precedence over configuration', () => {
+      localStorage.setItem(AI_ASSISTANT_COLLAPSED_STORAGE_KEY, 'false');
+      useGraphStore.getState().setConfig({}, { ui: { ai_assistant: { default_collapsed: true } } });
+      expect(useGraphStore.getState().chatPanelOpen).toBe(true);
+    });
+
+    it('persists explicit expand and collapse choices', () => {
+      useGraphStore.setState({ chatPanelOpen: true });
+      useGraphStore.getState().toggleChatPanel();
+      expect(localStorage.getItem(AI_ASSISTANT_COLLAPSED_STORAGE_KEY)).toBe('true');
+
+      useGraphStore.getState().setChatPanelOpen(true);
+      expect(localStorage.getItem(AI_ASSISTANT_COLLAPSED_STORAGE_KEY)).toBe('false');
+    });
+
+    it('does not persist guide-driven transient changes', () => {
+      useGraphStore.setState({ chatPanelOpen: true });
+      useGraphStore.getState().setChatPanelOpenTransient(false);
+      useGraphStore.getState().toggleChatPanelTransient();
+      expect(localStorage.getItem(AI_ASSISTANT_COLLAPSED_STORAGE_KEY)).toBeNull();
+    });
+
+    it('ignores malformed stored values', () => {
+      localStorage.setItem(AI_ASSISTANT_COLLAPSED_STORAGE_KEY, '{broken');
+      useGraphStore.getState().setConfig({}, { ui: { ai_assistant: { default_collapsed: true } } });
+      expect(useGraphStore.getState().chatPanelOpen).toBe(false);
+    });
+
+    it('continues when localStorage reads and writes throw', () => {
+      vi.spyOn(Storage.prototype, 'getItem').mockImplementation(() => {
+        throw new Error('disabled');
+      });
+      vi.spyOn(Storage.prototype, 'setItem').mockImplementation(() => {
+        throw new Error('disabled');
+      });
+
+      useGraphStore.getState().setConfig({}, { ui: { ai_assistant: { default_collapsed: true } } });
+      expect(useGraphStore.getState().chatPanelOpen).toBe(false);
+      expect(() => useGraphStore.getState().toggleChatPanel()).not.toThrow();
+      expect(useGraphStore.getState().chatPanelOpen).toBe(true);
     });
   });
 
@@ -443,11 +499,11 @@ describe('graphStore', () => {
       expect(useGraphStore.getState().chatPanelOpen).toBe(false);
     });
 
-    it('setChatPanelOpen (guide staging) does not persist a preference', () => {
+    it('transient chat-panel staging does not persist a preference', () => {
       window.localStorage.removeItem(CHAT_PANEL_KEY);
       const setItemSpy = vi.spyOn(window.localStorage.__proto__, 'setItem');
 
-      useGraphStore.getState().setChatPanelOpen(false);
+      useGraphStore.getState().setChatPanelOpenTransient(false);
 
       expect(useGraphStore.getState().chatPanelOpen).toBe(false);
       expect(setItemSpy).not.toHaveBeenCalledWith(CHAT_PANEL_KEY, expect.anything());

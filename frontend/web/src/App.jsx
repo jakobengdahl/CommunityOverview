@@ -23,6 +23,8 @@ import { serverStateToMirror, useSharedSession } from './hooks/useSharedSession'
 import { useSyncConnection } from './hooks/useSyncConnection';
 import { useToolResultCommands } from './hooks/useToolResultCommands';
 import { useViewportMode } from './hooks/useViewportMode';
+import { useFullscreenCanvas } from './hooks/useFullscreenCanvas';
+import FullscreenExitButton from './components/FullscreenExitButton';
 import { decideClearAction } from './utils/clearBoard';
 import { dropIntoFreshSession, receiveRemoteSessionDeleted } from './utils/sessionLifecycle';
 import { applyEdgeUpdate, confirmNodeDelete } from './utils/sessionScopedGraphEdits';
@@ -110,6 +112,9 @@ function App() {
   const urlViewLoadedRef = useRef(false);
   const latestViewport = useRef(null);
   const dialogOpenRef = useRef(false);
+  const appRef = useRef(null);
+  const { enterFullscreenCanvas, exitFullscreenCanvas, fullscreenCanvasActive } =
+    useFullscreenCanvas(appRef);
   const [notification, setNotification] = useState(null);
   const [saveViewDialog, setSaveViewDialog] = useState(null);
   const [showSubscriptionDialog, setShowSubscriptionDialog] = useState(false);
@@ -1796,11 +1801,13 @@ function App() {
     onCreateActiveKnowledgeCollection: handleCreateAKC,
     llmAvailable,
     akcShortName,
+    onEnterFullscreen: enterFullscreenCanvas,
   };
 
   return (
     <div
-      className={`app${drawerOpen ? ' session-drawer-open' : ''}${isMobile ? ' is-mobile' : ''}${isCoarsePointer ? ' is-touch' : ''}`}
+      ref={appRef}
+      className={`app${drawerOpen ? ' session-drawer-open' : ''}${isMobile ? ' is-mobile' : ''}${isCoarsePointer ? ' is-touch' : ''}${fullscreenCanvasActive ? ' fullscreen-canvas-mode' : ''}`}
     >
       <div className="app-canvas" id="guide-target-canvas">
         <GraphCanvas
@@ -1944,6 +1951,9 @@ function App() {
             setActivityOpen(true);
           }}
         />
+      )}
+      {fullscreenCanvasActive && (
+        <FullscreenExitButton onExit={exitFullscreenCanvas} label={t('fullscreen.exit')} />
       )}
       <RecentActivityDrawer open={activityOpen} onClose={() => setActivityOpen(false)} />
       {clearConfirm && (

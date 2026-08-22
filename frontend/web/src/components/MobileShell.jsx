@@ -56,6 +56,7 @@ function MobileShell({
   onOpenActivity,
   canvasLocked,
   onToggleLock,
+  onEnterFullscreen,
   suspendEscape,
   onCreateNodeForType,
   onCreateAgent,
@@ -67,7 +68,7 @@ function MobileShell({
   akcShortName,
 }) {
   const { t } = useI18n();
-  const { chatPanelOpen, setChatPanelOpen } = useGraphStore();
+  const { chatPanelOpen, setChatPanelOpen, setChatPanelOpenTransient } = useGraphStore();
   const surface = useSurfaceManager();
   const [sheetSnapPoint, setSheetSnapPoint] = useState('half');
 
@@ -87,11 +88,11 @@ function MobileShell({
 
   const closeAllSurfaces = () => {
     surface.close();
-    setChatPanelOpen(false);
+    setChatPanelOpenTransient(false);
   };
 
   const openSheet = (name) => {
-    setChatPanelOpen(false);
+    setChatPanelOpenTransient(false);
     surface.toggle(name);
   };
 
@@ -105,7 +106,7 @@ function MobileShell({
   };
 
   const openMenu = () => {
-    setChatPanelOpen(false);
+    setChatPanelOpenTransient(false);
     surface.toggle('menu');
   };
 
@@ -238,6 +239,7 @@ function MobileShell({
         }}
         canvasLocked={canvasLocked}
         onToggleLock={onToggleLock}
+        onEnterFullscreen={onEnterFullscreen}
         suspendEscape={suspendEscape}
       />
 

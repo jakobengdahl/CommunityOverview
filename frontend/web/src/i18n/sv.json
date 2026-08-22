@@ -225,6 +225,10 @@
     "language_sv": "Svenska",
     "logout": "Logga ut"
   },
+  "fullscreen": {
+    "enter": "Helskärmsläge för visualisering",
+    "exit": "Lämna helskärmsläget"
+  },
   "sessions": {
     "title": "Sessioner",
     "agent_arranging": "Assistenten ordnar vyn …",

@@ -420,6 +420,12 @@ where they make a question easier to answer.
 
 ## 5. Session menu and settings
 
+The session menu includes **Fullscreen canvas**, which hides application chrome
+while preserving the current canvas, selection, assistant, and drawer state.
+Use the subtle return button or Escape to leave it. The shortcut is
+Ctrl+Shift+F on Windows/Linux and Cmd+Shift+F on macOS. If browser fullscreen is
+unavailable or denied, the same action automatically uses an in-app focus mode.
+
 Click the **☰** (hamburger) icon in the top-left corner to open the session menu —
 a panel that slides out from the left and docks to the screen edge. While it is open,
 the toolbar shifts right so it keeps floating next to the panel.

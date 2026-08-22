@@ -207,6 +207,11 @@
       }
     }
   },
+  "ui": {
+    "ai_assistant": {
+      "default_collapsed": false
+    }
+  },
   "presentation": {
     "title": "Community Knowledge Graph",
     "introduction": "Explore the network of organizations, initiatives, and resources within the community collaboration.",

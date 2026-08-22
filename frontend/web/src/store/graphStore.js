@@ -5,6 +5,7 @@ const SHOW_MINIMAP_STORAGE_KEY = 'show_minimap';
 const NODE_PREVIEW_STORAGE_KEY = 'node_preview_enabled';
 const CANVAS_LOCKED_STORAGE_KEY = 'canvas_locked';
 const CHAT_PANEL_OPEN_STORAGE_KEY = 'chat_panel_open';
+export const AI_ASSISTANT_COLLAPSED_STORAGE_KEY = 'community-graph:ui:ai-assistant-collapsed';
 
 // Returns the visitor's own explicit open/collapsed choice, or null when none
 // has been made yet — distinct from loadInitialChatPanelOpen's boolean return
@@ -13,17 +14,36 @@ function loadStoredChatPanelOpen() {
   try {
     const stored = window?.localStorage?.getItem(CHAT_PANEL_OPEN_STORAGE_KEY);
     if (stored !== null) return stored === 'true';
+    const collapsed = window?.localStorage?.getItem(AI_ASSISTANT_COLLAPSED_STORAGE_KEY);
+    if (collapsed === 'true') return false;
+    if (collapsed === 'false') return true;
   } catch {
     // ignore storage errors and use default
   }
   return null;
 }
 
+function persistChatPanelOpen(open) {
+  try {
+    window?.localStorage?.setItem(CHAT_PANEL_OPEN_STORAGE_KEY, String(open));
+    window?.localStorage?.setItem(AI_ASSISTANT_COLLAPSED_STORAGE_KEY, String(!open));
+  } catch {
+    // ignore storage errors
+  }
+}
+
+function configuredChatPanelOpen(presentation) {
+  const stored = loadStoredChatPanelOpen();
+  if (stored !== null) return stored;
+  return !(
+    presentation?.default_chat_collapsed || presentation?.ui?.ai_assistant?.default_collapsed
+  );
+}
+
 function loadInitialChatPanelOpen() {
   const stored = loadStoredChatPanelOpen();
   // Falls back to open (the historical hardcoded default) until the backend
-  // config default arrives — setConfig reconciles this against
-  // presentation.default_chat_collapsed once it does.
+  // config default arrives — setConfig reconciles this once it does.
   return stored !== null ? stored : true;
 }
 
@@ -622,7 +642,7 @@ const useGraphStore = create((set, get) => ({
     // not made their own explicit open/collapse choice yet — an explicit
     // choice always takes precedence, matching the default_language pattern.
     if (loadStoredChatPanelOpen() === null) {
-      patch.chatPanelOpen = !presentation?.default_chat_collapsed;
+      patch.chatPanelOpen = configuredChatPanelOpen(presentation);
     }
     set(patch);
   },
@@ -858,31 +878,33 @@ const useGraphStore = create((set, get) => ({
   // toggleChatPanel is wired to the panel's own header/minimized-bar click —
   // a genuine explicit choice — so it persists and then overrides the
   // configured default on every later visit (see setConfig above and
-  // resetChatPanelToDefault below). setChatPanelOpen deliberately does NOT
-  // persist: GuideOverlay uses it to stage the panel open/closed for a
-  // scripted tour step, which is not the visitor expressing a real
-  // preference, and must not silently clobber one they already made.
+  // resetChatPanelToDefault below). Transient setters deliberately do NOT
+  // persist: GuideOverlay and MobileShell use them to stage/minimize the panel
+  // without treating that surface choreography as the visitor expressing a
+  // real preference or silently clobbering one they already made.
   toggleChatPanel: () =>
     set((state) => {
       const next = !state.chatPanelOpen;
-      try {
-        window?.localStorage?.setItem(CHAT_PANEL_OPEN_STORAGE_KEY, String(next));
-      } catch {
-        // ignore storage errors
-      }
+      persistChatPanelOpen(next);
       return { chatPanelOpen: next };
     }),
-  setChatPanelOpen: (open) => set({ chatPanelOpen: open }),
+  setChatPanelOpen: (open) => {
+    persistChatPanelOpen(open);
+    set({ chatPanelOpen: open });
+  },
+  setChatPanelOpenTransient: (open) => set({ chatPanelOpen: open }),
+  toggleChatPanelTransient: () => set((state) => ({ chatPanelOpen: !state.chatPanelOpen })),
   // Clears the visitor's stored choice and falls back to the configured
   // application default again.
   resetChatPanelToDefault: () =>
     set((state) => {
       try {
         window?.localStorage?.removeItem(CHAT_PANEL_OPEN_STORAGE_KEY);
+        window?.localStorage?.removeItem(AI_ASSISTANT_COLLAPSED_STORAGE_KEY);
       } catch {
         // ignore storage errors
       }
-      return { chatPanelOpen: !state.presentation?.default_chat_collapsed };
+      return { chatPanelOpen: configuredChatPanelOpen(state.presentation) };
     }),
 
   // Guide actions

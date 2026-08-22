@@ -13,6 +13,7 @@ import {
   ClockHistory,
   LockFill,
   UnlockFill,
+  ArrowsFullscreen,
 } from 'react-bootstrap-icons';
 import { useI18n } from '../i18n';
 import SessionContextMenu from './SessionContextMenu';
@@ -40,6 +41,7 @@ function SessionDrawer({
   onOpenActivity,
   canvasLocked = false,
   onToggleLock,
+  onEnterFullscreen,
   suspendEscape = false,
 }) {
   const { t } = useI18n();
@@ -201,6 +203,10 @@ function SessionDrawer({
       </div>
 
       <div className="session-drawer-footer">
+        <button className="session-drawer-item" onClick={() => onEnterFullscreen?.()}>
+          <ArrowsFullscreen size={15} />
+          <span>{t('fullscreen.enter')}</span>
+        </button>
         <button
           className={`session-drawer-item${canvasLocked ? ' active' : ''}`}
           onClick={() => onToggleLock?.()}

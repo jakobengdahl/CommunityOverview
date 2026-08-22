@@ -238,6 +238,7 @@ class TestConfigLoader:
         assert "default_language" in presentation
         assert "default_chat_collapsed" in presentation
         assert "language_policy" in presentation
+        assert presentation["ui"]["ai_assistant"]["default_collapsed"] is False
 
     def test_default_chat_collapsed_defaults_false(self):
         """A config without an explicit setting keeps the assistant panel open."""

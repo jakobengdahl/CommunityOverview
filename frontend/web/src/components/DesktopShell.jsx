@@ -33,6 +33,7 @@ function DesktopShell({
   onOpenActivity,
   canvasLocked,
   onToggleLock,
+  onEnterFullscreen,
   suspendEscape,
   onCreateNodeForType,
   onCreateAgent,
@@ -68,6 +69,7 @@ function DesktopShell({
         onOpenActivity={onOpenActivity}
         canvasLocked={canvasLocked}
         onToggleLock={onToggleLock}
+        onEnterFullscreen={onEnterFullscreen}
         suspendEscape={suspendEscape}
       />
       <FloatingSearch />
