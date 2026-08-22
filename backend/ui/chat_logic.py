@@ -1386,14 +1386,10 @@ class ChatProcessor:
         # Track existing IDs for accumulated nodes and edges to avoid duplicates.
         # Initializing sets here instead of inside the loop avoids O(N^2) complexity.
         existing_node_ids = {
-            n.get("id")
-            for n in accumulated_nodes
-            if isinstance(n, dict) and "id" in n
+            n.get("id") for n in accumulated_nodes if isinstance(n, dict) and "id" in n
         }
         existing_edge_ids = {
-            e.get("id")
-            for e in accumulated_edges
-            if isinstance(e, dict) and "id" in e
+            e.get("id") for e in accumulated_edges if isinstance(e, dict) and "id" in e
         }
 
         for tool_use in tool_uses:
