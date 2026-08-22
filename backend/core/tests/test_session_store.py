@@ -363,7 +363,10 @@ class TestStateOps:
             self._apply(
                 store,
                 s,
-                {"op": "annotation_updated", "annotation": {"id": ann_id, "kind": "arrow"}},
+                {
+                    "op": "annotation_updated",
+                    "annotation": {"id": ann_id, "kind": "arrow"},
+                },
             )
         assert s.state["annotations"][0]["type"] == "note"
 
