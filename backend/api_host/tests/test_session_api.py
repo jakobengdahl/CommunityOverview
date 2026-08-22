@@ -314,7 +314,11 @@ class TestSessionActivityAndUndo:
                 "ops": [
                     {
                         "op": "annotation_updated",
-                        "annotation": {"id": "note-1", "type": "note", "text": "second"},
+                        "annotation": {
+                            "id": "note-1",
+                            "type": "note",
+                            "text": "second",
+                        },
                     }
                 ],
             },
@@ -323,7 +327,10 @@ class TestSessionActivityAndUndo:
         resp = test_app.get(f"/api/sessions/{sid}/activity")
         assert resp.status_code == 200
         records = resp.json()["activity"]
-        assert [r["op"] for r in records] == ["annotation_updated", "annotation_created"]
+        assert [r["op"] for r in records] == [
+            "annotation_updated",
+            "annotation_created",
+        ]
 
     def test_undo_reverts_the_actors_last_action(self, test_app: TestClient):
         sid = test_app.post("/api/sessions", json={}).json()["id"]
@@ -364,7 +371,11 @@ class TestSessionActivityAndUndo:
                 "ops": [
                     {
                         "op": "annotation_updated",
-                        "annotation": {"id": "note-1", "type": "note", "text": "theirs"},
+                        "annotation": {
+                            "id": "note-1",
+                            "type": "note",
+                            "text": "theirs",
+                        },
                     }
                 ],
             },
@@ -379,9 +390,7 @@ class TestSessionActivityAndUndo:
         assert resp.status_code == 404
 
     def test_undo_unknown_session_404(self, test_app: TestClient):
-        resp = test_app.post(
-            "/api/sessions/9999-9999/undo", json={"client_id": "c1"}
-        )
+        resp = test_app.post("/api/sessions/9999-9999/undo", json={"client_id": "c1"})
         assert resp.status_code == 404
 
 
