@@ -352,6 +352,17 @@ class SessionOpsRequest(BaseModel):
     ops: List[Dict[str, Any]] = Field(..., description="Ordered ops to apply")
 
 
+class UndoSessionActionRequest(BaseModel):
+    """Request model for undoing a session actor's latest eligible action."""
+
+    client_id: str = Field(
+        ..., min_length=1, max_length=100, description="Requesting actor's client id"
+    )
+    expected_revision: Optional[int] = Field(
+        None, description="Client's last-known seq; conflicts if the session moved on"
+    )
+
+
 def _resolve_stream_event(
     event: Dict[str, Any], session_manager, session_id: str
 ) -> Dict[str, Any]:
@@ -793,10 +804,14 @@ def _register_session_endpoints(
     legacy ``/sessions/{id}/state|stream`` MCP-push channel, which is unchanged.
     """
     from backend.core.session_manager import (
+        LayoutBusy,
+        NoUndoableAction,
         OpBatchTooLarge,
         RateLimited,
+        RevisionConflict,
         SessionLimitReached,
         SessionNotFound,
+        UndoConflict,
     )
     from backend.core.session_store import OpError, is_valid_session_id
 
@@ -931,6 +946,54 @@ def _register_session_endpoints(
             raise HTTPException(status_code=429, detail="rate limit exceeded")
         except OpBatchTooLarge:
             raise HTTPException(status_code=413, detail="op batch too large")
+        except OpError as exc:
+            raise HTTPException(status_code=400, detail=str(exc))
+
+    @router.get("/sessions/{session_id}/activity")
+    async def get_session_activity(
+        session_id: str,
+        actor: Optional[str] = Query(
+            None, description="Restrict to activity by this client id"
+        ),
+        limit: int = Query(50, ge=1, le=500, description="Max records to return"),
+    ) -> Dict[str, Any]:
+        if not is_valid_session_id(session_id):
+            raise HTTPException(status_code=400, detail="invalid session_id format")
+        try:
+            records = session_manager.list_activity(
+                session_id, actor=actor, limit=limit
+            )
+        except SessionNotFound:
+            raise HTTPException(status_code=404, detail="session not found")
+        return {"session_id": session_id, "activity": records}
+
+    @router.post("/sessions/{session_id}/undo")
+    async def undo_session_action(
+        session_id: str, request: UndoSessionActionRequest
+    ) -> Dict[str, Any]:
+        if not is_valid_session_id(session_id):
+            raise HTTPException(status_code=400, detail="invalid session_id format")
+        try:
+            return session_manager.undo_last_action(
+                session_id,
+                request.client_id,
+                expected_revision=request.expected_revision,
+            )
+        except SessionNotFound:
+            raise HTTPException(status_code=404, detail="session not found")
+        except NoUndoableAction:
+            raise HTTPException(status_code=404, detail="no undoable action")
+        except UndoConflict as exc:
+            raise HTTPException(status_code=409, detail=exc.reason)
+        except RevisionConflict as exc:
+            raise HTTPException(
+                status_code=409,
+                detail=f"expected revision {exc.expected}, session is at {exc.actual}",
+            )
+        except LayoutBusy:
+            raise HTTPException(status_code=409, detail="session busy, retry")
+        except RateLimited:
+            raise HTTPException(status_code=429, detail="rate limit exceeded")
         except OpError as exc:
             raise HTTPException(status_code=400, detail=str(exc))
 
