@@ -83,6 +83,28 @@ class SessionLimitReached(Exception):
     pass
 
 
+class AnnotationNotFound(Exception):
+    """No annotation with the given id exists in this session (or it was just deleted)."""
+
+    def __init__(self, annotation_id: str) -> None:
+        super().__init__(f"annotation not found: {annotation_id!r}")
+        self.annotation_id = annotation_id
+
+
+class AnnotationRecentlyDeleted(Exception):
+    """A create used an id another collaborator deleted moments ago.
+
+    Mirrors the D-table rule in ``SessionStore.apply_state_op``: a create-op
+    retry for an id still in the session's short deleted-ids memory must not
+    resurrect it, so the write is refused rather than silently reviving stale
+    state a collaborator just removed.
+    """
+
+    def __init__(self, annotation_id: Optional[str]) -> None:
+        super().__init__(f"annotation was recently deleted: {annotation_id!r}")
+        self.annotation_id = annotation_id
+
+
 class LayoutBusy(Exception):
     """A concurrent op batch holds the session lock; a layout write should retry.
 
@@ -700,19 +722,183 @@ class SessionManager:
             "node_count": len(session.state.get("node_refs", [])),
         }
 
+    def upsert_annotation(
+        self,
+        session_id: str,
+        client_id: str,
+        annotation: Dict[str, Any],
+        *,
+        expected_revision: Optional[int] = None,
+    ) -> Dict[str, Any]:
+        """Create, or replace by id, one annotation **synchronously** (MCP write path).
+
+        Shares ``apply_layout``/``add_node_refs``' atomicity contract: it never
+        awaits, so it is atomic on a single-threaded loop, and a held per-session
+        lock (an ``apply_ops`` batch mid-flight) means ``LayoutBusy`` rather than a
+        seq assigned out of broadcast order.
+
+        ``annotation_created`` is already an upsert in ``SessionStore`` when
+        ``annotation["id"]`` matches one already in the session (idempotent
+        client retries), so create and upsert share this one op and this one
+        method. Omit ``annotation["id"]`` to have the store mint one.
+        """
+        if not is_valid_session_id(session_id):
+            raise SessionNotFound()
+        if not isinstance(client_id, str) or not client_id:
+            raise OpError("'client_id' is required")
+        if not isinstance(annotation, dict):
+            raise OpError("'annotation' must be an object")
+        if len(json.dumps(annotation)) > self._max_op_batch_bytes:
+            raise OpBatchTooLarge()
+        if not self._bucket.consume(client_id, 1):
+            raise RateLimited()
+
+        # A held lock means an apply_ops batch is mid-flight for this session
+        # (see apply_layout's docstring for the seq-ordering rationale).
+        if self._lock(session_id).locked():
+            raise LayoutBusy()
+
+        session = self.store.get(session_id)
+        if session is None:
+            raise SessionNotFound()
+        if expected_revision is not None and expected_revision != session.seq:
+            raise RevisionConflict(expected_revision, session.seq)
+
+        op: Dict[str, Any] = {
+            "op": "annotation_created",
+            "annotation": annotation,
+            "client_id": client_id,
+        }
+        applied = self._apply_op_sync(session, session_id, client_id, op)
+        if applied is None:
+            raise AnnotationRecentlyDeleted(annotation.get("id"))
+        return {
+            "applied": applied,
+            "revision": session.seq,
+            "annotation": applied.get("annotation"),
+        }
+
+    def update_annotation(
+        self,
+        session_id: str,
+        client_id: str,
+        patch: Dict[str, Any],
+        *,
+        expected_revision: Optional[int] = None,
+    ) -> Dict[str, Any]:
+        """Patch one existing annotation **synchronously** (MCP write path).
+
+        ``patch`` is merged onto the stored annotation with a shallow
+        ``dict.update`` in ``SessionStore`` — only the keys present in ``patch``
+        change, so a caller wanting to touch just one field (e.g. ``text``) must
+        still carry forward any nested field (e.g. ``geometry``) it does not
+        want overwritten with a partial value. Shares ``apply_layout``'s
+        atomicity contract; see its docstring for the ``LayoutBusy`` rationale.
+        """
+        if not is_valid_session_id(session_id):
+            raise SessionNotFound()
+        if not isinstance(client_id, str) or not client_id:
+            raise OpError("'client_id' is required")
+        if not isinstance(patch, dict) or not isinstance(patch.get("id"), str):
+            raise OpError("'patch' must be an object with a string 'id'")
+        if len(json.dumps(patch)) > self._max_op_batch_bytes:
+            raise OpBatchTooLarge()
+        if not self._bucket.consume(client_id, 1):
+            raise RateLimited()
+
+        if self._lock(session_id).locked():
+            raise LayoutBusy()
+
+        session = self.store.get(session_id)
+        if session is None:
+            raise SessionNotFound()
+        if expected_revision is not None and expected_revision != session.seq:
+            raise RevisionConflict(expected_revision, session.seq)
+
+        op: Dict[str, Any] = {
+            "op": "annotation_updated",
+            "annotation": patch,
+            "client_id": client_id,
+        }
+        applied = self._apply_op_sync(session, session_id, client_id, op)
+        if applied is None:
+            raise AnnotationNotFound(patch["id"])
+        return {
+            "applied": applied,
+            "revision": session.seq,
+            "annotation": applied.get("annotation"),
+        }
+
+    def delete_annotation(
+        self,
+        session_id: str,
+        client_id: str,
+        annotation_id: str,
+        *,
+        expected_revision: Optional[int] = None,
+    ) -> Dict[str, Any]:
+        """Delete one annotation by id **synchronously** (MCP write path).
+
+        Unlike the store's raw ``annotation_deleted`` op (which removes an id
+        unconditionally, present or not), this checks existence first so a
+        delete of an id that is not there is reported to the caller rather than
+        silently advancing the revision. Shares ``apply_layout``'s atomicity
+        contract; see its docstring for the ``LayoutBusy`` rationale.
+        """
+        if not is_valid_session_id(session_id):
+            raise SessionNotFound()
+        if not isinstance(client_id, str) or not client_id:
+            raise OpError("'client_id' is required")
+        if not isinstance(annotation_id, str) or not annotation_id:
+            raise OpError("'annotation_id' is required")
+        if not self._bucket.consume(client_id, 1):
+            raise RateLimited()
+
+        if self._lock(session_id).locked():
+            raise LayoutBusy()
+
+        session = self.store.get(session_id)
+        if session is None:
+            raise SessionNotFound()
+        if expected_revision is not None and expected_revision != session.seq:
+            raise RevisionConflict(expected_revision, session.seq)
+
+        existing = next(
+            (
+                a
+                for a in session.state.get("annotations", [])
+                if a.get("id") == annotation_id
+            ),
+            None,
+        )
+        if existing is None:
+            raise AnnotationNotFound(annotation_id)
+
+        op: Dict[str, Any] = {
+            "op": "annotation_deleted",
+            "annotation_id": annotation_id,
+            "client_id": client_id,
+        }
+        applied = self._apply_op_sync(session, session_id, client_id, op)
+        return {"applied": applied, "revision": session.seq}
+
     def _apply_op_sync(
         self,
         session: Session,
         session_id: str,
         client_id: str,
         op: Dict[str, Any],
-    ) -> Dict[str, Any]:
+    ) -> Optional[Dict[str, Any]]:
         """Apply, persist and broadcast one state op on the calling thread.
 
         Snapshots for rollback so a persistence failure leaves in-memory state,
         seq and ring untouched — mirroring apply_ops' all-or-nothing guarantee.
-        Callers must only pass ops that always apply (``apply_state_op`` returns
-        ``None`` for legitimate no-ops, which never reach here).
+        Returns ``None`` when ``apply_state_op`` reports a legitimate no-op (e.g.
+        an update on an already-deleted annotation, or a create retry for an id
+        another collaborator just deleted) — nothing is persisted or broadcast,
+        and the caller decides how to surface that (the two annotation callers
+        above raise a typed exception; ``apply_layout``/``add_node_refs`` never
+        hit this branch, since their ops always apply).
         """
         saved_state = copy.deepcopy(session.state)
         saved_seq = session.seq
@@ -721,7 +907,8 @@ class SessionManager:
         saved_ring = list(ring) if ring is not None else None
         try:
             applied = self.store.apply_state_op(session, op)
-            self.store.persist(session)
+            if applied is not None:
+                self.store.persist(session)
         except Exception:
             session.state = saved_state
             session.seq = saved_seq
@@ -730,6 +917,9 @@ class SessionManager:
                 ring.clear()
                 ring.extend(saved_ring)
             raise
+
+        if applied is None:
+            return None
 
         self.bus.publish(
             session_id,
