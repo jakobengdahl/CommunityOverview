@@ -109,7 +109,8 @@ def build_note_patch(
     geometry = dict(existing.get("geometry") or {})
     size = dict(existing.get("size") or DEFAULT_NOTE_SIZE)
     position = dict(
-        existing.get("position") or {"x": geometry.get("x", 0), "y": geometry.get("y", 0)}
+        existing.get("position")
+        or {"x": geometry.get("x", 0), "y": geometry.get("y", 0)}
     )
 
     moved = x is not None or y is not None

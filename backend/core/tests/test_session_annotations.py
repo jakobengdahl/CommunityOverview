@@ -33,7 +33,13 @@ class TestBuildNoteAnnotation:
         assert annotation["kind"] == "note"
         assert annotation["position"] == {"x": 10, "y": 20}
         assert annotation["size"] == DEFAULT_NOTE_SIZE
-        assert annotation["geometry"] == {"x": 10, "y": 20, "w": 160, "h": 96, "rotation": 0}
+        assert annotation["geometry"] == {
+            "x": 10,
+            "y": 20,
+            "w": 160,
+            "h": 96,
+            "rotation": 0,
+        }
         assert annotation["text"] == ""
         assert "id" not in annotation
 
@@ -86,13 +92,24 @@ class TestBuildNotePatch:
 
     def test_text_only_patch_touches_nothing_else(self):
         patch = build_note_patch(self._existing(), text="updated")
-        assert patch == {"id": "note-1", "type": "note", "kind": "note", "text": "updated"}
+        assert patch == {
+            "id": "note-1",
+            "type": "note",
+            "kind": "note",
+            "text": "updated",
+        }
 
     def test_position_patch_preserves_current_size_in_geometry(self):
         """A move-only patch must not drop w/h from geometry (shallow merge)."""
         patch = build_note_patch(self._existing(), x=100, y=200)
         assert patch["position"] == {"x": 100, "y": 200}
-        assert patch["geometry"] == {"x": 100, "y": 200, "w": 160, "h": 96, "rotation": 0}
+        assert patch["geometry"] == {
+            "x": 100,
+            "y": 200,
+            "w": 160,
+            "h": 96,
+            "rotation": 0,
+        }
         assert "size" not in patch
 
     def test_size_patch_preserves_current_position_in_geometry(self):

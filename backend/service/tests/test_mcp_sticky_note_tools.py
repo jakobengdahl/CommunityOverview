@@ -132,6 +132,26 @@ class TestCreateStickyNote:
         assert result["note"]["text"] == "v2"
         assert result["note"]["x"] == 5
 
+    def test_non_note_annotation_id_is_rejected_not_overwritten(self, note_tools):
+        """create/upsert must not clobber a line/frame/group sharing the id."""
+        tools_map, manager = note_tools
+        session = manager.create_session()
+        manager.upsert_annotation(
+            session.id, "mcp-agent", {"id": "line-1", "type": "line"}
+        )
+
+        result = tools_map["create_sticky_note"](
+            session_id=session.id, x=0, y=0, text="hijack", annotation_id="line-1"
+        )
+
+        assert result["success"] is False
+        assert result["error"] == "wrong_type"
+        assert len(session.state["annotations"]) == 1
+        surviving = session.state["annotations"][0]
+        assert surviving["id"] == "line-1"
+        assert surviving["type"] == "line"
+        assert "text" not in surviving
+
     def test_revision_conflict_is_reported(self, note_tools):
         tools_map, manager = note_tools
         session = manager.create_session()
@@ -267,7 +287,9 @@ class TestUpdateStickyNote:
         """A line annotation must not be editable through the sticky-note tools."""
         tools_map, manager = note_tools
         session = manager.create_session()
-        manager.upsert_annotation(session.id, "mcp-agent", {"id": "line-1", "type": "line"})
+        manager.upsert_annotation(
+            session.id, "mcp-agent", {"id": "line-1", "type": "line"}
+        )
 
         result = tools_map["update_sticky_note"](
             session_id=session.id, annotation_id="line-1", text="x"
@@ -313,7 +335,9 @@ class TestDeleteStickyNote:
         created = tools_map["create_sticky_note"](session_id=session.id, x=0, y=0)
         note_id = created["note"]["id"]
 
-        result = tools_map["delete_sticky_note"](session_id=session.id, annotation_id=note_id)
+        result = tools_map["delete_sticky_note"](
+            session_id=session.id, annotation_id=note_id
+        )
 
         assert result["success"] is True
         assert result["annotation_id"] == note_id
@@ -323,7 +347,9 @@ class TestDeleteStickyNote:
         tools_map, manager = note_tools
         session = manager.create_session()
 
-        result = tools_map["delete_sticky_note"](session_id=session.id, annotation_id="ghost")
+        result = tools_map["delete_sticky_note"](
+            session_id=session.id, annotation_id="ghost"
+        )
 
         assert result["success"] is False
         assert result["error"] == "not_found"
@@ -331,9 +357,13 @@ class TestDeleteStickyNote:
     def test_non_note_annotation_id_is_not_found(self, note_tools):
         tools_map, manager = note_tools
         session = manager.create_session()
-        manager.upsert_annotation(session.id, "mcp-agent", {"id": "line-1", "type": "line"})
+        manager.upsert_annotation(
+            session.id, "mcp-agent", {"id": "line-1", "type": "line"}
+        )
 
-        result = tools_map["delete_sticky_note"](session_id=session.id, annotation_id="line-1")
+        result = tools_map["delete_sticky_note"](
+            session_id=session.id, annotation_id="line-1"
+        )
 
         assert result["success"] is False
         assert result["error"] == "not_found"
@@ -358,7 +388,9 @@ class TestDeleteStickyNote:
 
     def test_invalid_session_id(self, note_tools):
         tools_map, _ = note_tools
-        result = tools_map["delete_sticky_note"](session_id="nope", annotation_id="note-1")
+        result = tools_map["delete_sticky_note"](
+            session_id="nope", annotation_id="note-1"
+        )
         assert result["success"] is False
 
     def test_unknown_session(self, note_tools):

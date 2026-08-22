@@ -1859,6 +1859,12 @@ def register_mcp_tools(
                 return annotation if is_note(annotation) else None
         return None
 
+    def _find_any_annotation(session, annotation_id: str):
+        for annotation in session.state.get("annotations", []):
+            if annotation.get("id") == annotation_id:
+                return annotation
+        return None
+
     @register_tool
     def list_sticky_notes(session_id: str) -> Dict[str, Any]:
         """
@@ -1943,8 +1949,8 @@ def register_mcp_tools(
             Dict with success, the created/replaced note, and the new revision.
             On a concurrency clash returns success=false with the current
             revision so the caller can re-read and retry. Retryable errors:
-            revision_conflict, busy, rate_limited; change the request for a
-            validation error.
+            revision_conflict, busy, rate_limited; change the request for
+            wrong_type or a validation error.
         """
         if session_manager is None:
             return {"success": False, "error": "Session manager not available"}
@@ -1956,6 +1962,20 @@ def register_mcp_tools(
         denied = _authorize_session(GRAPH_ACTION_MUTATE, "create_sticky_note")
         if denied:
             return denied
+        if annotation_id is not None:
+            session = session_manager.get_session(session_id)
+            if session is not None:
+                existing_annotation = _find_any_annotation(session, annotation_id)
+                if existing_annotation is not None and not is_note(existing_annotation):
+                    return {
+                        "success": False,
+                        "error": "wrong_type",
+                        "message": (
+                            f"Annotation id {annotation_id!r} already exists as a "
+                            "different annotation type; create_sticky_note only "
+                            "creates or replaces notes."
+                        ),
+                    }
         annotation = build_note_annotation(
             x=x,
             y=y,

@@ -1061,7 +1061,9 @@ class TestUpsertAnnotation:
     async def test_matching_id_upserts_in_place(self):
         mgr = _manager()
         s = mgr.create_session()
-        mgr.upsert_annotation(s.id, "mcp-agent", {"id": "note-1", "type": "note", "text": "v1"})
+        mgr.upsert_annotation(
+            s.id, "mcp-agent", {"id": "note-1", "type": "note", "text": "v1"}
+        )
         res = mgr.upsert_annotation(
             s.id, "mcp-agent", {"id": "note-1", "type": "note", "text": "v2"}
         )
@@ -1119,7 +1121,9 @@ class TestUpdateAnnotation:
         mgr = _manager()
         s = mgr.create_session()
         mgr.upsert_annotation(
-            s.id, "mcp-agent", {"id": "note-1", "type": "note", "text": "v1", "color": "red"}
+            s.id,
+            "mcp-agent",
+            {"id": "note-1", "type": "note", "text": "v1", "color": "red"},
         )
         res = mgr.update_annotation(
             s.id, "mcp-agent", {"id": "note-1", "type": "note", "text": "v2"}
