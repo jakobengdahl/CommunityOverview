@@ -246,7 +246,11 @@ describe('ArrowNode', () => {
     // Simulate a realtime lock landing between drag-start and this move: the
     // updater reads the fresh node from state, not the (now stale) render-time
     // `data` prop, and must refuse to touch its geometry.
-    const lockedNode = { id: 'arrow-1', position: { x: 0, y: 0 }, data: { dx: 160, dy: 0, locked: true } };
+    const lockedNode = {
+      id: 'arrow-1',
+      position: { x: 0, y: 0 },
+      data: { dx: 160, dy: 0, locked: true },
+    };
     const result = updater([lockedNode]);
     expect(result[0]).toBe(lockedNode);
   });
