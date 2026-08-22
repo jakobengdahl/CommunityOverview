@@ -106,3 +106,9 @@
      overridden here, which would block touch-scrolling the content itself. */
   touch-action: pan-y;
 }
+
+@media (pointer: coarse) {
+  .bottom-sheet-scrim {
+    bottom: calc(64px + env(safe-area-inset-bottom));
+  }
+}
