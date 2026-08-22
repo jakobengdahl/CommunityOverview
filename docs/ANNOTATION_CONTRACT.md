@@ -95,11 +95,17 @@ contract, including the per-type `content` payload shape.
 
 `note`, `label` and `line` have dedicated, interactive canvas UX (drag,
 resize, inline text editing, anchoring). The rest of the v1 model — `text`,
-`frame`, `shape`, `icon`, `vote_dot`, `image` — renders as a simple, read-only
-visual representation: enough to make an MCP-created annotation of one of
-these types visible on the canvas and round-trip through save/load. Editing
-them beyond drag-to-move (resizing, per-type property editors) is out of
-scope for v1 and is done through the MCP tools above instead.
+`frame`, `shape`, `icon`, `vote_dot`, `image` — renders with selection and
+drag-to-move for every kind, plus model-space resize (via the same
+`NodeResizer` handles as `note`) for the three kinds that carry an explicit
+box size: `frame`, `shape` and `image`. `text`, `icon` and `vote_dot` render
+at a fixed intrinsic size and are not resizable. A locked annotation of any
+generic kind hides its resize handles the same way a locked `note` does.
+Per-type property editors (recolouring, changing an icon, cropping an image)
+remain out of scope for v1 and are done through the MCP tools above instead.
+There is also no canvas-UI creation path for these six types yet — they are
+only created through the MCP tools; once created there, the canvas renders
+and manipulates them like any other annotation.
 
 `z` and `locked` round-trip through every annotation type's canvas
 representation (`overlayToFlowNode`/`flowNodeToOverlay` in
