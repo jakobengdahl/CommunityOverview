@@ -296,6 +296,8 @@ function GraphCanvasInner({
     return Object.entries(rt).map(([name, cfg]) => ({
       type: name,
       description: (cfg && typeof cfg === 'object' && cfg.description) || '',
+      source_types: (cfg && typeof cfg === 'object' && cfg.source_types) || [],
+      target_types: (cfg && typeof cfg === 'object' && cfg.target_types) || [],
     }));
   }, [schema]);
   const [loadedNodeCount, setLoadedNodeCount] = useState(INITIAL_LOAD_COUNT);
@@ -661,6 +663,24 @@ function GraphCanvasInner({
 
   const [nodes, setNodes, onNodesChange] = useNodesState(reactFlowNodes);
   const [edges, setEdges, onEdgesChange] = useEdgesState(reactFlowEdges);
+
+  const edgeContextRelationshipTypes = useMemo(() => {
+    if (!edgeContextMenu?.edge) return relationshipTypes;
+    const sourceNode = inputNodes.find((n) => n.id === edgeContextMenu.edge.source);
+    const targetNode = inputNodes.find((n) => n.id === edgeContextMenu.edge.target);
+    const sourceType = sourceNode?.type || sourceNode?.data?.type;
+    const targetType = targetNode?.type || targetNode?.data?.type;
+    if (!sourceType || !targetType) return relationshipTypes;
+    return relationshipTypes.filter((rt) => {
+      const sourceTypes = Array.isArray(rt.source_types) ? rt.source_types : [];
+      const targetTypes = Array.isArray(rt.target_types) ? rt.target_types : [];
+      const sourceAllowed =
+        sourceTypes.length === 0 || sourceTypes.includes('*') || sourceTypes.includes(sourceType);
+      const targetAllowed =
+        targetTypes.length === 0 || targetTypes.includes('*') || targetTypes.includes(targetType);
+      return sourceAllowed && targetAllowed;
+    });
+  }, [edgeContextMenu, inputNodes, relationshipTypes]);
 
   // Update nodes when input changes
   useEffect(() => {
@@ -2247,7 +2267,7 @@ function GraphCanvasInner({
         <EdgeContextMenu
           menu={edgeContextMenu}
           labels={cml}
-          relationshipTypes={relationshipTypes}
+          relationshipTypes={edgeContextRelationshipTypes}
           onSetEdgeType={onSetEdgeType}
           onEditEdge={onEditEdge}
           onHideEdge={onHideEdge}

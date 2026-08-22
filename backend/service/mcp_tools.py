@@ -646,6 +646,15 @@ def register_mcp_tools(
         return service.list_relationship_types()
 
     @register_tool
+    def audit_relationship_applicability() -> Dict[str, Any]:
+        """
+        Report existing edges that violate configured relationship applicability rules.
+
+        This tool is read-only. It does not delete or modify legacy graph data.
+        """
+        return service.audit_relationship_applicability()
+
+    @register_tool
     def get_schema() -> Dict[str, Any]:
         """
         Get the complete schema configuration.

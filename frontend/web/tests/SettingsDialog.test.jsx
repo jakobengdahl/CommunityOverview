@@ -11,6 +11,7 @@ describe('SettingsDialog', () => {
     useGraphStore.setState({
       showMinimap: false,
       setShowMinimap: useGraphStore.getState().setShowMinimap,
+      schema: null,
     });
   });
 
@@ -85,5 +86,45 @@ describe('SettingsDialog', () => {
 
     fireEvent.keyDown(document, { key: 'Escape' });
     expect(onClose).toHaveBeenCalledTimes(1);
+  });
+
+  it('shows relationship applicability rules in the metamodel details dialog', () => {
+    useGraphStore.setState({
+      schema: {
+        relationship_types: {
+          IMPLEMENTS: {
+            description: 'Implements',
+            source_types: ['Initiative'],
+            target_types: ['Legislation'],
+          },
+        },
+      },
+    });
+
+    render(
+      <I18nProvider>
+        <SettingsDialog
+          stats={{
+            total_nodes: 6,
+            total_edges: 1,
+            nodes_by_type: {
+              Actor: 1,
+              Initiative: 1,
+              Capability: 1,
+              Resource: 1,
+              Legislation: 1,
+              Goal: 1,
+            },
+          }}
+          onClose={() => {}}
+        />
+      </I18nProvider>
+    );
+
+    fireEvent.click(screen.getByRole('button', { name: 'Details' }));
+
+    expect(screen.getByText('Relationship types')).toBeInTheDocument();
+    expect(screen.getByText('IMPLEMENTS')).toBeInTheDocument();
+    expect(screen.getByText('Initiative -> Legislation')).toBeInTheDocument();
   });
 });

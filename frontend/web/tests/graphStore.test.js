@@ -221,6 +221,40 @@ describe('graphStore', () => {
       expect(relTypes.map((r) => r.type)).toContain('BELONGS_TO');
       expect(relTypes.map((r) => r.type)).toContain('IMPLEMENTS');
     });
+
+    it('filters relationship types by directed source and target applicability', () => {
+      useGraphStore.setState({
+        schema: {
+          relationship_types: {
+            RELATES_TO: { description: 'Global' },
+            IMPLEMENTS: {
+              description: 'Directed',
+              source_types: ['Initiative'],
+              target_types: ['Legislation'],
+            },
+            TAGS: {
+              description: 'Wildcard source',
+              source_types: ['*'],
+              target_types: ['Theme'],
+            },
+          },
+        },
+      });
+
+      const relTypes = useGraphStore
+        .getState()
+        .getRelationshipTypesForNodes('Initiative', 'Legislation');
+
+      expect(relTypes.map((r) => r.type)).toEqual(['RELATES_TO', 'IMPLEMENTS']);
+      expect(
+        useGraphStore
+          .getState()
+          .isRelationshipTypeApplicable('IMPLEMENTS', 'Legislation', 'Initiative')
+      ).toBe(false);
+      expect(useGraphStore.getState().isRelationshipTypeApplicable('TAGS', 'Actor', 'Theme')).toBe(
+        true
+      );
+    });
   });
 
   describe('edge actions', () => {

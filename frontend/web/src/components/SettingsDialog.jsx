@@ -198,6 +198,7 @@ function SettingsDialog({ stats, onExportGraph, onClose }) {
         createPortal(
           <NodeTypeStatsDialog
             nodesByType={stats.nodes_by_type}
+            schema={schema}
             onClose={() => setStatsDialogOpen(false)}
           />,
           document.body

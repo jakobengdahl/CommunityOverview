@@ -311,7 +311,10 @@ def add_edge(
         event_correlation_id=event_correlation_id,
     )
 
-    edge_id = storage.add_edge(edge, event_context=event_context)
+    try:
+        edge_id = storage.add_edge(edge, event_context=event_context)
+    except ValueError as e:
+        return {"success": False, "message": str(e)}
     if not edge_id:
         return {
             "success": False,
@@ -357,7 +360,12 @@ def update_edge(
         event_correlation_id=event_correlation_id,
     )
 
-    updated_edge = storage.update_edge(edge_id, updates, event_context=event_context)
+    try:
+        updated_edge = storage.update_edge(
+            edge_id, updates, event_context=event_context
+        )
+    except ValueError as e:
+        return {"success": False, "message": str(e)}
     if not updated_edge:
         return {"success": False, "error": f"Edge with ID {edge_id} not found"}
 
