@@ -320,6 +320,7 @@ describe('GraphCanvas', () => {
     );
 
     fireEvent.contextMenu(screen.getByTestId('edge-edge-1'));
+    fireEvent.click(screen.getByRole('button', { name: /^change type$/i }));
 
     expect(screen.getByRole('button', { name: /^works_for$/i })).toBeInTheDocument();
     expect(screen.queryByRole('button', { name: /^implements$/i })).toBeNull();
