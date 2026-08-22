@@ -116,6 +116,43 @@ describe('annotationModel contract v1', () => {
     expect(result.inverse.annotation.id).toBe('note-2');
   });
 
+  it('normalizes a line endpoint attachment the same way whether nested or given as target_id shorthand', () => {
+    const nested = createAnnotation({
+      id: 'line-1',
+      type: 'line',
+      from: { x: 0, y: 0 },
+      to: { x: 100, y: 0 },
+      start: { attachment: { target_id: 5, anchor: 'left', offset: { x: 1, y: 2 } } },
+    });
+    const shorthand = createAnnotation({
+      id: 'line-2',
+      type: 'line',
+      from: { x: 0, y: 0 },
+      to: { x: 100, y: 0 },
+      start: { target_id: 5, anchor: 'left', offset: { x: 1, y: 2 } },
+    });
+
+    const expected = {
+      target_id: '5',
+      target_type: 'node',
+      anchor: 'left',
+      offset: { x: 1, y: 2 },
+    };
+    expect(nested.start.attachment).toEqual(expected);
+    expect(shorthand.start.attachment).toEqual(expected);
+  });
+
+  it('drops a line endpoint attachment when the shorthand carries no target id', () => {
+    const annotation = createAnnotation({
+      id: 'line-3',
+      type: 'line',
+      from: { x: 0, y: 0 },
+      to: { x: 100, y: 0 },
+      start: { x: 0, y: 0 },
+    });
+    expect(annotation.start.attachment).toBeUndefined();
+  });
+
   it('fails invalid operations without mutating the document', () => {
     const doc = normalizeAnnotationDocument([{ id: 'note-1', type: 'note', text: 'safe' }]);
     expect(() =>

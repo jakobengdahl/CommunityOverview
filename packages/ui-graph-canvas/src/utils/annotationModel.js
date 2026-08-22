@@ -67,9 +67,12 @@ function normalizeEndpoint(endpoint, fallbackPoint) {
   const out = {
     point: normalizePoint(endpoint.point || endpoint.position || endpoint, fallbackPoint),
   };
-  if (endpoint.attachment) out.attachment = normalizeAttachment(endpoint.attachment);
-  if (endpoint.target_id)
-    out.attachment = { target_id: endpoint.target_id, target_type: endpoint.target_type || 'node' };
+  // `target_id` may be given directly on the endpoint as a shorthand for
+  // `attachment: { target_id }`. Route both through normalizeAttachment so a
+  // shorthand endpoint gets the same id coercion and anchor/offset support as
+  // one written with an explicit `attachment` object.
+  const attachment = normalizeAttachment(endpoint.attachment || endpoint);
+  if (attachment) out.attachment = attachment;
   return out;
 }
 
