@@ -75,7 +75,21 @@ go through the session op protocol (`annotation_created` / `annotation_updated`
 / `annotation_deleted`) and share its optimistic-concurrency contract
 (`expected_revision` / `revision_conflict`) — see
 `backend/DEVELOPMENT.md`'s "Sticky note tools" section for the full contract.
-Other v1 types are not yet exposed through MCP.
+
+The rest of the v1 model — `text`, `label`, `line` (`arrow` accepted as a
+legacy alias), `frame`, `shape`, `icon`, `vote_dot`, `image` — is exposed the
+same way through a generic tool set: `list_annotations` /
+`create_annotation` / `update_annotation` / `delete_annotation` /
+`reorder_annotation` / `set_annotation_lock` / `duplicate_annotation`, over
+the same session op protocol and optimistic-concurrency contract. `note`
+stays on its own dedicated tool set; `group` (node-membership boxes) is not
+exposed through either — its `member_node_ids` are edited through the
+`group_membership_changed` op, which has no MCP tool. Neither tool set lets
+a write silently convert one annotation type into another: creating or
+updating across the note/generic boundary, or replacing an existing generic
+annotation's id with a different type, is refused rather than applied. See
+`backend/DEVELOPMENT.md`'s "Generic annotation tools" section for the full
+contract, including the per-type `content` payload shape.
 
 ## V1 non-goals
 
