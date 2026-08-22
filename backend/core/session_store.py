@@ -20,6 +20,7 @@ stays a pure state layer with no asyncio dependency.
 
 from __future__ import annotations
 
+import copy
 import json
 import os
 import re
@@ -32,6 +33,16 @@ from collections import deque
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Deque, Dict, List, Optional, Protocol
+
+from .session_activity import (
+    DEFAULT_ACTIVITY_MAX_AGE_DAYS,
+    DEFAULT_MAX_ACTIVITY_RECORDS,
+    UNDOABLE_OPS,
+    build_activity_record,
+    find_latest_undoable as _find_latest_undoable,
+    prune_activity_log,
+    undo_conflict_reason as _undo_conflict_reason,
+)
 
 # Session IDs use the grouped-digit shape DDDD-DDDD-DDDD-DDDD (four groups,
 # ~10^16 address space) so an unauthenticated caller cannot feasibly enumerate
@@ -110,6 +121,10 @@ class Session:
     updated_at: str = field(default_factory=_now_iso)
     seq: int = 0
     state: Dict[str, Any] = field(default_factory=_empty_state)
+    # Persistent per-session activity log (annotation/canvas ops with an
+    # inverse), see session_activity.py. Newest entries last; bounded by
+    # retention applied on every append.
+    activity_log: List[Dict[str, Any]] = field(default_factory=list)
     # Ephemeral (not persisted, not part of to_dict/from_dict): recently
     # deleted annotation ids, so a create-op retry for an id another
     # collaborator has since deleted is dropped instead of resurrecting it —
@@ -127,6 +142,7 @@ class Session:
             "updated_at": self.updated_at,
             "seq": self.seq,
             "state": self.state,
+            "activity_log": self.activity_log,
         }
 
     def meta(self) -> Dict[str, Any]:
@@ -143,6 +159,7 @@ class Session:
         state = data.get("state") or {}
         merged = _empty_state()
         merged.update({k: v for k, v in state.items() if k in merged})
+        activity_log = data.get("activity_log")
         return cls(
             id=data["id"],
             name=data.get("name"),
@@ -150,6 +167,7 @@ class Session:
             updated_at=data.get("updated_at") or _now_iso(),
             seq=int(data.get("seq") or 0),
             state=merged,
+            activity_log=list(activity_log) if isinstance(activity_log, list) else [],
         )
 
 
@@ -358,10 +376,14 @@ class SessionStore:
         *,
         max_annotations: int = _DEFAULT_MAX_ANNOTATIONS,
         ring_size: int = _DEFAULT_RING_SIZE,
+        max_activity_records: int = DEFAULT_MAX_ACTIVITY_RECORDS,
+        activity_max_age_days: float = DEFAULT_ACTIVITY_MAX_AGE_DAYS,
     ) -> None:
         self._backend = backend
         self._max_annotations = max_annotations
         self._ring_size = ring_size
+        self._max_activity_records = max_activity_records
+        self._activity_max_age_days = activity_max_age_days
         self._sessions: Dict[str, Session] = {}
         self._rings: Dict[str, Deque[Dict[str, Any]]] = {}
         self._lock = threading.RLock()
@@ -510,7 +532,7 @@ class SessionStore:
     # ---------------- op application ----------------
 
     def apply_state_op(
-        self, session: Session, op: Dict[str, Any]
+        self, session: Session, op: Dict[str, Any], *, record_activity: bool = True
     ) -> Optional[Dict[str, Any]]:
         """Apply one persisted state op to ``session``.
 
@@ -519,6 +541,13 @@ class SessionStore:
         its ``seq``. Returns ``None`` when the op is a legitimate no-op that must
         not advance the sequence (e.g. an update on an already-deleted
         annotation) so callers do not broadcast a phantom event.
+
+        For ops in ``session_activity.UNDOABLE_OPS`` this also appends an
+        activity record (actor, before/after, inverse op) to
+        ``session.activity_log``, subject to the store's retention policy.
+        ``record_activity=False`` suppresses that — used when replaying an
+        undo's inverse op, so undoing an action does not itself become a new
+        undoable action (no redo stack).
         """
         op_type = op.get("op")
         if op_type not in STATE_OPS:
@@ -526,6 +555,7 @@ class SessionStore:
 
         state = session.state
         applied: Optional[Dict[str, Any]] = dict(op)
+        activity_kwargs: Optional[Dict[str, Any]] = None
 
         if op_type == "nodes_added":
             state["node_refs"] = _union(
@@ -548,16 +578,45 @@ class SessionStore:
             if not isinstance(node_id, str):
                 raise OpError("node_moved requires a string 'node_id'")
             position = _validate_position(op.get("position"))
+            before_position = copy.deepcopy(state["positions"].get(node_id))
             state["positions"][node_id] = position
             applied["position"] = position
+            activity_kwargs = {
+                "affected": {"kind": "node_position", "id": node_id},
+                "before": before_position,
+                "after": position,
+                "inverse_op": {
+                    "op": "node_moved",
+                    "node_id": node_id,
+                    "position": before_position or {"x": 0.0, "y": 0.0},
+                },
+            }
         elif op_type == "nodes_hidden":
-            state["hidden_node_ids"] = _union(
-                state["hidden_node_ids"], _require_id_list(op, "node_ids")
+            requested = _require_id_list(op, "node_ids")
+            newly_hidden = sorted(
+                {i for i in requested if i not in state["hidden_node_ids"]}
             )
+            state["hidden_node_ids"] = _union(state["hidden_node_ids"], requested)
+            if newly_hidden:
+                activity_kwargs = {
+                    "affected": {"kind": "node_visibility", "ids": newly_hidden},
+                    "before": [],
+                    "after": newly_hidden,
+                    "inverse_op": {"op": "nodes_shown", "node_ids": newly_hidden},
+                }
         elif op_type == "nodes_shown":
-            state["hidden_node_ids"] = _remove_all(
-                state["hidden_node_ids"], _require_id_list(op, "node_ids")
+            requested = _require_id_list(op, "node_ids")
+            newly_shown = sorted(
+                {i for i in requested if i in state["hidden_node_ids"]}
             )
+            state["hidden_node_ids"] = _remove_all(state["hidden_node_ids"], requested)
+            if newly_shown:
+                activity_kwargs = {
+                    "affected": {"kind": "node_visibility", "ids": newly_shown},
+                    "before": newly_shown,
+                    "after": [],
+                    "inverse_op": {"op": "nodes_hidden", "node_ids": newly_shown},
+                }
         elif op_type == "edges_added":
             # Manually drawn edges live in the graph itself, not in session
             # state (R14): a fresh hydration of the referenced nodes recovers
@@ -642,9 +701,20 @@ class SessionStore:
                         f"annotation {incoming_id!r} already exists as type "
                         f"{existing.get('type')!r}; cannot change type via upsert"
                     )
+                prior = copy.deepcopy(existing)
                 existing.update(annotation)
                 existing["updated_at"] = _now_iso()
                 applied["annotation"] = existing
+                activity_kwargs = {
+                    "affected": {
+                        "kind": "annotation",
+                        "id": incoming_id,
+                        "fields": sorted(annotation.keys()),
+                    },
+                    "before": prior,
+                    "after": existing,
+                    "inverse_op": {"op": "annotation_updated", "annotation": prior},
+                }
             else:
                 if len(state["annotations"]) >= self._max_annotations:
                     raise OpError("annotation limit reached for this session")
@@ -654,6 +724,19 @@ class SessionStore:
                 annotation["updated_at"] = _now_iso()
                 state["annotations"].append(annotation)
                 applied["annotation"] = annotation
+                activity_kwargs = {
+                    "affected": {
+                        "kind": "annotation",
+                        "id": annotation["id"],
+                        "fields": None,
+                    },
+                    "before": None,
+                    "after": annotation,
+                    "inverse_op": {
+                        "op": "annotation_deleted",
+                        "annotation_id": annotation["id"],
+                    },
+                }
         elif op_type == "annotation_updated":
             incoming = _validate_annotation(op.get("annotation"), require_id=True)
             target = next(
@@ -666,18 +749,39 @@ class SessionStore:
                     f"annotation {incoming['id']!r} is type {target.get('type')!r}; "
                     "cannot change type via update"
                 )
+            prior = copy.deepcopy(target)
             target.update(incoming)
             target["updated_at"] = _now_iso()
             applied["annotation"] = target
+            activity_kwargs = {
+                "affected": {
+                    "kind": "annotation",
+                    "id": target["id"],
+                    "fields": sorted(incoming.keys()),
+                },
+                "before": prior,
+                "after": target,
+                "inverse_op": {"op": "annotation_updated", "annotation": prior},
+            }
         elif op_type == "annotation_deleted":
             ann_id = op.get("annotation_id") or op.get("id")
             if not isinstance(ann_id, str):
                 raise OpError("annotation_deleted requires a string 'annotation_id'")
+            removed = next(
+                (a for a in state["annotations"] if a.get("id") == ann_id), None
+            )
             state["annotations"] = [
                 a for a in state["annotations"] if a.get("id") != ann_id
             ]
             session._deleted_annotation_ids.append(ann_id)
             applied["annotation_id"] = ann_id
+            if removed is not None:
+                activity_kwargs = {
+                    "affected": {"kind": "annotation", "id": ann_id, "fields": None},
+                    "before": removed,
+                    "after": None,
+                    "inverse_op": {"op": "annotation_created", "annotation": removed},
+                }
         elif op_type == "group_membership_changed":
             group_id = op.get("group_id")
             if not isinstance(group_id, str):
@@ -708,17 +812,58 @@ class SessionStore:
             normalised = {
                 nid: _validate_position(pos) for nid, pos in positions.items()
             }
+            before_positions = {
+                nid: copy.deepcopy(state["positions"].get(nid)) for nid in normalised
+            }
             state["positions"].update(normalised)
             applied["positions"] = normalised
+            activity_kwargs = {
+                "affected": {
+                    "kind": "layout",
+                    "node_ids": sorted(normalised.keys()),
+                },
+                "before": before_positions,
+                "after": normalised,
+                "inverse_op": {
+                    "op": "layout_applied",
+                    "positions": {
+                        nid: (before_positions[nid] or {"x": 0.0, "y": 0.0})
+                        for nid in normalised
+                    },
+                },
+            }
 
         session.seq += 1
         session.updated_at = _now_iso()
         applied["op"] = op_type
         applied["seq"] = session.seq
-        applied.pop("client_id", None)
+        actor = applied.pop("client_id", None)
         self._rings.setdefault(session.id, deque(maxlen=self._ring_size)).append(
             applied
         )
+
+        if (
+            record_activity
+            and activity_kwargs is not None
+            and op_type in UNDOABLE_OPS
+            and isinstance(actor, str)
+            and actor
+        ):
+            record = build_activity_record(
+                op_type=op_type,
+                actor=actor,
+                session_id=session.id,
+                seq=session.seq,
+                correlation_id=op.get("correlation_id"),
+                **activity_kwargs,
+            )
+            session.activity_log.append(record)
+            session.activity_log[:] = prune_activity_log(
+                session.activity_log,
+                max_records=self._max_activity_records,
+                max_age_days=self._activity_max_age_days,
+            )
+
         return applied
 
     def ring(self, session_id: str) -> Optional[Deque[Dict[str, Any]]]:
@@ -746,3 +891,26 @@ class SessionStore:
         if oldest > since_seq + 1:
             return None  # gap: a needed op has already been evicted
         return [op for op in ring if op["seq"] > since_seq]
+
+    # ---------------- activity log / undo ----------------
+
+    def list_activity(
+        self, session: Session, actor: Optional[str] = None, limit: int = 50
+    ) -> List[Dict[str, Any]]:
+        """Recent activity records, newest first, optionally filtered by actor."""
+        records = session.activity_log
+        if actor is not None:
+            records = [r for r in records if r.get("actor") == actor]
+        return list(reversed(records))[: max(0, limit)]
+
+    def find_latest_undoable(
+        self, session: Session, actor: str
+    ) -> Optional[Dict[str, Any]]:
+        """The most recent not-yet-undone, undoable record for ``actor``."""
+        return _find_latest_undoable(session.activity_log, actor)
+
+    def undo_conflict_reason(
+        self, session: Session, record: Dict[str, Any]
+    ) -> Optional[str]:
+        """``None`` if ``record`` is still safe to undo, else a conflict reason."""
+        return _undo_conflict_reason(session.state, record)

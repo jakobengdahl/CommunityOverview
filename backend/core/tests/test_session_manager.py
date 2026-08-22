@@ -21,12 +21,14 @@ from backend.core.session_manager import (
     AnnotationNotFound,
     AnnotationRecentlyDeleted,
     LayoutBusy,
+    NoUndoableAction,
     OpBatchTooLarge,
     RateLimited,
     RevisionConflict,
     SessionLimitReached,
     SessionManager,
     SessionNotFound,
+    UndoConflict,
     _TokenBucket,
 )
 from backend.service.rest_api import _resolve_stream_event
@@ -1260,3 +1262,170 @@ class TestDeleteAnnotation:
         mgr = _manager()
         with pytest.raises(SessionNotFound):
             mgr.delete_annotation("9999-9999", "mcp-agent", "note-1")
+
+
+class TestUndoLastAction:
+    """Actor-scoped undo (``undo_last_action``) over the persistent activity log."""
+
+    async def test_undo_create_removes_the_annotation(self):
+        mgr = _manager()
+        s = mgr.create_session()
+        mgr.upsert_annotation(s.id, "mcp-agent", {"id": "note-1", "type": "note"})
+
+        res = mgr.undo_last_action(s.id, "mcp-agent")
+
+        assert s.state["annotations"] == []
+        assert res["undone_op"] == "annotation_created"
+        assert res["revision"] == s.seq
+
+    async def test_undo_update_restores_prior_fields(self):
+        mgr = _manager()
+        s = mgr.create_session()
+        mgr.upsert_annotation(
+            s.id, "mcp-agent", {"id": "note-1", "type": "note", "text": "before"}
+        )
+        mgr.update_annotation(
+            s.id, "mcp-agent", {"id": "note-1", "type": "note", "text": "after"}
+        )
+
+        mgr.undo_last_action(s.id, "mcp-agent")
+
+        restored = next(a for a in s.state["annotations"] if a["id"] == "note-1")
+        assert restored["text"] == "before"
+
+    async def test_undo_delete_restores_the_annotation(self):
+        mgr = _manager()
+        s = mgr.create_session()
+        mgr.upsert_annotation(
+            s.id, "mcp-agent", {"id": "note-1", "type": "note", "text": "hello"}
+        )
+        mgr.delete_annotation(s.id, "mcp-agent", "note-1")
+        assert s.state["annotations"] == []
+
+        res = mgr.undo_last_action(s.id, "mcp-agent")
+
+        assert res["undone_op"] == "annotation_deleted"
+        restored = next(a for a in s.state["annotations"] if a["id"] == "note-1")
+        assert restored["text"] == "hello"
+        # The delete-guard memory must not block the id from being re-created
+        # by anyone else afterwards either.
+        assert "note-1" not in s._deleted_annotation_ids
+
+    async def test_undo_node_moved_restores_prior_position(self):
+        mgr = _manager()
+        s = mgr.create_session()
+        mgr.apply_layout(s.id, "mcp-agent", positions={"n1": {"x": 1.0, "y": 2.0}})
+        await mgr.apply_ops(
+            s.id,
+            "mcp-agent",
+            None,
+            [{"op": "node_moved", "node_id": "n1", "position": {"x": 9.0, "y": 9.0}}],
+        )
+
+        mgr.undo_last_action(s.id, "mcp-agent")
+
+        assert s.state["positions"]["n1"] == {"x": 1.0, "y": 2.0}
+
+    async def test_no_undoable_action_for_actor_with_no_history(self):
+        mgr = _manager()
+        s = mgr.create_session()
+        with pytest.raises(NoUndoableAction):
+            mgr.undo_last_action(s.id, "mcp-agent")
+
+    async def test_undo_is_rate_limited_like_other_write_paths(self):
+        mgr = _manager(bucket_capacity=0, bucket_refill_per_sec=0)
+        s = mgr.create_session()
+        with pytest.raises(RateLimited):
+            mgr.undo_last_action(s.id, "mcp-agent")
+
+    async def test_undo_is_scoped_to_the_requesting_actor(self):
+        mgr = _manager()
+        s = mgr.create_session()
+        mgr.upsert_annotation(s.id, "actor-a", {"id": "note-1", "type": "note"})
+        with pytest.raises(NoUndoableAction):
+            mgr.undo_last_action(s.id, "actor-b")
+        # actor-a's own action is untouched and still undoable.
+        mgr.undo_last_action(s.id, "actor-a")
+        assert s.state["annotations"] == []
+
+    async def test_conflict_when_annotation_changed_by_someone_else_since(self):
+        mgr = _manager()
+        s = mgr.create_session()
+        mgr.upsert_annotation(
+            s.id, "actor-a", {"id": "note-1", "type": "note", "text": "mine"}
+        )
+        mgr.update_annotation(
+            s.id, "actor-b", {"id": "note-1", "type": "note", "text": "theirs"}
+        )
+
+        with pytest.raises(UndoConflict):
+            mgr.undo_last_action(s.id, "actor-a")
+        # The conflicted undo must not have mutated anything.
+        current = next(a for a in s.state["annotations"] if a["id"] == "note-1")
+        assert current["text"] == "theirs"
+
+    async def test_double_undo_by_same_actor_falls_back_to_the_older_action(self):
+        mgr = _manager()
+        s = mgr.create_session()
+        mgr.upsert_annotation(s.id, "mcp-agent", {"id": "note-1", "type": "note"})
+        mgr.upsert_annotation(s.id, "mcp-agent", {"id": "note-2", "type": "note"})
+
+        mgr.undo_last_action(s.id, "mcp-agent")
+        ids = {a["id"] for a in s.state["annotations"]}
+        assert ids == {"note-1"}
+
+        mgr.undo_last_action(s.id, "mcp-agent")
+        assert s.state["annotations"] == []
+
+        with pytest.raises(NoUndoableAction):
+            mgr.undo_last_action(s.id, "mcp-agent")
+
+    async def test_unknown_session_raises(self):
+        mgr = _manager()
+        with pytest.raises(SessionNotFound):
+            mgr.undo_last_action("9999-9999", "mcp-agent")
+
+    async def test_expected_revision_conflict(self):
+        mgr = _manager()
+        s = mgr.create_session()
+        mgr.upsert_annotation(s.id, "mcp-agent", {"id": "note-1", "type": "note"})
+        with pytest.raises(RevisionConflict):
+            mgr.undo_last_action(s.id, "mcp-agent", expected_revision=0)
+
+    async def test_busy_when_session_lock_held(self):
+        mgr = _manager()
+        s = mgr.create_session()
+        mgr.upsert_annotation(s.id, "mcp-agent", {"id": "note-1", "type": "note"})
+        await mgr._lock(s.id).acquire()
+        with pytest.raises(LayoutBusy):
+            mgr.undo_last_action(s.id, "mcp-agent")
+
+    async def test_undo_broadcasts_the_inverse_op(self):
+        mgr = _manager()
+        s = mgr.create_session()
+        mgr.upsert_annotation(s.id, "mcp-agent", {"id": "note-1", "type": "note"})
+        sub, _ = mgr.connect(s.id, "c1", "A")
+        await _drain(sub)
+
+        mgr.undo_last_action(s.id, "mcp-agent")
+
+        events = await _drain(sub)
+        assert events[0]["op"]["op"] == "annotation_deleted"
+
+    async def test_undo_itself_is_not_undoable(self):
+        mgr = _manager()
+        s = mgr.create_session()
+        mgr.upsert_annotation(s.id, "mcp-agent", {"id": "note-1", "type": "note"})
+        mgr.undo_last_action(s.id, "mcp-agent")
+        with pytest.raises(NoUndoableAction):
+            mgr.undo_last_action(s.id, "mcp-agent")
+
+    async def test_list_activity_returns_newest_first(self):
+        mgr = _manager()
+        s = mgr.create_session()
+        mgr.upsert_annotation(s.id, "mcp-agent", {"id": "note-1", "type": "note"})
+        mgr.upsert_annotation(s.id, "mcp-agent", {"id": "note-2", "type": "note"})
+
+        records = mgr.list_activity(s.id)
+
+        assert [r["affected"]["id"] for r in records] == ["note-2", "note-1"]

@@ -105,6 +105,28 @@ class AnnotationRecentlyDeleted(Exception):
         self.annotation_id = annotation_id
 
 
+class NoUndoableAction(Exception):
+    """The requesting actor has no undoable activity in this session."""
+
+    def __init__(self, actor: str) -> None:
+        super().__init__(f"no undoable action for actor {actor!r}")
+        self.actor = actor
+
+
+class UndoConflict(Exception):
+    """The actor's latest undoable action can no longer be safely reverted.
+
+    Raised when the state it touched has changed since it was recorded (by
+    the same actor or another collaborator) — replaying the stored inverse op
+    would silently clobber that later change.
+    """
+
+    def __init__(self, activity_id: str, reason: str) -> None:
+        super().__init__(f"undo conflict for activity {activity_id!r}: {reason}")
+        self.activity_id = activity_id
+        self.reason = reason
+
+
 class LayoutBusy(Exception):
     """A concurrent op batch holds the session lock; a layout write should retry.
 
@@ -480,6 +502,7 @@ class SessionManager:
             saved_seq = session.seq
             saved_name = session.name
             saved_updated_at = session.updated_at
+            saved_activity_log = copy.deepcopy(session.activity_log)
             ring = self.store.ring(session_id)
             saved_ring = list(ring) if ring is not None else None
 
@@ -511,6 +534,7 @@ class SessionManager:
                 session.seq = saved_seq
                 session.name = saved_name
                 session.updated_at = saved_updated_at
+                session.activity_log = saved_activity_log
                 if ring is not None and saved_ring is not None:
                     ring.clear()
                     ring.extend(saved_ring)
@@ -882,12 +906,103 @@ class SessionManager:
         applied = self._apply_op_sync(session, session_id, client_id, op)
         return {"applied": applied, "revision": session.seq}
 
+    def list_activity(
+        self, session_id: str, actor: Optional[str] = None, limit: int = 50
+    ) -> List[Dict[str, Any]]:
+        """Recent per-session activity records, newest first (MCP/REST read path)."""
+        session = self.store.get(session_id)
+        if session is None:
+            raise SessionNotFound()
+        return self.store.list_activity(session, actor=actor, limit=limit)
+
+    def undo_last_action(
+        self,
+        session_id: str,
+        client_id: str,
+        *,
+        expected_revision: Optional[int] = None,
+    ) -> Dict[str, Any]:
+        """Revert the requesting actor's latest eligible action **synchronously**.
+
+        "Eligible" means: the actor's most recent not-yet-undone activity
+        record with an inverse op (``NoUndoableAction`` if there is none), and
+        the state it touched has not changed since (``UndoConflict`` if it
+        has — see ``session_activity.undo_conflict_reason``). Only the single
+        latest record is considered; a conflicted latest action is reported
+        rather than silently falling back to an older one, so the caller
+        decides whether to retry.
+
+        Replays the record's stored ``inverse_op`` through the same
+        synchronous, lock-guarded path as ``delete_annotation``/``apply_layout``
+        (``LayoutBusy`` while an ``apply_ops`` batch is mid-flight), with
+        ``record_activity=False`` so the undo itself is not appended as a new
+        undoable action. Deleting an annotation records the id in the store's
+        short-lived "recently deleted" memory (so a stale create retry cannot
+        resurrect it) — undoing that delete replays an ``annotation_created``
+        for the same id, so that memory is cleared first here, or the store
+        would otherwise refuse to recreate it.
+        """
+        if not is_valid_session_id(session_id):
+            raise SessionNotFound()
+        if not isinstance(client_id, str) or not client_id:
+            raise OpError("'client_id' is required")
+        if not self._bucket.consume(client_id, 1):
+            raise RateLimited()
+
+        if self._lock(session_id).locked():
+            raise LayoutBusy()
+
+        session = self.store.get(session_id)
+        if session is None:
+            raise SessionNotFound()
+        if expected_revision is not None and expected_revision != session.seq:
+            raise RevisionConflict(expected_revision, session.seq)
+
+        record = self.store.find_latest_undoable(session, client_id)
+        if record is None:
+            raise NoUndoableAction(client_id)
+        conflict_reason = self.store.undo_conflict_reason(session, record)
+        if conflict_reason is not None:
+            raise UndoConflict(record["id"], conflict_reason)
+
+        inverse_op = dict(record["inverse_op"])
+        if inverse_op.get("op") == "annotation_created":
+            ann_id = (inverse_op.get("annotation") or {}).get("id")
+            if isinstance(ann_id, str):
+                try:
+                    session._deleted_annotation_ids.remove(ann_id)
+                except ValueError:
+                    pass
+        inverse_op["client_id"] = client_id
+
+        applied = self._apply_op_sync(
+            session, session_id, client_id, inverse_op, record_activity=False
+        )
+        if applied is None:
+            # The conflict check above passed but the replay still turned out
+            # to be a no-op (e.g. the store dropped it as an update on a
+            # since-deleted annotation) — surface it the same way any other
+            # unsafe-to-undo state does, rather than marking the record undone.
+            raise UndoConflict(record["id"], "action could not be reverted")
+        record["undone"] = True
+        record["undone_at"] = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
+        self.store.persist(session)
+
+        return {
+            "undone_activity_id": record["id"],
+            "undone_op": record["op"],
+            "applied": applied,
+            "revision": session.seq,
+        }
+
     def _apply_op_sync(
         self,
         session: Session,
         session_id: str,
         client_id: str,
         op: Dict[str, Any],
+        *,
+        record_activity: bool = True,
     ) -> Optional[Dict[str, Any]]:
         """Apply, persist and broadcast one state op on the calling thread.
 
@@ -898,21 +1013,27 @@ class SessionManager:
         another collaborator just deleted) — nothing is persisted or broadcast,
         and the caller decides how to surface that (the two annotation callers
         above raise a typed exception; ``apply_layout``/``add_node_refs`` never
-        hit this branch, since their ops always apply).
+        hit this branch, since their ops always apply). ``record_activity=False``
+        is passed through to ``apply_state_op`` by ``undo_last_action`` so
+        replaying an inverse op does not itself become a new undoable action.
         """
         saved_state = copy.deepcopy(session.state)
         saved_seq = session.seq
         saved_updated_at = session.updated_at
+        saved_activity_log = copy.deepcopy(session.activity_log)
         ring = self.store.ring(session_id)
         saved_ring = list(ring) if ring is not None else None
         try:
-            applied = self.store.apply_state_op(session, op)
+            applied = self.store.apply_state_op(
+                session, op, record_activity=record_activity
+            )
             if applied is not None:
                 self.store.persist(session)
         except Exception:
             session.state = saved_state
             session.seq = saved_seq
             session.updated_at = saved_updated_at
+            session.activity_log = saved_activity_log
             if ring is not None and saved_ring is not None:
                 ring.clear()
                 ring.extend(saved_ring)
