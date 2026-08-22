@@ -36,6 +36,15 @@ from backend.core.session_annotations import (
     build_note_patch,
     is_note,
     project_note,
+    ALL_ANNOTATION_TYPES,
+    GENERIC_ANNOTATION_TYPES,
+    annotation_type_of,
+    build_annotation,
+    build_annotation_patch,
+    is_generic_annotation,
+    normalize_generic_type,
+    project_annotation,
+    resolve_annotation_type_alias,
 )
 from backend.config.config_loader import build_session_url
 from backend.runtime.authorization import GRAPH_ACTION_MUTATE, GRAPH_ACTION_READ
@@ -1851,7 +1860,9 @@ def register_mcp_tools(
     # Positions/sizes are model-space, matching the layout tools above, and
     # writes share their optimistic-concurrency contract (`expected_revision`
     # / `revision_conflict`). Only the `note` annotation type is exposed here;
-    # other v1 types (line, frame, group, ...) are out of scope for this tool set.
+    # the rest of the v1 types (line, frame, shape, ...) have their own
+    # generic tool set below ("Generic Annotations"); `group` is out of
+    # scope for both.
 
     def _find_note(session, annotation_id: str):
         for annotation in session.state.get("annotations", []):
@@ -2271,6 +2282,942 @@ def register_mcp_tools(
                 "success": False,
                 "error": "not_found",
                 "message": f"No sticky note with id {annotation_id!r} in this session.",
+            }
+        except LayoutBusy:
+            return {
+                "success": False,
+                "error": "busy",
+                "message": "Another change is being applied to this session; retry.",
+            }
+        except RateLimited:
+            return {
+                "success": False,
+                "error": "rate_limited",
+                "message": "Too many session writes; slow down and retry.",
+            }
+        except SessionNotFound:
+            return {
+                "success": False,
+                "error": (
+                    f"Session '{session_id}' not found. "
+                    "This tool acts on a session's stored state, which exists "
+                    "once create_visualization_session created it or a browser "
+                    "made its first change to it."
+                ),
+            }
+        except OpError as exc:
+            return {"success": False, "error": str(exc)}
+        return {
+            "success": True,
+            "session_id": session_id,
+            "annotation_id": annotation_id,
+            "revision": result["revision"],
+        }
+
+    # ==================== Generic Annotations ====================
+    #
+    # These tools extend note-only MCP annotation access to the rest of the
+    # v1 model: text, label, line/arrow, frame, shape, icon, vote_dot, image.
+    # `note` keeps its dedicated tool set above (list_sticky_notes / ...);
+    # `group` (node-membership boxes) is out of scope — its membership is
+    # edited through the group_membership_changed op, not exposed over MCP,
+    # and folding it into a generic content patch would risk silently
+    # dropping or corrupting member_node_ids. Reading/writing a note or
+    # group id through these tools is refused with "wrong_type"/"not_found",
+    # mirroring create_sticky_note's existing cross-type guard, so a type is
+    # never silently converted into another by either tool set.
+
+    def _find_generic_annotation(session, annotation_id: str):
+        for annotation in session.state.get("annotations", []):
+            if annotation.get("id") == annotation_id:
+                return annotation if is_generic_annotation(annotation) else None
+        return None
+
+    @register_tool
+    def list_annotations(
+        session_id: str, types: Optional[List[str]] = None
+    ) -> Dict[str, Any]:
+        """
+        List annotations in a visualization session, across every v1 type.
+
+        Args:
+            session_id: The session ID shown in the browser header (e.g. "8244-1742")
+            types: Optional list of annotation types to include (e.g.
+                ["line", "label"]; "arrow" is accepted as an alias for
+                "line"). Omit to list every type, including notes and groups.
+
+        Returns:
+            Dict with session_id, revision, annotations (id/type/x/y/w/h/
+            rotation/style/z/locked/content/created_at/updated_at/
+            created_by/updated_by — ``content`` holds the type-specific
+            payload fields, e.g. a line's ``from``/``to``, a label's
+            ``text``). ``revision`` can be threaded into the write tools'
+            ``expected_revision`` for optimistic concurrency.
+        """
+        if session_manager is None:
+            return {"error": "Session manager not available"}
+        if not is_valid_session_id(session_id):
+            return {"error": "Invalid session ID format — expected DDDD-DDDD-DDDD-DDDD"}
+        denied = _authorize_session(GRAPH_ACTION_READ, "list_annotations")
+        if denied:
+            return denied
+        wanted: Optional[set] = None
+        if types is not None:
+            wanted = set()
+            for raw_type in types:
+                resolved = resolve_annotation_type_alias(raw_type)
+                if resolved not in ALL_ANNOTATION_TYPES:
+                    return {
+                        "error": (
+                            f"Unknown annotation type {raw_type!r}; expected one "
+                            f"of {sorted(ALL_ANNOTATION_TYPES)} (or 'arrow' as an "
+                            "alias for 'line')."
+                        )
+                    }
+                wanted.add(resolved)
+        session = session_manager.get_session(session_id)
+        if session is None:
+            return {
+                "error": (
+                    f"Session '{session_id}' not found. "
+                    "This tool acts on a session's stored state, which exists "
+                    "once create_visualization_session created it or a browser "
+                    "made its first change to it."
+                )
+            }
+        annotations = [
+            project_annotation(annotation)
+            for annotation in session.state.get("annotations", [])
+            if wanted is None or annotation_type_of(annotation) in wanted
+        ]
+        return {
+            "session_id": session_id,
+            "revision": session.seq,
+            "annotations": annotations,
+            "coordinate_space": "model-space, pixels at zoom 1, x/y = top-left",
+        }
+
+    @register_tool
+    def create_annotation(
+        session_id: str,
+        type: str,
+        x: float,
+        y: float,
+        w: Optional[float] = None,
+        h: Optional[float] = None,
+        rotation: Optional[float] = None,
+        content: Optional[Dict[str, Any]] = None,
+        style: Optional[Dict[str, Any]] = None,
+        z: Optional[float] = None,
+        locked: bool = False,
+        annotation_id: Optional[str] = None,
+        expected_revision: Optional[int] = None,
+    ) -> Dict[str, Any]:
+        """
+        Create an annotation, or replace one by id (create/upsert).
+
+        Covers every v1 annotation type except `note` and `group`: `text`,
+        `label`, `line` (`arrow` accepted as an alias), `frame`, `shape`,
+        `icon`, `vote_dot`, `image`. Use `create_sticky_note` for notes;
+        `group` (node-membership boxes) is not exposed through MCP.
+
+        Coordinates are model space (zoom/pan independent, pixels at zoom 1,
+        `x`/`y` = top-left or anchor point), the same space `list_annotations`
+        reports. Pass `annotation_id` to replace an existing annotation of
+        the *same* type by its stable id (an upsert — idempotent for a
+        retried call with the same id); replacing an id that already holds a
+        different type is refused rather than silently converted. Omit
+        `annotation_id` to have the server mint one, returned in the result.
+
+        `content` carries the type-specific payload verbatim (the shape
+        differs per type — see docs/ANNOTATION_CONTRACT.md), for example:
+          - text/label: {"text": "..."}
+          - line: {"to": {"x": .., "y": ..}, "endArrow": true}
+          - shape: {"shape": "rectangle"}
+          - icon: {"icon": "flag"}
+          - vote_dot: {"value": 3}
+          - image: {"image": {...}, "alt": "..."}
+        `frame` typically needs no `content` — its box is `x`/`y`/`w`/`h`.
+
+        Args:
+            session_id: The session ID shown in the browser header (e.g. "8244-1742")
+            type: One of text/label/line/frame/shape/icon/vote_dot/image
+                ("arrow" accepted as an alias for "line").
+            x: Model-space x of the annotation's anchor/top-left corner.
+            y: Model-space y of the annotation's anchor/top-left corner.
+            w: Optional width in model-space px (no type-specific default;
+                frame/shape usually need one, line/icon usually don't).
+            h: Optional height in model-space px.
+            rotation: Optional rotation in degrees.
+            content: Optional type-specific payload fields (see above).
+            style: Optional style dict (fill/stroke/color/opacity/font, ...).
+            z: Optional layer order (higher draws on top). Defaults to 0.
+            locked: Whether the annotation starts locked against edits.
+            annotation_id: Stable id to create or replace. Omit to let the
+                server assign one.
+            expected_revision: If given, the write is rejected unless it
+                equals the session's current `revision` (optimistic
+                concurrency). Read it from `list_annotations` first. Omit
+                for last-write-wins.
+
+        Returns:
+            Dict with success, the created/replaced annotation (same shape
+            as `list_annotations`), and the new revision. Retryable errors:
+            revision_conflict, busy, rate_limited; change the request for
+            invalid_type, invalid_content, wrong_type, or too_large.
+        """
+        if session_manager is None:
+            return {"success": False, "error": "Session manager not available"}
+        if not is_valid_session_id(session_id):
+            return {
+                "success": False,
+                "error": "Invalid session ID format — expected DDDD-DDDD-DDDD-DDDD",
+            }
+        denied = _authorize_session(GRAPH_ACTION_MUTATE, "create_annotation")
+        if denied:
+            return denied
+        normalized_type = normalize_generic_type(type)
+        if normalized_type is None:
+            return {
+                "success": False,
+                "error": "invalid_type",
+                "message": (
+                    f"type must be one of {sorted(GENERIC_ANNOTATION_TYPES)} "
+                    "('arrow' accepted as an alias for 'line'); use "
+                    "create_sticky_note for notes — group annotations are not "
+                    "exposed through MCP."
+                ),
+            }
+        if annotation_id is not None:
+            session = session_manager.get_session(session_id)
+            if session is not None:
+                existing_annotation = _find_any_annotation(session, annotation_id)
+                if existing_annotation is not None:
+                    if not is_generic_annotation(existing_annotation):
+                        return {
+                            "success": False,
+                            "error": "wrong_type",
+                            "message": (
+                                f"Annotation id {annotation_id!r} already exists as "
+                                "a note or group; create_annotation only creates or "
+                                "replaces the generic types it manages."
+                            ),
+                        }
+                    existing_type = annotation_type_of(existing_annotation)
+                    if existing_type != normalized_type:
+                        return {
+                            "success": False,
+                            "error": "wrong_type",
+                            "message": (
+                                f"Annotation id {annotation_id!r} already exists as "
+                                f"type {existing_type!r}; create_annotation will not "
+                                "silently convert it to a different type. Delete it "
+                                "first or use a new annotation_id."
+                            ),
+                        }
+        try:
+            annotation = build_annotation(
+                type=normalized_type,
+                x=x,
+                y=y,
+                w=w,
+                h=h,
+                rotation=rotation,
+                content=content,
+                style=style,
+                z=z,
+                locked=locked,
+                annotation_id=annotation_id,
+            )
+        except ValueError as exc:
+            return {"success": False, "error": "invalid_content", "message": str(exc)}
+        try:
+            result = session_manager.upsert_annotation(
+                session_id,
+                _MCP_LAYOUT_CLIENT_ID,
+                annotation,
+                expected_revision=expected_revision,
+            )
+        except RevisionConflict as exc:
+            return {
+                "success": False,
+                "error": "revision_conflict",
+                "message": (
+                    "The session changed since you read it; re-read "
+                    "list_annotations and retry with the current revision."
+                ),
+                "expected_revision": exc.expected,
+                "current_revision": exc.actual,
+            }
+        except AnnotationRecentlyDeleted:
+            return {
+                "success": False,
+                "error": "annotation_recently_deleted",
+                "message": (
+                    f"Annotation id {annotation_id!r} was just deleted by another "
+                    "collaborator; retry with a different id."
+                ),
+            }
+        except LayoutBusy:
+            return {
+                "success": False,
+                "error": "busy",
+                "message": "Another change is being applied to this session; retry.",
+            }
+        except RateLimited:
+            return {
+                "success": False,
+                "error": "rate_limited",
+                "message": "Too many session writes; slow down and retry.",
+            }
+        except OpBatchTooLarge:
+            return {
+                "success": False,
+                "error": "too_large",
+                "message": "Annotation payload too large for one write.",
+            }
+        except SessionNotFound:
+            return {
+                "success": False,
+                "error": (
+                    f"Session '{session_id}' not found. "
+                    "This tool acts on a session's stored state, which exists "
+                    "once create_visualization_session created it or a browser "
+                    "made its first change to it."
+                ),
+            }
+        except OpError as exc:
+            return {"success": False, "error": str(exc)}
+        return {
+            "success": True,
+            "session_id": session_id,
+            "annotation": project_annotation(result["annotation"]),
+            "revision": result["revision"],
+        }
+
+    @register_tool
+    def update_annotation(
+        session_id: str,
+        annotation_id: str,
+        x: Optional[float] = None,
+        y: Optional[float] = None,
+        w: Optional[float] = None,
+        h: Optional[float] = None,
+        rotation: Optional[float] = None,
+        content: Optional[Dict[str, Any]] = None,
+        style: Optional[Dict[str, Any]] = None,
+        expected_revision: Optional[int] = None,
+    ) -> Dict[str, Any]:
+        """
+        Update an annotation's content, style, and/or geometry.
+
+        A partial update: only the arguments given change, everything else
+        on the annotation is left as-is. Position/size are model space,
+        matching `list_annotations`. Only acts on the generic types
+        `create_annotation` manages (not `note`/`group` — see its tool
+        docstring); layer order and lock state have their own tools
+        (`reorder_annotation`, `set_annotation_lock`).
+
+        Args:
+            session_id: The session ID shown in the browser header (e.g. "8244-1742")
+            annotation_id: The annotation's stable id, from `list_annotations`
+                or a prior `create_annotation` result.
+            x: New model-space x of the anchor/top-left corner, if moving it.
+            y: New model-space y of the anchor/top-left corner, if moving it.
+            w: New width in model-space px, if resizing it.
+            h: New height in model-space px, if resizing it.
+            rotation: New rotation in degrees, if changing it.
+            content: Type-specific payload fields to overwrite (see
+                `create_annotation`'s docstring for the shape per type).
+            style: New style dict, if changing it (replaces the whole dict).
+            expected_revision: If given, the write is rejected unless it
+                equals the session's current `revision` (optimistic
+                concurrency). Read it from `list_annotations` first. Omit
+                for last-write-wins.
+
+        Returns:
+            Dict with success, the updated annotation, and the new revision.
+            Retryable errors: revision_conflict, busy, rate_limited; change
+            the request for not_found, invalid_content, or no_fields_to_update.
+        """
+        if session_manager is None:
+            return {"success": False, "error": "Session manager not available"}
+        if not is_valid_session_id(session_id):
+            return {
+                "success": False,
+                "error": "Invalid session ID format — expected DDDD-DDDD-DDDD-DDDD",
+            }
+        denied = _authorize_session(GRAPH_ACTION_MUTATE, "update_annotation")
+        if denied:
+            return denied
+        if all(v is None for v in (x, y, w, h, rotation, content, style)):
+            return {
+                "success": False,
+                "error": "no_fields_to_update",
+                "message": "Give at least one of x/y/w/h/rotation/content/style.",
+            }
+        session = session_manager.get_session(session_id)
+        if session is None:
+            return {
+                "success": False,
+                "error": (
+                    f"Session '{session_id}' not found. "
+                    "This tool acts on a session's stored state, which exists "
+                    "once create_visualization_session created it or a browser "
+                    "made its first change to it."
+                ),
+            }
+        existing = _find_generic_annotation(session, annotation_id)
+        if existing is None:
+            return {
+                "success": False,
+                "error": "not_found",
+                "message": (
+                    f"No annotation with id {annotation_id!r} in this session's "
+                    "generic annotation set (note/group ids are managed by their "
+                    "own tools)."
+                ),
+            }
+        try:
+            patch = build_annotation_patch(
+                existing,
+                x=x,
+                y=y,
+                w=w,
+                h=h,
+                rotation=rotation,
+                content=content,
+                style=style,
+            )
+        except ValueError as exc:
+            return {"success": False, "error": "invalid_content", "message": str(exc)}
+        try:
+            result = session_manager.update_annotation(
+                session_id,
+                _MCP_LAYOUT_CLIENT_ID,
+                patch,
+                expected_revision=expected_revision,
+            )
+        except RevisionConflict as exc:
+            return {
+                "success": False,
+                "error": "revision_conflict",
+                "message": (
+                    "The session changed since you read it; re-read "
+                    "list_annotations and retry with the current revision."
+                ),
+                "expected_revision": exc.expected,
+                "current_revision": exc.actual,
+            }
+        except AnnotationNotFound:
+            return {
+                "success": False,
+                "error": "not_found",
+                "message": f"No annotation with id {annotation_id!r} in this session.",
+            }
+        except LayoutBusy:
+            return {
+                "success": False,
+                "error": "busy",
+                "message": "Another change is being applied to this session; retry.",
+            }
+        except RateLimited:
+            return {
+                "success": False,
+                "error": "rate_limited",
+                "message": "Too many session writes; slow down and retry.",
+            }
+        except OpBatchTooLarge:
+            return {
+                "success": False,
+                "error": "too_large",
+                "message": "Annotation payload too large for one write.",
+            }
+        except SessionNotFound:
+            return {
+                "success": False,
+                "error": (
+                    f"Session '{session_id}' not found. "
+                    "This tool acts on a session's stored state, which exists "
+                    "once create_visualization_session created it or a browser "
+                    "made its first change to it."
+                ),
+            }
+        except OpError as exc:
+            return {"success": False, "error": str(exc)}
+        return {
+            "success": True,
+            "session_id": session_id,
+            "annotation": project_annotation(result["annotation"]),
+            "revision": result["revision"],
+        }
+
+    @register_tool
+    def reorder_annotation(
+        session_id: str,
+        annotation_id: str,
+        z: float,
+        expected_revision: Optional[int] = None,
+    ) -> Dict[str, Any]:
+        """
+        Change an annotation's layer order (`z`; higher draws on top).
+
+        Only acts on the generic types `create_annotation` manages (not
+        `note`/`group`).
+
+        Args:
+            session_id: The session ID shown in the browser header (e.g. "8244-1742")
+            annotation_id: The annotation's stable id.
+            z: The new layer order value.
+            expected_revision: If given, the write is rejected unless it
+                equals the session's current `revision`. Omit for
+                last-write-wins.
+
+        Returns:
+            Dict with success, the updated annotation, and the new revision.
+            Retryable errors: revision_conflict, busy, rate_limited; change
+            the request for not_found.
+        """
+        if session_manager is None:
+            return {"success": False, "error": "Session manager not available"}
+        if not is_valid_session_id(session_id):
+            return {
+                "success": False,
+                "error": "Invalid session ID format — expected DDDD-DDDD-DDDD-DDDD",
+            }
+        denied = _authorize_session(GRAPH_ACTION_MUTATE, "reorder_annotation")
+        if denied:
+            return denied
+        session = session_manager.get_session(session_id)
+        if session is None:
+            return {
+                "success": False,
+                "error": (
+                    f"Session '{session_id}' not found. "
+                    "This tool acts on a session's stored state, which exists "
+                    "once create_visualization_session created it or a browser "
+                    "made its first change to it."
+                ),
+            }
+        existing = _find_generic_annotation(session, annotation_id)
+        if existing is None:
+            return {
+                "success": False,
+                "error": "not_found",
+                "message": f"No annotation with id {annotation_id!r} in this session's generic annotation set.",
+            }
+        patch = build_annotation_patch(existing, z=z)
+        try:
+            result = session_manager.update_annotation(
+                session_id,
+                _MCP_LAYOUT_CLIENT_ID,
+                patch,
+                expected_revision=expected_revision,
+            )
+        except RevisionConflict as exc:
+            return {
+                "success": False,
+                "error": "revision_conflict",
+                "message": (
+                    "The session changed since you read it; re-read "
+                    "list_annotations and retry with the current revision."
+                ),
+                "expected_revision": exc.expected,
+                "current_revision": exc.actual,
+            }
+        except AnnotationNotFound:
+            return {
+                "success": False,
+                "error": "not_found",
+                "message": f"No annotation with id {annotation_id!r} in this session.",
+            }
+        except LayoutBusy:
+            return {
+                "success": False,
+                "error": "busy",
+                "message": "Another change is being applied to this session; retry.",
+            }
+        except RateLimited:
+            return {
+                "success": False,
+                "error": "rate_limited",
+                "message": "Too many session writes; slow down and retry.",
+            }
+        except OpBatchTooLarge:
+            return {
+                "success": False,
+                "error": "too_large",
+                "message": "Annotation payload too large for one write.",
+            }
+        except SessionNotFound:
+            return {
+                "success": False,
+                "error": (
+                    f"Session '{session_id}' not found. "
+                    "This tool acts on a session's stored state, which exists "
+                    "once create_visualization_session created it or a browser "
+                    "made its first change to it."
+                ),
+            }
+        except OpError as exc:
+            return {"success": False, "error": str(exc)}
+        return {
+            "success": True,
+            "session_id": session_id,
+            "annotation": project_annotation(result["annotation"]),
+            "revision": result["revision"],
+        }
+
+    @register_tool
+    def set_annotation_lock(
+        session_id: str,
+        annotation_id: str,
+        locked: bool,
+        expected_revision: Optional[int] = None,
+    ) -> Dict[str, Any]:
+        """
+        Lock or unlock an annotation against edits (`locked=True`/`False`).
+
+        This is the canvas UI's own edit-lock convention, not a
+        server-enforced permission: `update_annotation`/`reorder_annotation`/
+        `delete_annotation` do not check the flag themselves, so an agent can
+        still edit or unlock a locked annotation deliberately. Only acts on
+        the generic types `create_annotation` manages (not `note`/`group`).
+
+        Args:
+            session_id: The session ID shown in the browser header (e.g. "8244-1742")
+            annotation_id: The annotation's stable id.
+            locked: True to lock, False to unlock.
+            expected_revision: If given, the write is rejected unless it
+                equals the session's current `revision`. Omit for
+                last-write-wins.
+
+        Returns:
+            Dict with success, the updated annotation, and the new revision.
+            Retryable errors: revision_conflict, busy, rate_limited; change
+            the request for not_found.
+        """
+        if session_manager is None:
+            return {"success": False, "error": "Session manager not available"}
+        if not is_valid_session_id(session_id):
+            return {
+                "success": False,
+                "error": "Invalid session ID format — expected DDDD-DDDD-DDDD-DDDD",
+            }
+        denied = _authorize_session(GRAPH_ACTION_MUTATE, "set_annotation_lock")
+        if denied:
+            return denied
+        session = session_manager.get_session(session_id)
+        if session is None:
+            return {
+                "success": False,
+                "error": (
+                    f"Session '{session_id}' not found. "
+                    "This tool acts on a session's stored state, which exists "
+                    "once create_visualization_session created it or a browser "
+                    "made its first change to it."
+                ),
+            }
+        existing = _find_generic_annotation(session, annotation_id)
+        if existing is None:
+            return {
+                "success": False,
+                "error": "not_found",
+                "message": f"No annotation with id {annotation_id!r} in this session's generic annotation set.",
+            }
+        patch = build_annotation_patch(existing, locked=locked)
+        try:
+            result = session_manager.update_annotation(
+                session_id,
+                _MCP_LAYOUT_CLIENT_ID,
+                patch,
+                expected_revision=expected_revision,
+            )
+        except RevisionConflict as exc:
+            return {
+                "success": False,
+                "error": "revision_conflict",
+                "message": (
+                    "The session changed since you read it; re-read "
+                    "list_annotations and retry with the current revision."
+                ),
+                "expected_revision": exc.expected,
+                "current_revision": exc.actual,
+            }
+        except AnnotationNotFound:
+            return {
+                "success": False,
+                "error": "not_found",
+                "message": f"No annotation with id {annotation_id!r} in this session.",
+            }
+        except LayoutBusy:
+            return {
+                "success": False,
+                "error": "busy",
+                "message": "Another change is being applied to this session; retry.",
+            }
+        except RateLimited:
+            return {
+                "success": False,
+                "error": "rate_limited",
+                "message": "Too many session writes; slow down and retry.",
+            }
+        except OpBatchTooLarge:
+            return {
+                "success": False,
+                "error": "too_large",
+                "message": "Annotation payload too large for one write.",
+            }
+        except SessionNotFound:
+            return {
+                "success": False,
+                "error": (
+                    f"Session '{session_id}' not found. "
+                    "This tool acts on a session's stored state, which exists "
+                    "once create_visualization_session created it or a browser "
+                    "made its first change to it."
+                ),
+            }
+        except OpError as exc:
+            return {"success": False, "error": str(exc)}
+        return {
+            "success": True,
+            "session_id": session_id,
+            "annotation": project_annotation(result["annotation"]),
+            "revision": result["revision"],
+        }
+
+    @register_tool
+    def duplicate_annotation(
+        session_id: str,
+        annotation_id: str,
+        new_annotation_id: Optional[str] = None,
+        dx: float = 0,
+        dy: float = 0,
+        expected_revision: Optional[int] = None,
+    ) -> Dict[str, Any]:
+        """
+        Duplicate an annotation at an optional offset.
+
+        Copies every field of the existing annotation — including its
+        type-specific content and style — onto a new id, so the caller does
+        not need to know the type's payload shape to duplicate it (mirrors
+        the canvas's `duplicate` operation, docs/ANNOTATION_CONTRACT.md).
+        Only acts on the generic types `create_annotation` manages (not
+        `note`/`group`).
+
+        Args:
+            session_id: The session ID shown in the browser header (e.g. "8244-1742")
+            annotation_id: The stable id of the annotation to duplicate.
+            new_annotation_id: Stable id for the copy. Omit to let the
+                server assign one. Rejected if it already names another
+                annotation.
+            dx: Model-space x offset applied to the copy. Default 0.
+            dy: Model-space y offset applied to the copy. Default 0.
+            expected_revision: If given, the write is rejected unless it
+                equals the session's current `revision`. Omit for
+                last-write-wins.
+
+        Returns:
+            Dict with success, the new annotation, and the new revision.
+            Retryable errors: revision_conflict, busy, rate_limited; change
+            the request for not_found or id_exists.
+        """
+        if session_manager is None:
+            return {"success": False, "error": "Session manager not available"}
+        if not is_valid_session_id(session_id):
+            return {
+                "success": False,
+                "error": "Invalid session ID format — expected DDDD-DDDD-DDDD-DDDD",
+            }
+        denied = _authorize_session(GRAPH_ACTION_MUTATE, "duplicate_annotation")
+        if denied:
+            return denied
+        session = session_manager.get_session(session_id)
+        if session is None:
+            return {
+                "success": False,
+                "error": (
+                    f"Session '{session_id}' not found. "
+                    "This tool acts on a session's stored state, which exists "
+                    "once create_visualization_session created it or a browser "
+                    "made its first change to it."
+                ),
+            }
+        existing = _find_generic_annotation(session, annotation_id)
+        if existing is None:
+            return {
+                "success": False,
+                "error": "not_found",
+                "message": f"No annotation with id {annotation_id!r} in this session's generic annotation set.",
+            }
+        if new_annotation_id is not None:
+            collision = _find_any_annotation(session, new_annotation_id)
+            if collision is not None:
+                return {
+                    "success": False,
+                    "error": "id_exists",
+                    "message": (
+                        f"Annotation id {new_annotation_id!r} already exists; "
+                        "choose a different new_annotation_id or omit it to let "
+                        "the server assign one."
+                    ),
+                }
+        copy = dict(existing)
+        for key in ("id", "created_at", "updated_at", "created_by", "updated_by"):
+            copy.pop(key, None)
+        geometry = dict(copy.get("geometry") or {})
+        geometry["x"] = geometry.get("x", 0) + dx
+        geometry["y"] = geometry.get("y", 0) + dy
+        copy["geometry"] = geometry
+        position = dict(
+            copy.get("position")
+            or {"x": geometry.get("x", 0), "y": geometry.get("y", 0)}
+        )
+        position["x"] = position.get("x", 0) + dx
+        position["y"] = position.get("y", 0) + dy
+        copy["position"] = position
+        if new_annotation_id is not None:
+            copy["id"] = new_annotation_id
+        try:
+            result = session_manager.upsert_annotation(
+                session_id,
+                _MCP_LAYOUT_CLIENT_ID,
+                copy,
+                expected_revision=expected_revision,
+            )
+        except RevisionConflict as exc:
+            return {
+                "success": False,
+                "error": "revision_conflict",
+                "message": (
+                    "The session changed since you read it; re-read "
+                    "list_annotations and retry with the current revision."
+                ),
+                "expected_revision": exc.expected,
+                "current_revision": exc.actual,
+            }
+        except AnnotationRecentlyDeleted:
+            return {
+                "success": False,
+                "error": "annotation_recently_deleted",
+                "message": (
+                    f"Annotation id {new_annotation_id!r} was just deleted by "
+                    "another collaborator; retry with a different id."
+                ),
+            }
+        except LayoutBusy:
+            return {
+                "success": False,
+                "error": "busy",
+                "message": "Another change is being applied to this session; retry.",
+            }
+        except RateLimited:
+            return {
+                "success": False,
+                "error": "rate_limited",
+                "message": "Too many session writes; slow down and retry.",
+            }
+        except OpBatchTooLarge:
+            return {
+                "success": False,
+                "error": "too_large",
+                "message": "Annotation payload too large for one write.",
+            }
+        except SessionNotFound:
+            return {
+                "success": False,
+                "error": (
+                    f"Session '{session_id}' not found. "
+                    "This tool acts on a session's stored state, which exists "
+                    "once create_visualization_session created it or a browser "
+                    "made its first change to it."
+                ),
+            }
+        except OpError as exc:
+            return {"success": False, "error": str(exc)}
+        return {
+            "success": True,
+            "session_id": session_id,
+            "annotation": project_annotation(result["annotation"]),
+            "revision": result["revision"],
+        }
+
+    @register_tool
+    def delete_annotation(
+        session_id: str,
+        annotation_id: str,
+        expected_revision: Optional[int] = None,
+    ) -> Dict[str, Any]:
+        """
+        Delete an annotation by its stable id.
+
+        Only acts on the generic types `create_annotation` manages (not
+        `note`/`group` — use `delete_sticky_note` for notes; group
+        annotations are not exposed through MCP).
+
+        Args:
+            session_id: The session ID shown in the browser header (e.g. "8244-1742")
+            annotation_id: The annotation's stable id.
+            expected_revision: If given, the write is rejected unless it
+                equals the session's current `revision`. Omit for
+                last-write-wins.
+
+        Returns:
+            Dict with success, deleted annotation_id, and the new revision.
+            Retryable errors: revision_conflict, busy, rate_limited; change
+            the request for not_found.
+        """
+        if session_manager is None:
+            return {"success": False, "error": "Session manager not available"}
+        if not is_valid_session_id(session_id):
+            return {
+                "success": False,
+                "error": "Invalid session ID format — expected DDDD-DDDD-DDDD-DDDD",
+            }
+        denied = _authorize_session(GRAPH_ACTION_MUTATE, "delete_annotation")
+        if denied:
+            return denied
+        session = session_manager.get_session(session_id)
+        if session is None:
+            return {
+                "success": False,
+                "error": (
+                    f"Session '{session_id}' not found. "
+                    "This tool acts on a session's stored state, which exists "
+                    "once create_visualization_session created it or a browser "
+                    "made its first change to it."
+                ),
+            }
+        if _find_generic_annotation(session, annotation_id) is None:
+            return {
+                "success": False,
+                "error": "not_found",
+                "message": f"No annotation with id {annotation_id!r} in this session's generic annotation set.",
+            }
+        try:
+            result = session_manager.delete_annotation(
+                session_id,
+                _MCP_LAYOUT_CLIENT_ID,
+                annotation_id,
+                expected_revision=expected_revision,
+            )
+        except RevisionConflict as exc:
+            return {
+                "success": False,
+                "error": "revision_conflict",
+                "message": (
+                    "The session changed since you read it; re-read "
+                    "list_annotations and retry with the current revision."
+                ),
+                "expected_revision": exc.expected,
+                "current_revision": exc.actual,
+            }
+        except AnnotationNotFound:
+            return {
+                "success": False,
+                "error": "not_found",
+                "message": f"No annotation with id {annotation_id!r} in this session.",
             }
         except LayoutBusy:
             return {

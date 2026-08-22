@@ -997,9 +997,42 @@ result. `update_sticky_note` is a partial update — only the given arguments
 size-only update leaves the other half exactly as it was. `delete_sticky_note`
 and `update_sticky_note` both resolve `annotation_id` against notes only —
 an id that names a different annotation type (e.g. a `line`) reports
-`not_found` rather than editing across types. Only the `note` annotation
-type is exposed through these tools; the other v1 types (`line`, `frame`,
-`group`, ...) are not yet covered by an MCP surface.
+`not_found` rather than editing across types.
+
+#### Generic annotation tools
+
+`list_annotations` / `create_annotation` / `update_annotation` /
+`delete_annotation` / `reorder_annotation` / `set_annotation_lock` /
+`duplicate_annotation` extend MCP annotation access to the rest of the v1
+model: `text`, `label`, `line` (`arrow` accepted as a legacy alias), `frame`,
+`shape`, `icon`, `vote_dot`, `image`. They share the sticky-note tools'
+session/revision contract — model-space coordinates, `revision` /
+`expected_revision` optimistic concurrency, `revision_conflict` on a stale
+write — over the same annotation document.
+
+`note` keeps its own dedicated tool set above; `group` (node-membership
+boxes) is not exposed through either tool set, since editing
+`member_node_ids` goes through the `group_membership_changed` op. Both
+boundaries are enforced the same way `create_sticky_note` already guards
+notes: `create_annotation` refuses to create/replace a `note` or `group` id
+(`wrong_type`), and refuses to silently convert an existing generic
+annotation into a different type at the same id (also `wrong_type` — delete
+it first or use a new id); the other generic tools resolve `annotation_id`
+against the generic type set only, so a note or group id reports `not_found`
+rather than being edited across the tool-set boundary.
+
+`create_annotation` takes a per-type `content` dict for the payload fields
+that differ by type (a line's `from`/`to`/arrows, a label's `text`, a
+shape's `shape` name, ...) — see docs/ANNOTATION_CONTRACT.md for the field
+list per type — plus the common `x`/`y`/`w`/`h`/`rotation`/`style`/`z`/
+`locked` envelope every type shares. `update_annotation` is a partial update
+over that same envelope plus `content`; `reorder_annotation` and
+`set_annotation_lock` are single-purpose wrappers over `z` and `locked`
+respectively; `duplicate_annotation` copies an existing annotation
+(including its `content`/`style`) to a new id at an optional offset.
+`list_annotations` reads across every v1 type, including `note` and `group`,
+so an assistant gets one full inventory of the session's annotation
+document; pass `types` to filter it.
 
 ### UI Backend Endpoints
 
