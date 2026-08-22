@@ -54,7 +54,7 @@ function ArrowNode({ id, data, selected }) {
       nds.map((n) => {
         if (n.id !== id) return n;
         const nextData = { ...n.data, ...patch };
-        return { ...n, data: nextData, draggable: !isArrowAnchored(nextData) };
+        return { ...n, data: nextData, draggable: !nextData.locked && !isArrowAnchored(nextData) };
       })
     );
   };
@@ -96,6 +96,7 @@ function ArrowNode({ id, data, selected }) {
       setNodes((nds) =>
         nds.map((n) => {
           if (n.id !== id) return n;
+          if (n.data?.locked) return n;
           const dx = Number(n.data.dx ?? 160);
           const dy = Number(n.data.dy ?? 0);
           let position = n.position;
@@ -111,7 +112,12 @@ function ArrowNode({ id, data, selected }) {
             nextData.dy = snapPoint.y - n.position.y;
             nextData.endAnchor = targetId || undefined;
           }
-          return { ...n, position, data: nextData, draggable: !isArrowAnchored(nextData) };
+          return {
+            ...n,
+            position,
+            data: nextData,
+            draggable: !nextData.locked && !isArrowAnchored(nextData),
+          };
         })
       );
     },
@@ -126,6 +132,7 @@ function ArrowNode({ id, data, selected }) {
   const startEndpointDrag = (endpoint) => (e) => {
     e.stopPropagation();
     e.preventDefault();
+    if (data.locked) return;
     draggingRef.current = endpoint;
     const handleMove = (ev) => {
       const flowPoint = screenToFlowPosition({ x: ev.clientX, y: ev.clientY });
@@ -217,7 +224,7 @@ function ArrowNode({ id, data, selected }) {
             markerStart={startArrow ? `url(#graph-arrow-tail-${id})` : undefined}
             markerEnd={endArrow ? `url(#graph-arrow-head-${id})` : undefined}
           />
-          {selected && (
+          {selected && !data.locked && (
             <>
               <circle
                 className="graph-arrow-handle nodrag"
