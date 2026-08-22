@@ -802,6 +802,10 @@ can configure one. See `docs/EVENT_SUBSCRIPTIONS.md`.
 | `get_visualization_session` | Inspect one session's resource metadata (incl. node count) |
 | `rename_visualization_session` | Set or clear a session's display name |
 | `delete_visualization_session` | Permanently delete a session — requires `confirm=true` |
+| `list_sticky_notes` | List every sticky note in a session (id/text/x/y/w/h/color/font_size) |
+| `create_sticky_note` | Create a sticky note at a model-space position, or replace one by id (create/upsert) |
+| `update_sticky_note` | Partially update a sticky note's content, style, position and/or size |
+| `delete_sticky_note` | Delete a sticky note by its stable id |
 
 Two independent things can be true of a session id, and
 `connect_to_visualization_session` reports both rather than collapsing them:
@@ -971,6 +975,31 @@ projection (`session_id`, `name`, `lifecycle_state`, timestamps, `revision`,
 `?session=<id>` link (from `COMMUNITYOVERVIEW_PUBLIC_BASE_URL`; `null` when
 unconfigured) so an assistant can hand the user a direct link without guessing a
 host. `owner`/`workspace` remain reserved and are populated by the hosted layer.
+
+#### Sticky note tools
+
+`list_sticky_notes` / `create_sticky_note` / `update_sticky_note` /
+`delete_sticky_note` let an assistant read and edit `note` annotations
+(docs/ANNOTATION_CONTRACT.md) in an open session — the same annotation
+document a connected browser renders and edits, so a note an agent creates
+appears on every collaborator's canvas via the same op broadcast the layout
+tools use. Coordinates are model space, matching the layout tools above.
+Writes share the layout tools' optimistic-concurrency contract: read
+`revision` from `list_sticky_notes`, thread it into `expected_revision` on a
+write, and a stale write returns `revision_conflict` with the current
+revision rather than silently clobbering a concurrent edit.
+
+`create_sticky_note` doubles as an upsert: passing an `annotation_id` that
+already exists replaces that note (idempotent for a retried call with the
+same id); omitting it lets the server mint a stable id, returned in the
+result. `update_sticky_note` is a partial update — only the given arguments
+(`text`/`color`/`font_size`/`x`/`y`/`w`/`h`) change, and a position-only or
+size-only update leaves the other half exactly as it was. `delete_sticky_note`
+and `update_sticky_note` both resolve `annotation_id` against notes only —
+an id that names a different annotation type (e.g. a `line`) reports
+`not_found` rather than editing across types. Only the `note` annotation
+type is exposed through these tools; the other v1 types (`line`, `frame`,
+`group`, ...) are not yet covered by an MCP surface.
 
 ### UI Backend Endpoints
 

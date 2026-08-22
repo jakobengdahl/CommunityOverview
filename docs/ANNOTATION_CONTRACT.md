@@ -64,6 +64,19 @@ The operation result returns the next document and an inverse operation for undo
 
 Session snapshots and saved views store the complete annotation document. Reload must accept v1 documents and legacy arrays of notes, labels, arrows and groups. Persisted annotations must not write graph nodes or graph edges.
 
+## MCP access
+
+`note` annotations (sticky notes) are exposed headlessly through
+`list_sticky_notes` / `create_sticky_note` / `update_sticky_note` /
+`delete_sticky_note` (`backend/service/mcp_tools.py`), so an agent can read
+and edit them in a session before or independently of a connected browser,
+using the same model-space coordinates and stable ids the canvas uses. Writes
+go through the session op protocol (`annotation_created` / `annotation_updated`
+/ `annotation_deleted`) and share its optimistic-concurrency contract
+(`expected_revision` / `revision_conflict`) — see
+`backend/DEVELOPMENT.md`'s "Sticky note tools" section for the full contract.
+Other v1 types are not yet exposed through MCP.
+
 ## V1 non-goals
 
 GIF, SVG, crop, image filters, threaded comments, vote counting, true frame grouping and cross-session annotation libraries are outside v1.

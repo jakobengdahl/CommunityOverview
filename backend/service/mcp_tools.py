@@ -22,12 +22,20 @@ from backend.core.session_auto_add import AutoAddRuleError
 from backend.core.storage_search import MATCH_MODE_SUBSTRING
 from backend.core.session_store import OpError, is_valid_session_id
 from backend.core.session_manager import (
+    AnnotationNotFound,
+    AnnotationRecentlyDeleted,
     LayoutBusy,
     OpBatchTooLarge,
     RateLimited,
     RevisionConflict,
     SessionLimitReached,
     SessionNotFound,
+)
+from backend.core.session_annotations import (
+    build_note_annotation,
+    build_note_patch,
+    is_note,
+    project_note,
 )
 from backend.config.config_loader import build_session_url
 from backend.runtime.authorization import GRAPH_ACTION_MUTATE, GRAPH_ACTION_READ
@@ -1834,6 +1842,466 @@ def register_mcp_tools(
         if not existed:
             return {"success": False, "error": f"Session '{session_id}' not found."}
         return {"success": True, "deleted": True, "session_id": session_id}
+
+    # ==================== Sticky Note Annotations ====================
+    #
+    # These tools let an assistant read and edit sticky-note annotations in an
+    # open visualization session — the same server-owned annotation document
+    # (docs/ANNOTATION_CONTRACT.md) a connected browser renders and edits.
+    # Positions/sizes are model-space, matching the layout tools above, and
+    # writes share their optimistic-concurrency contract (`expected_revision`
+    # / `revision_conflict`). Only the `note` annotation type is exposed here;
+    # other v1 types (line, frame, group, ...) are out of scope for this tool set.
+
+    def _find_note(session, annotation_id: str):
+        for annotation in session.state.get("annotations", []):
+            if annotation.get("id") == annotation_id:
+                return annotation if is_note(annotation) else None
+        return None
+
+    def _find_any_annotation(session, annotation_id: str):
+        for annotation in session.state.get("annotations", []):
+            if annotation.get("id") == annotation_id:
+                return annotation
+        return None
+
+    @register_tool
+    def list_sticky_notes(session_id: str) -> Dict[str, Any]:
+        """
+        List every sticky note in a visualization session.
+
+        Args:
+            session_id: The session ID shown in the browser header (e.g. "8244-1742")
+
+        Returns:
+            Dict with session_id, revision, notes (id/text/x/y/w/h/color/font_size/
+            z/locked/created_at/updated_at). ``revision`` can be threaded into
+            ``create_sticky_note``/``update_sticky_note``/``delete_sticky_note``'s
+            ``expected_revision`` for optimistic concurrency.
+        """
+        if session_manager is None:
+            return {"error": "Session manager not available"}
+        if not is_valid_session_id(session_id):
+            return {"error": "Invalid session ID format — expected DDDD-DDDD-DDDD-DDDD"}
+        denied = _authorize_session(GRAPH_ACTION_READ, "list_sticky_notes")
+        if denied:
+            return denied
+        session = session_manager.get_session(session_id)
+        if session is None:
+            return {
+                "error": (
+                    f"Session '{session_id}' not found. "
+                    "This tool acts on a session's stored state, which exists "
+                    "once create_visualization_session created it or a browser "
+                    "made its first change to it."
+                )
+            }
+        notes = [
+            project_note(annotation)
+            for annotation in session.state.get("annotations", [])
+            if is_note(annotation)
+        ]
+        return {
+            "session_id": session_id,
+            "revision": session.seq,
+            "notes": notes,
+            "coordinate_space": "model-space, pixels at zoom 1, x/y = top-left",
+        }
+
+    @register_tool
+    def create_sticky_note(
+        session_id: str,
+        x: float,
+        y: float,
+        text: str = "",
+        color: Optional[str] = None,
+        font_size: Optional[float] = None,
+        w: Optional[float] = None,
+        h: Optional[float] = None,
+        annotation_id: Optional[str] = None,
+        expected_revision: Optional[int] = None,
+    ) -> Dict[str, Any]:
+        """
+        Create a sticky note, or replace one by id (create/upsert).
+
+        Coordinates are model space (zoom/pan independent, pixels at zoom 1,
+        ``x``/``y`` = top-left), the same space ``list_sticky_notes`` reports.
+        Pass ``annotation_id`` to replace an existing note by its stable id
+        (an upsert — the write is idempotent for a retried call with the same
+        id); omit it to have the server mint one, returned in the result.
+
+        Args:
+            session_id: The session ID shown in the browser header (e.g. "8244-1742")
+            x: Model-space x of the note's top-left corner.
+            y: Model-space y of the note's top-left corner.
+            text: Note body text.
+            color: Optional note color (any CSS color the canvas accepts).
+            font_size: Optional font size in px.
+            w: Optional width in model-space px (default 160).
+            h: Optional height in model-space px (default 96).
+            annotation_id: Stable id to create or replace. Omit to let the
+                server assign one.
+            expected_revision: If given, the write is rejected unless it equals
+                the session's current ``revision`` (optimistic concurrency).
+                Read it from ``list_sticky_notes`` first. Omit for last-write-wins.
+
+        Returns:
+            Dict with success, the created/replaced note, and the new revision.
+            On a concurrency clash returns success=false with the current
+            revision so the caller can re-read and retry. Retryable errors:
+            revision_conflict, busy, rate_limited; change the request for
+            wrong_type or a validation error.
+        """
+        if session_manager is None:
+            return {"success": False, "error": "Session manager not available"}
+        if not is_valid_session_id(session_id):
+            return {
+                "success": False,
+                "error": "Invalid session ID format — expected DDDD-DDDD-DDDD-DDDD",
+            }
+        denied = _authorize_session(GRAPH_ACTION_MUTATE, "create_sticky_note")
+        if denied:
+            return denied
+        if annotation_id is not None:
+            session = session_manager.get_session(session_id)
+            if session is not None:
+                existing_annotation = _find_any_annotation(session, annotation_id)
+                if existing_annotation is not None and not is_note(existing_annotation):
+                    return {
+                        "success": False,
+                        "error": "wrong_type",
+                        "message": (
+                            f"Annotation id {annotation_id!r} already exists as a "
+                            "different annotation type; create_sticky_note only "
+                            "creates or replaces notes."
+                        ),
+                    }
+        annotation = build_note_annotation(
+            x=x,
+            y=y,
+            text=text,
+            color=color,
+            font_size=font_size,
+            w=w,
+            h=h,
+            annotation_id=annotation_id,
+        )
+        try:
+            result = session_manager.upsert_annotation(
+                session_id,
+                _MCP_LAYOUT_CLIENT_ID,
+                annotation,
+                expected_revision=expected_revision,
+            )
+        except RevisionConflict as exc:
+            return {
+                "success": False,
+                "error": "revision_conflict",
+                "message": (
+                    "The session changed since you read it; re-read "
+                    "list_sticky_notes and retry with the current revision."
+                ),
+                "expected_revision": exc.expected,
+                "current_revision": exc.actual,
+            }
+        except AnnotationRecentlyDeleted:
+            return {
+                "success": False,
+                "error": "annotation_recently_deleted",
+                "message": (
+                    f"Annotation id {annotation_id!r} was just deleted by another "
+                    "collaborator; retry with a different id."
+                ),
+            }
+        except LayoutBusy:
+            return {
+                "success": False,
+                "error": "busy",
+                "message": "Another change is being applied to this session; retry.",
+            }
+        except RateLimited:
+            return {
+                "success": False,
+                "error": "rate_limited",
+                "message": "Too many session writes; slow down and retry.",
+            }
+        except OpBatchTooLarge:
+            return {
+                "success": False,
+                "error": "too_large",
+                "message": "Note payload too large for one write.",
+            }
+        except SessionNotFound:
+            return {
+                "success": False,
+                "error": (
+                    f"Session '{session_id}' not found. "
+                    "This tool acts on a session's stored state, which exists "
+                    "once create_visualization_session created it or a browser "
+                    "made its first change to it."
+                ),
+            }
+        except OpError as exc:
+            return {"success": False, "error": str(exc)}
+        return {
+            "success": True,
+            "session_id": session_id,
+            "note": project_note(result["annotation"]),
+            "revision": result["revision"],
+        }
+
+    @register_tool
+    def update_sticky_note(
+        session_id: str,
+        annotation_id: str,
+        text: Optional[str] = None,
+        color: Optional[str] = None,
+        font_size: Optional[float] = None,
+        x: Optional[float] = None,
+        y: Optional[float] = None,
+        w: Optional[float] = None,
+        h: Optional[float] = None,
+        expected_revision: Optional[int] = None,
+    ) -> Dict[str, Any]:
+        """
+        Update a sticky note's content, style, position and/or size.
+
+        A partial update: only the arguments given change, everything else on
+        the note (including fields not modeled by this tool) is left as-is.
+        Position and size are model space, matching ``list_sticky_notes``.
+
+        Args:
+            session_id: The session ID shown in the browser header (e.g. "8244-1742")
+            annotation_id: The note's stable id, from ``list_sticky_notes`` or a
+                prior ``create_sticky_note`` result.
+            text: New body text, if changing it.
+            color: New color, if changing it.
+            font_size: New font size in px, if changing it.
+            x: New model-space x of the top-left corner, if moving it.
+            y: New model-space y of the top-left corner, if moving it.
+            w: New width in model-space px, if resizing it.
+            h: New height in model-space px, if resizing it.
+            expected_revision: If given, the write is rejected unless it equals
+                the session's current ``revision`` (optimistic concurrency).
+                Read it from ``list_sticky_notes`` first. Omit for last-write-wins.
+
+        Returns:
+            Dict with success, the updated note, and the new revision. On a
+            concurrency clash returns success=false with the current revision
+            so the caller can re-read and retry. Retryable errors:
+            revision_conflict, busy, rate_limited; change the request for
+            not_found or a validation error.
+        """
+        if session_manager is None:
+            return {"success": False, "error": "Session manager not available"}
+        if not is_valid_session_id(session_id):
+            return {
+                "success": False,
+                "error": "Invalid session ID format — expected DDDD-DDDD-DDDD-DDDD",
+            }
+        denied = _authorize_session(GRAPH_ACTION_MUTATE, "update_sticky_note")
+        if denied:
+            return denied
+        if all(v is None for v in (text, color, font_size, x, y, w, h)):
+            return {
+                "success": False,
+                "error": "no_fields_to_update",
+                "message": "Give at least one of text/color/font_size/x/y/w/h.",
+            }
+        session = session_manager.get_session(session_id)
+        if session is None:
+            return {
+                "success": False,
+                "error": (
+                    f"Session '{session_id}' not found. "
+                    "This tool acts on a session's stored state, which exists "
+                    "once create_visualization_session created it or a browser "
+                    "made its first change to it."
+                ),
+            }
+        existing = _find_note(session, annotation_id)
+        if existing is None:
+            return {
+                "success": False,
+                "error": "not_found",
+                "message": f"No sticky note with id {annotation_id!r} in this session.",
+            }
+        patch = build_note_patch(
+            existing,
+            text=text,
+            color=color,
+            font_size=font_size,
+            x=x,
+            y=y,
+            w=w,
+            h=h,
+        )
+        try:
+            result = session_manager.update_annotation(
+                session_id,
+                _MCP_LAYOUT_CLIENT_ID,
+                patch,
+                expected_revision=expected_revision,
+            )
+        except RevisionConflict as exc:
+            return {
+                "success": False,
+                "error": "revision_conflict",
+                "message": (
+                    "The session changed since you read it; re-read "
+                    "list_sticky_notes and retry with the current revision."
+                ),
+                "expected_revision": exc.expected,
+                "current_revision": exc.actual,
+            }
+        except AnnotationNotFound:
+            return {
+                "success": False,
+                "error": "not_found",
+                "message": f"No sticky note with id {annotation_id!r} in this session.",
+            }
+        except LayoutBusy:
+            return {
+                "success": False,
+                "error": "busy",
+                "message": "Another change is being applied to this session; retry.",
+            }
+        except RateLimited:
+            return {
+                "success": False,
+                "error": "rate_limited",
+                "message": "Too many session writes; slow down and retry.",
+            }
+        except OpBatchTooLarge:
+            return {
+                "success": False,
+                "error": "too_large",
+                "message": "Note payload too large for one write.",
+            }
+        except SessionNotFound:
+            return {
+                "success": False,
+                "error": (
+                    f"Session '{session_id}' not found. "
+                    "This tool acts on a session's stored state, which exists "
+                    "once create_visualization_session created it or a browser "
+                    "made its first change to it."
+                ),
+            }
+        except OpError as exc:
+            return {"success": False, "error": str(exc)}
+        return {
+            "success": True,
+            "session_id": session_id,
+            "note": project_note(result["annotation"]),
+            "revision": result["revision"],
+        }
+
+    @register_tool
+    def delete_sticky_note(
+        session_id: str,
+        annotation_id: str,
+        expected_revision: Optional[int] = None,
+    ) -> Dict[str, Any]:
+        """
+        Delete a sticky note by its stable id.
+
+        Args:
+            session_id: The session ID shown in the browser header (e.g. "8244-1742")
+            annotation_id: The note's stable id, from ``list_sticky_notes`` or a
+                prior ``create_sticky_note`` result.
+            expected_revision: If given, the write is rejected unless it equals
+                the session's current ``revision`` (optimistic concurrency).
+                Read it from ``list_sticky_notes`` first. Omit for last-write-wins.
+
+        Returns:
+            Dict with success, deleted annotation_id, and the new revision. On a
+            concurrency clash returns success=false with the current revision so
+            the caller can re-read and retry. Retryable errors: revision_conflict,
+            busy, rate_limited; change the request for not_found or a validation
+            error.
+        """
+        if session_manager is None:
+            return {"success": False, "error": "Session manager not available"}
+        if not is_valid_session_id(session_id):
+            return {
+                "success": False,
+                "error": "Invalid session ID format — expected DDDD-DDDD-DDDD-DDDD",
+            }
+        denied = _authorize_session(GRAPH_ACTION_MUTATE, "delete_sticky_note")
+        if denied:
+            return denied
+        session = session_manager.get_session(session_id)
+        if session is None:
+            return {
+                "success": False,
+                "error": (
+                    f"Session '{session_id}' not found. "
+                    "This tool acts on a session's stored state, which exists "
+                    "once create_visualization_session created it or a browser "
+                    "made its first change to it."
+                ),
+            }
+        if _find_note(session, annotation_id) is None:
+            return {
+                "success": False,
+                "error": "not_found",
+                "message": f"No sticky note with id {annotation_id!r} in this session.",
+            }
+        try:
+            result = session_manager.delete_annotation(
+                session_id,
+                _MCP_LAYOUT_CLIENT_ID,
+                annotation_id,
+                expected_revision=expected_revision,
+            )
+        except RevisionConflict as exc:
+            return {
+                "success": False,
+                "error": "revision_conflict",
+                "message": (
+                    "The session changed since you read it; re-read "
+                    "list_sticky_notes and retry with the current revision."
+                ),
+                "expected_revision": exc.expected,
+                "current_revision": exc.actual,
+            }
+        except AnnotationNotFound:
+            return {
+                "success": False,
+                "error": "not_found",
+                "message": f"No sticky note with id {annotation_id!r} in this session.",
+            }
+        except LayoutBusy:
+            return {
+                "success": False,
+                "error": "busy",
+                "message": "Another change is being applied to this session; retry.",
+            }
+        except RateLimited:
+            return {
+                "success": False,
+                "error": "rate_limited",
+                "message": "Too many session writes; slow down and retry.",
+            }
+        except SessionNotFound:
+            return {
+                "success": False,
+                "error": (
+                    f"Session '{session_id}' not found. "
+                    "This tool acts on a session's stored state, which exists "
+                    "once create_visualization_session created it or a browser "
+                    "made its first change to it."
+                ),
+            }
+        except OpError as exc:
+            return {"success": False, "error": str(exc)}
+        return {
+            "success": True,
+            "session_id": session_id,
+            "annotation_id": annotation_id,
+            "revision": result["revision"],
+        }
 
     return tools_map
 

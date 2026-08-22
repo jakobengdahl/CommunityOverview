@@ -18,6 +18,8 @@ from backend.core.session_store import (
     SessionStore,
 )
 from backend.core.session_manager import (
+    AnnotationNotFound,
+    AnnotationRecentlyDeleted,
     LayoutBusy,
     OpBatchTooLarge,
     RateLimited,
@@ -1028,3 +1030,182 @@ class TestAddNodeRefs:
         assert s.state["node_refs"] == ["a", "b"]
         events = await _drain(sub)
         assert events[0]["op"]["node_ids"] == ["a", "b"]
+
+
+class TestUpsertAnnotation:
+    """The synchronous MCP annotation-create/upsert write path (``upsert_annotation``)."""
+
+    async def test_creates_and_broadcasts(self):
+        mgr = _manager()
+        s = mgr.create_session()
+        sub, _ = mgr.connect(s.id, "c1", "A")
+        await _drain(sub)
+
+        res = mgr.upsert_annotation(
+            s.id, "mcp-agent", {"id": "note-1", "type": "note", "text": "hi"}
+        )
+
+        assert res["revision"] == s.seq == 1
+        assert res["annotation"]["id"] == "note-1"
+        assert s.state["annotations"][0]["text"] == "hi"
+        events = await _drain(sub)
+        assert events[0]["op"]["op"] == "annotation_created"
+        assert events[0]["seq"] == 1
+
+    async def test_omitted_id_is_assigned_by_the_store(self):
+        mgr = _manager()
+        s = mgr.create_session()
+        res = mgr.upsert_annotation(s.id, "mcp-agent", {"type": "note", "text": "hi"})
+        assert isinstance(res["annotation"]["id"], str) and res["annotation"]["id"]
+
+    async def test_matching_id_upserts_in_place(self):
+        mgr = _manager()
+        s = mgr.create_session()
+        mgr.upsert_annotation(
+            s.id, "mcp-agent", {"id": "note-1", "type": "note", "text": "v1"}
+        )
+        res = mgr.upsert_annotation(
+            s.id, "mcp-agent", {"id": "note-1", "type": "note", "text": "v2"}
+        )
+        assert len(s.state["annotations"]) == 1
+        assert s.state["annotations"][0]["text"] == "v2"
+        assert res["revision"] == 2
+
+    async def test_expected_revision_conflict(self):
+        mgr = _manager()
+        s = mgr.create_session()
+        mgr.upsert_annotation(s.id, "mcp-agent", {"id": "n1", "type": "note"})
+        with pytest.raises(RevisionConflict) as exc:
+            mgr.upsert_annotation(
+                s.id, "mcp-agent", {"id": "n2", "type": "note"}, expected_revision=0
+            )
+        assert exc.value.expected == 0 and exc.value.actual == 1
+        assert len(s.state["annotations"]) == 1
+
+    async def test_recreate_of_recently_deleted_id_raises(self):
+        """A create-op retry for an id another collaborator just deleted must not
+        resurrect it (D-table rule mirrored from SessionStore)."""
+        mgr = _manager()
+        s = mgr.create_session()
+        mgr.upsert_annotation(s.id, "mcp-agent", {"id": "note-1", "type": "note"})
+        mgr.delete_annotation(s.id, "mcp-agent", "note-1")
+        with pytest.raises(AnnotationRecentlyDeleted):
+            mgr.upsert_annotation(s.id, "mcp-agent", {"id": "note-1", "type": "note"})
+
+    async def test_busy_when_session_lock_held(self):
+        mgr = _manager()
+        s = mgr.create_session()
+        await mgr._lock(s.id).acquire()
+        with pytest.raises(LayoutBusy):
+            mgr.upsert_annotation(s.id, "mcp-agent", {"type": "note"})
+
+    async def test_unknown_session_raises(self):
+        mgr = _manager()
+        with pytest.raises(SessionNotFound):
+            mgr.upsert_annotation("9999-9999", "mcp-agent", {"type": "note"})
+
+    async def test_invalid_type_rolls_back(self):
+        mgr = _manager()
+        s = mgr.create_session()
+        seq_before = s.seq
+        with pytest.raises(OpError):
+            mgr.upsert_annotation(s.id, "mcp-agent", {"type": "not-a-real-type"})
+        assert s.seq == seq_before
+        assert s.state["annotations"] == []
+
+
+class TestUpdateAnnotation:
+    """The synchronous MCP annotation-update write path (``update_annotation``)."""
+
+    async def test_patch_merges_onto_existing(self):
+        mgr = _manager()
+        s = mgr.create_session()
+        mgr.upsert_annotation(
+            s.id,
+            "mcp-agent",
+            {"id": "note-1", "type": "note", "text": "v1", "color": "red"},
+        )
+        res = mgr.update_annotation(
+            s.id, "mcp-agent", {"id": "note-1", "type": "note", "text": "v2"}
+        )
+        stored = s.state["annotations"][0]
+        assert stored["text"] == "v2"
+        assert stored["color"] == "red"  # untouched field survives the shallow merge
+        assert res["annotation"]["text"] == "v2"
+
+    async def test_missing_annotation_raises_not_found(self):
+        mgr = _manager()
+        s = mgr.create_session()
+        with pytest.raises(AnnotationNotFound):
+            mgr.update_annotation(s.id, "mcp-agent", {"id": "ghost", "type": "note"})
+
+    async def test_expected_revision_conflict(self):
+        mgr = _manager()
+        s = mgr.create_session()
+        mgr.upsert_annotation(s.id, "mcp-agent", {"id": "note-1", "type": "note"})
+        with pytest.raises(RevisionConflict):
+            mgr.update_annotation(
+                s.id,
+                "mcp-agent",
+                {"id": "note-1", "type": "note", "text": "x"},
+                expected_revision=0,
+            )
+
+    async def test_requires_string_id_in_patch(self):
+        mgr = _manager()
+        s = mgr.create_session()
+        with pytest.raises(OpError):
+            mgr.update_annotation(s.id, "mcp-agent", {"type": "note"})
+
+    async def test_unknown_session_raises(self):
+        mgr = _manager()
+        with pytest.raises(SessionNotFound):
+            mgr.update_annotation(
+                "9999-9999", "mcp-agent", {"id": "note-1", "type": "note"}
+            )
+
+
+class TestDeleteAnnotation:
+    """The synchronous MCP annotation-delete write path (``delete_annotation``)."""
+
+    async def test_deletes_and_broadcasts(self):
+        mgr = _manager()
+        s = mgr.create_session()
+        mgr.upsert_annotation(s.id, "mcp-agent", {"id": "note-1", "type": "note"})
+        sub, _ = mgr.connect(s.id, "c1", "A")
+        await _drain(sub)
+
+        res = mgr.delete_annotation(s.id, "mcp-agent", "note-1")
+
+        assert s.state["annotations"] == []
+        assert res["revision"] == s.seq
+        events = await _drain(sub)
+        assert events[0]["op"]["op"] == "annotation_deleted"
+
+    async def test_missing_annotation_raises_not_found(self):
+        mgr = _manager()
+        s = mgr.create_session()
+        with pytest.raises(AnnotationNotFound):
+            mgr.delete_annotation(s.id, "mcp-agent", "ghost")
+
+    async def test_expected_revision_conflict(self):
+        mgr = _manager()
+        s = mgr.create_session()
+        mgr.upsert_annotation(s.id, "mcp-agent", {"id": "note-1", "type": "note"})
+        with pytest.raises(RevisionConflict):
+            mgr.delete_annotation(s.id, "mcp-agent", "note-1", expected_revision=0)
+        # The rejected delete left the annotation in place.
+        assert len(s.state["annotations"]) == 1
+
+    async def test_busy_when_session_lock_held(self):
+        mgr = _manager()
+        s = mgr.create_session()
+        mgr.upsert_annotation(s.id, "mcp-agent", {"id": "note-1", "type": "note"})
+        await mgr._lock(s.id).acquire()
+        with pytest.raises(LayoutBusy):
+            mgr.delete_annotation(s.id, "mcp-agent", "note-1")
+
+    async def test_unknown_session_raises(self):
+        mgr = _manager()
+        with pytest.raises(SessionNotFound):
+            mgr.delete_annotation("9999-9999", "mcp-agent", "note-1")
