@@ -67,17 +67,31 @@ MATRIX = [
     ("success", "failure", "false", FAIL),
     ("success", "cancelled", "true", FAIL),
     ("success", "cancelled", "false", FAIL),
+    # Unreachable today - detect-changes writes both flags before it can
+    # succeed - but pinned because defaulting an unknown flag to "pass" is the
+    # exact shape of the bug this gate exists to fix. Only an explicit false
+    # lets a skip through.
+    ("success", "skipped", "", FAIL),
     ("failure", "skipped", "", FAIL),  # fail-safe
     ("skipped", "skipped", "", FAIL),
     ("cancelled", "skipped", "", FAIL),
 ]
 
 # The two rows the whole change turns on. Pinned separately so emptying or
-# trimming MATRIX cannot quietly reduce this file to a green no-op.
+# trimming MATRIX cannot quietly reduce this file to a green no-op. Both are
+# needed: without the FAIL row a draft-skip goes green again, and without the
+# PASS row a "fix" that failed the gate on EVERY skip would look correct while
+# breaking every docs-only PR.
 DECISIVE_ROWS = {
     ("success", "skipped", "true", FAIL),
     ("success", "skipped", "false", PASS),
 }
+
+# Jobs that legitimately run regardless of an upstream result but are not
+# required-check gates. Empty today; an entry here is a deliberate statement
+# that a job needs no gate coverage, which is reviewable - silently falling
+# outside a narrow discovery predicate is not.
+NON_GATE_UNCONDITIONAL_JOBS: set[str] = set()
 
 
 @pytest.fixture(scope="module")
@@ -86,8 +100,14 @@ def workflow():
 
 
 def is_always(expr):
-    """`if: always()` parses as the string `always()`; `if: ${{ always() }}` as
-    that literal; a bare `if: true` as a bool. All three mean the same thing."""
+    """Strictly unconditional: `always()`, `${{ always() }}` or a bare `true`.
+
+    Deliberately strict, because the one caller that asserts with it is
+    checking the gates really do run unconditionally - `${{ always() && ... }}`
+    is a CONDITIONAL always and must fail there. Do NOT reuse this for
+    discovery: a predicate that only recognises this spelling is a hole, since
+    the gate it fails to recognise is exactly the one that ships unverified.
+    """
     if expr is True:
         return True
     return (
@@ -95,22 +115,58 @@ def is_always(expr):
     )
 
 
-def discover_gates(workflow):
-    """Every job that runs unconditionally and waits on a `<id>-run` worker.
+def runs_despite_upstream_result(expr):
+    """Broad on purpose - the mirror image of is_always().
 
-    Derived from the workflow rather than from GATES, so adding a gate without
-    adding it here is a test failure instead of an invisible coverage hole.
+    Any of `always()`, `!cancelled()`, `success() || failure()` or
+    `always() && <something>` makes a job run when an upstream job did not
+    succeed, which is what makes it capable of reporting green for work that
+    never happened. GitHub's own docs steer people towards `!cancelled()` over
+    `always()`, so recognising only the latter would miss the most likely
+    spelling of the next gate someone writes.
     """
-    return {
+    if expr is True:
+        return True
+    if expr is None:
+        return False
+    text = str(expr)
+    return any(tok in text for tok in ("always()", "cancelled()", "failure()"))
+
+
+def discover_gates(workflow):
+    """Jobs that could report a required-check name for work that did not run.
+
+    Two independent angles, because either alone has a blind spot:
+
+    1. A job that waits on something AND runs despite an upstream failure or
+       skip. Catches a gate however its `if` is spelled, and whatever its
+       worker is called.
+    2. The stem of any `<id>-run` job. Catches a gate that follows the naming
+       convention even if its `if` is spelled in some way angle 1 misses.
+
+    Anything found here must be in GATES, or explicitly excused in
+    NON_GATE_UNCONDITIONAL_JOBS.
+    """
+    jobs = workflow["jobs"]
+    by_condition = {
         job_id
-        for job_id, job in workflow["jobs"].items()
-        if is_always(job.get("if")) and f"{job_id}-run" in (job.get("needs") or [])
+        for job_id, job in jobs.items()
+        if job.get("needs") and runs_despite_upstream_result(job.get("if"))
     }
+    by_naming = {
+        job_id.removesuffix("-run")
+        for job_id in jobs
+        if job_id.endswith("-run") and job_id.removesuffix("-run") in jobs
+    }
+    return (by_condition | by_naming) - NON_GATE_UNCONDITIONAL_JOBS
 
 
 def gate_step(workflow, job_id):
-    """The verification step - the one declaring RESULT - rather than steps[0],
-    so adding a job-summary or checkout step to a gate is not a failure."""
+    """The verification step - the one declaring RESULT - rather than steps[0].
+
+    This keeps the truth-table tests working if a gate gains a step; the
+    separate single-step assertion below still flags that change deliberately.
+    """
     steps = workflow["jobs"][job_id]["steps"]
     verifying = [s for s in steps if "RESULT" in (s.get("env") or {})]
     assert len(verifying) == 1, (
@@ -151,10 +207,15 @@ class TestTheGateSetIsDiscovered:
             "gate jobs in ci.yml do not match the set this file checks. "
             f"only in workflow: {sorted(discovered - set(GATES))}; "
             f"only here: {sorted(set(GATES) - discovered)}. "
-            "A new gate must be added to GATES, or it ships unverified."
+            "Add a new gate to GATES and REQUIRED_CHECK_NAMES so its truth "
+            "table is verified, or - if it does not carry a branch-protection "
+            "required-check name - list it in NON_GATE_UNCONDITIONAL_JOBS."
         )
 
     def test_the_decisive_rows_are_still_in_the_matrix(self):
+        # The subset check alone is vacuously true on an empty set, which would
+        # let DECISIVE_ROWS and MATRIX be emptied together for a green no-op.
+        assert len(DECISIVE_ROWS) == 2
         assert DECISIVE_ROWS <= set(MATRIX)
 
     def test_check_names_cover_the_same_gates(self):

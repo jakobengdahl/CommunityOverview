@@ -237,11 +237,16 @@ jobs:
           case "$RESULT" in
             success) echo "Gate passed."; exit 0 ;;
             skipped)
-              if [ "$CODE" = "true" ]; then
-                echo "::error::Backend tests was skipped even though service_code=true. The only cause is a draft pull request, so this head has NOT run the full backend suite. Mark the PR ready for review to run it; a draft skip must not report green."
-                exit 1
+              # Fail closed: only an explicit false lets a skip through. An
+              # empty service_code would mean detect-changes never published it,
+              # which the guard above already rejects - but defaulting to
+              # "pass" here is the exact shape of the bug this gate fixes.
+              if [ "$CODE" = "false" ]; then
+                echo "Gate passed (service_code=false: nothing relevant changed, nothing to verify)."
+                exit 0
               fi
-              echo "Gate passed (service_code=false: nothing relevant changed, nothing to verify)."; exit 0 ;;
+              echo "::error::Backend tests was skipped with service_code=$CODE, so this head has NOT run the full backend suite. For service_code=true the cause is a draft pull request: mark the PR ready for review to run it. A skip must not report green."
+              exit 1 ;;
             *) echo "::error::Backend tests result '$RESULT' is not acceptable"; exit 1 ;;
           esac
 
@@ -300,11 +305,16 @@ jobs:
           case "$RESULT" in
             success) echo "Gate passed."; exit 0 ;;
             skipped)
-              if [ "$CODE" = "true" ]; then
-                echo "::error::Frontend tests was skipped even though service_code=true. The only cause is a draft pull request, so this head has NOT run the workspace unit tests. Mark the PR ready for review to run it; a draft skip must not report green."
-                exit 1
+              # Fail closed: only an explicit false lets a skip through. An
+              # empty service_code would mean detect-changes never published it,
+              # which the guard above already rejects - but defaulting to
+              # "pass" here is the exact shape of the bug this gate fixes.
+              if [ "$CODE" = "false" ]; then
+                echo "Gate passed (service_code=false: nothing relevant changed, nothing to verify)."
+                exit 0
               fi
-              echo "Gate passed (service_code=false: nothing relevant changed, nothing to verify)."; exit 0 ;;
+              echo "::error::Frontend tests was skipped with service_code=$CODE, so this head has NOT run the workspace unit tests. For service_code=true the cause is a draft pull request: mark the PR ready for review to run it. A skip must not report green."
+              exit 1 ;;
             *) echo "::error::Frontend tests result '$RESULT' is not acceptable"; exit 1 ;;
           esac
 
@@ -362,11 +372,16 @@ jobs:
           case "$RESULT" in
             success) echo "Gate passed."; exit 0 ;;
             skipped)
-              if [ "$CODE" = "true" ]; then
-                echo "::error::Gateway tests was skipped even though service_code=true. The only cause is a draft pull request, so this head has NOT run the gateway suite. Mark the PR ready for review to run it; a draft skip must not report green."
-                exit 1
+              # Fail closed: only an explicit false lets a skip through. An
+              # empty service_code would mean detect-changes never published it,
+              # which the guard above already rejects - but defaulting to
+              # "pass" here is the exact shape of the bug this gate fixes.
+              if [ "$CODE" = "false" ]; then
+                echo "Gate passed (service_code=false: nothing relevant changed, nothing to verify)."
+                exit 0
               fi
-              echo "Gate passed (service_code=false: nothing relevant changed, nothing to verify)."; exit 0 ;;
+              echo "::error::Gateway tests was skipped with service_code=$CODE, so this head has NOT run the gateway suite. For service_code=true the cause is a draft pull request: mark the PR ready for review to run it. A skip must not report green."
+              exit 1 ;;
             *) echo "::error::Gateway tests result '$RESULT' is not acceptable"; exit 1 ;;
           esac
 
@@ -516,11 +531,13 @@ jobs:
           case "$RESULT" in
             success) echo "Gate passed."; exit 0 ;;
             skipped)
-              if [ "$CODE" = "true" ]; then
-                echo "::error::Python lint was skipped even though python_code=true, so this head has NOT run ruff check/format. The worker carries no draft condition today, so this state should be unreachable - if you are reading this, a condition was added to python-lint-run without updating this gate. Do not merge on the strength of this check."
-                exit 1
+              # Fail closed, as in the *-tests gates above.
+              if [ "$CODE" = "false" ]; then
+                echo "Gate passed (python_code=false: nothing relevant changed, nothing to verify)."
+                exit 0
               fi
-              echo "Gate passed (python_code=false: nothing relevant changed, nothing to verify)."; exit 0 ;;
+              echo "::error::Python lint was skipped with python_code=$CODE, so this head has NOT run ruff check/format. This worker carries no draft condition, so the state should be unreachable - if you are reading this, a condition was added to python-lint-run without updating this gate. Do not merge on the strength of this check."
+              exit 1 ;;
             *) echo "::error::Python lint result '$RESULT' is not acceptable"; exit 1 ;;
           esac
 
