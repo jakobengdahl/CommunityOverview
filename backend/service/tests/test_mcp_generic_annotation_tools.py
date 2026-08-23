@@ -160,6 +160,42 @@ class TestCreateAnnotation:
         assert annotation["z"] == 2
         assert annotation["locked"] is True
 
+    def test_rotation_round_trips_through_create_list_and_update(
+        self, annotation_tools
+    ):
+        """A rotation an agent sets must still be readable after list/update.
+
+        The canvas renders geometry.rotation for the types the contract
+        accepts it for, so a rotation that survives the write but not the
+        read would show as an annotation that silently straightens itself.
+        """
+        tools_map, manager = annotation_tools
+        session = manager.create_session()
+
+        created = tools_map["create_annotation"](
+            session_id=session.id,
+            type="shape",
+            x=0,
+            y=0,
+            w=160,
+            h=96,
+            rotation=45,
+            content={"shape": "process_arrow"},
+            annotation_id="shape-1",
+        )
+        assert created["annotation"]["rotation"] == 45
+
+        listed = tools_map["list_annotations"](session_id=session.id, types=["shape"])
+        assert listed["annotations"][0]["rotation"] == 45
+        assert listed["annotations"][0]["content"]["shape"] == "process_arrow"
+
+        updated = tools_map["update_annotation"](
+            session_id=session.id, annotation_id="shape-1", rotation=-90
+        )
+        assert updated["annotation"]["rotation"] == -90
+        assert updated["annotation"]["w"] == 160
+        assert updated["annotation"]["content"]["shape"] == "process_arrow"
+
     def test_invalid_type_is_rejected(self, annotation_tools):
         tools_map, manager = annotation_tools
         session = manager.create_session()

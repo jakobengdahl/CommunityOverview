@@ -77,9 +77,15 @@
   line-height: 1;
 }
 
+/* Wraps rather than overflowing: a two-word label ("Process arrow") is wider
+   than the 64px button at 10px, and nowrap would spill it over its
+   neighbours. The items row stretches, so a wrapped label keeps the buttons
+   the same height as each other. */
 .annotation-toolbox-item-label {
   font-size: 10px;
-  white-space: nowrap;
+  line-height: 1.2;
+  text-align: center;
+  overflow-wrap: break-word;
 }
 
 /* Compact/mobile: bigger touch targets, full-width sheet-like strip rather

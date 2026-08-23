@@ -1,6 +1,8 @@
 import { memo, useContext } from 'react';
 import { NodeResizer } from 'reactflow';
 import { AnnotationContext } from './AnnotationContext';
+import { resolveAnnotationIcon } from '../utils/annotationIcons';
+import { rotationStyle } from '../utils/annotations';
 import './GenericAnnotationNode.css';
 
 const DEFAULT_COLOR = '#94a3b8';
@@ -11,6 +13,37 @@ const DEFAULT_COLOR = '#94a3b8';
 // size, so resizing them has no model-space geometry to change.
 const RESIZABLE_KINDS = new Set(['frame', 'shape', 'image']);
 const MIN_SIZE = 40;
+
+// Every `content.shape` variant the contract accepts, as the CSS that draws
+// it. Kept here rather than in the stylesheet so each variant's geometry is
+// one testable value: the rectangle/circle-only rendering this replaces
+// painted triangle, rhombus, hexagon and process arrow as plain rectangles,
+// which no class-name assertion could have caught. Null prototype because the
+// key is an annotation's configured shape name (same reason as
+// annotationIcons.js and the host app's ICON_REGISTRY).
+const SHAPE_STYLES = Object.freeze(
+  Object.assign(Object.create(null), {
+    rectangle: {},
+    circle: { borderRadius: '50%' },
+    triangle: { clipPath: 'polygon(50% 0%, 100% 100%, 0% 100%)' },
+    rhombus: { clipPath: 'polygon(50% 0%, 100% 50%, 50% 100%, 0% 50%)' },
+    hexagon: { clipPath: 'polygon(25% 0%, 75% 0%, 100% 50%, 75% 100%, 25% 100%, 0% 50%)' },
+    process_arrow: {
+      clipPath: 'polygon(0% 25%, 70% 25%, 70% 0%, 100% 50%, 70% 100%, 70% 75%, 0% 75%)',
+    },
+  })
+);
+
+// A clip-path clips the element's outline away too, so the dashed selection
+// outline every other generic kind uses is invisible on a triangle, rhombus,
+// hexagon or process arrow — and a locked one shows no resize handles either,
+// leaving a selected shape with no feedback at all. The halo therefore goes on
+// an unclipped wrapper: an element's own filter is rendered *before* its
+// clip-path, so a drop shadow on the clipped element itself would be clipped
+// away with it.
+const SELECTED_SHAPE_HALO = Object.freeze({
+  filter: 'drop-shadow(0 0 3px rgba(255, 255, 255, 0.9)) drop-shadow(0 0 1px rgba(0, 0, 0, 0.6))',
+});
 
 /**
  * GenericAnnotationNode - a simple visual representation for the v1
@@ -30,6 +63,9 @@ function GenericAnnotationNode({ type, data, selected }) {
   const locked = Boolean(data?.locked);
   const { notifyChange } = useContext(AnnotationContext);
   const selectedClass = selected ? ' selected' : '';
+  // Rotation is applied to the rendered element, not to the ReactFlow node
+  // wrapper, so drag hit-testing keeps using the unrotated bounding box.
+  const rotation = rotationStyle(kind, data?.rotation);
 
   // Locked annotations already refuse to drag (draggable: !locked in
   // overlayToFlowNode); hide the resize handles too so "locked" reads as one
@@ -48,7 +84,10 @@ function GenericAnnotationNode({ type, data, selected }) {
 
   if (kind === 'text') {
     return (
-      <div className={`graph-generic-annotation-node kind-text${selectedClass}`} style={{ color }}>
+      <div
+        className={`graph-generic-annotation-node kind-text${selectedClass}`}
+        style={{ color, ...rotation }}
+      >
         {data.text || ''}
       </div>
     );
@@ -60,7 +99,7 @@ function GenericAnnotationNode({ type, data, selected }) {
         {resizer}
         <div
           className={`graph-generic-annotation-node kind-frame${selectedClass}`}
-          style={{ borderColor: color, width: '100%', height: '100%' }}
+          style={{ borderColor: color, width: '100%', height: '100%', ...rotation }}
         />
       </>
     );
@@ -72,21 +111,45 @@ function GenericAnnotationNode({ type, data, selected }) {
       <>
         {resizer}
         <div
-          className={`graph-generic-annotation-node kind-shape shape-${shape}${selectedClass}`}
-          style={{ backgroundColor: color, width: '100%', height: '100%' }}
-        />
+          className="graph-generic-annotation-shape-halo"
+          data-testid="shape-halo"
+          style={{
+            width: '100%',
+            height: '100%',
+            ...rotation,
+            ...(selected ? SELECTED_SHAPE_HALO : null),
+          }}
+        >
+          <div
+            // No `selected` class: the shared dashed outline it carries is
+            // clipped away on the four clipped variants and would be
+            // inconsistent on the other two, so a selected shape is marked by
+            // the halo above instead — for every variant alike.
+            className={`graph-generic-annotation-node kind-shape shape-${shape}`}
+            style={{
+              backgroundColor: color,
+              width: '100%',
+              height: '100%',
+              ...(SHAPE_STYLES[shape] || SHAPE_STYLES.rectangle),
+            }}
+          />
+        </div>
       </>
     );
   }
 
   if (kind === 'icon') {
+    // An abbreviated name needs the smaller, uppercased treatment the glyphs
+    // do not: two letters at glyph size overflow the badge.
+    const icon = resolveAnnotationIcon(data.icon);
+    const iconClass = icon.isGlyph ? '' : ' kind-icon-abbreviated';
     return (
       <div
-        className={`graph-generic-annotation-node kind-icon${selectedClass}`}
-        style={{ borderColor: color }}
+        className={`graph-generic-annotation-node kind-icon${iconClass}${selectedClass}`}
+        style={{ borderColor: color, ...rotation }}
         title={data.icon}
       >
-        {(data.icon || '?').slice(0, 2)}
+        {icon.text}
       </div>
     );
   }
@@ -95,7 +158,7 @@ function GenericAnnotationNode({ type, data, selected }) {
     return (
       <div
         className={`graph-generic-annotation-node kind-vote_dot${selectedClass}`}
-        style={{ backgroundColor: color }}
+        style={{ backgroundColor: color, ...rotation }}
       >
         {data.value ?? ''}
       </div>
@@ -110,6 +173,7 @@ function GenericAnnotationNode({ type, data, selected }) {
           {resizer}
           <div
             className={`graph-generic-annotation-node kind-image kind-image-empty${selectedClass}`}
+            style={rotation}
           >
             {data.alt || ''}
           </div>
@@ -123,7 +187,7 @@ function GenericAnnotationNode({ type, data, selected }) {
           className={`graph-generic-annotation-node kind-image${selectedClass}`}
           src={url}
           alt={data.alt || ''}
-          style={{ width: '100%', height: '100%' }}
+          style={{ width: '100%', height: '100%', ...rotation }}
         />
       </>
     );

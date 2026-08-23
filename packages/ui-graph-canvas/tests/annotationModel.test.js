@@ -1,9 +1,11 @@
 import { describe, it, expect } from 'vitest';
 import {
   ANNOTATION_SCHEMA_VERSION,
+  ANNOTATION_SHAPES,
   applyAnnotationOperation,
   createAnnotation,
   normalizeAnnotationDocument,
+  normalizeShapeName,
 } from '../src/utils/annotationModel';
 
 describe('annotationModel contract v1', () => {
@@ -224,6 +226,46 @@ describe('annotationModel contract v1', () => {
       { x: 0, y: 0 },
       { x: 10, y: 10 },
     ]);
+  });
+
+  it('keeps every accepted shape variant as its canonical name', () => {
+    for (const shape of ANNOTATION_SHAPES) {
+      expect(createAnnotation({ type: 'shape', shape }).shape).toBe(shape);
+    }
+  });
+
+  it('resolves the spellings of a shape name that mean the same variant', () => {
+    for (const spelling of ['process_arrow', 'process-arrow', 'Process Arrow', 'processArrow']) {
+      expect(normalizeShapeName(spelling)).toBe('process_arrow');
+    }
+    expect(normalizeShapeName(undefined)).toBe('rectangle');
+  });
+
+  it('keeps an unrecognised shape name rather than rewriting it to a rectangle', () => {
+    expect(createAnnotation({ type: 'shape', shape: 'star' }).shape).toBe('star');
+  });
+
+  // Rotation is accepted for text, labels, notes, images, icons, dots and
+  // shapes; it must survive normalization and the transform op the same way
+  // x/y/w/h do, or a rotated annotation snaps back on the next round-trip.
+  it('round-trips rotation through geometry, whether given inline or in geometry', () => {
+    expect(createAnnotation({ type: 'shape', rotation: 45 }).geometry.rotation).toBe(45);
+    expect(
+      createAnnotation({ type: 'shape', geometry: { x: 0, y: 0, rotation: -90 } }).geometry.rotation
+    ).toBe(-90);
+    expect(createAnnotation({ type: 'shape' }).geometry.rotation).toBe(0);
+  });
+
+  it('transforms rotation and inverts back to the previous rotation', () => {
+    const doc = normalizeAnnotationDocument([{ id: 'shape-1', type: 'shape', rotation: 15 }]);
+    const result = applyAnnotationOperation(doc, {
+      type: 'transform',
+      id: 'shape-1',
+      geometry: { rotation: 60 },
+    });
+    expect(result.document.annotations[0].geometry.rotation).toBe(60);
+    const reverted = applyAnnotationOperation(result.document, result.inverse);
+    expect(reverted.document.annotations[0].geometry.rotation).toBe(15);
   });
 
   it('fails invalid operations without mutating the document', () => {

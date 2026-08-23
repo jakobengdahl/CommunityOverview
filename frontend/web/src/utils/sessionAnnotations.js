@@ -81,7 +81,11 @@ export function groupsToAnnotations(viewGroups, parentIds) {
 // note/label/line: text, frame, shape, icon, vote_dot, image. Color lives
 // under style.color (like label), and frame/shape/image size lives in
 // geometry — createAnnotation has no dedicated `size` payload field for
-// these types the way it does for note.
+// these types the way it does for note. `geometry.rotation` is carried on
+// every overlay (not only the kinds that draw it) for the same reason as
+// z/locked: a translator that dropped it would make the browser's next
+// autosave diff the annotation back to rotation 0, silently undoing what an
+// agent or a collaborator had just set.
 const SIZED_GENERIC_TYPES = new Set(['frame', 'shape', 'image']);
 const GENERIC_OVERLAY_TYPES = new Set(['text', 'frame', 'shape', 'icon', 'vote_dot', 'image']);
 
@@ -93,6 +97,7 @@ function genericAnnotationToOverlay(a) {
     color: a.style?.color,
     z: a.z ?? 0,
     locked: Boolean(a.locked),
+    rotation: a.geometry?.rotation ?? 0,
   };
   if (a.type === 'text') {
     overlay.text = a.text || '';
@@ -120,6 +125,7 @@ function genericOverlayToAnnotation(o) {
     position: o.position || { x: 0, y: 0 },
     z: o.z ?? 0,
     locked: Boolean(o.locked),
+    rotation: o.rotation ?? 0,
   };
   input.style = o.kind === 'text' ? { color: o.color, fontSize: o.fontSize } : { color: o.color };
   if (o.kind === 'text') input.text = o.text || '';
@@ -159,6 +165,7 @@ function freehandAnnotationToOverlay(a) {
     pressureSource: a.pressureSource,
     z: a.z ?? 0,
     locked: Boolean(a.locked),
+    rotation: a.geometry?.rotation ?? 0,
   };
 }
 
@@ -182,6 +189,7 @@ function freehandOverlayToAnnotation(o) {
     pressureSource: o.pressureSource,
     z: o.z ?? 0,
     locked: Boolean(o.locked),
+    rotation: o.rotation ?? 0,
   });
 }
 
@@ -204,6 +212,7 @@ export function annotationsToOverlays(annotations) {
         size: a.size,
         z: a.z ?? 0,
         locked: Boolean(a.locked),
+        rotation: a.geometry?.rotation ?? 0,
       });
     } else if (a?.type === 'label') {
       out.push({
@@ -215,6 +224,7 @@ export function annotationsToOverlays(annotations) {
         fontSize: a.style?.fontSize,
         z: a.z ?? 0,
         locked: Boolean(a.locked),
+        rotation: a.geometry?.rotation ?? 0,
       });
     } else if (a?.type === 'line') {
       const from = a.from || a.position || { x: 0, y: 0 };
@@ -230,6 +240,7 @@ export function annotationsToOverlays(annotations) {
         endArrow: a.endArrow ?? true,
         z: a.z ?? 0,
         locked: Boolean(a.locked),
+        rotation: a.geometry?.rotation ?? 0,
       };
       if (a.startAnchor) overlay.startAnchor = a.startAnchor;
       if (a.endAnchor) overlay.endAnchor = a.endAnchor;
@@ -256,6 +267,7 @@ export function overlaysToAnnotations(overlays) {
         size: o.size,
         z: o.z ?? 0,
         locked: Boolean(o.locked),
+        rotation: o.rotation ?? 0,
       });
     }
     if (o.kind === 'label') {
@@ -267,6 +279,7 @@ export function overlaysToAnnotations(overlays) {
         style: { color: o.color, fontSize: o.fontSize },
         z: o.z ?? 0,
         locked: Boolean(o.locked),
+        rotation: o.rotation ?? 0,
       });
     }
     if (o.kind === 'freehand') {
@@ -290,6 +303,7 @@ export function overlaysToAnnotations(overlays) {
       endArrow: o.endArrow ?? true,
       z: o.z ?? 0,
       locked: Boolean(o.locked),
+      rotation: o.rotation ?? 0,
     };
     if (o.startAnchor) ann.startAnchor = o.startAnchor;
     if (o.endAnchor) ann.endAnchor = o.endAnchor;

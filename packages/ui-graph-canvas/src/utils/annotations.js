@@ -56,6 +56,39 @@ const GENERIC_OVERLAY_FIELDS = {
 // icon/vote_dot/text render at a fixed intrinsic size instead.
 const SIZED_GENERIC_KINDS = new Set(['frame', 'shape', 'image']);
 
+// The kinds that draw geometry.rotation. The capability baseline names
+// text/headings, labels/callouts, sticky notes, images, icons/dots and basic
+// shapes (process arrow included, as a shape variant); `frame` is drawn too,
+// because the MCP tools accept a rotation for every generic type they take,
+// with no per-type validation, and a frame is one box like a shape — silently
+// discarding a rotation the server stored and reports back is worse than
+// honouring it.
+//
+// `line` and `freehand` are the real exclusions: their geometry lives in
+// endpoints and sampled points rather than in a box, so rotation there is a
+// tracked gap in the acceptance matrix, not a decision this file makes.
+// `group` never reaches this translation layer at all.
+export const ROTATABLE_OVERLAY_KINDS = new Set([
+  'note',
+  'label',
+  'text',
+  'shape',
+  'icon',
+  'vote_dot',
+  'image',
+  'frame',
+]);
+
+// Inline style that draws an annotation's geometry.rotation, or an empty
+// style when this kind is not rotatable or has no rotation. Applied to the
+// rendered element rather than to the ReactFlow node wrapper, so drag and
+// resize keep working against the unrotated bounding box.
+export function rotationStyle(kind, rotation) {
+  if (!ROTATABLE_OVERLAY_KINDS.has(kind)) return {};
+  if (!Number.isFinite(rotation) || rotation === 0) return {};
+  return { transform: `rotate(${rotation}deg)`, transformOrigin: 'center center' };
+}
+
 // Default text sizes (px) for note body and label text; overridable per node.
 export const DEFAULT_NOTE_FONT_SIZE = 14;
 export const DEFAULT_LABEL_FONT_SIZE = 16;
@@ -87,10 +120,20 @@ export function overlayToFlowNode(overlay) {
   // to their defaults, overwriting the very change realtime sync just delivered.
   const locked = Boolean(overlay.locked);
   const zIndex = overlay.z ?? 0;
+  // Rotation is an envelope field for the same reason as z/locked: a flow node
+  // that dropped it would diff back out on the next autosave as a rotation
+  // reset, silently overwriting whatever an agent or collaborator had set.
+  const rotation = overlay.rotation ?? 0;
   if (overlay.kind === 'note') {
     return {
       ...base,
-      data: { text: overlay.text || '', color: overlay.color, fontSize: overlay.fontSize, locked },
+      data: {
+        text: overlay.text || '',
+        color: overlay.color,
+        fontSize: overlay.fontSize,
+        locked,
+        rotation,
+      },
       style: overlay.size
         ? { width: overlay.size.w, height: overlay.size.h }
         : { width: 200, height: 140 },
@@ -101,13 +144,19 @@ export function overlayToFlowNode(overlay) {
   if (overlay.kind === 'label') {
     return {
       ...base,
-      data: { text: overlay.text || '', color: overlay.color, fontSize: overlay.fontSize, locked },
+      data: {
+        text: overlay.text || '',
+        color: overlay.color,
+        fontSize: overlay.fontSize,
+        locked,
+        rotation,
+      },
       draggable: !locked,
       zIndex,
     };
   }
   if (GENERIC_OVERLAY_TYPES.has(overlay.kind)) {
-    const data = { locked };
+    const data = { locked, rotation };
     for (const field of GENERIC_OVERLAY_FIELDS[overlay.kind]) data[field] = overlay[field];
     const node = { ...base, data, draggable: !locked, zIndex };
     if (SIZED_GENERIC_KINDS.has(overlay.kind)) {
@@ -125,6 +174,7 @@ export function overlayToFlowNode(overlay) {
     startArrow: overlay.startArrow ?? false,
     endArrow: overlay.endArrow ?? true,
     locked,
+    rotation,
   };
   if (overlay.startAnchor) data.startAnchor = overlay.startAnchor;
   if (overlay.endAnchor) data.endAnchor = overlay.endAnchor;
@@ -139,6 +189,7 @@ export function flowNodeToOverlay(node) {
   // on a freshly created node (never synced yet), hence the defaults below.
   const z = node.zIndex ?? 0;
   const locked = Boolean(node.data?.locked);
+  const rotation = node.data?.rotation ?? 0;
   if (node.type === 'note') {
     return {
       ...base,
@@ -148,6 +199,7 @@ export function flowNodeToOverlay(node) {
       size: node.style ? { w: node.style.width, h: node.style.height } : undefined,
       z,
       locked,
+      rotation,
     };
   }
   if (node.type === 'label') {
@@ -158,10 +210,11 @@ export function flowNodeToOverlay(node) {
       fontSize: node.data?.fontSize,
       z,
       locked,
+      rotation,
     };
   }
   if (GENERIC_OVERLAY_TYPES.has(node.type)) {
-    const out = { ...base, z, locked };
+    const out = { ...base, z, locked, rotation };
     for (const field of GENERIC_OVERLAY_FIELDS[node.type]) out[field] = node.data?.[field];
     if (SIZED_GENERIC_KINDS.has(node.type) && node.style) {
       out.size = { w: node.style.width, h: node.style.height };
@@ -177,6 +230,7 @@ export function flowNodeToOverlay(node) {
     endArrow: node.data?.endArrow ?? true,
     z,
     locked,
+    rotation,
   };
   if (node.data?.startAnchor) out.startAnchor = node.data.startAnchor;
   if (node.data?.endAnchor) out.endAnchor = node.data.endAnchor;

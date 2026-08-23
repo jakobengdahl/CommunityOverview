@@ -371,7 +371,11 @@
     "label": "Etikett",
     "frame": "Ram",
     "shape_rectangle": "Rektangel",
-    "shape_circle": "Cirkel"
+    "shape_circle": "Cirkel",
+    "shape_triangle": "Triangel",
+    "shape_rhombus": "Romb",
+    "shape_hexagon": "Hexagon",
+    "shape_process_arrow": "Processpil"
   },
   "common": {
     "saving": "Sparar...",

@@ -2,7 +2,7 @@ import { memo, useState, useRef, useEffect, useContext } from 'react';
 import { createPortal } from 'react-dom';
 import { NodeResizer, useReactFlow } from 'reactflow';
 import { AnnotationContext } from './AnnotationContext';
-import { DEFAULT_NOTE_FONT_SIZE } from '../utils/annotations';
+import { DEFAULT_NOTE_FONT_SIZE, rotationStyle } from '../utils/annotations';
 import './NoteNode.css';
 
 /**
@@ -106,7 +106,7 @@ function NoteNode({ id, data, selected }) {
       />
       <div
         className="graph-note-node"
-        style={{ backgroundColor: color }}
+        style={{ backgroundColor: color, ...rotationStyle('note', data.rotation) }}
         onDoubleClick={(e) => {
           e.stopPropagation();
           setIsEditing(true);

@@ -2,7 +2,7 @@ import { memo, useState, useRef, useEffect, useContext } from 'react';
 import { createPortal } from 'react-dom';
 import { useReactFlow } from 'reactflow';
 import { AnnotationContext } from './AnnotationContext';
-import { DEFAULT_LABEL_FONT_SIZE } from '../utils/annotations';
+import { DEFAULT_LABEL_FONT_SIZE, rotationStyle } from '../utils/annotations';
 import './LabelNode.css';
 
 /**
@@ -100,7 +100,7 @@ function LabelNode({ id, data, selected }) {
     <>
       <div
         className={`graph-label-node${selected ? ' selected' : ''}`}
-        style={{ color, fontSize }}
+        style={{ color, fontSize, ...rotationStyle('label', data.rotation) }}
         onDoubleClick={(e) => {
           e.stopPropagation();
           setIsEditing(true);
