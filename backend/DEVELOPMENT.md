@@ -1005,7 +1005,8 @@ an id that names a different annotation type (e.g. a `line`) reports
 `delete_annotation` / `reorder_annotation` / `set_annotation_lock` /
 `duplicate_annotation` extend MCP annotation access to the rest of the v1
 model: `text`, `label`, `line` (`arrow` accepted as a legacy alias), `frame`,
-`shape`, `icon`, `vote_dot`, `image`. They share the sticky-note tools'
+`shape`, `icon`, `vote_dot` — plus `image`, for everything except creating
+one (see the image annotation tool below). They share the sticky-note tools'
 session/revision contract — model-space coordinates, `revision` /
 `expected_revision` optimistic concurrency, `revision_conflict` on a stale
 write — over the same annotation document.
@@ -1058,11 +1059,20 @@ Once created, an image annotation is an ordinary generic annotation:
 `set_annotation_lock` and `duplicate_annotation` all act on it like any other
 type, since none of them touch the embedded bytes.
 
-`create_annotation` still accepts `type="image"` for building a bare envelope
-(as it does for every generic type) but does not run the ingest pipeline —
-a `content.image.url` supplied that way is stored verbatim, unvalidated and
-not necessarily embedded. Use `create_image_annotation` whenever the image
-itself (not just the envelope) needs to be created.
+`create_image_annotation` is the **only** way an image annotation's pixel
+content is set. `create_annotation` refuses `type="image"` (`invalid_type`)
+and `update_annotation` refuses a `content` carrying an `image` key
+(`invalid_content`), so neither can store an image reference that skipped
+ingest; replacing the picture of an existing image annotation means calling
+`create_image_annotation` again with the same `annotation_id`. Below both
+tools, `SessionStore` rejects any `annotation_created`/`annotation_updated`
+op — including one posted straight to `/api/sessions/{id}/ops` — whose
+`image` payload is not an embedded `data:image/png|jpeg|webp;base64` URI, so
+the rule holds for every write path rather than tool by tool. This is
+docs/ANNOTATION_CONTRACT.md's "Image ingest enforcement" requirement: an
+annotation must never depend on a remote resource staying reachable to keep
+rendering, and a caller-supplied URL must never be fetched or trusted on
+someone else's behalf.
 
 ### UI Backend Endpoints
 

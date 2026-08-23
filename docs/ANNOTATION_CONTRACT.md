@@ -215,14 +215,22 @@ Required for every path that can set an `image` annotation's pixel content:
   point (paste, upload, MCP data, MCP URL import) — an annotation must not
   depend on a remote resource staying reachable to keep rendering.
 
-**Current gap:** the dedicated `create_image_annotation` MCP tool enforces
-this correctly. The generic `create_annotation`/`update_annotation` tools
-still accept `type="image"` for building a bare envelope and, per
-`backend/DEVELOPMENT.md`'s "Image annotation tool" section, store a
-supplied `content.image.url` verbatim — unvalidated and not necessarily
-embedded. That bare-envelope path contradicts the rule above and is an open
-gap, not an accepted second way to set image content; see the acceptance
-matrix `image` row.
+**Enforcement:** `create_image_annotation` ingests the image and is the only
+tool that sets pixel content. `create_annotation` refuses `type="image"` and
+`update_annotation` refuses a `content` carrying an `image` key, so the
+generic envelope can no longer store a supplied `content.image.url`
+verbatim. Underneath both, `SessionStore._validate_annotation`
+(`image_annotation_error` in `backend/core/session_annotations.py`) rejects
+any `annotation_created`/`annotation_updated` op whose `image` payload is
+not an embedded `data:image/png|jpeg|webp;base64` URI — so a raw op posted
+to `/api/sessions/{id}/ops` is held to the same rule as an MCP call, and a
+move/resize/alt-text patch (which carries no changed `image` payload) is
+unaffected. What the store cannot tell apart is *which* embedded bytes were
+produced by ingest: a client that forges a small data URI of its own still
+persists a self-supplied picture (bounded by the generic op-batch cap, and
+by the same-origin session it is writing to). No GUI creates one today —
+the `image` GUI cell below is still ❌ — and no path fetches, embeds or
+re-serves a remote resource, which is the property this section requires.
 
 ## Persistence
 
@@ -262,8 +270,12 @@ than applied. See `backend/DEVELOPMENT.md`'s "Generic annotation tools"
 section for the full contract, including the per-type `content` payload
 shape.
 
-`image` additionally gets its own dedicated creation tool,
-`create_image_annotation`: rather than taking a `content` payload directly,
+`image` is created through its own dedicated tool instead —
+`create_image_annotation`, the only tool that sets image pixel content
+(`create_annotation` refuses `type="image"`, and `update_annotation` refuses
+a `content` carrying an `image` key; every other operation on an existing
+image annotation stays on the generic tool set). Rather than taking a
+`content` payload directly,
 it takes the image itself (`image_data` or `image_url`), ingests it
 server-side (`backend/core/image_ingest.py`: format/size validation,
 downscaling, re-encoding as WebP) and stores the result as an embedded
@@ -332,7 +344,7 @@ rule](#downstream-closure-rule).
 | `shape` | ⚠ toolbox create (rectangle/circle only), no subtype picker for the rest | ✅ generic tool set (`content.shape`) | ✅ | ✅ | ✅ | ⬜ |
 | `icon` | ❌ render/move only, no create UI or icon picker | ✅ generic tool set | ✅ | ✅ | ✅ | ⬜ |
 | `vote_dot` | ❌ render/move only, no create UI or color picker | ✅ generic tool set | ✅ | ✅ | ✅ | ⬜ |
-| `image` | ❌ no paste/upload UI | ⚠ `create_image_annotation` enforces ingest; generic tool's bare envelope does not ([gap](#image-ingest-enforcement)) | ✅ | ✅ | ✅ | ⬜ |
+| `image` | ❌ no paste/upload UI | ✅ `create_image_annotation` ingests; generic create/update refuse image content, and the store rejects any non-embedded image URL on every write path ([enforcement](#image-ingest-enforcement)) | ✅ | ✅ | ✅ | ⬜ |
 | `freehand` | ❌ no create UI (stylus input not wired) | ❌ no MCP tool | ✅ document model round-trips it | ⚠ no creation path to exercise it live | ✅ `translate_freehand_points` covers move/undo | ❌ no physical stylus/touch pass |
 | cross-type | — | — | — | ⚠ ops publish immediately, but the 300 ms text debounce and release-time-only geometry are not split out from the general autosave debounce, and edit leases are advisory/LWW with a 30 s TTL rather than exclusive ([gap](#operation-timing-and-leases)) | ✅ actor-scoped conditional undo (`session_activity.py`) | — |
 

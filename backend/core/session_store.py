@@ -43,6 +43,7 @@ from .session_activity import (
     prune_activity_log,
     undo_conflict_reason as _undo_conflict_reason,
 )
+from .session_annotations import image_annotation_error
 
 # Session IDs use the grouped-digit shape DDDD-DDDD-DDDD-DDDD (four groups,
 # ~10^16 address space) so an unauthenticated caller cannot feasibly enumerate
@@ -343,6 +344,14 @@ def _validate_annotation(value: Any, *, require_id: bool) -> Dict[str, Any]:
         raise OpError("annotation update/delete requires a string 'id'")
     if "position" in annotation and annotation["position"] is not None:
         _validate_position(annotation["position"])
+    # Every write of an `image` annotation's pixel content lands here — MCP's
+    # generic create/update tools, a browser's `annotation_created` op batch,
+    # a replayed inverse op — so this is where the contract's ingest rule is
+    # enforced, rather than once per entry point (which is how the generic
+    # tools came to bypass the hardened ingest path in the first place).
+    image_error = image_annotation_error(annotation)
+    if image_error:
+        raise OpError(image_error)
     return annotation
 
 

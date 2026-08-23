@@ -469,3 +469,96 @@ class TestCreateImageAnnotationAuthorization:
         assert result["success"] is False
         assert result.get("error_code") == "access_denied"
         assert session.state["annotations"] == []
+
+
+class TestImageIngestIsTheOnlyWayIn:
+    """docs/ANNOTATION_CONTRACT.md "Image ingest enforcement": no MCP tool may
+    persist an image annotation whose pixel content skipped this tool's
+    validated ingest. The generic envelope used to accept `type="image"` with
+    an arbitrary `content.image.url` — the bypass these tests cover."""
+
+    def test_generic_create_refuses_image_type(self, image_tools):
+        tools_map, manager = image_tools
+        session = manager.create_session()
+
+        result = tools_map["create_annotation"](
+            session_id=session.id,
+            type="image",
+            x=0,
+            y=0,
+            content={"image": {"url": "https://example.com/logo.png"}},
+        )
+
+        assert result["success"] is False
+        assert result["error"] == "invalid_type"
+        assert "create_image_annotation" in result["message"]
+        assert session.state["annotations"] == []
+
+    def test_generic_create_refuses_bare_image_envelope(self, image_tools):
+        tools_map, manager = image_tools
+        session = manager.create_session()
+
+        result = tools_map["create_annotation"](
+            session_id=session.id, type="image", x=0, y=0
+        )
+
+        assert result["success"] is False
+        assert result["error"] == "invalid_type"
+        assert session.state["annotations"] == []
+
+    def test_generic_update_cannot_replace_the_embedded_image(self, image_tools):
+        tools_map, manager = image_tools
+        session = manager.create_session()
+        created = tools_map["create_image_annotation"](
+            session_id=session.id, x=0, y=0, image_data=_png_data_url()
+        )
+        embedded_url = created["annotation"]["content"]["image"]["url"]
+
+        result = tools_map["update_annotation"](
+            session_id=session.id,
+            annotation_id=created["annotation"]["id"],
+            content={"image": {"url": "https://example.com/logo.png"}},
+        )
+
+        assert result["success"] is False
+        assert result["error"] == "invalid_content"
+        assert session.state["annotations"][0]["image"]["url"] == embedded_url
+
+    def test_generic_update_still_edits_other_fields_of_an_image(self, image_tools):
+        tools_map, manager = image_tools
+        session = manager.create_session()
+        created = tools_map["create_image_annotation"](
+            session_id=session.id, x=0, y=0, image_data=_png_data_url()
+        )
+        embedded_url = created["annotation"]["content"]["image"]["url"]
+
+        result = tools_map["update_annotation"](
+            session_id=session.id,
+            annotation_id=created["annotation"]["id"],
+            x=25,
+            y=35,
+            content={"alt": "a red square"},
+        )
+
+        assert result["success"] is True
+        assert result["annotation"]["x"] == 25
+        assert result["annotation"]["content"]["alt"] == "a red square"
+        assert result["annotation"]["content"]["image"]["url"] == embedded_url
+
+    def test_duplicating_an_image_keeps_the_embedded_copy(self, image_tools):
+        tools_map, manager = image_tools
+        session = manager.create_session()
+        created = tools_map["create_image_annotation"](
+            session_id=session.id, x=0, y=0, image_data=_png_data_url()
+        )
+        embedded_url = created["annotation"]["content"]["image"]["url"]
+
+        result = tools_map["duplicate_annotation"](
+            session_id=session.id,
+            annotation_id=created["annotation"]["id"],
+            dx=20,
+            dy=0,
+        )
+
+        assert result["success"] is True
+        assert result["annotation"]["content"]["image"]["url"] == embedded_url
