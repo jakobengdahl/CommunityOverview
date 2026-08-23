@@ -121,15 +121,15 @@ function GenericAnnotationNode({ type, data, selected }) {
           }}
         >
           <div
-            // No `selected` class: the shared dashed outline it carries would
-            // be clipped away anyway, and the inline `outline: none` below
-            // would override it. A selected shape is marked by the halo above.
+            // No `selected` class: the shared dashed outline it carries is
+            // clipped away on the four clipped variants and would be
+            // inconsistent on the other two, so a selected shape is marked by
+            // the halo above instead — for every variant alike.
             className={`graph-generic-annotation-node kind-shape shape-${shape}`}
             style={{
               backgroundColor: color,
               width: '100%',
               height: '100%',
-              outline: 'none',
               ...(SHAPE_STYLES[shape] || SHAPE_STYLES.rectangle),
             }}
           />

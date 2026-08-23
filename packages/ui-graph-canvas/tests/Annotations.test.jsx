@@ -49,8 +49,10 @@ describe('NoteNode', () => {
     expect(screen.getByText('Hello')).toBeInTheDocument();
   });
 
-  // Sticky notes and labels are the two rotatable kinds a human can actually
-  // create today, so they are the two whose rotation matters most in practice.
+  // Notes and labels render through their own components rather than
+  // GenericAnnotationNode, so their rotation is wired separately and needs its
+  // own coverage - both are toolbox-creatable, so a rotation set on one over
+  // MCP is something a user meets on an object they made themselves.
   it('draws a rotation on the note body', () => {
     const { container } = renderWithContext(
       <NoteNode id="note-1" data={{ text: 'x', rotation: 30 }} selected={false} />

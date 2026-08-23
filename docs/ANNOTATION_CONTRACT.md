@@ -327,9 +327,9 @@ rotatable and resizable — `note`, `frame`, `shape` and `image` — that has a
 visible cost, not just a benign one: the `NodeResizer` outline and handles are
 drawn axis-aligned around the unrotated box, so on a rotated annotation they
 sit visibly askew from the object and a handle drag grows the box along the
-unrotated axes. A rotated sticky note is the likeliest place to meet this,
-since `note` is the one rotatable kind a human can create today.
-Rotation-aware resize handles are an open gap. The capability
+unrotated axes. Three of those four — `note`, `frame` and `shape` — are
+creatable straight from the toolbox, so this is reachable without an agent
+ever being involved. Rotation-aware resize handles are an open gap. The capability
 baseline requires it for text/headings, labels/callouts, sticky notes,
 images, icons/dots and basic shapes including the process arrow; `frame` is
 drawn too, because `create_annotation`/`update_annotation` accept `rotation`
