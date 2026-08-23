@@ -322,12 +322,14 @@ matrix](#acceptance-matrix)'s `icon` row.
 
 `geometry.rotation` is drawn as a transform on the rendered element rather
 than on the ReactFlow node wrapper, so hit-testing, dragging and resizing keep
-operating on the unrotated bounding box. For the resizable kinds
-(`frame`/`shape`/`image`) that has a visible cost, not just a benign one: the
-`NodeResizer` outline and handles are drawn axis-aligned around the unrotated
-box, so on a rotated annotation they sit visibly askew from the shape and a
-handle drag grows the box along the unrotated axes. Rotation-aware resize
-handles are an open gap. The capability
+operating on the unrotated bounding box. For the four kinds that are both
+rotatable and resizable — `note`, `frame`, `shape` and `image` — that has a
+visible cost, not just a benign one: the `NodeResizer` outline and handles are
+drawn axis-aligned around the unrotated box, so on a rotated annotation they
+sit visibly askew from the object and a handle drag grows the box along the
+unrotated axes. A rotated sticky note is the likeliest place to meet this,
+since `note` is the one rotatable kind a human can create today.
+Rotation-aware resize handles are an open gap. The capability
 baseline requires it for text/headings, labels/callouts, sticky notes,
 images, icons/dots and basic shapes including the process arrow; `frame` is
 drawn too, because `create_annotation`/`update_annotation` accept `rotation`
