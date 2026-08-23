@@ -32,23 +32,13 @@ export {
 // Annotation model utilities
 export {
   ANNOTATION_SCHEMA_VERSION,
-  ANNOTATION_SHAPES,
   ANNOTATION_TYPES,
   applyAnnotationOperation,
   createAnnotation,
   createAnnotationDocument,
   migrateLegacyAnnotations,
   normalizeAnnotationDocument,
-  normalizeShapeName,
 } from './utils/annotationModel';
-
-// Annotation icon set (the glyphs an `icon` annotation's configured name
-// resolves to)
-export {
-  ANNOTATION_ICONS,
-  DEFAULT_ANNOTATION_ICON,
-  annotationIconGlyph,
-} from './utils/annotationIcons';
 
 // Freehand annotation utilities
 export { reduceFreehandPoints, pointsToPathData, buildFreehandPath } from './utils/freehandPath';

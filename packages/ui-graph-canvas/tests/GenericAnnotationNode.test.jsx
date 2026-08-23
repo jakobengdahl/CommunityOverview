@@ -145,13 +145,24 @@ describe('GenericAnnotationNode', () => {
     expect(badge.className).toContain('kind-icon-abbreviated');
   });
 
-  it('draws unmapped names distinguishably from each other, not as one dot', () => {
+  // Not a claim that unmapped names are all distinct - abbreviating the host
+  // registry's 64 unmapped names yields only 36 distinct marks (FileEarmark*
+  // all draw "Fi", List* all draw "Li"). The property is narrower: three names
+  // a single default glyph would have merged stay apart.
+  it('keeps unmapped names apart that one default glyph would have merged', () => {
     const names = ['DatabaseFill', 'GearFill', 'PeopleFill'];
     const drawn = names.map((icon) => {
       render(<GenericAnnotationNode type="icon" data={{ icon }} />);
       return screen.getByTitle(icon).textContent;
     });
     expect(new Set(drawn).size).toBe(names.length);
+  });
+
+  it('abbreviates two names sharing their first two characters to the same mark', () => {
+    for (const icon of ['Diagram2Fill', 'Diagram3Fill']) {
+      render(<GenericAnnotationNode type="icon" data={{ icon }} />);
+      expect(screen.getByTitle(icon).textContent).toBe('Di');
+    }
   });
 
   it('does not mark a real glyph as an abbreviation', () => {

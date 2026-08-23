@@ -105,9 +105,3 @@ export function resolveAnnotationIcon(name) {
   if (trimmed) return { text: trimmed.slice(0, 2), isGlyph: false };
   return { text: ANNOTATION_ICONS[DEFAULT_ANNOTATION_ICON], isGlyph: true };
 }
-
-// The text drawn for a configured icon name: its glyph when the set has one,
-// otherwise the name's abbreviation. See resolveAnnotationIcon.
-export function annotationIconGlyph(name) {
-  return resolveAnnotationIcon(name).text;
-}

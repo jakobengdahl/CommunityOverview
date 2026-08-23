@@ -313,12 +313,21 @@ same vocabulary `schema_config.json`'s `icon` field uses), plus everyday
 synonyms. A name the set does not cover keeps the two-character abbreviation
 of the name that the canvas drew before the set existed, rather than
 collapsing into one neutral marker — so no configured name became less
-distinguishable than it was, but most names are still an abbreviation and not
-their icon. Covering the whole registry is an open gap, tracked in the
-[acceptance matrix](#acceptance-matrix)'s `icon` row.
+distinguishable than it was. That is a floor, not a good outcome: most names
+are still an abbreviation and not their icon, and abbreviations collide (the
+registry's 64 uncovered names draw only 36 distinct marks — every
+`FileEarmark*` name draws `Fi`, every `List*` name draws `Li`). Covering the
+whole registry is an open gap, tracked in the [acceptance
+matrix](#acceptance-matrix)'s `icon` row.
 
-`geometry.rotation` is drawn as a transform on the rendered element, so drag
-and resize keep working against the unrotated bounding box. The capability
+`geometry.rotation` is drawn as a transform on the rendered element rather
+than on the ReactFlow node wrapper, so hit-testing, dragging and resizing keep
+operating on the unrotated bounding box. For the resizable kinds
+(`frame`/`shape`/`image`) that has a visible cost, not just a benign one: the
+`NodeResizer` outline and handles are drawn axis-aligned around the unrotated
+box, so on a rotated annotation they sit visibly askew from the shape and a
+handle drag grows the box along the unrotated axes. Rotation-aware resize
+handles are an open gap. The capability
 baseline requires it for text/headings, labels/callouts, sticky notes,
 images, icons/dots and basic shapes including the process arrow; `frame` is
 drawn too, because `create_annotation`/`update_annotation` accept `rotation`
@@ -370,7 +379,7 @@ rule](#downstream-closure-rule).
 | `frame` | ⚠ toolbox create (fixed default size), no color editor | ✅ generic tool set | ✅ | ✅ | ✅ | ⬜ |
 | `group` | ✅ toolbar create-group action | ❌ no MCP tool (by design — `group_membership_changed` op only) | ✅ | ✅ | ✅ | ⬜ |
 | `shape` | ⚠ toolbox creates all six variants, each drawn distinctly; no editor to change an existing shape's subtype | ✅ generic tool set (`content.shape`) | ✅ | ✅ | ✅ | ⬜ |
-| `icon` | ❌ move only — no create UI or icon picker; renders the 11 icon names the canvas set shares with the host registry as glyphs, the other 64 as a two-character abbreviation of the name | ✅ generic tool set | ✅ | ✅ | ✅ | ⬜ |
+| `icon` | ❌ move only — no create UI or icon picker; renders the 11 icon names the canvas set shares with the host registry as glyphs, the other 64 as a two-character abbreviation of the name (which collides: 64 names, 36 distinct marks) | ✅ generic tool set | ✅ | ✅ | ✅ | ⬜ |
 | `vote_dot` | ❌ render/move only, no create UI or color picker | ✅ generic tool set | ✅ | ✅ | ✅ | ⬜ |
 | `image` | ❌ no paste/upload UI | ⚠ `create_image_annotation` enforces ingest; generic tool's bare envelope does not ([gap](#image-ingest-enforcement)) | ✅ | ✅ | ✅ | ⬜ |
 | `freehand` | ❌ no create UI (stylus input not wired); a `rotation` on the document model is never drawn | ❌ no MCP tool | ✅ document model round-trips it | ⚠ no creation path to exercise it live | ✅ `translate_freehand_points` covers move/undo | ❌ no physical stylus/touch pass |
