@@ -18,16 +18,30 @@ const MIN_SIZE = 40;
 // it. Kept here rather than in the stylesheet so each variant's geometry is
 // one testable value: the rectangle/circle-only rendering this replaces
 // painted triangle, rhombus, hexagon and process arrow as plain rectangles,
-// which no class-name assertion could have caught.
-const SHAPE_STYLES = Object.freeze({
-  rectangle: {},
-  circle: { borderRadius: '50%' },
-  triangle: { clipPath: 'polygon(50% 0%, 100% 100%, 0% 100%)' },
-  rhombus: { clipPath: 'polygon(50% 0%, 100% 50%, 50% 100%, 0% 50%)' },
-  hexagon: { clipPath: 'polygon(25% 0%, 75% 0%, 100% 50%, 75% 100%, 25% 100%, 0% 50%)' },
-  process_arrow: {
-    clipPath: 'polygon(0% 25%, 70% 25%, 70% 0%, 100% 50%, 70% 100%, 70% 75%, 0% 75%)',
-  },
+// which no class-name assertion could have caught. Null prototype because the
+// key is an annotation's configured shape name (same reason as
+// annotationIcons.js and the host app's ICON_REGISTRY).
+const SHAPE_STYLES = Object.freeze(
+  Object.assign(Object.create(null), {
+    rectangle: {},
+    circle: { borderRadius: '50%' },
+    triangle: { clipPath: 'polygon(50% 0%, 100% 100%, 0% 100%)' },
+    rhombus: { clipPath: 'polygon(50% 0%, 100% 50%, 50% 100%, 0% 50%)' },
+    hexagon: { clipPath: 'polygon(25% 0%, 75% 0%, 100% 50%, 75% 100%, 25% 100%, 0% 50%)' },
+    process_arrow: {
+      clipPath: 'polygon(0% 25%, 70% 25%, 70% 0%, 100% 50%, 70% 100%, 70% 75%, 0% 75%)',
+    },
+  })
+);
+
+// A clip-path clips the element's outline away too, so the dashed selection
+// outline every other generic kind uses is invisible on a triangle, rhombus,
+// hexagon or process arrow — and a locked one shows no resize handles either,
+// leaving a selected shape with no feedback at all. A filter is applied after
+// clipping, so a drop shadow traces the clipped silhouette instead.
+const SELECTED_SHAPE_STYLE = Object.freeze({
+  outline: 'none',
+  filter: 'drop-shadow(0 0 3px rgba(255, 255, 255, 0.9)) drop-shadow(0 0 1px rgba(0, 0, 0, 0.6))',
 });
 
 /**
@@ -103,6 +117,7 @@ function GenericAnnotationNode({ type, data, selected }) {
             height: '100%',
             ...(SHAPE_STYLES[shape] || SHAPE_STYLES.rectangle),
             ...rotation,
+            ...(selected ? SELECTED_SHAPE_STYLE : null),
           }}
         />
       </>

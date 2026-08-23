@@ -16,27 +16,34 @@
 // read as a rendering error rather than as an unconfigured icon.
 export const DEFAULT_ANNOTATION_ICON = 'circle';
 
-export const ANNOTATION_ICONS = Object.freeze({
-  circle: '●',
-  flag: '⚑',
-  star: '★',
-  check: '✔',
-  cross: '✖',
-  warning: '⚠',
-  question: '❓',
-  info: 'ℹ',
-  lightbulb: '\u{1F4A1}',
-  pin: '\u{1F4CC}',
-  heart: '❤',
-  bell: '\u{1F514}',
-  target: '\u{1F3AF}',
-  lock: '\u{1F512}',
-  eye: '\u{1F441}',
-});
+// Null prototype for the same reason the host app's ICON_REGISTRY uses one
+// (FloatingToolbar.jsx): the key comes from an annotation's configured icon
+// name, and a plain object literal would resolve "constructor" or "toString"
+// to an inherited member instead of falling back to the default glyph.
+export const ANNOTATION_ICONS = Object.freeze(
+  Object.assign(Object.create(null), {
+    circle: '●',
+    flag: '⚑',
+    star: '★',
+    check: '✔',
+    cross: '✖',
+    warning: '⚠',
+    question: '❓',
+    info: 'ℹ',
+    lightbulb: '\u{1F4A1}',
+    pin: '\u{1F4CC}',
+    heart: '❤',
+    bell: '\u{1F514}',
+    target: '\u{1F3AF}',
+    lock: '\u{1F512}',
+    eye: '\u{1F441}',
+  })
+);
 
 // Alternative names resolving to the same icon: the host registry's
 // Bootstrap-icon names, plus the everyday synonyms an agent is likely to send.
-const ICON_ALIASES = Object.freeze({
+// Null prototype for the same reason as ANNOTATION_ICONS above.
+const ICON_ALIASES = Object.assign(Object.create(null), {
   circle_fill: 'circle',
   dot: 'circle',
   flag_fill: 'flag',

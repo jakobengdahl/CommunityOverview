@@ -71,6 +71,37 @@ describe('GenericAnnotationNode', () => {
     expect(el.style.borderRadius).toBe('');
   });
 
+  // The shape name comes from an annotation's content, so a name that collides
+  // with an inherited Object member must not resolve to that member.
+  it('falls back to the rectangle geometry for a shape name from Object.prototype', () => {
+    const { container } = render(
+      <GenericAnnotationNode type="shape" data={{ shape: 'constructor' }} />
+    );
+    const el = container.querySelector('.shape-constructor');
+    expect(el.style.clipPath).toBe('');
+    expect(el.style.borderRadius).toBe('');
+  });
+
+  // A clip-path clips the selection outline away, so a clipped shape needs
+  // selection feedback that survives clipping — otherwise a selected locked
+  // triangle (no resize handles either) looks exactly like an unselected one.
+  it.each(['triangle', 'rhombus', 'hexagon', 'process_arrow', 'rectangle'])(
+    'gives a selected %s visible selection feedback',
+    (shape) => {
+      const { container } = render(
+        <GenericAnnotationNode type="shape" data={{ shape, locked: true }} selected />
+      );
+      expect(container.querySelector(`.shape-${shape}`).style.filter).toContain('drop-shadow');
+    }
+  );
+
+  it('leaves an unselected shape unfiltered', () => {
+    const { container } = render(
+      <GenericAnnotationNode type="shape" data={{ shape: 'triangle' }} selected={false} />
+    );
+    expect(container.querySelector('.shape-triangle').style.filter).toBe('');
+  });
+
   it('renders the configured icon as its glyph, not an abbreviation of its name', () => {
     render(<GenericAnnotationNode type="icon" data={{ icon: 'flag' }} />);
     const badge = screen.getByTitle('flag');
@@ -87,6 +118,17 @@ describe('GenericAnnotationNode', () => {
     render(<GenericAnnotationNode type="icon" data={{ icon: 'no-such-icon' }} />);
     expect(screen.getByTitle('no-such-icon').textContent).toBe('●');
   });
+
+  // The icon name comes from an annotation's content: an inherited Object
+  // member must fall back to the default glyph, not resolve to that member
+  // (which React would refuse to render).
+  it.each(['constructor', 'toString', 'hasOwnProperty'])(
+    'renders the default glyph for the icon name %s',
+    (icon) => {
+      render(<GenericAnnotationNode type="icon" data={{ icon }} />);
+      expect(screen.getByTitle(icon).textContent).toBe('●');
+    }
+  );
 
   it.each(['text', 'shape', 'icon', 'vote_dot'])('draws a rotation on a %s', (type) => {
     const { container } = render(
