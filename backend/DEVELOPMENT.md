@@ -1029,11 +1029,12 @@ list per type — plus the common `x`/`y`/`w`/`h`/`rotation`/`style`/`z`/
 `rectangle`, `circle`, `triangle`, `rhombus`, `hexagon` or `process_arrow`
 (the canvas resolves case and separator variants such as `"Process Arrow"`);
 a name outside that set is stored verbatim and drawn as a rectangle.
-`rotation` is in degrees. The canvas draws it for text, label, note, image,
-icon, vote dot, shape and frame; for `line` and `freehand` it is stored and
-reported back but never drawn (a tracked gap in
-docs/ANNOTATION_CONTRACT.md's acceptance matrix, so do not read a stored
-rotation on those two as something a viewer can see).
+`rotation` is in degrees, and every type stores and reports back whatever is
+written. The canvas *draws* it for text, label, note, image, icon, vote dot,
+shape and frame only; a `line`'s or a `freehand` stroke's rotation is kept and
+returned but never rendered (a tracked gap in
+docs/ANNOTATION_CONTRACT.md's acceptance matrix), so do not read a stored
+rotation on those two as something a viewer can see.
 
 `update_annotation` is a partial update over that same envelope plus
 `content`; `reorder_annotation` and

@@ -120,11 +120,11 @@ describe('GenericAnnotationNode', () => {
   it.each([
     ['FlagFill', '⚑'],
     // A first word that is a single capital would collapse into the next word
-    // ("xcircle_fill") without the second camel-boundary rule, and silently
-    // fall back to the default glyph.
+    // ("xcircle_fill") without the second camel-boundary rule, and lose its
+    // alias — drawing the "XC" abbreviation instead of the cross.
     ['XCircleFill', '✖'],
     ['x-circle-fill', '✖'],
-  ])('accepts the host icon registry spelling %s', (icon, glyph) => {
+  ])('accepts the Bootstrap-style spelling %s', (icon, glyph) => {
     render(<GenericAnnotationNode type="icon" data={{ icon }} />);
     expect(screen.getByTitle(icon).textContent).toBe(glyph);
   });

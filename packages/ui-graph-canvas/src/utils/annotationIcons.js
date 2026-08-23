@@ -43,9 +43,10 @@ export const ANNOTATION_ICONS = Object.freeze(
   })
 );
 
-// Alternative names resolving to the same icon: the host registry's
-// Bootstrap-icon names, plus the everyday synonyms an agent is likely to send.
-// Null prototype for the same reason as ANNOTATION_ICONS above.
+// Alternative names resolving to the same icon: Bootstrap-icon spellings
+// (those the host registry actually carries, plus the same convention for a
+// few icons it does not) and the everyday synonyms an agent is likely to
+// send. Null prototype for the same reason as ANNOTATION_ICONS above.
 const ICON_ALIASES = Object.assign(Object.create(null), {
   circle_fill: 'circle',
   dot: 'circle',

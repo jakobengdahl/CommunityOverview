@@ -331,8 +331,9 @@ unrotated axes. `frame` and `shape` are where this is actually reachable
 today: both are toolbox-creatable and both accept a rotation through the
 generic MCP tools. `image` needs MCP for the object as well as the rotation.
 `note` cannot meet it at all yet — nothing can put a rotation on a note (see
-below) — so the rotation wiring in `NoteNode` is coverage for a value no path
-currently produces. Rotation-aware resize handles are an open gap. The capability
+below; the same boundary leaves its `z` and `locked` unwritable) — so the
+rotation wiring in `NoteNode` is coverage for a value no path currently
+produces. Rotation-aware resize handles are an open gap. The capability
 baseline requires it for text/headings, labels/callouts, sticky notes,
 images, icons/dots and basic shapes including the process arrow; `frame` is
 drawn too, because `create_annotation`/`update_annotation` accept `rotation`
@@ -354,9 +355,11 @@ through MCP (`create_annotation`/`update_annotation`), and belongs to the
 same per-type property-editor gap as recoloring and shape-subtype changes.
 That leaves `note` with no rotation source of any kind: the generic tools
 refuse note ids, and the dedicated sticky-note tools take no `rotation`
-argument (`build_note_annotation` writes `rotation: 0`). Rotating a sticky
-note is part of the accepted baseline, so that is a gap, tracked in the
-`note` row below — not a decision that notes do not rotate.
+argument (`build_note_annotation` writes `rotation: 0`). The same boundary
+leaves a note's `z` and `locked` unwritable over MCP even though
+`list_sticky_notes` reports them. Rotating a sticky note is part of the
+accepted baseline, so that is a gap, tracked in the `note` row below — not a
+decision that notes do not rotate.
 
 `z`, `locked` and `rotation` round-trip through every annotation type's canvas
 representation (`overlayToFlowNode`/`flowNodeToOverlay` in
@@ -382,7 +385,7 @@ rule](#downstream-closure-rule).
 
 | Type | GUI create/edit | MCP create/edit | Persistence/reload/saved views | Realtime/collaboration | Activity/undo | Accessibility/device |
 |---|---|---|---|---|---|---|
-| `note` | ✅ toolbox create, inline edit, drag/resize | ⚠ sticky note tool set, but no `rotation` argument on create or update, so a note's rotation cannot be set from anywhere today | ✅ | ✅ op broadcast + revision | ✅ actor-scoped undo | ⬜ no formal pass yet |
+| `note` | ✅ toolbox create, inline edit, drag/resize | ⚠ sticky note tool set, but it takes no `rotation` argument on create or update — and the generic `reorder_annotation`/`set_annotation_lock` refuse note ids — so a note's `rotation` (and its `z`/`locked`) cannot be set from anywhere, though `list_sticky_notes` reports all three | ✅ | ✅ op broadcast + revision | ✅ actor-scoped undo | ⬜ no formal pass yet |
 | `text` | ⚠ toolbox create (fixed default), no property editor | ✅ generic tool set | ✅ | ✅ | ✅ | ⬜ |
 | `label` | ✅ toolbox create, inline edit, drag/resize, attach | ✅ generic tool set | ✅ | ✅ | ✅ | ⬜ |
 | `line` | ⚠ toolbox create, endpoint attach/drag; a `rotation` the MCP tools accept is stored and reported but never drawn | ✅ generic tool set (`arrow` alias) | ✅ | ✅ | ✅ | ⬜ |
