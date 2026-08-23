@@ -1025,7 +1025,13 @@ rather than being edited across the tool-set boundary.
 that differ by type (a line's `from`/`to`/arrows, a label's `text`, a
 shape's `shape` name, ...) — see docs/ANNOTATION_CONTRACT.md for the field
 list per type — plus the common `x`/`y`/`w`/`h`/`rotation`/`style`/`z`/
-`locked` envelope every type shares. `update_annotation` is a partial update
+`locked` envelope every type shares. A shape's `content.shape` is one of
+`rectangle`, `circle`, `triangle`, `rhombus`, `hexagon` or `process_arrow`
+(the canvas resolves case and separator variants such as `"Process Arrow"`);
+a name outside that set is stored verbatim and drawn as a rectangle.
+`rotation` is in degrees and is drawn for the types the contract accepts it
+for — text, label, note, image, icon, vote dot and shape — and carried
+unchanged for the rest. `update_annotation` is a partial update
 over that same envelope plus `content`; `reorder_annotation` and
 `set_annotation_lock` are single-purpose wrappers over `z` and `locked`
 respectively; `duplicate_annotation` copies an existing annotation

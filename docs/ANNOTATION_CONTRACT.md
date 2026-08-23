@@ -121,17 +121,18 @@ MCP. The required entry points are:
 ```
 
 **Current gap:** `note`, `label`, `line` and `group` have GUI creation today
-(dedicated toolbar/toolbox actions). A first slice of the bottom toolbox now
-also creates `text`, `frame`, and `shape` limited to its `rectangle` and
-`circle` variants — the only two `content.shape` values that render as
-distinct visuals today. `icon`, `vote_dot`, `image`, `freehand`, and the
-remaining `shape` variants (triangle, rhombus, hexagon, process arrow) still
-render on canvas but have no GUI creation path — they can only be created via
-MCP. Per-type property editors (recoloring, changing an icon or shape
-subtype, cropping an image) do not exist yet for any generic type, including
-the ones the toolbox now creates. Closing this is tracked per type in the
-[acceptance matrix](#acceptance-matrix); it is not satisfied by documenting
-the wireframes above.
+(dedicated toolbar/toolbox actions). The bottom toolbox also creates `text`,
+`frame`, and `shape` in every variant `content.shape` accepts — rectangle,
+circle, triangle, rhombus, hexagon and process arrow — each of which now
+renders as its own distinct visual. `icon`, `vote_dot`, `image` and
+`freehand` still render on canvas but have no GUI creation path — they can
+only be created via MCP. Per-type property editors (recoloring, changing an
+icon or shape subtype, cropping an image, setting a rotation) do not exist
+yet for any generic type, including the ones the toolbox creates: a shape's
+variant is chosen when it is created and cannot yet be changed afterwards
+from the GUI. Closing this is tracked per type in the [acceptance
+matrix](#acceptance-matrix); it is not satisfied by documenting the
+wireframes above.
 
 ## Operation layer
 
@@ -300,17 +301,34 @@ scope (see [Human authoring surfaces](#human-authoring-surfaces)), not a
 non-goal — today they are reachable only through the MCP tools, which is
 the gap the acceptance matrix tracks, not the intended end state.
 
-`z` and `locked` round-trip through every annotation type's canvas
+Each `shape` variant draws its own geometry (`SHAPE_STYLES` in
+`GenericAnnotationNode.jsx`), and an `icon` annotation draws the glyph its
+configured `content.icon` name resolves to in the canvas package's icon set
+(`packages/ui-graph-canvas/src/utils/annotationIcons.js`, which also accepts
+the host app's Bootstrap-icon spellings); an unknown icon name falls back to
+a neutral marker rather than to an abbreviation of the name.
+
+`geometry.rotation` is drawn for the types this contract accepts rotation
+for — text/headings, labels/callouts, sticky notes, images, icons/dots and
+basic shapes including the process arrow — as a transform on the rendered
+element, so drag and resize keep working against the unrotated bounding box.
+Frames, lines, groups and freehand strokes carry rotation without drawing
+it. **There is no GUI control to set a rotation yet** — it can only be set
+through MCP (`create_annotation`/`update_annotation`), and belongs to the
+same per-type property-editor gap as recoloring and shape-subtype changes.
+
+`z`, `locked` and `rotation` round-trip through every annotation type's canvas
 representation (`overlayToFlowNode`/`flowNodeToOverlay` in
 `packages/ui-graph-canvas/src/utils/annotations.js`, and the server-model
 translators in `frontend/web/src/utils/sessionAnnotations.js`): `z` maps to
-the ReactFlow node's `zIndex`, and `locked` maps to `draggable: false`. This
-is the canvas UI's own enforcement of `locked` — the server never rejects a
-write to a locked annotation (`reorder_annotation` / `set_annotation_lock` /
-`update_annotation` all still apply). A translator that dropped either field
-would make the browser's own next autosave diff the annotation back to its
-`z: 0` / `locked: false` default and silently overwrite whatever a
-collaborator or agent had just set.
+the ReactFlow node's `zIndex`, `locked` maps to `draggable: false`, and
+`rotation` travels on the flow node's `data`. This is the canvas UI's own
+enforcement of `locked` — the server never rejects a write to a locked
+annotation (`reorder_annotation` / `set_annotation_lock` /
+`update_annotation` all still apply). A translator that dropped any of the
+three would make the browser's own next autosave diff the annotation back to
+its `z: 0` / `locked: false` / `rotation: 0` default and silently overwrite
+whatever a collaborator or agent had just set.
 
 ## Acceptance matrix
 
@@ -329,8 +347,8 @@ rule](#downstream-closure-rule).
 | `line` | ✅ toolbox create, endpoint attach/drag | ✅ generic tool set (`arrow` alias) | ✅ | ✅ | ✅ | ⬜ |
 | `frame` | ⚠ toolbox create (fixed default size), no color editor | ✅ generic tool set | ✅ | ✅ | ✅ | ⬜ |
 | `group` | ✅ toolbar create-group action | ❌ no MCP tool (by design — `group_membership_changed` op only) | ✅ | ✅ | ✅ | ⬜ |
-| `shape` | ⚠ toolbox create (rectangle/circle only), no subtype picker for the rest | ✅ generic tool set (`content.shape`) | ✅ | ✅ | ✅ | ⬜ |
-| `icon` | ❌ render/move only, no create UI or icon picker | ✅ generic tool set | ✅ | ✅ | ✅ | ⬜ |
+| `shape` | ⚠ toolbox creates all six variants, each drawn distinctly; no editor to change an existing shape's subtype | ✅ generic tool set (`content.shape`) | ✅ | ✅ | ✅ | ⬜ |
+| `icon` | ❌ renders its configured icon, but move only — no create UI or icon picker | ✅ generic tool set | ✅ | ✅ | ✅ | ⬜ |
 | `vote_dot` | ❌ render/move only, no create UI or color picker | ✅ generic tool set | ✅ | ✅ | ✅ | ⬜ |
 | `image` | ❌ no paste/upload UI | ⚠ `create_image_annotation` enforces ingest; generic tool's bare envelope does not ([gap](#image-ingest-enforcement)) | ✅ | ✅ | ✅ | ⬜ |
 | `freehand` | ❌ no create UI (stylus input not wired) | ❌ no MCP tool | ✅ document model round-trips it | ⚠ no creation path to exercise it live | ✅ `translate_freehand_points` covers move/undo | ❌ no physical stylus/touch pass |
