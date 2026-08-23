@@ -91,6 +91,17 @@ annotation's id with a different type, is refused rather than applied. See
 `backend/DEVELOPMENT.md`'s "Generic annotation tools" section for the full
 contract, including the per-type `content` payload shape.
 
+`image` additionally gets its own dedicated creation tool,
+`create_image_annotation`: rather than taking a `content` payload directly,
+it takes the image itself (`image_data` or `image_url`), ingests it
+server-side (`backend/core/image_ingest.py`: format/size validation,
+downscaling, re-encoding as WebP) and stores the result as an embedded
+`data:` URI in `content.image.url` — never the original remote link — so the
+annotation still renders once the source disappears. It enforces its own
+image-specific byte budgets in place of the small generic op-batch cap the
+other writes share. See `backend/DEVELOPMENT.md`'s "Image annotation tool"
+section for the full contract.
+
 ## Canvas rendering
 
 `note`, `label` and `line` have dedicated, interactive canvas UX (drag,

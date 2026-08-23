@@ -26,6 +26,11 @@ import json
 import time
 from typing import Any, Dict, List, Optional, Tuple
 
+from .image_ingest import (
+    DEFAULT_MAX_SESSION_DOCUMENT_BYTES,
+    DEFAULT_MAX_SESSION_IMAGE_BYTES,
+    data_url_byte_length,
+)
 from .session_hub import (
     ClaimMap,
     InProcessEventBus,
@@ -103,6 +108,17 @@ class AnnotationRecentlyDeleted(Exception):
     def __init__(self, annotation_id: Optional[str]) -> None:
         super().__init__(f"annotation was recently deleted: {annotation_id!r}")
         self.annotation_id = annotation_id
+
+
+class ImageBudgetExceeded(Exception):
+    """Embedding this image would exceed a configured image/document byte budget.
+
+    Raised by ``upsert_image_annotation`` before the write is attempted, so a
+    rejected image never touches the store — distinct from ``OpBatchTooLarge``,
+    which guards the small generic op-batch cap that every other annotation
+    write still uses (see ``upsert_image_annotation``'s docstring for why
+    embedded images need their own, larger budget).
+    """
 
 
 class NoUndoableAction(Exception):
@@ -196,6 +212,33 @@ class _TokenBucket:
             del self._tokens[k]
             del self._last[k]
         self._last_sweep = now
+
+
+def _image_annotation_bytes(annotation: Dict[str, Any]) -> int:
+    """Decoded byte size of an `image` annotation's embedded data URI, else 0."""
+    if annotation.get("type") != "image":
+        return 0
+    image = annotation.get("image")
+    if not isinstance(image, dict):
+        return 0
+    return data_url_byte_length(image.get("url"))
+
+
+def _session_image_bytes(
+    session: "Session", *, exclude_id: Optional[str] = None
+) -> int:
+    """Total embedded-image bytes across a session's annotations.
+
+    ``exclude_id`` omits one annotation (the one about to be replaced) so a
+    same-id upsert is budgeted against the *replacement*, not double-counted
+    against both the old and new copy.
+    """
+    total = 0
+    for annotation in session.state.get("annotations", []):
+        if exclude_id is not None and annotation.get("id") == exclude_id:
+            continue
+        total += _image_annotation_bytes(annotation)
+    return total
 
 
 class SessionManager:
@@ -787,6 +830,106 @@ class SessionManager:
             raise SessionNotFound()
         if expected_revision is not None and expected_revision != session.seq:
             raise RevisionConflict(expected_revision, session.seq)
+
+        op: Dict[str, Any] = {
+            "op": "annotation_created",
+            "annotation": annotation,
+            "client_id": client_id,
+        }
+        applied = self._apply_op_sync(session, session_id, client_id, op)
+        if applied is None:
+            raise AnnotationRecentlyDeleted(annotation.get("id"))
+        return {
+            "applied": applied,
+            "revision": session.seq,
+            "annotation": applied.get("annotation"),
+        }
+
+    def upsert_image_annotation(
+        self,
+        session_id: str,
+        client_id: str,
+        annotation: Dict[str, Any],
+        *,
+        optimized_image_bytes: int,
+        max_session_image_bytes: int = DEFAULT_MAX_SESSION_IMAGE_BYTES,
+        max_session_document_bytes: int = DEFAULT_MAX_SESSION_DOCUMENT_BYTES,
+        expected_revision: Optional[int] = None,
+    ) -> Dict[str, Any]:
+        """Create, or replace by id, one `image` annotation (MCP write path).
+
+        Shares ``upsert_annotation``'s shape and atomicity contract, but a
+        single optimized image (up to a few MB by default — see
+        ``image_ingest.py``) is already far bigger than
+        ``_max_op_batch_bytes`` (256KB, sized for reference-only ops — see
+        its definition above), so this method does not apply that cap at
+        all. Instead it enforces two image-specific budgets before writing
+        anything: the session's total embedded-image bytes
+        (`max_session_image_bytes`) and the full persisted document size
+        (`max_session_document_bytes`), both raising ``ImageBudgetExceeded``.
+        Every other annotation type still goes through ``upsert_annotation``
+        and its small generic cap.
+
+        ``optimized_image_bytes`` is the caller's already-computed decoded
+        size of the image being embedded (``len(OptimizedImage.data)`` from
+        ``image_ingest.optimize_image``) — passed in rather than re-derived
+        from ``annotation`` so the budget check reflects the exact bytes that
+        were validated, not a re-parse of the data URI.
+        """
+        if not is_valid_session_id(session_id):
+            raise SessionNotFound()
+        if not isinstance(client_id, str) or not client_id:
+            raise OpError("'client_id' is required")
+        if not isinstance(annotation, dict):
+            raise OpError("'annotation' must be an object")
+        if not self._bucket.consume(client_id, 1):
+            raise RateLimited()
+
+        if self._lock(session_id).locked():
+            raise LayoutBusy()
+
+        session = self.store.get(session_id)
+        if session is None:
+            raise SessionNotFound()
+        if expected_revision is not None and expected_revision != session.seq:
+            raise RevisionConflict(expected_revision, session.seq)
+
+        annotation_id = annotation.get("id")
+        existing = (
+            next(
+                (
+                    a
+                    for a in session.state.get("annotations", [])
+                    if a.get("id") == annotation_id
+                ),
+                None,
+            )
+            if isinstance(annotation_id, str)
+            else None
+        )
+
+        other_image_bytes = _session_image_bytes(
+            session,
+            exclude_id=annotation_id if isinstance(annotation_id, str) else None,
+        )
+        if other_image_bytes + optimized_image_bytes > max_session_image_bytes:
+            raise ImageBudgetExceeded(
+                f"embedding this image would bring the session's total "
+                f"embedded image data to "
+                f"{other_image_bytes + optimized_image_bytes} bytes, over "
+                f"the {max_session_image_bytes}-byte session limit"
+            )
+
+        current_doc_bytes = len(json.dumps(session.to_dict()))
+        existing_bytes = len(json.dumps(existing)) if existing is not None else 0
+        new_annotation_bytes = len(json.dumps(annotation))
+        projected_doc_bytes = current_doc_bytes - existing_bytes + new_annotation_bytes
+        if projected_doc_bytes > max_session_document_bytes:
+            raise ImageBudgetExceeded(
+                f"embedding this image would bring the session document to "
+                f"{projected_doc_bytes} bytes, over the "
+                f"{max_session_document_bytes}-byte document limit"
+            )
 
         op: Dict[str, Any] = {
             "op": "annotation_created",

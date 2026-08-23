@@ -18,6 +18,11 @@ pypdf>=4.0.0
 python-docx>=1.0.0
 python-multipart>=0.0.9
 
+# Image decoding/re-encoding for embedded annotation images (validate, downscale,
+# re-encode as WebP). Pure-C library, no GPU/model weights, so it stays in the
+# base requirements rather than requirements-ml.txt.
+Pillow>=10.0.0
+
 # LLM Providers
 anthropic>=0.18.0
 openai>=1.0.0

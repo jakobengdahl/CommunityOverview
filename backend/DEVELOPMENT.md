@@ -1034,6 +1034,36 @@ respectively; `duplicate_annotation` copies an existing annotation
 so an assistant gets one full inventory of the session's annotation
 document; pass `types` to filter it.
 
+#### Image annotation tool
+
+`create_image_annotation` creates (or replaces by id) an `image` annotation,
+sharing the generic tools' session/revision contract. Unlike
+`create_annotation`, it does not take `content` directly — it takes
+`image_data` (a `data:image/...;base64,...` string, or bare base64) or
+`image_url` (an http(s) URL, fetched once server-side), ingests the image
+(`backend/core/image_ingest.py`: decode, validate the real format from the
+decoded bytes, downscale to a longest side of 2560px if needed, re-encode as
+WebP), and stores the result as an embedded data URI in `content.image.url` —
+never the original remote link — so the annotation keeps rendering after the
+source disappears. Only PNG, JPEG and WebP are accepted.
+
+Because one embedded image is far bigger than the small generic op-batch cap
+the other annotation writes share, `create_image_annotation` does not apply
+that cap at all; instead `SessionManager.upsert_image_annotation` enforces
+its own image-specific budgets before writing anything — a per-image cap
+after optimization, a cap on a session's total embedded-image bytes, and a
+cap on the full session document size — all reported as MCP error `too_large`.
+Once created, an image annotation is an ordinary generic annotation:
+`update_annotation`, `delete_annotation`, `reorder_annotation`,
+`set_annotation_lock` and `duplicate_annotation` all act on it like any other
+type, since none of them touch the embedded bytes.
+
+`create_annotation` still accepts `type="image"` for building a bare envelope
+(as it does for every generic type) but does not run the ingest pipeline —
+a `content.image.url` supplied that way is stored verbatim, unvalidated and
+not necessarily embedded. Use `create_image_annotation` whenever the image
+itself (not just the envelope) needs to be created.
+
 ### UI Backend Endpoints
 
 | Method | Endpoint | Description |
