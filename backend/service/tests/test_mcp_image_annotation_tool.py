@@ -187,6 +187,18 @@ class TestCreateImageAnnotationFromData:
 
 
 class TestCreateImageAnnotationFromUrl:
+    @pytest.fixture(autouse=True)
+    def _public_dns(self, monkeypatch):
+        """``example.invalid`` used below must resolve to a public IP for
+        ``fetch_image_bytes``'s SSRF check (see backend/core/image_ingest.py);
+        SSRF-blocking behaviour itself is covered by
+        TestFetchImageBytesSSRF in test_image_ingest.py.
+        """
+        monkeypatch.setattr(
+            "backend.core.events.delivery.socket.getaddrinfo",
+            lambda *args, **kwargs: [(None, None, None, None, ("93.184.216.34", 0))],
+        )
+
     def test_fetches_and_creates(self, image_tools, monkeypatch):
         tools_map, manager = image_tools
         session = manager.create_session()

@@ -26,10 +26,13 @@ from __future__ import annotations
 
 import base64
 import io
+import urllib.parse
 from dataclasses import dataclass
 
 import httpx2 as httpx
 from PIL import Image, UnidentifiedImageError
+
+from .events.delivery import is_safe_url
 
 # SVG/GIF/etc are rejected: SVG can carry script content, GIF animation is
 # not preserved by the optimizer (a re-encode would silently drop frames).
@@ -51,6 +54,10 @@ DEFAULT_MAX_SESSION_DOCUMENT_BYTES = 25 * 1024 * 1024
 MAX_LONGEST_SIDE = 2560
 WEBP_QUALITY = 82
 _FETCH_TIMEOUT_SECONDS = 10.0
+# Mirrors backend/core/events/delivery.py's redirect cap for the same reason:
+# each hop is re-validated against is_safe_url, so a bounded number of hops
+# keeps that re-validation cost bounded too.
+_MAX_FETCH_REDIRECTS = 10
 
 
 class ImageIngestError(ValueError):
@@ -90,11 +97,19 @@ class OptimizedImage:
         return f"data:{self.content_type};base64,{encoded}"
 
 
-def decode_image_data(image_data: str) -> bytes:
+def decode_image_data(
+    image_data: str,
+    *,
+    max_bytes: int = DEFAULT_MAX_SOURCE_IMAGE_BYTES,
+) -> bytes:
     """Decode a ``data:<type>;base64,<...>`` string or bare base64 into bytes.
 
     Any declared content-type in a data URL header is ignored — the real
-    type is re-derived from the decoded bytes by ``optimize_image``.
+    type is re-derived from the decoded bytes by ``optimize_image``. Applies
+    the same ``max_bytes`` sanity cap ``fetch_image_bytes`` uses, checked
+    both before decoding (on the encoded length, to avoid base64-decoding an
+    arbitrarily large payload in the first place) and after (on the exact
+    decoded length).
     """
     if not isinstance(image_data, str) or not image_data:
         raise InvalidImageData("image_data must be a non-empty string")
@@ -104,12 +119,24 @@ def decode_image_data(image_data: str) -> bytes:
         if not sep or ";base64" not in header:
             raise InvalidImageData("data URL must be base64-encoded")
         payload = rest
+    # Base64 expands bytes by ~4/3; this bound is intentionally generous
+    # (over-estimates the decoded size) so it only ever catches inputs that
+    # would fail the exact post-decode check below anyway.
+    if len(payload) > (max_bytes * 4 // 3) + 4:
+        raise SourceImageTooLarge(
+            f"image_data exceeds {max_bytes} bytes before decoding"
+        )
     try:
         raw = base64.b64decode(payload, validate=True)
     except (ValueError, TypeError) as exc:
         raise InvalidImageData("image_data is not valid base64") from exc
     if not raw:
         raise InvalidImageData("image_data decoded to zero bytes")
+    if len(raw) > max_bytes:
+        raise SourceImageTooLarge(
+            f"image_data is {len(raw)} bytes, exceeding the {max_bytes}-byte "
+            "source limit"
+        )
     return raw
 
 
@@ -124,37 +151,68 @@ def fetch_image_bytes(
     The caller stores the bytes this returns (after ``optimize_image``) as
     an embedded copy — the URL itself is never persisted or re-served, so a
     dead or blocked source afterwards does not break the annotation.
+
+    ``image_url`` is server-controlled input that triggers an outbound
+    request, so it is validated against the same SSRF allow-list
+    ``backend/core/events/delivery.py`` uses for outbound webhooks
+    (``is_safe_url``: rejects private/loopback/link-local/CGNAT/metadata/
+    internal-reserved addresses, resolving hostnames and checking every
+    returned address). Redirects are not auto-followed by httpx here —
+    each hop is fetched with ``follow_redirects=False`` and its target is
+    re-validated with ``is_safe_url`` before it is requested, the same way
+    ``delivery.py``'s ``_post_with_redirect_ssrf_check`` re-validates every
+    webhook redirect hop, so a same-origin redirect to an internal address
+    cannot bypass the initial check.
     """
     if not isinstance(url, str) or not (
         url.startswith("http://") or url.startswith("https://")
     ):
         raise ImageFetchError("image_url must be an http(s) URL")
+    if not is_safe_url(url):
+        raise ImageFetchError(f"image_url resolves to a disallowed address: {url}")
     try:
         # A `Client` (rather than the bare module-level `httpx.stream`) is used
         # so tests can substitute a mock transport by monkeypatching the
         # module-level `httpx` name, the same pattern federation/manager.py
         # uses for its AsyncClient.
-        with httpx.Client(timeout=timeout, follow_redirects=True) as client:
-            with client.stream("GET", url) as response:
-                response.raise_for_status()
-                chunks = []
-                total = 0
-                for chunk in response.iter_bytes():
-                    total += len(chunk)
-                    if total > max_bytes:
-                        raise SourceImageTooLarge(
-                            f"downloaded image exceeds {max_bytes} bytes "
-                            "before optimization"
-                        )
-                    chunks.append(chunk)
+        with httpx.Client(timeout=timeout, follow_redirects=False) as client:
+            current_url = url
+            for _ in range(_MAX_FETCH_REDIRECTS):
+                with client.stream("GET", current_url) as response:
+                    if response.is_redirect:
+                        location = str(response.headers.get("location", ""))
+                        next_url = urllib.parse.urljoin(current_url, location)
+                        if not is_safe_url(next_url):
+                            raise ImageFetchError(
+                                "image_url redirected to a disallowed address: "
+                                f"{next_url}"
+                            )
+                        current_url = next_url
+                        continue
+                    response.raise_for_status()
+                    chunks = []
+                    total = 0
+                    for chunk in response.iter_bytes():
+                        total += len(chunk)
+                        if total > max_bytes:
+                            raise SourceImageTooLarge(
+                                f"downloaded image exceeds {max_bytes} bytes "
+                                "before optimization"
+                            )
+                        chunks.append(chunk)
+                    data = b"".join(chunks)
+                    if not data:
+                        raise ImageFetchError("image_url returned an empty body")
+                    return data
+            raise ImageFetchError(
+                f"image_url exceeded {_MAX_FETCH_REDIRECTS} redirects"
+            )
     except SourceImageTooLarge:
+        raise
+    except ImageFetchError:
         raise
     except httpx.HTTPError as exc:
         raise ImageFetchError(f"failed to fetch image_url: {exc}") from exc
-    data = b"".join(chunks)
-    if not data:
-        raise ImageFetchError("image_url returned an empty body")
-    return data
 
 
 def optimize_image(
@@ -172,10 +230,20 @@ def optimize_image(
     source transparency survives the re-encode (a flattened JPEG source
     never had transparency to preserve). Raises ``OptimizedImageTooLarge``
     if the result still exceeds *max_optimized_bytes* after downscaling.
+
+    A source whose declared pixel dimensions exceed Pillow's decompression-
+    bomb threshold (``Image.DecompressionBombError``, e.g. a small PNG with
+    a header claiming a huge width/height to force a large in-memory
+    decode) is treated as ``InvalidImageData`` rather than
+    ``SourceImageTooLarge``: the byte-size cap upstream already bounds the
+    compressed source, so a bomb here means the *declared* dimensions
+    themselves are hostile/malformed input, not a legitimately large image.
     """
     try:
         image = Image.open(io.BytesIO(raw))
         image.load()
+    except Image.DecompressionBombError as exc:
+        raise InvalidImageData(f"image pixel dimensions rejected: {exc}") from exc
     except (UnidentifiedImageError, OSError, ValueError) as exc:
         raise InvalidImageData(f"could not decode image data: {exc}") from exc
 

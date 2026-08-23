@@ -71,6 +71,26 @@ class TestDecodeImageData:
             image_ingest.decode_image_data(None)  # type: ignore[arg-type]
 
 
+class TestDecodeImageDataSourceCap:
+    def test_rejects_oversized_payload_before_decoding(self):
+        # The encoded length alone already exceeds the cap, so this must be
+        # rejected without ever reaching base64.b64decode.
+        huge_payload = "A" * 1000
+        with pytest.raises(image_ingest.SourceImageTooLarge):
+            image_ingest.decode_image_data(huge_payload, max_bytes=10)
+
+    def test_rejects_oversized_decoded_payload(self):
+        raw = b"x" * 100
+        encoded = base64.b64encode(raw).decode("ascii")
+        with pytest.raises(image_ingest.SourceImageTooLarge):
+            image_ingest.decode_image_data(encoded, max_bytes=50)
+
+    def test_default_cap_allows_a_normal_image(self):
+        raw = _png_bytes()
+        encoded = base64.b64encode(raw).decode("ascii")
+        assert image_ingest.decode_image_data(encoded) == raw
+
+
 class TestOptimizeImageFormats:
     @pytest.mark.parametrize(
         "builder", [_png_bytes, _jpeg_bytes, _webp_bytes], ids=["png", "jpeg", "webp"]
@@ -132,6 +152,19 @@ class TestOptimizeImageSizeCap:
         assert len(result.data) <= image_ingest.DEFAULT_MAX_OPTIMIZED_IMAGE_BYTES
 
 
+class TestOptimizeImageDecompressionBomb:
+    def test_rejects_declared_dimensions_beyond_pillow_bomb_threshold(
+        self, monkeypatch
+    ):
+        # Lowering Pillow's own threshold (rather than constructing an
+        # actual huge image) exercises the real Image.DecompressionBombError
+        # path without allocating a large buffer in the test itself.
+        monkeypatch.setattr(Image, "MAX_IMAGE_PIXELS", 100)
+        raw = _png_bytes(size=(200, 200))
+        with pytest.raises(image_ingest.InvalidImageData):
+            image_ingest.optimize_image(raw)
+
+
 class _StubHttpxModule:
     """Stands in for the module-level `httpx` name in image_ingest.py.
 
@@ -152,6 +185,20 @@ class _StubHttpxModule:
 def _install_transport(monkeypatch, handler):
     transport = httpx.MockTransport(handler)
     monkeypatch.setattr(image_ingest, "httpx", _StubHttpxModule(transport))
+
+
+@pytest.fixture(autouse=True)
+def _public_dns(monkeypatch):
+    """Make ``example.invalid`` (used throughout this class) resolve to a
+    public IP for ``is_safe_url``'s DNS check, so existing fetch tests don't
+    depend on real DNS resolving a reserved test TLD. Individual SSRF tests
+    override this with their own ``getaddrinfo`` patch or use IP literals,
+    which skip DNS resolution entirely.
+    """
+    monkeypatch.setattr(
+        "backend.core.events.delivery.socket.getaddrinfo",
+        lambda *args, **kwargs: [(None, None, None, None, ("93.184.216.34", 0))],
+    )
 
 
 class TestFetchImageBytes:
@@ -204,6 +251,60 @@ class TestFetchImageBytes:
         _install_transport(monkeypatch, handler)
         with pytest.raises(image_ingest.ImageFetchError):
             image_ingest.fetch_image_bytes("https://example.invalid/empty.png")
+
+
+class TestFetchImageBytesSSRF:
+    """image_url is server-controlled input that triggers an outbound
+    request; these mirror the SSRF cases covered for webhook delivery in
+    backend/core/events/tests/test_delivery.py.
+    """
+
+    def test_rejects_loopback_ip_literal(self, monkeypatch):
+        with pytest.raises(image_ingest.ImageFetchError):
+            image_ingest.fetch_image_bytes("http://127.0.0.1/pic.png")
+
+    def test_rejects_private_ip_literal(self, monkeypatch):
+        with pytest.raises(image_ingest.ImageFetchError):
+            image_ingest.fetch_image_bytes("http://10.0.0.5/pic.png")
+
+    def test_rejects_link_local_metadata_ip(self, monkeypatch):
+        with pytest.raises(image_ingest.ImageFetchError):
+            image_ingest.fetch_image_bytes("http://169.254.169.254/latest/meta-data/")
+
+    def test_rejects_hostname_resolving_to_private_ip(self, monkeypatch):
+        monkeypatch.setattr(
+            "backend.core.events.delivery.socket.getaddrinfo",
+            lambda *args, **kwargs: [(None, None, None, None, ("127.0.0.1", 0))],
+        )
+        with pytest.raises(image_ingest.ImageFetchError):
+            image_ingest.fetch_image_bytes("http://internal.example.invalid/pic.png")
+
+    def test_blocks_before_any_network_call(self, monkeypatch):
+        def handler(request):
+            raise AssertionError("must not reach the network for a blocked URL")
+
+        _install_transport(monkeypatch, handler)
+        with pytest.raises(image_ingest.ImageFetchError):
+            image_ingest.fetch_image_bytes("http://127.0.0.1/pic.png")
+
+    def test_rejects_redirect_to_private_ip(self, monkeypatch):
+        """The initial URL resolves to a public IP (via the class-level DNS
+        stub) and passes the pre-request check, but the server then
+        redirects to a link-local metadata address — this must be rejected
+        without the redirect ever being followed.
+        """
+        raw = _png_bytes()
+
+        def handler(request):
+            if request.url.host == "example.invalid":
+                return httpx.Response(
+                    302, headers={"location": "http://169.254.169.254/metadata"}
+                )
+            return httpx.Response(200, content=raw)  # pragma: no cover - unreachable
+
+        _install_transport(monkeypatch, handler)
+        with pytest.raises(image_ingest.ImageFetchError):
+            image_ingest.fetch_image_bytes("https://example.invalid/pic.png")
 
 
 class TestDataUrlByteLength:
