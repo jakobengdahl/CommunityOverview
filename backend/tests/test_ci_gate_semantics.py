@@ -16,10 +16,16 @@ in the repo pins that distinction: reverting a gate to the old permissive
 `success|skipped` is a one-word edit that no test would notice, and its only
 symptom is a green tick that lies. Hence this test.
 
-The gate bodies are shell, so they are extracted from the parsed workflow and
-executed, rather than pattern-matched — a regex over the YAML would pass
-against a body that had been rewritten to something equivalent-looking and
-wrong.
+Two properties keep it from rotting into a green rubber stamp:
+
+- The gate bodies are shell, so they are extracted from the parsed workflow and
+  EXECUTED, rather than pattern-matched. A regex over the YAML would pass
+  against a body rewritten to something equivalent-looking and wrong.
+- The set of gates is DISCOVERED from the workflow and compared against the
+  expected set, rather than only enumerated here. A hand-maintained list would
+  let a fifth gate ship the very bug this file exists to prevent - and
+  `ci.yml` names `frontend-lint` as the obvious next candidate for the same
+  split, so that is a live possibility rather than a hypothetical.
 """
 
 import subprocess
@@ -38,6 +44,13 @@ GATES = {
     "frontend-tests": "service_code",
     "gateway-tests": "service_code",
     "python-lint": "python_code",
+}
+
+REQUIRED_CHECK_NAMES = {
+    "backend-tests": "Backend tests",
+    "frontend-tests": "Frontend tests",
+    "gateway-tests": "Gateway tests",
+    "python-lint": "Python lint (ruff)",
 }
 
 PASS, FAIL = 0, 1
@@ -59,56 +72,114 @@ MATRIX = [
     ("cancelled", "skipped", "", FAIL),
 ]
 
+# The two rows the whole change turns on. Pinned separately so emptying or
+# trimming MATRIX cannot quietly reduce this file to a green no-op.
+DECISIVE_ROWS = {
+    ("success", "skipped", "true", FAIL),
+    ("success", "skipped", "false", PASS),
+}
+
 
 @pytest.fixture(scope="module")
 def workflow():
     return yaml.safe_load(WORKFLOW.read_text())
 
 
-def gate_script(workflow, job_id):
+def is_always(expr):
+    """`if: always()` parses as the string `always()`; `if: ${{ always() }}` as
+    that literal; a bare `if: true` as a bool. All three mean the same thing."""
+    if expr is True:
+        return True
+    return (
+        str(expr).strip().removeprefix("${{").removesuffix("}}").strip() == "always()"
+    )
+
+
+def discover_gates(workflow):
+    """Every job that runs unconditionally and waits on a `<id>-run` worker.
+
+    Derived from the workflow rather than from GATES, so adding a gate without
+    adding it here is a test failure instead of an invisible coverage hole.
+    """
+    return {
+        job_id
+        for job_id, job in workflow["jobs"].items()
+        if is_always(job.get("if")) and f"{job_id}-run" in (job.get("needs") or [])
+    }
+
+
+def gate_step(workflow, job_id):
+    """The verification step - the one declaring RESULT - rather than steps[0],
+    so adding a job-summary or checkout step to a gate is not a failure."""
     steps = workflow["jobs"][job_id]["steps"]
-    assert len(steps) == 1, f"{job_id} gate should be a single verification step"
-    return steps[0]["run"]
+    verifying = [s for s in steps if "RESULT" in (s.get("env") or {})]
+    assert len(verifying) == 1, (
+        f"{job_id}: expected one step declaring RESULT, got {len(verifying)}"
+    )
+    return verifying[0]
+
+
+def run_gate(workflow, job_id, detect, result, code, tmp_path):
+    # Stub the GITHUB_* file variables a gate step might plausibly append to.
+    # Unset, `>> "$GITHUB_STEP_SUMMARY"` expands to an empty redirect target
+    # and bash returns 1 - which would report a false FAIL for a case that
+    # passes in CI.
+    env = {
+        "PATH": "/usr/bin:/bin",
+        "DETECT": detect,
+        "RESULT": result,
+        "CODE": code,
+        "GITHUB_STEP_SUMMARY": str(tmp_path / "summary"),
+        "GITHUB_OUTPUT": str(tmp_path / "output"),
+        "GITHUB_ENV": str(tmp_path / "env"),
+    }
+    return subprocess.run(
+        ["bash", "-c", gate_step(workflow, job_id)["run"]],
+        env=env,
+        capture_output=True,
+        text=True,
+    )
+
+
+class TestTheGateSetIsDiscovered:
+    """Without these, every parametrised test below can collapse to zero cases
+    and still report green."""
+
+    def test_every_gate_in_the_workflow_is_covered(self, workflow):
+        discovered = discover_gates(workflow)
+        assert discovered == set(GATES), (
+            "gate jobs in ci.yml do not match the set this file checks. "
+            f"only in workflow: {sorted(discovered - set(GATES))}; "
+            f"only here: {sorted(set(GATES) - discovered)}. "
+            "A new gate must be added to GATES, or it ships unverified."
+        )
+
+    def test_the_decisive_rows_are_still_in_the_matrix(self):
+        assert DECISIVE_ROWS <= set(MATRIX)
+
+    def test_check_names_cover_the_same_gates(self):
+        assert set(REQUIRED_CHECK_NAMES) == set(GATES)
 
 
 class TestGateDistinguishesWhyTheWorkerSkipped:
     @pytest.mark.parametrize("job_id,flag", sorted(GATES.items()))
     @pytest.mark.parametrize("detect,result,code,expected", MATRIX)
     def test_gate_exit_code(
-        self, workflow, job_id, flag, detect, result, code, expected
+        self, workflow, job_id, flag, detect, result, code, expected, tmp_path
     ):
-        script = gate_script(workflow, job_id)
-        proc = subprocess.run(
-            ["bash", "-c", script],
-            env={
-                "PATH": "/usr/bin:/bin",
-                "DETECT": detect,
-                "RESULT": result,
-                "CODE": code,
-            },
-            capture_output=True,
-            text=True,
-        )
+        proc = run_gate(workflow, job_id, detect, result, code, tmp_path)
         assert proc.returncode == expected, (
             f"{job_id}: DETECT={detect} RESULT={result} CODE={code!r} "
             f"exited {proc.returncode}, expected {expected}\n{proc.stdout}{proc.stderr}"
         )
 
     @pytest.mark.parametrize("job_id,flag", sorted(GATES.items()))
-    def test_a_draft_skip_says_the_suite_did_not_run(self, workflow, job_id, flag):
+    def test_a_draft_skip_says_the_suite_did_not_run(
+        self, workflow, job_id, flag, tmp_path
+    ):
         """The failure has to be actionable: a reader must not mistake it for a
         real test failure, or they will hunt a bug that isn't there."""
-        proc = subprocess.run(
-            ["bash", "-c", gate_script(workflow, job_id)],
-            env={
-                "PATH": "/usr/bin:/bin",
-                "DETECT": "success",
-                "RESULT": "skipped",
-                "CODE": "true",
-            },
-            capture_output=True,
-            text=True,
-        )
+        proc = run_gate(workflow, job_id, "success", "skipped", "true", tmp_path)
         assert proc.returncode == FAIL
         assert "has NOT run" in proc.stdout
 
@@ -118,7 +189,7 @@ class TestGateDistinguishesWhyTheWorkerSkipped:
     ):
         """A gate wired to the wrong flag would pass a draft-skip whenever the
         other flag happened to be false."""
-        env = workflow["jobs"][job_id]["steps"][0]["env"]
+        env = gate_step(workflow, job_id)["env"]
         assert env["CODE"] == f"${{{{ needs.detect-changes.outputs.{flag} }}}}"
         assert env["RESULT"] == f"${{{{ needs.{job_id}-run.result }}}}"
 
@@ -130,20 +201,21 @@ class TestTheWorkerGateWiringItself:
     @pytest.mark.parametrize("job_id,flag", sorted(GATES.items()))
     def test_gate_always_runs_and_needs_both(self, workflow, job_id, flag):
         gate = workflow["jobs"][job_id]
-        assert gate["if"] is True or str(gate["if"]).strip() == "always()"
+        assert is_always(gate["if"])
         assert set(gate["needs"]) == {"detect-changes", f"{job_id}-run"}
+
+    @pytest.mark.parametrize("job_id,flag", sorted(GATES.items()))
+    def test_gate_is_a_single_verification_step(self, workflow, job_id, flag):
+        """Not a correctness requirement - a gate could legitimately gain a step.
+        Named separately so that change fails here with an obvious message
+        rather than scattering failures across the matrix."""
+        assert len(workflow["jobs"][job_id]["steps"]) == 1
 
     @pytest.mark.parametrize("job_id,flag", sorted(GATES.items()))
     def test_required_check_name_is_unchanged(self, workflow, job_id, flag):
         """Branch protection matches on these names; renaming one silently
         removes a required check rather than failing it."""
-        expected = {
-            "backend-tests": "Backend tests",
-            "frontend-tests": "Frontend tests",
-            "gateway-tests": "Gateway tests",
-            "python-lint": "Python lint (ruff)",
-        }
-        assert workflow["jobs"][job_id]["name"] == expected[job_id]
+        assert workflow["jobs"][job_id]["name"] == REQUIRED_CHECK_NAMES[job_id]
 
     @pytest.mark.parametrize("job_id,flag", sorted(GATES.items()))
     def test_worker_is_gated_on_the_flag(self, workflow, job_id, flag):

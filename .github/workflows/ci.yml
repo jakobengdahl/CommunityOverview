@@ -175,10 +175,11 @@ jobs:
   # network model download.
   #
   # This is the WORKER job. Branch protection requires the "Backend tests" gate
-  # job below (not this one). A skip here blocks merge only when it was caused
-  # by the draft condition: the gate passes a path-skip (service_code=false)
+  # job below (not this one). The gate passes a path-skip (service_code=false)
   # and fails a draft-skip, so a draft never reports green for a suite it did
-  # not run.
+  # not run. A skip here can also block merge without being draft-caused: if
+  # detect-changes itself fails this job skips via `needs`, and the gate then
+  # fails on its own detect-changes guard.
   # ---------------------------------------------------------------------------
   backend-tests-run:
     name: Backend tests (run)
