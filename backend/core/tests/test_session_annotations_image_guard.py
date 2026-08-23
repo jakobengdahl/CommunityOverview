@@ -176,6 +176,27 @@ class TestStoreRejectsUnvalidatedImageWrites:
 
 class TestApplyOpsRejectsUnvalidatedImageWrites:
     @pytest.mark.asyncio
+    async def test_undoing_a_deleted_image_restores_the_embedded_copy(self):
+        """Undo replays the inverse `annotation_created` op with the stored
+        annotation, so the guard must let a session's own history back in."""
+        manager = SessionManager(SessionStore(InMemorySessionPersistenceBackend()))
+        session = manager.create_session()
+        manager.upsert_image_annotation(
+            session.id, "client-a", _image_annotation(), optimized_image_bytes=100
+        )
+        await manager.apply_ops(
+            session.id,
+            "client-a",
+            manager.get_session(session.id).seq,
+            [{"op": "annotation_deleted", "annotation_id": "img-1"}],
+        )
+
+        manager.undo_last_action(session.id, "client-a")
+
+        restored = manager.get_session(session.id).state["annotations"]
+        assert [a["image"]["url"] for a in restored] == [EMBEDDED_URL]
+
+    @pytest.mark.asyncio
     async def test_op_batch_with_remote_image_url_is_refused(self):
         """The browser/REST path (`POST /sessions/{id}/ops`) shares the guard."""
         manager = SessionManager(SessionStore(InMemorySessionPersistenceBackend()))
