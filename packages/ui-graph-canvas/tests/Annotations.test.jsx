@@ -51,8 +51,9 @@ describe('NoteNode', () => {
 
   // Notes and labels render through their own components rather than
   // GenericAnnotationNode, so their rotation is wired separately and needs its
-  // own coverage - both are toolbox-creatable, so a rotation set on one over
-  // MCP is something a user meets on an object they made themselves.
+  // own coverage. A label's rotation is reachable today (the generic MCP tools
+  // accept `label`); a note's is not - the sticky-note tools take no rotation
+  // argument - so this pins the wiring ahead of the source that will set it.
   it('draws a rotation on the note body', () => {
     const { container } = renderWithContext(
       <NoteNode id="note-1" data={{ text: 'x', rotation: 30 }} selected={false} />
