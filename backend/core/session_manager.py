@@ -1119,7 +1119,12 @@ class SessionManager:
         inverse_op["client_id"] = client_id
 
         applied = self._apply_op_sync(
-            session, session_id, client_id, inverse_op, record_activity=False
+            session,
+            session_id,
+            client_id,
+            inverse_op,
+            record_activity=False,
+            trusted_replay=True,
         )
         if applied is None:
             # The conflict check above passed but the replay still turned out
@@ -1146,6 +1151,7 @@ class SessionManager:
         op: Dict[str, Any],
         *,
         record_activity: bool = True,
+        trusted_replay: bool = False,
     ) -> Optional[Dict[str, Any]]:
         """Apply, persist and broadcast one state op on the calling thread.
 
@@ -1158,7 +1164,9 @@ class SessionManager:
         above raise a typed exception; ``apply_layout``/``add_node_refs`` never
         hit this branch, since their ops always apply). ``record_activity=False``
         is passed through to ``apply_state_op`` by ``undo_last_action`` so
-        replaying an inverse op does not itself become a new undoable action.
+        replaying an inverse op does not itself become a new undoable action,
+        together with ``trusted_replay=True`` so restoring the session's own
+        prior state is not re-judged as fresh caller input.
         """
         saved_state = copy.deepcopy(session.state)
         saved_seq = session.seq
@@ -1168,7 +1176,10 @@ class SessionManager:
         saved_ring = list(ring) if ring is not None else None
         try:
             applied = self.store.apply_state_op(
-                session, op, record_activity=record_activity
+                session,
+                op,
+                record_activity=record_activity,
+                trusted_replay=trusted_replay,
             )
             if applied is not None:
                 self.store.persist(session)

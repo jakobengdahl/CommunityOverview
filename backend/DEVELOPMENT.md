@@ -1065,14 +1065,21 @@ and `update_annotation` refuses a `content` carrying an `image` key
 (`invalid_content`), so neither can store an image reference that skipped
 ingest; replacing the picture of an existing image annotation means calling
 `create_image_annotation` again with the same `annotation_id`. Below both
-tools, `SessionStore` rejects any `annotation_created`/`annotation_updated`
-op — including one posted straight to `/api/sessions/{id}/ops` — whose
-`image` payload is not an embedded `data:image/png|jpeg|webp;base64` URI, so
-the rule holds for every write path rather than tool by tool. This is
-docs/ANNOTATION_CONTRACT.md's "Image ingest enforcement" requirement: an
-annotation must never depend on a remote resource staying reachable to keep
-rendering, and a caller-supplied URL must never be fetched or trusted on
-someone else's behalf.
+tools, `SessionStore.apply_state_op` rejects any `annotation_created`/
+`annotation_updated` op — including one posted straight to
+`/api/sessions/{id}/ops` — that sets an `image.url` which is not an embedded
+`data:image/webp;base64` URI (the content type ingest emits), so the rule
+holds for every session annotation write rather than tool by tool. Two
+exemptions keep existing state usable: re-sending the URL already stored
+under that id (which the browser does on every move/resize/lock), and an
+undo replaying its own stored inverse op.
+
+This implements docs/ANNOTATION_CONTRACT.md's "Image ingest enforcement"
+requirement. Read that section for what it deliberately does *not* cover —
+the session/document byte budgets are enforced only by
+`SessionManager.upsert_image_annotation` and not on the op path, and a
+`SavedView`'s stored `annotation_document` is rendered without passing
+through this check.
 
 ### UI Backend Endpoints
 

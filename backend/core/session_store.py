@@ -344,15 +344,28 @@ def _validate_annotation(value: Any, *, require_id: bool) -> Dict[str, Any]:
         raise OpError("annotation update/delete requires a string 'id'")
     if "position" in annotation and annotation["position"] is not None:
         _validate_position(annotation["position"])
-    # Every write of an `image` annotation's pixel content lands here — MCP's
-    # generic create/update tools, a browser's `annotation_created` op batch,
-    # a replayed inverse op — so this is where the contract's ingest rule is
-    # enforced, rather than once per entry point (which is how the generic
-    # tools came to bypass the hardened ingest path in the first place).
-    image_error = image_annotation_error(annotation)
+    return annotation
+
+
+def _require_ingested_image(
+    annotation: Dict[str, Any], existing: Optional[Dict[str, Any]]
+) -> None:
+    """Refuse a write that would set an `image` annotation's pixel content to
+    anything but a server-ingested embedded copy.
+
+    Called from the `annotation_created`/`annotation_updated` branches rather
+    than from ``_validate_annotation`` because the rule needs the annotation
+    already stored under this id: re-sending the URL that is already there
+    (which the browser does on every move) is allowed, introducing a new one
+    is not. Every write of image pixel content reaches one of those two
+    branches — MCP's generic tools, a browser's op batch, a replayed inverse
+    op — so this is the whole enforcement surface, rather than one check per
+    entry point (which is how the generic tools came to bypass the hardened
+    ingest path in the first place).
+    """
+    image_error = image_annotation_error(annotation, existing)
     if image_error:
         raise OpError(image_error)
-    return annotation
 
 
 def _union(existing: List[str], incoming: List[str]) -> List[str]:
@@ -541,7 +554,12 @@ class SessionStore:
     # ---------------- op application ----------------
 
     def apply_state_op(
-        self, session: Session, op: Dict[str, Any], *, record_activity: bool = True
+        self,
+        session: Session,
+        op: Dict[str, Any],
+        *,
+        record_activity: bool = True,
+        trusted_replay: bool = False,
     ) -> Optional[Dict[str, Any]]:
         """Apply one persisted state op to ``session``.
 
@@ -557,6 +575,12 @@ class SessionStore:
         ``record_activity=False`` suppresses that — used when replaying an
         undo's inverse op, so undoing an action does not itself become a new
         undoable action (no redo stack).
+
+        ``trusted_replay=True`` is set by that same undo path: the annotation
+        in an inverse op is a copy of state this session already held, not
+        caller input, so restoring it is exempt from the image-ingest check
+        (otherwise deleting an image annotation stored before that rule
+        existed would be irreversible).
         """
         op_type = op.get("op")
         if op_type not in STATE_OPS:
@@ -697,6 +721,8 @@ class SessionStore:
                 if incoming_id is not None
                 else None
             )
+            if not trusted_replay:
+                _require_ingested_image(annotation, existing)
             if existing is not None:
                 # A retried create (lost response, resent batch) carries the same
                 # client-assigned id as the one already applied: upsert so the
@@ -758,6 +784,8 @@ class SessionStore:
                     f"annotation {incoming['id']!r} is type {target.get('type')!r}; "
                     "cannot change type via update"
                 )
+            if not trusted_replay:
+                _require_ingested_image(incoming, target)
             prior = copy.deepcopy(target)
             target.update(incoming)
             target["updated_at"] = _now_iso()

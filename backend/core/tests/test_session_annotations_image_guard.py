@@ -9,14 +9,16 @@ while the generic ``create_annotation``/``update_annotation`` envelope and a
 raw ``annotation_created`` op both stored a supplied URL verbatim.
 
 The guard lives in ``session_annotations.image_annotation_error`` and is
-applied by ``SessionStore._validate_annotation``, the one point every write
-passes through. These tests cover the helper, the store op paths, and the
-``apply_ops`` batch path a browser uses.
+applied by ``SessionStore.apply_state_op``'s ``annotation_created``/
+``annotation_updated`` branches — the two points every write of image pixel
+content passes through. These tests cover the helper, the store op paths, the
+``apply_ops`` batch path a browser uses, and annotations persisted before the
+rule existed.
 """
 
 import pytest
 
-from backend.core.image_ingest import ALLOWED_CONTENT_TYPES
+from backend.core.image_ingest import OPTIMIZED_CONTENT_TYPE
 from backend.core.session_annotations import (
     EMBEDDED_IMAGE_URL_PREFIXES,
     image_annotation_error,
@@ -95,12 +97,35 @@ class TestImageAnnotationError:
             is None
         )
 
-    def test_prefixes_cover_exactly_the_ingestable_content_types(self):
-        """The literal prefixes must not drift from image_ingest's allow-list."""
-        assert {
-            prefix[len("data:") : -len(";base64,")]
-            for prefix in EMBEDDED_IMAGE_URL_PREFIXES
-        } == set(ALLOWED_CONTENT_TYPES)
+    def test_prefixes_pin_to_what_ingest_actually_emits(self):
+        """Not the wider set of formats ingest *accepts*: every accepted source
+        is re-encoded, so keeping a prefix no path ever produces would only
+        widen what a forged data URI may claim to be."""
+        assert EMBEDDED_IMAGE_URL_PREFIXES == (
+            f"data:{OPTIMIZED_CONTENT_TYPE};base64,",
+        )
+
+    @pytest.mark.parametrize(
+        "url",
+        [
+            "data:image/png;base64,iVBORw0KGgo=",
+            "data:image/jpeg;base64,/9j/4AAQSkZJRg==",
+        ],
+    )
+    def test_accepted_input_formats_are_not_accepted_as_stored_urls(self, url):
+        assert image_annotation_error(_image_annotation(url=url)) is not None
+
+    def test_unchanged_legacy_url_is_exempt(self):
+        """An annotation persisted before this rule must stay movable: the
+        browser echoes the whole annotation, image payload included, on every
+        update (`sessionSyncClient.js`)."""
+        legacy = _image_annotation(url="https://example.com/legacy.png")
+        assert image_annotation_error(legacy, existing=legacy) is None
+
+    def test_a_different_remote_url_is_still_refused_on_legacy_data(self):
+        legacy = _image_annotation(url="https://example.com/legacy.png")
+        swapped = _image_annotation(url="https://example.com/other.png")
+        assert image_annotation_error(swapped, existing=legacy) is not None
 
     def test_is_embedded_image_url(self):
         assert is_embedded_image_url(EMBEDDED_URL)
@@ -174,6 +199,78 @@ class TestStoreRejectsUnvalidatedImageWrites:
         assert applied["annotation"]["position"] == {"x": 40, "y": 60}
 
 
+class TestLegacyRemoteUrlAnnotationsStayUsable:
+    """Annotations persisted through the old `create_annotation(type="image",
+    content={"image": {"url": ...}})` path really exist — it was documented
+    behaviour. The guard must not strand them: every envelope-only op re-sends
+    the stored URL, so a blanket refusal would make such an annotation
+    permanently unmovable and its deletion un-undoable."""
+
+    def _session_with_legacy_image(self):
+        manager = SessionManager(SessionStore(InMemorySessionPersistenceBackend()))
+        session = manager.create_session()
+        # Seeded directly: the guard is exactly what stops this being created
+        # through any op today.
+        session.state["annotations"].append(
+            _image_annotation(url="https://example.com/legacy.png")
+        )
+        manager.store.persist(session)
+        return manager, session
+
+    @pytest.mark.asyncio
+    async def test_move_and_lock_still_apply(self):
+        manager, session = self._session_with_legacy_image()
+        moved = _image_annotation(url="https://example.com/legacy.png")
+        moved["position"] = {"x": 90, "y": 12}
+        moved["locked"] = True
+
+        result = await manager.apply_ops(
+            session.id,
+            "browser-1",
+            session.seq,
+            [{"op": "annotation_updated", "annotation": moved}],
+        )
+
+        assert len(result["applied"]) == 1
+        stored = manager.get_session(session.id).state["annotations"][0]
+        assert stored["position"] == {"x": 90, "y": 12}
+        assert stored["locked"] is True
+
+    @pytest.mark.asyncio
+    async def test_delete_then_undo_round_trips(self):
+        manager, session = self._session_with_legacy_image()
+        await manager.apply_ops(
+            session.id,
+            "browser-1",
+            session.seq,
+            [{"op": "annotation_deleted", "annotation_id": "img-1"}],
+        )
+        assert manager.get_session(session.id).state["annotations"] == []
+
+        manager.undo_last_action(session.id, "browser-1")
+
+        restored = manager.get_session(session.id).state["annotations"]
+        assert [a["image"]["url"] for a in restored] == [
+            "https://example.com/legacy.png"
+        ]
+
+    @pytest.mark.asyncio
+    async def test_swapping_in_a_new_remote_url_is_still_refused(self):
+        manager, session = self._session_with_legacy_image()
+        swapped = _image_annotation(url="https://example.com/attacker.png")
+
+        with pytest.raises(OpError):
+            await manager.apply_ops(
+                session.id,
+                "browser-1",
+                session.seq,
+                [{"op": "annotation_updated", "annotation": swapped}],
+            )
+
+        stored = manager.get_session(session.id).state["annotations"][0]
+        assert stored["image"]["url"] == "https://example.com/legacy.png"
+
+
 class TestApplyOpsRejectsUnvalidatedImageWrites:
     @pytest.mark.asyncio
     async def test_undoing_a_deleted_image_restores_the_embedded_copy(self):
@@ -218,3 +315,38 @@ class TestApplyOpsRejectsUnvalidatedImageWrites:
             )
 
         assert manager.get_session(session.id).state["annotations"] == []
+
+    @pytest.mark.asyncio
+    async def test_a_poisoned_op_rolls_back_the_whole_batch(self):
+        """apply_ops is all-or-nothing: a valid op earlier in the same batch
+        must not survive a later refusal."""
+        manager = SessionManager(SessionStore(InMemorySessionPersistenceBackend()))
+        session = manager.create_session()
+
+        with pytest.raises(OpError):
+            await manager.apply_ops(
+                session.id,
+                "browser-1",
+                session.seq,
+                [
+                    {
+                        "op": "annotation_created",
+                        "annotation": {
+                            "id": "lbl-1",
+                            "type": "label",
+                            "position": {"x": 0, "y": 0},
+                            "text": "kept?",
+                        },
+                    },
+                    {
+                        "op": "annotation_created",
+                        "annotation": _image_annotation(
+                            url="https://example.com/x.png"
+                        ),
+                    },
+                ],
+            )
+
+        reloaded = manager.get_session(session.id)
+        assert reloaded.state["annotations"] == []
+        assert reloaded.seq == 0
