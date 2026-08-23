@@ -125,6 +125,41 @@ describe('graphStore.canvasBaselineEpoch', () => {
   });
 });
 
+// GraphCanvas drops every manual group/note/label/annotation from the canvas
+// while this flag is raised. Regression coverage for a bug where an ordinary
+// in-place node edit (handleNodeUpdate and its siblings all route through
+// updateVisualization) wiped every overlay off the canvas, and autosave then
+// persisted the loss as annotation_deleted ops.
+describe('graphStore.clearGroupsFlag', () => {
+  beforeEach(() => {
+    vi.useFakeTimers();
+    useGraphStore.setState({ clearGroupsFlag: false, nodes: [], edges: [] });
+  });
+
+  afterEach(() => {
+    vi.useRealTimers();
+  });
+
+  it('is not raised by an in-place edit of the current contents', () => {
+    // updateVisualization doubles as the setter for ordinary edits (edge
+    // retype, node edit, node removal, chat's update_in_visualization). Only a
+    // genuine replace — which calls clearVisualization first — may raise this.
+    useGraphStore.getState().updateVisualization([{ id: 'n1' }], []);
+    expect(useGraphStore.getState().clearGroupsFlag).toBe(false);
+
+    vi.advanceTimersByTime(200);
+    expect(useGraphStore.getState().clearGroupsFlag).toBe(false);
+  });
+
+  it('is raised (then lowered) by a wholesale canvas replacement', () => {
+    useGraphStore.getState().clearVisualization();
+    expect(useGraphStore.getState().clearGroupsFlag).toBe(true);
+
+    vi.advanceTimersByTime(200);
+    expect(useGraphStore.getState().clearGroupsFlag).toBe(false);
+  });
+});
+
 describe('graphStore.clearVisualization', () => {
   beforeEach(() => {
     vi.useFakeTimers();
