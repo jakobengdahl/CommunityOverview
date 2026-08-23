@@ -53,6 +53,17 @@ REQUIRED_CHECK_NAMES = {
     "python-lint": "Python lint (ruff)",
 }
 
+# Every check name `main`'s branch protection requires - the four gates above
+# plus `frontend-lint`, which is unconditional and does its own work rather
+# than gating a worker. Listed in full because the property that actually
+# matters is about these NAMES, not about the gate pattern: GitHub reports a
+# SKIPPED job to branch protection as success, so any job carrying one of these
+# names either has to be a gate this file verifies, or has to be incapable of
+# being skipped at all.
+BRANCH_PROTECTION_CHECKS = set(REQUIRED_CHECK_NAMES.values()) | {
+    "Frontend lint (eslint + prettier)",
+}
+
 PASS, FAIL = 0, 1
 
 # (detect-changes result, worker result, code flag) -> expected gate exit.
@@ -130,7 +141,12 @@ def runs_despite_upstream_result(expr):
     if expr is None:
         return False
     text = str(expr)
-    return any(tok in text for tok in ("always()", "cancelled()", "failure()"))
+    # All four of GitHub's status-check functions. `success()` belongs here
+    # too: `${{ success() || needs.W.result == 'skipped' }}` suppresses the
+    # implicit success() and runs the job after its worker skipped.
+    return any(
+        tok in text for tok in ("always()", "cancelled()", "failure()", "success()")
+    )
 
 
 def discover_gates(workflow):
@@ -213,13 +229,59 @@ class TestTheGateSetIsDiscovered:
         )
 
     def test_the_decisive_rows_are_still_in_the_matrix(self):
-        # The subset check alone is vacuously true on an empty set, which would
-        # let DECISIVE_ROWS and MATRIX be emptied together for a green no-op.
-        assert len(DECISIVE_ROWS) == 2
+        # Pin the rows literally, not just their count: any two MATRIX rows
+        # satisfy a length check, so a cardinality assertion alone still lets
+        # the draft-skip row be swapped out and the whole bug restored.
+        assert DECISIVE_ROWS == {
+            ("success", "skipped", "true", FAIL),
+            ("success", "skipped", "false", PASS),
+        }
         assert DECISIVE_ROWS <= set(MATRIX)
 
     def test_check_names_cover_the_same_gates(self):
         assert set(REQUIRED_CHECK_NAMES) == set(GATES)
+
+    def test_the_gate_set_itself_is_pinned(self):
+        """GATES is what every other test parametrises over, so allowlisting a
+        gate and deleting it from GATES would leave the file green while that
+        gate carries any body it likes."""
+        assert set(GATES) == {
+            "backend-tests",
+            "frontend-tests",
+            "gateway-tests",
+            "python-lint",
+        }
+
+    def test_the_allowlist_cannot_excuse_a_real_gate(self, workflow):
+        """Having a `<id>-run` worker is what makes a job a gate. Excusing one
+        is the single edit that would silence this file."""
+        for job_id in NON_GATE_UNCONDITIONAL_JOBS:
+            assert f"{job_id}-run" not in workflow["jobs"], (
+                f"{job_id} has a worker, so it is a gate and cannot be "
+                "excused in NON_GATE_UNCONDITIONAL_JOBS"
+            )
+
+    def test_every_required_check_either_gates_or_cannot_be_skipped(self, workflow):
+        """The property the whole file is about, stated over the check names
+        branch protection actually requires.
+
+        GitHub reports a job skipped by its own condition to branch protection
+        as success. So a required check is safe only if it is a gate this file
+        verifies, or if it can never be skipped - no `needs` and no `if`. The
+        cheapest way to make `frontend-lint` cost-aware is to add a condition
+        to it in place rather than split it, and that alone would restore the
+        bug with every gate-discovery angle still green.
+        """
+        for job_id, job in workflow["jobs"].items():
+            if job.get("name") not in BRANCH_PROTECTION_CHECKS:
+                continue
+            if job_id in GATES:
+                continue
+            assert not job.get("needs") and job.get("if") is None, (
+                f"{job_id} carries the required check {job['name']!r} but is "
+                "neither a verified gate nor unconditional: if it is skipped, "
+                "branch protection sees success for work that never ran."
+            )
 
 
 class TestGateDistinguishesWhyTheWorkerSkipped:
