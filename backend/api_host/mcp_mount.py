@@ -110,7 +110,7 @@ def _mount_relative_path(scope) -> str:
     """
     path = scope.get("path", "") or ""
     root_path = scope.get("root_path", "") or ""
-    if root_path and path.startswith(root_path):
+    if root_path and (path == root_path or path.startswith(root_path + "/")):
         path = path[len(root_path) :]
     return path or "/"
 
