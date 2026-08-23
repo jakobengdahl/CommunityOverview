@@ -85,13 +85,21 @@ describe('GenericAnnotationNode', () => {
   // A clip-path clips the selection outline away, so a clipped shape needs
   // selection feedback that survives clipping — otherwise a selected locked
   // triangle (no resize handles either) looks exactly like an unselected one.
+  // An element's own filter renders before its clip-path, so the halo has to
+  // sit on an ancestor that is not itself clipped; asserting only that some
+  // element carries a drop-shadow would pass on a halo that is clipped away.
   it.each(['triangle', 'rhombus', 'hexagon', 'process_arrow', 'rectangle'])(
-    'gives a selected %s visible selection feedback',
+    'gives a selected %s a selection halo on an unclipped ancestor',
     (shape) => {
       const { container } = render(
         <GenericAnnotationNode type="shape" data={{ shape, locked: true }} selected />
       );
-      expect(container.querySelector(`.shape-${shape}`).style.filter).toContain('drop-shadow');
+      const clipped = container.querySelector(`.shape-${shape}`);
+      const halo = clipped.parentElement;
+      expect(halo.style.filter).toContain('drop-shadow');
+      expect(halo.style.clipPath).toBe('');
+      expect(halo.contains(clipped)).toBe(true);
+      expect(clipped).not.toBe(halo);
     }
   );
 
@@ -99,7 +107,7 @@ describe('GenericAnnotationNode', () => {
     const { container } = render(
       <GenericAnnotationNode type="shape" data={{ shape: 'triangle' }} selected={false} />
     );
-    expect(container.querySelector('.shape-triangle').style.filter).toBe('');
+    expect(container.querySelector('[data-testid="shape-halo"]').style.filter).toBe('');
   });
 
   it('renders the configured icon as its glyph, not an abbreviation of its name', () => {
@@ -109,9 +117,16 @@ describe('GenericAnnotationNode', () => {
     expect(badge.textContent).not.toBe('fl');
   });
 
-  it('accepts the host icon registry spelling of the same icon', () => {
-    render(<GenericAnnotationNode type="icon" data={{ icon: 'FlagFill' }} />);
-    expect(screen.getByTitle('FlagFill').textContent).toBe('⚑');
+  it.each([
+    ['FlagFill', '⚑'],
+    // A first word that is a single capital would collapse into the next word
+    // ("xcircle_fill") without the second camel-boundary rule, and silently
+    // fall back to the default glyph.
+    ['XCircleFill', '✖'],
+    ['x-circle-fill', '✖'],
+  ])('accepts the host icon registry spelling %s', (icon, glyph) => {
+    render(<GenericAnnotationNode type="icon" data={{ icon }} />);
+    expect(screen.getByTitle(icon).textContent).toBe(glyph);
   });
 
   it('renders an unknown icon name as the neutral default glyph', () => {
@@ -130,7 +145,18 @@ describe('GenericAnnotationNode', () => {
     }
   );
 
-  it.each(['text', 'shape', 'icon', 'vote_dot'])('draws a rotation on a %s', (type) => {
+  // A shape's rotation goes on the same wrapper as its selection halo, so the
+  // halo rotates with the shape instead of staying axis-aligned around it.
+  it('draws a rotation on a shape, on the wrapper that also carries its halo', () => {
+    const { container } = render(
+      <GenericAnnotationNode type="shape" data={{ shape: 'triangle', rotation: 45 }} />
+    );
+    const halo = container.querySelector('[data-testid="shape-halo"]');
+    expect(halo.style.transform).toBe('rotate(45deg)');
+    expect(halo.querySelector('.shape-triangle')).toBeTruthy();
+  });
+
+  it.each(['text', 'icon', 'vote_dot'])('draws a rotation on a %s', (type) => {
     const { container } = render(
       <GenericAnnotationNode type={type} data={{ rotation: 45, text: 'x' }} />
     );

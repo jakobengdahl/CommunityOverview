@@ -37,10 +37,11 @@ const SHAPE_STYLES = Object.freeze(
 // A clip-path clips the element's outline away too, so the dashed selection
 // outline every other generic kind uses is invisible on a triangle, rhombus,
 // hexagon or process arrow — and a locked one shows no resize handles either,
-// leaving a selected shape with no feedback at all. A filter is applied after
-// clipping, so a drop shadow traces the clipped silhouette instead.
-const SELECTED_SHAPE_STYLE = Object.freeze({
-  outline: 'none',
+// leaving a selected shape with no feedback at all. The halo therefore goes on
+// an unclipped wrapper: an element's own filter is rendered *before* its
+// clip-path, so a drop shadow on the clipped element itself would be clipped
+// away with it.
+const SELECTED_SHAPE_HALO = Object.freeze({
   filter: 'drop-shadow(0 0 3px rgba(255, 255, 255, 0.9)) drop-shadow(0 0 1px rgba(0, 0, 0, 0.6))',
 });
 
@@ -110,16 +111,26 @@ function GenericAnnotationNode({ type, data, selected }) {
       <>
         {resizer}
         <div
-          className={`graph-generic-annotation-node kind-shape shape-${shape}${selectedClass}`}
+          className="graph-generic-annotation-shape-halo"
+          data-testid="shape-halo"
           style={{
-            backgroundColor: color,
             width: '100%',
             height: '100%',
-            ...(SHAPE_STYLES[shape] || SHAPE_STYLES.rectangle),
             ...rotation,
-            ...(selected ? SELECTED_SHAPE_STYLE : null),
+            ...(selected ? SELECTED_SHAPE_HALO : null),
           }}
-        />
+        >
+          <div
+            className={`graph-generic-annotation-node kind-shape shape-${shape}${selectedClass}`}
+            style={{
+              backgroundColor: color,
+              width: '100%',
+              height: '100%',
+              outline: 'none',
+              ...(SHAPE_STYLES[shape] || SHAPE_STYLES.rectangle),
+            }}
+          />
+        </div>
       </>
     );
   }

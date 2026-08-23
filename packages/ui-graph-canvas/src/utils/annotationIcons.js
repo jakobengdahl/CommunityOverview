@@ -68,11 +68,17 @@ const ICON_ALIASES = Object.assign(Object.create(null), {
 
 function normalizeIconName(name) {
   if (typeof name !== 'string') return '';
-  return name
-    .trim()
-    .replace(/([a-z0-9])([A-Z])/g, '$1_$2')
-    .replace(/[\s-]+/g, '_')
-    .toLowerCase();
+  return (
+    name
+      .trim()
+      .replace(/([a-z0-9])([A-Z])/g, '$1_$2')
+      // Second boundary: a run of capitals followed by a capitalised word, so a
+      // name whose first word is a single letter ("XCircleFill") splits into
+      // x_circle_fill rather than xcircle_fill and still finds its alias.
+      .replace(/([A-Z]+)([A-Z][a-z])/g, '$1_$2')
+      .replace(/[\s-]+/g, '_')
+      .toLowerCase()
+  );
 }
 
 // Resolve a configured icon name to the glyph that renders it. Unknown names

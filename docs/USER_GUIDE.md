@@ -201,7 +201,7 @@ and edge data. Select an annotation and press **Delete** to remove it.
 A collapsible toolbox is also anchored to the bottom of the canvas. Click **Add
 annotation** to expand it, then pick a type to drop it at the centre of your current view:
 **Note**, **Text**, **Label**, **Frame**, or a **Shape** — rectangle, circle, triangle,
-rhombus, hexagon or process arrow, each drawn as its own outline. It is hidden
+rhombus, hexagon or process arrow, each drawn as its own filled shape. It is hidden
 while a focus view is active, since annotations are set aside during focus (see
 [9. On a phone](#9-on-a-phone) for how focus view works).
 
