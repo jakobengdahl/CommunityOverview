@@ -310,10 +310,14 @@ resolves to in the canvas package's icon set
 it covers **11 of the 75 Bootstrap-icon names in the host app's registry**
 (`ICON_REGISTRY` in `frontend/web/src/components/FloatingToolbar.jsx`, the
 same vocabulary `schema_config.json`'s `icon` field uses), plus everyday
-synonyms. A name the set does not cover keeps the two-character abbreviation
-of the name that the canvas drew before the set existed, rather than
-collapsing into one neutral marker — so no configured name became less
-distinguishable than it was. That is a floor, not a good outcome: most names
+synonyms. A name that resolves to neither draws the two-character abbreviation
+of itself that the canvas drew before the set existed, rather than collapsing
+into one neutral marker — so no name from the host registry became less
+distinguishable than it was. (The synonym aliases do merge on purpose:
+`circle`/`dot`, `check`/`ok`, `cross`/`x`, `warning`/`alert` and
+`lightbulb`/`idea` each draw one glyph where they used to draw two different
+abbreviations — a meaningful icon is worth more there than two distinct pairs
+of letters.) That is a floor, not a good outcome: most names
 are still an abbreviation and not their icon, and abbreviations collide (the
 registry's 64 uncovered names draw only 36 distinct marks — every
 `FileEarmark*` name draws `Fi`, every `List*` name draws `Li`). Covering the
@@ -385,7 +389,7 @@ rule](#downstream-closure-rule).
 
 | Type | GUI create/edit | MCP create/edit | Persistence/reload/saved views | Realtime/collaboration | Activity/undo | Accessibility/device |
 |---|---|---|---|---|---|---|
-| `note` | ✅ toolbox create, inline edit, drag/resize | ⚠ sticky note tool set, but it takes no `rotation` argument on create or update — and the generic `reorder_annotation`/`set_annotation_lock` refuse note ids — so a note's `rotation` (and its `z`/`locked`) cannot be set from anywhere, though `list_sticky_notes` reports all three | ✅ | ✅ op broadcast + revision | ✅ actor-scoped undo | ⬜ no formal pass yet |
+| `note` | ✅ toolbox create, inline edit, drag/resize | ⚠ sticky note tool set, but it takes no `rotation` argument on create or update — and the generic `reorder_annotation`/`set_annotation_lock` refuse note ids — so a note's `rotation` (and its `z`/`locked`) cannot be set from anywhere, though `list_sticky_notes` reports `z` and `locked` back and `list_annotations` reports the rotation | ✅ | ✅ op broadcast + revision | ✅ actor-scoped undo | ⬜ no formal pass yet |
 | `text` | ⚠ toolbox create (fixed default), no property editor | ✅ generic tool set | ✅ | ✅ | ✅ | ⬜ |
 | `label` | ✅ toolbox create, inline edit, drag/resize, attach | ✅ generic tool set | ✅ | ✅ | ✅ | ⬜ |
 | `line` | ⚠ toolbox create, endpoint attach/drag; a `rotation` the MCP tools accept is stored and reported but never drawn | ✅ generic tool set (`arrow` alias) | ✅ | ✅ | ✅ | ⬜ |

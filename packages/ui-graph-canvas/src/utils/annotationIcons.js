@@ -8,9 +8,10 @@
  * set of text glyphs — the same approach AnnotationToolbox already uses for
  * its buttons. Bootstrap-style names from that host registry are accepted as
  * aliases for the 11 icons the two sets share, so an annotation authored with
- * `content.icon: "FlagFill"` shows a flag; any other name keeps the
- * two-character abbreviation of itself that this component drew before the
- * set existed, so no name became less distinguishable than it was.
+ * `content.icon: "FlagFill"` shows a flag. A name that matches neither a
+ * canonical key nor an alias draws the two-character abbreviation of itself
+ * that this component drew before the set existed, so no host-registry name
+ * became less distinguishable than it was.
  */
 
 // Glyph drawn when an annotation has no icon name at all. Mirrors the host
@@ -94,7 +95,9 @@ function normalizeIconName(name) {
 // neutral dot, so that adding the set never makes a name *less*
 // distinguishable than it was: a board of DatabaseFill/GearFill/PeopleFill
 // icons keeps three separable marks instead of collapsing into three
-// identical dots. `isGlyph` lets the caller style the two cases differently
+// identical dots. (The synonym aliases below merge deliberately - `dot` draws
+// the same ● as `circle` where both used to draw different letters - because
+// a meaningful icon beats two distinct abbreviations.) `isGlyph` lets the caller style the two cases differently
 // (an abbreviation needs the smaller, uppercased treatment a glyph does not).
 export function resolveAnnotationIcon(name) {
   const normalized = normalizeIconName(name);
