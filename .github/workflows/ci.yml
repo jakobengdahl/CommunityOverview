@@ -175,7 +175,10 @@ jobs:
   # network model download.
   #
   # This is the WORKER job. Branch protection requires the "Backend tests" gate
-  # job below (not this one), so a skip here never blocks merge.
+  # job below (not this one). A skip here blocks merge only when it was caused
+  # by the draft condition: the gate passes a path-skip (service_code=false)
+  # and fails a draft-skip, so a draft never reports green for a suite it did
+  # not run.
   # ---------------------------------------------------------------------------
   backend-tests-run:
     name: Backend tests (run)
@@ -513,7 +516,7 @@ jobs:
             success) echo "Gate passed."; exit 0 ;;
             skipped)
               if [ "$CODE" = "true" ]; then
-                echo "::error::Python lint was skipped even though python_code=true. The only cause is a draft pull request, so this head has NOT run ruff check/format. Mark the PR ready for review to run it; a draft skip must not report green."
+                echo "::error::Python lint was skipped even though python_code=true, so this head has NOT run ruff check/format. The worker carries no draft condition today, so this state should be unreachable - if you are reading this, a condition was added to python-lint-run without updating this gate. Do not merge on the strength of this check."
                 exit 1
               fi
               echo "Gate passed (python_code=false: nothing relevant changed, nothing to verify)."; exit 0 ;;
