@@ -56,10 +56,18 @@ const GENERIC_OVERLAY_FIELDS = {
 // icon/vote_dot/text render at a fixed intrinsic size instead.
 const SIZED_GENERIC_KINDS = new Set(['frame', 'shape', 'image']);
 
-// The kinds the contract accepts rotation for: text/headings, labels/callouts,
-// sticky notes, images, icons/dots and basic shapes (process arrow included,
-// as a shape variant). Frames, lines, groups and freehand strokes are not
-// rotatable, so their geometry.rotation is carried but never drawn.
+// The kinds that draw geometry.rotation. The capability baseline names
+// text/headings, labels/callouts, sticky notes, images, icons/dots and basic
+// shapes (process arrow included, as a shape variant); `frame` is drawn too,
+// because the MCP tools accept a rotation for every generic type with no
+// per-type validation, and a frame is one box like a shape — silently
+// discarding a rotation the server stored and reports back is worse than
+// honouring it.
+//
+// `line` and `freehand` are the real exclusions: their geometry lives in
+// endpoints and sampled points rather than in a box, so rotation there is a
+// tracked gap in the acceptance matrix, not a decision this file makes.
+// `group` never reaches this translation layer at all.
 export const ROTATABLE_OVERLAY_KINDS = new Set([
   'note',
   'label',
@@ -68,6 +76,7 @@ export const ROTATABLE_OVERLAY_KINDS = new Set([
   'icon',
   'vote_dot',
   'image',
+  'frame',
 ]);
 
 // Inline style that draws an annotation's geometry.rotation, or an empty

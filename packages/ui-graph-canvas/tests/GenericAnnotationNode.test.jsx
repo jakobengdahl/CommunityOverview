@@ -129,21 +129,53 @@ describe('GenericAnnotationNode', () => {
     expect(screen.getByTitle(icon).textContent).toBe(glyph);
   });
 
-  it('renders an unknown icon name as the neutral default glyph', () => {
-    render(<GenericAnnotationNode type="icon" data={{ icon: 'no-such-icon' }} />);
-    expect(screen.getByTitle('no-such-icon').textContent).toBe('●');
+  // The set covers 11 of the host registry's 75 icon names. The other 64 must
+  // stay as distinguishable as they were before the set existed - collapsing
+  // DatabaseFill/GearFill/PeopleFill into three identical dots would make the
+  // rendering worse, not better, so an unmapped name keeps its abbreviation.
+  it.each([
+    ['DatabaseFill', 'Da'],
+    ['GearFill', 'Ge'],
+    ['PeopleFill', 'Pe'],
+    ['no-such-icon', 'no'],
+  ])('abbreviates the unmapped icon name %s instead of drawing a generic dot', (icon, text) => {
+    render(<GenericAnnotationNode type="icon" data={{ icon }} />);
+    const badge = screen.getByTitle(icon);
+    expect(badge.textContent).toBe(text);
+    expect(badge.className).toContain('kind-icon-abbreviated');
+  });
+
+  it('draws unmapped names distinguishably from each other, not as one dot', () => {
+    const names = ['DatabaseFill', 'GearFill', 'PeopleFill'];
+    const drawn = names.map((icon) => {
+      render(<GenericAnnotationNode type="icon" data={{ icon }} />);
+      return screen.getByTitle(icon).textContent;
+    });
+    expect(new Set(drawn).size).toBe(names.length);
+  });
+
+  it('does not mark a real glyph as an abbreviation', () => {
+    render(<GenericAnnotationNode type="icon" data={{ icon: 'flag' }} />);
+    expect(screen.getByTitle('flag').className).not.toContain('kind-icon-abbreviated');
   });
 
   // The icon name comes from an annotation's content: an inherited Object
-  // member must fall back to the default glyph, not resolve to that member
-  // (which React would refuse to render).
-  it.each(['constructor', 'toString', 'hasOwnProperty'])(
-    'renders the default glyph for the icon name %s',
-    (icon) => {
-      render(<GenericAnnotationNode type="icon" data={{ icon }} />);
-      expect(screen.getByTitle(icon).textContent).toBe('●');
-    }
-  );
+  // member must not resolve to that member (which React would refuse to
+  // render) - it falls through to the abbreviation like any unmapped name.
+  it.each([
+    ['constructor', 'co'],
+    ['toString', 'to'],
+    ['hasOwnProperty', 'ha'],
+    ['__proto__', '__'],
+  ])('renders a plain abbreviation for the icon name %s', (icon, text) => {
+    render(<GenericAnnotationNode type="icon" data={{ icon }} />);
+    expect(screen.getByTitle(icon).textContent).toBe(text);
+  });
+
+  it('renders the default glyph when an annotation has no icon name at all', () => {
+    const { container } = render(<GenericAnnotationNode type="icon" data={{}} />);
+    expect(container.querySelector('.kind-icon').textContent).toBe('●');
+  });
 
   // A shape's rotation goes on the same wrapper as its selection halo, so the
   // halo rotates with the shape instead of staying axis-aligned around it.
@@ -165,9 +197,12 @@ describe('GenericAnnotationNode', () => {
     );
   });
 
-  it('leaves a frame unrotated (the contract does not accept rotation for frames)', () => {
+  // A frame is one box like a shape, and the MCP tools accept a rotation for
+  // it with no per-type validation, so a stored rotation is drawn rather than
+  // silently discarded while list_annotations keeps reporting it.
+  it('draws a rotation on a frame', () => {
     const { container } = render(<GenericAnnotationNode type="frame" data={{ rotation: 45 }} />);
-    expect(container.querySelector('.kind-frame').style.transform).toBe('');
+    expect(container.querySelector('.kind-frame').style.transform).toBe('rotate(45deg)');
   });
 
   it('rotates an image annotation', () => {

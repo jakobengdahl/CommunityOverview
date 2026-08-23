@@ -1,7 +1,7 @@
 import { memo, useContext } from 'react';
 import { NodeResizer } from 'reactflow';
 import { AnnotationContext } from './AnnotationContext';
-import { annotationIconGlyph } from '../utils/annotationIcons';
+import { resolveAnnotationIcon } from '../utils/annotationIcons';
 import { rotationStyle } from '../utils/annotations';
 import './GenericAnnotationNode.css';
 
@@ -99,7 +99,7 @@ function GenericAnnotationNode({ type, data, selected }) {
         {resizer}
         <div
           className={`graph-generic-annotation-node kind-frame${selectedClass}`}
-          style={{ borderColor: color, width: '100%', height: '100%' }}
+          style={{ borderColor: color, width: '100%', height: '100%', ...rotation }}
         />
       </>
     );
@@ -136,13 +136,17 @@ function GenericAnnotationNode({ type, data, selected }) {
   }
 
   if (kind === 'icon') {
+    // An abbreviated name needs the smaller, uppercased treatment the glyphs
+    // do not: two letters at glyph size overflow the badge.
+    const icon = resolveAnnotationIcon(data.icon);
+    const iconClass = icon.isGlyph ? '' : ' kind-icon-abbreviated';
     return (
       <div
-        className={`graph-generic-annotation-node kind-icon${selectedClass}`}
+        className={`graph-generic-annotation-node kind-icon${iconClass}${selectedClass}`}
         style={{ borderColor: color, ...rotation }}
         title={data.icon}
       >
-        {annotationIconGlyph(data.icon)}
+        {icon.text}
       </div>
     );
   }

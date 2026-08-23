@@ -49,6 +49,22 @@ describe('NoteNode', () => {
     expect(screen.getByText('Hello')).toBeInTheDocument();
   });
 
+  // Sticky notes and labels are the two rotatable kinds a human can actually
+  // create today, so they are the two whose rotation matters most in practice.
+  it('draws a rotation on the note body', () => {
+    const { container } = renderWithContext(
+      <NoteNode id="note-1" data={{ text: 'x', rotation: 30 }} selected={false} />
+    );
+    expect(container.querySelector('.graph-note-node').style.transform).toBe('rotate(30deg)');
+  });
+
+  it('leaves an unrotated note untransformed', () => {
+    const { container } = renderWithContext(
+      <NoteNode id="note-1" data={{ text: 'x' }} selected={false} />
+    );
+    expect(container.querySelector('.graph-note-node').style.transform).toBe('');
+  });
+
   it('commits edited text and notifies on blur', () => {
     const { notifyChange } = renderWithContext(
       <NoteNode id="note-1" data={{ text: '' }} selected />
@@ -92,6 +108,20 @@ describe('NoteNode', () => {
 
 describe('LabelNode', () => {
   beforeEach(() => vi.clearAllMocks());
+
+  it('draws a rotation on the label', () => {
+    const { container } = renderWithContext(
+      <LabelNode id="label-1" data={{ text: 'x', rotation: -15 }} selected={false} />
+    );
+    expect(container.querySelector('.graph-label-node').style.transform).toBe('rotate(-15deg)');
+  });
+
+  it('leaves an unrotated label untransformed', () => {
+    const { container } = renderWithContext(
+      <LabelNode id="label-1" data={{ text: 'x' }} selected={false} />
+    );
+    expect(container.querySelector('.graph-label-node').style.transform).toBe('');
+  });
 
   it('commits edited text on Enter', () => {
     const { notifyChange } = renderWithContext(

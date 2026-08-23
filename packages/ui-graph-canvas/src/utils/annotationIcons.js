@@ -7,13 +7,16 @@
  * `icon` field), so the annotation icons are their own small, self-contained
  * set of text glyphs — the same approach AnnotationToolbox already uses for
  * its buttons. Bootstrap-style names from that host registry are accepted as
- * aliases for the icons the two sets share, so an annotation authored with
- * `content.icon: "FlagFill"` shows a flag rather than falling back.
+ * aliases for the 11 icons the two sets share, so an annotation authored with
+ * `content.icon: "FlagFill"` shows a flag; any other name keeps the
+ * two-character abbreviation of itself that this component drew before the
+ * set existed, so no name became less distinguishable than it was.
  */
 
-// Neutral glyph for an icon name the set does not know. Mirrors the host
+// Glyph drawn when an annotation has no icon name at all. Mirrors the host
 // app's DEFAULT_ICON reasoning (FloatingToolbar.jsx): a question mark would
-// read as a rendering error rather than as an unconfigured icon.
+// read as a rendering error rather than as an unconfigured icon. A name the
+// set does not know is abbreviated instead — see resolveAnnotationIcon.
 export const DEFAULT_ANNOTATION_ICON = 'circle';
 
 // Null prototype for the same reason the host app's ICON_REGISTRY uses one
@@ -81,12 +84,30 @@ function normalizeIconName(name) {
   );
 }
 
-// Resolve a configured icon name to the glyph that renders it. Unknown names
-// fall back to the neutral default rather than to an abbreviation of the name.
-export function annotationIconGlyph(name) {
+// Resolve a configured icon name to what should be drawn for it.
+//
+// The host app's icon registry (FloatingToolbar.jsx) carries 75 Bootstrap-icon
+// names and this set covers 11 of them, so most configured names have no glyph
+// here. Those fall back to the first two characters of the name — the same
+// abbreviation this component drew before the set existed — rather than to a
+// neutral dot, so that adding the set never makes a name *less*
+// distinguishable than it was: a board of DatabaseFill/GearFill/PeopleFill
+// icons keeps three separable marks instead of collapsing into three
+// identical dots. `isGlyph` lets the caller style the two cases differently
+// (an abbreviation needs the smaller, uppercased treatment a glyph does not).
+export function resolveAnnotationIcon(name) {
   const normalized = normalizeIconName(name);
-  const resolved = ANNOTATION_ICONS[normalized]
-    ? normalized
-    : ICON_ALIASES[normalized] || DEFAULT_ANNOTATION_ICON;
-  return ANNOTATION_ICONS[resolved];
+  const resolved = ANNOTATION_ICONS[normalized] ? normalized : ICON_ALIASES[normalized];
+  if (resolved && ANNOTATION_ICONS[resolved]) {
+    return { text: ANNOTATION_ICONS[resolved], isGlyph: true };
+  }
+  const trimmed = typeof name === 'string' ? name.trim() : '';
+  if (trimmed) return { text: trimmed.slice(0, 2), isGlyph: false };
+  return { text: ANNOTATION_ICONS[DEFAULT_ANNOTATION_ICON], isGlyph: true };
+}
+
+// The text drawn for a configured icon name: its glyph when the set has one,
+// otherwise the name's abbreviation. See resolveAnnotationIcon.
+export function annotationIconGlyph(name) {
+  return resolveAnnotationIcon(name).text;
 }

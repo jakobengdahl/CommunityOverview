@@ -302,18 +302,40 @@ non-goal — today they are reachable only through the MCP tools, which is
 the gap the acceptance matrix tracks, not the intended end state.
 
 Each `shape` variant draws its own geometry (`SHAPE_STYLES` in
-`GenericAnnotationNode.jsx`), and an `icon` annotation draws the glyph its
-configured `content.icon` name resolves to in the canvas package's icon set
-(`packages/ui-graph-canvas/src/utils/annotationIcons.js`, which also accepts
-the host app's Bootstrap-icon spellings); an unknown icon name falls back to
-a neutral marker rather than to an abbreviation of the name.
+`GenericAnnotationNode.jsx`).
 
-`geometry.rotation` is drawn for the types this contract accepts rotation
-for — text/headings, labels/callouts, sticky notes, images, icons/dots and
-basic shapes including the process arrow — as a transform on the rendered
-element, so drag and resize keep working against the unrotated bounding box.
-Frames, lines, groups and freehand strokes carry rotation without drawing
-it. **There is no GUI control to set a rotation yet** — it can only be set
+An `icon` annotation draws the glyph its configured `content.icon` name
+resolves to in the canvas package's icon set
+(`packages/ui-graph-canvas/src/utils/annotationIcons.js`). That set is small:
+it covers **11 of the 75 Bootstrap-icon names in the host app's registry**
+(`ICON_REGISTRY` in `frontend/web/src/components/FloatingToolbar.jsx`, the
+same vocabulary `schema_config.json`'s `icon` field uses), plus everyday
+synonyms. A name the set does not cover keeps the two-character abbreviation
+of the name that the canvas drew before the set existed, rather than
+collapsing into one neutral marker — so no configured name became less
+distinguishable than it was, but most names are still an abbreviation and not
+their icon. Covering the whole registry is an open gap, tracked in the
+[acceptance matrix](#acceptance-matrix)'s `icon` row.
+
+`geometry.rotation` is drawn as a transform on the rendered element, so drag
+and resize keep working against the unrotated bounding box. The capability
+baseline requires it for text/headings, labels/callouts, sticky notes,
+images, icons/dots and basic shapes including the process arrow; `frame` is
+drawn too, because `create_annotation`/`update_annotation` accept `rotation`
+for every generic type with no per-type validation, and a frame is a single
+box like a shape — storing a rotation, reporting it back from
+`list_annotations` and then quietly drawing the frame axis-aligned would be a
+silent discard.
+
+`line` and `freehand` are the two that do **not** draw it: their geometry
+lives in endpoints and sampled points rather than in a box, so a rotation the
+server accepts for them is stored and reported but never rendered. That is a
+tracked gap in the [acceptance matrix](#acceptance-matrix), not a decided
+non-goal. `group` never reaches this translation layer at all — its helpers
+(`annotationsToGroups`/`groupsToAnnotations`) carry no rotation field, so a
+group has no rotation to draw or preserve.
+
+**There is no GUI control to set a rotation yet** — it can only be set
 through MCP (`create_annotation`/`update_annotation`), and belongs to the
 same per-type property-editor gap as recoloring and shape-subtype changes.
 
@@ -344,14 +366,14 @@ rule](#downstream-closure-rule).
 | `note` | ✅ toolbox create, inline edit, drag/resize | ✅ sticky note tool set | ✅ | ✅ op broadcast + revision | ✅ actor-scoped undo | ⬜ no formal pass yet |
 | `text` | ⚠ toolbox create (fixed default), no property editor | ✅ generic tool set | ✅ | ✅ | ✅ | ⬜ |
 | `label` | ✅ toolbox create, inline edit, drag/resize, attach | ✅ generic tool set | ✅ | ✅ | ✅ | ⬜ |
-| `line` | ✅ toolbox create, endpoint attach/drag | ✅ generic tool set (`arrow` alias) | ✅ | ✅ | ✅ | ⬜ |
+| `line` | ⚠ toolbox create, endpoint attach/drag; a `rotation` the MCP tools accept is stored and reported but never drawn | ✅ generic tool set (`arrow` alias) | ✅ | ✅ | ✅ | ⬜ |
 | `frame` | ⚠ toolbox create (fixed default size), no color editor | ✅ generic tool set | ✅ | ✅ | ✅ | ⬜ |
 | `group` | ✅ toolbar create-group action | ❌ no MCP tool (by design — `group_membership_changed` op only) | ✅ | ✅ | ✅ | ⬜ |
 | `shape` | ⚠ toolbox creates all six variants, each drawn distinctly; no editor to change an existing shape's subtype | ✅ generic tool set (`content.shape`) | ✅ | ✅ | ✅ | ⬜ |
-| `icon` | ❌ renders its configured icon, but move only — no create UI or icon picker | ✅ generic tool set | ✅ | ✅ | ✅ | ⬜ |
+| `icon` | ❌ move only — no create UI or icon picker; renders the 11 icon names the canvas set shares with the host registry as glyphs, the other 64 as a two-character abbreviation of the name | ✅ generic tool set | ✅ | ✅ | ✅ | ⬜ |
 | `vote_dot` | ❌ render/move only, no create UI or color picker | ✅ generic tool set | ✅ | ✅ | ✅ | ⬜ |
 | `image` | ❌ no paste/upload UI | ⚠ `create_image_annotation` enforces ingest; generic tool's bare envelope does not ([gap](#image-ingest-enforcement)) | ✅ | ✅ | ✅ | ⬜ |
-| `freehand` | ❌ no create UI (stylus input not wired) | ❌ no MCP tool | ✅ document model round-trips it | ⚠ no creation path to exercise it live | ✅ `translate_freehand_points` covers move/undo | ❌ no physical stylus/touch pass |
+| `freehand` | ❌ no create UI (stylus input not wired); a `rotation` on the document model is never drawn | ❌ no MCP tool | ✅ document model round-trips it | ⚠ no creation path to exercise it live | ✅ `translate_freehand_points` covers move/undo | ❌ no physical stylus/touch pass |
 | cross-type | — | — | — | ⚠ ops publish immediately, but the 300 ms text debounce and release-time-only geometry are not split out from the general autosave debounce, and edit leases are advisory/LWW with a 30 s TTL rather than exclusive ([gap](#operation-timing-and-leases)) | ✅ actor-scoped conditional undo (`session_activity.py`) | — |
 
 ## Downstream closure rule

@@ -40,6 +40,14 @@
   line-height: 1;
 }
 
+/* An icon name the set has no glyph for falls back to a two-character
+   abbreviation of the name, which needs the smaller uppercased treatment a
+   glyph does not - two letters at 18px overflow the 32px badge. */
+.graph-generic-annotation-node.kind-icon.kind-icon-abbreviated {
+  font-size: 11px;
+  text-transform: uppercase;
+}
+
 .graph-generic-annotation-node.kind-vote_dot {
   display: flex;
   align-items: center;
