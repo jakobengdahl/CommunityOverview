@@ -198,6 +198,12 @@ Annotations are part of the session, not the knowledge graph: they are stored wi
 session (so everyone sharing the session sees them) and never change the underlying node
 and edge data. Select an annotation and press **Delete** to remove it.
 
+A collapsible toolbox is also anchored to the bottom of the canvas. Click **Add
+annotation** to expand it, then pick a type to drop it at the centre of your current view:
+**Note**, **Text**, **Label**, **Frame**, or a rectangle/circle **Shape**. It is hidden
+while a focus view is active, since annotations are set aside during focus (see
+[9. On a phone](#9-on-a-phone) for how focus view works).
+
 ### 2.6 Saved views
 
 Click **Save view** in the toolbar or ask the AI assistant to save the current layout.

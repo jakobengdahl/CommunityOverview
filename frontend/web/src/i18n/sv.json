@@ -363,6 +363,16 @@
     "undo_notification": "Flytt ångrad",
     "redo_notification": "Flytt återställd"
   },
+  "annotation_toolbox": {
+    "toggle_expand": "Lägg till kommentar",
+    "toggle_collapse": "Fäll ihop kommentarsverktyg",
+    "note": "Anteckning",
+    "text": "Text",
+    "label": "Etikett",
+    "frame": "Ram",
+    "shape_rectangle": "Rektangel",
+    "shape_circle": "Cirkel"
+  },
   "common": {
     "saving": "Sparar...",
     "save": "Spara",
