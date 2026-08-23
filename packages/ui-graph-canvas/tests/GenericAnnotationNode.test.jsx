@@ -46,9 +46,70 @@ describe('GenericAnnotationNode', () => {
     expect(container.querySelector('.shape-circle')).toBeTruthy();
   });
 
-  it('renders an icon badge showing the icon name as a title', () => {
+  // The regression this pins: triangle, rhombus, hexagon and process_arrow
+  // used to reach the canvas as accepted content.shape values but painted as
+  // plain rectangles, because only circle had a rule of its own. A class name
+  // alone never caught that, so each variant's drawn geometry is asserted.
+  it('draws every accepted shape variant as its own geometry, not as a rectangle', () => {
+    const shapes = ['rectangle', 'circle', 'triangle', 'rhombus', 'hexagon', 'process_arrow'];
+    const signatures = shapes.map((shape) => {
+      const { container } = render(<GenericAnnotationNode type="shape" data={{ shape }} />);
+      const el = container.querySelector(`.shape-${shape}`);
+      expect(el).toBeTruthy();
+      return `${el.style.clipPath}|${el.style.borderRadius}`;
+    });
+    expect(new Set(signatures).size).toBe(shapes.length);
+    for (const signature of signatures.slice(1)) {
+      expect(signature).not.toBe(signatures[0]);
+    }
+  });
+
+  it('falls back to the rectangle geometry for an unknown shape name', () => {
+    const { container } = render(<GenericAnnotationNode type="shape" data={{ shape: 'star' }} />);
+    const el = container.querySelector('.shape-star');
+    expect(el.style.clipPath).toBe('');
+    expect(el.style.borderRadius).toBe('');
+  });
+
+  it('renders the configured icon as its glyph, not an abbreviation of its name', () => {
     render(<GenericAnnotationNode type="icon" data={{ icon: 'flag' }} />);
-    expect(screen.getByTitle('flag')).toBeInTheDocument();
+    const badge = screen.getByTitle('flag');
+    expect(badge.textContent).toBe('⚑');
+    expect(badge.textContent).not.toBe('fl');
+  });
+
+  it('accepts the host icon registry spelling of the same icon', () => {
+    render(<GenericAnnotationNode type="icon" data={{ icon: 'FlagFill' }} />);
+    expect(screen.getByTitle('FlagFill').textContent).toBe('⚑');
+  });
+
+  it('renders an unknown icon name as the neutral default glyph', () => {
+    render(<GenericAnnotationNode type="icon" data={{ icon: 'no-such-icon' }} />);
+    expect(screen.getByTitle('no-such-icon').textContent).toBe('●');
+  });
+
+  it.each(['text', 'shape', 'icon', 'vote_dot'])('draws a rotation on a %s', (type) => {
+    const { container } = render(
+      <GenericAnnotationNode type={type} data={{ rotation: 45, text: 'x' }} />
+    );
+    expect(container.querySelector('.graph-generic-annotation-node').style.transform).toBe(
+      'rotate(45deg)'
+    );
+  });
+
+  it('leaves a frame unrotated (the contract does not accept rotation for frames)', () => {
+    const { container } = render(<GenericAnnotationNode type="frame" data={{ rotation: 45 }} />);
+    expect(container.querySelector('.kind-frame').style.transform).toBe('');
+  });
+
+  it('rotates an image annotation', () => {
+    render(
+      <GenericAnnotationNode
+        type="image"
+        data={{ image: { url: 'https://example.com/a.png' }, alt: 'diagram', rotation: 90 }}
+      />
+    );
+    expect(screen.getByAltText('diagram').style.transform).toBe('rotate(90deg)');
   });
 
   it('renders a vote dot with its value', () => {

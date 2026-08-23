@@ -20,6 +20,10 @@ describe('AnnotationToolbox', () => {
     expect(screen.getByRole('button', { name: /^frame$/i })).toBeInTheDocument();
     expect(screen.getByRole('button', { name: /^rectangle$/i })).toBeInTheDocument();
     expect(screen.getByRole('button', { name: /^circle$/i })).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: /^triangle$/i })).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: /^rhombus$/i })).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: /^hexagon$/i })).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: /^process arrow$/i })).toBeInTheDocument();
   });
 
   it('collapses again on a second toggle click', () => {
@@ -49,16 +53,22 @@ describe('AnnotationToolbox', () => {
     expect(onCreate).toHaveBeenLastCalledWith('frame', undefined);
   });
 
-  it('calls onCreate with the shape kind and variant for rectangle/circle', () => {
+  // Every accepted content.shape variant is offered, not only the two that
+  // used to render distinctly (docs/ANNOTATION_CONTRACT.md, `shape` row).
+  it.each([
+    [/^rectangle$/i, 'rectangle'],
+    [/^circle$/i, 'circle'],
+    [/^triangle$/i, 'triangle'],
+    [/^rhombus$/i, 'rhombus'],
+    [/^hexagon$/i, 'hexagon'],
+    [/^process arrow$/i, 'process_arrow'],
+  ])('calls onCreate with the shape kind and the %s variant', (name, shape) => {
     const onCreate = vi.fn();
     render(<AnnotationToolbox onCreate={onCreate} />);
     fireEvent.click(screen.getByRole('button', { name: /add annotation/i }));
 
-    fireEvent.click(screen.getByRole('button', { name: /^rectangle$/i }));
-    expect(onCreate).toHaveBeenLastCalledWith('shape', { shape: 'rectangle' });
-
-    fireEvent.click(screen.getByRole('button', { name: /^circle$/i }));
-    expect(onCreate).toHaveBeenLastCalledWith('shape', { shape: 'circle' });
+    fireEvent.click(screen.getByRole('button', { name }));
+    expect(onCreate).toHaveBeenLastCalledWith('shape', { shape });
   });
 
   it('accepts a labels override so the host app can localize it', () => {

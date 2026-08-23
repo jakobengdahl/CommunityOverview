@@ -16,6 +16,7 @@ describe('annotation overlay translation', () => {
         size: { w: 200, h: 140 },
         z: 0,
         locked: false,
+        rotation: 0,
       },
     ];
     const server = overlaysToAnnotations(overlays);
@@ -38,6 +39,7 @@ describe('annotation overlay translation', () => {
         color: '#fff',
         z: 0,
         locked: false,
+        rotation: 0,
       },
     ];
     const server = overlaysToAnnotations(overlays);
@@ -58,6 +60,7 @@ describe('annotation overlay translation', () => {
         endArrow: true,
         z: 0,
         locked: false,
+        rotation: 0,
       },
     ];
     const server = overlaysToAnnotations(overlays);
@@ -81,6 +84,7 @@ describe('annotation overlay translation', () => {
         endAnchor: 'node-b',
         z: 0,
         locked: false,
+        rotation: 0,
       },
     ];
     const server = overlaysToAnnotations(overlays);
@@ -108,6 +112,7 @@ describe('annotation overlay translation', () => {
         pressureSource: 'device',
         z: 0,
         locked: false,
+        rotation: 0,
       },
     ];
     const server = overlaysToAnnotations(overlays);
@@ -134,6 +139,7 @@ describe('annotation overlay translation', () => {
         color: undefined,
         z: 0,
         locked: false,
+        rotation: 0,
       },
     ];
     const server = overlaysToAnnotations(overlays);
@@ -168,6 +174,7 @@ describe('annotation overlay translation', () => {
         size: { w: 200, h: 140 },
         z: 0,
         locked: false,
+        rotation: 0,
       },
       {
         id: 'label-1',
@@ -178,14 +185,16 @@ describe('annotation overlay translation', () => {
         fontSize: 28,
         z: 0,
         locked: false,
+        rotation: 0,
       },
     ];
     expect(annotationsToOverlays(overlaysToAnnotations(overlays))).toEqual(overlays);
   });
 
-  // z (layer order) and locked (the canvas UI's own edit-lock convention set by
-  // the generic MCP annotation tools, docs/ANNOTATION_CONTRACT.md) are envelope
-  // fields on every v1 annotation type. Before this fix, annotationsToOverlays
+  // z (layer order), locked (the canvas UI's own edit-lock convention set by
+  // the generic MCP annotation tools, docs/ANNOTATION_CONTRACT.md) and
+  // rotation are envelope fields on every v1 annotation type. Before this fix,
+  // annotationsToOverlays
   // silently dropped them, so a browser's next autosave would diff the
   // annotation back to z=0/locked=false and overwrite a collaborator's or
   // agent's `reorder_annotation`/`set_annotation_lock` call — a realtime-sync
@@ -201,11 +210,31 @@ describe('annotation overlay translation', () => {
         size: { w: 200, h: 140 },
         z: 3,
         locked: true,
+        rotation: 0,
       },
     ];
     const server = overlaysToAnnotations(overlays);
     expect(server[0]).toMatchObject({ z: 3, locked: true });
     expect(annotationsToOverlays(server)).toEqual(overlays);
+  });
+
+  // Rotation is the third envelope field with the same failure mode: the
+  // model, the backend and the MCP tools all carried geometry.rotation, but
+  // this translation dropped it, so a rotation set by an agent survived until
+  // the browser's next autosave diffed it back to 0.
+  it('preserves a rotation set on the server annotation across the full round trip', () => {
+    const server = [
+      {
+        id: 'shape-1',
+        type: 'shape',
+        position: { x: 0, y: 0 },
+        geometry: { x: 0, y: 0, w: 160, h: 96, rotation: 45 },
+        shape: 'triangle',
+      },
+    ];
+    const overlays = annotationsToOverlays(server);
+    expect(overlays[0].rotation).toBe(45);
+    expect(overlaysToAnnotations(overlays)[0].geometry.rotation).toBe(45);
   });
 
   it('ignores group annotations (handled separately)', () => {
@@ -237,6 +266,7 @@ describe('generic annotation overlay translation', () => {
         fontSize: 20,
         z: 0,
         locked: false,
+        rotation: 0,
       },
     ];
     const server = overlaysToAnnotations(overlays);
@@ -254,6 +284,7 @@ describe('generic annotation overlay translation', () => {
         size: { w: 300, h: 200 },
         z: 0,
         locked: false,
+        rotation: 0,
       },
     ];
     const server = overlaysToAnnotations(overlays);
@@ -272,6 +303,7 @@ describe('generic annotation overlay translation', () => {
         size: { w: 120, h: 120 },
         z: 4,
         locked: false,
+        rotation: 0,
       },
     ];
     const server = overlaysToAnnotations(overlays);
@@ -290,6 +322,7 @@ describe('generic annotation overlay translation', () => {
         color: '#F472B6',
         z: 0,
         locked: true,
+        rotation: 0,
       },
     ];
     const server = overlaysToAnnotations(overlays);
@@ -308,6 +341,7 @@ describe('generic annotation overlay translation', () => {
         color: '#FB923C',
         z: 0,
         locked: false,
+        rotation: 0,
       },
     ];
     const server = overlaysToAnnotations(overlays);
@@ -327,6 +361,7 @@ describe('generic annotation overlay translation', () => {
         size: { w: 240, h: 180 },
         z: 0,
         locked: false,
+        rotation: 0,
       },
     ];
     const server = overlaysToAnnotations(overlays);
