@@ -20,6 +20,7 @@ from backend.core.session_store import (
 from backend.core.session_manager import (
     AnnotationNotFound,
     AnnotationRecentlyDeleted,
+    ImageBudgetExceeded,
     LayoutBusy,
     NoUndoableAction,
     OpBatchTooLarge,
@@ -38,6 +39,20 @@ pytestmark = pytest.mark.asyncio
 
 def _manager(**kwargs) -> SessionManager:
     return SessionManager(SessionStore(InMemorySessionPersistenceBackend()), **kwargs)
+
+
+def _image_annotation(annotation_id: str, *, data_bytes: int) -> dict:
+    """A raw `image` annotation dict with an embedded data URI of exactly
+    ``data_bytes`` decoded bytes (padding-free, so the approximation in
+    ``data_url_byte_length`` is exact)."""
+    import base64
+
+    encoded = base64.b64encode(b"x" * data_bytes).decode("ascii")
+    return {
+        "id": annotation_id,
+        "type": "image",
+        "image": {"url": f"data:image/webp;base64,{encoded}"},
+    }
 
 
 async def _drain(sub):
@@ -1155,6 +1170,143 @@ class TestUpsertAnnotation:
             mgr.upsert_annotation(s.id, "mcp-agent", {"id": "ann-1", "type": "shape"})
         assert s.seq == seq_before
         assert s.state["annotations"][0]["type"] == "line"
+
+
+class TestUpsertImageAnnotation:
+    """The synchronous MCP image-annotation write path
+    (``upsert_image_annotation``), including the image-specific session and
+    document byte budgets it enforces instead of the generic op-batch cap
+    (see ``TestOpBatchByteCap`` for that cap and the class docstring on
+    ``upsert_image_annotation`` for why images need their own)."""
+
+    async def test_creates_and_broadcasts(self):
+        mgr = _manager()
+        s = mgr.create_session()
+        sub, _ = mgr.connect(s.id, "c1", "A")
+        await _drain(sub)
+
+        res = mgr.upsert_image_annotation(
+            s.id,
+            "mcp-agent",
+            _image_annotation("img-1", data_bytes=100),
+            optimized_image_bytes=100,
+        )
+
+        assert res["revision"] == s.seq == 1
+        assert res["annotation"]["id"] == "img-1"
+        assert s.state["annotations"][0]["type"] == "image"
+        events = await _drain(sub)
+        assert events[0]["op"]["op"] == "annotation_created"
+        assert events[0]["seq"] == 1
+
+    async def test_matching_id_upserts_in_place_and_excludes_old_copy_from_budget(
+        self,
+    ):
+        """A same-id replace must budget the *new* image, not old+new — see
+        ``exclude_id`` on ``_session_image_bytes``."""
+        mgr = _manager()
+        s = mgr.create_session()
+        mgr.upsert_image_annotation(
+            s.id,
+            "mcp-agent",
+            _image_annotation("img-1", data_bytes=1000),
+            optimized_image_bytes=1000,
+            max_session_image_bytes=1500,
+        )
+
+        res = mgr.upsert_image_annotation(
+            s.id,
+            "mcp-agent",
+            _image_annotation("img-1", data_bytes=1200),
+            optimized_image_bytes=1200,
+            max_session_image_bytes=1500,
+        )
+
+        assert len(s.state["annotations"]) == 1
+        assert res["revision"] == 2
+
+    async def test_session_image_budget_rejects_before_writing(self):
+        mgr = _manager()
+        s = mgr.create_session()
+        mgr.upsert_image_annotation(
+            s.id,
+            "mcp-agent",
+            _image_annotation("img-1", data_bytes=800),
+            optimized_image_bytes=800,
+            max_session_image_bytes=1000,
+        )
+        seq_before = s.seq
+
+        with pytest.raises(ImageBudgetExceeded):
+            mgr.upsert_image_annotation(
+                s.id,
+                "mcp-agent",
+                _image_annotation("img-2", data_bytes=300),
+                optimized_image_bytes=300,
+                max_session_image_bytes=1000,
+            )
+
+        assert s.seq == seq_before
+        assert len(s.state["annotations"]) == 1
+
+    async def test_document_budget_rejects_before_writing(self):
+        mgr = _manager()
+        s = mgr.create_session()
+        seq_before = s.seq
+
+        with pytest.raises(ImageBudgetExceeded):
+            mgr.upsert_image_annotation(
+                s.id,
+                "mcp-agent",
+                _image_annotation("img-1", data_bytes=500),
+                optimized_image_bytes=500,
+                max_session_image_bytes=10_000,
+                max_session_document_bytes=200,
+            )
+
+        assert s.seq == seq_before
+        assert s.state["annotations"] == []
+
+    async def test_expected_revision_conflict(self):
+        mgr = _manager()
+        s = mgr.create_session()
+        mgr.upsert_image_annotation(
+            s.id,
+            "mcp-agent",
+            _image_annotation("img-1", data_bytes=100),
+            optimized_image_bytes=100,
+        )
+        with pytest.raises(RevisionConflict):
+            mgr.upsert_image_annotation(
+                s.id,
+                "mcp-agent",
+                _image_annotation("img-2", data_bytes=100),
+                optimized_image_bytes=100,
+                expected_revision=0,
+            )
+        assert len(s.state["annotations"]) == 1
+
+    async def test_busy_when_session_lock_held(self):
+        mgr = _manager()
+        s = mgr.create_session()
+        await mgr._lock(s.id).acquire()
+        with pytest.raises(LayoutBusy):
+            mgr.upsert_image_annotation(
+                s.id,
+                "mcp-agent",
+                _image_annotation("img-1", data_bytes=100),
+                optimized_image_bytes=100,
+            )
+
+    async def test_unknown_session_raises(self):
+        mgr = _manager()
+        with pytest.raises(SessionNotFound):
+            mgr.upsert_image_annotation(
+                "9999-9999",
+                "mcp-agent",
+                _image_annotation("img-1", data_bytes=100),
+                optimized_image_bytes=100,
+            )
 
 
 class TestUpdateAnnotation:

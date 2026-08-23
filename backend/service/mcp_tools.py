@@ -24,12 +24,23 @@ from backend.core.session_store import OpError, is_valid_session_id
 from backend.core.session_manager import (
     AnnotationNotFound,
     AnnotationRecentlyDeleted,
+    ImageBudgetExceeded,
     LayoutBusy,
     OpBatchTooLarge,
     RateLimited,
     RevisionConflict,
     SessionLimitReached,
     SessionNotFound,
+)
+from backend.core.image_ingest import (
+    ImageFetchError,
+    InvalidImageData,
+    OptimizedImageTooLarge,
+    SourceImageTooLarge,
+    UnsupportedImageType,
+    decode_image_data,
+    fetch_image_bytes,
+    optimize_image,
 )
 from backend.core.session_annotations import (
     build_note_annotation,
@@ -2577,6 +2588,236 @@ def register_mcp_tools(
                 "error": "too_large",
                 "message": "Annotation payload too large for one write.",
             }
+        except SessionNotFound:
+            return {
+                "success": False,
+                "error": (
+                    f"Session '{session_id}' not found. "
+                    "This tool acts on a session's stored state, which exists "
+                    "once create_visualization_session created it or a browser "
+                    "made its first change to it."
+                ),
+            }
+        except OpError as exc:
+            return {"success": False, "error": str(exc)}
+        return {
+            "success": True,
+            "session_id": session_id,
+            "annotation": project_annotation(result["annotation"]),
+            "revision": result["revision"],
+        }
+
+    @register_tool
+    def create_image_annotation(
+        session_id: str,
+        x: float,
+        y: float,
+        image_data: Optional[str] = None,
+        image_url: Optional[str] = None,
+        w: Optional[float] = None,
+        h: Optional[float] = None,
+        rotation: Optional[float] = None,
+        alt: str = "",
+        style: Optional[Dict[str, Any]] = None,
+        z: Optional[float] = None,
+        locked: bool = False,
+        annotation_id: Optional[str] = None,
+        expected_revision: Optional[int] = None,
+    ) -> Dict[str, Any]:
+        """
+        Create an `image` annotation by embedding an image, or replace one by id.
+
+        Ingests the image server-side and stores the result as an embedded
+        data URI — never a remote link — so the annotation still renders if
+        the source later disappears. Give exactly one of `image_data` (a
+        `data:image/...;base64,...` string, or bare base64) or `image_url`
+        (an http(s) URL fetched once, server-side). Only PNG, JPEG and WebP
+        are accepted, validated from the decoded bytes rather than a
+        declared content-type; the image is downscaled to a longest side of
+        2560px if needed and re-encoded as WebP, preserving PNG/WebP
+        transparency.
+
+        This is a separate tool from `create_annotation` because an embedded
+        image is orders of magnitude larger than the generic op-batch cap
+        that tool's writes share (see its docstring) — this tool enforces
+        its own, larger, image-specific budgets instead: a per-image cap
+        after optimization, a per-session cap on total embedded image bytes,
+        and a cap on the full session document size. Once created, an image
+        annotation is an ordinary generic annotation: `update_annotation`,
+        `delete_annotation`, `reorder_annotation`, `set_annotation_lock` and
+        `duplicate_annotation` all act on it like any other type (moving,
+        resizing, rotating, relayering, locking, copying and deleting need
+        no image-specific handling — they only touch the envelope, not the
+        embedded bytes).
+
+        Coordinates are model space (zoom/pan independent, pixels at zoom 1,
+        `x`/`y` = top-left), the same space `list_annotations` reports.
+
+        Args:
+            session_id: The session ID shown in the browser header (e.g. "8244-1742")
+            x: Model-space x of the image's top-left corner.
+            y: Model-space y of the image's top-left corner.
+            image_data: The image's bytes, as a `data:` URL or bare base64.
+                Give this or `image_url`, not both.
+            image_url: An http(s) URL to fetch the image from, server-side,
+                exactly once. Give this or `image_data`, not both.
+            w: Optional width in model-space px. Defaults to the image's
+                (possibly downscaled) pixel width.
+            h: Optional height in model-space px. Defaults to the image's
+                (possibly downscaled) pixel height.
+            rotation: Optional rotation in degrees.
+            alt: Optional alt text for the image.
+            style: Optional style dict (opacity, border, ...).
+            z: Optional layer order (higher draws on top). Defaults to 0.
+            locked: Whether the annotation starts locked against edits.
+            annotation_id: Stable id to create or replace. Omit to let the
+                server assign one.
+            expected_revision: If given, the write is rejected unless it
+                equals the session's current `revision` (optimistic
+                concurrency). Read it from `list_annotations` first. Omit
+                for last-write-wins.
+
+        Returns:
+            Dict with success, the created/replaced annotation (same shape
+            as `list_annotations`), and the new revision. Retryable errors:
+            revision_conflict, busy, rate_limited; change the request for
+            invalid_source, invalid_image, unsupported_type, fetch_failed,
+            invalid_content, wrong_type or too_large.
+        """
+        if session_manager is None:
+            return {"success": False, "error": "Session manager not available"}
+        if not is_valid_session_id(session_id):
+            return {
+                "success": False,
+                "error": "Invalid session ID format — expected DDDD-DDDD-DDDD-DDDD",
+            }
+        denied = _authorize_session(GRAPH_ACTION_MUTATE, "create_image_annotation")
+        if denied:
+            return denied
+        if bool(image_data) == bool(image_url):
+            return {
+                "success": False,
+                "error": "invalid_source",
+                "message": "Give exactly one of image_data or image_url.",
+            }
+
+        if annotation_id is not None:
+            session = session_manager.get_session(session_id)
+            if session is not None:
+                existing_annotation = _find_any_annotation(session, annotation_id)
+                if existing_annotation is not None:
+                    if not is_generic_annotation(existing_annotation):
+                        return {
+                            "success": False,
+                            "error": "wrong_type",
+                            "message": (
+                                f"Annotation id {annotation_id!r} already exists as "
+                                "a note or group; create_image_annotation only "
+                                "creates or replaces image annotations."
+                            ),
+                        }
+                    existing_type = annotation_type_of(existing_annotation)
+                    if existing_type != "image":
+                        return {
+                            "success": False,
+                            "error": "wrong_type",
+                            "message": (
+                                f"Annotation id {annotation_id!r} already exists as "
+                                f"type {existing_type!r}; create_image_annotation "
+                                "will not silently convert it to image. Delete it "
+                                "first or use a new annotation_id."
+                            ),
+                        }
+
+        try:
+            raw = (
+                fetch_image_bytes(image_url)
+                if image_url is not None
+                else decode_image_data(image_data)
+            )
+        except SourceImageTooLarge as exc:
+            return {"success": False, "error": "too_large", "message": str(exc)}
+        except ImageFetchError as exc:
+            return {"success": False, "error": "fetch_failed", "message": str(exc)}
+        except InvalidImageData as exc:
+            return {"success": False, "error": "invalid_image", "message": str(exc)}
+
+        try:
+            optimized = optimize_image(raw)
+        except UnsupportedImageType as exc:
+            return {"success": False, "error": "unsupported_type", "message": str(exc)}
+        except OptimizedImageTooLarge as exc:
+            return {"success": False, "error": "too_large", "message": str(exc)}
+        except InvalidImageData as exc:
+            return {"success": False, "error": "invalid_image", "message": str(exc)}
+
+        content = {
+            "image": {
+                "url": optimized.data_url,
+                "width": optimized.width,
+                "height": optimized.height,
+            },
+            "alt": alt or "",
+        }
+        try:
+            annotation = build_annotation(
+                type="image",
+                x=x,
+                y=y,
+                w=w if w is not None else optimized.width,
+                h=h if h is not None else optimized.height,
+                rotation=rotation,
+                content=content,
+                style=style,
+                z=z,
+                locked=locked,
+                annotation_id=annotation_id,
+            )
+        except ValueError as exc:
+            return {"success": False, "error": "invalid_content", "message": str(exc)}
+
+        try:
+            result = session_manager.upsert_image_annotation(
+                session_id,
+                _MCP_LAYOUT_CLIENT_ID,
+                annotation,
+                optimized_image_bytes=len(optimized.data),
+                expected_revision=expected_revision,
+            )
+        except RevisionConflict as exc:
+            return {
+                "success": False,
+                "error": "revision_conflict",
+                "message": (
+                    "The session changed since you read it; re-read "
+                    "list_annotations and retry with the current revision."
+                ),
+                "expected_revision": exc.expected,
+                "current_revision": exc.actual,
+            }
+        except AnnotationRecentlyDeleted:
+            return {
+                "success": False,
+                "error": "annotation_recently_deleted",
+                "message": (
+                    f"Annotation id {annotation_id!r} was just deleted by another "
+                    "collaborator; retry with a different id."
+                ),
+            }
+        except LayoutBusy:
+            return {
+                "success": False,
+                "error": "busy",
+                "message": "Another change is being applied to this session; retry.",
+            }
+        except RateLimited:
+            return {
+                "success": False,
+                "error": "rate_limited",
+                "message": "Too many session writes; slow down and retry.",
+            }
+        except ImageBudgetExceeded as exc:
+            return {"success": False, "error": "too_large", "message": str(exc)}
         except SessionNotFound:
             return {
                 "success": False,
