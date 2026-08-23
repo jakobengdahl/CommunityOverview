@@ -43,6 +43,12 @@ _PIL_FORMAT_TO_CONTENT_TYPE = {
 }
 ALLOWED_CONTENT_TYPES = frozenset(_PIL_FORMAT_TO_CONTENT_TYPE.values())
 
+# What ingest *emits*, as opposed to what it accepts: every accepted source is
+# re-encoded by `optimize_image`, so this single content type is the only one
+# a persisted `content.image.url` can legitimately carry. `session_annotations`
+# pins its embedded-URL prefix to this value.
+OPTIMIZED_CONTENT_TYPE = "image/webp"
+
 # Sanity cap on the raw source (upload or download) before optimization runs,
 # independent of the post-optimization per-image budget below — without this
 # a multi-hundred-MB source would still be fully decoded into memory.
@@ -277,7 +283,7 @@ def optimize_image(
             f"{width}x{height}"
         )
     return OptimizedImage(
-        data=data, content_type="image/webp", width=width, height=height
+        data=data, content_type=OPTIMIZED_CONTENT_TYPE, width=width, height=height
     )
 
 

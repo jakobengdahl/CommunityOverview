@@ -499,3 +499,60 @@ class TestOpBatchBodyCap:
             headers={"content-type": "application/json"},
         )
         assert resp.status_code == 422
+
+
+class TestSessionOpsImageIngestGuard:
+    """This endpoint is the widest of the image-ingest bypasses: no MCP layer is
+    involved, so anything holding a session id can post an annotation op
+    directly. The guard is unit-tested in
+    ``backend/core/tests/test_session_annotations_image_guard.py``; these assert
+    it is actually reachable over HTTP and reported as a 400."""
+
+    _EMBEDDED = (
+        "data:image/webp;base64,UklGRhoAAABXRUJQVlA4TA0AAAAvAAAAEAcQERGIiP4HAA=="
+    )
+
+    def _image_op(self, url: str) -> dict:
+        return {
+            "op": "annotation_created",
+            "annotation": {
+                "id": "img-1",
+                "type": "image",
+                "position": {"x": 0, "y": 0},
+                "image": {"url": url, "width": 10, "height": 10},
+            },
+        }
+
+    def test_remote_image_url_is_rejected_400_and_persists_nothing(
+        self, test_app: TestClient
+    ):
+        sid = test_app.post("/api/sessions", json={}).json()["id"]
+
+        resp = test_app.post(
+            f"/api/sessions/{sid}/ops",
+            json={
+                "client_id": "c1",
+                "base_seq": 0,
+                "ops": [self._image_op("https://example.com/logo.png")],
+            },
+        )
+
+        assert resp.status_code == 400
+        state = test_app.get(f"/api/sessions/{sid}").json()["state"]
+        assert state["annotations"] == []
+
+    def test_embedded_image_url_is_accepted(self, test_app: TestClient):
+        sid = test_app.post("/api/sessions", json={}).json()["id"]
+
+        resp = test_app.post(
+            f"/api/sessions/{sid}/ops",
+            json={
+                "client_id": "c1",
+                "base_seq": 0,
+                "ops": [self._image_op(self._EMBEDDED)],
+            },
+        )
+
+        assert resp.status_code == 200
+        state = test_app.get(f"/api/sessions/{sid}").json()["state"]
+        assert [a["image"]["url"] for a in state["annotations"]] == [self._EMBEDDED]
