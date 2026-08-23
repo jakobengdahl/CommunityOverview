@@ -31,7 +31,13 @@
 #     PR is ready for review, so docs-only and draft PRs do not pay for the
 #     full suite.
 #   - The always-running gate jobs keep the branch-protection required-check
-#     names reporting on every PR, so a skipped heavy job never blocks merge.
+#     names reporting on every PR, so a path-skipped heavy job never blocks
+#     merge. A DRAFT-skipped one does: the gate passes a skip only when
+#     detect-changes found nothing relevant to run, and fails a skip that
+#     happened purely because the PR was a draft. Otherwise the five required
+#     checks would report green on a draft whose tests never ran, and "CI is
+#     green" would stop meaning "the suite passed" exactly where it is relied
+#     on - the draft-to-ready step right before a merge.
 # =============================================================================
 
 name: CI
@@ -198,8 +204,15 @@ jobs:
           PYTHONPATH: ${{ github.workspace }}
 
   # Gate: always runs and carries the branch-protection required-check name
-  # "Backend tests". Passes when the worker succeeded or was skipped (docs-only
-  # or draft PR); fails only when the worker actually failed or was cancelled.
+  # "Backend tests". Passes when the worker succeeded, or when it was skipped
+  # because nothing relevant changed (service_code=false) - there is then
+  # nothing to verify. It FAILS when the worker was skipped while
+  # service_code=true, which can only mean a draft PR: the suite did not run on
+  # this head, so reporting green would tell branch protection, an agent or a
+  # reviewer that it passed. A draft cannot be merged anyway, and the
+  # ready_for_review trigger re-runs the workflow, so the gate turns honestly
+  # green the moment it matters. Also fails when the worker actually failed or
+  # was cancelled.
   backend-tests:
     name: Backend tests
     runs-on: ubuntu-latest
@@ -210,14 +223,21 @@ jobs:
         env:
           DETECT: ${{ needs.detect-changes.result }}
           RESULT: ${{ needs.backend-tests-run.result }}
+          CODE: ${{ needs.detect-changes.outputs.service_code }}
         run: |
-          echo "detect-changes result: $DETECT | Backend tests (run) result: $RESULT"
+          echo "detect-changes result: $DETECT | Backend tests (run) result: $RESULT | service_code=$CODE"
           if [ "$DETECT" != "success" ]; then
             echo "::error::detect-changes did not succeed ($DETECT); refusing to pass the gate"
             exit 1
           fi
           case "$RESULT" in
-            success|skipped) echo "Gate passed."; exit 0 ;;
+            success) echo "Gate passed."; exit 0 ;;
+            skipped)
+              if [ "$CODE" = "true" ]; then
+                echo "::error::Backend tests was skipped even though service_code=true. The only cause is a draft pull request, so this head has NOT run the full backend suite. Mark the PR ready for review to run it; a draft skip must not report green."
+                exit 1
+              fi
+              echo "Gate passed (service_code=false: nothing relevant changed, nothing to verify)."; exit 0 ;;
             *) echo "::error::Backend tests result '$RESULT' is not acceptable"; exit 1 ;;
           esac
 
@@ -253,7 +273,9 @@ jobs:
       - name: Run workspace unit tests
         run: npm run test:unit
 
-  # Gate carrying the required-check name "Frontend tests".
+  # Gate carrying the required-check name "Frontend tests". Same semantics as the
+  # "Backend tests" gate above: a skip passes only when service_code=false;
+  # a skip while service_code=true means a draft PR and fails.
   frontend-tests:
     name: Frontend tests
     runs-on: ubuntu-latest
@@ -264,14 +286,21 @@ jobs:
         env:
           DETECT: ${{ needs.detect-changes.result }}
           RESULT: ${{ needs.frontend-tests-run.result }}
+          CODE: ${{ needs.detect-changes.outputs.service_code }}
         run: |
-          echo "detect-changes result: $DETECT | Frontend tests (run) result: $RESULT"
+          echo "detect-changes result: $DETECT | Frontend tests (run) result: $RESULT | service_code=$CODE"
           if [ "$DETECT" != "success" ]; then
             echo "::error::detect-changes did not succeed ($DETECT); refusing to pass the gate"
             exit 1
           fi
           case "$RESULT" in
-            success|skipped) echo "Gate passed."; exit 0 ;;
+            success) echo "Gate passed."; exit 0 ;;
+            skipped)
+              if [ "$CODE" = "true" ]; then
+                echo "::error::Frontend tests was skipped even though service_code=true. The only cause is a draft pull request, so this head has NOT run the workspace unit tests. Mark the PR ready for review to run it; a draft skip must not report green."
+                exit 1
+              fi
+              echo "Gate passed (service_code=false: nothing relevant changed, nothing to verify)."; exit 0 ;;
             *) echo "::error::Frontend tests result '$RESULT' is not acceptable"; exit 1 ;;
           esac
 
@@ -306,7 +335,9 @@ jobs:
         run: pytest test_oauth_flow.py -q
         working-directory: services/mcp_oauth_gateway
 
-  # Gate carrying the required-check name "Gateway tests".
+  # Gate carrying the required-check name "Gateway tests". Same semantics as the
+  # "Backend tests" gate above: a skip passes only when service_code=false;
+  # a skip while service_code=true means a draft PR and fails.
   gateway-tests:
     name: Gateway tests
     runs-on: ubuntu-latest
@@ -317,14 +348,21 @@ jobs:
         env:
           DETECT: ${{ needs.detect-changes.result }}
           RESULT: ${{ needs.gateway-tests-run.result }}
+          CODE: ${{ needs.detect-changes.outputs.service_code }}
         run: |
-          echo "detect-changes result: $DETECT | Gateway tests (run) result: $RESULT"
+          echo "detect-changes result: $DETECT | Gateway tests (run) result: $RESULT | service_code=$CODE"
           if [ "$DETECT" != "success" ]; then
             echo "::error::detect-changes did not succeed ($DETECT); refusing to pass the gate"
             exit 1
           fi
           case "$RESULT" in
-            success|skipped) echo "Gate passed."; exit 0 ;;
+            success) echo "Gate passed."; exit 0 ;;
+            skipped)
+              if [ "$CODE" = "true" ]; then
+                echo "::error::Gateway tests was skipped even though service_code=true. The only cause is a draft pull request, so this head has NOT run the gateway suite. Mark the PR ready for review to run it; a draft skip must not report green."
+                exit 1
+              fi
+              echo "Gate passed (service_code=false: nothing relevant changed, nothing to verify)."; exit 0 ;;
             *) echo "::error::Gateway tests result '$RESULT' is not acceptable"; exit 1 ;;
           esac
 
@@ -448,9 +486,12 @@ jobs:
         run: ruff format --check backend scripts
 
   # Gate: always runs and carries the branch-protection required-check name
-  # "Python lint (ruff)". Passes when the worker succeeded or was skipped (no
-  # Python-relevant files changed); fails only when the worker actually failed
-  # or was cancelled.
+  # "Python lint (ruff)". Passes when the worker succeeded or was skipped
+  # because no Python-relevant files changed (python_code=false). Fails when
+  # the worker was skipped while python_code=true - today the worker carries no
+  # draft condition so that cannot happen, but the check is kept uniform with
+  # the *-tests gates so adding one later cannot silently reintroduce a green
+  # tick for an unrun job.
   python-lint:
     name: Python lint (ruff)
     runs-on: ubuntu-latest
@@ -461,14 +502,21 @@ jobs:
         env:
           DETECT: ${{ needs.detect-changes.result }}
           RESULT: ${{ needs.python-lint-run.result }}
+          CODE: ${{ needs.detect-changes.outputs.python_code }}
         run: |
-          echo "detect-changes result: $DETECT | Python lint (ruff) (run) result: $RESULT"
+          echo "detect-changes result: $DETECT | Python lint (ruff) (run) result: $RESULT | python_code=$CODE"
           if [ "$DETECT" != "success" ]; then
             echo "::error::detect-changes did not succeed ($DETECT); refusing to pass the gate"
             exit 1
           fi
           case "$RESULT" in
-            success|skipped) echo "Gate passed."; exit 0 ;;
+            success) echo "Gate passed."; exit 0 ;;
+            skipped)
+              if [ "$CODE" = "true" ]; then
+                echo "::error::Python lint was skipped even though python_code=true. The only cause is a draft pull request, so this head has NOT run ruff check/format. Mark the PR ready for review to run it; a draft skip must not report green."
+                exit 1
+              fi
+              echo "Gate passed (python_code=false: nothing relevant changed, nothing to verify)."; exit 0 ;;
             *) echo "::error::Python lint result '$RESULT' is not acceptable"; exit 1 ;;
           esac
 
