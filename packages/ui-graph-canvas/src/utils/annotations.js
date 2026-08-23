@@ -59,8 +59,8 @@ const SIZED_GENERIC_KINDS = new Set(['frame', 'shape', 'image']);
 // The kinds that draw geometry.rotation. The capability baseline names
 // text/headings, labels/callouts, sticky notes, images, icons/dots and basic
 // shapes (process arrow included, as a shape variant); `frame` is drawn too,
-// because the MCP tools accept a rotation for every generic type with no
-// per-type validation, and a frame is one box like a shape — silently
+// because the MCP tools accept a rotation for every generic type they take,
+// with no per-type validation, and a frame is one box like a shape — silently
 // discarding a rotation the server stored and reports back is worse than
 // honouring it.
 //
