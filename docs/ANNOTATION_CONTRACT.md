@@ -382,14 +382,16 @@ sit visibly askew from the object and a handle drag grows the box along the
 unrotated axes. `frame` and `shape` are where this is actually reachable
 today: both are toolbox-creatable and both accept a rotation through the
 generic MCP tools. `image` needs MCP for the object as well as the rotation.
-`note` is hard to meet in practice: no MCP tool can rotate one (see below), so
-a rotated note only exists if a client posts the op itself. Rotation-aware resize handles are an open gap. The capability
+`note` is hard to meet in practice: no MCP tool can rotate one (see below),
+so a rotated note only exists if a client posts the op itself.
+Rotation-aware resize handles are an open gap. The capability
 baseline requires it for text/headings, labels/callouts, sticky notes,
 images, icons/dots and basic shapes including the process arrow; `frame` is
-drawn too, because `create_annotation`/`update_annotation` accept `rotation`
-for every generic type they still take (every one but `image`, which #428
-moved to `create_image_annotation` — that tool takes a `rotation` of its own)
-with no per-type validation, and a frame is a single box like a shape — storing a rotation, reporting it back from
+drawn too, because the generic tools accept `rotation` for every type with no
+per-type validation (`create_annotation` no longer creates an `image` — #428
+moved that to `create_image_annotation`, which takes its own `rotation` — but
+`update_annotation` still rotates an existing one), and a frame is a single
+box like a shape — storing a rotation, reporting it back from
 `list_annotations` and then quietly drawing the frame axis-aligned would be a
 silent discard.
 
@@ -401,9 +403,11 @@ non-goal. `group` never reaches this translation layer at all — its helpers
 (`annotationsToGroups`/`groupsToAnnotations`) carry no rotation field, so a
 group has no rotation to draw or preserve.
 
-**There is no GUI control to set a rotation yet** — it can only be set
-through MCP (`create_annotation`/`update_annotation`, or
-`create_image_annotation` for an image), and belongs to the
+**There is no GUI control to set a rotation yet.** On the tool surface it is
+set through MCP (`create_annotation`/`update_annotation`, or
+`create_image_annotation` when creating an image); a client posting raw ops
+can set one directly, as the note case below shows. The missing control
+belongs to the
 same per-type property-editor gap as recoloring and shape-subtype changes.
 That leaves `note` with no rotation source *on the MCP tool surface*: the
 generic tools refuse note ids, and the dedicated sticky-note tools take no
