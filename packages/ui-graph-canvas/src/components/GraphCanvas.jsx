@@ -302,6 +302,10 @@ function GraphCanvasInner({
     frame: 'Frame',
     shapeRectangle: 'Rectangle',
     shapeCircle: 'Circle',
+    shapeTriangle: 'Triangle',
+    shapeRhombus: 'Rhombus',
+    shapeHexagon: 'Hexagon',
+    shapeProcessArrow: 'Process arrow',
     ...annotationToolboxLabels,
   };
 

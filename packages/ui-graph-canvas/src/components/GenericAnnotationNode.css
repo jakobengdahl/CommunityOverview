@@ -22,9 +22,9 @@
   border-radius: 4px;
 }
 
-.graph-generic-annotation-node.kind-shape.shape-circle {
-  border-radius: 50%;
-}
+/* Per-variant shape geometry (circle's radius, the clip paths for triangle,
+   rhombus, hexagon and process arrow) lives in SHAPE_STYLES in
+   GenericAnnotationNode.jsx so one source defines every variant. */
 
 .graph-generic-annotation-node.kind-icon {
   display: flex;
@@ -36,8 +36,8 @@
   border: 2px solid #94a3b8;
   background: #1a1a1a;
   color: #e6edf3;
-  font-size: 11px;
-  text-transform: uppercase;
+  font-size: 18px;
+  line-height: 1;
 }
 
 .graph-generic-annotation-node.kind-vote_dot {

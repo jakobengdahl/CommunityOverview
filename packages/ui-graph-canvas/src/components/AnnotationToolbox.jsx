@@ -1,13 +1,12 @@
 import { useState } from 'react';
 import './AnnotationToolbox.css';
 
-// The v1 annotation kinds this toolbox can create today. 'shape' carries a
-// `shape` option because only 'rectangle' and 'circle' actually render as
-// distinct visuals in GenericAnnotationNode.css - the other content.shape
-// values the model accepts (triangle, rhombus, hexagon, process arrow) all
-// paint as a plain rectangle, so offering them here would promise a shape the
-// canvas can't yet draw. See docs/ANNOTATION_CONTRACT.md's acceptance matrix
-// for the remaining shape-variant and per-type-editor gaps this doesn't close.
+// The v1 annotation kinds this toolbox can create today. Each 'shape' entry
+// carries the `shape` option it creates; every variant the model accepts now
+// renders as its own visual (SHAPE_STYLES in GenericAnnotationNode.jsx), so
+// all six are offered. See docs/ANNOTATION_CONTRACT.md's acceptance matrix for
+// the per-type-editor gaps this still doesn't close - creating a shape from
+// here is not the same as being able to change an existing one's subtype.
 const TOOLBOX_ITEMS = [
   { kind: 'note', glyph: '📝', labelKey: 'note' },
   { kind: 'text', glyph: 'T', labelKey: 'text' },
@@ -15,6 +14,10 @@ const TOOLBOX_ITEMS = [
   { kind: 'frame', glyph: '▢', labelKey: 'frame' },
   { kind: 'shape', glyph: '▭', labelKey: 'shapeRectangle', shape: 'rectangle' },
   { kind: 'shape', glyph: '◯', labelKey: 'shapeCircle', shape: 'circle' },
+  { kind: 'shape', glyph: '△', labelKey: 'shapeTriangle', shape: 'triangle' },
+  { kind: 'shape', glyph: '◇', labelKey: 'shapeRhombus', shape: 'rhombus' },
+  { kind: 'shape', glyph: '⬡', labelKey: 'shapeHexagon', shape: 'hexagon' },
+  { kind: 'shape', glyph: '➜', labelKey: 'shapeProcessArrow', shape: 'process_arrow' },
 ];
 
 /**
@@ -27,10 +30,10 @@ const TOOLBOX_ITEMS = [
  * type list, so a user never confuses "create a graph node" with "annotate
  * the canvas".
  *
- * This is a narrow first slice: note/text/label/frame/shape(rectangle,
- * circle). icon/vote_dot/image/freehand have no creation entry point yet
- * (tracked gaps, not silently downgraded here) and are left for follow-up
- * work, per the acceptance matrix's per-type rows.
+ * It creates note/text/label/frame and every shape variant.
+ * icon/vote_dot/image/freehand have no creation entry point yet (tracked
+ * gaps, not silently downgraded here) and are left for follow-up work, per
+ * the acceptance matrix's per-type rows.
  */
 function AnnotationToolbox({ onCreate, labels = {}, compact = false }) {
   const [expanded, setExpanded] = useState(false);
@@ -44,6 +47,10 @@ function AnnotationToolbox({ onCreate, labels = {}, compact = false }) {
     frame: 'Frame',
     shapeRectangle: 'Rectangle',
     shapeCircle: 'Circle',
+    shapeTriangle: 'Triangle',
+    shapeRhombus: 'Rhombus',
+    shapeHexagon: 'Hexagon',
+    shapeProcessArrow: 'Process arrow',
     ...labels,
   };
 

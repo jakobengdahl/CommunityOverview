@@ -371,7 +371,11 @@
     "label": "Label",
     "frame": "Frame",
     "shape_rectangle": "Rectangle",
-    "shape_circle": "Circle"
+    "shape_circle": "Circle",
+    "shape_triangle": "Triangle",
+    "shape_rhombus": "Rhombus",
+    "shape_hexagon": "Hexagon",
+    "shape_process_arrow": "Process arrow"
   },
   "common": {
     "saving": "Saving...",

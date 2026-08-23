@@ -14,6 +14,36 @@ export const ANNOTATION_TYPES = Object.freeze([
   'freehand',
 ]);
 
+// The shape variants `content.shape` accepts (docs/ANNOTATION_CONTRACT.md).
+// Every one renders as its own distinct visual in GenericAnnotationNode.
+export const ANNOTATION_SHAPES = Object.freeze([
+  'rectangle',
+  'circle',
+  'triangle',
+  'rhombus',
+  'hexagon',
+  'process_arrow',
+]);
+
+const SHAPE_SET = new Set(ANNOTATION_SHAPES);
+
+// Resolve the spellings a human or an agent plausibly writes for the same
+// variant ("Process Arrow", "process-arrow", "processArrow") to the one
+// canonical name the renderer keys off, so a shape does not silently fall back
+// to a rectangle over punctuation. A name outside the set is kept verbatim —
+// an agent's payload is never rewritten into a different shape — and renders
+// with the rectangle fallback.
+export function normalizeShapeName(value) {
+  if (typeof value !== 'string') return 'rectangle';
+  const trimmed = value.trim();
+  if (!trimmed) return 'rectangle';
+  const candidate = trimmed
+    .replace(/([a-z0-9])([A-Z])/g, '$1_$2')
+    .replace(/[\s-]+/g, '_')
+    .toLowerCase();
+  return SHAPE_SET.has(candidate) ? candidate : trimmed;
+}
+
 const TYPE_SET = new Set(ANNOTATION_TYPES);
 const LEGACY_KIND_ALIASES = Object.freeze({ arrow: 'line' });
 const DEFAULT_SIZE = Object.freeze({ w: 160, h: 96 });
@@ -157,7 +187,7 @@ function withTypePayload(annotation, type, geometry) {
     };
   }
   if (type === 'shape') {
-    return { shape: annotation.shape || 'rectangle' };
+    return { shape: normalizeShapeName(annotation.shape) };
   }
   if (type === 'icon') {
     return {

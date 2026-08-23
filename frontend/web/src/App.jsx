@@ -1932,6 +1932,10 @@ function App() {
             frame: t('annotation_toolbox.frame'),
             shapeRectangle: t('annotation_toolbox.shape_rectangle'),
             shapeCircle: t('annotation_toolbox.shape_circle'),
+            shapeTriangle: t('annotation_toolbox.shape_triangle'),
+            shapeRhombus: t('annotation_toolbox.shape_rhombus'),
+            shapeHexagon: t('annotation_toolbox.shape_hexagon'),
+            shapeProcessArrow: t('annotation_toolbox.shape_process_arrow'),
           }}
           nodeColorResolver={getNodeColor}
           sessionKey={sessionId}
