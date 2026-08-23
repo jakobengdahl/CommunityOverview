@@ -136,10 +136,12 @@ function navNameType(node, fallbackId) {
   };
 }
 
-// Both updateVisualization and clearVisualization raise clearGroupsFlag and then
-// lower it after a short delay. A single shared timer means a second call within
-// that window cancels the earlier timer instead of letting it lower the flag
-// prematurely on the later call, which would make ReactFlow miss the signal.
+// clearVisualization raises clearGroupsFlag and then lowers it after a short
+// delay. A single shared timer means a second call within that window cancels
+// the earlier timer instead of letting it lower the flag prematurely on the
+// later call, which would make ReactFlow miss the signal. updateVisualization
+// deliberately does NOT touch this flag (see its own comment) — only a genuine
+// wholesale replace should drop the canvas's groups and annotations.
 let clearGroupsResetTimer = null;
 function scheduleClearGroupsReset(set) {
   if (clearGroupsResetTimer) clearTimeout(clearGroupsResetTimer);
@@ -278,7 +280,10 @@ const useGraphStore = create((set, get) => ({
   editingEdge: null, // Edge to show in the edge-edit dialog
   deleteDialog: null, // Pending node-delete confirmation ({ nodeId | nodeIds, ... })
   contextMenu: null,
-  clearGroupsFlag: false, // Signal to clear groups in visualization
+  // Signal to GraphCanvas to drop its manual groups/annotations. Raised only by
+  // clearVisualization (a genuine wholesale replace or session clear) — see the
+  // comment above updateVisualization for why that action must not raise it.
+  clearGroupsFlag: false,
   // Monotonic counter bumped every time the canvas contents are replaced
   // wholesale (clearVisualization): a saved view loaded into the running
   // session, an agent's replace/load, a search that swaps the view, the
@@ -375,16 +380,20 @@ const useGraphStore = create((set, get) => ({
     // recorded as 'added' here — a full replace is a baseline, not the
     // incremental user additions the trail captures (those come through
     // addNodesToVisualization).
+    // Deliberately does not touch clearGroupsFlag: every caller either performs
+    // an in-place edit of the current contents (edge retype, node edit, node
+    // removal, chat's update_in_visualization) that must leave groups and
+    // annotations on the canvas untouched, or is a genuine replace that calls
+    // clearVisualization on the line before — which already raises the flag.
+    // Raising it unconditionally here used to wipe every group/annotation on an
+    // ordinary node edit, and the loss then persisted through autosave.
     const presentIds = new Set(uniqueNodes.map((n) => n.id));
     set((state) => ({
       nodes: uniqueNodes,
       edges: uniqueEdges,
       highlightedNodeIds: highlightIds,
-      clearGroupsFlag: true, // Signal to clear groups
       navHistory: state.navHistory.filter((e) => presentIds.has(e.id)),
     }));
-    // Reset flag after a short delay
-    scheduleClearGroupsReset(set);
   },
 
   addNodesToVisualization: (newNodes, newEdges = []) => {
