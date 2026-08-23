@@ -1923,6 +1923,16 @@ function App() {
             undoNotification: t('context_menu.undo_notification'),
             redoNotification: t('context_menu.redo_notification'),
           }}
+          annotationToolboxLabels={{
+            toggleExpand: t('annotation_toolbox.toggle_expand'),
+            toggleCollapse: t('annotation_toolbox.toggle_collapse'),
+            note: t('annotation_toolbox.note'),
+            text: t('annotation_toolbox.text'),
+            label: t('annotation_toolbox.label'),
+            frame: t('annotation_toolbox.frame'),
+            shapeRectangle: t('annotation_toolbox.shape_rectangle'),
+            shapeCircle: t('annotation_toolbox.shape_circle'),
+          }}
           nodeColorResolver={getNodeColor}
           sessionKey={sessionId}
           onViewportChange={(vp) => {

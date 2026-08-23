@@ -1,0 +1,149 @@
+import { describe, it, expect, vi, beforeEach } from 'vitest';
+import { render, screen, fireEvent } from '@testing-library/react';
+import { GraphCanvas } from '../src/index';
+
+const hoisted = vi.hoisted(() => ({ setNodes: vi.fn() }));
+
+vi.mock('reactflow', () => {
+  const MockReactFlow = ({ children, onPaneContextMenu, onPaneMouseDown }) => (
+    <div data-testid="react-flow" className="react-flow">
+      <div
+        data-testid="pane"
+        onMouseDown={(event) => onPaneMouseDown?.(event)}
+        onContextMenu={(event) => onPaneContextMenu?.(event)}
+      />
+      {children}
+    </div>
+  );
+  return {
+    default: MockReactFlow,
+    ReactFlow: MockReactFlow,
+    ReactFlowProvider: ({ children }) => <div>{children}</div>,
+    useNodesState: (initial) => [initial || [], hoisted.setNodes, vi.fn()],
+    useEdgesState: (initial) => [initial || [], vi.fn(), vi.fn()],
+    useReactFlow: () => ({
+      fitView: vi.fn(),
+      zoomIn: vi.fn(),
+      zoomOut: vi.fn(),
+      getNodes: () => [],
+      getEdges: () => [],
+      setNodes: hoisted.setNodes,
+      setEdges: vi.fn(),
+      screenToFlowPosition: ({ x, y }) => ({ x, y }),
+      setCenter: vi.fn(),
+      getViewport: () => ({ x: 0, y: 0, zoom: 1 }),
+    }),
+    useOnSelectionChange: () => {},
+    Background: () => <div data-testid="background" />,
+    Controls: () => <div data-testid="controls" />,
+    MiniMap: () => <div data-testid="minimap" />,
+    NodeResizer: () => null,
+    SelectionMode: { Partial: 'partial' },
+  };
+});
+
+// setNodes fires from several effects; find the created node by applying every
+// captured updater to an empty node array and collecting the result. Mirrors
+// the helper in GraphCanvasAnnotations.test.jsx.
+function findCreatedNode(type) {
+  for (const call of hoisted.setNodes.mock.calls) {
+    const updater = call[0];
+    if (typeof updater !== 'function') continue;
+    let result;
+    try {
+      result = updater([]);
+    } catch {
+      continue;
+    }
+    const found = Array.isArray(result) && result.find((n) => n.type === type);
+    if (found) return found;
+  }
+  return undefined;
+}
+
+describe('GraphCanvas bottom annotation toolbox', () => {
+  beforeEach(() => vi.clearAllMocks());
+
+  it('renders the toolbox as a surface distinct from the pane annotation context menu', () => {
+    render(<GraphCanvas nodes={[]} edges={[]} />);
+    // The toolbox is present up front (collapsed to its toggle)...
+    expect(screen.getByTestId('annotation-toolbox')).toBeInTheDocument();
+    // ...while the pane context menu (right-click add note/label/arrow) does
+    // not exist until a right-click opens it - the two are separate surfaces,
+    // not the same menu re-skinned.
+    expect(screen.queryByRole('button', { name: /^add note$/i })).not.toBeInTheDocument();
+  });
+
+  it('creates a sticky note via the toolbox without going through the pane context menu', () => {
+    const onAnnotationChange = vi.fn();
+    render(<GraphCanvas nodes={[]} edges={[]} onAnnotationChange={onAnnotationChange} />);
+
+    fireEvent.click(screen.getByRole('button', { name: /add annotation/i }));
+    fireEvent.click(screen.getByRole('button', { name: /^note$/i }));
+
+    expect(onAnnotationChange).toHaveBeenCalled();
+    const note = findCreatedNode('note');
+    expect(note).toBeTruthy();
+    expect(note.style).toEqual({ width: 200, height: 140 });
+  });
+
+  it('creates a generic text annotation via the toolbox', () => {
+    render(<GraphCanvas nodes={[]} edges={[]} onAnnotationChange={vi.fn()} />);
+    fireEvent.click(screen.getByRole('button', { name: /add annotation/i }));
+    fireEvent.click(screen.getByRole('button', { name: /^text$/i }));
+
+    const text = findCreatedNode('text');
+    expect(text).toBeTruthy();
+    expect(text.data).toEqual({ text: '', color: undefined, fontSize: undefined });
+  });
+
+  it('creates a frame annotation via the toolbox with a default box size', () => {
+    render(<GraphCanvas nodes={[]} edges={[]} onAnnotationChange={vi.fn()} />);
+    fireEvent.click(screen.getByRole('button', { name: /add annotation/i }));
+    fireEvent.click(screen.getByRole('button', { name: /^frame$/i }));
+
+    const frame = findCreatedNode('frame');
+    expect(frame).toBeTruthy();
+    expect(frame.style).toEqual({ width: 220, height: 160 });
+  });
+
+  it('creates a rectangle shape annotation via the toolbox by default', () => {
+    render(<GraphCanvas nodes={[]} edges={[]} onAnnotationChange={vi.fn()} />);
+    fireEvent.click(screen.getByRole('button', { name: /add annotation/i }));
+    fireEvent.click(screen.getByRole('button', { name: /^rectangle$/i }));
+
+    const shape = findCreatedNode('shape');
+    expect(shape).toBeTruthy();
+    expect(shape.data.shape).toBe('rectangle');
+  });
+
+  it('creates a circle shape variant via the toolbox', () => {
+    render(<GraphCanvas nodes={[]} edges={[]} onAnnotationChange={vi.fn()} />);
+    fireEvent.click(screen.getByRole('button', { name: /add annotation/i }));
+    fireEvent.click(screen.getByRole('button', { name: /^circle$/i }));
+
+    const shape = findCreatedNode('shape');
+    expect(shape).toBeTruthy();
+    expect(shape.data.shape).toBe('circle');
+  });
+
+  it('creates a label annotation via the toolbox', () => {
+    render(<GraphCanvas nodes={[]} edges={[]} onAnnotationChange={vi.fn()} />);
+    fireEvent.click(screen.getByRole('button', { name: /add annotation/i }));
+    fireEvent.click(screen.getByRole('button', { name: /^label$/i }));
+
+    const label = findCreatedNode('label');
+    expect(label).toBeTruthy();
+  });
+
+  it('honours a host-provided label override for i18n', () => {
+    render(
+      <GraphCanvas
+        nodes={[]}
+        edges={[]}
+        annotationToolboxLabels={{ toggleExpand: 'Lägg till kommentar' }}
+      />
+    );
+    expect(screen.getByRole('button', { name: /lägg till kommentar/i })).toBeInTheDocument();
+  });
+});

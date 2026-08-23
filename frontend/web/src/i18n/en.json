@@ -363,6 +363,16 @@
     "undo_notification": "Move undone",
     "redo_notification": "Move redone"
   },
+  "annotation_toolbox": {
+    "toggle_expand": "Add annotation",
+    "toggle_collapse": "Collapse annotation toolbox",
+    "note": "Note",
+    "text": "Text",
+    "label": "Label",
+    "frame": "Frame",
+    "shape_rectangle": "Rectangle",
+    "shape_circle": "Circle"
+  },
   "common": {
     "saving": "Saving...",
     "save": "Save",

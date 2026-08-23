@@ -121,11 +121,15 @@ MCP. The required entry points are:
 ```
 
 **Current gap:** `note`, `label`, `line` and `group` have GUI creation today
-(dedicated toolbar/toolbox actions). `text`, `frame`, `shape`, `icon`,
-`vote_dot`, `image` and `freehand` render on canvas but have no GUI creation
-path yet — they can only be created via MCP. Per-type property editors
-(recoloring, changing an icon or shape subtype, cropping an image) do not
-exist yet for any generic type. Closing this is tracked per type in the
+(dedicated toolbar/toolbox actions). A first slice of the bottom toolbox now
+also creates `text`, `frame`, and `shape` limited to its `rectangle` and
+`circle` variants — the only two `content.shape` values that render as
+distinct visuals today. `icon`, `vote_dot`, `image`, `freehand`, and the
+remaining `shape` variants (triangle, rhombus, hexagon, process arrow) still
+render on canvas but have no GUI creation path — they can only be created via
+MCP. Per-type property editors (recoloring, changing an icon or shape
+subtype, cropping an image) do not exist yet for any generic type, including
+the ones the toolbox now creates. Closing this is tracked per type in the
 [acceptance matrix](#acceptance-matrix); it is not satisfied by documenting
 the wireframes above.
 
@@ -320,12 +324,12 @@ rule](#downstream-closure-rule).
 | Type | GUI create/edit | MCP create/edit | Persistence/reload/saved views | Realtime/collaboration | Activity/undo | Accessibility/device |
 |---|---|---|---|---|---|---|
 | `note` | ✅ toolbox create, inline edit, drag/resize | ✅ sticky note tool set | ✅ | ✅ op broadcast + revision | ✅ actor-scoped undo | ⬜ no formal pass yet |
-| `text` | ❌ render/move only, no create UI or editor | ✅ generic tool set | ✅ | ✅ | ✅ | ⬜ |
+| `text` | ⚠ toolbox create (fixed default), no property editor | ✅ generic tool set | ✅ | ✅ | ✅ | ⬜ |
 | `label` | ✅ toolbox create, inline edit, drag/resize, attach | ✅ generic tool set | ✅ | ✅ | ✅ | ⬜ |
 | `line` | ✅ toolbox create, endpoint attach/drag | ✅ generic tool set (`arrow` alias) | ✅ | ✅ | ✅ | ⬜ |
-| `frame` | ❌ render/resize only, no create UI | ✅ generic tool set | ✅ | ✅ | ✅ | ⬜ |
+| `frame` | ⚠ toolbox create (fixed default size), no color editor | ✅ generic tool set | ✅ | ✅ | ✅ | ⬜ |
 | `group` | ✅ toolbar create-group action | ❌ no MCP tool (by design — `group_membership_changed` op only) | ✅ | ✅ | ✅ | ⬜ |
-| `shape` | ❌ render/resize only, no create UI or subtype picker | ✅ generic tool set (`content.shape`) | ✅ | ✅ | ✅ | ⬜ |
+| `shape` | ⚠ toolbox create (rectangle/circle only), no subtype picker for the rest | ✅ generic tool set (`content.shape`) | ✅ | ✅ | ✅ | ⬜ |
 | `icon` | ❌ render/move only, no create UI or icon picker | ✅ generic tool set | ✅ | ✅ | ✅ | ⬜ |
 | `vote_dot` | ❌ render/move only, no create UI or color picker | ✅ generic tool set | ✅ | ✅ | ✅ | ⬜ |
 | `image` | ❌ no paste/upload UI | ⚠ `create_image_annotation` enforces ingest; generic tool's bare envelope does not ([gap](#image-ingest-enforcement)) | ✅ | ✅ | ✅ | ⬜ |

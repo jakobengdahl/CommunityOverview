@@ -17,6 +17,7 @@ export { default as LabelNode } from './components/LabelNode';
 export { default as ArrowNode } from './components/ArrowNode';
 export { default as GenericAnnotationNode } from './components/GenericAnnotationNode';
 export { default as FreehandAnnotationNode } from './components/FreehandAnnotationNode';
+export { default as AnnotationToolbox } from './components/AnnotationToolbox';
 
 // Layout utilities
 export {

@@ -19,6 +19,7 @@ import NoteNode from './NoteNode';
 import LabelNode from './LabelNode';
 import ArrowNode from './ArrowNode';
 import GenericAnnotationNode from './GenericAnnotationNode';
+import AnnotationToolbox from './AnnotationToolbox';
 import FreehandAnnotationNode from './FreehandAnnotationNode';
 import { AnnotationContext } from './AnnotationContext';
 import SimpleFloatingEdge from './SimpleFloatingEdge';
@@ -238,6 +239,7 @@ function GraphCanvasInner({
   sessionKey = null,
   nodePreviewEnabled = true,
   contextMenuLabels = {},
+  annotationToolboxLabels = {},
   // 'auto' detects a coarse (touch) pointer itself via matchMedia — this
   // package has no access to the host app's viewport-mode hook, so
   // detection must be self-contained. 'on'/'off' force the mode (mainly for
@@ -289,6 +291,18 @@ function GraphCanvasInner({
     undoNotification: 'Move undone',
     redoNotification: 'Move redone',
     ...contextMenuLabels,
+  };
+
+  const atl = {
+    toggleExpand: 'Add annotation',
+    toggleCollapse: 'Collapse annotation toolbox',
+    note: 'Note',
+    text: 'Text',
+    label: 'Label',
+    frame: 'Frame',
+    shapeRectangle: 'Rectangle',
+    shapeCircle: 'Circle',
+    ...annotationToolboxLabels,
   };
 
   // Relationship types defined in the schema, used for the edge type picker.
@@ -1003,11 +1017,13 @@ function GraphCanvasInner({
     [selectedNodes, nodes, edges, setNodes, onNodePositionChange, closeAllMenus, recordMove]
   );
 
-  // Create a free-floating annotation (note, label or arrow) at the given flow
-  // position. Notes/labels/arrows are persisted in the session annotation list
-  // via the save-view round-trip; onAnnotationChange schedules that save.
+  // Create a free-floating annotation (note, label, arrow, or one of the
+  // generic overlay kinds - text/frame/shape) at the given flow position.
+  // These are persisted in the session annotation list via the save-view
+  // round-trip; onAnnotationChange schedules that save. `options.shape` picks
+  // the shape variant for kind 'shape' (defaults to 'rectangle').
   const createAnnotation = useCallback(
-    (kind, position) => {
+    (kind, position, options = {}) => {
       const id = `${kind}-${Date.now()}`;
       let newNode;
       if (kind === 'note') {
@@ -1020,6 +1036,29 @@ function GraphCanvasInner({
         };
       } else if (kind === 'label') {
         newNode = { id, type: 'label', position, data: { text: '', color: undefined } };
+      } else if (kind === 'text') {
+        newNode = {
+          id,
+          type: 'text',
+          position,
+          data: { text: '', color: undefined, fontSize: undefined },
+        };
+      } else if (kind === 'frame') {
+        newNode = {
+          id,
+          type: 'frame',
+          position,
+          data: { color: undefined },
+          style: { width: 220, height: 160 },
+        };
+      } else if (kind === 'shape') {
+        newNode = {
+          id,
+          type: 'shape',
+          position,
+          data: { shape: options.shape || 'rectangle', color: undefined },
+          style: { width: 160, height: 96 },
+        };
       } else {
         newNode = {
           id,
@@ -1033,6 +1072,21 @@ function GraphCanvasInner({
       onAnnotationChangeRef.current?.();
     },
     [setNodes]
+  );
+
+  // Create an annotation at the current viewport's centre (used by the
+  // bottom toolbox, which has no click position of its own the way the pane
+  // context menu does). Mirrors handleAddGroup's centre computation.
+  const createAnnotationAtViewportCenter = useCallback(
+    (kind, options) => {
+      const wrapper = reactFlowWrapper.current;
+      const rect = wrapper?.getBoundingClientRect();
+      const centerX = rect ? rect.left + rect.width / 2 : window.innerWidth / 2;
+      const centerY = rect ? rect.top + rect.height / 2 : window.innerHeight / 2;
+      const position = screenToFlowPosition({ x: centerX, y: centerY });
+      createAnnotation(kind, position, options);
+    },
+    [screenToFlowPosition, createAnnotation]
   );
 
   // Dismiss the pane annotation menu on any outside interaction (e.g. clicking a
@@ -2242,6 +2296,18 @@ function GraphCanvasInner({
                 })}
               </div>
             </div>
+          )}
+
+          {/* Focus view sets annotations aside (see onPaneContextMenu above),
+              so an annotation created here would be silently dropped by the
+              next reconcile - hide the toolbox rather than let it create
+              something that disappears. */}
+          {!activeFocusRootId && (
+            <AnnotationToolbox
+              onCreate={(kind, options) => createAnnotationAtViewportCenter(kind, options)}
+              labels={atl}
+              compact={isCompact}
+            />
           )}
         </div>
 
