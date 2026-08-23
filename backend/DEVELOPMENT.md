@@ -1005,7 +1005,8 @@ an id that names a different annotation type (e.g. a `line`) reports
 `delete_annotation` / `reorder_annotation` / `set_annotation_lock` /
 `duplicate_annotation` extend MCP annotation access to the rest of the v1
 model: `text`, `label`, `line` (`arrow` accepted as a legacy alias), `frame`,
-`shape`, `icon`, `vote_dot`, `image`. They share the sticky-note tools'
+`shape`, `icon`, `vote_dot` — plus `image`, for everything except creating
+one (see the image annotation tool below). They share the sticky-note tools'
 session/revision contract — model-space coordinates, `revision` /
 `expected_revision` optimistic concurrency, `revision_conflict` on a stale
 write — over the same annotation document.
@@ -1053,16 +1054,37 @@ that cap at all; instead `SessionManager.upsert_image_annotation` enforces
 its own image-specific budgets before writing anything — a per-image cap
 after optimization, a cap on a session's total embedded-image bytes, and a
 cap on the full session document size — all reported as MCP error `too_large`.
-Once created, an image annotation is an ordinary generic annotation:
-`update_annotation`, `delete_annotation`, `reorder_annotation`,
-`set_annotation_lock` and `duplicate_annotation` all act on it like any other
-type, since none of them touch the embedded bytes.
+Once created, an image annotation is an ordinary generic annotation for the
+ops that only touch its envelope: `update_annotation`, `delete_annotation`,
+`reorder_annotation` and `set_annotation_lock` all act on it like any other
+type. `duplicate_annotation` is the exception, and only for an annotation
+whose stored URL is not an embedded one (i.e. persisted before the ingest
+rule existed): the copy lands on a new id, so it counts as introducing a new
+reference to unvalidated content and is refused with the ingest error rather
+than silently propagating it. Duplicating a properly ingested image works
+normally.
 
-`create_annotation` still accepts `type="image"` for building a bare envelope
-(as it does for every generic type) but does not run the ingest pipeline —
-a `content.image.url` supplied that way is stored verbatim, unvalidated and
-not necessarily embedded. Use `create_image_annotation` whenever the image
-itself (not just the envelope) needs to be created.
+`create_image_annotation` is the **only** way an image annotation's pixel
+content is set. `create_annotation` refuses `type="image"` (`invalid_type`)
+and `update_annotation` refuses a `content` carrying an `image` key
+(`invalid_content`), so neither can store an image reference that skipped
+ingest; replacing the picture of an existing image annotation means calling
+`create_image_annotation` again with the same `annotation_id`. Below both
+tools, `SessionStore.apply_state_op` rejects any `annotation_created`/
+`annotation_updated` op — including one posted straight to
+`/api/sessions/{id}/ops` — that sets an `image.url` which is not an embedded
+`data:image/webp;base64` URI (the content type ingest emits), so the rule
+holds for every session annotation write rather than tool by tool. Two
+exemptions keep existing state usable: re-sending the URL already stored
+under that id (which the browser does on every move/resize/lock), and an
+undo replaying its own stored inverse op.
+
+This implements docs/ANNOTATION_CONTRACT.md's "Image ingest enforcement"
+requirement. Read that section for what it deliberately does *not* cover —
+the session/document byte budgets are enforced only by
+`SessionManager.upsert_image_annotation` and not on the op path, and a
+`SavedView`'s stored `annotation_document` is rendered without passing
+through this check.
 
 ### UI Backend Endpoints
 

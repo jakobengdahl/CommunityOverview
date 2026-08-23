@@ -23,6 +23,13 @@ Two helper sets live here:
   (kept on its own dedicated tool set above) and ``group`` (node-membership
   boxes, out of scope — editing ``member_node_ids`` goes through the
   ``group_membership_changed`` op, not exposed over MCP).
+
+``image_annotation_error`` also lives here: the contract rule that an
+``image`` annotation's pixel content is always an embedded, server-ingested
+data URI is a property of the annotation *shape*, so ``SessionStore`` applies
+it in one place rather than per entry point. Two writes are exempt by design
+— re-sending the URL already stored under that id, and an undo replaying its
+own inverse op — see the function's docstring and ``SessionStore.apply_state_op``.
 """
 
 from __future__ import annotations
@@ -31,7 +38,20 @@ from typing import Any, Dict, FrozenSet, Optional
 
 NOTE_TYPE = "note"
 GROUP_TYPE = "group"
+IMAGE_TYPE = "image"
 DEFAULT_NOTE_SIZE = {"w": 160, "h": 96}
+
+# The only `content.image.url` form an `image` annotation may be persisted
+# with: an embedded base64 data URI of the content type server-side ingest
+# *emits* (``image_ingest.OPTIMIZED_CONTENT_TYPE``). Deliberately not the
+# wider set of formats ingest *accepts* as input — those are all re-encoded,
+# so accepting their prefixes here would widen what a forged data URI may
+# claim to be without any path ever producing one. Kept as a literal rather
+# than imported so this module (which ``session_store`` imports on every
+# annotation op) does not pull Pillow/httpx into the store's import path;
+# ``test_session_annotations_image_guard.py`` pins it to the optimizer's
+# output so the two cannot drift apart.
+EMBEDDED_IMAGE_URL_PREFIXES = ("data:image/webp;base64,",)
 
 # Every v1 type except `note` and `group` — see module docstring for why
 # those two are excluded from the generic tool set.
@@ -243,6 +263,78 @@ def is_generic_annotation(annotation: Dict[str, Any]) -> bool:
     """Whether *annotation* is one of the types the generic tool set manages
     (i.e. not a ``note`` and not a ``group``)."""
     return annotation_type_of(annotation) in GENERIC_ANNOTATION_TYPES
+
+
+def is_embedded_image_url(url: Any) -> bool:
+    """Whether *url* is an embedded image data URI ingest is allowed to store."""
+    return isinstance(url, str) and url.startswith(EMBEDDED_IMAGE_URL_PREFIXES)
+
+
+def image_annotation_error(
+    annotation: Dict[str, Any], existing: Optional[Dict[str, Any]] = None
+) -> Optional[str]:
+    """Why *annotation* may not be persisted as an ``image``, or ``None``.
+
+    Enforces docs/ANNOTATION_CONTRACT.md's "Image ingest enforcement" rule
+    for the writes ``SessionStore.apply_state_op`` submits to it:
+    an ``image`` annotation's pixel content must be the embedded result of
+    server-side ingest (``image_ingest.py``), never a remote URL that the
+    annotation would then depend on staying reachable — and never a
+    ``file:``/``javascript:`` style URL either. Without this, the generic
+    ``create_annotation``/``update_annotation`` tools and any client posting a
+    raw ``annotation_created`` op could store an arbitrary unvalidated remote
+    URL, going around the validation, budgets and SSRF checks
+    ``create_image_annotation`` performs.
+
+    *existing* is the annotation already stored under this id, when there is
+    one. A write whose ``image.url`` is byte-identical to the stored one is
+    allowed even if that URL is not embedded: it introduces no new reference,
+    and refusing it would strand annotations persisted before this rule
+    existed — the browser echoes the *whole* annotation, image payload
+    included, on every move/resize/lock (``sessionSyncClient.js``), so a
+    blanket refusal would make such an annotation permanently unmovable. Only
+    a *new* non-embedded URL is refused — and a duplicate, which lands on a
+    fresh id with no *existing* to match, counts as new.
+
+    The second exemption is not here at all: ``apply_state_op`` skips this
+    check entirely for an undo replaying its stored inverse op
+    (``trusted_replay``), which restores a copy of the session's own earlier
+    state rather than accepting caller input. Without it, deleting an
+    annotation persisted before this rule existed would be irreversible,
+    since after the delete there is no *existing* left to match against.
+
+    An annotation of another type, or an ``image`` patch that omits the pixel
+    payload entirely, is unaffected.
+    """
+    if annotation_type_of(annotation) != IMAGE_TYPE:
+        return None
+    if "image" not in annotation:
+        return None
+    image = annotation.get("image")
+    if image is None:
+        return None
+    if not isinstance(image, dict):
+        return "image annotation 'image' payload must be an object"
+    url = image.get("url")
+    if url is None:
+        # No pixel content to validate. A browser echoing an annotation back
+        # on a move serialises `image` as `{}` when the payload is missing
+        # (`sessionAnnotations.js`), and rejecting that would wedge the whole
+        # op batch — including every unrelated op in it — over an annotation
+        # that references nothing.
+        return None
+    if is_embedded_image_url(url):
+        return None
+    if isinstance(existing, dict):
+        stored = existing.get("image")
+        if isinstance(stored, dict) and stored.get("url") == url:
+            return None
+    return (
+        "image annotation content must be an embedded image produced by "
+        "server-side ingest (a data:image/webp;base64 URI); a remote or "
+        "unvalidated URL is not accepted — create or replace the image with "
+        "the image ingest path instead"
+    )
 
 
 def _apply_content(target: Dict[str, Any], content: Optional[Dict[str, Any]]) -> None:

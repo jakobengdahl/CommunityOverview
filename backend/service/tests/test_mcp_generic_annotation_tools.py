@@ -5,9 +5,11 @@ registered in ``backend/service/mcp_tools.py``.
 
 These extend the note-only MCP annotation access added in the sticky-note
 tool set (see ``test_mcp_sticky_note_tools.py``) to the rest of the v1 model
-(``text``/``label``/``line``/``frame``/``shape``/``icon``/``vote_dot``/
-``image``); ``note`` and ``group`` stay out of scope for these tools (see
-``backend/core/session_annotations.py`` module docstring). The tools are
+(``text``/``label``/``line``/``frame``/``shape``/``icon``/``vote_dot``);
+``note``, ``group`` and ``image`` stay out of scope for *creation* through
+these tools (see ``backend/core/session_annotations.py``'s module docstring,
+and ``test_mcp_image_annotation_tool.py`` for the image ingest path an
+`image` annotation must be created through). The tools are
 thin wrappers over ``SessionManager.upsert_annotation``/``update_annotation``/
 ``delete_annotation`` plus the generic-shape helpers in
 ``backend/core/session_annotations.py``; the op semantics themselves are
@@ -107,7 +109,7 @@ class TestListAnnotations:
 class TestCreateAnnotation:
     @pytest.mark.parametrize(
         "ann_type",
-        ["text", "label", "line", "frame", "shape", "icon", "vote_dot", "image"],
+        ["text", "label", "line", "frame", "shape", "icon", "vote_dot"],
     )
     def test_creates_each_generic_type(self, annotation_tools, ann_type):
         tools_map, manager = annotation_tools

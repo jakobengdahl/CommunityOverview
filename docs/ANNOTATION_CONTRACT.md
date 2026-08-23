@@ -215,14 +215,58 @@ Required for every path that can set an `image` annotation's pixel content:
   point (paste, upload, MCP data, MCP URL import) — an annotation must not
   depend on a remote resource staying reachable to keep rendering.
 
-**Current gap:** the dedicated `create_image_annotation` MCP tool enforces
-this correctly. The generic `create_annotation`/`update_annotation` tools
-still accept `type="image"` for building a bare envelope and, per
-`backend/DEVELOPMENT.md`'s "Image annotation tool" section, store a
-supplied `content.image.url` verbatim — unvalidated and not necessarily
-embedded. That bare-envelope path contradicts the rule above and is an open
-gap, not an accepted second way to set image content; see the acceptance
-matrix `image` row.
+**Enforcement:** `create_image_annotation` ingests the image and is the only
+tool that sets pixel content. `create_annotation` refuses `type="image"` and
+`update_annotation` refuses a `content` carrying an `image` key, so the
+generic envelope can no longer store a supplied `content.image.url`
+verbatim. Underneath both, `SessionStore.apply_state_op`'s
+`annotation_created`/`annotation_updated` branches (`image_annotation_error`
+in `backend/core/session_annotations.py`) reject any op whose `image` payload
+sets a URL that is not an embedded `data:image/webp;base64` URI — the content
+type ingest emits — so a raw op posted to `/api/sessions/{id}/ops` is held to
+the same rule as an MCP call.
+
+Two writes are deliberately exempt, because refusing them would break state
+the session already holds rather than keep anything out:
+
+- A payload whose `url` is byte-identical to the one already stored under
+  that id. The browser re-sends the *whole* annotation on every move, resize
+  and lock (`sessionSyncClient.js`), so without this an annotation persisted
+  before this rule existed would be permanently unmovable.
+- An undo replaying its stored inverse op (`trusted_replay`), which restores
+  a copy of this session's own earlier state — otherwise deleting such an
+  annotation would be irreversible.
+
+Duplication is deliberately *not* exempt: a copy lands on a new id, with no
+stored URL to match, so duplicating an annotation whose URL was persisted
+before this rule existed is refused with the ingest error (reorder, lock,
+move and delete on that same annotation still work). Duplicating a properly
+ingested image is unaffected.
+
+**What this does not do.** Two limits are worth stating exactly, because it
+is tempting to read more into the rule than it delivers:
+
+- The store can tell an embedded data URI from a remote link, but not *which*
+  embedded bytes came from ingest. A client can still forge a data URI and
+  persist a self-supplied picture. The per-image, per-session and document
+  budgets in `image_ingest.py` are enforced only by
+  `SessionManager.upsert_image_annotation`, **not** on the op path, and the
+  256KB op-batch cap is per request rather than cumulative — so repeated
+  single-op batches can grow a session document far past those budgets. That
+  growth path predates this rule (any large `text` payload does the same) and
+  is tracked as a follow-up; there is no CSRF or origin check on the ops
+  endpoint either, so "a client" here means anything holding the session id.
+- A `SavedView` node's `metadata.annotation_document` never passes through
+  this check: it is stored as ordinary graph-node metadata and rendered
+  straight into the canvas on load, so a saved view carrying a remote image
+  URL still makes every viewer's browser fetch that host. Nothing persists
+  into the session from it — the resulting op is refused — but the fetch has
+  already happened. Also tracked as a follow-up.
+
+So the property this section actually guarantees today is narrower than "no
+remote resource anywhere": **no session annotation write persists a new
+non-embedded image URL**. No GUI creates image content at all yet — the
+`image` GUI cell below is still ❌.
 
 ## Persistence
 
@@ -262,8 +306,12 @@ than applied. See `backend/DEVELOPMENT.md`'s "Generic annotation tools"
 section for the full contract, including the per-type `content` payload
 shape.
 
-`image` additionally gets its own dedicated creation tool,
-`create_image_annotation`: rather than taking a `content` payload directly,
+`image` is created through its own dedicated tool instead —
+`create_image_annotation`, the only tool that sets image pixel content
+(`create_annotation` refuses `type="image"`, and `update_annotation` refuses
+a `content` carrying an `image` key; every other operation on an existing
+image annotation stays on the generic tool set). Rather than taking a
+`content` payload directly,
 it takes the image itself (`image_data` or `image_url`), ingests it
 server-side (`backend/core/image_ingest.py`: format/size validation,
 downscaling, re-encoding as WebP) and stores the result as an embedded
@@ -332,7 +380,7 @@ rule](#downstream-closure-rule).
 | `shape` | ⚠ toolbox create (rectangle/circle only), no subtype picker for the rest | ✅ generic tool set (`content.shape`) | ✅ | ✅ | ✅ | ⬜ |
 | `icon` | ❌ render/move only, no create UI or icon picker | ✅ generic tool set | ✅ | ✅ | ✅ | ⬜ |
 | `vote_dot` | ❌ render/move only, no create UI or color picker | ✅ generic tool set | ✅ | ✅ | ✅ | ⬜ |
-| `image` | ❌ no paste/upload UI | ⚠ `create_image_annotation` enforces ingest; generic tool's bare envelope does not ([gap](#image-ingest-enforcement)) | ✅ | ✅ | ✅ | ⬜ |
+| `image` | ❌ no paste/upload UI | ✅ `create_image_annotation` ingests; generic create/update refuse image content, and no session annotation write can persist a *new* non-embedded image URL — note the duplicate, saved-view and budget limits in [enforcement](#image-ingest-enforcement) | ✅ | ✅ | ✅ | ⬜ |
 | `freehand` | ❌ no create UI (stylus input not wired) | ❌ no MCP tool | ✅ document model round-trips it | ⚠ no creation path to exercise it live | ✅ `translate_freehand_points` covers move/undo | ❌ no physical stylus/touch pass |
 | cross-type | — | — | — | ⚠ ops publish immediately, but the 300 ms text debounce and release-time-only geometry are not split out from the general autosave debounce, and edit leases are advisory/LWW with a 30 s TTL rather than exclusive ([gap](#operation-timing-and-leases)) | ✅ actor-scoped conditional undo (`session_activity.py`) | — |
 

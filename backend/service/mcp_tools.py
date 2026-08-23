@@ -49,6 +49,7 @@ from backend.core.session_annotations import (
     project_note,
     ALL_ANNOTATION_TYPES,
     GENERIC_ANNOTATION_TYPES,
+    IMAGE_TYPE,
     annotation_type_of,
     build_annotation,
     build_annotation_patch,
@@ -2428,10 +2429,15 @@ def register_mcp_tools(
         """
         Create an annotation, or replace one by id (create/upsert).
 
-        Covers every v1 annotation type except `note` and `group`: `text`,
-        `label`, `line` (`arrow` accepted as an alias), `frame`, `shape`,
-        `icon`, `vote_dot`, `image`. Use `create_sticky_note` for notes;
-        `group` (node-membership boxes) is not exposed through MCP.
+        Covers every v1 annotation type except `note`, `group` and `image`:
+        `text`, `label`, `line` (`arrow` accepted as an alias), `frame`,
+        `shape`, `icon`, `vote_dot`. Use `create_sticky_note` for notes and
+        `create_image_annotation` for images (an image's pixel content must
+        be ingested server-side, so it cannot be created from a bare
+        envelope here); `group` (node-membership boxes) is not exposed
+        through MCP. An image annotation that already exists is updated,
+        moved, reordered, locked, duplicated and deleted through these
+        generic tools like any other type.
 
         Coordinates are model space (zoom/pan independent, pixels at zoom 1,
         `x`/`y` = top-left or anchor point), the same space `list_annotations`
@@ -2448,13 +2454,13 @@ def register_mcp_tools(
           - shape: {"shape": "rectangle"}
           - icon: {"icon": "flag"}
           - vote_dot: {"value": 3}
-          - image: {"image": {...}, "alt": "..."}
         `frame` typically needs no `content` — its box is `x`/`y`/`w`/`h`.
 
         Args:
             session_id: The session ID shown in the browser header (e.g. "8244-1742")
-            type: One of text/label/line/frame/shape/icon/vote_dot/image
-                ("arrow" accepted as an alias for "line").
+            type: One of text/label/line/frame/shape/icon/vote_dot
+                ("arrow" accepted as an alias for "line"; "image" is
+                rejected — use create_image_annotation).
             x: Model-space x of the annotation's anchor/top-left corner.
             y: Model-space y of the annotation's anchor/top-left corner.
             w: Optional width in model-space px (no type-specific default;
@@ -2494,10 +2500,24 @@ def register_mcp_tools(
                 "success": False,
                 "error": "invalid_type",
                 "message": (
-                    f"type must be one of {sorted(GENERIC_ANNOTATION_TYPES)} "
+                    "type must be one of "
+                    f"{sorted(GENERIC_ANNOTATION_TYPES - {IMAGE_TYPE})} "
                     "('arrow' accepted as an alias for 'line'); use "
-                    "create_sticky_note for notes — group annotations are not "
-                    "exposed through MCP."
+                    "create_sticky_note for notes and create_image_annotation "
+                    "for images — group annotations are not exposed through MCP."
+                ),
+            }
+        if normalized_type == IMAGE_TYPE:
+            return {
+                "success": False,
+                "error": "invalid_type",
+                "message": (
+                    "image annotations are created with create_image_annotation, "
+                    "which ingests the picture server-side (format validation, "
+                    "downscale, embed) — this tool would otherwise store an "
+                    "unvalidated image reference. Every other operation "
+                    "(update/move/reorder/lock/duplicate/delete) works on an "
+                    "image annotation through the generic tools."
                 ),
             }
         if annotation_id is not None:
@@ -2644,11 +2664,16 @@ def register_mcp_tools(
         after optimization, a per-session cap on total embedded image bytes,
         and a cap on the full session document size. Once created, an image
         annotation is an ordinary generic annotation: `update_annotation`,
-        `delete_annotation`, `reorder_annotation`, `set_annotation_lock` and
-        `duplicate_annotation` all act on it like any other type (moving,
-        resizing, rotating, relayering, locking, copying and deleting need
-        no image-specific handling — they only touch the envelope, not the
-        embedded bytes).
+        `delete_annotation`, `reorder_annotation` and `set_annotation_lock`
+        all act on it like any other type (moving, resizing, rotating,
+        relayering and locking touch only the envelope, not the embedded
+        bytes). `duplicate_annotation` works too, except on an annotation
+        whose stored URL is not an embedded one — a copy lands on a new id,
+        so it counts as a new reference to unvalidated content and is
+        refused. Replacing the *picture* means calling this tool
+        again with the same `annotation_id`; `create_annotation` and
+        `update_annotation` cannot set image content, so no path stores a
+        picture that has not been ingested here.
 
         Coordinates are model space (zoom/pan independent, pixels at zoom 1,
         `x`/`y` = top-left), the same space `list_annotations` reports.
@@ -2871,6 +2896,9 @@ def register_mcp_tools(
             rotation: New rotation in degrees, if changing it.
             content: Type-specific payload fields to overwrite (see
                 `create_annotation`'s docstring for the shape per type).
+                `image` is rejected here: an image annotation's picture is
+                replaced by calling `create_image_annotation` again with the
+                same annotation_id, so the new bytes go through ingest.
             style: New style dict, if changing it (replaces the whole dict).
             expected_revision: If given, the write is rejected unless it
                 equals the session's current `revision` (optimistic
@@ -2897,6 +2925,18 @@ def register_mcp_tools(
                 "success": False,
                 "error": "no_fields_to_update",
                 "message": "Give at least one of x/y/w/h/rotation/content/style.",
+            }
+        if isinstance(content, dict) and "image" in content:
+            return {
+                "success": False,
+                "error": "invalid_content",
+                "message": (
+                    "an image annotation's picture is replaced with "
+                    "create_image_annotation (same annotation_id), which ingests "
+                    "the new picture server-side; this tool cannot set "
+                    "content.image directly. Alt text and every other field are "
+                    "editable here."
+                ),
             }
         session = session_manager.get_session(session_id)
         if session is None:

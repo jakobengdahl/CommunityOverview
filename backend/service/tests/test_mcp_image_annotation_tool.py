@@ -469,3 +469,158 @@ class TestCreateImageAnnotationAuthorization:
         assert result["success"] is False
         assert result.get("error_code") == "access_denied"
         assert session.state["annotations"] == []
+
+
+class TestImageIngestIsTheOnlyWayIn:
+    """docs/ANNOTATION_CONTRACT.md "Image ingest enforcement": no MCP tool may
+    persist an image annotation whose pixel content skipped this tool's
+    validated ingest. The generic envelope used to accept `type="image"` with
+    an arbitrary `content.image.url` — the bypass these tests cover."""
+
+    def test_generic_create_refuses_image_type(self, image_tools):
+        tools_map, manager = image_tools
+        session = manager.create_session()
+
+        result = tools_map["create_annotation"](
+            session_id=session.id,
+            type="image",
+            x=0,
+            y=0,
+            content={"image": {"url": "https://example.com/logo.png"}},
+        )
+
+        assert result["success"] is False
+        assert result["error"] == "invalid_type"
+        assert "create_image_annotation" in result["message"]
+        assert session.state["annotations"] == []
+
+    def test_generic_create_refuses_bare_image_envelope(self, image_tools):
+        tools_map, manager = image_tools
+        session = manager.create_session()
+
+        result = tools_map["create_annotation"](
+            session_id=session.id, type="image", x=0, y=0
+        )
+
+        assert result["success"] is False
+        assert result["error"] == "invalid_type"
+        assert session.state["annotations"] == []
+
+    def test_generic_update_cannot_replace_the_embedded_image(self, image_tools):
+        tools_map, manager = image_tools
+        session = manager.create_session()
+        created = tools_map["create_image_annotation"](
+            session_id=session.id, x=0, y=0, image_data=_png_data_url()
+        )
+        embedded_url = created["annotation"]["content"]["image"]["url"]
+
+        result = tools_map["update_annotation"](
+            session_id=session.id,
+            annotation_id=created["annotation"]["id"],
+            content={"image": {"url": "https://example.com/logo.png"}},
+        )
+
+        assert result["success"] is False
+        assert result["error"] == "invalid_content"
+        assert session.state["annotations"][0]["image"]["url"] == embedded_url
+
+    def test_generic_update_still_edits_other_fields_of_an_image(self, image_tools):
+        tools_map, manager = image_tools
+        session = manager.create_session()
+        created = tools_map["create_image_annotation"](
+            session_id=session.id, x=0, y=0, image_data=_png_data_url()
+        )
+        embedded_url = created["annotation"]["content"]["image"]["url"]
+
+        result = tools_map["update_annotation"](
+            session_id=session.id,
+            annotation_id=created["annotation"]["id"],
+            x=25,
+            y=35,
+            content={"alt": "a red square"},
+        )
+
+        assert result["success"] is True
+        assert result["annotation"]["x"] == 25
+        assert result["annotation"]["content"]["alt"] == "a red square"
+        assert result["annotation"]["content"]["image"]["url"] == embedded_url
+
+    def test_duplicating_an_image_keeps_the_embedded_copy(self, image_tools):
+        tools_map, manager = image_tools
+        session = manager.create_session()
+        created = tools_map["create_image_annotation"](
+            session_id=session.id, x=0, y=0, image_data=_png_data_url()
+        )
+        embedded_url = created["annotation"]["content"]["image"]["url"]
+
+        result = tools_map["duplicate_annotation"](
+            session_id=session.id,
+            annotation_id=created["annotation"]["id"],
+            dx=20,
+            dy=0,
+        )
+
+        assert result["success"] is True
+        assert result["annotation"]["content"]["image"]["url"] == embedded_url
+
+
+class TestLegacyRemoteUrlAnnotationsThroughTheTools:
+    """The store-level half of this is in
+    ``backend/core/tests/test_session_annotations_image_guard.py``'s
+    ``TestLegacyRemoteUrlAnnotationsStayUsable``; these pin what the generic
+    *tools* do with an annotation whose stored URL predates the ingest rule.
+
+    Duplication is the one envelope-ish operation that is refused: the copy
+    lands on a new id, so there is no stored URL to match and it counts as
+    introducing a new reference to unvalidated content. It fails gracefully
+    (``success: False`` with the ingest error) rather than raising, and the
+    operations that keep the annotation on its own id still work.
+    """
+
+    def _session_with_legacy_image(self, manager):
+        session = manager.create_session()
+        # Seeded directly: the guard is exactly what stops this being created
+        # through any tool or op today.
+        session.state["annotations"].append(
+            {
+                "id": "img-legacy",
+                "type": "image",
+                "kind": "image",
+                "position": {"x": 0, "y": 0},
+                "geometry": {"x": 0, "y": 0, "w": 10, "h": 10, "rotation": 0},
+                "image": {"url": "https://example.com/legacy.png"},
+                "alt": "",
+            }
+        )
+        manager.store.persist(session)
+        return session
+
+    def test_duplicate_is_refused(self, image_tools):
+        tools_map, manager = image_tools
+        session = self._session_with_legacy_image(manager)
+
+        result = tools_map["duplicate_annotation"](
+            session_id=session.id, annotation_id="img-legacy", dx=20, dy=0
+        )
+
+        assert result["success"] is False
+        # duplicate_annotation surfaces the store's OpError text verbatim.
+        assert "embedded image produced by server-side ingest" in result["error"]
+        assert [a["id"] for a in session.state["annotations"]] == ["img-legacy"]
+
+    def test_reorder_and_lock_still_succeed(self, image_tools):
+        tools_map, manager = image_tools
+        session = self._session_with_legacy_image(manager)
+
+        reordered = tools_map["reorder_annotation"](
+            session_id=session.id, annotation_id="img-legacy", z=7
+        )
+        locked = tools_map["set_annotation_lock"](
+            session_id=session.id, annotation_id="img-legacy", locked=True
+        )
+
+        assert reordered["success"] is True
+        assert locked["success"] is True
+        stored = session.state["annotations"][0]
+        assert stored["z"] == 7
+        assert stored["locked"] is True
