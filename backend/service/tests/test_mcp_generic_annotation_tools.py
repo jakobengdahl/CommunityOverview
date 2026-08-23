@@ -158,7 +158,9 @@ class TestCreateAnnotation:
         assert annotation["z"] == 2
         assert annotation["locked"] is True
 
-    def test_rotation_round_trips_through_create_list_and_update(self, annotation_tools):
+    def test_rotation_round_trips_through_create_list_and_update(
+        self, annotation_tools
+    ):
         """A rotation an agent sets must still be readable after list/update.
 
         The canvas renders geometry.rotation for the types the contract
