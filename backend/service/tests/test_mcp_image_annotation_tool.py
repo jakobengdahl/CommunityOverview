@@ -562,3 +562,65 @@ class TestImageIngestIsTheOnlyWayIn:
 
         assert result["success"] is True
         assert result["annotation"]["content"]["image"]["url"] == embedded_url
+
+
+class TestLegacyRemoteUrlAnnotationsThroughTheTools:
+    """The store-level half of this is in
+    ``backend/core/tests/test_session_annotations_image_guard.py``'s
+    ``TestLegacyRemoteUrlAnnotationsStayUsable``; these pin what the generic
+    *tools* do with an annotation whose stored URL predates the ingest rule.
+
+    Duplication is the one envelope-ish operation that is refused: the copy
+    lands on a new id, so there is no stored URL to match and it counts as
+    introducing a new reference to unvalidated content. It fails gracefully
+    (``success: False`` with the ingest error) rather than raising, and the
+    operations that keep the annotation on its own id still work.
+    """
+
+    def _session_with_legacy_image(self, manager):
+        session = manager.create_session()
+        # Seeded directly: the guard is exactly what stops this being created
+        # through any tool or op today.
+        session.state["annotations"].append(
+            {
+                "id": "img-legacy",
+                "type": "image",
+                "kind": "image",
+                "position": {"x": 0, "y": 0},
+                "geometry": {"x": 0, "y": 0, "w": 10, "h": 10, "rotation": 0},
+                "image": {"url": "https://example.com/legacy.png"},
+                "alt": "",
+            }
+        )
+        manager.store.persist(session)
+        return session
+
+    def test_duplicate_is_refused(self, image_tools):
+        tools_map, manager = image_tools
+        session = self._session_with_legacy_image(manager)
+
+        result = tools_map["duplicate_annotation"](
+            session_id=session.id, annotation_id="img-legacy", dx=20, dy=0
+        )
+
+        assert result["success"] is False
+        # duplicate_annotation surfaces the store's OpError text verbatim.
+        assert "embedded image produced by server-side ingest" in result["error"]
+        assert [a["id"] for a in session.state["annotations"]] == ["img-legacy"]
+
+    def test_reorder_and_lock_still_succeed(self, image_tools):
+        tools_map, manager = image_tools
+        session = self._session_with_legacy_image(manager)
+
+        reordered = tools_map["reorder_annotation"](
+            session_id=session.id, annotation_id="img-legacy", z=7
+        )
+        locked = tools_map["set_annotation_lock"](
+            session_id=session.id, annotation_id="img-legacy", locked=True
+        )
+
+        assert reordered["success"] is True
+        assert locked["success"] is True
+        stored = session.state["annotations"][0]
+        assert stored["z"] == 7
+        assert stored["locked"] is True

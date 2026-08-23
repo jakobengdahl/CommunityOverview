@@ -2664,11 +2664,13 @@ def register_mcp_tools(
         after optimization, a per-session cap on total embedded image bytes,
         and a cap on the full session document size. Once created, an image
         annotation is an ordinary generic annotation: `update_annotation`,
-        `delete_annotation`, `reorder_annotation`, `set_annotation_lock` and
-        `duplicate_annotation` all act on it like any other type (moving,
-        resizing, rotating, relayering, locking, copying and deleting need
-        no image-specific handling — they only touch the envelope, not the
-        embedded bytes). Replacing the *picture* means calling this tool
+        `delete_annotation`, `reorder_annotation` and `set_annotation_lock`
+        all act on it like any other type (moving, resizing, rotating,
+        relayering and locking touch only the envelope, not the embedded
+        bytes). `duplicate_annotation` works too, except on an annotation
+        whose stored URL is not an embedded one — a copy lands on a new id,
+        so it counts as a new reference to unvalidated content and is
+        refused. Replacing the *picture* means calling this tool
         again with the same `annotation_id`; `create_annotation` and
         `update_annotation` cannot set image content, so no path stores a
         picture that has not been ingested here.

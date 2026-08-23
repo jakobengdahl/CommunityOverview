@@ -357,11 +357,16 @@ def _require_ingested_image(
     than from ``_validate_annotation`` because the rule needs the annotation
     already stored under this id: re-sending the URL that is already there
     (which the browser does on every move) is allowed, introducing a new one
-    is not. Every write of image pixel content reaches one of those two
-    branches — MCP's generic tools, a browser's op batch, a replayed inverse
-    op — so this is the whole enforcement surface, rather than one check per
-    entry point (which is how the generic tools came to bypass the hardened
-    ingest path in the first place).
+    is not.
+
+    Every write of image pixel content reaches one of those two branches —
+    MCP's generic tools, a browser's op batch, an undo replaying an inverse
+    op — so between them they are the whole enforcement surface, rather than
+    one check per entry point (which is how the generic tools came to bypass
+    the hardened ingest path in the first place). Of those, the undo replay
+    is the one deliberately let through: its caller passes
+    ``trusted_replay=True`` and this function is not called at all, because
+    the annotation it carries is a copy of state this session already held.
     """
     image_error = image_annotation_error(annotation, existing)
     if image_error:

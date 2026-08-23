@@ -1054,10 +1054,15 @@ that cap at all; instead `SessionManager.upsert_image_annotation` enforces
 its own image-specific budgets before writing anything — a per-image cap
 after optimization, a cap on a session's total embedded-image bytes, and a
 cap on the full session document size — all reported as MCP error `too_large`.
-Once created, an image annotation is an ordinary generic annotation:
-`update_annotation`, `delete_annotation`, `reorder_annotation`,
-`set_annotation_lock` and `duplicate_annotation` all act on it like any other
-type, since none of them touch the embedded bytes.
+Once created, an image annotation is an ordinary generic annotation for the
+ops that only touch its envelope: `update_annotation`, `delete_annotation`,
+`reorder_annotation` and `set_annotation_lock` all act on it like any other
+type. `duplicate_annotation` is the exception, and only for an annotation
+whose stored URL is not an embedded one (i.e. persisted before the ingest
+rule existed): the copy lands on a new id, so it counts as introducing a new
+reference to unvalidated content and is refused with the ingest error rather
+than silently propagating it. Duplicating a properly ingested image works
+normally.
 
 `create_image_annotation` is the **only** way an image annotation's pixel
 content is set. `create_annotation` refuses `type="image"` (`invalid_type`)

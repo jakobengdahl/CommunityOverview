@@ -237,6 +237,12 @@ the session already holds rather than keep anything out:
   a copy of this session's own earlier state — otherwise deleting such an
   annotation would be irreversible.
 
+Duplication is deliberately *not* exempt: a copy lands on a new id, with no
+stored URL to match, so duplicating an annotation whose URL was persisted
+before this rule existed is refused with the ingest error (reorder, lock,
+move and delete on that same annotation still work). Duplicating a properly
+ingested image is unaffected.
+
 **What this does not do.** Two limits are worth stating exactly, because it
 is tempting to read more into the rule than it delivers:
 
@@ -374,7 +380,7 @@ rule](#downstream-closure-rule).
 | `shape` | ⚠ toolbox create (rectangle/circle only), no subtype picker for the rest | ✅ generic tool set (`content.shape`) | ✅ | ✅ | ✅ | ⬜ |
 | `icon` | ❌ render/move only, no create UI or icon picker | ✅ generic tool set | ✅ | ✅ | ✅ | ⬜ |
 | `vote_dot` | ❌ render/move only, no create UI or color picker | ✅ generic tool set | ✅ | ✅ | ✅ | ⬜ |
-| `image` | ❌ no paste/upload UI | ✅ `create_image_annotation` ingests; generic create/update refuse image content, and no session annotation write can persist a *new* non-embedded image URL — note the saved-view and budget limits in [enforcement](#image-ingest-enforcement) | ✅ | ✅ | ✅ | ⬜ |
+| `image` | ❌ no paste/upload UI | ✅ `create_image_annotation` ingests; generic create/update refuse image content, and no session annotation write can persist a *new* non-embedded image URL — note the duplicate, saved-view and budget limits in [enforcement](#image-ingest-enforcement) | ✅ | ✅ | ✅ | ⬜ |
 | `freehand` | ❌ no create UI (stylus input not wired) | ❌ no MCP tool | ✅ document model round-trips it | ⚠ no creation path to exercise it live | ✅ `translate_freehand_points` covers move/undo | ❌ no physical stylus/touch pass |
 | cross-type | — | — | — | ⚠ ops publish immediately, but the 300 ms text debounce and release-time-only geometry are not split out from the general autosave debounce, and edit leases are advisory/LWW with a 30 s TTL rather than exclusive ([gap](#operation-timing-and-leases)) | ✅ actor-scoped conditional undo (`session_activity.py`) | — |
 

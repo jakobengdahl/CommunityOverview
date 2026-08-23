@@ -26,8 +26,10 @@ Two helper sets live here:
 
 ``image_annotation_error`` also lives here: the contract rule that an
 ``image`` annotation's pixel content is always an embedded, server-ingested
-data URI is a property of the annotation *shape*, so it is checked once, by
-``SessionStore``, for every write rather than per entry point.
+data URI is a property of the annotation *shape*, so ``SessionStore`` applies
+it in one place rather than per entry point. Two writes are exempt by design
+— re-sending the URL already stored under that id, and an undo replaying its
+own inverse op — see the function's docstring and ``SessionStore.apply_state_op``.
 """
 
 from __future__ import annotations
@@ -273,8 +275,8 @@ def image_annotation_error(
 ) -> Optional[str]:
     """Why *annotation* may not be persisted as an ``image``, or ``None``.
 
-    Enforces docs/ANNOTATION_CONTRACT.md's "Image ingest enforcement" rule at
-    the one point every write passes through (``SessionStore.apply_state_op``):
+    Enforces docs/ANNOTATION_CONTRACT.md's "Image ingest enforcement" rule
+    for the writes ``SessionStore.apply_state_op`` submits to it:
     an ``image`` annotation's pixel content must be the embedded result of
     server-side ingest (``image_ingest.py``), never a remote URL that the
     annotation would then depend on staying reachable — and never a
@@ -290,8 +292,16 @@ def image_annotation_error(
     and refusing it would strand annotations persisted before this rule
     existed — the browser echoes the *whole* annotation, image payload
     included, on every move/resize/lock (``sessionSyncClient.js``), so a
-    blanket refusal would make such an annotation permanently unmovable and
-    its deletion un-undoable. Only a *new* non-embedded URL is refused.
+    blanket refusal would make such an annotation permanently unmovable. Only
+    a *new* non-embedded URL is refused — and a duplicate, which lands on a
+    fresh id with no *existing* to match, counts as new.
+
+    The second exemption is not here at all: ``apply_state_op`` skips this
+    check entirely for an undo replaying its stored inverse op
+    (``trusted_replay``), which restores a copy of the session's own earlier
+    state rather than accepting caller input. Without it, deleting an
+    annotation persisted before this rule existed would be irreversible,
+    since after the delete there is no *existing* left to match against.
 
     An annotation of another type, or an ``image`` patch that omits the pixel
     payload entirely, is unaffected.

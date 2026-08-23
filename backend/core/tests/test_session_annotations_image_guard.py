@@ -204,7 +204,13 @@ class TestLegacyRemoteUrlAnnotationsStayUsable:
     content={"image": {"url": ...}})` path really exist — it was documented
     behaviour. The guard must not strand them: every envelope-only op re-sends
     the stored URL, so a blanket refusal would make such an annotation
-    permanently unmovable and its deletion un-undoable."""
+    permanently unmovable and its deletion un-undoable.
+
+    Duplication is the deliberate exception — the copy gets a new id, so there
+    is no stored URL to match and it is refused; that is pinned at the tool
+    level in
+    ``backend/service/tests/test_mcp_image_annotation_tool.py``'s
+    ``TestLegacyRemoteUrlAnnotationsThroughTheTools``."""
 
     def _session_with_legacy_image(self):
         manager = SessionManager(SessionStore(InMemorySessionPersistenceBackend()))
