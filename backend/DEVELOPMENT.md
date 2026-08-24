@@ -805,9 +805,9 @@ can configure one. See `docs/EVENT_SUBSCRIPTIONS.md`.
 | `get_visualization_session` | Inspect one session's resource metadata (incl. node count) |
 | `rename_visualization_session` | Set or clear a session's display name |
 | `delete_visualization_session` | Permanently delete a session — requires `confirm=true` |
-| `list_sticky_notes` | List every sticky note in a session (id/text/x/y/w/h/color/font_size) |
+| `list_sticky_notes` | List every sticky note in a session (id/text/x/y/w/h/color/font_size/rotation/z/locked) |
 | `create_sticky_note` | Create a sticky note at a model-space position, or replace one by id (create/upsert) |
-| `update_sticky_note` | Partially update a sticky note's content, style, position and/or size |
+| `update_sticky_note` | Partially update a sticky note's content, style, position, size, rotation, layer order and/or lock state |
 | `delete_sticky_note` | Delete a sticky note by its stable id |
 
 Two independent things can be true of a session id, and
@@ -996,11 +996,19 @@ revision rather than silently clobbering a concurrent edit.
 already exists replaces that note (idempotent for a retried call with the
 same id); omitting it lets the server mint a stable id, returned in the
 result. `update_sticky_note` is a partial update — only the given arguments
-(`text`/`color`/`font_size`/`x`/`y`/`w`/`h`) change, and a position-only or
-size-only update leaves the other half exactly as it was. `delete_sticky_note`
-and `update_sticky_note` both resolve `annotation_id` against notes only —
-an id that names a different annotation type (e.g. a `line`) reports
-`not_found` rather than editing across types.
+(`text`/`color`/`font_size`/`x`/`y`/`w`/`h`/`rotation`/`z`/`locked`) change,
+and a position-only or size-only update leaves the other half exactly as it
+was. `delete_sticky_note` and `update_sticky_note` both resolve
+`annotation_id` against notes only — an id that names a different annotation
+type (e.g. a `line`) reports `not_found` rather than editing across types.
+
+`create_sticky_note` and `update_sticky_note` are also where a note's
+`rotation`, `z` and `locked` are set — the generic `reorder_annotation`/
+`set_annotation_lock` tools below resolve ids against the generic type set
+only, so they refuse a note id (`not_found`) rather than editing it. Omitting
+`rotation`/`z` on create defaults them to `0`, matching the generic tools'
+convention for the same fields; `locked` defaults to `False`.
+`list_sticky_notes` reports all three back.
 
 #### Generic annotation tools
 
@@ -1047,8 +1055,9 @@ both `create_annotation` and `update_annotation`. Both tools refuse the
 malformed write *before* touching the session — a rejected `content` never
 partially mutates the stored annotation.
 `rotation` is in degrees, and every type these generic tools manage stores
-and reports back whatever is written (`note` is not one of them: its own tool
-set takes no `rotation` and `list_sticky_notes` does not report one — see
+and reports back whatever is written (`note` is not one of them: it has its
+own `rotation`/`z`/`locked` arguments on `create_sticky_note`/
+`update_sticky_note` instead, reported back by `list_sticky_notes` — see
 docs/ANNOTATION_CONTRACT.md's `note` row). The canvas *draws* a rotation for
 text, label, note, image, icon, vote dot, shape and frame only: whatever is
 stored for a `line` or a `freehand` stroke is never rendered (a tracked gap in
