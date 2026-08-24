@@ -116,6 +116,31 @@ class TestCreateStickyNote:
         assert note["font_size"] == 18
         assert note["w"] == 300 and note["h"] == 150
 
+    def test_creates_with_rotation_z_and_locked(self, note_tools):
+        tools_map, manager = note_tools
+        session = manager.create_session()
+
+        result = tools_map["create_sticky_note"](
+            session_id=session.id, x=0, y=0, rotation=45, z=3, locked=True
+        )
+
+        assert result["success"] is True
+        note = result["note"]
+        assert note["rotation"] == 45
+        assert note["z"] == 3
+        assert note["locked"] is True
+
+    def test_rotation_z_and_locked_default_when_omitted(self, note_tools):
+        tools_map, manager = note_tools
+        session = manager.create_session()
+
+        result = tools_map["create_sticky_note"](session_id=session.id, x=0, y=0)
+
+        note = result["note"]
+        assert note["rotation"] == 0
+        assert note["z"] == 0
+        assert note["locked"] is False
+
     def test_upserts_by_matching_id(self, note_tools):
         tools_map, manager = note_tools
         session = manager.create_session()
@@ -259,6 +284,85 @@ class TestUpdateStickyNote:
 
         assert result["note"]["color"] == "#0000ff"
         assert result["note"]["font_size"] == 22
+
+    def test_rotation_update(self, note_tools):
+        tools_map, manager = note_tools
+        session = manager.create_session()
+        created = tools_map["create_sticky_note"](session_id=session.id, x=0, y=0)
+        note_id = created["note"]["id"]
+
+        result = tools_map["update_sticky_note"](
+            session_id=session.id, annotation_id=note_id, rotation=90
+        )
+
+        assert result["success"] is True
+        assert result["note"]["rotation"] == 90
+
+    def test_z_and_locked_update(self, note_tools):
+        tools_map, manager = note_tools
+        session = manager.create_session()
+        created = tools_map["create_sticky_note"](session_id=session.id, x=0, y=0)
+        note_id = created["note"]["id"]
+
+        result = tools_map["update_sticky_note"](
+            session_id=session.id, annotation_id=note_id, z=9, locked=True
+        )
+
+        assert result["success"] is True
+        assert result["note"]["z"] == 9
+        assert result["note"]["locked"] is True
+
+    def test_z_zero_and_locked_false_are_applied_not_ignored(self, note_tools):
+        """``z=0``/``locked=False`` must be distinguishable from "not given"."""
+        tools_map, manager = note_tools
+        session = manager.create_session()
+        created = tools_map["create_sticky_note"](
+            session_id=session.id, x=0, y=0, z=9, locked=True
+        )
+        note_id = created["note"]["id"]
+
+        result = tools_map["update_sticky_note"](
+            session_id=session.id, annotation_id=note_id, z=0, locked=False
+        )
+
+        assert result["note"]["z"] == 0
+        assert result["note"]["locked"] is False
+
+    def test_rotation_z_and_locked_round_trip_through_list_sticky_notes(
+        self, note_tools
+    ):
+        tools_map, manager = note_tools
+        session = manager.create_session()
+        created = tools_map["create_sticky_note"](
+            session_id=session.id, x=0, y=0, rotation=30, z=2, locked=True
+        )
+        note_id = created["note"]["id"]
+
+        listed = tools_map["list_sticky_notes"](session_id=session.id)
+
+        assert len(listed["notes"]) == 1
+        note = listed["notes"][0]
+        assert note["id"] == note_id
+        assert note["rotation"] == 30
+        assert note["z"] == 2
+        assert note["locked"] is True
+
+    def test_partial_update_does_not_disturb_rotation_z_or_locked(self, note_tools):
+        tools_map, manager = note_tools
+        session = manager.create_session()
+        created = tools_map["create_sticky_note"](
+            session_id=session.id, x=0, y=0, rotation=30, z=2, locked=True
+        )
+        note_id = created["note"]["id"]
+
+        result = tools_map["update_sticky_note"](
+            session_id=session.id, annotation_id=note_id, text="new text"
+        )
+
+        assert result["note"]["text"] == "new text"
+        assert result["note"]["rotation"] == 30
+        assert result["note"]["z"] == 2
+        assert result["note"]["locked"] is True
 
     def test_no_fields_given_is_an_error(self, note_tools):
         tools_map, manager = note_tools

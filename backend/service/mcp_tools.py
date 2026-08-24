@@ -1945,6 +1945,9 @@ def register_mcp_tools(
         font_size: Optional[float] = None,
         w: Optional[float] = None,
         h: Optional[float] = None,
+        rotation: Optional[float] = None,
+        z: Optional[float] = None,
+        locked: bool = False,
         annotation_id: Optional[str] = None,
         expected_revision: Optional[int] = None,
     ) -> Dict[str, Any]:
@@ -1966,6 +1969,9 @@ def register_mcp_tools(
             font_size: Optional font size in px.
             w: Optional width in model-space px (default 160).
             h: Optional height in model-space px (default 96).
+            rotation: Optional rotation in degrees. Defaults to 0.
+            z: Optional layer order (higher draws on top). Defaults to 0.
+            locked: Whether the note starts locked against edits.
             annotation_id: Stable id to create or replace. Omit to let the
                 server assign one.
             expected_revision: If given, the write is rejected unless it equals
@@ -2011,6 +2017,9 @@ def register_mcp_tools(
             font_size=font_size,
             w=w,
             h=h,
+            rotation=rotation,
+            z=z,
+            locked=locked,
             annotation_id=annotation_id,
         )
         try:
@@ -2088,14 +2097,24 @@ def register_mcp_tools(
         y: Optional[float] = None,
         w: Optional[float] = None,
         h: Optional[float] = None,
+        rotation: Optional[float] = None,
+        z: Optional[float] = None,
+        locked: Optional[bool] = None,
         expected_revision: Optional[int] = None,
     ) -> Dict[str, Any]:
         """
-        Update a sticky note's content, style, position and/or size.
+        Update a sticky note's content, style, position, size, rotation, layer
+        order and/or lock state.
 
         A partial update: only the arguments given change, everything else on
         the note (including fields not modeled by this tool) is left as-is.
         Position and size are model space, matching ``list_sticky_notes``.
+        This is the note equivalent of the generic ``update_annotation`` /
+        ``reorder_annotation`` / ``set_annotation_lock`` tools, which refuse
+        note ids — a note's ``rotation``/``z``/``locked`` are set here
+        instead. Like those generic tools, ``locked`` is the canvas UI's own
+        edit-lock convention, not a server-enforced permission: this tool does
+        not check the note's current ``locked`` value before applying a write.
 
         Args:
             session_id: The session ID shown in the browser header (e.g. "8244-1742")
@@ -2108,6 +2127,9 @@ def register_mcp_tools(
             y: New model-space y of the top-left corner, if moving it.
             w: New width in model-space px, if resizing it.
             h: New height in model-space px, if resizing it.
+            rotation: New rotation in degrees, if changing it.
+            z: New layer order (higher draws on top), if changing it.
+            locked: New lock state, if changing it.
             expected_revision: If given, the write is rejected unless it equals
                 the session's current ``revision`` (optimistic concurrency).
                 Read it from ``list_sticky_notes`` first. Omit for last-write-wins.
@@ -2129,11 +2151,16 @@ def register_mcp_tools(
         denied = _authorize_session(GRAPH_ACTION_MUTATE, "update_sticky_note")
         if denied:
             return denied
-        if all(v is None for v in (text, color, font_size, x, y, w, h)):
+        if all(
+            v is None for v in (text, color, font_size, x, y, w, h, rotation, z, locked)
+        ):
             return {
                 "success": False,
                 "error": "no_fields_to_update",
-                "message": "Give at least one of text/color/font_size/x/y/w/h.",
+                "message": (
+                    "Give at least one of "
+                    "text/color/font_size/x/y/w/h/rotation/z/locked."
+                ),
             }
         session = session_manager.get_session(session_id)
         if session is None:
@@ -2162,6 +2189,9 @@ def register_mcp_tools(
             y=y,
             w=w,
             h=h,
+            rotation=rotation,
+            z=z,
+            locked=locked,
         )
         try:
             result = session_manager.update_annotation(
