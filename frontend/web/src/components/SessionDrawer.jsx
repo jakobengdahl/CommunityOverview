@@ -153,12 +153,13 @@ function SessionDrawer({
   // Modal focus management for the mobile overlay only: move focus in on
   // open, restore it to whatever had focus beforehand on close — the same
   // contract BottomSheet.jsx uses for the sibling search/create sheets.
-  // Intentionally keyed on `open` alone (isMobile is read, not a dependency):
-  // depending on isMobile too would re-run this effect's cleanup — which
-  // restores focus to the pre-open trigger — on every crossing of the
-  // mobile breakpoint while the drawer stays open (e.g. rotating a tablet),
-  // yanking focus out of a drawer that is still visibly open. The isMobile
-  // check only needs its value from the render where `open` actually flips.
+  // isMobile is a plain dependency here (not specially excluded): App.jsx
+  // renders either <MobileShell/> or <DesktopShell/> based on the identical
+  // isMobile value, so any instance of this component only ever exists
+  // inside one of those two mutually-exclusive subtrees — a real crossing of
+  // the breakpoint unmounts this instance (with whatever pending cleanup
+  // React runs for that) and mounts a fresh one in the other shell, rather
+  // than flipping isMobile under a still-mounted SessionDrawer.
   useEffect(() => {
     if (!open || !isMobile) return undefined;
     lastFocusedRef.current = typeof document !== 'undefined' ? document.activeElement : null;
@@ -172,8 +173,7 @@ function SessionDrawer({
         toRestore.focus();
       }
     };
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [open]);
+  }, [open, isMobile]);
 
   // Body scroll lock for the mobile overlay only, mirroring BottomSheet.jsx's
   // contract for the sibling search/create sheets — without it, a touch-scroll

@@ -86,7 +86,7 @@
 
 @media (max-width: 600px) {
   .floating-header,
-  .app.session-drawer-open .floating-header {
+  .app.session-drawer-open:not(.is-mobile) .floating-header {
     left: calc(16px + env(safe-area-inset-left));
   }
 

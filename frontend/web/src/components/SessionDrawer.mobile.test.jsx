@@ -2,7 +2,7 @@
  * @vitest-environment jsdom
  */
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
-import { render, screen, fireEvent, act } from '@testing-library/react';
+import { render, screen, fireEvent } from '@testing-library/react';
 import SessionDrawer from './SessionDrawer';
 
 // Mirrors the fake MediaQueryList pattern in useViewportMode.test.jsx and
@@ -17,26 +17,6 @@ function makeMql(matches) {
 
 function setMobile(isMobile) {
   window.matchMedia = vi.fn((query) => makeMql(query === '(max-width: 768px)' ? isMobile : false));
-}
-
-// Same as makeMql, but with a working addEventListener/emit so a test can
-// simulate the query flipping live (e.g. a tablet rotation), the way
-// useViewportMode.test.jsx does for the hook itself.
-function makeTrackingMql(initialMatches) {
-  const listeners = new Set();
-  return {
-    matches: initialMatches,
-    addEventListener: (event, handler) => {
-      if (event === 'change') listeners.add(handler);
-    },
-    removeEventListener: (event, handler) => {
-      if (event === 'change') listeners.delete(handler);
-    },
-    emit(matches) {
-      this.matches = matches;
-      listeners.forEach((handler) => handler({ matches }));
-    },
-  };
 }
 
 function renderDrawer(props = {}) {
@@ -164,32 +144,6 @@ describe('SessionDrawer mobile overlay', () => {
       />
     );
     expect(trigger).toHaveFocus();
-    trigger.remove();
-  });
-
-  it('does not eject focus back to the trigger when the viewport crosses the mobile breakpoint while the drawer stays open', () => {
-    const mobileMql = makeTrackingMql(true);
-    window.matchMedia = vi.fn((query) =>
-      query === '(max-width: 768px)' ? mobileMql : makeMql(false)
-    );
-
-    const trigger = document.createElement('button');
-    document.body.appendChild(trigger);
-    trigger.focus();
-
-    renderDrawer({ open: true });
-    const closeButton = screen.getByRole('button', { name: 'Close menu' });
-    expect(closeButton).toHaveFocus();
-
-    // Simulate e.g. a tablet rotation crossing the mobile breakpoint while
-    // the drawer stays open (`open` never changes) — this must not run the
-    // focus-restore cleanup and eject focus back to the pre-open trigger.
-    act(() => {
-      mobileMql.emit(false);
-    });
-
-    expect(closeButton).toHaveFocus();
-    expect(trigger).not.toHaveFocus();
     trigger.remove();
   });
 
