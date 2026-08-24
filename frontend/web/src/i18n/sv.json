@@ -371,7 +371,9 @@
     "focus_view": "Fokusera på vald nod",
     "exit_focus_view": "Tillbaka till hela grafen",
     "controls_group": "Kontroller för arbetsytan",
-    "image_ingest_failed": "Det gick inte att lägga till bilden"
+    "image_ingest_failed": "Det gick inte att lägga till bilden",
+    "freehand_drawing_hint": "Rita ett streck på arbetsytan — tryck Escape för att avbryta",
+    "freehand_concurrent_input_blocked": "Avsluta det pågående strecket innan du börjar ett nytt"
   },
   "guide": {
     "title": "Guide",
@@ -418,7 +420,11 @@
     "annotation_rotate_reset": "Återställ rotation",
     "undo_notification": "Flytt ångrad",
     "redo_notification": "Flytt återställd",
-    "annotation_remote_locked": "Någon annan redigerar denna annotering"
+    "annotation_remote_locked": "Någon annan redigerar denna annotering",
+    "freehand_color": "Färg",
+    "freehand_width": "Streckbredd",
+    "freehand_smoothing": "Utjämning",
+    "freehand_opacity": "Opacitet"
   },
   "annotation_toolbox": {
     "toggle_expand": "Lägg till kommentar",
@@ -433,7 +439,8 @@
     "shape_rhombus": "Romb",
     "shape_hexagon": "Hexagon",
     "shape_process_arrow": "Processpil",
-    "image": "Bild"
+    "image": "Bild",
+    "freehand": "Frihand"
   },
   "common": {
     "saving": "Sparar...",

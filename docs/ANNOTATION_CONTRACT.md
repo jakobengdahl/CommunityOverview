@@ -126,18 +126,29 @@ MCP. The required entry points are:
 circle, triangle, rhombus, hexagon and process arrow — each of which now
 renders as its own distinct visual. `image` also has GUI creation now
 (toolbox file picker, clipboard paste, and OS file drop — all through the
-same server-side ingest MCP uses). `icon`, `vote_dot` and `freehand` still
-render on canvas but have no GUI creation path — they can only be created via
-MCP. A right-click property editor now exists for every
-rotatable kind (`note`, `label`, `text`, `frame`, `shape`, `icon`, `vote_dot`,
-`image`): a rotation control (±15° steps plus reset), and, for `shape` only,
-a subtype picker to change an existing shape's variant after creation. What
-it still does not cover: recoloring any generic kind, an icon picker for
-`icon`, and cropping/replacing an `image`'s pixel content. `label`, `text`,
-`icon` and `vote_dot` can now also be attached to a node or another
-annotation from the GUI, by dragging the annotation within snapping distance
-of the target ([Attachment and detach behavior](#attachment-and-detach-behavior))
-— there is still no dedicated "nearby object menu" (the wireframe above) that
+same server-side ingest MCP uses). `freehand` now has GUI creation too: the
+toolbox's "Freehand" item arms a one-shot drawing mode (single stroke, then
+auto-disarms) that captures actual pointer samples — coalesced samples via
+`getCoalescedEvents()` when the browser provides them, device pressure via
+`event.pressure` when available, never predicted events — into a vector
+stroke (`createFreehandStrokeCapture`,
+`packages/ui-graph-canvas/src/utils/freehandStroke.js`, wired into
+`GraphCanvas.jsx`). `icon` and `vote_dot` still render on canvas but have no
+GUI creation path — they can only be created via MCP. A right-click property
+editor now exists for every rotatable kind (`note`, `label`, `text`, `frame`,
+`shape`, `icon`, `vote_dot`, `image`): a rotation control (±15° steps plus
+reset), and, for `shape` only, a subtype picker to change an existing shape's
+variant after creation. `freehand` gets its own right-click property editor
+too (color, stroke width, smoothing, opacity) — it is not in the rotatable
+set (see [Canvas rendering](#canvas-rendering) on why rotation is not drawn
+for it), so it has no rotation control. What the rotatable kinds' editor
+still does not cover: recoloring any generic kind other than `freehand`, an
+icon picker for `icon`, and cropping/replacing an `image`'s pixel content.
+`label`, `text`, `icon` and `vote_dot` can now also be attached to a node or
+another annotation from the GUI, by dragging the annotation within snapping
+distance of the target
+([Attachment and detach behavior](#attachment-and-detach-behavior)) — there
+is still no dedicated "nearby object menu" (the wireframe above) that
 pre-wires a new attachable annotation to a target at creation time. Closing
 what remains is tracked per type in the [acceptance matrix](#acceptance-matrix);
 it is not satisfied by documenting the wireframes above.
@@ -480,11 +491,29 @@ annotation tool" section for the full contract.
 not just mouse. V1 acceptance for `freehand` requires testing on at least
 one physical touch/stylus device (not only a mouse-driven emulator), because
 pointer pressure, palm rejection and coalesced-event sampling do not behave
-identically under emulation. No such device acceptance pass exists yet —
-`freehand` has an MCP creation entry point (the generic tool set), but no
-*GUI* creation entry point (stylus input is not wired), and a physical-device
-pass is inherently about real pointer input reaching the canvas, not headless
-creation — so device acceptance still cannot be scheduled ahead of that.
+identically under emulation. No such device acceptance pass exists yet.
+
+`freehand` now has both a GUI creation entry point (the toolbox's "Freehand"
+drawing mode, described above and in
+[Canvas rendering](#canvas-rendering)) and its pre-existing MCP one (the
+generic tool set), so a physical-device pass — which is inherently about real
+pointer input reaching the canvas, not headless creation — can now be
+scheduled; it just has not happened yet. What the GUI wiring does today,
+verified only under jsdom/mouse-event emulation, not a physical device:
+samples actual pointer events (coalesced samples via `getCoalescedEvents()`
+when the browser reports them; `getPredictedEvents()` is never called,
+matching `persist_predicted_points: false`), captures device pressure via
+`event.pressure` onto persisted points when reported, and falls back to a
+constant stroke width (rather than a velocity-derived one) for mouse/touch/
+pressure-less-pen input. It also structurally suppresses concurrent input
+while a stroke is active — `createFreehandStrokeCapture` tracks only the
+first ("primary") pointer of a stroke, and a second pointer going down
+mid-stroke is a no-op accompanied by a surfaced notice — but "structurally
+suppresses" is not the same claim as "verified against a real palm-rejection
+scenario on a physical touchscreen with an active pen," which is exactly what
+the still-missing device pass would confirm or correct. Panning, marquee
+selection and node dragging are disabled for the duration of the armed
+drawing mode so a stroke does not fight the canvas's other gestures.
 
 ## Canvas rendering
 
@@ -641,7 +670,7 @@ rule](#downstream-closure-rule).
 | `icon` | ⚠ move, rotate (right-click) and attach by dragging near a node/annotation; still no create UI or icon picker — renders every one of the 75 host-registry icon names as its own distinct glyph (see [Canvas rendering](#canvas-rendering)) | ✅ generic tool set | ✅ | ✅ | ✅ | ⬜ |
 | `vote_dot` | ⚠ move, rotate (right-click) and attach by dragging near a node/annotation; still no create UI or color picker | ✅ generic tool set | ✅ | ✅ | ✅ | ⬜ |
 | `image` | ✅ clipboard paste, OS file drop, and the toolbox's file-picker item all ingest through `POST /api/sessions/{id}/annotations/image` (same pipeline as MCP); move/resize/rotate (right-click)/layer/lock/copy/delete via the generic annotation context menu once created | ✅ `create_image_annotation` ingests; generic create/update refuse image content, and no session annotation write can persist a *new* non-embedded image URL — note the duplicate, saved-view and budget limits in [enforcement](#image-ingest-enforcement) | ✅ | ✅ | ⚠ actor-scoped undo works, but the op is attributed to a dedicated server client id rather than the pasting browser's own (required so the pasting browser's own SSE subscription sees the embedded result instead of dropping it as a self-authored echo — see `_HUMAN_IMAGE_INGEST_CLIENT_ID` in `rest_api.py`), so only that marker's own undo call reverts it, not the pasting browser's | ⬜ no formal pass yet |
-| `freehand` | ❌ no create UI (stylus input not wired); a `rotation` on the document model is never drawn | ✅ generic tool set — `freehand` has been in `GENERIC_ANNOTATION_TYPES` since #422, so create/update/reorder/lock/delete already worked; `duplicate_annotation` was missing the `translate_freehand_points` call `update_annotation`'s patch builder already had (a duplicated stroke kept its original `points` at a moved envelope position), fixed here | ✅ document model round-trips it | ✅ same op broadcast as every other type — MCP creation now gives a way to exercise this live | ✅ `translate_freehand_points` covers move/undo | ❌ no physical stylus/touch pass |
+| `freehand` | ⚠ toolbox "Freehand" item arms a one-shot pointer-capture drawing mode (coalesced samples, device pressure when reported, constant-width fallback otherwise, concurrent-input suppressed with a notice); right-click property editor for color/width/smoothing/opacity; a `rotation` on the document model is still never drawn (see Canvas rendering) | ✅ generic tool set — `freehand` has been in `GENERIC_ANNOTATION_TYPES` since #422, so create/update/reorder/lock/delete already worked; `duplicate_annotation` was missing the `translate_freehand_points` call `update_annotation`'s patch builder already had (a duplicated stroke kept its original `points` at a moved envelope position), fixed here | ✅ document model round-trips it | ✅ same op broadcast as every other type — MCP creation now gives a way to exercise this live | ✅ `translate_freehand_points` covers move/undo | ❌ no physical stylus/touch pass — the GUI wiring above is verified only under mouse-event emulation, not a real device |
 | cross-type | — | — | — | ⚠ create/delete/style/geometry publish immediately and note/label text is now live-synced and debounced at 300 ms, split out from the general autosave debounce; selection claims cover every annotation kind and are enforced client-side, but the server's `ClaimMap` is still advisory/LWW with a 30 s TTL rather than rejecting a non-claim-holder's write ([gap](#operation-timing-and-leases)) | ✅ actor-scoped conditional undo (`session_activity.py`) | — |
 
 ## Downstream closure rule

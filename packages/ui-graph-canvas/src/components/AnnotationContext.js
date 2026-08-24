@@ -38,5 +38,9 @@ export const AnnotationContext = createContext({
     rotateLeft: 'Rotate left 15°',
     rotateRight: 'Rotate right 15°',
     rotateReset: 'Reset rotation',
+    freehandColor: 'Colour',
+    freehandWidth: 'Stroke width',
+    freehandSmoothing: 'Smoothing',
+    freehandOpacity: 'Opacity',
   },
 });

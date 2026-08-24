@@ -2029,6 +2029,12 @@ function App() {
             redoNotification: t('context_menu.redo_notification'),
             imageIngestFailed: t('canvas.image_ingest_failed'),
             annotationRemoteLocked: t('context_menu.annotation_remote_locked'),
+            freehandColor: t('context_menu.freehand_color'),
+            freehandWidth: t('context_menu.freehand_width'),
+            freehandSmoothing: t('context_menu.freehand_smoothing'),
+            freehandOpacity: t('context_menu.freehand_opacity'),
+            freehandDrawingHint: t('canvas.freehand_drawing_hint'),
+            freehandConcurrentInputBlocked: t('canvas.freehand_concurrent_input_blocked'),
           }}
           annotationToolboxLabels={{
             toggleExpand: t('annotation_toolbox.toggle_expand'),
@@ -2044,6 +2050,7 @@ function App() {
             shapeHexagon: t('annotation_toolbox.shape_hexagon'),
             shapeProcessArrow: t('annotation_toolbox.shape_process_arrow'),
             image: t('annotation_toolbox.image'),
+            freehand: t('annotation_toolbox.freehand'),
           }}
           nodeColorResolver={getNodeColor}
           sessionKey={sessionId}

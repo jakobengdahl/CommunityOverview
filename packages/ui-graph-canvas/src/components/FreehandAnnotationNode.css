@@ -6,6 +6,16 @@
   cursor: default;
 }
 
-.graph-freehand-node.selected svg path:last-of-type {
-  filter: drop-shadow(0 0 3px rgba(255, 255, 255, 0.7));
+/* The selected-state halo is applied inline (FreehandAnnotationNode.jsx) on
+   the `.graph-freehand-stroke` group rather than here, because the visible
+   stroke is either one path or several pressure-width segments, and
+   `:last-of-type` can only ever pick out one of several sibling segments. */
+
+/* The property editor's colour swatch grid (`.graph-annotation-context-menu
+   .color-button`, shared with NoteNode/LabelNode) has no shared "currently
+   selected" treatment — only this editor marks one active, mirroring the
+   `.size-button.active`/`.shape-picker-button.active` convention those
+   already use. */
+.graph-annotation-context-menu .color-button.active {
+  border-color: white;
 }

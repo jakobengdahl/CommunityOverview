@@ -65,6 +65,8 @@ import {
   neighborDragPositions,
 } from '../utils/dragConnected';
 import { createLongPressDetector } from '../utils/longPress';
+import { createFreehandStrokeCapture } from '../utils/freehandStroke';
+import { pointsToPathData } from '../utils/freehandPath';
 
 // Phone-sized viewport, matching the host app's mobile breakpoint.
 const COMPACT_MEDIA_QUERY = '(max-width: 768px)';
@@ -75,6 +77,17 @@ const COMPACT_FIT_PADDING = 0.05;
 const FOCUS_CENTER = { x: 0, y: 0 };
 const FOCUS_MIN_RADIUS = 260;
 const FOCUS_RADIUS_PER_NEIGHBOUR = 55;
+// Defaults for a freehand stroke drawn via the toolbox's drawing mode; all
+// four are editable afterwards through FreehandAnnotationNode's right-click
+// property editor (docs/ANNOTATION_CONTRACT.md's freehand row).
+const DEFAULT_FREEHAND_COLOR = '#e6edf3';
+const DEFAULT_FREEHAND_STROKE_WIDTH = 2;
+const DEFAULT_FREEHAND_SMOOTHING = 0.3;
+const DEFAULT_FREEHAND_OPACITY = 1;
+// A stroke shorter than this many sampled points is a stray tap, not a
+// deliberate drawing gesture — mirrors createFreehandStrokeCapture's own
+// `minPoints` default, made explicit here since GraphCanvas passes it in.
+const FREEHAND_MIN_POINTS = 2;
 import './GraphCanvas.css';
 
 /**
@@ -310,8 +323,21 @@ function GraphCanvasInner({
     redoNotification: 'Move redone',
     imageIngestFailed: 'Could not add the image',
     annotationRemoteLocked: 'Someone else is editing this annotation',
+    freehandColor: 'Colour',
+    freehandWidth: 'Stroke width',
+    freehandSmoothing: 'Smoothing',
+    freehandOpacity: 'Opacity',
+    freehandDrawingHint: 'Draw a stroke on the canvas — press Escape to cancel',
+    freehandConcurrentInputBlocked: 'Finish the current stroke before starting another',
     ...contextMenuLabels,
   };
+  // Read through a ref inside the freehand pointer-capture effect below, for
+  // the same reason as screenToFlowPositionRef/getViewportRef above: `cml` is
+  // a fresh object literal every render, and including one of its fields
+  // directly in that effect's deps would tear down its listeners on any
+  // unrelated re-render.
+  const cmlRef = useRef(cml);
+  cmlRef.current = cml;
 
   const atl = {
     toggleExpand: 'Add annotation',
@@ -327,6 +353,7 @@ function GraphCanvasInner({
     shapeHexagon: 'Hexagon',
     shapeProcessArrow: 'Process arrow',
     image: 'Image',
+    freehand: 'Freehand',
     ...annotationToolboxLabels,
   };
 
@@ -433,6 +460,25 @@ function GraphCanvasInner({
   // file picker the way the pane context menu carries one).
   const imageFileInputRef = useRef(null);
   const pendingImagePositionRef = useRef(null);
+  // Freehand drawing mode: armed by the toolbox's 'freehand' item, consumed by
+  // exactly one stroke (pointerdown through pointerup/cancel), then
+  // auto-disarmed — a one-shot tool, not a sticky one, matching every other
+  // toolbox item creating exactly one annotation per click. `freehandActive`
+  // drives the ReactFlow pan/selection/drag props and the pointer-capture
+  // effect below; the rest are refs since they only matter inside that
+  // effect's own event handlers, not to rendering.
+  const [freehandActive, setFreehandActive] = useState(false);
+  const freehandCaptureRef = useRef(null);
+  const freehandPrimaryPointerIdRef = useRef(null);
+  const freehandPreviewPathRef = useRef(null);
+  const freehandModelPointsRef = useRef([]);
+  const commitFreehandStrokeRef = useRef(null);
+  if (!freehandCaptureRef.current) {
+    freehandCaptureRef.current = createFreehandStrokeCapture({
+      minPoints: FREEHAND_MIN_POINTS,
+      onStrokeComplete: (stroke) => commitFreehandStrokeRef.current?.(stroke),
+    });
+  }
   const rightDragStart = useRef({ x: 0, y: 0, time: null });
   const mouseDownPos = useRef(null);
   // Two-step "organize" keyboard chord: Ctrl/Cmd+O arms it, then c/h/v/t picks
@@ -455,6 +501,18 @@ function GraphCanvasInner({
     zoomIn,
     zoomOut,
   } = useReactFlow();
+  // Read through refs (updated every render below) inside the freehand
+  // pointer-capture effect instead of closing over these directly: some
+  // `useReactFlow()` implementations (and this package's own test mocks)
+  // return a new function identity on every render, and putting either
+  // directly in that effect's dependency array would tear down and rebuild
+  // its listeners mid-stroke on any unrelated re-render (e.g. the "second
+  // pointer ignored" notification's own state update), silently abandoning
+  // an in-progress drawing gesture.
+  const screenToFlowPositionRef = useRef(screenToFlowPosition);
+  screenToFlowPositionRef.current = screenToFlowPosition;
+  const getViewportRef = useRef(getViewport);
+  getViewportRef.current = getViewport;
   // Last session identity seen by the node-reconciliation effect and the
   // refit-on-switch effect. Seeded with the mount value so the very first render
   // is not treated as a switch (mount already fits via the ReactFlow fitView prop).
@@ -476,6 +534,13 @@ function GraphCanvasInner({
     setNotification({ type, message });
     setTimeout(() => setNotification(null), 3000);
   }, []);
+  // Read via ref inside the freehand pointer-capture effect for the same
+  // reason as screenToFlowPositionRef/getViewportRef/cmlRef above (though
+  // showNotification's own identity is already stable via useCallback's `[]`
+  // deps, keeping every value that effect reads through the same ref pattern
+  // avoids relying on that staying true).
+  const showNotificationRef = useRef(showNotification);
+  showNotificationRef.current = showNotification;
 
   // Stable notifier for annotation nodes (note/label/arrow) to signal the host
   // that an annotation was edited, recoloured or deleted so the session can be
@@ -511,6 +576,10 @@ function GraphCanvasInner({
         rotateLeft: cml.annotationRotateLeft,
         rotateRight: cml.annotationRotateRight,
         rotateReset: cml.annotationRotateReset,
+        freehandColor: cml.freehandColor,
+        freehandWidth: cml.freehandWidth,
+        freehandSmoothing: cml.freehandSmoothing,
+        freehandOpacity: cml.freehandOpacity,
       },
     }),
     [
@@ -528,6 +597,10 @@ function GraphCanvasInner({
       cml.annotationRotateLeft,
       cml.annotationRotateRight,
       cml.annotationRotateReset,
+      cml.freehandColor,
+      cml.freehandWidth,
+      cml.freehandSmoothing,
+      cml.freehandOpacity,
     ]
   );
 
@@ -1141,9 +1214,16 @@ function GraphCanvasInner({
   // Create an annotation at the current viewport's centre (used by the bottom
   // toolbox). 'image' is not a local-state creation like the other kinds — it
   // opens the hidden file picker instead, and onImageIngest carries the
-  // resulting server round-trip (see that prop's docstring above).
+  // resulting server round-trip (see that prop's docstring above). 'freehand'
+  // is not created here at all — there is no click position to draw from —
+  // it arms/disarms the one-shot drawing mode the pointer-capture effect
+  // below consumes.
   const createAnnotationAtViewportCenter = useCallback(
     (kind, options) => {
+      if (kind === 'freehand') {
+        setFreehandActive((active) => !active);
+        return;
+      }
       const position = viewportCenterPosition();
       if (kind === 'image') {
         pendingImagePositionRef.current = position;
@@ -1154,6 +1234,47 @@ function GraphCanvasInner({
     },
     [viewportCenterPosition, createAnnotation]
   );
+
+  // Build and add the freehand annotation node once a stroke completes
+  // (createFreehandStrokeCapture's onStrokeComplete). `points` are absolute
+  // model-space coordinates; stored node-relative to the first point, the
+  // same anchor convention arrow's dx/dy and every other freehand translation
+  // layer uses (see annotations.js's GENERIC_OVERLAY_FIELDS comment).
+  // `pressureSource` is set only when a real device sample was captured —
+  // never invented — matching docs/ANNOTATION_CONTRACT.md's
+  // `persist_predicted_points: false` / "only bounded actual points with
+  // optional pressure" rule; nothing here ever reads getPredictedEvents().
+  const commitFreehandStroke = useCallback(
+    ({ points, pointerType }) => {
+      if (!Array.isArray(points) || points.length < FREEHAND_MIN_POINTS) return;
+      const anchor = points[0];
+      const relativePoints = points.map((p) => {
+        const point = { x: p.x - anchor.x, y: p.y - anchor.y };
+        if (Number.isFinite(p.pressure)) point.pressure = p.pressure;
+        return point;
+      });
+      const hasRealPressure = points.some((p) => Number.isFinite(p.pressure));
+      const id = `freehand-${Date.now()}`;
+      const newNode = {
+        id,
+        type: 'freehand',
+        position: { x: anchor.x, y: anchor.y },
+        data: {
+          points: relativePoints,
+          color: DEFAULT_FREEHAND_COLOR,
+          strokeWidth: DEFAULT_FREEHAND_STROKE_WIDTH,
+          smoothing: DEFAULT_FREEHAND_SMOOTHING,
+          opacity: DEFAULT_FREEHAND_OPACITY,
+          pointerType: pointerType || undefined,
+          pressureSource: hasRealPressure ? 'device' : undefined,
+        },
+      };
+      setNodes((nds) => reorderNodesForParentChild([...nds, newNode]));
+      onAnnotationChangeRef.current?.('create');
+    },
+    [setNodes]
+  );
+  commitFreehandStrokeRef.current = commitFreehandStroke;
 
   // Read a single File as a data: URL (base64) — the same shape the MCP
   // create_image_annotation tool's image_data param accepts server-side, so
@@ -1709,9 +1830,12 @@ function GraphCanvasInner({
   // is disabled instead (see selectionOnDrag/panOnDrag on <ReactFlow> below);
   // tap-to-select and double-tap keep using ReactFlow's own click/double-click
   // handling. Attached only in touch mode, so desktop mouse behaviour —
-  // right-drag pans, left-drag marquee-selects — is untouched.
+  // right-drag pans, left-drag marquee-selects — is untouched. Also suppressed
+  // while freehand drawing mode is armed: a deliberately slow, still stroke
+  // start can otherwise exceed the long-press delay and pop the pane context
+  // menu mid-gesture.
   useEffect(() => {
-    if (!isTouchMode) return undefined;
+    if (!isTouchMode || freehandActive) return undefined;
     const wrapper = reactFlowWrapper.current;
     if (!wrapper) return undefined;
     const detector = longPressDetectorRef.current;
@@ -1763,7 +1887,127 @@ function GraphCanvasInner({
       wrapper.removeEventListener('pointercancel', handlePointerCancel);
       detector.reset();
     };
-  }, [isTouchMode]);
+  }, [isTouchMode, freehandActive]);
+
+  // Freehand drawing mode's pointer-capture wiring: mirrors the long-press
+  // effect above (listeners on the wrapper, not on ReactFlow's own pane, so
+  // bubbling from any child — node, edge, pane background — reaches it the
+  // same way), but for every pointer type, gated on `freehandActive` instead
+  // of touch mode. `createFreehandStrokeCapture` (freehandStroke.js) already
+  // tracks only the first ("primary") pointer of a stroke and ignores a
+  // second one going down mid-stroke; this effect adds the surfaced guidance
+  // for that case (remaining_scope item 4: "suppress concurrent touch input
+  // while a pen stroke is active, with user-facing guidance").
+  //
+  // Coalesced samples (`getCoalescedEvents()`) are fed to the capture one at a
+  // time when the browser provides them, so a fast stylus stroke is not
+  // undersampled between animation frames — and only ever *actual* samples;
+  // `getPredictedEvents()` is never called, matching
+  // `persist_predicted_points: false`.
+  //
+  // Deliberately depends on nothing but `freehandActive`: every other value
+  // the handlers below need (screenToFlowPosition, getViewport, showNotification,
+  // the notification copy) is read through a ref at call time instead of
+  // being closed over directly, so an unrelated re-render mid-stroke (e.g.
+  // the "second pointer ignored" notification's own state update) can never
+  // tear down and rebuild these listeners and silently abandon an
+  // in-progress gesture the way including them in the dependency array
+  // would.
+  useEffect(() => {
+    if (!freehandActive) return undefined;
+    const wrapper = reactFlowWrapper.current;
+    if (!wrapper) return undefined;
+    const capture = freehandCaptureRef.current;
+
+    const toModelPoint = (event) =>
+      screenToFlowPositionRef.current({ x: event.clientX, y: event.clientY });
+
+    const clearPreview = () => {
+      freehandPreviewPathRef.current?.setAttribute('d', '');
+    };
+
+    const updatePreview = () => {
+      const pathEl = freehandPreviewPathRef.current;
+      if (!pathEl) return;
+      const viewport = getViewportRef.current();
+      const screenPoints = freehandModelPointsRef.current.map((p) => ({
+        x: p.x * viewport.zoom + viewport.x,
+        y: p.y * viewport.zoom + viewport.y,
+      }));
+      pathEl.setAttribute('d', pointsToPathData(screenPoints));
+    };
+
+    const abandonStroke = () => {
+      freehandPrimaryPointerIdRef.current = null;
+      freehandModelPointsRef.current = [];
+      clearPreview();
+    };
+
+    // Single-shot: one completed (or cancelled) stroke disarms the tool, the
+    // same way clicking any other toolbox item creates exactly one
+    // annotation. Drawing a second stroke means clicking "Freehand" again.
+    const finishStroke = () => {
+      abandonStroke();
+      setFreehandActive(false);
+    };
+
+    const handlePointerDown = (event) => {
+      // A non-primary mouse button (right/middle click) is not a draw
+      // gesture; leave it for the pane's own context-menu/pan handling.
+      if (event.pointerType === 'mouse' && event.button !== 0) return;
+      if (freehandPrimaryPointerIdRef.current != null) {
+        // A second pointer while a stroke is already in progress —
+        // createFreehandStrokeCapture already ignores it structurally; this
+        // only surfaces that to the user instead of a silent no-op.
+        showNotificationRef.current('info', cmlRef.current.freehandConcurrentInputBlocked);
+        return;
+      }
+      freehandPrimaryPointerIdRef.current = event.pointerId;
+      freehandModelPointsRef.current = [toModelPoint(event)];
+      capture.onPointerDown(event, toModelPoint);
+      updatePreview();
+    };
+
+    const handlePointerMove = (event) => {
+      if (event.pointerId !== freehandPrimaryPointerIdRef.current) return;
+      const coalesced =
+        typeof event.getCoalescedEvents === 'function' ? event.getCoalescedEvents() : null;
+      const samples = coalesced && coalesced.length > 0 ? coalesced : [event];
+      for (const sample of samples) {
+        capture.onPointerMove(sample, toModelPoint);
+        freehandModelPointsRef.current.push(toModelPoint(sample));
+      }
+      updatePreview();
+    };
+
+    const handlePointerUp = (event) => {
+      if (event.pointerId !== freehandPrimaryPointerIdRef.current) return;
+      capture.onPointerUp(event);
+      finishStroke();
+    };
+
+    const handlePointerCancel = (event) => {
+      if (event.pointerId !== freehandPrimaryPointerIdRef.current) return;
+      capture.onPointerCancel(event);
+      finishStroke();
+    };
+
+    wrapper.addEventListener('pointerdown', handlePointerDown);
+    wrapper.addEventListener('pointermove', handlePointerMove);
+    wrapper.addEventListener('pointerup', handlePointerUp);
+    wrapper.addEventListener('pointercancel', handlePointerCancel);
+    return () => {
+      wrapper.removeEventListener('pointerdown', handlePointerDown);
+      wrapper.removeEventListener('pointermove', handlePointerMove);
+      wrapper.removeEventListener('pointerup', handlePointerUp);
+      wrapper.removeEventListener('pointercancel', handlePointerCancel);
+      // Deactivating mid-stroke (Escape, or the mode toggled off some other
+      // way) abandons cleanly rather than leaving the capture wedged active
+      // for whatever comes next.
+      if (capture.isActive()) capture.reset();
+      abandonStroke();
+    };
+  }, [freehandActive]);
 
   // Always prevent browser context menu on the canvas wrapper
   useEffect(() => {
@@ -1959,6 +2203,10 @@ function GraphCanvasInner({
       }
 
       if (e.key === 'Escape') {
+        if (freehandActive) {
+          setFreehandActive(false);
+          return;
+        }
         closeAllMenus();
         clearSelection();
         return;
@@ -2023,6 +2271,7 @@ function GraphCanvasInner({
     handleUndo,
     handleRedo,
     setNodes,
+    freehandActive,
   ]);
 
   // Create group when signal changes (triggered from toolbar)
@@ -2373,7 +2622,17 @@ function GraphCanvasInner({
             </div>
           )}
 
-        <div ref={reactFlowWrapper} style={{ width: '100%', height: '100%' }}>
+        <div
+          ref={reactFlowWrapper}
+          style={{
+            width: '100%',
+            height: '100%',
+            // Stop the browser turning a slow stylus/touch stroke into a
+            // scroll/pinch gesture mid-draw, which would otherwise fire
+            // pointercancel and abandon the stroke unpredictably.
+            touchAction: freehandActive ? 'none' : undefined,
+          }}
+        >
           <ReactFlow
             nodes={nodes}
             edges={edges}
@@ -2407,10 +2666,11 @@ function GraphCanvasInner({
             minZoom={0.1}
             maxZoom={2}
             defaultEdgeOptions={{ animated: true, style: { strokeWidth: 2 } }}
-            panOnDrag={isTouchMode ? true : [0, 2]}
-            selectionOnDrag={!isTouchMode}
+            panOnDrag={freehandActive ? false : isTouchMode ? true : [0, 2]}
+            selectionOnDrag={freehandActive ? false : !isTouchMode}
             selectionMode={SelectionMode.Partial}
             selectNodesOnDrag={true}
+            nodesDraggable={!freehandActive}
             deleteKeyCode={null}
             multiSelectionKeyCode={['Shift', 'Meta', 'Control']}
             edgesUpdatable={false}
@@ -2546,6 +2806,7 @@ function GraphCanvasInner({
               onCreate={(kind, options) => createAnnotationAtViewportCenter(kind, options)}
               labels={atl}
               compact={isCompact}
+              activeKind={freehandActive ? 'freehand' : null}
             />
           )}
           {/* Backs the toolbox's image item and is otherwise invisible; the
@@ -2560,6 +2821,35 @@ function GraphCanvasInner({
             style={{ display: 'none' }}
             data-testid="graph-image-file-input"
           />
+          {freehandActive && (
+            <>
+              {/* Live in-progress stroke preview, drawn imperatively (see the
+                  pointer-capture effect's updatePreview) rather than through
+                  React state, so a fast pointermove burst never re-renders
+                  the whole canvas — only this path's `d` attribute changes.
+                  Screen-space, not model-space: positioned to match the
+                  current pan/zoom directly rather than living inside
+                  ReactFlow's own transformed pane. pointer-events: none so it
+                  never itself intercepts the drawing gesture; the wrapper's
+                  own listeners (bubbling up from underneath) do that. */}
+              <svg
+                className="graph-freehand-preview-overlay"
+                data-testid="freehand-preview-overlay"
+              >
+                <path
+                  ref={freehandPreviewPathRef}
+                  stroke={DEFAULT_FREEHAND_COLOR}
+                  strokeWidth={DEFAULT_FREEHAND_STROKE_WIDTH}
+                  fill="none"
+                  strokeLinecap="round"
+                  strokeLinejoin="round"
+                />
+              </svg>
+              <div className="graph-freehand-drawing-hint" role="status" aria-live="polite">
+                {cml.freehandDrawingHint}
+              </div>
+            </>
+          )}
         </div>
 
         <NodeContextMenu

@@ -371,7 +371,9 @@
     "focus_view": "Focus on selected node",
     "exit_focus_view": "Back to whole graph",
     "controls_group": "Canvas controls",
-    "image_ingest_failed": "Could not add the image"
+    "image_ingest_failed": "Could not add the image",
+    "freehand_drawing_hint": "Draw a stroke on the canvas — press Escape to cancel",
+    "freehand_concurrent_input_blocked": "Finish the current stroke before starting another"
   },
   "guide": {
     "title": "Guide",
@@ -418,7 +420,11 @@
     "annotation_rotate_reset": "Reset rotation",
     "undo_notification": "Move undone",
     "redo_notification": "Move redone",
-    "annotation_remote_locked": "Someone else is editing this annotation"
+    "annotation_remote_locked": "Someone else is editing this annotation",
+    "freehand_color": "Colour",
+    "freehand_width": "Stroke width",
+    "freehand_smoothing": "Smoothing",
+    "freehand_opacity": "Opacity"
   },
   "annotation_toolbox": {
     "toggle_expand": "Add annotation",
@@ -433,7 +439,8 @@
     "shape_rhombus": "Rhombus",
     "shape_hexagon": "Hexagon",
     "shape_process_arrow": "Process arrow",
-    "image": "Image"
+    "image": "Image",
+    "freehand": "Freehand"
   },
   "common": {
     "saving": "Saving...",
