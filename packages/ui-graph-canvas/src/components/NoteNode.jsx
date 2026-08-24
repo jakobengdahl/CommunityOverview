@@ -76,6 +76,23 @@ function NoteNode({ id, data, selected }) {
     notifyChange('text');
   };
 
+  // Live per-keystroke sync (docs/ANNOTATION_CONTRACT.md's "300 ms text
+  // debounce": in-progress edits coalesce and publish at most every 300 ms
+  // while typing, not only on blur). Pushes the raw, untrimmed value on
+  // every change — `commitText` still trims on blur/close, the authoritative
+  // final write. The host's scheduler (annotationChangeScheduler.js)
+  // debounces the 'text' kind, so a burst of keystrokes coalesces into one
+  // publish regardless of how often this fires.
+  const handleTextChange = (e) => {
+    const next = e.target.value;
+    setText(next);
+    if (remoteLocked) return;
+    setNodes((nds) =>
+      nds.map((n) => (n.id === id ? { ...n, data: { ...n.data, text: next } } : n))
+    );
+    notifyChange('text');
+  };
+
   const handleKeyDown = (e) => {
     if (e.key === 'Escape') {
       e.preventDefault();
@@ -177,7 +194,7 @@ function NoteNode({ id, data, selected }) {
             className="graph-note-input nodrag"
             style={{ fontSize }}
             value={text}
-            onChange={(e) => setText(e.target.value)}
+            onChange={handleTextChange}
             onBlur={commitText}
             onKeyDown={handleKeyDown}
             onClick={(e) => e.stopPropagation()}

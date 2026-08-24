@@ -202,17 +202,27 @@ Required collaboration semantics for every v1 type:
   acting client's own most recent not-yet-undone operation, never another
   actor's.
 
-**Current gap:** `ClaimMap` (`backend/core/session_hub.py`) implements
-selection as an *advisory* soft-lock with a 30 s TTL and last-writer-wins
-takeover — a claim held by one client is silently taken over by another's
-newer claim, and a stale claim expires rather than blocking. This is not an
-exclusive lease: it prevents nothing, it only records who claimed last. The
-generic op debounce in `sessionSyncClient.js` batches the outgoing queue as
-a whole; it does not distinguish a 300 ms text-specific debounce from
-release-time-only geometry publication. Actor-scoped conditional undo *is*
-implemented (`backend/core/session_activity.py`). Closing the lease and
-timing gaps is tracked in the acceptance matrix as a cross-type row, since
-neither is type-specific.
+**Status (`task-annotation-shared-session-realtime`):** operation timing is
+now split out from the generic autosave debounce (`AnnotationContext`'s
+`notifyChange(kind)` plus the host's `annotationChangeScheduler.js`):
+create/delete/style/geometry publish immediately, and `note`/`label` content
+edits sync on every keystroke (not only on blur) with the scheduler
+debouncing/coalescing the actual publish to at most once per 300 ms.
+Selection claims are extended to every annotation kind — previously the
+browser only claimed graph nodes at all — and are now enforced client-side:
+a claim another live client holds blocks local dragging, resizing, and every
+per-kind mutation (with a surfaced notice rather than a silent no-op).
+
+**Remaining gap:** the enforcement above is client-side/cooperative only.
+`ClaimMap` (`backend/core/session_hub.py`) is still an *advisory* soft-lock
+with a 30 s TTL and last-writer-wins takeover — a claim held by one client is
+silently taken over by another's newer claim, and the server never rejects
+an op from a non-claim-holder. A client that ignores `data.remoteSelection`
+(or an MCP agent, which does not claim at all) is not blocked. Closing that —
+server-side rejection of a mutating op against a claim someone else holds,
+and a decision on whether MCP-agent writes bypass claims — is the remaining
+piece of this row. Actor-scoped conditional undo *is* implemented
+(`backend/core/session_activity.py`).
 
 ## Attachment and detach behavior
 
@@ -606,7 +616,7 @@ rule](#downstream-closure-rule).
 | `vote_dot` | ⚠ move, rotate (right-click) and attach by dragging near a node/annotation; still no create UI or color picker | ✅ generic tool set | ✅ | ✅ | ✅ | ⬜ |
 | `image` | ✅ clipboard paste, OS file drop, and the toolbox's file-picker item all ingest through `POST /api/sessions/{id}/annotations/image` (same pipeline as MCP); move/resize/rotate (right-click)/layer/lock/copy/delete via the generic annotation context menu once created | ✅ `create_image_annotation` ingests; generic create/update refuse image content, and no session annotation write can persist a *new* non-embedded image URL — note the duplicate, saved-view and budget limits in [enforcement](#image-ingest-enforcement) | ✅ | ✅ | ⚠ actor-scoped undo works, but the op is attributed to a dedicated server client id rather than the pasting browser's own (required so the pasting browser's own SSE subscription sees the embedded result instead of dropping it as a self-authored echo — see `_HUMAN_IMAGE_INGEST_CLIENT_ID` in `rest_api.py`), so only that marker's own undo call reverts it, not the pasting browser's | ⬜ no formal pass yet |
 | `freehand` | ❌ no create UI (stylus input not wired); a `rotation` on the document model is never drawn | ✅ generic tool set — `freehand` has been in `GENERIC_ANNOTATION_TYPES` since #422, so create/update/reorder/lock/delete already worked; `duplicate_annotation` was missing the `translate_freehand_points` call `update_annotation`'s patch builder already had (a duplicated stroke kept its original `points` at a moved envelope position), fixed here | ✅ document model round-trips it | ✅ same op broadcast as every other type — MCP creation now gives a way to exercise this live | ✅ `translate_freehand_points` covers move/undo | ❌ no physical stylus/touch pass |
-| cross-type | — | — | — | ⚠ ops publish immediately, but the 300 ms text debounce and release-time-only geometry are not split out from the general autosave debounce, and edit leases are advisory/LWW with a 30 s TTL rather than exclusive ([gap](#operation-timing-and-leases)) | ✅ actor-scoped conditional undo (`session_activity.py`) | — |
+| cross-type | — | — | — | ⚠ create/delete/style/geometry publish immediately and note/label text is now live-synced and debounced at 300 ms, split out from the general autosave debounce; selection claims cover every annotation kind and are enforced client-side, but the server's `ClaimMap` is still advisory/LWW with a 30 s TTL rather than rejecting a non-claim-holder's write ([gap](#operation-timing-and-leases)) | ✅ actor-scoped conditional undo (`session_activity.py`) | — |
 
 ## Downstream closure rule
 

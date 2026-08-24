@@ -82,12 +82,30 @@ describe('NoteNode', () => {
     const input = screen.getByRole('textbox');
     fireEvent.change(input, { target: { value: 'Remember this' } });
     fireEvent.blur(input);
-    expect(hoisted.setNodes).toHaveBeenCalledTimes(1);
-    expect(notifyChange).toHaveBeenCalledTimes(1);
-    // The updater sets the note text on the matching node.
-    const updater = hoisted.setNodes.mock.calls[0][0];
+    // Each keystroke syncs live (docs/ANNOTATION_CONTRACT.md's 300ms text
+    // debounce, coalesced downstream by the host's scheduler) in addition to
+    // blur's own trimmed commit — one call each here since this fires a
+    // single change event, then blur.
+    expect(hoisted.setNodes).toHaveBeenCalledTimes(2);
+    expect(notifyChange).toHaveBeenCalledTimes(2);
+    expect(notifyChange).toHaveBeenCalledWith('text');
+    // The last updater (blur's trimmed commit) is authoritative.
+    const updater = hoisted.setNodes.mock.calls.at(-1)[0];
     const result = updater([{ id: 'note-1', data: { text: '' } }]);
     expect(result[0].data.text).toBe('Remember this');
+  });
+
+  it('syncs text live on each keystroke, not only on blur', () => {
+    const { notifyChange } = renderWithContext(
+      <NoteNode id="note-1" data={{ text: '' }} selected />
+    );
+    fireEvent.doubleClick(screen.getByText('Note'));
+    const input = screen.getByRole('textbox');
+    fireEvent.change(input, { target: { value: 'Rem' } });
+    expect(hoisted.setNodes).toHaveBeenCalledTimes(1);
+    expect(notifyChange).toHaveBeenCalledWith('text');
+    const updater = hoisted.setNodes.mock.calls[0][0];
+    expect(updater([{ id: 'note-1', data: { text: '' } }])[0].data.text).toBe('Rem');
   });
 
   it('deletes itself and notifies from the context menu', () => {
@@ -140,9 +158,10 @@ describe('LabelNode', () => {
     const input = screen.getByRole('textbox');
     fireEvent.change(input, { target: { value: 'Region A' } });
     fireEvent.keyDown(input, { key: 'Enter' });
-    expect(hoisted.setNodes).toHaveBeenCalledTimes(1);
-    expect(notifyChange).toHaveBeenCalledTimes(1);
-    const updater = hoisted.setNodes.mock.calls[0][0];
+    // The change event's live sync, then Enter's own commit.
+    expect(hoisted.setNodes).toHaveBeenCalledTimes(2);
+    expect(notifyChange).toHaveBeenCalledTimes(2);
+    const updater = hoisted.setNodes.mock.calls.at(-1)[0];
     expect(updater([{ id: 'label-1', data: {} }])[0].data.text).toBe('Region A');
   });
 

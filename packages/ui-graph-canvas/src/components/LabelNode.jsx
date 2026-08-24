@@ -73,6 +73,18 @@ function LabelNode({ id, data, selected }) {
     notifyChange('text');
   };
 
+  // Live per-keystroke sync — see NoteNode's equivalent comment
+  // (docs/ANNOTATION_CONTRACT.md's "300 ms text debounce").
+  const handleTextChange = (e) => {
+    const next = e.target.value;
+    setText(next);
+    if (remoteLocked) return;
+    setNodes((nds) =>
+      nds.map((n) => (n.id === id ? { ...n, data: { ...n.data, text: next } } : n))
+    );
+    notifyChange('text');
+  };
+
   const handleKeyDown = (e) => {
     if (e.key === 'Enter') {
       e.preventDefault();
@@ -171,7 +183,7 @@ function LabelNode({ id, data, selected }) {
             className="graph-label-input nodrag"
             style={{ fontSize }}
             value={text}
-            onChange={(e) => setText(e.target.value)}
+            onChange={handleTextChange}
             onBlur={commitText}
             onKeyDown={handleKeyDown}
             onClick={(e) => e.stopPropagation()}
