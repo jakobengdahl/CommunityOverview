@@ -203,9 +203,20 @@ and edge data. Select an annotation and press **Delete** to remove it.
 A collapsible toolbox is also anchored to the bottom of the canvas. Click **Add
 annotation** to expand it, then pick a type to drop it at the centre of your current view:
 **Note**, **Text**, **Label**, **Frame**, a **Shape** — rectangle, circle, triangle,
-rhombus, hexagon or process arrow, each drawn as its own filled shape — or **Image**. It
-is hidden while a focus view is active, since annotations are set aside during focus (see
-[9. On a phone](#9-on-a-phone) for how focus view works).
+rhombus, hexagon or process arrow, each drawn as its own filled shape — **Image**, or
+**Freehand**. It is hidden while a focus view is active, since annotations are set aside
+during focus (see [9. On a phone](#9-on-a-phone) for how focus view works).
+
+**Freehand** works differently from the rest of the toolbox: clicking it arms a
+drawing mode (the button stays highlighted and a banner reminds you Escape cancels)
+instead of placing something immediately. Draw one stroke with your mouse, finger or
+stylus and the mode turns itself off again once you lift the pointer — click **Freehand**
+again for another stroke. Panning and marquee-selection are disabled while a stroke is
+being drawn, and a second finger touching down mid-stroke is ignored (with a brief notice)
+rather than starting a second line. On a pressure-sensitive stylus the stroke's width
+follows how hard you press; without pressure data (a mouse, a finger, or a pressure-less
+pen) it draws at a constant width instead. Right-click a finished stroke for its own
+colour, stroke-width, smoothing and opacity controls.
 
 **Image** annotations can be added three ways: pick **Image** in the toolbox to choose a
 file (PNG, JPEG or WebP); paste an image from your clipboard anywhere on the canvas
