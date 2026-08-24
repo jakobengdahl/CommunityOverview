@@ -16,12 +16,18 @@ function isVisualViewportAvailable() {
  * Returns 0 when the API is unavailable (desktop browsers, older mobile
  * browsers, jsdom) - a graceful no-op rather than an error, since keyboard
  * awareness is a progressive enhancement on top of the sheet already working.
+ *
+ * `enabled` (default true) skips subscribing entirely - pass false from a
+ * caller that only needs this value in one of several render paths (e.g.
+ * ChatPanel's desktop "floating" variant, which never reads the result) so
+ * every resize/scroll on that path doesn't force a re-render for a value
+ * nothing consumes.
  */
-export function useVisualViewportInset() {
+export function useVisualViewportInset(enabled = true) {
   const [inset, setInset] = useState(0);
 
   useEffect(() => {
-    if (!isVisualViewportAvailable()) return undefined;
+    if (!enabled || !isVisualViewportAvailable()) return undefined;
     const vv = window.visualViewport;
 
     const update = () => {
@@ -38,8 +44,12 @@ export function useVisualViewportInset() {
     return () => {
       vv.removeEventListener('resize', update);
       vv.removeEventListener('scroll', update);
+      // Reset on the way out (enabled flipping to false, or unmount) so a
+      // caller that later re-enables starts clean rather than carrying a
+      // stale inset from before the subscription was torn down.
+      setInset(0);
     };
-  }, []);
+  }, [enabled]);
 
   return inset;
 }

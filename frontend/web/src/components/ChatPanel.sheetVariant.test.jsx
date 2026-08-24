@@ -158,4 +158,13 @@ describe('ChatPanel sheet variant', () => {
 
     expect(composer.style.marginBottom).toBe('');
   });
+
+  it('never subscribes to visualViewport in the floating (desktop) variant', () => {
+    const vv = makeVisualViewport({ height: 800 });
+    Object.defineProperty(window, 'visualViewport', { configurable: true, value: vv });
+
+    render(<ChatPanel />);
+
+    expect(vv.addEventListener).not.toHaveBeenCalled();
+  });
 });

@@ -115,4 +115,30 @@ describe('useVisualViewportInset', () => {
     expect(vv.listenerCount('resize')).toBe(0);
     expect(vv.listenerCount('scroll')).toBe(0);
   });
+
+  it('does not subscribe at all when enabled=false, so a caller that never reads the value pays no listener cost', () => {
+    const vv = makeVisualViewport({ height: 480 });
+    Object.defineProperty(window, 'visualViewport', { configurable: true, value: vv });
+
+    const { result } = renderHook(() => useVisualViewportInset(false));
+
+    expect(result.current).toBe(0);
+    expect(vv.addEventListener).not.toHaveBeenCalled();
+  });
+
+  it('unsubscribes and resets to 0 when enabled flips from true to false', () => {
+    const vv = makeVisualViewport({ height: 480 });
+    Object.defineProperty(window, 'visualViewport', { configurable: true, value: vv });
+
+    const { result, rerender } = renderHook(({ enabled }) => useVisualViewportInset(enabled), {
+      initialProps: { enabled: true },
+    });
+    expect(result.current).toBe(320);
+    expect(vv.listenerCount('resize')).toBe(1);
+
+    rerender({ enabled: false });
+
+    expect(result.current).toBe(0);
+    expect(vv.listenerCount('resize')).toBe(0);
+  });
 });

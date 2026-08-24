@@ -86,10 +86,10 @@ function ChatPanel({ collectionShortName, variant = 'floating' }) {
   const fileInputRef = useRef(null);
   const handleSendRef = useRef(null);
 
-  // Keyboard-aware composer (sheet variant only, see the JSX below) — a
-  // graceful no-op everywhere visualViewport is unavailable, so this is safe
-  // to always call regardless of variant.
-  const keyboardInset = useVisualViewportInset();
+  // Keyboard-aware composer (sheet variant only, see the JSX below) — disabled
+  // outright for the floating (desktop) variant so it never subscribes to
+  // visualViewport resize/scroll for a value that variant never reads.
+  const keyboardInset = useVisualViewportInset(isSheet);
 
   const scrollToBottom = () => {
     messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' });
