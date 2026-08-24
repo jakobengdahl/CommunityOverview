@@ -121,6 +121,24 @@ function FreehandAnnotationNode({ id, data, selected }) {
     notifyChange('delete');
   };
 
+  // The only action a locked stroke's context menu offers (besides the
+  // capability baseline's "copy", which has no GUI action yet at all) —
+  // everything else (colour/width/smoothing/opacity/delete) stays out of
+  // reach while `locked` is set, matching NoteNode/LabelNode/
+  // GenericAnnotationNode's context menus.
+  const unlock = () => {
+    if (remoteLocked) {
+      setContextMenu(null);
+      notifyRemoteLockedAttempt();
+      return;
+    }
+    setNodes((nds) =>
+      nds.map((n) => (n.id === id ? { ...n, data: { ...n.data, locked: false } } : n))
+    );
+    setContextMenu(null);
+    notifyChange('style');
+  };
+
   const { minX, minY, maxX, maxY } = boundingBox(rawPoints);
   const boxW = Math.max(1, maxX - minX) + PAD * 2;
   const boxH = Math.max(1, maxY - minY) + PAD * 2;
@@ -207,61 +225,74 @@ function FreehandAnnotationNode({ id, data, selected }) {
             className="graph-annotation-context-menu"
             style={{ left: contextMenu.x, top: contextMenu.y }}
           >
-            <div className="context-menu-title">{labels.freehandColor}</div>
-            <div className="context-menu-colors">
-              {FREEHAND_COLORS.map((c) => (
-                <button
-                  key={c}
-                  type="button"
-                  className={`color-button${color === c ? ' active' : ''}`}
-                  style={{ backgroundColor: c }}
-                  aria-label={c}
-                  onClick={() => updateStyle({ color: c })}
-                />
-              ))}
-            </div>
-            <div className="context-menu-title">{labels.freehandWidth}</div>
-            <div className="context-menu-sizes">
-              {FREEHAND_WIDTHS.map((w) => (
-                <button
-                  key={w}
-                  type="button"
-                  className={`size-button${strokeWidth === w ? ' active' : ''}`}
-                  onClick={() => updateStyle({ strokeWidth: w })}
-                >
-                  {w}
+            {locked ? (
+              // The only action a locked stroke's context menu offers
+              // (besides the capability baseline's "copy", which has no GUI
+              // action yet at all) — everything else stays out of reach
+              // while `locked` is set, matching the pattern established in
+              // NoteNode/LabelNode/GenericAnnotationNode.
+              <button type="button" className="context-menu-unlock" onClick={unlock}>
+                🔓 {labels.unlock}
+              </button>
+            ) : (
+              <>
+                <div className="context-menu-title">{labels.freehandColor}</div>
+                <div className="context-menu-colors">
+                  {FREEHAND_COLORS.map((c) => (
+                    <button
+                      key={c}
+                      type="button"
+                      className={`color-button${color === c ? ' active' : ''}`}
+                      style={{ backgroundColor: c }}
+                      aria-label={c}
+                      onClick={() => updateStyle({ color: c })}
+                    />
+                  ))}
+                </div>
+                <div className="context-menu-title">{labels.freehandWidth}</div>
+                <div className="context-menu-sizes">
+                  {FREEHAND_WIDTHS.map((w) => (
+                    <button
+                      key={w}
+                      type="button"
+                      className={`size-button${strokeWidth === w ? ' active' : ''}`}
+                      onClick={() => updateStyle({ strokeWidth: w })}
+                    >
+                      {w}
+                    </button>
+                  ))}
+                </div>
+                <div className="context-menu-title">{labels.freehandSmoothing}</div>
+                <div className="context-menu-sizes">
+                  {FREEHAND_SMOOTHING_LEVELS.map((s) => (
+                    <button
+                      key={s}
+                      type="button"
+                      className={`size-button${smoothing === s ? ' active' : ''}`}
+                      onClick={() => updateStyle({ smoothing: s })}
+                    >
+                      {Math.round(s * 100)}%
+                    </button>
+                  ))}
+                </div>
+                <div className="context-menu-title">{labels.freehandOpacity}</div>
+                <div className="context-menu-sizes">
+                  {FREEHAND_OPACITY_LEVELS.map((o) => (
+                    <button
+                      key={o}
+                      type="button"
+                      className={`size-button${opacity === o ? ' active' : ''}`}
+                      onClick={() => updateStyle({ opacity: o })}
+                    >
+                      {Math.round(o * 100)}%
+                    </button>
+                  ))}
+                </div>
+                <button type="button" className="context-menu-delete" onClick={remove}>
+                  🗑️ {labels.delete}
                 </button>
-              ))}
-            </div>
-            <div className="context-menu-title">{labels.freehandSmoothing}</div>
-            <div className="context-menu-sizes">
-              {FREEHAND_SMOOTHING_LEVELS.map((s) => (
-                <button
-                  key={s}
-                  type="button"
-                  className={`size-button${smoothing === s ? ' active' : ''}`}
-                  onClick={() => updateStyle({ smoothing: s })}
-                >
-                  {Math.round(s * 100)}%
-                </button>
-              ))}
-            </div>
-            <div className="context-menu-title">{labels.freehandOpacity}</div>
-            <div className="context-menu-sizes">
-              {FREEHAND_OPACITY_LEVELS.map((o) => (
-                <button
-                  key={o}
-                  type="button"
-                  className={`size-button${opacity === o ? ' active' : ''}`}
-                  onClick={() => updateStyle({ opacity: o })}
-                >
-                  {Math.round(o * 100)}%
-                </button>
-              ))}
-            </div>
-            <button type="button" className="context-menu-delete" onClick={remove}>
-              🗑️ {labels.delete}
-            </button>
+              </>
+            )}
           </div>,
           document.body
         )}
