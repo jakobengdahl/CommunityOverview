@@ -139,28 +139,45 @@ describe('GenericAnnotationNode', () => {
     expect(screen.getByTitle(icon).textContent).toBe(glyph);
   });
 
-  // The set covers 11 of the host registry's 75 icon names. The other 64 must
-  // stay as distinguishable as they were before the set existed - collapsing
-  // DatabaseFill/GearFill/PeopleFill into three identical dots would make the
-  // rendering worse, not better, so an unmapped name keeps its abbreviation.
+  // The set now has a canonical or aliased entry for every one of the host
+  // registry's 75 icon names (see docs/ANNOTATION_CONTRACT.md's icon
+  // acceptance-matrix cell), so a real host-registry name never falls back to
+  // the abbreviation any more - only a name outside that vocabulary does.
   it.each([
-    ['DatabaseFill', 'Da'],
-    ['GearFill', 'Ge'],
-    ['PeopleFill', 'Pe'],
     ['no-such-icon', 'no'],
-  ])('abbreviates the unmapped icon name %s instead of drawing a generic dot', (icon, text) => {
-    render(<GenericAnnotationNode type="icon" data={{ icon }} />);
-    const badge = screen.getByTitle(icon);
-    expect(badge.textContent).toBe(text);
-    expect(badge.className).toContain('kind-icon-abbreviated');
-  });
+    ['not-a-real-icon-either', 'no'],
+  ])(
+    'abbreviates the out-of-vocabulary icon name %s instead of drawing a generic dot',
+    (icon, text) => {
+      render(<GenericAnnotationNode type="icon" data={{ icon }} />);
+      const badge = screen.getByTitle(icon);
+      expect(badge.textContent).toBe(text);
+      expect(badge.className).toContain('kind-icon-abbreviated');
+    }
+  );
 
-  // Not a claim that unmapped names are all distinct - abbreviating the host
-  // registry's 64 unmapped names yields only 36 distinct marks (FileEarmark*
-  // all draw "Fi", List* all draw "Li"). The property is narrower: three names
-  // a single default glyph would have merged stay apart.
-  it('keeps unmapped names apart that one default glyph would have merged', () => {
-    const names = ['DatabaseFill', 'GearFill', 'PeopleFill'];
+  // Previously unmapped names that used to collapse into the same
+  // two-character abbreviation (DatabaseFill/GearFill/PeopleFill all used to
+  // draw letters starting "Da"/"Ge"/"Pe" - distinct then, but Diagram2Fill and
+  // Diagram3Fill both drew "Di") now each draw their own configured glyph.
+  it.each([
+    ['DatabaseFill', '\u{1F5C4}'],
+    ['GearFill', '⚙'],
+    ['PeopleFill', '\u{1F465}'],
+    ['Diagram2Fill', '\u{1F578}'],
+    ['Diagram3Fill', '\u{1F9EC}'],
+  ])(
+    'renders the host-registry icon name %s as its configured glyph, not an abbreviation',
+    (icon, glyph) => {
+      render(<GenericAnnotationNode type="icon" data={{ icon }} />);
+      const badge = screen.getByTitle(icon);
+      expect(badge.textContent).toBe(glyph);
+      expect(badge.className).not.toContain('kind-icon-abbreviated');
+    }
+  );
+
+  it('keeps out-of-vocabulary names apart that one default glyph would have merged', () => {
+    const names = ['AlphaThing', 'BetaThing', 'GammaThing'];
     const drawn = names.map((icon) => {
       render(<GenericAnnotationNode type="icon" data={{ icon }} />);
       return screen.getByTitle(icon).textContent;
@@ -168,10 +185,15 @@ describe('GenericAnnotationNode', () => {
     expect(new Set(drawn).size).toBe(names.length);
   });
 
-  it('abbreviates two names sharing their first two characters to the same mark', () => {
-    for (const icon of ['Diagram2Fill', 'Diagram3Fill']) {
+  // Not a claim that every pair of out-of-vocabulary names stays distinct -
+  // the two-character abbreviation still collides on a shared prefix
+  // (FileEarmark* all drew "Fi" before the set existed too). The property is
+  // narrower: the fallback never regresses distinguishability below what it
+  // was before the set existed.
+  it('still abbreviates two out-of-vocabulary names sharing their first two characters to the same mark', () => {
+    for (const icon of ['FooBarThing', 'FooQuxThing']) {
       render(<GenericAnnotationNode type="icon" data={{ icon }} />);
-      expect(screen.getByTitle(icon).textContent).toBe('Di');
+      expect(screen.getByTitle(icon).textContent).toBe('Fo');
     }
   });
 
