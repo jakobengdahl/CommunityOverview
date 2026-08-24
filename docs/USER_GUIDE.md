@@ -185,9 +185,11 @@ Alongside groups, you can add free-floating **annotations** to a session by righ
 an empty area of the canvas and choosing one of:
 
 - **Note** — a resizable sticky note for longer comments. Double-click to edit its text;
-  right-click for a colour, to change the text size, or to delete it.
+  right-click for a colour, to change the text size, to rotate it, or to delete it.
 - **Label** — a short free-floating text label. Double-click to edit, right-click to
-  recolour, change its text size, or delete.
+  recolour, change its text size, rotate it, or delete. Drag a label close to a node or
+  another annotation and it snaps onto it (magnetic), staying attached as that target
+  moves; drag it away again to detach it, keeping wherever you dropped it.
 - **Arrow / line** — a connector you can position anywhere on the canvas. Right-click to
   recolour, toggle an arrowhead on either end (so it can be a plain line, a single arrow,
   or a double arrow), or delete. When selected, drag either endpoint; bring an endpoint
@@ -204,6 +206,13 @@ annotation** to expand it, then pick a type to drop it at the centre of your cur
 rhombus, hexagon or process arrow, each drawn as its own filled shape. It is hidden
 while a focus view is active, since annotations are set aside during focus (see
 [9. On a phone](#9-on-a-phone) for how focus view works).
+
+Right-click any Text, Frame or Shape annotation for the same rotate control the note and
+label menus offer; a Shape's menu also has a subtype picker to swap its variant (circle,
+triangle, and so on) after it's been placed. Icon and voting-dot annotations — created
+today only via an MCP agent, not from either toolbox — support the same rotate-and-attach
+behaviour as labels once placed: right-click to rotate, or drag one near a node or another
+annotation to attach it.
 
 ### 2.6 Saved views
 
