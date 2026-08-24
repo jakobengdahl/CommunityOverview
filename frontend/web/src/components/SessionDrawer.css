@@ -25,6 +25,44 @@
   visibility: visible;
 }
 
+/* Mobile: a full-width overlay sheet instead of the docked 280px pane, with
+   its own scrim below (rendered as a sibling, see SessionDrawer.jsx). It does
+   not offset any other chrome the way the desktop dock does. */
+.session-drawer--mobile {
+  width: 100%;
+  border-right: none;
+  padding-right: env(safe-area-inset-right);
+}
+
+/* Always mounted (in mobile mode) rather than conditionally rendered on
+   `open`, so it fades in/out over the same 0.2s as the drawer's own slide
+   transition instead of vanishing abruptly mid-animation on close. */
+.session-drawer-scrim {
+  position: fixed;
+  inset: 0;
+  background: rgba(0, 0, 0, 0.55);
+  z-index: 290;
+  opacity: 0;
+  pointer-events: none;
+  transition: opacity 0.2s ease-out;
+}
+
+.session-drawer-scrim.open {
+  opacity: 1;
+  pointer-events: auto;
+}
+
+/* Matches BottomSheet.css's reduced-motion contract for the sibling
+   search/create sheets — this drawer uses plain CSS transitions rather than
+   BottomSheet's JS-driven mount animation, so a media query is sufficient
+   here without needing the equivalent of its usePrefersReducedMotion hook. */
+@media (prefers-reduced-motion: reduce) {
+  .session-drawer,
+  .session-drawer-scrim {
+    transition: none;
+  }
+}
+
 .session-drawer-header {
   display: flex;
   align-items: center;

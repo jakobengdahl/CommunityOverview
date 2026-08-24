@@ -756,7 +756,9 @@ bottom navigation bar replaces the toolbar and the hamburger menu:
 | **Create** | Opens the node-type picker in the same bottom sheet |
 | **Chat** | Opens the AI assistant (only shown when it is available) |
 | **Menu** | Opens the session menu — the same panel described in
-[section 5](#5-session-menu-and-settings) |
+[section 5](#5-session-menu-and-settings), as a full-width overlay with a
+dimmed scrim behind it on a phone, rather than the narrower panel desktop
+uses. Tap the scrim, tap the **✕**, or press **Escape** to close it. |
 
 Only one of these is ever open at a time — opening one closes whatever else was
 open, so the canvas is never covered by more than one panel at once.
@@ -839,3 +841,4 @@ Screenshots for this guide are saved to `docs/images/` in PNG format.
 | `mobile-focus-view.png` | pending | Phone viewport in focus view — one node ringed by its direct neighbours |
 | `mobile-bottom-nav.png` | pending | Phone viewport showing the compact top bar and the five-slot bottom navigation |
 | `mobile-create-sheet.png` | pending | Phone viewport with the Create bottom sheet open over the canvas |
+| `mobile-session-menu.png` | pending | Phone viewport with the session menu open as a full-width overlay and scrim |
