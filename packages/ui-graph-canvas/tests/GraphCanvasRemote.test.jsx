@@ -179,6 +179,118 @@ describe('GraphCanvas remote apply (design step 6)', () => {
     });
   });
 
+  it('stamps a live remote claim onto an annotation node and refuses local dragging (task-annotation-shared-session-realtime)', () => {
+    render(
+      <GraphCanvas
+        nodes={[]}
+        edges={[]}
+        remoteSelections={{ 'note-1': { clientId: 'c2', color: '#e6194b', displayName: 'Ada' } }}
+      />
+    );
+    const seed = [
+      { id: 'note-1', type: 'note', position: { x: 0, y: 0 }, data: {}, draggable: true },
+    ];
+    const result = findResult(
+      seed,
+      (r) => r.find((n) => n.id === 'note-1')?.data?.remoteSelection?.displayName === 'Ada'
+    );
+    const note = result.find((n) => n.id === 'note-1');
+    expect(note.data.remoteSelection).toEqual({
+      clientId: 'c2',
+      color: '#e6194b',
+      displayName: 'Ada',
+    });
+    expect(note.draggable).toBe(false);
+  });
+
+  it('leaves a graph ("custom") node untouched by the annotation remote-claim effect', () => {
+    render(
+      <GraphCanvas
+        nodes={[]}
+        edges={[]}
+        remoteSelections={{
+          'graph-node-a': { clientId: 'c2', color: '#e6194b', displayName: 'Ada' },
+        }}
+      />
+    );
+    const seed = [
+      { id: 'graph-node-a', type: 'custom', position: { x: 0, y: 0 }, data: {}, draggable: true },
+    ];
+    // The annotation-claim effect's updater must be a no-op for a 'custom' node
+    // (graph nodes get their remoteSelection marker from the separate
+    // reactFlowNodes memo, not this effect) — applying every captured updater
+    // to the seed must never flip draggable to false via this path.
+    for (const call of hoisted.setNodes.mock.calls) {
+      if (typeof call[0] !== 'function') continue;
+      let result;
+      try {
+        result = call[0](seed.map((n) => ({ ...n, data: { ...n.data } })));
+      } catch {
+        continue;
+      }
+      if (!Array.isArray(result)) continue;
+      const node = result.find((n) => n.id === 'graph-node-a');
+      if (node) expect(node.draggable).not.toBe(false);
+    }
+  });
+
+  it('restores dragging once a remote claim is released', () => {
+    const { rerender } = render(
+      <GraphCanvas
+        nodes={[]}
+        edges={[]}
+        remoteSelections={{ 'note-1': { clientId: 'c2', color: '#e6194b', displayName: 'Ada' } }}
+      />
+    );
+    hoisted.setNodes.mockClear();
+    rerender(<GraphCanvas nodes={[]} edges={[]} remoteSelections={{}} />);
+    const seed = [
+      {
+        id: 'note-1',
+        type: 'note',
+        position: { x: 0, y: 0 },
+        data: { remoteSelection: { clientId: 'c2', color: '#e6194b', displayName: 'Ada' } },
+        draggable: false,
+      },
+    ];
+    const result = findResult(
+      seed,
+      (r) => r.find((n) => n.id === 'note-1')?.data?.remoteSelection == null
+    );
+    const note = result.find((n) => n.id === 'note-1');
+    expect(note.data.remoteSelection).toBeNull();
+    expect(note.draggable).toBe(true);
+  });
+
+  it('keeps an anchored arrow non-draggable even once its remote claim clears (isArrowAnchored still applies)', () => {
+    const { rerender } = render(
+      <GraphCanvas
+        nodes={[]}
+        edges={[]}
+        remoteSelections={{ 'arrow-1': { clientId: 'c2', color: '#e6194b', displayName: 'Ada' } }}
+      />
+    );
+    hoisted.setNodes.mockClear();
+    rerender(<GraphCanvas nodes={[]} edges={[]} remoteSelections={{}} />);
+    const seed = [
+      {
+        id: 'arrow-1',
+        type: 'arrow',
+        position: { x: 0, y: 0 },
+        data: {
+          startAnchor: 'graph-node-a',
+          remoteSelection: { clientId: 'c2', color: '#e6194b', displayName: 'Ada' },
+        },
+        draggable: false,
+      },
+    ];
+    const result = findResult(
+      seed,
+      (r) => r.find((n) => n.id === 'arrow-1')?.data?.remoteSelection == null
+    );
+    expect(result.find((n) => n.id === 'arrow-1').draggable).toBe(false);
+  });
+
   it('reassigns membership from a remote group_membership_changed', () => {
     render(
       <GraphCanvas

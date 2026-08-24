@@ -291,6 +291,21 @@ describe('GenericAnnotationNode', () => {
     expect(props.isVisible).toBe(false);
   });
 
+  // task-annotation-shared-session-realtime: another client's live selection
+  // claim makes an annotation's lease exclusive, the same way a persisted
+  // `locked` flag already hides the resize handles.
+  it('hides resize handles while another client holds the selection claim', () => {
+    render(
+      <GenericAnnotationNode
+        type="frame"
+        data={{ remoteSelection: { clientId: 'c2', color: '#e6194b', displayName: 'Ada' } }}
+        selected
+      />
+    );
+    const props = hoisted.resizerProps.at(-1);
+    expect(props.isVisible).toBe(false);
+  });
+
   it('hides resize handles when not selected', () => {
     render(<GenericAnnotationNode type="shape" data={{}} selected={false} />);
     const props = hoisted.resizerProps.at(-1);
@@ -345,6 +360,31 @@ describe('GenericAnnotationNode property editor', () => {
     fireEvent.contextMenu(container.querySelector('.kind-frame'));
     expect(screen.queryByLabelText('circle')).toBeNull();
     expect(screen.getByLabelText('Rotate left 15°')).toBeInTheDocument();
+  });
+
+  // task-annotation-shared-session-realtime: an exclusive lease refuses even
+  // opening the property editor while another client holds the claim, so an
+  // in-progress rotation/shape edit can never be started against it.
+  it('refuses to open the property editor while another client holds the selection claim, notifying instead', () => {
+    const notifyRemoteLockedAttempt = vi.fn();
+    const { container } = render(
+      <AnnotationContext.Provider
+        value={{ notifyChange: vi.fn(), notifyRemoteLockedAttempt, labels: {} }}
+      >
+        <GenericAnnotationNode
+          id="s1"
+          type="shape"
+          data={{
+            shape: 'circle',
+            remoteSelection: { clientId: 'c2', color: '#e6194b', displayName: 'Ada' },
+          }}
+        />
+      </AnnotationContext.Provider>
+    );
+    fireEvent.contextMenu(screen.getByTestId('shape-halo'));
+    expect(screen.queryByLabelText('Rotate left 15°')).toBeNull();
+    expect(notifyRemoteLockedAttempt).toHaveBeenCalledTimes(1);
+    expect(container.querySelector('.graph-node-remote-badge').textContent).toBe('Ada');
   });
 
   it.each(['text', 'frame', 'shape', 'icon', 'vote_dot', 'image'])(

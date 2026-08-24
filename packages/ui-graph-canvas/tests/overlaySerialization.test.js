@@ -5,6 +5,8 @@ import {
   isManualNode,
   isArrowAnchored,
   isArrowHeld,
+  isRemoteLocked,
+  isAnnotationDraggable,
   nodeCenter,
   findSnapTarget,
   resolveAnchoredArrow,
@@ -673,5 +675,48 @@ describe('resolveAttachedPosition', () => {
     };
     const centers = new Map([['a', { x: 50, y: 50 }]]);
     expect(resolveAttachedPosition(node, centers)).toBeNull();
+  });
+});
+
+// task-annotation-shared-session-realtime: another live client's selection
+// claim makes an annotation's edit lease exclusive rather than merely
+// advisory. isRemoteLocked/isAnnotationDraggable are the single source of
+// truth every annotation component and GraphCanvas's remote-claim effect
+// reads to enforce it.
+describe('isRemoteLocked / isAnnotationDraggable (exclusive annotation leases)', () => {
+  const CLAIM = { clientId: 'c2', color: '#e6194b', displayName: 'Ada' };
+
+  it('isRemoteLocked is false with no remoteSelection and true once one is set', () => {
+    expect(isRemoteLocked(undefined)).toBe(false);
+    expect(isRemoteLocked({})).toBe(false);
+    expect(isRemoteLocked({ remoteSelection: null })).toBe(false);
+    expect(isRemoteLocked({ remoteSelection: CLAIM })).toBe(true);
+  });
+
+  it('a plain unlocked, unclaimed annotation is draggable', () => {
+    expect(isAnnotationDraggable({ type: 'note', data: {} })).toBe(true);
+  });
+
+  it('a persisted `locked` flag blocks dragging, independent of any claim', () => {
+    expect(isAnnotationDraggable({ type: 'note', data: { locked: true } })).toBe(false);
+  });
+
+  it('a live remote claim blocks dragging even when unlocked', () => {
+    expect(
+      isAnnotationDraggable({ type: 'note', data: { locked: false, remoteSelection: CLAIM } })
+    ).toBe(false);
+  });
+
+  it('an anchored arrow stays non-draggable regardless of claim state', () => {
+    expect(isAnnotationDraggable({ type: 'arrow', data: { startAnchor: 'node-a' } })).toBe(false);
+  });
+
+  it('an unanchored, unlocked, unclaimed arrow is draggable', () => {
+    expect(isAnnotationDraggable({ type: 'arrow', data: {} })).toBe(true);
+  });
+
+  it('a group box is subject to the same claim-based exclusivity as any other annotation', () => {
+    expect(isAnnotationDraggable({ type: 'group', data: {} })).toBe(true);
+    expect(isAnnotationDraggable({ type: 'group', data: { remoteSelection: CLAIM } })).toBe(false);
   });
 });
