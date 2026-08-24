@@ -8,6 +8,7 @@ as explicit parameters.
 from typing import TYPE_CHECKING, Any, Dict, List
 
 from backend.core import NodeType
+from backend.core.session_annotations import sanitize_saved_view_metadata
 from backend.runtime.authorization import GRAPH_ACTION_READ
 
 from . import access
@@ -205,12 +206,17 @@ def get_saved_view(
         return {"success": False, "error": f"View '{name}' not found."}
 
     view_node = visible_views[0]
+    # Defense in depth: a view saved before saved_view_annotation_error existed
+    # (or whose metadata reached storage by some other path) must not make a
+    # viewer fetch a remote host merely by opening it — never read
+    # view_node.metadata directly below, only this sanitized copy.
+    safe_metadata = sanitize_saved_view_metadata(view_node.metadata)
 
     position_map: Dict[str, Any] = {}
     node_ids: List[str] = []
     hidden_node_ids: List[str] = []
 
-    view_data = view_node.metadata.get("view_data", {})
+    view_data = safe_metadata.get("view_data", {})
     if view_data and "nodes" in view_data:
         node_position_data = view_data.get("nodes", [])
         hidden_node_ids = view_data.get("hidden_nodes", [])
@@ -220,10 +226,10 @@ def get_saved_view(
             if isinstance(item, dict)
         }
         node_ids = list(position_map.keys())
-    elif "node_ids" in view_node.metadata:
-        node_ids = view_node.metadata.get("node_ids", [])
-        position_map = view_node.metadata.get("positions", {})
-        hidden_node_ids = view_node.metadata.get("hidden_nodes", [])
+    elif "node_ids" in safe_metadata:
+        node_ids = safe_metadata.get("node_ids", [])
+        position_map = safe_metadata.get("positions", {})
+        hidden_node_ids = safe_metadata.get("hidden_nodes", [])
     else:
         return {"success": False, "error": f"View '{name}' contains no nodes."}
 
@@ -246,9 +252,9 @@ def get_saved_view(
 
     edges = serialize_edges(storage.get_edges_between_nodes(visible_node_ids))
 
-    annotation_document = view_node.metadata.get("annotation_document")
+    annotation_document = safe_metadata.get("annotation_document")
     legacy_from_document = _annotation_document_to_legacy_metadata(annotation_document)
-    saved_groups = view_node.metadata.get("groups", [])
+    saved_groups = safe_metadata.get("groups", [])
     if annotation_document:
         group_data = saved_groups or legacy_from_document["groups"]
     elif saved_groups:
@@ -270,7 +276,7 @@ def get_saved_view(
         node_id for node_id in hidden_node_ids if node_id in visible_node_id_set
     ]
     legacy_parent_ids = (
-        view_node.metadata.get("parentIds", {}) or legacy_from_document["parentIds"]
+        safe_metadata.get("parentIds", {}) or legacy_from_document["parentIds"]
     )
     parent_ids = {
         node_id: group_id
@@ -286,12 +292,12 @@ def get_saved_view(
         "hidden_node_ids": filtered_hidden_node_ids,
         "groups": group_data,
         "parentIds": parent_ids,
-        "annotations": view_node.metadata.get("annotations", [])
+        "annotations": safe_metadata.get("annotations", [])
         or legacy_from_document["annotations"],
         "action": "load_visualization",
     }
     if annotation_document:
-        result["annotation_schema_version"] = view_node.metadata.get(
+        result["annotation_schema_version"] = safe_metadata.get(
             "annotation_schema_version", 1
         )
         result["annotation_document"] = annotation_document

@@ -543,6 +543,108 @@ def image_annotation_error(
     )
 
 
+def iter_saved_view_annotations(metadata: Dict[str, Any]):
+    """Yield every annotation-shaped dict embedded in SavedView/VisualizationView
+    node metadata: the v1 annotation document's ``annotations`` list and the
+    legacy ``annotations`` list the frontend keeps in sync alongside it
+    (``frontend/web/src/utils/sessionAnnotations.js``, design 3.1).
+
+    A SavedView node's annotation content is ordinary node metadata, written
+    through the generic ``add_nodes``/``update_node`` tools rather than
+    through ``SessionStore.apply_state_op`` — so unlike a live session op it
+    is not opaque to the caller here, but it uses the identical v1 annotation
+    shape and must be checked against the identical rule
+    (``saved_view_annotation_error`` below).
+    """
+    if not isinstance(metadata, dict):
+        return
+    document = metadata.get("annotation_document")
+    if isinstance(document, dict):
+        for annotation in document.get("annotations", []) or []:
+            if isinstance(annotation, dict):
+                yield annotation
+    legacy = metadata.get("annotations")
+    if isinstance(legacy, list):
+        for annotation in legacy:
+            if isinstance(annotation, dict):
+                yield annotation
+
+
+def saved_view_annotation_error(metadata: Dict[str, Any]) -> Optional[str]:
+    """Why *metadata* may not be persisted on a SavedView/VisualizationView
+    node, or ``None`` if every embedded annotation is fine.
+
+    Applies ``image_annotation_error`` — the same rule
+    ``SessionStore.apply_state_op`` enforces for live annotation ops — to
+    every annotation reachable from saved-view metadata (see
+    ``iter_saved_view_annotations``). Unlike a live op, a saved-view write is
+    not an incremental patch onto previously-validated state, so there is no
+    legitimate *existing* annotation to exempt a re-sent URL against here:
+    every image annotation must already be an embedded data URI, with no
+    byte-identical-URL exemption. Callers gate this call to nodes of the
+    right type themselves — this module has no notion of node types.
+    """
+    for annotation in iter_saved_view_annotations(metadata):
+        error = image_annotation_error(annotation)
+        if error:
+            return error
+    return None
+
+
+def _sanitize_saved_view_annotation(annotation: Dict[str, Any]) -> Dict[str, Any]:
+    if annotation_type_of(annotation) != IMAGE_TYPE:
+        return annotation
+    image = annotation.get("image")
+    if not isinstance(image, dict):
+        return annotation
+    url = image.get("url")
+    if url is None or is_embedded_image_url(url):
+        return annotation
+    sanitized_image = dict(image)
+    sanitized_image.pop("url", None)
+    return {**annotation, "image": sanitized_image}
+
+
+def sanitize_saved_view_metadata(metadata: Dict[str, Any]) -> Dict[str, Any]:
+    """Return a copy of SavedView/VisualizationView *metadata* with every
+    non-embedded image annotation URL stripped.
+
+    Defense in depth alongside ``saved_view_annotation_error``: a view saved
+    before that check existed (or whose metadata reached storage by some
+    other path) must still not make a viewer fetch a remote host merely by
+    opening it — ``GenericAnnotationNode`` renders ``content.image.url``
+    straight into an ``<img src>``. Never mutates *metadata* itself (callers
+    read this directly off live ``Node.metadata``); returns a shallow copy
+    with only the ``annotation_document``/``annotations`` keys replaced when
+    something was actually stripped, leaving every other field — and every
+    non-image annotation — untouched (and byte-for-byte identical, so callers
+    that need to detect "did this change" can compare by equality).
+    """
+    if not isinstance(metadata, dict):
+        return metadata
+    sanitized = dict(metadata)
+    document = metadata.get("annotation_document")
+    if isinstance(document, dict) and isinstance(document.get("annotations"), list):
+        new_annotations = [
+            _sanitize_saved_view_annotation(a) if isinstance(a, dict) else a
+            for a in document["annotations"]
+        ]
+        if new_annotations != document["annotations"]:
+            sanitized["annotation_document"] = {
+                **document,
+                "annotations": new_annotations,
+            }
+    legacy = metadata.get("annotations")
+    if isinstance(legacy, list):
+        new_legacy = [
+            _sanitize_saved_view_annotation(a) if isinstance(a, dict) else a
+            for a in legacy
+        ]
+        if new_legacy != legacy:
+            sanitized["annotations"] = new_legacy
+    return sanitized
+
+
 def _apply_content(
     target: Dict[str, Any],
     content: Optional[Dict[str, Any]],

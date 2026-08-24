@@ -581,6 +581,262 @@ class TestGraphServiceSavedViews:
         assert any(v["name"] == "Test View" for v in result["views"])
 
 
+class TestSavedViewAnnotationValidation:
+    """Regression coverage for smallfix-saved-view-annotation-document-unvalidated:
+    a SavedView node's annotation_document/annotations are ordinary node
+    metadata, so add_nodes/update_node must apply the same image-annotation
+    rule SessionStore enforces for live ops, and get_saved_view/get_node_details
+    must not surface a pre-existing (or otherwise directly-injected) remote
+    image URL even after it already reached storage.
+    """
+
+    _REMOTE_IMAGE_ANNOTATION = {
+        "id": "img-1",
+        "type": "image",
+        "kind": "image",
+        "position": {"x": 0, "y": 0},
+        "geometry": {"x": 0, "y": 0, "w": 10, "h": 10, "rotation": 0},
+        "image": {
+            "url": "https://attacker.example/tracker.png",
+            "width": 10,
+            "height": 10,
+        },
+        "alt": "",
+    }
+    _EMBEDDED_IMAGE_ANNOTATION = {
+        **_REMOTE_IMAGE_ANNOTATION,
+        "image": {
+            "url": (
+                "data:image/webp;base64,"
+                "UklGRhoAAABXRUJQVlA4TA0AAAAvAAAAEAcQERGIiP4HAA=="
+            ),
+            "width": 10,
+            "height": 10,
+        },
+    }
+
+    def _saved_view_node_dict(self, name: str, annotation: dict) -> dict:
+        return {
+            "name": name,
+            "type": "SavedView",
+            "metadata": {
+                "node_ids": ["actor-1"],
+                "positions": {"actor-1": {"x": 0, "y": 0}},
+                "annotation_schema_version": 1,
+                "annotation_document": {
+                    "schema_version": 1,
+                    "annotations": [annotation],
+                },
+                "annotations": [annotation],
+            },
+        }
+
+    def test_add_nodes_rejects_saved_view_with_remote_image_annotation(
+        self, populated_service: GraphService
+    ):
+        result = populated_service.add_nodes(
+            nodes=[
+                self._saved_view_node_dict(
+                    "Malicious View", self._REMOTE_IMAGE_ANNOTATION
+                )
+            ],
+            edges=[],
+        )
+
+        assert result["success"] is False
+        assert "embedded" in result["message"]
+        assert result["added_node_ids"] == []
+        # Nothing was persisted: the view cannot be found afterwards.
+        assert populated_service.get_saved_view("Malicious View")["success"] is False
+
+    def test_add_nodes_accepts_saved_view_with_embedded_image_annotation(
+        self, populated_service: GraphService
+    ):
+        result = populated_service.add_nodes(
+            nodes=[
+                self._saved_view_node_dict(
+                    "Clean View", self._EMBEDDED_IMAGE_ANNOTATION
+                )
+            ],
+            edges=[],
+        )
+
+        assert result["success"] is True
+        assert len(result["added_node_ids"]) == 1
+
+    def test_add_nodes_rejects_legacy_visualization_view_type_too(
+        self, populated_service: GraphService
+    ):
+        node = self._saved_view_node_dict(
+            "Legacy Malicious View", self._REMOTE_IMAGE_ANNOTATION
+        )
+        node["type"] = "VisualizationView"
+
+        result = populated_service.add_nodes(nodes=[node], edges=[])
+
+        assert result["success"] is False
+
+    def test_add_nodes_does_not_validate_annotations_on_non_saved_view_nodes(
+        self, populated_service: GraphService
+    ):
+        """The guard is scoped to SavedView/VisualizationView metadata -- an
+        unrelated node type carrying an `annotations` key (meaningless there)
+        must not be caught by it."""
+        result = populated_service.add_nodes(
+            nodes=[
+                {
+                    "type": "Actor",
+                    "name": "Some Actor",
+                    "metadata": {"annotations": [self._REMOTE_IMAGE_ANNOTATION]},
+                }
+            ],
+            edges=[],
+        )
+
+        assert result["success"] is True
+
+    def test_update_node_rejects_saved_view_with_remote_image_annotation(
+        self, service_with_view: GraphService
+    ):
+        result = service_with_view.update_node(
+            "view-1",
+            {
+                "metadata": {
+                    "annotation_document": {
+                        "schema_version": 1,
+                        "annotations": [self._REMOTE_IMAGE_ANNOTATION],
+                    }
+                }
+            },
+            metadata_merge=True,
+        )
+
+        assert result["success"] is False
+        assert "embedded" in result["error"]
+        # The rejected write must not have applied.
+        stored = service_with_view._storage.get_node("view-1")
+        assert "annotation_document" not in stored.metadata
+
+    def test_update_node_accepts_saved_view_with_embedded_image_annotation(
+        self, service_with_view: GraphService
+    ):
+        result = service_with_view.update_node(
+            "view-1",
+            {
+                "metadata": {
+                    "annotation_document": {
+                        "schema_version": 1,
+                        "annotations": [self._EMBEDDED_IMAGE_ANNOTATION],
+                    }
+                }
+            },
+            metadata_merge=True,
+        )
+
+        assert result["success"] is True
+
+    def test_update_node_ignores_updates_without_annotation_content(
+        self, service_with_view: GraphService
+    ):
+        """A rename/description-only update on a SavedView node, carrying no
+        annotation content at all, must not be caught by the guard."""
+        result = service_with_view.update_node("view-1", {"description": "Renamed"})
+
+        assert result["success"] is True
+
+    def test_get_saved_view_sanitizes_pre_existing_remote_image_annotation(
+        self, service_with_view: GraphService
+    ):
+        """A view whose annotation content reached storage before this guard
+        existed (simulated here by writing directly through storage, bypassing
+        the service-layer guard the same way the SessionStore image guard's
+        own tests simulate legacy data) must not surface the remote URL when
+        the view is opened."""
+        storage = service_with_view._storage
+        view = storage.get_node("view-1")
+        view.metadata["annotation_schema_version"] = 1
+        view.metadata["annotation_document"] = {
+            "schema_version": 1,
+            "annotations": [self._REMOTE_IMAGE_ANNOTATION],
+        }
+        view.metadata["annotations"] = [self._REMOTE_IMAGE_ANNOTATION]
+        storage.update_node("view-1", {"metadata": view.metadata})
+
+        result = service_with_view.get_saved_view("Test View")
+
+        assert result["success"] is True
+        doc_image = result["annotation_document"]["annotations"][0]["image"]
+        assert "url" not in doc_image
+        legacy_image = result["annotations"][0]["image"]
+        assert "url" not in legacy_image
+        # Sanitization never mutates storage, only the read-time response.
+        stored = storage.get_node("view-1")
+        assert (
+            stored.metadata["annotation_document"]["annotations"][0]["image"]["url"]
+            == self._REMOTE_IMAGE_ANNOTATION["image"]["url"]
+        )
+
+    def test_get_saved_view_leaves_embedded_image_annotation_untouched(
+        self, service_with_view: GraphService
+    ):
+        storage = service_with_view._storage
+        view = storage.get_node("view-1")
+        view.metadata["annotation_document"] = {
+            "schema_version": 1,
+            "annotations": [self._EMBEDDED_IMAGE_ANNOTATION],
+        }
+        storage.update_node("view-1", {"metadata": view.metadata})
+
+        result = service_with_view.get_saved_view("Test View")
+
+        assert (
+            result["annotation_document"]["annotations"][0]["image"]["url"]
+            == self._EMBEDDED_IMAGE_ANNOTATION["image"]["url"]
+        )
+
+    def test_get_node_details_sanitizes_saved_view_remote_image_annotation(
+        self, service_with_view: GraphService
+    ):
+        """The 'double-click a SavedView node to open it' flow
+        (frontend/web/src/App.jsx) reads metadata.annotations straight off a
+        generically-serialized node rather than calling get_saved_view again,
+        so get_node_details must be safe on its own too."""
+        storage = service_with_view._storage
+        view = storage.get_node("view-1")
+        view.metadata["annotations"] = [self._REMOTE_IMAGE_ANNOTATION]
+        storage.update_node("view-1", {"metadata": view.metadata})
+
+        result = service_with_view.get_node_details("view-1")
+
+        assert result["success"] is True
+        image = result["node"]["metadata"]["annotations"][0]["image"]
+        assert "url" not in image
+
+    def test_get_node_details_on_non_saved_view_node_is_unaffected(
+        self, populated_service: GraphService
+    ):
+        """The sanitizer only inspects SavedView/VisualizationView metadata;
+        an unrelated node's metadata passes through serialize_node untouched."""
+        result = populated_service.add_nodes(
+            nodes=[
+                {
+                    "type": "Actor",
+                    "name": "Some Actor",
+                    "metadata": {"annotations": [self._REMOTE_IMAGE_ANNOTATION]},
+                }
+            ],
+            edges=[],
+        )
+        node_id = result["added_node_ids"][0]
+
+        details = populated_service.get_node_details(node_id)
+
+        assert (
+            details["node"]["metadata"]["annotations"][0]["image"]["url"]
+            == self._REMOTE_IMAGE_ANNOTATION["image"]["url"]
+        )
+
+
 class TestGraphServiceExport:
     """Tests for export operations."""
 

@@ -1156,9 +1156,22 @@ undo replaying its own stored inverse op.
 This implements docs/ANNOTATION_CONTRACT.md's "Image ingest enforcement"
 requirement. Read that section for what it deliberately does *not* cover —
 the session/document byte budgets are enforced only by
-`SessionManager.upsert_image_annotation` and not on the op path, and a
-`SavedView`'s stored `annotation_document` is rendered without passing
-through this check.
+`SessionManager.upsert_image_annotation` and not on the op path.
+
+A `SavedView`/`VisualizationView` node's `annotation_document`/`annotations`
+are ordinary node metadata, not a session write, so they go through a
+separate pair of checks instead of the one above:
+`saved_view_annotation_error` applies the identical embedded-URL rule at
+write time (`add_nodes`/`update_node` in `backend/service/mutations.py`,
+with no byte-identical-URL exemption), and `sanitize_saved_view_metadata`
+strips any non-embedded URL at read time regardless of how it reached
+storage (`get_saved_view` in `backend/service/views.py`, and the generic
+`serialize_node` in `backend/service/serializers.py` so every node read —
+search, `get_node_details`, the canvas's double-click-to-open-a-view flow —
+is covered, not only `get_saved_view`). See
+docs/ANNOTATION_CONTRACT.md's "Image ingest enforcement" section for the
+full rationale, including the one write path (`adopt_federated_node`) that
+still bypasses the write-side check.
 
 The human GUI (clipboard paste, or a dropped/uploaded file on the canvas)
 reaches the identical pipeline through `POST /api/sessions/{id}/annotations/image`
