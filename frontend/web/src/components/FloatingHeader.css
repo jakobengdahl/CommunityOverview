@@ -10,8 +10,11 @@
 }
 
 /* When the session drawer is docked to the left edge, the header keeps its
-   original 16px offset relative to the drawer's right edge. */
-.app.session-drawer-open .floating-header {
+   original 16px offset relative to the drawer's right edge. FloatingHeader
+   isn't mounted in mobile mode (MobileShell has its own topbar instead), but
+   the override is scoped off .is-mobile defensively so this rule can never
+   offset mobile chrome even if that ever changes. */
+.app.session-drawer-open:not(.is-mobile) .floating-header {
   left: calc(var(--session-drawer-width, 280px) + 16px);
 }
 
@@ -83,7 +86,7 @@
 
 @media (max-width: 600px) {
   .floating-header,
-  .app.session-drawer-open .floating-header {
+  .app.session-drawer-open:not(.is-mobile) .floating-header {
     left: calc(16px + env(safe-area-inset-left));
   }
 

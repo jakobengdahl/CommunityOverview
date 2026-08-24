@@ -25,8 +25,12 @@
 }
 
 /* The toolbar follows the session drawer: it stays "floating" at the same
-   16px distance from the drawer's edge as it had from the screen edge. */
-.app.session-drawer-open .floating-toolbar {
+   16px distance from the drawer's edge as it had from the screen edge. This
+   fixed-position .floating-toolbar isn't mounted in mobile mode (MobileShell
+   hosts it as the sheet variant instead, laid out in normal flow), but the
+   override is scoped off .is-mobile defensively so it can never offset
+   mobile chrome even if that ever changes. */
+.app.session-drawer-open:not(.is-mobile) .floating-toolbar {
   left: calc(var(--session-drawer-width, 280px) + 16px);
 }
 
