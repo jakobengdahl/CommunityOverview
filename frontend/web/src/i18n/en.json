@@ -415,6 +415,7 @@
     "arrow_start_head": "Start arrowhead",
     "arrow_end_head": "End arrowhead",
     "annotation_shape": "Shape",
+    "annotation_icon": "Icon",
     "annotation_rotation": "Rotation",
     "annotation_rotate_left": "Rotate left 15°",
     "annotation_rotate_right": "Rotate right 15°",
@@ -440,6 +441,8 @@
     "shape_rhombus": "Rhombus",
     "shape_hexagon": "Hexagon",
     "shape_process_arrow": "Process arrow",
+    "icon": "Icon",
+    "vote_dot": "Vote dot",
     "image": "Image",
     "freehand": "Freehand"
   },

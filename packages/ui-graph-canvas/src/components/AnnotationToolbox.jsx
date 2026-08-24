@@ -18,6 +18,8 @@ const TOOLBOX_ITEMS = [
   { kind: 'shape', glyph: '◇', labelKey: 'shapeRhombus', shape: 'rhombus' },
   { kind: 'shape', glyph: '⬡', labelKey: 'shapeHexagon', shape: 'hexagon' },
   { kind: 'shape', glyph: '➜', labelKey: 'shapeProcessArrow', shape: 'process_arrow' },
+  { kind: 'icon', glyph: '🔘', labelKey: 'icon' },
+  { kind: 'vote_dot', glyph: '⚫', labelKey: 'voteDot' },
   { kind: 'image', glyph: '🖼️', labelKey: 'image' },
   // Unlike every other item, clicking this one does not create an annotation
   // immediately — GraphCanvas's onCreate special-cases 'freehand' to arm a
@@ -37,14 +39,17 @@ const TOOLBOX_ITEMS = [
  * type list, so a user never confuses "create a graph node" with "annotate
  * the canvas".
  *
- * It creates note/text/label/frame, every shape variant, and image (which
- * opens a file picker rather than adding a node directly — the host's
- * onCreate handles that distinction; see GraphCanvas's onImageIngest).
- * icon/vote_dot still have no creation entry point yet (tracked gaps, not
- * silently downgraded here) and are left for follow-up work, per the
- * acceptance matrix's per-type rows. `activeKind` (currently only meaningful
- * for 'freehand') marks that item as pressed while its armed drawing mode is
- * active, so a user mid-stroke can see which tool is live.
+ * It creates note/text/label/frame, every shape variant, icon, vote_dot, and
+ * image (which opens a file picker rather than adding a node directly — the
+ * host's onCreate handles that distinction; see GraphCanvas's onImageIngest).
+ * icon/vote_dot each create with a fixed default (a generic glyph / a value
+ * of 1 — see GraphCanvas's createAnnotation); an icon's right-click property
+ * editor (GenericAnnotationNode.jsx) offers a picker over the full icon
+ * vocabulary to change it after creation, the same pattern `shape`'s subtype
+ * picker already established — there is no picker at creation time itself.
+ * `activeKind` (currently only meaningful for 'freehand') marks that item as
+ * pressed while its armed drawing mode is active, so a user mid-stroke can
+ * see which tool is live.
  */
 function AnnotationToolbox({ onCreate, labels = {}, compact = false, activeKind = null }) {
   const [expanded, setExpanded] = useState(false);
@@ -62,6 +67,8 @@ function AnnotationToolbox({ onCreate, labels = {}, compact = false, activeKind 
     shapeRhombus: 'Rhombus',
     shapeHexagon: 'Hexagon',
     shapeProcessArrow: 'Process arrow',
+    icon: 'Icon',
+    voteDot: 'Vote dot',
     image: 'Image',
     freehand: 'Freehand',
     ...labels,

@@ -133,17 +133,24 @@ auto-disarms) that captures actual pointer samples — coalesced samples via
 `event.pressure` when available, never predicted events — into a vector
 stroke (`createFreehandStrokeCapture`,
 `packages/ui-graph-canvas/src/utils/freehandStroke.js`, wired into
-`GraphCanvas.jsx`). `icon` and `vote_dot` still render on canvas but have no
-GUI creation path — they can only be created via MCP. A right-click property
-editor now exists for every rotatable kind (`note`, `label`, `text`, `frame`,
-`shape`, `icon`, `vote_dot`, `image`): a rotation control (±15° steps plus
-reset), and, for `shape` only, a subtype picker to change an existing shape's
-variant after creation. `freehand` gets its own right-click property editor
+`GraphCanvas.jsx`). `icon` and `vote_dot` now have a bottom-toolbox/mobile-sheet
+creation entry point, each with a fixed default (a generic glyph, and a value
+of 1) — GraphCanvas's `createAnnotation` also gives each a data-only
+`geometry.w/h` matching its fixed intrinsic rendered size (32×32 / 24×24), so
+that geometry survives the session save round trip (see
+[Persistence](#persistence) and
+`61d5cc7b`/`smallfix-annotation-unsized-generic-geometry-clobber`) instead of
+being silently reset to a mismatched box on the next reload. A right-click
+property editor now exists for every rotatable kind (`note`, `label`, `text`,
+`frame`, `shape`, `icon`, `vote_dot`, `image`): a rotation control (±15° steps
+plus reset), for `shape` a subtype picker, and for `icon` a picker grid over
+the full icon vocabulary. `freehand` gets its own right-click property editor
 too (color, stroke width, smoothing, opacity) — it is not in the rotatable
 set (see [Canvas rendering](#canvas-rendering) on why rotation is not drawn
 for it), so it has no rotation control. What the rotatable kinds' editor
-still does not cover: recoloring any generic kind other than `freehand`, an
-icon picker for `icon`, and cropping/replacing an `image`'s pixel content.
+still does not cover: recoloring any generic kind other than `freehand`,
+changing a `vote_dot`'s value after creation, and cropping/replacing an
+`image`'s pixel content.
 `label`, `text`, `icon` and `vote_dot` can now also be attached to a node or
 another annotation from the GUI, by dragging the annotation within snapping
 distance of the target
@@ -530,9 +537,13 @@ Per-type property editors and GUI creation for these types are required v1
 scope (see [Human authoring surfaces](#human-authoring-surfaces)), not a
 non-goal. A right-click rotation control and, for `shape`, a subtype picker
 now exist for every generic kind; image paste/upload now has a GUI path too
-(toolbox file picker, clipboard paste, OS file drop). Recoloring and an icon
-picker are still reachable only through the MCP tools, which is the gap the
-acceptance matrix tracks, not the intended end state.
+(toolbox file picker, clipboard paste, OS file drop); the bottom
+toolbox/mobile sheet now also creates `icon` and `vote_dot` (each with a
+fixed default), and `icon`'s right-click editor has its own picker grid over
+the full vocabulary described below. Recoloring any generic kind and
+changing a `vote_dot`'s value after creation are still reachable only
+through the MCP tools, which is the gap the acceptance matrix tracks, not
+the intended end state.
 
 Each `shape` variant draws its own geometry (`SHAPE_STYLES` in
 `GenericAnnotationNode.jsx`).
@@ -667,8 +678,8 @@ rule](#downstream-closure-rule).
 | `frame` | ⚠ toolbox create (fixed default size), rotate (right-click); no color editor | ✅ generic tool set | ✅ | ✅ | ✅ | ⬜ |
 | `group` | ✅ toolbar create-group action | ✅ `create_group_annotation` creates or upserts the box — editing an existing group's label/color/geometry goes through this same upsert-by-id path (resend every field you want kept, unlike the generic types' dedicated patch tool) rather than a separate update tool — `update_group_members` adds/removes member ids without a full resend, and `delete_group_annotation` deletes the box (member graph nodes are never cascade-deleted — a group never owns them as annotations) | ✅ | ✅ | ⚠ creating/deleting the group annotation itself is actor-scoped undoable like any other type, but `group_membership_changed` is outside `session_activity.UNDOABLE_OPS` by design — a membership change is not itself undoable through `undo_last_action` | ⬜ |
 | `shape` | ✅ toolbox creates all six variants, each drawn distinctly; right-click editor changes an existing shape's subtype and rotation | ✅ generic tool set (`content.shape`) | ✅ | ✅ | ✅ | ⬜ |
-| `icon` | ⚠ move, rotate (right-click) and attach by dragging near a node/annotation; still no create UI or icon picker — renders every one of the 75 host-registry icon names as its own distinct glyph (see [Canvas rendering](#canvas-rendering)) | ✅ generic tool set | ✅ | ✅ | ✅ | ⬜ |
-| `vote_dot` | ⚠ move, rotate (right-click) and attach by dragging near a node/annotation; still no create UI or color picker | ✅ generic tool set | ✅ | ✅ | ✅ | ⬜ |
+| `icon` | ⚠ toolbox create (fixed default glyph), move, rotate (right-click) and attach by dragging near a node/annotation; right-click picker grid over the full icon vocabulary changes an existing icon's name — renders every one of the 75 host-registry icon names as its own distinct glyph (see [Canvas rendering](#canvas-rendering)); no color editor | ✅ generic tool set | ✅ | ✅ | ✅ | ⬜ |
+| `vote_dot` | ⚠ toolbox create (fixed default value of 1), move, rotate (right-click) and attach by dragging near a node/annotation; no way to change the value or color after creation | ✅ generic tool set | ✅ | ✅ | ✅ | ⬜ |
 | `image` | ✅ clipboard paste, OS file drop, and the toolbox's file-picker item all ingest through `POST /api/sessions/{id}/annotations/image` (same pipeline as MCP); move/resize/rotate (right-click)/layer/lock/copy/delete via the generic annotation context menu once created | ✅ `create_image_annotation` ingests; generic create/update refuse image content, and no session annotation write can persist a *new* non-embedded image URL — note the duplicate, saved-view and budget limits in [enforcement](#image-ingest-enforcement) | ✅ | ✅ | ⚠ actor-scoped undo works, but the op is attributed to a dedicated server client id rather than the pasting browser's own (required so the pasting browser's own SSE subscription sees the embedded result instead of dropping it as a self-authored echo — see `_HUMAN_IMAGE_INGEST_CLIENT_ID` in `rest_api.py`), so only that marker's own undo call reverts it, not the pasting browser's | ⬜ no formal pass yet |
 | `freehand` | ⚠ toolbox "Freehand" item arms a one-shot pointer-capture drawing mode (coalesced samples, device pressure when reported, constant-width fallback otherwise, concurrent-input suppressed with a notice); right-click property editor for color/width/smoothing/opacity; a `rotation` on the document model is still never drawn (see Canvas rendering) | ✅ generic tool set — `freehand` has been in `GENERIC_ANNOTATION_TYPES` since #422, so create/update/reorder/lock/delete already worked; `duplicate_annotation` was missing the `translate_freehand_points` call `update_annotation`'s patch builder already had (a duplicated stroke kept its original `points` at a moved envelope position), fixed here | ✅ document model round-trips it | ✅ same op broadcast as every other type — MCP creation now gives a way to exercise this live | ✅ `translate_freehand_points` covers move/undo | ❌ no physical stylus/touch pass — the GUI wiring above is verified only under mouse-event emulation, not a real device |
 | cross-type | — | — | — | ⚠ create/delete/style/geometry publish immediately and note/label text is now live-synced and debounced at 300 ms, split out from the general autosave debounce; selection claims cover every annotation kind and are enforced client-side, but the server's `ClaimMap` is still advisory/LWW with a 30 s TTL rather than rejecting a non-claim-holder's write ([gap](#operation-timing-and-leases)) | ✅ actor-scoped conditional undo (`session_activity.py`) | — |

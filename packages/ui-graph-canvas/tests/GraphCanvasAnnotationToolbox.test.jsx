@@ -127,6 +127,34 @@ describe('GraphCanvas bottom annotation toolbox', () => {
     expect(shape.data.shape).toBe('circle');
   });
 
+  // task-annotation-render-direct-manipulation remaining_scope: "icon/vote_dot
+  // GUI creation is still not implemented" — closed here.
+  it('creates an icon annotation via the toolbox with a default icon and size', () => {
+    render(<GraphCanvas nodes={[]} edges={[]} onAnnotationChange={vi.fn()} />);
+    fireEvent.click(screen.getByRole('button', { name: /add annotation/i }));
+    fireEvent.click(screen.getByRole('button', { name: /^icon$/i }));
+
+    const icon = findCreatedNode('icon');
+    expect(icon).toBeTruthy();
+    expect(icon.data.icon).toBe('circle');
+    // No `style` box (fixed intrinsic size) — geometry lives in `data.size`
+    // only, so it round-trips without becoming a resizable box (61d5cc7b).
+    expect(icon.style).toBeUndefined();
+    expect(icon.data.size).toEqual({ w: 32, h: 32 });
+  });
+
+  it('creates a vote_dot annotation via the toolbox with a default value and size', () => {
+    render(<GraphCanvas nodes={[]} edges={[]} onAnnotationChange={vi.fn()} />);
+    fireEvent.click(screen.getByRole('button', { name: /add annotation/i }));
+    fireEvent.click(screen.getByRole('button', { name: /^vote dot$/i }));
+
+    const voteDot = findCreatedNode('vote_dot');
+    expect(voteDot).toBeTruthy();
+    expect(voteDot.data.value).toBe(1);
+    expect(voteDot.style).toBeUndefined();
+    expect(voteDot.data.size).toEqual({ w: 24, h: 24 });
+  });
+
   it('creates a label annotation via the toolbox', () => {
     render(<GraphCanvas nodes={[]} edges={[]} onAnnotationChange={vi.fn()} />);
     fireEvent.click(screen.getByRole('button', { name: /add annotation/i }));

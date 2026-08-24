@@ -442,6 +442,59 @@ describe('GenericAnnotationNode property editor', () => {
     expect(screen.getByLabelText('Rotate left 15°')).toBeInTheDocument();
   });
 
+  // task-annotation-render-direct-manipulation remaining_scope: "no icon
+  // picker for `icon`" — closed by reusing annotationIcons.js's full
+  // vocabulary, the same pattern the shape subtype picker already
+  // established.
+  it('opens an icon picker over the full vocabulary for an icon annotation', () => {
+    render(<GenericAnnotationNode id="i1" type="icon" data={{ icon: 'circle' }} />);
+    fireEvent.contextMenu(screen.getByTitle('circle'));
+    expect(screen.getByLabelText('flag')).toBeInTheDocument();
+    expect(screen.getByLabelText('person_fill')).toBeInTheDocument();
+    expect(screen.getByLabelText('Rotate left 15°')).toBeInTheDocument();
+  });
+
+  it('marks the current icon as the active picker option', () => {
+    render(<GenericAnnotationNode id="i1" type="icon" data={{ icon: 'flag' }} />);
+    fireEvent.contextMenu(screen.getByTitle('flag'));
+    expect(screen.getByLabelText('flag').className).toContain('active');
+    expect(screen.getByLabelText('circle').className).not.toContain('active');
+  });
+
+  it("changes an existing icon annotation's name from the picker", () => {
+    render(<GenericAnnotationNode id="i1" type="icon" data={{ icon: 'circle' }} />);
+    fireEvent.contextMenu(screen.getByTitle('circle'));
+    fireEvent.click(screen.getByLabelText('flag'));
+    expect(applyLatestUpdate({ id: 'i1', data: { icon: 'circle' } }).data.icon).toBe('flag');
+  });
+
+  it('does not show an icon picker for a non-icon kind', () => {
+    const { container } = render(<GenericAnnotationNode id="f1" type="frame" data={{}} />);
+    fireEvent.contextMenu(container.querySelector('.kind-frame'));
+    expect(screen.queryByLabelText('flag')).toBeNull();
+  });
+
+  it('refuses the icon picker while another client holds the selection claim', () => {
+    const notifyRemoteLockedAttempt = vi.fn();
+    render(
+      <AnnotationContext.Provider
+        value={{ notifyChange: vi.fn(), notifyRemoteLockedAttempt, labels: {} }}
+      >
+        <GenericAnnotationNode
+          id="i1"
+          type="icon"
+          data={{
+            icon: 'circle',
+            remoteSelection: { clientId: 'c2', color: '#e6194b', displayName: 'Ada' },
+          }}
+        />
+      </AnnotationContext.Provider>
+    );
+    fireEvent.contextMenu(screen.getByTitle('circle'));
+    expect(screen.queryByLabelText('flag')).toBeNull();
+    expect(notifyRemoteLockedAttempt).toHaveBeenCalledTimes(1);
+  });
+
   // task-annotation-shared-session-realtime: an exclusive lease refuses even
   // opening the property editor while another client holds the claim, so an
   // in-progress rotation/shape edit can never be started against it.
