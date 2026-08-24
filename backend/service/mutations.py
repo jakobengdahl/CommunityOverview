@@ -655,6 +655,16 @@ def adopt_federated_node(
         metadata=metadata,
     )
 
+    if local_node.type_str in _SAVED_VIEW_NODE_TYPES:
+        annotation_error = saved_view_annotation_error(local_node.metadata)
+        if annotation_error:
+            return {
+                "success": False,
+                "message": f"Error validating input: {annotation_error}",
+                "added_node_ids": [],
+                "added_edge_ids": [],
+            }
+
     source_reference = storage.get_node(source_node.id)
     if source_reference is None:
         source_reference = Node(
