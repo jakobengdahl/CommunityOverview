@@ -493,6 +493,7 @@
     "chat": "Chatt",
     "menu": "Meny",
     "search_panel_title": "Sök",
-    "create_panel_title": "Skapa"
+    "create_panel_title": "Skapa",
+    "chat_panel_title": "Assistent"
   }
 }

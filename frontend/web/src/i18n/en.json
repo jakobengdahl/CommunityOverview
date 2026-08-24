@@ -493,6 +493,7 @@
     "chat": "Chat",
     "menu": "Menu",
     "search_panel_title": "Search",
-    "create_panel_title": "Create"
+    "create_panel_title": "Create",
+    "chat_panel_title": "Assistant"
   }
 }

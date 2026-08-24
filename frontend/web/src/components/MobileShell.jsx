@@ -33,12 +33,17 @@ import './MobileShell.css';
  *    right, so it is driven directly by the surface manager's "menu" state
  *    rather than re-hosted inside BottomSheet — a deliberate scoping choice
  *    (see the PR description) rather than a smaller version of the same idea.
- *  - Chat reuses ChatPanel exactly as DesktopShell does. ChatPanel already
- *    manages its own floating/minimized presentation via the shared store's
- *    chatPanelOpen field (WAVE 0), so MobileShell orchestrates it through
- *    that field instead of re-hosting it inside BottomSheet, and minimizes it
- *    whenever another surface opens so at most one surface ever covers the
- *    canvas.
+ *  - Chat also mounts inside the shared BottomSheet, via ChatPanel's
+ *    variant="sheet" (ChatPanel.jsx) — the fixed-position floating panel and
+ *    its minimized vertical bar are a desktop-only presentation; on mobile
+ *    the Chat slot in the bottom nav is the equivalent affordance while
+ *    closed. It gets its own BottomSheet instance (a second one alongside
+ *    the search/create sheet below) because it is driven by the shared
+ *    store's chatPanelOpen field rather than useSurfaceManager — ChatPanel's
+ *    own controls (its header, its minimized bar on desktop) can flip that
+ *    field directly, bypassing whatever this component calls to open it, so
+ *    mutual exclusion with search/create/menu is enforced reactively below
+ *    rather than only at this component's own call sites.
  */
 function MobileShell({
   sessionId,
@@ -71,6 +76,7 @@ function MobileShell({
   const { chatPanelOpen, setChatPanelOpen, setChatPanelOpenTransient } = useGraphStore();
   const surface = useSurfaceManager();
   const [sheetSnapPoint, setSheetSnapPoint] = useState('half');
+  const [chatSnapPoint, setChatSnapPoint] = useState('half');
 
   const sheetOpen = surface.isOpen('search') || surface.isOpen('create');
 
@@ -243,7 +249,17 @@ function MobileShell({
         suspendEscape={suspendEscape}
       />
 
-      {llmAvailable && <ChatPanel collectionShortName={akcShortName || undefined} />}
+      {llmAvailable && (
+        <BottomSheet
+          isOpen={chatPanelOpen}
+          snapPoint={chatSnapPoint}
+          onSnapPointChange={setChatSnapPoint}
+          onClose={() => setChatPanelOpen(false)}
+          title={t('mobile_nav.chat_panel_title')}
+        >
+          <ChatPanel variant="sheet" collectionShortName={akcShortName || undefined} />
+        </BottomSheet>
+      )}
     </>
   );
 }
