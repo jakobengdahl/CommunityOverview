@@ -125,8 +125,14 @@ function SessionDrawer({
   // Modal focus management for the mobile overlay only: move focus in on
   // open, restore it to whatever had focus beforehand on close — the same
   // contract BottomSheet.jsx uses for the sibling search/create sheets.
+  // Intentionally keyed on `open` alone (isMobile is read, not a dependency):
+  // depending on isMobile too would re-run this effect's cleanup — which
+  // restores focus to the pre-open trigger — on every crossing of the
+  // mobile breakpoint while the drawer stays open (e.g. rotating a tablet),
+  // yanking focus out of a drawer that is still visibly open. The isMobile
+  // check only needs its value from the render where `open` actually flips.
   useEffect(() => {
-    if (!isMobile || !open) return undefined;
+    if (!open || !isMobile) return undefined;
     lastFocusedRef.current = typeof document !== 'undefined' ? document.activeElement : null;
 
     const focusable = getFocusableElements(drawerRef.current);
@@ -137,6 +143,22 @@ function SessionDrawer({
       if (toRestore && typeof toRestore.focus === 'function' && document.contains(toRestore)) {
         toRestore.focus();
       }
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [open]);
+
+  // Body scroll lock for the mobile overlay only, mirroring BottomSheet.jsx's
+  // contract for the sibling search/create sheets — without it, a touch-scroll
+  // gesture reaching an ancestor of #root would scroll the page behind the
+  // full-screen drawer. Safe to depend on both flags (unlike the effect
+  // above): restoring and re-hiding overflow on a breakpoint crossing has no
+  // visible side effect while the drawer stays open.
+  useEffect(() => {
+    if (!isMobile || !open || typeof document === 'undefined') return undefined;
+    const previousOverflow = document.body.style.overflow;
+    document.body.style.overflow = 'hidden';
+    return () => {
+      document.body.style.overflow = previousOverflow;
     };
   }, [isMobile, open]);
 
