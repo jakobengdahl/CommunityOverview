@@ -691,7 +691,9 @@ class TestSessionImageIngestEndpoint:
         png_bytes = base64.b64decode(_png_data_url().split(",", 1)[1])
 
         def handler(request):
-            return httpx.Response(200, content=png_bytes, headers={"content-type": "image/png"})
+            return httpx.Response(
+                200, content=png_bytes, headers={"content-type": "image/png"}
+            )
 
         class _StubHttpxModule:
             HTTPError = httpx.HTTPError
@@ -721,7 +723,9 @@ class TestSessionImageIngestEndpoint:
             "data:image/webp;base64,"
         )
 
-    def test_requires_exactly_one_of_image_data_or_image_url(self, test_app: TestClient):
+    def test_requires_exactly_one_of_image_data_or_image_url(
+        self, test_app: TestClient
+    ):
         sid = test_app.post("/api/sessions", json={}).json()["id"]
 
         neither = test_app.post(

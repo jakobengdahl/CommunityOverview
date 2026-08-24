@@ -453,7 +453,9 @@ def _fetch_and_optimize_image(image_data: Optional[str], image_url: Optional[str
     share one ingest path (backend/service/mcp_tools.py).
     """
     raw = (
-        fetch_image_bytes(image_url) if image_url is not None else decode_image_data(image_data)
+        fetch_image_bytes(image_url)
+        if image_url is not None
+        else decode_image_data(image_data)
     )
     return optimize_image(raw)
 
