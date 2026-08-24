@@ -73,6 +73,19 @@ class TestBuildNoteAnnotation:
         assert "style" not in annotation
         assert "fontSize" not in annotation
 
+    def test_rotation_z_and_locked_default_like_generic_builder(self):
+        """Mirrors ``build_annotation``'s defaults for the same fields."""
+        annotation = build_note_annotation(x=0, y=0)
+        assert annotation["geometry"]["rotation"] == 0
+        assert annotation["z"] == 0
+        assert annotation["locked"] is False
+
+    def test_explicit_rotation_z_and_locked(self):
+        annotation = build_note_annotation(x=0, y=0, rotation=45, z=5, locked=True)
+        assert annotation["geometry"]["rotation"] == 45
+        assert annotation["z"] == 5
+        assert annotation["locked"] is True
+
 
 class TestBuildNotePatch:
     def _existing(self, **overrides):
@@ -139,6 +152,28 @@ class TestBuildNotePatch:
         patch = build_note_patch(self._existing())
         assert patch == {"id": "note-1", "type": "note", "kind": "note"}
 
+    def test_rotation_only_patch(self):
+        patch = build_note_patch(self._existing(), rotation=90)
+        assert patch["geometry"]["rotation"] == 90
+        assert patch["geometry"]["w"] == 160 and patch["geometry"]["h"] == 96
+        assert "position" not in patch and "size" not in patch
+
+    def test_rotation_combined_with_move(self):
+        patch = build_note_patch(self._existing(), x=1, y=2, rotation=90)
+        assert patch["geometry"] == {"x": 1, "y": 2, "w": 160, "h": 96, "rotation": 90}
+
+    def test_z_and_locked_patch(self):
+        patch = build_note_patch(self._existing(), z=7, locked=True)
+        assert patch["z"] == 7
+        assert patch["locked"] is True
+        assert "geometry" not in patch
+
+    def test_z_zero_and_locked_false_are_still_applied(self):
+        """``z=0``/``locked=False`` must be distinguishable from "not given"."""
+        patch = build_note_patch(self._existing(), z=0, locked=False)
+        assert patch["z"] == 0
+        assert patch["locked"] is False
+
 
 class TestProjectNote:
     def test_projects_read_shape(self):
@@ -167,6 +202,7 @@ class TestProjectNote:
             "h": 20,
             "color": "#fff",
             "font_size": 14,
+            "rotation": 0,
             "z": 3,
             "locked": True,
             "created_at": "t1",
@@ -175,10 +211,20 @@ class TestProjectNote:
             "updated_by": None,
         }
 
+    def test_reports_nonzero_rotation(self):
+        annotation = {
+            "id": "note-1",
+            "type": "note",
+            "geometry": {"x": 0, "y": 0, "w": 10, "h": 20, "rotation": 45},
+        }
+        projected = project_note(annotation)
+        assert projected["rotation"] == 45
+
     def test_missing_geometry_falls_back_to_defaults(self):
         projected = project_note({"id": "n", "type": "note"})
         assert projected["x"] == 0 and projected["y"] == 0
         assert projected["w"] == DEFAULT_NOTE_SIZE["w"]
         assert projected["h"] == DEFAULT_NOTE_SIZE["h"]
         assert projected["text"] == ""
+        assert projected["rotation"] == 0
         assert projected["locked"] is False
