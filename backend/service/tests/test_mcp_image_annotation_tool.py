@@ -48,6 +48,31 @@ def _bmp_data_url():
     return f"data:image/bmp;base64,{encoded}"
 
 
+def _seed_large_image_annotation(manager, session, *, annotation_id, data_bytes):
+    """Persist an `image` annotation with an embedded data URI of exactly
+    ``data_bytes`` decoded bytes, via ``upsert_image_annotation`` directly —
+    bypassing ``optimize_image``'s real re-encode, whose WebP compression
+    would make a solid-color test fixture like ``_png_data_url`` collapse to
+    a few bytes regardless of pixel count. Same trick as
+    ``test_session_manager.py``'s ``_image_annotation`` helper, sized to
+    exceed the flat op-batch cap while staying under the per-image budget —
+    the exact realistic-image scenario the flat cap wrongly rejected."""
+    encoded = base64.b64encode(b"x" * data_bytes).decode("ascii")
+    annotation = {
+        "id": annotation_id,
+        "type": "image",
+        "position": {"x": 0, "y": 0},
+        "geometry": {"x": 0, "y": 0, "w": 10, "h": 10, "rotation": 0},
+        "image": {
+            "url": f"data:{image_ingest.OPTIMIZED_CONTENT_TYPE};base64,{encoded}"
+        },
+        "alt": "",
+    }
+    return manager.upsert_image_annotation(
+        session.id, "mcp-agent", annotation, optimized_image_bytes=data_bytes
+    )
+
+
 def _install_transport(monkeypatch, handler):
     """Same pattern as test_image_ingest.py's _StubHttpxModule: the tool calls
     ``image_ingest.fetch_image_bytes``, which builds its own ``httpx.Client()``
@@ -562,6 +587,30 @@ class TestImageIngestIsTheOnlyWayIn:
 
         assert result["success"] is True
         assert result["annotation"]["content"]["image"]["url"] == embedded_url
+
+    def test_duplicating_a_realistic_sized_image_succeeds(self, image_tools):
+        """Regression test for smallfix-duplicate-image-annotation-op-cap:
+        ``duplicate_annotation`` routes the copy through ``upsert_annotation``,
+        which used to apply the small generic op-batch cap (256KB) to the
+        copy even though the original — the same bytes — was created through
+        ``create_image_annotation``'s much larger image budget. A realistic
+        picture (well over 256KB, still under the 2MB per-image budget) used
+        to fail here with `too_large` although creating it succeeded."""
+        tools_map, manager = image_tools
+        session = manager.create_session()
+        _seed_large_image_annotation(
+            manager, session, annotation_id="img-1", data_bytes=400_000
+        )
+
+        result = tools_map["duplicate_annotation"](
+            session_id=session.id, annotation_id="img-1", dx=20, dy=0
+        )
+
+        assert result["success"] is True
+        assert result["annotation"]["content"]["image"]["url"].startswith(
+            f"data:{image_ingest.OPTIMIZED_CONTENT_TYPE};base64,"
+        )
+        assert len(session.state["annotations"]) == 2
 
 
 class TestLegacyRemoteUrlAnnotationsThroughTheTools:

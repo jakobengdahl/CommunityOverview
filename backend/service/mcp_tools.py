@@ -2606,6 +2606,8 @@ def register_mcp_tools(
                 "error": "rate_limited",
                 "message": "Too many session writes; slow down and retry.",
             }
+        except ImageBudgetExceeded as exc:
+            return {"success": False, "error": "too_large", "message": str(exc)}
         except OpBatchTooLarge:
             return {
                 "success": False,
@@ -3406,6 +3408,8 @@ def register_mcp_tools(
                 "error": "rate_limited",
                 "message": "Too many session writes; slow down and retry.",
             }
+        except ImageBudgetExceeded as exc:
+            return {"success": False, "error": "too_large", "message": str(exc)}
         except OpBatchTooLarge:
             return {
                 "success": False,

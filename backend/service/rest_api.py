@@ -993,21 +993,23 @@ def _register_session_endpoints(
         session_id: str, http_request: Request
     ) -> Dict[str, Any]:
         # Reject an oversized batch from the Content-Length header alone, before
-        # buffering the body — the len(json.dumps(ops)) cap in apply_ops only
-        # catches this after FastAPI has already read and parsed the whole body.
+        # buffering the body — the per-op accounting in apply_ops only catches
+        # this after FastAPI has already read and parsed the whole body. This
+        # pre-parse check cannot yet tell an ordinary batch from one carrying a
+        # validated embedded image (that requires decoding the JSON), so it
+        # admits the larger `max_request_body_bytes` ceiling; apply_ops applies
+        # the tighter, per-case cap once it has parsed the ops.
+        max_body_bytes = session_manager.max_request_body_bytes
         content_length = http_request.headers.get("content-length")
         if content_length is not None:
             try:
                 declared_length = int(content_length)
             except ValueError:
                 declared_length = None
-            if (
-                declared_length is not None
-                and declared_length > session_manager.max_op_batch_bytes
-            ):
+            if declared_length is not None and declared_length > max_body_bytes:
                 raise HTTPException(status_code=413, detail="op batch too large")
         body = await http_request.body()
-        if len(body) > session_manager.max_op_batch_bytes:
+        if len(body) > max_body_bytes:
             raise HTTPException(status_code=413, detail="op batch too large")
         try:
             request = SessionOpsRequest.model_validate_json(body)
