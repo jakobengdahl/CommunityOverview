@@ -1,5 +1,6 @@
 """Tests for the group MCP annotation tools (``create_group_annotation``,
-``update_group_members``) registered in ``backend/service/mcp_tools.py``.
+``update_group_members``, ``delete_group_annotation``) registered in
+``backend/service/mcp_tools.py``.
 
 These are the MCP surface for ``group`` (node-membership box) annotations,
 closing the "group boxes and membership changes through governed MCP
@@ -7,7 +8,7 @@ operations" item of ``task-mcp-full-annotation-crud`` — before this, `group`
 had no MCP tool at all (docs/ANNOTATION_CONTRACT.md), only a GUI
 toolbar action and the raw ``group_membership_changed`` op. `create_annotation`
 still refuses `type="group"` (see ``test_mcp_generic_annotation_tools.py``);
-these two tools are the only MCP entry point for the type.
+these three tools are the only MCP entry point for the type.
 """
 
 import os
@@ -390,6 +391,115 @@ class TestListAnnotationsIncludesGroups:
         assert {a["type"] for a in listed["annotations"]} == {"group"}
 
 
+class TestDeleteGroupAnnotation:
+    def test_deletes_existing_group(self, annotation_tools):
+        tools_map, manager = annotation_tools
+        session = manager.create_session()
+        created = tools_map["create_group_annotation"](
+            session_id=session.id, x=0, y=0, member_node_ids=["n1", "n2"]
+        )
+        gid = created["group"]["id"]
+
+        result = tools_map["delete_group_annotation"](
+            session_id=session.id, group_id=gid
+        )
+
+        assert result["success"] is True
+        assert result["group_id"] == gid
+        assert session.state["annotations"] == []
+
+    def test_delete_only_removes_the_group_box_members_are_graph_nodes(
+        self, annotation_tools
+    ):
+        """member_node_ids names graph nodes by id, not owned annotations —
+        deleting the group has nothing else to cascade-delete, matching the
+        GUI's own group-delete behavior (GroupNode.jsx's removeGroupKeepChildren,
+        which un-parents and keeps every member node)."""
+        tools_map, manager = annotation_tools
+        session = manager.create_session()
+        created = tools_map["create_group_annotation"](
+            session_id=session.id, x=0, y=0, member_node_ids=["n1", "n2"]
+        )
+        gid = created["group"]["id"]
+
+        result = tools_map["delete_group_annotation"](
+            session_id=session.id, group_id=gid
+        )
+
+        assert result["success"] is True
+        # The group annotation is gone; there is no annotation-level trace of
+        # "n1"/"n2" to clean up because they were never annotations.
+        assert session.state["annotations"] == []
+
+    def test_unknown_group_id_is_not_found(self, annotation_tools):
+        tools_map, manager = annotation_tools
+        session = manager.create_session()
+
+        result = tools_map["delete_group_annotation"](
+            session_id=session.id, group_id="ghost"
+        )
+
+        assert result["success"] is False
+        assert result["error"] == "not_found"
+
+    def test_note_annotation_id_is_not_found(self, annotation_tools):
+        """A note must not be deletable through the group tool."""
+        tools_map, manager = annotation_tools
+        session = manager.create_session()
+        tools_map["create_sticky_note"](
+            session_id=session.id, x=0, y=0, annotation_id="note-1"
+        )
+
+        result = tools_map["delete_group_annotation"](
+            session_id=session.id, group_id="note-1"
+        )
+
+        assert result["success"] is False
+        assert result["error"] == "not_found"
+        assert len(session.state["annotations"]) == 1
+
+    def test_generic_annotation_id_is_not_found(self, annotation_tools):
+        """A label or other generic type must not be deletable as a group."""
+        tools_map, manager = annotation_tools
+        session = manager.create_session()
+        created = tools_map["create_annotation"](
+            session_id=session.id, type="label", x=0, y=0
+        )
+
+        result = tools_map["delete_group_annotation"](
+            session_id=session.id, group_id=created["annotation"]["id"]
+        )
+
+        assert result["success"] is False
+        assert result["error"] == "not_found"
+        assert len(session.state["annotations"]) == 1
+
+    def test_revision_conflict_is_reported(self, annotation_tools):
+        tools_map, manager = annotation_tools
+        session = manager.create_session()
+        created = tools_map["create_group_annotation"](session_id=session.id, x=0, y=0)
+
+        result = tools_map["delete_group_annotation"](
+            session_id=session.id,
+            group_id=created["group"]["id"],
+            expected_revision=0,
+        )
+
+        assert result["success"] is False
+        assert result["error"] == "revision_conflict"
+        assert len(session.state["annotations"]) == 1
+
+    def test_session_not_found(self, annotation_tools):
+        tools_map, _manager = annotation_tools
+
+        result = tools_map["delete_group_annotation"](
+            session_id="0000-0000-0000-0000", group_id="group-1"
+        )
+
+        assert result["success"] is False
+        assert "not found" in result["error"]
+
+
 class TestGroupAnnotationToolsAuthorization:
     """Same authorization seam as the other generic annotation tools (see
     TestGenericAnnotationToolsAuthorization in
@@ -451,3 +561,34 @@ class TestGroupAnnotationToolsAuthorization:
         assert result["success"] is False
         assert result.get("error_code") == "access_denied"
         assert session.state["annotations"][0]["member_node_ids"] == ["n0"]
+
+    def test_deny_all_blocks_delete_group_annotation(
+        self, annotation_tools, monkeypatch
+    ):
+        tools_map, manager = annotation_tools
+        session = manager.create_session()
+        created = tools_map["create_group_annotation"](session_id=session.id, x=0, y=0)
+        monkeypatch.setenv(AUTHORIZATION_MODE_ENV, "deny-all")
+
+        result = tools_map["delete_group_annotation"](
+            session_id=session.id, group_id=created["group"]["id"]
+        )
+
+        assert result.get("error_code") == "access_denied"
+        assert len(session.state["annotations"]) == 1
+
+    def test_read_only_blocks_delete_group_annotation_and_deletes_nothing(
+        self, annotation_tools, monkeypatch
+    ):
+        tools_map, manager = annotation_tools
+        session = manager.create_session()
+        created = tools_map["create_group_annotation"](session_id=session.id, x=0, y=0)
+        monkeypatch.setenv(AUTHORIZATION_MODE_ENV, "read-only")
+
+        result = tools_map["delete_group_annotation"](
+            session_id=session.id, group_id=created["group"]["id"]
+        )
+
+        assert result["success"] is False
+        assert result.get("error_code") == "access_denied"
+        assert len(session.state["annotations"]) == 1
