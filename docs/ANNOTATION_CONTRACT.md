@@ -224,15 +224,33 @@ browser only claimed graph nodes at all — and are now enforced client-side:
 a claim another live client holds blocks local dragging, resizing, and every
 per-kind mutation (with a surfaced notice rather than a silent no-op).
 
-**Remaining gap:** the enforcement above is client-side/cooperative only.
-`ClaimMap` (`backend/core/session_hub.py`) is still an *advisory* soft-lock
-with a 30 s TTL and last-writer-wins takeover — a claim held by one client is
-silently taken over by another's newer claim, and the server never rejects
-an op from a non-claim-holder. A client that ignores `data.remoteSelection`
-(or an MCP agent, which does not claim at all) is not blocked. Closing that —
-server-side rejection of a mutating op against a claim someone else holds,
-and a decision on whether MCP-agent writes bypass claims — is the remaining
-piece of this row. Actor-scoped conditional undo *is* implemented
+**Status update:** the server now also rejects (409 `ClaimConflict`) a
+**browser** batch op (`POST /sessions/{id}/ops`, i.e. `SessionManager.apply_ops`
+— the path every generic annotation mutation from the GUI's op scheduler goes
+through) and the human clipboard-paste/file-upload image endpoint
+(`POST /sessions/{id}/annotations/image`) when it would update or delete an
+annotation another client currently holds a live claim on. `ClaimMap`
+(`backend/core/session_hub.py`) itself is unchanged and stays *advisory* —
+`claim()` still always takes over an existing claim (LWW) rather than
+refusing — but every write path that goes through `apply_ops` now reads a
+snapshot of it first and refuses instead of silently applying, matching the
+client-side exclusivity above with a server backstop a client that ignores
+`data.remoteSelection` can no longer bypass. `undo_last_action` (`/undo`) is
+not covered by this check either.
+
+**Remaining gap:** this is scoped to browser-originated writes only. The
+synchronous MCP write path (`upsert_annotation`/`update_annotation`/
+`delete_annotation`/`apply_layout`/`add_node_refs`, all keyed to the shared
+`mcp-agent` client id — `backend/service/mcp_tools.py`) never goes through
+`apply_ops` and is not checked against `ClaimMap` at all: an MCP agent still
+silently overrides a live human claim exactly as before, the same way it
+already bypasses the client-side exclusivity UI and the `locked` flag today.
+Whether MCP-issued ops should be checked against claims too — an agent is
+often doing the kind of bulk/automated arrangement work a claim exists to
+protect against, but agents also need to act on sessions nobody has open — is
+a genuine, still-open product decision, tracked on
+`task-annotation-shared-session-realtime`; it is deliberately not guessed at
+here. Actor-scoped conditional undo *is* implemented
 (`backend/core/session_activity.py`).
 
 ## Attachment and detach behavior
@@ -671,7 +689,7 @@ rule](#downstream-closure-rule).
 | `vote_dot` | ⚠ move, rotate (right-click) and attach by dragging near a node/annotation; still no create UI or color picker | ✅ generic tool set | ✅ | ✅ | ✅ | ⬜ |
 | `image` | ✅ clipboard paste, OS file drop, and the toolbox's file-picker item all ingest through `POST /api/sessions/{id}/annotations/image` (same pipeline as MCP); move/resize/rotate (right-click)/layer/lock/copy/delete via the generic annotation context menu once created | ✅ `create_image_annotation` ingests; generic create/update refuse image content, and no session annotation write can persist a *new* non-embedded image URL — note the duplicate, saved-view and budget limits in [enforcement](#image-ingest-enforcement) | ✅ | ✅ | ⚠ actor-scoped undo works, but the op is attributed to a dedicated server client id rather than the pasting browser's own (required so the pasting browser's own SSE subscription sees the embedded result instead of dropping it as a self-authored echo — see `_HUMAN_IMAGE_INGEST_CLIENT_ID` in `rest_api.py`), so only that marker's own undo call reverts it, not the pasting browser's | ⬜ no formal pass yet |
 | `freehand` | ⚠ toolbox "Freehand" item arms a one-shot pointer-capture drawing mode (coalesced samples, device pressure when reported, constant-width fallback otherwise, concurrent-input suppressed with a notice); right-click property editor for color/width/smoothing/opacity; a `rotation` on the document model is still never drawn (see Canvas rendering) | ✅ generic tool set — `freehand` has been in `GENERIC_ANNOTATION_TYPES` since #422, so create/update/reorder/lock/delete already worked; `duplicate_annotation` was missing the `translate_freehand_points` call `update_annotation`'s patch builder already had (a duplicated stroke kept its original `points` at a moved envelope position), fixed here | ✅ document model round-trips it | ✅ same op broadcast as every other type — MCP creation now gives a way to exercise this live | ✅ `translate_freehand_points` covers move/undo | ❌ no physical stylus/touch pass — the GUI wiring above is verified only under mouse-event emulation, not a real device |
-| cross-type | — | — | — | ⚠ create/delete/style/geometry publish immediately and note/label text is now live-synced and debounced at 300 ms, split out from the general autosave debounce; selection claims cover every annotation kind and are enforced client-side, but the server's `ClaimMap` is still advisory/LWW with a 30 s TTL rather than rejecting a non-claim-holder's write ([gap](#operation-timing-and-leases)) | ✅ actor-scoped conditional undo (`session_activity.py`) | — |
+| cross-type | — | — | — | ⚠ create/delete/style/geometry publish immediately and note/label text is now live-synced and debounced at 300 ms, split out from the general autosave debounce; selection claims cover every annotation kind, are enforced client-side, and the server now rejects a browser write against a claim someone else holds — but the MCP write path still bypasses `ClaimMap` entirely, a still-open decision ([gap](#operation-timing-and-leases)) | ✅ actor-scoped conditional undo (`session_activity.py`) | — |
 
 ## Downstream closure rule
 

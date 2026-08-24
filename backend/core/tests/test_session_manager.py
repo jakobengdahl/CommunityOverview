@@ -12,7 +12,7 @@ import threading
 import pytest
 
 from backend.core import image_ingest
-from backend.core.session_hub import InProcessEventBus
+from backend.core.session_hub import ClaimMap, InProcessEventBus
 from backend.core.session_store import (
     FileSessionPersistenceBackend,
     InMemorySessionPersistenceBackend,
@@ -22,6 +22,7 @@ from backend.core.session_store import (
 from backend.core.session_manager import (
     AnnotationNotFound,
     AnnotationRecentlyDeleted,
+    ClaimConflict,
     ImageBudgetExceeded,
     LayoutBusy,
     NoUndoableAction,
@@ -334,6 +335,211 @@ class TestClaimOps:
         s = mgr.create_session()
         with pytest.raises(OpError):
             await mgr.apply_ops(s.id, "c1", 0, [{"op": "selection_claimed"}])
+
+
+class TestClaimEnforcement:
+    """Server-side rejection of a browser (``apply_ops``) write to an
+    annotation another client holds a live selection claim on
+    (task-annotation-shared-session-realtime's server-side-claim-enforcement
+    slice). Scoped to the ``apply_ops`` batch path only; the last test in this
+    class documents that the synchronous MCP write path is deliberately left
+    unaffected pending the still-open agent-bypass decision.
+    """
+
+    async def _seeded(self, mgr, ann_id="note-1"):
+        s = mgr.create_session()
+        await mgr.apply_ops(
+            s.id,
+            "c1",
+            0,
+            [
+                {
+                    "op": "annotation_created",
+                    "annotation": {"id": ann_id, "type": "note"},
+                }
+            ],
+        )
+        return s
+
+    async def test_non_holder_update_is_rejected(self):
+        mgr = _manager()
+        s = await self._seeded(mgr)
+        await mgr.apply_ops(
+            s.id, "c1", 0, [{"op": "selection_claimed", "element_ids": ["note-1"]}]
+        )
+        with pytest.raises(ClaimConflict) as exc_info:
+            await mgr.apply_ops(
+                s.id,
+                "c2",
+                0,
+                [
+                    {
+                        "op": "annotation_updated",
+                        "annotation": {
+                            "id": "note-1",
+                            "type": "note",
+                            "text": "hijacked",
+                        },
+                    }
+                ],
+            )
+        assert exc_info.value.annotation_id == "note-1"
+        assert exc_info.value.held_by == "c1"
+        # rejected, so the state never actually changed
+        assert s.state["annotations"][0].get("text") != "hijacked"
+
+    async def test_non_holder_delete_is_rejected(self):
+        mgr = _manager()
+        s = await self._seeded(mgr)
+        await mgr.apply_ops(
+            s.id, "c1", 0, [{"op": "selection_claimed", "element_ids": ["note-1"]}]
+        )
+        with pytest.raises(ClaimConflict):
+            await mgr.apply_ops(
+                s.id, "c2", 0, [{"op": "annotation_deleted", "annotation_id": "note-1"}]
+            )
+        assert len(s.state["annotations"]) == 1
+
+    async def test_claim_holders_own_write_still_succeeds(self):
+        mgr = _manager()
+        s = await self._seeded(mgr)
+        await mgr.apply_ops(
+            s.id, "c1", 0, [{"op": "selection_claimed", "element_ids": ["note-1"]}]
+        )
+        await mgr.apply_ops(
+            s.id,
+            "c1",
+            0,
+            [
+                {
+                    "op": "annotation_updated",
+                    "annotation": {"id": "note-1", "type": "note", "text": "mine"},
+                }
+            ],
+        )
+        assert s.state["annotations"][0]["text"] == "mine"
+
+    async def test_a_new_annotation_id_has_no_claim_to_protect(self):
+        mgr = _manager()
+        s = mgr.create_session()
+        await mgr.apply_ops(
+            s.id, "c1", 0, [{"op": "selection_claimed", "element_ids": ["note-1"]}]
+        )
+        # "note-1" is claimed but does not exist yet — creating it fresh is not
+        # a mutation of anything the claim holder has, so it is not blocked.
+        await mgr.apply_ops(
+            s.id,
+            "c2",
+            0,
+            [
+                {
+                    "op": "annotation_created",
+                    "annotation": {"id": "note-1", "type": "note"},
+                }
+            ],
+        )
+        assert s.state["annotations"][0]["id"] == "note-1"
+
+    async def test_release_reopens_the_write_path(self):
+        mgr = _manager()
+        s = await self._seeded(mgr)
+        await mgr.apply_ops(
+            s.id, "c1", 0, [{"op": "selection_claimed", "element_ids": ["note-1"]}]
+        )
+        await mgr.apply_ops(
+            s.id, "c1", 0, [{"op": "selection_released", "element_ids": ["note-1"]}]
+        )
+        await mgr.apply_ops(
+            s.id,
+            "c2",
+            0,
+            [
+                {
+                    "op": "annotation_updated",
+                    "annotation": {"id": "note-1", "type": "note", "text": "now free"},
+                }
+            ],
+        )
+        assert s.state["annotations"][0]["text"] == "now free"
+
+    async def test_expired_claim_reopens_the_write_path(self):
+        clock = {"t": 0.0}
+        mgr = SessionManager(
+            SessionStore(InMemorySessionPersistenceBackend()),
+            claims=ClaimMap(ttl=30.0, time_fn=lambda: clock["t"]),
+        )
+        s = await self._seeded(mgr)
+        await mgr.apply_ops(
+            s.id, "c1", 0, [{"op": "selection_claimed", "element_ids": ["note-1"]}]
+        )
+        clock["t"] += 31.0  # past the 30s TTL
+        await mgr.apply_ops(
+            s.id,
+            "c2",
+            0,
+            [
+                {
+                    "op": "annotation_updated",
+                    "annotation": {
+                        "id": "note-1",
+                        "type": "note",
+                        "text": "expired claim",
+                    },
+                }
+            ],
+        )
+        assert s.state["annotations"][0]["text"] == "expired claim"
+
+    async def test_a_conflicting_op_rolls_back_the_whole_batch(self):
+        """apply_ops is documented all-or-nothing: an earlier op in the same
+        batch as a rejected one must not have taken effect either."""
+        mgr = _manager()
+        s = await self._seeded(mgr)
+        await mgr.apply_ops(
+            s.id, "c1", 0, [{"op": "selection_claimed", "element_ids": ["note-1"]}]
+        )
+        with pytest.raises(ClaimConflict):
+            await mgr.apply_ops(
+                s.id,
+                "c2",
+                0,
+                [
+                    {"op": "nodes_added", "node_ids": ["n1"]},
+                    {
+                        "op": "annotation_updated",
+                        "annotation": {
+                            "id": "note-1",
+                            "type": "note",
+                            "text": "hijacked",
+                        },
+                    },
+                ],
+            )
+        assert s.state["node_refs"] == []
+
+    async def test_mcp_write_path_is_unaffected_by_a_live_claim(self):
+        """Deliberately unenforced for now — see ClaimConflict's docstring.
+
+        upsert_annotation/update_annotation/delete_annotation are the
+        synchronous MCP tool write path (mcp_tools.py, all keyed to the
+        shared 'mcp-agent' client id) and never go through apply_ops, so
+        they are not checked against ClaimMap at all — an MCP write still
+        silently overrides a live human claim, exactly as before this
+        change. Whether that should change is the open decision named on
+        task-annotation-shared-session-realtime; this test documents and
+        pins the current (unaffected) behaviour rather than guessing at it.
+        """
+        mgr = _manager()
+        s = await self._seeded(mgr)
+        await mgr.apply_ops(
+            s.id, "c1", 0, [{"op": "selection_claimed", "element_ids": ["note-1"]}]
+        )
+        result = mgr.update_annotation(
+            s.id,
+            "mcp-agent",
+            {"id": "note-1", "type": "note", "text": "agent wrote anyway"},
+        )
+        assert result["annotation"]["text"] == "agent wrote anyway"
 
 
 class TestCatchUp:

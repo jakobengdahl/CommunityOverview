@@ -16,7 +16,18 @@ Three concerns:
   colours. Ephemeral, keyed by ``(session_id, client_id)``.
 * ``ClaimMap`` — advisory selection soft-locks with a 30 s TTL (D3). Expiry is
   lazy (pruned on every read/write) so no background task is needed and a
-  departed user never freezes an element.
+  departed user never freezes an element. The map itself stays advisory —
+  ``claim()`` always takes over an existing claim (LWW) and never refuses —
+  but ``session_manager.SessionManager.apply_ops`` now reads a snapshot of it
+  and rejects (``ClaimConflict``) a browser batch op that would mutate an
+  annotation another client currently holds. That check runs only for the
+  ``apply_ops`` batch path (the REST ``/ops`` endpoint): whether an
+  MCP-agent-issued write (the separate synchronous ``upsert_annotation`` /
+  ``update_annotation`` / ``delete_annotation`` path, all keyed to the shared
+  ``mcp-agent`` client id) should also be checked against a live claim, or
+  should keep bypassing it the way it already bypasses the client-side
+  exclusivity UI and the `locked` flag today, is an open product decision —
+  not yet made, not implemented either way.
 """
 
 from __future__ import annotations
