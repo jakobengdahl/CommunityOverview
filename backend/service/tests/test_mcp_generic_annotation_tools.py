@@ -241,6 +241,116 @@ class TestCreateAnnotation:
         assert result["error"] == "invalid_content"
         assert session.state["annotations"] == []
 
+    def test_non_string_shape_is_invalid_content(self, annotation_tools):
+        tools_map, manager = annotation_tools
+        session = manager.create_session()
+
+        result = tools_map["create_annotation"](
+            session_id=session.id, type="shape", x=0, y=0, content={"shape": 7}
+        )
+
+        assert result["success"] is False
+        assert result["error"] == "invalid_content"
+        assert session.state["annotations"] == []
+
+    def test_unrecognised_shape_name_is_accepted(self, annotation_tools):
+        """Only the type of `content.shape` is validated, not membership in
+        the accepted variant set — an unrecognised-but-stringy name is stored
+        (docs/ANNOTATION_CONTRACT.md, backend/DEVELOPMENT.md)."""
+        tools_map, manager = annotation_tools
+        session = manager.create_session()
+
+        result = tools_map["create_annotation"](
+            session_id=session.id, type="shape", x=0, y=0, content={"shape": "star"}
+        )
+
+        assert result["success"] is True
+        assert result["annotation"]["content"]["shape"] == "star"
+
+    def test_non_string_icon_is_invalid_content(self, annotation_tools):
+        tools_map, manager = annotation_tools
+        session = manager.create_session()
+
+        result = tools_map["create_annotation"](
+            session_id=session.id, type="icon", x=0, y=0, content={"icon": ["flag"]}
+        )
+
+        assert result["success"] is False
+        assert result["error"] == "invalid_content"
+
+    @pytest.mark.parametrize("ann_type", ["label", "text", "icon", "vote_dot"])
+    def test_attachment_round_trips_for_every_attachable_type(
+        self, annotation_tools, ann_type
+    ):
+        tools_map, manager = annotation_tools
+        session = manager.create_session()
+
+        result = tools_map["create_annotation"](
+            session_id=session.id,
+            type=ann_type,
+            x=0,
+            y=0,
+            content={"attachment": {"target_id": "node-1", "anchor": "right"}},
+        )
+
+        assert result["success"] is True
+        attachment = result["annotation"]["content"]["attachment"]
+        assert attachment["target_id"] == "node-1"
+        assert attachment["anchor"] == "right"
+
+    def test_malformed_attachment_target_id_is_invalid_content(self, annotation_tools):
+        tools_map, manager = annotation_tools
+        session = manager.create_session()
+
+        result = tools_map["create_annotation"](
+            session_id=session.id,
+            type="label",
+            x=0,
+            y=0,
+            content={"attachment": {"anchor": "top"}},  # missing target_id
+        )
+
+        assert result["success"] is False
+        assert result["error"] == "invalid_content"
+        assert session.state["annotations"] == []
+
+    def test_line_endpoint_attachment_round_trips(self, annotation_tools):
+        tools_map, manager = annotation_tools
+        session = manager.create_session()
+
+        result = tools_map["create_annotation"](
+            session_id=session.id,
+            type="line",
+            x=0,
+            y=0,
+            content={
+                "to": {"x": 100, "y": 0},
+                "end": {"attachment": {"target_id": "node-2"}},
+            },
+        )
+
+        assert result["success"] is True
+        assert (
+            result["annotation"]["content"]["end"]["attachment"]["target_id"]
+            == "node-2"
+        )
+
+    def test_malformed_line_endpoint_is_invalid_content(self, annotation_tools):
+        tools_map, manager = annotation_tools
+        session = manager.create_session()
+
+        result = tools_map["create_annotation"](
+            session_id=session.id,
+            type="line",
+            x=0,
+            y=0,
+            content={"start": {"point": {"x": "nope", "y": 0}}},
+        )
+
+        assert result["success"] is False
+        assert result["error"] == "invalid_content"
+        assert session.state["annotations"] == []
+
     def test_upserts_by_matching_id_and_same_type(self, annotation_tools):
         tools_map, manager = annotation_tools
         session = manager.create_session()
@@ -486,6 +596,54 @@ class TestUpdateAnnotation:
 
         assert result["success"] is False
         assert result["error"] == "revision_conflict"
+
+    def test_malformed_shape_update_is_rejected_without_mutating(
+        self, annotation_tools
+    ):
+        tools_map, manager = annotation_tools
+        session = manager.create_session()
+        created = tools_map["create_annotation"](
+            session_id=session.id,
+            type="shape",
+            x=0,
+            y=0,
+            content={"shape": "rectangle"},
+        )
+
+        result = tools_map["update_annotation"](
+            session_id=session.id,
+            annotation_id=created["annotation"]["id"],
+            content={"shape": {"nope": True}},
+        )
+
+        assert result["success"] is False
+        assert result["error"] == "invalid_content"
+        stored = session.state["annotations"][0]
+        assert stored["shape"] == "rectangle"
+
+    def test_malformed_attachment_update_is_rejected_without_mutating(
+        self, annotation_tools
+    ):
+        tools_map, manager = annotation_tools
+        session = manager.create_session()
+        created = tools_map["create_annotation"](
+            session_id=session.id,
+            type="icon",
+            x=0,
+            y=0,
+            content={"attachment": {"target_id": "node-1"}},
+        )
+
+        result = tools_map["update_annotation"](
+            session_id=session.id,
+            annotation_id=created["annotation"]["id"],
+            content={"attachment": {"target_id": ""}},
+        )
+
+        assert result["success"] is False
+        assert result["error"] == "invalid_content"
+        stored = session.state["annotations"][0]
+        assert stored["attachment"]["target_id"] == "node-1"
 
 
 class TestReorderAnnotation:

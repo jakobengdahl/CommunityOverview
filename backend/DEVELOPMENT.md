@@ -1029,7 +1029,20 @@ list per type — plus the common `x`/`y`/`w`/`h`/`rotation`/`style`/`z`/
 `locked` envelope every type shares. A shape's `content.shape` is one of
 `rectangle`, `circle`, `triangle`, `rhombus`, `hexagon` or `process_arrow`
 (the canvas resolves case and separator variants such as `"Process Arrow"`);
-a name outside that set is stored verbatim and drawn as a rectangle.
+a name outside that set is stored verbatim and drawn as a rectangle — that
+membership is not enforced, only the field's *type* is (a non-string or
+empty `shape`/`icon` is refused as `invalid_content`, mirroring the same
+check backend/core/session_annotations.py's `_validate_generic_content` runs
+for both tools). `text`/`label`/`icon`/`vote_dot` accept a
+`content.attachment = {target_id, target_type, anchor, offset}` binding them
+to a node, and a `line`'s `content.start`/`content.end` may each carry a
+`point` (`{x, y}`) and/or an `attachment`
+(docs/ANNOTATION_CONTRACT.md's "Attachment and detach behavior"); a
+structurally malformed attachment or endpoint (missing/empty `target_id`, a
+non-numeric `offset`) is refused as `invalid_content` rather than stored, on
+both `create_annotation` and `update_annotation`. Both tools refuse the
+malformed write *before* touching the session — a rejected `content` never
+partially mutates the stored annotation.
 `rotation` is in degrees, and every type these generic tools manage stores
 and reports back whatever is written (`note` is not one of them: its own tool
 set takes no `rotation` and `list_sticky_notes` does not report one — see

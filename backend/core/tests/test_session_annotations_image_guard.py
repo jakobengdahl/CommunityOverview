@@ -21,6 +21,7 @@ import pytest
 from backend.core.image_ingest import OPTIMIZED_CONTENT_TYPE
 from backend.core.session_annotations import (
     EMBEDDED_IMAGE_URL_PREFIXES,
+    build_annotation,
     image_annotation_error,
     is_embedded_image_url,
 )
@@ -275,6 +276,36 @@ class TestLegacyRemoteUrlAnnotationsStayUsable:
 
         stored = manager.get_session(session.id).state["annotations"][0]
         assert stored["image"]["url"] == "https://example.com/legacy.png"
+
+
+class TestObjectModelLayerCannotBypassTheIngestGuard:
+    """`build_annotation` — this object-model layer's own generic builder,
+    used by `create_annotation`/`update_annotation` — does not itself
+    special-case `type="image"` (see its docstring: that guard lives one
+    level up, in the MCP tool, which refuses `type="image"` before ever
+    calling this function). This pins that even if a caller reached
+    `build_annotation`/`SessionManager.upsert_annotation` directly with an
+    `image` type and an unvalidated URL — skipping the MCP tool's own
+    early refusal entirely — the `SessionStore` choke point still catches
+    it: there is no path through this layer's create/update operations that
+    persists an unvalidated image URL, not just the one the MCP tool
+    docstring describes.
+    """
+
+    def test_build_annotation_with_image_type_is_still_refused_by_the_store(self):
+        annotation = build_annotation(
+            type="image",
+            x=0,
+            y=0,
+            content={"image": {"url": "https://example.com/x.png"}},
+        )
+        manager = SessionManager(SessionStore(InMemorySessionPersistenceBackend()))
+        session = manager.create_session()
+
+        with pytest.raises(OpError):
+            manager.upsert_annotation(session.id, "client-a", annotation)
+
+        assert manager.get_session(session.id).state["annotations"] == []
 
 
 class TestApplyOpsRejectsUnvalidatedImageWrites:

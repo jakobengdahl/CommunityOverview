@@ -9,6 +9,8 @@ import pytest
 
 from backend.core.session_annotations import (
     ALL_ANNOTATION_TYPES,
+    ANNOTATION_SHAPES,
+    ATTACHABLE_ANNOTATION_TYPES,
     GENERIC_ANNOTATION_TYPES,
     annotation_type_of,
     build_annotation,
@@ -132,6 +134,156 @@ class TestBuildAnnotation:
     def test_content_cannot_smuggle_id(self):
         with pytest.raises(ValueError):
             build_annotation(type="label", x=0, y=0, content={"id": "hijack"})
+
+
+class TestBuildAnnotationContentValidation:
+    """`build_annotation`/`build_annotation_patch` validate the `shape`,
+    `icon`, `attachment` and `line` `start`/`end` payload fields the v1
+    contract type-constrains (docs/ANNOTATION_CONTRACT.md); every other
+    `content` field stays the free-form verbatim payload
+    `TestBuildAnnotation.test_content_is_merged_verbatim` covers.
+    """
+
+    @pytest.mark.parametrize("shape", sorted(ANNOTATION_SHAPES))
+    def test_every_accepted_shape_variant_is_explicit_and_accepted(self, shape):
+        annotation = build_annotation(type="shape", x=0, y=0, content={"shape": shape})
+        assert annotation["shape"] == shape
+
+    def test_unrecognised_but_stringy_shape_is_accepted_verbatim(self):
+        """A shape name outside `ANNOTATION_SHAPES` is not rejected — only its
+        *type* is validated. backend/DEVELOPMENT.md documents that such a name
+        is "stored verbatim and drawn as a rectangle" by the canvas, matching
+        `annotationModel.js`'s `normalizeShapeName` (which keeps rather than
+        discards an unrecognised name)."""
+        annotation = build_annotation(type="shape", x=0, y=0, content={"shape": "star"})
+        assert annotation["shape"] == "star"
+
+    @pytest.mark.parametrize(
+        "bad_shape", [42, ["rectangle"], {"name": "rectangle"}, ""]
+    )
+    def test_non_string_or_empty_shape_is_rejected(self, bad_shape):
+        with pytest.raises(ValueError, match="content.shape"):
+            build_annotation(type="shape", x=0, y=0, content={"shape": bad_shape})
+
+    def test_icon_name_is_accepted_as_a_string(self):
+        annotation = build_annotation(type="icon", x=0, y=0, content={"icon": "flag"})
+        assert annotation["icon"] == "flag"
+
+    def test_icon_open_vocabulary_is_not_restricted(self):
+        """Unlike `shape`, there is no accepted-set constant for `icon` at
+        all: docs/ANNOTATION_CONTRACT.md documents its vocabulary as
+        intentionally open (an unrecognised name still renders, as an
+        abbreviation). Only the field's type is validated."""
+        annotation = build_annotation(
+            type="icon", x=0, y=0, content={"icon": "SomeFutureBootstrapIconName"}
+        )
+        assert annotation["icon"] == "SomeFutureBootstrapIconName"
+
+    @pytest.mark.parametrize("bad_icon", [42, ["flag"], {"name": "flag"}, ""])
+    def test_non_string_or_empty_icon_is_rejected(self, bad_icon):
+        with pytest.raises(ValueError, match="content.icon"):
+            build_annotation(type="icon", x=0, y=0, content={"icon": bad_icon})
+
+    @pytest.mark.parametrize("ann_type", sorted(ATTACHABLE_ANNOTATION_TYPES))
+    def test_well_formed_attachment_is_accepted_for_every_attachable_type(
+        self, ann_type
+    ):
+        content = {
+            "attachment": {
+                "target_id": "node-1",
+                "anchor": "top",
+                "offset": {"x": 1, "y": 2},
+            }
+        }
+        if ann_type == "text":
+            content["text"] = "hi"
+        annotation = build_annotation(type=ann_type, x=0, y=0, content=content)
+        assert annotation["attachment"]["target_id"] == "node-1"
+        assert annotation["attachment"]["anchor"] == "top"
+        assert annotation["attachment"]["offset"] == {"x": 1, "y": 2}
+
+    def test_attachment_can_be_explicitly_cleared_with_none(self):
+        annotation = build_annotation(
+            type="icon", x=0, y=0, content={"attachment": None}
+        )
+        assert annotation["attachment"] is None
+
+    @pytest.mark.parametrize(
+        "bad_attachment",
+        [
+            "node-1",  # not an object
+            {},  # missing target_id
+            {"target_id": ""},  # empty target_id
+            {"target_id": "node-1", "anchor": 5},  # wrong anchor type
+            {"target_id": "node-1", "offset": {"x": 1}},  # incomplete offset
+        ],
+    )
+    def test_malformed_attachment_is_rejected(self, bad_attachment):
+        with pytest.raises(ValueError, match="attachment"):
+            build_annotation(
+                type="icon", x=0, y=0, content={"attachment": bad_attachment}
+            )
+
+    def test_attachment_on_a_non_attachable_type_is_not_validated(self):
+        """`frame`/`shape`/`group` never attach (docs/ANNOTATION_CONTRACT.md);
+        an `attachment`-named field on one of them is just an ordinary
+        free-form content field, not a payload this layer interprets."""
+        annotation = build_annotation(
+            type="frame", x=0, y=0, content={"attachment": "not-even-an-object"}
+        )
+        assert annotation["attachment"] == "not-even-an-object"
+
+    def test_line_endpoints_with_attachment_round_trip(self):
+        content = {
+            "to": {"x": 100, "y": 0},
+            "start": {"point": {"x": 0, "y": 0}},
+            "end": {"attachment": {"target_id": "node-2", "target_type": "node"}},
+        }
+        annotation = build_annotation(type="line", x=0, y=0, content=content)
+        assert annotation["start"]["point"] == {"x": 0, "y": 0}
+        assert annotation["end"]["attachment"]["target_id"] == "node-2"
+
+    @pytest.mark.parametrize(
+        "bad_endpoint",
+        [
+            "node-1",
+            {"point": {"x": "not-a-number", "y": 0}},
+            {"attachment": {"target_id": ""}},
+        ],
+    )
+    @pytest.mark.parametrize("key", ["start", "end"])
+    def test_malformed_line_endpoint_is_rejected(self, key, bad_endpoint):
+        with pytest.raises(ValueError, match=f"content.{key}"):
+            build_annotation(type="line", x=0, y=0, content={key: bad_endpoint})
+
+    def test_patch_only_validates_fields_the_patch_itself_touches(self):
+        """A patch that does not mention `shape`/`icon`/`attachment` must not
+        be rejected because of what the *existing* annotation happens to
+        hold — matches `build_annotation_patch`'s documented "only fields
+        present are touched" contract."""
+        existing = {
+            "id": "icon-1",
+            "type": "icon",
+            "kind": "icon",
+            "position": {"x": 0, "y": 0},
+            "geometry": {"x": 0, "y": 0, "w": 0, "h": 0, "rotation": 0},
+            "icon": "flag",
+        }
+        patch = build_annotation_patch(existing, x=10)
+        assert patch["position"] == {"x": 10, "y": 0}
+        assert "icon" not in patch
+
+    def test_patch_rejects_a_malformed_content_update(self):
+        existing = {
+            "id": "shape-1",
+            "type": "shape",
+            "kind": "shape",
+            "position": {"x": 0, "y": 0},
+            "geometry": {"x": 0, "y": 0, "w": 0, "h": 0, "rotation": 0},
+            "shape": "rectangle",
+        }
+        with pytest.raises(ValueError, match="content.shape"):
+            build_annotation_patch(existing, content={"shape": 99})
 
 
 class TestBuildAnnotationPatch:

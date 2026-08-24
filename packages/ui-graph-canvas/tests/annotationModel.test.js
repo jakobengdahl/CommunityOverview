@@ -144,6 +144,61 @@ describe('annotationModel contract v1', () => {
     expect(shorthand.start.attachment).toEqual(expected);
   });
 
+  it.each(['text', 'label', 'icon', 'vote_dot'])(
+    'normalizes a %s attachment to a node with target_id/target_type/anchor/offset',
+    (type) => {
+      const annotation = createAnnotation({
+        id: `${type}-1`,
+        type,
+        attachment: { target_id: 'node-9', anchor: 'bottom', offset: { x: 4, y: -2 } },
+      });
+      expect(annotation.attachment).toEqual({
+        target_id: 'node-9',
+        target_type: 'node',
+        anchor: 'bottom',
+        offset: { x: 4, y: -2 },
+      });
+    }
+  );
+
+  it.each(['text', 'label', 'icon', 'vote_dot'])(
+    'drops a %s attachment with no target id rather than storing a dangling reference',
+    (type) => {
+      const annotation = createAnnotation({ id: `${type}-2`, type, attachment: { anchor: 'top' } });
+      expect(annotation.attachment).toBeUndefined();
+    }
+  );
+
+  it('accepts targetId/nodeId/target_type as attachment aliases for label/icon/vote_dot', () => {
+    expect(
+      createAnnotation({ id: 'label-alias', type: 'label', attachment: { nodeId: 42 } }).attachment
+        .target_id
+    ).toBe('42');
+    expect(
+      createAnnotation({
+        id: 'icon-alias',
+        type: 'icon',
+        attachment: { targetId: 'n1', targetType: 'annotation' },
+      }).attachment
+    ).toMatchObject({ target_id: 'n1', target_type: 'annotation' });
+  });
+
+  it('normalizes both line endpoint attachments independently (start to a node, end to an annotation)', () => {
+    const annotation = createAnnotation({
+      id: 'line-endpoints',
+      type: 'line',
+      from: { x: 0, y: 0 },
+      to: { x: 100, y: 0 },
+      start: { attachment: { target_id: 'node-a' } },
+      end: { attachment: { target_id: 'label-b', target_type: 'annotation' } },
+    });
+    expect(annotation.start.attachment).toMatchObject({ target_id: 'node-a', target_type: 'node' });
+    expect(annotation.end.attachment).toMatchObject({
+      target_id: 'label-b',
+      target_type: 'annotation',
+    });
+  });
+
   it('drops a line endpoint attachment when the shorthand carries no target id', () => {
     const annotation = createAnnotation({
       id: 'line-3',

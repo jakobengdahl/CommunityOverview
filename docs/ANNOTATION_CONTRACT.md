@@ -203,6 +203,26 @@ neither is type-specific.
   `member_node_ids` and the `group_membership_changed` op, not via
   `attachment`.
 
+**Validation.** `backend/core/session_annotations.py`'s generic annotation
+builder/patcher (used by `create_annotation`/`update_annotation`) rejects a
+structurally malformed `attachment` or `line` `start`/`end` before it ever
+reaches the stored document — a missing/empty `target_id`, a non-object
+`attachment`, or a non-numeric `offset`/`point` all fail with
+`invalid_content` rather than being stored and silently failing to resolve
+later. This is a *structural* check, not a target-existence check: an
+`attachment.target_id` that does not (yet, or ever) name a real node is
+still accepted, matching "attached objects follow the referenced target's
+movement" being a rendering-time concern, not a write-time one. `shape` and
+`icon` get the same treatment for their own field: `content.shape`/
+`content.icon` must be a non-empty string, but — unlike `attachment` — an
+unrecognised *value* is not an error (see the [canvas
+rendering](#canvas-rendering) section on why an unknown shape/icon name is
+stored verbatim rather than rejected). `packages/ui-graph-canvas`'s
+client-side `annotationModel.js` deliberately does **not** mirror this
+rejection: it must stay able to load and render a session's already-stored
+document without throwing, including one written before this validation
+existed, so it normalizes defensively instead of refusing.
+
 ## Image ingest enforcement
 
 Required for every path that can set an `image` annotation's pixel content:
