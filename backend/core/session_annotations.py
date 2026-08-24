@@ -233,6 +233,9 @@ def build_note_annotation(
     font_size: Optional[float] = None,
     w: Optional[float] = None,
     h: Optional[float] = None,
+    rotation: Optional[float] = None,
+    z: Optional[float] = None,
+    locked: bool = False,
     annotation_id: Optional[str] = None,
 ) -> Dict[str, Any]:
     """Build a v1 ``note`` annotation dict for the ``annotation_created`` op.
@@ -243,6 +246,10 @@ def build_note_annotation(
     store assigns one (``SessionStore.apply_state_op`` mints a
     ``secrets.token_hex(8)`` id for a create with no id) — the caller reads the
     assigned id off the op result instead of inventing one.
+
+    ``rotation``/``z``/``locked`` default the same way ``build_annotation``
+    does for the generic types: an omitted ``rotation``/``z`` becomes ``0``,
+    an omitted ``locked`` becomes ``False``.
     """
     size = {
         "w": w if w is not None else DEFAULT_NOTE_SIZE["w"],
@@ -252,11 +259,17 @@ def build_note_annotation(
         "type": NOTE_TYPE,
         "kind": NOTE_TYPE,
         "position": {"x": x, "y": y},
-        "geometry": {"x": x, "y": y, "w": size["w"], "h": size["h"], "rotation": 0},
+        "geometry": {
+            "x": x,
+            "y": y,
+            "w": size["w"],
+            "h": size["h"],
+            "rotation": rotation if rotation is not None else 0,
+        },
         "size": size,
         "text": text or "",
-        "z": 0,
-        "locked": False,
+        "z": z if z is not None else 0,
+        "locked": bool(locked),
     }
     if annotation_id is not None:
         annotation["id"] = annotation_id
@@ -278,6 +291,9 @@ def build_note_patch(
     y: Optional[float] = None,
     w: Optional[float] = None,
     h: Optional[float] = None,
+    rotation: Optional[float] = None,
+    z: Optional[float] = None,
+    locked: Optional[bool] = None,
 ) -> Dict[str, Any]:
     """Build a partial ``annotation_updated`` patch for an existing note.
 
@@ -288,6 +304,11 @@ def build_note_patch(
     size-only resize its current x/y), or the untouched half would be dropped
     rather than preserved. Only fields present here as non-``None`` arguments
     are touched; the rest keep the value already in ``existing``.
+
+    ``rotation``/``z``/``locked`` follow ``build_annotation_patch``'s
+    convention for the same fields: ``rotation`` is folded into ``geometry``
+    alongside any position/size change (so it survives the same shallow
+    merge), ``z``/``locked`` are set directly on the patch when given.
     """
     patch: Dict[str, Any] = {
         "id": existing["id"],
@@ -311,6 +332,7 @@ def build_note_patch(
 
     moved = x is not None or y is not None
     resized = w is not None or h is not None
+    rotated = rotation is not None
     if moved:
         position["x"] = x if x is not None else position.get("x", 0)
         position["y"] = y if y is not None else position.get("y", 0)
@@ -323,8 +345,14 @@ def build_note_patch(
         geometry["w"] = size["w"]
         geometry["h"] = size["h"]
         patch["size"] = size
-    if moved or resized:
+    if rotated:
+        geometry["rotation"] = rotation
+    if moved or resized or rotated:
         patch["geometry"] = geometry
+    if z is not None:
+        patch["z"] = z
+    if locked is not None:
+        patch["locked"] = bool(locked)
     return patch
 
 
@@ -348,6 +376,7 @@ def project_note(annotation: Dict[str, Any]) -> Dict[str, Any]:
         "h": size.get("h", DEFAULT_NOTE_SIZE["h"]),
         "color": annotation.get("color"),
         "font_size": annotation.get("fontSize"),
+        "rotation": geometry.get("rotation", 0),
         "z": annotation.get("z", 0),
         "locked": bool(annotation.get("locked", False)),
         "created_at": annotation.get("created_at"),

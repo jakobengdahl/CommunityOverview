@@ -545,9 +545,9 @@ today: both are toolbox-creatable and both accept a rotation through the
 generic MCP tools or the GUI rotation control described below. `image` needs
 MCP or the GUI control to create the object, but either can set the rotation.
 `note` no longer needs a raw op to reach a non-zero rotation — the GUI control
-below writes it directly — though no MCP tool can rotate one yet (see below).
-Rotation-aware resize handles are an open gap. The capability
-baseline requires it for text/headings, labels/callouts, sticky notes,
+below writes it directly, and `create_sticky_note`/`update_sticky_note` set
+one over MCP too (see below). Rotation-aware resize handles are an open gap.
+The capability baseline requires it for text/headings, labels/callouts, sticky notes,
 images, icons/dots and basic shapes including the process arrow; `frame` is
 drawn too, because the generic tools accept `rotation` for every type with no
 per-type validation (`create_annotation` no longer creates an `image` — #428
@@ -578,18 +578,15 @@ below — no MCP or backend change was needed. This closes `note`'s
 tool-surface gap from the GUI side specifically: `note`'s rotation is now
 reachable without any client posting a raw op by hand.
 
-On the MCP tool surface, rotation is otherwise set through
-`create_annotation`/`update_annotation`, or `create_image_annotation` when
-creating an image. That leaves `note` with no rotation source *on the MCP
-tool surface* specifically: the generic tools refuse note ids, and the
-dedicated sticky-note tools take no `rotation` argument (`build_note_annotation`
-writes `rotation: 0`). The same boundary leaves a note's `z` and `locked`
-unwritable through those tools even though `list_sticky_notes` reports `z`
-and `locked` back. The raw op endpoint is not bounded that way —
-`SessionStore.apply_state_op` accepts an `annotation_created` note carrying
-`geometry.rotation`, `z` and `locked`, and `list_annotations` then reports all
-three. Adding a `rotation` argument to the sticky-note MCP tool set is still a
-tracked gap in the `note` row below, unaffected by the GUI control above.
+On the MCP tool surface, rotation is set through `create_annotation`/
+`update_annotation`, `create_image_annotation` when creating an image, or
+`create_sticky_note`/`update_sticky_note` when creating or editing a note —
+those two take `rotation`, `z` and `locked` arguments (mirroring the generic
+tools' conventions for the same fields), and `list_sticky_notes` reports all
+three back alongside the rest of a note's envelope. The raw op endpoint
+still accepts the same fields directly (`SessionStore.apply_state_op`), but
+that is no longer the only path for a note: this closed the gap tracked in
+the `note` row below.
 
 `z`, `locked` and `rotation` round-trip through every annotation type's canvas
 representation (`overlayToFlowNode`/`flowNodeToOverlay` in
@@ -598,11 +595,30 @@ translators in `frontend/web/src/utils/sessionAnnotations.js`): `z` maps to
 the ReactFlow node's `zIndex`, `locked` maps to `draggable: false`, and
 `rotation` travels on the flow node's `data`. This is the canvas UI's own
 enforcement of `locked` — the server never rejects a write to a locked
-annotation (`reorder_annotation` / `set_annotation_lock` /
-`update_annotation` all still apply). A translator that dropped any of the
-three would make the browser's own next autosave diff the annotation back to
-its `z: 0` / `locked: false` / `rotation: 0` default and silently overwrite
-whatever a collaborator or agent had just set.
+annotation — but which *tool* performs that write differs by type:
+
+- For the generic types (`text`/`label`/`line`/`frame`/`shape`/`icon`/
+  `vote_dot`/`image`), `reorder_annotation`, `set_annotation_lock` and
+  `update_annotation` all still apply regardless of the annotation's current
+  `locked` value.
+- For `note`, those three refuse the id outright — they resolve every id
+  through the generic annotation set (`_find_generic_annotation`), which
+  excludes `note` by design (see [MCP access](#mcp-access)) — so none of the
+  three "still apply" to a note the way the sentence above once implied.
+  `update_sticky_note` is the equivalent write (`rotation`/`z`/`locked`
+  alongside content/position/size), and `create_sticky_note` sets `locked`
+  at creation time; neither tool checks the note's current `locked` value
+  either, so the same "client enforces, server does not" property holds for
+  notes — just through their own dedicated tool, not the generic three.
+- For `group`, none of the three apply — group annotations are not exposed
+  through the generic tool set at all (`create_group_annotation`/
+  `update_group_members`/`delete_group_annotation` are its own dedicated set,
+  and none of them models `z`/`locked`/`rotation`).
+
+A translator that dropped any of `z`/`locked`/`rotation` would make the
+browser's own next autosave diff the annotation back to its `z: 0` /
+`locked: false` / `rotation: 0` default and silently overwrite whatever a
+collaborator or agent had just set.
 
 ## Acceptance matrix
 
@@ -615,7 +631,7 @@ rule](#downstream-closure-rule).
 
 | Type | GUI create/edit | MCP create/edit | Persistence/reload/saved views | Realtime/collaboration | Activity/undo | Accessibility/device |
 |---|---|---|---|---|---|---|
-| `note` | ✅ toolbox create, inline edit, drag/resize, rotate (right-click) | ⚠ sticky note tool set, but it takes no `rotation` argument on create or update — and the generic `reorder_annotation`/`set_annotation_lock` refuse note ids — so a note's `rotation` (and its `z`/`locked`) cannot be set through any MCP tool, though `list_sticky_notes` reports `z` and `locked` back and `list_annotations` reports the rotation; a raw `annotation_created` op or the GUI rotation control can still set it | ✅ | ✅ op broadcast + revision | ✅ actor-scoped undo | ⬜ no formal pass yet |
+| `note` | ✅ toolbox create, inline edit, drag/resize, rotate (right-click) | ✅ `create_sticky_note`/`update_sticky_note` take `rotation`, `z` and `locked` (mirroring the generic tools' fields for the same); `list_sticky_notes` reports all three back — the generic `reorder_annotation`/`set_annotation_lock` still refuse note ids by design, but the dedicated tools now cover the same ground | ✅ | ✅ op broadcast + revision | ✅ actor-scoped undo | ⬜ no formal pass yet |
 | `text` | ⚠ toolbox create (fixed default), rotate (right-click), attach by dragging near a node/annotation; no color/font editor and no way to inspect or clear an attachment other than dragging | ✅ generic tool set | ✅ | ✅ | ✅ | ⬜ |
 | `label` | ✅ toolbox create, inline edit, drag/resize, rotate (right-click), attach by dragging near a node/annotation — previously listed "attach" as done, but it was modeled server-side only and never wired into the canvas translation layer until this slice | ✅ generic tool set | ✅ | ✅ | ✅ | ⬜ |
 | `line` | ⚠ toolbox create, endpoint attach/drag; a `rotation` the MCP tools accept is stored and reported but never drawn | ✅ generic tool set (`arrow` alias) | ✅ | ✅ | ✅ | ⬜ |
