@@ -471,23 +471,28 @@ Each `shape` variant draws its own geometry (`SHAPE_STYLES` in
 
 An `icon` annotation draws the glyph its configured `content.icon` name
 resolves to in the canvas package's icon set
-(`packages/ui-graph-canvas/src/utils/annotationIcons.js`). That set is small:
-it covers **11 of the 75 Bootstrap-icon names in the host app's registry**
-(`ICON_REGISTRY` in `frontend/web/src/components/FloatingToolbar.jsx`, the
-same vocabulary `schema_config.json`'s `icon` field uses), plus everyday
-synonyms. A name that resolves to neither draws the two-character abbreviation
-of itself that the canvas drew before the set existed, rather than collapsing
-into one neutral marker — so no name from the host registry became less
-distinguishable than it was. (The synonym aliases do merge on purpose:
-`circle`/`dot`, `check`/`ok`, `cross`/`x`, `warning`/`alert` and
-`lightbulb`/`idea` each draw one glyph where they used to draw two different
-abbreviations — a meaningful icon is worth more there than two distinct pairs
-of letters.) That is a floor, not a good outcome: most names
-are still an abbreviation and not their icon, and abbreviations collide (the
-registry's 64 uncovered names draw only 36 distinct marks — every
-`FileEarmark*` name draws `Fi`, every `List*` name draws `Li`). Covering the
-whole registry is an open gap, tracked in the [acceptance
-matrix](#acceptance-matrix)'s `icon` row.
+(`packages/ui-graph-canvas/src/utils/annotationIcons.js`). That set now has a
+canonical or aliased entry for **all 75 Bootstrap-icon names in the host
+app's registry** (`ICON_REGISTRY` in
+`frontend/web/src/components/FloatingToolbar.jsx`, the same vocabulary
+`schema_config.json`'s `icon` field uses), each with its own distinct glyph,
+plus everyday synonyms. The canvas package still has no access to the host
+app's react-bootstrap-icons registry — and, separately, every generic
+annotation renders its icon as plain text content rather than a mounted SVG
+component, so reusing the host registry's React components was never a fit
+regardless — so this remains its own self-contained text-glyph set rather
+than a reference to the host's. A name that resolves to neither a canonical
+key nor an alias (i.e. one the host registry does not carry, including any it
+adds after this was written) draws the two-character abbreviation of itself
+that the canvas drew before the set existed, rather than collapsing into one
+neutral marker — so a future gap still never makes a name less distinguishable
+than it was. (The synonym aliases do merge on purpose: `circle`/`dot`,
+`check`/`ok`, `cross`/`x`, `warning`/`alert` and `lightbulb`/`idea` each draw
+one glyph where they used to draw two different abbreviations — a meaningful
+icon is worth more there than two distinct pairs of letters.) Full-registry
+coverage is verified by `packages/ui-graph-canvas/tests/annotationIcons.test.js`,
+which asserts every one of the 75 names resolves to a glyph and that all 75
+glyphs are pairwise distinct.
 
 `geometry.rotation` is drawn as a transform on the rendered element rather
 than on the ReactFlow node wrapper, so hit-testing, dragging and resizing keep
@@ -578,7 +583,7 @@ rule](#downstream-closure-rule).
 | `frame` | ⚠ toolbox create (fixed default size), rotate (right-click); no color editor | ✅ generic tool set | ✅ | ✅ | ✅ | ⬜ |
 | `group` | ✅ toolbar create-group action | ✅ `create_group_annotation` creates or upserts the box — editing an existing group's label/color/geometry goes through this same upsert-by-id path (resend every field you want kept, unlike the generic types' dedicated patch tool) rather than a separate update tool — `update_group_members` adds/removes member ids without a full resend, and `delete_group_annotation` deletes the box (member graph nodes are never cascade-deleted — a group never owns them as annotations) | ✅ | ✅ | ⚠ creating/deleting the group annotation itself is actor-scoped undoable like any other type, but `group_membership_changed` is outside `session_activity.UNDOABLE_OPS` by design — a membership change is not itself undoable through `undo_last_action` | ⬜ |
 | `shape` | ✅ toolbox creates all six variants, each drawn distinctly; right-click editor changes an existing shape's subtype and rotation | ✅ generic tool set (`content.shape`) | ✅ | ✅ | ✅ | ⬜ |
-| `icon` | ⚠ move, rotate (right-click) and attach by dragging near a node/annotation; still no create UI or icon picker — renders the 11 icon names the canvas set shares with the host registry as glyphs, the other 64 as a two-character abbreviation of the name (which collides: 64 names, 36 distinct marks) | ✅ generic tool set | ✅ | ✅ | ✅ | ⬜ |
+| `icon` | ⚠ move, rotate (right-click) and attach by dragging near a node/annotation; still no create UI or icon picker — renders every one of the 75 host-registry icon names as its own distinct glyph (see [Canvas rendering](#canvas-rendering)) | ✅ generic tool set | ✅ | ✅ | ✅ | ⬜ |
 | `vote_dot` | ⚠ move, rotate (right-click) and attach by dragging near a node/annotation; still no create UI or color picker | ✅ generic tool set | ✅ | ✅ | ✅ | ⬜ |
 | `image` | ✅ clipboard paste, OS file drop, and the toolbox's file-picker item all ingest through `POST /api/sessions/{id}/annotations/image` (same pipeline as MCP); move/resize/rotate (right-click)/layer/lock/copy/delete via the generic annotation context menu once created | ✅ `create_image_annotation` ingests; generic create/update refuse image content, and no session annotation write can persist a *new* non-embedded image URL — note the duplicate, saved-view and budget limits in [enforcement](#image-ingest-enforcement) | ✅ | ✅ | ⚠ actor-scoped undo works, but the op is attributed to a dedicated server client id rather than the pasting browser's own (required so the pasting browser's own SSE subscription sees the embedded result instead of dropping it as a self-authored echo — see `_HUMAN_IMAGE_INGEST_CLIENT_ID` in `rest_api.py`), so only that marker's own undo call reverts it, not the pasting browser's | ⬜ no formal pass yet |
 | `freehand` | ❌ no create UI (stylus input not wired); a `rotation` on the document model is never drawn | ✅ generic tool set — `freehand` has been in `GENERIC_ANNOTATION_TYPES` since #422, so create/update/reorder/lock/delete already worked; `duplicate_annotation` was missing the `translate_freehand_points` call `update_annotation`'s patch builder already had (a duplicated stroke kept its original `points` at a moved envelope position), fixed here | ✅ document model round-trips it | ✅ same op broadcast as every other type — MCP creation now gives a way to exercise this live | ✅ `translate_freehand_points` covers move/undo | ❌ no physical stylus/touch pass |
