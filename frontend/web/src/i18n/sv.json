@@ -370,7 +370,8 @@
     "fit_view": "Visa hela grafen",
     "focus_view": "Fokusera på vald nod",
     "exit_focus_view": "Tillbaka till hela grafen",
-    "controls_group": "Kontroller för arbetsytan"
+    "controls_group": "Kontroller för arbetsytan",
+    "image_ingest_failed": "Det gick inte att lägga till bilden"
   },
   "guide": {
     "title": "Guide",
@@ -430,7 +431,8 @@
     "shape_triangle": "Triangel",
     "shape_rhombus": "Romb",
     "shape_hexagon": "Hexagon",
-    "shape_process_arrow": "Processpil"
+    "shape_process_arrow": "Processpil",
+    "image": "Bild"
   },
   "common": {
     "saving": "Sparar...",

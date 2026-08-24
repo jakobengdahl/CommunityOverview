@@ -370,7 +370,8 @@
     "fit_view": "Fit whole graph",
     "focus_view": "Focus on selected node",
     "exit_focus_view": "Back to whole graph",
-    "controls_group": "Canvas controls"
+    "controls_group": "Canvas controls",
+    "image_ingest_failed": "Could not add the image"
   },
   "guide": {
     "title": "Guide",
@@ -430,7 +431,8 @@
     "shape_triangle": "Triangle",
     "shape_rhombus": "Rhombus",
     "shape_hexagon": "Hexagon",
-    "shape_process_arrow": "Process arrow"
+    "shape_process_arrow": "Process arrow",
+    "image": "Image"
   },
   "common": {
     "saving": "Saving...",

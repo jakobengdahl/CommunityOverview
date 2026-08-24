@@ -346,6 +346,11 @@ export class SessionSyncClient {
     // dropped forever instead of applied late.
     this._appliedSeq = 0;
     this._ready = false; // stream has delivered its first event (session exists)
+    // Resolvers for whenReady() callers (image ingest — see that method):
+    // posts directly rather than through the op queue, so it needs its own
+    // wait for the same "session exists server-side" fact _flush() already
+    // guards on, instead of racing the stream's own lazy materialisation.
+    this._readyWaiters = [];
     this._hadSnapshot = false;
     this._source = null;
     this._flushTimer = null;
@@ -554,6 +559,28 @@ export class SessionSyncClient {
       // browser is already retrying, so native reconnect will recover — no action.
     };
     this._source = source;
+  }
+
+  _resolveReadyWaiters() {
+    if (!this._readyWaiters.length) return;
+    const waiters = this._readyWaiters;
+    this._readyWaiters = [];
+    waiters.forEach((resolve) => resolve());
+  }
+
+  /**
+   * Resolve once the stream has delivered its first event and the session is
+   * confirmed to exist server-side — the same fact `_flush()` gates queued ops
+   * on. A caller that posts directly instead of going through the op queue
+   * (image ingest — see App.jsx's handleImageIngest) must wait on this too, or
+   * it can race the session's own lazy materialisation (D13/D14: a session is
+   * never created server-side until its first real write) and 404 on a brand
+   * new session's very first action.
+   * @returns {Promise<void>}
+   */
+  whenReady() {
+    if (this._ready) return Promise.resolve();
+    return new Promise((resolve) => this._readyWaiters.push(resolve));
   }
 
   /** Set the synced baseline without emitting ops (after a load or remote apply). */
@@ -823,6 +850,7 @@ export class SessionSyncClient {
           this._appliedSeq = data.seq; // a snapshot brings the baseline fully up to date
         }
         this._ready = true;
+        this._resolveReadyWaiters();
         this._seedPresence(data.roster, data.claims);
         if (!this._hadSnapshot) {
           this._hadSnapshot = true;
@@ -839,6 +867,7 @@ export class SessionSyncClient {
           this._appliedSeq = data.seq; // onResync below reloads state fully up to this seq
         }
         this._ready = true;
+        this._resolveReadyWaiters();
         this._hadSnapshot = true;
         this._seedPresence(data.roster, data.claims);
         // catch_up only follows a reconnect (since_seq was sent), so always
@@ -949,5 +978,13 @@ export class SessionSyncClient {
       this._pruneTimer = null;
     }
     this._queue = [];
+    // A close() before the client ever became ready (e.g. a session switch
+    // while whenReady() is still pending) must still resolve any waiter, or
+    // its awaiter hangs forever holding this whole client alive. Resolving
+    // (never becoming ready) rather than rejecting lets a caller's own
+    // "did the session change under me?" check after the await — see
+    // App.jsx's handleImageIngest — decide what to do, without every caller
+    // needing a try/catch just for this teardown path.
+    this._resolveReadyWaiters();
   }
 }

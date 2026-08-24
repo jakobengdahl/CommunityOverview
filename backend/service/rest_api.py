@@ -28,6 +28,21 @@ from pydantic import BaseModel, Field, field_validator
 from pydantic import ValidationError as PydanticValidationError
 
 from backend.config.config_loader import RestInterfaceConfig, get_rest_interfaces
+from backend.core.image_ingest import (
+    ImageFetchError,
+    InvalidImageData,
+    OptimizedImageTooLarge,
+    SourceImageTooLarge,
+    UnsupportedImageType,
+    decode_image_data,
+    fetch_image_bytes,
+    optimize_image,
+)
+from backend.core.session_annotations import (
+    annotation_type_of,
+    build_annotation,
+    is_generic_annotation,
+)
 from backend.core.storage_search import MATCH_MODE_SUBSTRING, validate_match_mode
 from backend.runtime.authorization import use_request_authorization
 
@@ -363,6 +378,38 @@ class UndoSessionActionRequest(BaseModel):
     )
 
 
+class IngestSessionImageRequest(BaseModel):
+    """Request model for the human clipboard-paste / file-upload image GUI.
+
+    Mirrors the MCP ``create_image_annotation`` tool's inputs (same underlying
+    ``image_ingest``/``upsert_image_annotation`` pipeline — see
+    ``_register_session_endpoints``'s ``ingest_session_image`` handler), so a
+    human pasting or dropping an image on the canvas goes through the same
+    validated, budget-enforced ingest as an MCP agent.
+    """
+
+    client_id: str = Field(
+        ..., min_length=1, max_length=100, description="Pasting browser's client id"
+    )
+    x: float
+    y: float
+    image_data: Optional[str] = Field(
+        None, description="Image bytes as a data: URL or bare base64"
+    )
+    image_url: Optional[str] = Field(
+        None, description="http(s) URL to fetch server-side, exactly once"
+    )
+    w: Optional[float] = None
+    h: Optional[float] = None
+    rotation: Optional[float] = None
+    alt: Optional[str] = None
+    style: Optional[Dict[str, Any]] = None
+    z: Optional[float] = None
+    locked: bool = False
+    annotation_id: Optional[str] = None
+    expected_revision: Optional[int] = None
+
+
 def _resolve_stream_event(
     event: Dict[str, Any], session_manager, session_id: str
 ) -> Dict[str, Any]:
@@ -379,6 +426,38 @@ def _resolve_stream_event(
     if event.get("type") == "resync":
         return session_manager.catch_up(session_id, None)
     return event
+
+
+# Stable marker distinct from any real browser `graph_client_id` (see
+# frontend/web/src/services/api.js's getClientId), attributing a human GUI
+# image-ingest op's SSE broadcast the same way _MCP_LAYOUT_CLIENT_ID in
+# mcp_tools.py attributes an MCP agent's writes. sessionSyncClient.js drops the
+# SSE echo of an op carrying the sender's own client_id (standard "don't
+# re-apply your own optimistic update" behaviour) — but this op is a server
+# round-trip (validate/optimize/embed), so the pasting browser must see the
+# server's actual outcome over the normal SSE channel, not a client-side
+# guess. Sending the op back under the browser's own client_id would make
+# that echo indistinguishable from a self-authored op and it would be
+# silently dropped, so a distinct marker is required, not optional.
+_HUMAN_IMAGE_INGEST_CLIENT_ID = "human-image-ingest"
+
+
+def _fetch_and_optimize_image(image_data: Optional[str], image_url: Optional[str]):
+    """Run the blocking fetch/decode/optimize steps of image ingest.
+
+    Both a URL fetch (network I/O, up to the ingest module's own timeout) and
+    Pillow's decode/re-encode (CPU-bound) are synchronous; the caller runs this
+    via ``asyncio.to_thread`` so a slow or malicious ``image_url`` cannot stall
+    the event loop for every other request. Mirrors the MCP
+    ``create_image_annotation`` tool's ingest call exactly, so REST and MCP
+    share one ingest path (backend/service/mcp_tools.py).
+    """
+    raw = (
+        fetch_image_bytes(image_url)
+        if image_url is not None
+        else decode_image_data(image_data)
+    )
+    return optimize_image(raw)
 
 
 def _raise_for_access_denied(result: Dict[str, Any]) -> None:
@@ -804,6 +883,8 @@ def _register_session_endpoints(
     legacy ``/sessions/{id}/state|stream`` MCP-push channel, which is unchanged.
     """
     from backend.core.session_manager import (
+        AnnotationRecentlyDeleted,
+        ImageBudgetExceeded,
         LayoutBusy,
         NoUndoableAction,
         OpBatchTooLarge,
@@ -948,6 +1029,149 @@ def _register_session_endpoints(
             raise HTTPException(status_code=413, detail="op batch too large")
         except OpError as exc:
             raise HTTPException(status_code=400, detail=str(exc))
+
+    @router.post("/sessions/{session_id}/annotations/image")
+    async def ingest_session_image(
+        session_id: str, request: IngestSessionImageRequest
+    ) -> Dict[str, Any]:
+        """Human GUI clipboard-paste / file-upload image ingest.
+
+        Shares the exact validate/optimize/embed pipeline the MCP
+        ``create_image_annotation`` tool uses (``image_ingest.py`` +
+        ``SessionManager.upsert_image_annotation`` — see that tool in
+        mcp_tools.py for the sibling error-mapping), so a pasted/uploaded image
+        goes through the same server-side ingest, budgets and SSRF protections
+        as an MCP agent's. It never persists the raw ``image_url``/``image_data``
+        the caller sent, only the optimized embedded copy.
+
+        The response body is informational only — the pasting browser's own
+        canvas update comes back over its SSE subscription (`GET
+        .../stream`), not this response, because the annotation is attributed
+        to `_HUMAN_IMAGE_INGEST_CLIENT_ID` rather than `request.client_id` (see
+        that constant's docstring for why the echo would otherwise be dropped).
+        """
+        if not is_valid_session_id(session_id):
+            raise HTTPException(status_code=400, detail="invalid session_id format")
+        if bool(request.image_data) == bool(request.image_url):
+            raise HTTPException(
+                status_code=400,
+                detail="Give exactly one of image_data or image_url.",
+            )
+
+        if request.annotation_id is not None:
+            session = session_manager.get_session(session_id)
+            if session is not None:
+                existing = next(
+                    (
+                        a
+                        for a in session.state.get("annotations", [])
+                        if a.get("id") == request.annotation_id
+                    ),
+                    None,
+                )
+                if existing is not None and (
+                    not is_generic_annotation(existing)
+                    or annotation_type_of(existing) != "image"
+                ):
+                    raise HTTPException(
+                        status_code=409,
+                        detail=(
+                            f"Annotation id {request.annotation_id!r} already "
+                            "exists as a different type; image upload will not "
+                            "silently convert it."
+                        ),
+                    )
+
+        try:
+            optimized = await asyncio.to_thread(
+                _fetch_and_optimize_image, request.image_data, request.image_url
+            )
+        except SourceImageTooLarge as exc:
+            raise HTTPException(status_code=413, detail=str(exc))
+        except ImageFetchError as exc:
+            raise HTTPException(status_code=422, detail=str(exc))
+        except InvalidImageData as exc:
+            raise HTTPException(status_code=400, detail=str(exc))
+        except UnsupportedImageType as exc:
+            raise HTTPException(status_code=415, detail=str(exc))
+        except OptimizedImageTooLarge as exc:
+            raise HTTPException(status_code=413, detail=str(exc))
+
+        content = {
+            "image": {
+                "url": optimized.data_url,
+                "width": optimized.width,
+                "height": optimized.height,
+            },
+            "alt": request.alt or "",
+        }
+        try:
+            annotation = build_annotation(
+                type="image",
+                x=request.x,
+                y=request.y,
+                w=request.w if request.w is not None else optimized.width,
+                h=request.h if request.h is not None else optimized.height,
+                rotation=request.rotation,
+                content=content,
+                style=request.style,
+                z=request.z,
+                locked=request.locked,
+                annotation_id=request.annotation_id,
+            )
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc))
+
+        # Preserve the pasting browser's real identity as the annotation's
+        # human-visible creator; only the op's attribution (SSE broadcast +
+        # activity actor, passed as the second arg below) uses the dedicated
+        # marker. `SessionStore.apply_state_op` only defaults `created_by` from
+        # the op's client_id when the annotation doesn't already carry one, so
+        # setting it here keeps both facts distinct and correct.
+        annotation["created_by"] = request.client_id
+
+        try:
+            result = session_manager.upsert_image_annotation(
+                session_id,
+                _HUMAN_IMAGE_INGEST_CLIENT_ID,
+                annotation,
+                optimized_image_bytes=len(optimized.data),
+                expected_revision=request.expected_revision,
+            )
+        except RevisionConflict as exc:
+            raise HTTPException(
+                status_code=409,
+                detail=f"expected revision {exc.expected}, session is at {exc.actual}",
+            )
+        except AnnotationRecentlyDeleted:
+            raise HTTPException(
+                status_code=409,
+                detail=(
+                    f"Annotation id {request.annotation_id!r} was just deleted "
+                    "by another collaborator; retry with a different id."
+                ),
+            )
+        except LayoutBusy:
+            raise HTTPException(status_code=409, detail="session busy, retry")
+        except RateLimited:
+            raise HTTPException(status_code=429, detail="rate limit exceeded")
+        except ImageBudgetExceeded as exc:
+            raise HTTPException(status_code=413, detail=str(exc))
+        except SessionNotFound:
+            raise HTTPException(status_code=404, detail="session not found")
+        except OpError as exc:
+            # A same-id collision with a different type slipped past the
+            # pre-check above (a concurrent write landed in the window between
+            # that read and this write — the pre-check is a fast-path UX
+            # nicety, not the enforcement point); SessionStore.apply_state_op
+            # is the actual authority and raises OpError here instead of
+            # silently retyping the annotation.
+            raise HTTPException(status_code=409, detail=str(exc))
+
+        return {
+            "annotation": result.get("annotation"),
+            "revision": result.get("revision"),
+        }
 
     @router.get("/sessions/{session_id}/activity")
     async def get_session_activity(

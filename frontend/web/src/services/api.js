@@ -740,6 +740,66 @@ export function getSessionOpsUrl(sessionId) {
 }
 
 /**
+ * Ingest a human-pasted/uploaded image as a session `image` annotation.
+ *
+ * A plain POST, not a sessionSyncClient op: the server validates, optimizes
+ * and embeds the image (the same pipeline the MCP `create_image_annotation`
+ * tool uses — backend/service/rest_api.py's `ingest_session_image`), so the
+ * result cannot be diffed client-side the way a note or shape can. The
+ * response here is informational only — the annotation the server actually
+ * stored arrives over this browser's own SSE subscription, attributed to a
+ * dedicated server client id rather than `clientId`, specifically so that
+ * echo is not dropped as a self-authored op (see the endpoint's docstring).
+ *
+ * @param {string} sessionId
+ * @param {Object} image
+ * @param {number} image.x
+ * @param {number} image.y
+ * @param {string} [image.imageData] - a data: URL or bare base64 string
+ * @param {string} [image.imageUrl] - an http(s) URL, fetched once server-side
+ * @param {number} [image.w]
+ * @param {number} [image.h]
+ * @param {number} [image.rotation]
+ * @param {string} [image.alt]
+ * @param {Object} [image.style]
+ * @param {number} [image.z]
+ * @param {boolean} [image.locked]
+ * @param {string} [image.annotationId]
+ * @param {number} [image.expectedRevision]
+ * @returns {Promise<{annotation: Object, revision: number}>}
+ */
+export async function ingestSessionImage(sessionId, image) {
+  const response = await fetch(
+    `${SESSIONS_BASE()}/${encodeURIComponent(sessionId)}/annotations/image`,
+    {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        client_id: getClientId(),
+        x: image.x,
+        y: image.y,
+        image_data: image.imageData || null,
+        image_url: image.imageUrl || null,
+        w: image.w ?? null,
+        h: image.h ?? null,
+        rotation: image.rotation ?? null,
+        alt: image.alt || null,
+        style: image.style || null,
+        z: image.z ?? null,
+        locked: !!image.locked,
+        annotation_id: image.annotationId || null,
+        expected_revision: image.expectedRevision ?? null,
+      }),
+    }
+  );
+  if (!response.ok) {
+    const errorData = await response.json().catch(() => ({}));
+    throw new Error(errorData.detail || `Image ingest failed: ${response.status}`);
+  }
+  return response.json();
+}
+
+/**
  * Recent per-session annotation/canvas activity, newest first (backend PR #423:
  * persisted, actor-scoped, bounded to 500 records / 7 days per session).
  * @param {string} sessionId

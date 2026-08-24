@@ -7,7 +7,11 @@ exercised at the unit level in test_session_manager.py; here we assert the HTTP
 contract of the request/response endpoints.
 """
 
+import base64
+import io
+
 from fastapi.testclient import TestClient
+from PIL import Image
 
 
 class TestSessionCrud:
@@ -556,3 +560,295 @@ class TestSessionOpsImageIngestGuard:
         assert resp.status_code == 200
         state = test_app.get(f"/api/sessions/{sid}").json()["state"]
         assert [a["image"]["url"] for a in state["annotations"]] == [self._EMBEDDED]
+
+
+def _png_data_url(size=(4, 4), color=(255, 0, 0)):
+    image = Image.new("RGB", size, color)
+    buffer = io.BytesIO()
+    image.save(buffer, format="PNG")
+    encoded = base64.b64encode(buffer.getvalue()).decode("ascii")
+    return f"data:image/png;base64,{encoded}"
+
+
+def _bmp_data_url():
+    image = Image.new("RGB", (4, 4), (1, 2, 3))
+    buffer = io.BytesIO()
+    image.save(buffer, format="BMP")
+    encoded = base64.b64encode(buffer.getvalue()).decode("ascii")
+    return f"data:image/bmp;base64,{encoded}"
+
+
+class TestSessionImageIngestEndpoint:
+    """POST /api/sessions/{id}/annotations/image — the human GUI's clipboard-
+    paste / file-upload half of image ingest (task-annotation-image-ingest-
+    embedding). Shares the exact validate/optimize/embed pipeline the MCP
+    create_image_annotation tool exercises (unit-tested end to end in
+    backend/service/tests/test_mcp_image_annotation_tool.py); these tests
+    cover the REST endpoint's own glue — error mapping, the id-collision
+    guard, and above all the SSE echo-attribution fix: the op the ingest
+    triggers must broadcast under a client id distinct from the posting
+    browser's own, or sessionSyncClient.js drops it as a self-authored echo
+    and the pasting browser never sees its own paste."""
+
+    def test_ingests_from_image_data_and_persists_the_embedded_copy(
+        self, test_app: TestClient
+    ):
+        sid = test_app.post("/api/sessions", json={}).json()["id"]
+
+        resp = test_app.post(
+            f"/api/sessions/{sid}/annotations/image",
+            json={
+                "client_id": "browser-1",
+                "x": 10,
+                "y": 20,
+                "image_data": _png_data_url(),
+            },
+        )
+
+        assert resp.status_code == 200
+        body = resp.json()
+        annotation = body["annotation"]
+        assert annotation["image"]["url"].startswith("data:image/webp;base64,")
+        assert body["revision"] == 1
+
+        state = test_app.get(f"/api/sessions/{sid}").json()["state"]
+        assert len(state["annotations"]) == 1
+        stored = state["annotations"][0]
+        assert stored["image"]["url"].startswith("data:image/webp;base64,")
+        # The pasting browser's real identity is preserved as the human-visible
+        # creator even though the op that broadcasts it (below) is attributed
+        # to a different, dedicated id.
+        assert stored["created_by"] == "browser-1"
+
+    def test_ingest_op_is_attributed_to_a_marker_distinct_from_the_posting_browser(
+        self, test_app: TestClient
+    ):
+        """The core regression: sessionSyncClient.js drops the SSE echo of an
+        op whose client_id equals the receiving browser's own — so the op this
+        endpoint triggers must NOT carry the posting browser's client_id, or
+        that same browser's own paste would never come back to it over its
+        own subscription.
+
+        The manager-level plumbing that turns a write's client_id into both
+        the SSE broadcast's `client_id` field and the activity log's `actor`
+        is exercised directly (unchanged by this task) in
+        backend/core/tests/test_session_manager.py's
+        TestUpsertImageAnnotation.test_creates_and_broadcasts. What is new
+        here is only that this REST endpoint must call it with a marker, not
+        with the caller's own client_id — proved observably through the
+        activity log (actor) and the per-actor /undo endpoint, without having
+        to hold the SSE stream open over HTTP (which this endpoint's response
+        already makes redundant: see its docstring)."""
+        sid = test_app.post("/api/sessions", json={}).json()["id"]
+        browser_client_id = "browser-1"
+
+        resp = test_app.post(
+            f"/api/sessions/{sid}/annotations/image",
+            json={
+                "client_id": browser_client_id,
+                "x": 0,
+                "y": 0,
+                "image_data": _png_data_url(),
+            },
+        )
+        assert resp.status_code == 200
+
+        # The activity record's actor is exactly the op's broadcast client_id
+        # (SessionStore.apply_state_op: `actor = applied.pop("client_id")`) —
+        # so this is the same fact the SSE frame would have carried.
+        as_browser = test_app.get(
+            f"/api/sessions/{sid}/activity", params={"actor": browser_client_id}
+        ).json()["activity"]
+        assert as_browser == []
+
+        as_marker = test_app.get(
+            f"/api/sessions/{sid}/activity", params={"actor": "human-image-ingest"}
+        ).json()["activity"]
+        assert len(as_marker) == 1
+        assert as_marker[0]["op"] == "annotation_created"
+
+        # Observable consequence for undo too: the posting browser's own undo
+        # must not see this as its own action (D2/actor-scoped undo).
+        undo_as_browser = test_app.post(
+            f"/api/sessions/{sid}/undo", json={"client_id": browser_client_id}
+        )
+        assert undo_as_browser.status_code == 404
+        undo_as_marker = test_app.post(
+            f"/api/sessions/{sid}/undo", json={"client_id": "human-image-ingest"}
+        )
+        assert undo_as_marker.status_code == 200
+        assert undo_as_marker.json()["undone_op"] == "annotation_created"
+
+    def test_ingests_from_image_url_through_the_same_shared_pipeline(
+        self, test_app: TestClient, monkeypatch
+    ):
+        """image_url goes through the identical fetch_image_bytes/optimize_image
+        pipeline the MCP tool uses (backend/core/image_ingest.py) — proves this
+        endpoint does not reimplement ingest, only reuses it."""
+        import httpx2 as httpx
+        from backend.core import image_ingest
+
+        png_bytes = base64.b64decode(_png_data_url().split(",", 1)[1])
+
+        def handler(request):
+            return httpx.Response(
+                200, content=png_bytes, headers={"content-type": "image/png"}
+            )
+
+        class _StubHttpxModule:
+            HTTPError = httpx.HTTPError
+
+            def __init__(self, transport):
+                self._transport = transport
+
+            def Client(self, **kwargs):
+                return httpx.Client(transport=self._transport, **kwargs)
+
+        monkeypatch.setattr(
+            image_ingest, "httpx", _StubHttpxModule(httpx.MockTransport(handler))
+        )
+
+        sid = test_app.post("/api/sessions", json={}).json()["id"]
+        resp = test_app.post(
+            f"/api/sessions/{sid}/annotations/image",
+            json={
+                "client_id": "browser-1",
+                "x": 0,
+                "y": 0,
+                "image_url": "https://example.com/pic.png",
+            },
+        )
+        assert resp.status_code == 200
+        assert resp.json()["annotation"]["image"]["url"].startswith(
+            "data:image/webp;base64,"
+        )
+
+    def test_requires_exactly_one_of_image_data_or_image_url(
+        self, test_app: TestClient
+    ):
+        sid = test_app.post("/api/sessions", json={}).json()["id"]
+
+        neither = test_app.post(
+            f"/api/sessions/{sid}/annotations/image",
+            json={"client_id": "c1", "x": 0, "y": 0},
+        )
+        assert neither.status_code == 400
+
+        both = test_app.post(
+            f"/api/sessions/{sid}/annotations/image",
+            json={
+                "client_id": "c1",
+                "x": 0,
+                "y": 0,
+                "image_data": _png_data_url(),
+                "image_url": "https://example.com/pic.png",
+            },
+        )
+        assert both.status_code == 400
+
+    def test_unsupported_image_type_returns_415_and_persists_nothing(
+        self, test_app: TestClient
+    ):
+        sid = test_app.post("/api/sessions", json={}).json()["id"]
+        resp = test_app.post(
+            f"/api/sessions/{sid}/annotations/image",
+            json={"client_id": "c1", "x": 0, "y": 0, "image_data": _bmp_data_url()},
+        )
+        assert resp.status_code == 415
+        state = test_app.get(f"/api/sessions/{sid}").json()["state"]
+        assert state["annotations"] == []
+
+    def test_invalid_base64_returns_400(self, test_app: TestClient):
+        sid = test_app.post("/api/sessions", json={}).json()["id"]
+        resp = test_app.post(
+            f"/api/sessions/{sid}/annotations/image",
+            json={
+                "client_id": "c1",
+                "x": 0,
+                "y": 0,
+                "image_data": "data:image/png;base64,not-valid-base64!!!",
+            },
+        )
+        assert resp.status_code == 400
+
+    def test_unknown_session_returns_404(self, test_app: TestClient):
+        resp = test_app.post(
+            "/api/sessions/9999-9999/annotations/image",
+            json={"client_id": "c1", "x": 0, "y": 0, "image_data": _png_data_url()},
+        )
+        assert resp.status_code == 404
+
+    def test_invalid_session_id_format_returns_400(self, test_app: TestClient):
+        resp = test_app.post(
+            "/api/sessions/not-a-valid-id/annotations/image",
+            json={"client_id": "c1", "x": 0, "y": 0, "image_data": _png_data_url()},
+        )
+        assert resp.status_code == 400
+
+    def test_annotation_id_colliding_with_a_different_type_is_refused(
+        self, test_app: TestClient
+    ):
+        sid = test_app.post("/api/sessions", json={}).json()["id"]
+        test_app.post(
+            f"/api/sessions/{sid}/ops",
+            json={
+                "client_id": "c1",
+                "base_seq": 0,
+                "ops": [
+                    {
+                        "op": "annotation_created",
+                        "annotation": {
+                            "id": "shared-id",
+                            "type": "note",
+                            "position": {"x": 0, "y": 0},
+                            "text": "hi",
+                        },
+                    }
+                ],
+            },
+        )
+
+        resp = test_app.post(
+            f"/api/sessions/{sid}/annotations/image",
+            json={
+                "client_id": "c1",
+                "x": 0,
+                "y": 0,
+                "image_data": _png_data_url(),
+                "annotation_id": "shared-id",
+            },
+        )
+        assert resp.status_code == 409
+        state = test_app.get(f"/api/sessions/{sid}").json()["state"]
+        assert state["annotations"][0]["type"] == "note"
+
+    def test_replacing_an_existing_image_annotation_by_id_succeeds(
+        self, test_app: TestClient
+    ):
+        sid = test_app.post("/api/sessions", json={}).json()["id"]
+        first = test_app.post(
+            f"/api/sessions/{sid}/annotations/image",
+            json={
+                "client_id": "c1",
+                "x": 0,
+                "y": 0,
+                "image_data": _png_data_url(color=(255, 0, 0)),
+                "annotation_id": "img-1",
+            },
+        )
+        assert first.status_code == 200
+
+        second = test_app.post(
+            f"/api/sessions/{sid}/annotations/image",
+            json={
+                "client_id": "c1",
+                "x": 5,
+                "y": 5,
+                "image_data": _png_data_url(color=(0, 255, 0)),
+                "annotation_id": "img-1",
+            },
+        )
+        assert second.status_code == 200
+        state = test_app.get(f"/api/sessions/{sid}").json()["state"]
+        assert len(state["annotations"]) == 1
+        assert state["annotations"][0]["id"] == "img-1"

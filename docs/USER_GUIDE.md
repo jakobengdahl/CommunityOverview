@@ -202,17 +202,24 @@ and edge data. Select an annotation and press **Delete** to remove it.
 
 A collapsible toolbox is also anchored to the bottom of the canvas. Click **Add
 annotation** to expand it, then pick a type to drop it at the centre of your current view:
-**Note**, **Text**, **Label**, **Frame**, or a **Shape** — rectangle, circle, triangle,
-rhombus, hexagon or process arrow, each drawn as its own filled shape. It is hidden
-while a focus view is active, since annotations are set aside during focus (see
+**Note**, **Text**, **Label**, **Frame**, a **Shape** — rectangle, circle, triangle,
+rhombus, hexagon or process arrow, each drawn as its own filled shape — or **Image**. It
+is hidden while a focus view is active, since annotations are set aside during focus (see
 [9. On a phone](#9-on-a-phone) for how focus view works).
 
-Right-click any Text, Frame or Shape annotation for the same rotate control the note and
-label menus offer; a Shape's menu also has a subtype picker to swap its variant (circle,
-triangle, and so on) after it's been placed. Icon and voting-dot annotations — created
-today only via an MCP agent, not from either toolbox — support the same rotate-and-attach
-behaviour as labels once placed: right-click to rotate, or drag one near a node or another
-annotation to attach it.
+**Image** annotations can be added three ways: pick **Image** in the toolbox to choose a
+file (PNG, JPEG or WebP); paste an image from your clipboard anywhere on the canvas
+(Ctrl/Cmd+V); or drag an image file in from your desktop and drop it. Either way the image
+is uploaded to the server, which validates it, optimises it, and embeds the result — so it
+keeps rendering even if the original file or URL later disappears. It appears on the
+canvas a moment after you paste or drop it, once the server has finished processing.
+
+Right-click any Text, Frame, Shape or Image annotation for the same rotate control the
+note and label menus offer; a Shape's menu also has a subtype picker to swap its variant
+(circle, triangle, and so on) after it's been placed. Icon and voting-dot annotations —
+created today only via an MCP agent, not from either toolbox — support the same
+rotate-and-attach behaviour as labels once placed: right-click to rotate, or drag one near
+a node or another annotation to attach it.
 
 ### 2.6 Saved views
 
