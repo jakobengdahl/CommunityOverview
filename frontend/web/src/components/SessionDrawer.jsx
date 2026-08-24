@@ -219,6 +219,11 @@ function SessionDrawer({
         role={isMobile ? 'dialog' : undefined}
         aria-modal={isMobile ? open : undefined}
         aria-label={t('sessions.title')}
+        // Matches BottomSheet.jsx's sheetRef: makes the container itself a
+        // valid focus target so the `focusable[0] || drawerRef.current`
+        // fallback below can actually move focus into an (unreachable today,
+        // but defensively handled) drawer with no focusable descendants.
+        tabIndex={-1}
       >
         <div className="session-drawer-header">
           <Feather size={18} className="session-drawer-app-icon" />
