@@ -203,38 +203,32 @@ class TestSessionPersistenceAndMcpRoundTrip:
         assert match["color"] == case["fields"]["color"]
         assert match["font_size"] == case["fields"]["fontSize"]
 
-    def test_group_case_round_trips_through_persistence_and_list_annotations(
+    def test_group_case_round_trips_through_mcp_and_persistence(
         self, annotation_tools
     ):
-        """`group` is not exposed through any MCP write tool (its
-        `member_node_ids` are edited via the `group_membership_changed` op —
-        see session_annotations.py's module docstring), so it is created
-        directly through the manager, matching how a group actually reaches
-        a session; `list_annotations` still reads it."""
+        """`group` has its own dedicated MCP tool set
+        (`create_group_annotation`/`update_group_members`,
+        task-mcp-full-annotation-crud) — this drives the fixture's group
+        case through `create_group_annotation` rather than the manager
+        directly, matching how a group actually reaches a session over MCP
+        now that the tool exists."""
         tools_map, manager = annotation_tools
         session = manager.create_session()
         case = next(c for c in CASES if c["type"] == "group")
 
-        manager.upsert_annotation(
-            session.id,
-            "test-client",
-            {
-                "id": case["id"],
-                "type": "group",
-                "kind": "group",
-                "position": {"x": case["x"], "y": case["y"]},
-                "geometry": {
-                    "x": case["x"],
-                    "y": case["y"],
-                    "w": case["w"],
-                    "h": case["h"],
-                    "rotation": 0,
-                },
-                **case["fields"],
-            },
+        created = tools_map["create_group_annotation"](
+            session_id=session.id,
+            x=case["x"],
+            y=case["y"],
+            w=case.get("w"),
+            h=case.get("h"),
+            label=case["fields"]["label"],
+            member_node_ids=case["fields"]["member_node_ids"],
+            annotation_id=case["id"],
         )
 
-        assert manager.get_session(session.id) is not None
+        assert created["success"] is True
+        _assert_contains(created["group"]["content"], case["fields"])
         listed = tools_map["list_annotations"](session_id=session.id, types=["group"])
         match = next(a for a in listed["annotations"] if a["id"] == case["id"])
         assert match["type"] == "group"
@@ -269,3 +263,306 @@ class TestSessionPersistenceAndMcpRoundTrip:
         match = next(a for a in listed["annotations"] if a["id"] == case["id"])
         assert match["type"] == "image"
         _assert_contains(match["content"], case["fields"])
+
+
+class TestSequentialWritesDoNotRollBackEarlierSuccesses:
+    """task-mcp-full-annotation-crud's "batch create/update ... partial
+    success" requirement: one MCP write is one independent tool call over
+    one annotation (there is no multi-item batch envelope on any create/
+    update tool — the atomic, all-or-nothing unit is the raw
+    ``apply_ops``/``POST /sessions/{id}/ops`` op batch, a different and
+    deliberately *non*-partial-success mechanism pinned by
+    ``test_a_poisoned_op_rolls_back_the_whole_batch`` in
+    ``backend/core/tests/test_session_annotations_image_guard.py``). So "a
+    batch where some entries are invalid saves the valid ones and returns a
+    per-object error for the rest" is a property of a *sequence* of
+    independent create/update calls, one per v1 type: a later call's error
+    must never undo an earlier call's success, and the failing call's own
+    error must be reported on its own response rather than swallowed.
+
+    This drives one such sequence across the complete v1 type set — the
+    original non-note types PR #415 covered (`create_annotation`'s
+    text/label/line/frame/shape/icon/vote_dot) plus every type this task
+    added or extended MCP coverage for: `note`, `group`, `image`, and
+    `freehand`. Each type contributes one guaranteed-valid create
+    (interleaved with one guaranteed-invalid create for a *different*
+    reason per type — invalid_content, wrong_type, revision_conflict,
+    invalid_source — so the property holds regardless of which failure kind
+    is in play) and the running state is checked after every single call.
+    """
+
+    def test_valid_creates_across_the_full_type_matrix_survive_interleaved_failures(
+        self, annotation_tools
+    ):
+        tools_map, manager = annotation_tools
+        session = manager.create_session()
+        confirmed_ids: list[str] = []
+
+        def _assert_only_confirmed_ids_present():
+            stored_ids = {a["id"] for a in session.state["annotations"]}
+            assert stored_ids == set(confirmed_ids), (
+                f"expected exactly {confirmed_ids}, session holds {sorted(stored_ids)}"
+            )
+
+        # note: valid create, then an invalid create that collides an id
+        # already used by a different type (wrong_type).
+        ok = tools_map["create_sticky_note"](
+            session_id=session.id, x=0, y=0, text="hi", annotation_id="note-1"
+        )
+        assert ok["success"] is True
+        confirmed_ids.append("note-1")
+        _assert_only_confirmed_ids_present()
+
+        # A different tool's create attempting to reuse note-1's id is the
+        # per-object failure here (wrong_type) — create_sticky_note itself
+        # would treat a repeat of the same id/type as an idempotent upsert,
+        # not a failure, so it would not exercise this property at all.
+        bad = tools_map["create_group_annotation"](
+            session_id=session.id, x=0, y=0, annotation_id="note-1"
+        )
+        assert bad["success"] is False
+        assert bad["error"] == "wrong_type"
+        _assert_only_confirmed_ids_present()
+
+        # text: valid create, then invalid_content (malformed attachment).
+        ok = tools_map["create_annotation"](
+            session_id=session.id, type="text", x=0, y=0, annotation_id="text-1"
+        )
+        assert ok["success"] is True
+        confirmed_ids.append("text-1")
+        _assert_only_confirmed_ids_present()
+
+        bad = tools_map["create_annotation"](
+            session_id=session.id,
+            type="text",
+            x=0,
+            y=0,
+            annotation_id="text-bad",
+            content={"attachment": {"anchor": "top"}},  # missing target_id
+        )
+        assert bad["success"] is False
+        assert bad["error"] == "invalid_content"
+        _assert_only_confirmed_ids_present()
+
+        # label: same invalid_content shape as text.
+        ok = tools_map["create_annotation"](
+            session_id=session.id, type="label", x=0, y=0, annotation_id="label-1"
+        )
+        assert ok["success"] is True
+        confirmed_ids.append("label-1")
+        _assert_only_confirmed_ids_present()
+
+        bad = tools_map["create_annotation"](
+            session_id=session.id,
+            type="label",
+            x=0,
+            y=0,
+            annotation_id="label-bad",
+            content={"attachment": {"target_id": ""}},
+        )
+        assert bad["success"] is False
+        assert bad["error"] == "invalid_content"
+        _assert_only_confirmed_ids_present()
+
+        # line: valid create, then a malformed endpoint.
+        ok = tools_map["create_annotation"](
+            session_id=session.id,
+            type="line",
+            x=0,
+            y=0,
+            annotation_id="line-1",
+            content={"to": {"x": 100, "y": 0}},
+        )
+        assert ok["success"] is True
+        confirmed_ids.append("line-1")
+        _assert_only_confirmed_ids_present()
+
+        bad = tools_map["create_annotation"](
+            session_id=session.id,
+            type="line",
+            x=0,
+            y=0,
+            annotation_id="line-bad",
+            content={"start": {"point": {"x": "nope", "y": 0}}},
+        )
+        assert bad["success"] is False
+        assert bad["error"] == "invalid_content"
+        _assert_only_confirmed_ids_present()
+
+        # frame: valid create, then a revision_conflict (frame has no
+        # type-specific content validation to trip).
+        ok = tools_map["create_annotation"](
+            session_id=session.id, type="frame", x=0, y=0, annotation_id="frame-1"
+        )
+        assert ok["success"] is True
+        confirmed_ids.append("frame-1")
+        _assert_only_confirmed_ids_present()
+
+        bad = tools_map["create_annotation"](
+            session_id=session.id,
+            type="frame",
+            x=0,
+            y=0,
+            annotation_id="frame-bad",
+            expected_revision=0,
+        )
+        assert bad["success"] is False
+        assert bad["error"] == "revision_conflict"
+        _assert_only_confirmed_ids_present()
+
+        # group: valid create, then invalid_content (non-list member_node_ids).
+        ok = tools_map["create_group_annotation"](
+            session_id=session.id,
+            x=0,
+            y=0,
+            annotation_id="group-2",
+            member_node_ids=["node-a"],
+        )
+        assert ok["success"] is True
+        confirmed_ids.append("group-2")
+        _assert_only_confirmed_ids_present()
+
+        bad = tools_map["create_group_annotation"](
+            session_id=session.id,
+            x=0,
+            y=0,
+            annotation_id="group-bad",
+            member_node_ids="node-a",
+        )
+        assert bad["success"] is False
+        assert bad["error"] == "invalid_content"
+        _assert_only_confirmed_ids_present()
+
+        # shape: valid create, then invalid_content (non-string shape).
+        ok = tools_map["create_annotation"](
+            session_id=session.id,
+            type="shape",
+            x=0,
+            y=0,
+            annotation_id="shape-2",
+            content={"shape": "rectangle"},
+        )
+        assert ok["success"] is True
+        confirmed_ids.append("shape-2")
+        _assert_only_confirmed_ids_present()
+
+        bad = tools_map["create_annotation"](
+            session_id=session.id,
+            type="shape",
+            x=0,
+            y=0,
+            annotation_id="shape-bad",
+            content={"shape": 123},
+        )
+        assert bad["success"] is False
+        assert bad["error"] == "invalid_content"
+        _assert_only_confirmed_ids_present()
+
+        # icon: valid create, then invalid_content (non-string icon).
+        ok = tools_map["create_annotation"](
+            session_id=session.id,
+            type="icon",
+            x=0,
+            y=0,
+            annotation_id="icon-1",
+            content={"icon": "flag"},
+        )
+        assert ok["success"] is True
+        confirmed_ids.append("icon-1")
+        _assert_only_confirmed_ids_present()
+
+        bad = tools_map["create_annotation"](
+            session_id=session.id,
+            type="icon",
+            x=0,
+            y=0,
+            annotation_id="icon-bad",
+            content={"icon": ["flag"]},
+        )
+        assert bad["success"] is False
+        assert bad["error"] == "invalid_content"
+        _assert_only_confirmed_ids_present()
+
+        # vote_dot: valid create, then invalid_content (malformed attachment).
+        ok = tools_map["create_annotation"](
+            session_id=session.id,
+            type="vote_dot",
+            x=0,
+            y=0,
+            annotation_id="vote-dot-1",
+            content={"value": 3},
+        )
+        assert ok["success"] is True
+        confirmed_ids.append("vote-dot-1")
+        _assert_only_confirmed_ids_present()
+
+        bad = tools_map["create_annotation"](
+            session_id=session.id,
+            type="vote_dot",
+            x=0,
+            y=0,
+            annotation_id="vote-dot-bad",
+            content={"attachment": {"target_id": ""}},
+        )
+        assert bad["success"] is False
+        assert bad["error"] == "invalid_content"
+        _assert_only_confirmed_ids_present()
+
+        # image: valid create through ingest, then invalid_source (neither
+        # image_data nor image_url given).
+        png_data_url = (
+            "data:image/png;base64,"
+            "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR4"
+            "2mNk+A8AAQUBAScY42YAAAAASUVORK5CYII="
+        )
+        ok = tools_map["create_image_annotation"](
+            session_id=session.id,
+            x=0,
+            y=0,
+            image_data=png_data_url,
+            annotation_id="image-1",
+        )
+        assert ok["success"] is True
+        confirmed_ids.append("image-1")
+        _assert_only_confirmed_ids_present()
+
+        bad = tools_map["create_image_annotation"](
+            session_id=session.id, x=0, y=0, annotation_id="image-bad"
+        )
+        assert bad["success"] is False
+        assert bad["error"] == "invalid_source"
+        _assert_only_confirmed_ids_present()
+
+        # freehand: valid create, then a revision_conflict (freehand also has
+        # no type-specific content validation to trip).
+        ok = tools_map["create_annotation"](
+            session_id=session.id,
+            type="freehand",
+            x=0,
+            y=0,
+            annotation_id="freehand-1",
+            content={"points": [{"x": 0, "y": 0}]},
+        )
+        assert ok["success"] is True
+        confirmed_ids.append("freehand-1")
+        _assert_only_confirmed_ids_present()
+
+        bad = tools_map["create_annotation"](
+            session_id=session.id,
+            type="freehand",
+            x=0,
+            y=0,
+            annotation_id="freehand-bad",
+            content={"points": [{"x": 0, "y": 0}]},
+            expected_revision=0,
+        )
+        assert bad["success"] is False
+        assert bad["error"] == "revision_conflict"
+        _assert_only_confirmed_ids_present()
+
+        # Final check: every type in the matrix contributed exactly one
+        # surviving annotation, and no invalid call from any later type
+        # reached back and undid an earlier type's success.
+        assert len(confirmed_ids) == 11  # every v1 type except the second shape variant
+        listed = tools_map["list_annotations"](session_id=session.id)
+        assert {a["id"] for a in listed["annotations"]} == set(confirmed_ids)

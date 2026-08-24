@@ -152,6 +152,27 @@ undo/redo. Invalid operations must fail without partially mutating the
 document. Agents and GUI code use the same model-space coordinates and
 operation semantics.
 
+**Two different meanings of "batch," on purpose.** A raw
+`POST /sessions/{id}/ops` call (`SessionManager.apply_ops`) carries a list of
+ops and applies them **atomically**: `test_a_poisoned_op_rolls_back_the_whole_batch`
+(`backend/core/tests/test_session_annotations_image_guard.py`) pins that a
+valid op earlier in that list does not survive a later op's refusal — the
+whole list commits or none of it does, because a partial commit there would
+leave already-connected browsers and a retried client's next attempt
+diverged from each other. None of the create/update MCP tools take a list of
+annotations, though — `create_annotation`/`update_annotation`/
+`create_group_annotation`/etc. each act on exactly one annotation per call,
+so an agent creating several annotations makes several independent tool
+calls, each with its own success/failure. For *that* kind of "batch" — a
+sequence of independent writes, not one atomic op list — a later call's
+failure must never undo an earlier call's success, and it does not: each
+tool call commits (or does not) on its own, so the property holds
+structurally rather than needing new atomicity semantics that would
+conflict with `apply_ops`'s. See
+`TestSequentialWritesDoNotRollBackEarlierSuccesses` in
+`backend/core/tests/test_annotation_type_matrix.py` for this verified across
+the complete v1 type set.
+
 ### Operation timing and leases
 
 Required collaboration semantics for every v1 type:
@@ -308,24 +329,47 @@ go through the session op protocol (`annotation_created` / `annotation_updated`
 (`expected_revision` / `revision_conflict`) — see
 `backend/DEVELOPMENT.md`'s "Sticky note tools" section for the full contract.
 
-The rest of the v1 model except `group` and `freehand` — `text`, `label`,
-`line` (`arrow` accepted as a legacy alias), `frame`, `shape`, `icon`,
-`vote_dot`, `image` — is exposed the same way through a generic tool set:
+The rest of the v1 model except `group` — `text`, `label`, `line` (`arrow`
+accepted as a legacy alias), `frame`, `shape`, `icon`, `vote_dot`, `image`,
+`freehand` — is exposed the same way through a generic tool set:
 `list_annotations` / `create_annotation` / `update_annotation` /
 `delete_annotation` / `reorder_annotation` / `set_annotation_lock` /
 `duplicate_annotation`, over the same session op protocol and
-optimistic-concurrency contract. `note` stays on its own dedicated tool set;
-`group` (node-membership boxes) is not exposed through either — its
-`member_node_ids` are edited through the `group_membership_changed` op,
-which has no MCP tool. **`freehand` has no MCP tool at all yet** — it can be
-read via `list_annotations` (it round-trips through the document model) but
-cannot be created, updated or deleted headlessly; see the acceptance matrix.
+optimistic-concurrency contract. This includes `freehand`: an earlier
+revision of this document claimed it had no MCP tool at all, but
+`freehand` has been a member of `GENERIC_ANNOTATION_TYPES`
+(`backend/core/session_annotations.py`) since the type was added (#422),
+which was already enough for every generic tool above to create, read,
+move (translating its `points`, same as a `line`'s endpoints), restyle,
+reorder, lock, duplicate and delete one — that claim was simply wrong, not
+a gap that has since closed. `duplicate_annotation` did have a real, narrower
+gap this task closed: it translated a `line`'s endpoints by the given
+offset but not a `freehand` stroke's `points`, so a duplicated freehand
+annotation kept its original geometry at a moved envelope position; it now
+calls `translate_freehand_points` the same way `update_annotation`'s patch
+builder already did.
+
+`note` stays on its own dedicated tool set; `group` (node-membership boxes)
+has its own dedicated tool set too: `create_group_annotation` creates or
+upserts the box (label/description/color/geometry/an optional starting
+`member_node_ids`), and `update_group_members` adds and/or removes member
+node ids by wrapping the `group_membership_changed` op — resolving the
+current list and the requested change under the session lock so a caller
+does not have to read-modify-write the full membership itself. Membership is
+deliberately kept off `create_group_annotation`'s upsert-by-id path unless a
+caller explicitly passes `member_node_ids`: the op merges by shallow
+`dict.update`, so an upsert that always reset membership to `[]` when
+omitted would fight `update_group_members`'s own writes any time a caller
+recreated a group just to change its label or color. There is no MCP tool
+yet to delete a group box itself (only its creation and membership) — see
+the acceptance matrix.
+
 Neither tool set lets a write silently convert one annotation type into
-another: creating or updating across the note/generic boundary, or replacing
-an existing generic annotation's id with a different type, is refused rather
-than applied. See `backend/DEVELOPMENT.md`'s "Generic annotation tools"
-section for the full contract, including the per-type `content` payload
-shape.
+another: creating or updating across the note/generic/group boundary, or
+replacing an existing generic annotation's id with a different type, is
+refused rather than applied. See `backend/DEVELOPMENT.md`'s "Generic
+annotation tools" and "Group annotation tools" sections for the full
+contract, including the per-type `content` payload shape.
 
 `image` is created through its own dedicated tool instead —
 `create_image_annotation`, the only tool that sets image pixel content
@@ -350,8 +394,10 @@ not just mouse. V1 acceptance for `freehand` requires testing on at least
 one physical touch/stylus device (not only a mouse-driven emulator), because
 pointer pressure, palm rejection and coalesced-event sampling do not behave
 identically under emulation. No such device acceptance pass exists yet —
-`freehand` also has no creation entry point (GUI or MCP) to test end-to-end
-today, so device acceptance cannot be scheduled ahead of that.
+`freehand` has an MCP creation entry point (the generic tool set), but no
+*GUI* creation entry point (stylus input is not wired), and a physical-device
+pass is inherently about real pointer input reaching the canvas, not headless
+creation — so device acceptance still cannot be scheduled ahead of that.
 
 ## Canvas rendering
 
@@ -470,12 +516,12 @@ rule](#downstream-closure-rule).
 | `label` | ✅ toolbox create, inline edit, drag/resize, attach | ✅ generic tool set | ✅ | ✅ | ✅ | ⬜ |
 | `line` | ⚠ toolbox create, endpoint attach/drag; a `rotation` the MCP tools accept is stored and reported but never drawn | ✅ generic tool set (`arrow` alias) | ✅ | ✅ | ✅ | ⬜ |
 | `frame` | ⚠ toolbox create (fixed default size), no color editor | ✅ generic tool set | ✅ | ✅ | ✅ | ⬜ |
-| `group` | ✅ toolbar create-group action | ❌ no MCP tool (by design — `group_membership_changed` op only) | ✅ | ✅ | ✅ | ⬜ |
+| `group` | ✅ toolbar create-group action | ⚠ `create_group_annotation` creates/upserts the box, `update_group_members` adds/removes member ids; no MCP tool deletes a group box itself, and editing an existing group's own label/color/geometry is only possible by a full upsert (no partial-update tool the way generic types have) | ✅ | ✅ | ⚠ creating/deleting the group annotation itself is actor-scoped undoable like any other type, but `group_membership_changed` is outside `session_activity.UNDOABLE_OPS` by design — a membership change is not itself undoable through `undo_last_action` | ⬜ |
 | `shape` | ⚠ toolbox creates all six variants, each drawn distinctly; no editor to change an existing shape's subtype | ✅ generic tool set (`content.shape`) | ✅ | ✅ | ✅ | ⬜ |
 | `icon` | ❌ move only — no create UI or icon picker; renders the 11 icon names the canvas set shares with the host registry as glyphs, the other 64 as a two-character abbreviation of the name (which collides: 64 names, 36 distinct marks) | ✅ generic tool set | ✅ | ✅ | ✅ | ⬜ |
 | `vote_dot` | ❌ render/move only, no create UI or color picker | ✅ generic tool set | ✅ | ✅ | ✅ | ⬜ |
 | `image` | ❌ no paste/upload UI | ✅ `create_image_annotation` ingests; generic create/update refuse image content, and no session annotation write can persist a *new* non-embedded image URL — note the duplicate, saved-view and budget limits in [enforcement](#image-ingest-enforcement) | ✅ | ✅ | ✅ | ⬜ |
-| `freehand` | ❌ no create UI (stylus input not wired); a `rotation` on the document model is never drawn | ❌ no MCP tool | ✅ document model round-trips it | ⚠ no creation path to exercise it live | ✅ `translate_freehand_points` covers move/undo | ❌ no physical stylus/touch pass |
+| `freehand` | ❌ no create UI (stylus input not wired); a `rotation` on the document model is never drawn | ✅ generic tool set — `freehand` has been in `GENERIC_ANNOTATION_TYPES` since #422, so create/update/reorder/lock/delete already worked; `duplicate_annotation` was missing the `translate_freehand_points` call `update_annotation`'s patch builder already had (a duplicated stroke kept its original `points` at a moved envelope position), fixed here | ✅ document model round-trips it | ✅ same op broadcast as every other type — MCP creation now gives a way to exercise this live | ✅ `translate_freehand_points` covers move/undo | ❌ no physical stylus/touch pass |
 | cross-type | — | — | — | ⚠ ops publish immediately, but the 300 ms text debounce and release-time-only geometry are not split out from the general autosave debounce, and edit leases are advisory/LWW with a 30 s TTL rather than exclusive ([gap](#operation-timing-and-leases)) | ✅ actor-scoped conditional undo (`session_activity.py`) | — |
 
 ## Downstream closure rule

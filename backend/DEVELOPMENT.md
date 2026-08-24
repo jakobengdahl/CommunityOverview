@@ -1005,22 +1005,22 @@ an id that names a different annotation type (e.g. a `line`) reports
 `delete_annotation` / `reorder_annotation` / `set_annotation_lock` /
 `duplicate_annotation` extend MCP annotation access to the rest of the v1
 model: `text`, `label`, `line` (`arrow` accepted as a legacy alias), `frame`,
-`shape`, `icon`, `vote_dot` — plus `image`, for everything except creating
-one (see the image annotation tool below). They share the sticky-note tools'
-session/revision contract — model-space coordinates, `revision` /
-`expected_revision` optimistic concurrency, `revision_conflict` on a stale
-write — over the same annotation document.
+`shape`, `icon`, `vote_dot`, `freehand` — plus `image`, for everything except
+creating one (see the image annotation tool below). They share the
+sticky-note tools' session/revision contract — model-space coordinates,
+`revision` / `expected_revision` optimistic concurrency, `revision_conflict`
+on a stale write — over the same annotation document.
 
-`note` keeps its own dedicated tool set above; `group` (node-membership
-boxes) is not exposed through either tool set, since editing
-`member_node_ids` goes through the `group_membership_changed` op. Both
-boundaries are enforced the same way `create_sticky_note` already guards
-notes: `create_annotation` refuses to create/replace a `note` or `group` id
-(`wrong_type`), and refuses to silently convert an existing generic
-annotation into a different type at the same id (also `wrong_type` — delete
-it first or use a new id); the other generic tools resolve `annotation_id`
-against the generic type set only, so a note or group id reports `not_found`
-rather than being edited across the tool-set boundary.
+`note` keeps its own dedicated tool set above and `group` (node-membership
+boxes) keeps its own below ("Group annotation tools"); neither is exposed
+through this generic tool set. Both boundaries are enforced the same way
+`create_sticky_note` already guards notes: `create_annotation` refuses to
+create/replace a `note` or `group` id (`wrong_type`), and refuses to
+silently convert an existing generic annotation into a different type at
+the same id (also `wrong_type` — delete it first or use a new id); the
+other generic tools resolve `annotation_id` against the generic type set
+only, so a note or group id reports `not_found` rather than being edited
+across the tool-set boundary.
 
 `create_annotation` takes a per-type `content` dict for the payload fields
 that differ by type (a line's `from`/`to`/arrows, a label's `text`, a
@@ -1056,10 +1056,44 @@ rotation on those two as something a viewer can see.
 `content`; `reorder_annotation` and
 `set_annotation_lock` are single-purpose wrappers over `z` and `locked`
 respectively; `duplicate_annotation` copies an existing annotation
-(including its `content`/`style`) to a new id at an optional offset.
+(including its `content`/`style`) to a new id at an optional offset,
+translating a `line`'s endpoints and a `freehand` stroke's `points` by the
+same `dx`/`dy` as the envelope so the copy keeps its shape instead of the
+stroke geometry staying behind while the envelope moves.
 `list_annotations` reads across every v1 type, including `note` and `group`,
 so an assistant gets one full inventory of the session's annotation
 document; pass `types` to filter it.
+
+#### Group annotation tools
+
+`create_group_annotation` creates, or replaces by id (an upsert), a `group`
+(node-membership box) annotation: `label`/`description`/`color` plus the
+common `x`/`y`/`w`/`h`/`z`/`locked` envelope, and optionally a starting
+`member_node_ids` list. `update_group_members` is the ongoing way to manage
+membership: given `add_member_node_ids` and/or `remove_member_node_ids`, it
+reads the group's current `member_node_ids` under the session lock, applies
+the additions and removals (a duplicate add is a no-op, a remove of an
+absent id is dropped without error), and writes the merged result as one
+`group_membership_changed` op — so a caller adding one member does not have
+to fetch and resend the whole current list, and two calls in the same
+window each read a fresh list rather than clobbering each other's change.
+
+`create_group_annotation`'s upsert path deliberately does **not** reset
+`member_node_ids` to `[]` when the argument is omitted, unlike every other
+field: the op is a shallow `dict.update`, so if omitting `member_node_ids`
+always meant "clear it," calling this tool again just to rename or
+recolor an existing group would silently wipe out membership
+`update_group_members` had set. Pass an explicit list (`[]` included) to
+set membership from this tool instead.
+
+Both tools resolve `annotation_id`/`group_id` against `group`-typed
+annotations only — a note or generic-type id is refused (`wrong_type` on
+create, `not_found` on `update_group_members`), matching the note/generic
+boundary above. There is no MCP tool yet to delete a group box itself, and
+`group_membership_changed` is outside `session_activity.UNDOABLE_OPS`
+(see that module's docstring), so a membership change made through
+`update_group_members` is not itself undoable through `undo_last_action` —
+creating or deleting the group annotation is, like any other type.
 
 #### Image annotation tool
 

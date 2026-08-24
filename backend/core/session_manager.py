@@ -1049,6 +1049,73 @@ class SessionManager:
         applied = self._apply_op_sync(session, session_id, client_id, op)
         return {"applied": applied, "revision": session.seq}
 
+    def set_group_members(
+        self,
+        session_id: str,
+        client_id: str,
+        group_id: str,
+        member_node_ids: List[str],
+        *,
+        expected_revision: Optional[int] = None,
+    ) -> Dict[str, Any]:
+        """Replace a ``group`` annotation's ``member_node_ids`` **synchronously**
+        (the MCP write path for group membership).
+
+        Applies the same ``group_membership_changed`` op the browser's own
+        add/remove-from-group actions use. ``SessionStore.apply_state_op``
+        requires the op to name an id that already exists as a ``group``
+        annotation and raises ``OpError`` otherwise — this method does not
+        pre-check that itself, matching how ``update_annotation``/
+        ``delete_annotation`` above let the store be the single place that
+        judges existence. Shares ``apply_layout``'s atomicity contract; see
+        its docstring for the ``LayoutBusy`` rationale.
+
+        Unlike the annotation write methods above, ``group_membership_changed``
+        is deliberately outside ``session_activity.UNDOABLE_OPS`` (see that
+        module's docstring), so this write is not undoable through
+        ``undo_last_action``.
+        """
+        if not is_valid_session_id(session_id):
+            raise SessionNotFound()
+        if not isinstance(client_id, str) or not client_id:
+            raise OpError("'client_id' is required")
+        if not isinstance(group_id, str) or not group_id:
+            raise OpError("'group_id' is required")
+        if not isinstance(member_node_ids, list) or not all(
+            isinstance(m, str) for m in member_node_ids
+        ):
+            raise OpError("'member_node_ids' must be a list of strings")
+        if len(json.dumps(member_node_ids)) > self._max_op_batch_bytes:
+            raise OpBatchTooLarge()
+        if not self._bucket.consume(client_id, 1):
+            raise RateLimited()
+
+        if self._lock(session_id).locked():
+            raise LayoutBusy()
+
+        session = self.store.get(session_id)
+        if session is None:
+            raise SessionNotFound()
+        if expected_revision is not None and expected_revision != session.seq:
+            raise RevisionConflict(expected_revision, session.seq)
+
+        op: Dict[str, Any] = {
+            "op": "group_membership_changed",
+            "group_id": group_id,
+            "member_node_ids": member_node_ids,
+            "client_id": client_id,
+        }
+        applied = self._apply_op_sync(session, session_id, client_id, op)
+        group = next(
+            (
+                a
+                for a in session.state.get("annotations", [])
+                if a.get("id") == group_id
+            ),
+            None,
+        )
+        return {"applied": applied, "revision": session.seq, "annotation": group}
+
     def list_activity(
         self, session_id: str, actor: Optional[str] = None, limit: int = 50
     ) -> List[Dict[str, Any]]:

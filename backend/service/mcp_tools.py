@@ -53,10 +53,13 @@ from backend.core.session_annotations import (
     annotation_type_of,
     build_annotation,
     build_annotation_patch,
+    build_group_annotation,
     is_generic_annotation,
+    is_group,
     normalize_generic_type,
     project_annotation,
     resolve_annotation_type_alias,
+    translate_freehand_points,
     translate_line_endpoints,
 )
 from backend.config.config_loader import build_session_url
@@ -1874,8 +1877,8 @@ def register_mcp_tools(
     # writes share their optimistic-concurrency contract (`expected_revision`
     # / `revision_conflict`). Only the `note` annotation type is exposed here;
     # the rest of the v1 types (line, frame, shape, ...) have their own
-    # generic tool set below ("Generic Annotations"); `group` is out of
-    # scope for both.
+    # generic tool set below ("Generic Annotations"); `group` has its own
+    # dedicated tool set too (create_group_annotation/update_group_members).
 
     def _find_note(session, annotation_id: str):
         for annotation in session.state.get("annotations", []):
@@ -2332,13 +2335,15 @@ def register_mcp_tools(
     # These tools extend note-only MCP annotation access to the rest of the
     # v1 model: text, label, line/arrow, frame, shape, icon, vote_dot, image.
     # `note` keeps its dedicated tool set above (list_sticky_notes / ...);
-    # `group` (node-membership boxes) is out of scope — its membership is
-    # edited through the group_membership_changed op, not exposed over MCP,
-    # and folding it into a generic content patch would risk silently
-    # dropping or corrupting member_node_ids. Reading/writing a note or
-    # group id through these tools is refused with "wrong_type"/"not_found",
-    # mirroring create_sticky_note's existing cross-type guard, so a type is
-    # never silently converted into another by either tool set.
+    # `group` (node-membership boxes) keeps its own dedicated tool set below
+    # (create_group_annotation / update_group_members) — folding it into a
+    # generic content patch would risk silently dropping or corrupting
+    # member_node_ids via a shallow dict.update, the same reason
+    # build_group_annotation only ever writes that key when a caller
+    # explicitly passes it. Reading/writing a note or group id through these
+    # generic tools is refused with "wrong_type"/"not_found", mirroring
+    # create_sticky_note's existing cross-type guard, so a type is never
+    # silently converted into another by any of the three tool sets.
 
     def _find_generic_annotation(session, annotation_id: str):
         for annotation in session.state.get("annotations", []):
@@ -2431,13 +2436,12 @@ def register_mcp_tools(
 
         Covers every v1 annotation type except `note`, `group` and `image`:
         `text`, `label`, `line` (`arrow` accepted as an alias), `frame`,
-        `shape`, `icon`, `vote_dot`. Use `create_sticky_note` for notes and
-        `create_image_annotation` for images (an image's pixel content must
-        be ingested server-side, so it cannot be created from a bare
-        envelope here); `group` (node-membership boxes) is not exposed
-        through MCP. An image annotation that already exists is updated,
-        moved, reordered, locked, duplicated and deleted through these
-        generic tools like any other type.
+        `shape`, `icon`, `vote_dot`. Use `create_sticky_note` for notes,
+        `create_group_annotation` for groups, and `create_image_annotation`
+        for images (an image's pixel content must be ingested server-side, so
+        it cannot be created from a bare envelope here). An image annotation
+        that already exists is updated, moved, reordered, locked, duplicated
+        and deleted through these generic tools like any other type.
 
         Coordinates are model space (zoom/pan independent, pixels at zoom 1,
         `x`/`y` = top-left or anchor point), the same space `list_annotations`
@@ -2503,8 +2507,8 @@ def register_mcp_tools(
                     "type must be one of "
                     f"{sorted(GENERIC_ANNOTATION_TYPES - {IMAGE_TYPE})} "
                     "('arrow' accepted as an alias for 'line'); use "
-                    "create_sticky_note for notes and create_image_annotation "
-                    "for images — group annotations are not exposed through MCP."
+                    "create_sticky_note for notes, create_group_annotation for "
+                    "groups, and create_image_annotation for images."
                 ),
             }
         if normalized_type == IMAGE_TYPE:
@@ -3360,6 +3364,7 @@ def register_mcp_tools(
         position["y"] = position.get("y", 0) + dy
         copy["position"] = position
         copy.update(translate_line_endpoints(existing, dx, dy))
+        copy.update(translate_freehand_points(existing, dx, dy))
         if new_annotation_id is not None:
             copy["id"] = new_annotation_id
         try:
@@ -3436,8 +3441,9 @@ def register_mcp_tools(
         Delete an annotation by its stable id.
 
         Only acts on the generic types `create_annotation` manages (not
-        `note`/`group` — use `delete_sticky_note` for notes; group
-        annotations are not exposed through MCP).
+        `note`/`group` — use `delete_sticky_note` for notes; deleting a
+        group box itself is not exposed through MCP yet, only its creation
+        and membership via `create_group_annotation`/`update_group_members`).
 
         Args:
             session_id: The session ID shown in the browser header (e.g. "8244-1742")
@@ -3530,6 +3536,342 @@ def register_mcp_tools(
             "success": True,
             "session_id": session_id,
             "annotation_id": annotation_id,
+            "revision": result["revision"],
+        }
+
+    @register_tool
+    def create_group_annotation(
+        session_id: str,
+        x: float,
+        y: float,
+        w: Optional[float] = None,
+        h: Optional[float] = None,
+        label: str = "",
+        description: str = "",
+        color: Optional[str] = None,
+        member_node_ids: Optional[List[str]] = None,
+        z: Optional[float] = None,
+        locked: bool = False,
+        annotation_id: Optional[str] = None,
+        expected_revision: Optional[int] = None,
+    ) -> Dict[str, Any]:
+        """
+        Create a `group` (node-membership box) annotation, or replace one by id.
+
+        A group is a visual box that tracks a set of graph node ids
+        (`member_node_ids`) — not attachment, and not a canonical graph
+        relationship (docs/ANNOTATION_CONTRACT.md's "Attachment and detach
+        behavior"). Use `update_group_members` to add or remove members after
+        creation.
+
+        Coordinates are model space (zoom/pan independent, pixels at zoom 1,
+        `x`/`y` = top-left), the same space `list_annotations` reports. Pass
+        `annotation_id` to replace an existing group by its stable id (an
+        upsert — idempotent for a retried call with the same id); replacing
+        an id that already holds a different annotation type is refused
+        rather than silently converted. Omit `annotation_id` to have the
+        server mint one, returned in the result.
+
+        Unlike the other fields, omitting `member_node_ids` on an upsert
+        leaves the group's current membership untouched rather than clearing
+        it — resending a group's label or color should not also have to
+        resend every member id, and doing so would fight
+        `update_group_members`'s own writes. Pass an explicit list
+        (including `[]`) to set membership from this call instead.
+
+        Args:
+            session_id: The session ID shown in the browser header (e.g. "8244-1742")
+            x: Model-space x of the group box's top-left corner.
+            y: Model-space y of the group box's top-left corner.
+            w: Optional width in model-space px (default 320).
+            h: Optional height in model-space px (default 200).
+            label: Optional group label shown on the box.
+            description: Optional longer description.
+            color: Optional box color (any CSS color the canvas accepts).
+            member_node_ids: Optional list of graph node ids to start the
+                group with. Omit to leave current membership alone on an
+                upsert, or create an empty group. Use `update_group_members`
+                afterward for ongoing add/remove.
+            z: Optional layer order (higher draws on top). Defaults to 0.
+            locked: Whether the group starts locked against edits.
+            annotation_id: Stable id to create or replace. Omit to let the
+                server assign one.
+            expected_revision: If given, the write is rejected unless it
+                equals the session's current `revision` (optimistic
+                concurrency). Read it from `list_annotations` first. Omit
+                for last-write-wins.
+
+        Returns:
+            Dict with success, the created/replaced group (same projected
+            shape as `list_annotations`, with `label`/`description`/`color`/
+            `member_node_ids` under `content`), and the new revision.
+            Retryable errors: revision_conflict, busy, rate_limited; change
+            the request for invalid_content, wrong_type, or too_large.
+        """
+        if session_manager is None:
+            return {"success": False, "error": "Session manager not available"}
+        if not is_valid_session_id(session_id):
+            return {
+                "success": False,
+                "error": "Invalid session ID format — expected DDDD-DDDD-DDDD-DDDD",
+            }
+        denied = _authorize_session(GRAPH_ACTION_MUTATE, "create_group_annotation")
+        if denied:
+            return denied
+        if annotation_id is not None:
+            session = session_manager.get_session(session_id)
+            if session is not None:
+                existing_annotation = _find_any_annotation(session, annotation_id)
+                if existing_annotation is not None and not is_group(
+                    existing_annotation
+                ):
+                    return {
+                        "success": False,
+                        "error": "wrong_type",
+                        "message": (
+                            f"Annotation id {annotation_id!r} already exists as a "
+                            "different annotation type; create_group_annotation "
+                            "only creates or replaces groups."
+                        ),
+                    }
+        try:
+            annotation = build_group_annotation(
+                x=x,
+                y=y,
+                w=w,
+                h=h,
+                label=label,
+                description=description,
+                color=color,
+                member_node_ids=member_node_ids,
+                z=z,
+                locked=locked,
+                annotation_id=annotation_id,
+            )
+        except ValueError as exc:
+            return {"success": False, "error": "invalid_content", "message": str(exc)}
+        try:
+            result = session_manager.upsert_annotation(
+                session_id,
+                _MCP_LAYOUT_CLIENT_ID,
+                annotation,
+                expected_revision=expected_revision,
+            )
+        except RevisionConflict as exc:
+            return {
+                "success": False,
+                "error": "revision_conflict",
+                "message": (
+                    "The session changed since you read it; re-read "
+                    "list_annotations and retry with the current revision."
+                ),
+                "expected_revision": exc.expected,
+                "current_revision": exc.actual,
+            }
+        except AnnotationRecentlyDeleted:
+            return {
+                "success": False,
+                "error": "annotation_recently_deleted",
+                "message": (
+                    f"Annotation id {annotation_id!r} was just deleted by another "
+                    "collaborator; retry with a different id."
+                ),
+            }
+        except LayoutBusy:
+            return {
+                "success": False,
+                "error": "busy",
+                "message": "Another change is being applied to this session; retry.",
+            }
+        except RateLimited:
+            return {
+                "success": False,
+                "error": "rate_limited",
+                "message": "Too many session writes; slow down and retry.",
+            }
+        except OpBatchTooLarge:
+            return {
+                "success": False,
+                "error": "too_large",
+                "message": "Group payload too large for one write.",
+            }
+        except SessionNotFound:
+            return {
+                "success": False,
+                "error": (
+                    f"Session '{session_id}' not found. "
+                    "This tool acts on a session's stored state, which exists "
+                    "once create_visualization_session created it or a browser "
+                    "made its first change to it."
+                ),
+            }
+        except OpError as exc:
+            return {"success": False, "error": str(exc)}
+        return {
+            "success": True,
+            "session_id": session_id,
+            "group": project_annotation(result["annotation"]),
+            "revision": result["revision"],
+        }
+
+    @register_tool
+    def update_group_members(
+        session_id: str,
+        group_id: str,
+        add_member_node_ids: Optional[List[str]] = None,
+        remove_member_node_ids: Optional[List[str]] = None,
+        expected_revision: Optional[int] = None,
+    ) -> Dict[str, Any]:
+        """
+        Add and/or remove graph node ids from an existing group's membership.
+
+        Reads the group's current `member_node_ids`, applies the given
+        additions and removals (dedupes; a duplicate add is a no-op, an id
+        not present is dropped by a remove without error), and writes the
+        result as one `group_membership_changed` op — so the caller does not
+        have to fetch the full current list first just to add or remove one
+        id, and two agents adding different members in the same call window
+        do not silently clobber each other's addition (each call reads the
+        group fresh under the session lock). This op has no undo entry
+        (docs/ANNOTATION_CONTRACT.md's cross-type row, and
+        `session_activity.UNDOABLE_OPS`'s docstring — membership changes are
+        not currently undoable through `undo_last_action`, unlike most other
+        annotation writes).
+
+        Args:
+            session_id: The session ID shown in the browser header (e.g. "8244-1742")
+            group_id: The group annotation's stable id (from
+                `create_group_annotation` or `list_annotations`).
+            add_member_node_ids: Optional list of graph node ids to add.
+            remove_member_node_ids: Optional list of graph node ids to remove.
+                At least one of `add_member_node_ids`/`remove_member_node_ids`
+                is required.
+            expected_revision: If given, the write is rejected unless it
+                equals the session's current `revision` (optimistic
+                concurrency). Read it from `list_annotations` first. Omit
+                for last-write-wins.
+
+        Returns:
+            Dict with success, the group (same projected shape as
+            `list_annotations`), the resulting `member_node_ids`, and the new
+            revision. Retryable errors: revision_conflict, busy, rate_limited;
+            change the request for invalid_content, not_found, or too_large.
+        """
+        if session_manager is None:
+            return {"success": False, "error": "Session manager not available"}
+        if not is_valid_session_id(session_id):
+            return {
+                "success": False,
+                "error": "Invalid session ID format — expected DDDD-DDDD-DDDD-DDDD",
+            }
+        denied = _authorize_session(GRAPH_ACTION_MUTATE, "update_group_members")
+        if denied:
+            return denied
+        if add_member_node_ids is None and remove_member_node_ids is None:
+            return {
+                "success": False,
+                "error": "no_fields_to_update",
+                "message": (
+                    "Provide add_member_node_ids and/or remove_member_node_ids."
+                ),
+            }
+        for field_name, value in (
+            ("add_member_node_ids", add_member_node_ids),
+            ("remove_member_node_ids", remove_member_node_ids),
+        ):
+            if value is not None and (
+                not isinstance(value, list)
+                or not all(isinstance(v, str) for v in value)
+            ):
+                return {
+                    "success": False,
+                    "error": "invalid_content",
+                    "message": f"{field_name} must be a list of strings",
+                }
+        session = session_manager.get_session(session_id)
+        if session is None:
+            return {
+                "success": False,
+                "error": (
+                    f"Session '{session_id}' not found. "
+                    "This tool acts on a session's stored state, which exists "
+                    "once create_visualization_session created it or a browser "
+                    "made its first change to it."
+                ),
+            }
+        existing = _find_any_annotation(session, group_id)
+        if existing is None or not is_group(existing):
+            return {
+                "success": False,
+                "error": "not_found",
+                "message": f"No group annotation with id {group_id!r} in this session.",
+            }
+        current = [
+            m for m in (existing.get("member_node_ids") or []) if isinstance(m, str)
+        ]
+        seen = set(current)
+        for node_id in add_member_node_ids or []:
+            if node_id not in seen:
+                current.append(node_id)
+                seen.add(node_id)
+        if remove_member_node_ids:
+            removing = set(remove_member_node_ids)
+            current = [m for m in current if m not in removing]
+        try:
+            result = session_manager.set_group_members(
+                session_id,
+                _MCP_LAYOUT_CLIENT_ID,
+                group_id,
+                current,
+                expected_revision=expected_revision,
+            )
+        except RevisionConflict as exc:
+            return {
+                "success": False,
+                "error": "revision_conflict",
+                "message": (
+                    "The session changed since you read it; re-read "
+                    "list_annotations and retry with the current revision."
+                ),
+                "expected_revision": exc.expected,
+                "current_revision": exc.actual,
+            }
+        except LayoutBusy:
+            return {
+                "success": False,
+                "error": "busy",
+                "message": "Another change is being applied to this session; retry.",
+            }
+        except RateLimited:
+            return {
+                "success": False,
+                "error": "rate_limited",
+                "message": "Too many session writes; slow down and retry.",
+            }
+        except OpBatchTooLarge:
+            return {
+                "success": False,
+                "error": "too_large",
+                "message": "Membership payload too large for one write.",
+            }
+        except SessionNotFound:
+            return {
+                "success": False,
+                "error": (
+                    f"Session '{session_id}' not found. "
+                    "This tool acts on a session's stored state, which exists "
+                    "once create_visualization_session created it or a browser "
+                    "made its first change to it."
+                ),
+            }
+        except OpError as exc:
+            return {"success": False, "error": str(exc)}
+        updated = result.get("annotation")
+        return {
+            "success": True,
+            "session_id": session_id,
+            "group": project_annotation(updated) if updated else None,
+            "member_node_ids": current,
             "revision": result["revision"],
         }
 

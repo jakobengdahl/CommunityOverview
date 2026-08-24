@@ -1416,6 +1416,84 @@ class TestDeleteAnnotation:
             mgr.delete_annotation("9999-9999", "mcp-agent", "note-1")
 
 
+class TestSetGroupMembers:
+    """The synchronous MCP group-membership write path (``set_group_members``),
+    wrapping the ``group_membership_changed`` op."""
+
+    async def test_replaces_membership_and_broadcasts(self):
+        mgr = _manager()
+        s = mgr.create_session()
+        mgr.upsert_annotation(
+            s.id, "mcp-agent", {"id": "group-1", "type": "group"}
+        )
+        sub, _ = mgr.connect(s.id, "c1", "A")
+        await _drain(sub)
+
+        res = mgr.set_group_members(s.id, "mcp-agent", "group-1", ["n1", "n2"])
+
+        assert res["revision"] == s.seq
+        assert res["annotation"]["member_node_ids"] == ["n1", "n2"]
+        stored = s.state["annotations"][0]
+        assert stored["member_node_ids"] == ["n1", "n2"]
+        events = await _drain(sub)
+        assert events[0]["op"]["op"] == "group_membership_changed"
+
+    async def test_missing_group_raises_op_error(self):
+        mgr = _manager()
+        s = mgr.create_session()
+        with pytest.raises(OpError):
+            mgr.set_group_members(s.id, "mcp-agent", "ghost", ["n1"])
+
+    async def test_non_group_annotation_id_raises_op_error(self):
+        mgr = _manager()
+        s = mgr.create_session()
+        mgr.upsert_annotation(s.id, "mcp-agent", {"id": "note-1", "type": "note"})
+        with pytest.raises(OpError):
+            mgr.set_group_members(s.id, "mcp-agent", "note-1", ["n1"])
+
+    async def test_expected_revision_conflict(self):
+        mgr = _manager()
+        s = mgr.create_session()
+        mgr.upsert_annotation(s.id, "mcp-agent", {"id": "group-1", "type": "group"})
+        with pytest.raises(RevisionConflict):
+            mgr.set_group_members(
+                s.id, "mcp-agent", "group-1", ["n1"], expected_revision=0
+            )
+        assert s.state["annotations"][0].get("member_node_ids") is None
+
+    async def test_busy_when_session_lock_held(self):
+        mgr = _manager()
+        s = mgr.create_session()
+        mgr.upsert_annotation(s.id, "mcp-agent", {"id": "group-1", "type": "group"})
+        await mgr._lock(s.id).acquire()
+        with pytest.raises(LayoutBusy):
+            mgr.set_group_members(s.id, "mcp-agent", "group-1", ["n1"])
+
+    async def test_unknown_session_raises(self):
+        mgr = _manager()
+        with pytest.raises(SessionNotFound):
+            mgr.set_group_members("9999-9999", "mcp-agent", "group-1", ["n1"])
+
+    async def test_non_string_member_id_raises_op_error(self):
+        mgr = _manager()
+        s = mgr.create_session()
+        mgr.upsert_annotation(s.id, "mcp-agent", {"id": "group-1", "type": "group"})
+        with pytest.raises(OpError):
+            mgr.set_group_members(s.id, "mcp-agent", "group-1", [1, 2])
+
+    async def test_membership_change_is_not_recorded_in_activity_log(self):
+        """group_membership_changed is deliberately outside UNDOABLE_OPS
+        (session_activity.py) — it does not become an undoable action."""
+        mgr = _manager()
+        s = mgr.create_session()
+        mgr.upsert_annotation(s.id, "mcp-agent", {"id": "group-1", "type": "group"})
+        before = len(s.activity_log)
+
+        mgr.set_group_members(s.id, "mcp-agent", "group-1", ["n1"])
+
+        assert len(s.activity_log) == before
+
+
 class TestUndoLastAction:
     """Actor-scoped undo (``undo_last_action``) over the persistent activity log."""
 
