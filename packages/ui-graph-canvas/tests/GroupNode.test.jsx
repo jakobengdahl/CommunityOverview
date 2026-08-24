@@ -11,16 +11,23 @@ vi.mock('reactflow', () => ({
   useReactFlow: () => ({ setNodes: hoisted.setNodes }),
 }));
 
-function renderGroup(data = { label: 'G', color: '#646cff' }, notifyChange = vi.fn()) {
+function renderGroup(
+  data = { label: 'G', color: '#646cff' },
+  notifyChange = vi.fn(),
+  notifyRemoteLockedAttempt = vi.fn()
+) {
   return {
     notifyChange,
+    notifyRemoteLockedAttempt,
     ...render(
-      <AnnotationContext.Provider value={{ notifyChange, labels: {} }}>
+      <AnnotationContext.Provider value={{ notifyChange, notifyRemoteLockedAttempt, labels: {} }}>
         <GroupNode id="group-1" data={data} selected />
       </AnnotationContext.Provider>
     ),
   };
 }
+
+const REMOTE_CLAIM = { clientId: 'c2', color: '#e6194b', displayName: 'Ada' };
 
 describe('GroupNode host notification (design step 6)', () => {
   beforeEach(() => vi.clearAllMocks());
@@ -96,5 +103,48 @@ describe('GroupNode interaction fixes', () => {
     await new Promise((r) => setTimeout(r, 0));
     fireEvent.focusIn(screen.getByRole('button', { name: /delete group/i }));
     expect(document.querySelector('.graph-group-context-menu')).not.toBeNull();
+  });
+});
+
+// task-annotation-shared-session-realtime: a group box is itself an
+// annotation kind, so it gets the same exclusive-lease treatment as
+// note/label/arrow/generic annotations.
+describe('GroupNode remote selection claim exclusivity', () => {
+  beforeEach(() => vi.clearAllMocks());
+
+  it('refuses a rename while another client holds the claim, notifying instead', () => {
+    const { notifyChange, notifyRemoteLockedAttempt } = renderGroup({
+      label: 'G',
+      remoteSelection: REMOTE_CLAIM,
+    });
+    fireEvent.doubleClick(screen.getByText('G'));
+    expect(screen.queryByRole('textbox')).toBeNull();
+    expect(notifyRemoteLockedAttempt).toHaveBeenCalledTimes(1);
+    expect(notifyChange).not.toHaveBeenCalled();
+  });
+
+  it('refuses to open the context menu while another client holds the claim', () => {
+    const { notifyRemoteLockedAttempt } = renderGroup({
+      label: 'G',
+      remoteSelection: REMOTE_CLAIM,
+    });
+    fireEvent.contextMenu(screen.getByText('G'));
+    expect(document.querySelector('.graph-group-context-menu')).toBeNull();
+    expect(notifyRemoteLockedAttempt).toHaveBeenCalledTimes(1);
+  });
+
+  it("renders the claiming collaborator's badge and outline", () => {
+    const { container } = renderGroup({ label: 'G', remoteSelection: REMOTE_CLAIM });
+    expect(container.querySelector('.graph-node-remote-badge').textContent).toBe('Ada');
+    expect(container.querySelector('.graph-group-node').style.outline).toContain('#e6194b');
+  });
+
+  it('edits normally once no claim is present', () => {
+    const { notifyChange } = renderGroup({ label: 'G' });
+    fireEvent.doubleClick(screen.getByText('G'));
+    expect(screen.getByRole('textbox')).toBeInTheDocument();
+    fireEvent.change(screen.getByRole('textbox'), { target: { value: 'Team map' } });
+    fireEvent.blur(screen.getByRole('textbox'));
+    expect(notifyChange).toHaveBeenCalledWith('text');
   });
 });

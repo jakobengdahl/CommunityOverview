@@ -40,6 +40,12 @@ function FreehandAnnotationNode({ data, selected }) {
   const strokeWidth = Number.isFinite(data?.strokeWidth) ? data.strokeWidth : DEFAULT_STROKE_WIDTH;
   const smoothing = data?.smoothing ?? 0;
   const locked = Boolean(data?.locked);
+  // Another client's live selection claim (task-annotation-shared-session-
+  // realtime): dragging is already refused centrally via `draggable`
+  // (GraphCanvas's remote-selection effect); this only adds the visual cue,
+  // since freehand strokes have no per-component mutation UI of their own to
+  // guard.
+  const remoteSelection = data?.remoteSelection || null;
 
   const { minX, minY, maxX, maxY } = boundingBox(rawPoints);
   const boxW = Math.max(1, maxX - minX) + PAD * 2;
@@ -56,8 +62,22 @@ function FreehandAnnotationNode({ data, selected }) {
   return (
     <div
       className={`graph-freehand-node${selected ? ' selected' : ''}${locked ? ' locked' : ''}`}
-      style={{ marginLeft: -originX, marginTop: -originY }}
+      style={{
+        marginLeft: -originX,
+        marginTop: -originY,
+        outline: remoteSelection ? `2px solid ${remoteSelection.color}` : undefined,
+        outlineOffset: remoteSelection ? '2px' : undefined,
+      }}
     >
+      {remoteSelection && (
+        <div
+          className="graph-node-remote-badge"
+          style={{ backgroundColor: remoteSelection.color, left: originX - 2, top: originY - 11 }}
+          title={remoteSelection.displayName}
+        >
+          {remoteSelection.displayName}
+        </div>
+      )}
       <svg width={boxW} height={boxH} style={{ overflow: 'visible', display: 'block' }}>
         {/* Transparent wide hit target so a thin stroke is easy to select/grab. */}
         <path

@@ -2,6 +2,7 @@ import { memo, useState, useRef, useEffect, useContext } from 'react';
 import { createPortal } from 'react-dom';
 import { NodeResizer, useReactFlow } from 'reactflow';
 import { AnnotationContext } from './AnnotationContext';
+import { isRemoteLocked } from '../utils/annotations';
 import './GroupNode.css';
 
 /**
@@ -24,7 +25,10 @@ function GroupNode({ id, data, selected }) {
   // Groups are annotations (design 3.1); reuse the annotation change notifier so
   // a rename, recolour, resize or delete schedules a session save (and, in a
   // shared session, an op) the same way note/label/arrow edits do.
-  const { notifyChange } = useContext(AnnotationContext);
+  const { notifyChange, notifyRemoteLockedAttempt } = useContext(AnnotationContext);
+  // See NoteNode's equivalent comment: another client's live claim makes
+  // this group's lease exclusive (task-annotation-shared-session-realtime).
+  const remoteLocked = isRemoteLocked(data);
 
   useEffect(() => {
     if (isEditing && inputRef.current) {
@@ -68,6 +72,10 @@ function GroupNode({ id, data, selected }) {
 
   const handleDoubleClick = (e) => {
     e.stopPropagation();
+    if (remoteLocked) {
+      notifyRemoteLockedAttempt();
+      return;
+    }
     setIsEditing(true);
   };
 
@@ -77,6 +85,11 @@ function GroupNode({ id, data, selected }) {
 
   const handleLabelBlur = () => {
     setIsEditing(false);
+    if (remoteLocked) {
+      setEditedLabel(data.label || 'Group');
+      notifyRemoteLockedAttempt();
+      return;
+    }
     if (editedLabel.trim() && editedLabel.trim() !== data.label) {
       setNodes((nds) =>
         nds.map((n) => {
@@ -86,7 +99,7 @@ function GroupNode({ id, data, selected }) {
           return n;
         })
       );
-      notifyChange();
+      notifyChange('text');
     } else if (!editedLabel.trim()) {
       setEditedLabel(data.label || 'Group');
     }
@@ -105,10 +118,19 @@ function GroupNode({ id, data, selected }) {
   const handleContextMenu = (e) => {
     e.preventDefault();
     e.stopPropagation();
+    if (remoteLocked) {
+      notifyRemoteLockedAttempt();
+      return;
+    }
     setContextMenu({ x: e.clientX, y: e.clientY });
   };
 
   const handleChangeColor = (color) => {
+    if (remoteLocked) {
+      setContextMenu(null);
+      notifyRemoteLockedAttempt();
+      return;
+    }
     setNodes((nds) =>
       nds.map((n) => {
         if (n.id === id) {
@@ -118,11 +140,15 @@ function GroupNode({ id, data, selected }) {
       })
     );
     setContextMenu(null);
-    notifyChange();
+    notifyChange('style');
   };
 
   // Un-parent children and remove the group node from the canvas
   const removeGroupKeepChildren = () => {
+    if (remoteLocked) {
+      notifyRemoteLockedAttempt();
+      return;
+    }
     setNodes((nds) => {
       const children = nds.filter((n) => n.parentId === id);
       const groupNode = nds.find((n) => n.id === id);
@@ -143,7 +169,7 @@ function GroupNode({ id, data, selected }) {
           return updated || n;
         });
     });
-    notifyChange();
+    notifyChange('delete');
   };
 
   const handleHideGroup = () => {
@@ -162,8 +188,8 @@ function GroupNode({ id, data, selected }) {
       <NodeResizer
         minWidth={200}
         minHeight={150}
-        onResizeEnd={() => notifyChange()}
-        isVisible={selected}
+        onResizeEnd={() => notifyChange('geometry')}
+        isVisible={selected && !remoteLocked}
         lineStyle={{ stroke: data.color || '#646cff', strokeWidth: 4 }}
         handleStyle={{
           width: 14,
@@ -179,8 +205,19 @@ function GroupNode({ id, data, selected }) {
         style={{
           borderColor: data.color || '#646cff',
           backgroundColor: `${data.color || '#646cff'}15`,
+          outline: remoteLocked ? `2px solid ${data.remoteSelection.color}` : undefined,
+          outlineOffset: remoteLocked ? '2px' : undefined,
         }}
       >
+        {remoteLocked && (
+          <div
+            className="graph-node-remote-badge"
+            style={{ backgroundColor: data.remoteSelection.color }}
+            title={data.remoteSelection.displayName}
+          >
+            {data.remoteSelection.displayName}
+          </div>
+        )}
         <div
           className="graph-group-header"
           style={{ backgroundColor: data.color || '#646cff', color: 'white' }}

@@ -26,14 +26,20 @@ const labels = {
   arrowEndHead: 'End arrowhead',
 };
 
-function renderWithContext(ui, notifyChange = vi.fn()) {
+function renderWithContext(ui, notifyChange = vi.fn(), notifyRemoteLockedAttempt = vi.fn()) {
   return {
     notifyChange,
+    notifyRemoteLockedAttempt,
     ...render(
-      <AnnotationContext.Provider value={{ notifyChange, labels }}>{ui}</AnnotationContext.Provider>
+      <AnnotationContext.Provider value={{ notifyChange, notifyRemoteLockedAttempt, labels }}>
+        {ui}
+      </AnnotationContext.Provider>
     ),
   };
 }
+
+// A live claim held by another client (task-annotation-shared-session-realtime).
+const REMOTE_CLAIM = { clientId: 'c2', color: '#e6194b', displayName: 'Ada' };
 
 describe('NoteNode', () => {
   beforeEach(() => vi.clearAllMocks());
@@ -76,12 +82,30 @@ describe('NoteNode', () => {
     const input = screen.getByRole('textbox');
     fireEvent.change(input, { target: { value: 'Remember this' } });
     fireEvent.blur(input);
-    expect(hoisted.setNodes).toHaveBeenCalledTimes(1);
-    expect(notifyChange).toHaveBeenCalledTimes(1);
-    // The updater sets the note text on the matching node.
-    const updater = hoisted.setNodes.mock.calls[0][0];
+    // Each keystroke syncs live (docs/ANNOTATION_CONTRACT.md's 300ms text
+    // debounce, coalesced downstream by the host's scheduler) in addition to
+    // blur's own trimmed commit — one call each here since this fires a
+    // single change event, then blur.
+    expect(hoisted.setNodes).toHaveBeenCalledTimes(2);
+    expect(notifyChange).toHaveBeenCalledTimes(2);
+    expect(notifyChange).toHaveBeenCalledWith('text');
+    // The last updater (blur's trimmed commit) is authoritative.
+    const updater = hoisted.setNodes.mock.calls.at(-1)[0];
     const result = updater([{ id: 'note-1', data: { text: '' } }]);
     expect(result[0].data.text).toBe('Remember this');
+  });
+
+  it('syncs text live on each keystroke, not only on blur', () => {
+    const { notifyChange } = renderWithContext(
+      <NoteNode id="note-1" data={{ text: '' }} selected />
+    );
+    fireEvent.doubleClick(screen.getByText('Note'));
+    const input = screen.getByRole('textbox');
+    fireEvent.change(input, { target: { value: 'Rem' } });
+    expect(hoisted.setNodes).toHaveBeenCalledTimes(1);
+    expect(notifyChange).toHaveBeenCalledWith('text');
+    const updater = hoisted.setNodes.mock.calls[0][0];
+    expect(updater([{ id: 'note-1', data: { text: '' } }])[0].data.text).toBe('Rem');
   });
 
   it('deletes itself and notifies from the context menu', () => {
@@ -134,9 +158,10 @@ describe('LabelNode', () => {
     const input = screen.getByRole('textbox');
     fireEvent.change(input, { target: { value: 'Region A' } });
     fireEvent.keyDown(input, { key: 'Enter' });
-    expect(hoisted.setNodes).toHaveBeenCalledTimes(1);
-    expect(notifyChange).toHaveBeenCalledTimes(1);
-    const updater = hoisted.setNodes.mock.calls[0][0];
+    // The change event's live sync, then Enter's own commit.
+    expect(hoisted.setNodes).toHaveBeenCalledTimes(2);
+    expect(notifyChange).toHaveBeenCalledTimes(2);
+    const updater = hoisted.setNodes.mock.calls.at(-1)[0];
     expect(updater([{ id: 'label-1', data: {} }])[0].data.text).toBe('Region A');
   });
 
@@ -286,5 +311,112 @@ describe('ArrowNode', () => {
     };
     const result = updater([lockedNode]);
     expect(result[0]).toBe(lockedNode);
+  });
+});
+
+describe('remote selection claim exclusivity (task-annotation-shared-session-realtime)', () => {
+  beforeEach(() => vi.clearAllMocks());
+
+  it('NoteNode: refuses a text commit while another client holds the claim', () => {
+    const { notifyChange, notifyRemoteLockedAttempt } = renderWithContext(
+      <NoteNode id="note-1" data={{ text: 'x', remoteSelection: REMOTE_CLAIM }} selected />
+    );
+    fireEvent.doubleClick(screen.getByText('x'));
+    // Blocked at the double-click too: no textarea is offered to type into.
+    expect(screen.queryByRole('textbox')).toBeNull();
+    expect(notifyRemoteLockedAttempt).toHaveBeenCalledTimes(1);
+    expect(notifyChange).not.toHaveBeenCalled();
+    expect(hoisted.setNodes).not.toHaveBeenCalled();
+  });
+
+  it('NoteNode: refuses a colour change while another client holds the claim', () => {
+    const { notifyChange, notifyRemoteLockedAttempt } = renderWithContext(
+      <NoteNode id="note-1" data={{ text: 'x', remoteSelection: REMOTE_CLAIM }} selected />
+    );
+    fireEvent.contextMenu(screen.getByText('x'));
+    fireEvent.click(document.querySelectorAll('.color-button')[0]);
+    expect(notifyRemoteLockedAttempt).toHaveBeenCalledTimes(1);
+    expect(notifyChange).not.toHaveBeenCalled();
+    expect(hoisted.setNodes).not.toHaveBeenCalled();
+  });
+
+  it('NoteNode: refuses delete while another client holds the claim', () => {
+    const { notifyChange, notifyRemoteLockedAttempt } = renderWithContext(
+      <NoteNode id="note-1" data={{ text: 'x', remoteSelection: REMOTE_CLAIM }} selected />
+    );
+    fireEvent.contextMenu(screen.getByText('x'));
+    fireEvent.click(screen.getByRole('button', { name: /delete/i }));
+    expect(notifyRemoteLockedAttempt).toHaveBeenCalledTimes(1);
+    expect(notifyChange).not.toHaveBeenCalled();
+    expect(hoisted.setNodes).not.toHaveBeenCalled();
+  });
+
+  it('NoteNode: edits normally once no claim is present', () => {
+    const { notifyChange } = renderWithContext(
+      <NoteNode id="note-1" data={{ text: 'x' }} selected />
+    );
+    fireEvent.doubleClick(screen.getByText('x'));
+    expect(screen.getByRole('textbox')).toBeInTheDocument();
+    fireEvent.blur(screen.getByRole('textbox'));
+    expect(notifyChange).toHaveBeenCalledWith('text');
+  });
+
+  it('LabelNode: refuses a text commit while another client holds the claim', () => {
+    const { notifyChange, notifyRemoteLockedAttempt } = renderWithContext(
+      <LabelNode id="label-1" data={{ text: 'x', remoteSelection: REMOTE_CLAIM }} selected />
+    );
+    fireEvent.doubleClick(screen.getByText('x'));
+    expect(screen.queryByRole('textbox')).toBeNull();
+    expect(notifyRemoteLockedAttempt).toHaveBeenCalledTimes(1);
+    expect(notifyChange).not.toHaveBeenCalled();
+  });
+
+  it('ArrowNode: refuses a colour change while another client holds the claim', () => {
+    const { notifyChange, notifyRemoteLockedAttempt } = renderWithContext(
+      <ArrowNode
+        id="arrow-1"
+        data={{ dx: 160, dy: 0, remoteSelection: REMOTE_CLAIM }}
+        selected={false}
+      />
+    );
+    fireEvent.contextMenu(document.querySelector('.graph-arrow-node'));
+    fireEvent.click(document.querySelectorAll('.color-button')[0]);
+    expect(notifyRemoteLockedAttempt).toHaveBeenCalledTimes(1);
+    expect(notifyChange).not.toHaveBeenCalled();
+    expect(hoisted.setNodes).not.toHaveBeenCalled();
+  });
+
+  it('ArrowNode: hides endpoint handles while another client holds the claim, even when selected', () => {
+    const { container } = renderWithContext(
+      <ArrowNode id="arrow-1" data={{ dx: 160, dy: 0, remoteSelection: REMOTE_CLAIM }} selected />
+    );
+    expect(container.querySelectorAll('circle.graph-arrow-handle').length).toBe(0);
+  });
+
+  it('ArrowNode: ignores an in-flight endpoint move once a remote claim lands mid-drag', () => {
+    // Mirrors the existing "becomes locked" case above: the drag starts while
+    // unclaimed (the handle is present and armable), then a claim from
+    // another client lands before the next move — moveEndpoint reads the
+    // fresh node from state, not the stale render-time `data` prop, and must
+    // refuse to touch its geometry.
+    renderWithContext(<ArrowNode id="arrow-1" data={{ dx: 160, dy: 0 }} selected />);
+    const [startHandle] = document.querySelectorAll('circle.graph-arrow-handle');
+    fireEvent.pointerDown(startHandle, { clientX: 0, clientY: 0 });
+    const moveEvent = new MouseEvent('pointermove', {
+      bubbles: true,
+      cancelable: true,
+      clientX: 20,
+      clientY: 5,
+    });
+    window.dispatchEvent(moveEvent);
+    expect(hoisted.setNodes).toHaveBeenCalledTimes(1);
+    const updater = hoisted.setNodes.mock.calls[0][0];
+    const remotelyLockedNode = {
+      id: 'arrow-1',
+      position: { x: 0, y: 0 },
+      data: { dx: 160, dy: 0, remoteSelection: REMOTE_CLAIM },
+    };
+    const result = updater([remotelyLockedNode]);
+    expect(result[0]).toBe(remotelyLockedNode);
   });
 });

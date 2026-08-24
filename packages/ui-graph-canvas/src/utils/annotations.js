@@ -114,6 +114,33 @@ export function isArrowAnchored(data) {
   return Boolean(data?.startAnchor || data?.endAnchor);
 }
 
+// Whether another live client currently holds this annotation's selection
+// claim (task-annotation-shared-session-realtime: annotation leases are
+// exclusive, not merely advisory — see the task's slice_scope). GraphCanvas's
+// remote-selection effect stamps `data.remoteSelection` from the sync
+// client's live claim map; this is the single read-side check every
+// annotation component uses to refuse a local edit while someone else holds
+// the claim. Distinct from `data.locked` (a persisted, geometry-only edit
+// lock a user sets deliberately) — a remote claim clears itself (release or
+// 30s TTL expiry) the moment the other client lets go.
+export function isRemoteLocked(data) {
+  return Boolean(data?.remoteSelection);
+}
+
+// Whether an annotation should currently accept a plain ReactFlow drag,
+// combining its persisted lock, a live remote claim, and — for arrows only —
+// whether either endpoint is anchored to a target (anchored arrows move only
+// via their endpoint handles, never as a whole). Single source of truth for
+// GraphCanvas's remote-selection effect; `overlayToFlowNode` computes the
+// locked/anchor-only half of this itself at hydration time, when no remote
+// claim can yet exist.
+export function isAnnotationDraggable(node) {
+  const data = node?.data;
+  if (Boolean(data?.locked) || isRemoteLocked(data)) return false;
+  if (node?.type === 'arrow') return !isArrowAnchored(data);
+  return true;
+}
+
 // Build a ReactFlow node for a note/label/arrow overlay from the host's
 // canvas-shape annotation ({id, kind, position, ...payload}).
 export function overlayToFlowNode(overlay) {

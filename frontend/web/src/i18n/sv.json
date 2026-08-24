@@ -417,7 +417,8 @@
     "annotation_rotate_right": "Rotera höger 15°",
     "annotation_rotate_reset": "Återställ rotation",
     "undo_notification": "Flytt ångrad",
-    "redo_notification": "Flytt återställd"
+    "redo_notification": "Flytt återställd",
+    "annotation_remote_locked": "Någon annan redigerar denna annotering"
   },
   "annotation_toolbox": {
     "toggle_expand": "Lägg till kommentar",

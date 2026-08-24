@@ -40,6 +40,14 @@ export {
   normalizeAnnotationDocument,
 } from './utils/annotationModel';
 
+// Canvas-facing annotation type set (ReactFlow node `type` values, e.g.
+// 'arrow') — distinct from ANNOTATION_TYPES above, which lists the
+// server-side document-model kind names (e.g. 'line') and is not the set to
+// check a ReactFlow node's `type` against. Exposed for the host app to
+// extend selection claims and realtime publish timing to annotation nodes
+// (task-annotation-shared-session-realtime).
+export { ANNOTATION_TYPES as CANVAS_ANNOTATION_TYPES } from './utils/annotations';
+
 // Freehand annotation utilities
 export { reduceFreehandPoints, pointsToPathData, buildFreehandPath } from './utils/freehandPath';
 export { createFreehandStrokeCapture } from './utils/freehandStroke';
