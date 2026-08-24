@@ -60,11 +60,17 @@ describe('NoteNode', () => {
   // own coverage. A label's rotation is reachable today (the generic MCP tools
   // accept `label`); a note's is not - the sticky-note tools take no rotation
   // argument - so this pins the wiring ahead of the source that will set it.
-  it('draws a rotation on the note body', () => {
+  // smallfix-annotation-rotated-resize-handles: the rotation now lives on
+  // the wrapper that also carries the note's resize handles, so they rotate
+  // along with it instead of staying axis-aligned around its unrotated
+  // bounds.
+  it('draws a rotation on the note body, on the wrapper that also carries its resizer', () => {
     const { container } = renderWithContext(
       <NoteNode id="note-1" data={{ text: 'x', rotation: 30 }} selected={false} />
     );
-    expect(container.querySelector('.graph-note-node').style.transform).toBe('rotate(30deg)');
+    const wrap = container.querySelector('.graph-annotation-rotate-wrap');
+    expect(wrap.style.transform).toBe('rotate(30deg)');
+    expect(wrap.querySelector('.graph-note-node')).toBeTruthy();
   });
 
   it('leaves an unrotated note untransformed', () => {

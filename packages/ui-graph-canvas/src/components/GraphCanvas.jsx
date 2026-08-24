@@ -309,6 +309,7 @@ function GraphCanvasInner({
     addArrow: 'Add arrow',
     annotationColor: 'Colour',
     deleteAnnotation: 'Delete',
+    unlockAnnotation: 'Unlock',
     notePlaceholder: 'Note',
     labelPlaceholder: 'Label',
     annotationTextSize: 'Text size',
@@ -566,6 +567,7 @@ function GraphCanvasInner({
       labels: {
         color: cml.annotationColor,
         delete: cml.deleteAnnotation,
+        unlock: cml.unlockAnnotation,
         notePlaceholder: cml.notePlaceholder,
         labelPlaceholder: cml.labelPlaceholder,
         textSize: cml.annotationTextSize,
@@ -587,6 +589,7 @@ function GraphCanvasInner({
       notifyRemoteLockedAttempt,
       cml.annotationColor,
       cml.deleteAnnotation,
+      cml.unlockAnnotation,
       cml.notePlaceholder,
       cml.labelPlaceholder,
       cml.annotationTextSize,

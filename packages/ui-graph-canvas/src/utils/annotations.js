@@ -106,6 +106,58 @@ export function rotationStyle(kind, rotation) {
   return { transform: `rotate(${rotation}deg)`, transformOrigin: 'center center' };
 }
 
+// Recompute a resized annotation's geometry so a rotated note/frame/shape/
+// image grows along its own local axes instead of the canvas's global ones.
+// NodeResizer's own math (in @reactflow/node-resizer) always operates as if
+// the box were axis-aligned: it tracks the raw pointer's global flow-space
+// movement and applies it straight to width/height (and, for a top/left
+// handle, to position, keeping the *global* opposite corner fixed). That is
+// exactly wrong for a rotated shape, whose handles are drawn (via CSS,
+// rotating with the shape) at its *rotated* corners: dragging one should
+// keep the shape's own opposite corner fixed in its *local* rotated frame,
+// which moves in global terms as the box grows — so the shape's centre
+// shifts, not just its size.
+//
+// `start`/`end` are `{x, y, width, height}` snapshots (flow coordinates)
+// bracketing one resize gesture, taken from NodeResizer's onResizeStart/
+// onResizeEnd callbacks. Which side moved (`start.x/y` vs `end.x/y`) tells us
+// which corner or edge was dragged — the anchor is the opposite one. When a
+// dimension did not change (a single-axis edge drag), its invert sign is
+// irrelevant: the old and new local offsets on that axis are then identical
+// (same width/height) and cancel out regardless of which sign is used.
+//
+// At rotation 0 this reduces exactly to NodeResizer's own math (the rotation
+// is the identity), so it is safe to call unconditionally rather than only
+// when an annotation actually carries a rotation.
+export function resolveRotatedResizeGeometry({ start, end, rotation }) {
+  const rad = ((rotation ?? 0) * Math.PI) / 180;
+  const cos = Math.cos(rad);
+  const sin = Math.sin(rad);
+  const rotateVec = (v) => ({ x: v.x * cos - v.y * sin, y: v.x * sin + v.y * cos });
+
+  const invertX = end.x !== start.x;
+  const invertY = end.y !== start.y;
+  const anchorLocal = (w, h) => ({ x: invertX ? w / 2 : -w / 2, y: invertY ? h / 2 : -h / 2 });
+
+  const oldCenter = { x: start.x + start.width / 2, y: start.y + start.height / 2 };
+  const anchorGlobal = {
+    x: oldCenter.x + rotateVec(anchorLocal(start.width, start.height)).x,
+    y: oldCenter.y + rotateVec(anchorLocal(start.width, start.height)).y,
+  };
+  const newAnchorOffset = rotateVec(anchorLocal(end.width, end.height));
+  const newCenter = {
+    x: anchorGlobal.x - newAnchorOffset.x,
+    y: anchorGlobal.y - newAnchorOffset.y,
+  };
+
+  return {
+    x: newCenter.x - end.width / 2,
+    y: newCenter.y - end.height / 2,
+    width: end.width,
+    height: end.height,
+  };
+}
+
 // Default text sizes (px) for note body and label text; overridable per node.
 export const DEFAULT_NOTE_FONT_SIZE = 14;
 export const DEFAULT_LABEL_FONT_SIZE = 16;

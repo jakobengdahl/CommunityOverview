@@ -2015,6 +2015,7 @@ function App() {
             addArrow: t('context_menu.add_arrow'),
             annotationColor: t('context_menu.annotation_color'),
             deleteAnnotation: t('context_menu.delete'),
+            unlockAnnotation: t('context_menu.annotation_unlock'),
             notePlaceholder: t('context_menu.note_placeholder'),
             labelPlaceholder: t('context_menu.label_placeholder'),
             annotationTextSize: t('context_menu.annotation_text_size'),

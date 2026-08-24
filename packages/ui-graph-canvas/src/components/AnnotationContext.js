@@ -28,6 +28,7 @@ export const AnnotationContext = createContext({
   labels: {
     color: 'Colour',
     delete: 'Delete',
+    unlock: 'Unlock',
     notePlaceholder: 'Note',
     labelPlaceholder: 'Label',
     textSize: 'Text size',
