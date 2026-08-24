@@ -243,20 +243,43 @@ describe('GenericAnnotationNode', () => {
   // A frame is one box like a shape, and the MCP tools accept a rotation for
   // it with no per-type validation, so a stored rotation is drawn rather than
   // silently discarded while list_annotations keeps reporting it.
-  it('draws a rotation on a frame', () => {
+  //
+  // smallfix-annotation-rotated-resize-handles: the rotation now lives on the
+  // wrapper that also carries the resize handles (rather than on `.kind-frame`
+  // itself), so the handles rotate along with the box instead of staying
+  // axis-aligned around its unrotated bounds.
+  it('draws a rotation on a frame, on the wrapper that also carries its resizer', () => {
     const { container } = render(<GenericAnnotationNode type="frame" data={{ rotation: 45 }} />);
-    expect(container.querySelector('.kind-frame').style.transform).toBe('rotate(45deg)');
+    const wrap = container.querySelector('.graph-generic-annotation-rotate-wrap');
+    expect(wrap.style.transform).toBe('rotate(45deg)');
+    expect(wrap.querySelector('.kind-frame')).toBeTruthy();
   });
 
-  it('rotates an image annotation', () => {
-    render(
+  it('rotates an image annotation, on the wrapper that also carries its resizer', () => {
+    const { container } = render(
       <GenericAnnotationNode
         type="image"
         data={{ image: { url: 'https://example.com/a.png' }, alt: 'diagram', rotation: 90 }}
       />
     );
-    expect(screen.getByAltText('diagram').style.transform).toBe('rotate(90deg)');
+    const wrap = container.querySelector('.graph-generic-annotation-rotate-wrap');
+    expect(wrap.style.transform).toBe('rotate(90deg)');
+    expect(wrap.contains(screen.getByAltText('diagram'))).toBe(true);
   });
+
+  it.each(['frame', 'shape', 'image'])(
+    'rotates the resize handles along with a rotated, selected %s',
+    (type) => {
+      const data = { rotation: 30, shape: 'circle', image: { url: 'https://example.com/a.png' } };
+      const { container } = render(<GenericAnnotationNode type={type} data={data} selected />);
+      const resizer = screen.getByTestId('resizer');
+      const rotatedAncestor =
+        container.querySelector('.graph-generic-annotation-rotate-wrap') ||
+        container.querySelector('.graph-generic-annotation-shape-halo');
+      expect(rotatedAncestor.style.transform).toBe('rotate(30deg)');
+      expect(rotatedAncestor.contains(resizer)).toBe(true);
+    }
+  );
 
   it('renders a vote dot with its value', () => {
     render(<GenericAnnotationNode type="vote_dot" data={{ value: 3 }} />);
@@ -344,6 +367,41 @@ describe('GenericAnnotationNode', () => {
     const props = hoisted.resizerProps.at(-1);
     props.onResizeEnd();
     expect(notifyChange).toHaveBeenCalledTimes(1);
+  });
+
+  // smallfix-annotation-rotated-resize-handles: a rotated frame/shape/image
+  // must grow along its own axes, not the canvas's - see
+  // resolveRotatedResizeGeometry.test.js for the underlying math.
+  it('remaps a resize gesture on a rotated frame through its rotation', () => {
+    render(<GenericAnnotationNode id="f1" type="frame" data={{ rotation: 90 }} selected />);
+    const props = hoisted.resizerProps.at(-1);
+    props.onResizeStart(null, { x: 0, y: 0, width: 100, height: 50 });
+    props.onResizeEnd(null, { x: 0, y: 0, width: 150, height: 80 });
+    const updated = applyLatestUpdate({
+      id: 'f1',
+      position: { x: 0, y: 0 },
+      style: { width: 100, height: 50 },
+    });
+    expect(updated.position.x).toBeCloseTo(-40, 9);
+    expect(updated.position.y).toBeCloseTo(10, 9);
+    expect(updated.style.width).toBe(150);
+    expect(updated.style.height).toBe(80);
+  });
+
+  // At rotation 0 the correction is the identity, so an unrotated resize
+  // keeps behaving exactly as it did before this fix.
+  it('leaves an unrotated resize gesture unchanged', () => {
+    render(<GenericAnnotationNode id="f1" type="frame" data={{}} selected />);
+    const props = hoisted.resizerProps.at(-1);
+    props.onResizeStart(null, { x: 5, y: 5, width: 100, height: 50 });
+    props.onResizeEnd(null, { x: 5, y: 5, width: 160, height: 90 });
+    const updated = applyLatestUpdate({
+      id: 'f1',
+      position: { x: 5, y: 5 },
+      style: { width: 100, height: 50 },
+    });
+    expect(updated.position).toEqual({ x: 5, y: 5 });
+    expect(updated.style).toEqual({ width: 160, height: 90 });
   });
 });
 
@@ -468,5 +526,64 @@ describe('GenericAnnotationNode property editor', () => {
     await new Promise((resolve) => setTimeout(resolve, 0));
     fireEvent.keyDown(document, { key: 'Escape' });
     expect(screen.queryByLabelText('Reset rotation')).toBeNull();
+  });
+});
+
+// smallfix-annotation-context-menus-ignore-lock: the accepted capability
+// baseline is "a locked object remains selectable but offers only unlock or
+// copy" - previously every kind's context menu offered full editing
+// regardless of `data.locked`.
+describe('GenericAnnotationNode locked context menu', () => {
+  beforeEach(() => {
+    hoisted.setNodes.mockClear();
+  });
+
+  it.each(['text', 'frame', 'shape', 'icon', 'vote_dot', 'image'])(
+    'shows only an unlock action for a locked %s, hiding rotation/shape/delete',
+    (kind) => {
+      const data = { locked: true, text: 'x', icon: 'flag', image: {}, value: 1 };
+      const { container } = render(
+        <AnnotationContext.Provider value={{ notifyChange: vi.fn(), labels: { unlock: 'Unlock' } }}>
+          <GenericAnnotationNode id="n1" type={kind} data={data} selected />
+        </AnnotationContext.Provider>
+      );
+      const root =
+        kind === 'shape'
+          ? screen.getByTestId('shape-halo')
+          : container.querySelector(`.kind-${kind}`);
+      fireEvent.contextMenu(root);
+      expect(screen.getByText(/Unlock/)).toBeInTheDocument();
+      expect(screen.queryByLabelText('Rotate left 15°')).toBeNull();
+      expect(screen.queryByLabelText('circle')).toBeNull();
+      expect(screen.queryByText(/Delete/)).toBeNull();
+    }
+  );
+
+  it('unlocks a locked annotation and notifies the annotation context', () => {
+    const notifyChange = vi.fn();
+    render(
+      <AnnotationContext.Provider value={{ notifyChange, labels: { unlock: 'Unlock' } }}>
+        <GenericAnnotationNode id="f1" type="frame" data={{ locked: true }} selected />
+      </AnnotationContext.Provider>
+    );
+    fireEvent.contextMenu(document.querySelector('.kind-frame'));
+    fireEvent.click(screen.getByText(/Unlock/));
+    const updated = applyLatestUpdate({ id: 'f1', data: { locked: true } });
+    expect(updated.data.locked).toBe(false);
+    expect(notifyChange).toHaveBeenCalledWith('style');
+  });
+
+  it('still shows the full property editor when unlocked', () => {
+    render(<GenericAnnotationNode id="f1" type="frame" data={{ locked: false }} selected />);
+    fireEvent.contextMenu(document.querySelector('.kind-frame'));
+    expect(screen.getByLabelText('Rotate left 15°')).toBeInTheDocument();
+    expect(screen.getByText(/Delete/)).toBeInTheDocument();
+  });
+
+  // Resize/drag already refuse a locked annotation; the resizer must stay
+  // hidden even if the (restricted) context menu is open at the same time.
+  it('keeps resize handles hidden for a locked, selected frame', () => {
+    render(<GenericAnnotationNode type="frame" data={{ locked: true }} selected />);
+    expect(hoisted.resizerProps.at(-1).isVisible).toBe(false);
   });
 });

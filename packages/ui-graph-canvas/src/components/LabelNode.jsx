@@ -25,6 +25,7 @@ function LabelNode({ id, data, selected }) {
   // See NoteNode's equivalent comment: another client's live claim makes
   // this label's lease exclusive (task-annotation-shared-session-realtime).
   const remoteLocked = isRemoteLocked(data);
+  const locked = Boolean(data?.locked);
 
   useEffect(() => {
     setText(data.text || '');
@@ -139,6 +140,23 @@ function LabelNode({ id, data, selected }) {
     notifyChange('delete');
   };
 
+  // The only action a locked label's context menu offers (besides the
+  // capability baseline's "copy", which has no GUI action yet at all) —
+  // everything else (colour/size/rotation/delete) stays out of reach while
+  // `locked` is set, matching resize/drag already refusing it.
+  const unlock = () => {
+    if (remoteLocked) {
+      setContextMenu(null);
+      notifyRemoteLockedAttempt();
+      return;
+    }
+    setNodes((nds) =>
+      nds.map((n) => (n.id === id ? { ...n, data: { ...n.data, locked: false } } : n))
+    );
+    setContextMenu(null);
+    notifyChange('style');
+  };
+
   const color = data.color || LABEL_COLORS[0];
   const fontSize = data.fontSize || DEFAULT_LABEL_FONT_SIZE;
 
@@ -202,60 +220,73 @@ function LabelNode({ id, data, selected }) {
             className="graph-annotation-context-menu"
             style={{ left: contextMenu.x, top: contextMenu.y }}
           >
-            <div className="context-menu-title">{labels.color}</div>
-            <div className="context-menu-colors">
-              {LABEL_COLORS.map((c) => (
-                <button
-                  key={c}
-                  className="color-button"
-                  style={{ backgroundColor: c }}
-                  onClick={() => changeColor(c)}
-                />
-              ))}
-            </div>
-            <div className="context-menu-title">{labels.textSize}</div>
-            <div className="context-menu-sizes">
-              {LABEL_FONT_SIZES.map((s) => (
-                <button
-                  key={s}
-                  className={`size-button${fontSize === s ? ' active' : ''}`}
-                  style={{ fontSize: Math.min(s, 18) }}
-                  onClick={() => changeFontSize(s)}
-                >
-                  A
+            {locked ? (
+              // The only action a locked label's context menu offers
+              // (besides the capability baseline's "copy", which has no GUI
+              // action yet at all) — everything else stays out of reach
+              // while `locked` is set, matching resize/drag already refusing
+              // it.
+              <button type="button" className="context-menu-unlock" onClick={unlock}>
+                🔓 {labels.unlock}
+              </button>
+            ) : (
+              <>
+                <div className="context-menu-title">{labels.color}</div>
+                <div className="context-menu-colors">
+                  {LABEL_COLORS.map((c) => (
+                    <button
+                      key={c}
+                      className="color-button"
+                      style={{ backgroundColor: c }}
+                      onClick={() => changeColor(c)}
+                    />
+                  ))}
+                </div>
+                <div className="context-menu-title">{labels.textSize}</div>
+                <div className="context-menu-sizes">
+                  {LABEL_FONT_SIZES.map((s) => (
+                    <button
+                      key={s}
+                      className={`size-button${fontSize === s ? ' active' : ''}`}
+                      style={{ fontSize: Math.min(s, 18) }}
+                      onClick={() => changeFontSize(s)}
+                    >
+                      A
+                    </button>
+                  ))}
+                </div>
+                <div className="context-menu-title">{labels.rotation}</div>
+                <div className="context-menu-rotate">
+                  <button
+                    type="button"
+                    className="rotate-button"
+                    aria-label={labels.rotateLeft}
+                    onClick={() => changeRotation((data.rotation ?? 0) - 15)}
+                  >
+                    ⟲
+                  </button>
+                  <button
+                    type="button"
+                    className="rotate-button rotate-reset"
+                    aria-label={labels.rotateReset}
+                    onClick={() => changeRotation(0)}
+                  >
+                    {Math.round(data.rotation ?? 0)}°
+                  </button>
+                  <button
+                    type="button"
+                    className="rotate-button"
+                    aria-label={labels.rotateRight}
+                    onClick={() => changeRotation((data.rotation ?? 0) + 15)}
+                  >
+                    ⟳
+                  </button>
+                </div>
+                <button className="context-menu-delete" onClick={remove}>
+                  🗑️ {labels.delete}
                 </button>
-              ))}
-            </div>
-            <div className="context-menu-title">{labels.rotation}</div>
-            <div className="context-menu-rotate">
-              <button
-                type="button"
-                className="rotate-button"
-                aria-label={labels.rotateLeft}
-                onClick={() => changeRotation((data.rotation ?? 0) - 15)}
-              >
-                ⟲
-              </button>
-              <button
-                type="button"
-                className="rotate-button rotate-reset"
-                aria-label={labels.rotateReset}
-                onClick={() => changeRotation(0)}
-              >
-                {Math.round(data.rotation ?? 0)}°
-              </button>
-              <button
-                type="button"
-                className="rotate-button"
-                aria-label={labels.rotateRight}
-                onClick={() => changeRotation((data.rotation ?? 0) + 15)}
-              >
-                ⟳
-              </button>
-            </div>
-            <button className="context-menu-delete" onClick={remove}>
-              🗑️ {labels.delete}
-            </button>
+              </>
+            )}
           </div>,
           document.body
         )}

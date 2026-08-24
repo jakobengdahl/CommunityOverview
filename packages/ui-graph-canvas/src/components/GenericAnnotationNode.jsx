@@ -3,7 +3,12 @@ import { createPortal } from 'react-dom';
 import { NodeResizer, useReactFlow } from 'reactflow';
 import { AnnotationContext } from './AnnotationContext';
 import { resolveAnnotationIcon } from '../utils/annotationIcons';
-import { rotationStyle, ROTATABLE_OVERLAY_KINDS, isRemoteLocked } from '../utils/annotations';
+import {
+  rotationStyle,
+  ROTATABLE_OVERLAY_KINDS,
+  isRemoteLocked,
+  resolveRotatedResizeGeometry,
+} from '../utils/annotations';
 import './GenericAnnotationNode.css';
 
 const DEFAULT_COLOR = '#94a3b8';
@@ -93,6 +98,10 @@ function GenericAnnotationNode({ id, type, data, selected }) {
 
   const [contextMenu, setContextMenu] = useState(null);
   const contextMenuRef = useRef(null);
+  // Snapshot of {x, y, width, height} at the start of the current resize
+  // gesture, read by handleResizeEnd to map the gesture's net delta back
+  // through this annotation's rotation (resolveRotatedResizeGeometry).
+  const resizeStartRef = useRef(null);
 
   useEffect(() => {
     if (!contextMenu) return;
@@ -160,6 +169,56 @@ function GenericAnnotationNode({ id, type, data, selected }) {
     notifyChange('delete');
   };
 
+  // The only action a locked annotation's context menu offers (besides the
+  // capability baseline's "copy", which has no GUI action yet at all) —
+  // everything else (colour/rotation/shape/font-size/delete) stays out of
+  // reach while `locked` is set, matching resize/drag already refusing it.
+  const unlock = () => {
+    if (remoteLocked) {
+      setContextMenu(null);
+      notifyRemoteLockedAttempt();
+      return;
+    }
+    setNodes((nds) =>
+      nds.map((n) => (n.id === id ? { ...n, data: { ...n.data, locked: false } } : n))
+    );
+    setContextMenu(null);
+    notifyChange('style');
+  };
+
+  const handleResizeStart = (event, params) => {
+    resizeStartRef.current = params;
+  };
+
+  // NodeResizer computes `params` as if this annotation's box were
+  // axis-aligned (see resolveRotatedResizeGeometry's comment for why that is
+  // wrong once the box is visually rotated); remap the gesture's net delta
+  // through the rotation before it lands on the node. Guarded so a caller
+  // that invokes this with no params (as an existing test does) still just
+  // notifies, unchanged from before this fix.
+  const handleResizeEnd = (event, params) => {
+    if (params && resizeStartRef.current) {
+      const geometry = resolveRotatedResizeGeometry({
+        start: resizeStartRef.current,
+        end: params,
+        rotation: data?.rotation ?? 0,
+      });
+      setNodes((nds) =>
+        nds.map((n) =>
+          n.id === id
+            ? {
+                ...n,
+                position: { x: geometry.x, y: geometry.y },
+                style: { ...n.style, width: geometry.width, height: geometry.height },
+              }
+            : n
+        )
+      );
+    }
+    resizeStartRef.current = null;
+    notifyChange('geometry');
+  };
+
   // Locked annotations already refuse to drag (draggable: !locked in
   // overlayToFlowNode); hide the resize handles too so "locked" reads as one
   // consistent geometry lock rather than only blocking one of two ways to
@@ -172,7 +231,8 @@ function GenericAnnotationNode({ id, type, data, selected }) {
       isVisible={Boolean(selected) && !locked && !remoteLocked}
       lineStyle={{ stroke: color, strokeWidth: 2 }}
       handleStyle={{ width: 10, height: 10, background: color, border: '2px solid white' }}
-      onResizeEnd={() => notifyChange('geometry')}
+      onResizeStart={handleResizeStart}
+      onResizeEnd={handleResizeEnd}
     />
   );
 
@@ -194,10 +254,12 @@ function GenericAnnotationNode({ id, type, data, selected }) {
       kind={kind}
       shape={data.shape || 'rectangle'}
       rotation={currentRotation}
+      locked={locked}
       labels={labels}
       onChangeShape={changeShape}
       onChangeRotation={changeRotation}
       onDelete={remove}
+      onUnlock={unlock}
     />
   );
 
@@ -220,12 +282,22 @@ function GenericAnnotationNode({ id, type, data, selected }) {
   if (kind === 'frame') {
     return (
       <>
-        {resizer}
+        {/* Carries the rotation for both the resizer and the visible frame,
+            so the handles rotate with the box instead of staying
+            axis-aligned around its unrotated bounds (the ReactFlow node
+            wrapper itself deliberately stays unrotated — see the module doc
+            comment on `rotation`). */}
         <div
-          className={`graph-generic-annotation-node kind-frame${selectedClass}`}
-          style={{ borderColor: color, width: '100%', height: '100%', ...rotation }}
-          onContextMenu={openContextMenu}
-        />
+          className="graph-generic-annotation-rotate-wrap"
+          style={{ width: '100%', height: '100%', position: 'relative', ...rotation }}
+        >
+          {resizer}
+          <div
+            className={`graph-generic-annotation-node kind-frame${selectedClass}`}
+            style={{ borderColor: color, width: '100%', height: '100%' }}
+            onContextMenu={openContextMenu}
+          />
+        </div>
         {menu}
         {remoteBadge}
       </>
@@ -236,18 +308,22 @@ function GenericAnnotationNode({ id, type, data, selected }) {
     const shape = data.shape || 'rectangle';
     return (
       <>
-        {resizer}
         <div
           className="graph-generic-annotation-shape-halo"
           data-testid="shape-halo"
           style={{
             width: '100%',
             height: '100%',
+            position: 'relative',
             ...rotation,
             ...(selected ? SELECTED_SHAPE_HALO : null),
           }}
           onContextMenu={openContextMenu}
         >
+          {/* Inside the halo (rather than a sibling of it) so the resize
+              handles rotate along with it — see the `frame` branch's
+              comment. */}
+          {resizer}
           <div
             // No `selected` class: the shared dashed outline it carries is
             // clipped away on the four clipped variants and would be
@@ -310,13 +386,17 @@ function GenericAnnotationNode({ id, type, data, selected }) {
     if (!url) {
       return (
         <>
-          {resizer}
           <div
-            className={`graph-generic-annotation-node kind-image kind-image-empty${selectedClass}`}
-            style={rotation}
-            onContextMenu={openContextMenu}
+            className="graph-generic-annotation-rotate-wrap"
+            style={{ width: '100%', height: '100%', position: 'relative', ...rotation }}
           >
-            {data.alt || ''}
+            {resizer}
+            <div
+              className={`graph-generic-annotation-node kind-image kind-image-empty${selectedClass}`}
+              onContextMenu={openContextMenu}
+            >
+              {data.alt || ''}
+            </div>
           </div>
           {menu}
           {remoteBadge}
@@ -325,14 +405,19 @@ function GenericAnnotationNode({ id, type, data, selected }) {
     }
     return (
       <>
-        {resizer}
-        <img
-          className={`graph-generic-annotation-node kind-image${selectedClass}`}
-          src={url}
-          alt={data.alt || ''}
-          style={{ width: '100%', height: '100%', ...rotation }}
-          onContextMenu={openContextMenu}
-        />
+        <div
+          className="graph-generic-annotation-rotate-wrap"
+          style={{ width: '100%', height: '100%', position: 'relative', ...rotation }}
+        >
+          {resizer}
+          <img
+            className={`graph-generic-annotation-node kind-image${selectedClass}`}
+            src={url}
+            alt={data.alt || ''}
+            style={{ width: '100%', height: '100%' }}
+            onContextMenu={openContextMenu}
+          />
+        </div>
         {menu}
         {remoteBadge}
       </>
@@ -345,18 +430,36 @@ function GenericAnnotationNode({ id, type, data, selected }) {
 // The right-click property editor's portal content, split out only so the
 // six kind branches above can each attach it without repeating its JSX.
 // Rotation controls show for every EDITABLE_KINDS member; the shape-subtype
-// grid shows only for `kind === 'shape'`.
+// grid shows only for `kind === 'shape'`. A locked annotation gets neither —
+// the capability baseline is "a locked object remains selectable but offers
+// only unlock or copy" — so this shows only the unlock action instead.
 function ContextMenuPortal({
   menuRef,
   position,
   kind,
   shape,
   rotation,
+  locked,
   labels,
   onChangeShape,
   onChangeRotation,
   onDelete,
+  onUnlock,
 }) {
+  if (locked) {
+    return createPortal(
+      <div
+        ref={menuRef}
+        className="graph-annotation-context-menu"
+        style={{ left: position.x, top: position.y }}
+      >
+        <button type="button" className="context-menu-unlock" onClick={onUnlock}>
+          🔓 {labels.unlock}
+        </button>
+      </div>,
+      document.body
+    );
+  }
   return createPortal(
     <div
       ref={menuRef}
