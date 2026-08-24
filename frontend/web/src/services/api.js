@@ -85,7 +85,14 @@ async function apiFetch(url, options = {}) {
 
   if (!response.ok) {
     const errorData = await response.json().catch(() => ({}));
-    const error = new Error(errorData.error || `HTTP error: ${response.status}`);
+    // Most endpoints return {"error": "..."}; a few (e.g. the session
+    // activity/undo routes, which raise a plain FastAPI HTTPException) return
+    // {"detail": "..."} instead — fall back to that so callers branching on
+    // `error.message` (activity/undo conflict feedback) see the real reason
+    // rather than a generic "HTTP error: 409".
+    const error = new Error(
+      errorData.error || errorData.detail || `HTTP error: ${response.status}`
+    );
     error.status = response.status;
     throw error;
   }
@@ -790,4 +797,36 @@ export async function ingestSessionImage(sessionId, image) {
     throw new Error(errorData.detail || `Image ingest failed: ${response.status}`);
   }
   return response.json();
+}
+
+/**
+ * Recent per-session annotation/canvas activity, newest first (backend PR #423:
+ * persisted, actor-scoped, bounded to 500 records / 7 days per session).
+ * @param {string} sessionId
+ * @param {{actor?: string, limit?: number}} [options]
+ * @returns {Promise<{session_id: string, activity: Array}>}
+ */
+export async function getSessionActivity(sessionId, { actor, limit } = {}) {
+  const params = new URLSearchParams();
+  if (actor) params.set('actor', actor);
+  if (limit) params.set('limit', String(limit));
+  const suffix = params.toString() ? `?${params.toString()}` : '';
+  return apiFetch(`${SESSIONS_BASE()}/${encodeURIComponent(sessionId)}/activity${suffix}`);
+}
+
+/**
+ * Undo the requesting actor's latest eligible session activity record.
+ * Only the actor's own most recent not-yet-undone action is eligible; a
+ * thrown error's `status` is 404 (nothing to undo / session gone), 409 (the
+ * affected state changed since, or the session is mid-write — retry), or 429
+ * (rate limited) — see backend/core/session_manager.py's undo_last_action.
+ * @param {string} sessionId
+ * @param {string} clientId
+ * @returns {Promise<{undone_activity_id: string, undone_op: string, applied: Object, revision: number}>}
+ */
+export async function undoSessionAction(sessionId, clientId) {
+  return apiFetch(`${SESSIONS_BASE()}/${encodeURIComponent(sessionId)}/undo`, {
+    method: 'POST',
+    body: JSON.stringify({ client_id: clientId }),
+  });
 }

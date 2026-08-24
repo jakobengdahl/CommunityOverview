@@ -283,8 +283,9 @@ between two nodes does not push the rest of the session out of the trail. A node
 added keeps its **Added** label even after you return to it later.
 
 This trail is per-session and lives only in your browser. It is separate from
-**Recent activity** ([5.2](#52-recent-activity-audit-log)), which is a persisted
-audit log of who changed what in the graph data.
+**Recent activity** ([5.2](#52-recent-activity-audit-log)), whose Graph tab is a
+persisted audit log of who changed what in the graph data (its Session tab is a
+different, session-scoped record: this session's own annotation/canvas activity).
 
 ---
 
@@ -467,7 +468,7 @@ AI apps:
 | **Search previous sessions** | Filters the recent-session list by name or ID |
 | **Connect to session (via ID)** | Joins an existing session by entering its ID (format `1234-5678-9012-3456`) |
 | **Recent sessions** | The most recently used sessions — shown by name if you have named them, otherwise by ID. Click one to load it; the current session is saved automatically first. Hover a row and open the **⋮** menu for per-session actions: **Name session**, **Copy link** (copies the shareable `?session=…` URL to the clipboard), **Copy pulse-trigger URL** (on the session you are currently in — see [8.4](#84-external-pulse-triggers)), and **Delete session**. |
-| **Recent activity** | Opens the activity panel — a read-only audit log of graph changes (see [5.2](#52-recent-activity-audit-log)) |
+| **Recent activity** | Opens the activity panel — this session's annotation/canvas activity with undo, plus a read-only audit log of graph changes (see [5.2](#52-recent-activity-audit-log)) |
 | **Lock / Unlock visualization** | Guards the current board against accidental clearing. While locked, **Esc × 2** does nothing at all, and the top-bar **clear** button asks for an emphatic confirmation warning that everything on the board will be removed. The setting is remembered in your browser. |
 | **Settings** | Opens the Settings dialog (see below) |
 
@@ -522,15 +523,38 @@ your browser and takes effect the next time you open or switch session.
 
 ### 5.2 Recent activity (audit log)
 
-Open **Recent activity** from the bottom of the session menu to see a read-only
-log of everything that has changed in the graph, newest first. The panel slides
-in from the right edge of the screen.
+Open **Recent activity** from the bottom of the session menu to see the activity
+panel. It slides in from the right edge of the screen and has two tabs:
+**Session** (this session's annotation and canvas activity — sticky notes, shapes,
+node moves, layout changes — with undo) and **Graph** (a read-only log of
+everything that has changed in the graph itself, newest first). They are
+deliberately separate: session activity lives with the session and disappears
+with it; graph history is the permanent audit trail.
 
 ![Recent activity panel](images/recent-activity.png)
-*The activity panel lists graph changes newest-first, with an **AI** badge on
-changes made by an agent.*
+*The activity panel's Session tab, with a readable description per action and an
+**Undo** button on your own latest undoable action.*
 
-Each entry shows:
+#### Session tab
+
+Every annotation or canvas change you or a collaborator makes in the current
+session appears here as a plain-language entry — "Created a sticky note",
+"Moved \"Acme Corp\"", "Rotated a shape" — with who did it (your own actions are
+marked *(You)*) and when.
+
+- **Undo** appears only on *your own* most recent undoable action — you can
+  never undo someone else's change. The same action is also available as
+  **Undo my last action** above the list.
+- If the item you are trying to undo has changed since (someone else edited it,
+  or you did something else to it first), undo fails with a clear conflict
+  message instead of silently overwriting that later change.
+- Session activity is kept for 7 days or the last 500 actions per session,
+  whichever comes first — it is not a permanent record.
+
+#### Graph tab
+
+The graph tab lists graph changes newest-first, with an **AI** badge on changes
+made by an agent. Each entry shows:
 
 - **What happened** — node or connection created, updated, or deleted.
 - **When** — a relative time (e.g. "5 min ago") with the exact date and time
@@ -542,8 +566,9 @@ Each entry shows:
 
 For an update, a compact **before → after** diff lists the fields that changed.
 Use **Load more** at the bottom to page further back through the history, and the
-refresh icon in the header to reload from the top. This view never changes the
-graph — it is purely for looking back at what happened.
+refresh icon in the header to reload from the top (it reloads whichever tab is
+open). This view never changes the graph — it is purely for looking back at what
+happened.
 
 History is also available per item: double-click a node (or open a connection's
 editor) and switch to the **History** tab to see only that item's changes. When a
@@ -848,7 +873,7 @@ Screenshots for this guide are saved to `docs/images/` in PNG format.
 | `node-marking.png` | pending | Canvas with colour marking dots and legend |
 | `document-upload.png` | ✓ | Chat after file upload with extracted entity proposals |
 | `hamburger-menu.png` | ✓ | Session menu (☰) — left panel with session navigation and Settings entry |
-| `recent-activity.png` | pending | Recent activity panel (right side) with entries, an AI badge, and a before→after diff |
+| `recent-activity.png` | pending | Recent activity panel (right side), Session tab: entries with an Undo button and an actor badge |
 | `create-agent.png` | ✓ | Create Agent dialog with all configuration sections |
 | `skills.png` | ✓ | Chat panel bottom showing active skill and selected nodes |
 | `mcp-session-control.png` | ✓ | External AI (ChatGPT) controlling the canvas via session ID |

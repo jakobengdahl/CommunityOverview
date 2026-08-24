@@ -719,6 +719,8 @@ node content is rehydrated from the graph on load via `?resolve=true`.
 | POST | `/api/sessions/{id}/ops` | Apply an ordered op batch (`{client_id, base_seq, ops}` → `{applied, seq}`); server-ordered LWW, monotonic `seq`. Bounded per batch by op count (≤ 500) **and** body size (≤ 256 KB → `413`), plus a per-client token bucket (200 burst, 100 ops/s refill → `429`) — design §3.9 |
 | POST | `/api/sessions/{id}/annotations/image` | Human GUI clipboard-paste / file-upload image ingest (`{client_id, x, y, image_data\|image_url, ...}` → `{annotation, revision}`). Runs the same `image_ingest.py` validate/optimize/embed pipeline and `SessionManager.upsert_image_annotation` budgets as the MCP `create_image_annotation` tool — see "Image annotation tool" below. The response is informational only: the annotation is attributed to a dedicated `human-image-ingest` client id (not the caller's `client_id`) so the pasting browser's own SSE subscription receives and applies the embedded result instead of the echo being dropped as a self-authored op |
 | GET | `/api/sessions/{id}/stream` | SSE fan-out: presence, applied ops, claims, and broadcast MCP commands (`{"type": "command", ...}` — every connected client applies these, not just one browser). Query `client_id`, `name`, `since_seq` (op catch-up or full-snapshot fallback). A slow consumer whose queue overflows is sent a fresh full snapshot rather than diverging. EventSource-opened, so it bypasses Basic Auth (protected by the unguessable session id — design §3.9) |
+| GET | `/api/sessions/{id}/activity` | Recent per-session annotation/canvas activity, newest first (`?actor=`, `?limit=` up to 500) — `backend/core/session_activity.py`, persisted with the session, bounded to 500 records / 7 days. Covers the `UNDOABLE_OPS` kinds (annotation create/update/delete, node move, layout apply, node show/hide); other state ops (nodes_added/removed, edges_*, group/session renames) are out of scope for this log |
+| POST | `/api/sessions/{id}/undo` | Revert the requesting actor's own latest not-yet-undone activity record (`{client_id, expected_revision?}` → `{undone_activity_id, undone_op, applied, revision}`), replaying its stored inverse op through the same synchronous op path as a direct write (broadcast over the stream like any other op). `404` if the actor has nothing eligible, `409` if the affected state changed since (conflict) or the session is mid-write (retry), `429` rate-limited. Surfaced in the web UI as the Activity drawer's Session tab (`frontend/web/src/components/ActivityDrawer.jsx`) |
 
 Session state is server-owned: the browser no longer uploads canvas state, and
 MCP query tools read visible nodes / selection from the shared-session store
@@ -1089,14 +1091,23 @@ recolor an existing group would silently wipe out membership
 `update_group_members` had set. Pass an explicit list (`[]` included) to
 set membership from this tool instead.
 
-Both tools resolve `annotation_id`/`group_id` against `group`-typed
+`delete_group_annotation` deletes a `group` by id, sharing the same
+revision-checked delete contract as `delete_annotation`/`delete_sticky_note`.
+It removes only the group box — `member_node_ids` names graph nodes by id,
+not annotations the group owns, so there is nothing else to cascade-delete.
+This matches the canvas GUI's own "Delete Group" action
+(`packages/ui-graph-canvas/src/components/GroupNode.jsx`'s
+`removeGroupKeepChildren`), which un-parents and keeps every member node
+rather than deleting or hiding them.
+
+All three tools resolve `annotation_id`/`group_id` against `group`-typed
 annotations only — a note or generic-type id is refused (`wrong_type` on
-create, `not_found` on `update_group_members`), matching the note/generic
-boundary above. There is no MCP tool yet to delete a group box itself, and
-`group_membership_changed` is outside `session_activity.UNDOABLE_OPS`
-(see that module's docstring), so a membership change made through
-`update_group_members` is not itself undoable through `undo_last_action` —
-creating or deleting the group annotation is, like any other type.
+create, `not_found` on `update_group_members`/`delete_group_annotation`),
+matching the note/generic boundary above. `group_membership_changed` is
+outside `session_activity.UNDOABLE_OPS` (see that module's docstring), so a
+membership change made through `update_group_members` is not itself
+undoable through `undo_last_action` — creating or deleting the group
+annotation is, like any other type.
 
 #### Image annotation tool
 
