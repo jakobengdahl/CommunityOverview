@@ -5,10 +5,12 @@ registered in ``backend/service/mcp_tools.py``.
 
 These extend the note-only MCP annotation access added in the sticky-note
 tool set (see ``test_mcp_sticky_note_tools.py``) to the rest of the v1 model
-(``text``/``label``/``line``/``frame``/``shape``/``icon``/``vote_dot``);
-``note``, ``group`` and ``image`` stay out of scope for *creation* through
-these tools (see ``backend/core/session_annotations.py``'s module docstring,
-and ``test_mcp_image_annotation_tool.py`` for the image ingest path an
+(``text``/``label``/``line``/``frame``/``shape``/``icon``/``vote_dot``/
+``freehand``); ``note``, ``group`` and ``image`` stay out of scope for
+*creation* through these tools — each has its own dedicated tool set instead
+(see ``backend/core/session_annotations.py``'s module docstring,
+``test_mcp_group_annotation_tools.py`` for ``group``, and
+``test_mcp_image_annotation_tool.py`` for the image ingest path an
 `image` annotation must be created through). The tools are
 thin wrappers over ``SessionManager.upsert_annotation``/``update_annotation``/
 ``delete_annotation`` plus the generic-shape helpers in
@@ -645,6 +647,96 @@ class TestUpdateAnnotation:
         stored = session.state["annotations"][0]
         assert stored["attachment"]["target_id"] == "node-1"
 
+    @pytest.mark.parametrize("ann_type", ["label", "text", "icon", "vote_dot"])
+    def test_update_annotation_attaches_a_previously_unattached_annotation(
+        self, annotation_tools, ann_type
+    ):
+        """create_annotation's create-time attachment round trip is covered
+        above; this pins the update path — adding an attachment after
+        creation — and confirms it survives an independent list_annotations
+        read, not just the update call's own response."""
+        tools_map, manager = annotation_tools
+        session = manager.create_session()
+        created = tools_map["create_annotation"](
+            session_id=session.id, type=ann_type, x=0, y=0
+        )
+        assert "attachment" not in created["annotation"]["content"]
+
+        result = tools_map["update_annotation"](
+            session_id=session.id,
+            annotation_id=created["annotation"]["id"],
+            content={"attachment": {"target_id": "node-9", "anchor": "top"}},
+        )
+
+        assert result["success"] is True
+        assert result["annotation"]["content"]["attachment"] == {
+            "target_id": "node-9",
+            "anchor": "top",
+        }
+        listed = tools_map["list_annotations"](session_id=session.id)
+        assert listed["annotations"][0]["content"]["attachment"]["target_id"] == (
+            "node-9"
+        )
+
+    def test_update_annotation_changes_a_line_endpoint_attachment_target(
+        self, annotation_tools
+    ):
+        """Docking a line's end onto a different node via update_annotation,
+        then confirming the new target survives a fresh list_annotations
+        read (end-to-end round trip, not just the update response)."""
+        tools_map, manager = annotation_tools
+        session = manager.create_session()
+        created = tools_map["create_annotation"](
+            session_id=session.id,
+            type="line",
+            x=0,
+            y=0,
+            content={
+                "to": {"x": 100, "y": 0},
+                "end": {"attachment": {"target_id": "node-a"}},
+            },
+        )
+        ann_id = created["annotation"]["id"]
+
+        result = tools_map["update_annotation"](
+            session_id=session.id,
+            annotation_id=ann_id,
+            content={"end": {"attachment": {"target_id": "node-b"}}},
+        )
+
+        assert result["success"] is True
+        assert (
+            result["annotation"]["content"]["end"]["attachment"]["target_id"]
+            == "node-b"
+        )
+        listed = tools_map["list_annotations"](session_id=session.id, types=["line"])
+        assert (
+            listed["annotations"][0]["content"]["end"]["attachment"]["target_id"]
+            == "node-b"
+        )
+
+    def test_update_annotation_can_detach_by_clearing_attachment(
+        self, annotation_tools
+    ):
+        tools_map, manager = annotation_tools
+        session = manager.create_session()
+        created = tools_map["create_annotation"](
+            session_id=session.id,
+            type="label",
+            x=0,
+            y=0,
+            content={"attachment": {"target_id": "node-1"}},
+        )
+
+        result = tools_map["update_annotation"](
+            session_id=session.id,
+            annotation_id=created["annotation"]["id"],
+            content={"attachment": None},
+        )
+
+        assert result["success"] is True
+        assert result["annotation"]["content"]["attachment"] is None
+
 
 class TestReorderAnnotation:
     def test_sets_z(self, annotation_tools):
@@ -817,6 +909,162 @@ class TestDuplicateAnnotation:
 
         assert result["success"] is False
         assert result["error"] == "not_found"
+
+    def test_duplicating_a_freehand_stroke_translates_its_points(
+        self, annotation_tools
+    ):
+        """Regression test: duplicate_annotation translated a line's from/to
+        endpoints by (dx, dy) but not a freehand stroke's `points`, so a
+        duplicated stroke kept its original geometry at a moved envelope
+        position (docs/ANNOTATION_CONTRACT.md's `freehand` row)."""
+        tools_map, manager = annotation_tools
+        session = manager.create_session()
+        created = tools_map["create_annotation"](
+            session_id=session.id,
+            type="freehand",
+            x=0,
+            y=0,
+            content={"points": [{"x": 0, "y": 0}, {"x": 10, "y": 10}]},
+        )
+
+        result = tools_map["duplicate_annotation"](
+            session_id=session.id,
+            annotation_id=created["annotation"]["id"],
+            dx=100,
+            dy=-50,
+        )
+
+        assert result["success"] is True
+        assert result["annotation"]["x"] == 100
+        assert result["annotation"]["y"] == -50
+        assert result["annotation"]["content"]["points"] == [
+            {"x": 100, "y": -50},
+            {"x": 110, "y": -40},
+        ]
+
+
+class TestFreehandOverGenericTools:
+    """`freehand` has been a member of GENERIC_ANNOTATION_TYPES since #422
+    (docs/ANNOTATION_CONTRACT.md's `freehand` row was stale in claiming it
+    had no MCP tool at all) — these pin that create/update/style/reorder/
+    lock/delete already work through the same generic tools as every other
+    non-note, non-group, non-image type."""
+
+    def test_create_with_points_and_style(self, annotation_tools):
+        tools_map, manager = annotation_tools
+        session = manager.create_session()
+
+        result = tools_map["create_annotation"](
+            session_id=session.id,
+            type="freehand",
+            x=0,
+            y=0,
+            content={
+                "points": [{"x": 0, "y": 0}, {"x": 5, "y": 5}],
+                "strokeWidth": 4,
+            },
+            style={"stroke": "#123456"},
+        )
+
+        assert result["success"] is True
+        assert result["annotation"]["content"]["points"] == [
+            {"x": 0, "y": 0},
+            {"x": 5, "y": 5},
+        ]
+        assert result["annotation"]["content"]["strokeWidth"] == 4
+        assert result["annotation"]["style"] == {"stroke": "#123456"}
+
+    def test_position_move_translates_points(self, annotation_tools):
+        tools_map, manager = annotation_tools
+        session = manager.create_session()
+        created = tools_map["create_annotation"](
+            session_id=session.id,
+            type="freehand",
+            x=0,
+            y=0,
+            content={"points": [{"x": 0, "y": 0}, {"x": 10, "y": 0}]},
+        )
+
+        result = tools_map["update_annotation"](
+            session_id=session.id,
+            annotation_id=created["annotation"]["id"],
+            x=20,
+            y=30,
+        )
+
+        assert result["success"] is True
+        assert result["annotation"]["x"] == 20 and result["annotation"]["y"] == 30
+        assert result["annotation"]["content"]["points"] == [
+            {"x": 20, "y": 30},
+            {"x": 30, "y": 30},
+        ]
+
+    def test_style_update(self, annotation_tools):
+        tools_map, manager = annotation_tools
+        session = manager.create_session()
+        created = tools_map["create_annotation"](
+            session_id=session.id,
+            type="freehand",
+            x=0,
+            y=0,
+            content={"points": [{"x": 0, "y": 0}]},
+            style={"stroke": "#000000"},
+        )
+
+        result = tools_map["update_annotation"](
+            session_id=session.id,
+            annotation_id=created["annotation"]["id"],
+            style={"stroke": "#ffffff"},
+        )
+
+        assert result["annotation"]["style"] == {"stroke": "#ffffff"}
+        # content (points) is untouched by a style-only patch.
+        assert result["annotation"]["content"]["points"] == [{"x": 0, "y": 0}]
+
+    def test_rotation_round_trips_though_never_rendered(self, annotation_tools):
+        """docs/ANNOTATION_CONTRACT.md: freehand's stored rotation is accepted
+        and reported back over MCP, even though the canvas never draws it."""
+        tools_map, manager = annotation_tools
+        session = manager.create_session()
+        created = tools_map["create_annotation"](
+            session_id=session.id,
+            type="freehand",
+            x=0,
+            y=0,
+            rotation=45,
+            content={"points": [{"x": 0, "y": 0}]},
+        )
+
+        assert created["annotation"]["rotation"] == 45
+        listed = tools_map["list_annotations"](session_id=session.id)
+        assert listed["annotations"][0]["rotation"] == 45
+
+    def test_reorder_lock_and_delete(self, annotation_tools):
+        tools_map, manager = annotation_tools
+        session = manager.create_session()
+        created = tools_map["create_annotation"](
+            session_id=session.id,
+            type="freehand",
+            x=0,
+            y=0,
+            content={"points": [{"x": 0, "y": 0}]},
+        )
+        ann_id = created["annotation"]["id"]
+
+        reordered = tools_map["reorder_annotation"](
+            session_id=session.id, annotation_id=ann_id, z=3
+        )
+        locked = tools_map["set_annotation_lock"](
+            session_id=session.id, annotation_id=ann_id, locked=True
+        )
+        deleted = tools_map["delete_annotation"](
+            session_id=session.id, annotation_id=ann_id
+        )
+
+        assert reordered["success"] is True
+        assert locked["success"] is True
+        assert deleted["success"] is True
+        assert session.state["annotations"] == []
 
 
 class TestDeleteAnnotation:

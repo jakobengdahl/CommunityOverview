@@ -9,7 +9,7 @@ defined by ``packages/ui-graph-canvas/src/utils/annotationModel.js`` and
 consumed as-is by the canvas. This module builds and reads that same shape
 from Python, once, so MCP tools do not each hand-roll it.
 
-Two helper sets live here:
+Three helper sets live here:
 
 * note-shape helpers (``is_note``, ``build_note_annotation``,
   ``build_note_patch``, ``project_note``) — used by the dedicated
@@ -21,8 +21,13 @@ Two helper sets live here:
   ``delete_annotation``/``reorder_annotation``/``set_annotation_lock``/
   ``duplicate_annotation`` tools, which cover every v1 type except ``note``
   (kept on its own dedicated tool set above) and ``group`` (node-membership
-  boxes, out of scope — editing ``member_node_ids`` goes through the
-  ``group_membership_changed`` op, not exposed over MCP).
+  boxes, kept on its own tool set below).
+* group-shape helpers (``is_group``, ``build_group_annotation``) — used by
+  the dedicated ``create_group_annotation``/``update_group_members`` MCP
+  tools. Membership itself is edited through the ``group_membership_changed``
+  op (``update_group_members``, not this module), never by re-supplying
+  ``member_node_ids`` through a generic patch — see
+  ``build_group_annotation``'s docstring for why.
 
 ``image_annotation_error`` also lives here: the contract rule that an
 ``image`` annotation's pixel content is always an embedded, server-ingested
@@ -34,12 +39,16 @@ own inverse op — see the function's docstring and ``SessionStore.apply_state_o
 
 from __future__ import annotations
 
-from typing import Any, Dict, FrozenSet, Optional
+from typing import Any, Dict, FrozenSet, List, Optional
 
 NOTE_TYPE = "note"
 GROUP_TYPE = "group"
 IMAGE_TYPE = "image"
 DEFAULT_NOTE_SIZE = {"w": 160, "h": 96}
+# A group box has no natural single-member size the way a note does; this is
+# just a usable default footprint for a freshly created, still-empty group —
+# callers passing member ids up front should size it themselves.
+DEFAULT_GROUP_SIZE = {"w": 320, "h": 200}
 
 # The only `content.image.url` form an `image` annotation may be persisted
 # with: an embedded base64 data URI of the content type server-side ingest
@@ -346,6 +355,83 @@ def project_note(annotation: Dict[str, Any]) -> Dict[str, Any]:
         "created_by": annotation.get("created_by"),
         "updated_by": annotation.get("updated_by"),
     }
+
+
+# ==================== Group (node-membership box) helpers ====================
+
+
+def is_group(annotation: Dict[str, Any]) -> bool:
+    """Whether *annotation* is a v1 ``group`` annotation (checks type or its
+    ``kind`` compatibility alias, matching how the store itself resolves type).
+    """
+    ann_type = annotation.get("type") or annotation.get("kind")
+    return ann_type == GROUP_TYPE
+
+
+def build_group_annotation(
+    *,
+    x: float,
+    y: float,
+    w: Optional[float] = None,
+    h: Optional[float] = None,
+    label: str = "",
+    description: str = "",
+    color: Optional[str] = None,
+    member_node_ids: Optional[List[str]] = None,
+    z: Optional[float] = None,
+    locked: bool = False,
+    annotation_id: Optional[str] = None,
+) -> Dict[str, Any]:
+    """Build a v1 ``group`` annotation dict for the ``annotation_created`` op.
+
+    Mirrors ``build_note_annotation``'s shape and upsert behaviour (passing
+    an existing ``annotation_id`` replaces that group's fields), with one
+    deliberate difference: ``member_node_ids`` is included in the built dict
+    only when the caller passes it explicitly, instead of always defaulting
+    to ``[]`` the way ``build_note_annotation`` always sets ``text``.
+    ``SessionStore`` applies an upsert with a shallow ``dict.update``, so a
+    key this function omits is left untouched on the stored annotation
+    rather than reset. Membership is meant to be managed through
+    ``update_group_members`` (the ``group_membership_changed`` op) once a
+    group exists; if re-creating a group by id to change its label or color
+    also silently wiped out membership set through that other tool whenever
+    the caller did not resend the current list, the two tools would fight
+    each other. A brand-new group with no ``member_node_ids`` given is
+    simply created empty — the canvas and ``project_annotation`` both treat
+    an absent list the same as an empty one.
+
+    ``ValueError`` is raised for a non-list-of-strings ``member_node_ids``,
+    matching how the generic builders report a malformed payload as
+    ``invalid_content`` at the MCP tool layer.
+    """
+    if member_node_ids is not None and (
+        not isinstance(member_node_ids, list)
+        or not all(isinstance(m, str) for m in member_node_ids)
+    ):
+        raise ValueError("member_node_ids must be a list of strings")
+    size = {
+        "w": w if w is not None else DEFAULT_GROUP_SIZE["w"],
+        "h": h if h is not None else DEFAULT_GROUP_SIZE["h"],
+    }
+    annotation: Dict[str, Any] = {
+        "type": GROUP_TYPE,
+        "kind": GROUP_TYPE,
+        "position": {"x": x, "y": y},
+        "geometry": {"x": x, "y": y, "w": size["w"], "h": size["h"], "rotation": 0},
+        "size": size,
+        "label": label or "",
+        "description": description or "",
+        "z": z if z is not None else 0,
+        "locked": bool(locked),
+    }
+    if annotation_id is not None:
+        annotation["id"] = annotation_id
+    if color is not None:
+        annotation["color"] = color
+        annotation["style"] = {"color": color}
+    if member_node_ids is not None:
+        annotation["member_node_ids"] = list(member_node_ids)
+    return annotation
 
 
 # ==================== Generic (non-note, non-group) type helpers ====================
