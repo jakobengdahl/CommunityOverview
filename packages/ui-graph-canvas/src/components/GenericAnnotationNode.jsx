@@ -2,7 +2,7 @@ import { memo, useContext, useEffect, useRef, useState } from 'react';
 import { createPortal } from 'react-dom';
 import { NodeResizer, useReactFlow } from 'reactflow';
 import { AnnotationContext } from './AnnotationContext';
-import { resolveAnnotationIcon } from '../utils/annotationIcons';
+import { ANNOTATION_ICONS, resolveAnnotationIcon } from '../utils/annotationIcons';
 import {
   rotationStyle,
   ROTATABLE_OVERLAY_KINDS,
@@ -14,12 +14,12 @@ import './GenericAnnotationNode.css';
 const DEFAULT_COLOR = '#94a3b8';
 
 // A right-click property editor exists only for the kinds that actually have
-// something to edit today: `shape`'s subtype (only `shape` needs this) and
+// something to edit today: `shape`'s subtype, `icon`'s configured name, and
 // every rotatable generic kind's rotation (docs/ANNOTATION_CONTRACT.md:
 // "there is no GUI control to set a rotation yet" / "no editor to change an
-// existing shape's subtype" — `shape` is already a member of
-// ROTATABLE_OVERLAY_KINDS, so this is exactly that set). Recolouring and an
-// icon picker for `icon` stay out of this slice — see remaining_scope on
+// existing shape's subtype" / "no icon picker" — `shape` and `icon` are both
+// already members of ROTATABLE_OVERLAY_KINDS, so this is exactly that set).
+// Recolouring stays out of this slice — see remaining_scope on
 // task-annotation-render-direct-manipulation.
 const EDITABLE_KINDS = ROTATABLE_OVERLAY_KINDS;
 
@@ -58,6 +58,15 @@ const SHAPE_STYLES = Object.freeze(
 // The shape-subtype picker's option order — every variant SHAPE_STYLES draws.
 const SHAPE_NAMES = ['rectangle', 'circle', 'triangle', 'rhombus', 'hexagon', 'process_arrow'];
 
+// The icon picker's option order: every canonical name annotationIcons.js
+// draws a distinct glyph for (the full set the module doc comment there
+// describes — a canonical or aliased entry for every one of the host
+// registry's 75 icon names, plus the friendly synonyms that predate it).
+// Reusing this set rather than inventing a second vocabulary is the point:
+// whatever a user picks here, resolveAnnotationIcon already knows how to
+// draw on the annotation itself.
+const ICON_NAMES = Object.keys(ANNOTATION_ICONS);
+
 // A clip-path clips the element's outline away too, so the dashed selection
 // outline every other generic kind uses is invisible on a triangle, rhombus,
 // hexagon or process arrow — and a locked one shows no resize handles either,
@@ -79,8 +88,8 @@ const SELECTED_SHAPE_HALO = Object.freeze({
  * for every annotation type; this component adds the visual selection
  * outline, for the sized kinds, model-space resize via ReactFlow's
  * NodeResizer, and — for the kinds EDITABLE_KINDS names — a right-click
- * property editor (shape subtype, rotation). Recolouring and an icon picker
- * remain out of scope; see the module doc comment on EDITABLE_KINDS.
+ * property editor (shape subtype, icon name, rotation). Recolouring remains
+ * out of scope; see the module doc comment on EDITABLE_KINDS.
  */
 function GenericAnnotationNode({ id, type, data, selected }) {
   const kind = type;
@@ -142,6 +151,18 @@ function GenericAnnotationNode({ id, type, data, selected }) {
       return;
     }
     setNodes((nds) => nds.map((n) => (n.id === id ? { ...n, data: { ...n.data, shape } } : n)));
+    setContextMenu(null);
+    notifyChange('style');
+  };
+
+  const changeIcon = (name) => {
+    if (remoteLocked) {
+      notifyRemoteLockedAttempt();
+      return;
+    }
+    setNodes((nds) =>
+      nds.map((n) => (n.id === id ? { ...n, data: { ...n.data, icon: name } } : n))
+    );
     setContextMenu(null);
     notifyChange('style');
   };
@@ -253,10 +274,12 @@ function GenericAnnotationNode({ id, type, data, selected }) {
       position={contextMenu}
       kind={kind}
       shape={data.shape || 'rectangle'}
+      icon={data.icon}
       rotation={currentRotation}
       locked={locked}
       labels={labels}
       onChangeShape={changeShape}
+      onChangeIcon={changeIcon}
       onChangeRotation={changeRotation}
       onDelete={remove}
       onUnlock={unlock}
@@ -430,18 +453,21 @@ function GenericAnnotationNode({ id, type, data, selected }) {
 // The right-click property editor's portal content, split out only so the
 // six kind branches above can each attach it without repeating its JSX.
 // Rotation controls show for every EDITABLE_KINDS member; the shape-subtype
-// grid shows only for `kind === 'shape'`. A locked annotation gets neither —
-// the capability baseline is "a locked object remains selectable but offers
-// only unlock or copy" — so this shows only the unlock action instead.
+// grid shows only for `kind === 'shape'`, the icon-name grid only for
+// `kind === 'icon'`. A locked annotation gets neither — the capability
+// baseline is "a locked object remains selectable but offers only unlock or
+// copy" — so this shows only the unlock action instead.
 function ContextMenuPortal({
   menuRef,
   position,
   kind,
   shape,
+  icon,
   rotation,
   locked,
   labels,
   onChangeShape,
+  onChangeIcon,
   onChangeRotation,
   onDelete,
   onUnlock,
@@ -483,6 +509,25 @@ function ContextMenuPortal({
                   className={`shape-picker-swatch shape-${name}`}
                   style={SHAPE_STYLES[name] || SHAPE_STYLES.rectangle}
                 />
+              </button>
+            ))}
+          </div>
+        </>
+      )}
+      {kind === 'icon' && (
+        <>
+          <div className="context-menu-title">{labels.icon}</div>
+          <div className="context-menu-icons">
+            {ICON_NAMES.map((name) => (
+              <button
+                key={name}
+                type="button"
+                className={`icon-picker-button${icon === name ? ' active' : ''}`}
+                aria-label={name}
+                title={name}
+                onClick={() => onChangeIcon(name)}
+              >
+                {resolveAnnotationIcon(name).text}
               </button>
             ))}
           </div>

@@ -35,6 +35,16 @@ export const ANNOTATION_TYPES = new Set([
 // dimensions (frame/shape/image) but wasn't given a size.
 const DEFAULT_GENERIC_SIZE = { w: 160, h: 96 };
 
+// Natural on-canvas size (px) of the two fixed-intrinsic-size kinds that a
+// one-click toolbox creation can usefully default to — matches the CSS box
+// GenericAnnotationNode.css draws for `.kind-icon`/`.kind-vote_dot` (these
+// two constants are the single JS-side source of that size; the CSS value is
+// the visual source of truth and duplicates it, since the two can't share a
+// value directly). `text` has no natural fixed size (it grows with content),
+// so it gets no equivalent constant here.
+export const ICON_INTRINSIC_SIZE = { w: 32, h: 32 };
+export const VOTE_DOT_INTRINSIC_SIZE = { w: 24, h: 24 };
+
 // The v1 types that may bind to a node/annotation via `content.attachment`
 // (docs/ANNOTATION_CONTRACT.md's "Attachment and detach behavior"). `line`
 // attaches per-endpoint (`start`/`end`) instead, via its own mechanism
@@ -260,6 +270,19 @@ export function overlayToFlowNode(overlay) {
       node.style = overlay.size
         ? { width: overlay.size.w, height: overlay.size.h }
         : { width: DEFAULT_GENERIC_SIZE.w, height: DEFAULT_GENERIC_SIZE.h };
+    } else if (overlay.size) {
+      // icon/vote_dot/text draw at a fixed intrinsic size (no `style` box, no
+      // NodeResizer — RESIZABLE_KINDS in GenericAnnotationNode.jsx), but
+      // sessionAnnotations.js now carries their geometry.w/h through its own
+      // translators unconditionally, the same envelope-field treatment as
+      // z/locked/rotation (smallfix-annotation-unsized-generic-geometry-clobber).
+      // Without this, a live ReactFlow node had nowhere to hold that value, so
+      // the browser's hydrate -> autosave round trip still dropped it even
+      // after that fix. Kept in `data` (not `style`) so it never affects the
+      // CSS box or resize handles — silently-preserved geometry only, not a
+      // new resizable control (61d5cc7b's decision note: making these kinds
+      // resizable is a separate, bigger UX change, out of scope here).
+      data.size = overlay.size;
     }
     return node;
   }
@@ -316,6 +339,11 @@ export function flowNodeToOverlay(node) {
     for (const field of GENERIC_OVERLAY_FIELDS[node.type]) out[field] = node.data?.[field];
     if (SIZED_GENERIC_KINDS.has(node.type) && node.style) {
       out.size = { w: node.style.width, h: node.style.height };
+    } else if (node.data?.size) {
+      // Mirrors overlayToFlowNode's `data.size` slot for icon/vote_dot/text —
+      // see its comment. Nothing in this file ever writes to it besides
+      // hydration, since these kinds have no resize UI.
+      out.size = node.data.size;
     }
     return out;
   }

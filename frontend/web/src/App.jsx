@@ -2022,6 +2022,7 @@ function App() {
             arrowStartHead: t('context_menu.arrow_start_head'),
             arrowEndHead: t('context_menu.arrow_end_head'),
             annotationShape: t('context_menu.annotation_shape'),
+            annotationIcon: t('context_menu.annotation_icon'),
             annotationRotation: t('context_menu.annotation_rotation'),
             annotationRotateLeft: t('context_menu.annotation_rotate_left'),
             annotationRotateRight: t('context_menu.annotation_rotate_right'),
@@ -2050,6 +2051,8 @@ function App() {
             shapeRhombus: t('annotation_toolbox.shape_rhombus'),
             shapeHexagon: t('annotation_toolbox.shape_hexagon'),
             shapeProcessArrow: t('annotation_toolbox.shape_process_arrow'),
+            icon: t('annotation_toolbox.icon'),
+            voteDot: t('annotation_toolbox.vote_dot'),
             image: t('annotation_toolbox.image'),
             freehand: t('annotation_toolbox.freehand'),
           }}

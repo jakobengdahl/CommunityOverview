@@ -58,7 +58,10 @@ import {
   resolveAnchoredArrow,
   computeDroppedAttachment,
   resolveAttachedPosition,
+  ICON_INTRINSIC_SIZE,
+  VOTE_DOT_INTRINSIC_SIZE,
 } from '../utils/annotations';
+import { DEFAULT_ANNOTATION_ICON } from '../utils/annotationIcons';
 import {
   directNeighborIds,
   neighborStartPositions,
@@ -316,6 +319,7 @@ function GraphCanvasInner({
     arrowStartHead: 'Start arrowhead',
     arrowEndHead: 'End arrowhead',
     annotationShape: 'Shape',
+    annotationIcon: 'Icon',
     annotationRotation: 'Rotation',
     annotationRotateLeft: 'Rotate left 15°',
     annotationRotateRight: 'Rotate right 15°',
@@ -353,6 +357,8 @@ function GraphCanvasInner({
     shapeRhombus: 'Rhombus',
     shapeHexagon: 'Hexagon',
     shapeProcessArrow: 'Process arrow',
+    icon: 'Icon',
+    voteDot: 'Vote dot',
     image: 'Image',
     freehand: 'Freehand',
     ...annotationToolboxLabels,
@@ -574,6 +580,7 @@ function GraphCanvasInner({
         arrowStartHead: cml.arrowStartHead,
         arrowEndHead: cml.arrowEndHead,
         shape: cml.annotationShape,
+        icon: cml.annotationIcon,
         rotation: cml.annotationRotation,
         rotateLeft: cml.annotationRotateLeft,
         rotateRight: cml.annotationRotateRight,
@@ -596,6 +603,7 @@ function GraphCanvasInner({
       cml.arrowStartHead,
       cml.arrowEndHead,
       cml.annotationShape,
+      cml.annotationIcon,
       cml.annotationRotation,
       cml.annotationRotateLeft,
       cml.annotationRotateRight,
@@ -1186,6 +1194,33 @@ function GraphCanvasInner({
           position,
           data: { shape: options.shape || 'rectangle', color: undefined },
           style: { width: 160, height: 96 },
+        };
+      } else if (kind === 'icon') {
+        // No `style` box — icon renders at a fixed intrinsic size
+        // (GenericAnnotationNode.css `.kind-icon`), not a resizable one.
+        // `data.size` carries that natural size as silently-preserved
+        // geometry (annotations.js's data-only slot for unsized generic
+        // kinds — 61d5cc7b) so it survives the session save round trip
+        // instead of being dropped and later defaulted to a mismatched
+        // 160x96 box. The default icon matches what an icon annotation with
+        // no configured name already renders (resolveAnnotationIcon).
+        newNode = {
+          id,
+          type: 'icon',
+          position,
+          data: {
+            icon: DEFAULT_ANNOTATION_ICON,
+            color: undefined,
+            size: { ...ICON_INTRINSIC_SIZE },
+          },
+        };
+      } else if (kind === 'vote_dot') {
+        // Same fixed-intrinsic-size treatment as icon, above.
+        newNode = {
+          id,
+          type: 'vote_dot',
+          position,
+          data: { value: 1, color: undefined, size: { ...VOTE_DOT_INTRINSIC_SIZE } },
         };
       } else {
         newNode = {

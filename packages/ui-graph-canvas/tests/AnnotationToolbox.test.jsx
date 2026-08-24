@@ -24,6 +24,8 @@ describe('AnnotationToolbox', () => {
     expect(screen.getByRole('button', { name: /^rhombus$/i })).toBeInTheDocument();
     expect(screen.getByRole('button', { name: /^hexagon$/i })).toBeInTheDocument();
     expect(screen.getByRole('button', { name: /^process arrow$/i })).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: /^icon$/i })).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: /^vote dot$/i })).toBeInTheDocument();
     expect(screen.getByRole('button', { name: /^image$/i })).toBeInTheDocument();
   });
 
@@ -79,6 +81,24 @@ describe('AnnotationToolbox', () => {
 
     fireEvent.click(screen.getByRole('button', { name: /^image$/i }));
     expect(onCreate).toHaveBeenLastCalledWith('image', undefined);
+  });
+
+  it('calls onCreate with the icon kind and no options', () => {
+    const onCreate = vi.fn();
+    render(<AnnotationToolbox onCreate={onCreate} />);
+    fireEvent.click(screen.getByRole('button', { name: /add annotation/i }));
+
+    fireEvent.click(screen.getByRole('button', { name: /^icon$/i }));
+    expect(onCreate).toHaveBeenLastCalledWith('icon', undefined);
+  });
+
+  it('calls onCreate with the vote_dot kind and no options', () => {
+    const onCreate = vi.fn();
+    render(<AnnotationToolbox onCreate={onCreate} />);
+    fireEvent.click(screen.getByRole('button', { name: /add annotation/i }));
+
+    fireEvent.click(screen.getByRole('button', { name: /^vote dot$/i }));
+    expect(onCreate).toHaveBeenLastCalledWith('vote_dot', undefined);
   });
 
   it('accepts a labels override so the host app can localize it', () => {

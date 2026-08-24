@@ -415,6 +415,7 @@
     "arrow_start_head": "Pilspets i början",
     "arrow_end_head": "Pilspets i slutet",
     "annotation_shape": "Form",
+    "annotation_icon": "Ikon",
     "annotation_rotation": "Rotation",
     "annotation_rotate_left": "Rotera vänster 15°",
     "annotation_rotate_right": "Rotera höger 15°",
@@ -440,6 +441,8 @@
     "shape_rhombus": "Romb",
     "shape_hexagon": "Hexagon",
     "shape_process_arrow": "Processpil",
+    "icon": "Ikon",
+    "vote_dot": "Röstprick",
     "image": "Bild",
     "freehand": "Frihand"
   },
