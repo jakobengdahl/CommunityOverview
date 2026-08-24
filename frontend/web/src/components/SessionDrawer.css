@@ -25,6 +25,32 @@
   visibility: visible;
 }
 
+/* Mobile: a full-width overlay sheet instead of the docked 280px pane, with
+   its own scrim below (rendered as a sibling, see SessionDrawer.jsx). It does
+   not offset any other chrome the way the desktop dock does. */
+.session-drawer--mobile {
+  width: 100%;
+  border-right: none;
+  padding-right: env(safe-area-inset-right);
+}
+
+.session-drawer-scrim {
+  position: fixed;
+  inset: 0;
+  background: rgba(0, 0, 0, 0.55);
+  z-index: 290;
+  animation: session-drawer-scrim-fade-in 0.2s ease;
+}
+
+@keyframes session-drawer-scrim-fade-in {
+  from {
+    opacity: 0;
+  }
+  to {
+    opacity: 1;
+  }
+}
+
 .session-drawer-header {
   display: flex;
   align-items: center;
