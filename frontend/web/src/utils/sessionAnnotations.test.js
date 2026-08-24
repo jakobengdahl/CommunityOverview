@@ -114,3 +114,48 @@ describe('attachment round-trip through the server annotation document', () => {
     expect(document.annotations[0].attachment).toBeUndefined();
   });
 });
+
+// smallfix-annotation-unsized-generic-geometry-clobber: icon/vote_dot/text
+// used to lose their geometry.w/h on this round trip and get re-materialised
+// at createAnnotation's 160x96 default by the next autosave. frame/shape/
+// image already carried size through; this locks in that all six generic
+// kinds now behave the same way.
+describe('geometry w/h round-trip for generic overlay kinds', () => {
+  const overlayFor = (kind) => ({
+    id: `${kind}-1`,
+    kind,
+    position: { x: 0, y: 0 },
+    text: kind === 'text' ? 'hi' : undefined,
+    shape: kind === 'shape' ? 'circle' : undefined,
+    icon: kind === 'icon' ? 'flag' : undefined,
+    value: kind === 'vote_dot' ? 1 : undefined,
+    image: kind === 'image' ? { url: 'https://example.test/x.png' } : undefined,
+    size: { w: 32, h: 41 },
+  });
+
+  it.each(['icon', 'vote_dot', 'text', 'frame', 'shape', 'image'])(
+    'preserves an explicit non-default size for %s through overlay -> document -> overlay',
+    (kind) => {
+      const overlay = overlayFor(kind);
+      const document = legacyMetadataToAnnotationDocument({ annotations: [overlay] });
+      const stored = document.annotations.find((a) => a.id === overlay.id);
+      expect(stored.geometry.w).toBe(32);
+      expect(stored.geometry.h).toBe(41);
+
+      const metadata = annotationDocumentToLegacyMetadata(document);
+      const roundTripped = metadata.annotations.find((a) => a.id === overlay.id);
+      expect(roundTripped.size).toEqual({ w: 32, h: 41 });
+    }
+  );
+
+  it.each(['icon', 'vote_dot', 'text'])(
+    'no longer falls back to the 160x96 default for %s when a size was set',
+    (kind) => {
+      const overlay = overlayFor(kind);
+      const document = legacyMetadataToAnnotationDocument({ annotations: [overlay] });
+      const metadata = annotationDocumentToLegacyMetadata(document);
+      const roundTripped = metadata.annotations.find((a) => a.id === overlay.id);
+      expect(roundTripped.size).not.toEqual({ w: 160, h: 96 });
+    }
+  );
+});

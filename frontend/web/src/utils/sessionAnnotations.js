@@ -79,14 +79,14 @@ export function groupsToAnnotations(viewGroups, parentIds) {
 
 // The rest of the v1 annotation model (docs/ANNOTATION_CONTRACT.md) beyond
 // note/label/line: text, frame, shape, icon, vote_dot, image. Color lives
-// under style.color (like label), and frame/shape/image size lives in
-// geometry — createAnnotation has no dedicated `size` payload field for
-// these types the way it does for note. `geometry.rotation` is carried on
-// every overlay (not only the kinds that draw it) for the same reason as
-// z/locked: a translator that dropped it would make the browser's next
-// autosave diff the annotation back to rotation 0, silently undoing what an
-// agent or a collaborator had just set.
-const SIZED_GENERIC_TYPES = new Set(['frame', 'shape', 'image']);
+// under style.color (like label), and geometry.w/h lives in `geometry` for
+// all six of these types — createAnnotation has no dedicated `size` payload
+// field the way it does for note. `geometry.rotation` and `geometry.w/h` are
+// both carried on every overlay of these kinds (not only the kinds the
+// canvas currently renders as resizable) for the same reason as z/locked: a
+// translator that dropped them would make the browser's next autosave diff
+// the annotation back to rotation 0 / createAnnotation's 160x96 default,
+// silently undoing what an agent or a collaborator had just set.
 const GENERIC_OVERLAY_TYPES = new Set(['text', 'frame', 'shape', 'icon', 'vote_dot', 'image']);
 
 function genericAnnotationToOverlay(a) {
@@ -98,6 +98,7 @@ function genericAnnotationToOverlay(a) {
     z: a.z ?? 0,
     locked: Boolean(a.locked),
     rotation: a.geometry?.rotation ?? 0,
+    size: { w: a.geometry?.w ?? 0, h: a.geometry?.h ?? 0 },
   };
   if (a.type === 'text') {
     overlay.text = a.text || '';
@@ -114,9 +115,6 @@ function genericAnnotationToOverlay(a) {
   } else if (a.type === 'image') {
     overlay.image = a.image || {};
     overlay.alt = a.alt || '';
-  }
-  if (SIZED_GENERIC_TYPES.has(a.type)) {
-    overlay.size = { w: a.geometry?.w ?? 0, h: a.geometry?.h ?? 0 };
   }
   return overlay;
 }
@@ -145,7 +143,7 @@ function genericOverlayToAnnotation(o) {
     input.image = o.image || {};
     input.alt = o.alt || '';
   }
-  if (SIZED_GENERIC_TYPES.has(o.kind) && o.size) input.size = o.size;
+  if (o.size) input.size = o.size;
   return createAnnotation(input);
 }
 
