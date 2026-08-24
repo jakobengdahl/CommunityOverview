@@ -289,6 +289,40 @@ class TestSessionOps:
         )
         assert resp.status_code == 400
 
+    def test_ops_write_to_claimed_annotation_by_another_client_409(
+        self, test_app: TestClient
+    ):
+        sid = test_app.post("/api/sessions", json={}).json()["id"]
+        test_app.post(
+            f"/api/sessions/{sid}/ops",
+            json={
+                "client_id": "c1",
+                "ops": [
+                    {
+                        "op": "annotation_created",
+                        "annotation": {"id": "note-1", "type": "note"},
+                    },
+                    {"op": "selection_claimed", "element_ids": ["note-1"]},
+                ],
+            },
+        )
+        resp = test_app.post(
+            f"/api/sessions/{sid}/ops",
+            json={
+                "client_id": "c2",
+                "ops": [
+                    {
+                        "op": "annotation_updated",
+                        "annotation": {"id": "note-1", "text": "hijacked"},
+                    }
+                ],
+            },
+        )
+        assert resp.status_code == 409
+        assert "note-1" in resp.json()["detail"]
+        state = test_app.get(f"/api/sessions/{sid}").json()["state"]
+        assert state["annotations"][0].get("text") != "hijacked"
+
 
 class TestSessionActivityAndUndo:
     def _create_note(
@@ -852,3 +886,59 @@ class TestSessionImageIngestEndpoint:
         state = test_app.get(f"/api/sessions/{sid}").json()["state"]
         assert len(state["annotations"]) == 1
         assert state["annotations"][0]["id"] == "img-1"
+
+    def test_replacing_a_claimed_image_annotation_is_rejected_409(
+        self, test_app: TestClient
+    ):
+        """This endpoint writes through upsert_image_annotation directly, not
+        apply_ops, so it needs its own claim check (rest_api.py) rather than
+        inheriting SessionManager.apply_ops'. The op broadcast for this write
+        is always attributed to the shared human-image-ingest marker (see the
+        SSE-echo test above), but the *claim* check must use the real posting
+        browser's own client_id — 'browser-1' here — or a browser holding its
+        own claim would be locked out of replacing its own image."""
+        sid = test_app.post("/api/sessions", json={}).json()["id"]
+        first = test_app.post(
+            f"/api/sessions/{sid}/annotations/image",
+            json={
+                "client_id": "browser-1",
+                "x": 0,
+                "y": 0,
+                "image_data": _png_data_url(color=(255, 0, 0)),
+                "annotation_id": "img-1",
+            },
+        )
+        assert first.status_code == 200
+
+        mgr = test_app.app.state.session_manager
+        mgr.claims.claim(sid, "browser-2", ["img-1"])
+
+        blocked = test_app.post(
+            f"/api/sessions/{sid}/annotations/image",
+            json={
+                "client_id": "browser-1",
+                "x": 5,
+                "y": 5,
+                "image_data": _png_data_url(color=(0, 255, 0)),
+                "annotation_id": "img-1",
+            },
+        )
+        assert blocked.status_code == 409
+        state = test_app.get(f"/api/sessions/{sid}").json()["state"]
+        assert (
+            state["annotations"][0]["image"]["url"]
+            == first.json()["annotation"]["image"]["url"]
+        )
+
+        # The claim holder's own replacement still succeeds.
+        allowed = test_app.post(
+            f"/api/sessions/{sid}/annotations/image",
+            json={
+                "client_id": "browser-2",
+                "x": 5,
+                "y": 5,
+                "image_data": _png_data_url(color=(0, 255, 0)),
+                "annotation_id": "img-1",
+            },
+        )
+        assert allowed.status_code == 200

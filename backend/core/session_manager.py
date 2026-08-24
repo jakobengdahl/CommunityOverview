@@ -8,7 +8,10 @@ used by the REST/SSE endpoints and by MCP pushes:
 * ``apply_ops`` — validates a batch, applies each op under a per-session lock in
   arrival order (server-ordered last-write-wins, no CRDT — design D2), assigns a
   monotonic ``seq`` to each state op, persists once per batch, and broadcasts
-  every applied op to all subscribers including the originator.
+  every applied op to all subscribers including the originator. It also rejects
+  (``ClaimConflict``) a batch op that would mutate an annotation another client
+  currently holds a live selection claim on — the one browser write path this
+  goes through; see ``ClaimConflict`` for what stays out of scope.
 * selection claims (``selection_claimed`` / ``selection_released``) are handled
   inline but stay ephemeral — broadcast, never persisted, never sequenced.
 * ``connect`` / ``disconnect`` manage presence and release a departing client's
@@ -170,6 +173,29 @@ class RevisionConflict(Exception):
         self.actual = actual
 
 
+class ClaimConflict(Exception):
+    """A browser batch (``apply_ops``) tried to mutate an annotation another
+    client currently holds a live selection claim on.
+
+    Raised only for the ``apply_ops`` batch path — the REST ``/ops`` endpoint,
+    the sole browser write path (D3/D9). The synchronous MCP write path
+    (``upsert_annotation``/``update_annotation``/``delete_annotation``/
+    ``apply_layout``/``add_node_refs``, all keyed to the shared ``mcp-agent``
+    client id — see ``mcp_tools.py``) never calls ``apply_ops`` and is
+    unaffected by this check; see ``session_hub.ClaimMap``'s docstring for the
+    open decision on whether it should be.
+    """
+
+    def __init__(self, annotation_id: str, held_by: str) -> None:
+        super().__init__(
+            f"annotation {annotation_id!r} is claimed by another client "
+            f"({held_by!r}); wait for the claim to release or expire before "
+            "editing it"
+        )
+        self.annotation_id = annotation_id
+        self.held_by = held_by
+
+
 _DEFAULT_BUCKET_IDLE_TTL = 3600.0  # evict a key after 1 h of silence
 _DEFAULT_BUCKET_SWEEP_INTERVAL = 300.0  # run the eviction sweep at most every 5 min
 
@@ -221,6 +247,35 @@ class _TokenBucket:
             del self._tokens[k]
             del self._last[k]
         self._last_sweep = now
+
+
+def _claimed_annotation_target(op: Dict[str, Any], session: Session) -> Optional[str]:
+    """Return the id of the *existing* annotation ``op`` would mutate, if any.
+
+    Used to check a batch op against the live claim snapshot before applying
+    it (``apply_ops``). Only ``annotation_updated``/``annotation_deleted``
+    always target an existing annotation; ``annotation_created`` targets one
+    only when its id already exists in the session (the upsert-as-replace
+    case) — a genuinely new id has no prior claim to protect. Every other
+    state op type (node/edge/layout/rename ops) is out of scope for this
+    check — see ``ClaimConflict``'s docstring for why annotations only, for
+    now.
+    """
+    op_type = op.get("op")
+    if op_type == "annotation_updated":
+        annotation = op.get("annotation")
+        ann_id = annotation.get("id") if isinstance(annotation, dict) else None
+    elif op_type == "annotation_deleted":
+        ann_id = op.get("annotation_id") or op.get("id")
+    elif op_type == "annotation_created":
+        annotation = op.get("annotation")
+        ann_id = annotation.get("id") if isinstance(annotation, dict) else None
+    else:
+        return None
+    if not isinstance(ann_id, str):
+        return None
+    exists = any(a.get("id") == ann_id for a in session.state.get("annotations", []))
+    return ann_id if exists else None
 
 
 def _image_annotation_bytes(annotation: Dict[str, Any]) -> int:
@@ -686,6 +741,14 @@ class SessionManager:
             ring = self.store.ring(session_id)
             saved_ring = list(ring) if ring is not None else None
 
+            # Read once, before this batch applies anything: claim() / release()
+            # for this session only ever run later in this same critical
+            # section (below, under this same lock), so this snapshot is a
+            # consistent view of who held what when the batch started —
+            # matching apply_ops' own all-or-nothing semantics (D3 enforcement;
+            # see ClaimConflict's docstring for what this does not cover yet).
+            live_claims = self.claims.snapshot(session_id)
+
             # ("state", applied) | ("claim", op_type, element_ids), in arrival order
             pending: List[Tuple[Any, ...]] = []
             state_changed = False
@@ -695,6 +758,11 @@ class SessionManager:
                     if op_type in CLAIM_OPS:
                         pending.append(("claim", op_type, list(op["element_ids"])))
                     else:
+                        conflict_id = _claimed_annotation_target(op, session)
+                        if conflict_id is not None:
+                            holder = live_claims.get(conflict_id)
+                            if holder is not None and holder != client_id:
+                                raise ClaimConflict(conflict_id, holder)
                         result = self.store.apply_state_op(
                             session, {**op, "client_id": client_id}
                         )
